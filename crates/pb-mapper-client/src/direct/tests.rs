@@ -1,6 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
-use crate::sdk::{Client, RegisterOptions, RegisterRequest, Transport};
+use crate::{
+    diagnostics::{InterfaceTier, StunOutcome},
+    sdk::{Client, PortMapping, RegisterOptions, RegisterRequest, Registration, Transport},
+};
+use endpoint::InterfaceSource;
+use lan::{Interface, Interfaces};
 use pb_mapper_auth::{AuthConfig, AuthRuntime};
 use pb_mapper_core::config::ResolvedAddrs;
 use pb_mapper_server::DirectServerConfig;
@@ -41,28 +46,39 @@ fn fallback_cooldown_doubles_to_its_cap_and_clears() {
     assert!(!cooldown.active(now + COOLDOWN_INITIAL));
 }
 
-#[tokio::test]
-async fn blocked_quic_selects_relay_and_dials_backend_once() {
-    let credential = Credential::Admin(pb_mapper_core::checksum::gen_random_key());
-    let state_dir = std::env::temp_dir().join(format!(
-        "pb-direct-fallback-{}-{}",
-        std::process::id(),
-        rand::random::<u64>()
-    ));
-    let auth = AuthRuntime::start(
-        *credential.key(),
-        AuthConfig {
-            state_dir: state_dir.clone(),
-            ..AuthConfig::default()
-        },
-    )
-    .await
-    .unwrap();
-    let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = relay.local_addr().unwrap();
-    let _relay = AbortOnDropHandle::new(tokio::spawn(
-        pb_mapper_server::run_server_on_listener_with_direct(
-            relay,
+/// A loopback relay that offers direct, with a share of a local TCP backend
+/// on it.
+struct Share {
+    credential: Credential,
+    relay: std::net::SocketAddr,
+    client: Client,
+    registration: Registration,
+    backend: TcpListener,
+    state_dir: std::path::PathBuf,
+    _relay: AbortOnDropHandle<()>,
+}
+
+impl Share {
+    async fn start(key: &str) -> Self {
+        let credential = Credential::Admin(pb_mapper_core::checksum::gen_random_key());
+        let state_dir = std::env::temp_dir().join(format!(
+            "pb-direct-{key}-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let auth = AuthRuntime::start(
+            *credential.key(),
+            AuthConfig {
+                state_dir: state_dir.clone(),
+                ..AuthConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = listener.local_addr().unwrap();
+        let server = pb_mapper_server::run_server_on_listener_with_direct(
+            listener,
             CancellationToken::new(),
             None,
             false,
@@ -71,52 +87,106 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
                 listen: "127.0.0.1:0".parse().unwrap(),
                 advertise: "127.0.0.1:0".parse().unwrap(),
             }),
-        ),
-    ));
-    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let backend_addr = backend.local_addr().unwrap();
-    let client = Client::from_credential(addr.to_string(), credential, false, None);
-    let registration = client
-        .register_with_options(
-            RegisterRequest {
-                key: "fallback".into(),
-                local_addr: backend_addr.to_string(),
-                transport: Transport::Tcp,
-                codec: true,
-                force_namespace: false,
-            },
-            RegisterOptions {
-                allow_direct: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    registration
-        .wait_ready_timeout(Duration::from_secs(5))
-        .await
-        .unwrap();
-    let diagnostics = Diagnostics::default();
-    let consumer = Consumer::new(
-        RelayEndpoint::fixed(ResolvedAddrs::from(addr)),
-        credential,
-        None,
-        false,
-        true,
-        diagnostics,
-        crate::sdk::PortMapping::Off,
-    );
-    let network = Network::new(
-        false,
-        crate::sdk::PortMapping::Off,
-        &crate::diagnostics::Diagnostics::default(),
-    )
-    .unwrap();
+        );
+        let _relay = AbortOnDropHandle::new(tokio::spawn(async move {
+            let _ = server.await;
+        }));
+        let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::from_credential(relay.to_string(), credential, false, None);
+        let registration = client
+            .register_with_options(
+                RegisterRequest {
+                    key: key.into(),
+                    local_addr: backend.local_addr().unwrap().to_string(),
+                    transport: Transport::Tcp,
+                    codec: true,
+                    force_namespace: false,
+                },
+                RegisterOptions {
+                    allow_direct: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        registration
+            .wait_ready_timeout(Duration::from_secs(5))
+            .await
+            .unwrap();
+        Self {
+            credential,
+            relay,
+            client,
+            registration,
+            backend,
+            state_dir,
+            _relay,
+        }
+    }
+
+    /// A consumer of the share over `network`.
+    fn consumer(&self, network: Arc<Network>, diagnostics: Diagnostics) -> Arc<Consumer> {
+        let consumer = Consumer::new(
+            RelayEndpoint::fixed(ResolvedAddrs::from(self.relay)),
+            self.credential,
+            None,
+            false,
+            true,
+            diagnostics,
+            PortMapping::Off,
+        );
+        consumer
+            .network
+            .set(network)
+            .unwrap_or_else(|_| panic!("network already initialized"));
+        consumer
+    }
+
+    /// Forward a prepared session from a local application, and check that
+    /// bytes reach the backend; returns the forwarding task.
+    async fn forward(&self, prepared: Prepared) -> AbortOnDropHandle<io::Result<()>> {
+        let (mut service, _) = tokio::time::timeout(Duration::from_secs(1), self.backend.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let downstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local = TcpStreamProvider::from_addr(downstream.local_addr().unwrap())
+            .await
+            .unwrap();
+        let forward =
+            AbortOnDropHandle::new(tokio::spawn(prepared.forward(local, self.credential)));
+        let (mut application, _) = downstream.accept().await.unwrap();
+        application.write_all(b"exactly once").await.unwrap();
+        let mut bytes = [0; 12];
+        tokio::time::timeout(Duration::from_secs(2), service.read_exact(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&bytes, b"exactly once");
+        service.write_all(&bytes).await.unwrap();
+        application.read_exact(&mut bytes).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), self.backend.accept())
+                .await
+                .is_err(),
+            "exactly one backend connection"
+        );
+        forward
+    }
+
+    async fn stop(self) {
+        self.registration.stop().await.unwrap();
+        drop(self._relay);
+        let _ = std::fs::remove_dir_all(self.state_dir);
+    }
+}
+
+#[tokio::test]
+async fn blocked_quic_selects_relay_and_dials_backend_once() {
+    let share = Share::start("fallback").await;
+    let network = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
     network.block_quic();
-    consumer
-        .network
-        .set(network)
-        .unwrap_or_else(|_| panic!("network already initialized"));
+    let consumer = share.consumer(network, Diagnostics::default());
     let prepared = tokio::time::timeout(
         Duration::from_secs(8),
         consumer.prepare("fallback", Instant::now() + Duration::from_secs(8)),
@@ -140,6 +210,7 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
                 path: SessionPath::Direct,
                 state: SessionState::Active,
                 reason: None,
+                link: None,
             },
             session: summary,
             secret: SessionSecret::random(),
@@ -148,7 +219,7 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
     consumer.report_wake.notify_one();
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            for observation in client.sessions().await.unwrap() {
+            for observation in share.client.sessions().await.unwrap() {
                 report_ids.remove(&observation.id);
             }
             if report_ids.is_empty() {
@@ -159,55 +230,100 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
     })
     .await
     .expect("snapshot must drain beyond the control channel capacity");
-    let (mut service, _) = tokio::time::timeout(Duration::from_secs(1), backend.accept())
+    let _forward = share.forward(prepared).await;
+    share.stop().await;
+}
+
+/// Strong evidence of one LAN: the LAN path is dialed on its first answer,
+/// the paths off it wait, and the session says where it runs while it is
+/// open. This machine's loopback stands in for the LAN: injected as one, its
+/// subnet holds the share's 127.0.0.1, which is also what the relay's STUN
+/// sees of this end.
+#[tokio::test]
+async fn a_lan_is_dialed_on_its_first_answer_and_reported_while_open() {
+    let share = Share::start("lan").await;
+    let mut network = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+    Arc::get_mut(&mut network).unwrap().interfaces =
+        InterfaceSource::Fixed(Interfaces::new(vec![Interface::new(
+            "lan0",
+            InterfaceTier::Lan,
+            [("127.0.0.2".parse().unwrap(), 8)],
+        )]));
+    let diagnostics = Diagnostics::default();
+    let consumer = share.consumer(network, diagnostics.clone());
+    let prepared = consumer
+        .prepare("lan", Instant::now() + Duration::from_secs(8))
         .await
         .unwrap()
         .unwrap();
-    let downstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let local = TcpStreamProvider::from_addr(downstream.local_addr().unwrap())
-        .await
-        .unwrap();
-    let _forward = AbortOnDropHandle::new(tokio::spawn(prepared.forward(local, credential)));
-    let (mut application, _) = downstream.accept().await.unwrap();
-    application.write_all(b"exactly once").await.unwrap();
-    let mut bytes = [0; 12];
-    tokio::time::timeout(Duration::from_secs(2), service.read_exact(&mut bytes))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(&bytes, b"exactly once");
-    service.write_all(&bytes).await.unwrap();
-    application.read_exact(&mut bytes).await.unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), backend.accept())
-            .await
-            .is_err()
+    assert!(matches!(prepared.path, DataPath::Quic { .. }));
+    let forward = share.forward(prepared).await;
+    let read = || {
+        diagnostics
+            .snapshot(&RelayEndpoint::shared("127.0.0.1:1"))
+            .direct
+            .unwrap()
+    };
+    let direct = read();
+    let link = direct
+        .link
+        .clone()
+        .expect("an open direct session has a link");
+    assert_eq!(
+        (link.kind, link.family, link.same_lan),
+        (
+            LinkKind::Lan,
+            AddressFamily::Ipv4,
+            Some(LanEvidence::PublicIpSubnet)
+        )
     );
-    registration.stop().await.unwrap();
-    drop(_relay);
-    let _ = std::fs::remove_dir_all(state_dir);
+    // Every other address of the share answered too, and was held back.
+    assert_eq!(link.candidates.handshakes, 1);
+    assert!(link.candidates.answered >= 1);
+    assert!(link.stats.rtt_us > 0, "QUIC's round trip, read live");
+    let timings = link.timings;
+    assert_eq!(timings.stun, StunOutcome::Ok);
+    for stage in [
+        timings.negotiate_ms,
+        timings.discover_ms,
+        timings.grant_ms,
+        timings.lan_first_pong_ms,
+        timings.handshake_ms,
+        timings.commit_ms,
+    ] {
+        assert!(stage.is_some(), "{timings:?}");
+    }
+    assert_eq!(
+        (direct.active_lan, direct.lan_sessions, direct.lan_detected),
+        (1, 1, 1)
+    );
+    assert_eq!(
+        (direct.lan_missed, direct.last_kind),
+        (0, Some(LinkKind::Lan))
+    );
+    // The session's end lets its connection go.
+    drop(forward);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while read().link.is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(read().active_lan, 0);
+    share.stop().await;
 }
 
 #[tokio::test]
 async fn peer_certificate_and_session_binding_are_both_required() {
-    let provider = Network::new(
-        true,
-        crate::sdk::PortMapping::Off,
-        &crate::diagnostics::Diagnostics::default(),
-    )
-    .unwrap();
-    let consumer = Network::new(
-        false,
-        crate::sdk::PortMapping::Off,
-        &crate::diagnostics::Diagnostics::default(),
-    )
-    .unwrap();
+    let provider = Network::new(true, PortMapping::Off, &Diagnostics::default()).unwrap();
+    let consumer = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
     // Use one discovered loopback path for the TLS boundary test. With multiple
     // candidates, the client's winning connection and the first server accept
     // can be different TLS sessions, which correctly have different bindings.
     let stun: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
-    let mut provider_peer = provider.peer(stun).await;
-    let mut consumer_peer = consumer.peer(stun).await;
+    let mut provider_peer = provider.peer(stun).await.peer;
+    let mut consumer_peer = consumer.peer(stun).await.peer;
     for peer in [&mut provider_peer, &mut consumer_peer] {
         peer.candidates
             .retain(|addr| addr.is_ipv4() && addr.ip().is_loopback());
@@ -235,28 +351,24 @@ async fn peer_certificate_and_session_binding_are_both_required() {
     let deadline = Instant::now() + Duration::from_secs(3);
     provider.authorize(&grant, true, deadline).unwrap();
     consumer.authorize(&grant, false, deadline).unwrap();
+    let no_lan = Assessment::default();
     let (outgoing, incoming) = tokio::join!(
-        consumer.connect(&grant, deadline),
+        consumer.connect(&grant, deadline, &no_lan),
         tokio::time::timeout_at(deadline, provider.accept())
     );
-    let outgoing = outgoing.unwrap();
+    let (outgoing, _) = outgoing.unwrap();
     let incoming = incoming.unwrap().unwrap();
     let tag = endpoint::binding(&outgoing, &grant).unwrap();
     endpoint::verify_binding(&incoming, &grant, &tag).unwrap();
     let mut wrong = grant.clone();
     wrong.service = "another-service".into();
     assert!(endpoint::verify_binding(&incoming, &wrong, &tag).is_err());
-    let stranger = Network::new(
-        false,
-        crate::sdk::PortMapping::Off,
-        &crate::diagnostics::Diagnostics::default(),
-    )
-    .unwrap();
+    let stranger = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
     stranger
         .authorize(&grant, false, Instant::now() + Duration::from_secs(3))
         .unwrap();
-    if let Ok(connection) = stranger
-        .connect(&grant, Instant::now() + Duration::from_millis(500))
+    if let Ok((connection, _)) = stranger
+        .connect(&grant, Instant::now() + Duration::from_millis(500), &no_lan)
         .await
     {
         // TLS 1.3 client completion can precede the server's client-cert decision.
@@ -278,16 +390,11 @@ async fn peer_certificate_and_session_binding_are_both_required() {
             "only the granted identity may reach application accept"
         );
     }
-    let other_provider = Network::new(
-        true,
-        crate::sdk::PortMapping::Off,
-        &crate::diagnostics::Diagnostics::default(),
-    )
-    .unwrap();
+    let other_provider = Network::new(true, PortMapping::Off, &Diagnostics::default()).unwrap();
     wrong.provider.certificate = other_provider.identity.certificate.clone();
     assert!(
         consumer
-            .connect(&wrong, Instant::now() + Duration::from_millis(500))
+            .connect(&wrong, Instant::now() + Duration::from_millis(500), &no_lan)
             .await
             .is_err(),
         "server certificate must match grant"

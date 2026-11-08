@@ -1,0 +1,209 @@
+//! How a direct session travels, as [`PathDiagnostics::link`] reports it:
+//! which network it crosses, by which interface, how it was found, how long
+//! each stage of its setup took, and QUIC's live view of the path.
+//!
+//! [`PathDiagnostics::link`]: super::PathDiagnostics::link
+
+pub use pb_mapper_protocol::direct::{AddressFamily, LinkKind};
+use serde::Serialize;
+use std::net::{IpAddr, SocketAddr};
+
+/// What a local interface is. Candidates are offered, and probed, in this
+/// order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterfaceTier {
+    /// Ethernet or Wi-Fi with a gateway: a network other devices share.
+    Lan,
+    /// Physical, without a gateway: a cable to one other machine, or a
+    /// network with no way out.
+    Physical,
+    /// Mobile data.
+    Cellular,
+    /// A VPN's tunnel, a hypervisor's switch or a container's bridge,
+    /// however private its addresses look.
+    Virtual,
+    Loopback,
+}
+
+impl InterfaceTier {
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lan => "lan",
+            Self::Physical => "physical",
+            Self::Cellular => "cellular",
+            Self::Virtual => "virtual",
+            Self::Loopback => "loopback",
+        }
+    }
+}
+
+/// Why this end believed, before any packet said so, that the peer shares
+/// one of its local networks. Strong evidence gives the LAN a head start;
+/// weak evidence only probes it first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LanEvidence {
+    /// A global IPv6 address of the peer is in the /64 of one of ours.
+    /// Strong: global prefixes are unique.
+    Ipv6Prefix,
+    /// The peer offers this end's public IP, so sits behind the same NAT,
+    /// and an address on one of its subnets. Strong.
+    PublicIpSubnet,
+    /// Only a subnet is shared, as countless homes share 192.168.1.0/24.
+    /// Weak.
+    Subnet,
+}
+
+impl LanEvidence {
+    /// Whether this is enough to hold other paths back for the LAN.
+    pub fn strong(self) -> bool {
+        !matches!(self, Self::Subnet)
+    }
+
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ipv6Prefix => "ipv6_prefix",
+            Self::PublicIpSubnet => "public_ip_subnet",
+            Self::Subnet => "subnet",
+        }
+    }
+}
+
+/// How this end came to know the peer address its path runs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkVia {
+    /// An interface address the peer offered.
+    Host,
+    /// A public IPv4 address the peer offered: what a STUN server saw of
+    /// it, or one of its interfaces.
+    Public,
+    /// The peer's router mapping: offered first, ahead of another public
+    /// IPv4 address.
+    Mapped,
+    /// Not offered: the peer's packets came from it, and it answered a
+    /// challenge sent back to it.
+    PeerReflexive,
+}
+
+impl LinkVia {
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Public => "public",
+            Self::Mapped => "mapped",
+            Self::PeerReflexive => "peer_reflexive",
+        }
+    }
+}
+
+/// How this end's STUN lookup went for the setup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StunOutcome {
+    /// It answered.
+    Ok,
+    /// It did not answer in time (700 ms).
+    Timeout,
+    /// It failed, or this end has no socket of the relay's address family.
+    #[default]
+    Unavailable,
+    /// A lookup made in the last 10 s was used.
+    Cached,
+}
+
+impl StunOutcome {
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Timeout => "timeout",
+            Self::Unavailable => "unavailable",
+            Self::Cached => "cached",
+        }
+    }
+}
+
+/// How long each stage of a direct setup took on this end, in milliseconds.
+/// A stage this end does not run, such as dialing on the publishing end, is
+/// `None`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct SetupTimings {
+    /// Asking the relay whether direct is offered and opening its control
+    /// link.
+    pub negotiate_ms: Option<u64>,
+    /// Gathering this end's candidates, STUN included.
+    pub discover_ms: Option<u64>,
+    pub stun_ms: Option<u64>,
+    pub stun: StunOutcome,
+    /// From asking for a session to the grant.
+    pub grant_ms: Option<u64>,
+    /// From the grant to the first peer address that answered a probe, and
+    /// to the first on a local network.
+    pub first_pong_ms: Option<u64>,
+    pub lan_first_pong_ms: Option<u64>,
+    /// The winning QUIC handshake.
+    pub handshake_ms: Option<u64>,
+    /// From the handshake to the publisher's local service being open.
+    pub commit_ms: Option<u64>,
+    /// The whole setup.
+    pub setup_ms: u64,
+}
+
+/// The addresses a direct setup worked with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct CandidateCounts {
+    /// This end's candidates as offered, those on a LAN interface, and
+    /// those left out past the limit of 8.
+    pub local: u32,
+    pub local_lan: u32,
+    pub truncated: u32,
+    /// The peer's candidates, and those on one of this end's networks.
+    pub peer: u32,
+    pub peer_lan: u32,
+    /// Peer addresses probed and those that answered; QUIC handshakes this
+    /// end started (none on the publishing end, which is dialed).
+    pub probed: u32,
+    pub answered: u32,
+    pub handshakes: u32,
+}
+
+/// QUIC's view of the path, read when diagnostics are.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct LinkStats {
+    pub rtt_us: u64,
+    /// The lowest round trip seen: the path without queues.
+    pub min_rtt_us: u64,
+    pub congestion_window: u64,
+    pub mtu: u16,
+    pub sent_packets: u64,
+    pub lost_packets: u64,
+    pub congestion_events: u64,
+}
+
+/// A direct session's path, kept while the session is open.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct DirectLink {
+    pub kind: LinkKind,
+    pub family: AddressFamily,
+    pub via: LinkVia,
+    pub peer: SocketAddr,
+    /// The local address the path leaves from, when the socket reports it.
+    pub local_ip: Option<IpAddr>,
+    /// The interface that address belongs to, and what it is.
+    pub interface: Option<String>,
+    pub tier: Option<InterfaceTier>,
+    /// What suggested a shared network before the setup, if anything.
+    pub same_lan: Option<LanEvidence>,
+    pub timings: SetupTimings,
+    pub candidates: CandidateCounts,
+    pub stats: LinkStats,
+}

@@ -3081,6 +3081,7 @@ version = "0.10.2"
 dependencies = [
  "if-addrs",
  "if-watch",
+ "netdev",
  "pb-mapper-auth",
  "pb-mapper-core",
  "pb-mapper-protocol",

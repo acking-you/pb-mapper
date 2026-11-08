@@ -178,6 +178,77 @@ pub struct SessionReport {
     pub path: SessionPath,
     pub state: SessionState,
     pub reason: Option<String>,
+    /// What a direct session's path is, as the reporting end saw it. Absent
+    /// from relayed sessions and from endpoints that predate it; a relay
+    /// that predates it drops it, as it re-serializes only what it parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkSummary>,
+}
+
+/// A direct path in two words, with no address: reports must not carry
+/// candidates.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinkSummary {
+    pub kind: LinkKind,
+    pub family: AddressFamily,
+}
+
+/// Where a direct path runs.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkKind {
+    /// Within one local network: the peer is on the subnet, or the IPv6 /64,
+    /// of a physical interface of this end.
+    Lan,
+    /// Across the internet, between public addresses.
+    Internet,
+    /// Between private addresses that are not on one local network: a VPN,
+    /// a routed private network, a carrier's NAT, or this machine.
+    Private,
+    /// A kind added by a later version.
+    #[serde(other)]
+    Unknown,
+}
+
+impl LinkKind {
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lan => "lan",
+            Self::Internet => "internet",
+            Self::Private => "private",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AddressFamily {
+    Ipv4,
+    Ipv6,
+    /// A family added by a later version.
+    #[serde(other)]
+    Unknown,
+}
+
+impl AddressFamily {
+    pub fn of(addr: IpAddr) -> Self {
+        if addr.to_canonical().is_ipv4() {
+            Self::Ipv4
+        } else {
+            Self::Ipv6
+        }
+    }
+
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ipv4 => "ipv4",
+            Self::Ipv6 => "ipv6",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Metadata claimed by an authenticated endpoint. It never authorizes setup.
@@ -295,6 +366,42 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(&response).unwrap(),
             br#"{"Service":{"key":"legacy","connections":[]}}"#
+        );
+    }
+
+    /// A report without a link reads exactly as before, so an old relay and
+    /// old peers see nothing new; one with a kind this build does not know
+    /// still decodes, so a later endpoint cannot break the session list.
+    #[test]
+    fn a_session_report_link_is_optional_and_tolerates_later_kinds() {
+        use super::{AddressFamily, LinkKind, LinkSummary, SessionPath, SessionReport};
+        let mut report = SessionReport {
+            id: [7; 16],
+            seq: 3,
+            path: SessionPath::Direct,
+            state: super::SessionState::Active,
+            reason: None,
+            link: None,
+        };
+        let id = serde_json::to_string(&[7u8; 16]).unwrap();
+        assert_eq!(
+            serde_json::to_string(&report).unwrap(),
+            format!(r#"{{"id":{id},"seq":3,"path":"direct","state":"active","reason":null}}"#)
+        );
+        report.link = Some(LinkSummary {
+            kind: LinkKind::Lan,
+            family: AddressFamily::Ipv4,
+        });
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.ends_with(r#","link":{"kind":"lan","family":"ipv4"}}"#));
+        let later = json.replace(r#""lan","family":"ipv4""#, r#""mesh","family":"ipv9""#);
+        let parsed: SessionReport = serde_json::from_str(&later).unwrap();
+        assert_eq!(
+            parsed.link,
+            Some(LinkSummary {
+                kind: LinkKind::Unknown,
+                family: AddressFamily::Unknown,
+            })
         );
     }
 

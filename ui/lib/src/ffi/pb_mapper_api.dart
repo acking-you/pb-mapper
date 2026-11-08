@@ -249,6 +249,75 @@ enum DirectStage {
       DirectStage.values.firstWhereOrNull((stage) => stage.name == raw);
 }
 
+/// Where a direct path runs.
+enum LinkKind {
+  /// Within one local network.
+  lan,
+
+  /// Across the internet.
+  internet,
+
+  /// Between private addresses not on one local network: a VPN, say.
+  private;
+
+  /// Null for a kind this app does not know yet.
+  static LinkKind? parse(Object? raw) =>
+      values.firstWhereOrNull((kind) => kind.name == raw);
+}
+
+/// A direct session's path, as the SDK saw it set up.
+@immutable
+class TunnelLink {
+  const TunnelLink({
+    this.kind,
+    this.family,
+    this.peer,
+    this.localIp,
+    this.rttMs,
+    this.setupMs,
+  });
+
+  /// Null for a kind this app does not know yet.
+  final LinkKind? kind;
+
+  /// `ipv4` or `ipv6`.
+  final String? family;
+
+  /// The other computer's address, and this one's, the path runs between.
+  final String? peer;
+  final String? localIp;
+
+  /// QUIC's round trip, in whole milliseconds rounded up.
+  final int? rttMs;
+  final int? setupMs;
+
+  static TunnelLink? maybeFrom(Object? raw) {
+    if (raw is! Map) return null;
+    int? number(Object? value) => value == null ? null : _asInt(value);
+    return TunnelLink(
+      kind: LinkKind.parse(raw['kind']),
+      family: raw['family'] as String?,
+      peer: raw['peer'] as String?,
+      localIp: raw['localIp'] as String?,
+      rttMs: number(raw['rttMs']),
+      setupMs: number(raw['setupMs']),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is TunnelLink &&
+      other.kind == kind &&
+      other.family == family &&
+      other.peer == peer &&
+      other.localIp == localIp &&
+      other.rttMs == rttMs &&
+      other.setupMs == setupMs;
+
+  @override
+  int get hashCode => Object.hash(kind, family, peer, localIp, rttMs, setupMs);
+}
+
 /// How a running tunnel's sessions travel: each TCP connection or UDP flow
 /// through it goes direct or through the relay, decided as it opens. A
 /// connection counts both and its attempts; a share counts only the
@@ -258,27 +327,38 @@ class TunnelPath {
   const TunnelPath({
     this.activeDirect = 0,
     this.activeRelay = 0,
+    this.activeLan = 0,
     this.directSessions = 0,
     this.relaySessions = 0,
+    this.lanSessions = 0,
     this.attempt,
     this.lastDirect,
+    this.lastKind,
     this.setupMs,
     this.fallbackStage,
+    this.link,
   });
 
-  /// Sessions open now, on each path.
+  /// Sessions open now, on each path, and of the direct ones those within
+  /// one local network.
   final int activeDirect;
   final int activeRelay;
+  final int activeLan;
 
-  /// Sessions opened since the tunnel started, on each path.
+  /// Sessions opened since the tunnel started, on each path, and of the
+  /// direct ones those within one local network.
   final int directSessions;
   final int relaySessions;
+  final int lanSessions;
 
   /// The stage reached by a direct attempt in flight.
   final DirectStage? attempt;
 
   /// How the latest attempt ended: direct, the relay, or none yet.
   final bool? lastDirect;
+
+  /// Where the latest direct path ran.
+  final LinkKind? lastKind;
 
   /// How long the latest direct path took to set up.
   final int? setupMs;
@@ -287,6 +367,9 @@ class TunnelPath {
   /// its sessions straight to the relay for a while before trying again.
   final DirectStage? fallbackStage;
 
+  /// The newest direct session open now.
+  final TunnelLink? link;
+
   static TunnelPath? maybeFrom(Object? raw) {
     if (raw is! Map) return null;
     final last = raw['last'];
@@ -294,18 +377,22 @@ class TunnelPath {
     return TunnelPath(
       activeDirect: _asInt(raw['activeDirect']),
       activeRelay: _asInt(raw['activeRelay']),
+      activeLan: _asInt(raw['activeLan']),
       directSessions: _asInt(raw['directSessions']),
       relaySessions: _asInt(raw['relaySessions']),
+      lanSessions: _asInt(raw['lanSessions']),
       attempt: DirectStage.parse(raw['attempt']),
       lastDirect: switch (lastPath) {
         'direct' => true,
         'relay' => false,
         _ => null,
       },
+      lastKind: last is Map ? LinkKind.parse(last['kind']) : null,
       setupMs: last is Map && last['setupMs'] != null
           ? _asInt(last['setupMs'])
           : null,
       fallbackStage: last is Map ? DirectStage.parse(last['stage']) : null,
+      link: TunnelLink.maybeFrom(raw['link']),
     );
   }
 
@@ -314,23 +401,31 @@ class TunnelPath {
       other is TunnelPath &&
       other.activeDirect == activeDirect &&
       other.activeRelay == activeRelay &&
+      other.activeLan == activeLan &&
       other.directSessions == directSessions &&
       other.relaySessions == relaySessions &&
+      other.lanSessions == lanSessions &&
       other.attempt == attempt &&
       other.lastDirect == lastDirect &&
+      other.lastKind == lastKind &&
       other.setupMs == setupMs &&
-      other.fallbackStage == fallbackStage;
+      other.fallbackStage == fallbackStage &&
+      other.link == link;
 
   @override
   int get hashCode => Object.hash(
     activeDirect,
     activeRelay,
+    activeLan,
     directSessions,
     relaySessions,
+    lanSessions,
     attempt,
     lastDirect,
+    lastKind,
     setupMs,
     fallbackStage,
+    link,
   );
 }
 

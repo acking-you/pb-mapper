@@ -40,7 +40,8 @@ use crate::{
 use outbound::{Barrier, Lifecycle, Next, Outbound};
 use parking_lot::Mutex;
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, Connection, RelayTransport, TunnelDiagnostics,
+    AddressFamily, Client, ConnectOptions, Connection, DirectLink, LanEvidence, LinkKind, LinkVia,
+    RelayTransport, TunnelDiagnostics,
 };
 use serde::Serialize;
 use status::{CursorSlot, HostStats, ViewerStatsAcc, millis};
@@ -175,6 +176,8 @@ pub(crate) struct ViewerStateSlot {
     /// The last host `State`.
     host: Option<StateRecord>,
     route: Option<Route>,
+    /// The direct link under `route`, as of the last path sample.
+    link: Option<ViewerLink>,
     paused: bool,
     /// The app asked for control and has not revoked it since. The host's
     /// `controlling` counts only while this holds.
@@ -376,6 +379,7 @@ impl Viewer {
                 quality: accepted.quality,
                 host: None,
                 route: None,
+                link: None,
                 paused: false,
                 control_requested: false,
                 local_reason: None,
@@ -442,6 +446,7 @@ impl Viewer {
         stats.path = path.into();
         stats.relay_transport = relay_transport.map(Into::into);
         stats.preset = state.quality;
+        stats.link = state.link.clone();
         stats.presented_fps = sink.presented_fps;
         stats.width = video.map_or(0, |video| video.width);
         stats.height = video.map_or(0, |video| video.height);
@@ -1081,8 +1086,12 @@ impl Writer<'_> {
         let second = self.ticks.is_multiple_of(TICKS_PER_SECOND);
         self.ticks += 1;
         if second && let Some(connection) = self.connection {
-            let route = route(&connection.diagnostics());
-            let changed = self.shared.state.lock().route.replace(route) != Some(route);
+            let (route, link) = route(&connection.diagnostics());
+            let changed = {
+                let mut state = self.shared.state.lock();
+                state.link = link;
+                state.route.replace(route) != Some(route)
+            };
             if changed {
                 self.shared.outbound.route(route);
             }
@@ -1109,18 +1118,54 @@ impl Writer<'_> {
     }
 }
 
-/// The path this viewer's tunnel carries the session on.
-fn route(diagnostics: &TunnelDiagnostics) -> Route {
-    if diagnostics
+/// The path this viewer's tunnel carries the session on, and on a direct
+/// one, its link. A viewer's tunnel carries this one session.
+fn route(diagnostics: &TunnelDiagnostics) -> (Route, Option<ViewerLink>) {
+    match diagnostics
         .direct
         .as_ref()
-        .is_some_and(|direct| direct.active_direct > 0)
+        .filter(|direct| direct.active_direct > 0)
     {
-        Route::Direct
-    } else if diagnostics.relay_transport == RelayTransport::Quic {
-        Route::RelayQuic
-    } else {
-        Route::RelayTcp
+        Some(direct) => (Route::Direct, direct.link.as_ref().map(ViewerLink::from)),
+        None if diagnostics.relay_transport == RelayTransport::Quic => (Route::RelayQuic, None),
+        None => (Route::RelayTcp, None),
+    }
+}
+
+/// The direct link a session runs on, as `ViewerStats::link` reports it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ViewerLink {
+    /// `lan`, `internet` or `private`.
+    pub kind: LinkKind,
+    pub family: AddressFamily,
+    /// How the peer address was learned.
+    pub via: LinkVia,
+    pub peer: String,
+    pub local_ip: Option<String>,
+    /// QUIC's round trip and its lowest, rounded up to whole milliseconds:
+    /// the network alone, unlike `ViewerStats::rtt_ms`, which the host's
+    /// probe measures behind the video.
+    pub rtt_ms: u32,
+    pub min_rtt_ms: u32,
+    pub setup_ms: u32,
+    /// What suggested a shared network before the setup.
+    pub same_lan: Option<LanEvidence>,
+}
+
+impl From<&DirectLink> for ViewerLink {
+    fn from(link: &DirectLink) -> Self {
+        let ms = |us: u64| u32::try_from(us.div_ceil(1000)).unwrap_or(u32::MAX);
+        Self {
+            kind: link.kind,
+            family: link.family,
+            via: link.via,
+            peer: link.peer.to_string(),
+            local_ip: link.local_ip.map(|ip| ip.to_string()),
+            rtt_ms: ms(link.stats.rtt_us),
+            min_rtt_ms: ms(link.stats.min_rtt_us),
+            setup_ms: u32::try_from(link.timings.setup_ms).unwrap_or(u32::MAX),
+            same_lan: link.same_lan,
+        }
     }
 }
 

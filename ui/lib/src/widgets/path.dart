@@ -73,15 +73,18 @@ class PathRoute extends StatelessWidget {
     if (mode == null) return const SizedBox.shrink();
     final scheme = Theme.of(context).colorScheme;
     final direct = switch (mode) {
-      PathMode.direct || PathMode.mixed || PathMode.trying => true,
+      PathMode.direct ||
+      PathMode.lan ||
+      PathMode.mixed ||
+      PathMode.trying => true,
       _ => false,
     };
     final throughRelay = switch (mode) {
-      PathMode.direct || PathMode.trying => false,
+      PathMode.direct || PathMode.lan || PathMode.trying => false,
       _ => true,
     };
     final muted = scheme.onSurfaceVariant;
-    final signal = signalColor(scheme);
+    final signal = pathColor(scheme, mode);
     Widget end(IconData icon) => Icon(icon, size: 18, color: muted);
     return SizedBox(
       key: Key('route-${tunnel.id}'),
@@ -224,9 +227,11 @@ class _BreathingState extends State<_Breathing>
 }
 
 /// The colour of a path: the signal blue for a path of its own, past the
-/// relay, as live tunnels are drawn; a neutral grey for the relay.
+/// relay, as live tunnels are drawn, and green within one local network; a
+/// neutral grey for the relay.
 Color pathColor(ColorScheme scheme, PathMode mode) => switch (mode) {
   PathMode.direct || PathMode.mixed || PathMode.trying => signalColor(scheme),
+  PathMode.lan => successColor(scheme),
   PathMode.relay ||
   PathMode.relayOnly ||
   PathMode.directFirst => scheme.outline,
@@ -234,6 +239,7 @@ Color pathColor(ColorScheme scheme, PathMode mode) => switch (mode) {
 
 IconData pathIcon(PathMode mode) => switch (mode) {
   PathMode.direct || PathMode.trying || PathMode.directFirst => AppIcons.direct,
+  PathMode.lan => AppIcons.router,
   PathMode.mixed => AppIcons.mixedPath,
   PathMode.relay || PathMode.relayOnly => AppIcons.relay,
 };
@@ -264,6 +270,10 @@ String _pathLabel(BuildContext context, Tunnel tunnel) {
     PathMode.direct when tunnel.kind == TunnelKind.share =>
       l10n.pathShareDirect(path?.activeDirect ?? 0),
     PathMode.direct => l10n.pathDirect,
+    PathMode.lan when tunnel.kind == TunnelKind.share => l10n.pathLanSessions(
+      path?.activeLan ?? 0,
+    ),
+    PathMode.lan => l10n.pathLan,
     PathMode.relay => l10n.pathRelay,
     PathMode.mixed => l10n.pathMixed(
       path?.activeDirect ?? 0,
@@ -292,13 +302,22 @@ String _pathDetail(BuildContext context, Tunnel tunnel) {
       return l10n.pathDirectFirstDetail;
     case PathMode.trying:
       return l10n.pathTryingDetail(_stage(context, path?.attempt));
-    case PathMode.direct when share:
-      return l10n.pathShareDirectDetail(path?.activeDirect ?? 0);
-    case PathMode.direct:
-      final setup = path?.setupMs;
-      return setup == null
-          ? l10n.pathDirectDetail
-          : '${l10n.pathDirectDetail} ${l10n.pathSetup(setup)}';
+    case PathMode.direct || PathMode.lan when share:
+      return _withLink(
+        context,
+        l10n.pathShareDirectDetail(path?.activeDirect ?? 0),
+        path,
+      );
+    case PathMode.direct || PathMode.lan:
+      final said = tunnel.pathMode == PathMode.lan
+          ? l10n.pathLanDetail
+          : l10n.pathDirectDetail;
+      final setup = path?.link?.setupMs ?? path?.setupMs;
+      return _withLink(
+        context,
+        setup == null ? said : '$said ${l10n.pathSetup(setup)}',
+        path,
+      );
     case PathMode.mixed:
       return l10n.pathMixedDetail(
         path?.activeDirect ?? 0,
@@ -319,6 +338,31 @@ String _pathDetail(BuildContext context, Tunnel tunnel) {
       return '';
   }
 }
+
+/// [said], and under it the direct link open now: where it runs, over
+/// which family, to which address, and its round trip.
+String _withLink(BuildContext context, String said, TunnelPath? path) {
+  final link = path?.link;
+  if (link == null) return said;
+  final facts = [
+    linkKindLabel(context, link.kind),
+    ?familyLabel(link.family),
+    ?link.peer,
+    if (link.rttMs case final rtt?) context.l10n.pathRoundTrip(rtt),
+  ];
+  return '$said\n${facts.join(' · ')}';
+}
+
+/// What a direct path's kind is called.
+String linkKindLabel(BuildContext context, LinkKind? kind) =>
+    context.l10n.pathLinkKind(kind?.name ?? '');
+
+/// `IPv4` or `IPv6`, for the SDK's `ipv4` and `ipv6`.
+String? familyLabel(String? family) => switch (family) {
+  'ipv4' => 'IPv4',
+  'ipv6' => 'IPv6',
+  _ => null,
+};
 
 String _stage(BuildContext context, DirectStage? stage) {
   final l10n = context.l10n;

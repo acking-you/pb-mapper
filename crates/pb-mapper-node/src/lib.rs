@@ -221,10 +221,130 @@ pub struct JsPathDiagnostics {
     pub relay_sessions: f64,
     pub active_direct: f64,
     pub active_relay: f64,
+    /// Direct sessions within one local network, open now and in all.
+    pub active_lan: f64,
+    pub lan_sessions: f64,
+    /// Setups that found the peer on a local network, and those of them that
+    /// ended on another path or on the relay.
+    pub lan_detected: f64,
+    pub lan_missed: f64,
     pub fallbacks: f64,
     pub last_fallback: Option<String>,
+    /// `lan`, `internet` or `private`: where the latest direct session this
+    /// end set up runs.
+    pub last_kind: Option<String>,
     /// The direct attempt in flight, if any.
     pub attempt: Option<JsDirectAttempt>,
+    /// The newest direct session open now.
+    pub link: Option<JsDirectLink>,
+}
+
+/// A direct session's path, as `diagnostics().direct.link` reports it.
+#[napi(object)]
+pub struct JsDirectLink {
+    /// `lan`, `internet` or `private`.
+    pub kind: String,
+    /// `ipv4` or `ipv6`.
+    pub family: String,
+    /// How the peer address was learned: `host`, `public`, `mapped` or
+    /// `peer_reflexive`.
+    pub via: String,
+    pub peer: String,
+    pub local_ip: Option<String>,
+    /// The local interface the path leaves by, and its tier: `lan`,
+    /// `physical`, `cellular`, `virtual` or `loopback`.
+    pub interface: Option<String>,
+    pub tier: Option<String>,
+    /// `ipv6_prefix`, `public_ip_subnet` or `subnet`: what suggested a shared
+    /// network before the setup.
+    pub same_lan: Option<String>,
+    pub timings: JsSetupTimings,
+    pub candidates: JsCandidateCounts,
+    /// QUIC's view of the path as of this read.
+    pub rtt_us: f64,
+    pub min_rtt_us: f64,
+    pub congestion_window: f64,
+    pub mtu: u32,
+    pub sent_packets: f64,
+    pub lost_packets: f64,
+    pub congestion_events: f64,
+}
+
+/// How long each stage of a direct setup took on this end; a stage it did
+/// not run is absent.
+#[napi(object)]
+pub struct JsSetupTimings {
+    pub negotiate_ms: Option<f64>,
+    pub discover_ms: Option<f64>,
+    pub stun_ms: Option<f64>,
+    /// `ok`, `timeout`, `unavailable` or `cached`.
+    pub stun: String,
+    pub grant_ms: Option<f64>,
+    pub first_pong_ms: Option<f64>,
+    pub lan_first_pong_ms: Option<f64>,
+    pub handshake_ms: Option<f64>,
+    pub commit_ms: Option<f64>,
+    pub setup_ms: f64,
+}
+
+/// The addresses a direct setup worked with.
+#[napi(object)]
+pub struct JsCandidateCounts {
+    pub local: u32,
+    pub local_lan: u32,
+    /// Left out past the wire's limit of 8.
+    pub truncated: u32,
+    pub peer: u32,
+    pub peer_lan: u32,
+    pub probed: u32,
+    pub answered: u32,
+    pub handshakes: u32,
+}
+
+impl From<sdk::DirectLink> for JsDirectLink {
+    fn from(link: sdk::DirectLink) -> Self {
+        let timings = link.timings;
+        let candidates = link.candidates;
+        Self {
+            kind: link.kind.as_str().into(),
+            family: link.family.as_str().into(),
+            via: link.via.as_str().into(),
+            peer: link.peer.to_string(),
+            local_ip: link.local_ip.map(|ip| ip.to_string()),
+            interface: link.interface,
+            tier: link.tier.map(|tier| tier.as_str().into()),
+            same_lan: link.same_lan.map(|evidence| evidence.as_str().into()),
+            timings: JsSetupTimings {
+                negotiate_ms: timings.negotiate_ms.map(number),
+                discover_ms: timings.discover_ms.map(number),
+                stun_ms: timings.stun_ms.map(number),
+                stun: timings.stun.as_str().into(),
+                grant_ms: timings.grant_ms.map(number),
+                first_pong_ms: timings.first_pong_ms.map(number),
+                lan_first_pong_ms: timings.lan_first_pong_ms.map(number),
+                handshake_ms: timings.handshake_ms.map(number),
+                commit_ms: timings.commit_ms.map(number),
+                setup_ms: number(timings.setup_ms),
+            },
+            candidates: JsCandidateCounts {
+                local: candidates.local,
+                local_lan: candidates.local_lan,
+                truncated: candidates.truncated,
+                peer: candidates.peer,
+                peer_lan: candidates.peer_lan,
+                probed: candidates.probed,
+                answered: candidates.answered,
+                handshakes: candidates.handshakes,
+            },
+            rtt_us: number(link.stats.rtt_us),
+            min_rtt_us: number(link.stats.min_rtt_us),
+            congestion_window: number(link.stats.congestion_window),
+            mtu: link.stats.mtu.into(),
+            sent_packets: number(link.stats.sent_packets),
+            lost_packets: number(link.stats.lost_packets),
+            congestion_events: number(link.stats.congestion_events),
+        }
+    }
 }
 
 /// One event of a tunnel. In `diagnostics().events` consecutive repeats fold
@@ -241,8 +361,8 @@ pub struct JsTunnelEvent {
     /// `relay_failed`, `network_changed`, `direct_established`,
     /// `direct_fallback` and `stopped`, the last event of a stream. Steps,
     /// from `subscribeEvents()` only: `phase_changed`, `direct_stage_changed`,
-    /// `direct_abandoned`, `session_opened`, `session_closed` and
-    /// `port_mapping_changed`.
+    /// `direct_abandoned`, `session_opened`, `session_closed`,
+    /// `port_mapping_changed`, `lan_detected` and `path_selected`.
     pub kind: String,
     /// `relay_ready`: setup latency of the answering relay.
     pub latency_ms: Option<f64>,
@@ -263,6 +383,13 @@ pub struct JsTunnelEvent {
     pub path: Option<String>,
     /// `port_mapping_changed`: the mapping as it now stands.
     pub mapping: Option<JsPortMappingStatus>,
+    /// `lan_detected`: `ipv6_prefix`, `public_ip_subnet` or `subnet`.
+    pub evidence: Option<String>,
+    /// `path_selected`: `lan`, `internet` or `private`, `ipv4` or `ipv6`,
+    /// and how the peer address was learned.
+    pub link: Option<String>,
+    pub family: Option<String>,
+    pub via: Option<String>,
 }
 
 impl From<sdk::TunnelEvent> for JsTunnelEvent {
@@ -280,6 +407,10 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
             phase: None,
             path: None,
             mapping: None,
+            evidence: None,
+            link: None,
+            family: None,
+            via: None,
         };
         js.kind = match event.kind {
             sdk::TunnelEventKind::RelayReady { latency_ms } => {
@@ -328,6 +459,16 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 js.mapping = Some((*mapping).into());
                 "port_mapping_changed"
             }
+            sdk::TunnelEventKind::LanDetected { evidence } => {
+                js.evidence = Some(evidence.as_str().into());
+                "lan_detected"
+            }
+            sdk::TunnelEventKind::PathSelected { link, family, via } => {
+                js.link = Some(link.as_str().into());
+                js.family = Some(family.as_str().into());
+                js.via = Some(via.as_str().into());
+                "path_selected"
+            }
         }
         .to_string();
         js
@@ -370,13 +511,19 @@ impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
                 relay_sessions: number(d.relay_sessions),
                 active_direct: number(d.active_direct),
                 active_relay: number(d.active_relay),
+                active_lan: number(d.active_lan),
+                lan_sessions: number(d.lan_sessions),
+                lan_detected: number(d.lan_detected),
+                lan_missed: number(d.lan_missed),
                 fallbacks: number(d.fallbacks),
                 last_fallback: d.last_fallback,
+                last_kind: d.last_kind.map(|kind| kind.as_str().into()),
                 attempt: d.attempt.map(|attempt| JsDirectAttempt {
                     stage: attempt.stage.as_str().to_string(),
                     elapsed_ms: number(attempt.elapsed_ms),
                     in_flight: attempt.in_flight,
                 }),
+                link: d.link.map(JsDirectLink::from),
             }),
             relay_transport: transport_name(value.relay_transport),
             sdk_version: value.sdk_version.to_string(),

@@ -485,11 +485,20 @@ fn session_json(session: &SessionObservation) -> Value {
         .filter_map(|report| report.as_ref())
         .min_by_key(|report| report.age_ms);
     let id: String = session.id[..6].iter().map(|b| format!("{b:02x}")).collect();
+    // What the ends said of a direct path, the latest first: absent where
+    // both ends, or the relay, predate it.
+    let link = latest.and_then(|report| report.report.link).or_else(|| {
+        reports
+            .iter()
+            .find_map(|report| report.as_ref()?.report.link)
+    });
     json!({
         "id": id,
         "service": session.service,
         "transport": if session.is_datagram { "UDP" } else { "TCP" },
         "path": latest.map(|report| format!("{:?}", report.report.path).to_lowercase()),
+        "pathKind": link.map(|link| link.kind.as_str()),
+        "family": link.map(|link| link.family.as_str()),
         "state": latest.map(|report| format!("{:?}", report.report.state).to_lowercase()),
         "reason": latest.and_then(|report| report.report.reason.clone()),
         "ageMs": latest.map(|report| report.age_ms),
