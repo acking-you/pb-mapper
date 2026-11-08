@@ -124,7 +124,6 @@
   "pathDirect": "直连",
   "pathLan": "局域网",
   "pathRelay": "中继",
-  "pathLan": "局域网",
   "pathMixed": "直连 {direct} · 中继 {relay}",
   "pathShareDirect": "直连 {count}",
   "pathLanSessions": "局域网 {count}",

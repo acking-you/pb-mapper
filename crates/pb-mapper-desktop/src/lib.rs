@@ -52,8 +52,8 @@ pub use security::HostIdentity;
 pub use video_sink::{AttachError, Pull, VideoConsumer, VideoSink, VideoUnit};
 pub use viewer::{
     ConnectError, ConnectStage, DecoderInfo, DecoderState, DesktopView, InputError, IntervalStats,
-    NoticeInfo, PresentedInfo, VideoInfo, Viewer, ViewerConfig, ViewerReason, ViewerState,
-    ViewerStats, ViewerStatus,
+    NoticeInfo, PresentedInfo, VideoInfo, Viewer, ViewerConfig, ViewerLink, ViewerReason,
+    ViewerState, ViewerStats, ViewerStatus,
 };
 
 /// Embedding applications coordinate their other input writers here. Merely

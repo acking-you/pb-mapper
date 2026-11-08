@@ -125,7 +125,6 @@
   "pathDirect": "Direct",
   "pathLan": "LAN",
   "pathRelay": "Relay",
-  "pathLan": "LAN",
   "pathMixed": "{direct} direct · {relay} relay",
   "@pathMixed": {"placeholders": {"direct": {"type": "int"}, "relay": {"type": "int"}}},
   "pathShareDirect": "{count} direct",
