@@ -170,6 +170,9 @@ pub struct TunnelMetrics {
     /// Sessions that went straight to the relay without trying direct,
     /// because a recent attempt had fallen back.
     pub cooldown_skips: u64,
+    /// Whether direct setups try a shared local network first; see
+    /// [TunnelDiagnostics::lan_first](super::TunnelDiagnostics::lan_first).
+    pub lan_first: bool,
 }
 
 /// The closest two samples of a stream may be.

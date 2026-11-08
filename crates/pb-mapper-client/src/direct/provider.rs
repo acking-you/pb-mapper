@@ -316,7 +316,7 @@ where
         lan_first,
     );
     if let Some(evidence) = lan.evidence {
-        diagnostics.lan_detected(evidence);
+        diagnostics.lan_detected(evidence, lan.prefers());
     }
     let missed = |took: Option<LinkKind>| {
         if let Some(evidence) = lan.evidence {

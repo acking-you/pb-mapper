@@ -106,6 +106,7 @@ Requires a Tokio runtime. The `pb-mapper` CLI and relay live in the
 | Publish / reach a TCP or UDP service | `Client::register`, `Client::connect`, `Transport::{Tcp, Udp}` |
 | Choose the path | `RegisterOptions { allow_direct }`, `ConnectOptions { path: PathPolicy::{Auto, RelayOnly} }` |
 | Ask the router to map the direct port | `port_mapping: PortMapping::{Auto, Always, Off}` in either options; `Auto`, once punching fails, by default |
+| Try a shared Wi-Fi or LAN first | `lan_first` in either options, `true` by default; `false` probes in the peer's order and waits for nothing, while the LAN is still reported |
 | Reclaim abandoned TCP data connections | `register_with_idle_timeout`, `RegisterOptions { idle_timeout }` |
 | Listen to a tunnel | `subscribe()` for status, `subscribe_events()` for every event as it happens, `subscribe_metrics(every)` for sessions, bytes per path and round trips as they change, `diagnostics()` for a snapshot |
 | Watch the relay carrier | `Client::relay_diagnostics`, `Client::subscribe_relay_metrics(every)` |

@@ -95,6 +95,8 @@
   "@diagnosticsFallbacks": {"placeholders": {"count": {"type": "int"}}},
   "diagnosticsTraffic": "{path} ↑ {sent} ↓ {received}",
   "@diagnosticsTraffic": {"description": "What one path carried: sent from this computer's side (up), and received (down).", "placeholders": {"path": {"type": "String"}, "sent": {"type": "String"}, "received": {"type": "String"}}},
+  "diagnosticsLanFirstOff": "LAN first off",
+  "@diagnosticsLanFirstOff": {"description": "This tunnel started with Try the local network first turned off."},
   "portMappingOff": "Off for this tunnel.",
   "portMappingStage": "{stage, select, standby{Standing by: asks the router if a punch fails} waiting_for_direct{Waiting for the first direct connection} discovering{Looking for the router} gateway_found{Found the router} discovered{Learned what the router speaks} requesting{Asking the router} active{Mapped} renewing{Renewing the lease} expired{Lease expired} retrying{Trying again soon} network_changed{Network changed} releasing{Releasing} released{Released} release_sent{Release sent} failed{The router did not map it} release_failed{Could not release} cancelled{Cancelled} stopped{Stopped} other{{stage}}}",
   "@portMappingStage": {"placeholders": {"stage": {"type": "String"}}},

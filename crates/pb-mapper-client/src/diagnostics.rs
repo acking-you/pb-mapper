@@ -227,8 +227,12 @@ pub enum TunnelEventKind {
     /// The gateway mapping of the tunnel's direct endpoint changed.
     PortMappingChanged { mapping: Box<PortMappingStatus> },
     /// A direct setup found the peer on one of this end's local networks,
-    /// before any packet: its LAN addresses are probed first.
-    LanDetected { evidence: LanEvidence },
+    /// before any packet. With preferred, this end's LAN-first is on: the
+    /// peer's LAN addresses are probed first.
+    LanDetected {
+        evidence: LanEvidence,
+        preferred: bool,
+    },
     /// A direct session committed to a path: across `link`, over `family`,
     /// to an address learned `via`.
     PathSelected {
@@ -359,6 +363,9 @@ impl std::error::Error for EventsLagged {}
 pub struct TunnelDiagnostics {
     /// The carrier this tunnel reaches the relay over, fixed when it started.
     pub relay_transport: crate::relay::RelayTransport,
+    /// Whether its direct setups try a shared local network first: its
+    /// lan_first option, and never for a tunnel without direct.
+    pub lan_first: bool,
     /// How its sessions travel, on the relay and direct alike: present once
     /// one has opened or a direct attempt has begun.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -486,6 +493,8 @@ struct State {
     /// Until when sessions skip direct after a fallback, and how many have.
     cooldown: Option<Instant>,
     cooldown_skips: u64,
+    /// Whether direct setups try a shared local network first.
+    lan_first: bool,
     port_mapping: Option<PortMappingDiagnostics>,
     phase: RecoveryPhase,
     /// The phase last announced to subscribers. A ready tunnel's routine
@@ -646,6 +655,7 @@ impl State {
                 .filter(|until| *until > now)
                 .map(|until| ms(until - now)),
             cooldown_skips: self.cooldown_skips,
+            lan_first: self.lan_first,
         }
     }
 }
@@ -677,6 +687,7 @@ impl Default for Diagnostics {
             relay_rtt: None,
             cooldown: None,
             cooldown_skips: 0,
+            lan_first: false,
             port_mapping: None,
             phase: RecoveryPhase::Starting,
             announced: RecoveryPhase::Starting,
@@ -754,6 +765,10 @@ impl Diagnostics {
     pub(crate) fn defer_close(&self) -> DeferClose {
         self.state().cleanups += 1;
         DeferClose(self.clone())
+    }
+    /// Whether this tunnel's direct setups try a shared local network first.
+    pub(crate) fn prefer_lan(&self, prefer: bool) {
+        self.state().lan_first = prefer;
     }
     /// This tunnel may map its direct endpoint's port: once that opens, or
     /// (`Auto`) once punching through has failed.
@@ -881,10 +896,13 @@ impl Diagnostics {
     }
     /// A setup found the peer on one of this end's local networks.
     #[cfg(feature = "p2p")]
-    pub(crate) fn lan_detected(&self, evidence: LanEvidence) {
+    pub(crate) fn lan_detected(&self, evidence: LanEvidence, preferred: bool) {
         let mut state = self.state();
         state.direct.get_or_insert_default().lan_detected += 1;
-        state.record(TunnelEventKind::LanDetected { evidence });
+        state.record(TunnelEventKind::LanDetected {
+            evidence,
+            preferred,
+        });
     }
     /// A setup that found the peer on a local network, by `evidence`, took
     /// a path across `took` instead, or the relay.
@@ -1046,6 +1064,7 @@ impl Diagnostics {
         let link = None;
         TunnelDiagnostics {
             relay_transport: endpoint.transport(),
+            lan_first: state.lan_first,
             direct: state.direct.clone().map(|direct| PathDiagnostics {
                 attempt,
                 link,

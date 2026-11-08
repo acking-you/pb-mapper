@@ -160,8 +160,16 @@ Nothing in the SDK crates knows it exists.
     (netdev, read in the background) and judges from a peer's candidates
     whether it shares a LAN; `candidates.rs` orders what is offered, LAN
     first; `socket.rs` and `endpoint.rs` probe and dial each path as it
-    answers; `provider.rs` is the publishing end. A committed session's
-    `DirectLink` lives in `diagnostics/link.rs`
+    answers; `provider.rs` is the publishing end. LAN-first (on by default,
+    `lan_first` in the options, carried as the crate-private `DirectPolicy`)
+    only orders probes and holds other paths back while a LAN is known to
+    be there (`Assessment::holds`); off, the LAN is still detected and
+    reported. A committed session's `DirectLink` lives in
+    `diagnostics/link.rs`
+  - `diagnostics.rs`, `diagnostics/metrics.rs`: a tunnel's diagnostics, its
+    event stream and its `TunnelMetrics` (sessions and bytes per path, the
+    relay round trip, the live link), all read from one state; each session
+    holds a `SessionGuard` whose `ByteMeter` the forwarding fills
 
 - **`pb-mapper-desktop/`**: Endpoint-owned remote desktop, reached as
   `pb_mapper::desktop`; how it works is in `docs/remote-desktop.md`
@@ -235,7 +243,8 @@ The design and its rules are in `docs/ui-design.md`.
     connections, and (administrator key only) credentials and security, plus
     the relay this computer can run itself
   - `logs_page.dart`: The log stream, filtered by level and word
-  - `settings_page.dart`: Relay, credential, setup string, theme, language;
+  - `settings_page.dart`: Relay, credential, setup string, *Try the local
+    network first* (saved at once, outside the relay form), theme, language;
     Test says what the relay answered, or why it did not
   - `setup_flow.dart`: First run — relay, then what to do, then that tunnel
   - `tunnel_editor.dart`: The one share/connect form, and `followTunnel`
@@ -382,10 +391,13 @@ The design and its rules are in `docs/ui-design.md`.
     the tunnel
   - `tunnel_events.rs`: `pb_mapper_tunnel_events_call_json`, the window's
     readers of a running tunnel's events (`subscribe`/`next`/`close`), each
-    answer carrying the tunnel's diagnostics as they are by then
-  - The relay carrier (TCP or QUIC, `relay-quic`) is app config, set by
-    `pb_mapper_update_config` with the address and credential; a tunnel
-    keeps the one it started with and reports it as `relayTransport`.
+    event carrying the tunnel's diagnostics and metrics as they are by then;
+    with `metrics_ms`, `next` also answers `{type:"metrics"}` samples alone
+  - The relay carrier (TCP or QUIC, `relay-quic`) and LAN-first are app
+    config, set by `pb_mapper_update_config` with the address and
+    credential; a tunnel keeps what it started with and reports its carrier
+    as `relayTransport`. Only a change of the relay settings
+    (`AppConfig::same_relay`) resets the relay caches or asks the relay again.
     `pb_mapper_start_server` takes a `quic_port` (0: none). The window's
     own relay questions, and the remote desktop's connects and host starts,
     go through `relay_client()`, cached per config,

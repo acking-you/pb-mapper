@@ -299,7 +299,7 @@ impl Consumer {
             self.policy.lan_first,
         );
         if let Some(evidence) = lan.evidence {
-            self.diagnostics.lan_detected(evidence);
+            self.diagnostics.lan_detected(evidence, lan.prefers());
         }
         attempt.stage(DirectStage::Punching);
         let direct_deadline = deadline.min(Instant::now() + Duration::from_secs(2));

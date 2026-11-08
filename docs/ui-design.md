@@ -117,10 +117,10 @@ the last attempt ended.
   tooltip adding the family, the other computer's address, QUIC's round
   trip and the setup time; **Relay** and **Relay only** in
   grey with the relay's tower; both counted when a connection holds both;
-  **Going direct…** breathing while a path is being set up. A share knows
-  only the sessions that reached it directly, so it shows a chip only for
-  those, or for Relay only. On a phone the chip takes the room left of the
-  actions.
+  **Going direct…** breathing while a path is being set up. A share counts
+  every session that reaches it, relayed or direct, so its chip says
+  Direct, LAN, Relay or both, as a connection's does. On a phone the chip
+  takes the room left of the actions.
 - **A route** in the galaxy's details panel, `PathRoute`: this computer and
   the service at either end; the relay on the line when traffic crosses it,
   set below an arc that clears it when it goes direct. Under it, one
@@ -139,10 +139,14 @@ the last attempt ended.
 - **Diagnostics**, for a running tunnel, from its menu or its details
   panel (`pages/tunnel_diagnostics.dart`): its carrier, relay and sessions as
   pills, its port mapping as it stands, and its events, newest first, as they
-  happen. Each update carries the tunnel's diagnostics, so nothing on screen
-  is kept up by the app itself. A session's opening and closing are counted,
-  not listed. A mapping the router will not make is amber, never red: like a
-  relayed path, it is no fault of the tunnel's.
+  happen. Each event carries the tunnel's diagnostics, and the SDK's metrics
+  are sampled every second while the panel is open, so the relay's round
+  trip, the sessions on each path, the live link and the bytes each path
+  carried (up and down) stay current with nothing kept up by the app itself.
+  A tunnel started with *Try the local network first* off says so in a
+  quiet pill. A session's opening and closing are counted, not listed. A
+  mapping the router will not make is amber, never red: like a relayed path,
+  it is no fault of the tunnel's.
 
 Blue keeps its one meaning: this computer and what it reaches by itself. A
 relayed path is not a fault, so it is never amber or red; why it is the

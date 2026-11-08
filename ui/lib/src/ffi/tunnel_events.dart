@@ -100,6 +100,7 @@ class ByteCount {
 class TunnelDiagnostics {
   TunnelDiagnostics.fromMap(this.raw)
     : relayTransport = raw['relay_transport'] as String?,
+      lanFirst = raw['lan_first'] as bool?,
       phase = raw['last_attempt_phase'] as String?,
       attempts = _int(raw['attempts']),
       consecutiveFailures = _int(raw['consecutive_failures']),
@@ -125,6 +126,10 @@ class TunnelDiagnostics {
 
   /// `tcp` or `quic`.
   final String? relayTransport;
+
+  /// Whether its direct setups try a shared local network first; null from
+  /// a library that does not say.
+  final bool? lanFirst;
 
   /// The phase its relay attempt is in, as the SDK names it.
   final String? phase;
@@ -229,6 +234,9 @@ class TunnelEvent {
   /// `lan_detected` and `lan_missed`: why the peer seemed to share this
   /// network.
   String? get evidence => detail['evidence'] as String?;
+
+  /// `lan_detected`: whether this end tried that network first.
+  bool? get preferred => detail['preferred'] as bool?;
 
   /// `lan_missed`: where the session went instead; null for the relay.
   LinkKind? get took => LinkKind.parse(detail['took']);

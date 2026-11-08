@@ -620,6 +620,11 @@ export interface JsSetupTimings {
 
 export interface JsTunnelDiagnostics {
   relayTransport: string
+  /**
+   * Whether direct setups try a shared local network first: the
+   * tunnel's lanFirst, and never without direct.
+   */
+  lanFirst: boolean
   direct?: JsPathDiagnostics
   /** Application bytes on each path, as `metrics().traffic`. */
   traffic: JsPathTraffic
@@ -724,6 +729,11 @@ export interface JsTunnelEvent {
    * `private`; absent when it took the relay.
    */
   took?: string
+  /**
+   * lan_detected: whether this end's LAN-first is on, so the peer's
+   * LAN addresses are probed first.
+   */
+  preferred?: boolean
 }
 
 /** What a running tunnel keeps measuring, sampled at once. */
@@ -742,4 +752,6 @@ export interface JsTunnelMetrics {
    */
   directCooldownMs?: number
   cooldownSkips: number
+  /** Whether direct setups try a shared local network first. */
+  lanFirst: boolean
 }

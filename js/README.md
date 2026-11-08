@@ -73,6 +73,12 @@ renewed while the tunnel runs and released when it stops, and
 `diagnostics().portMapping` says where it stands (`standby` until a punch
 fails).
 
+When both ends share a Wi-Fi or LAN, direct setup tries that network first:
+`lanFirst: true`, the default for `register` and `connect`. With
+`lanFirst: false` the peer's addresses are probed in the order offered and
+nothing waits for the LAN; it is still detected and reported, and
+`diagnostics().lanFirst` says which the tunnel runs with.
+
 ## Listening for changes
 
 Three feeds, all free of credentials and payload. The status:

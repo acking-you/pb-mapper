@@ -402,6 +402,8 @@ pub struct JsTunnelMetrics {
     /// fallback, and how many have.
     pub direct_cooldown_ms: Option<f64>,
     pub cooldown_skips: f64,
+    /// Whether direct setups try a shared local network first.
+    pub lan_first: bool,
 }
 
 impl From<sdk::TunnelMetrics> for JsTunnelMetrics {
@@ -453,6 +455,7 @@ impl From<sdk::TunnelMetrics> for JsTunnelMetrics {
             },
             direct_cooldown_ms: value.direct_cooldown_ms.map(number),
             cooldown_skips: number(value.cooldown_skips),
+            lan_first: value.lan_first,
         }
     }
 }
@@ -672,6 +675,9 @@ pub struct JsTunnelEvent {
     /// `lan_missed`: where the session went instead, `internet` or
     /// `private`; absent when it took the relay.
     pub took: Option<String>,
+    /// lan_detected: whether this end's LAN-first is on, so the peer's
+    /// LAN addresses are probed first.
+    pub preferred: Option<bool>,
 }
 
 impl From<sdk::TunnelEvent> for JsTunnelEvent {
@@ -699,6 +705,7 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
             family: None,
             via: None,
             took: None,
+            preferred: None,
         };
         js.kind = match event.kind {
             sdk::TunnelEventKind::RelayReady { latency_ms } => {
@@ -768,8 +775,13 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 js.mapping = Some((*mapping).into());
                 "port_mapping_changed"
             }
-            sdk::TunnelEventKind::LanDetected { evidence } => {
+            sdk::TunnelEventKind::LanDetected {
+                evidence,
+                preferred,
+                ..
+            } => {
                 js.evidence = Some(evidence.as_str().into());
+                js.preferred = Some(preferred);
                 "lan_detected"
             }
             sdk::TunnelEventKind::PathSelected { link, family, via } => {
@@ -793,6 +805,9 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
 #[napi(object)]
 pub struct JsTunnelDiagnostics {
     pub relay_transport: String,
+    /// Whether direct setups try a shared local network first: the
+    /// tunnel's lanFirst, and never without direct.
+    pub lan_first: bool,
     pub direct: Option<JsPathDiagnostics>,
     /// Application bytes on each path, as `metrics().traffic`.
     pub traffic: JsPathTraffic,
@@ -847,6 +862,7 @@ impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
             traffic: value.traffic.into(),
             relay_rtt_ms: value.relay_rtt_ms.map(number),
             relay_transport: transport_name(value.relay_transport),
+            lan_first: value.lan_first,
             sdk_version: value.sdk_version.to_string(),
             last_attempt_phase: value.last_attempt_phase.as_str().to_string(),
             attempts: number(value.attempts),

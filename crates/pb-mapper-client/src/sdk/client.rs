@@ -306,14 +306,7 @@ impl Client {
             .prepare_worker(&request.key, &request.local_addr)
             .await?;
         let credential = self.credential();
-        let direct = worker.direct_policy(
-            if allow_direct {
-                port_mapping
-            } else {
-                PortMapping::Off
-            },
-            lan_first,
-        );
+        let direct = worker.direct_policy(allow_direct, port_mapping, lan_first);
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_server_side_cli_recovering::<TcpStreamProvider>(
@@ -406,10 +399,8 @@ impl Client {
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
         let policy = worker.direct_policy(
-            match options.path {
-                PathPolicy::Auto => options.port_mapping,
-                PathPolicy::RelayOnly => PortMapping::Off,
-            },
+            options.path == PathPolicy::Auto,
+            options.port_mapping,
             options.lan_first,
         );
         let handle = worker.spawn(move |context| async move {
@@ -487,10 +478,8 @@ impl Client {
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
         let direct = worker.direct_policy(
-            match options.path {
-                PathPolicy::Auto => options.port_mapping,
-                PathPolicy::RelayOnly => PortMapping::Off,
-            },
+            options.path == PathPolicy::Auto,
+            options.port_mapping,
             options.lan_first,
         );
         let handle = match request.transport {
@@ -761,21 +750,28 @@ struct TunnelWorker {
 }
 
 impl TunnelWorker {
-    /// How this tunnel's direct setups go: how it maps its direct endpoint's
-    /// port, noted in its diagnostics from the start when it may, and whether
-    /// it tries a shared local network first.
-    fn direct_policy(&self, port_mapping: PortMapping, lan_first: bool) -> DirectPolicy {
-        let port_mapping = if cfg!(feature = "port-mapping") {
+    /// How this tunnel's direct setups go, if it has any: how it maps its
+    /// direct endpoint's port and whether it tries a shared local network
+    /// first, both noted in its diagnostics from the start.
+    fn direct_policy(
+        &self,
+        direct: bool,
+        port_mapping: PortMapping,
+        lan_first: bool,
+    ) -> DirectPolicy {
+        let port_mapping = if direct && cfg!(feature = "port-mapping") {
             port_mapping
         } else {
             PortMapping::Off
         };
+        let lan_first = direct && lan_first;
         if port_mapping != PortMapping::Off {
             self.diagnostics.port_mapping_requested(
                 port_mapping,
                 crate::network::NetworkHints::shared().generation(),
             );
         }
+        self.diagnostics.prefer_lan(lan_first);
         DirectPolicy {
             port_mapping,
             lan_first,

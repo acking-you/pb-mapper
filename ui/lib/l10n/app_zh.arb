@@ -94,6 +94,7 @@
   "@diagnosticsFallbacks": {"placeholders": {"count": {"type": "int"}}},
   "diagnosticsTraffic": "{path} ↑ {sent} ↓ {received}",
   "@diagnosticsTraffic": {"placeholders": {"path": {"type": "String"}, "sent": {"type": "String"}, "received": {"type": "String"}}},
+  "diagnosticsLanFirstOff": "局域网优先已关",
   "portMappingOff": "此隧道未开启。",
   "portMappingStage": "{stage, select, standby{待命：打洞失败时再请求路由器} waiting_for_direct{等待首个直连} discovering{正在寻找路由器} gateway_found{已找到路由器} discovered{已识别路由器协议} requesting{正在请求映射} active{已映射} renewing{正在续租} expired{租期已过} retrying{稍后重试} network_changed{网络已变化} releasing{正在释放} released{已释放} release_sent{已发送释放请求} failed{路由器未映射} release_failed{释放失败} cancelled{已取消} stopped{已停止} other{{stage}}}",
   "@portMappingStage": {"placeholders": {"stage": {"type": "String"}}},

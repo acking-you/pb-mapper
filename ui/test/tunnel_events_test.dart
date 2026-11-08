@@ -11,8 +11,12 @@ import 'support.dart';
 
 /// A tunnel's diagnostics, shaped as `pb_mapper_tunnel_events_call_json`
 /// answers with them.
-Map<String, dynamic> tunnelDiagnostics({Map<String, dynamic>? mapping}) => {
+Map<String, dynamic> tunnelDiagnostics({
+  Map<String, dynamic>? mapping,
+  bool? lanFirst,
+}) => {
   'relay_transport': 'tcp',
+  'lan_first': ?lanFirst,
   'last_setup_latency_ms': 42,
   'consecutive_failures': 0,
   'direct': {'direct_sessions': 2, 'relay_sessions': 0, 'fallbacks': 0},
@@ -122,10 +126,17 @@ void main() {
         ..add(tunnelEvent(1, {'kind': 'relay_ready', 'latency_ms': 42}))
         ..add(tunnelEvent(2, {'kind': 'session_opened', 'path': 'direct'}))
         ..add(
-          tunnelEvent(3, {
-            'kind': 'port_mapping_changed',
-            'mapping': mappingStatus('active'),
-          }, diagnostics: tunnelDiagnostics(mapping: mappingStatus('active'))),
+          tunnelEvent(
+            3,
+            {
+              'kind': 'port_mapping_changed',
+              'mapping': mappingStatus('active'),
+            },
+            diagnostics: tunnelDiagnostics(
+              mapping: mappingStatus('active'),
+              lanFirst: false,
+            ),
+          ),
         );
       await tester.tap(find.byKey(const Key('menu-share:web')));
       await settle(tester);
@@ -141,6 +152,8 @@ void main() {
       );
       expect(find.text(':52183 → 203.0.113.7:52183'), findsOneWidget);
       expect(find.byKey(const Key('traffic-relay')), findsNothing);
+      // A tunnel started with LAN-first off says so.
+      expect(find.byKey(const Key('lan-first-off')), findsOneWidget);
 
       // A sample between events keeps the figures live, and alone does
       // not lose what the events said.

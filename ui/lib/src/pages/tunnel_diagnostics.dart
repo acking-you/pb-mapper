@@ -156,7 +156,11 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _Facts(diagnostics: diagnostics, metrics: _metrics),
+                  _Facts(
+                    diagnostics: diagnostics,
+                    metrics: _metrics,
+                    allowDirect: widget.tunnel.allowDirect,
+                  ),
                   const SizedBox(height: 16),
                   _Heading(l10n.portMapping),
                   _PortMapping(
@@ -276,10 +280,15 @@ class _Header extends StatelessWidget {
 /// each path carried. The figures that keep changing come from the latest
 /// [metrics] sample once there is one, the rest from [diagnostics].
 class _Facts extends StatelessWidget {
-  const _Facts({required this.diagnostics, required this.metrics});
+  const _Facts({
+    required this.diagnostics,
+    required this.metrics,
+    required this.allowDirect,
+  });
 
   final TunnelDiagnostics diagnostics;
   final TunnelMetrics? metrics;
+  final bool allowDirect;
 
   @override
   Widget build(BuildContext context) {
@@ -358,6 +367,13 @@ class _Facts extends StatelessWidget {
             icon: AppIcons.mixedPath,
             text: l10n.diagnosticsFallbacks(sessions.fallbacks),
           ),
+        // Said only when off: on is the default, with nothing to note.
+        if (allowDirect && diagnostics.lanFirst == false)
+          _Pill(
+            key: const Key('lan-first-off'),
+            icon: AppIcons.router,
+            text: l10n.diagnosticsLanFirstOff,
+          ),
       ],
     );
   }
@@ -394,12 +410,17 @@ class _Pill extends StatelessWidget {
         children: [
           Icon(icon, size: AppIconSize.inline, color: ink),
           const SizedBox(width: 5),
-          Text(
-            text,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
-              color: ink,
+          // Never wider than the panel, however long a figure gets.
+          Flexible(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: ink,
+              ),
             ),
           ),
         ],
@@ -695,9 +716,12 @@ _Reading _read(BuildContext context, TunnelEvent event) {
     case 'lan_detected':
       return (
         title: l10n.tunnelEventTitle(event.kind),
-        detail: l10n.tunnelEventLanEvidence(event.evidence ?? ''),
+        detail: [
+          l10n.tunnelEventLanEvidence(event.evidence ?? ''),
+          if (event.preferred == false) l10n.diagnosticsLanFirstOff,
+        ].join(' · '),
         icon: AppIcons.router,
-        tone: _Tone.signal,
+        tone: event.preferred == false ? _Tone.quiet : _Tone.signal,
       );
     case 'lan_missed':
       // Where it went instead: across another network, or the relay.
