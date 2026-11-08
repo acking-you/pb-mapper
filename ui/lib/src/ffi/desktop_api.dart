@@ -29,6 +29,7 @@ class DesktopHelper {
     this.identityVerified = false,
     this.protocol = 0,
     this.updateRequired = false,
+    this.updateAvailable = false,
     this.message = '',
   });
   factory DesktopHelper.fromJson(Map<String, dynamic> data) => DesktopHelper(
@@ -38,6 +39,7 @@ class DesktopHelper {
     identityVerified: data['identity_verified'] == true,
     protocol: data['protocol'] as int? ?? 0,
     updateRequired: data['update_required'] == true,
+    updateAvailable: data['update_available'] == true,
     message: data['message'] as String? ?? '',
   );
   final bool installed, running, authorized, identityVerified;
@@ -46,6 +48,11 @@ class DesktopHelper {
   /// this app's, so the helper must be reinstalled (D2).
   final int protocol;
   final bool updateRequired;
+
+  /// The installed helper is another build of this app's protocol: it
+  /// works, but hosts in the background with its own build's code until it
+  /// is updated.
+  final bool updateAvailable;
   final String message;
 }
 
@@ -126,8 +133,9 @@ class DesktopHostStatus {
   /// The relay the local host is published on.
   final String? server;
 
-  /// False when the settings now name another relay or credential than
-  /// [server] and its namespace, as Rust compares them; true while unknown.
+  /// False when the settings now name another relay or credential namespace
+  /// than [server] and its namespace, as Rust compares them; true while
+  /// unknown.
   final bool matchesRelay;
 
   DesktopHostStatus copyWith({
@@ -197,8 +205,9 @@ class DesktopBackground {
   final DesktopHostStatus? host;
   final String message;
 
-  /// False when the settings now name another relay or credential than the
-  /// one it is published on, as Rust compares them; true while unknown.
+  /// False when the settings now name another relay or credential namespace
+  /// than the ones it is published on, as Rust compares them; true while
+  /// unknown, since a resume that would move it is refused unless asked.
   final bool matchesRelay;
 }
 
@@ -494,10 +503,16 @@ abstract interface class DesktopApiClient {
   /// ready.
   Future<bool> helperAction(String action);
 
-  /// `status` asks the service; `start` resumes its saved host on the relay
-  /// and credential the settings name now, with a new invitation when they
-  /// are not the ones it was published on.
-  Future<DesktopBackground> backgroundAction(String action);
+  /// Asks the service for its state.
+  Future<DesktopBackground> backgroundStatus();
+
+  /// Resumes the service's saved host on the relay and credential the
+  /// settings name now. Throws [DesktopCallException] `RELAY_CHANGED` when
+  /// they are not the relay and namespace it was published on, unless
+  /// [moveRelay] says the owner agreed to its new invitation. A helper that
+  /// is not ready, or another build, is set up first as [enableHost] does:
+  /// then [DesktopHostEnable.restart] may ask the app to restart into it.
+  Future<DesktopHostEnable> resumeBackground({bool moveRelay = false});
 
   /// Throws [DesktopCallException] `SETUP_STRING` or `INVALID_INVITATION`.
   Future<DesktopInvitationInfo> inspectInvitation(String text);
@@ -685,9 +700,22 @@ class DesktopApi implements DesktopApiClient {
       (await _call('helper_action', {'action': action}))['restart'] == true;
 
   @override
-  Future<DesktopBackground> backgroundAction(String action) async =>
-      _background(await _call('background_action', {'action': action})) ??
+  Future<DesktopBackground> backgroundStatus() async =>
+      _background(await _call('background_action', {'action': 'status'})) ??
       const DesktopBackground();
+
+  @override
+  Future<DesktopHostEnable> resumeBackground({bool moveRelay = false}) async {
+    final data = await _call('background_action', {
+      'action': 'start',
+      'move_relay': moveRelay,
+    });
+    return DesktopHostEnable(
+      restart: data['restart'] == true,
+      invitation: data['invitation'] as String?,
+      background: _background(data['background']),
+    );
+  }
 
   @override
   Future<DesktopInvitationInfo> inspectInvitation(String text) async {

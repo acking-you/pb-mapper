@@ -393,7 +393,7 @@ class DesktopStore {
   /// `host_status` reads the cached background state; this asks the
   /// service itself, which only the startup and explicit actions do.
   Future<void> _discoverBackground() async {
-    final background = await _api.backgroundAction('status');
+    final background = await _api.backgroundStatus();
     if (_disposed) return;
     _host = DesktopHostSnapshot(host: _host?.host, background: background);
   }
@@ -489,7 +489,11 @@ class DesktopStore {
 
   static DesktopHelperState _helperState(DesktopHelper? helper) {
     if (helper == null || !helper.installed) return DesktopHelperState.none;
-    if (helper.updateRequired) return DesktopHelperState.outdated;
+    // Another build still works, but hosts in the background with its own
+    // code: Update installs this one.
+    if (helper.updateRequired || helper.updateAvailable) {
+      return DesktopHelperState.outdated;
+    }
     if (!helper.running) return DesktopHelperState.stopped;
     if (!helper.authorized || !helper.identityVerified) {
       return DesktopHelperState.unverified;
@@ -651,32 +655,10 @@ class DesktopStore {
           autoStart: true,
         );
       } else {
-        final DesktopHostEnable result;
-        try {
-          result = await _api.enableHost(
-            name,
-            displayId,
-            allowControl: allowControl,
-          );
-        } catch (_) {
-          // A failed IPC reply can leave durable setup waiting for the
-          // helper. Resume that intent through HostRestore, which never
-          // installs or asks for UAC. A cancelled installation has already
-          // retired it.
-          try {
-            final pending = await _api.trustStatus();
-            if (_hostCurrent(serial) &&
-                pending.saved?.background == true &&
-                pending.saved?.autoStart == true &&
-                pending.matchesRelay) {
-              _trust = pending;
-              _scheduleHostResume(serial, _resumePendingHost);
-            }
-          } catch (_) {
-            // Keep the original setup error when local trust cannot be read.
-          }
-          rethrow;
-        }
+        final result = await _setUp(
+          serial,
+          () => _api.enableHost(name, displayId, allowControl: allowControl),
+        );
         if (!_hostCurrent(serial)) return;
         if (result.restart) {
           _restart();
@@ -688,18 +670,69 @@ class DesktopStore {
     });
   }
 
+  /// [call], which may set up the helper. A failed IPC reply can leave
+  /// durable setup waiting for the helper: that intent resumes through
+  /// HostRestore, which never installs or asks for UAC. A cancelled
+  /// installation has already retired it.
+  Future<DesktopHostEnable> _setUp(
+    int serial,
+    Future<DesktopHostEnable> Function() call,
+  ) async {
+    try {
+      return await call();
+    } catch (_) {
+      try {
+        final pending = await _api.trustStatus();
+        if (_hostCurrent(serial) &&
+            pending.saved?.background == true &&
+            pending.saved?.autoStart == true &&
+            pending.matchesRelay) {
+          _trust = pending;
+          _scheduleHostResume(serial, _resumePendingHost);
+        }
+      } catch (_) {
+        // Keep the original setup error when local trust cannot be read.
+      }
+      rethrow;
+    }
+  }
+
   /// Starts the remembered or configured host again. The background
-  /// service's is configured again from the settings, so on another relay
-  /// it gets a new invitation: the card asks first
-  /// ([DesktopHostView.otherRelay], [shareOnCurrentRelay]).
-  Future<void> resumeHost() async {
+  /// service's is configured again from the settings; on another relay that
+  /// gives it a new invitation, so the card asks first
+  /// ([DesktopHostView.otherRelay], [shareOnCurrentRelay]), and Rust refuses
+  /// a move it was not asked for.
+  Future<void> resumeHost() => _resumeHost(moveRelay: false);
+
+  Future<void> _resumeHost({required bool moveRelay}) async {
     await _hostAction(enabling: true, () async {
       _cancelHostResume();
       final serial = _hostSerial;
       if (_host?.background?.configured == true) {
-        final background = await _api.backgroundAction('start');
+        // A helper that is not ready, or another build, is set up first, as
+        // turning remote control on does, and may restart the app into it.
+        final DesktopHostEnable result;
+        try {
+          result = await _setUp(
+            serial,
+            () => _api.resumeBackground(moveRelay: moveRelay),
+          );
+        } on DesktopCallException catch (e) {
+          if (e.code != 'RELAY_CHANGED') rethrow;
+          // The settings name another relay than the card knew: read again,
+          // and it says so and asks.
+          if (_hostCurrent(serial)) await _readHost();
+          return;
+        }
         if (!_hostCurrent(serial)) return;
-        _host = DesktopHostSnapshot(host: _host?.host, background: background);
+        if (result.restart) {
+          _restart();
+          return;
+        }
+        _host = DesktopHostSnapshot(
+          host: _host?.host,
+          background: result.background,
+        );
       } else {
         await _api.restoreHost();
       }
@@ -714,7 +747,7 @@ class DesktopStore {
   /// starts again there with its settings.
   Future<void> shareOnCurrentRelay() async {
     final local = _host?.host;
-    if (local == null) return resumeHost();
+    if (local == null) return _resumeHost(moveRelay: true);
     final saved = _trust?.saved;
     await _hostAction(enabling: true, () async {
       _cancelHostResume();

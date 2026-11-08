@@ -179,6 +179,60 @@ void main() {
   );
 
   testWidgets(
+    'a paused background host resumes through setup while its helper is '
+    'another build, and through the service once it is current',
+    (tester) async {
+      for (final current in [false, true]) {
+        // Another build, launched outside the protected installation, is
+        // also not the authorized application.
+        final api = FakeDesktopApi()
+          ..trust = const DesktopTrust(supported: true)
+          ..available = DesktopCapabilities(
+            host: true,
+            displays: const [DesktopDisplay(1, 'Display 1', 1920, 1080)],
+            helper: DesktopHelper(
+              installed: true,
+              running: true,
+              authorized: current,
+              identityVerified: true,
+              protocol: 4,
+              updateAvailable: !current,
+            ),
+          )
+          ..hostSnapshot = const DesktopHostSnapshot(
+            background: DesktopBackground(
+              configured: true,
+              service: 'desktop:machine',
+              server: 'test',
+              invitation: FakeDesktopApi.backgroundInvitation,
+              displayId: 1,
+            ),
+          );
+        var exits = 0;
+        final store = DesktopStore(api, onRestartReady: () => exits++);
+        await store.restoreOnStartup();
+        final view = store.hostView.value;
+        expect(
+          view.helper,
+          current ? DesktopHelperState.ready : DesktopHelperState.outdated,
+        );
+        expect((view.configured, view.sharing), (true, false));
+
+        await store.resumeHost();
+        expect(api.argsOf('background_action').last, {
+          'action': 'start',
+          'move_relay': false,
+        });
+        expect(exits, current ? 0 : 1);
+        expect(store.hostView.value.restarting, !current);
+        expect(store.hostView.value.sharing, current);
+        expect(store.hostView.value.error, isNull);
+        store.dispose();
+      }
+    },
+  );
+
+  testWidgets(
     'restart waits for a successful handoff and cancellation keeps UI alive',
     (tester) async {
       final api = _HostProbe()..enableResult = Completer<DesktopHostEnable>();
