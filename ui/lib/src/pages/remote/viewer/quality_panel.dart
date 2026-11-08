@@ -251,7 +251,7 @@ class QualityPanel extends StatelessWidget {
   /// is by design, so its 30 reads as expected beside it.
   static List<_Row> _host(BuildContext context, DesktopStats st) {
     final l10n = context.l10n;
-    final preset = st.preset, ceiling = st.ceilingFps;
+    final preset = st.preset, ceiling = st.ceilingFps();
     final skipped = st.skippedPerSecond, dwell = st.encoderDwellMs;
     return [
       if (preset != null)

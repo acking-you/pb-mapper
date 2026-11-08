@@ -218,6 +218,9 @@ class RemoteDesktop {
           computerId: c.id,
           relayOnly: c.relayOnly,
           quality: c.quality,
+          resolution: c.resolution,
+          maxFps: c.maxFps,
+          codec: prefs.codec,
         ),
       ),
     );
@@ -251,6 +254,9 @@ class RemoteDesktop {
       onRememberFailed: onRememberFailed,
     );
     _rememberPending = result.remember;
+    // A replaced record's choices carry over; a new computer starts from
+    // the defaults.
+    final previous = replaced == null ? null : computers.byId(replaced);
     unawaited(
       desktop.connect(
         DesktopTarget(
@@ -258,9 +264,10 @@ class RemoteDesktop {
           name: result.name,
           computerId: id,
           relayOnly: result.relayOnly,
-          quality:
-              (replaced == null ? null : computers.byId(replaced))?.quality ??
-              DesktopQuality.balanced,
+          quality: previous?.quality ?? DesktopQuality.balanced,
+          resolution: previous?.resolution ?? DesktopResolution.p1080,
+          maxFps: previous?.maxFps ?? 0,
+          codec: prefs.codec,
         ),
       ),
     );
@@ -332,6 +339,20 @@ class RemoteDesktop {
     desktop.setQuality(quality);
     final id = rememberedComputer?.id;
     if (id != null) await computers.setQuality(id, quality);
+  }
+
+  /// Connects again at once (D7), and is kept for a remembered computer.
+  Future<void> setResolution(DesktopResolution resolution) async {
+    desktop.setResolution(resolution);
+    final id = rememberedComputer?.id;
+    if (id != null) await computers.setResolution(id, resolution);
+  }
+
+  /// Connects again at once (D8), and is kept for a remembered computer.
+  Future<void> setMaxFps(int fps) async {
+    desktop.setMaxFps(fps);
+    final id = rememberedComputer?.id;
+    if (id != null) await computers.setMaxFps(id, fps);
   }
 
   /// Disconnects the store at once, before any await, so the picture is
@@ -417,6 +438,7 @@ class RemoteDesktop {
     _Target target,
     DesktopSessionView session,
   ) async {
+    final chosen = session.target;
     final record = await computers.rememberSession(
       id: target.id,
       name: target.name,
@@ -425,7 +447,9 @@ class RemoteDesktop {
       relay: _relayAddress(),
       namespace: _credentialKeyId(),
       relayOnly: target.relayOnly,
-      quality: session.target?.quality ?? DesktopQuality.balanced,
+      quality: chosen?.quality ?? DesktopQuality.balanced,
+      resolution: chosen?.resolution ?? DesktopResolution.p1080,
+      maxFps: chosen?.maxFps ?? 0,
       replaceId: target.replaceId,
     );
     if (record != null) {

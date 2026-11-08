@@ -64,6 +64,8 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
     required int namespace,
     required bool relayOnly,
     required DesktopQuality quality,
+    required DesktopResolution resolution,
+    required int maxFps,
     String? replaceId,
   }) async {
     calls.add((
@@ -92,6 +94,8 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
       namespace: namespace,
       relayOnly: relayOnly,
       quality: quality,
+      resolution: resolution,
+      maxFps: maxFps,
     );
     if (at < 0) {
       records.add(record);
@@ -107,6 +111,8 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
     String id, {
     String? name,
     DesktopQuality? quality,
+    DesktopResolution? resolution,
+    int? maxFps,
     DateTime? lastConnectedAt,
     String? lastPath,
     bool? lastControlAllowed,
@@ -125,6 +131,8 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
       namespace: c.namespace,
       relayOnly: c.relayOnly,
       quality: quality ?? c.quality,
+      resolution: resolution ?? c.resolution,
+      maxFps: maxFps ?? c.maxFps,
       lastConnectedAt: lastConnectedAt ?? c.lastConnectedAt,
       lastPath: lastPath ?? c.lastPath,
       lastControlAllowed: lastControlAllowed ?? c.lastControlAllowed,

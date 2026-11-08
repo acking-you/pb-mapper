@@ -13,8 +13,11 @@
 //
 // Defines: setupUrl (a loopback controller.json), seconds (15..1800),
 // relayOnly, lanFirst (default true, used only when controller.json carries
-// no lan_first), quality (quality | balanced | smooth), case (a label for the
-// run) and host (the host's GPU and refresh rate, which a viewer cannot see).
+// no lan_first), quality (quality | balanced | smooth), codec (auto | h264:
+// whether H.265 is offered where this device decodes it), resolution (720p |
+// 1080p | 1440p | native), maxFps (0 for Auto, else 30 | 60 | 90 | 120), case
+// (a label for the run) and host (the host's GPU and refresh rate, which a
+// viewer cannot see). The report names the decoders the probe found.
 // controller.json may override seconds and relay_only. `deployed` always
 // writes the host's lan_first into it, so the A/B run with LAN-first off
 // switches it off on the host. Its decoder_hints false (case F) configures
@@ -51,14 +54,28 @@ Future<void> main() async {
         'quality',
         defaultValue: 'balanced',
       )];
+  final codec = DesktopCodecPreference.values
+      .asNameMap()[const String.fromEnvironment('codec', defaultValue: 'auto')];
+  const resolutionName = String.fromEnvironment(
+    'resolution',
+    defaultValue: '1080p',
+  );
+  final resolution = DesktopResolution.values
+      .where((r) => r.wire == resolutionName)
+      .firstOrNull;
+  const maxFps = int.fromEnvironment('maxFps');
   if (setup.scheme != 'http' ||
       !['127.0.0.1', 'localhost', '::1'].contains(setup.host) ||
       defaultSeconds < 15 ||
       defaultSeconds > 1800 ||
-      quality == null) {
+      quality == null ||
+      codec == null ||
+      resolution == null ||
+      (maxFps != 0 && !kMaxFpsChoices.contains(maxFps))) {
     throw ArgumentError(
-      'Set a loopback setupUrl, seconds 15..1800 and quality '
-      'quality|balanced|smooth',
+      'Set a loopback setupUrl, seconds 15..1800, quality '
+      'quality|balanced|smooth, codec auto|h264, resolution '
+      '720p|1080p|1440p|native and maxFps 0|30|60|90|120',
     );
   }
   final config = await _fetchSetup(setup);
@@ -102,6 +119,9 @@ Future<void> main() async {
     if (update['success'] != true) {
       throw StateError('Acceptance configuration failed');
     }
+    // The Display menu shows the codec this run offers.
+    final prefs = ViewerPrefs(persist: false);
+    await prefs.setCodec(codec);
     runApp(
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -111,7 +131,7 @@ Future<void> main() async {
             data: viewerTheme(context),
             child: DesktopViewer(
               desktop: store,
-              prefs: ViewerPrefs(persist: false),
+              prefs: prefs,
               title: 'acceptance',
             ),
           ),
@@ -125,6 +145,9 @@ Future<void> main() async {
         name: 'acceptance',
         relayOnly: relayOnly,
         quality: quality,
+        resolution: resolution,
+        maxFps: maxFps,
+        codec: codec,
       ),
     );
     for (var i = 0; i < seconds; i++) {
@@ -136,6 +159,10 @@ Future<void> main() async {
       'schema': 2,
       'case': const String.fromEnvironment('case'),
       'quality': quality.name,
+      'codec_preference': codec.name,
+      'resolution': resolution.wire,
+      'max_fps': maxFps,
+      'decoders': _decoders(store.decoders.value),
       'relay_only': relayOnly,
       'lan_first': lanFirst,
       'decoder_hints': decoderHints,
@@ -219,6 +246,18 @@ Future<void> _upload(Uri target, Map<String, Object?> report) async {
   } finally {
     http.close(force: true);
   }
+}
+
+/// What the probe found, as the channel answered it.
+Map<String, Object?>? _decoders(DesktopDecoders? decoders) {
+  if (decoders == null) return null;
+  Map<String, int>? limit(DesktopDecoderLimit? l) =>
+      l == null ? null : {'max_width': l.maxWidth, 'max_height': l.maxHeight};
+  return {
+    'h264': limit(decoders.h264),
+    'h265': limit(decoders.h265),
+    'display_max_hz': decoders.displayMaxHz,
+  };
 }
 
 double get _refreshHz {

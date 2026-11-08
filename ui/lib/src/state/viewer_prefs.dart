@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'desktop_models.dart';
+
 /// How a touch screen drives the remote pointer: as a trackpad that moves
 /// it, or by touching where to click.
 enum TouchMode { trackpad, direct }
@@ -13,7 +15,9 @@ enum ViewerScaleMode { fit, original }
 /// rebuilds the whole app. Remembered across launches; a failed read or write
 /// only costs the choice.
 ///
-/// The picture's quality is not here: it belongs to each remembered computer.
+/// The picture's quality, resolution and maximum frame rate are not here:
+/// they belong to each remembered computer. The codec is: whether a picture
+/// can be H.265 is this device's affair.
 class ViewerPrefs extends ChangeNotifier {
   ViewerPrefs({this.persist = true});
 
@@ -22,6 +26,8 @@ class ViewerPrefs extends ChangeNotifier {
 
   static const _toolbarPinnedKey = 'viewer_toolbar_pinned';
   static const _qualityPanelKey = 'viewer_quality_panel';
+  static const _qualityMonitorKey = 'viewer_quality_monitor';
+  static const _codecKey = 'viewer_codec';
   static const _scaleModeKey = 'viewer_scale_mode';
   static const _touchModeKey = 'viewer_touch_mode';
   static const _virtualMouseKey = 'viewer_virtual_mouse';
@@ -35,6 +41,15 @@ class ViewerPrefs extends ChangeNotifier {
   /// Whether the connection-quality panel is open.
   bool get qualityPanel => _qualityPanel;
   bool _qualityPanel = false;
+
+  /// Whether the quality monitor, RustDesk's small figures over the
+  /// picture, shows (D11).
+  bool get qualityMonitor => _qualityMonitor;
+  bool _qualityMonitor = false;
+
+  /// What a session offers to decode (D6); it takes it at connect.
+  DesktopCodecPreference get codec => _codec;
+  DesktopCodecPreference _codec = DesktopCodecPreference.auto;
 
   ViewerScaleMode get scaleMode => _scaleMode;
   ViewerScaleMode _scaleMode = ViewerScaleMode.fit;
@@ -56,6 +71,12 @@ class ViewerPrefs extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       _toolbarPinned = prefs.getBool(_toolbarPinnedKey) ?? true;
       _qualityPanel = prefs.getBool(_qualityPanelKey) ?? false;
+      _qualityMonitor = prefs.getBool(_qualityMonitorKey) ?? false;
+      _codec = _named(
+        DesktopCodecPreference.values,
+        prefs.getString(_codecKey),
+        DesktopCodecPreference.auto,
+      );
       _scaleMode = _named(
         ViewerScaleMode.values,
         prefs.getString(_scaleModeKey),
@@ -82,6 +103,18 @@ class ViewerPrefs extends ChangeNotifier {
     if (v == _qualityPanel) return;
     _qualityPanel = v;
     await _changed((prefs) => prefs.setBool(_qualityPanelKey, v));
+  }
+
+  Future<void> setQualityMonitor(bool v) async {
+    if (v == _qualityMonitor) return;
+    _qualityMonitor = v;
+    await _changed((prefs) => prefs.setBool(_qualityMonitorKey, v));
+  }
+
+  Future<void> setCodec(DesktopCodecPreference v) async {
+    if (v == _codec) return;
+    _codec = v;
+    await _changed((prefs) => prefs.setString(_codecKey, v.name));
   }
 
   Future<void> setScaleMode(ViewerScaleMode v) async {

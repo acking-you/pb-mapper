@@ -139,6 +139,7 @@ class DesktopStore {
   );
   final _quality = ValueNotifier(DesktopQuality.balanced);
   final _hostCursor = ValueNotifier<Offset?>(null);
+  final _decoders = ValueNotifier<DesktopDecoders?>(null);
 
   ValueListenable<DesktopHostView> get hostView => _hostView;
   ValueListenable<DesktopSessionView> get session => _session;
@@ -166,6 +167,15 @@ class DesktopStore {
   /// this connection. The view leaf publishes it, read every rendered frame
   /// and every 16 ms (D11).
   ValueListenable<Offset?> get hostCursor => _hostCursor;
+
+  /// What this device decodes natively, probed once, at the first connect
+  /// (I4); null until then. H.265 leaves it for the rest of the run once a
+  /// picture failed to decode as H.265 (D5).
+  ValueListenable<DesktopDecoders?> get decoders => _decoders;
+
+  /// The highest frame rate this display shows: what the probe reported,
+  /// else its current refresh rate.
+  double get displayMaxHz => _decoders.value?.displayMaxHz ?? _refreshHz();
 
   // ---------------------------------------------------------------- demand
 
@@ -896,6 +906,10 @@ class DesktopStore {
       _controlSuppressed = false,
       _nativePaused = false;
   bool _statsDue = false;
+
+  /// The latest attempt offered H.265.
+  bool _offeredH265 = false;
+  Future<DesktopDecoders>? _probing;
   int _reconnectAttempt = 0, _protocolStops = 0;
   Timer? _retryTimer;
   DateTime? _retryAt;
@@ -951,8 +965,7 @@ class DesktopStore {
   }
 
   Future<void> _attempt(int serial) async {
-    final target = _target;
-    if (_disposed || target == null || serial != _serial) return;
+    if (_disposed || _target == null || serial != _serial) return;
     _attemptSerial = serial;
     _setup = DesktopSetupStep.finding;
     _status = null;
@@ -966,12 +979,20 @@ class DesktopStore {
       // attempt still waiting on the network.
       await _disconnectNative();
       if (_disposed || serial != _serial) return;
+      final decoders = _decoders.value ?? await _probeDecoders();
+      // Read after the waits: a change meanwhile applies to this attempt.
+      final target = _target;
+      if (_disposed || target == null || serial != _serial) return;
+      _offeredH265 = decoders.offersH265(target);
       final session = await _api.connect(
         target.invitation,
         computerId: target.computerId,
         relayOnly: target.relayOnly,
         quality: _quality.value,
         refreshHz: _refreshHz(),
+        h265: _offeredH265,
+        resolution: target.resolution,
+        maxFps: target.maxFps,
       );
       if (_disposed || serial != _serial) return;
       _attemptSerial = null;
@@ -1013,6 +1034,7 @@ class DesktopStore {
   }
 
   void _connectFailed(DesktopFailure failure) {
+    if (failure.code == 'DECODER' && _fallBackFromH265()) return;
     switch (failure.code) {
       case 'IO' || 'HOST_BUSY':
         _scheduleReconnect(failure);
@@ -1118,9 +1140,45 @@ class DesktopStore {
         failure,
         immediate: resumed && (code == 'transport' || code == 'timeout'),
       );
-    } else {
+    } else if (code != 'decoder_failed' || !_fallBackFromH265()) {
       _endSession(_endReason(code), failure);
     }
+  }
+
+  /// D5: this device failed to decode the session's H.265. H.265 is not
+  /// offered again this run, and the session connects again at once, on
+  /// H.264; only a failure there reaches the user. False for any other
+  /// codec.
+  bool _fallBackFromH265() {
+    if (_media?.codec != 'h265') return false;
+    _decoders.value = (_decoders.value ?? DesktopDecoders.h264Only)
+        .withoutH265();
+    _reconnectNow();
+    return true;
+  }
+
+  /// Connects the session's computer again at once, keeping its picture,
+  /// the control choice and the preset: for what only a new session
+  /// carries (resolution, frame rate, codec), or a codec that failed. A run
+  /// of failures starts over. An ended session takes the change at its
+  /// next connect.
+  void _reconnectNow() {
+    if (_disposed || !_sessionActive) return;
+    _cancelRetry();
+    _resetRetries();
+    _failure = null;
+    _stoppedWhileHidden = null;
+    unawaited(_attempt(++_serial));
+  }
+
+  /// The decoders the first connect probes; later ones reuse the answer
+  /// ([decoders]) without waiting.
+  Future<DesktopDecoders> _probeDecoders() async {
+    final probed = await (_probing ??= _api.decoders().catchError(
+      (Object _) => DesktopDecoders.h264Only,
+    ));
+    if (_disposed) return probed;
+    return _decoders.value ??= probed;
   }
 
   void _pollStatus({bool resumed = false}) {
@@ -1556,7 +1614,8 @@ class DesktopStore {
       _picture.value = DesktopPicture(
         textureId: texture.textureId,
         aspectRatio: width > 1 && height > 1 ? width / height : 16 / 9,
-        codec: 'h264',
+        // Between sessions, the last one's.
+        codec: _media?.codec ?? _picture.value?.codec ?? 'h264',
       );
     } else if (image != null) {
       _picture.value = DesktopPicture(
@@ -1868,7 +1927,7 @@ class DesktopStore {
     if (_disposed) return;
     _quality.value = quality;
     final target = _target;
-    if (target != null) _target = target.withQuality(quality);
+    if (target != null) _target = target.copyWith(quality: quality);
     if (_media != null) {
       try {
         _api.setQuality(quality);
@@ -1877,6 +1936,37 @@ class DesktopStore {
       }
     }
     _publishSession();
+  }
+
+  /// The encoded size's bound (D7), fixed for a session: a change connects
+  /// again at once.
+  void setResolution(DesktopResolution resolution) =>
+      _setLimits(_target?.copyWith(resolution: resolution));
+
+  /// The frame rate's ceiling (D8), 0 for Auto, fixed for a session: a
+  /// change connects again at once.
+  void setMaxFps(int fps) => _setLimits(_target?.copyWith(maxFps: fps));
+
+  void _setLimits(DesktopTarget? next) {
+    if (_disposed || next == null || next == _target) return;
+    _target = next;
+    _publishSession();
+    _reconnectNow();
+  }
+
+  /// The device's codec preference (D6), which a session takes at connect.
+  /// It connects again at once only where the session would differ: H.265
+  /// is offered now, or the session decodes H.265 and is not to.
+  void setCodec(DesktopCodecPreference codec) {
+    final target = _target;
+    if (_disposed || target == null || target.codec == codec) return;
+    final next = _target = target.copyWith(codec: codec);
+    _publishSession();
+    final offer = _decoders.value?.offersH265(next) ?? false;
+    if (offer == _offeredH265) return;
+    // Offered and not taken (the host cannot encode it): nothing changes.
+    if (!offer && _media?.codec == 'h264') return;
+    _reconnectNow();
   }
 
   bool _accepts(int geometryEpoch) =>
@@ -2033,5 +2123,6 @@ class DesktopStore {
     _decoder.dispose();
     _quality.dispose();
     _hostCursor.dispose();
+    _decoders.dispose();
   }
 }

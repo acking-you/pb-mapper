@@ -57,6 +57,13 @@ class FakeDesktopApi implements DesktopApiClient {
   /// The codec a `connect` reports; `h264` needs a texture factory.
   String codec = 'jpeg';
 
+  /// The host encodes H.265: a `connect` that offers it reports `h265`.
+  bool hostH265 = false;
+
+  /// What `decoders` answers, and how often it was asked.
+  DesktopDecoders decodersValue = DesktopDecoders.h264Only;
+  int decodersProbed = 0;
+
   /// While set, `connect` waits for it. A `disconnect` meanwhile makes that
   /// connect fail as cancelled, as the FFI does.
   Completer<void>? connectGate;
@@ -478,6 +485,9 @@ class FakeDesktopApi implements DesktopApiClient {
     required bool relayOnly,
     required DesktopQuality quality,
     required double refreshHz,
+    required bool h265,
+    required DesktopResolution resolution,
+    required int maxFps,
   }) async {
     final epoch = _epoch;
     calls.add((
@@ -490,6 +500,9 @@ class FakeDesktopApi implements DesktopApiClient {
         'relay_only': relayOnly,
         'quality': quality.name,
         'refresh_hz': refreshHz,
+        'h265': h265,
+        'resolution': resolution.wire,
+        'max_fps': maxFps,
       },
     ));
     final failure = _failures.remove('connect') ?? failConnects;
@@ -506,7 +519,16 @@ class FakeDesktopApi implements DesktopApiClient {
     }
     viewerStatusValue = DesktopViewerStatus(quality: quality);
     viewValue = null;
-    return DesktopSession(videoSource: ++_sources, codec: codec);
+    return DesktopSession(
+      videoSource: ++_sources,
+      codec: h265 && hostH265 ? 'h265' : codec,
+    );
+  }
+
+  @override
+  Future<DesktopDecoders> decoders() async {
+    decodersProbed++;
+    return decodersValue;
   }
 
   @override

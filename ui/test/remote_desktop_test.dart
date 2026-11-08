@@ -83,6 +83,22 @@ void main() {
       expect(computers.byId(id)?.lastConnectedAt, isNotNull);
       expect(remote.title, 'home');
 
+      // Its resolution and frame rate connect again at once, and are kept
+      // with it.
+      await remote.setResolution(DesktopResolution.p1440);
+      await remote.setMaxFps(60);
+      await tester.pump();
+      expect(
+        api.argsOf('connect').last,
+        allOf(containsPair('resolution', '1440p'), containsPair('max_fps', 60)),
+      );
+      expect(
+        (computers.byId(id)?.resolution, computers.byId(id)?.maxFps),
+        (DesktopResolution.p1440, 60),
+      );
+      api.viewerStatusValue = liveStatus();
+      await tester.pump(const Duration(milliseconds: 500));
+
       // Leaving the picture pauses the session; going back resumes it, and
       // the time it spent paused stops counting.
       api.calls.clear();
@@ -110,7 +126,14 @@ void main() {
       api.failNext('connect', 'IDENTITY_CHANGED');
       await remote.open(saved);
       await tester.pump();
-      expect(api.argsOf('connect').last, containsPair('computer_id', id));
+      expect(
+        api.argsOf('connect').last,
+        allOf(
+          containsPair('computer_id', id),
+          containsPair('resolution', '1440p'),
+          containsPair('max_fps', 60),
+        ),
+      );
       expect(desktop.session.value.phase, DesktopPhase.identityChanged);
       // Hidden, it holds no slot to give up: its card waits for the user.
       api.calls.clear();

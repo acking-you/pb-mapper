@@ -275,7 +275,8 @@ final class PbDesktopVideoMetaV1 extends Struct {
   @Uint32()
   external int len;
 
-  /// Bit 0 keyframe, 1 discontinuity, 2 JPEG (else H.264), 3 duplicate.
+  /// Bit 0 keyframe, 1 discontinuity, 2 JPEG, 3 duplicate, 4 H.265; a
+  /// unit with neither 2 nor 4 is H.264.
   @Uint32()
   external int flags;
 }
