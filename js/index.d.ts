@@ -183,6 +183,19 @@ export interface JsAuthStatus {
   serverInstanceId: string
 }
 
+/** The addresses a direct setup worked with. */
+export interface JsCandidateCounts {
+  local: number
+  localLan: number
+  /** Left out past the wire's limit of 8. */
+  truncated: number
+  peer: number
+  peerLan: number
+  probed: number
+  answered: number
+  handshakes: number
+}
+
 export interface JsClientConfig {
   /** Relay carrier: tcp (default) or quic, independent of the local service protocol. */
   relayTransport?: string
@@ -234,6 +247,42 @@ export interface JsDirectAttempt {
   inFlight: number
 }
 
+/** A direct session's path, as `diagnostics().direct.link` reports it. */
+export interface JsDirectLink {
+  /** `lan`, `internet` or `private`. */
+  kind: string
+  /** `ipv4` or `ipv6`. */
+  family: string
+  /**
+   * How the peer address was learned: `host`, `public`, `mapped` or
+   * `peer_reflexive`.
+   */
+  via: string
+  peer: string
+  localIp?: string
+  /**
+   * The local interface the path leaves by, and its tier: `lan`,
+   * `physical`, `cellular`, `virtual` or `loopback`.
+   */
+  interface?: string
+  tier?: string
+  /**
+   * `ipv6_prefix`, `public_ip_subnet` or `subnet`: what suggested a shared
+   * network before the setup.
+   */
+  sameLan?: string
+  timings: JsSetupTimings
+  candidates: JsCandidateCounts
+  /** QUIC's view of the path as of this read. */
+  rttUs: number
+  minRttUs: number
+  congestionWindow: number
+  mtu: number
+  sentPackets: number
+  lostPackets: number
+  congestionEvents: number
+}
+
 export interface JsIssuedKey {
   keyId: number
   state: string
@@ -257,10 +306,26 @@ export interface JsPathDiagnostics {
   relaySessions: number
   activeDirect: number
   activeRelay: number
+  /** Direct sessions within one local network, open now and in all. */
+  activeLan: number
+  lanSessions: number
+  /**
+   * Setups that found the peer on a local network, and those of them that
+   * ended on another path or on the relay.
+   */
+  lanDetected: number
+  lanMissed: number
   fallbacks: number
   lastFallback?: string
+  /**
+   * `lan`, `internet` or `private`: where the latest direct session this
+   * end set up runs.
+   */
+  lastKind?: string
   /** The direct attempt in flight, if any. */
   attempt?: JsDirectAttempt
+  /** The newest direct session open now. */
+  link?: JsDirectLink
 }
 
 export interface JsPortMappingDiagnostics {
@@ -361,6 +426,24 @@ export interface JsServiceInfo {
   connectionCount: number
 }
 
+/**
+ * How long each stage of a direct setup took on this end; a stage it did
+ * not run is absent.
+ */
+export interface JsSetupTimings {
+  negotiateMs?: number
+  discoverMs?: number
+  stunMs?: number
+  /** `ok`, `timeout`, `unavailable` or `cached`. */
+  stun: string
+  grantMs?: number
+  firstPongMs?: number
+  lanFirstPongMs?: number
+  handshakeMs?: number
+  commitMs?: number
+  setupMs: number
+}
+
 export interface JsTunnelDiagnostics {
   relayTransport: string
   direct?: JsPathDiagnostics
@@ -400,8 +483,8 @@ export interface JsTunnelEvent {
    * `relay_failed`, `network_changed`, `direct_established`,
    * `direct_fallback` and `stopped`, the last event of a stream. Steps,
    * from `subscribeEvents()` only: `phase_changed`, `direct_stage_changed`,
-   * `direct_abandoned`, `session_opened`, `session_closed` and
-   * `port_mapping_changed`.
+   * `direct_abandoned`, `session_opened`, `session_closed`,
+   * `port_mapping_changed`, `lan_detected` and `path_selected`.
    */
   kind: string
   /** `relay_ready`: setup latency of the answering relay. */
@@ -427,4 +510,13 @@ export interface JsTunnelEvent {
   path?: string
   /** `port_mapping_changed`: the mapping as it now stands. */
   mapping?: JsPortMappingStatus
+  /** `lan_detected`: `ipv6_prefix`, `public_ip_subnet` or `subnet`. */
+  evidence?: string
+  /**
+   * `path_selected`: `lan`, `internet` or `private`, `ipv4` or `ipv6`,
+   * and how the peer address was learned.
+   */
+  link?: string
+  family?: string
+  via?: string
 }

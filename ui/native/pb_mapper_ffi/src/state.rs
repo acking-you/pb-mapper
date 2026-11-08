@@ -26,9 +26,10 @@ use tokio_util::sync::CancellationToken;
 
 use pb_mapper_auth::{AuthConfig, AuthRuntime};
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, Connection, DirectStage, PathPolicy, PortMapping,
-    RecoveryFailure, RegisterOptions, RegisterRequest, Registration, RelayTransport, RemoteId,
-    Transport, TunnelDiagnostics, TunnelEventKind, TunnelStatus,
+    AddressFamily, Client, ConnectOptions, ConnectRequest, Connection, DirectLink, DirectStage,
+    LanEvidence, LinkKind, LinkVia, PathPolicy, PortMapping, RecoveryFailure, RegisterOptions,
+    RegisterRequest, Registration, RelayTransport, RemoteId, StunOutcome, Transport,
+    TunnelDiagnostics, TunnelEventKind, TunnelStatus,
 };
 use pb_mapper_core::checksum::{
     Credential, get_process_credential, parse_credential, set_process_msg_header_key,
@@ -325,35 +326,127 @@ pub struct ClientConfigInfo {
 /// A connection counts both paths and its direct attempts. A share counts
 /// only the sessions that reached it directly: the rest come in over its
 /// registration with the relay, which does not tell them apart.
-#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PathInfo {
-    /// Sessions open now, on each path.
+    /// Sessions open now, on each path, and of the direct ones those within
+    /// one local network.
     pub active_direct: u64,
     pub active_relay: u64,
-    /// Sessions opened since the tunnel started, on each path.
+    pub active_lan: u64,
+    /// Sessions opened since the tunnel started, on each path, and of the
+    /// direct ones those within one local network.
     pub direct_sessions: u64,
     pub relay_sessions: u64,
+    pub lan_sessions: u64,
     /// The stage reached by a direct attempt in flight.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt: Option<DirectStage>,
     /// How the latest attempt ended.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last: Option<PathOutcome>,
+    /// The newest direct session open now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<PathLink>,
 }
 
 /// How a direct attempt ended.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(tag = "path", rename_all = "camelCase")]
 pub enum PathOutcome {
-    /// It went direct, set up in this long.
+    /// It went direct, set up in this long, over a path of this kind.
     Direct {
         #[serde(rename = "setupMs")]
         setup_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<LinkKind>,
     },
     /// It gave way to the relay at this stage. Later sessions go straight to
     /// the relay for a while (10 s, doubling to 5 min) before trying again.
     Relay { stage: DirectStage },
+}
+
+/// A direct session's path: the SDK's [`DirectLink`], as the window reads
+/// it.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PathLink {
+    /// `lan`, `internet` or `private`.
+    pub kind: LinkKind,
+    pub family: AddressFamily,
+    /// How the peer address was learned.
+    pub via: LinkVia,
+    pub peer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+    /// QUIC's round trip now and its lowest, rounded up to whole
+    /// milliseconds, so that a LAN never reads 0.
+    pub rtt_ms: u64,
+    pub min_rtt_ms: u64,
+    pub setup_ms: u64,
+    /// What suggested a shared network before the setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub same_lan: Option<LanEvidence>,
+    /// The stages of the setup on this end; one it did not run is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negotiate_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discover_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stun_ms: Option<u64>,
+    pub stun: StunOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_pong_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lan_first_pong_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handshake_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_ms: Option<u64>,
+}
+
+impl From<&DirectLink> for PathLink {
+    fn from(link: &DirectLink) -> Self {
+        let timings = link.timings;
+        Self {
+            kind: link.kind,
+            family: link.family,
+            via: link.via,
+            peer: link.peer.to_string(),
+            local_ip: link.local_ip.map(|ip| ip.to_string()),
+            interface: link.interface.clone(),
+            rtt_ms: link.stats.rtt_us.div_ceil(1000),
+            min_rtt_ms: link.stats.min_rtt_us.div_ceil(1000),
+            setup_ms: timings.setup_ms,
+            same_lan: link.same_lan,
+            negotiate_ms: timings.negotiate_ms,
+            discover_ms: timings.discover_ms,
+            stun_ms: timings.stun_ms,
+            stun: timings.stun,
+            grant_ms: timings.grant_ms,
+            first_pong_ms: timings.first_pong_ms,
+            lan_first_pong_ms: timings.lan_first_pong_ms,
+            handshake_ms: timings.handshake_ms,
+            commit_ms: timings.commit_ms,
+        }
+    }
+}
+
+/// What a change of a tunnel's path is worth telling the window about:
+/// which paths are in use, the LAN among them, an attempt, and how the last
+/// one ended; not the counts, nor the link's live figures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PathShape {
+    direct: bool,
+    relay: bool,
+    lan: bool,
+    attempt: Option<DirectStage>,
+    last_direct: Option<bool>,
+    last_kind: Option<LinkKind>,
 }
 
 impl PathInfo {
@@ -366,32 +459,41 @@ impl PathInfo {
             .iter()
             .rev()
             .find_map(|event| match event.kind {
-                TunnelEventKind::DirectEstablished { setup_ms } => {
-                    Some(PathOutcome::Direct { setup_ms })
-                }
+                TunnelEventKind::DirectEstablished { setup_ms } => Some(PathOutcome::Direct {
+                    setup_ms,
+                    kind: direct.last_kind,
+                }),
                 TunnelEventKind::DirectFallback { stage } => Some(PathOutcome::Relay { stage }),
                 _ => None,
             });
         Some(Self {
             active_direct: direct.active_direct,
             active_relay: direct.active_relay,
+            active_lan: direct.active_lan,
             direct_sessions: direct.direct_sessions,
             relay_sessions: direct.relay_sessions,
+            lan_sessions: direct.lan_sessions,
             attempt: direct.attempt.map(|attempt| attempt.stage),
             last,
+            link: direct.link.as_ref().map(PathLink::from),
         })
     }
 
-    /// What a change of is worth telling the window about: which paths are
-    /// in use, an attempt and how the last one ended, but not the counts.
-    fn shape(&self) -> (bool, bool, Option<DirectStage>, Option<bool>) {
-        (
-            self.active_direct > 0,
-            self.active_relay > 0,
-            self.attempt,
-            self.last
+    fn shape(&self) -> PathShape {
+        let last_kind = match self.last {
+            Some(PathOutcome::Direct { kind, .. }) => kind,
+            _ => None,
+        };
+        PathShape {
+            direct: self.active_direct > 0,
+            relay: self.active_relay > 0,
+            lan: self.active_lan > 0,
+            attempt: self.attempt,
+            last_direct: self
+                .last
                 .map(|last| matches!(last, PathOutcome::Direct { .. })),
-        )
+            last_kind,
+        }
     }
 }
 
@@ -1009,6 +1111,82 @@ mod tests {
         (guard, Arc::new(Mutex::new(state)), root)
     }
 
+    /// The window reads a LAN link's kind, address and figures, and hears
+    /// when a tunnel's path turns to a LAN, but not when its round trip moves.
+    #[test]
+    fn a_lan_link_reaches_the_window_and_changes_its_shape() {
+        let lan = PathInfo {
+            active_direct: 1,
+            active_lan: 1,
+            direct_sessions: 1,
+            lan_sessions: 1,
+            last: Some(PathOutcome::Direct {
+                setup_ms: 140,
+                kind: Some(LinkKind::Lan),
+            }),
+            link: Some(PathLink {
+                kind: LinkKind::Lan,
+                family: AddressFamily::Ipv4,
+                via: LinkVia::Host,
+                peer: "192.168.21.100:53000".into(),
+                local_ip: Some("192.168.21.5".into()),
+                interface: Some("WLAN".into()),
+                rtt_ms: 4,
+                min_rtt_ms: 3,
+                setup_ms: 140,
+                same_lan: Some(LanEvidence::PublicIpSubnet),
+                negotiate_ms: Some(12),
+                discover_ms: None,
+                stun_ms: None,
+                stun: StunOutcome::Cached,
+                grant_ms: Some(40),
+                first_pong_ms: Some(3),
+                lan_first_pong_ms: Some(3),
+                handshake_ms: Some(5),
+                commit_ms: Some(2),
+            }),
+            ..PathInfo::default()
+        };
+        let json = serde_json::to_value(&lan).unwrap();
+        assert_eq!(
+            (&json["activeLan"], &json["lanSessions"]),
+            (&1.into(), &1.into())
+        );
+        assert_eq!(
+            json["last"],
+            serde_json::json!({ "path": "direct", "setupMs": 140, "kind": "lan" })
+        );
+        let link = &json["link"];
+        assert_eq!(
+            (
+                &link["kind"],
+                &link["localIp"],
+                &link["sameLan"],
+                &link["rttMs"]
+            ),
+            (
+                &"lan".into(),
+                &"192.168.21.5".into(),
+                &"public_ip_subnet".into(),
+                &4.into()
+            )
+        );
+        assert!(link.get("discoverMs").is_none());
+
+        let mut internet = lan.clone();
+        internet.active_lan = 0;
+        internet.last = Some(PathOutcome::Direct {
+            setup_ms: 140,
+            kind: Some(LinkKind::Internet),
+        });
+        assert_ne!(lan.shape(), internet.shape());
+        let mut slower = lan.clone();
+        if let Some(link) = &mut slower.link {
+            link.rtt_ms = 40;
+        }
+        assert_eq!(lan.shape(), slower.shape());
+    }
+
     #[tokio::test]
     async fn ui_server_uses_its_writable_config_directory_and_reports_readiness() {
         let (_process_credential_guard, state, root) = temp_state("server-auth-path").await;
@@ -1201,7 +1379,7 @@ mod tests {
             infos
                 .iter()
                 .find(|(name, _)| name == key)
-                .and_then(|(_, path)| *path)
+                .and_then(|(_, path)| path.clone())
                 .unwrap_or_else(|| panic!("{key} reports no path"))
         };
         let clients: Vec<_> = state
@@ -1219,7 +1397,14 @@ mod tests {
 
         let direct = path("direct", &clients);
         assert_eq!((direct.active_direct, direct.active_relay), (1, 0));
-        assert!(matches!(direct.last, Some(PathOutcome::Direct { .. })));
+        assert!(matches!(
+            direct.last,
+            Some(PathOutcome::Direct { kind: Some(_), .. })
+        ));
+        assert!(
+            direct.link.is_some(),
+            "an open direct session reports its link"
+        );
         assert_eq!(path("direct", &shares).active_direct, 1);
 
         // The relay asked the share, which declined: no grant came back.

@@ -188,6 +188,9 @@ pub struct ViewerStats {
     pub present_interval: IntervalStats,
     /// Queue delay, picture latency or presentation rate has been poor for 3 s.
     pub degraded: bool,
+    /// The direct link under `path`, sampled once a second; `None` on the
+    /// relay.
+    pub link: Option<super::ViewerLink>,
 }
 impl Default for ViewerStats {
     fn default() -> Self {
@@ -220,6 +223,7 @@ impl Default for ViewerStats {
             dropped_frames: 0,
             present_interval: IntervalStats::default(),
             degraded: false,
+            link: None,
         }
     }
 }
