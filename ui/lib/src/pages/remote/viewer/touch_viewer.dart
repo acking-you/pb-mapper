@@ -370,9 +370,11 @@ class _TouchViewerState extends State<TouchViewer> {
   Widget _layers(Size size, EdgeInsets padding, double aspect) {
     final prefs = widget.prefs;
     final gutters = gutterLayoutFor(size, aspect, padding);
-    // Kept while the keyboard hides the gutters: it only occludes.
+    // Kept while the keyboard hides the gutters: it only occludes. Laid out
+    // with the size it belongs to, here before the surface lays out the
+    // same size, so a rotation keeps the zoom and pan.
     final frame = gutters.frame(size);
-    _viewport.setFrame(frame);
+    _viewport.layout(size, frame: frame);
     final occluded = _inset + kModifierBarHeight;
     // Where hints, the minimap and panels go: between the gutters, or
     // within the frame above the keyboard while it is up.

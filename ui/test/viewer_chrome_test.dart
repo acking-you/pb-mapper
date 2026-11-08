@@ -794,6 +794,61 @@ void main() {
   );
 
   testWidgets(
+    "a tablet's rotation keeps the zoom and the point at the centre, though "
+    'the gutters become bars',
+    (tester) async {
+      _size(tester, const Size(1280, 800));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      await tester.pumpWidget(
+        _app(
+          TouchViewer(
+            desktop: store,
+            prefs: prefs,
+            title: 'Office',
+            onBack: () {},
+          ),
+        ),
+      );
+      await tester.pump(kHintDuration);
+      final viewport = tester
+          .widget<RemoteSurface>(find.byType(RemoteSurface))
+          .viewport;
+      Offset centre() =>
+          viewport.toNormalized(viewport.visibleRect.center, clamp: true)!;
+      viewport
+        ..zoomAt(viewport.visibleRect.center, 3)
+        ..panBy(const Offset(-200, -100));
+      await tester.pump();
+      final before = centre();
+
+      for (final (size, framed) in [
+        (const Size(800, 1280), true),
+        (const Size(1280, 800), false),
+      ]) {
+        tester.view.physicalSize = size;
+        await tester.pump();
+        expect(viewport.frame.top > 0, framed, reason: '$size');
+        expect(viewport.scale, 3, reason: '$size');
+        expect(centre().dx, moreOrLessEquals(before.dx), reason: '$size');
+        expect(centre().dy, moreOrLessEquals(before.dy), reason: '$size');
+      }
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
     'a trackpad stroke repaints the cursor and the ring alone, and a pan the '
     'stage and the minimap alone',
     (tester) async {
