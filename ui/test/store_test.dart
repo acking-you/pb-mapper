@@ -109,13 +109,16 @@ void main() {
       connection(const TunnelPath(activeDirect: 1), status: 'failed').pathMode,
       isNull,
     );
-    // A share knows only the sessions that reached it directly.
-    expect(Tunnel.fromService(fakeService(serviceKey: 'web')).pathMode, isNull);
+    // A share shows the sessions reaching it now, on either path.
+    PathMode? share(TunnelPath? path) =>
+        Tunnel.fromService(fakeService(serviceKey: 'web', path: path)).pathMode;
+    expect(share(null), isNull);
+    expect(share(const TunnelPath(relaySessions: 3)), isNull);
+    expect(share(const TunnelPath(activeDirect: 2)), PathMode.direct);
+    expect(share(const TunnelPath(activeRelay: 1)), PathMode.relay);
     expect(
-      Tunnel.fromService(
-        fakeService(serviceKey: 'web', path: const TunnelPath(activeDirect: 2)),
-      ).pathMode,
-      PathMode.direct,
+      share(const TunnelPath(activeDirect: 1, activeRelay: 1)),
+      PathMode.mixed,
     );
   });
 

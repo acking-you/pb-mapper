@@ -144,21 +144,25 @@ class Tunnel {
   bool get overQuic => relayTransport == RelayTransport.quic;
 
   /// Which way its traffic goes, for a tunnel that is up; null otherwise,
-  /// and for a share no connection has reached directly.
+  /// and for a share no connection is reaching now.
   PathMode? get pathMode {
     if (health != TunnelHealth.running) return null;
     if (!allowDirect) return PathMode.relayOnly;
     final path = this.path;
     // Direct, within one local network when any session open now is.
     PathMode direct(bool lan) => lan ? PathMode.lan : PathMode.direct;
+    final open = ((path?.activeDirect ?? 0) > 0, (path?.activeRelay ?? 0) > 0);
     if (kind == TunnelKind.share) {
-      // A share cannot tell the sessions that came through the relay apart.
-      return path != null && path.activeDirect > 0
-          ? direct(path.activeLan > 0)
-          : null;
+      // A share is reached, and makes no attempts of its own.
+      return switch (open) {
+        (true, true) => PathMode.mixed,
+        (true, false) => direct((path?.activeLan ?? 0) > 0),
+        (false, true) => PathMode.relay,
+        (false, false) => null,
+      };
     }
     if (path == null) return PathMode.directFirst;
-    return switch ((path.activeDirect > 0, path.activeRelay > 0)) {
+    return switch (open) {
       (true, true) => PathMode.mixed,
       (true, false) => direct(path.activeLan > 0),
       (false, true) => PathMode.relay,

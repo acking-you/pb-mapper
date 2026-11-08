@@ -1,11 +1,13 @@
 /// A running tunnel's diagnostics, opened from its menu and from the galaxy's
-/// details panel: how it reaches the relay, how its sessions travel, its port
-/// mapping, and what happened to it, as it happens. The whole of it copies as
-/// one JSON report.
+/// details panel: how it reaches the relay, how its sessions travel and what
+/// they carry, its port mapping, and what happened to it, as it happens. Its
+/// figures are sampled every second while it is open. The whole of it copies
+/// as one JSON report.
 library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -59,6 +61,9 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
   /// Ages are said relative to now, so they are said again now and then.
   late final Timer _clock;
   TunnelDiagnostics? _diagnostics;
+
+  /// The figures that keep changing, sampled every second.
+  TunnelMetrics? _metrics;
   final List<_Received> _events = [];
   int _missed = 0;
   Object? _error;
@@ -70,6 +75,7 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
         .tunnelEvents(
           serviceKey: widget.tunnel.key,
           share: widget.tunnel.kind == TunnelKind.share,
+          metricsEvery: const Duration(seconds: 1),
         )
         .listen(
           _receive,
@@ -86,6 +92,7 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
     if (!mounted) return;
     setState(() {
       _diagnostics = update.diagnostics ?? _diagnostics;
+      _metrics = update.metrics ?? _metrics;
       _missed += update.missed;
       final event = update.event;
       if (event != null &&
@@ -107,6 +114,7 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
     final report = {
       'tunnel': {'kind': widget.tunnel.kind.name, 'key': widget.tunnel.key},
       'diagnostics': _diagnostics?.raw,
+      'metrics': _metrics?.raw,
       'events': [for (final received in _events) received.event.raw],
       if (_missed > 0) 'missed': _missed,
     };
@@ -148,7 +156,7 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _Facts(tunnel: widget.tunnel, diagnostics: diagnostics),
+                  _Facts(diagnostics: diagnostics, metrics: _metrics),
                   const SizedBox(height: 16),
                   _Heading(l10n.portMapping),
                   _PortMapping(
@@ -264,41 +272,54 @@ class _Header extends StatelessWidget {
   }
 }
 
-/// The tunnel at a glance: its carrier, the relay, and its sessions.
+/// The tunnel at a glance: its carrier, the relay, its sessions and what
+/// each path carried. The figures that keep changing come from the latest
+/// [metrics] sample once there is one, the rest from [diagnostics].
 class _Facts extends StatelessWidget {
-  const _Facts({required this.tunnel, required this.diagnostics});
+  const _Facts({required this.diagnostics, required this.metrics});
 
-  final Tunnel tunnel;
   final TunnelDiagnostics diagnostics;
+  final TunnelMetrics? metrics;
 
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final scheme = Theme.of(context).colorScheme;
+    final metrics = this.metrics;
     final sessions = diagnostics.direct;
+    final failures = metrics?.relayFailures ?? diagnostics.consecutiveFailures;
+    final direct = metrics?.directSessions ?? sessions?.direct;
+    final relayed = metrics?.relaySessions ?? sessions?.relay;
+    final lan = metrics?.lanSessions ?? sessions?.lan ?? 0;
+    // A sample says whether a direct session is open now; without one, the
+    // snapshot does.
+    final link = metrics == null ? sessions?.link : metrics.link;
     return Wrap(
       spacing: 6,
       runSpacing: 6,
       children: [
         CarrierChip(carrier: RelayTransport.parse(diagnostics.relayTransport)),
-        if (diagnostics.consecutiveFailures > 0)
+        if (failures > 0)
           _Pill(
             icon: AppIcons.warning,
-            text: l10n.diagnosticsRelayFailures(
-              diagnostics.consecutiveFailures,
-            ),
+            text: l10n.diagnosticsRelayFailures(failures),
             color: cautionColor(scheme),
+          )
+        else if (metrics?.relayRtt case final rtt?)
+          _Pill(
+            icon: AppIcons.relay,
+            text: l10n.diagnosticsRelay(
+              l10n.pathRoundTrip(math.max(1, rtt.inMilliseconds)),
+            ),
           )
         else if (diagnostics.lastSetup case final setup?)
           _Pill(icon: AppIcons.relay, text: l10n.diagnosticsRelay(_ms(setup))),
-        if (sessions != null)
+        if (direct != null && relayed != null && direct + relayed > 0)
           _Pill(
             icon: AppIcons.direct,
-            text: tunnel.kind == TunnelKind.share
-                ? l10n.diagnosticsDirectSessions(sessions.direct)
-                : l10n.diagnosticsSessions(sessions.direct, sessions.relay),
+            text: l10n.diagnosticsSessions(direct, relayed),
           ),
-        if (sessions?.link case final link?)
+        if (link != null)
           _Pill(
             icon: link.kind == LinkKind.lan ? AppIcons.router : AppIcons.direct,
             text: [
@@ -309,11 +330,29 @@ class _Facts extends StatelessWidget {
             ].join(' · '),
             color: link.kind == LinkKind.lan ? successColor(scheme) : null,
           )
-        else if (sessions != null && sessions.lan > 0)
+        else if (lan > 0)
+          _Pill(icon: AppIcons.router, text: l10n.pathLanSessions(lan)),
+        if (metrics != null && !metrics.relay.isEmpty)
           _Pill(
-            icon: AppIcons.router,
-            text: l10n.pathLanSessions(sessions.lan),
+            key: const Key('traffic-relay'),
+            icon: AppIcons.relay,
+            text: _traffic(context, l10n.pathRelay, metrics.relay),
           ),
+        // Named the LAN when all of it crossed one.
+        if (metrics != null && !metrics.direct.isEmpty)
+          metrics.lan.sent == metrics.direct.sent &&
+                  metrics.lan.received == metrics.direct.received
+              ? _Pill(
+                  key: const Key('traffic-direct'),
+                  icon: AppIcons.router,
+                  text: _traffic(context, l10n.pathLan, metrics.direct),
+                  color: successColor(scheme),
+                )
+              : _Pill(
+                  key: const Key('traffic-direct'),
+                  icon: AppIcons.direct,
+                  text: _traffic(context, l10n.pathDirect, metrics.direct),
+                ),
         if (sessions != null && sessions.fallbacks > 0)
           _Pill(
             icon: AppIcons.mixedPath,
@@ -324,8 +363,16 @@ class _Facts extends StatelessWidget {
   }
 }
 
+/// What [path] carried: sent from this computer's side, and received.
+String _traffic(BuildContext context, String path, ByteCount bytes) =>
+    context.l10n.diagnosticsTraffic(
+      path,
+      formatBytes(bytes.sent),
+      formatBytes(bytes.received),
+    );
+
 class _Pill extends StatelessWidget {
-  const _Pill({required this.icon, required this.text, this.color});
+  const _Pill({super.key, required this.icon, required this.text, this.color});
 
   final IconData icon;
   final String text;
@@ -651,6 +698,18 @@ _Reading _read(BuildContext context, TunnelEvent event) {
         detail: l10n.tunnelEventLanEvidence(event.evidence ?? ''),
         icon: AppIcons.router,
         tone: _Tone.signal,
+      );
+    case 'lan_missed':
+      // Where it went instead: across another network, or the relay.
+      final took = event.took;
+      return (
+        title: l10n.tunnelEventTitle(event.kind),
+        detail: [
+          l10n.tunnelEventLanEvidence(event.evidence ?? ''),
+          took == null ? l10n.pathRelay : linkKindLabel(context, took),
+        ].join(' · '),
+        icon: took == null ? AppIcons.relay : AppIcons.direct,
+        tone: _Tone.quiet,
       );
     case 'path_selected':
       final lan = event.link == LinkKind.lan;

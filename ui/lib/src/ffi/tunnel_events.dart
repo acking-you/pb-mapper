@@ -8,14 +8,22 @@ library;
 import 'package:pb_mapper_ui/src/common/polling.dart' show FirstWhereOrNull;
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart' show LinkKind;
 
-/// What a tunnel's event feed delivers: the tunnel's diagnostics as they are
-/// now, and the event that brought them, if any. The first update carries
-/// diagnostics alone.
+/// What a tunnel's event feed delivers: the tunnel's diagnostics and metrics
+/// as they are now, and the event that brought them, if any. The first
+/// update carries those alone; a sample of the metrics comes alone too.
 class TunnelEventsUpdate {
-  const TunnelEventsUpdate({this.diagnostics, this.event, this.missed = 0});
+  const TunnelEventsUpdate({
+    this.diagnostics,
+    this.metrics,
+    this.event,
+    this.missed = 0,
+  });
 
-  /// Null once the tunnel itself is gone.
+  /// Absent from a sample, and once the tunnel itself is gone.
   final TunnelDiagnostics? diagnostics;
+
+  /// Absent once the tunnel itself is gone.
+  final TunnelMetrics? metrics;
   final TunnelEvent? event;
 
   /// Events this reader fell behind by; [diagnostics] has caught up.
@@ -27,12 +35,65 @@ class TunnelEventsUpdate {
           final Map<dynamic, dynamic> d => TunnelDiagnostics.fromMap(_map(d)),
           _ => null,
         },
+        metrics: switch (map['metrics']) {
+          final Map<dynamic, dynamic> m => TunnelMetrics.fromMap(_map(m)),
+          _ => null,
+        },
         event: switch (map['event']) {
           final Map<dynamic, dynamic> e => TunnelEvent.fromMap(_map(e)),
           _ => null,
         },
         missed: map['type'] == 'lagged' ? _int(map['skipped']) : 0,
       );
+}
+
+/// What a running tunnel keeps measuring, as one sample: its sessions, the
+/// bytes each path carried, the relay's round trip and the direct link.
+class TunnelMetrics {
+  TunnelMetrics.fromMap(this.raw)
+    : sessions = _at(raw, 'sessions'),
+      traffic = _at(raw, 'traffic'),
+      relayRtt = _duration(_at(raw, 'relay')['rtt_ms']),
+      relayFailures = _int(_at(raw, 'relay')['consecutive_failures']),
+      link = switch (raw['link']) {
+        final Map<dynamic, dynamic> link => DirectLinkInfo.fromMap(_map(link)),
+        _ => null,
+      };
+
+  final Map<String, dynamic> raw;
+  final Map<String, dynamic> sessions;
+  final Map<String, dynamic> traffic;
+
+  /// The smoothed round trip of the tunnel's control exchanges with the
+  /// relay, the relay's handling included.
+  final Duration? relayRtt;
+  final int relayFailures;
+
+  /// The newest direct session open now.
+  final DirectLinkInfo? link;
+
+  /// Sessions since the tunnel started, on each path; of the direct ones,
+  /// those within one local network.
+  int get directSessions => _int(sessions['direct']);
+  int get relaySessions => _int(sessions['relay']);
+  int get lanSessions => _int(sessions['lan']);
+
+  /// The application bytes on each path; [direct] includes [lan].
+  ByteCount get relay => ByteCount.fromMap(_at(traffic, 'relay'));
+  ByteCount get direct => ByteCount.fromMap(_at(traffic, 'direct'));
+  ByteCount get lan => ByteCount.fromMap(_at(traffic, 'lan'));
+}
+
+/// Application bytes: sent from this computer's side, and received.
+class ByteCount {
+  ByteCount.fromMap(Map<String, dynamic> map)
+    : sent = _int(map['sent']),
+      received = _int(map['received']);
+
+  final int sent;
+  final int received;
+
+  bool get isEmpty => sent == 0 && received == 0;
 }
 
 /// A point-in-time view of a running tunnel.
@@ -81,7 +142,7 @@ class TunnelDiagnostics {
   final List<TunnelEvent> events;
 }
 
-/// Sessions by path. A share counts only those that reached it directly.
+/// Sessions by path, with the fallbacks direct attempts made.
 class SessionCounts {
   SessionCounts.fromMap(Map<String, dynamic> map)
     : direct = _int(map['direct_sessions']),
@@ -104,7 +165,8 @@ class SessionCounts {
   final DirectLinkInfo? link;
 }
 
-/// A direct session's path, as the SDK reports it.
+/// A direct session's path, as the SDK reports it, in diagnostics and in
+/// metrics alike.
 class DirectLinkInfo {
   DirectLinkInfo.fromMap(Map<String, dynamic> map)
     : kind = LinkKind.parse(map['kind']),
@@ -164,8 +226,12 @@ class TunnelEvent {
   /// `session_opened` and `session_closed`: `direct` or `relay`.
   String? get path => detail['path'] as String?;
 
-  /// `lan_detected`: why the peer seemed to share this network.
+  /// `lan_detected` and `lan_missed`: why the peer seemed to share this
+  /// network.
   String? get evidence => detail['evidence'] as String?;
+
+  /// `lan_missed`: where the session went instead; null for the relay.
+  LinkKind? get took => LinkKind.parse(detail['took']);
 
   /// `path_selected`: where the path runs, its family, and how its address
   /// was learned.
@@ -271,6 +337,13 @@ class PortMappingStatus {
 
 Map<String, dynamic> _map(Map<dynamic, dynamic> map) =>
     Map<String, dynamic>.from(map);
+
+/// The map under [key], or an empty one.
+Map<String, dynamic> _at(Map<String, dynamic> map, String key) =>
+    switch (map[key]) {
+      final Map<dynamic, dynamic> inner => _map(inner),
+      _ => const {},
+    };
 
 int _int(Object? value, {int fallback = 0}) =>
     (value as num?)?.toInt() ?? fallback;

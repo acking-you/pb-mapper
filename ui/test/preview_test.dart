@@ -68,7 +68,12 @@ FakePbMapperApi _busy() => FakePbMapperApi(
     fakeService(
       serviceKey: 'nas-files',
       localAddress: '127.0.0.1:5000',
-      path: const TunnelPath(activeDirect: 2, directSessions: 5),
+      path: const TunnelPath(
+        activeDirect: 2,
+        activeRelay: 1,
+        directSessions: 5,
+        relaySessions: 2,
+      ),
     ),
     fakeService(
       serviceKey: 'home-ssh',
@@ -505,6 +510,24 @@ void main() {
                     },
                   },
                 }),
+              // The second's sample: what each path carried by then.
+              TunnelEventsUpdate.fromMap({
+                'type': 'metrics',
+                'metrics': {
+                  'sessions': {'direct': 3, 'relay': 1, 'lan': 0},
+                  'traffic': {
+                    'relay': {'sent': 81920, 'received': 1258291},
+                    'direct': {'sent': 2411724, 'received': 48234496},
+                    'lan': {'sent': 0, 'received': 0},
+                  },
+                  'relay': {'rtt_ms': 31, 'consecutive_failures': 0},
+                  'link': {
+                    'kind': 'internet',
+                    'family': 'ipv4',
+                    'stats': {'rtt_us': 23400},
+                  },
+                },
+              }),
             ]);
       await pumpApp(
         tester,
