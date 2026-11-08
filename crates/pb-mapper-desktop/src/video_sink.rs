@@ -73,7 +73,9 @@ pub struct VideoUnit {
     pub duplicate: bool,
     /// The first unit after any drop, generation change or resume: the decoder
     /// drops what it still holds, restarts at this IDR and rebuilds only if
-    /// the size changed.
+    /// the size changed. A session's codec is fixed, but a native decoder
+    /// outlives its session: it also rebuilds when the next session's first
+    /// IDR is of another codec.
     pub discontinuity: bool,
     pub pts_us: u64,
     pub bytes: bytes::Bytes,
@@ -187,7 +189,7 @@ struct SinkState {
     decoder_error: String,
 }
 impl SinkState {
-    fn new(epoch: Instant, max_fps: u32) -> Self {
+    fn new(epoch: Instant, max_fps: u32, fps_override: bool) -> Self {
         Self {
             queue: VecDeque::new(),
             bytes: 0,
@@ -199,7 +201,7 @@ impl SinkState {
             handed: VecDeque::with_capacity(RECENT_FRAMES),
             presented: None,
             recovery: Recovery::default(),
-            fps_cap: FpsCap::new(max_fps),
+            fps_cap: FpsCap::new(max_fps, fps_override),
             present: PresentStats::new(epoch),
             discarded: 0,
             backlog_drops: 0,
@@ -292,10 +294,10 @@ fn micros(epoch: Instant, at: Instant) -> u64 {
 }
 
 impl VideoSink {
-    fn new(shared: Weak<ViewerShared>, max_fps: u32) -> Self {
+    fn new(shared: Weak<ViewerShared>, max_fps: u32, fps_override: bool) -> Self {
         let epoch = Instant::now();
         Self {
-            state: parking_lot::Mutex::new(SinkState::new(epoch, max_fps)),
+            state: parking_lot::Mutex::new(SinkState::new(epoch, max_fps, fps_override)),
             ready: parking_lot::Condvar::new(),
             closed: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -305,9 +307,14 @@ impl VideoSink {
         }
     }
 
-    /// `max_fps` is the session's `limits.max_fps`, which bounds the fps cap.
-    pub(crate) fn for_session(shared: Weak<ViewerShared>, max_fps: u32) -> Arc<Self> {
-        Arc::new(Self::new(shared, max_fps))
+    /// `max_fps` is the session's `limits.max_fps`, which bounds the fps cap;
+    /// with `fps_override` it is the cap's ceiling for every preset.
+    pub(crate) fn for_session(
+        shared: Weak<ViewerShared>,
+        max_fps: u32,
+        fps_override: bool,
+    ) -> Arc<Self> {
+        Arc::new(Self::new(shared, max_fps, fps_override))
     }
 
     /// The single consumer of this sink: exactly one pops video.
@@ -604,7 +611,7 @@ impl VideoSink {
     /// presentations and forwards them nowhere.
     #[doc(hidden)]
     pub fn detached_for_test() -> Arc<Self> {
-        Arc::new(Self::new(Weak::new(), DETACHED_MAX_FPS))
+        Arc::new(Self::new(Weak::new(), DETACHED_MAX_FPS, false))
     }
 
     /// Feed a detached sink: the FFI's synthetic source and native tests.

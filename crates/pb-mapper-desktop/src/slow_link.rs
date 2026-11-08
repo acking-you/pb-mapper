@@ -378,6 +378,7 @@ impl Rig {
             ViewerConfig {
                 codecs: vec![VideoCodec::H264],
                 limits: VideoLimits::for_viewer(60.0),
+                fps_override: false,
                 quality: QualityPreset::Balanced,
                 progress: None,
             },

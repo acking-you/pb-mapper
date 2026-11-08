@@ -30,8 +30,9 @@ pub use status::{
 use crate::{
     Input, Invitation, KeyframeReason, QualityPreset, Result, VideoCodec, VideoLimits, error,
     protocol::{
-        CAPABILITY_ENCODER_DWELL, DesktopKind, HostMessage, NoticeCode, RejectReason, Route,
-        SessionState, StateRecord, VideoSize, ViewerMessage, valid_capabilities,
+        CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265, DesktopKind,
+        HostMessage, NoticeCode, RejectReason, Route, SessionState, StateRecord, VideoSize,
+        ViewerMessage, valid_capabilities,
     },
     security, valid_service,
     video_sink::{VideoSink, VideoUnit},
@@ -44,7 +45,7 @@ use pb_mapper_client::sdk::{
     RelayTransport, TunnelMetrics, TunnelMetricsStream,
 };
 use serde::Serialize;
-use status::{CursorSlot, HostStats, ViewerStatsAcc, millis};
+use status::{CursorSlot, HostStats, Traffic, ViewerStatsAcc, millis};
 use std::{
     io,
     sync::Arc,
@@ -70,21 +71,55 @@ const DECODER_FAILED: &str = "the remote picture could not be decoded";
 
 /// How a viewer connects.
 pub struct ViewerConfig {
-    /// One or two codecs the renderer decodes, in preference order.
+    /// The codecs the renderer decodes, in preference order: one or two of
+    /// H.264 and JPEG, and `H265` beside them when it decodes that too. H.265
+    /// never goes in `Authenticate.codecs`, which an older host rejects: it is
+    /// offered as the `h265` capability, and only a host that can encode it
+    /// answers with it. Whatever the host picks, it is one of these.
     pub codecs: Vec<VideoCodec>,
-    /// Fixed for the session; see `VideoLimits::for_viewer`.
+    /// Fixed for the session; see `VideoLimits::choose`.
     pub limits: VideoLimits,
+    /// `limits.max_fps` is a frame rate the user chose, sent as the
+    /// `fps_override` capability: the host's ceiling for every preset, and
+    /// the fps cap's, in place of each preset's own.
+    pub fps_override: bool,
     /// The initial preset; `Viewer::set_quality` changes it live.
     pub quality: QualityPreset,
     /// Called as the connection passes each stage.
     pub progress: Option<Arc<dyn Fn(ConnectStage) + Send + Sync>>,
 }
 impl ViewerConfig {
+    /// H.265 at most once, and beside one or two codecs every host knows.
     fn validate(&self) -> std::result::Result<(), ConnectError> {
-        if self.codecs.is_empty() || self.codecs.len() > 2 || self.limits.validate().is_err() {
+        let offered = self.wire_codecs().len();
+        let h265 = self
+            .codecs
+            .iter()
+            .filter(|codec| **codec == VideoCodec::H265)
+            .count();
+        if !(1..=2).contains(&offered) || h265 > 1 || self.limits.validate().is_err() {
             return Err(ConnectError::InvalidRequest);
         }
         Ok(())
+    }
+    /// What `Authenticate.codecs` lists: every codec but H.265.
+    fn wire_codecs(&self) -> Vec<VideoCodec> {
+        self.codecs
+            .iter()
+            .copied()
+            .filter(|codec| *codec != VideoCodec::H265)
+            .collect()
+    }
+    /// What this viewer reads and asks for, as `Authenticate.capabilities`.
+    fn capabilities(&self) -> Vec<String> {
+        let mut capabilities = vec![CAPABILITY_ENCODER_DWELL.to_owned()];
+        if self.codecs.contains(&VideoCodec::H265) {
+            capabilities.push(CAPABILITY_H265.to_owned());
+        }
+        if self.fps_override {
+            capabilities.push(CAPABILITY_FPS_OVERRIDE.to_owned());
+        }
+        capabilities
     }
     fn progress(&self, stage: ConnectStage) {
         if let Some(progress) = &self.progress {
@@ -351,6 +386,7 @@ impl Viewer {
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
+        config.validate()?;
         Self::start(stream, token, config, None).await
     }
 
@@ -391,7 +427,11 @@ impl Viewer {
             cursor: Mutex::new(CursorSlot::default()),
             outbound: Outbound::new(),
         });
-        let sink = VideoSink::for_session(Arc::downgrade(&shared), config.limits.max_fps);
+        let sink = VideoSink::for_session(
+            Arc::downgrade(&shared),
+            config.limits.max_fps,
+            config.fps_override,
+        );
         let cancel = CancellationToken::new();
         let join = tokio::spawn(run(
             stream,
@@ -701,10 +741,10 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> std::result::Result<Accepted, ConnectError> {
     let authenticate = ViewerMessage::Authenticate {
         token,
-        codecs: config.codecs.clone(),
+        codecs: config.wire_codecs(),
         limits: config.limits,
         quality: config.quality,
-        capabilities: vec![CAPABILITY_ENCODER_DWELL.into()],
+        capabilities: config.capabilities(),
     };
     wire::write_message(stream, &authenticate, None)
         .await
@@ -717,6 +757,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
             capabilities,
             ..
         })) => {
+            // H.265 too: only a viewer that offered it may receive it.
             if !config.codecs.contains(&codec) || !valid_capabilities(&capabilities) {
                 return Err(ConnectError::Protocol(
                     "the host accepted with a codec or capabilities this viewer did not offer"
@@ -916,7 +957,8 @@ impl Reader<'_> {
                 if generation > self.generation {
                     return Err(Ended::protocol("video before its generation's state"));
                 }
-                // JPEG reports the display geometry; H.264 its encoded size.
+                // JPEG reports the display geometry; H.264 and H.265 their
+                // encoded size.
                 let bounded = self.codec == VideoCodec::Jpeg
                     || (width <= self.limits.max_width && height <= self.limits.max_height);
                 if !bounded
@@ -1098,13 +1140,17 @@ impl Writer<'_> {
     }
 
     /// Every `VIEWER_TICK`: the fps cap, keyframe retries and the stall
-    /// watchdog; once a second also the path and the stats roll-up. Why the
-    /// decoder failed, once it failed for good.
+    /// watchdog; once a second also the path, the tunnel's traffic and the
+    /// stats roll-up. Why the decoder failed, once it failed for good.
     fn tick(&mut self, now: Instant) -> Option<String> {
         let second = self.ticks.is_multiple_of(TICKS_PER_SECOND);
         self.ticks += 1;
-        if second && let Some(connection) = self.connection {
-            let (route, link) = route(&connection.metrics());
+        let tunnel = self
+            .connection
+            .filter(|_| second)
+            .map(|connection| connection.metrics());
+        if let Some(metrics) = &tunnel {
+            let (route, link) = route(metrics);
             let changed = {
                 let mut state = self.shared.state.lock();
                 state.link = link;
@@ -1127,12 +1173,26 @@ impl Writer<'_> {
         }
         if second {
             let sink = self.sink.snapshot(now);
-            self.shared
-                .stats
-                .lock()
-                .roll(now, streaming, sink.presented_fps, sink.viewer_ms);
+            self.shared.stats.lock().roll(
+                now,
+                streaming,
+                sink.presented_fps,
+                sink.viewer_ms,
+                tunnel.as_ref().map(traffic),
+            );
         }
         self.sink.decoder_failure()
+    }
+}
+
+/// What the session's tunnel carried so far, on every path: TLS and every
+/// message, each way. A viewer's tunnel carries this one session.
+fn traffic(metrics: &TunnelMetrics) -> Traffic {
+    let paths = metrics.traffic;
+    // `direct` includes `lan`.
+    Traffic {
+        sent: paths.relay.sent.saturating_add(paths.direct.sent),
+        received: paths.relay.received.saturating_add(paths.direct.received),
     }
 }
 
@@ -1198,6 +1258,7 @@ mod tests {
         ViewerConfig {
             codecs: vec![VideoCodec::H264],
             limits: VideoLimits::for_viewer(60.0),
+            fps_override: false,
             quality: QualityPreset::Balanced,
             progress: None,
         }
@@ -1297,8 +1358,12 @@ mod tests {
     }
 
     fn accepted() -> HostMessage {
+        accepted_with(VideoCodec::H264)
+    }
+
+    fn accepted_with(codec: VideoCodec) -> HostMessage {
         HostMessage::Accepted {
-            codec: VideoCodec::H264,
+            codec,
             limits: VideoLimits::for_viewer(60.0),
             nominal_fps: 60,
             quality: QualityPreset::Balanced,
@@ -1314,8 +1379,19 @@ mod tests {
         DuplexStream,
         ViewerMessage,
     ) {
+        connect_with(config(), answer).await
+    }
+
+    async fn connect_with(
+        config: ViewerConfig,
+        answer: HostMessage,
+    ) -> (
+        std::result::Result<Viewer, ConnectError>,
+        DuplexStream,
+        ViewerMessage,
+    ) {
         let (viewer, mut host) = tokio::io::duplex(1 << 20);
-        let connecting = tokio::spawn(Viewer::start(viewer, TOKEN.into(), config(), None));
+        let connecting = tokio::spawn(Viewer::start(viewer, TOKEN.into(), config, None));
         let authenticate = receive(&mut host).await;
         send(&mut host, answer, None).await;
         (connecting.await.unwrap(), host, authenticate)
@@ -1436,6 +1512,57 @@ mod tests {
         ));
         assert!(matches!(viewer.input(2, &shift), Err(InputError::Closed)));
         viewer.stop().await.unwrap();
+    }
+
+    /// H.265 and a chosen frame rate are capabilities, so an older host sees
+    /// only H.264 and values it ignores; H.265 is taken only when offered.
+    #[tokio::test]
+    async fn h265_is_offered_as_a_capability_and_accepted_only_when_offered() {
+        let h265 = || ViewerConfig {
+            codecs: vec![VideoCodec::H265, VideoCodec::H264],
+            fps_override: true,
+            ..config()
+        };
+        let (viewer, mut host, authenticate) =
+            connect_with(h265(), accepted_with(VideoCodec::H265)).await;
+        let viewer = viewer.unwrap();
+        let ViewerMessage::Authenticate {
+            codecs,
+            capabilities,
+            ..
+        } = authenticate
+        else {
+            panic!("expected Authenticate first");
+        };
+        assert_eq!(codecs, [VideoCodec::H264]);
+        assert_eq!(
+            capabilities,
+            [
+                CAPABILITY_ENCODER_DWELL,
+                CAPABILITY_H265,
+                CAPABILITY_FPS_OVERRIDE
+            ]
+        );
+        assert_eq!(viewer.status().stats.codec, VideoCodec::H265);
+        send(&mut host, state(1, false), None).await;
+        send(&mut host, video(1, 1, 1, true), Some(&[1; 64])).await;
+        let consumer = viewer.video_sink().attach().unwrap();
+        assert_eq!(pull(&consumer).await.codec, VideoCodec::H265);
+        drop(host);
+        viewer.stop().await.unwrap();
+
+        let (unasked, _, _) = connect(accepted_with(VideoCodec::H265)).await;
+        assert!(matches!(unasked, Err(ConnectError::Protocol(_))));
+        // H.265 alone would leave an older host no codec it knows.
+        let alone = ViewerConfig {
+            codecs: vec![VideoCodec::H265],
+            ..config()
+        };
+        let (stream, _host) = tokio::io::duplex(64);
+        assert!(matches!(
+            Viewer::over_stream_for_test(stream, TOKEN.into(), alone).await,
+            Err(ConnectError::InvalidRequest)
+        ));
     }
 
     /// Dart reconnects after 5 s without video while streaming: neither

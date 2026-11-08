@@ -10,12 +10,15 @@
 //! is remembered from the live session, which already passed its certificate
 //! pin, and `connect` resolves an id here. Nothing logs an invitation.
 use crate::{
-    desktop::trust::{protect, write_private},
+    desktop::{
+        trust::{protect, write_private},
+        valid_max_fps,
+    },
     error::CtlError,
     handle::PbMapperHandle,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use pb_mapper::desktop::{Invitation, QualityPreset};
+use pb_mapper::desktop::{Invitation, QualityPreset, Resolution};
 use ring::{
     aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey},
     rand::{SecureRandom, SystemRandom},
@@ -88,6 +91,10 @@ enum Request {
         relay_only: bool,
         quality: QualityPreset,
         #[serde(default)]
+        resolution: Resolution,
+        #[serde(default)]
+        max_fps: u32,
+        #[serde(default)]
         replace_id: Option<String>,
     },
     #[serde(rename = "computers_update")]
@@ -97,6 +104,10 @@ enum Request {
         name: Option<String>,
         #[serde(default)]
         quality: Option<QualityPreset>,
+        #[serde(default)]
+        resolution: Option<Resolution>,
+        #[serde(default)]
+        max_fps: Option<u32>,
         #[serde(default)]
         last_connected_ms: Option<u64>,
         #[serde(default)]
@@ -120,6 +131,13 @@ struct Record {
     namespace: u64,
     relay_only: bool,
     quality: QualityPreset,
+    /// The largest picture asked of it; a file from before the choice
+    /// existed reads as the default, 1080p.
+    #[serde(default)]
+    resolution: Resolution,
+    /// Its maximum frame rate: 0 is Auto, see `valid_max_fps`.
+    #[serde(default)]
+    max_fps: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_connected_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,6 +162,9 @@ impl Record {
         }
         if self.last_path.as_ref().is_some_and(|path| path.len() > 32) {
             return invalid("connection path");
+        }
+        if !valid_max_fps(self.max_fps) {
+            return invalid("maximum frame rate");
         }
         Ok(())
     }
@@ -509,6 +530,8 @@ fn apply(
             namespace,
             relay_only,
             quality,
+            resolution,
+            max_fps,
             replace_id,
         } => {
             let record = Record {
@@ -520,6 +543,8 @@ fn apply(
                 namespace,
                 relay_only,
                 quality,
+                resolution,
+                max_fps,
                 last_connected_ms: None,
                 last_path: None,
                 last_control_allowed: None,
@@ -530,6 +555,8 @@ fn apply(
             id,
             name,
             quality,
+            resolution,
+            max_fps,
             last_connected_ms,
             last_path,
             last_control_allowed,
@@ -539,6 +566,12 @@ fn apply(
             }
             if let Some(quality) = quality {
                 record.quality = quality;
+            }
+            if let Some(resolution) = resolution {
+                record.resolution = resolution;
+            }
+            if let Some(max_fps) = max_fps {
+                record.max_fps = max_fps;
             }
             if last_connected_ms.is_some() {
                 record.last_connected_ms = last_connected_ms;
@@ -672,12 +705,34 @@ mod tests {
         )
         .unwrap();
         assert!(record.get("invitation").is_none());
+        assert_eq!(
+            (&record["resolution"], &record["max_fps"]),
+            (&json!("1080p"), &json!(0))
+        );
         let renamed = request(json!({"op": "computers_update", "id": id, "name": "Desk",
-            "last_connected_ms": 5}));
+            "last_connected_ms": 5, "resolution": "native", "max_fps": 120}));
         run(&mut slot, None, renamed).unwrap();
+        let unbounded = request(json!({"op": "computers_update", "id": id, "max_fps": 240}));
+        let refused = run(&mut slot, None, unbounded);
+        assert_eq!(refused.unwrap_err().code(), ErrorCode::InvalidArgument);
         let listed = run(&mut slot, None, request(json!({"op": "computers_list"}))).unwrap();
         assert_eq!(listed[0]["name"], "Desk");
+        assert_eq!(
+            (&listed[0]["resolution"], &listed[0]["max_fps"]),
+            (&json!("native"), &json!(120))
+        );
         assert!(listed[0].get("invitation").is_none());
+        // A computer remembered before either choice existed reads as the
+        // defaults.
+        let earlier = json!({"version": 1, "computers": [{"id": id, "name": "Office",
+            "service": "desktop:office", "fingerprint": fingerprint, "relay": "relay:7666",
+            "namespace": 3, "relay_only": false, "quality": "balanced",
+            "invitation": current.encode()}]});
+        let decoded = decode(&serde_json::to_vec(&earlier).unwrap()).unwrap();
+        assert_eq!(
+            (decoded[0].record.resolution, decoded[0].record.max_fps),
+            (Resolution::P1080, 0)
+        );
 
         // The file holds neither the record nor the invitation in the clear.
         let sealed = std::fs::read(directory.join(SEALED_FILE)).unwrap();

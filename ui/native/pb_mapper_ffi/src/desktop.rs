@@ -17,8 +17,8 @@ use pb_mapper::{
     Client, ConnectOptions, PathPolicy,
     desktop::{
         self, ConnectError, ConnectStage, DesktopView, Host, HostOptions, InputError, Invitation,
-        InvitationError, InvitationFormat, KeyframeReason, QualityPreset, StopReason, VideoCodec,
-        VideoLimits, Viewer, ViewerConfig,
+        InvitationError, InvitationFormat, KeyframeReason, QualityPreset, Resolution, StopReason,
+        VideoCodec, VideoLimits, Viewer, ViewerConfig,
     },
 };
 #[cfg(windows)]
@@ -402,6 +402,15 @@ enum Request {
         #[serde(default)]
         quality: QualityPreset,
         refresh_hz: f64,
+        /// Offer H.265 too: the app's decoder probe found a decoder for it
+        /// that takes `resolution`, and it has not failed this run.
+        #[serde(default)]
+        h265: bool,
+        #[serde(default)]
+        resolution: Resolution,
+        /// 0 is Auto; otherwise the user's own rate, see `valid_max_fps`.
+        #[serde(default)]
+        max_fps: u32,
     },
     Disconnect,
 }
@@ -474,6 +483,12 @@ enum ViewerRequest {
 
 fn err(e: impl std::fmt::Display) -> CtlError {
     CtlError::io(e.to_string())
+}
+
+/// A maximum frame rate as `connect` and a remembered computer take it: 0
+/// for Auto, otherwise one the user chose, 30..=120.
+pub(crate) fn valid_max_fps(max_fps: u32) -> bool {
+    max_fps == 0 || (30..=120).contains(&max_fps)
 }
 
 fn disconnected() -> CtlError {
@@ -1186,7 +1201,15 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             relay_only,
             quality,
             refresh_hz,
+            h265,
+            resolution,
+            max_fps,
         } => {
+            if !valid_max_fps(max_fps) {
+                return Err(CtlError::invalid_argument(
+                    "max_fps must be 0 (Auto) or 30..=120",
+                ));
+            }
             // A pasted invitation is checked before anything waits; a
             // remembered one is read inside the cancellable attempt.
             let target = match (invitation, computer_id) {
@@ -1201,15 +1224,22 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                 }
             };
             // Android, and Windows where Media Foundation is installed,
-            // decode H.264 natively; elsewhere Dart decodes JPEG.
+            // decode H.264 natively, and H.265 where the app found a decoder;
+            // elsewhere Dart decodes JPEG.
             let codecs = if cfg!(target_os = "android") || desktop::media_foundation() {
-                vec![VideoCodec::H264]
+                if h265 {
+                    vec![VideoCodec::H265, VideoCodec::H264]
+                } else {
+                    vec![VideoCodec::H264]
+                }
             } else {
                 vec![VideoCodec::Jpeg]
             };
+            let chosen_fps = (max_fps != 0).then_some(max_fps);
             let (viewer, source) = connect(handle, target, relay_only, |progress| ViewerConfig {
                 codecs,
-                limits: VideoLimits::for_viewer(refresh_hz),
+                limits: VideoLimits::choose(refresh_hz, resolution, chosen_fps),
+                fps_override: chosen_fps.is_some(),
                 quality,
                 progress: Some(progress),
             })
@@ -2027,6 +2057,7 @@ mod tests {
             ViewerConfig {
                 codecs: vec![VideoCodec::H264],
                 limits: VideoLimits::for_viewer(60.0),
+                fps_override: false,
                 quality: QualityPreset::Balanced,
                 progress: None,
             },
@@ -2554,6 +2585,7 @@ mod tests {
                 ViewerConfig {
                     codecs: vec![VideoCodec::Jpeg],
                     limits: VideoLimits::for_viewer(60.0),
+                    fps_override: false,
                     quality: QualityPreset::Balanced,
                     progress: None,
                 },
@@ -2717,7 +2749,7 @@ mod tests {
             // must be cancelled while the lock is still held, before loading
             // credentials or contacting a relay.
             let config = handle.state.lock().await;
-            let connect = |invitation: String| {
+            let connect_at = |invitation: String, max_fps| {
                 call(
                     &handle,
                     Request::Connect {
@@ -2726,16 +2758,27 @@ mod tests {
                         relay_only: false,
                         quality: QualityPreset::Balanced,
                         refresh_hz: 60.0,
+                        h265: true,
+                        resolution: Resolution::P1440,
+                        max_fps,
                     },
                 )
             };
+            let connect = |invitation| connect_at(invitation, 0);
             let invalid = tokio::time::timeout(Duration::from_secs(1), connect(String::new()))
                 .await
                 .unwrap()
                 .unwrap_err();
             assert_eq!(invalid.code(), ErrorCode::InvalidInvitation);
-            assert!(handle.desktop.connecting.lock().is_none());
             let invitation = invitation().encode();
+            // A frame rate no viewer asks for is refused before anything waits.
+            let unbounded =
+                tokio::time::timeout(Duration::from_secs(1), connect_at(invitation.clone(), 240))
+                    .await
+                    .unwrap()
+                    .unwrap_err();
+            assert_eq!(unbounded.code(), ErrorCode::InvalidArgument);
+            assert!(handle.desktop.connecting.lock().is_none());
             let mut first = std::pin::pin!(connect(invitation.clone()));
             let mut context = Context::from_waker(Waker::noop());
             assert!(first.as_mut().poll(&mut context).is_pending());
@@ -2786,6 +2829,9 @@ mod tests {
                     relay_only: false,
                     quality: QualityPreset::Balanced,
                     refresh_hz: 60.0,
+                    h265: false,
+                    resolution: Resolution::default(),
+                    max_fps: 0,
                 },
             ))
             .unwrap_err();

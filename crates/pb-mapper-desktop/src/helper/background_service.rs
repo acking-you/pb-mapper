@@ -795,6 +795,7 @@ mod tests {
                 ViewerConfig {
                     codecs: vec![VideoCodec::Jpeg],
                     limits: VideoLimits::for_viewer(60.0),
+                    fps_override: false,
                     quality: QualityPreset::Balanced,
                     progress: None,
                 },

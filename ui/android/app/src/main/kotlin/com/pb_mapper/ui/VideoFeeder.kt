@@ -49,6 +49,7 @@ internal class FeedUnit(
         internal set
     val keyframe get() = flags and DesktopVideoNative.FLAG_KEYFRAME != 0L
     val discontinuity get() = flags and DesktopVideoNative.FLAG_DISCONTINUITY != 0L
+    val hevc get() = flags and DesktopVideoNative.FLAG_H265 != 0L
 
     companion object {
         fun from(buffer: ByteBuffer, meta: LongArray) = FeedUnit(

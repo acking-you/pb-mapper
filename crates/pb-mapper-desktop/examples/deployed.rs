@@ -3,7 +3,10 @@
 //! never the administrator credential, and is revoked when the host exits.
 //! `selftest` views the host from this machine through a simulated renderer
 //! that presents every unit at once; options `--max-width`, `--max-height`,
-//! `--fps` and `--quality quality|balanced|smooth` set what that viewer asks.
+//! `--fps` and `--quality quality|balanced|smooth` set what that viewer asks,
+//! `--fps-override` makes `--fps` its user's choice, every preset's ceiling,
+//! and `--codec h265` offers H.265 beside H.264, as the app does when it can
+//! decode it (the host picks; the line printed says what it picked).
 //! `--no-decoder-hints` has the phone tool configure its decoder without the
 //! low-latency hint (case F). The configuration's `lan_first`, the app's
 //! *Try the local network first*, is read once at start: the host and the
@@ -88,6 +91,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("smooth") => QualityPreset::Smooth,
         Some(_) => return Err("--quality must be quality, balanced or smooth".into()),
     };
+    let codecs = match option("--codec") {
+        None | Some("h264") => vec![VideoCodec::H264],
+        Some("h265") => vec![VideoCodec::H265, VideoCodec::H264],
+        Some(_) => return Err("--codec must be h264 or h265".into()),
+    };
+    let fps_override = args.iter().any(|arg| arg == "--fps-override");
     std::fs::create_dir_all(&output)?;
     let admin_client = Client::new(ClientConfig {
         server: config.server_address.clone(),
@@ -121,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else {
             for policy in [PathPolicy::Auto,PathPolicy::RelayOnly] {
-                let viewer = Viewer::connect(&client,host.invitation(),ConnectOptions { path: policy, lan_first: config.lan_first, ..Default::default() },ViewerConfig { codecs: vec![VideoCodec::H264], limits, quality, progress: None }).await?;
+                let viewer = Viewer::connect(&client,host.invitation(),ConnectOptions { path: policy, lan_first: config.lan_first, ..Default::default() },ViewerConfig { codecs: codecs.clone(), limits, fps_override, quality, progress: None }).await?;
                 let consumer = viewer.video_sink().attach()?;
                 // The renderer blocks on the sink, so it gets its own thread.
                 let renderer = tokio::task::spawn_blocking(move || {
@@ -146,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err(format!("{:?}: {}", status.reason, status.message).into());
                 }
                 let stats = &status.stats;
-                println!("path={} video={}x{} fps_limit={} unique_receive_fps={:.2} presented_fps={:.2} source_fps={:.2} receive_mbps={:.2} dropped={} picture_latency_ms={:?}", stats.path,stats.width,stats.height,limits.max_fps,received as f64/elapsed,stats.presented_fps,stats.capture_fps, bytes as f64*8.0/elapsed/1e6,stats.dropped_frames,stats.picture_latency_ms);
+                println!("path={} codec={:?} video={}x{} fps_limit={} fps_override={fps_override} unique_receive_fps={:.2} presented_fps={:.2} source_fps={:.2} receive_mbps={:.2} speed_rx_bps={} speed_tx_bps={} dropped={} picture_latency_ms={:?}", stats.path,stats.codec,stats.width,stats.height,limits.max_fps,received as f64/elapsed,stats.presented_fps,stats.capture_fps, bytes as f64*8.0/elapsed/1e6,stats.speed_rx_bps,stats.speed_tx_bps,stats.dropped_frames,stats.picture_latency_ms);
                 viewer.stop().await?;
             }
         }

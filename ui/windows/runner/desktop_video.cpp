@@ -73,8 +73,17 @@ constexpr int32_t kVideoNeedCapacity = -2;
 constexpr int32_t kVideoPaused = -3;
 constexpr uint32_t kFlagKeyframe = 1;
 constexpr uint32_t kFlagDiscontinuity = 2;
+// A unit with neither this nor the JPEG bit (which never reaches the runner:
+// Dart decodes JPEG) is H.264.
+constexpr uint32_t kFlagH265 = 1u << 4;
 constexpr uint32_t kReasonGap = 1;
 constexpr uint32_t kPullTimeoutMs = 50;
+// The bounds a viewer may ask for (Resolution::bounds in lib.rs), largest
+// first: the decoders probe reports the largest a decoder takes.
+constexpr uint32_t kBounds[][2] = {{3840, 2160}, {2560, 1440}, {1920, 1080}, {1280, 720}};
+
+enum class Codec { kH264, kH265 };
+const char* CodecName(Codec codec) { return codec == Codec::kH265 ? "H.265" : "H.264"; }
 
 struct VideoLibrary {
   HMODULE module = nullptr;
@@ -138,6 +147,32 @@ void Check(HRESULT hr, const char* operation) {
   snprintf(code, sizeof(code), "0x%08lX", static_cast<unsigned long>(hr));
   throw std::runtime_error(std::string(operation) + " (" + code + ")");
 }
+void Check(HRESULT hr, const std::string& operation) { Check(hr, operation.c_str()); }
+
+// The synchronous Media Foundation decoders from `subtype` to NV12, best
+// first. Feed and Take drive a decoder synchronously, so an asynchronous
+// hardware MFT is not one of them. Windows ships none for H.265: the HEVC
+// Video Extensions, or a manufacturer's copy, register one, which this finds
+// from an unpackaged app too.
+std::vector<ComPtr<IMFActivate>> SyncDecoders(const GUID& subtype) {
+  const MFT_REGISTER_TYPE_INFO input{MFMediaType_Video, subtype};
+  const MFT_REGISTER_TYPE_INFO output{MFMediaType_Video, MFVideoFormat_NV12};
+  IMFActivate** found = nullptr;
+  UINT32 count = 0;
+  std::vector<ComPtr<IMFActivate>> decoders;
+  if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER,
+                       MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER, &input, &output,
+                       &found, &count))) {
+    return decoders;
+  }
+  for (UINT32 i = 0; i < count; ++i) {
+    ComPtr<IMFActivate> decoder;
+    decoder.Attach(found[i]);
+    decoders.push_back(std::move(decoder));
+  }
+  CoTaskMemFree(found);
+  return decoders;
+}
 int64_t Number(const Map& map, const char* key) {
   const auto it = map.find(Value(key));
   if (it == map.end()) throw std::runtime_error("Missing video field");
@@ -156,25 +191,118 @@ std::wstring Path(const Map& map, const char* key) {
   return path;
 }
 
-// Snapshot replies, completed on the platform thread: the decoder thread
-// queues them and posts kWake, and DesktopVideo::HandleMessage drains them.
+// Replies from other threads, completed on the platform thread: a decoder
+// thread's snapshots and the decoders probe's answers. The thread queues them
+// and posts kWake, and DesktopVideo::HandleMessage drains them.
 struct Replies {
   explicit Replies(HWND value) : window(value) {}
   std::mutex mutex;
   HWND window;
   bool posted = false;
-  std::vector<std::pair<Reply, bool>> ready;
-  void Send(Reply reply, bool ok) {
+  std::vector<std::pair<Reply, Value>> ready;
+  void Send(Reply reply, Value value) {
     std::lock_guard<std::mutex> lock(mutex);
-    ready.emplace_back(std::move(reply), ok);
+    ready.emplace_back(std::move(reply), std::move(value));
     if (!posted) { posted = true; PostMessage(window, kWake, 0, 0); }
   }
   void Drain() {
-    std::vector<std::pair<Reply, bool>> done;
+    std::vector<std::pair<Reply, Value>> done;
     { std::lock_guard<std::mutex> lock(mutex); done.swap(ready); posted = false; }
-    for (auto& entry : done) entry.first->Success(Value(entry.second));
+    for (auto& entry : done) entry.first->Success(entry.second);
   }
 };
+
+Value MaxSize(uint32_t width, uint32_t height) {
+  return Value(Map{{Value("max_width"), Value(static_cast<int64_t>(width))},
+                   {Value("max_height"), Value(static_cast<int64_t>(height))}});
+}
+
+// The largest of the viewer's bounds the adapter's DXVA decodes H.265 Main
+// at, to NV12; null when it does not. It asks the driver and creates no
+// decoder.
+Value HevcLimit(IDXGIAdapter* adapter) {
+  ComPtr<ID3D11Device> device;
+  const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+  ComPtr<ID3D11VideoDevice> video;
+  BOOL nv12 = FALSE;
+  if (FAILED(D3D11CreateDevice(adapter, adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                               D3D11_CREATE_DEVICE_VIDEO_SUPPORT, levels, 2, D3D11_SDK_VERSION, &device, nullptr,
+                               nullptr)) ||
+      FAILED(device.As(&video)) ||
+      FAILED(video->CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_HEVC_VLD_MAIN, DXGI_FORMAT_NV12, &nv12)) || !nv12) {
+    return Value();
+  }
+  for (const auto& bounds : kBounds) {
+    const D3D11_VIDEO_DECODER_DESC desc{D3D11_DECODER_PROFILE_HEVC_VLD_MAIN, bounds[0], bounds[1], DXGI_FORMAT_NV12};
+    UINT configs = 0;
+    if (SUCCEEDED(video->GetVideoDecoderConfigCount(&desc, &configs)) && configs > 0) return MaxSize(bounds[0], bounds[1]);
+  }
+  return Value();
+}
+
+// The fastest refresh among the displays as they are set now: the viewer
+// presents at its display's rate, and the window may move to the fastest.
+// The active display paths give the exact rate, 59.94 Hz as Android reports
+// it; a process outside the console session (a remote session) cannot query
+// them and falls back to the display modes, which round down to whole hertz.
+double DisplayMaxHz() {
+  double fastest = 0;
+  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  LONG status = ERROR_INSUFFICIENT_BUFFER;
+  // A display arriving between the two calls outgrows the buffers: ask again.
+  while (status == ERROR_INSUFFICIENT_BUFFER) {
+    UINT32 path_count = 0, mode_count = 0;
+    status = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count);
+    if (status != ERROR_SUCCESS) break;
+    paths.resize(path_count);
+    modes.resize(mode_count);
+    status = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count, modes.data(), nullptr);
+    paths.resize(path_count);
+  }
+  if (status == ERROR_SUCCESS) {
+    for (const auto& path : paths) {
+      const auto& rate = path.targetInfo.refreshRate;
+      if (rate.Denominator) fastest = std::max(fastest, static_cast<double>(rate.Numerator) / rate.Denominator);
+    }
+  }
+  if (fastest > 1) return fastest;
+  // No path gave a rate: read the modes.
+  fastest = 0;
+  EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    // 0 and 1 mean the hardware's default rate, which says nothing.
+    if (GetMonitorInfoW(monitor, &info) && EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
+        mode.dmDisplayFrequency > 1) {
+      auto& rate = *reinterpret_cast<double*>(data);
+      rate = std::max(rate, static_cast<double>(mode.dmDisplayFrequency));
+    }
+    return TRUE;
+  }, reinterpret_cast<LPARAM>(&fastest));
+  return fastest > 0 ? fastest : 60.0;
+}
+
+// The `decoders` reply: which codecs this computer decodes natively, each up
+// to the largest bound it takes, or null, and the fastest display refresh.
+// H.264 needs Media Foundation, whose in-box decoder takes every bound. H.265
+// needs a decoder MFT and DXVA's HEVC Main on Flutter's adapter, where the
+// decoder runs. Nothing here creates a decoder: a bad driver can hang there.
+Map ProbeDecoders(IDXGIAdapter* adapter) {
+  Value h264, h265;
+  if (MediaFoundationInstalled()) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) {
+      h264 = MaxSize(kMaxWidth, kMaxHeight);
+      if (!SyncDecoders(MFVideoFormat_HEVC).empty()) h265 = HevcLimit(adapter);
+      MFShutdown();
+    }
+    if (SUCCEEDED(com)) CoUninitialize();
+  }
+  return {{Value("h264"), h264}, {Value("h265"), h265}, {Value("display_max_hz"), Value(DisplayMaxHz())}};
+}
 
 struct SnapshotRequest {
   std::wstring path;
@@ -289,6 +417,7 @@ struct Frame {
   uint32_t width = 0, height = 0;
   uint64_t revision = 0;
   bool key = false;
+  Codec codec = Codec::kH264;
 };
 
 struct Surface {
@@ -453,7 +582,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     }
     if (!request) return;
     const bool ok = Capture(*request);
-    replies_->Send(std::move(request->reply), ok);
+    replies_->Send(std::move(request->reply), Value(ok));
   }
   // Decoder thread. The next keyframe recreates the decoder in a new revision.
   void Fail(uint64_t consumer, const std::string& reason) {
@@ -461,7 +590,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     awaiting_key_ = true;
     ++recoveries_;
     { std::lock_guard<std::mutex> lock(mutex_); last_recovery_ = reason; }
-    OutputDebugStringA(("Native H.264 decoding failed: " + reason + "\n").c_str());
+    OutputDebugStringA(("Native video decoding failed: " + reason + "\n").c_str());
     // Rust logs the reason, counts it toward giving up and rate-limits the
     // request. A paused source asks for nothing: its resume already starts
     // with an IDR.
@@ -476,14 +605,24 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
     ComPtr<ID3D11VideoProcessor> processor;
     ComPtr<IMFDXGIDeviceManager> manager;
+    // What created an H.265 decoder, which must shut it down after use.
+    // Declared before `transform`, so its shutdown follows the decoder's
+    // release whether the Decoder is destroyed or its constructor throws.
+    struct Activation {
+      ComPtr<IMFActivate> object;
+      ~Activation() { if (object) object->ShutdownObject(); }
+    } activation;
     ComPtr<IMFTransform> transform;
     std::map<LONGLONG, Frame> pending;
     uint64_t revision;
     uint32_t width, height;
+    Codec codec;
     UINT32 coded_width = 0, coded_height = 0;
     RECT source_rect{};
     LONGLONG next_pts = 0;
-    Decoder(const Frame& frame, IDXGIAdapter* adapter) : revision(frame.revision), width(frame.width), height(frame.height) {
+    Decoder(const Frame& frame, IDXGIAdapter* adapter)
+        : revision(frame.revision), width(frame.width), height(frame.height), codec(frame.codec) {
+      const std::string name = CodecName(codec);
       UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
       const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
       Check(D3D11CreateDevice(adapter, adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
@@ -495,22 +634,35 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       UINT token = 0;
       Check(MFCreateDXGIDeviceManager(&token, &manager), "Create decoder device manager");
       Check(manager->ResetDevice(device.Get(), token), "Assign decoder device");
-      Check(CoCreateInstance(CLSID_CMSH264DecoderMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&transform)), "Create H.264 decoder");
+      if (codec == Codec::kH264) {
+        Check(CoCreateInstance(CLSID_CMSH264DecoderMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&transform)), "Create H.264 decoder");
+      } else {
+        const auto decoders = SyncDecoders(MFVideoFormat_HEVC);
+        if (decoders.empty()) throw std::runtime_error("No H.265 decoder is installed");
+        activation.object = decoders.front();
+        Check(activation.object->ActivateObject(IID_PPV_ARGS(&transform)), "Create H.265 decoder");
+      }
       ComPtr<IMFAttributes> attrs;
-      if (SUCCEEDED(transform->GetAttributes(&attrs))) {
-        attrs->SetUINT32(MF_LOW_LATENCY, TRUE);
-        attrs->SetUINT32(CODECAPI_AVLowLatencyMode, TRUE);
+      UINT32 d3d11 = 0;
+      // Every picture stays on the GPU, so a decoder that cannot is no use.
+      if (FAILED(transform->GetAttributes(&attrs)) || FAILED(attrs->GetUINT32(MF_SA_D3D11_AWARE, &d3d11)) || !d3d11) {
+        throw std::runtime_error(name + " decoder is not Direct3D 11 aware");
+      }
+      // Low latency: one picture out for each unit in, nothing held back.
+      attrs->SetUINT32(MF_LOW_LATENCY, TRUE);
+      attrs->SetUINT32(CODECAPI_AVLowLatencyMode, TRUE);
+      if (codec == Codec::kH264) {
         attrs->SetUINT32(CODECAPI_AVDecVideoMaxCodedWidth, (width + 15) & ~15u);
         attrs->SetUINT32(CODECAPI_AVDecVideoMaxCodedHeight, (height + 15) & ~15u);
       }
       Check(transform->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, reinterpret_cast<ULONG_PTR>(manager.Get())), "Set decoder GPU manager");
       ComPtr<IMFMediaType> input;
-      Check(MFCreateMediaType(&input), "Create H.264 type");
+      Check(MFCreateMediaType(&input), "Create " + name + " type");
       Check(input->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video), "Set video type");
-      Check(input->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264), "Set H.264 subtype");
+      Check(input->SetGUID(MF_MT_SUBTYPE, codec == Codec::kH265 ? MFVideoFormat_HEVC : MFVideoFormat_H264), "Set " + name + " subtype");
       Check(MFSetAttributeSize(input.Get(), MF_MT_FRAME_SIZE, width, height), "Set video size");
       Check(input->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive), "Set progressive type");
-      Check(transform->SetInputType(0, input.Get(), 0), "Configure H.264 decoder");
+      Check(transform->SetInputType(0, input.Get(), 0), "Configure " + name + " decoder");
       SetOutput();
       Check(transform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0), "Begin video decoding");
       Check(transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0), "Start video decoding");
@@ -568,8 +720,11 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
           UINT32 actual_width = 0, actual_height = 0;
           Check(MFGetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, &actual_width, &actual_height), "Get decoded dimensions");
           // H.264 surfaces are macroblock aligned (1080p commonly uses 1088
-          // rows). Only an explicit, integral display aperture may crop those
+          // rows); an H.265 decoder may align to its coding tree block, up to
+          // 64. Only an explicit, integral display aperture may crop those
           // rows; the visible rectangle must still equal the authorized frame.
+          const uint32_t align = codec == Codec::kH265 ? 64 : 16;
+          const auto aligned = [align](uint32_t size) { return (size + align - 1) & ~(align - 1); };
           MFVideoArea area{};
           area.Area = {static_cast<LONG>(actual_width), static_cast<LONG>(actual_height)};
           UINT32 blob_size = 0;
@@ -585,7 +740,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
           }
           const int64_t right = static_cast<int64_t>(area.OffsetX.value) + area.Area.cx;
           const int64_t bottom = static_cast<int64_t>(area.OffsetY.value) + area.Area.cy;
-          if (actual_width > ((width + 15) & ~15u) || actual_height > ((height + 15) & ~15u) ||
+          if (actual_width > aligned(width) || actual_height > aligned(height) ||
               area.OffsetX.fract != 0 || area.OffsetY.fract != 0 ||
               area.OffsetX.value < 0 || area.OffsetY.value < 0 ||
               area.Area.cx != static_cast<LONG>(width) || area.Area.cy != static_cast<LONG>(height) ||
@@ -619,7 +774,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       sample->SetSampleTime(next_pts);
       sample->SetSampleDuration(166667);
       if (frame.key) sample->SetUINT32(MFSampleExtension_CleanPoint, TRUE);
-      Check(transform->ProcessInput(0, sample.Get(), 0), "Decode H.264 input");
+      Check(transform->ProcessInput(0, sample.Get(), 0), "Decode video input");
       pending.emplace(next_pts, frame);
     }
     std::shared_ptr<Surface> Take() {
@@ -631,7 +786,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       if (output.pEvents) output.pEvents->Release();
       if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return nullptr;
       if (hr == MF_E_TRANSFORM_STREAM_CHANGE) { SetOutput(); return Take(); }
-      Check(hr, "Decode H.264 output");
+      Check(hr, "Decode video output");
       if (!sample) throw std::runtime_error("Decoder returned an empty sample");
       LONGLONG timestamp = 0;
       Check(sample->GetSampleTime(&timestamp), "Get decoded timestamp");
@@ -687,6 +842,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     frame.width = meta.width;
     frame.height = meta.height;
     frame.key = (meta.flags & kFlagKeyframe) != 0;
+    frame.codec = (meta.flags & kFlagH265) != 0 ? Codec::kH265 : Codec::kH264;
     if (frame.generation < generation_) { ++dropped_; return; }
     if (frame.generation != generation_ || (meta.flags & kFlagDiscontinuity) != 0) {
       ++revision_;
@@ -706,8 +862,10 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     ++submitted_;
     try {
       Check(mf_, "Initialize native media decoding");
-      // Only a size change or a failure (which released it) rebuilds the decoder.
-      if (!decoder || decoder->width != frame.width || decoder->height != frame.height) {
+      // Only a size or codec change, or a failure (which released it),
+      // rebuilds the decoder. A codec changes only with the session.
+      if (!decoder || decoder->width != frame.width || decoder->height != frame.height ||
+          decoder->codec != frame.codec) {
         if (!frame.key) throw std::runtime_error("A fresh key frame is required");
         if (frame.width == 0 || frame.height == 0 || frame.width > kMaxWidth || frame.height > kMaxHeight) {
           throw std::runtime_error("Video size outside the session limits");
@@ -818,11 +976,21 @@ struct DesktopVideo::Impl {
   std::shared_ptr<const VideoLibrary> video;
   std::shared_ptr<Replies> replies;
   std::map<int64_t, std::shared_ptr<Viewer>> viewers;
+  std::mutex probe_mutex;
+  // Guarded by probe_mutex: who waits for the running probe, and whether one runs.
+  std::vector<Reply> probe_waiting;
+  bool probing = false;
+  // Platform thread only.
+  std::thread probe;
   Impl(flutter::FlutterEngine* value, HWND window) : engine(value), replies(std::make_shared<Replies>(window)) {
     registrar = flutter::PluginRegistrarManager::GetInstance()->GetRegistrar<flutter::PluginRegistrarWindows>(engine->GetRegistrarForPlugin("PbMapperDesktopVideo"));
     channel = std::make_unique<flutter::MethodChannel<Value>>(engine->messenger(), "pb_mapper/desktop_video", &flutter::StandardMethodCodec::GetInstance());
     channel->SetMethodCallHandler([this](const auto& call, auto result) {
       try {
+        if (call.method_name() == "decoders") {
+          Decoders(std::move(result));
+          return;
+        }
         const auto* args = call.arguments() ? std::get_if<Map>(call.arguments()) : nullptr;
         if (!args) throw std::runtime_error("Missing desktop video arguments");
         if (call.method_name() == "create") {
@@ -859,9 +1027,32 @@ struct DesktopVideo::Impl {
     channel->SetMethodCallHandler(nullptr);
     for (auto& entry : viewers) entry.second->Close();
     viewers.clear();
-    // Every decoder thread has stopped. Answer the snapshots they served
-    // while the engine and its messenger still exist.
+    if (probe.joinable()) probe.join();
+    // Every decoder thread and the probe have stopped. Answer what they
+    // served while the engine and its messenger still exist.
     replies->Drain();
+  }
+  // `decoders` takes no arguments and probes off the platform thread, one
+  // probe at a time: calls meanwhile share its answer. Dart keeps it.
+  void Decoders(Reply reply) {
+    std::lock_guard<std::mutex> lock(probe_mutex);
+    probe_waiting.push_back(std::move(reply));
+    if (probing) return;
+    probing = true;
+    // A finished probe: it took its callers and cleared `probing` already.
+    if (probe.joinable()) probe.join();
+    ComPtr<IDXGIAdapter> adapter;
+    engine->GetGraphicsAdapter(&adapter);
+    probe = std::thread([this, adapter] {
+      const Value answer(ProbeDecoders(adapter.Get()));
+      std::vector<Reply> waiting;
+      {
+        std::lock_guard<std::mutex> lock(probe_mutex);
+        waiting.swap(probe_waiting);
+        probing = false;
+      }
+      for (auto& reply : waiting) replies->Send(std::move(reply), answer);
+    });
   }
   // D9: Dart and this runner must reach one library instance, or the decoder
   // would pull from a registry Dart never filled. Fails closed.
