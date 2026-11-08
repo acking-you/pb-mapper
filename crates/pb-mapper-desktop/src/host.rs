@@ -839,6 +839,8 @@ mod trust_tests {
         let (mut viewer, answer) =
             authenticate(&client, &invitation, token.clone(), vec![VideoCodec::Jpeg]).await;
         assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+        // The host publishes the session just after writing `Accepted`.
+        until(|| host.status().viewer.is_some()).await;
         let watching = host.status().viewer.unwrap();
         assert_eq!(
             (
