@@ -167,27 +167,60 @@ mod tests {
                 }
             }
         };
-        let pid = child.0.id();
-        let denied = |access| {
-            let result = unsafe { OpenProcess(access, false, pid) };
-            match result {
-                Ok(handle) => {
-                    drop(unsafe { os::Handle::own(handle) });
-                    panic!("unexpected process access");
-                }
-                Err(failure) => assert_eq!(
-                    failure.code(),
-                    windows::core::HRESULT::from_win32(ERROR_ACCESS_DENIED.0)
-                ),
+        // A runner's token may hold SeDebugPrivilege enabled, as GitHub's
+        // elevated Windows runners do, and that opens any process past its
+        // DACL. Probe as a copy of this process's token with every privilege
+        // disabled, on this thread and only around each open, so the DACL
+        // alone decides and the parallel tests keep their own token.
+        let unprivileged = {
+            let mut original = HANDLE::default();
+            unsafe {
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_QUERY | TOKEN_DUPLICATE,
+                    &mut original,
+                )
             }
+            .unwrap();
+            let original = unsafe { os::Handle::own(original) };
+            let mut duplicate = HANDLE::default();
+            unsafe {
+                DuplicateTokenEx(
+                    original.raw(),
+                    TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES | TOKEN_IMPERSONATE,
+                    None,
+                    SecurityImpersonation,
+                    TokenImpersonation,
+                    &mut duplicate,
+                )
+            }
+            .unwrap();
+            let duplicate = unsafe { os::Handle::own(duplicate) };
+            unsafe { AdjustTokenPrivileges(duplicate.raw(), true, None, 0, None, None) }.unwrap();
+            duplicate
+        };
+        let pid = child.0.id();
+        let open = |access| {
+            unsafe { SetThreadToken(None, Some(unprivileged.raw())) }.unwrap();
+            let result = unsafe { OpenProcess(access, false, pid) };
+            unsafe { RevertToSelf() }.unwrap();
+            result
+        };
+        let denied = |access: PROCESS_ACCESS_RIGHTS| match open(access) {
+            Ok(handle) => {
+                drop(unsafe { os::Handle::own(handle) });
+                panic!("unexpected process access {:#x}", access.0);
+            }
+            Err(failure) => assert_eq!(
+                failure.code(),
+                windows::core::HRESULT::from_win32(ERROR_ACCESS_DENIED.0)
+            ),
         };
         wait_for("restricted");
         denied(PROCESS_QUERY_LIMITED_INFORMATION);
         child.0.stdin.as_mut().unwrap().write_all(b"q").unwrap();
         wait_for("query-granted");
-        let handle =
-            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, child.0.id()) }.unwrap();
-        let handle = unsafe { os::Handle::own(handle) };
+        let handle = unsafe { os::Handle::own(open(PROCESS_QUERY_LIMITED_INFORMATION).unwrap()) };
         assert!(os::same_path(
             &os::image(handle.raw()).unwrap(),
             &std::env::current_exe().unwrap()
