@@ -47,6 +47,7 @@ const FLAG_KEYFRAME: u32 = 1;
 const FLAG_DISCONTINUITY: u32 = 1 << 1;
 const FLAG_JPEG: u32 = 1 << 2;
 const FLAG_DUPLICATE: u32 = 1 << 3;
+const FLAG_H265: u32 = 1 << 4;
 
 /// What `next` says about the unit it copied.
 #[repr(C)]
@@ -64,7 +65,8 @@ pub struct PbDesktopVideoMetaV1 {
     pub height: u32,
     /// Bytes written, or on `NEED_CAPACITY` the bytes needed.
     pub len: u32,
-    /// Bit 0 keyframe, 1 discontinuity, 2 JPEG (else H.264), 3 duplicate.
+    /// Bit 0 keyframe, 1 discontinuity, 2 JPEG, 3 duplicate, 4 H.265. The
+    /// codec is bit 2 or bit 4; a unit with neither is H.264.
     pub flags: u32,
 }
 // The layout of perf 7.5, field by field, as the Windows runner asserts it
@@ -99,7 +101,8 @@ impl PbDesktopVideoMetaV1 {
             flags: flag(unit.keyframe, FLAG_KEYFRAME)
                 | flag(unit.discontinuity, FLAG_DISCONTINUITY)
                 | flag(unit.codec == VideoCodec::Jpeg, FLAG_JPEG)
-                | flag(unit.duplicate, FLAG_DUPLICATE),
+                | flag(unit.duplicate, FLAG_DUPLICATE)
+                | flag(unit.codec == VideoCodec::H265, FLAG_H265),
         }
     }
 
@@ -399,9 +402,10 @@ pub extern "C" fn pb_mapper_desktop_instance_token_v1() -> u64 {
 /// Plays a `video_bench --dump` clip (`u32` big-endian length, then an Annex B
 /// access unit, repeated) into a new source, looped at `fps` (1..=120) until
 /// stopped: generation 1, frame ids 1, 2, 3 …, a keyframe wherever a unit
-/// holds an IDR slice, the size from the latest SPS. The clip's first unit
-/// must be a keyframe with its SPS; every loop, and every resume, restarts at
-/// it. The sink marks discontinuities as it does in a session, so the first
+/// holds an IDR slice (an IRAP picture in H.265), the size from the latest
+/// SPS. The clip is H.265 when its first unit holds a VPS, otherwise H.264.
+/// Its first unit must be a keyframe with its SPS; every loop, and every
+/// resume, restarts at it. The sink marks discontinuities as it does in a session, so the first
 /// unit after a resume carries one. Returns the source id, or 0 for a bad
 /// path, clip or `fps`.
 ///
@@ -487,7 +491,12 @@ mod test_source {
     /// The wire's largest payload.
     const MAX_UNIT: usize = 4 * 1024 * 1024;
 
-    pub(super) struct Unit {
+    pub(super) struct Clip {
+        codec: VideoCodec,
+        units: Vec<Unit>,
+    }
+
+    struct Unit {
         bytes: Bytes,
         keyframe: bool,
         width: u32,
@@ -501,7 +510,7 @@ mod test_source {
         thread: JoinHandle<()>,
     }
     impl Player {
-        pub(super) fn start(sink: Arc<VideoSink>, clip: Vec<Unit>, fps: u32) -> Option<Self> {
+        pub(super) fn start(sink: Arc<VideoSink>, clip: Clip, fps: u32) -> Option<Self> {
             let (stop, stopped) = mpsc::channel();
             let paused = Arc::new(AtomicBool::new(false));
             let playing = paused.clone();
@@ -530,7 +539,7 @@ mod test_source {
     /// again from its first IDR.
     fn play(
         sink: &VideoSink,
-        clip: &[Unit],
+        clip: &Clip,
         fps: u32,
         paused: &AtomicBool,
         stopped: &mpsc::Receiver<()>,
@@ -543,13 +552,13 @@ mod test_source {
         loop {
             if paused.load(Ordering::Acquire) {
                 position = 0;
-            } else if let Some(unit) = clip.get(position) {
+            } else if let Some(unit) = clip.units.get(position) {
                 frame_id += 1;
                 sink.push_for_test(VideoUnit {
                     seq: frame_id,
                     generation: 1,
                     frame_id,
-                    codec: VideoCodec::H264,
+                    codec: clip.codec,
                     width: unit.width,
                     height: unit.height,
                     keyframe: unit.keyframe,
@@ -561,7 +570,7 @@ mod test_source {
                     bytes: unit.bytes.clone(),
                     received_at: Instant::now(),
                 });
-                position = (position + 1) % clip.len();
+                position = (position + 1) % clip.units.len();
             }
             deadline += interval;
             let now = Instant::now();
@@ -576,11 +585,12 @@ mod test_source {
         }
     }
 
-    pub(super) fn load(path: &Path) -> Option<Vec<Unit>> {
+    pub(super) fn load(path: &Path) -> Option<Clip> {
         if std::fs::metadata(path).ok()?.len() > MAX_CLIP {
             return None;
         }
         let data = Bytes::from(std::fs::read(path).ok()?);
+        let mut codec = None;
         let mut units = Vec::new();
         let mut size = None;
         let mut offset = 0;
@@ -597,11 +607,21 @@ mod test_source {
             if nals.is_empty() {
                 return None;
             }
+            // An H.265 VPS header, 0x40 0x01, is a NAL type no H.264
+            // encoder writes.
+            let codec =
+                *codec.get_or_insert(if nals.iter().any(|nal| nal.starts_with(&[0x40, 1])) {
+                    VideoCodec::H265
+                } else {
+                    VideoCodec::H264
+                });
             let mut keyframe = false;
             for nal in nals {
-                match nal[0] & 0x1f {
-                    5 => keyframe = true,
-                    7 => size = Some(sps_size(nal)?),
+                match (codec, nal_type(codec, nal)) {
+                    (VideoCodec::H264, 5) | (VideoCodec::H265, 16..=21) => keyframe = true,
+                    (VideoCodec::H264, 7) | (VideoCodec::H265, 33) => {
+                        size = Some(sps_size(codec, nal)?);
+                    }
                     _ => {}
                 }
             }
@@ -617,7 +637,20 @@ mod test_source {
             });
             offset = end;
         }
-        (!units.is_empty()).then_some(units)
+        Some(Clip {
+            codec: codec?,
+            units,
+        })
+    }
+
+    /// H.264's NAL type is the low five bits of its one-byte header,
+    /// H.265's the six above the forbidden bit of its two-byte one.
+    fn nal_type(codec: VideoCodec, nal: &[u8]) -> u8 {
+        if codec == VideoCodec::H265 {
+            (nal[0] >> 1) & 0x3f
+        } else {
+            nal[0] & 0x1f
+        }
     }
 
     /// The NAL units of an Annex B access unit, without their start codes.
@@ -643,8 +676,65 @@ mod test_source {
             .collect()
     }
 
-    /// The picture size an H.264 SPS declares, after its cropping.
-    pub(super) fn sps_size(nal: &[u8]) -> Option<(u32, u32)> {
+    /// The picture size an SPS declares, after its cropping.
+    pub(super) fn sps_size(codec: VideoCodec, nal: &[u8]) -> Option<(u32, u32)> {
+        if codec == VideoCodec::H265 {
+            h265_sps_size(nal)
+        } else {
+            h264_sps_size(nal)
+        }
+    }
+
+    /// H.265: the luma size after the conformance window, which crops the
+    /// coding-block padding (1088 rows to 1080) in chroma units.
+    fn h265_sps_size(nal: &[u8]) -> Option<(u32, u32)> {
+        let rbsp = unescape(nal.get(2..)?);
+        let mut bits = Bits {
+            data: &rbsp,
+            position: 0,
+        };
+        bits.read(4)?; // sps_video_parameter_set_id
+        let sub_layers = bits.read(3)? as usize; // sps_max_sub_layers_minus1
+        bits.bit()?; // sps_temporal_id_nesting_flag
+        // profile_tier_level: the general profile (88 bits) and level (8),
+        // then what each sub-layer adds.
+        bits.skip(88 + 8)?;
+        let mut present = [(false, false); 7];
+        for layer in &mut present[..sub_layers] {
+            *layer = (bits.bit()? == 1, bits.bit()? == 1);
+        }
+        if sub_layers > 0 {
+            bits.skip(2 * (8 - sub_layers))?; // reserved_zero_2bits
+        }
+        for (profile, level) in &present[..sub_layers] {
+            bits.skip(if *profile { 88 } else { 0 } + if *level { 8 } else { 0 })?;
+        }
+        bits.ue()?; // sps_seq_parameter_set_id
+        let chroma = bits.ue()?;
+        if chroma == 3 {
+            bits.bit()?; // separate_colour_plane_flag
+        }
+        let width = bits.ue()?;
+        let height = bits.ue()?;
+        let mut window = [0; 4];
+        if bits.bit()? == 1 {
+            for edge in &mut window {
+                *edge = bits.ue()?;
+            }
+        }
+        let [left, right, top, bottom] = window;
+        let (unit_x, unit_y) = match chroma {
+            1 => (2, 2),
+            2 => (2, 1),
+            _ => (1, 1),
+        };
+        let width = width.checked_sub(left.checked_add(right)?.checked_mul(unit_x)?)?;
+        let height = height.checked_sub(top.checked_add(bottom)?.checked_mul(unit_y)?)?;
+        (width > 0 && height > 0).then_some((width, height))
+    }
+
+    /// H.264: the macroblock size after the frame cropping.
+    fn h264_sps_size(nal: &[u8]) -> Option<(u32, u32)> {
         let rbsp = unescape(nal.get(1..)?);
         let mut bits = Bits {
             data: &rbsp,
@@ -752,6 +842,11 @@ mod test_source {
 
         fn read(&mut self, count: u32) -> Option<u32> {
             (0..count).try_fold(0, |value, _| Some(value << 1 | self.bit()?))
+        }
+
+        fn skip(&mut self, count: usize) -> Option<()> {
+            self.position += count;
+            (self.position <= self.data.len() * 8).then_some(())
         }
 
         /// Exp-Golomb, unsigned.
@@ -963,20 +1058,7 @@ mod tests {
         let source = start("clip.h264", &[keyframe, predicted].concat(), 10);
         assert!(source > 0);
         let consumer = pb_mapper_desktop_video_attach_v1(source) as u64;
-        let mut meta = PbDesktopVideoMetaV1::default();
-        let mut buffer = vec![0u8; 64];
-        let mut pull = |timeout_ms| {
-            let code = unsafe {
-                pb_mapper_desktop_video_next_v1(
-                    consumer,
-                    timeout_ms,
-                    buffer.as_mut_ptr(),
-                    64,
-                    &mut meta,
-                )
-            };
-            (code, meta)
-        };
+        let pull = |timeout_ms| pull_unit(consumer, timeout_ms);
         let pulled: Vec<_> = (0..3).map(|_| pull(1000)).collect();
         for (index, (code, meta)) in pulled.iter().enumerate() {
             assert_eq!(*code, UNIT);
@@ -1002,6 +1084,68 @@ mod tests {
             CLOSED
         );
         pb_mapper_desktop_video_detach_v1(consumer);
+
+        // H.265, as NVENC writes it: the units say so, and the size is the
+        // SPS's after its conformance window, 1088 rows cropped to 1080.
+        let keyframe = record(&[H265_VPS, H265_SPS_1080, H265_PPS, &[0x26, 0x01, 0xaf, 0x10]]);
+        let predicted = record(&[&[0x02, 0x01, 0xd0, 0x10]]);
+        let source = start("clip.h265", &[keyframe, predicted].concat(), 10);
+        assert!(source > 0);
+        let consumer = pb_mapper_desktop_video_attach_v1(source) as u64;
+        let pulled = [pull_unit(consumer, 1000), pull_unit(consumer, 1000)];
+        assert_eq!(
+            pulled.map(|(code, meta)| (code, meta.flags, meta.width, meta.height)),
+            [
+                (UNIT, both | FLAG_H265, 1920, 1080),
+                (UNIT, FLAG_H265, 1920, 1080)
+            ]
+        );
+        pb_mapper_desktop_video_test_source_stop_v1(source);
+        pb_mapper_desktop_video_detach_v1(consumer);
+        // x265 at 1366x766 pads to 1368x768 and crops one chroma column and row.
+        assert_eq!(
+            test_source::sps_size(VideoCodec::H265, H265_SPS_766),
+            Some((1366, 766))
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
+
+    #[cfg(feature = "desktop-test-source")]
+    fn pull_unit(consumer: u64, timeout_ms: u32) -> (i32, PbDesktopVideoMetaV1) {
+        let mut meta = PbDesktopVideoMetaV1::default();
+        let mut buffer = [0u8; 256];
+        let code = unsafe {
+            pb_mapper_desktop_video_next_v1(
+                consumer,
+                timeout_ms,
+                buffer.as_mut_ptr(),
+                256,
+                &mut meta,
+            )
+        };
+        (code, meta)
+    }
+
+    // Parameter sets from real encoders, Main 4:2:0: hevc_nvenc at 1920x1080
+    // and libx265 at 1366x766.
+    #[cfg(feature = "desktop-test-source")]
+    const H265_VPS: &[u8] = &[
+        0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00,
+        0x03, 0x00, 0x00, 0x03, 0x00, 0x78, 0x99, 0xc0, 0x90,
+    ];
+    #[cfg(feature = "desktop-test-source")]
+    const H265_SPS_1080: &[u8] = &[
+        0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x03, 0x00, 0x78, 0xa0, 0x03, 0xc0, 0x80, 0x11, 0x07, 0xcb, 0x96, 0x67, 0x4a, 0x42, 0x11,
+        0x91, 0xbf, 0x50, 0xc0, 0x40, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40, 0x00, 0x00, 0x07, 0x98,
+        0x01, 0x77, 0x94, 0x40, 0x00, 0x2d, 0xc6, 0xc0, 0x00, 0x0f, 0x42, 0x40, 0x40,
+    ];
+    #[cfg(feature = "desktop-test-source")]
+    const H265_PPS: &[u8] = &[0x44, 0x01, 0xc1, 0xa5, 0x7c, 0x0c, 0xc9];
+    #[cfg(feature = "desktop-test-source")]
+    const H265_SPS_766: &[u8] = &[
+        0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x03, 0x00, 0x78, 0xa0, 0x02, 0xac, 0x80, 0x30, 0x1d, 0x56, 0x59, 0x59, 0xa4, 0x93, 0x2b,
+        0xc0, 0x5a, 0x02, 0x00, 0x00, 0x03, 0x00, 0x02, 0x00, 0x00, 0x03, 0x00, 0x3c, 0x10,
+    ];
 }
