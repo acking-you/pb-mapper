@@ -24,9 +24,12 @@ use tracing_subscriber::{Layer, filter::Targets, layer::SubscriberExt};
 const START_BPS: u64 = 4_000_000;
 /// Balanced's ceiling under the viewer's 60 fps limit.
 const CEILING_FPS: u64 = 60;
-/// The synthetic encoder's latency, and when an output left in it is lost.
+/// The synthetic encoder's usual latency, and when an output left in it is
+/// lost.
 const ENCODE_TIME: Duration = Duration::from_millis(8);
 const ENCODER_EXPIRY: Duration = Duration::from_millis(250);
+/// A LAN or nearby direct path, one way.
+const SHORT_PATH_MS: u64 = 18;
 const FEEDBACK: &str = "pb_mapper_desktop::feedback";
 
 /// One host stats interval, as `desktop_feedback_interval` traced it.
@@ -174,11 +177,12 @@ const TYPICAL: Sizes = Sizes::Budget { idr: 4 };
 
 /// A synthetic asynchronous H.264 encoder at 1080p, run as thread C runs the
 /// Windows MFT: each capture submits one picture, whose output is ready
-/// `ENCODE_TIME` later and must be drained; an output left in it longer than
+/// `latency` later and must be drained; an output left in it longer than
 /// `ENCODER_EXPIRY` is lost. No decoder reads the bytes.
 struct SyntheticEncoder {
     probe: Arc<Probe>,
     sizes: Sizes,
+    latency: Duration,
     nominal_fps: u32,
     frames: u64,
     pending: VecDeque<(Instant, EncodedFrame)>,
@@ -187,7 +191,7 @@ impl SyntheticEncoder {
     fn ready(&mut self) -> Option<EncodedFrame> {
         while let Some((submitted, _)) = self.pending.front() {
             let age = submitted.elapsed();
-            if age < ENCODE_TIME {
+            if age < self.latency {
                 return None;
             }
             let (_, frame) = self.pending.pop_front()?;
@@ -321,6 +325,14 @@ struct Rig {
 }
 impl Rig {
     async fn start(name: &str, shape: Option<Arc<Shape>>, sizes: Sizes) -> Self {
+        Self::with_encoder(name, shape, sizes, ENCODE_TIME).await
+    }
+    async fn with_encoder(
+        name: &str,
+        shape: Option<Arc<Shape>>,
+        sizes: Sizes,
+        latency: Duration,
+    ) -> Self {
         let relay = Relay::start(&format!("desktop-{name}")).await;
         let client = |addr: SocketAddr| {
             Client::from_credential(addr.to_string(), admin_credential(), true, None)
@@ -340,6 +352,7 @@ impl Rig {
                 Ok(Box::new(SyntheticEncoder {
                     probe: source.clone(),
                     sizes,
+                    latency,
                     nominal_fps: 0,
                     frames: 0,
                     pending: VecDeque::new(),
@@ -387,6 +400,148 @@ impl Rig {
 
 fn ms(since: Instant) -> f64 {
     since.elapsed().as_secs_f64() * 1000.0
+}
+
+/// The viewer's received fps, sampled once a second for `seconds`.
+async fn received_fps(viewer: &Viewer, seconds: u64) -> Vec<f32> {
+    let mut samples = Vec::new();
+    for _ in 0..seconds {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        samples.push(viewer.status().stats.received_fps);
+    }
+    samples
+}
+
+fn mean(samples: &[f32]) -> f32 {
+    samples.iter().sum::<f32>() / samples.len().max(1) as f32
+}
+
+/// A short fixed delay, as on a LAN or a nearby direct path: the pace reaches
+/// the ceiling within 8 s, and the viewer then receives at least 58 fps.
+#[test]
+#[ignore = "explicit ~18-second short-path acceptance"]
+fn lan_rtt_keeps_60() {
+    traced(|trace| async move {
+        let shape = Arc::new(Shape::default());
+        shape.delay_ms.store(SHORT_PATH_MS, Ordering::Relaxed);
+        let rig = Rig::start("lan-rtt", Some(shape), TYPICAL).await;
+        let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+        let started = Instant::now();
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let ceiling = trace
+            .between(started, Instant::now())
+            .into_iter()
+            .find(|interval| interval.pace_fps == CEILING_FPS)
+            .map(|interval| interval.at - started);
+        let received = received_fps(&rig.viewer, 10).await;
+        let status = rig.viewer.status();
+        rig.stop().await;
+        println!(
+            "lan_rtt one_way_ms={SHORT_PATH_MS} ceiling_after_ms={:?} received_fps_mean={:.1} received_fps={received:?} presented_fps={:.1} rtt_ms={:?} state={:?}",
+            ceiling.map(|after| after.as_millis()),
+            mean(&received),
+            status.stats.presented_fps,
+            status.stats.rtt_ms,
+            status.state
+        );
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        assert!(
+            ceiling.is_some(),
+            "the pace must reach the ceiling within 8 s"
+        );
+        assert!(mean(&received) >= 58.0, "{received:?}");
+    });
+}
+
+/// Wi-Fi stalls of about 600 ms on a short path, 6 s apart: each delays the
+/// probes in flight, and none may collapse the frame rate. The pace never
+/// falls below half its value before a stall, and is at 55 or more again
+/// within 4 s of the stall ending. Three stalls, so that at least one delays a
+/// probe even when they come only once a second.
+#[test]
+#[ignore = "explicit ~26-second isolated stall acceptance"]
+fn isolated_stall_does_not_collapse_fps() {
+    const STALL: Duration = Duration::from_millis(600);
+    const SPACING: Duration = Duration::from_secs(6);
+    const RECOVERY: Duration = Duration::from_secs(4);
+    traced(|trace| async move {
+        let shape = Arc::new(Shape::default());
+        shape.delay_ms.store(SHORT_PATH_MS, Ordering::Relaxed);
+        let rig = Rig::start("stall", Some(shape.clone()), TYPICAL).await;
+        let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let mut stalls = Vec::new();
+        for _ in 0..3 {
+            let before = trace.last().pace_fps;
+            // Every byte read from now on waits behind one held for the stall.
+            shape
+                .delay_ms
+                .store(SHORT_PATH_MS + STALL.as_millis() as u64, Ordering::Relaxed);
+            tokio::time::sleep(STALL).await;
+            shape.delay_ms.store(SHORT_PATH_MS, Ordering::Relaxed);
+            let ended = Instant::now();
+            tokio::time::sleep(SPACING - STALL).await;
+            let after = trace.between(ended - STALL, Instant::now());
+            let lowest = after
+                .iter()
+                .map(|interval| interval.pace_fps)
+                .min()
+                .unwrap();
+            // From the first interval after which the pace stays at 55 or more.
+            let recovered = after
+                .iter()
+                .rposition(|interval| interval.pace_fps < 55)
+                .map_or(Duration::ZERO, |low| {
+                    after
+                        .get(low + 1)
+                        .map_or(SPACING, |back| back.at.saturating_duration_since(ended))
+                });
+            stalls.push((before, lowest, recovered));
+        }
+        let status = rig.viewer.status();
+        rig.stop().await;
+        println!(
+            "isolated_stall one_way_ms={SHORT_PATH_MS} stall_ms={} (pace_before, lowest_pace, back_at_55_after)={stalls:?} received_fps={:.1} state={:?}",
+            STALL.as_millis(),
+            status.stats.received_fps,
+            status.state
+        );
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        for (before, lowest, recovered) in stalls {
+            assert!(lowest * 2 >= before, "{lowest} is below half of {before}");
+            assert!(recovered <= RECOVERY, "back at 55 only after {recovered:?}");
+        }
+    });
+}
+
+/// An encoder, or a helper, that holds each picture for 45 ms: nearly three
+/// periods at 60 fps. The capture gate must not halve the delivered rate.
+#[test]
+#[ignore = "explicit ~18-second slow encoder acceptance"]
+fn encoder_latency_of_45ms_keeps_60() {
+    traced(|trace| async move {
+        let latency = Duration::from_millis(45);
+        let rig = Rig::with_encoder("slow-encoder", None, TYPICAL, latency).await;
+        let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let received = received_fps(&rig.viewer, 10).await;
+        let status = rig.viewer.status();
+        let last = trace.last();
+        rig.stop().await;
+        println!(
+            "slow_encoder latency_ms={} received_fps_mean={:.1} received_fps={received:?} pace_fps={} capture_fps={:.1} skipped_ticks={} expired_encoder_outputs={} state={:?}",
+            latency.as_millis(),
+            mean(&received),
+            last.pace_fps,
+            status.stats.capture_fps,
+            last.skipped_ticks,
+            rig.expired(),
+            status.state
+        );
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        assert!(mean(&received) >= 58.0, "{received:?}");
+        assert_eq!(rig.expired(), 0);
+    });
 }
 
 /// A fixed propagation delay is not congestion: the delay controller climbs
