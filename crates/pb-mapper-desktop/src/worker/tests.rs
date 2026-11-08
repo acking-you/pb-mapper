@@ -42,6 +42,10 @@ struct Fake {
     /// Where the pointer is: where the last move put it, or where the test
     /// moved it.
     pointer: Arc<Mutex<(i32, i32)>>,
+    /// A `ClipCursor` bound: a move further right stops there.
+    clip: Arc<Mutex<Option<u32>>>,
+    /// The pointer is hidden, and reads as the Windows backend reads it then.
+    hidden: Arc<AtomicBool>,
     /// How long a capture call takes, in real time.
     delay: Duration,
     /// Told when a capture call starts.
@@ -67,6 +71,8 @@ impl Fake {
             fail_capture: Arc::default(),
             guard: Arc::default(),
             pointer: Arc::new(Mutex::new((3, 3))),
+            clip: Arc::default(),
+            hidden: Arc::default(),
             delay: Duration::ZERO,
             started: None,
             latency: Arc::default(),
@@ -110,6 +116,9 @@ impl Backend for Fake {
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<CursorPosition>> {
         if &self.context()? != expected {
             return Err(error("fake desktop changed"));
+        }
+        if self.hidden.load(Ordering::SeqCst) {
+            return Ok(Some(CursorPosition::default()));
         }
         let (x, y) = *self.pointer.lock();
         Ok(Some(CursorPosition {
@@ -178,6 +187,7 @@ impl Backend for Fake {
             return Err(error("native injection rejected"));
         }
         if let Input::Move { x, y } = *event {
+            let x = self.clip.lock().map_or(x, |clip| x.min(clip));
             *self.pointer.lock() = (x as i32, y as i32);
         }
         self.log.lock().inputs.push(((self.clock)(), event.clone()));
@@ -700,14 +710,31 @@ fn the_cursor_reports_every_change_but_the_controllers_own_move() {
         h.run(Duration::from_millis(20), true);
         assert_eq!(reported(&h), Some((serial, generation, x, 3)));
     }
+    // A move the OS stops short is reported where the pointer stopped, though
+    // the pointer did not move since the last sample.
+    *h.fake.clip.lock() = Some(8);
+    for x in [8, 9] {
+        h.input(Input::Move { x, y: 3 });
+        h.run(Duration::from_millis(20), true);
+    }
+    assert_eq!(reported(&h), Some((first + 3, generation, 8, 3)));
+    // Hiding is reported, and the controller's next move, which shows the
+    // pointer again, is still its own.
+    h.fake.hidden.store(true, Ordering::SeqCst);
+    h.run(Duration::from_millis(20), true);
+    assert_eq!(reported(&h), Some((first + 4, generation, 0, 0)));
+    h.fake.hidden.store(false, Ordering::SeqCst);
+    h.input(Input::Move { x: 6, y: 3 });
+    h.run(Duration::from_millis(20), true);
+    assert_eq!(reported(&h), Some((first + 4, generation, 0, 0)));
     // A new generation reports where the pointer is, though it did not move.
     h.input(Input::Move { x: 5, y: 5 });
     h.run(Duration::from_millis(20), true);
-    assert_eq!(reported(&h), Some((first + 2, generation, 7, 3)));
+    assert_eq!(reported(&h), Some((first + 4, generation, 0, 0)));
     h.fake.width.store(11, Ordering::SeqCst);
     h.run(Duration::from_millis(300), true);
     let (serial, moved, x, y) = reported(&h).unwrap();
-    assert!(serial > first + 2 && moved > generation);
+    assert!(serial > first + 4 && moved > generation);
     assert_eq!((x, y), (5, 5));
 }
 

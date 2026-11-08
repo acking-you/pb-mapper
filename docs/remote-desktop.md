@@ -1021,13 +1021,16 @@ most 600 ms) after a click on the same spot, so the two never merge into a
 double click. Held commands are re-authorised when they are released.
 
 The desktop-bound thread samples the cursor every 16 ms while capturing (never
-while paused or unavailable) and reports each change at once, except the
-controlling viewer's own move coming back: the viewer draws its pointer where
-it put it, and an echo arriving behind the video would drag it back. A sample
-at the position the thread last injected, in the same display pixels, is that
-echo, while the pointer showed before and has not been seen anywhere else
-since; a later return to that spot is someone else's move, and is reported.
-Nothing is held back and sent late. A backend reports the pointer as every
+while paused or unavailable) and at once reports every sample unlike its last
+report, except the controlling viewer's own move coming back: the viewer draws
+its pointer where it put it, and an echo arriving behind the video would drag
+it back. A shown pointer at the position the thread last injected, in the same
+display pixels, is that echo, whatever it showed before, until a report finds
+the pointer elsewhere; a later return to that spot is someone else's move, and
+is reported. A hidden pointer carries no position and is never an echo.
+Comparing with the last report, not the last sample, reports a move the OS
+stopped short (a `ClipCursor`, an edge) where the pointer stopped. Nothing is
+held back and sent late. A backend reports the pointer as every
 input it applied left it: the helper's worker, which observes it during the
 capture call, also answers each input with the pointer, so its report is
 never older than the last move. A new generation, a display change included,
