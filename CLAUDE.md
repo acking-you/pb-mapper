@@ -264,8 +264,8 @@ The design and its rules are in `docs/ui-design.md`.
   change stream), `RelayStore` (the Relay page's reads and the administrator's
   changes, polled only while that page is on screen) and the `Tunnel` model.
   The remote desktop: `DesktopStore` (`desktop_store.dart`; its views —
-  host, session, stats — each notify only their own listeners, never
-  `AppStore`), `RemoteDesktop` (`remote_desktop.dart`: which computer is
+  host, session, stats, the native decoder's stats — each notify only their
+  own listeners, never `AppStore`), `RemoteDesktop` (`remote_desktop.dart`: which computer is
   open, Back pausing it, remembering at the first picture),
   `RemoteComputerStore` (`remote_computers.dart`: the remembered list and
   its thumbnails) and `ViewerPrefs` (`viewer_prefs.dart`)
