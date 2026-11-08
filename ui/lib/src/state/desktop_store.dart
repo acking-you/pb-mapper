@@ -122,6 +122,10 @@ class DesktopStore {
   final _picture = ValueNotifier<DesktopPicture?>(null);
   final _jpegImage = ValueNotifier<ui.Image?>(null);
   late final _stats = _SampledNotifier(DesktopStats.none, _schedulePolling);
+  late final _decoder = _SampledNotifier<DesktopDecoderStats?>(
+    null,
+    _schedulePolling,
+  );
   final _quality = ValueNotifier(DesktopQuality.balanced);
   final _hostCursor = ValueNotifier<Offset?>(null);
 
@@ -139,6 +143,11 @@ class DesktopStore {
 
   /// At most once a second, and only while something listens.
   ValueListenable<DesktopStats> get stats => _stats;
+
+  /// The native decoder's own figures, read once a second only while
+  /// something shows them (the quality panel); null without a native
+  /// decoder, and until its second read.
+  ValueListenable<DesktopDecoderStats?> get decoderStats => _decoder;
   ValueListenable<DesktopQuality> get quality => _quality;
 
   /// The host's cursor, normalised to its display; null while hidden,
@@ -225,7 +234,7 @@ class DesktopStore {
 
   // ---------------------------------------------------------------- timers
 
-  Timer? _hostTimer, _statusTimer, _viewTimer, _statsTimer;
+  Timer? _hostTimer, _statusTimer, _viewTimer, _statsTimer, _decoderTimer;
   Duration? _hostEvery, _statusEvery;
 
   bool get _sessionActive =>
@@ -286,6 +295,25 @@ class DesktopStore {
           : null;
       // A new listener sees the next status read, not a second later.
       _statsDue = statsOn;
+    }
+    final decoderOn = !_disposed && _sessionActive && _decoder.listened;
+    if (decoderOn != (_decoderTimer != null)) {
+      _decoderTimer?.cancel();
+      _decoderRead = null;
+      if (decoderOn) {
+        _decoderTimer = Timer.periodic(
+          _statsInterval,
+          (_) => unawaited(_readDecoder()),
+        );
+        unawaited(_readDecoder());
+      } else {
+        _decoderTimer = null;
+        if (!_disposed) _decoder.value = null;
+        // The decoder stops timing until the next look.
+        unawaited(
+          _texture?.stats(timings: false).then((_) {}, onError: (Object _) {}),
+        );
+      }
     }
   }
 
@@ -1335,6 +1363,31 @@ class DesktopStore {
   int _mediaSerial = 0;
   StreamSubscription<DesktopJpegFrame>? _jpeg;
 
+  /// The decoder's last read, which the next one is measured against.
+  ({DesktopVideoTexture texture, Map<String, Object?> stats, DateTime at})?
+  _decoderRead;
+
+  Future<void> _readDecoder() async {
+    final texture = _texture;
+    if (texture == null) return;
+    final Map<String, Object?> stats;
+    try {
+      stats = await texture.stats();
+    } catch (_) {
+      return;
+    }
+    if (_disposed || _decoderTimer == null) return;
+    final at = _now();
+    final last = _decoderRead;
+    _decoderRead = (texture: texture, stats: stats, at: at);
+    if (last == null || !identical(last.texture, texture)) return;
+    _decoder.value = DesktopDecoderStats.between(
+      last.stats,
+      stats,
+      at.difference(last.at),
+    );
+  }
+
   Future<void> _attachMedia(DesktopSession session, int serial) async {
     if (session.codec == 'jpeg') {
       _jpeg = _api
@@ -1810,6 +1863,7 @@ class DesktopStore {
     _statusTimer?.cancel();
     _viewTimer?.cancel();
     _statsTimer?.cancel();
+    _decoderTimer?.cancel();
     _moveGate?.cancel();
     _framed.remove(this);
     _lifecycle?.dispose();
@@ -1828,6 +1882,7 @@ class DesktopStore {
     _picture.dispose();
     _jpegImage.dispose();
     _stats.dispose();
+    _decoder.dispose();
     _quality.dispose();
     _hostCursor.dispose();
   }

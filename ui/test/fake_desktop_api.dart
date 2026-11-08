@@ -621,7 +621,7 @@ class FakeVideoTexture implements DesktopVideoTexture {
   }
 
   @override
-  Future<Map<String, Object?>> stats() async => const {};
+  Future<Map<String, Object?>> stats({bool timings = true}) async => const {};
 
   @override
   Future<void> dispose() async => disposed = true;

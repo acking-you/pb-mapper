@@ -340,6 +340,87 @@ void main() {
     expect(find.text('60 fps'), findsOneWidget);
   });
 
+  testWidgets('the quality panel tells a LAN path, both round trips, the '
+      "three frame rates and the decoder's own rates apart, and scrolls on a "
+      'landscape phone', (tester) async {
+    _size(tester, const Size(851, 393));
+    final stats = ValueNotifier(
+      DesktopStats.fromJson({
+        'path': 'direct',
+        'rtt_ms': 37,
+        'presented_fps': 58.6,
+        'received_fps': 59.4,
+        'capture_fps': 60.0,
+        'link': {'kind': 'lan', 'family': 'ipv4', 'rtt_ms': 4},
+      }),
+    );
+    // Two reads of Android's decoder a second apart.
+    final decoder = ValueNotifier<DesktopDecoderStats?>(
+      DesktopDecoderStats.between(
+        {
+          'decoded': 100,
+          'timings': {
+            'surface_consume': {'samples': 100, 'mean_ms': 10.0},
+          },
+        },
+        {
+          'decoded': 160,
+          'timings': {
+            'surface_consume': {'samples': 160, 'mean_ms': 9.25},
+          },
+        },
+        const Duration(seconds: 1),
+      ),
+    );
+    await tester.pumpWidget(
+      _app(
+        Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            height: 369,
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: QualityPanel(
+                session: ValueNotifier(
+                  const DesktopSessionView(
+                    target: _target,
+                    phase: DesktopPhase.live,
+                    path: 'direct',
+                  ),
+                ),
+                stats: stats,
+                decoder: decoder,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    final l10n = AppLocalizations.of(
+      tester.element(find.byType(QualityPanel)),
+    )!;
+    Finder row(String id, String text) => find.descendant(
+      of: find.byKey(Key('quality-$id')),
+      matching: find.text(text),
+    );
+    expect(row('path', '${l10n.qualityPathLan} · IPv4'), findsOneWidget);
+    expect(row('link-rtt', '4 ms'), findsOneWidget);
+    expect(row('stream-rtt', '37 ms'), findsOneWidget);
+    expect(row('presented-fps', '59 fps'), findsOneWidget);
+    expect(row('received-fps', '59 fps'), findsOneWidget);
+    expect(row('capture-fps', '60 fps'), findsOneWidget);
+    expect(row('decoded', '60 /s'), findsOneWidget);
+    expect(row('surface', '8.0 ms'), findsOneWidget);
+    // What the host and the decoder do not report is left out.
+    expect(find.byKey(const Key('quality-sent-bitrate')), findsNothing);
+    expect(find.byKey(const Key('quality-credits')), findsNothing);
+    expect(
+      tester.getSize(find.byType(QualityPanel)).height,
+      lessThanOrEqualTo(369),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('the chip keeps its width as the figures change', (tester) async {
     // The toolbar is centred around the chip: a wider figure would move
     // every button.

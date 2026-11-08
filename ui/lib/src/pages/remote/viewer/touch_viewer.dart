@@ -444,13 +444,19 @@ class _TouchViewerState extends State<TouchViewer> {
             ),
           ),
         ],
+        // Scrolls within the content's height on a landscape phone.
         if (prefs.qualityPanel)
           Positioned(
             left: content.left + 12,
             top: content.top + 12,
-            child: QualityPanel(
-              session: _desktop.session,
-              stats: _desktop.stats,
+            bottom: size.height - content.bottom + 12,
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: QualityPanel(
+                session: _desktop.session,
+                stats: _desktop.stats,
+                decoder: _desktop.decoderStats,
+              ),
             ),
           ),
       ],

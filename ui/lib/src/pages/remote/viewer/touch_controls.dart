@@ -272,7 +272,7 @@ class QualityGutterButton extends StatelessWidget {
       final s = session.value;
       final st = stats.value;
       final (:degraded, :dot) = viewerLink(s, st);
-      final path = pathLabel(context, s.path);
+      final path = pathLabel(context, s.path, lan: st.lan);
       final fps = s.connected ? st.presentedFps.round() : null;
       return MergeSemantics(
         child: Semantics(

@@ -15,7 +15,10 @@ abstract interface class DesktopVideoTexture {
   /// Writes the last presented picture as a JPEG at most [maxWidth] wide
   /// (D23). False when there is none. The caller bounds the wait.
   Future<bool> snapshot(String path, {int maxWidth = 320});
-  Future<Map<String, Object?>> stats();
+
+  /// The decoder's counters. [timings] starts its timing accumulators, or
+  /// keeps them; false drops them until the next read that asks.
+  Future<Map<String, Object?>> stats({bool timings = true});
   Future<void> dispose();
 }
 
@@ -76,10 +79,11 @@ class _ChannelVideoTexture implements DesktopVideoTexture {
   }
 
   @override
-  Future<Map<String, Object?>> stats() async {
+  Future<Map<String, Object?>> stats({bool timings = true}) async {
     if (_disposed) return const {};
     final stats = await _channel.invokeMapMethod<String, Object?>('stats', {
       'textureId': textureId,
+      'timings': timings,
     });
     return stats ?? const {};
   }
