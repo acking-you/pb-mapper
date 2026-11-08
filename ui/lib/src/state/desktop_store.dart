@@ -68,9 +68,15 @@ final class DesktopDemandHandle {
 
 /// A notifier that tells its owner when it gains its first listener or loses
 /// its last, so sampling runs only while something shows the value.
+///
+/// A widget that rebuilds around a fresh `Listenable.merge` takes its
+/// listener out and puts it back in the same frame; that is not a loss, so
+/// the last listener counts as gone only if none is back by the next
+/// microtask.
 class _SampledNotifier<T> extends ValueNotifier<T> {
   _SampledNotifier(super.value, this._listenersChanged);
   final void Function() _listenersChanged;
+  bool _leaving = false;
 
   bool get listened => hasListeners;
 
@@ -84,7 +90,12 @@ class _SampledNotifier<T> extends ValueNotifier<T> {
   @override
   void removeListener(VoidCallback listener) {
     super.removeListener(listener);
-    if (!hasListeners) _listenersChanged();
+    if (hasListeners || _leaving) return;
+    _leaving = true;
+    scheduleMicrotask(() {
+      _leaving = false;
+      if (!hasListeners) _listenersChanged();
+    });
   }
 }
 
@@ -1412,14 +1423,18 @@ class DesktopStore {
 
   Future<void> _readDecoder() async {
     final texture = _texture;
-    if (texture == null) return;
+    // A read belongs to the timer that made it: one that answers after its
+    // timer stopped, even if another has started since, is not measured
+    // against the new timer's reads.
+    final timer = _decoderTimer;
+    if (texture == null || timer == null) return;
     final Map<String, Object?> stats;
     try {
       stats = await texture.stats();
     } catch (_) {
       return;
     }
-    if (_disposed || _decoderTimer == null) return;
+    if (_disposed || !identical(_decoderTimer, timer)) return;
     final at = _now();
     final last = _decoderRead;
     _decoderRead = (texture: texture, stats: stats, at: at);

@@ -625,6 +625,10 @@ class FakeVideoTexture implements DesktopVideoTexture {
   /// a decoder that does not answer.
   Future<bool> Function() snapshotAnswer = () async => true;
 
+  /// Every [stats] call's `timings`, in order, and what it answers.
+  final statsTimings = <bool>[];
+  Future<Map<String, Object?>> Function() statsAnswer = () async => const {};
+
   @override
   Future<void> attach(int videoSource) async => attached.add(videoSource);
 
@@ -635,7 +639,10 @@ class FakeVideoTexture implements DesktopVideoTexture {
   }
 
   @override
-  Future<Map<String, Object?>> stats({bool timings = true}) async => const {};
+  Future<Map<String, Object?>> stats({bool timings = true}) {
+    statsTimings.add(timings);
+    return statsAnswer();
+  }
 
   @override
   Future<void> dispose() async => disposed = true;

@@ -18,6 +18,7 @@ import 'modifier_bar.dart';
 import 'modifier_latch.dart';
 import 'quality_panel.dart';
 import 'remote_input.dart';
+import 'remote_surface.dart';
 import 'remote_text_input.dart';
 import 'remote_viewport.dart';
 import 'side_panel.dart';
@@ -87,6 +88,15 @@ class _TouchViewerState extends State<TouchViewer> {
   late final AppLifecycleListener _lifecycle;
   late ViewerActions _actions;
   late Widget _stage;
+
+  /// The finger's ring and the joystick, over the gutter strips, where a
+  /// stroke or a long press may start; at the stage's origin, so in the
+  /// machine's coordinates. Built once, like the stage; keyed, so strips
+  /// coming or going keep its fade.
+  late final Widget _indicator = TouchIndicator(
+    key: const Key('touch-indicator'),
+    machine: _machine,
+  );
 
   Timer? _settle, _hintTimer;
   double _inset = 0;
@@ -242,6 +252,7 @@ class _TouchViewerState extends State<TouchViewer> {
         title: widget.title,
         actions: _actions,
         compact: true,
+        touchIndicator: false,
       ),
     ),
   );
@@ -370,9 +381,11 @@ class _TouchViewerState extends State<TouchViewer> {
   Widget _layers(Size size, EdgeInsets padding, double aspect) {
     final prefs = widget.prefs;
     final gutters = gutterLayoutFor(size, aspect, padding);
-    // Kept while the keyboard hides the gutters: it only occludes.
+    // Kept while the keyboard hides the gutters: it only occludes. Laid out
+    // with the size it belongs to, here before the surface lays out the
+    // same size, so a rotation keeps the zoom and pan.
     final frame = gutters.frame(size);
-    _viewport.setFrame(frame);
+    _viewport.layout(size, frame: frame);
     final occluded = _inset + kModifierBarHeight;
     // Where hints, the minimap and panels go: between the gutters, or
     // within the frame above the keyboard while it is up.
@@ -390,6 +403,7 @@ class _TouchViewerState extends State<TouchViewer> {
       children: [
         _stage,
         ..._strips(gutters, size),
+        _indicator,
         if (!_keyboard) ..._gutters(gutters),
         Positioned(
           top: content.top + 10,

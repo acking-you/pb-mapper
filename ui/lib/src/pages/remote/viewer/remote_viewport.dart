@@ -134,17 +134,16 @@ final class RemoteViewport extends ChangeNotifier {
   }
 
   /// A resize or rotation keeps the scale and the point at the centre of
-  /// the visible rect.
-  void layout(Size size) {
-    if (size == _layoutSize) return;
-    _relayout(() => _layoutSize = size);
-  }
-
-  /// The picture refits between the new gutters, keeping its scale and the
-  /// point at the centre of the visible rect.
-  void setFrame(EdgeInsets frame) {
-    if (frame == _frame) return;
-    _relayout(() => _frame = frame);
+  /// the visible rect. A [frame] (a phone's gutters, which follow the size)
+  /// changes with the size in the same step: either one alone, applied
+  /// against the other's old value, can leave no room for the picture and
+  /// so lose the zoom. Null keeps the frame.
+  void layout(Size size, {EdgeInsets? frame}) {
+    if (size == _layoutSize && (frame == null || frame == _frame)) return;
+    _relayout(() {
+      _layoutSize = size;
+      if (frame != null) _frame = frame;
+    });
   }
 
   /// Re-bounds the offset only: the scene and the scale stay.

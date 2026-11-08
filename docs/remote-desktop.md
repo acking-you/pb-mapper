@@ -1005,9 +1005,10 @@ left out; while the connection is down the core rows show dashes.
   and keyframes with those the viewer asked for.
 - **Host**: the preset with its ceiling (Quality stays at 30 by design, so a
   30 under it is expected; Balanced reaches 60, Smooth 120, each within the
-  viewer's display limit), pace and target with any viewer cap, capture ticks
-  skipped a second, the encoder's dwell, its target bitrate and rate model,
-  and the adaptation.
+  viewer's display limit; a JPEG session stops at 8 whatever the preset, so
+  its pace stays under a higher target), pace and target with any viewer
+  cap, capture ticks skipped a second, the encoder's dwell, its target
+  bitrate and rate model, and the adaptation.
 - **Decoder**: while the panel is open, the store reads the native decoder's
   `stats` once a second and turns two reads into decoded and dropped
   pictures a second, the mean from a picture's release to the surface to

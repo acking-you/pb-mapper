@@ -711,8 +711,8 @@ void main() {
   );
 
   testWidgets(
-    'beside a cutout the picture fits between the gutters, and zoomed in it '
-    'pans clear of them',
+    'beside a cutout the picture fits between the gutters, zoomed in it pans '
+    "clear of them, and a finger's ring is drawn over their strips",
     (tester) async {
       _size(tester, const Size(851, 393));
       tester.view.padding = const FakeViewPadding(left: 29);
@@ -784,6 +784,81 @@ void main() {
       expect(strip.left, 0);
       expect(picture().left, moreOrLessEquals(strip.right));
       expect(api.argsOf('input'), isEmpty);
+
+      // A finger on the strip, between two controls: its ring is there, and
+      // drawn after the strip, so over it.
+      await tester.pump(const Duration(seconds: 1));
+      final back = tester.getRect(find.byKey(const Key('touch-back')));
+      final quality = tester.getRect(find.byKey(const Key('touch-quality')));
+      final on = Offset(strip.center.dx, (back.bottom + quality.top) / 2);
+      final finger = await tester.startGesture(on);
+      await tester.pump();
+      final ring = tester.widget<TouchIndicator>(find.byType(TouchIndicator));
+      expect(ring.machine.indicatorPoint.value, on);
+      final painted = find
+          .byWidgetPredicate(
+            (w) =>
+                w is TouchIndicator || w.key == const Key('touch-gutter-lead'),
+          )
+          .evaluate()
+          .map((e) => e.widget is TouchIndicator ? 'ring' : 'strip');
+      expect(painted, ['strip', 'ring']);
+      await finger.up();
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
+    "a tablet's rotation keeps the zoom and the point at the centre, though "
+    'the gutters become bars',
+    (tester) async {
+      _size(tester, const Size(1280, 800));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      await tester.pumpWidget(
+        _app(
+          TouchViewer(
+            desktop: store,
+            prefs: prefs,
+            title: 'Office',
+            onBack: () {},
+          ),
+        ),
+      );
+      await tester.pump(kHintDuration);
+      final viewport = tester
+          .widget<RemoteSurface>(find.byType(RemoteSurface))
+          .viewport;
+      Offset centre() =>
+          viewport.toNormalized(viewport.visibleRect.center, clamp: true)!;
+      viewport
+        ..zoomAt(viewport.visibleRect.center, 3)
+        ..panBy(const Offset(-200, -100));
+      await tester.pump();
+      final before = centre();
+
+      for (final (size, framed) in [
+        (const Size(800, 1280), true),
+        (const Size(1280, 800), false),
+      ]) {
+        tester.view.physicalSize = size;
+        await tester.pump();
+        expect(viewport.frame.top > 0, framed, reason: '$size');
+        expect(viewport.scale, 3, reason: '$size');
+        expect(centre().dx, moreOrLessEquals(before.dx), reason: '$size');
+        expect(centre().dy, moreOrLessEquals(before.dy), reason: '$size');
+      }
       expect(tester.takeException(), isNull);
 
       await tester.pumpWidget(const SizedBox.shrink());

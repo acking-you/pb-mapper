@@ -317,10 +317,23 @@ statements stay until the owner accepts fluidity.
      no stray letters; the same for a latched Ctrl+C from the phone's
      modifier bar.
 7. Mobile viewer:
-   - landscape lock; gutters;
-   - trackpad mode by default: a tap clicks at once; a long press
-     right-clicks; double-tap-and-hold drags (an Explorer icon moves, it does
-     not open); three fingers scroll; two fingers pinch and pan locally;
+   - landscape lock; on a tablet, a rotation keeps the zoom and the point at
+     the centre;
+   - over a white page, fitted and zoomed in, the gutter controls, the dark
+     strips, the trackpad ring and the joystick's ring and ball stay legible,
+     the ring and ball as clearly over a strip as over the picture; zoomed
+     in, every edge of the picture (the Start button's corner included) pans
+     clear of the strips; direct touch ignores a finger landing on a strip;
+   - trackpad mode by default: a tap clicks at once; a long press (500 ms)
+     gives a haptic and a ring, and lifted inside the dead zone it
+     right-clicks on release; a long press then a push scrolls at the pointer
+     on both axes, the ball pushed up scrolling the page up as autoscroll
+     does, slowly just past the dead zone and fast at the ring, and the lift
+     ends it without a click; in direct touch the same push scrolls the
+     window under the press point; a second finger ends the burst and pans;
+     double-tap-and-hold drags (an Explorer icon moves, it does not open);
+     three fingers still scroll, as a fallback; two fingers pinch and pan
+     locally;
    - modifier bar: Ctrl one-shot, lock and release; the latches clear when the
      app goes to the background;
    - the soft keyboard keeps zoom and offset;
