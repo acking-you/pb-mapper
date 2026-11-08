@@ -562,7 +562,7 @@ impl Qos {
                 };
             }
         }
-        if delay < 150 {
+        if delay < CUT_DELAY {
             self.increase += 1;
             if self.increase >= 3 {
                 self.increase = 0;
