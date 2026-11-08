@@ -13,6 +13,10 @@ static EPOCH: AtomicU64 = AtomicU64::new(1);
 // on the Winlogon desktop: UAC and the lock UI share it, so a lock there may
 // raise no switch and the console state is the only signal.
 const CONSOLE_REUSE: std::time::Duration = std::time::Duration::from_millis(4);
+/// A host that asked for no video this long is paused or gone: the worker
+/// gives its fine timers back.
+#[cfg(feature = "windows-helper")]
+const VIDEO_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
 // SendInput requires journal-playback access on the bound desktop handle.
 // READ/WRITEOBJECTS alone allows SetCursorPos but rejects buttons and keys,
 // even for a SYSTEM process with UIAccess. Do not broaden the worker token.
@@ -348,9 +352,16 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
             };
             let mut sequence = 0;
             let mut last_input = std::time::Instant::now();
+            // Fine process timers while the host asks for video; a paused
+            // host asks for none.
+            let mut timer = None;
+            let mut last_video = std::time::Instant::now();
             while !stopped.is_cancelled() {
                 if last_input.elapsed() > std::time::Duration::from_secs(2) {
                     backend.release();
+                }
+                if last_video.elapsed() > VIDEO_IDLE {
+                    timer = None;
                 }
                 let (request, reply) =
                     match incoming.recv_timeout(std::time::Duration::from_millis(15)) {
@@ -360,6 +371,10 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                     };
                 if stopped.is_cancelled() {
                     break;
+                }
+                if matches!(request, Request::Video { .. }) {
+                    last_video = std::time::Instant::now();
+                    timer.get_or_insert_with(crate::timer::TimerResolution::hold);
                 }
                 let close = matches!(request, Request::Close {});
                 let result = serve(&mut *backend, request, &mut sequence, &mut last_input);

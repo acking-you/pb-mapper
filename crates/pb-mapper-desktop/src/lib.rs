@@ -28,6 +28,7 @@ mod shared;
 mod slow_link;
 #[cfg(test)]
 mod tests;
+mod timer;
 mod video_sink;
 mod viewer;
 mod wire;

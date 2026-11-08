@@ -21,6 +21,7 @@ use crate::{
     protocol::{DesktopKind, NoticeCode, SessionState, StateReason, VideoSize},
     scheduler::Waiter,
     shared::{CursorUpdate, EngineState, InputWaitStats, SessionShared},
+    timer::TimerResolution,
 };
 use std::{
     collections::VecDeque,
@@ -210,6 +211,8 @@ struct Engine {
     /// When each unit the encoder holds was submitted, oldest first, in step
     /// with `pending_video`.
     submitted: VecDeque<Instant>,
+    /// Held while this session captures.
+    timer: Option<TimerResolution>,
     last_lease: Option<Instant>,
     /// Held input was released for a presentation gone stale; nothing new is
     /// admitted until a fresh one arrives.
@@ -260,6 +263,7 @@ impl Engine {
             cursor: None,
             drain_due: now,
             submitted: VecDeque::new(),
+            timer: None,
             last_lease: None,
             stale_released: false,
             fatal: None,
@@ -309,6 +313,12 @@ impl Engine {
         let now = (self.clock)();
         self.sample_cursor(now);
         self.window.roll(now, &mut self.state);
+        // Fine process timers while capturing serve the network tasks too;
+        // a paused or unavailable session gives them back.
+        let capturing = !self.paused && self.unavailable.is_none();
+        if capturing != self.timer.is_some() {
+            self.timer = capturing.then(TimerResolution::hold);
+        }
         if self.notice_until.is_some_and(|until| now >= until) {
             self.notice_until = None;
             self.state.notice = None;
