@@ -12,6 +12,8 @@ struct RemoteBackend {
     /// From the `Start` response: the interactive session's values, which
     /// differ from this process's when it is the SYSTEM service in session 0.
     double_click: Option<crate::DoubleClickGuard>,
+    /// From the `H265` response.
+    h265: Option<bool>,
     /// The last capture's codec and rate, repeated by drains.
     codec: crate::VideoCodec,
     rate: crate::VideoRate,
@@ -66,6 +68,7 @@ impl RemoteBackend {
             cursor: None,
             pending: 0,
             double_click: None,
+            h265: None,
             codec: crate::VideoCodec::H264,
             rate: crate::VideoRate {
                 bitrate: 0,
@@ -80,9 +83,11 @@ impl RemoteBackend {
     /// call with `NotConnected`, which ends the session: a reinstalled or
     /// crashed helper never leaves a viewer waiting. The desktop and pointer
     /// the helper last reported stay until a response reports others: Release
-    /// and Close report no desktop, only Context, Capture and Video observe
-    /// the pointer, and an error answers the request, not the desktop. The
-    /// engine's own context checks notice a desktop change.
+    /// and Close report no desktop; Context, Capture and Video observe the
+    /// pointer, and so does an applied input when the worker could read it,
+    /// so the pointer is never older than the last input; and an error
+    /// answers the request, not the desktop. The engine's own context checks
+    /// notice a desktop change.
     fn call(&mut self, request: Request) -> Result<Vec<u8>> {
         if self.failed {
             return Err(disconnected("helper disconnected; restart desktop sharing"));
@@ -92,6 +97,7 @@ impl RemoteBackend {
             request,
             Request::Context {} | Request::Capture {} | Request::Video { .. }
         );
+        let applies = matches!(request, Request::Input { .. });
         let result = self.runtime.block_on(async {
             tokio::time::timeout(TIMEOUT, async {
                 let pipe = self
@@ -109,11 +115,12 @@ impl RemoteBackend {
                 if reports {
                     self.context = response.context;
                 }
-                if observes {
+                if observes || (applies && response.cursor.is_some()) {
                     self.cursor = response.cursor;
                 }
                 self.video = response.video;
                 self.double_click = response.double_click.or(self.double_click);
+                self.h265 = response.h265.or(self.h265);
                 Ok::<_, std::io::Error>(Ok(image))
             })
             .await
@@ -209,6 +216,11 @@ impl Backend for RemoteBackend {
     }
     fn pending_video(&self) -> usize {
         self.pending
+    }
+    /// The worker probes the GPU of the display it captures, in the
+    /// interactive session; the background host in session 0 cannot.
+    fn encodes_h265(&mut self) -> bool {
+        self.call(Request::H265 {}).is_ok() && self.h265 == Some(true)
     }
     fn input(&mut self, input: &Input) -> Result<()> {
         let context = self
@@ -313,6 +325,7 @@ mod tests {
             cursor: None,
             pending: 0,
             double_click: None,
+            h265: None,
         }
     }
 

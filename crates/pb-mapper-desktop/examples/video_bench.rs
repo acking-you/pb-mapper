@@ -17,12 +17,20 @@
 //!   synthetic test source plays. The pattern covers the whole display, so the
 //!   clip holds pattern frames only, never desktop pixels.
 //! - `--frames <n>`: stop after `n` access units.
+//! - `--codec h264|h265`: the encoder; H.264 by default.
+//! - `--exact`: encode exactly `--max-width` × `--max-height`, upscaling a
+//!   smaller display, to measure a resolution this display does not have.
+//! - `--noise`: cover the whole display with fresh noise every refresh, the
+//!   worst case for an access unit's size. It is encoded with the desktop.
 //! - `--bitrate`, `--max-width`, `--max-height`, `--output <raw Annex B>`,
 //!   `--pause-ms` (encoder recovery probe), `--poll-us` (backend polling).
+//!
+//! It prints the largest keyframe and access unit, which `wire::MAX_PAYLOAD`
+//! must hold.
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use pb_mapper_desktop::{
-        VideoRate, displays,
+        VideoCodec, VideoRate, displays,
         video::windows::{Encoded, Encoder, Statistics},
     };
     use std::{
@@ -30,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time::{Duration, Instant},
     };
 
-    const VALUED: [&str; 9] = [
+    const VALUED: [&str; 10] = [
         "--max-width",
         "--max-height",
         "--bitrate",
@@ -40,6 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "--pace",
         "--dump",
         "--frames",
+        "--codec",
     ];
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| args.iter().any(|arg| arg == name);
@@ -79,14 +88,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("--pace needs 3 s or more per step, and paces of 1..fps".into());
     }
+    let codec = match value("--codec").unwrap_or("h264") {
+        "h264" => VideoCodec::H264,
+        "h265" => VideoCodec::H265,
+        other => return Err(format!("unknown codec {other}: h264 or h265").into()),
+    };
     let display = displays()?.into_iter().next().ok_or("no display")?;
     let pattern_only = flag("--pattern-only");
-    let _animation = if value("--dump").is_some() {
+    let noise = flag("--noise");
+    let _animation = if value("--dump").is_some() || noise {
         Some(pattern::Pattern::new(
             display.x,
             display.y,
             display.width,
             display.height,
+            noise,
         )?)
     } else if pattern_only || flag("--animate") || paces.is_some() {
         Some(pattern::Pattern::new(
@@ -94,6 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             display.y + 32,
             960,
             540,
+            false,
         )?)
     } else {
         None
@@ -145,13 +162,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(std::fs::File::create)
         .transpose()?
         .map(std::io::BufWriter::new);
+    let exact = flag("--exact");
+    if exact && backend_mode {
+        return Err("--exact drives the encoder; a backend never upscales".into());
+    }
+    if codec == VideoCodec::H265 {
+        // What a host asks before it offers H.265: probed once per adapter.
+        for _ in 0..2 {
+            let asked = Instant::now();
+            let usable = pb_mapper_desktop::video::windows::h265_available(display.id);
+            println!(
+                "h265_available={usable} probe_ms={:.1}",
+                asked.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+    let building = Instant::now();
     let mut encoder = if backend_mode {
         None
+    } else if exact {
+        Some(Encoder::new_exact(
+            &display, codec, fps, bitrate, max_width, max_height,
+        )?)
     } else {
         Some(Encoder::new_with_size(
-            &display, fps, bitrate, max_width, max_height,
+            &display, codec, fps, bitrate, max_width, max_height,
         )?)
     };
+    let build_ms = building.elapsed().as_secs_f64() * 1000.0;
     let mut backend = if backend_mode {
         let mut backend = pb_mapper_desktop::native_backend(display.id)?;
         backend.configure_video(
@@ -167,10 +205,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     println!(
-        "encoder={} display={}x{} nominal_fps={fps} max_size={max_width}x{max_height} target_bitrate={bitrate}",
+        "encoder={} codec={codec:?} build_ms={build_ms:.1} display={}x{} nominal_fps={fps} max_size={max_width}x{max_height}{} target_bitrate={bitrate}",
         encoder.as_ref().map_or("full SDK backend", Encoder::name),
         display.width,
-        display.height
+        display.height,
+        if exact { " exact" } else { "" },
     );
 
     // Each step runs `seconds` at its pace; its bitrate is measured after the
@@ -184,6 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut forced = 0u32;
     let mut pending_idr = None;
     let mut keyframes = 0;
+    let (mut max_keyframe, mut max_unit) = (0, 0);
     let mut current_bitrate = bitrate;
     let mut backend_stats = Statistics::default();
     let mut context_us = 0u128;
@@ -244,18 +284,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 context_us += before.elapsed().as_micros();
                 let before = Instant::now();
                 let frame = if tick {
-                    backend.capture_video(
-                        &context,
-                        pb_mapper_desktop::VideoCodec::H264,
-                        force,
-                        rate,
-                    )?
+                    backend.capture_video(&context, codec, force, rate)?
                 } else {
                     backend.drain_video(&context, Duration::ZERO)?
                 };
                 capture_us += before.elapsed().as_micros();
                 calls += 1;
                 ready.extend(frame.map(|frame| Encoded {
+                    codec: frame.format.codec,
                     bytes: frame.bytes,
                     width: frame.format.width,
                     height: frame.format.height,
@@ -281,8 +317,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if step_start.elapsed() >= settle {
                     measured[step] += frame.bytes.len() as u64;
                 }
+                max_unit = max_unit.max(frame.bytes.len());
                 if frame.keyframe {
                     keyframes += 1;
+                    max_keyframe = max_keyframe.max(frame.bytes.len());
                     if let Some(request) = pending_idr.take() {
                         println!(
                             "forced_keyframe_ms={:.3}",
@@ -337,6 +375,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("encoder GOP is {} frames, under 5 s", stats.gop).into());
     }
     let elapsed = start.elapsed().as_secs_f64();
+    println!("max_keyframe_bytes={max_keyframe} max_access_unit_bytes={max_unit}");
     if backend_mode {
         println!(
             "seconds={elapsed:.3} keyframes={keyframes} forced={forced} gop={} encoded={} encoded_fps={:.2} unique_encoded_fps={:.2} bitrate_mbps={:.2} polls={} mean_context_ms={:.3} mean_capture_video_ms={:.3} (includes initial encoder startup)",
@@ -430,7 +469,7 @@ mod pattern {
     };
 
     /// A topmost window that repaints every display refresh, at physical
-    /// desktop coordinates.
+    /// desktop coordinates: a changing colour, or fresh noise.
     pub struct Pattern {
         stop: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
@@ -441,6 +480,7 @@ mod pattern {
             y: i32,
             width: u32,
             height: u32,
+            noise: bool,
         ) -> Result<Self, Box<dyn std::error::Error>> {
             let stop = Arc::new(AtomicBool::new(false));
             let done = stop.clone();
@@ -472,11 +512,20 @@ mod pattern {
                 let dc = GetDC(Some(window));
                 let _ = SetBkMode(dc, TRANSPARENT);
                 let _ = SetTextColor(dc, COLORREF(0x00ffffff));
+                let noise = noise.then(|| Noise::new(dc, width, height)).flatten();
                 let mut frame = 0u32;
                 let mut message = MSG::default();
                 while !done.load(Ordering::Acquire) {
                     while PeekMessageW(&mut message, Some(window), 0, 0, PM_REMOVE).as_bool() {
                         let _ = DispatchMessageW(&message);
+                    }
+                    if let Some(noise) = &noise {
+                        noise.paint(dc, frame);
+                        frame = frame.wrapping_add(1);
+                        if DwmFlush().is_err() {
+                            break;
+                        }
+                        continue;
                     }
                     let brush = CreateSolidBrush(COLORREF(
                         ((frame * 3) & 255)
@@ -503,6 +552,7 @@ mod pattern {
                         break;
                     }
                 }
+                drop(noise);
                 let _ = ReleaseDC(Some(window), dc);
                 let _ = DestroyWindow(window);
             });
@@ -520,6 +570,77 @@ mod pattern {
             self.stop.store(true, Ordering::Release);
             if let Some(thread) = self.thread.take() {
                 let _ = thread.join();
+            }
+        }
+    }
+
+    /// A 32-bit bitmap the size of the window, refilled with xorshift noise.
+    struct Noise {
+        memory: HDC,
+        bitmap: HBITMAP,
+        bits: *mut u64,
+        words: usize,
+        width: i32,
+        height: i32,
+    }
+    impl Noise {
+        unsafe fn new(dc: HDC, width: i32, height: i32) -> Option<Self> {
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits = std::ptr::null_mut();
+            let bitmap = unsafe {
+                CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?
+            };
+            let memory = unsafe { CreateCompatibleDC(Some(dc)) };
+            unsafe { SelectObject(memory, bitmap.into()) };
+            Some(Self {
+                memory,
+                bitmap,
+                bits: bits.cast(),
+                words: (width as usize * height as usize) / 2,
+                width,
+                height,
+            })
+        }
+        unsafe fn paint(&self, dc: HDC, frame: u32) {
+            let words = unsafe { std::slice::from_raw_parts_mut(self.bits, self.words) };
+            let mut state = 0x9e37_79b9_7f4a_7c15u64 ^ u64::from(frame).wrapping_mul(0xbf58_476d);
+            for word in words {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *word = state;
+            }
+            let _ = unsafe {
+                BitBlt(
+                    dc,
+                    0,
+                    0,
+                    self.width,
+                    self.height,
+                    Some(self.memory),
+                    0,
+                    0,
+                    SRCCOPY,
+                )
+            };
+        }
+    }
+    impl Drop for Noise {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteDC(self.memory);
+                let _ = DeleteObject(self.bitmap.into());
             }
         }
     }

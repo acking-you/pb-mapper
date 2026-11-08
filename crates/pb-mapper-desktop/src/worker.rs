@@ -20,18 +20,35 @@ use crate::{
     pacer::Pacer,
     protocol::{DesktopKind, NoticeCode, SessionState, StateReason, VideoSize},
     scheduler::Waiter,
-    shared::{CursorUpdate, EngineState, InputWaitStats, SessionShared},
+    shared::{CursorReport, CursorUpdate, EngineState, InputWaitStats, SessionShared},
     timer::TimerResolution,
 };
 use std::{
     collections::VecDeque,
     io,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
+use tokio::sync::oneshot;
 
 pub(crate) type Factory = Arc<dyn Fn() -> Result<Box<dyn Backend>> + Send + Sync>;
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// Begins the text of every failure of an H.265 encoder to build or to encode,
+/// as opposed to the capture around it: the backend's, or the helper's, as it
+/// crosses the pipe.
+pub(crate) const H265_ENCODER_FAILED: &str = "h265_encoder_failed";
+/// An H.265 encoder failed in this process.
+static H265_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Whether an H.265 encoder failed in this process: the host offers H.265 no
+/// more, and its viewers reconnect to H.264.
+pub(crate) fn h265_failed() -> bool {
+    H265_FAILED.load(Ordering::Acquire)
+}
 
 /// Units waiting in the hand-off for send credit at which a tick is skipped:
 /// transport backpressure.
@@ -111,37 +128,85 @@ impl WorkerHandle {
     }
 }
 
-/// Start thread C. Whoever cancels `shared.cancel`, C is woken at once.
-pub(crate) fn spawn_session(
-    shared: Arc<SessionShared>,
-    factory: Factory,
-    config: WorkerConfig,
-) -> WorkerHandle {
-    let (cancel, wake) = (shared.cancel.clone(), shared.wake.clone());
-    let (cancelled, woken) = (cancel.clone(), wake.clone());
-    let join = tokio::spawn(async move {
-        let mut thread = tokio::task::spawn_blocking(move || run(&shared, &factory, config));
-        let joined = tokio::select! {
-            joined = &mut thread => joined,
-            () = cancelled.cancelled() => {
-                woken.notify();
-                thread.await
+/// Thread C before its session: it builds the backend at once, so that the
+/// host can ask what it encodes before it answers the viewer, then waits for
+/// `start`. Dropped unstarted, it drops the backend on its own thread.
+pub(crate) struct Prepared {
+    /// The backend's answer to `encodes_h265`, when it was asked.
+    h265: Option<oneshot::Receiver<bool>>,
+    start: oneshot::Sender<(Arc<SessionShared>, WorkerConfig)>,
+    thread: tokio::task::JoinHandle<WorkerExit>,
+}
+
+/// Start thread C on `factory`'s backend, asking it whether it encodes H.265
+/// when `probe_h265`.
+pub(crate) fn prepare(factory: Factory, probe_h265: bool) -> Prepared {
+    let (answer, h265) = oneshot::channel();
+    let (start, started) = oneshot::channel::<(Arc<SessionShared>, WorkerConfig)>();
+    let thread = tokio::task::spawn_blocking(move || {
+        let backend = factory().map(|mut backend| {
+            if probe_h265 {
+                let _ = answer.send(backend.encodes_h265());
             }
+            backend
+        });
+        let Ok((shared, config)) = started.blocking_recv() else {
+            return WorkerExit::Cancelled;
         };
-        joined.unwrap_or_else(|failure| WorkerExit::CaptureFailed(failure.to_string()))
+        run(&shared, backend, config)
     });
-    WorkerHandle {
-        join: Some(join),
-        exit: None,
-        cancel,
-        wake,
+    Prepared {
+        h265: probe_h265.then_some(h265),
+        start,
+        thread,
     }
 }
 
-fn run(shared: &Arc<SessionShared>, factory: &Factory, config: WorkerConfig) -> WorkerExit {
+impl Prepared {
+    /// Whether the backend encodes H.265: false when it was not asked, could
+    /// not be built, or has not answered within `wait`.
+    pub async fn h265(&mut self, wait: Duration) -> bool {
+        let Some(answer) = self.h265.take() else {
+            return false;
+        };
+        matches!(tokio::time::timeout(wait, answer).await, Ok(Ok(true)))
+    }
+
+    /// Run the session. Whoever cancels `shared.cancel`, C is woken at once.
+    pub fn start(self, shared: Arc<SessionShared>, config: WorkerConfig) -> WorkerHandle {
+        let (cancel, wake) = (shared.cancel.clone(), shared.wake.clone());
+        let (cancelled, woken) = (cancel.clone(), wake.clone());
+        // Only a thread that already ended misses this, and then it reports
+        // how it ended.
+        let _ = self.start.send((shared, config));
+        let mut thread = self.thread;
+        let join = tokio::spawn(async move {
+            let joined = tokio::select! {
+                joined = &mut thread => joined,
+                () = cancelled.cancelled() => {
+                    woken.notify();
+                    thread.await
+                }
+            };
+            joined.unwrap_or_else(|failure| WorkerExit::CaptureFailed(failure.to_string()))
+        });
+        WorkerHandle {
+            join: Some(join),
+            exit: None,
+            cancel,
+            wake,
+        }
+    }
+}
+
+fn run(
+    shared: &Arc<SessionShared>,
+    backend: Result<Box<dyn Backend>>,
+    config: WorkerConfig,
+) -> WorkerExit {
     let clock: Clock = Arc::new(Instant::now);
     let started = Waiter::new(&shared.wake)
-        .and_then(|waiter| Ok((waiter, Engine::start(shared, factory, config, clock)?)));
+        .and_then(|waiter| Ok((waiter, Engine::start(shared, backend?, config, clock)?)));
     let (waiter, mut engine) = match started {
         Ok(started) => started,
         Err(failure) => {
@@ -205,7 +270,7 @@ struct Engine {
     /// The next context check, or the next retry while unavailable.
     context_due: Instant,
     cursor_due: Instant,
-    cursor: Option<CursorUpdate>,
+    cursor: CursorEcho,
     /// When to poll the encoder again while it holds units.
     drain_due: Instant,
     /// Held while this session captures.
@@ -225,12 +290,11 @@ struct Engine {
 impl Engine {
     fn start(
         shared: &Arc<SessionShared>,
-        factory: &Factory,
+        mut backend: Box<dyn Backend>,
         config: WorkerConfig,
         clock: Clock,
     ) -> Result<Self> {
         config.limits.validate()?;
-        let mut backend = factory()?;
         backend.configure_video(config.limits, config.nominal_fps)?;
         let now = clock();
         let pace_fps = shared.targets.pace_fps.load(Ordering::Acquire).max(1);
@@ -257,7 +321,7 @@ impl Engine {
             pace_fps,
             context_due: now,
             cursor_due: now,
-            cursor: None,
+            cursor: CursorEcho::default(),
             drain_due: now,
             timer: None,
             last_lease: None,
@@ -501,7 +565,12 @@ impl Engine {
                 "The remote computer is locked".into(),
                 now,
             ),
-            Ok(()) => self.hold.injected(&event.input, now),
+            Ok(()) => {
+                self.hold.injected(&event.input, now);
+                if let Input::Move { x, y } = event.input {
+                    self.cursor.injected(x, y);
+                }
+            }
             Err(failure) => {
                 if failure.kind() == io::ErrorKind::NotConnected {
                     self.fatal = Some(failure.to_string());
@@ -572,6 +641,7 @@ impl Engine {
     fn invalidate(&mut self) {
         self.backend.release();
         self.hold.drop_held();
+        self.cursor.invalidate();
         self.state.record.generation += 1;
         let generation = self.state.record.generation;
         self.shared.auth.lock().on_invalidate(generation);
@@ -629,10 +699,21 @@ impl Engine {
     /// streaming may be a desktop switch: it starts a new generation and is
     /// retried at once. Any other, such as a capture failing again right
     /// after a recovery, is retried every `UNAVAILABLE_RETRY`, never at the
-    /// capture pace. A sticky link failure ends the session instead.
+    /// capture pace. A sticky link failure ends the session instead, and so
+    /// does an H.265 encoder that would not build or encode: H.265 is then
+    /// off for the rest of the process, and the viewer reconnects to H.264.
     fn fail(&mut self, failure: io::Error, now: Instant) {
+        let message = failure.to_string();
         if failure.kind() == io::ErrorKind::NotConnected {
-            self.fatal = Some(failure.to_string());
+            self.fatal = Some(message);
+        } else if self.codec == VideoCodec::H265 && message.starts_with(H265_ENCODER_FAILED) {
+            H265_FAILED.store(true, Ordering::Release);
+            tracing::warn!(
+                target: "pb_mapper_desktop::session",
+                event = "desktop_h265_failed",
+                detail = ?message,
+            );
+            self.fatal = Some(message);
         }
         self.context_due = if self.unavailable.is_none() && self.streaming {
             self.invalidate();
@@ -786,7 +867,8 @@ impl Engine {
     }
 
     /// Every `CURSOR_INTERVAL` while capturing; never while paused or
-    /// unavailable. Published only when it changes.
+    /// unavailable. Reported when it differs from the last report, unless it
+    /// is the echo of the controller's own move.
     fn sample_cursor(&mut self, now: Instant) {
         if self.paused || self.unavailable.is_some() || now < self.cursor_due {
             return;
@@ -803,9 +885,8 @@ impl Engine {
                     y: position.y,
                     visible: position.visible,
                 });
-                if cursor != self.cursor {
-                    self.cursor = cursor;
-                    self.shared.cursor.send_replace(cursor);
+                if let Some(report) = self.cursor.sample(cursor) {
+                    self.shared.cursor.send_replace(Some(report));
                 }
             }
             Err(failure) => self.fail(failure, now),
@@ -949,6 +1030,55 @@ impl DragHold {
             } => self.left_down = self.pointer.map(|pointer| (now, pointer)),
             _ => {}
         }
+    }
+}
+
+/// What C reports of the pointer: every sample unlike the last report, at once,
+/// except the controller's own move coming back. The viewer draws its own
+/// pointer where the controller put it; an echo of that move, late behind the
+/// video, would drag it back. A shown pointer at the position C last injected,
+/// in the same display pixels, is that echo, whatever it showed before, until
+/// a report finds it elsewhere: then a return there is someone else's move. A
+/// hidden pointer carries no position, so it is never an echo. Comparing with
+/// the last report rather than the last sample is what reports a move the OS
+/// stopped short (a `ClipCursor`, an edge): the pointer stays where it was, but
+/// not where the controller put it. A sample equal to the last report has
+/// nothing to tell a viewer. A backend observes the pointer after every input
+/// it applied (see `Backend::cursor`), so the helper's, observed during a
+/// capture call, is never older than the last injection.
+#[derive(Default)]
+struct CursorEcho {
+    /// The last report.
+    reported: Option<CursorUpdate>,
+    /// Where the last move in this generation put the pointer, until a report
+    /// finds it elsewhere.
+    injected: Option<(u32, u32)>,
+    serial: u64,
+}
+impl CursorEcho {
+    fn injected(&mut self, x: u32, y: u32) {
+        self.injected = Some((x, y));
+    }
+
+    /// A new generation: nothing in it was injected yet.
+    fn invalidate(&mut self) {
+        self.injected = None;
+    }
+
+    /// The report to send for `cursor`, if any.
+    fn sample(&mut self, cursor: Option<CursorUpdate>) -> Option<CursorReport> {
+        let cursor = cursor.filter(|cursor| self.reported != Some(*cursor))?;
+        let at = (u32::try_from(cursor.x).ok(), u32::try_from(cursor.y).ok());
+        if cursor.visible && self.injected.is_some_and(|(x, y)| at == (Some(x), Some(y))) {
+            return None;
+        }
+        self.reported = Some(cursor);
+        self.injected = None;
+        self.serial += 1;
+        Some(CursorReport {
+            serial: self.serial,
+            cursor,
+        })
     }
 }
 

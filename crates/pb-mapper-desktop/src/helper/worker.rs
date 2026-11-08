@@ -456,6 +456,7 @@ impl Response {
             cursor: None,
             pending,
             double_click: None,
+            h265: None,
         }
     }
 }
@@ -477,6 +478,7 @@ fn serve(
         cursor: None,
         pending: 0,
         double_click: None,
+        h265: None,
     };
     if matches!(request, Request::Release {} | Request::Close {}) {
         backend.release();
@@ -497,6 +499,9 @@ fn serve(
         // still `expected`.
         backend.input_in_context(&expected, &input)?;
         *last_input = std::time::Instant::now();
+        // The pointer as the input left it, so that the host's thread C knows
+        // its own move when it comes back. The input stands without it.
+        response.cursor = backend.cursor(&expected).ok().flatten();
         // The host keeps the desktop each answer reports: this is the one the
         // input reached.
         response.context = Some(expected);
@@ -521,6 +526,10 @@ fn serve(
             vec![]
         }
         Request::Attach { .. } => return Err(error("worker is already attached")),
+        Request::H265 {} => {
+            response.h265 = Some(backend.encodes_h265());
+            vec![]
+        }
         Request::ConfigureVideo {
             limits,
             nominal_fps,
@@ -543,7 +552,8 @@ fn serve(
             if expected != context
                 || wait_ms > DRAIN_WAIT_MAX_MS
                 || submit
-                    && (!(256_000..=40_000_000).contains(&rate.bitrate)
+                    && (!(crate::qos::ENCODER_BITRATE_MIN..=crate::qos::ENCODER_BITRATE_MAX)
+                        .contains(&rate.bitrate)
                         || !(1..=120).contains(&rate.pace_fps))
             {
                 return Err(error("invalid or stale video request"));
@@ -834,6 +844,7 @@ mod tests {
                         cursor: None,
                         pending: 0,
                         double_click: None,
+                        h265: None,
                     },
                     vec![],
                 ))

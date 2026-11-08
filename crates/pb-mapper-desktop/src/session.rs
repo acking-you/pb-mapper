@@ -6,16 +6,17 @@
 //! B-send writes the final `Stopped` when the session ends for a reason the
 //! viewer should hear.
 use crate::{
-    Input, QualityPreset, VideoCodec, VideoLimits,
+    QualityPreset, VideoCodec, VideoLimits,
     credit::CreditLedger,
     idr::IdrReason,
     lane::LaneCommand,
     outgoing::OUTGOING_MAX_AGE,
     protocol::{
-        CAPABILITY_ENCODER_DWELL, HostMessage, StateReason, StateRecord, StopReason, ViewerMessage,
+        CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, HostMessage, StateReason, StateRecord,
+        StopReason, ViewerMessage,
     },
     qos::{QOS_TICK, Qos, TargetValues},
-    shared::{CursorUpdate, EngineState, Policy, SessionShared, Targets},
+    shared::{CursorReport, EngineState, Policy, SessionShared, Targets},
     wire::{self, MAX_PAYLOAD},
     worker::WorkerExit,
 };
@@ -43,8 +44,6 @@ pub(crate) const STATS_INTERVAL: Duration = Duration::from_secs(1);
 /// After a session is cancelled, the message in flight, the final `Stopped`
 /// and the wait for the viewer to close share this.
 pub(crate) const STOP_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
-/// The controller's own pointer input is not echoed back within this.
-pub(crate) const CURSOR_ECHO_SUPPRESS: Duration = Duration::from_millis(300);
 /// How soon B-send looks again at a head that waits for credit.
 const CREDIT_RECHECK: Duration = Duration::from_millis(20);
 const CONTROL_DENIED: &str = "Control is not allowed on this computer";
@@ -98,7 +97,8 @@ impl Session {
         capabilities: &[String],
     ) -> Arc<Self> {
         let now = Instant::now();
-        let qos = Qos::new(limits, codec, quality, now);
+        let listed = |wanted: &str| capabilities.iter().any(|capability| capability == wanted);
+        let qos = Qos::new(limits, codec, quality, listed(CAPABILITY_FPS_OVERRIDE), now);
         let targets = qos.targets(now);
         Arc::new(Self {
             shared: Arc::new(SessionShared::new(
@@ -107,9 +107,7 @@ impl Session {
                 Targets::new(targets.pace_fps, targets.encoder_bps),
             )),
             codec,
-            encoder_dwell: capabilities
-                .iter()
-                .any(|capability| capability == CAPABILITY_ENCODER_DWELL),
+            encoder_dwell: listed(CAPABILITY_ENCODER_DWELL),
             started_unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| {
@@ -276,16 +274,6 @@ impl Session {
                 // A revoked policy drops input at the edge; C releases held
                 // input on its next iteration.
                 if shared.policy.allowed() {
-                    if matches!(
-                        event.input,
-                        Input::Move { .. } | Input::Button { .. } | Input::Wheel { .. }
-                    ) {
-                        let since = now.saturating_duration_since(shared.epoch).as_micros();
-                        shared.pointer_input_at_us.store(
-                            u64::try_from(since).unwrap_or(u64::MAX).max(1),
-                            Ordering::Release,
-                        );
-                    }
                     shared.lane.push(LaneCommand::Input(event));
                 }
             }
@@ -384,47 +372,6 @@ async fn receive<R: AsyncRead + Unpin>(session: &Session, mut reader: R) -> Opti
     }
 }
 
-/// Holds back the echo of the controller's own pointer input: the viewer
-/// already draws its local pointer, and a late echo would drag it back.
-#[derive(Default)]
-pub(crate) struct CursorGate {
-    last_sent: Option<CursorUpdate>,
-}
-impl CursorGate {
-    /// The cursor to write now, if any, and when to look again at one held
-    /// back. A cursor waits for its generation's `State`; a generation change
-    /// is never held back; the newest held value goes out when the hold ends.
-    pub fn poll(
-        &mut self,
-        latest: Option<CursorUpdate>,
-        stated_generation: u64,
-        controlling: bool,
-        pointer_input_at: Option<Instant>,
-        now: Instant,
-    ) -> (Option<CursorUpdate>, Option<Instant>) {
-        let Some(cursor) = latest else {
-            return (None, None);
-        };
-        if cursor.generation != stated_generation || self.last_sent == Some(cursor) {
-            return (None, None);
-        }
-        let same_generation = self
-            .last_sent
-            .is_some_and(|sent| sent.generation == cursor.generation);
-        if same_generation
-            && controlling
-            && let Some(input) = pointer_input_at
-        {
-            let until = input + CURSOR_ECHO_SUPPRESS;
-            if now < until {
-                return (None, Some(until));
-            }
-        }
-        self.last_sent = Some(cursor);
-        (Some(cursor), None)
-    }
-}
-
 /// A write could not finish: the transport failed, or the stop budget ran out.
 struct Abandoned;
 
@@ -471,11 +418,12 @@ struct Sender<'a, W> {
     session: &'a Session,
     writer: W,
     state: watch::Receiver<EngineState>,
-    cursor: watch::Receiver<Option<CursorUpdate>>,
+    cursor: watch::Receiver<Option<CursorReport>>,
     /// The engine state last written as `State`.
     written: Option<StateRecord>,
     notice_serial: u64,
-    gate: CursorGate,
+    /// The last cursor report written, or dropped as stale.
+    cursor_serial: u64,
     next_tick: Instant,
     next_stats: Instant,
     stats_since: Instant,
@@ -492,7 +440,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             cursor: session.shared.cursor.subscribe(),
             written: None,
             notice_serial: 0,
-            gate: CursorGate::default(),
+            cursor_serial: 0,
             next_tick: now + QOS_TICK,
             next_stats: now + STATS_INTERVAL,
             stats_since: now,
@@ -581,9 +529,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         }
         // Paused: no cursor and no video, while probes, state and stats go on.
         if !self.session.shared.targets.paused.load(Ordering::Acquire) {
-            if let Some(recheck) = self.cursor(&engine, now).await? {
-                wake_at = wake_at.min(recheck);
-            }
+            self.cursor().await?;
             if self.video().await? {
                 wake_at = wake_at.min(Instant::now() + CREDIT_RECHECK);
             }
@@ -638,32 +584,32 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         self.send(&HostMessage::Probe { nonce }, None).await
     }
 
-    async fn cursor(
-        &mut self,
-        engine: &EngineState,
-        now: Instant,
-    ) -> Result<Option<Instant>, Abandoned> {
-        let latest = *self.cursor.borrow_and_update();
-        let shared = &self.session.shared;
-        let input_us = shared.pointer_input_at_us.load(Ordering::Acquire);
-        let input_at = (input_us > 0).then(|| shared.epoch + Duration::from_micros(input_us));
+    /// Write C's newest cursor report, once. It waits for its generation's
+    /// `State`, and one of an older generation is stale. C never reports the
+    /// controller's own move coming back, so nothing here holds one back.
+    async fn cursor(&mut self) -> Result<(), Abandoned> {
+        let Some(report) = *self.cursor.borrow_and_update() else {
+            return Ok(());
+        };
         let stated = self
             .written
             .as_ref()
             .map_or(0, |written| written.generation);
-        let (cursor, recheck) =
-            self.gate
-                .poll(latest, stated, engine.record.controlling, input_at, now);
-        if let Some(cursor) = cursor {
-            let message = HostMessage::Cursor {
-                generation: cursor.generation,
-                x: cursor.x,
-                y: cursor.y,
-                visible: cursor.visible,
-            };
-            self.send(&message, None).await?;
+        let cursor = report.cursor;
+        if report.serial <= self.cursor_serial || cursor.generation > stated {
+            return Ok(());
         }
-        Ok(recheck)
+        self.cursor_serial = report.serial;
+        if cursor.generation < stated {
+            return Ok(());
+        }
+        let message = HostMessage::Cursor {
+            generation: cursor.generation,
+            x: cursor.x,
+            y: cursor.y,
+            visible: cursor.visible,
+        };
+        self.send(&message, None).await
     }
 
     /// Write every unit credit admits. Returns whether the head waits for
@@ -707,9 +653,9 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
                 self.write_state(&engine).await?;
                 continue;
             }
-            // Every JPEG picture is independent; only an H.264 IDR uses the
-            // IDR headroom and taints probes.
-            let idr = head.keyframe && self.session.codec == VideoCodec::H264;
+            // Every JPEG picture is independent; only an H.264 or H.265 IDR
+            // uses the IDR headroom and taints probes.
+            let idr = head.keyframe && self.session.codec != VideoCodec::Jpeg;
             if !self.session.admissible(head.len, idr, now) {
                 return Ok(true);
             }
@@ -867,59 +813,9 @@ mod tests {
         Display,
         outgoing::HostUnit,
         protocol::{SessionState, VideoSize},
+        shared::CursorUpdate,
     };
     use tokio::io::{AsyncReadExt, DuplexStream, ReadHalf, WriteHalf};
-
-    #[test]
-    fn cursor_is_not_echoed_within_300ms_but_generation_changes_pass() {
-        let t0 = Instant::now();
-        let ms = |n| t0 + Duration::from_millis(n);
-        let at = |generation, x| {
-            Some(CursorUpdate {
-                generation,
-                x,
-                y: 0,
-                visible: true,
-            })
-        };
-        let mut gate = CursorGate::default();
-        assert_eq!(gate.poll(at(1, 1), 1, true, None, t0), (at(1, 1), None));
-        // An unchanged cursor is not written again.
-        assert_eq!(gate.poll(at(1, 1), 1, true, None, ms(1)), (None, None));
-
-        // The controller moved the pointer at 100 ms: its echo is held for
-        // 300 ms, and the newest held value goes out when the hold ends.
-        let input = Some(ms(100));
-        assert_eq!(
-            gate.poll(at(1, 2), 1, true, input, ms(110)),
-            (None, Some(ms(400)))
-        );
-        assert_eq!(
-            gate.poll(at(1, 3), 1, true, input, ms(399)),
-            (None, Some(ms(400)))
-        );
-        assert_eq!(
-            gate.poll(at(1, 3), 1, true, input, ms(400)),
-            (at(1, 3), None)
-        );
-        // A viewer that is not controlling sees every move at once.
-        assert_eq!(
-            gate.poll(at(1, 4), 1, false, input, ms(150)),
-            (at(1, 4), None)
-        );
-
-        // A generation change is never held back, but waits for its `State`.
-        assert_eq!(
-            gate.poll(at(2, 4), 1, true, Some(ms(500)), ms(510)),
-            (None, None)
-        );
-        assert_eq!(
-            gate.poll(at(2, 4), 2, true, Some(ms(500)), ms(510)),
-            (at(2, 4), None)
-        );
-        // A cursor of an older generation is stale.
-        assert_eq!(gate.poll(at(1, 5), 2, false, None, ms(600)), (None, None));
-    }
 
     fn streaming(generation: u64) -> EngineState {
         let mut engine = EngineState::connecting(true);
@@ -1055,17 +951,45 @@ mod tests {
         assert_eq!(payload.unwrap()[..], [1; 100]);
 
         // A control grant invalidates generation 1 while two of its units
-        // wait in the hand-off: they are dropped without a seq.
+        // wait in the hand-off: they are dropped without a seq. The new
+        // generation's cursor waits for its `State`.
+        let report = |serial| {
+            Some(CursorReport {
+                serial,
+                cursor: CursorUpdate {
+                    generation: 2,
+                    x: 5,
+                    y: 6,
+                    visible: true,
+                },
+            })
+        };
+        let cursor = |message: &HostMessage| {
+            matches!(
+                message,
+                HostMessage::Cursor {
+                    generation: 2,
+                    x: 5,
+                    y: 6,
+                    visible: true
+                }
+            )
+        };
         shared.outgoing.push(unit(1, 2, false));
         shared.outgoing.push(unit(1, 3, false));
+        shared.cursor.send_replace(report(1));
         shared.state.send_replace(streaming(2));
         shared.outgoing.push(unit(2, 4, true));
         assert_eq!(state_generation(&viewer.next().await.0), 2);
+        assert!(cursor(&viewer.next().await.0));
         assert_eq!(video(&viewer.next().await.0), (2, 2, 4));
 
-        // The session continues, and the seq stays contiguous.
+        // The session continues, and the seq stays contiguous. Each report
+        // goes out once, even at a position written before.
         viewer.send(ViewerMessage::Received { seq: 2 }).await;
+        shared.cursor.send_replace(report(2));
         shared.outgoing.push(unit(2, 5, false));
+        assert!(cursor(&viewer.next().await.0));
         assert_eq!(video(&viewer.next().await.0), (3, 2, 5));
         let HostMessage::Stats {
             dropped_frames,

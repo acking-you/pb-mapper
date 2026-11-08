@@ -36,11 +36,12 @@ pub(crate) fn record_input_failure(detail: &str) {
 /// Any change to a request or a response bumps it, with both pipe names.
 /// 3: `VideoFormat` carries the encoder's GOP. 4: `Request::Input` carries
 /// the whole expected desktop. 5: the background host's `Options` carry
-/// `lan_first`.
-pub const HELPER_PROTOCOL: u32 = 5;
+/// `lan_first`. 6: video may be H.265, `Request::H265` asks the worker
+/// whether it encodes it, and an applied input answers with the pointer.
+pub const HELPER_PROTOCOL: u32 = 6;
 
 const SERVICE: &str = "PbMapperDesktop";
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v5";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v6";
 const EXECUTABLE: &str = "pb-mapper-desktop-helper.exe";
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// The longest a helper drain may wait for encoder output.
@@ -300,12 +301,17 @@ enum Request {
     /// Includes `Input::Lock`. A `drag_start` press is held by the host's
     /// thread C before it gets here; the helper ignores the flag. `expected`
     /// is the desktop the host admitted it on: the worker injects only while
-    /// the bound desktop is still that one, display included.
+    /// the bound desktop is still that one, display included. The answer
+    /// carries the pointer as the input left it, when the worker could read
+    /// it.
     Input {
         expected: DesktopContext,
         sequence: u64,
         input: Input,
     },
+    /// Whether the worker encodes H.265 on its display, which it probes in
+    /// the interactive session.
+    H265 {},
     Release {},
     Close {},
 }
@@ -324,6 +330,9 @@ struct Response {
     /// interactive session, read by the worker, which runs in it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     double_click: Option<crate::DoubleClickGuard>,
+    /// In the `H265` response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    h265: Option<bool>,
 }
 
 /// Entry point of the dedicated helper executable, never the Flutter process.
@@ -372,9 +381,10 @@ mod readiness_tests {
         assert!(!serde_json::to_string(&old).unwrap().contains("protocol"));
         assert!(update_required(old.protocol(), true, || true));
         assert!(update_required(old.protocol(), false, || false));
-        // Protocol 3 sends input with its generation alone, and protocol 4
-        // refuses the background host's `lan_first`: both are outdated too.
-        for outdated in [3, 4] {
+        // Protocol 3 sends input with its generation alone, protocol 4
+        // refuses the background host's `lan_first`, and protocol 5 H.265:
+        // all are outdated too.
+        for outdated in [3, 4, 5] {
             let previous = installation(&format!(r#""schema":2,"protocol":{outdated},"#)).unwrap();
             assert!(update_required(previous.protocol(), true, || true));
         }

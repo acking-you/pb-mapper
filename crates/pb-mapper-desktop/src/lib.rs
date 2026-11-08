@@ -121,7 +121,9 @@ pub enum VideoCodec {
 }
 
 /// What a viewer asks the host to favour. Each preset maps to bitrate and
-/// fps targets on the host; changing it mid-session never reconnects.
+/// fps targets on the host; changing it mid-session never reconnects. A
+/// viewer listing `fps_override` makes its `limits.max_fps` every preset's
+/// ceiling.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QualityPreset {
@@ -424,10 +426,20 @@ pub trait Backend: 'static {
     }
     fn capture(&mut self) -> Result<Vec<u8>>;
     /// Report a pointer for the expected desktop, including when no video frame
-    /// changed. A desktop transition must fail instead of reporting another
-    /// desktop's pointer. Backends without pointer metadata return `None`.
+    /// changed, as it stands after every input this backend applied: thread C
+    /// takes a report at the position it last injected for the controller's
+    /// own move coming back, and never sends it. A desktop transition must
+    /// fail instead of reporting another desktop's pointer. Backends without
+    /// pointer metadata return `None`.
     fn cursor(&mut self, _expected: &DesktopContext) -> Result<Option<CursorPosition>> {
         Ok(None)
+    }
+    /// Whether `capture_video` can encode `VideoCodec::H265` on this
+    /// backend's display. Asked once a session, right after the backend is
+    /// built and before the host answers a viewer that decodes H.265; a
+    /// backend probes its GPU once and keeps the answer for its process.
+    fn encodes_h265(&mut self) -> bool {
+        false
     }
     /// Drain finished output, then (encoder backends) submit at most one
     /// capture. The default captures one JPEG picture. A `keyframe` is asked

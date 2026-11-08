@@ -1,10 +1,16 @@
-//! Desktop Duplication -> D3D11 video processor -> Media Foundation H.264.
+//! Desktop Duplication -> D3D11 video processor -> Media Foundation H.264 or
+//! H.265.
 //!
 //! Raw desktop pixels stay on the GPU. Only complete encoded access units cross
-//! into host memory. The Windows codec, rather than application code, implements
-//! H.264. Create, use and drop this object on the capture worker's desktop thread.
+//! into host memory. The GPU's own Media Foundation encoder, rather than
+//! application code, implements the codec. Create, use and drop this object on
+//! the capture worker's desktop thread.
 
-use crate::{Display, Result, error};
+use crate::{
+    Display, Result, VideoCodec, error,
+    qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN},
+    worker::H265_ENCODER_FAILED,
+};
 use std::{
     collections::VecDeque,
     mem::ManuallyDrop,
@@ -13,10 +19,14 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::RECT,
+        Foundation::{HMODULE, LUID, RECT},
         Graphics::{
+            Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
             Direct3D11::*,
-            Dxgi::{Common::*, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIDevice},
+            Dxgi::{
+                Common::*, CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+                IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
+            },
         },
         Media::MediaFoundation::*,
         System::{
@@ -47,6 +57,7 @@ const LIVENESS_INTERVAL: Duration = Duration::from_millis(250);
 const GOP_CANDIDATES: [u32; 4] = [u32::MAX, 0x7FFF_FFFF, 65_535, 3_600];
 
 pub struct Encoded {
+    pub codec: VideoCodec,
     pub bytes: Vec<u8>,
     pub width: u32,
     pub height: u32,
@@ -66,7 +77,7 @@ impl From<Encoded> for crate::EncodedFrame {
     fn from(image: Encoded) -> Self {
         Self {
             format: crate::VideoFormat {
-                codec: crate::VideoCodec::H264,
+                codec: image.codec,
                 width: image.width,
                 height: image.height,
                 keyframe: image.keyframe,
@@ -161,23 +172,72 @@ pub struct Encoder {
     _runtime: Runtime,
 }
 
-impl Encoder {
-    pub fn new(display: &Display, fps: u32, bitrate: u32) -> Result<Self> {
-        Self::new_with_size(display, fps, bitrate, display.width, display.height)
-    }
+/// The encoded size: the capture fitted inside these bounds, keeping its aspect
+/// ratio and never upscaling (a session), or exactly this size.
+#[derive(Clone, Copy)]
+enum OutputSize {
+    Fit(u32, u32),
+    Exact(u32, u32),
+}
 
-    /// Scale on the D3D11 video processor before hardware encoding. The latest
-    /// captured desktop texture remains at native resolution; no CPU readback.
+impl Encoder {
+    /// Scale on the D3D11 video processor before hardware encoding, to fit
+    /// inside `max_width` × `max_height` without upscaling. The latest captured
+    /// desktop texture remains at native resolution; no CPU readback.
     pub fn new_with_size(
         display: &Display,
+        codec: VideoCodec,
         fps: u32,
         bitrate: u32,
         max_width: u32,
         max_height: u32,
     ) -> Result<Self> {
-        if !(1..=120).contains(&fps) || !(256_000..=80_000_000).contains(&bitrate) {
+        Self::build(
+            display,
+            codec,
+            fps,
+            bitrate,
+            OutputSize::Fit(max_width, max_height),
+        )
+    }
+
+    /// Encode exactly `width` × `height` (rounded down to even), upscaling a
+    /// smaller display: `video_bench` measures a resolution the display does
+    /// not have. A session never upscales.
+    pub fn new_exact(
+        display: &Display,
+        codec: VideoCodec,
+        fps: u32,
+        bitrate: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
+        Self::build(
+            display,
+            codec,
+            fps,
+            bitrate,
+            OutputSize::Exact(width, height),
+        )
+    }
+
+    fn build(
+        display: &Display,
+        kind: VideoCodec,
+        fps: u32,
+        bitrate: u32,
+        size: OutputSize,
+    ) -> Result<Self> {
+        if kind == VideoCodec::Jpeg {
+            return Err(error("the hardware encoder encodes H.264 or H.265"));
+        }
+        if !(1..=120).contains(&fps)
+            || !(ENCODER_BITRATE_MIN..=ENCODER_BITRATE_MAX).contains(&bitrate)
+        {
             return Err(error("video rate outside supported bounds"));
         }
+        let (OutputSize::Fit(max_width, max_height) | OutputSize::Exact(max_width, max_height)) =
+            size;
         if !(2..=7680).contains(&max_width) || !(2..=4320).contains(&max_height) {
             return Err(error("video size outside supported bounds"));
         }
@@ -200,22 +260,14 @@ impl Encoder {
         if input_width < 2 || input_height < 2 || input_width > 7680 || input_height > 4320 {
             return Err(error("unsupported GPU capture dimensions"));
         }
-        let (width, height) = scaled_size(input_width, input_height, max_width, max_height);
+        let (width, height) = match size {
+            OutputSize::Fit(..) => scaled_size(input_width, input_height, max_width, max_height),
+            OutputSize::Exact(..) => ((max_width & !1).max(2), (max_height & !1).max(2)),
+        };
         let device = capture.device();
-        let protection: ID3D11Multithread = capture.device_context().cast().map_err(error)?;
-        unsafe {
-            let _ = protection.SetMultithreadProtected(true);
-        }
-        let mut token = 0;
-        let mut manager = None;
-        unsafe {
-            MFCreateDXGIDeviceManager(&mut token, &mut manager).map_err(error)?;
-        }
-        let manager = manager.ok_or_else(|| error("missing DXGI device manager"))?;
-        unsafe {
-            manager.ResetDevice(device, token).map_err(error)?;
-        }
-        let codec = Codec::new(device, &manager, width, height, fps, bitrate)?;
+        let manager = device_manager(device, capture.device_context())?;
+        let codec = Codec::new(device, &manager, kind, width, height, fps, bitrate)
+            .map_err(|failure| codec_error(kind, failure))?;
         let converter = Converter::new(
             device,
             capture.device_context(),
@@ -278,6 +330,9 @@ impl Encoder {
     pub fn name(&self) -> &str {
         &self.codec.name
     }
+    pub fn codec(&self) -> VideoCodec {
+        self.codec.kind
+    }
     pub fn statistics(&self) -> Statistics {
         self.stats.clone()
     }
@@ -287,16 +342,18 @@ impl Encoder {
     /// frame rate and GOP never change, so a rate change never rebuilds.
     pub fn set_rate(&mut self, rate: crate::VideoRate) -> Result<()> {
         self.check_thread()?;
-        if !(256_000..=80_000_000).contains(&rate.bitrate) {
+        if !(ENCODER_BITRATE_MIN..=ENCODER_BITRATE_MAX).contains(&rate.bitrate) {
             return Err(error("video bitrate outside supported bounds"));
         }
         if self.bitrate == rate.bitrate {
             return Ok(());
         }
-        self.codec.property(
-            &CODECAPI_AVEncCommonMeanBitRate,
-            &VARIANT::from(rate.bitrate),
-        )?;
+        self.codec
+            .property(
+                &CODECAPI_AVEncCommonMeanBitRate,
+                &VARIANT::from(rate.bitrate),
+            )
+            .map_err(|failure| codec_error(self.codec.kind, failure))?;
         self.bitrate = rate.bitrate;
         Ok(())
     }
@@ -312,6 +369,18 @@ impl Encoder {
     /// closed. This never acquires a desktop texture or calls ProcessInput.
     pub fn drain(&mut self) -> Result<Option<Encoded>> {
         self.check_thread()?;
+        if self.stats.submitted == 0
+            && self.latest.is_none()
+            && self.created.elapsed() > Duration::from_secs(3)
+        {
+            // No desktop image yet: capture, not the encoder, is stuck.
+            return Err(error("desktop capture delivered no image"));
+        }
+        let kind = self.codec.kind;
+        self.collect().map_err(|failure| codec_error(kind, failure))
+    }
+
+    fn collect(&mut self) -> Result<Option<Encoded>> {
         self.codec.events()?;
         let mut ready = None;
         if self.codec.have_output > 0 {
@@ -323,7 +392,7 @@ impl Encoder {
                     .ok_or_else(|| error("unsolicited video output"))?;
                 if unsafe { sample.GetSampleTime().map_err(error)? } != (pts_us * 10) as i64 {
                     return Err(error(
-                        "hardware encoder reordered input despite baseline profile",
+                        "hardware encoder reordered input despite B-frames being off",
                     ));
                 }
                 let bytes = sample_bytes(&sample)?;
@@ -346,6 +415,7 @@ impl Encoder {
                     let encode_us = now.saturating_duration_since(at).as_micros();
                     self.stats.encode_time_us += encode_us as u64;
                     ready = Some(Encoded {
+                        codec: self.codec.kind,
                         bytes,
                         width: self.width,
                         height: self.height,
@@ -427,15 +497,17 @@ impl Encoder {
                 .SetSampleDuration((duration.as_nanos() / 100) as i64)
                 .map_err(error)?;
         }
+        let kind = self.codec.kind;
         if self.force_keyframe {
             self.codec
-                .property(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32))?;
+                .property(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32))
+                .map_err(|failure| codec_error(kind, failure))?;
         }
         unsafe {
             self.codec
                 .transform
                 .ProcessInput(self.codec.input_id, &sample, 0)
-                .map_err(error)?;
+                .map_err(|failure| codec_error(kind, error(failure)))?;
         }
         self.codec.need_input -= 1;
         self.force_keyframe = false;
@@ -518,6 +590,141 @@ fn late(submitted: Instant, previous: Option<Instant>, now: Instant) -> bool {
     now.saturating_duration_since(started) > LATE_OUTPUT
 }
 
+/// An error of the hardware codec itself, rather than of the capture or the
+/// scaler around it. An H.265 one starts with `H265_ENCODER_FAILED`: thread C
+/// then ends the session, and this host offers H.265 no more.
+fn codec_error(kind: VideoCodec, failure: std::io::Error) -> std::io::Error {
+    if kind == VideoCodec::H265 {
+        error(format!("{H265_ENCODER_FAILED}: {failure}"))
+    } else {
+        failure
+    }
+}
+
+fn codec_name(kind: VideoCodec) -> &'static str {
+    match kind {
+        VideoCodec::H265 => "H.265",
+        VideoCodec::H264 => "H.264",
+        VideoCodec::Jpeg => "JPEG",
+    }
+}
+
+/// A DXGI device manager over `device`, which the encoder's own threads use.
+fn device_manager(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+) -> Result<IMFDXGIDeviceManager> {
+    let protection: ID3D11Multithread = context.cast().map_err(error)?;
+    unsafe {
+        let _ = protection.SetMultithreadProtected(true);
+    }
+    let mut token = 0;
+    let mut manager = None;
+    unsafe {
+        MFCreateDXGIDeviceManager(&mut token, &mut manager).map_err(error)?;
+    }
+    let manager = manager.ok_or_else(|| error("missing DXGI device manager"))?;
+    unsafe {
+        manager.ResetDevice(device, token).map_err(error)?;
+    }
+    Ok(manager)
+}
+
+fn luid_value(luid: LUID) -> u64 {
+    (u64::from(luid.HighPart as u32) << 32) | u64::from(luid.LowPart)
+}
+
+/// The adapter driving display `id` (its `HMONITOR`, as `Display::id` holds it).
+fn display_adapter(id: u32) -> Result<IDXGIAdapter1> {
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1().map_err(error)? };
+    for index in 0.. {
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
+            break;
+        };
+        for output in 0.. {
+            let Ok(output) = (unsafe { adapter.EnumOutputs(output) }) else {
+                break;
+            };
+            let desc = unsafe { output.GetDesc().map_err(error)? };
+            if desc.Monitor.0 as usize as u32 == id {
+                return Ok(adapter);
+            }
+        }
+    }
+    Err(error("selected display is no longer available"))
+}
+
+/// Whether the GPU that drives display `id` has a hardware H.265 encoder this
+/// pipeline can use: an MFT for that adapter that activates, takes the Main
+/// 4:2:0 output and NV12 input types at 1920x1080@60 with B-frames off, and
+/// starts streaming, without encoding a frame. Probed once per adapter LUID
+/// and kept for the process; a display no adapter drives is not kept.
+pub fn h265_available(id: u32) -> bool {
+    static PROBED: parking_lot::Mutex<Vec<(u64, bool)>> = parking_lot::const_mutex(Vec::new());
+    let probe = || -> Result<bool> {
+        let adapter = display_adapter(id)?;
+        let luid = luid_value(unsafe { adapter.GetDesc1().map_err(error)? }.AdapterLuid);
+        // Held while probing: one probe per adapter, however many ask at once.
+        let mut probed = PROBED.lock();
+        if let Some(&(_, usable)) = probed.iter().find(|(probed, _)| *probed == luid) {
+            return Ok(usable);
+        }
+        let started = Instant::now();
+        let probe = probe_h265(&adapter);
+        tracing::info!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_h265_probe",
+            usable = probe.is_ok(),
+            ms = started.elapsed().as_millis() as u64,
+            detail = ?probe.as_ref().err().map(ToString::to_string),
+        );
+        probed.push((luid, probe.is_ok()));
+        Ok(probe.is_ok())
+    };
+    probe().unwrap_or_else(|failure| {
+        tracing::info!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_h265_probe",
+            usable = false,
+            detail = ?failure.to_string(),
+        );
+        false
+    })
+}
+
+fn probe_h265(adapter: &IDXGIAdapter1) -> Result<()> {
+    let _runtime = Runtime::new()?;
+    let mut device = None;
+    let mut context = None;
+    unsafe {
+        D3D11CreateDevice(
+            adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )
+        .map_err(error)?;
+    }
+    let device = device.ok_or_else(|| error("missing D3D11 device"))?;
+    let context = context.ok_or_else(|| error("missing D3D11 device context"))?;
+    let manager = device_manager(&device, &context)?;
+    Codec::new(
+        &device,
+        &manager,
+        VideoCodec::H265,
+        1920,
+        1080,
+        60,
+        8_000_000,
+    )
+    .map(drop)
+}
+
 fn scaled_size(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
     // Integer arithmetic avoids rounding beyond the renderer's bounds. NV12
     // needs even dimensions; at most one source edge pixel is lost to rounding.
@@ -552,6 +759,7 @@ fn pick_gop(mut set: impl FnMut(u32) -> bool, mut read: impl FnMut() -> Option<u
 }
 
 struct Codec {
+    kind: VideoCodec,
     transform: IMFTransform,
     events: IMFMediaEventGenerator,
     api: ICodecAPI,
@@ -564,9 +772,12 @@ struct Codec {
     gop: u32,
 }
 impl Codec {
+    /// The first hardware encoder of `kind` on `device`'s adapter that takes
+    /// this pipeline's settings. There is no software fallback.
     fn new(
         device: &ID3D11Device,
         manager: &IMFDXGIDeviceManager,
+        kind: VideoCodec,
         width: u32,
         height: u32,
         fps: u32,
@@ -578,13 +789,12 @@ impl Codec {
         };
         let output = MFT_REGISTER_TYPE_INFO {
             guidMajorType: MFMediaType_Video,
-            guidSubtype: MFVideoFormat_H264,
+            guidSubtype: subtype(kind),
         };
         let attrs = attributes()?;
         let dxgi: IDXGIDevice = device.cast().map_err(error)?;
         let adapter = unsafe { dxgi.GetAdapter().map_err(error)?.GetDesc().map_err(error)? };
-        let luid = (u64::from(adapter.AdapterLuid.HighPart as u32) << 32)
-            | u64::from(adapter.AdapterLuid.LowPart);
+        let luid = luid_value(adapter.AdapterLuid);
         unsafe {
             attrs
                 .SetBlob(&MFT_ENUM_ADAPTER_LUID, &luid.to_le_bytes())
@@ -624,6 +834,7 @@ impl Codec {
                 &activation,
                 name.clone(),
                 manager,
+                kind,
                 width,
                 height,
                 fps,
@@ -639,7 +850,8 @@ impl Codec {
             }
         }
         Err(error(format!(
-            "No compatible hardware H.264 encoder on the capture GPU{}",
+            "No compatible hardware {} encoder on the capture GPU{}",
+            codec_name(kind),
             if failures.is_empty() {
                 String::new()
             } else {
@@ -648,10 +860,12 @@ impl Codec {
         )))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn activate(
         activation: &IMFActivate,
         name: String,
         manager: &IMFDXGIDeviceManager,
+        kind: VideoCodec,
         width: u32,
         height: u32,
         fps: u32,
@@ -678,6 +892,7 @@ impl Codec {
         let events = transform.cast().map_err(error)?;
         let api = transform.cast().map_err(error)?;
         let mut codec = Self {
+            kind,
             transform,
             events,
             api,
@@ -686,7 +901,7 @@ impl Codec {
             output_id: 0,
             need_input: 0,
             have_output: 0,
-            parameter_sets: ParameterSets::default(),
+            parameter_sets: ParameterSets::new(kind),
             gop: 0,
         };
         let mut input_ids = [0];
@@ -702,9 +917,26 @@ impl Codec {
             codec.output_id = output_ids[0];
         }
         codec.property(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true))?;
-        // Baseline profile forbids B slices even on drivers that reject this
-        // optional property. Do not require a vendor-specific writable switch.
-        let _ = codec.property(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32));
+        let b_frames = codec.property(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32));
+        // B-frames would reorder output. H.264's Baseline profile forbids them
+        // even on drivers that reject this optional property. H.265's Main
+        // profile allows them: an encoder that implements the property must
+        // turn them off and read back 0. One that does not (NVIDIA's HEVC MFT
+        // answers E_NOTIMPL) has only the low-latency mode, which is required
+        // above, and every output's check against reordering in `collect`.
+        if kind == VideoCodec::H265
+            && unsafe {
+                codec
+                    .api
+                    .IsSupported(&CODECAPI_AVEncMPVDefaultBPictureCount)
+            }
+            .is_ok()
+        {
+            b_frames?;
+            if codec.value(&CODECAPI_AVEncMPVDefaultBPictureCount) != Some(0) {
+                return Err(error("B-frames could not be turned off"));
+            }
+        }
         let _ = codec.property(
             &CODECAPI_AVEncCommonRateControlMode,
             &VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32),
@@ -714,14 +946,18 @@ impl Codec {
         // accepts a GOP SetValue but keeps its default of one IDR per fps frames.
         codec.gop = codec.set_infinite_gop();
         tracing::info!(encoder = %codec.name, gop = codec.gop, "desktop video encoder GOP");
-        let output = media_type(&MFVideoFormat_H264, width, height, fps)?;
+        let output = media_type(&subtype(kind), width, height, fps)?;
         let input = media_type(&MFVideoFormat_NV12, width, height, fps)?;
+        let profile = match kind {
+            VideoCodec::H265 => eAVEncH265VProfile_Main_420_8.0,
+            _ => eAVEncH264VProfile_Base.0,
+        };
         unsafe {
             output
                 .SetUINT32(&MF_MT_AVG_BITRATE, bitrate)
                 .map_err(error)?;
             output
-                .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)
+                .SetUINT32(&MF_MT_MPEG2_PROFILE, profile as u32)
                 .map_err(error)?;
             codec
                 .transform
@@ -750,6 +986,12 @@ impl Codec {
                 .map_err(|e| error(format!("codec property {key:?}: {e}")))
         }
     }
+    /// What the encoder reports for `key`, when it reads it back as a number.
+    fn value(&self, key: &GUID) -> Option<u32> {
+        unsafe { self.api.GetValue(key) }
+            .ok()
+            .and_then(|value| u32::try_from(&value).ok())
+    }
     /// Vendors accept a GOP setting and then clamp or ignore it, so only a
     /// value read back unchanged counts. Returns the GOP the encoder reports.
     fn set_infinite_gop(&self) -> u32 {
@@ -758,11 +1000,7 @@ impl Codec {
                 self.property(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(gop))
                     .is_ok()
             },
-            || {
-                unsafe { self.api.GetValue(&CODECAPI_AVEncMPVGOPSize) }
-                    .ok()
-                    .and_then(|value| u32::try_from(&value).ok())
-            },
+            || self.value(&CODECAPI_AVEncMPVGOPSize),
         )
     }
     fn events(&mut self) -> Result<()> {
@@ -863,7 +1101,7 @@ impl Codec {
         };
         if let Ok(size) = unsafe { media_type.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) } {
             if size > 64 * 1024 {
-                return Err(error("H.264 sequence header exceeds limit"));
+                return Err(error("sequence header exceeds limit"));
             }
             let mut bytes = vec![0; size as usize];
             unsafe {
@@ -877,36 +1115,24 @@ impl Codec {
         }
         Ok(())
     }
+    /// The access unit as sent, and whether it is a keyframe. MF's elementary
+    /// H.264 and H.265 types produce Annex B; refuse an unexpected format
+    /// instead of shipping undecodable length-prefixed data to phones. A
+    /// keyframe that comes without its parameter sets gets the last ones,
+    /// in-band or from the media type, in front.
     fn annex_b(&mut self, bytes: Vec<u8>) -> Result<(Vec<u8>, bool)> {
-        // MF's elementary H.264 type produces Annex B. Refuse an unexpected
-        // format instead of shipping undecodable length-prefixed data to phones.
         let units = nal_ranges(&bytes)?;
-        let keyframe = units.iter().any(|&(start, _)| bytes[start] & 0x1f == 5);
         self.parameter_sets.observe(&bytes, &units)?;
-        if keyframe
-            && (!units.iter().any(|&(start, _)| bytes[start] & 0x1f == 7)
-                || !units.iter().any(|&(start, _)| bytes[start] & 0x1f == 8))
-        {
-            if !self.parameter_sets.complete() {
-                self.update_header()?;
-            }
-            if !self.parameter_sets.complete() {
-                return Err(error("H.264 keyframe has no decoder configuration"));
-            }
-            let mut result = Vec::with_capacity(
-                self.parameter_sets.sps.len() + self.parameter_sets.pps.len() + bytes.len() + 8,
-            );
-            result.extend_from_slice(&[0, 0, 0, 1]);
-            result.extend_from_slice(&self.parameter_sets.sps);
-            result.extend_from_slice(&[0, 0, 0, 1]);
-            result.extend_from_slice(&self.parameter_sets.pps);
-            result.extend_from_slice(&bytes);
-            if result.len() > MAX_ACCESS_UNIT {
-                return Err(error("H.264 access unit exceeds video limit"));
-            }
-            return Ok((result, true));
+        let keyframe = units
+            .iter()
+            .any(|&(start, _)| nal(self.kind, bytes[start]) == Nal::Irap);
+        if !keyframe || self.parameter_sets.carried(&bytes, &units) {
+            return Ok((bytes, keyframe));
         }
-        Ok((bytes, keyframe))
+        if !self.parameter_sets.complete() {
+            self.update_header()?;
+        }
+        Ok((self.parameter_sets.prepend(&bytes, &units)?, true))
     }
 }
 impl Drop for Codec {
@@ -1138,13 +1364,19 @@ fn media_type(subtype: &GUID, width: u32, height: u32, fps: u32) -> Result<IMFMe
     }
     Ok(media_type)
 }
+fn subtype(kind: VideoCodec) -> GUID {
+    match kind {
+        VideoCodec::H265 => MFVideoFormat_HEVC,
+        _ => MFVideoFormat_H264,
+    }
+}
 fn activation_name(activation: &IMFActivate) -> String {
     let mut raw = PWSTR::null();
     let mut len = 0;
     if unsafe { activation.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut raw, &mut len) }
         .is_err()
     {
-        return "hardware H.264".into();
+        return "hardware encoder".into();
     }
     let name = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(raw.0, len as usize)) };
     unsafe {
@@ -1160,7 +1392,7 @@ fn sample_bytes(sample: &IMFSample) -> Result<Vec<u8>> {
         buffer.Lock(&mut raw, None, Some(&mut len)).map_err(error)?;
     }
     let result = if len as usize > MAX_ACCESS_UNIT || raw.is_null() || len == 0 {
-        Err(error("invalid H.264 access unit size"))
+        Err(error("invalid access unit size"))
     } else {
         Ok(unsafe { std::slice::from_raw_parts(raw, len as usize) }.to_vec())
     };
@@ -1169,9 +1401,11 @@ fn sample_bytes(sample: &IMFSample) -> Result<Vec<u8>> {
     }
     result
 }
+/// Each NAL unit's range in an Annex B access unit, from its header to the
+/// next start code. The scan is the same for H.264 and H.265.
 fn nal_ranges(bytes: &[u8]) -> Result<Vec<(usize, usize)>> {
     if !bytes.starts_with(&[0, 0, 0, 1]) && !bytes.starts_with(&[0, 0, 1]) {
-        return Err(error("hardware encoder did not produce Annex B H.264"));
+        return Err(error("hardware encoder did not produce Annex B"));
     }
     let mut units = Vec::new();
     let mut position = 0;
@@ -1189,43 +1423,143 @@ fn nal_ranges(bytes: &[u8]) -> Result<Vec<(usize, usize)>> {
         }
         let start = position + prefix;
         if start >= bytes.len() {
-            return Err(error("truncated H.264 NAL"));
+            return Err(error("truncated NAL unit"));
         }
         units.push((start, bytes.len()));
         if units.len() > 4096 {
-            return Err(error("too many H.264 NAL units"));
+            return Err(error("too many NAL units"));
         }
         position = start;
     }
     if units.is_empty() {
-        return Err(error("hardware encoder did not produce Annex B H.264"));
+        return Err(error("hardware encoder did not produce Annex B"));
     }
     Ok(units)
 }
 
-#[derive(Default)]
+/// What a NAL unit is, as far as sending it goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Nal {
+    /// A picture a decoder can start from: H.264's IDR (5); H.265's IRAP
+    /// pictures (16 to 21), which hold its IDRs (19 and 20) and CRA (21).
+    Irap,
+    /// H.265's video parameter set (32); H.264 has none.
+    Vps,
+    /// H.264 7, H.265 33.
+    Sps,
+    /// H.264 8, H.265 34.
+    Pps,
+    /// The access unit delimiter, first in its unit when there is one:
+    /// H.264 9, H.265 35.
+    Delimiter,
+    Other,
+}
+
+/// A NAL unit's kind from its first header byte: H.264's type is the low five
+/// bits; H.265's two-byte header holds its type in the six bits below the
+/// forbidden bit, `(b0 >> 1) & 0x3f`.
+fn nal(kind: VideoCodec, header: u8) -> Nal {
+    match kind {
+        VideoCodec::H265 => match (header >> 1) & 0x3f {
+            16..=21 => Nal::Irap,
+            32 => Nal::Vps,
+            33 => Nal::Sps,
+            34 => Nal::Pps,
+            35 => Nal::Delimiter,
+            _ => Nal::Other,
+        },
+        _ => match header & 0x1f {
+            5 => Nal::Irap,
+            7 => Nal::Sps,
+            8 => Nal::Pps,
+            9 => Nal::Delimiter,
+            _ => Nal::Other,
+        },
+    }
+}
+
+/// The parameter sets an encoder last produced, in-band or in its media type.
 struct ParameterSets {
+    kind: VideoCodec,
+    vps: Vec<u8>,
     sps: Vec<u8>,
     pps: Vec<u8>,
 }
 impl ParameterSets {
+    fn new(kind: VideoCodec) -> Self {
+        Self {
+            kind,
+            vps: Vec::new(),
+            sps: Vec::new(),
+            pps: Vec::new(),
+        }
+    }
+    /// The sets this codec's decoder needs, in decoding order: H.265's VPS
+    /// first.
+    fn needed(&self) -> impl Iterator<Item = Nal> + use<> {
+        let vps = (self.kind == VideoCodec::H265).then_some(Nal::Vps);
+        vps.into_iter().chain([Nal::Sps, Nal::Pps])
+    }
+    fn set(&self, nal: Nal) -> &[u8] {
+        match nal {
+            Nal::Vps => &self.vps,
+            Nal::Sps => &self.sps,
+            _ => &self.pps,
+        }
+    }
     fn complete(&self) -> bool {
-        !self.sps.is_empty() && !self.pps.is_empty()
+        self.needed().all(|nal| !self.set(nal).is_empty())
+    }
+    /// Whether the units carry every set this codec needs.
+    fn carried(&self, bytes: &[u8], units: &[(usize, usize)]) -> bool {
+        self.needed().all(|needed| {
+            units
+                .iter()
+                .any(|&(start, _)| nal(self.kind, bytes[start]) == needed)
+        })
     }
     fn observe(&mut self, bytes: &[u8], units: &[(usize, usize)]) -> Result<()> {
         for &(start, end) in units {
-            let target = match bytes[start] & 0x1f {
-                7 => &mut self.sps,
-                8 => &mut self.pps,
-                _ => continue,
+            let target = match nal(self.kind, bytes[start]) {
+                Nal::Vps => &mut self.vps,
+                Nal::Sps => &mut self.sps,
+                Nal::Pps => &mut self.pps,
+                Nal::Irap | Nal::Delimiter | Nal::Other => continue,
             };
             if end - start > 64 * 1024 {
-                return Err(error("H.264 parameter set exceeds limit"));
+                return Err(error("parameter set exceeds limit"));
             }
             target.clear();
             target.extend_from_slice(&bytes[start..end]);
         }
         Ok(())
+    }
+    /// `keyframe`, whose NAL units are `units`, with every kept set in front
+    /// of its pictures: after its delimiter, which stays first.
+    fn prepend(&self, keyframe: &[u8], units: &[(usize, usize)]) -> Result<Vec<u8>> {
+        if !self.complete() {
+            return Err(error(format!(
+                "{} keyframe has no decoder configuration",
+                codec_name(self.kind)
+            )));
+        }
+        let at = match units.first() {
+            Some(&(start, end)) if nal(self.kind, keyframe[start]) == Nal::Delimiter => end,
+            _ => 0,
+        };
+        let mut unit = Vec::with_capacity(
+            self.vps.len() + self.sps.len() + self.pps.len() + keyframe.len() + 12,
+        );
+        unit.extend_from_slice(&keyframe[..at]);
+        for nal in self.needed() {
+            unit.extend_from_slice(&[0, 0, 0, 1]);
+            unit.extend_from_slice(self.set(nal));
+        }
+        unit.extend_from_slice(&keyframe[at..]);
+        if unit.len() > MAX_ACCESS_UNIT {
+            return Err(error("access unit exceeds video limit"));
+        }
+        Ok(unit)
     }
 }
 
@@ -1283,7 +1617,7 @@ mod tests {
     }
     #[test]
     fn parameter_sets_survive_partial_updates_and_emulation_prevention() -> Result<()> {
-        let mut sets = ParameterSets::default();
+        let mut sets = ParameterSets::new(VideoCodec::H264);
         let initial = [0, 0, 0, 1, 0x67, 1, 0, 0, 3, 1, 0, 0, 1, 0x68, 2];
         sets.observe(&initial, &nal_ranges(&initial)?)?;
         assert!(sets.complete());
@@ -1294,6 +1628,51 @@ mod tests {
         assert_eq!(sets.pps, &[0x68, 3]);
         assert!(nal_ranges(&[0, 0, 0, 1]).is_err());
         assert!(nal_ranges(&[0, 0, 0, 8, 0x65]).is_err());
+        Ok(())
+    }
+    #[test]
+    fn h265_keyframes_and_parameter_sets_follow_its_two_byte_header() -> Result<()> {
+        let h265 = |kind: u8| nal(VideoCodec::H265, kind << 1);
+        assert_eq!([16, 19, 20, 21].map(h265), [Nal::Irap; 4]);
+        assert_eq!(
+            [32, 33, 34, 35, 1, 39].map(h265),
+            [
+                Nal::Vps,
+                Nal::Sps,
+                Nal::Pps,
+                Nal::Delimiter,
+                Nal::Other,
+                Nal::Other
+            ]
+        );
+        // Read as H.264, an IDR_N_LP header is a PPS.
+        assert_eq!(nal(VideoCodec::H264, 20 << 1), Nal::Pps);
+
+        let sets_only = [
+            0, 0, 0, 1, 0x40, 1, 0xa, 0, 0, 0, 1, 0x42, 1, 0xb, 0, 0, 1, 0x44, 1, 0xc,
+        ];
+        let mut sets = ParameterSets::new(VideoCodec::H265);
+        sets.observe(&sets_only, &nal_ranges(&sets_only)?)?;
+        assert!(sets.complete());
+        // An IDR without them gets the VPS, SPS and PPS in front, in order,
+        // after its delimiter ...
+        let idr = [0, 0, 0, 1, 0x46, 1, 0x50, 0, 0, 0, 1, 0x28, 1, 0xd];
+        let units = nal_ranges(&idr)?;
+        assert!(!sets.carried(&idr, &units));
+        assert_eq!(
+            sets.prepend(&idr, &units)?,
+            [
+                0, 0, 0, 1, 0x46, 1, 0x50, 0, 0, 0, 1, 0x40, 1, 0xa, 0, 0, 0, 1, 0x42, 1, 0xb, 0,
+                0, 0, 1, 0x44, 1, 0xc, 0, 0, 0, 1, 0x28, 1, 0xd
+            ]
+        );
+        // ... one that carries them goes as it is ...
+        let whole = [&sets_only[..], &idr].concat();
+        assert!(sets.carried(&whole, &nal_ranges(&whole)?));
+        // ... and without a VPS there is no decoder configuration.
+        let mut partial = ParameterSets::new(VideoCodec::H265);
+        partial.observe(&sets_only[7..], &nal_ranges(&sets_only[7..])?)?;
+        assert!(!partial.complete() && partial.prepend(&idr, &units).is_err());
         Ok(())
     }
 }

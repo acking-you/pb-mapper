@@ -58,11 +58,8 @@ pub(crate) struct SessionShared {
     pub targets: Targets,
     /// C to B-send and `Host::status`.
     pub state: tokio::sync::watch::Sender<EngineState>,
-    /// C to B-send.
-    pub cursor: tokio::sync::watch::Sender<Option<CursorUpdate>>,
-    /// Microseconds since `epoch` of the last pointer input (B-recv), for the
-    /// cursor echo suppression.
-    pub pointer_input_at_us: AtomicU64,
+    /// C to B-send: the newest pointer report.
+    pub cursor: tokio::sync::watch::Sender<Option<CursorReport>>,
     /// Wakes C's waiter.
     pub wake: Wake,
 }
@@ -81,7 +78,6 @@ impl SessionShared {
             targets,
             state: tokio::sync::watch::Sender::new(EngineState::connecting(control_allowed)),
             cursor: tokio::sync::watch::Sender::new(None),
-            pointer_input_at_us: AtomicU64::new(0),
             wake,
         }
     }
@@ -158,10 +154,19 @@ pub(crate) struct InputWaitStats {
     pub max_us: u32,
 }
 
+/// A pointer sample, in the display's physical pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CursorUpdate {
     pub generation: u64,
     pub x: i32,
     pub y: i32,
     pub visible: bool,
+}
+
+/// A sample C reports. The serial counts reports, so that B-send writes each
+/// one once, even one at a position it wrote before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CursorReport {
+    pub serial: u64,
+    pub cursor: CursorUpdate,
 }

@@ -279,13 +279,14 @@ impl Backend for Desktop {
         if self
             .encoder
             .as_ref()
-            .is_none_or(|(context, _)| context != expected)
+            .is_none_or(|(context, encoder)| context != expected || encoder.codec() != codec)
         {
             self.encoder = None;
             self.encoder = Some((
                 expected.clone(),
                 crate::video::windows::Encoder::new_with_size(
                     &expected.display,
+                    codec,
                     self.video_limits.max_fps,
                     rate.bitrate,
                     self.video_limits.max_width,
@@ -336,6 +337,11 @@ impl Backend for Desktop {
         self.encoder
             .as_ref()
             .map_or(0, |(_, encoder)| encoder.pending_len())
+    }
+    /// The helper's worker answers the same way, in the interactive session
+    /// where it encodes.
+    fn encodes_h265(&mut self) -> bool {
+        crate::video::windows::h265_available(self.id)
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         let context = self.context()?;

@@ -2,7 +2,8 @@ use crate::{Backend, Capabilities, Display, Result};
 
 pub fn capabilities() -> Capabilities {
     Capabilities {
-        // A Windows host encodes H.264 with Media Foundation.
+        // A Windows host encodes H.264 with Media Foundation, and H.265 where
+        // its GPU has an encoder for it (`Backend::encodes_h265`).
         host: media_foundation(),
         viewer: true,
         secure_desktop: false,

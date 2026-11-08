@@ -15,13 +15,11 @@ pub(crate) const CAPABILITY_LOCK: &str = "lock";
 /// The viewer reads `Stats::encoder_dwell_ms`; a host writes it to no other.
 pub(crate) const CAPABILITY_ENCODER_DWELL: &str = "encoder_dwell";
 /// From a viewer: it can decode `VideoCodec::H265`. A host that can encode it
-/// may then answer `Accepted { codec: h265 }`; no other host ever sees the
-/// value.
-#[allow(dead_code)] // Read once the host and viewer packages land.
+/// then answers `Accepted { codec: h265 }`; no other host ever sees the
+/// value, which is never in `codecs`.
 pub(crate) const CAPABILITY_H265: &str = "h265";
 /// From a viewer: `limits.max_fps` is a frame rate its user chose, which
 /// replaces every quality preset's own ceiling for the session.
-#[allow(dead_code)] // Read once the host and viewer packages land.
 pub(crate) const CAPABILITY_FPS_OVERRIDE: &str = "fps_override";
 const MAX_CAPABILITIES: usize = 16;
 
@@ -44,7 +42,8 @@ pub(crate) enum ViewerMessage {
     Authenticate {
         /// The 43-character base64url form of the invitation's 32-byte token.
         token: String,
-        /// One or two codecs, in the viewer's preference order.
+        /// One or two codecs, in the viewer's preference order; never
+        /// `h265`, which is the capability of that name.
         codecs: Vec<VideoCodec>,
         /// Constant for the session.
         limits: VideoLimits,
