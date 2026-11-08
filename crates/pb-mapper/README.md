@@ -107,7 +107,8 @@ Requires a Tokio runtime. The `pb-mapper` CLI and relay live in the
 | Choose the path | `RegisterOptions { allow_direct }`, `ConnectOptions { path: PathPolicy::{Auto, RelayOnly} }` |
 | Ask the router to map the direct port | `port_mapping: PortMapping::{Auto, Always, Off}` in either options; `Auto`, once punching fails, by default |
 | Reclaim abandoned TCP data connections | `register_with_idle_timeout`, `RegisterOptions { idle_timeout }` |
-| Listen to a tunnel | `subscribe()` for status, `subscribe_events()` for every event as it happens, `diagnostics()` for a snapshot |
+| Listen to a tunnel | `subscribe()` for status, `subscribe_events()` for every event as it happens, `subscribe_metrics(every)` for sessions, bytes per path and round trips as they change, `diagnostics()` for a snapshot |
+| Watch the relay carrier | `Client::relay_diagnostics`, `Client::subscribe_relay_metrics(every)` |
 | Wake recovery after a network change or resume | `Client::notify_network_change` |
 | Inspect a namespace | `list_keys`, `service_status`, `sessions`, `remote_id` |
 | Manage credentials (administrator key) | `admin()`: `issue_key`, `show_key`, `reveal_key`, `renew_key`, `revoke_key`, `list_keys_all`, `gc_keys`, `auth_status` |
@@ -151,15 +152,42 @@ while let Some(event) = events.recv().await {
 ```
 
 Besides the outcomes, a stream carries the steps that lead to them: relay
-phases, direct stages and attempts given up, sessions opening and closing,
+phases, direct stages and attempts given up, sessions opening and closing
+(each closing with its duration and bytes), a LAN found and a LAN missed,
 and each change of the port mapping. `release_sent` is a PCP or NAT-PMP deletion the router does not
 acknowledge; `released` is one UPnP confirmed. Each subscriber reads at its
-own pace, and none keeps the tunnel alive.
+own pace, and none keeps the tunnel alive. `TunnelEventKind` is
+`#[non_exhaustive]`: a `match` needs a wildcard arm.
+
+The figures that keep changing are `metrics()`: sessions open and in all on
+each path, the application bytes each path carried (`traffic.relay`,
+`traffic.direct`, of which `traffic.lan`; sent is what this end's local side
+sent), the relay's health with the smoothed round trip of the tunnel's
+control exchanges, and the newest direct link with QUIC's figures.
+`subscribe_metrics(every)` samples them at once, then every period and
+whenever a session opens or closes, never twice within 100 ms, and once more
+after the tunnel stops:
+
+```rust,ignore
+let mut metrics = connection.subscribe_metrics(Duration::from_secs(1));
+while let Some(sample) = metrics.recv().await {
+    let relay = sample.traffic.relay;
+    println!("{} open, relay {}/{} bytes", sample.sessions.active_relay, relay.sent, relay.received);
+}
+```
+
+Nothing samples in the background and nothing queues: each sample is taken
+when `recv()` returns it, so a slow reader gets fewer, fresher ones. One
+second suits a panel on screen; lists and logs need five or more. Both ends
+count every session, a share's relayed ones and a relay-only connection's
+included. `LinkStats` bytes are QUIC's on the wire, more than `traffic`.
 
 The relay carrier defaults to TCP. Select QUIC with
 `client.with_relay_transport(RelayTransport::Quic)?` before registering or
 connecting, and inspect `client.relay_diagnostics().await` for connection reuse,
-RTT, loss and byte counters. Clients of the same relay and carrier in one
+RTT, loss, bandwidth and byte counters, or follow it with
+`client.subscribe_relay_metrics(every)`; `control_rtt_ms` is the smoothed
+round trip of every tunnel's control exchanges, over TCP as over QUIC. Clients of the same relay and carrier in one
 process share one pool, so every tunnel rides one QUIC connection per
 credential; a connection left without streams closes after 30 seconds.
 `client.relay_quic_port().await?` asks, over TCP, whether the relay offers QUIC
