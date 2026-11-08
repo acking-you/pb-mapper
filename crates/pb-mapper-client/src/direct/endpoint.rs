@@ -24,7 +24,7 @@ use tokio::{
 /// How long a path that is not on the LAN waits after its first answer,
 /// when the peer has shown it shares this end's network: a LAN handshake
 /// that finishes in the meantime saves a handshake to every other path.
-pub(super) const LAN_HEAD_START: Duration = Duration::from_millis(150);
+const LAN_HEAD_START: Duration = Duration::from_millis(150);
 /// When paths on the LAN are probed again after the first round, on any
 /// evidence of one: a first probe lost to Wi-Fi, or dropped by a firewall
 /// the peer's own probe had not opened yet, costs 20 ms, not 120.
@@ -579,7 +579,7 @@ impl Network {
 /// Whether a path that answered `since` ago may be dialed now. Only strong
 /// evidence of a shared network holds a path off it back, and only for
 /// [`LAN_HEAD_START`] or until the LAN has failed.
-pub(super) fn dial_now(
+fn dial_now(
     evidence: Option<LanEvidence>,
     on_lan: bool,
     since: Duration,
