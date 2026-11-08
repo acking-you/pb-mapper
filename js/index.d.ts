@@ -230,6 +230,13 @@ export interface JsConnectRequest {
    * Ignored on the relay-only path.
    */
   portMapping?: string
+  /**
+   * Try a local network shared with the publisher first (default `true`):
+   * probe its addresses there first, and once that network is known to be
+   * there, hold other paths back up to 150 ms for it. `false` dials every
+   * path as soon as it answers. Ignored on the relay-only path.
+   */
+  lanFirst?: boolean
   key: string
   localAddr: string
   transport: string
@@ -387,6 +394,13 @@ export interface JsRegisterRequest {
    * Ignored when direct is not allowed.
    */
   portMapping?: string
+  /**
+   * Probe a consumer's addresses on a local network shared with it first,
+   * and again 20 and 50 ms later (default `true`). `false` probes them in
+   * the order the consumer offered them. Ignored when direct is not
+   * allowed.
+   */
+  lanFirst?: boolean
   key: string
   localAddr: string
   transport: string

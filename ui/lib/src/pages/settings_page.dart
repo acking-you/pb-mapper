@@ -44,6 +44,8 @@ class SettingsPage extends StatelessWidget {
             children: [
               RelayCard(store: scope.store),
               const SizedBox(height: 16),
+              _DirectCard(store: scope.store),
+              const SizedBox(height: 16),
               _AppearanceCard(prefs: scope.prefs),
               // A compact window's bar has no Logs: it lives here.
               if (!ShellLayout.wideOf(context)) ...[
@@ -551,6 +553,103 @@ class _SetupStringDialogState extends State<_SetupStringDialog> {
           child: Text(l10n.apply),
         ),
       ],
+    );
+  }
+}
+
+/// How this computer tries the paths to another: a property of this
+/// computer, not of the relay, so it is saved at once and the relay is asked
+/// nothing. Tunnels and the remote desktop take it as they start; the
+/// running tunnels it would reach are offered a restart.
+class _DirectCard extends StatefulWidget {
+  const _DirectCard({required this.store});
+
+  final AppStore store;
+
+  @override
+  State<_DirectCard> createState() => _DirectCardState();
+}
+
+class _DirectCardState extends State<_DirectCard> {
+  /// The value being saved, shown until the save is answered.
+  bool? _saving;
+
+  AppStore get _store => widget.store;
+
+  Future<void> _set(bool on) async {
+    setState(() => _saving = on);
+    final result = await _store.setLanFirst(on);
+    if (!mounted) return;
+    setState(() => _saving = null);
+    if (!result.success) {
+      showToast(context, result.message, kind: ToastKind.error);
+      return;
+    }
+    final running = _store.liveDirect;
+    if (running.isNotEmpty) await _offerRestart(running);
+  }
+
+  Future<void> _offerRestart(List<Tunnel> running) async {
+    final l10n = context.l10n;
+    final here = Navigator.of(context).context;
+    final now = await showDialog<bool>(
+      context: here,
+      builder: (c) => AlertDialog(
+        key: const Key('lan-first-restart'),
+        icon: const Icon(AppIcons.refresh),
+        title: Text(l10n.lanFirstRestartTitle),
+        content: SizedBox(
+          width: 420,
+          child: Text(l10n.lanFirstRestartBody(running.length)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(c).pop(false),
+            child: Text(l10n.later),
+          ),
+          FilledButton(
+            key: const Key('lan-first-restart-now'),
+            onPressed: () => Navigator.of(c).pop(true),
+            child: Text(l10n.lanFirstRestartNow),
+          ),
+        ],
+      ),
+    );
+    if (now != true || !here.mounted) return;
+    final failed = await _store.restartTunnels(running);
+    if (!here.mounted) return;
+    if (failed.isEmpty) {
+      showToast(
+        here,
+        l10n.lanFirstRestarted(running.length),
+        kind: ToastKind.success,
+      );
+    } else {
+      showToast(
+        here,
+        l10n.tunnelsRestartFailed(failed.join(', ')),
+        kind: ToastKind.warning,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    return GroupCard(
+      title: l10n.settingsDirect,
+      icon: AppIcons.direct,
+      child: ListenableBuilder(
+        listenable: _store,
+        builder: (context, _) => SwitchListTile(
+          key: const Key('settings-lan-first'),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+          title: Text(l10n.lanFirst),
+          subtitle: Text(l10n.lanFirstHelp),
+          value: _saving ?? _store.config.lanFirst,
+          onChanged: _saving == null ? _set : null,
+        ),
+      ),
     );
   }
 }

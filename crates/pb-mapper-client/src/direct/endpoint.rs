@@ -22,12 +22,14 @@ use tokio::{
 };
 
 /// How long a path that is not on the LAN waits after its first answer,
-/// when the peer has shown it shares this end's network: a LAN handshake
-/// that finishes in the meantime saves a handshake to every other path.
+/// with LAN-first on, once the LAN is known to be there (by strong evidence,
+/// or because a path on it answered): a LAN handshake that finishes in the
+/// meantime saves a handshake to every other path.
 const LAN_HEAD_START: Duration = Duration::from_millis(150);
-/// When paths on the LAN are probed again after the first round, on any
-/// evidence of one: a first probe lost to Wi-Fi, or dropped by a firewall
-/// the peer's own probe had not opened yet, costs 20 ms, not 120.
+/// When paths on the LAN are probed again after the first round, with
+/// LAN-first on and any evidence of one: a first probe lost to Wi-Fi, or
+/// dropped by a firewall the peer's own probe had not opened yet, costs
+/// 20 ms, not 120.
 const LAN_REPROBES: [Duration; 2] = [Duration::from_millis(20), Duration::from_millis(50)];
 
 struct Discovery {
@@ -394,15 +396,16 @@ impl Network {
             .flat_map(|(socket, _)| socket.learned(id))
             .collect()
     }
-    /// How a peer's candidates are probed: every 120 ms all of them, those on
-    /// a local network first, and on evidence of one those again shortly
-    /// after the first round.
+    /// How a peer's candidates are probed: every 120 ms all of them. With
+    /// LAN-first on, those on a local network go first, and on evidence of
+    /// one again shortly after the first round; off, they keep the peer's
+    /// order and nothing is probed again early.
     fn probing(candidates: &[SocketAddr], lan: &Assessment) -> (Vec<SocketAddr>, Vec<SocketAddr>) {
         let ordered = lan.order(candidates);
         let reprobed = ordered
             .iter()
             .copied()
-            .filter(|addr| lan.is_lan(*addr))
+            .filter(|addr| lan.prefers() && lan.is_lan(*addr))
             .collect();
         (ordered, reprobed)
     }
@@ -427,7 +430,7 @@ impl Network {
         let (ordered, reprobed) = Self::probing(&grant.consumer.candidates, lan);
         let wake = self.wake(&id);
         let started = Instant::now();
-        let mut reprobes = reprobe_times(started, lan.evidence, &reprobed);
+        let mut reprobes = reprobe_times(started, lan.preferred(), &reprobed);
         let mut probes = tokio::time::interval(Duration::from_millis(120));
         loop {
             let reprobe = reprobes.first().copied();
@@ -483,7 +486,7 @@ impl Network {
         let (ordered, reprobed) = Self::probing(&grant.provider.candidates, lan);
         let probed = self.reachable(&ordered);
         let wake = self.wake(&id);
-        let mut reprobes = reprobe_times(started, lan.evidence, &reprobed);
+        let mut reprobes = reprobe_times(started, lan.preferred(), &reprobed);
         let mut attempts = JoinSet::new();
         let mut tried = Vec::new();
         // LAN handshakes started and failed, and whether the system refused
@@ -493,7 +496,11 @@ impl Network {
         loop {
             let now = Instant::now();
             let mut held: Option<Instant> = None;
-            for (addr, answered) in self.learned(&id) {
+            let learned = self.learned(&id);
+            // A LAN path that answered an authenticated probe is proof of
+            // the LAN, where the offer was only evidence of it.
+            let hold = lan.holds(learned.iter().any(|(addr, _)| lan.is_lan(*addr)));
+            for (addr, answered) in learned {
                 // At most 16 handshakes per setup: an attempt is bounded
                 // work, and the setup deadline ends the search anyway.
                 if tried.contains(&addr) || tried.len() >= 16 {
@@ -502,7 +509,7 @@ impl Network {
                 let on_lan = lan.is_lan(addr);
                 let settled = lan_refused || (lan_dialed > 0 && lan_failed == lan_dialed);
                 let since = now.saturating_duration_since(answered);
-                if !dial_now(lan.evidence, on_lan, since, settled) {
+                if !dial_now(hold, on_lan, since, settled) {
                     let at = answered + LAN_HEAD_START;
                     held = Some(held.map_or(at, |held| held.min(at)));
                     continue;
@@ -576,19 +583,15 @@ impl Network {
         }
     }
 }
-/// Whether a path that answered `since` ago may be dialed now. Only strong
-/// evidence of a shared network holds a path off it back, and only for
-/// [`LAN_HEAD_START`] or until the LAN has failed.
-fn dial_now(
-    evidence: Option<LanEvidence>,
-    on_lan: bool,
-    since: Duration,
-    lan_failed: bool,
-) -> bool {
-    on_lan || lan_failed || since >= LAN_HEAD_START || !evidence.is_some_and(LanEvidence::strong)
+/// Whether a path that answered `since` ago may be dialed now. Only while
+/// the LAN [`holds`](Assessment::holds) other paths back is a path off it
+/// held, and only for [`LAN_HEAD_START`] or until the LAN has failed.
+fn dial_now(hold: bool, on_lan: bool, since: Duration, lan_failed: bool) -> bool {
+    on_lan || lan_failed || since >= LAN_HEAD_START || !hold
 }
 
-/// When LAN paths are probed again, on any evidence of a shared network.
+/// When LAN paths are probed again, on any evidence of a shared network
+/// that this end acts on.
 fn reprobe_times(
     started: Instant,
     evidence: Option<LanEvidence>,
@@ -741,18 +744,40 @@ mod tests {
     }
 
     #[test]
-    fn only_strong_evidence_holds_other_paths_back_and_never_for_long() {
-        let strong = Some(LanEvidence::PublicIpSubnet);
+    fn only_a_lan_known_to_be_there_holds_other_paths_back_and_never_for_long() {
+        let assessed = |evidence, prefer| {
+            let mut lan = Assessment::new(Arc::default(), &[], prefer);
+            lan.evidence = evidence;
+            lan
+        };
+        let strong = assessed(Some(LanEvidence::PublicIpSubnet), true);
+        let weak = assessed(Some(LanEvidence::Subnet), true);
+        let none = assessed(None, true);
         let soon = Duration::from_millis(10);
-        // No evidence, or weak evidence, dials whatever answers at once.
-        assert!(dial_now(None, false, Duration::ZERO, false));
-        assert!(dial_now(Some(LanEvidence::Subnet), false, soon, false));
+        // No evidence dials whatever answers at once; so does weak evidence,
+        // a private subnet that may merely collide, while no LAN path has
+        // answered.
+        assert!(dial_now(none.holds(false), false, soon, false));
+        assert!(dial_now(weak.holds(false), false, soon, false));
         // Strong evidence: the LAN at once, the rest after the head start,
         // or as soon as the LAN has failed.
-        assert!(dial_now(strong, true, Duration::ZERO, false));
-        assert!(!dial_now(strong, false, soon, false));
-        assert!(dial_now(strong, false, LAN_HEAD_START, false));
-        assert!(dial_now(strong, false, soon, true));
+        let hold = strong.holds(false);
+        assert!(dial_now(hold, true, Duration::ZERO, false));
+        assert!(!dial_now(hold, false, soon, false));
+        assert!(dial_now(hold, false, LAN_HEAD_START, false));
+        assert!(dial_now(hold, false, soon, true));
+        // A LAN path's answer proves the LAN, whatever the offer showed.
+        assert!(!dial_now(weak.holds(true), false, soon, false));
+        assert!(!dial_now(none.holds(true), false, soon, false));
+        // LAN-first off: nothing waits, and nothing is probed again early.
+        let off = assessed(Some(LanEvidence::PublicIpSubnet), false);
+        assert!(dial_now(off.holds(true), false, soon, false));
+        let lan = [SocketAddr::from(([192, 168, 1, 2], 4000))];
+        assert!(reprobe_times(Instant::now(), off.preferred(), &lan).is_empty());
+        assert_eq!(
+            reprobe_times(Instant::now(), strong.preferred(), &lan).len(),
+            LAN_REPROBES.len()
+        );
     }
 
     /// Where punching works, a tunnel that maps when needed never asks the

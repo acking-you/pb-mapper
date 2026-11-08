@@ -5,7 +5,7 @@ use crate::{HostStatus, Result, error};
 use pb_mapper_client::sdk::RelayTransport;
 use serde::{Deserialize, Serialize};
 
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v4";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v5";
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const FILE_NAME: &str = "background-host.dpapi";
 const REVOKED_MARKER: &str = "background-host.revoked";
@@ -27,6 +27,17 @@ pub struct Options {
     pub credential: String,
     pub relay_transport: RelayTransport,
     pub settings: Settings,
+    /// The host's `HostOptions::lan_first`, as the application's setting
+    /// was when sharing started. Written only when off, so a grant saved
+    /// with the default stays readable by a helper from before it.
+    #[serde(default = "lan_first_by_default", skip_serializing_if = "is_true")]
+    pub lan_first: bool,
+}
+fn lan_first_by_default() -> bool {
+    true
+}
+fn is_true(value: &bool) -> bool {
+    *value
 }
 impl std::fmt::Debug for Options {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -35,6 +46,7 @@ impl std::fmt::Debug for Options {
             .field("credential", &"[redacted]")
             .field("relay_transport", &self.relay_transport)
             .field("settings", &self.settings)
+            .field("lan_first", &self.lan_first)
             .finish()
     }
 }
@@ -162,3 +174,36 @@ pub async fn set_control_allowed(allow_control: bool) -> Result<Snapshot> {
 mod service;
 #[cfg(feature = "windows-helper")]
 pub(super) use service::{revoke_installation, run};
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// A grant saved with LAN-first on, the default, stays readable by a
+    /// protocol 4 helper, whose `Options` refuse unknown fields; one saved
+    /// before the field existed reads as on.
+    #[test]
+    fn lan_first_is_written_only_when_off() {
+        let mut options = Options {
+            server: "relay.example:7666".into(),
+            credential: "background-test-key-000000000000".into(),
+            relay_transport: RelayTransport::Tcp,
+            settings: Settings {
+                service: "desktop:study".into(),
+                display_id: 1,
+                allow_control: false,
+                allow_direct: true,
+                auto_start: true,
+            },
+            lan_first: true,
+        };
+        let on = serde_json::to_value(&options).unwrap();
+        assert!(on.get("lan_first").is_none());
+        assert!(serde_json::from_value::<Options>(on).unwrap().lan_first);
+        options.lan_first = false;
+        let off = serde_json::to_value(&options).unwrap();
+        assert_eq!(off["lan_first"], false);
+        assert!(!serde_json::from_value::<Options>(off).unwrap().lan_first);
+    }
+}

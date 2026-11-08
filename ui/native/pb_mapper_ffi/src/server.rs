@@ -241,12 +241,13 @@ mod tests {
                     .state
                     .lock()
                     .await
-                    .update_config(
-                        address.clone(),
-                        false,
-                        pb_mapper_testkit::TEST_ADMIN_KEY.into(),
-                        RelayTransport::Tcp,
-                    )
+                    .update_config(crate::state::AppConfig {
+                        server_address: address.clone(),
+                        keep_alive_enabled: false,
+                        msg_header_key: pb_mapper_testkit::TEST_ADMIN_KEY.into(),
+                        relay_transport: RelayTransport::Tcp,
+                        lan_first: true,
+                    })
                     .await
             })
             .unwrap();

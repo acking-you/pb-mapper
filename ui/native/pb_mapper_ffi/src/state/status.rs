@@ -53,7 +53,7 @@ impl PbMapperState {
     pub(crate) fn relay_client(&self) -> Result<Client, CtlError> {
         let mut cached = self.relay_client.lock();
         if let Some((config, client)) = cached.as_ref()
-            && *config == self.config
+            && config.same_relay(&self.config)
         {
             return Ok(client.clone());
         }
@@ -70,21 +70,15 @@ impl PbMapperState {
         Ok(client)
     }
 
-    pub async fn update_config(
-        &mut self,
-        server_address: String,
-        keep_alive: bool,
-        msg_header_key: String,
-        relay_transport: RelayTransport,
-    ) -> Result<(), CtlError> {
-        let msg_header_key = normalize_msg_header_key(msg_header_key)?;
-        let previous = self.config.clone();
+    /// Save `candidate` as this computer's config, its credential checked
+    /// and in effect for the process. What is cached about the relay is
+    /// dropped only when the relay settings changed.
+    pub async fn update_config(&mut self, candidate: AppConfig) -> Result<(), CtlError> {
         let candidate = AppConfig {
-            server_address,
-            keep_alive_enabled: keep_alive,
-            msg_header_key,
-            relay_transport,
+            msg_header_key: normalize_msg_header_key(candidate.msg_header_key)?,
+            ..candidate
         };
+        let previous = self.config.clone();
         self.write_config_file(&candidate)?;
         self.config = candidate;
         if let Err(error) = self.apply_msg_header_key_env() {
@@ -93,7 +87,9 @@ impl PbMapperState {
             let _ = self.apply_msg_header_key_env();
             return Err(error);
         }
-        self.reset_status_caches().await;
+        if !previous.same_relay(&self.config) {
+            self.reset_status_caches().await;
+        }
         Ok(())
     }
 
@@ -294,7 +290,7 @@ impl PbMapperState {
     fn known_quic_offer(&self) -> Option<Option<u16>> {
         self.quic_offer
             .as_ref()
-            .filter(|(config, _)| *config == self.config)
+            .filter(|(config, _)| config.same_relay(&self.config))
             .map(|(_, port)| *port)
     }
 
@@ -304,7 +300,7 @@ impl PbMapperState {
     /// under the same settings may land in either order; both are the same
     /// relay's answer a moment apart, and the next forced check asks again.
     fn remember_quic_offer(&mut self, config: AppConfig, port: Option<u16>) {
-        if config == self.config {
+        if config.same_relay(&self.config) {
             self.quic_offer = Some((config, port));
         }
     }

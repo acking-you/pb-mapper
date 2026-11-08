@@ -55,7 +55,7 @@ impl Provider {
         shutdown: CancellationToken,
         idle: Option<Duration>,
         diagnostics: Diagnostics,
-        port_mapping: crate::sdk::PortMapping,
+        policy: crate::sdk::DirectPolicy,
     ) -> Arc<Self>
     where
         L::Item: StreamForward,
@@ -77,7 +77,7 @@ impl Provider {
                 idle,
                 diagnostics,
                 actor_active,
-                port_mapping,
+                policy,
             )
             .await;
         }));
@@ -117,7 +117,7 @@ async fn run<L: StreamProvider + Send + 'static>(
     idle: Option<Duration>,
     diagnostics: Diagnostics,
     active: Arc<AtomicUsize>,
-    port_mapping: crate::sdk::PortMapping,
+    policy: crate::sdk::DirectPolicy,
 ) where
     L::Item: StreamForward,
 {
@@ -143,14 +143,14 @@ async fn run<L: StreamProvider + Send + 'static>(
                             continue;
                         }
                         let admitted =
-                            admit_offer(&grant, &key, is_datagram, sessions.len(), &mut network, &reply, || Network::new(true, port_mapping, &diagnostics));
+                            admit_offer(&grant, &key, is_datagram, sessions.len(), &mut network, &reply, || Network::new(true, policy.port_mapping, &diagnostics));
                         let Some(net) = admitted else { continue };
                         let (tx, rx) = mpsc::channel(8);
                         let id = grant.id;
                         sessions.insert(id, tx);
                         let session = session::<L>(
                             net, grant, stun_addr, reply, rx, local.clone(), idle,
-                            diagnostics.clone(), active.clone(), reports.clone(),
+                            diagnostics.clone(), active.clone(), reports.clone(), policy.lan_first,
                         );
                         tasks.spawn(async move {
                             if let Err(error) = session.await {
@@ -293,6 +293,7 @@ async fn session<L: StreamProvider>(
     diagnostics: Diagnostics,
     active: Arc<AtomicUsize>,
     reports: Arc<ProviderReports>,
+    lan_first: bool,
 ) -> io::Result<()>
 where
     L::Item: StreamForward,
@@ -307,7 +308,11 @@ where
     let discover_ms = ms(started.elapsed());
     grant.provider = discovered.peer.clone();
     network.authorize(&grant, true, deadline)?;
-    let lan = Assessment::new(discovered.local.clone(), &grant.consumer.candidates);
+    let lan = Assessment::new(
+        discovered.local.clone(),
+        &grant.consumer.candidates,
+        lan_first,
+    );
     if let Some(evidence) = lan.evidence {
         diagnostics.lan_detected(evidence);
     }
@@ -718,6 +723,7 @@ mod tests {
             Diagnostics::default(),
             active.clone(),
             Arc::new(ProviderReports::default()),
+            true,
         )));
         let Some(LocalControlWrite::Direct(accepted)) = reply_rx.recv().await else {
             panic!("expected accepted offer");

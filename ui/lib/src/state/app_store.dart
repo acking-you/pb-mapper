@@ -248,11 +248,22 @@ class AppStore extends ChangeNotifier {
     }
     if (kinds.contains(StateChangeKind.services)) unawaited(_loadShares());
     if (kinds.contains(StateChangeKind.clients)) unawaited(_loadConnections());
-    // A config change asks the relay again anyway, at its new address.
+    // A change of the relay settings asks the relay again anyway, at its new
+    // address; one of this computer's own preferences does not.
     if (kinds.contains(StateChangeKind.config)) {
-      unawaited(_loadConfig().then((_) => checkRelay(force: true)));
+      unawaited(_reloadConfig(server: kinds.contains(StateChangeKind.server)));
     } else if (kinds.contains(StateChangeKind.server)) {
       unawaited(checkRelay());
+    }
+  }
+
+  Future<void> _reloadConfig({required bool server}) async {
+    final before = config;
+    await _loadConfig();
+    if (!config.sameRelay(before)) {
+      await checkRelay(force: true);
+    } else if (server) {
+      await checkRelay();
     }
   }
 
@@ -533,6 +544,7 @@ class AppStore extends ChangeNotifier {
       keepAlive: keepAlive,
       msgHeaderKey: credential.trim(),
       relayTransport: relayTransport ?? config.relayTransport,
+      lanFirst: config.lanFirst,
     );
     await _loadConfig();
     relay = null;
@@ -540,6 +552,45 @@ class AppStore extends ChangeNotifier {
     await checkRelay(force: true);
     return result;
   }
+
+  /// Whether this computer tries a local network it shares with the other
+  /// end first, saved at once with the relay settings as they are. Nothing
+  /// about the relay changed, so it is not asked anything. Running tunnels
+  /// and a running remote-desktop host keep what they started with: see
+  /// [liveDirect].
+  Future<OperationResult> setLanFirst(bool on) async {
+    final result = await api.updateConfig(
+      serverAddress: config.serverAddress,
+      keepAlive: config.keepAliveEnabled,
+      msgHeaderKey: config.msgHeaderKey,
+      relayTransport: config.relayTransport,
+      lanFirst: on,
+    );
+    await _loadConfig();
+    return result;
+  }
+
+  /// The running tunnels a change of [ConfigStatus.lanFirst] would reach
+  /// once started again: those that may go direct.
+  List<Tunnel> get liveDirect => [
+    for (final tunnel in tunnels)
+      if (tunnel.isLive && tunnel.allowDirect) tunnel,
+  ];
+
+  /// Start [tunnels] again, so that each takes this computer's settings as
+  /// they are now. Returns those that did not start, each with why.
+  Future<List<String>> restartTunnels(List<Tunnel> tunnels) => restart(
+    shares: [
+      for (final t in tunnels)
+        if (t.kind == TunnelKind.share) t.key,
+    ],
+    connections: [
+      for (final t in tunnels)
+        if (t.kind == TunnelKind.connect) t.key,
+    ],
+    relay: config.serverAddress,
+    credential: config.msgHeaderKey,
+  );
 
   /// Start [move]'s tunnels again, so that they reach the relay over the
   /// carrier Settings names now; their open sessions reconnect. Returns

@@ -684,6 +684,45 @@ void main() {
     await finish(tester);
   });
 
+  _preview('settings lan first', (tester) async {
+    Future<void> reveal() => tester.scrollUntilVisible(
+      find.byKey(const Key('settings-lan-first')),
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byKey(const Key('settings-list')),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await pumpApp(tester, _busy(), page: AppPage.settings);
+    await reveal();
+    await _capture(tester, 'settings_lan_first_light');
+    // Turned off with tunnels running: the offer to restart them.
+    await tester.tap(find.byKey(const Key('settings-lan-first')));
+    await settle(tester);
+    await _capture(tester, 'settings_lan_first_restart_light');
+    await finish(tester);
+
+    await pumpApp(
+      tester,
+      _busy(),
+      page: AppPage.settings,
+      themeMode: ThemeMode.dark,
+      size: const Size(393, 852),
+      locale: const Locale('zh'),
+    );
+    await reveal();
+    // Mid-screen, clear of the bottom bar.
+    await Scrollable.ensureVisible(
+      tester.element(find.byKey(const Key('settings-lan-first'))),
+      alignment: 0.5,
+    );
+    await settle(tester);
+    await _capture(tester, 'settings_lan_first_phone_zh_dark');
+    await finish(tester);
+  });
+
   _preview('settings quic on a relay without it', (tester) async {
     await pumpApp(
       tester,

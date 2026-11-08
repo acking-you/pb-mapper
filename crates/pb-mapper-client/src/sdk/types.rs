@@ -181,15 +181,38 @@ impl PortMapping {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct ConnectOptions {
     pub path: PathPolicy,
     /// `Auto` by default, and ignored on the relay-only path.
     pub port_mapping: PortMapping,
+    /// Try a local network this end shares with the publisher first. On, the
+    /// publisher's addresses on that network are probed ahead of the others
+    /// and again 20 and 50 ms later; and once the network is known to be
+    /// there, by strong evidence or by an answer from a path on it, a path
+    /// off it waits up to 150 ms after its own answer before it is dialed,
+    /// unless a LAN handshake completes or every LAN path fails first. Off,
+    /// the publisher's addresses are probed in the order it offered them and
+    /// every path that answers is dialed at once. What either end offers,
+    /// and how a path is reported, are the same either way.
+    ///
+    /// On by default. It is this end's policy alone: nothing about it crosses
+    /// the wire, and the publisher follows its own. Ignored on the relay-only
+    /// path.
+    pub lan_first: bool,
+}
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            path: PathPolicy::default(),
+            port_mapping: PortMapping::Auto,
+            lan_first: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(not(feature = "p2p"), derive(Default))]
 pub struct RegisterOptions {
     /// Accept direct sessions from authorized consumers. Defaults to `true`
     /// with the `p2p` feature. Allowing it costs nothing until a consumer asks:
@@ -198,15 +221,57 @@ pub struct RegisterOptions {
     pub idle_timeout: Option<std::time::Duration>,
     /// `Auto` by default, and ignored unless `allow_direct`.
     pub port_mapping: PortMapping,
+    /// Try a local network this end shares with a consumer first: probe the
+    /// consumer's addresses on it ahead of the others, and again 20 and 50 ms
+    /// later. Off, they are probed in the order the consumer offered them.
+    /// Which path a session takes is the dialing consumer's choice, under its
+    /// own [`ConnectOptions::lan_first`].
+    ///
+    /// On by default. It is this end's policy alone, and nothing about it
+    /// crosses the wire. Ignored unless `allow_direct`.
+    pub lan_first: bool,
 }
 
-#[cfg(feature = "p2p")]
 impl Default for RegisterOptions {
     fn default() -> Self {
         Self {
-            allow_direct: true,
+            allow_direct: cfg!(feature = "p2p"),
             idle_timeout: None,
             port_mapping: PortMapping::Auto,
+            lan_first: true,
         }
+    }
+}
+
+/// How a tunnel's direct setups go, as its options say, carried from the SDK
+/// to the direct core. It exists without `p2p` as well, since the workers
+/// that carry it do, though only the direct core reads it.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(feature = "p2p"), allow(dead_code))]
+pub(crate) struct DirectPolicy {
+    pub port_mapping: PortMapping,
+    pub lan_first: bool,
+}
+
+impl DirectPolicy {
+    /// The relay-only workers', which never set up a direct path.
+    pub const RELAY: Self = Self {
+        port_mapping: PortMapping::Off,
+        lan_first: true,
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A derived `Default` would turn a bool off: LAN-first stays on for
+    /// every caller that fills the rest with `..Default::default()`.
+    #[test]
+    fn options_default_to_lan_first() {
+        assert!(ConnectOptions::default().lan_first);
+        let register = RegisterOptions::default();
+        assert!(register.lan_first);
+        assert_eq!(register.allow_direct, cfg!(feature = "p2p"));
     }
 }

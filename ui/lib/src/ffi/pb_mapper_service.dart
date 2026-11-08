@@ -417,12 +417,14 @@ class PbMapperService {
     required bool keepAlive,
     required String msgHeaderKey,
     required String relayTransport,
+    bool lanFirst = true,
   }) {
     return _runJsonOnWorker('updateConfig', {
       'serverAddress': serverAddress,
       'keepAlive': keepAlive,
       'msgHeaderKey': msgHeaderKey,
       'relayTransport': relayTransport,
+      'lanFirst': lanFirst,
     });
   }
 
@@ -677,6 +679,7 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
           (params['keepAlive'] as bool) ? 1 : 0,
           arg2,
           arg3,
+          (params['lanFirst'] as bool? ?? true) ? 1 : 0,
         );
         break;
       case 'getServiceConfigs':

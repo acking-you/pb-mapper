@@ -108,6 +108,24 @@ proxy.
   first**) in a tunnel's **More options**: Off, Auto or Always. It is saved
   with the tunnel and kept while direct is off.
 
+When both computers are on one Wi-Fi or LAN, a direct connection tries that
+network first: the other end's addresses on it are probed first, and again 20
+and 50 ms later, and once the LAN is known to be there (the addresses offered
+show it beyond doubt, or a LAN address has answered an authenticated probe),
+other paths wait up to 150 ms for it. Two homes that merely number their
+networks alike never answer each other's probes, so nothing waits for them.
+This is on by default, and each end decides for itself; the connecting end,
+which dials, chooses the path. Turned off, every path that answers is dialed at
+once, probed in the order the other end offered them. What each end offers,
+and how a path is reported, do not change.
+
+- CLI: `--no-lan-first` on `register` or `connect`.
+- Rust SDK: `lan_first: false` in `RegisterOptions` or `ConnectOptions`.
+- Node: `lanFirst: false` in the `register` or `connect` request.
+- App: **Settings → Direct connections → Try the local network first**, for
+  every tunnel and the remote desktop as they next start. Running tunnels are
+  offered a restart.
+
 To watch a tunnel, Rust handles have `subscribe_events()` and Node handles
 `subscribeEvents()`: the outcomes a tunnel kept, then every event as it
 happens, including relay phases, direct stages and each change of the port

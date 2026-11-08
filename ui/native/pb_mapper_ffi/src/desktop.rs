@@ -740,8 +740,9 @@ async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<
 
 /// What resuming the service's `saved` host configures: the service, display
 /// and permissions it saved, published through the relay, credential (of
-/// `namespace`) and carrier the settings name now, and restored at startup
-/// again. Moving it to another relay or namespace needs `move_relay`.
+/// `namespace`) and carrier the settings name now, with LAN-first as they
+/// have it, and restored at startup again. Moving it to another relay or
+/// namespace needs `move_relay`.
 #[cfg(windows)]
 fn resume_options(
     saved: &Value,
@@ -777,6 +778,7 @@ fn resume_options(
             auto_start: true,
             ..settings
         },
+        lan_first: config.lan_first,
     })
 }
 
@@ -1249,13 +1251,20 @@ async fn connect(
             };
             // Configuration can wait behind other app operations. Keep that
             // wait inside the registered, cancellable attempt.
-            let client = handle.state.lock().await.relay_client()?;
+            let (client, lan_first) = {
+                let state = handle.state.lock().await;
+                (
+                    state.relay_client()?,
+                    state.get_config_status().await.lan_first,
+                )
+            };
             let options = ConnectOptions {
                 path: if relay_only {
                     PathPolicy::RelayOnly
                 } else {
                     PathPolicy::Auto
                 },
+                lan_first,
                 ..Default::default()
             };
             let progress = Arc::new(move |next: ConnectStage| {
@@ -1310,6 +1319,7 @@ async fn start_background(handle: &PbMapperHandle, start: HostStart) -> Result<V
                 allow_direct: !start.relay_only,
                 auto_start: start.auto_start,
             },
+            lan_first: config.lan_first,
         };
         let scope = trust::Scope {
             directory: directory.clone(),
@@ -1443,7 +1453,13 @@ async fn start_local(handle: &PbMapperHandle, start: Start) -> Result<Value, Ctl
         settings,
         remembered: remember,
     };
-    let host = launch(&client, &local_identity.settings, identity).await?;
+    let host = launch(
+        &client,
+        &local_identity.settings,
+        config.lan_first,
+        identity,
+    )
+    .await?;
     if let Some(saved) = persisted {
         let directory = local_identity.scope.directory.clone();
         let stored = tokio::task::spawn_blocking(move || trust::save(&directory, &saved))
@@ -1461,10 +1477,11 @@ async fn start_local(handle: &PbMapperHandle, start: Start) -> Result<Value, Ctl
 }
 
 /// A local host for `settings` under `identity`, through the helper when
-/// privileged.
+/// privileged, with this computer's LAN-first as the config has it now.
 async fn launch(
     client: &Client,
     settings: &trust::Settings,
+    lan_first: bool,
     identity: desktop::HostIdentity,
 ) -> Result<Host, CtlError> {
     let display_id = settings.display_id;
@@ -1473,6 +1490,7 @@ async fn launch(
         display_id,
         allow_control: settings.allow_control,
         allow_direct: !settings.relay_only,
+        lan_first,
     };
     if settings.privileged {
         #[cfg(windows)]
@@ -1543,7 +1561,7 @@ async fn restart_host(
         host.stop_with(reason).await.map_err(err)?;
     }
     *state.host_identity.lock().await = None;
-    let host = launch(&client, &settings, local.identity.clone()).await?;
+    let host = launch(&client, &settings, config.lan_first, local.identity.clone()).await?;
     if let Some(saved) = persisted {
         let directory = local.scope.directory.clone();
         let stored = tokio::task::spawn_blocking(move || trust::save(&directory, &saved))
@@ -1693,6 +1711,7 @@ async fn enable_host(
                 allow_direct: true,
                 auto_start: true,
             },
+            lan_first: config.lan_first,
         },
         identity,
     )
@@ -2346,6 +2365,7 @@ mod tests {
         let config = crate::state::AppConfig {
             server_address: "new-relay:7666".into(),
             relay_transport: RelayTransport::Quic,
+            lan_first: false,
             ..Default::default()
         };
         let nothing = unavailable_background("");
@@ -2378,6 +2398,7 @@ mod tests {
                     allow_direct: false,
                     auto_start: true,
                 },
+                lan_first: false,
             }
         );
     }
@@ -2517,6 +2538,7 @@ mod tests {
                     display_id: 1,
                     allow_control: false,
                     allow_direct: false,
+                    lan_first: true,
                 },
                 Arc::new(|| Ok(Box::new(Pixel))),
             )

@@ -28,6 +28,7 @@ use crate::error::CtlError;
 use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, parse_c_string};
+use crate::state::AppConfig;
 
 /// Long enough for an inventory paged across a large relay, short enough
 /// that a relay that stopped answering is reported rather than waited on.
@@ -93,14 +94,15 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
                 .ok();
             let mut state = state.lock().await;
             let mut save_error = None;
-            let saved = state.get_config_status().await == config
+            // Only the relay settings matter: a preference of this
+            // computer's changed meanwhile is kept as it is now.
+            let current = state.get_config_status().await;
+            let saved = current.same_relay(&config)
                 && match state
-                    .update_config(
-                        config.server_address.clone(),
-                        config.keep_alive_enabled,
-                        key,
-                        config.relay_transport,
-                    )
+                    .update_config(AppConfig {
+                        msg_header_key: key,
+                        ..current
+                    })
                     .await
                 {
                     Ok(()) => true,

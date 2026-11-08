@@ -28,7 +28,7 @@ it is laid out, and how the galaxy view is drawn.
 | Remote desktop | Who can see this computer, and which computers it can see | `pages/remote/` |
 | Relay | Whether the relay answers, who this computer is to it, what it holds, and what an administrator can change | `pages/relay_page.dart`, `pages/relay/` |
 | Logs | What the Rust side said | `pages/logs_page.dart` |
-| Settings | Where the relay is, this computer's credential, theme, language | `pages/settings_page.dart` |
+| Settings | Where the relay is, this computer's credential, whether it tries the local network first, theme, language | `pages/settings_page.dart` |
 
 Sharing (`register`) and connecting (`connect`) are one editor
 (`pages/tunnel_editor.dart`) with a Share/Connect switch: key, local address,
@@ -153,6 +153,25 @@ The FFI reports each running tunnel's `path` (`PathInfo` in
 task per tunnel emits a change event when its state or which paths it uses
 changes, so the window follows a path as it is chosen. The embedded relay
 offers direct as `pb-mapper server` does, over UDP on its TCP port.
+
+### Trying the local network first
+
+When the other computer is on the same Wi-Fi or LAN, a direct path tries
+that network first: its addresses are probed first, and paths off it wait
+briefly for it. It is a property of this computer, not of a tunnel or of the
+relay, so it is one switch in Settings — **Direct connections**, *Try the
+local network first*, on by default — beside the relay but outside its form:
+it is saved the moment it is flipped, needs no Save, and asks the relay
+nothing (`AppConfig.lan_first`, through `pb_mapper_update_config`). Not in
+the setup string, which carries the relay's settings to another computer,
+nor in first-run setup or the tunnel editor.
+
+Each tunnel, remote-desktop connection and sharing start takes it as it is
+then; what is running keeps what it started with. Flipping it with tunnels
+running that may go direct offers, in a dialog like the carrier's, to start
+them again; Later leaves them until they next start, and a failure to start
+one says which in a toast. A remote-desktop host, local or in the
+background service, takes it at the next Start sharing.
 
 ### How this computer reaches the relay
 

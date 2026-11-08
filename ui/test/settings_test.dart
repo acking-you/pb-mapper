@@ -11,6 +11,19 @@ import 'support.dart';
 Future<void> _open(WidgetTester tester, FakePbMapperApi api) =>
     pumpApp(tester, api, page: AppPage.settings);
 
+/// Scroll the settings list until [target], perhaps not built yet, is shown.
+Future<void> _reveal(WidgetTester tester, Finder target) =>
+    tester.scrollUntilVisible(
+      target,
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byKey(const Key('settings-list')),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+
 void main() {
   testWidgets('the relay form is filled from the saved config', (tester) async {
     await _open(tester, FakePbMapperApi());
@@ -138,6 +151,31 @@ void main() {
     await finish(tester);
   });
 
+  testWidgets('LAN-first applies at once and restarts what it reaches', (
+    tester,
+  ) async {
+    final api = FakePbMapperApi(
+      services: [
+        fakeService(serviceKey: 'nas'),
+        fakeService(serviceKey: 'cam', allowDirect: false),
+        fakeService(serviceKey: 'old', status: 'stopped'),
+      ],
+    );
+    await _open(tester, api);
+    final lanFirst = find.byKey(const Key('settings-lan-first'));
+    await _reveal(tester, lanFirst);
+    await tester.tap(lanFirst);
+    await settle(tester);
+    // Saved with the relay settings as they were, without pressing Save.
+    expect(api.calls, ['updateConfig(lb7666.top:7666, lan-first off)']);
+    expect(api.config.lanFirst, isFalse);
+    // Only the running share that may go direct is offered a restart.
+    await tester.tap(find.byKey(const Key('lan-first-restart-now')));
+    await settle(tester);
+    expect(api.calls.skip(1), ['registerService(nas)']);
+    await finish(tester);
+  });
+
   testWidgets('a string that is not a setup string is refused', (tester) async {
     final api = FakePbMapperApi();
     await _open(tester, api);
@@ -153,7 +191,9 @@ void main() {
 
   testWidgets('the theme switch repaints the app dark', (tester) async {
     await _open(tester, FakePbMapperApi());
-    await tester.tap(find.byKey(const Key('settings-theme-dark')));
+    final dark = find.byKey(const Key('settings-theme-dark'));
+    await _reveal(tester, dark);
+    await tester.tap(dark);
     await settle(tester);
     final context = tester.element(find.byKey(const Key('settings-list')));
     expect(Theme.of(context).brightness, Brightness.dark);
@@ -162,7 +202,9 @@ void main() {
 
   testWidgets('the language switch speaks Chinese at once', (tester) async {
     await _open(tester, FakePbMapperApi());
-    await tester.tap(find.byKey(const Key('settings-language-zh')));
+    final chinese = find.byKey(const Key('settings-language-zh'));
+    await _reveal(tester, chinese);
+    await tester.tap(chinese);
     await settle(tester);
     expect(find.text('中继服务器'), findsOneWidget);
     await finish(tester);

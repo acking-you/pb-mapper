@@ -562,7 +562,7 @@ async fn run_server_side_cli_pool<LocalStream>(
         Diagnostics::default(),
         None,
         false,
-        crate::sdk::PortMapping::Off,
+        crate::sdk::DirectPolicy::RELAY,
     )
     .await;
 }
@@ -579,7 +579,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
     diagnostics: Diagnostics,
     idle_timeout: Option<Duration>,
     allow_direct: bool,
-    port_mapping: crate::sdk::PortMapping,
+    policy: crate::sdk::DirectPolicy,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
@@ -605,11 +605,11 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
             shutdown.clone(),
             idle_timeout,
             diagnostics.clone(),
-            port_mapping,
+            policy,
         )
     });
     #[cfg(not(feature = "p2p"))]
-    let _ = (allow_direct, port_mapping);
+    let _ = (allow_direct, policy);
     let mut workers = JoinSet::new();
     // Every worker reports here, and the pool's aggregate is what the caller is
     // told: one healthy control connection is a reachable service, whichever

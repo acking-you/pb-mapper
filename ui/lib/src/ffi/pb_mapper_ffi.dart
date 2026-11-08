@@ -133,7 +133,7 @@ typedef _PbMapperDeleteClientConfigDart =
 typedef _PbMapperGetConfigNative = Pointer<Utf8> Function(Pointer<Void> handle);
 typedef _PbMapperGetConfigDart = Pointer<Utf8> Function(Pointer<Void> handle);
 
-/// `relayTransport` is `tcp` or `quic`.
+/// `relayTransport` is `tcp` or `quic`; `lanFirst` is 1 or 0.
 typedef _PbMapperUpdateConfigNative =
     Pointer<Utf8> Function(
       Pointer<Void> handle,
@@ -141,6 +141,7 @@ typedef _PbMapperUpdateConfigNative =
       Int32 enableKeepAlive,
       Pointer<Utf8> msgHeaderKey,
       Pointer<Utf8> relayTransport,
+      Int32 lanFirst,
     );
 typedef _PbMapperUpdateConfigDart =
     Pointer<Utf8> Function(
@@ -149,6 +150,7 @@ typedef _PbMapperUpdateConfigDart =
       int enableKeepAlive,
       Pointer<Utf8> msgHeaderKey,
       Pointer<Utf8> relayTransport,
+      int lanFirst,
     );
 
 typedef _PbMapperGetServiceConfigsNative =
