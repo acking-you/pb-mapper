@@ -17,11 +17,7 @@ class DisplayRefresh(private val activity: Activity) {
 
     fun hold() {
         if (holders++ > 0) return
-        val display = display() ?: return
-        val current = display.mode
-        val fastest = display.supportedModes
-            .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
-            .maxByOrNull { it.refreshRate } ?: return
+        val fastest = fastest() ?: return
         val attributes = activity.window.attributes
         previous = attributes.preferredDisplayModeId
         attributes.preferredDisplayModeId = fastest.modeId
@@ -39,6 +35,18 @@ class DisplayRefresh(private val activity: Activity) {
 
     /** The refresh asked for while video shows, otherwise the display's current one. */
     val refreshHz: Double get() = (requested ?: display()?.mode)?.refreshRate?.toDouble() ?: 0.0
+
+    /** The refresh [hold] asks for: the highest a viewer presents at. 60 when unknown. */
+    val fastestHz: Double get() = fastest()?.refreshRate?.toDouble() ?: 60.0
+
+    // The fastest mode at the display's current resolution.
+    private fun fastest(): Display.Mode? {
+        val display = display() ?: return null
+        val current = display.mode
+        return display.supportedModes
+            .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
+            .maxByOrNull { it.refreshRate }
+    }
 
     @Suppress("DEPRECATION")
     private fun display(): Display? =

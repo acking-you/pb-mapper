@@ -28,11 +28,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Native H.264 into a Flutter texture. Access units come from Rust on a
- * feeder thread and never cross Dart; presentation receipts and keyframe
- * requests go straight back to Rust. The channel only creates, binds,
- * snapshots and tears down textures. While a texture shows video, the
- * window asks for the display's fastest refresh ([refresh]).
+ * Native H.264 and H.265 into a Flutter texture. Access units come from Rust
+ * on a feeder thread and never cross Dart; presentation receipts and keyframe
+ * requests go straight back to Rust. The channel only probes the decoders
+ * ([DecoderProbe]), and creates, binds, snapshots and tears down textures.
+ * While a texture shows video, the window asks for the display's fastest
+ * refresh ([refresh]).
  */
 @Suppress("DEPRECATION")
 class DesktopVideo(
@@ -47,7 +48,9 @@ class DesktopVideo(
     init {
         channel.setMethodCallHandler { call, result ->
             try {
-                if (call.method == "create") {
+                if (call.method == "decoders") {
+                    decoders(result)
+                } else if (call.method == "create") {
                     checkInstance(call.argument<Number>("instance")?.toLong() ?: error("Missing video library instance"))
                     check(viewers.size < 2) { "Desktop texture limit reached" }
                     val viewer = Viewer(
@@ -86,6 +89,20 @@ class DesktopVideo(
         channel.setMethodCallHandler(null)
         viewers.values.forEach { it.dispose() }
         viewers.clear()
+    }
+
+    // The codec list takes a while to read, so it is read off the main
+    // thread; the display, main thread only, is read first.
+    private fun decoders(result: MethodChannel.Result) {
+        val displayMaxHz = refresh.fastestHz
+        Thread({
+            try {
+                val decoders = DecoderProbe.decoders(displayMaxHz)
+                main.post { result.success(decoders) }
+            } catch (e: Exception) {
+                main.post { result.error("desktop_video", e.message ?: "Decoder probe failed", null) }
+            }
+        }, "pb-desktop-decoders").start()
     }
 
     // D9: Dart's dlopen and this System.loadLibrary must reach one library,
@@ -199,10 +216,10 @@ class DesktopVideo(
         // or stalls before its first picture has its successor start without
         // them. Either way they stay off for this texture.
         private var hinted = decoderHints
-        private var active: FrameSize? = null
+        private var active: VideoFormat? = null
         // The size of the picture last released to the surface, which is what
         // a snapshot reads. It outlives the codec that drew it.
-        private var lastPicture: FrameSize? = null
+        private var lastPicture: VideoFormat? = null
         private var lastPresentedGeneration = -1L
         private var lastPresentedFrameId = 0L
         private var pts = 0L
@@ -469,16 +486,17 @@ class DesktopVideo(
         private fun stalled(message: String) =
             fail(message) { api.keyframe(consumer, DesktopVideoNative.REASON_STALL) }
 
-        private fun configure(unit: FeedUnit, parameterSets: Map<Int, ByteArray>) {
+        private fun configure(unit: FeedUnit, codecConfig: Map<String, ByteArray>) {
             // Async flush leaves callbacks carrying invalid buffer indices.
-            // Recreate on a size change so old callbacks can be rejected by
-            // codec identity without ever returning an obsolete buffer.
+            // Recreate on a size or codec change so old callbacks can be
+            // rejected by codec identity without ever returning an obsolete
+            // buffer.
             releaseCodec()
             entry.surfaceTexture().setDefaultBufferSize(unit.width, unit.height)
-            var next = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            var next = MediaCodec.createDecoderByType(mime(unit))
             decoderName = next.name
             try {
-                start(next, unit, parameterSets, hinted)
+                start(next, unit, codecConfig, hinted)
             } catch (e: Exception) {
                 try { next.release() } catch (_: Exception) {}
                 if (!hinted) throw e
@@ -486,7 +504,7 @@ class DesktopVideo(
                 Log.w(TAG, "$decoderName failed to start with the decoder hints; retrying without them", e)
                 next = MediaCodec.createByCodecName(decoderName)
                 try {
-                    start(next, unit, parameterSets, false)
+                    start(next, unit, codecConfig, false)
                 } catch (retry: Exception) {
                     try { next.release() } catch (_: Exception) {}
                     throw retry
@@ -496,13 +514,13 @@ class DesktopVideo(
             // Callbacks reach this worker only after configure returns.
             codec = next
             codecDecoded = false
-            active = FrameSize(unit.width, unit.height)
+            active = VideoFormat(unit.width, unit.height, unit.hevc)
             configurations.incrementAndGet()
-            api.report(consumer, next.name, hardware(next))
+            api.report(consumer, next.name, DecoderProbe.hardware(next.codecInfo))
         }
 
-        private fun start(c: MediaCodec, unit: FeedUnit, parameterSets: Map<Int, ByteArray>, hinted: Boolean) {
-            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, unit.width, unit.height)
+        private fun start(c: MediaCodec, unit: FeedUnit, codecConfig: Map<String, ByteArray>, hinted: Boolean) {
+            val format = MediaFormat.createVideoFormat(mime(unit), unit.width, unit.height)
             format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_BYTES)
             format.setInteger(MediaFormat.KEY_MAX_WIDTH, unit.width)
             format.setInteger(MediaFormat.KEY_MAX_HEIGHT, unit.height)
@@ -520,7 +538,7 @@ class DesktopVideo(
             // would strand its consumption credit and look like a frozen
             // renderer; an older one returns with the next consumption.
             if (Build.VERSION.SDK_INT >= 29) format.setInteger(MediaFormat.KEY_ALLOW_FRAME_DROP, 0)
-            parameterSets.forEach { (type, bytes) -> format.setByteBuffer(if (type == 7) "csd-0" else "csd-1", ByteBuffer.wrap(bytes)) }
+            codecConfig.forEach { (key, bytes) -> format.setByteBuffer(key, ByteBuffer.wrap(bytes)) }
             c.setCallback(callback, worker)
             c.configure(format, surface, null, 0)
             c.start()
@@ -603,7 +621,7 @@ class DesktopVideo(
         // Rust logs the text, counts it toward giving up, and ends the
         // session's message with it.
         private fun codecFailed(error: Exception) {
-            Log.w(TAG, "Native H.264 decoder failed", error)
+            Log.w(TAG, "Native video decoder failed", error)
             val message = error.toString()
             fail(message) { api.failed(consumer, message) }
         }
@@ -623,8 +641,8 @@ class DesktopVideo(
                         }
                         DecoderRules.Step.CONFIGURE -> {
                             check(unit.keyframe) { "Decoder requires a key frame" }
-                            val sets = feed.read(unit) { parameterSets(it.buffer, it.len) } ?: continue
-                            configure(unit, sets)
+                            val config = feed.read(unit) { DecoderRules.codecConfig(it.buffer, it.len, it.hevc) } ?: continue
+                            configure(unit, config)
                         }
                         DecoderRules.Step.FEED -> Unit
                     }
@@ -711,67 +729,83 @@ class DesktopVideo(
             false
         }
 
-        private fun hardware(codec: MediaCodec): Boolean =
-            if (Build.VERSION.SDK_INT >= 29) {
-                !codec.codecInfo.isSoftwareOnly
-            } else {
-                // Before API 29, the platform's software decoders are named.
-                !codec.name.startsWith("OMX.google.") && !codec.name.startsWith("c2.android.")
-            }
-
-        // A key frame leads with its SPS (7) and PPS (8); the scan stops once
-        // both are found. They stay owned by the decoder for its lifetime.
-        private fun parameterSets(buffer: ByteBuffer, len: Int): Map<Int, ByteArray> {
-            fun zero(at: Int) = buffer.get(at) == 0.toByte()
-            fun startCode(at: Int) = when {
-                zero(at) && zero(at + 1) && buffer.get(at + 2) == 1.toByte() -> 3
-                at + 3 < len && zero(at) && zero(at + 1) && zero(at + 2) && buffer.get(at + 3) == 1.toByte() -> 4
-                else -> 0
-            }
-            val result = mutableMapOf<Int, ByteArray>()
-            var nal = -1
-            fun finish(end: Int) {
-                if (nal < 0 || nal >= end) return
-                val type = buffer.get(nal).toInt() and 31
-                if (type != 7 && type != 8) return
-                val bytes = ByteArray(4 + end - nal)
-                bytes[3] = 1
-                val view = buffer.duplicate()
-                view.span(nal, end)
-                view.get(bytes, 4, end - nal)
-                result[type] = bytes
-            }
-            var i = 0
-            while (i + 3 < len && result.size < 2) {
-                val count = startCode(i)
-                if (count == 0) { i++; continue }
-                finish(i)
-                i += count
-                nal = i
-            }
-            if (result.size < 2) finish(len)
-            require(result.size == 2) { "Key frame must include H.264 SPS and PPS" }
-            return result
-        }
+        private fun mime(unit: FeedUnit) =
+            if (unit.hevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
     }
 }
 
-internal data class FrameSize(val width: Int, val height: Int)
+/** What a running codec was configured for. */
+internal data class VideoFormat(val width: Int, val height: Int, val hevc: Boolean)
 
 /** The codec thread's decisions about the head unit, pure so the JVM tests hold them. */
 internal object DecoderRules {
     enum class Step { DISCARD, CONFIGURE, FEED }
 
+    private val H264_PARAMETER_SETS = listOf(7, 8)
+    private val H265_PARAMETER_SETS = listOf(32, 33, 34)
+
     /**
      * A unit of an older revision is discarded. Otherwise a codec is configured
      * only when there is none ([configured] null, also after a failure released
-     * it) or the size changed. A discontinuity bumps the revision but keeps the
-     * size: its IDR goes to the running codec, whose in-band SPS/PPS resets the
-     * references (R18).
+     * it), or the size or the codec changed; the codec changes only with the
+     * session, at its first IDR. A discontinuity bumps the revision but keeps
+     * the format: its IDR goes to the running codec, whose in-band parameter
+     * sets reset the references (R18).
      */
-    fun step(unit: FeedUnit, revision: Long, configured: FrameSize?): Step = when {
+    fun step(unit: FeedUnit, revision: Long, configured: VideoFormat?): Step = when {
         unit.revision != revision -> Step.DISCARD
-        configured == null || configured.width != unit.width || configured.height != unit.height -> Step.CONFIGURE
+        configured == null || configured.width != unit.width || configured.height != unit.height ||
+            configured.hevc != unit.hevc -> Step.CONFIGURE
         else -> Step.FEED
+    }
+
+    /**
+     * What configures a decoder from a key frame's parameter sets, each NAL
+     * unit behind a start code: H.264's SPS (7) as csd-0 and PPS (8) as
+     * csd-1; H.265's VPS (32), SPS (33) and PPS (34) together as csd-0. The
+     * scan stops once all are found. They stay owned by the decoder for its
+     * lifetime.
+     */
+    fun codecConfig(buffer: ByteBuffer, len: Int, hevc: Boolean): Map<String, ByteArray> {
+        val wanted = if (hevc) H265_PARAMETER_SETS else H264_PARAMETER_SETS
+        fun zero(at: Int) = buffer.get(at) == 0.toByte()
+        fun startCode(at: Int) = when {
+            zero(at) && zero(at + 1) && buffer.get(at + 2) == 1.toByte() -> 3
+            at + 3 < len && zero(at) && zero(at + 1) && zero(at + 2) && buffer.get(at + 3) == 1.toByte() -> 4
+            else -> 0
+        }
+        val found = mutableMapOf<Int, ByteArray>()
+        var nal = -1
+        fun finish(end: Int) {
+            if (nal < 0 || nal >= end) return
+            val header = buffer.get(nal).toInt()
+            // H.264's type is the low five bits of its one-byte header,
+            // H.265's the six above the forbidden bit of its two-byte one.
+            val type = if (hevc) (header shr 1) and 0x3f else header and 31
+            if (type !in wanted) return
+            val bytes = ByteArray(4 + end - nal)
+            bytes[3] = 1
+            val view = buffer.duplicate()
+            view.span(nal, end)
+            view.get(bytes, 4, end - nal)
+            found[type] = bytes
+        }
+        var i = 0
+        while (i + 3 < len && found.size < wanted.size) {
+            val count = startCode(i)
+            if (count == 0) { i++; continue }
+            finish(i)
+            i += count
+            nal = i
+        }
+        if (found.size < wanted.size) finish(len)
+        require(found.size == wanted.size) {
+            if (hevc) "Key frame must include H.265 VPS, SPS and PPS" else "Key frame must include H.264 SPS and PPS"
+        }
+        return if (hevc) {
+            mapOf("csd-0" to wanted.map(found::getValue).reduce(ByteArray::plus))
+        } else {
+            mapOf("csd-0" to found.getValue(7), "csd-1" to found.getValue(8))
+        }
     }
 }

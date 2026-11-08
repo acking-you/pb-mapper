@@ -52,6 +52,8 @@ internal object DesktopVideoNative {
     const val FLAG_DISCONTINUITY = 2L
     const val FLAG_JPEG = 4L
     const val FLAG_DUPLICATE = 8L
+    // Neither this nor FLAG_JPEG: H.264.
+    const val FLAG_H265 = 16L
 
     const val REASON_GAP = 1
     const val REASON_STALL = 3
