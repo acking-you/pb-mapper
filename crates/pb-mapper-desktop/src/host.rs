@@ -11,7 +11,10 @@ use crate::{
     worker::{self, Factory, WorkerConfig},
 };
 use parking_lot::Mutex;
-use pb_mapper_client::sdk::{Client, RegisterOptions, RegisterRequest, Registration, Transport};
+use pb_mapper_client::sdk::{
+    Client, RegisterOptions, RegisterRequest, Registration, Transport, TunnelMetrics,
+    TunnelMetricsStream,
+};
 use std::{
     sync::{
         Arc,
@@ -224,6 +227,16 @@ impl Host {
             desktop: record.desktop,
             capabilities,
         }
+    }
+    /// The host's tunnel figures, sampled now: its viewers' sessions on each
+    /// path, the bytes they carried, the relay's health and the direct link.
+    pub fn metrics(&self) -> TunnelMetrics {
+        self.registration.metrics()
+    }
+    /// [`Self::metrics`] at once, then every `every` and as the tunnel
+    /// changes, until hosting stops: see [`TunnelMetricsStream`].
+    pub fn subscribe_metrics(&self, every: Duration) -> TunnelMetricsStream {
+        self.registration.subscribe_metrics(every)
     }
     /// The one viewer's path, sampled from the registration's sessions,
     /// which it counts on the relay as well as direct.

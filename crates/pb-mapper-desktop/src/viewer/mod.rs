@@ -41,7 +41,7 @@ use outbound::{Barrier, Lifecycle, Next, Outbound};
 use parking_lot::Mutex;
 use pb_mapper_client::sdk::{
     AddressFamily, Client, ConnectOptions, Connection, LanEvidence, LinkKind, LinkSample, LinkVia,
-    RelayTransport, TunnelMetrics,
+    RelayTransport, TunnelMetrics, TunnelMetricsStream,
 };
 use serde::Serialize;
 use status::{CursorSlot, HostStats, ViewerStatsAcc, millis};
@@ -411,6 +411,24 @@ impl Viewer {
             cancel,
             join: tokio::sync::Mutex::new(Some(join)),
         })
+    }
+
+    /// The figures of the tunnel the session runs over, sampled now: its
+    /// path, the bytes it carried, the relay's health and the direct link.
+    /// `None` only for a session over a test stream.
+    pub fn metrics(&self) -> Option<TunnelMetrics> {
+        self.connection
+            .as_ref()
+            .map(|connection| connection.metrics())
+    }
+
+    /// [`Self::metrics`] at once, then every `every` and as the tunnel
+    /// changes, until the session's tunnel stops: see
+    /// [`TunnelMetricsStream`].
+    pub fn subscribe_metrics(&self, every: std::time::Duration) -> Option<TunnelMetricsStream> {
+        self.connection
+            .as_ref()
+            .map(|connection| connection.subscribe_metrics(every))
     }
 
     /// The session for polls: never waits on the network.
