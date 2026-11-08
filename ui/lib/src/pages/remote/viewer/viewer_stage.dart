@@ -23,8 +23,9 @@ import 'viewer_overlays.dart';
 /// overlays, reconnects and the soft keyboard; nothing that changes at
 /// media or state rate rebuilds above the `Texture`.
 ///
-/// It is its own layer, as are the cursor and the touch ring inside it: a
-/// stroke, a pan or a zoom repaints no gutter, bar or title.
+/// It is its own layer, as are the cursor and the touch ring inside it (or
+/// above it, see [touchIndicator]): a stroke, a pan or a zoom repaints no
+/// gutter, bar or title.
 class ViewerStage extends StatelessWidget {
   const ViewerStage({
     super.key,
@@ -42,6 +43,7 @@ class ViewerStage extends StatelessWidget {
     required this.actions,
     this.compact = false,
     this.toolbarInset,
+    this.touchIndicator = true,
   });
 
   /// The stage over [desktop]'s own slices.
@@ -56,6 +58,7 @@ class ViewerStage extends StatelessWidget {
     required ViewerActions actions,
     bool compact = false,
     ValueListenable<double>? toolbarInset,
+    bool touchIndicator = true,
   }) => ViewerStage(
     key: key,
     session: desktop.session,
@@ -72,6 +75,7 @@ class ViewerStage extends StatelessWidget {
     actions: actions,
     compact: compact,
     toolbarInset: toolbarInset,
+    touchIndicator: touchIndicator,
   );
 
   final ValueListenable<DesktopSessionView> session;
@@ -92,6 +96,11 @@ class ViewerStage extends StatelessWidget {
 
   /// Desktop: the top of the pills under the toolbar.
   final ValueListenable<double>? toolbarInset;
+
+  /// False: the [TouchIndicator] is drawn by the viewer instead, above
+  /// what it lays over the picture (a phone's gutter strips), where a
+  /// stroke or a long press may start.
+  final bool touchIndicator;
 
   @override
   Widget build(BuildContext context) => RepaintBoundary(child: _stack(context));
@@ -143,7 +152,7 @@ class ViewerStage extends StatelessWidget {
           viewport: viewport,
           input: input,
         ),
-        TouchIndicator(machine: machine),
+        if (touchIndicator) TouchIndicator(machine: machine),
         if (compact)
           _PictureFrame(viewport: viewport, child: _overlays)
         else

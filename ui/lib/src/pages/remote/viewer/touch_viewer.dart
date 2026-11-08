@@ -18,6 +18,7 @@ import 'modifier_bar.dart';
 import 'modifier_latch.dart';
 import 'quality_panel.dart';
 import 'remote_input.dart';
+import 'remote_surface.dart';
 import 'remote_text_input.dart';
 import 'remote_viewport.dart';
 import 'side_panel.dart';
@@ -87,6 +88,15 @@ class _TouchViewerState extends State<TouchViewer> {
   late final AppLifecycleListener _lifecycle;
   late ViewerActions _actions;
   late Widget _stage;
+
+  /// The finger's ring and the joystick, over the gutter strips, where a
+  /// stroke or a long press may start; at the stage's origin, so in the
+  /// machine's coordinates. Built once, like the stage; keyed, so strips
+  /// coming or going keep its fade.
+  late final Widget _indicator = TouchIndicator(
+    key: const Key('touch-indicator'),
+    machine: _machine,
+  );
 
   Timer? _settle, _hintTimer;
   double _inset = 0;
@@ -242,6 +252,7 @@ class _TouchViewerState extends State<TouchViewer> {
         title: widget.title,
         actions: _actions,
         compact: true,
+        touchIndicator: false,
       ),
     ),
   );
@@ -392,6 +403,7 @@ class _TouchViewerState extends State<TouchViewer> {
       children: [
         _stage,
         ..._strips(gutters, size),
+        _indicator,
         if (!_keyboard) ..._gutters(gutters),
         Positioned(
           top: content.top + 10,

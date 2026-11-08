@@ -711,8 +711,8 @@ void main() {
   );
 
   testWidgets(
-    'beside a cutout the picture fits between the gutters, and zoomed in it '
-    'pans clear of them',
+    'beside a cutout the picture fits between the gutters, zoomed in it pans '
+    "clear of them, and a finger's ring is drawn over their strips",
     (tester) async {
       _size(tester, const Size(851, 393));
       tester.view.padding = const FakeViewPadding(left: 29);
@@ -784,6 +784,26 @@ void main() {
       expect(strip.left, 0);
       expect(picture().left, moreOrLessEquals(strip.right));
       expect(api.argsOf('input'), isEmpty);
+
+      // A finger on the strip, between two controls: its ring is there, and
+      // drawn after the strip, so over it.
+      await tester.pump(const Duration(seconds: 1));
+      final back = tester.getRect(find.byKey(const Key('touch-back')));
+      final quality = tester.getRect(find.byKey(const Key('touch-quality')));
+      final on = Offset(strip.center.dx, (back.bottom + quality.top) / 2);
+      final finger = await tester.startGesture(on);
+      await tester.pump();
+      final ring = tester.widget<TouchIndicator>(find.byType(TouchIndicator));
+      expect(ring.machine.indicatorPoint.value, on);
+      final painted = find
+          .byWidgetPredicate(
+            (w) =>
+                w is TouchIndicator || w.key == const Key('touch-gutter-lead'),
+          )
+          .evaluate()
+          .map((e) => e.widget is TouchIndicator ? 'ring' : 'strip');
+      expect(painted, ['strip', 'ring']);
+      await finger.up();
       expect(tester.takeException(), isNull);
 
       await tester.pumpWidget(const SizedBox.shrink());
