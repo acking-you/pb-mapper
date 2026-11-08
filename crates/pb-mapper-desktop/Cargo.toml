@@ -32,9 +32,15 @@ enigo.workspace = true
 image.workspace = true
 windows = { workspace = true, features = ["Win32_Security", "Win32_Security_Cryptography", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_JobObjects", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Environment", "Win32_System_Registry", "Win32_System_Services", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_Media_MediaFoundation", "Win32_Media_DirectShow", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Variant", "Win32_System_Ole", "Win32_Graphics_Dwm", "Win32_System_Shutdown", "Win32_UI_Input_KeyboardAndMouse"] }
 windows-service = { workspace = true, optional = true }
+# The background service's own log.
+tracing-subscriber = { workspace = true, optional = true }
 
 [features]
-windows-helper = ["dep:windows-service", "pb-mapper-client/relay-quic"]
+windows-helper = [
+    "dep:windows-service",
+    "dep:tracing-subscriber",
+    "pb-mapper-client/relay-quic",
+]
 
 [[bin]]
 name = "pb-mapper-desktop-helper"
