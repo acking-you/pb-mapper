@@ -110,9 +110,9 @@ pub(crate) struct EngineState {
     /// What `State` carries.
     pub record: StateRecord,
     pub capture_fps: f32,
-    /// Median submit to drain of the units the encoder returned in the last
-    /// second; `None` when it returned none, or returns each from the call
-    /// that submits it.
+    /// Median of the encoder's own submit to output time
+    /// (`VideoFormat::encode_us`) of the units it returned in the last second;
+    /// `None` when it returned none or measured none (JPEG).
     pub encoder_dwell: Option<Duration>,
     pub skipped_ticks: u64,
     pub dropped_frames: u64,

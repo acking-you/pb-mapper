@@ -179,8 +179,8 @@ pub struct ViewerStats {
     /// Host capture ticks skipped per second, for transport backpressure or
     /// a full encoder.
     pub skipped_per_s: f32,
-    /// The host's median time a unit stays in its encoder, or the helper,
-    /// from submit to drain. `None` from a host that reports none.
+    /// The host's median time a unit stays in its encoder, from submit to
+    /// output. `None` from a host that reports none.
     pub encoder_dwell_ms: Option<u32>,
     /// What the host sent, in bits per second.
     pub sent_bitrate: u32,
@@ -565,13 +565,19 @@ impl ViewerStatsAcc {
     }
 
     /// The host's `Stats`, with its skipped ticks turned into a rate since the
-    /// previous one, or since the session started.
+    /// previous one, or since the session started. `Stats` carries no host
+    /// time, and a link that held one delivers it right before the next, but
+    /// the host sends them at least `STATS_INTERVAL` apart: the rate is over
+    /// no less, and never above `max_fps`, since a tick skipped is one the
+    /// pace had.
     pub fn on_host(&mut self, now: Instant, host: HostStats) {
         let skipped = self.host.map_or(0, |last| last.skipped_ticks);
-        let elapsed = now.saturating_duration_since(self.host_at).as_secs_f32();
-        if elapsed > 0.0 {
-            self.skipped_per_s = host.skipped_ticks.saturating_sub(skipped) as f32 / elapsed;
-        }
+        let elapsed = now
+            .saturating_duration_since(self.host_at)
+            .max(crate::session::STATS_INTERVAL)
+            .as_secs_f32();
+        self.skipped_per_s =
+            (host.skipped_ticks.saturating_sub(skipped) as f32 / elapsed).min(self.max_fps as f32);
         self.host = Some(host);
         self.host_at = now;
     }

@@ -160,8 +160,8 @@ pub(crate) enum HostMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queue_delay_ms: Option<u32>,
         ack_queue_ms: u32,
-        /// The median time a unit stayed in the encoder, or the helper, from
-        /// submit to drain over the last second. Only to a viewer that listed
+        /// The median time a unit stayed in the encoder, from submit to
+        /// output, over the last second. Only to a viewer that listed
         /// `encoder_dwell`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encoder_dwell_ms: Option<u32>,

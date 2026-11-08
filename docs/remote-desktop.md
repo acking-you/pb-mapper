@@ -633,8 +633,9 @@ two, an encoder that kept each unit 40 ms delivered 40 FPS at a pace of 60, and
 one that kept it 60 ms delivered 30. Four cover a latency of nearly four
 periods, and a fast encoder never holds more than one, so it adds no latency.
 The bound is fixed rather than derived from the measured dwell, because a
-queueing encoder's dwell grows with its depth. Thread C measures each unit's
-dwell, from submit to drain, and reports the median of the last second as
+queueing encoder's dwell grows with its depth. The encoder measures each
+unit's dwell, from submit to output (the `encode_us` it returns with the
+unit), and thread C reports the median of the last second as
 `encoder_dwell_ms`. A static screen is resubmitted about every 250 ms as a
 duplicate, which unique-frame rates exclude. The hand-off queue holds at most
 six units and 8 MiB, which both bounds together never reach; when its oldest
@@ -674,9 +675,12 @@ ended streaming), a resume, a viewer's request, or a hand-off queue that
 overflowed or went stale. Requests other than a resume or a new generation
 wait until 300 ms after the previous IDR. A request is answered once its IDR
 is handed to the encoder, so an IDR still being encoded is never asked for
-twice. Encoder output more than 250 ms late is discarded, and output resumes
-at the next IDR. Nothing periodic, and no frame rate, bitrate, preset or
-congestion change, produces an IDR.
+twice. Encoder output that took more than 250 ms is discarded, and output
+resumes at the next IDR. The time counts from the unit's submit or from the
+output before it, whichever is later: the encoder serves units in order, so a
+unit is not late for waiting behind the others the gate admits, and a slow
+encoder delivers fewer frames rather than none. Nothing periodic, and no frame
+rate, bitrate, preset or congestion change, produces an IDR.
 
 In a process with no visible window, which is the background service and the
 app when hidden, Windows 11 fires every timer on its 15.6 ms tick and ignores
@@ -929,8 +933,8 @@ numbers the UI, the acceptance tool and these docs use:
 | `presented_fps` | Accepted presentations per second |
 | `received_fps` | Non-duplicate video records per second |
 | `preset`, `max_fps` | The preset this session asked for, and its `limits.max_fps`, which bounds every preset's ceiling |
-| `skipped_per_s` | Host capture ticks skipped per second, for transport backpressure or a full encoder |
-| `encoder_dwell_ms` | The host's median time a unit stays in its encoder or helper, from submit to drain, over the last second; null from a host that reports none |
+| `skipped_per_s` | Host capture ticks skipped per second, for transport backpressure or a full encoder, between the last two `Stats`: over at least the host's 1 s interval, however close together they arrive, and never above `max_fps` |
+| `encoder_dwell_ms` | The host's median time a unit stays in its encoder, or the helper's, from submit to output as the encoder measures it, over the last second; null from a host that reports none |
 | `sent_bitrate` | What the host sent over the last second, in bit/s |
 | `ack_queue_ms` | The host's receipt-based queue delay (the ack queue under send credit) |
 | `present_interval` | p50/p95/p99/max of the intervals between accepted presentations over the last 60 s, with the gaps over 100 and 250 ms |
