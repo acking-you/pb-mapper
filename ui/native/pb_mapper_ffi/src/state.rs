@@ -463,7 +463,7 @@ impl PathInfo {
                     setup_ms,
                     kind: direct.last_kind,
                 }),
-                TunnelEventKind::DirectFallback { stage } => Some(PathOutcome::Relay { stage }),
+                TunnelEventKind::DirectFallback { stage, .. } => Some(PathOutcome::Relay { stage }),
                 _ => None,
             });
         Some(Self {

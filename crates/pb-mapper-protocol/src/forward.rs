@@ -58,6 +58,16 @@ impl ByteMeter {
             received: self.received.load(Ordering::Relaxed),
         }
     }
+
+    /// Count `bytes` sent, for a transport that forwards on its own.
+    pub fn add_sent(&self, bytes: u64) {
+        self.sent.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Count `bytes` received, for a transport that forwards on its own.
+    pub fn add_received(&self, bytes: u64) {
+        self.received.fetch_add(bytes, Ordering::Relaxed);
+    }
 }
 
 /// Application bytes one forward moved: `sent` from the local end to the

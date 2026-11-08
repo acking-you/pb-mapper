@@ -2,8 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, DirectStage, PathPolicy, RegisterOptions,
-    RegisterRequest, Transport, TunnelEventKind,
+    Client, ConnectOptions, ConnectRequest, DirectStage, FallbackReason, PathPolicy,
+    RegisterOptions, RegisterRequest, Transport, TunnelEventKind,
 };
 use pb_mapper_server::DirectServerConfig;
 use pb_mapper_testkit::{READY_TIMEOUT, Relay, admin_credential, reserve_addr};
@@ -385,12 +385,14 @@ async fn either_side_can_keep_connections_on_the_existing_relay_path() {
         };
         let seen = connection.diagnostics();
         assert_eq!(seen.direct.as_ref().unwrap().attempt, None);
-        assert!(
-            seen.events
-                .iter()
-                .any(|event| event.kind == TunnelEventKind::DirectFallback { stage })
-        );
-        assert!(registration.diagnostics().direct.is_none());
+        assert!(seen.events.iter().any(|event| event.kind
+            == TunnelEventKind::DirectFallback {
+                stage,
+                reason: FallbackReason::NotOffered
+            }));
+        // The share counts the session too, on the relay it came over.
+        let shared = registration.diagnostics().direct.unwrap();
+        assert_eq!((shared.relay_sessions, shared.direct_sessions), (1, 0));
         assert_eq!(count.load(Ordering::Relaxed), 1);
         connection.stop().await.unwrap();
         registration.stop().await.unwrap();

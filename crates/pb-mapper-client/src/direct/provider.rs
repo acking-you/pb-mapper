@@ -5,7 +5,9 @@ use super::{
     lan::Assessment,
 };
 use crate::{
-    diagnostics::{CandidateCounts, Diagnostics, LinkGuard, LinkKind, SetupTimings, ms},
+    diagnostics::{
+        CandidateCounts, Diagnostics, LinkGuard, LinkKind, SessionGuard, SetupTimings, ms,
+    },
     server::LocalControlWrite,
 };
 use pb_mapper_core::config::ResolvedAddrs;
@@ -311,9 +313,9 @@ where
     if let Some(evidence) = lan.evidence {
         diagnostics.lan_detected(evidence);
     }
-    let missed = || {
-        if lan.evidence.is_some() {
-            diagnostics.lan_missed();
+    let missed = |took: Option<LinkKind>| {
+        if let Some(evidence) = lan.evidence {
+            diagnostics.lan_missed(evidence, took);
         }
     };
     let accept = DirectProviderMessage::Accept {
@@ -352,7 +354,7 @@ where
                         // The consumer chose the relay before any path committed:
                         // the punch did not get through.
                         network.punching_failed();
-                        missed();
+                        missed(None);
                         let selected = DirectProviderMessage::RelaySelected { id: grant.id };
                         return send_until(&reply, selected, deadline).await;
                     }
@@ -384,7 +386,7 @@ where
                 }
                 event = events.recv() => match event {
                     Some(SessionEvent::Relay) => {
-                        missed();
+                        missed(None);
                         let selected = DirectProviderMessage::RelaySelected { id: grant.id };
                         return send_until(&reply, selected, deadline).await;
                     }
@@ -436,21 +438,24 @@ where
         candidates,
     );
     if link.kind != LinkKind::Lan {
-        missed();
+        missed(Some(link.kind));
     }
     super::log_path(&grant.service, &link);
+    let summary = super::summary(&link);
+    let _link = diagnostics.link_opened(link, incoming.connection.0.clone());
+    let session = diagnostics.session_opened(SessionPath::Direct, Some(summary.kind));
+    let meter = Some(session.meter());
     let mut report = Report {
         reports,
         session: (&grant).into(),
         secret: grant.secret,
-        link: super::summary(&link),
+        link: summary,
         seq: 0,
-        _link: diagnostics.link_opened(link, incoming.connection.0.clone()),
-        diagnostics,
+        _session: session,
+        _link,
     };
-    report.diagnostics.session_opened(SessionPath::Direct);
     report.tick();
-    let forwarding = super::forward_quic(local, incoming.send, incoming.recv, framing, idle);
+    let forwarding = super::forward_quic(local, incoming.send, incoming.recv, framing, idle, meter);
     tokio::pin!(forwarding);
     let mut tick = tokio::time::interval(Duration::from_secs(15));
     tick.tick().await;
@@ -586,7 +591,8 @@ struct Report {
     secret: SessionSecret,
     link: LinkSummary,
     seq: u64,
-    diagnostics: Diagnostics,
+    /// Closes the session in diagnostics after the final report.
+    _session: SessionGuard,
     _link: LinkGuard,
 }
 impl Report {
@@ -611,7 +617,6 @@ impl Report {
 }
 impl Drop for Report {
     fn drop(&mut self) {
-        self.diagnostics.session_closed(SessionPath::Direct);
         self.update(SessionState::Closed);
     }
 }

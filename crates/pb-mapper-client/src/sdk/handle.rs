@@ -4,7 +4,9 @@
 //! handle, and the status channel it publishes to. A handle observes and stops
 //! its tunnel; it never drives the traffic itself.
 
-use crate::diagnostics::{Diagnostics, TunnelDiagnostics, TunnelEvents};
+use crate::diagnostics::{
+    Diagnostics, TunnelDiagnostics, TunnelEvents, TunnelMetrics, TunnelMetricsStream,
+};
 use crate::endpoint::RelayEndpoint;
 use std::time::Duration;
 
@@ -144,6 +146,25 @@ macro_rules! tunnel_handle {
             /// event as it happens, until the tunnel stops.
             pub fn subscribe_events(&self) -> TunnelEvents {
                 self.inner.diagnostics.subscribe()
+            }
+
+            /// Its sessions, bytes, relay health and direct link, sampled
+            /// now: the part of [`Self::diagnostics`] that keeps changing,
+            /// cheap enough to read every second.
+            pub fn metrics(&self) -> TunnelMetrics {
+                self.inner
+                    .diagnostics
+                    .metrics(self.inner.endpoint.transport())
+            }
+
+            /// [`Self::metrics`] at once, then every `every` (100 ms to an
+            /// hour) and whenever the tunnel changes, until it stops: see
+            /// [`TunnelMetricsStream`]. One second suits a panel on screen;
+            /// lists and logs need five or more.
+            pub fn subscribe_metrics(&self, every: Duration) -> TunnelMetricsStream {
+                self.inner
+                    .diagnostics
+                    .subscribe_metrics(self.inner.endpoint.transport(), every)
             }
 
             /// Subscribe to status changes. Useful for N-API event bridges.

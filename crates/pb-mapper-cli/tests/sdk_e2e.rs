@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use pb_mapper_auth::MIN_TEMP_KEY_TTL;
 use pb_mapper_client::sdk::{
-    Admin, Client, ClientConfig, ConnectRequest, ConnectionInfo, RegisterRequest, Transport,
-    TunnelStatus,
+    Admin, Client, ClientConfig, ConnectOptions, ConnectRequest, ConnectionInfo, PathPolicy,
+    RegisterRequest, Transport, TunnelMetrics, TunnelStatus,
 };
 use pb_mapper_testkit::{
     READY_TIMEOUT, Relay, admin_credential, reserve_addr, run_raw_tcp_echo, run_udp_datagram_echo,
@@ -255,6 +255,66 @@ async fn sdk_tcp_codec_tunnel_round_trips() {
         .unwrap();
     connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
     run_raw_tcp_echo(listen_addr, 4, None).await;
+    connection.stop().await.unwrap();
+    registration.stop().await.unwrap();
+}
+
+/// Both ends count every session with the bytes it carried: a relay-only
+/// connection, and the share it reaches, whose relayed sessions once counted
+/// nowhere. A share's metrics stream reports the session when it opens.
+#[tokio::test]
+async fn sdk_relay_sessions_count_with_their_bytes_on_both_ends() {
+    let relay = Relay::start("sdk-relay-metrics").await;
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let (registration, _) = register_echo(&client, "metered", Transport::Tcp, false).await;
+    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+    let connection = client
+        .connect_with_options(
+            ConnectRequest {
+                key: "metered".into(),
+                local_addr: listen_addr.to_string(),
+                transport: Transport::Tcp,
+            },
+            ConnectOptions {
+                path: PathPolicy::RelayOnly,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    // An hour apart: only a change makes it sample.
+    let mut followed = registration.subscribe_metrics(Duration::from_secs(3600));
+    assert_eq!(followed.recv().await.unwrap().sessions.relay, 0);
+
+    let payload = vec![0x5a_u8; 1000];
+    let mut stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+    stream.write_all(&payload).await.unwrap();
+    let mut echoed = vec![0; payload.len()];
+    stream.read_exact(&mut echoed).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while followed.recv().await.unwrap().sessions.active_relay != 1 {}
+    })
+    .await
+    .expect("the share's stream reports the session it opened");
+    drop(stream);
+
+    let closed =
+        |metrics: &TunnelMetrics| (metrics.sessions.relay, metrics.sessions.active_relay) == (1, 0);
+    let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
+    let (connected, shared) = loop {
+        let both = (connection.metrics(), registration.metrics());
+        if closed(&both.0) && closed(&both.1) {
+            break both;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{both:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    // An echo: each end sent what it received, the application's bytes alone.
+    for traffic in [connected.traffic, shared.traffic] {
+        assert_eq!((traffic.relay.sent, traffic.relay.received), (1000, 1000));
+        assert_eq!(traffic.direct.sent + traffic.direct.received, 0);
+    }
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
 }

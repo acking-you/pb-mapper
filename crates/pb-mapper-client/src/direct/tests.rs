@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 use crate::{
-    diagnostics::{InterfaceTier, StunOutcome},
+    diagnostics::{ByteCount, InterfaceTier, StunOutcome, TunnelEventKind},
+    relay::RelayTransport,
     sdk::{Client, PortMapping, RegisterOptions, RegisterRequest, Registration, Transport},
 };
 use endpoint::InterfaceSource;
@@ -301,6 +302,14 @@ async fn a_lan_is_dialed_on_its_first_answer_and_reported_while_open() {
         (direct.lan_missed, direct.last_kind),
         (0, Some(LinkKind::Lan))
     );
+    // Its bytes count on the LAN, which is direct, and only there.
+    let traffic = diagnostics.metrics(RelayTransport::Tcp).traffic;
+    let echoed = ByteCount {
+        sent: 12,
+        received: 12,
+    };
+    assert_eq!((traffic.lan, traffic.direct), (echoed, echoed));
+    assert_eq!(traffic.relay, ByteCount::default());
     // The session's end lets its connection go.
     drop(forward);
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -311,6 +320,52 @@ async fn a_lan_is_dialed_on_its_first_answer_and_reported_while_open() {
     .await
     .unwrap();
     assert_eq!(read().active_lan, 0);
+    share.stop().await;
+}
+
+/// Strong evidence of a LAN that no handshake gets across: the miss says
+/// the session took the relay, which carries and counts its bytes.
+#[tokio::test]
+async fn a_missed_lan_is_reported_and_the_relay_counts_the_session() {
+    let share = Share::start("missed").await;
+    let mut network = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+    Arc::get_mut(&mut network).unwrap().interfaces =
+        InterfaceSource::Fixed(Interfaces::new(vec![Interface::new(
+            "lan0",
+            InterfaceTier::Lan,
+            [("127.0.0.2".parse().unwrap(), 8)],
+        )]));
+    network.block_quic();
+    let diagnostics = Diagnostics::default();
+    let mut events = diagnostics.subscribe();
+    let consumer = share.consumer(network, diagnostics.clone());
+    let prepared = consumer
+        .prepare("missed", Instant::now() + Duration::from_secs(8))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(prepared.path, DataPath::Relay { .. }));
+    let _forward = share.forward(prepared).await;
+    let missed = loop {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let TunnelEventKind::LanMissed { evidence, took } = event.kind {
+            break (evidence, took);
+        }
+    };
+    assert_eq!(missed, (LanEvidence::PublicIpSubnet, None));
+    let metrics = diagnostics.metrics(RelayTransport::Tcp);
+    assert_eq!((metrics.lan.detected, metrics.lan.missed), (1, 1));
+    assert_eq!(
+        metrics.traffic.relay,
+        ByteCount {
+            sent: 12,
+            received: 12
+        }
+    );
     share.stop().await;
 }
 

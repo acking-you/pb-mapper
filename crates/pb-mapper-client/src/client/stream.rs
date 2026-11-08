@@ -154,24 +154,22 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
     setup.timing.lock().await.record(setup_latency);
     let _ = setup.events.try_send(true);
     drop(setup.permit);
-    #[cfg(feature = "p2p")]
-    let _path = setup.direct.as_ref().map(|_| {
-        let path = pb_mapper_protocol::direct::SessionPath::Relay;
-        setup.diagnostics.session_opened(path);
-        crate::diagnostics::PathUsage(setup.diagnostics.clone(), path)
-    });
+    let session = setup
+        .diagnostics
+        .session_opened(pb_mapper_protocol::direct::SessionPath::Relay, None);
     let span = info_span!("forward", "client:{client_id} <-> server_id:{server_id}");
     pb_mapper_protocol::with_relay_stream!(&mut remote_stream, remote_stream, {
         let (client_reader, client_writer) = local_stream.split();
         let (server_reader, server_writer) = remote_stream.split();
         snafu_error_handle!(
-            <LocalStream as StreamForward>::forward_local_to_remote_with_codec(
+            <LocalStream as StreamForward>::forward_local_to_remote_metered(
                 codec_key,
                 *credential.key(),
                 client_reader,
                 client_writer,
                 server_reader,
                 server_writer,
+                Some(session.meter()),
             )
             .instrument(span)
             .await

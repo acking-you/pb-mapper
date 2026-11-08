@@ -8,6 +8,7 @@ use super::error::{
     DecodePbConnStreamRespSnafu, EncodePbConnStreamReqSnafu, PbConnStreamRespNotMatchSnafu, Result,
     WritePbConnStreamReqSnafu,
 };
+use crate::diagnostics::Diagnostics;
 use crate::endpoint::RelayEndpoint;
 use crate::server::error::CreateHeaderToolSnafu;
 use pb_mapper_core::checksum::Credential;
@@ -15,6 +16,7 @@ use pb_mapper_core::config::{ResolvedAddrs, control_io_timeout};
 use pb_mapper_core::snafu_error_handle;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use pb_mapper_protocol::data::{DATA_PROTOCOL_V2, DataCodec};
+use pb_mapper_protocol::direct::SessionPath;
 use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
 use uni_stream::stream::{StreamProvider, StreamSplit};
@@ -33,8 +35,9 @@ pub struct StreamConnect {
     pub idle_timeout: Option<std::time::Duration>,
 }
 
-/// Forward a stream using the carrier and relay selected by its registration.
-#[instrument(skip(connect, setup_permit, endpoint), fields(key = %key))]
+/// Forward a stream using the carrier and relay selected by its registration,
+/// counted as one of the tunnel's relay sessions once it starts forwarding.
+#[instrument(skip(connect, setup_permit, endpoint, diagnostics), fields(key = %key))]
 pub(crate) async fn handle_stream_on_endpoint<LocalStream: StreamProvider>(
     key: Arc<str>,
     client_id: u32,
@@ -42,6 +45,7 @@ pub(crate) async fn handle_stream_on_endpoint<LocalStream: StreamProvider>(
     connect: StreamConnect,
     setup_permit: tokio::sync::OwnedSemaphorePermit,
     endpoint: RelayEndpoint,
+    diagnostics: Diagnostics,
 ) -> Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -143,18 +147,21 @@ where
         }
     };
     drop(setup_permit);
+    let session = diagnostics.session_opened(SessionPath::Relay, None);
 
     pb_mapper_protocol::with_relay_stream!(&mut remote_stream, remote_stream, {
         let (client_reader, client_writer) = remote_stream.split();
         let (server_reader, server_writer) = local_stream.split();
 
-        let forward = <LocalStream::Item as StreamForward>::forward_local_to_remote_with_codec(
+        // The service is this end's local side: what it writes is sent.
+        let forward = <LocalStream::Item as StreamForward>::forward_local_to_remote_metered(
             codec_key,
             *credential.key(),
             server_reader,
             server_writer,
             client_reader,
             client_writer,
+            Some(session.meter()),
         );
         let result = match idle_timeout {
             Some(timeout) => {
