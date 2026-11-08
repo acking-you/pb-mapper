@@ -344,11 +344,17 @@ the picture and the choice to view only; the menus say so. A frame rate
 chosen over Auto replaces every preset's own ceiling, Quality's 30 too. The
 codec is the device's: Auto offers H.265 where this device has a hardware
 decoder that takes the chosen resolution (asked of the platform at the first
-connect, never by creating a decoder), H.264 offers only that. A resolution
-no decoder here would take is shown disabled with the reason. When a picture
-fails to decode as H.265 the session connects again at once on H.264, and
-H.265 is not offered again until the app restarts; only a failure on H.264
-too ends the session.
+connect, never by creating a decoder), H.264 offers only that. A computer
+that answers an offer of H.265 with H.264 is not offered it again for the
+rest of the session. A session never asks for more than its codec's
+decoder takes: one not offered H.265 asks for the largest size up to the
+choice that the H.264 decoder takes, and one offered it at a size only
+H.265 decodes here and answered with H.264 connects again at once that way;
+the computer keeps the choice. A resolution the decoder of the codec the
+session would carry cannot take is shown disabled with the reason. When a
+picture fails to decode as H.265 the session connects again at once on
+H.264, and H.265 is not offered again until the app restarts; only a
+failure on H.264 too ends the session.
 
 **Figures at a glance.** Speed is RustDesk's: everything the session moves
 each way, per second, as the tunnel counts it. The chip and the phone's
@@ -585,7 +591,7 @@ CPU and memory without starting tunnels or reading settings.
   the pill), `remote_desktop_test.dart` and `remote_computers_test.dart`
   (remembering at the first picture, pausing, forgetting),
   `viewer_chrome_test.dart` (the toolbar, the overlays, input only while
-  live), `desktop_store_test.dart` (the H.265 offer and its fallback, the
+  live), `desktop_store_test.dart` (the H.265 offer and its fallbacks, the
   choices that connect again, the last move kept for a fresh picture), and
   the input core's pure tests — `touch_gesture_test.dart`,
   `remote_input_test.dart` (the cursor stays the viewer's own, a reopened

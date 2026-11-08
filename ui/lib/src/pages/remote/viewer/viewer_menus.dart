@@ -179,14 +179,14 @@ List<ViewerMenuEntry> _figures(
 
 /// What a session takes at connect, so a change connects again: the
 /// computer's resolution (D7) and maximum frame rate (D8), and this
-/// device's codec (D6). A resolution no decoder here would take is shown
-/// disabled, and a rate above the display's is not offered.
+/// device's codec (D6). A resolution the decoder of the codec it would
+/// carry cannot take is shown disabled, and a rate above the display's is
+/// not offered.
 List<ViewerMenuEntry> _sessionChoices(AppLocalizations l10n, ViewerActions a) {
   final target = a.desktop.session.value.target;
   final resolution = target?.resolution ?? DesktopResolution.p1080;
   final maxFps = target?.maxFps ?? 0;
   final codec = a.prefs.codec;
-  final decoders = a.desktop.decoders.value;
   String resolutionLabel(DesktopResolution r) =>
       r == DesktopResolution.native ? l10n.viewerResolutionNative : r.wire;
   String fpsLabel(int fps) => fps == 0 ? l10n.viewerMaxFpsAuto : '$fps fps';
@@ -205,7 +205,7 @@ List<ViewerMenuEntry> _sessionChoices(AppLocalizations l10n, ViewerActions a) {
       note: l10n.viewerReconnectsToApply,
       entries: [
         for (final r in DesktopResolution.values)
-          if (decoders?.decodes(r, codec) ?? true)
+          if (a.desktop.decodes(r))
             ViewerMenuItem(
               key: Key('resolution-${r.wire}'),
               label: resolutionLabel(r),

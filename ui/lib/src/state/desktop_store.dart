@@ -994,6 +994,10 @@ class DesktopStore {
 
   /// The latest attempt offered H.265.
   bool _offeredH265 = false;
+
+  /// This computer answered an offer of H.265 with H.264 (an older build,
+  /// no encoder, or one that failed): its sessions are H.264 from then on.
+  bool _h265Declined = false;
   Future<DesktopDecoders>? _probing;
   int _reconnectAttempt = 0, _protocolStops = 0;
   Timer? _retryTimer;
@@ -1035,11 +1039,12 @@ class DesktopStore {
     _cancelControlCooldown();
     _quality.value = target.quality;
     if (!sameComputer) {
-      // Another computer's last picture and cursor must not carry over to
-      // this one.
+      // Another computer's last picture, cursor and codec answer must not
+      // carry over to this one.
       _hasPicture = false;
       _releaseMedia();
       _cursor._reset();
+      _h265Declined = false;
     }
     _attemptSerial = serial;
     _setup = DesktopSetupStep.finding;
@@ -1070,18 +1075,31 @@ class DesktopStore {
       // Read after the waits: a change meanwhile applies to this attempt.
       final target = _target;
       if (_disposed || target == null || serial != _serial) return;
-      _offeredH265 = decoders.offersH265(target);
+      final h265 = _offeredH265 = _offersH265(decoders, target);
+      // Never a size the decoder of the codec asked for cannot take.
+      final resolution = h265
+          ? target.resolution
+          : decoders.forH264(target.resolution);
       final session = await _api.connect(
         target.invitation,
         computerId: target.computerId,
         relayOnly: target.relayOnly,
         quality: _quality.value,
         refreshHz: _refreshHz(),
-        h265: _offeredH265,
-        resolution: target.resolution,
+        h265: h265,
+        resolution: resolution,
         maxFps: target.maxFps,
       );
       if (_disposed || serial != _serial) return;
+      if (h265 && session.codec == 'h264') {
+        _h265Declined = true;
+        if (decoders.forH264(resolution) != resolution) {
+          // Only H.265 decodes this size here: again at once, at the
+          // largest H.264 does. The computer keeps the choice.
+          _reconnectNow();
+          return;
+        }
+      }
       _attemptSerial = null;
       _media = session;
       _stopHandled = false;
@@ -1266,6 +1284,24 @@ class DesktopStore {
     ));
     if (_disposed) return probed;
     return _decoders.value ??= probed;
+  }
+
+  /// D6, and what this computer answered: H.265 is offered when the device
+  /// would offer it and the computer has not declined it.
+  bool _offersH265(DesktopDecoders? decoders, DesktopTarget target) =>
+      !_h265Declined && (decoders?.offersH265(target) ?? false);
+
+  /// D7: a session at [r] would decode here, judged by the codec it would
+  /// carry — H.265 where it would be offered, else H.264. Before the probe
+  /// has answered, every size.
+  bool decodes(DesktopResolution r) {
+    final decoders = _decoders.value;
+    if (decoders == null) return true;
+    return decoders.decodes(
+      r,
+      _target?.codec ?? DesktopCodecPreference.auto,
+      h265Declined: _h265Declined,
+    );
   }
 
   void _pollStatus({bool resumed = false}) {
@@ -2055,7 +2091,7 @@ class DesktopStore {
     if (_disposed || target == null || target.codec == codec) return;
     final next = _target = target.copyWith(codec: codec);
     _publishSession();
-    final offer = _decoders.value?.offersH265(next) ?? false;
+    final offer = _offersH265(_decoders.value, next);
     if (offer == _offeredH265) return;
     // Offered and not taken (the host cannot encode it): nothing changes.
     if (!offer && _media?.codec == 'h264') return;

@@ -125,13 +125,32 @@ class DesktopDecoders {
       target.codec == DesktopCodecPreference.auto &&
       (h265?.takes(target.resolution) ?? false);
 
-  /// D7: a decoder this device would use under [codec] takes [r]: H.265
-  /// where it would be offered, else H.264. Without either, the picture is
-  /// JPEG, which Dart decodes at any size.
-  bool decodes(DesktopResolution r, DesktopCodecPreference codec) =>
+  /// D7: the decoder a session at [r] would use under [codec] takes it:
+  /// H.265 where it would be offered, else H.264 — H.264 alone once the
+  /// computer declined H.265 ([h265Declined]). Without either decoder, the
+  /// picture is JPEG, which Dart decodes at any size.
+  bool decodes(
+    DesktopResolution r,
+    DesktopCodecPreference codec, {
+    bool h265Declined = false,
+  }) =>
       (h264 == null && h265 == null) ||
       (h264?.takes(r) ?? false) ||
-      (codec == DesktopCodecPreference.auto && (h265?.takes(r) ?? false));
+      (codec == DesktopCodecPreference.auto &&
+          !h265Declined &&
+          (h265?.takes(r) ?? false));
+
+  /// The largest resolution up to [r] the H.264 decoder takes: what a
+  /// session asks for when it is not offered H.265. Without a limit known
+  /// for H.264, [r] itself.
+  DesktopResolution forH264(DesktopResolution r) {
+    final limit = h264;
+    if (limit == null) return r;
+    return DesktopResolution.values.lastWhere(
+      (c) => c.index <= r.index && limit.takes(c),
+      orElse: () => DesktopResolution.values.first,
+    );
+  }
 
   @override
   bool operator ==(Object other) =>

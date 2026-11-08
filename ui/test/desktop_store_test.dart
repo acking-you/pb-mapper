@@ -578,7 +578,9 @@ void main() {
     expect(maxFpsChoicesFor(59.94), [30, 60]);
 
     // A phone whose AVC decoder stops at 1080p and whose HEVC one does not:
-    // 1440p decodes only while H.265 may be used.
+    // 1440p decodes only while H.265 may be used — not once it failed here,
+    // nor once the computer answered it with H.264 — and a session that is
+    // not offered H.265 asks for what H.264 takes.
     final phone = DesktopDecoders.fromJson({
       'h264': {'max_width': 1920, 'max_height': 1080},
       'h265': {'max_width': 2560, 'max_height': 1440},
@@ -589,6 +591,11 @@ void main() {
     expect(phone.decodes(DesktopResolution.p1440, h264), isFalse);
     expect(phone.decodes(DesktopResolution.native, auto), isFalse);
     expect(phone.withoutH265().decodes(DesktopResolution.p1440, auto), isFalse);
+    expect(
+      phone.decodes(DesktopResolution.p1440, auto, h265Declined: true),
+      isFalse,
+    );
+    expect(phone.forH264(DesktopResolution.native), DesktopResolution.p1080);
 
     // Garbage, or nothing, offers no H.265 and limits nothing.
     final none = DesktopDecoders.fromJson({'h265': 'yes'});
@@ -685,6 +692,46 @@ void main() {
       await tester.pump(const Duration(milliseconds: 500));
       expect(store.session.value.end, DesktopEndReason.decoderFailed);
       expect(api.argsOf('connect'), hasLength(7));
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
+
+  testWidgets(
+    'a computer that answers H.265 with H.264 is not offered it again, and '
+    'a size only H.265 decodes here connects again at once at the largest '
+    'H.264 does, the choice kept',
+    (tester) async {
+      final api = FakeDesktopApi()
+        ..codec = 'h264'
+        ..decodersValue = const DesktopDecoders(
+          h264: DesktopDecoderLimit(1920, 1080),
+          h265: DesktopDecoderLimit(2560, 1440),
+        );
+      final store = DesktopStore(api, textures: FakeTextures().create);
+      final viewer = store.demand(DesktopDemand.viewer);
+      List<(Object?, Object?)> asked() => [
+        for (final c in api.argsOf('connect')) (c['h265'], c['resolution']),
+      ];
+
+      await store.connect(
+        _target.copyWith(resolution: DesktopResolution.p1440),
+      );
+      await tester.pump();
+      api.viewerStatusValue = liveStatus();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(store.session.value.phase, DesktopPhase.live);
+      expect(asked(), [(true, '1440p'), (false, '1080p')]);
+      expect(store.session.value.target?.resolution, DesktopResolution.p1440);
+      expect(store.decodes(DesktopResolution.p1440), isFalse);
+      expect(store.decodes(DesktopResolution.p1080), isTrue);
+
+      // A reconnect asks for what this session decodes straight away.
+      api.viewerStatusValue = stoppedStatus('transport');
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(seconds: 1));
+      expect(asked().last, (false, '1080p'));
 
       viewer.dispose();
       store.dispose();
