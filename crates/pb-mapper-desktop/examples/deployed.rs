@@ -5,7 +5,9 @@
 //! that presents every unit at once; options `--max-width`, `--max-height`,
 //! `--fps` and `--quality quality|balanced|smooth` set what that viewer asks.
 //! `--no-decoder-hints` has the phone tool configure its decoder without the
-//! low-latency hint (case F).
+//! low-latency hint (case F). The configuration's `lan_first`, the app's
+//! *Try the local network first*, is read once at start: the host and the
+//! selftest viewer take it, and `controller.json` hands it to the phone tool.
 use pb_mapper_client::sdk::{Client, ClientConfig, ConnectOptions, PathPolicy, RelayTransport};
 use pb_mapper_desktop::{
     Host, HostOptions, Pull, QualityPreset, VideoCodec, VideoLimits, Viewer, ViewerConfig,
@@ -23,6 +25,14 @@ struct Configuration {
     msg_header_key: String,
     #[serde(default)]
     relay_transport: RelayTransport,
+    /// As the app's `AppConfig::lan_first`, so on for a file saved before
+    /// the switch existed.
+    #[serde(default = "lan_first_by_default")]
+    lan_first: bool,
+}
+
+fn lan_first_by_default() -> bool {
+    true
 }
 
 #[tokio::main]
@@ -96,10 +106,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = async {
         let client = Client::new(ClientConfig { server: config.server_address.clone(), credential: key.credential.clone(), keep_alive: true, namespace: None })?.with_relay_transport(config.relay_transport)?;
         let display = pb_mapper_desktop::displays()?.into_iter().next().ok_or("no display")?;
-        let host = Host::start(&client, HostOptions { service: format!("desktop:acceptance-{}",std::process::id()), display_id:display.id, allow_control:args.iter().any(|arg| arg == "--control"),allow_direct:true,lan_first:true }).await?;
-        let controller = serde_json::json!({"server":config.server_address,"credential":key.credential,"transport":config.relay_transport,"invitation":host.invitation().encode(),"decoder_hints":!args.iter().any(|arg| arg == "--no-decoder-hints")});
+        let host = Host::start(&client, HostOptions { service: format!("desktop:acceptance-{}",std::process::id()), display_id:display.id, allow_control:args.iter().any(|arg| arg == "--control"),allow_direct:true,lan_first:config.lan_first }).await?;
+        // The phone tool follows `lan_first` as it follows the carrier, so
+        // both ends run the host's arm and the report records it.
+        let controller = serde_json::json!({"server":config.server_address,"credential":key.credential,"transport":config.relay_transport,"lan_first":config.lan_first,"invitation":host.invitation().encode(),"decoder_hints":!args.iter().any(|arg| arg == "--no-decoder-hints")});
         std::fs::write(output.join("controller.json"),serde_json::to_vec(&controller)?)?;
-        println!("host_ready display={}x{} duration={seconds} mode={mode}", display.width,display.height);
+        println!("host_ready display={}x{} duration={seconds} mode={mode} lan_first={}", display.width,display.height,config.lan_first);
         if mode == "serve" {
             for _ in 0..seconds {
                 if output.join("stop").exists() { break; }
@@ -109,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else {
             for policy in [PathPolicy::Auto,PathPolicy::RelayOnly] {
-                let viewer = Viewer::connect(&client,host.invitation(),ConnectOptions { path: policy, ..Default::default() },ViewerConfig { codecs: vec![VideoCodec::H264], limits, quality, progress: None }).await?;
+                let viewer = Viewer::connect(&client,host.invitation(),ConnectOptions { path: policy, lan_first: config.lan_first, ..Default::default() },ViewerConfig { codecs: vec![VideoCodec::H264], limits, quality, progress: None }).await?;
                 let consumer = viewer.video_sink().attach()?;
                 // The renderer blocks on the sink, so it gets its own thread.
                 let renderer = tokio::task::spawn_blocking(move || {

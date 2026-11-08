@@ -666,6 +666,8 @@ struct PinnedTunnel {
     relay: String,
     /// The namespace a connection subscribes in, when not its credential's own.
     namespace: Option<u64>,
+    /// Whether it may go direct: only then does LAN-first reach it.
+    allow_direct: bool,
 }
 
 impl PinnedTunnel {
@@ -829,10 +831,12 @@ struct TunnelRuntime {
 }
 
 /// This computer's tunnels on one relay, as rotating that relay's
-/// administrator key leaves them. See [`PbMapperState::tunnels_on`].
+/// administrator key leaves them (see [`PbMapperState::tunnels_on`]), or
+/// as a change of carrier or LAN-first does, which strands none.
 #[derive(Default, Debug)]
 pub struct RelayTunnels {
-    /// On the retired administrator key: they start again on the new one.
+    /// To start again: on the retired administrator key, to start on the
+    /// new one, or started with the setting this computer just left.
     pub shares: Vec<String>,
     pub connections: Vec<String>,
     /// On another credential, a temporary one, which the rotation erased.
@@ -856,7 +860,6 @@ struct RegisterCommit {
     protocol: String,
     enable_encryption: bool,
     enable_keep_alive: bool,
-    allow_direct: bool,
     port_mapping: PortMapping,
     handle: Registration,
     pin: PinnedTunnel,
@@ -869,7 +872,6 @@ struct ConnectCommit {
     local_address: String,
     protocol: String,
     enable_keep_alive: bool,
-    allow_direct: bool,
     port_mapping: PortMapping,
     handle: Connection,
     pin: PinnedTunnel,
@@ -1017,7 +1019,6 @@ pub async fn register_service(
             protocol,
             enable_encryption,
             enable_keep_alive,
-            allow_direct,
             port_mapping,
             handle,
             pin: PinnedTunnel {
@@ -1025,6 +1026,7 @@ pub async fn register_service(
                 endpoint: remote_addrs,
                 relay: server_address,
                 namespace: None,
+                allow_direct,
             },
         })
         .await
@@ -1117,7 +1119,6 @@ pub async fn connect_service(
             local_address,
             protocol,
             enable_keep_alive,
-            allow_direct,
             port_mapping,
             handle,
             pin: PinnedTunnel {
@@ -1125,6 +1126,7 @@ pub async fn connect_service(
                 endpoint: remote_addrs,
                 relay: server_address,
                 namespace,
+                allow_direct,
             },
         })
         .await
@@ -1282,9 +1284,10 @@ mod tests {
     /// start again. One on another credential would land in the
     /// administrator's namespace under the new key, so it is only named; one
     /// on another relay is left alone. The relay is known by its address as
-    /// well as by how it was written.
+    /// well as by how it was written. A change of carrier or LAN-first
+    /// restarts the same ones, and LAN-first only those that may go direct.
     #[tokio::test]
-    async fn a_rotation_restarts_only_the_relays_tunnels_on_the_retired_key() {
+    async fn a_change_restarts_only_the_relays_tunnels_on_its_key() {
         let (_process_credential_guard, state, root) = temp_state("rotation-tunnels").await;
         let retired = pb_mapper_core::checksum::parse_credential(&"a".repeat(32)).unwrap();
         let other = pb_mapper_core::checksum::parse_credential(&"b".repeat(32)).unwrap();
@@ -1312,6 +1315,7 @@ mod tests {
                 endpoint: ResolvedAddrs::from(addr),
                 relay: name.to_owned(),
                 namespace: None,
+                allow_direct: true,
             },
         };
         let mut state = state.lock().await;
@@ -1332,6 +1336,35 @@ mod tests {
         assert_eq!(found.shares, ["web"]);
         assert_eq!(found.connections, ["db"]);
         assert_eq!(found.stranded, ["cam"]);
+
+        // The handle runs on TCP, trying the LAN first, so leaving either
+        // reaches every tunnel on the relay and key; the others stay put.
+        let endpoint = ResolvedAddrs::from(relay);
+        let to_quic = state.on_other_carrier(
+            "relay.example:7666",
+            Some(&endpoint),
+            retired,
+            RelayTransport::Quic,
+        );
+        assert_eq!(to_quic.shares, ["web"]);
+        assert_eq!(to_quic.connections, ["db"]);
+        let lan_off =
+            state.on_other_lan_first("relay.example:7666", Some(&endpoint), retired, false);
+        assert_eq!(lan_off.shares, ["web"]);
+        assert_eq!(lan_off.connections, ["db"]);
+        // Those already running with the setting are not offered.
+        let lan_on = state.on_other_lan_first("relay.example:7666", Some(&endpoint), retired, true);
+        assert!(lan_on.shares.is_empty() && lan_on.connections.is_empty());
+        // One kept on the relay is not offered: no start would change it.
+        state
+            .service_runtime
+            .get_mut("web")
+            .unwrap()
+            .pin
+            .allow_direct = false;
+        let lan_off =
+            state.on_other_lan_first("relay.example:7666", Some(&endpoint), retired, false);
+        assert!(lan_off.shares.is_empty());
         drop(state);
         let _ = std::fs::remove_dir_all(&root);
     }

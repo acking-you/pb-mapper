@@ -26,7 +26,7 @@ use pb_mapper_auth::{
 use pb_mapper_client::client::handle_status_cli_scoped;
 use pb_mapper_client::sdk::{
     Client, ConnectOptions, ConnectRequest, PathPolicy, PortMapping, RegisterOptions,
-    RegisterRequest, TunnelEventKind, TunnelEvents, TunnelMetrics, TunnelStatus,
+    RegisterRequest, TunnelDiagnostics, TunnelEventKind, TunnelEvents, TunnelMetrics, TunnelStatus,
 };
 use pb_mapper_core::checksum::set_process_msg_header_key;
 use pb_mapper_core::checksum::{MACHINE_MSG_HEADER_KEY_PATH, setup_machine_msg_header_key};
@@ -530,6 +530,7 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
         registration.subscribe(),
         registration.subscribe_events(),
         || registration.metrics(),
+        || registration.diagnostics(),
     )
     .await?;
     registration.stop().await?;
@@ -561,20 +562,25 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
         connection.subscribe(),
         connection.subscribe_events(),
         || connection.metrics(),
+        || connection.diagnostics(),
     )
     .await?;
     connection.stop().await?;
     Ok(())
 }
 
-/// Log a running tunnel until it stops: its metrics and the relay's every
-/// 30 s, and as they happen each session that closes, with its bytes, and
-/// each setup that found the LAN and went elsewhere.
+/// Log a running tunnel until it stops: its metrics, its diagnostics and the
+/// relay's every 30 s, and as they happen each session that closes, with its
+/// bytes, and each setup that found the LAN and went elsewhere. The
+/// diagnostics carry what the metrics leave out: port mapping, the retry
+/// state, recent events, and the direct link's setup timings and candidate
+/// counts, which a LAN-first A/B compares.
 async fn monitor_tunnel(
     client: &Client,
     mut status: tokio::sync::watch::Receiver<TunnelStatus>,
     mut events: TunnelEvents,
     metrics: impl Fn() -> TunnelMetrics,
+    diagnostics: impl Fn() -> TunnelDiagnostics,
 ) -> Result<(), Box<dyn Error>> {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -603,7 +609,7 @@ async fn monitor_tunnel(
                 None => events_open = false,
             },
             _ = interval.tick() => {
-                tracing::info!(event = "tunnel_metrics", status = ?state, metrics = %serde_json::to_string(&metrics())?, relay = %serde_json::to_string(&client.relay_diagnostics().await)?, "tunnel metrics");
+                tracing::info!(event = "tunnel_metrics", status = ?state, metrics = %serde_json::to_string(&metrics())?, diagnostics = %serde_json::to_string(&diagnostics())?, relay = %serde_json::to_string(&client.relay_diagnostics().await)?, "tunnel metrics");
             },
         }
     }

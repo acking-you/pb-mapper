@@ -171,11 +171,15 @@ the setup string, which carries the relay's settings to another computer,
 nor in first-run setup or the tunnel editor.
 
 Each tunnel, remote-desktop connection and sharing start takes it as it is
-then; what is running keeps what it started with. Flipping it with tunnels
-running that may go direct offers, in a dialog like the carrier's, to start
-them again; Later leaves them until they next start, and a failure to start
-one says which in a toast. A remote-desktop host, local or in the
-background service, takes it at the next Start sharing.
+then; what is running keeps what it started with. Flipping it offers, in a
+dialog like the carrier's, to start again the tunnels Rust names in the
+save's `lanFirst`: those on the saved relay, under the saved credential,
+that may go direct and started with the other setting. A tunnel still on an
+earlier relay or credential is left alone, as the carrier move leaves it,
+since a start would move it onto these. Later leaves them until they next
+start, and a failure to start one says which in a toast. A remote-desktop
+host, local or in the background service, takes it at the next Start
+sharing.
 
 ### How this computer reaches the relay
 

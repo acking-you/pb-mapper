@@ -396,7 +396,10 @@ The design and its rules are in `docs/ui-design.md`.
   - The relay carrier (TCP or QUIC, `relay-quic`) and LAN-first are app
     config, set by `pb_mapper_update_config` with the address and
     credential; a tunnel keeps what it started with and reports its carrier
-    as `relayTransport`. Only a change of the relay settings
+    as `relayTransport`. A change of either answers with the tunnels it
+    reaches (`move`, `lanFirst`), only those on the saved relay under the
+    saved credential, and the window offers to restart exactly those. Only
+    a change of the relay settings
     (`AppConfig::same_relay`) resets the relay caches or asks the relay again.
     `pb_mapper_start_server` takes a `quic_port` (0: none). The window's
     own relay questions, and the remote desktop's connects and host starts,

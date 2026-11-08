@@ -13,7 +13,7 @@ use crate::error::CtlError;
 use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, parse_c_string};
-use crate::state::AppConfig;
+use crate::state::{AppConfig, RelayTunnels};
 
 /// Get current app config.
 #[unsafe(no_mangle)]
@@ -69,9 +69,14 @@ pub unsafe extern "C" fn pb_mapper_reveal_isolated_admin_key(
 /// next tunnel or remote-desktop start. A change of `lan_first` alone keeps
 /// what the window knows about the relay.
 ///
-/// When the carrier changes, `data.move` names this computer's tunnels on
-/// the saved relay, under the saved credential, still on the old carrier:
-/// they keep it until started again, which is the window's to offer.
+/// A running tunnel keeps the carrier and LAN-first it started with until
+/// it is started again, which is the window's to offer. When the carrier
+/// changes, `data.move` names this computer's tunnels on the saved relay,
+/// under the saved credential, still on the old carrier; when `lan_first`
+/// changes, `data.lanFirst` names those there that may go direct and
+/// started with the other setting. A tunnel on another relay or credential
+/// is in neither: a start would move it onto these. Each is empty when its
+/// setting did not change.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_update_config(
     handle: *mut PbMapperHandle,
@@ -99,73 +104,88 @@ pub unsafe extern "C" fn pb_mapper_update_config(
         Ok(v) => v,
         Err(e) => return err_ctl(&e),
     };
+    let lan_first = lan_first != 0;
 
     let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         // Where that relay is, to know its tunnels by address as well as by
         // name: resolved before the state is locked, since it can be slow,
-        // and only when the carrier looks about to change. `None` is not
-        // looked up; `Some(None)` did not resolve.
-        let current = state.lock().await.get_config_status().await.relay_transport;
-        let looked_up = if current == relay_transport {
-            None
-        } else {
-            Some(
-                resolve_pb_mapper_server_async(Some(&server_address))
-                    .await
-                    .ok(),
-            )
-        };
-        // Compared, written, and the tunnels to move named, under one lock:
-        // two saves at once cannot both see the old carrier, or both miss
-        // the change, and the tunnels named are the ones on another carrier
-        // than the one this save wrote.
+        // and only when the carrier or LAN-first looks about to change.
+        // `None` is not looked up; `Some(None)` did not resolve.
+        let current = state.lock().await.get_config_status().await;
+        let looked_up =
+            if current.relay_transport == relay_transport && current.lan_first == lan_first {
+                None
+            } else {
+                Some(
+                    resolve_pb_mapper_server_async(Some(&server_address))
+                        .await
+                        .ok(),
+                )
+            };
+        // Compared, written, and the tunnels each change reaches named,
+        // under one lock: two saves at once cannot both see the old
+        // setting, or both miss the change, and the tunnels named are the
+        // ones started otherwise than this save wrote.
         let mut state = state.lock().await;
-        let changed = state.get_config_status().await.relay_transport != relay_transport;
+        let saved = state.get_config_status().await;
+        let carrier_changed = saved.relay_transport != relay_transport;
+        let lan_first_changed = saved.lan_first != lan_first;
         state
             .update_config(AppConfig {
                 server_address: server_address.clone(),
                 keep_alive_enabled: enable_keep_alive != 0,
                 msg_header_key,
                 relay_transport,
-                lan_first: lan_first != 0,
+                lan_first,
             })
             .await?;
         let credential = match get_process_credential() {
-            Ok(credential) if changed => credential,
+            Ok(credential) if carrier_changed || lan_first_changed => credential,
             _ => return Ok(Default::default()),
         };
         let endpoint = match looked_up {
             Some(endpoint) => endpoint,
-            // Another save changed the carrier between that look and this
+            // Another save changed one of them between that look and this
             // lock, so the change was not foreseen: looked up now, with the
             // lock held, rather than naming tunnels by address text alone.
             None => resolve_pb_mapper_server_async(Some(&server_address))
                 .await
                 .ok(),
         };
-        let moving = state.on_other_carrier(
-            &server_address,
-            endpoint.as_ref(),
-            credential,
-            relay_transport,
-        );
-        Ok::<_, CtlError>(moving)
+        let endpoint = endpoint.as_ref();
+        let moving = if carrier_changed {
+            state.on_other_carrier(&server_address, endpoint, credential, relay_transport)
+        } else {
+            RelayTunnels::default()
+        };
+        let reached = if lan_first_changed {
+            state.on_other_lan_first(&server_address, endpoint, credential, lan_first)
+        } else {
+            RelayTunnels::default()
+        };
+        Ok::<_, CtlError>((moving, reached))
     });
 
     match result {
-        Ok(moving) => {
+        Ok((moving, reached)) => {
             events::emit(events::ChangeKind::Config, None, Origin::Ui);
             ok_data(json!({
-                "move": {
-                    "shares": moving.shares,
-                    "connections": moving.connections,
-                },
+                "move": named(moving),
+                "lanFirst": named(reached),
             }))
         }
         Err(e) => err_ctl(&e),
     }
+}
+
+/// Tunnels to start again, as the window reads them.
+fn named(tunnels: RelayTunnels) -> serde_json::Value {
+    json!({
+        "shares": tunnels.shares,
+        "connections": tunnels.connections,
+    })
 }
 
 /// The carrier `raw` names.

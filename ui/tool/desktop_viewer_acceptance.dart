@@ -12,12 +12,13 @@
 // status only, never images, invitations or credentials.
 //
 // Defines: setupUrl (a loopback controller.json), seconds (15..1800),
-// relayOnly, lanFirst (default true; false for the A/B run with LAN-first
-// off), quality (quality | balanced | smooth), case (a label for the run)
-// and host (the host's GPU and refresh rate, which a viewer cannot see).
-// controller.json may override seconds, relay_only and lan_first, and its
-// decoder_hints false (case F) configures the decoder without its
-// low-latency hint.
+// relayOnly, lanFirst (default true, used only when controller.json carries
+// no lan_first), quality (quality | balanced | smooth), case (a label for the
+// run) and host (the host's GPU and refresh rate, which a viewer cannot see).
+// controller.json may override seconds and relay_only. `deployed` always
+// writes the host's lan_first into it, so the A/B run with LAN-first off
+// switches it off on the host. Its decoder_hints false (case F) configures
+// the decoder without its low-latency hint.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';

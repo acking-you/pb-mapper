@@ -560,7 +560,7 @@ class _SetupStringDialogState extends State<_SetupStringDialog> {
 /// How this computer tries the paths to another: a property of this
 /// computer, not of the relay, so it is saved at once and the relay is asked
 /// nothing. Tunnels and the remote desktop take it as they start; the
-/// running tunnels it would reach are offered a restart.
+/// running tunnels Rust names as reached by it are offered a restart.
 class _DirectCard extends StatefulWidget {
   const _DirectCard({required this.store});
 
@@ -578,6 +578,10 @@ class _DirectCardState extends State<_DirectCard> {
 
   Future<void> _set(bool on) async {
     setState(() => _saving = on);
+    // What the save writes, read before it: a later save may have replaced
+    // the store's config by the time this one is answered.
+    final relay = _store.config.serverAddress;
+    final credential = _store.config.msgHeaderKey;
     final result = await _store.setLanFirst(on);
     if (!mounted) return;
     setState(() => _saving = null);
@@ -585,11 +589,19 @@ class _DirectCardState extends State<_DirectCard> {
       showToast(context, result.message, kind: ToastKind.error);
       return;
     }
-    final running = _store.liveDirect;
-    if (running.isNotEmpty) await _offerRestart(running);
+    // Only the tunnels on the relay and credential just saved: a start
+    // takes those, so one still on an earlier relay or credential would be
+    // moved onto them, away from whoever reaches it there.
+    final reached = CarrierMove.fromMap(result.data['lanFirst']);
+    if (reached.isEmpty) return;
+    await _offerRestart(reached, relay: relay, credential: credential);
   }
 
-  Future<void> _offerRestart(List<Tunnel> running) async {
+  Future<void> _offerRestart(
+    CarrierMove reached, {
+    required String relay,
+    required String credential,
+  }) async {
     final l10n = context.l10n;
     final here = Navigator.of(context).context;
     final now = await showDialog<bool>(
@@ -600,7 +612,7 @@ class _DirectCardState extends State<_DirectCard> {
         title: Text(l10n.lanFirstRestartTitle),
         content: SizedBox(
           width: 420,
-          child: Text(l10n.lanFirstRestartBody(running.length)),
+          child: Text(l10n.lanFirstRestartBody(reached.length)),
         ),
         actions: [
           TextButton(
@@ -616,12 +628,17 @@ class _DirectCardState extends State<_DirectCard> {
       ),
     );
     if (now != true || !here.mounted) return;
-    final failed = await _store.restartTunnels(running);
+    final failed = await _store.restart(
+      shares: reached.shares,
+      connections: reached.connections,
+      relay: relay,
+      credential: credential,
+    );
     if (!here.mounted) return;
     if (failed.isEmpty) {
       showToast(
         here,
-        l10n.lanFirstRestarted(running.length),
+        l10n.lanFirstRestarted(reached.length),
         kind: ToastKind.success,
       );
     } else {

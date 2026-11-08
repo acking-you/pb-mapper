@@ -223,7 +223,6 @@ impl PbMapperState {
             protocol,
             enable_encryption,
             enable_keep_alive,
-            allow_direct,
             port_mapping,
             handle,
             pin,
@@ -244,7 +243,7 @@ impl PbMapperState {
             enable_encryption,
             enable_keep_alive,
             DirectOptions {
-                allow_direct,
+                allow_direct: pin.allow_direct,
                 port_mapping,
             },
         )
@@ -312,8 +311,7 @@ impl PbMapperState {
 
     /// This computer's tunnels on `relay` under `credential` that reach it
     /// over another carrier than `transport`: the ones to start again for
-    /// them to move to it. A tunnel on another relay or credential is not
-    /// this change's to move.
+    /// them to move to it.
     pub fn on_other_carrier(
         &self,
         relay: &str,
@@ -321,17 +319,49 @@ impl PbMapperState {
         credential: Credential,
         transport: RelayTransport,
     ) -> RelayTunnels {
+        self.started_otherwise(relay, endpoint, credential, |runtime| {
+            runtime.handle.diagnostics().relay_transport != transport
+        })
+    }
+
+    /// This computer's tunnels on `relay` under `credential` that may go
+    /// direct and started with LAN-first other than `lan_first`: the ones to
+    /// start again for it to reach them. One kept on the relay never tries a
+    /// local network, so no start changes it.
+    pub fn on_other_lan_first(
+        &self,
+        relay: &str,
+        endpoint: Option<&ResolvedAddrs>,
+        credential: Credential,
+        lan_first: bool,
+    ) -> RelayTunnels {
+        self.started_otherwise(relay, endpoint, credential, |runtime| {
+            runtime.pin.allow_direct && runtime.handle.diagnostics().lan_first != lan_first
+        })
+    }
+
+    /// This computer's tunnels on `relay` under `credential` that `differs`
+    /// picks. A start takes the relay and credential configured now, so a
+    /// tunnel on another relay or credential is never named: starting it
+    /// again would move it there, away from whoever reaches it where it is.
+    fn started_otherwise(
+        &self,
+        relay: &str,
+        endpoint: Option<&ResolvedAddrs>,
+        credential: Credential,
+        differs: impl Fn(&TunnelRuntime) -> bool,
+    ) -> RelayTunnels {
         let mut found = RelayTunnels::default();
-        for (runtimes, moving) in [
+        for (runtimes, named) in [
             (&self.service_runtime, &mut found.shares),
             (&self.client_runtime, &mut found.connections),
         ] {
             for (key, runtime) in runtimes {
                 if runtime.pin.is_on(relay, endpoint)
                     && runtime.pin.credential == credential
-                    && runtime.handle.diagnostics().relay_transport != transport
+                    && differs(runtime)
                 {
-                    moving.push(key.clone());
+                    named.push(key.clone());
                 }
             }
         }
@@ -376,7 +406,6 @@ impl PbMapperState {
             local_address,
             protocol,
             enable_keep_alive,
-            allow_direct,
             port_mapping,
             handle,
             pin,
@@ -391,6 +420,7 @@ impl PbMapperState {
         );
 
         let namespace = pin.namespace;
+        let allow_direct = pin.allow_direct;
         let handle = Arc::new(TunnelHandle::Connect(handle));
         watch_tunnel(&handle, events::ChangeKind::Clients, &service_key);
         if self

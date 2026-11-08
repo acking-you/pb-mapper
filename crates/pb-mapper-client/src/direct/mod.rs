@@ -713,7 +713,9 @@ fn summary(link: &DirectLink) -> LinkSummary {
 }
 
 /// The line that says which way a session went, which the app's Logs page
-/// shows.
+/// shows. It carries the figures a LAN-first A/B compares: the setup time,
+/// how soon a LAN address answered (absent when none did) and the handshakes
+/// this end started (none on the publishing end, which is dialed).
 fn log_path(service: &str, link: &DirectLink) {
     tracing::info!(
         event = "session_path_selected",
@@ -725,6 +727,9 @@ fn log_path(service: &str, link: &DirectLink) {
         local_ip = %link.local_ip.map_or_else(|| "-".to_string(), |ip| ip.to_string()),
         evidence = link.same_lan.map_or("none", LanEvidence::as_str),
         setup_ms = link.timings.setup_ms,
+        lan_first_pong_ms = link.timings.lan_first_pong_ms,
+        // Only the dialing end makes handshakes; the dialed end has none to count.
+        handshakes = link.timings.handshake_ms.map(|_| link.candidates.handshakes),
     );
 }
 

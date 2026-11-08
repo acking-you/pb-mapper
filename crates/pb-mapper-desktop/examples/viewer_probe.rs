@@ -25,6 +25,14 @@ struct Setup {
     credential: String,
     transport: RelayTransport,
     invitation: String,
+    /// The host's LAN-first, which the viewer follows; one from an older
+    /// `deployed` says nothing, which reads as on.
+    #[serde(default = "lan_first_by_default")]
+    lan_first: bool,
+}
+
+fn lan_first_by_default() -> bool {
+    true
 }
 
 /// What the simulated decoder saw.
@@ -82,6 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &Invitation::decode(&setup.invitation)?,
         ConnectOptions {
             path,
+            lan_first: setup.lan_first,
             ..Default::default()
         },
         ViewerConfig {

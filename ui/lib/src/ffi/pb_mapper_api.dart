@@ -29,9 +29,10 @@ class OperationResult {
   });
 }
 
-/// What saving the relay settings left to do: this computer's tunnels on
-/// that relay, under that credential, still on the carrier it had before.
-/// Each keeps it until started again.
+/// What saving the settings left to do: this computer's tunnels on that
+/// relay, under that credential, still on the carrier it had before (`move`)
+/// or, when they may go direct, on the LAN-first it had (`lanFirst`). Each
+/// keeps it until started again.
 class CarrierMove {
   const CarrierMove({this.shares = const [], this.connections = const []});
 
@@ -612,7 +613,7 @@ abstract interface class PbMapperApiClient {
 
   /// Save the relay settings, and whether this computer tries a shared local
   /// network first. Its [OperationResult.data] carries a [CarrierMove] under
-  /// `move` when the carrier changed.
+  /// `move` when the carrier changed, and under `lanFirst` when that did.
   Future<OperationResult> updateConfig({
     required String serverAddress,
     required bool keepAlive,

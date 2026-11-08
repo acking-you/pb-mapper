@@ -556,8 +556,9 @@ class AppStore extends ChangeNotifier {
   /// Whether this computer tries a local network it shares with the other
   /// end first, saved at once with the relay settings as they are. Nothing
   /// about the relay changed, so it is not asked anything. Running tunnels
-  /// and a running remote-desktop host keep what they started with: see
-  /// [liveDirect].
+  /// and a running remote-desktop host keep what they started with; when it
+  /// changed, the result's `lanFirst` lists the tunnels on this relay, under
+  /// this credential, that starting again would change: see [restart].
   Future<OperationResult> setLanFirst(bool on) async {
     final result = await api.updateConfig(
       serverAddress: config.serverAddress,
@@ -569,28 +570,6 @@ class AppStore extends ChangeNotifier {
     await _loadConfig();
     return result;
   }
-
-  /// The running tunnels a change of [ConfigStatus.lanFirst] would reach
-  /// once started again: those that may go direct.
-  List<Tunnel> get liveDirect => [
-    for (final tunnel in tunnels)
-      if (tunnel.isLive && tunnel.allowDirect) tunnel,
-  ];
-
-  /// Start [tunnels] again, so that each takes this computer's settings as
-  /// they are now. Returns those that did not start, each with why.
-  Future<List<String>> restartTunnels(List<Tunnel> tunnels) => restart(
-    shares: [
-      for (final t in tunnels)
-        if (t.kind == TunnelKind.share) t.key,
-    ],
-    connections: [
-      for (final t in tunnels)
-        if (t.kind == TunnelKind.connect) t.key,
-    ],
-    relay: config.serverAddress,
-    credential: config.msgHeaderKey,
-  );
 
   /// Start [move]'s tunnels again, so that they reach the relay over the
   /// carrier Settings names now; their open sessions reconnect. Returns
