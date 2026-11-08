@@ -48,6 +48,11 @@ const MAX_IN_FLIGHT: usize = crate::worker::ENCODER_DEPTH;
 /// the next IDR. A unit's time counts from when the encoder could start it:
 /// see `late`.
 const LATE_OUTPUT: Duration = Duration::from_millis(250);
+/// A pipeline that has submitted nothing this long after it was built is
+/// stuck; `unsubmitted` says on what.
+const FIRST_SUBMIT_WAIT: Duration = Duration::from_secs(3);
+/// An encoder that has held a unit this long is stuck.
+const OUTPUT_WAIT: Duration = Duration::from_secs(2);
 const MAX_ACCESS_UNIT: usize = 4 * 1024 * 1024;
 /// A static desktop still submits a verified repeat this often, which keeps a
 /// presented frame fresh enough to authorise input.
@@ -367,17 +372,28 @@ impl Encoder {
 
     /// Complete previously submitted work even while network admission is
     /// closed. This never acquires a desktop texture or calls ProcessInput.
+    /// A stuck pipeline fails, blamed on the encoder or on the capture.
     pub fn drain(&mut self) -> Result<Option<Encoded>> {
         self.check_thread()?;
-        if self.stats.submitted == 0
-            && self.latest.is_none()
-            && self.created.elapsed() > Duration::from_secs(3)
-        {
-            // No desktop image yet: capture, not the encoder, is stuck.
-            return Err(error("desktop capture delivered no image"));
-        }
         let kind = self.codec.kind;
-        self.collect().map_err(|failure| codec_error(kind, failure))
+        let ready = self
+            .collect()
+            .map_err(|failure| codec_error(kind, failure))?;
+        if self.stats.submitted == 0 && self.created.elapsed() > FIRST_SUBMIT_WAIT {
+            return Err(unsubmitted(
+                kind,
+                self.codec.need_input > 0,
+                self.latest.is_some(),
+            ));
+        }
+        if self
+            .pending
+            .front()
+            .is_some_and(|(_, at, _)| at.elapsed() > OUTPUT_WAIT)
+        {
+            return Err(codec_error(kind, error("hardware video encoder stalled")));
+        }
+        Ok(ready)
     }
 
     fn collect(&mut self) -> Result<Option<Encoded>> {
@@ -431,14 +447,6 @@ impl Encoder {
                 // when that notification is already available.
                 self.codec.events()?;
             }
-        }
-        if self
-            .pending
-            .front()
-            .is_some_and(|(_, at, _)| at.elapsed() > Duration::from_secs(2))
-            || (self.stats.submitted == 0 && self.created.elapsed() > Duration::from_secs(3))
-        {
-            return Err(error("hardware video encoder stalled"));
         }
         Ok(ready)
     }
@@ -598,6 +606,19 @@ fn codec_error(kind: VideoCodec, failure: std::io::Error) -> std::io::Error {
         error(format!("{H265_ENCODER_FAILED}: {failure}"))
     } else {
         failure
+    }
+}
+
+/// Why an encoder took no input in its first `FIRST_SUBMIT_WAIT`. It asked
+/// for input and capture had no desktop image to give it: capture is stuck,
+/// and is retried. It never asked, or had an image and no free sample for it:
+/// the encoder is stuck, a codec error. The probe encodes no frame, so this is
+/// where an H.265 encoder that never asks for input is turned off.
+fn unsubmitted(kind: VideoCodec, asked: bool, image: bool) -> std::io::Error {
+    if asked && !image {
+        error("desktop capture delivered no image")
+    } else {
+        codec_error(kind, error("hardware video encoder stalled"))
     }
 }
 
@@ -1572,6 +1593,21 @@ mod tests {
         assert_eq!(scaled_size(1280, 720, 1920, 1080), (1280, 720));
         assert_eq!(scaled_size(3440, 1440, 1920, 1080), (1920, 802));
         assert_eq!(scaled_size(1080, 1920, 1920, 1080), (606, 1080));
+    }
+    #[test]
+    fn an_encoder_that_never_asks_for_input_is_blamed_not_capture() {
+        let h265_failed = |asked, image| {
+            unsubmitted(VideoCodec::H265, asked, image)
+                .to_string()
+                .starts_with(H265_ENCODER_FAILED)
+        };
+        // Asked, and capture had no image: capture is stuck, and is retried
+        // with H.265 still on.
+        assert!(!h265_failed(true, false));
+        // Never asked, or no sample for the image: the encoder's, so H.265 is
+        // turned off and the viewer reconnects to H.264.
+        assert!(h265_failed(false, false));
+        assert!(h265_failed(true, true));
     }
     #[test]
     fn a_unit_queued_behind_a_slow_encoder_is_not_late() {

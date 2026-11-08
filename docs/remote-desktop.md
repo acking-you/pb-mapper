@@ -792,8 +792,11 @@ probe tainting, on-demand IDRs and their rate limits.
 When a session's H.265 encoder fails to build or to encode (an error of the
 codec itself, rather than of the capture around it, including one the helper
 reports), the host turns H.265 off for the rest of its process and ends that
-session with `capture_failed`; the viewer's reconnect then gets H.264. The
-failure is logged as `desktop_h265_failed`, and each probe as
+session with `capture_failed`; the viewer's reconnect then gets H.264. Since
+the probe encodes no frame, an encoder that takes no input within 3 s of being
+built is such a failure: one that never asked for input, or had an image and
+no free sample for it. Only an encoder that asked while capture had no desktop
+image blames the capture, which is retried. The failure is logged as `desktop_h265_failed`, and each probe as
 `desktop_h265_probe`, on `pb_mapper_desktop::session`.
 
 ### Send credit
