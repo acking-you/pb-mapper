@@ -140,6 +140,31 @@ void main() {
         'Mapped',
       );
       expect(find.text(':52183 → 203.0.113.7:52183'), findsOneWidget);
+      expect(find.byKey(const Key('traffic-relay')), findsNothing);
+
+      // A sample between events keeps the figures live, and alone does
+      // not lose what the events said.
+      feed.add(
+        TunnelEventsUpdate.fromMap({
+          'type': 'metrics',
+          'metrics': {
+            'sessions': {'direct': 2, 'relay': 1, 'lan': 0},
+            'traffic': {
+              'relay': {'sent': 2048, 'received': 4096},
+              'direct': {'sent': 10, 'received': 20},
+              'lan': {'sent': 0, 'received': 0},
+            },
+            'relay': {'rtt_ms': 12, 'consecutive_failures': 0},
+          },
+        }),
+      );
+      await settle(tester);
+      expect(find.byKey(const Key('traffic-relay')), findsOneWidget);
+      expect(find.byKey(const Key('traffic-direct')), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('port-mapping-stage'))).data,
+        'Mapped',
+      );
       expect(tester.takeException(), isNull);
 
       await tester.tap(find.byTooltip('Close').last);

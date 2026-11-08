@@ -12,8 +12,8 @@ mod socket;
 
 use crate::{
     diagnostics::{
-        CandidateCounts, Diagnostics, DirectLink, DirectStage, LanEvidence, LinkGuard, LinkKind,
-        LinkStats, LinkVia, SetupTimings, ms,
+        CandidateCounts, Diagnostics, DirectLink, DirectStage, FallbackReason, LanEvidence,
+        LinkGuard, LinkKind, LinkStats, LinkVia, SessionGuard, SetupTimings, ms,
     },
     endpoint::RelayEndpoint,
 };
@@ -26,7 +26,7 @@ use pb_mapper_protocol::{
     command::{PbConnRequest, PbConnStatusReq, PbConnStatusResp},
     data::DataCodec,
     direct::*,
-    forward::StreamForward,
+    forward::{ByteMeter, StreamForward},
 };
 pub(crate) use provider::Provider;
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
@@ -138,6 +138,16 @@ impl Consumer {
     fn cooldown(&self) -> std::sync::MutexGuard<'_, Cooldown> {
         self.cooldown.lock().unwrap_or_else(|e| e.into_inner())
     }
+    /// Pause direct after a fallback, and say until when.
+    fn back_off(&self) {
+        let mut cooldown = self.cooldown();
+        cooldown.back_off(Instant::now());
+        self.diagnostics.direct_cooldown(cooldown.until);
+    }
+    fn clear_cooldown(&self) {
+        self.cooldown().clear();
+        self.diagnostics.direct_cooldown(None);
+    }
     async fn control(&self, key: &str) -> io::Result<Option<Arc<Control>>> {
         let mut slot = self.control.lock().await;
         if let Some(control) = slot.as_ref().filter(|c| c.alive()) {
@@ -168,7 +178,7 @@ impl Consumer {
             tracing::debug!(service = %key, "relay or publisher does not offer direct");
             *slot = None;
             // Set before the lock is released, so no queued setup repeats the query.
-            self.cooldown().back_off(Instant::now());
+            self.back_off();
             return Ok(None);
         };
         if capability.version != DIRECT_VERSION {
@@ -176,7 +186,7 @@ impl Consumer {
                 version = capability.version,
                 "unsupported direct coordination version"
             );
-            self.cooldown().back_off(Instant::now());
+            self.back_off();
             return Ok(None);
         }
         let control = Control::connect(&self.remote, self.credential, self.namespace).await?;
@@ -184,7 +194,7 @@ impl Consumer {
         Ok(Some(control))
     }
     pub fn invalidate(&self) {
-        self.cooldown().clear();
+        self.clear_cooldown();
         if let Some(network) = self.network.get() {
             network.invalidate();
         }
@@ -202,6 +212,7 @@ impl Consumer {
         // A recent fallback says this path will not punch: take the ordinary
         // relay path without spending the connection's setup budget on it.
         if self.cooldown().active(Instant::now()) {
+            self.diagnostics.cooldown_skip();
             return Ok(None);
         }
         // Before a grant arrives no endpoint can have committed, so a failed
@@ -242,17 +253,17 @@ impl Consumer {
             Ok(Ok(Some(prepared))) => prepared,
             result => {
                 let reason = match result {
-                    Ok(Ok(None)) => "direct_not_offered",
+                    Ok(Ok(None)) => FallbackReason::NotOffered,
                     Ok(Err(error)) => {
                         tracing::debug!(%error, "direct coordination or discovery failed before a grant");
-                        "direct_negotiation_failed"
+                        FallbackReason::NegotiationFailed
                     }
-                    Err(_) => "direct_negotiation_timeout",
+                    Err(_) => FallbackReason::NegotiationTimeout,
                     Ok(Ok(Some(_))) => unreachable!(),
                 };
-                tracing::info!(event = "session_path_selected", path = "relay", service = %key, reason);
+                tracing::info!(event = "session_path_selected", path = "relay", service = %key, reason = reason.as_str());
                 attempt.fell_back(reason);
-                self.cooldown().back_off(Instant::now());
+                self.back_off();
                 return Ok(None);
             }
         };
@@ -341,11 +352,13 @@ impl Consumer {
                 timings,
                 candidates,
             );
-            if lan.evidence.is_some() && link.kind != LinkKind::Lan {
-                self.diagnostics.lan_missed();
+            if let Some(evidence) = lan.evidence
+                && link.kind != LinkKind::Lan
+            {
+                self.diagnostics.lan_missed(evidence, Some(link.kind));
             }
             attempt.established(setup, link.kind);
-            self.cooldown().clear();
+            self.clear_cooldown();
             log_path(key, &link);
             Ok(Some(Prepared {
                 path: DataPath::Quic {
@@ -362,11 +375,11 @@ impl Consumer {
             }))
         } else {
             tracing::debug!(reason = ?candidate.as_ref().map(|r| r.as_ref().map(|_| ())), "direct attempt failed before commit");
-            if lan.evidence.is_some() {
-                self.diagnostics.lan_missed();
+            if let Some(evidence) = lan.evidence {
+                self.diagnostics.lan_missed(evidence, None);
             }
-            attempt.fell_back("direct_timeout_or_unreachable");
-            self.cooldown().back_off(Instant::now());
+            attempt.fell_back(FallbackReason::Unreachable);
+            self.back_off();
             network.punching_failed();
             control.relay(grant.id).await?;
             let ready = crate::client::stream::subscribe_request(
@@ -385,7 +398,7 @@ impl Consumer {
             .await
             .map_err(io_error)?;
             pending.completed = true;
-            tracing::info!(event = "session_path_selected", path = "relay", service = %key, reason = "direct_timeout_or_unreachable");
+            tracing::info!(event = "session_path_selected", path = "relay", service = %key, reason = FallbackReason::Unreachable.as_str());
             Ok(Some(Prepared {
                 path: DataPath::Relay {
                     socket: ready.0,
@@ -456,20 +469,24 @@ impl Prepared {
             ),
             DataPath::Relay { .. } => (SessionPath::Relay, None),
         };
+        let summary = match &self.path {
+            DataPath::Quic { link, .. } => Some(summary(link)),
+            DataPath::Relay { .. } => None,
+        };
+        let session = self
+            .diagnostics
+            .session_opened(path, summary.map(|link| link.kind));
+        let meter = Some(session.meter());
         let mut report = ConsumerReport {
             owner: self.owner,
             session: (&self.grant).into(),
             secret: self.grant.secret,
             path,
-            link: match &self.path {
-                DataPath::Quic { link, .. } => Some(summary(link)),
-                DataPath::Relay { .. } => None,
-            },
+            link: summary,
             seq: 0,
-            diagnostics: self.diagnostics,
+            _session: session,
             _link: link,
         };
-        report.diagnostics.session_opened(path);
         report.active();
         let forwarding = async {
             match self.path {
@@ -480,20 +497,22 @@ impl Prepared {
                     framing_key,
                     link: _,
                     _network,
-                } => forward_quic(local, send, recv, framing_key, None).await,
+                } => forward_quic(local, send, recv, framing_key, None, meter).await,
                 DataPath::Relay { mut socket, codec } => {
                     pb_mapper_protocol::with_relay_stream!(&mut socket, socket, {
                         let (read, write) = local.split();
                         let (remote_read, remote_write) = socket.split();
-                        L::forward_local_to_remote_with_codec(
+                        L::forward_local_to_remote_metered(
                             codec,
                             *credential.key(),
                             read,
                             write,
                             remote_read,
                             remote_write,
+                            meter,
                         )
                         .await
+                        .map(|_| ())
                         .map_err(io_error)
                     })
                 }
@@ -513,10 +532,11 @@ async fn forward_quic<L: NetworkStream + StreamForward>(
     recv: quinn::RecvStream,
     framing: [u8; 32],
     idle: Option<Duration>,
+    meter: Option<Arc<ByteMeter>>,
 ) -> io::Result<()> {
     let (read, write) = local.split();
     let forward =
-        L::forward_local_to_remote_with_codec(None, framing, read, write, recv, &mut send);
+        L::forward_local_to_remote_metered(None, framing, read, write, recv, &mut send, meter);
     if let Some(idle) = idle {
         pb_mapper_protocol::forward::with_tunnel_idle_timeout(idle, forward)
             .await
@@ -538,7 +558,8 @@ struct ConsumerReport {
     path: SessionPath,
     link: Option<LinkSummary>,
     seq: u64,
-    diagnostics: Diagnostics,
+    /// Closes the session in diagnostics after the final report.
+    _session: SessionGuard,
     _link: Option<LinkGuard>,
 }
 impl ConsumerReport {
@@ -564,7 +585,6 @@ impl ConsumerReport {
 }
 impl Drop for ConsumerReport {
     fn drop(&mut self) {
-        self.diagnostics.session_closed(self.path);
         self.update(SessionState::Closed);
     }
 }

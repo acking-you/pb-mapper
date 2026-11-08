@@ -40,8 +40,8 @@ use crate::{
 use outbound::{Barrier, Lifecycle, Next, Outbound};
 use parking_lot::Mutex;
 use pb_mapper_client::sdk::{
-    AddressFamily, Client, ConnectOptions, Connection, DirectLink, LanEvidence, LinkKind, LinkVia,
-    RelayTransport, TunnelDiagnostics,
+    AddressFamily, Client, ConnectOptions, Connection, LanEvidence, LinkKind, LinkSample, LinkVia,
+    RelayTransport, TunnelMetrics,
 };
 use serde::Serialize;
 use status::{CursorSlot, HostStats, ViewerStatsAcc, millis};
@@ -1086,7 +1086,7 @@ impl Writer<'_> {
         let second = self.ticks.is_multiple_of(TICKS_PER_SECOND);
         self.ticks += 1;
         if second && let Some(connection) = self.connection {
-            let (route, link) = route(&connection.diagnostics());
+            let (route, link) = route(&connection.metrics());
             let changed = {
                 let mut state = self.shared.state.lock();
                 state.link = link;
@@ -1120,15 +1120,13 @@ impl Writer<'_> {
 
 /// The path this viewer's tunnel carries the session on, and on a direct
 /// one, its link. A viewer's tunnel carries this one session.
-fn route(diagnostics: &TunnelDiagnostics) -> (Route, Option<ViewerLink>) {
-    match diagnostics
-        .direct
-        .as_ref()
-        .filter(|direct| direct.active_direct > 0)
-    {
-        Some(direct) => (Route::Direct, direct.link.as_ref().map(ViewerLink::from)),
-        None if diagnostics.relay_transport == RelayTransport::Quic => (Route::RelayQuic, None),
-        None => (Route::RelayTcp, None),
+fn route(metrics: &TunnelMetrics) -> (Route, Option<ViewerLink>) {
+    if metrics.sessions.active_direct > 0 {
+        (Route::Direct, metrics.link.as_ref().map(ViewerLink::from))
+    } else if metrics.relay.transport == RelayTransport::Quic {
+        (Route::RelayQuic, None)
+    } else {
+        (Route::RelayTcp, None)
     }
 }
 
@@ -1152,8 +1150,8 @@ pub struct ViewerLink {
     pub same_lan: Option<LanEvidence>,
 }
 
-impl From<&DirectLink> for ViewerLink {
-    fn from(link: &DirectLink) -> Self {
+impl From<&LinkSample> for ViewerLink {
+    fn from(link: &LinkSample) -> Self {
         let ms = |us: u64| u32::try_from(us.div_ceil(1000)).unwrap_or(u32::MAX);
         Self {
             kind: link.kind,
@@ -1163,7 +1161,7 @@ impl From<&DirectLink> for ViewerLink {
             local_ip: link.local_ip.map(|ip| ip.to_string()),
             rtt_ms: ms(link.stats.rtt_us),
             min_rtt_ms: ms(link.stats.min_rtt_us),
-            setup_ms: u32::try_from(link.timings.setup_ms).unwrap_or(u32::MAX),
+            setup_ms: u32::try_from(link.setup_ms).unwrap_or(u32::MAX),
             same_lan: link.same_lan,
         }
     }

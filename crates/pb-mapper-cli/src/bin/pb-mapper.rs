@@ -26,7 +26,7 @@ use pb_mapper_auth::{
 use pb_mapper_client::client::handle_status_cli_scoped;
 use pb_mapper_client::sdk::{
     Client, ConnectOptions, ConnectRequest, PathPolicy, PortMapping, RegisterOptions,
-    RegisterRequest, TunnelDiagnostics, TunnelStatus,
+    RegisterRequest, TunnelEventKind, TunnelEvents, TunnelMetrics, TunnelStatus,
 };
 use pb_mapper_core::checksum::set_process_msg_header_key;
 use pb_mapper_core::checksum::{MACHINE_MSG_HEADER_KEY_PATH, setup_machine_msg_header_key};
@@ -525,9 +525,12 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
             },
         )
         .await?;
-    monitor_tunnel(&client, registration.subscribe(), || {
-        registration.diagnostics()
-    })
+    monitor_tunnel(
+        &client,
+        registration.subscribe(),
+        registration.subscribe_events(),
+        || registration.metrics(),
+    )
     .await?;
     registration.stop().await?;
     Ok(())
@@ -553,18 +556,29 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
             },
         )
         .await?;
-    monitor_tunnel(&client, connection.subscribe(), || connection.diagnostics()).await?;
+    monitor_tunnel(
+        &client,
+        connection.subscribe(),
+        connection.subscribe_events(),
+        || connection.metrics(),
+    )
+    .await?;
     connection.stop().await?;
     Ok(())
 }
 
+/// Log a running tunnel until it stops: its metrics and the relay's every
+/// 30 s, and as they happen each session that closes, with its bytes, and
+/// each setup that found the LAN and went elsewhere.
 async fn monitor_tunnel(
     client: &Client,
     mut status: tokio::sync::watch::Receiver<TunnelStatus>,
-    diagnostics: impl Fn() -> TunnelDiagnostics,
+    mut events: TunnelEvents,
+    metrics: impl Fn() -> TunnelMetrics,
 ) -> Result<(), Box<dyn Error>> {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut events_open = true;
     loop {
         let state = status.borrow_and_update().clone();
         match state {
@@ -575,9 +589,21 @@ async fn monitor_tunnel(
         tokio::select! {
             result = tokio::signal::ctrl_c() => { result?; return Ok(()); },
             result = status.changed() => { if result.is_err() { return Ok(()); } },
+            event = events.recv(), if events_open => match event {
+                Some(Ok(event)) => match &event.kind {
+                    TunnelEventKind::SessionClosed { .. } => {
+                        tracing::info!(event = "tunnel_session_closed", detail = %serde_json::to_string(&event.kind)?, "tunnel session closed");
+                    }
+                    TunnelEventKind::LanMissed { .. } => {
+                        tracing::info!(event = "tunnel_lan_missed", detail = %serde_json::to_string(&event.kind)?, "direct setup found the LAN but did not stay on it");
+                    }
+                    _ => {}
+                },
+                Some(Err(lagged)) => tracing::debug!(%lagged, "tunnel events skipped"),
+                None => events_open = false,
+            },
             _ = interval.tick() => {
-                let snapshot = diagnostics();
-                tracing::info!(event = "tunnel_diagnostics", status = ?state, diagnostics = %serde_json::to_string(&snapshot)?, relay = %serde_json::to_string(&client.relay_diagnostics().await)?, "tunnel recovery snapshot");
+                tracing::info!(event = "tunnel_metrics", status = ?state, metrics = %serde_json::to_string(&metrics())?, relay = %serde_json::to_string(&client.relay_diagnostics().await)?, "tunnel metrics");
             },
         }
     }

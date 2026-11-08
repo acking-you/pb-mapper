@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 use crate::{
-    diagnostics::{InterfaceTier, StunOutcome},
+    diagnostics::{ByteCount, InterfaceTier, StunOutcome, TunnelEventKind},
+    relay::RelayTransport,
     sdk::{Client, PortMapping, RegisterOptions, RegisterRequest, Registration, Transport},
 };
 use endpoint::InterfaceSource;
@@ -184,12 +185,23 @@ impl Share {
     }
 }
 
+/// No handshake gets across: the session takes the relay, which carries and
+/// counts its bytes. The share is on a LAN of this end, by strong evidence
+/// (see the next test), so the miss is reported with where it went instead.
 #[tokio::test]
 async fn blocked_quic_selects_relay_and_dials_backend_once() {
     let share = Share::start("fallback").await;
-    let network = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+    let mut network = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+    Arc::get_mut(&mut network).unwrap().interfaces =
+        InterfaceSource::Fixed(Interfaces::new(vec![Interface::new(
+            "lan0",
+            InterfaceTier::Lan,
+            [("127.0.0.2".parse().unwrap(), 8)],
+        )]));
     network.block_quic();
-    let consumer = share.consumer(network, Diagnostics::default());
+    let diagnostics = Diagnostics::default();
+    let mut events = diagnostics.subscribe();
+    let consumer = share.consumer(network, diagnostics.clone());
     let prepared = tokio::time::timeout(
         Duration::from_secs(8),
         consumer.prepare("fallback", Instant::now() + Duration::from_secs(8)),
@@ -199,6 +211,15 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
     .unwrap()
     .unwrap();
     assert!(matches!(prepared.path, DataPath::Relay { .. }));
+    // The fallback pauses direct: the next session goes to the relay at once.
+    let next = consumer
+        .prepare("fallback", Instant::now() + Duration::from_secs(8))
+        .await
+        .unwrap();
+    assert!(next.is_none());
+    let paused = diagnostics.metrics(RelayTransport::Tcp);
+    assert!(paused.direct_cooldown_ms.is_some());
+    assert_eq!(paused.cooldown_skips, 1);
     // A reconnect snapshot can include more retained reports than the control
     // channel can hold. Every authenticated observation must eventually arrive.
     let mut report_ids = std::collections::HashSet::new();
@@ -234,6 +255,26 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
     .await
     .expect("snapshot must drain beyond the control channel capacity");
     let _forward = share.forward(prepared).await;
+    let missed = loop {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let TunnelEventKind::LanMissed { evidence, took } = event.kind {
+            break (evidence, took);
+        }
+    };
+    assert_eq!(missed, (LanEvidence::PublicIpSubnet, None));
+    let metrics = diagnostics.metrics(RelayTransport::Tcp);
+    assert_eq!((metrics.lan.detected, metrics.lan.missed), (1, 1));
+    assert_eq!(
+        metrics.traffic.relay,
+        ByteCount {
+            sent: 12,
+            received: 12
+        }
+    );
     share.stop().await;
 }
 
@@ -304,6 +345,14 @@ async fn a_lan_is_dialed_on_its_first_answer_and_reported_while_open() {
         (direct.lan_missed, direct.last_kind),
         (0, Some(LinkKind::Lan))
     );
+    // Its bytes count on the LAN, which is direct, and only there.
+    let traffic = diagnostics.metrics(RelayTransport::Tcp).traffic;
+    let echoed = ByteCount {
+        sent: 12,
+        received: 12,
+    };
+    assert_eq!((traffic.lan, traffic.direct), (echoed, echoed));
+    assert_eq!(traffic.relay, ByteCount::default());
     // The session's end lets its connection go.
     drop(forward);
     tokio::time::timeout(Duration::from_secs(2), async {

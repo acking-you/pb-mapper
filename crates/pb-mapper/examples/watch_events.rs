@@ -5,17 +5,23 @@
 //!   cargo run -p pb-mapper --example watch_events -- web 127.0.0.1:9090
 //! ```
 //!
-//! Two feeds, both free of credentials and payload:
+//! Three feeds, all free of credentials and payload:
 //!
 //! * `subscribe()` is a `tokio::sync::watch` receiver of [`TunnelStatus`]:
 //!   `Starting`, `Connected`, `Retrying`, `Stopped`, `Failed(reason)`. It is
 //!   what to drive a connection indicator from.
 //! * `subscribe_events()` yields the tunnel's recent outcomes, then every
-//!   event as it happens: relay phases, direct stages, sessions, and, once
-//!   a direct attempt fails to punch through, the router mapping the tunnel
-//!   then asks for, as it is found, granted, renewed and released. A reader
-//!   that falls behind is told how many it missed; `diagnostics()` is the
-//!   state to reconcile with. Events and snapshots serialize to JSON.
+//!   event as it happens: relay phases, direct stages, sessions with the
+//!   bytes they carried, and, once a direct attempt fails to punch through,
+//!   the router mapping the tunnel then asks for, as it is found, granted,
+//!   renewed and released. A reader that falls behind is told how many it
+//!   missed; `diagnostics()` is the state to reconcile with.
+//! * `subscribe_metrics(every)` samples the figures that keep changing —
+//!   sessions, bytes per path, the relay's round trip, the direct link —
+//!   every period and as sessions open and close. Nothing queues: a slow
+//!   reader gets fewer, fresher samples.
+//!
+//! Events, samples and snapshots serialize to JSON.
 //!
 //! When the host reports a network change or a resume from sleep, call
 //! `client.notify_network_change()`: waiting retries start at once and the
@@ -47,7 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut status = connection.subscribe();
     let mut events = connection.subscribe_events();
+    let mut metrics = connection.subscribe_metrics(std::time::Duration::from_secs(5));
     let mut status_open = true;
+    let mut metrics_open = true;
     let mut stopping = false;
     loop {
         tokio::select! {
@@ -60,6 +68,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 status_open = changed.is_ok();
                 println!("status: {:?}", *status.borrow_and_update());
             }
+            sample = metrics.recv(), if metrics_open => match sample {
+                Some(sample) => println!("metrics: {}", serde_json::to_string(&sample)?),
+                None => metrics_open = false,
+            },
             event = events.recv() => match event {
                 Some(Ok(event)) => println!("{}", serde_json::to_string(&event)?),
                 Some(Err(lagged)) => {

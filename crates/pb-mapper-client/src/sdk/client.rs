@@ -158,6 +158,19 @@ impl Client {
         self.inner.endpoint.relay_diagnostics().await
     }
 
+    /// [`Self::relay_diagnostics`] at once, then every `every` (100 ms to an
+    /// hour), for as long as this client or a clone of it is kept.
+    pub fn subscribe_relay_metrics(&self, every: std::time::Duration) -> RelayMetricsStream {
+        RelayMetricsStream {
+            client: Arc::downgrade(&self.inner),
+            every: every.clamp(
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_secs(60 * 60),
+            ),
+            due: None,
+        }
+    }
+
     /// The UDP port the relay offers QUIC on, or `None` when it offers none:
     /// one started without a QUIC listener, or one from before QUIC. Asked
     /// over TCP whatever this client's carrier, so a TCP client can learn
@@ -635,6 +648,32 @@ impl Client {
             Err(_) => {}
         }
         result
+    }
+}
+
+/// A relay carrier's [`RelayDiagnostics`](super::RelayDiagnostics), sampled
+/// as time passes: from [`Client::subscribe_relay_metrics`].
+///
+/// Each sample is taken when it is returned: nothing runs in the background
+/// and nothing queues. It does not keep its client alive; once every clone
+/// of that client is gone, the stream ends at its next tick.
+pub struct RelayMetricsStream {
+    client: std::sync::Weak<ClientInner>,
+    every: std::time::Duration,
+    /// When the next sample is due; the first is due at once.
+    due: Option<tokio::time::Instant>,
+}
+
+impl RelayMetricsStream {
+    /// The next sample: the first at once, then one a period after the
+    /// last. `None` once the client is gone. Cancel-safe.
+    pub async fn recv(&mut self) -> Option<super::RelayDiagnostics> {
+        if let Some(due) = self.due {
+            tokio::time::sleep_until(due).await;
+        }
+        let client = self.client.upgrade()?;
+        self.due = Some(tokio::time::Instant::now() + self.every);
+        Some(client.endpoint.relay_diagnostics().await)
     }
 }
 

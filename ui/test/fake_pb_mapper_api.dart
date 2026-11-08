@@ -356,6 +356,7 @@ class FakePbMapperApi implements PbMapperApiClient {
   Stream<TunnelEventsUpdate> tunnelEvents({
     required String serviceKey,
     required bool share,
+    Duration? metricsEvery,
   }) => tunnelEventFeed;
 
   // --- The relay as a whole.

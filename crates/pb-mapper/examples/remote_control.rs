@@ -82,13 +82,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         socket.write_all(b"whoami\n").await?;
         let mut reply = vec![0_u8; 64];
         let read = socket.read(&mut reply).await?;
-        let path = connection.diagnostics().direct.map_or("relay", |path| {
-            if path.direct_sessions > 0 {
-                "direct"
-            } else {
-                "relay"
-            }
-        });
+        let path = if connection.metrics().sessions.direct > 0 {
+            "direct"
+        } else {
+            "relay"
+        };
         println!(
             "{label} -> {} via {path}",
             String::from_utf8_lossy(&reply[..read]).trim()

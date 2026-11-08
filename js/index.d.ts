@@ -33,6 +33,11 @@ export declare class Admin {
 export declare class Client {
   constructor(config: JsClientConfig)
   relayDiagnostics(): Promise<JsRelayDiagnostics>
+  /**
+   * `relayDiagnostics()` at once, then every `everyMs` (one second when
+   * absent; 100 ms to an hour), read one at a time.
+   */
+  subscribeRelayMetrics(everyMs?: number | undefined | null): RelayMetricsReader
   /** The relay carrier this client uses: `tcp` or `quic`. */
   relayTransport(): string
   /**
@@ -79,6 +84,18 @@ export declare class Connection {
    */
   subscribeEvents(): TunnelEvents
   /**
+   * Its sessions, bytes per path, relay health and direct link,
+   * sampled now: the part of `diagnostics()` that keeps changing.
+   */
+  metrics(): JsTunnelMetrics
+  /**
+   * `metrics()` at once, then every `everyMs` (one second when
+   * absent; 100 ms to an hour) and whenever the tunnel changes,
+   * until it stops. One second suits a panel on screen; lists
+   * and logs need five or more.
+   */
+  subscribeMetrics(everyMs?: number | undefined | null): TunnelMetricsReader
+  /**
    * Resolves with the next status this tunnel reports, rendered as
    * `status()` renders it: an event listener for status changes.
    *
@@ -124,6 +141,18 @@ export declare class Registration {
    */
   subscribeEvents(): TunnelEvents
   /**
+   * Its sessions, bytes per path, relay health and direct link,
+   * sampled now: the part of `diagnostics()` that keeps changing.
+   */
+  metrics(): JsTunnelMetrics
+  /**
+   * `metrics()` at once, then every `everyMs` (one second when
+   * absent; 100 ms to an hour) and whenever the tunnel changes,
+   * until it stops. One second suits a panel on screen; lists
+   * and logs need five or more.
+   */
+  subscribeMetrics(everyMs?: number | undefined | null): TunnelMetricsReader
+  /**
    * Resolves with the next status this tunnel reports, rendered as
    * `status()` renders it: an event listener for status changes.
    *
@@ -149,6 +178,21 @@ export declare class Registration {
 }
 
 /**
+ * A relay carrier's diagnostics, sampled as they are read: one at once,
+ * then one a period, for as long as the client is kept.
+ */
+export declare class RelayMetricsReader {
+  /**
+   * The next sample, or `null` once the client is gone or `close()` was
+   * called. Rejects when `timeoutMs` passes first. Calls are served one
+   * at a time.
+   */
+  next(timeoutMs?: number | undefined | null): Promise<JsRelayDiagnostics | null>
+  /** Stop reading: a pending `next()` resolves with `null`, as do later ones. */
+  close(): void
+}
+
+/**
  * A tunnel's events, read one at a time: the outcomes it kept, then every
  * event as it happens. Nothing queues on the JS side while no one reads.
  */
@@ -160,6 +204,23 @@ export declare class TunnelEvents {
    * first, which loses no event. Calls are served one at a time.
    */
   next(timeoutMs?: number | undefined | null): Promise<JsTunnelEvent | null>
+  /** Stop reading: a pending `next()` resolves with `null`, as do later ones. */
+  close(): void
+}
+
+/**
+ * A tunnel's metrics, sampled as they are read: one at once, then one a
+ * period and one whenever a session opens or closes or the tunnel changes,
+ * never two within 100 ms. Each is taken when `next()` resolves, so nothing
+ * queues and a slow reader gets fewer, fresher samples.
+ */
+export declare class TunnelMetricsReader {
+  /**
+   * The next sample, or `null` once the tunnel has stopped (after one
+   * last sample) or `close()` was called. Rejects when `timeoutMs` passes
+   * first, which loses nothing. Calls are served one at a time.
+   */
+  next(timeoutMs?: number | undefined | null): Promise<JsTunnelMetrics | null>
   /** Stop reading: a pending `next()` resolves with `null`, as do later ones. */
   close(): void
 }
@@ -181,6 +242,15 @@ export interface JsAuthStatus {
   authSuccesses: number
   authFailures: number
   serverInstanceId: string
+}
+
+/**
+ * Application bytes, after decryption and without framing: `sent` from
+ * this end's local side, `received` back.
+ */
+export interface JsByteCount {
+  sent: number
+  received: number
 }
 
 /** The addresses a direct setup worked with. */
@@ -288,6 +358,15 @@ export interface JsDirectLink {
   sentPackets: number
   lostPackets: number
   congestionEvents: number
+  /**
+   * UDP bytes on the wire each way, and lost: QUIC's headers and probes
+   * included, so more than the application's.
+   */
+  sentBytes: number
+  receivedBytes: number
+  lostBytes: number
+  /** The congestion controller's estimate of the path, in bits per second. */
+  bandwidthBps?: number
 }
 
 export interface JsIssuedKey {
@@ -305,6 +384,42 @@ export interface JsKeyMetadata {
   issuedAt: number
   expiresAt: number
   label?: string
+}
+
+/**
+ * Setups that found the peer on a local network, and those that ended
+ * elsewhere.
+ */
+export interface JsLanCounts {
+  detected: number
+  missed: number
+}
+
+/** The newest direct session open now, with QUIC's view of it. */
+export interface JsLinkSample {
+  /** `lan`, `internet` or `private`. */
+  kind: string
+  /** `ipv4` or `ipv6`. */
+  family: string
+  /** `host`, `public`, `mapped` or `peer_reflexive`. */
+  via: string
+  peer: string
+  localIp?: string
+  /** `ipv6_prefix`, `public_ip_subnet` or `subnet`. */
+  sameLan?: string
+  setupMs: number
+  rttUs: number
+  minRttUs: number
+  congestionWindow: number
+  mtu: number
+  sentPackets: number
+  lostPackets: number
+  congestionEvents: number
+  /** UDP bytes on the wire, QUIC's overhead included. */
+  sentBytes: number
+  receivedBytes: number
+  lostBytes: number
+  bandwidthBps?: number
 }
 
 /** Recovery counters from the running SDK, with no credential or payload data. */
@@ -333,6 +448,16 @@ export interface JsPathDiagnostics {
   attempt?: JsDirectAttempt
   /** The newest direct session open now. */
   link?: JsDirectLink
+}
+
+/**
+ * A tunnel's application bytes by path, over its life; `direct` includes
+ * `lan`.
+ */
+export interface JsPathTraffic {
+  relay: JsByteCount
+  direct: JsByteCount
+  lan: JsByteCount
 }
 
 export interface JsPortMappingDiagnostics {
@@ -373,13 +498,18 @@ export interface JsQuicConnectionDiagnostics {
    */
   pooled: boolean
   rttUs: number
+  minRttUs: number
   congestionWindow: number
   mtu: number
   sentPackets: number
   lostPackets: number
   congestionEvents: number
+  /** UDP bytes each way, and lost, of every tunnel on the connection. */
   sentBytes: number
   receivedBytes: number
+  lostBytes: number
+  /** The congestion controller's estimate of the path, in bits per second. */
+  bandwidthBps?: number
 }
 
 export interface JsRegisterRequest {
@@ -415,6 +545,26 @@ export interface JsRelayDiagnostics {
   streamsReused: number
   lastError?: string
   connections: Array<JsQuicConnectionDiagnostics>
+  /**
+   * The smoothed round trip of every tunnel's control exchanges with
+   * this relay over this carrier, the relay's handling included.
+   */
+  controlRttMs?: number
+}
+
+/** How a tunnel's relay is doing, as its own attempts and probes see it. */
+export interface JsRelayHealth {
+  /** `tcp` or `quic`. */
+  transport: string
+  /** The relay attempt's phase, as `lastAttemptPhase` names it. */
+  phase: string
+  consecutiveFailures: number
+  /**
+   * The smoothed round trip of the tunnel's control exchanges with the
+   * relay, the relay's handling included.
+   */
+  rttMs?: number
+  lastSuccessAgeMs?: number
 }
 
 export interface JsRemoteId {
@@ -440,6 +590,16 @@ export interface JsServiceInfo {
   connectionCount: number
 }
 
+/** A tunnel's sessions on each path: open now, and since it started. */
+export interface JsSessionCounts {
+  activeRelay: number
+  activeDirect: number
+  activeLan: number
+  relay: number
+  direct: number
+  lan: number
+}
+
 /**
  * How long each stage of a direct setup took on this end; a stage it did
  * not run is absent.
@@ -461,6 +621,10 @@ export interface JsSetupTimings {
 export interface JsTunnelDiagnostics {
   relayTransport: string
   direct?: JsPathDiagnostics
+  /** Application bytes on each path, as `metrics().traffic`. */
+  traffic: JsPathTraffic
+  /** The smoothed round trip of control exchanges with the relay. */
+  relayRttMs?: number
   /** Present when the tunnel maps its direct endpoint's port. */
   portMapping?: JsPortMappingDiagnostics
   sdkVersion: string
@@ -498,7 +662,8 @@ export interface JsTunnelEvent {
    * `direct_fallback` and `stopped`, the last event of a stream. Steps,
    * from `subscribeEvents()` only: `phase_changed`, `direct_stage_changed`,
    * `direct_abandoned`, `session_opened`, `session_closed`,
-   * `port_mapping_changed`, `lan_detected` and `path_selected`.
+   * `port_mapping_changed`, `lan_detected`, `path_selected` and
+   * `lan_missed`. A kind added by a later SDK reads `unknown`.
    */
   kind: string
   /** `relay_ready`: setup latency of the answering relay. */
@@ -518,19 +683,63 @@ export interface JsTunnelEvent {
    * stage at which it was given up.
    */
   stage?: string
+  /**
+   * `direct_fallback`: why: `direct_not_offered`,
+   * `direct_negotiation_failed`, `direct_negotiation_timeout` or
+   * `direct_timeout_or_unreachable`.
+   */
+  reason?: string
   /** `phase_changed`: the relay attempt's new phase. */
   phase?: string
-  /** `session_opened`, `session_closed`: `direct` or `relay`. */
+  /**
+   * `session_opened`, `session_closed`: the session's number in this
+   * tunnel, and `direct` or `relay`.
+   */
+  session?: number
   path?: string
+  /**
+   * `session_closed`: how long it was open, and the application bytes it
+   * carried, sent from this end's local side and received.
+   */
+  durationMs?: number
+  sentBytes?: number
+  receivedBytes?: number
   /** `port_mapping_changed`: the mapping as it now stands. */
   mapping?: JsPortMappingStatus
-  /** `lan_detected`: `ipv6_prefix`, `public_ip_subnet` or `subnet`. */
+  /**
+   * `lan_detected`, `lan_missed`: `ipv6_prefix`, `public_ip_subnet` or
+   * `subnet`.
+   */
   evidence?: string
   /**
-   * `path_selected`: `lan`, `internet` or `private`, `ipv4` or `ipv6`,
-   * and how the peer address was learned.
+   * `path_selected`, and a direct `session_opened` or `session_closed`:
+   * `lan`, `internet` or `private`; with `path_selected`, `ipv4` or
+   * `ipv6`, and how the peer address was learned.
    */
   link?: string
   family?: string
   via?: string
+  /**
+   * `lan_missed`: where the session went instead, `internet` or
+   * `private`; absent when it took the relay.
+   */
+  took?: string
+}
+
+/** What a running tunnel keeps measuring, sampled at once. */
+export interface JsTunnelMetrics {
+  uptimeMs: number
+  /** The `seq` of the tunnel's latest event. */
+  eventSeq: number
+  sessions: JsSessionCounts
+  traffic: JsPathTraffic
+  relay: JsRelayHealth
+  link?: JsLinkSample
+  lan: JsLanCounts
+  /**
+   * How long new sessions still go straight to the relay after a
+   * fallback, and how many have.
+   */
+  directCooldownMs?: number
+  cooldownSkips: number
 }

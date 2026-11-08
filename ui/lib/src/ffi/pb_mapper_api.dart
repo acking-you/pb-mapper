@@ -334,8 +334,8 @@ class TunnelLink {
 
 /// How a running tunnel's sessions travel: each TCP connection or UDP flow
 /// through it goes direct or through the relay, decided as it opens. A
-/// connection counts both and its attempts; a share counts only the
-/// sessions that reach it directly.
+/// connection and a share both count every session on each path; a
+/// connection also counts its direct attempts, which a share does not make.
 @immutable
 class TunnelPath {
   const TunnelPath({
@@ -674,12 +674,15 @@ abstract interface class PbMapperApiClient {
   Future<OperationResult> deleteClientConfig(String serviceKey);
 
   /// A running share's ([share]) or connection's events as they happen, each
-  /// with its diagnostics as they stand by then; the first update carries
-  /// the diagnostics alone. Fails at once for a tunnel that is not running,
-  /// and ends when it stops. Cancelling ends the reader in Rust.
+  /// with its diagnostics and metrics as they stand by then; the first update
+  /// carries those alone. With [metricsEvery], updates of fresh metrics alone
+  /// come that often too, and as sessions open and close. Fails at once for a
+  /// tunnel that is not running, and ends when it stops. Cancelling ends the
+  /// reader in Rust.
   Stream<TunnelEventsUpdate> tunnelEvents({
     required String serviceKey,
     required bool share,
+    Duration? metricsEvery,
   });
 
   // --- The relay as a whole (`pb_mapper_relay_call_json`). Each throws a
@@ -997,8 +1000,13 @@ class PbMapperApi implements PbMapperApiClient {
   Stream<TunnelEventsUpdate> tunnelEvents({
     required String serviceKey,
     required bool share,
+    Duration? metricsEvery,
   }) => _service
-      .tunnelEvents(serviceKey: serviceKey, share: share)
+      .tunnelEvents(
+        serviceKey: serviceKey,
+        share: share,
+        metricsEvery: metricsEvery,
+      )
       .map(TunnelEventsUpdate.fromMap);
 
   OperationResult _resultFrom(Map<String, dynamic> result) {

@@ -349,9 +349,8 @@ pub struct ClientConfigInfo {
 /// How a running tunnel's sessions travel: each TCP connection or UDP flow
 /// through it takes a direct path or the relay, decided when it opens.
 ///
-/// A connection counts both paths and its direct attempts. A share counts
-/// only the sessions that reached it directly: the rest come in over its
-/// registration with the relay, which does not tell them apart.
+/// A connection and a share both count every session on each path; a
+/// connection also counts its direct attempts, which a share does not make.
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PathInfo {
@@ -374,6 +373,12 @@ pub struct PathInfo {
     /// The newest direct session open now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link: Option<PathLink>,
+    /// The application bytes its sessions carried on each path, `sent`
+    /// from this computer's side; `direct` includes `lan`.
+    pub traffic: pb_mapper_client::sdk::PathTraffic,
+    /// The smoothed round trip of its control exchanges with the relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_rtt_ms: Option<u64>,
 }
 
 /// How a direct attempt ended.
@@ -489,7 +494,7 @@ impl PathInfo {
                     setup_ms,
                     kind: direct.last_kind,
                 }),
-                TunnelEventKind::DirectFallback { stage } => Some(PathOutcome::Relay { stage }),
+                TunnelEventKind::DirectFallback { stage, .. } => Some(PathOutcome::Relay { stage }),
                 _ => None,
             });
         Some(Self {
@@ -502,6 +507,8 @@ impl PathInfo {
             attempt: direct.attempt.map(|attempt| attempt.stage),
             last,
             link: direct.link.as_ref().map(PathLink::from),
+            traffic: diagnostics.traffic,
+            relay_rtt_ms: diagnostics.relay_rtt_ms,
         })
     }
 
@@ -707,6 +714,23 @@ impl TunnelHandle {
         match self {
             Self::Share(handle) => handle.subscribe_events(),
             Self::Connect(handle) => handle.subscribe_events(),
+        }
+    }
+
+    pub(crate) fn metrics(&self) -> pb_mapper_client::sdk::TunnelMetrics {
+        match self {
+            Self::Share(handle) => handle.metrics(),
+            Self::Connect(handle) => handle.metrics(),
+        }
+    }
+
+    pub(crate) fn subscribe_metrics(
+        &self,
+        every: std::time::Duration,
+    ) -> pb_mapper_client::sdk::TunnelMetricsStream {
+        match self {
+            Self::Share(handle) => handle.subscribe_metrics(every),
+            Self::Connect(handle) => handle.subscribe_metrics(every),
         }
     }
 
@@ -1448,9 +1472,13 @@ mod tests {
         );
         // As the window reads it; `store_test.dart` parses this same shape.
         assert_eq!(
-            serde_json::to_value(relayed).unwrap()["last"],
+            serde_json::to_value(&relayed).unwrap()["last"],
             serde_json::json!({ "path": "relay", "stage": "discovering" })
         );
+        assert_eq!(relayed.traffic.relay.sent, 4);
+        // The share counts the session the relay brought it, too.
+        let reached = path("relayed", &shares);
+        assert_eq!((reached.active_direct, reached.active_relay), (0, 1));
 
         drop(sessions);
         drop(state);

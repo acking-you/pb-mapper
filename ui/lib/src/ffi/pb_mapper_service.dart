@@ -466,16 +466,18 @@ class PbMapperService {
     return _runJsonOnWorker('relayCall', {'request': jsonEncode(request)});
   }
 
-  /// A running tunnel's events (see `tunnel_events.rs`), read one at a time
-  /// while listened to.
+  /// A running tunnel's events (see `tunnel_events.rs`), and with
+  /// [metricsEvery] its metrics, read one at a time while listened to.
   Stream<Map<String, dynamic>> tunnelEvents({
     required String serviceKey,
     required bool share,
+    Duration? metricsEvery,
   }) => tunnelEventStream(
     (request) =>
         _runJsonOnWorker('tunnelEvents', {'request': jsonEncode(request)}),
     serviceKey: serviceKey,
     share: share,
+    metricsEvery: metricsEvery,
   );
 }
 

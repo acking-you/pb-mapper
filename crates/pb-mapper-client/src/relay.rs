@@ -156,6 +156,11 @@ pub struct RelayDiagnostics {
     /// Every open QUIC connection: those the pool hands out, then those it
     /// has retired that streams opened earlier still carry traffic on.
     pub connections: Vec<QuicConnectionDiagnostics>,
+    /// The smoothed round trip of control exchanges with the relay, over
+    /// either carrier: a share's heartbeat, a connection's service probe, of
+    /// every tunnel in this process on this relay and carrier. It includes
+    /// the relay's handling; `None` until one is answered.
+    pub control_rtt_ms: Option<u64>,
 }
 impl RelayDiagnostics {
     pub(crate) fn empty(transport: RelayTransport) -> Self {
@@ -166,6 +171,7 @@ impl RelayDiagnostics {
             streams_reused: 0,
             last_error: None,
             connections: Vec::new(),
+            control_rtt_ms: None,
         }
     }
 }
@@ -180,11 +186,18 @@ pub struct QuicConnectionDiagnostics {
     /// for the streams already on it.
     pub pooled: bool,
     pub rtt_us: u64,
+    /// The lowest round trip seen: the path without queues.
+    pub min_rtt_us: u64,
     pub congestion_window: u64,
     pub mtu: u16,
     pub sent_packets: u64,
     pub lost_packets: u64,
     pub congestion_events: u64,
+    /// UDP bytes each way, and lost, of every tunnel on the connection.
     pub sent_bytes: u64,
     pub received_bytes: u64,
+    pub lost_bytes: u64,
+    /// The congestion controller's estimate of what the path sustains, in
+    /// bits per second, when it makes one.
+    pub bandwidth_bps: Option<u64>,
 }

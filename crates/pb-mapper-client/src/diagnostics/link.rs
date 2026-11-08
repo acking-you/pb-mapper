@@ -174,7 +174,7 @@ pub struct CandidateCounts {
     pub handshakes: u32,
 }
 
-/// QUIC's view of the path, read when diagnostics are.
+/// QUIC's view of the path, read when diagnostics or metrics are.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct LinkStats {
@@ -186,6 +186,15 @@ pub struct LinkStats {
     pub sent_packets: u64,
     pub lost_packets: u64,
     pub congestion_events: u64,
+    /// UDP bytes on the wire each way and those lost: QUIC's headers,
+    /// acknowledgements and probes included, so more than the application
+    /// bytes in [`PathTraffic`](super::PathTraffic).
+    pub sent_bytes: u64,
+    pub received_bytes: u64,
+    pub lost_bytes: u64,
+    /// The congestion controller's estimate of what the path sustains, in
+    /// bits per second, when it makes one.
+    pub bandwidth_bps: Option<u64>,
 }
 
 /// A direct session's path, kept while the session is open.
