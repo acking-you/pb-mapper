@@ -895,8 +895,10 @@ impl Engine {
     }
 
     /// Every `CURSOR_INTERVAL` while capturing; never while paused or
-    /// unavailable. Reported when it differs from the last report, unless it
-    /// is the echo of the controller's own move.
+    /// unavailable. Reported when it differs from the last report, or, equal
+    /// to it, once more after C takes a move, so the report carries that
+    /// move's sequence; never when it is the echo of the controller's own
+    /// move. `CursorEcho` holds the rule.
     fn sample_cursor(&mut self, now: Instant) {
         if self.paused || self.unavailable.is_some() || now < self.cursor_due {
             return;
