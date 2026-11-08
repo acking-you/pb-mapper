@@ -201,6 +201,8 @@ void main() {
             viewport: viewport,
             onDisconnect: () async {},
             onQuality: (_) {},
+            onResolution: (_) {},
+            onMaxFps: (_) {},
             onTypeText: () {},
           ),
         ),
@@ -310,6 +312,7 @@ void main() {
         rttMs: 18,
         presentedFps: 60,
         receivedBitrateBps: 8000000,
+        speedRxBps: 2516582,
         width: 1920,
         height: 1080,
         codec: 'h264',
@@ -326,8 +329,11 @@ void main() {
       ),
     );
     // Neither the last sample nor zeros.
-    expect(find.textContaining(RegExp(r'\d (ms|fps|Mbps)')), findsNothing);
-    expect(find.textContaining(RegExp(r'— ms · +— fps')), findsOneWidget);
+    expect(
+      find.textContaining(RegExp(r'\d (ms|fps|Mbps|[KM]iB/s)')),
+      findsNothing,
+    );
+    expect(find.textContaining(RegExp(r'— ms · +— fps · +—')), findsOneWidget);
 
     session.value = const DesktopSessionView(
       target: _target,
@@ -335,7 +341,10 @@ void main() {
       path: 'direct',
     );
     await tester.pump();
-    expect(find.textContaining(RegExp(r'18 ms · +60 fps')), findsOneWidget);
+    expect(
+      find.textContaining(RegExp(r'18 ms · +60 fps · +2\.4 MiB/s')),
+      findsOneWidget,
+    );
     expect(find.text('60 fps'), findsOneWidget);
   });
 
@@ -344,14 +353,18 @@ void main() {
       'landscape phone', (tester) async {
     _size(tester, const Size(851, 393));
     final stats = ValueNotifier(
-      DesktopStats.fromJson({
-        'path': 'direct',
-        'rtt_ms': 37,
-        'presented_fps': 58.6,
-        'received_fps': 59.4,
-        'capture_fps': 60.0,
-        'link': {'kind': 'lan', 'family': 'ipv4', 'rtt_ms': 4},
-      }),
+      DesktopStats.fromJson(
+        {
+          'path': 'direct',
+          'rtt_ms': 37,
+          'presented_fps': 58.6,
+          'received_fps': 59.4,
+          'capture_fps': 60.0,
+          'codec': 'h265',
+          'link': {'kind': 'lan', 'family': 'ipv4', 'rtt_ms': 4},
+        },
+        status: {'speed_rx_bps': 2516582, 'speed_tx_bps': 18432},
+      ),
     );
     // Two reads of Android's decoder a second apart.
     final decoder = ValueNotifier<DesktopDecoderStats?>(
@@ -405,6 +418,10 @@ void main() {
     expect(row('path', '${l10n.qualityPathLan} · IPv4'), findsOneWidget);
     expect(row('link-rtt', '4 ms'), findsOneWidget);
     expect(row('stream-rtt', '37 ms'), findsOneWidget);
+    expect(row('speed', '2.4 MiB/s'), findsOneWidget);
+    expect(row('speed', l10n.qualitySpeedSent('18 KiB/s')), findsOneWidget);
+    expect(row('codec', 'H.265'), findsOneWidget);
+    expect(row('chroma', '4:2:0'), findsOneWidget);
     expect(row('presented-fps', '59 fps'), findsOneWidget);
     expect(row('received-fps', '59 fps'), findsOneWidget);
     expect(row('capture-fps', '60 fps'), findsOneWidget);

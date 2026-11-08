@@ -245,7 +245,8 @@ class GutterButton extends StatelessWidget {
   }
 }
 
-/// The path and frame rate at a glance; a tap opens the quality panel.
+/// The path, frame rate and speed received at a glance; a tap opens the
+/// quality panel.
 class QualityGutterButton extends StatelessWidget {
   const QualityGutterButton({
     super.key,
@@ -274,13 +275,15 @@ class QualityGutterButton extends StatelessWidget {
       final (:degraded, :dot) = viewerLink(s, st);
       final path = pathLabel(context, s.path, lan: st.lan);
       final fps = s.connected ? st.presentedFps.round() : null;
+      final received = s.connected ? st.speedRxBps : null;
+      final speed = received == null ? '—' : formatSpeed(received);
       return MergeSemantics(
         child: Semantics(
           button: true,
           selected: selected,
           label: fps == null
               ? l10n.viewerQuality
-              : l10n.touchQualityA11y(path, fps),
+              : l10n.touchQualityA11y(path, fps, speed),
           child: Material(
             type: MaterialType.transparency,
             child: InkWell(
@@ -343,6 +346,20 @@ class QualityGutterButton extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 10.5,
                           color: ViewerPalette.textSecondary,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      // Shrunk rather than cut where "999 KiB/s" is too
+                      // wide for the column.
+                      FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          speed,
+                          maxLines: 1,
+                          style: const TextStyle(
+                            fontSize: 10.5,
+                            color: ViewerPalette.textSecondary,
+                          ),
                         ),
                       ),
                     ],

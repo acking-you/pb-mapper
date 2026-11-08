@@ -338,6 +338,13 @@ FakePbMapperApi _remoteApi({bool host = true, bool viewed = false}) {
     ),
   );
   if (viewed) api.desktop.hostSnapshot = viewedHost(controlling: true);
+  // A 120 Hz display whose H.265 decoder takes 1440p and whose H.264 one
+  // stops at 1080p: Native is out of its reach.
+  api.desktop.decodersValue = const DesktopDecoders(
+    h264: DesktopDecoderLimit(1920, 1080),
+    h265: DesktopDecoderLimit(2560, 1440),
+    displayMaxHz: 120,
+  );
   return api;
 }
 
@@ -379,9 +386,16 @@ Future<RemoteDesktop> _view(
       controlAllowed: controlAllowed,
       stats: const DesktopStats(
         path: 'direct',
-        codec: 'h264',
+        codec: 'h265',
         presentedFps: 60,
         rttMs: 18,
+        speedRxBps: 2516582,
+        speedTxBps: 18432,
+        encoderBitrateBps: 8000000,
+        width: 1920,
+        height: 1080,
+        preset: DesktopQuality.balanced,
+        maxFps: 120,
       ),
     );
     await tester.pump(const Duration(milliseconds: 300));
@@ -919,6 +933,8 @@ void main() {
       bool live = true,
       bool controlAllowed = true,
       ThemeMode theme = ThemeMode.light,
+      Locale locale = const Locale('en'),
+      ViewerPrefs? prefs,
     }) => _onWindows(tester, () async {
       final api = _remoteApi();
       // Held mid-connect, it stays on the Connecting overlay.
@@ -928,7 +944,9 @@ void main() {
         api,
         page: AppPage.remote,
         themeMode: theme,
+        locale: locale,
         size: const Size(1440, 900),
+        viewerPrefs: prefs,
         vault: _computers(),
       );
       await _view(tester, api, live: live, controlAllowed: controlAllowed);
@@ -936,6 +954,47 @@ void main() {
       await _capture(tester, name);
       api.desktop.connectGate?.complete();
       await finish(tester);
+    });
+
+    // Display, its Resolution submenu open: Native is beyond this device's
+    // decoders.
+    for (final (name, theme, locale) in [
+      ('viewer_display_menu', ThemeMode.light, const Locale('en')),
+      ('viewer_display_menu_zh_dark', ThemeMode.dark, const Locale('zh')),
+    ]) {
+      _preview('viewer display menu $name', (tester) async {
+        await desktopViewer(tester, name, theme: theme, locale: locale, (
+          _,
+        ) async {
+          await tester.tap(find.byKey(const Key('viewer-display')));
+          await tester.pump(const Duration(milliseconds: 400));
+          // A mouse opens a submenu by hovering it, as on Windows.
+          final mouse = await tester.createGesture(
+            kind: PointerDeviceKind.mouse,
+          );
+          await mouse.addPointer(
+            location: tester.getCenter(
+              find.byKey(const Key('display-resolution')),
+            ),
+          );
+          await mouse.moveBy(const Offset(4, 0));
+          await tester.pump(const Duration(milliseconds: 400));
+          await mouse.removePointer();
+          await tester.pump();
+        });
+      });
+    }
+
+    _preview('viewer quality monitor', (tester) async {
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setQualityMonitor(true);
+      await prefs.setQualityPanel(true);
+      await desktopViewer(
+        tester,
+        'viewer_quality_monitor',
+        prefs: prefs,
+        (_) async => tester.pump(const Duration(seconds: 2)),
+      );
     });
 
     _preview('viewer connecting', (tester) async {
@@ -1080,18 +1139,51 @@ void main() {
     });
 
     /// The touch viewer over Office PC on a landscape phone.
-    Future<void> phoneViewer(WidgetTester tester, ViewerPrefs prefs) async {
+    Future<void> phoneViewer(
+      WidgetTester tester,
+      ViewerPrefs prefs, {
+      ThemeMode theme = ThemeMode.dark,
+      Locale locale = const Locale('en'),
+    }) async {
       final api = _remoteApi(host: false);
       await pumpApp(
         tester,
         api,
         page: AppPage.remote,
-        themeMode: ThemeMode.dark,
+        themeMode: theme,
+        locale: locale,
         size: const Size(844, 390),
         viewerPrefs: prefs,
         vault: _computers(),
       );
       await _view(tester, api);
+    }
+
+    // The quality monitor and the quality panel over the picture, then the
+    // More panel's picture choices.
+    for (final (name, theme, locale) in [
+      ('phone_viewer_monitor', ThemeMode.light, const Locale('en')),
+      ('phone_viewer_monitor_zh_dark', ThemeMode.dark, const Locale('zh')),
+    ]) {
+      _preview('phone viewer, $name', (tester) async {
+        final prefs = await _sheetSeen();
+        await prefs.setQualityMonitor(true);
+        await prefs.setQualityPanel(true);
+        await phoneViewer(tester, prefs, theme: theme, locale: locale);
+        await tester.pump(const Duration(seconds: 4));
+        await _capture(tester, name);
+        await prefs.setQualityPanel(false);
+        await tester.tap(find.byKey(const Key('touch-more')));
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.scrollUntilVisible(
+          find.byKey(const Key('resolution-native')),
+          100,
+          scrollable: find.byType(Scrollable).last,
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        await _capture(tester, '${name}_more');
+        await finish(tester);
+      });
     }
 
     _preview('phone viewer, trackpad', (tester) async {

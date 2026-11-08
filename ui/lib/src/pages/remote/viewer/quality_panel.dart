@@ -8,6 +8,23 @@ import '../../../theme/fonts.dart';
 import '../../../theme/viewer_palette.dart';
 import '../remote_format.dart';
 
+/// A codec as people write it; never localised.
+String codecLabel(String codec) => switch (codec) {
+  'h264' => 'H.264',
+  'h265' => 'H.265',
+  '' => '—',
+  _ => codec.toUpperCase(),
+};
+
+/// The decoded picture's chroma: the video codecs are 4:2:0 (Main
+/// profile); JPEG's is not reported.
+String? chromaOf(String codec) =>
+    codec == 'h264' || codec == 'h265' ? '4:2:0' : null;
+
+String _mbps(int bps) => '${(bps / 1e6).toStringAsFixed(1)} Mbps';
+
+String _ms(int? ms) => ms == null ? '—' : '$ms ms';
+
 /// One figure of the panel; [id] keys its row (`quality-<id>`).
 class _Row {
   const _Row(
@@ -50,17 +67,7 @@ class QualityPanel extends StatelessWidget {
   /// The native decoder's figures; read only while this panel shows.
   final ValueListenable<DesktopDecoderStats?>? decoder;
 
-  static const _width = 256.0;
-
-  static String _codec(String codec) => switch (codec) {
-    'h264' => 'H.264',
-    '' => '—',
-    _ => codec.toUpperCase(),
-  };
-
-  static String _mbps(int bps) => '${(bps / 1e6).toStringAsFixed(1)} Mbps';
-
-  static String _ms(int? ms) => ms == null ? '—' : '$ms ms';
+  static const width = 256.0;
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
@@ -72,7 +79,7 @@ class QualityPanel extends StatelessWidget {
       final sections = [
         (context.l10n.qualityNetwork, _network(context, s, st)),
         (context.l10n.qualityPicture, _picture(context, s, st)),
-        if (s.connected) (context.l10n.qualityHost, _host(context, st)),
+        if (s.connected) (context.l10n.qualityHost, _host(context, s, st)),
         if (dec != null) (context.l10n.qualityDecoder, _decoder(context, dec)),
       ];
       final footer = switch (st.adaptation) {
@@ -82,7 +89,7 @@ class QualityPanel extends StatelessWidget {
         _ => null,
       };
       return Container(
-        width: _width,
+        width: width,
         decoration: BoxDecoration(
           color: ViewerPalette.panel,
           borderRadius: BorderRadius.circular(14),
@@ -178,6 +185,7 @@ class QualityPanel extends StatelessWidget {
     final linkRtt = link?.rttMs, lowest = link?.minRttMs;
     final queued = st.queueDelayMs ?? 0;
     final sent = st.sentBitrateBps;
+    final (down, up) = (st.speedRxBps, st.speedTxBps);
     return [
       _Row('path', l10n.qualityPath, _path(context, s, st), mono: false),
       if (linkRtt != null)
@@ -193,6 +201,14 @@ class QualityPanel extends StatelessWidget {
         _ms(st.rttMs),
         detail: queued > 0 ? l10n.qualityQueued(queued) : null,
       ),
+      // Everything the session moves, each way, as RustDesk counts it.
+      if (!s.connected || down != null)
+        _Row(
+          'speed',
+          l10n.qualitySpeed,
+          down == null ? '—' : formatSpeed(down),
+          detail: up == null ? null : l10n.qualitySpeedSent(formatSpeed(up)),
+        ),
       _Row(
         'bitrate',
         l10n.qualityBitrate,
@@ -209,7 +225,8 @@ class QualityPanel extends StatelessWidget {
     DesktopStats st,
   ) {
     final l10n = context.l10n;
-    final codec = _codec(st.codec);
+    final codec = codecLabel(st.codec);
+    final chroma = chromaOf(st.codec);
     final (host, viewer) = (st.hostMs, st.viewerMs);
     String fps(double value) => s.connected ? '${value.round()} fps' : '—';
     return [
@@ -235,6 +252,7 @@ class QualityPanel extends StatelessWidget {
         false => l10n.qualitySoftware(codec),
         null => codec,
       }, mono: false),
+      if (chroma != null) _Row('chroma', l10n.qualityChroma, chroma),
       if (s.connected)
         _Row(
           'keyframes',
@@ -248,10 +266,16 @@ class QualityPanel extends StatelessWidget {
   }
 
   /// What the host was asked for and what it does: Quality's ceiling of 30
-  /// is by design, so its 30 reads as expected beside it.
-  static List<_Row> _host(BuildContext context, DesktopStats st) {
+  /// is by design, so its 30 reads as expected beside it, unless the user
+  /// chose a frame rate, which replaces it.
+  static List<_Row> _host(
+    BuildContext context,
+    DesktopSessionView s,
+    DesktopStats st,
+  ) {
     final l10n = context.l10n;
-    final preset = st.preset, ceiling = st.ceilingFps();
+    final preset = st.preset;
+    final ceiling = st.ceilingFps(chosen: s.target?.maxFps ?? 0);
     final skipped = st.skippedPerSecond, dwell = st.encoderDwellMs;
     return [
       if (preset != null)
@@ -324,6 +348,103 @@ class QualityPanel extends StatelessWidget {
         _Row('refresh', l10n.qualityRefresh, '${refresh.round()} Hz'),
     ];
   }
+}
+
+/// RustDesk's quality monitor (D11): the few figures that say at a glance
+/// how the session goes, small and translucent at the picture's top right,
+/// in the viewer's dark palette. It takes no pointer, so a stroke may start
+/// under it, and shows dashes while the connection is not up. Listening to
+/// [stats] is what samples them, as the panel's does.
+class QualityMonitor extends StatelessWidget {
+  const QualityMonitor({
+    super.key = const Key('viewer-quality-monitor'),
+    required this.session,
+    required this.stats,
+  });
+
+  final ValueListenable<DesktopSessionView> session;
+  final ValueListenable<DesktopStats> stats;
+
+  static const width = 196.0;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: Listenable.merge([session, stats]),
+    builder: (context, _) {
+      final l10n = context.l10n;
+      final s = session.value;
+      final st = s.connected ? stats.value : DesktopStats.none;
+      final speed = st.speedRxBps;
+      final rows = [
+        (l10n.qualitySpeed, speed == null ? '—' : formatSpeed(speed)),
+        (l10n.monitorFps, s.connected ? '${st.presentedFps.round()}' : '—'),
+        (l10n.monitorDelay, _ms(st.rttMs)),
+        (
+          l10n.monitorTarget,
+          st.encoderBitrateBps > 0 ? _mbps(st.encoderBitrateBps) : '—',
+        ),
+        (l10n.qualityCodec, codecLabel(st.codec)),
+        (l10n.qualityChroma, chromaOf(st.codec) ?? '—'),
+        (
+          l10n.qualityResolution,
+          st.width > 0 && st.height > 0 ? '${st.width}×${st.height}' : '—',
+        ),
+      ];
+      return IgnorePointer(
+        child: Semantics(
+          container: true,
+          label: l10n.viewerQualityMonitor,
+          child: Container(
+            width: width,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: const BoxDecoration(
+              // Translucent, yet its quietest text keeps 4.5:1 over white.
+              color: ViewerPalette.gutter,
+              borderRadius: BorderRadius.all(Radius.circular(8)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final (label, value) in rows)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 1.5),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          flex: 6,
+                          child: Text(
+                            label,
+                            textAlign: TextAlign.end,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: ViewerPalette.textSecondary,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          flex: 5,
+                          child: Text(
+                            value,
+                            maxLines: 1,
+                            style: mono(
+                              fontSize: 11,
+                              color: ViewerPalette.text,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    },
+  );
 }
 
 class _SectionTitle extends StatelessWidget {

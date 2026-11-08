@@ -305,8 +305,11 @@ offers Reconnect where that can help.
 - **Desktop** (`desktop_viewer.dart`): a dark title bar with the computer's
   name, the sharing capsule when this computer is being viewed too, and the
   caption buttons in their dark tone. Below it, a floating toolbar: the
-  connection chip (path, round trip, frame rate; it shows or hides the
-  quality panel), View and Control, Display (scaling, picture preference),
+  connection chip (path, round trip, frame rate and the speed received, each
+  in a fixed cell so the centred bar never shifts; it shows or hides the
+  quality panel), View and Control, Display (scaling, picture preference,
+  then Resolution, Maximum frame rate and Codec as submenus that name the
+  current choice, then the quality panel and the quality monitor),
   Shortcuts, More, full screen and Disconnect. It is pinned at first;
   unpinned, it folds to a handle 2 s after the pointer leaves it, and never
   while one of its menus is open. In control, a hint says that keyboard and
@@ -314,8 +317,10 @@ offers Reconnect where that can help.
   computer keeps for itself are in the Shortcuts menu.
 - **Phone and tablet** (`touch_viewer.dart`): immersive, and landscape on a
   phone. The controls stand in the black gutters beside the picture — Back,
-  the path and frame rate, and the input mode on one side; Keyboard,
-  Shortcuts, Right click and More on the other. A tablet in portrait gets
+  the path, frame rate and speed, and the input mode on one side; Keyboard,
+  Shortcuts, Right click and More on the other. More holds what Display
+  holds on a desktop, each submenu laid flat as a section of its own. A
+  tablet in portrait gets
   bars, and a screen the picture fills gets plates over it. The picture fits
   between side gutters or bars, not under them (the viewport's frame), and
   they stand on dark strips that let touches through: zoomed in, what lies
@@ -329,6 +334,42 @@ offers Reconnect where that can help.
   connection figures, which scroll on a landscape phone. Direct touch can
   add a virtual mouse. The first session opens the gesture sheet by itself;
   a long press on the input mode opens it again.
+
+**What the picture is made of.** The picture preference changes live. The
+resolution (720p, 1080p by default, 1440p, or Native up to 4K) and the
+maximum frame rate (Auto, or 30, 60, 90 or 120 up to the display's highest
+refresh rate) belong to each remembered computer, as the preference does,
+and are fixed for a session, so choosing one connects again at once, keeping
+the picture and the choice to view only; the menus say so. A frame rate
+chosen over Auto replaces every preset's own ceiling, Quality's 30 too. The
+codec is the device's: Auto offers H.265 where this device has a hardware
+decoder that takes the chosen resolution (asked of the platform at the first
+connect, never by creating a decoder), H.264 offers only that. A resolution
+no decoder here would take is shown disabled with the reason. When a picture
+fails to decode as H.265 the session connects again at once on H.264, and
+H.265 is not offered again until the app restarts; only a failure on H.264
+too ends the session.
+
+**Figures at a glance.** Speed is RustDesk's: everything the session moves
+each way, per second, as the tunnel counts it. The chip and the phone's
+quality button show the speed received; the quality panel adds Speed both
+ways, the encoded resolution, the codec (H.265, H.264 or JPEG) and its
+chroma. The quality monitor, off at first and remembered for the device,
+puts RustDesk's few figures (speed, frame rate, delay, target bitrate, codec,
+chroma, resolution) small and translucent at the picture's top right — left
+of the quality panel while that is open, under the minimap on a phone — and
+takes no touch, so a stroke may start under it.
+
+**The remote cursor** is the viewer's own (`remote_input.dart`): strokes,
+taps and the mouse move it, the arrow is drawn there, and no wait hands it
+back to the host. It follows a host report only where the report says
+something new: the first one of a connection or a display, any report while
+viewing only, and else a report that changed and lies more than a pixel from
+where this viewer put it — the remote user, a program or a clamp moved it.
+The host reports nothing it injected for this viewer, so a lagging report
+can no longer pull the arrow, or the next stroke, back. A hidden cursor
+hides the arrow until this viewer moves it. A last move refused because the
+picture went stale is sent with the next fresh picture.
 
 How touch, the mouse and keys become remote input is in
 [the remote desktop's documentation](remote-desktop.md#gestures-keys-and-modifiers).
@@ -542,9 +583,11 @@ CPU and memory without starting tunnels or reading settings.
   the pill), `remote_desktop_test.dart` and `remote_computers_test.dart`
   (remembering at the first picture, pausing, forgetting),
   `viewer_chrome_test.dart` (the toolbar, the overlays, input only while
-  live), and the input core's pure tests — `touch_gesture_test.dart`,
-  `remote_input_test.dart`, `remote_text_input_test.dart`,
-  `remote_surface_test.dart`.
+  live), `desktop_store_test.dart` (the H.265 offer and its fallback, the
+  choices that connect again, the last move kept for a fresh picture), and
+  the input core's pure tests — `touch_gesture_test.dart`,
+  `remote_input_test.dart` (the cursor stays the viewer's own),
+  `remote_text_input_test.dart`, `remote_surface_test.dart`.
 
 To look at the design without a device, render the pages with their real
 typefaces to PNGs:
