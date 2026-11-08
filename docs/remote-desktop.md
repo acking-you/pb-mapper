@@ -1046,6 +1046,26 @@ every change. The writer sends each report once, outside the video queue,
 after its generation's `State`. Cursor metadata is a generic position, not the
 Windows cursor bitmap, and observing it never renews input authorisation.
 
+A report can still cross the controller's moves on the wire. Sampled before
+the thread took a move, it reaches the viewer after the move left; and since
+that move's echo is never reported, taking the report would leave the viewer's
+pointer where the host's is not: the remote user bumps the mouse during a
+stroke, or a key press hides the pointer just before a tap. So each report
+carries an input watermark, `input_sequence`: the sequence of the last input
+the thread had taken off the lane when it sampled, applied or not, held input
+it dropped included. A viewer lists the `cursor_sequence` capability to get
+it, and the host writes it to no other, since an older viewer rejects a field
+it does not know. The viewer remembers the generation and sequence of the last
+move it wrote to the wire (never one a barrier, a pause or a release dropped
+from its queue). While it controls, a report of that generation below that
+sequence is set aside, its position and its visibility alike. The first report
+of a generation is always taken, and so is every report while the viewer does
+not control, or from a host that sends no watermark. Because a clamp or a
+hidden pointer may have been reported only before the move, the thread, once
+it has taken a move, reports the next sample that is not that move's echo even
+when it equals the last report, at the newer watermark: the clamp, or the
+pointer still hidden, reaches the viewer with the move behind it.
+
 ### Constants
 
 | What | Value |
@@ -1062,7 +1082,7 @@ Windows cursor bitmap, and observing it never renews input authorisation.
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued; IDR grace 500 ms; stall watchdog 700 ms |
 | fps cap | tick 250 ms; × 0.9 direct, × 0.8 relay; minimum 5; +5 after 3 s; ≥ 1 s between changes |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
-| Cursor | sampled every 16 ms; the controller's own move never reported |
+| Cursor | sampled every 16 ms; the controller's own move never reported; a report older than the controller's last move set aside |
 | Codec | `Accepted` waits at most 3 s for the backend's H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3 |
 
 ### Diagnostics

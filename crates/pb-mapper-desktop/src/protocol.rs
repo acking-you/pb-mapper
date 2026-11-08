@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) const CAPABILITY_LOCK: &str = "lock";
 /// The viewer reads `Stats::encoder_dwell_ms`; a host writes it to no other.
 pub(crate) const CAPABILITY_ENCODER_DWELL: &str = "encoder_dwell";
+/// The viewer reads `Cursor::input_sequence`; a host writes it to no other.
+pub(crate) const CAPABILITY_CURSOR_SEQUENCE: &str = "cursor_sequence";
 /// From a viewer: it can decode `VideoCodec::H265`. A host that can encode it
 /// then answers `Accepted { codec: h265 }`; no other host ever sees the
 /// value, which is never in `codecs`.
@@ -145,6 +147,12 @@ pub(crate) enum HostMessage {
         x: i32,
         y: i32,
         visible: bool,
+        /// The sequence of the last input the host had taken off its lane,
+        /// applied or not, when it sampled the pointer: below the viewer's
+        /// newest move, the report predates that move. Only to a viewer that
+        /// listed `cursor_sequence`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_sequence: Option<u64>,
     },
     /// 1, 2, 3 …; one outstanding at a time, in stream order.
     Probe {
@@ -418,6 +426,7 @@ mod tests {
                 x: -3,
                 y: 8,
                 visible: true,
+                input_sequence: Some(12),
             },
             HostMessage::Probe { nonce: 2 },
             HostMessage::Stats {

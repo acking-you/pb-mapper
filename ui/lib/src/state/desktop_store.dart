@@ -114,7 +114,9 @@ class _SampledNotifier<T> extends ValueNotifier<T> {
 /// else a new report more than a pixel from this cursor — the remote user,
 /// a program or a clamp moved it. The host never reports a position it
 /// injected for this viewer, so a report already seen is old news, however
-/// late a viewer comes to it.
+/// late a viewer comes to it; and while this viewer controls, Rust sets
+/// aside a report the host sampled before taking this viewer's newest move,
+/// which crossed that move on the way.
 final class DesktopCursor extends ChangeNotifier {
   Offset _position = const Offset(0.5, 0.5);
 
