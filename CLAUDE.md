@@ -164,6 +164,8 @@ Nothing in the SDK crates knows it exists.
   - `worker.rs`, `pacer.rs`, `scheduler.rs`, `lane.rs`: Thread C, the one
     desktop-bound thread (capture, encode, input), its pacing, its one wait,
     and the input lane from B-recv
+  - `timer.rs`: Fine Windows timers for the whole process (power-throttling
+    opt-out and `timeBeginPeriod`), held while a session captures
   - `credit.rs`, `qos.rs`, `idr.rs`, `outgoing.rs`: Receipt credit, delay-based
     QoS, on-demand IDRs, and the hand-off from thread C to B-send
   - `protocol.rs`, `wire.rs`, `invite.rs`, `security.rs`, `auth.rs`: Protocol v2
