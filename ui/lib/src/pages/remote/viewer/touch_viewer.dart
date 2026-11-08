@@ -49,6 +49,8 @@ class TouchViewer extends StatefulWidget {
     required this.onBack,
     this.onDisconnect,
     this.onQuality,
+    this.onResolution,
+    this.onMaxFps,
     this.onReconnect,
     this.onPasteNewInvite,
   });
@@ -65,6 +67,10 @@ class TouchViewer extends StatefulWidget {
 
   /// Default: `desktop.setQuality`.
   final ValueChanged<DesktopQuality>? onQuality;
+
+  /// Defaults: `desktop.setResolution` and `desktop.setMaxFps`.
+  final ValueChanged<DesktopResolution>? onResolution;
+  final ValueChanged<int>? onMaxFps;
 
   /// Default: connects the session's target again.
   final VoidCallback? onReconnect;
@@ -221,6 +227,8 @@ class _TouchViewerState extends State<TouchViewer> {
     viewport: _viewport,
     onDisconnect: () => (widget.onDisconnect ?? _desktop.disconnect)(),
     onQuality: (q) => (widget.onQuality ?? _desktop.setQuality)(q),
+    onResolution: (r) => (widget.onResolution ?? _desktop.setResolution)(r),
+    onMaxFps: (fps) => (widget.onMaxFps ?? _desktop.setMaxFps)(fps),
     onTypeText: _textInput.show,
     onBack: () => widget.onBack(),
     onGestureSheet: () => unawaited(_showGestures()),
@@ -405,14 +413,31 @@ class _TouchViewerState extends State<TouchViewer> {
         ..._strips(gutters, size),
         _indicator,
         if (!_keyboard) ..._gutters(gutters),
+        // The minimap while zoomed, and the quality monitor under it.
         Positioned(
           top: content.top + 10,
           right: size.width - content.right + 12,
-          child: ValueListenableBuilder(
-            valueListenable: _viewport.visibleRegion,
-            builder: (context, region, _) => region == null
-                ? const SizedBox.shrink()
-                : Minimap(region: region, aspectRatio: aspect),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              ValueListenableBuilder(
+                valueListenable: _viewport.visibleRegion,
+                builder: (context, region, _) => region == null
+                    ? const SizedBox.shrink()
+                    : Padding(
+                        padding: EdgeInsets.only(
+                          bottom: prefs.qualityMonitor ? 8 : 0,
+                        ),
+                        child: Minimap(region: region, aspectRatio: aspect),
+                      ),
+              ),
+              if (prefs.qualityMonitor)
+                QualityMonitor(
+                  session: _desktop.session,
+                  stats: _desktop.stats,
+                ),
+            ],
           ),
         ),
         Positioned(

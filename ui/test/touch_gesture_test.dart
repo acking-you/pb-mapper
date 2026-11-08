@@ -15,9 +15,6 @@ class _Sink implements RemotePointerSink {
   Offset cursor = const Offset(0.5, 0.5);
 
   @override
-  set strokeActive(bool active) {}
-
-  @override
   void hover(Offset n) {
     calls.add('hover');
     points.add(n);

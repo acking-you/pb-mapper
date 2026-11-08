@@ -1,32 +1,28 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'remote_input.dart';
 import 'remote_viewport.dart';
 
-/// The remote cursor over the picture (D11): the host's latest cursor, as
-/// the store publishes it from the view leaf, or the local prediction while
-/// this viewer moves it, since the host does not echo a mover's cursor back
-/// for [kCursorEchoWindow]. The local OS pointer stays visible on desktop.
+/// The remote cursor over the picture (D11, D12): this viewer's own, which
+/// follows the host's reports only as [RemoteInput.shownCursor] says, so it
+/// never jumps back to where a lagging report left it. The local OS pointer
+/// stays visible on desktop.
 ///
-/// Its own layer: the arrow moves with every stroke, hover and sample, and
+/// Its own layer: the arrow moves with every stroke, hover and report, and
 /// repaints nothing around it.
 class RemoteCursorLayer extends StatelessWidget {
   const RemoteCursorLayer({
     super.key,
-    required this.hostCursor,
     required this.viewport,
     required this.input,
   });
 
-  /// The host's cursor, normalised; null while hidden or unknown.
-  final ValueListenable<Offset?> hostCursor;
   final RemoteViewport viewport;
   final RemoteInput input;
 
   /// Where to draw, in the stage's coordinates.
   Offset? _at() {
-    final n = input.predicting ? input.cursor : hostCursor.value;
+    final n = input.shownCursor;
     return n == null ? null : viewport.toLocal(n);
   }
 
@@ -38,11 +34,7 @@ class RemoteCursorLayer extends StatelessWidget {
           size: Size.infinite,
           painter: RemoteCursorPainter(
             at: _at,
-            repaint: Listenable.merge([
-              hostCursor,
-              viewport,
-              input.cursorChanges,
-            ]),
+            repaint: Listenable.merge([viewport, input.cursorChanges]),
           ),
         ),
       ),

@@ -29,10 +29,6 @@ const kLatchedTextKeys = 16;
 /// UTF-8 bytes per [RemoteInput.typeText] call: at most 64 `text` events.
 const kTextMaxBytes = 64 * 1024;
 
-/// The host stops echoing the cursor to whoever moved it for this long
-/// (D11), so the local prediction is what the cursor layer draws.
-const kCursorEchoWindow = Duration(milliseconds: 300);
-
 /// Code points per [RemoteInput.backspace] call: 128 events in 8 batches.
 const _backspaceMax = 64;
 
@@ -48,10 +44,14 @@ const _backspacesPerSequence = kSequenceMax ~/ 2;
 /// nothing can stay held on the host (D16). What is held across sequences
 /// — a pressed button, a three-finger scroll's modifiers, a repeating key,
 /// a physical key — is tracked, and [releaseAll] gives it back.
+///
+/// The cursor it moves is the session's ([DesktopStore.cursor], D12), not
+/// this viewer's: strokes, taps and the mouse move it, and a viewer opened
+/// again resumes it.
 final class RemoteInput implements RemotePointerSink {
   /// [onLocalCancel] cancels the local gesture in progress (the touch
-  /// machine's `cancel`). [clock] is the viewer's one timeline for events,
-  /// timeouts and the cursor echo window.
+  /// machine's `cancel`). [clock] is the viewer's one timeline for events
+  /// and timeouts.
   RemoteInput({
     required DesktopStore desktop,
     required ModifierLatch latch,
@@ -78,12 +78,7 @@ final class RemoteInput implements RemotePointerSink {
   final Duration Function() clock;
 
   final _ready = ValueNotifier(false);
-  final _cursorChanges = _Notifier();
   int? _epoch;
-
-  Offset _cursor = const Offset(0.5, 0.5);
-  Duration? _lastLocalMoveAt;
-  bool _strokeActive = false;
 
   /// Physical keys whose down is held on the host, and those whose down
   /// went as a whole tap, so their up sends nothing.
@@ -103,38 +98,20 @@ final class RemoteInput implements RemotePointerSink {
   /// Control is live and the picture's geometry known.
   ValueListenable<bool> get ready => _ready;
 
-  /// Fires when the local prediction moves or a stroke starts or ends.
-  Listenable get cursorChanges => _cursorChanges;
+  /// Fires when the cursor moves, shows or hides.
+  Listenable get cursorChanges => _desktop.cursor;
 
-  bool get strokeActive => _strokeActive;
-
+  /// Where taps click and strokes start, normalised to the display.
   @override
-  set strokeActive(bool active) {
-    if (active == _strokeActive) return;
-    // A stroke starts from where the cursor is shown.
-    if (active && !predicting) _cursor = _desktop.hostCursor.value ?? _cursor;
-    _strokeActive = active;
-    _cursorChanges.notify();
-  }
+  Offset get cursor => _desktop.cursor.position;
 
-  /// Whether the local prediction, rather than the host's cursor, is the
-  /// cursor: during a stroke, and for [kCursorEchoWindow] after a local
-  /// move, while the host does not echo it back (D11).
-  bool get predicting {
-    final at = _lastLocalMoveAt;
-    return _strokeActive || (at != null && clock() - at < kCursorEchoWindow);
-  }
-
+  /// A local move: the arrow shows here.
   @override
-  Offset get cursor =>
-      predicting ? _cursor : (_desktop.hostCursor.value ?? _cursor);
+  set cursor(Offset normalized) => _desktop.cursor.moveTo(normalized);
 
-  @override
-  set cursor(Offset normalized) {
-    if (normalized == _cursor) return;
-    _cursor = normalized;
-    _cursorChanges.notify();
-  }
+  /// Where the cursor layer draws the arrow; null while the host hides its
+  /// cursor and this viewer has not moved it since.
+  Offset? get shownCursor => _desktop.cursor.shown;
 
   // -------------------------------------------------------------- pointer
 
@@ -148,7 +125,7 @@ final class RemoteInput implements RemotePointerSink {
   void press(RemoteButton b, Offset n, {bool dragStart = false}) {
     final g = _live;
     if (g == null) return;
-    _localMove(n);
+    cursor = n;
     final mods = _latch.active.difference(_buttonMods);
     final sent = _sequence(g, [
       _moveInput(g, n),
@@ -174,7 +151,7 @@ final class RemoteInput implements RemotePointerSink {
   void click(RemoteButton b, Offset n) {
     final g = _live;
     if (g == null) return;
-    _localMove(n);
+    cursor = n;
     _wrapped(
       g,
       const {},
@@ -404,7 +381,6 @@ final class RemoteInput implements RemotePointerSink {
     _desktop.session.removeListener(_onState);
     _desktop.geometry.removeListener(_onState);
     _ready.dispose();
-    _cursorChanges.dispose();
   }
 
   // ---------------------------------------------------------------- inner
@@ -447,15 +423,10 @@ final class RemoteInput implements RemotePointerSink {
     _repeatMods = const {};
   }
 
-  void _localMove(Offset n) {
-    _lastLocalMoveAt = clock();
-    cursor = n;
-  }
-
   void _moveTo(Offset n) {
     final g = _live;
     if (g == null) return;
-    _localMove(n);
+    cursor = n;
     _desktop.send(_moveInput(g, n), geometryEpoch: g.epoch);
   }
 
@@ -540,8 +511,4 @@ final class RemoteInput implements RemotePointerSink {
       : rune < 0x10000
       ? 3
       : 4;
-}
-
-class _Notifier extends ChangeNotifier {
-  void notify() => notifyListeners();
 }

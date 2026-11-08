@@ -122,24 +122,47 @@ class _SidePanel extends StatelessWidget {
   }
 
   Widget _row(BuildContext context, ViewerMenuEntry entry) => switch (entry) {
-    ViewerMenuSection(:final label) => Padding(
-      padding: const EdgeInsetsDirectional.fromSTEB(20, 14, 20, 4),
-      child: Text(
-        label,
-        style: const TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w600,
-          color: ViewerPalette.textQuiet,
-        ),
-      ),
-    ),
+    ViewerMenuSection(:final label) => _section(label),
     ViewerMenuDivider() => Container(
       height: 1,
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       color: ViewerPalette.edge,
     ),
     final ViewerMenuItem item => _Row(item: item),
+    // A submenu lies flat here: a section of its own.
+    ViewerMenuSubmenu(:final label, :final note, :final entries) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _section(label, note: note),
+        for (final entry in entries) _row(context, entry),
+      ],
+    ),
   };
+
+  static Widget _section(String label, {String? note}) => Padding(
+    padding: const EdgeInsetsDirectional.fromSTEB(20, 14, 20, 4),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: ViewerPalette.textQuiet,
+          ),
+        ),
+        if (note != null)
+          Text(
+            note,
+            style: const TextStyle(
+              fontSize: 11.5,
+              color: ViewerPalette.textQuiet,
+            ),
+          ),
+      ],
+    ),
+  );
 }
 
 class _Row extends StatelessWidget {

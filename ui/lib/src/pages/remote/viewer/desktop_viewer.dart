@@ -34,6 +34,8 @@ class DesktopViewer extends StatefulWidget {
     this.onBack,
     this.onDisconnect,
     this.onQuality,
+    this.onResolution,
+    this.onMaxFps,
     this.onReconnect,
     this.onPasteNewInvite,
   });
@@ -50,6 +52,10 @@ class DesktopViewer extends StatefulWidget {
 
   /// Default: `desktop.setQuality`.
   final ValueChanged<DesktopQuality>? onQuality;
+
+  /// Defaults: `desktop.setResolution` and `desktop.setMaxFps`.
+  final ValueChanged<DesktopResolution>? onResolution;
+  final ValueChanged<int>? onMaxFps;
 
   /// Default: connects the session's target again.
   final VoidCallback? onReconnect;
@@ -202,6 +208,8 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
     viewport: _viewport,
     onDisconnect: _disconnect,
     onQuality: (q) => (widget.onQuality ?? _desktop.setQuality)(q),
+    onResolution: (r) => (widget.onResolution ?? _desktop.setResolution)(r),
+    onMaxFps: (fps) => (widget.onMaxFps ?? _desktop.setMaxFps)(fps),
     onTypeText: () => unawaited(_typeText()),
     onBack: widget.onBack == null ? null : () => widget.onBack?.call(),
     onReconnect: () => (widget.onReconnect ?? _reconnect)(),
@@ -273,6 +281,22 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
                               stats: _desktop.stats,
                               decoder: _desktop.decoderStats,
                             ),
+                          ),
+                        ),
+                ),
+                // At the top right, beside the panel while that is open.
+                ListenableBuilder(
+                  listenable: Listenable.merge([widget.prefs, _toolbar.inset]),
+                  builder: (context, _) => !widget.prefs.qualityMonitor
+                      ? const SizedBox.shrink()
+                      : PositionedDirectional(
+                          top: _toolbar.inset.value,
+                          end: widget.prefs.qualityPanel
+                              ? 14 + QualityPanel.width + 8
+                              : 14,
+                          child: QualityMonitor(
+                            session: _desktop.session,
+                            stats: _desktop.stats,
                           ),
                         ),
                 ),

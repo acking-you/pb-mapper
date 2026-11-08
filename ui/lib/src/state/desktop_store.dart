@@ -45,6 +45,10 @@ const _statsInterval = Duration(seconds: 1);
 /// The host's 1 s `STOP_WRITE_TIMEOUT`, plus a worker isolate's spawn.
 const _shutdownBound = Duration(milliseconds: 1500);
 
+/// How long a connect waits for the decoder probe (I4), which enumerates
+/// in driver code and may never answer.
+const _decoderProbeBound = Duration(seconds: 2);
+
 /// Stop reasons that reconnect with backoff; `protocol` does too, a bounded
 /// number of times in a row.
 const _retryableStops = {
@@ -99,6 +103,92 @@ class _SampledNotifier<T> extends ValueNotifier<T> {
   }
 }
 
+/// The remote cursor as this viewer knows it (D12): its own, which strokes,
+/// taps and the mouse move, and which the cursor layer draws. The store
+/// owns it for the session, not the viewer on screen, so a viewer opened
+/// again after Back resumes it where the last one left it.
+///
+/// The host's reports never take it back on a timer. One is followed only
+/// where it tells this viewer something its own cursor cannot know: the
+/// first of a connection or a display, every one while viewing only, and
+/// else a new report more than a pixel from this cursor — the remote user,
+/// a program or a clamp moved it. The host never reports a position it
+/// injected for this viewer, so a report already seen is old news, however
+/// late a viewer comes to it.
+final class DesktopCursor extends ChangeNotifier {
+  Offset _position = const Offset(0.5, 0.5);
+
+  /// The arrow is drawn: the host showed its cursor, or this viewer moved
+  /// it since the host last said it is hidden.
+  bool _shown = false;
+
+  /// The last host report seen, and the geometry epoch of the last one
+  /// that was not hidden.
+  Offset? _report;
+  int? _reportEpoch;
+
+  /// Where taps click and strokes start, normalised to the display.
+  Offset get position => _position;
+
+  /// Where the arrow is drawn; null while the host hides its cursor and
+  /// this viewer has not moved it since.
+  Offset? get shown => _shown ? _position : null;
+
+  /// A local move: the arrow shows here.
+  void moveTo(Offset normalized) {
+    if (normalized == _position && _shown) return;
+    _position = normalized;
+    _shown = true;
+    notifyListeners();
+  }
+
+  /// The host's cursor as the store last read it, null while hidden or
+  /// unknown, read against [g]. True when what is drawn changed.
+  bool _onReport(
+    Offset? report,
+    DesktopGeometry? g, {
+    required bool controlling,
+  }) {
+    if (report == _report) return false;
+    _report = report;
+    if (report == null) {
+      // Hidden, off the shared display, or not reported yet.
+      if (!_shown) return false;
+      _shown = false;
+      notifyListeners();
+      return true;
+    }
+    final first = g == null || g.epoch != _reportEpoch;
+    _reportEpoch = g?.epoch;
+    final follow = first || !controlling || _apart(report, g);
+    if (!follow && _shown) return false;
+    if (follow) _position = report;
+    _shown = true;
+    notifyListeners();
+    return true;
+  }
+
+  /// More than a display pixel from the pixel this cursor is sent as: the
+  /// host reports whole pixels, and this cursor keeps the fraction.
+  bool _apart(Offset report, DesktopGeometry? g) {
+    if (g == null) return true;
+    bool far(double reported, double local, int size) =>
+        ((reported * size).round() - (local * size).floor()).abs() > 1;
+    return far(report.dx, _position.dx, g.displayWidth) ||
+        far(report.dy, _position.dy, g.displayHeight);
+  }
+
+  /// Another computer: nothing of the last one's cursor carries over.
+  void _reset() {
+    _position = const Offset(0.5, 0.5);
+    _report = null;
+    _reportEpoch = null;
+    if (!_shown) return;
+    _shown = false;
+    notifyListeners();
+  }
+}
+
 /// Owns the desktop host and the viewer session, independently of
 /// navigation. It is not a `ChangeNotifier`: each concern is its own
 /// [ValueListenable], which changes only when its value does (D14). Nothing
@@ -138,7 +228,8 @@ class DesktopStore {
     _schedulePolling,
   );
   final _quality = ValueNotifier(DesktopQuality.balanced);
-  final _hostCursor = ValueNotifier<Offset?>(null);
+  final _cursor = DesktopCursor();
+  final _decoders = ValueNotifier<DesktopDecoders?>(null);
 
   ValueListenable<DesktopHostView> get hostView => _hostView;
   ValueListenable<DesktopSessionView> get session => _session;
@@ -161,10 +252,19 @@ class DesktopStore {
   ValueListenable<DesktopDecoderStats?> get decoderStats => _decoder;
   ValueListenable<DesktopQuality> get quality => _quality;
 
-  /// The host's cursor, normalised to its display; null while hidden,
-  /// unknown or of another generation than [geometry]. The view leaf
-  /// publishes it, read every rendered frame and every 16 ms (D11).
-  ValueListenable<Offset?> get hostCursor => _hostCursor;
+  /// The remote cursor, the session's: what the viewer moves, and the
+  /// host's reports where they say something new. The view leaf reports
+  /// them, read every rendered frame and every 16 ms (D11).
+  DesktopCursor get cursor => _cursor;
+
+  /// What this device decodes natively, probed once, at the first connect
+  /// (I4); null until the probe answers. H.265 leaves it for the rest of the
+  /// run once a picture failed to decode as H.265 (D5).
+  ValueListenable<DesktopDecoders?> get decoders => _decoders;
+
+  /// The highest frame rate this display shows: what the probe reported,
+  /// else its current refresh rate.
+  double get displayMaxHz => _decoders.value?.displayMaxHz ?? _refreshHz();
 
   // ---------------------------------------------------------------- demand
 
@@ -895,6 +995,14 @@ class DesktopStore {
       _controlSuppressed = false,
       _nativePaused = false;
   bool _statsDue = false;
+
+  /// The latest attempt offered H.265.
+  bool _offeredH265 = false;
+
+  /// This computer answered an offer of H.265 with H.264 (an older build,
+  /// no encoder, or one that failed): its sessions are H.264 from then on.
+  bool _h265Declined = false;
+  Future<DesktopDecoders>? _probing;
   int _reconnectAttempt = 0, _protocolStops = 0;
   Timer? _retryTimer;
   DateTime? _retryAt;
@@ -935,9 +1043,12 @@ class DesktopStore {
     _cancelControlCooldown();
     _quality.value = target.quality;
     if (!sameComputer) {
-      // Another computer's last picture must not show under this one.
+      // Another computer's last picture, cursor and codec answer must not
+      // carry over to this one.
       _hasPicture = false;
       _releaseMedia();
+      _cursor._reset();
+      _h265Declined = false;
     }
     _attemptSerial = serial;
     _setup = DesktopSetupStep.finding;
@@ -950,8 +1061,7 @@ class DesktopStore {
   }
 
   Future<void> _attempt(int serial) async {
-    final target = _target;
-    if (_disposed || target == null || serial != _serial) return;
+    if (_disposed || _target == null || serial != _serial) return;
     _attemptSerial = serial;
     _setup = DesktopSetupStep.finding;
     _status = null;
@@ -965,14 +1075,35 @@ class DesktopStore {
       // attempt still waiting on the network.
       await _disconnectNative();
       if (_disposed || serial != _serial) return;
+      final decoders = _decoders.value ?? await _probeDecoders();
+      // Read after the waits: a change meanwhile applies to this attempt.
+      final target = _target;
+      if (_disposed || target == null || serial != _serial) return;
+      final h265 = _offeredH265 = _offersH265(decoders, target);
+      // Never a size the decoder of the codec asked for cannot take.
+      final resolution = h265
+          ? target.resolution
+          : decoders.forH264(target.resolution);
       final session = await _api.connect(
         target.invitation,
         computerId: target.computerId,
         relayOnly: target.relayOnly,
         quality: _quality.value,
         refreshHz: _refreshHz(),
+        h265: h265,
+        resolution: resolution,
+        maxFps: target.maxFps,
       );
       if (_disposed || serial != _serial) return;
+      if (h265 && session.codec == 'h264') {
+        _h265Declined = true;
+        if (decoders.forH264(resolution) != resolution) {
+          // Only H.265 decodes this size here: again at once, at the
+          // largest H.264 does. The computer keeps the choice.
+          _reconnectNow();
+          return;
+        }
+      }
       _attemptSerial = null;
       _media = session;
       _stopHandled = false;
@@ -980,8 +1111,11 @@ class DesktopStore {
       _controlSuppressed = false;
       _cancelControlCooldown();
       _setup = DesktopSetupStep.firstPicture;
-      // A new Rust viewer: new sequences, so nothing older may be sent.
+      // A new Rust viewer: new sequences, so nothing older may be sent, and
+      // no cursor is known until it reports one.
       _invalidateInput();
+      _view = null;
+      _publishCursor();
       _bumpGeometry();
       if (!_visible) _pauseNative();
       try {
@@ -1009,6 +1143,7 @@ class DesktopStore {
   }
 
   void _connectFailed(DesktopFailure failure) {
+    if (failure.code == 'DECODER' && _fallBackFromH265()) return;
     switch (failure.code) {
       case 'IO' || 'HOST_BUSY':
         _scheduleReconnect(failure);
@@ -1114,9 +1249,67 @@ class DesktopStore {
         failure,
         immediate: resumed && (code == 'transport' || code == 'timeout'),
       );
-    } else {
+    } else if (code != 'decoder_failed' || !_fallBackFromH265()) {
       _endSession(_endReason(code), failure);
     }
+  }
+
+  /// D5: this device failed to decode the session's H.265. H.265 is not
+  /// offered again this run, and the session connects again at once, on
+  /// H.264; only a failure there reaches the user. False for any other
+  /// codec.
+  bool _fallBackFromH265() {
+    if (_media?.codec != 'h265') return false;
+    _decoders.value = (_decoders.value ?? DesktopDecoders.h264Only)
+        .withoutH265();
+    _reconnectNow();
+    return true;
+  }
+
+  /// Connects the session's computer again at once, keeping its picture,
+  /// the control choice and the preset: for what only a new session
+  /// carries (resolution, frame rate, codec), or a codec that failed. A run
+  /// of failures starts over. An ended session takes the change at its
+  /// next connect.
+  void _reconnectNow() {
+    if (_disposed || !_sessionActive) return;
+    _cancelRetry();
+    _resetRetries();
+    _failure = null;
+    _stoppedWhileHidden = null;
+    unawaited(_attempt(++_serial));
+  }
+
+  /// The decoders the first connect probes; later ones reuse the answer
+  /// ([decoders]) without waiting. Until a probe that has not answered
+  /// within [_decoderProbeBound] (a wedged driver) does, attempts are H.264
+  /// only and none waits again; the platform is asked once, and its answer,
+  /// however late, is kept.
+  Future<DesktopDecoders> _probeDecoders() => _probing ??= _api
+      .decoders()
+      .catchError((Object _) => DesktopDecoders.h264Only)
+      .then((probed) {
+        if (_disposed) return probed;
+        return _decoders.value ??= probed;
+      })
+      .timeout(_decoderProbeBound, onTimeout: () => DesktopDecoders.h264Only);
+
+  /// D6, and what this computer answered: H.265 is offered when the device
+  /// would offer it and the computer has not declined it.
+  bool _offersH265(DesktopDecoders? decoders, DesktopTarget target) =>
+      !_h265Declined && (decoders?.offersH265(target) ?? false);
+
+  /// D7: a session at [r] would decode here, judged by the codec it would
+  /// carry — H.265 where it would be offered, else H.264. Before the probe
+  /// has answered, every size.
+  bool decodes(DesktopResolution r) {
+    final decoders = _decoders.value;
+    if (decoders == null) return true;
+    return decoders.decodes(
+      r,
+      _target?.codec ?? DesktopCodecPreference.auto,
+      h265Declined: _h265Declined,
+    );
   }
 
   void _pollStatus({bool resumed = false}) {
@@ -1280,9 +1473,21 @@ class DesktopStore {
       notice: status?.notice,
       capabilities: status?.capabilities ?? const [],
     );
-    if (_session.value.inputLive != _wasLive) {
-      _wasLive = _session.value.inputLive;
-      if (!_wasLive) _invalidateInput();
+    final session = _session.value;
+    if (session.inputLive != _wasLive) {
+      _wasLive = session.inputLive;
+      final geometry = _geometry.value;
+      if (_wasLive) {
+        _resendKept();
+      } else if (session.controlling && geometry != null) {
+        // Only the picture went stale: the newest move waits for the next
+        // fresh one.
+        final move = _takeMove()?.single;
+        _invalidateInput();
+        if (move is DesktopMove) _keep(move, geometry.epoch);
+      } else {
+        _invalidateInput();
+      }
     }
   }
 
@@ -1299,20 +1504,23 @@ class DesktopStore {
   }
 
   /// The leaf runs every rendered frame, and from a timer at the rate the
-  /// host samples its cursor. A cursor change publishes [hostCursor], whose
-  /// repaint asks for the frame that draws it. A change of generation,
-  /// state or flags re-reads the status, which publishes it.
+  /// host samples its cursor. A report that moves [cursor] repaints it, and
+  /// asks for the frame that draws it. A change of generation, state or
+  /// flags re-reads the status, which publishes it.
   void _acceptView(DesktopView? view, {required bool inFrame}) {
     final previous = _view;
     _view = view;
-    final shown = _hostCursor.value;
-    _publishCursor();
     // After paint a repaint asks for no frame: ask for the one that draws
     // the new cursor.
-    if (inFrame && _hostCursor.value != shown) {
+    if (_publishCursor() && inFrame) {
       SchedulerBinding.instance.scheduleFrame();
     }
     if (view == null) return;
+    if (_keptMove != null &&
+        view.fresh &&
+        view.presentedFrameId != _keptAtFrame) {
+      _resendKept();
+    }
     final structural =
         previous == null ||
         previous.generation != view.generation ||
@@ -1336,11 +1544,14 @@ class DesktopStore {
     }
   }
 
-  /// Normalises the last leaf read against [geometry]: the one place the
-  /// host's cursor meets the display it moves on.
-  void _publishCursor() {
+  /// Normalises the last leaf read against [geometry], the one place the
+  /// host's cursor meets the display it moves on, and reports it to
+  /// [cursor]: null while hidden, unknown, of another generation than
+  /// [geometry], or not yet reported by this connection. True when what
+  /// [cursor] draws changed.
+  bool _publishCursor() {
     final view = _view, g = _geometry.value;
-    _hostCursor.value =
+    final report =
         view == null ||
             g == null ||
             !view.cursorVisible ||
@@ -1352,6 +1563,11 @@ class DesktopStore {
             (view.cursorX / g.displayWidth).clamp(0.0, 1.0),
             (view.cursorY / g.displayHeight).clamp(0.0, 1.0),
           );
+    return _cursor._onReport(
+      report,
+      g,
+      controlling: _session.value.controlling,
+    );
   }
 
   int _geometryEpoch = 0;
@@ -1535,7 +1751,8 @@ class DesktopStore {
       _picture.value = DesktopPicture(
         textureId: texture.textureId,
         aspectRatio: width > 1 && height > 1 ? width / height : 16 / 9,
-        codec: 'h264',
+        // Between sessions, the last one's.
+        codec: _media?.codec ?? _picture.value?.codec ?? 'h264',
       );
     } else if (image != null) {
       _picture.value = DesktopPicture(
@@ -1759,14 +1976,39 @@ class DesktopStore {
   /// The newest move not yet sent, with the input epoch it was sent in.
   (DesktopMove, int)? _pendingMove;
 
+  /// The newest move refused because the picture was not fresh, or held
+  /// back as it went stale, with the geometry epoch it belongs to. It goes
+  /// with the next fresh picture, so the last position always reaches the
+  /// host (D12); whatever else ends input drops it.
+  (DesktopMove, int)? _keptMove;
+
+  /// The presented frame the kept move was refused at: only a newer fresh
+  /// one sends it again.
+  int _keptAtFrame = 0;
+
   /// Running for 4 ms after a move went out; moves meanwhile coalesce.
   Timer? _moveGate;
 
   void _invalidateInput() {
     _inputEpoch++;
     _pendingMove = null;
+    _keptMove = null;
     _moveGate?.cancel();
     _moveGate = null;
+  }
+
+  void _keep(DesktopMove move, int geometryEpoch) {
+    _keptMove = (move, geometryEpoch);
+    _keptAtFrame = _view?.presentedFrameId ?? 0;
+  }
+
+  /// The kept move goes, now that the picture is fresh again.
+  void _resendKept() {
+    final kept = _keptMove;
+    // An open gate sends it with whatever waits behind it.
+    if (kept == null || _moveGate != null || !_accepts(kept.$2)) return;
+    _keptMove = null;
+    if (_deliver([kept.$1])) _moveGate = Timer(_moveInterval, _flushMove);
   }
 
   /// The user's choice between viewing and controlling. Control is asked
@@ -1822,7 +2064,7 @@ class DesktopStore {
     if (_disposed) return;
     _quality.value = quality;
     final target = _target;
-    if (target != null) _target = target.withQuality(quality);
+    if (target != null) _target = target.copyWith(quality: quality);
     if (_media != null) {
       try {
         _api.setQuality(quality);
@@ -1833,14 +2075,45 @@ class DesktopStore {
     _publishSession();
   }
 
+  /// The encoded size's bound (D7), fixed for a session: a change connects
+  /// again at once.
+  void setResolution(DesktopResolution resolution) =>
+      _setLimits(_target?.copyWith(resolution: resolution));
+
+  /// The frame rate's ceiling (D8), 0 for Auto, fixed for a session: a
+  /// change connects again at once.
+  void setMaxFps(int fps) => _setLimits(_target?.copyWith(maxFps: fps));
+
+  void _setLimits(DesktopTarget? next) {
+    if (_disposed || next == null || next == _target) return;
+    _target = next;
+    _publishSession();
+    _reconnectNow();
+  }
+
+  /// The device's codec preference (D6), which a session takes at connect.
+  /// It connects again at once only where the session would differ: H.265
+  /// is offered now, or the session decodes H.265 and is not to.
+  void setCodec(DesktopCodecPreference codec) {
+    final target = _target;
+    if (_disposed || target == null || target.codec == codec) return;
+    final next = _target = target.copyWith(codec: codec);
+    _publishSession();
+    final offer = _offersH265(_decoders.value, next);
+    if (offer == _offeredH265) return;
+    // Offered and not taken (the host cannot encode it): nothing changes.
+    if (!offer && _media?.codec == 'h264') return;
+    _reconnectNow();
+  }
+
   bool _accepts(int geometryEpoch) =>
       !_disposed &&
       _session.value.inputLive &&
       _geometry.value?.epoch == geometryEpoch;
 
   /// False when dropped: not live, or [geometryEpoch] is not the current
-  /// one. Moves are coalesced to one per 4 ms; a pending move goes before
-  /// any other input.
+  /// one. Moves are coalesced to one per 4 ms; a pending or kept move goes
+  /// before any other input.
   bool send(DesktopInput input, {required int geometryEpoch}) {
     if (!_accepts(geometryEpoch)) return false;
     if (input is DesktopMove) {
@@ -1848,6 +2121,8 @@ class DesktopStore {
         _pendingMove = (input, _inputEpoch);
         return true;
       }
+      // Newer than any kept move.
+      _keptMove = null;
       if (!_deliver([input])) return false;
       _moveGate = Timer(_moveInterval, _flushMove);
       return true;
@@ -1874,10 +2149,13 @@ class DesktopStore {
     return false;
   }
 
+  /// The newest move not sent yet: the pending one, else the kept one.
   List<DesktopInput>? _takeMove() {
-    final pending = _pendingMove;
+    final pending = _pendingMove, kept = _keptMove;
     _pendingMove = null;
-    return pending != null && pending.$2 == _inputEpoch ? [pending.$1] : null;
+    _keptMove = null;
+    if (pending != null && pending.$2 == _inputEpoch) return [pending.$1];
+    return kept != null && kept.$2 == _geometry.value?.epoch ? [kept.$1] : null;
   }
 
   /// The gate closes: the newest move waiting behind it goes, and opens the
@@ -1891,6 +2169,8 @@ class DesktopStore {
   }
 
   /// Rust stamps the frame id and sequence; Dart names only the generation.
+  /// `NOT_FRESH` drops the batch, but keeps its move for the next fresh
+  /// picture; any other refusal ends control.
   bool _deliver(List<DesktopInput> inputs) {
     final geometry = _geometry.value;
     if (geometry == null) return false;
@@ -1898,7 +2178,11 @@ class DesktopStore {
       _api.input(geometry.generation, [for (final i in inputs) i.toJson()]);
       return true;
     } on DesktopCallException catch (e) {
-      if (e.code != 'NOT_FRESH') _interruptInput();
+      if (e.code != 'NOT_FRESH') {
+        _interruptInput();
+      } else if (inputs.whereType<DesktopMove>().lastOrNull case final move?) {
+        _keep(move, geometry.epoch);
+      }
       return false;
     } catch (_) {
       _interruptInput();
@@ -1975,6 +2259,7 @@ class DesktopStore {
     _stats.dispose();
     _decoder.dispose();
     _quality.dispose();
-    _hostCursor.dispose();
+    _cursor.dispose();
+    _decoders.dispose();
   }
 }

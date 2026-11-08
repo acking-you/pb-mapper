@@ -30,11 +30,15 @@ class RemoteComputer {
     required this.namespace,
     this.relayOnly = false,
     this.quality = DesktopQuality.balanced,
+    this.resolution = DesktopResolution.p1080,
+    this.maxFps = 0,
     this.lastConnectedAt,
     this.lastPath,
     this.lastControlAllowed,
   });
 
+  /// A record saved before resolution and frame rate were chosen has
+  /// neither: it is 1080p at Auto, as it was viewed then.
   factory RemoteComputer.fromJson(Map<String, dynamic> json) => RemoteComputer(
     id: json['id'] as String,
     name: json['name'] as String,
@@ -44,6 +48,8 @@ class RemoteComputer {
     namespace: json['namespace'] as int? ?? 0,
     relayOnly: json['relay_only'] == true,
     quality: desktopQualityFromWire(json['quality']),
+    resolution: desktopResolutionFromWire(json['resolution']),
+    maxFps: json['max_fps'] as int? ?? 0,
     lastConnectedAt: switch (json['last_connected_ms']) {
       final int ms => DateTime.fromMillisecondsSinceEpoch(ms),
       _ => null,
@@ -72,8 +78,12 @@ class RemoteComputer {
   final int namespace;
   final bool relayOnly;
 
-  /// The Display menu's choice for this computer (D12).
+  /// The Display menu's choices for this computer: the picture preference
+  /// (D12), the resolution (D7) and the maximum frame rate, 0 for Auto
+  /// (D8).
   final DesktopQuality quality;
+  final DesktopResolution resolution;
+  final int maxFps;
   final DateTime? lastConnectedAt;
 
   /// `direct` or `relay`.
@@ -91,6 +101,8 @@ class RemoteComputer {
       other.namespace == namespace &&
       other.relayOnly == relayOnly &&
       other.quality == quality &&
+      other.resolution == resolution &&
+      other.maxFps == maxFps &&
       other.lastConnectedAt == lastConnectedAt &&
       other.lastPath == lastPath &&
       other.lastControlAllowed == lastControlAllowed;
@@ -104,6 +116,8 @@ class RemoteComputer {
     namespace,
     relayOnly,
     quality,
+    resolution,
+    maxFps,
     lastConnectedAt,
     lastPath,
     lastControlAllowed,
@@ -311,6 +325,8 @@ class RemoteComputerStore extends ChangeNotifier {
     required int namespace,
     required bool relayOnly,
     required DesktopQuality quality,
+    DesktopResolution resolution = DesktopResolution.p1080,
+    int maxFps = 0,
     String? replaceId,
   }) async {
     await load();
@@ -328,6 +344,8 @@ class RemoteComputerStore extends ChangeNotifier {
         namespace: namespace,
         relayOnly: relayOnly,
         quality: quality,
+        resolution: resolution,
+        maxFps: maxFps,
         replaceId: replaceId,
       );
       _put(record, replacing: replaceId);
@@ -353,6 +371,8 @@ class RemoteComputerStore extends ChangeNotifier {
     String id, {
     String? name,
     DesktopQuality? quality,
+    DesktopResolution? resolution,
+    int? maxFps,
     DateTime? lastConnectedAt,
     String? lastPath,
     bool? lastControlAllowed,
@@ -364,6 +384,8 @@ class RemoteComputerStore extends ChangeNotifier {
           id,
           name: name,
           quality: quality,
+          resolution: resolution,
+          maxFps: maxFps,
           lastConnectedAt: lastConnectedAt,
           lastPath: lastPath,
           lastControlAllowed: lastControlAllowed,
@@ -391,6 +413,11 @@ class RemoteComputerStore extends ChangeNotifier {
 
   Future<void> setQuality(String id, DesktopQuality quality) =>
       _update(id, quality: quality);
+
+  Future<void> setResolution(String id, DesktopResolution resolution) =>
+      _update(id, resolution: resolution);
+
+  Future<void> setMaxFps(String id, int fps) => _update(id, maxFps: fps);
 
   Future<void> recordSession(
     String id, {

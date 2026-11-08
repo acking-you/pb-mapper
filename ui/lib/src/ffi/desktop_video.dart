@@ -2,9 +2,12 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
-/// The native H.264 decoder and its Flutter texture. The decoder pulls video
-/// from Rust itself and receipts presentations there; Dart only binds it to a
-/// source, snapshots it, and disposes it.
+import '../state/desktop_models.dart';
+
+/// The native decoder (H.264 or H.265, as each unit says) and its Flutter
+/// texture. The decoder pulls video from Rust itself and receipts
+/// presentations there; Dart only binds it to a source, snapshots it, and
+/// disposes it.
 abstract interface class DesktopVideoTexture {
   int get textureId;
 
@@ -29,6 +32,25 @@ typedef DesktopTextureFactory =
 /// Android and Windows can decode H.264 natively; the session's codec decides
 /// (Windows without Media Foundation takes JPEG).
 bool get nativeDesktopVideo => Platform.isAndroid || Platform.isWindows;
+
+/// What this device decodes natively, from the channel's `decoders` (I4),
+/// which enumerates and never creates a decoder: a bad driver can hang
+/// there. Never throws: no answer, or no channel, is H.264 only.
+Future<DesktopDecoders> probeDesktopDecoders() async {
+  if (!nativeDesktopVideo) return DesktopDecoders.h264Only;
+  try {
+    final reply = await _ChannelVideoTexture._channel
+        .invokeMapMethod<String, Object?>(
+          'decoders',
+          const <String, Object?>{},
+        );
+    return reply == null
+        ? DesktopDecoders.h264Only
+        : DesktopDecoders.fromJson(reply);
+  } catch (_) {
+    return DesktopDecoders.h264Only;
+  }
+}
 
 /// The channel-backed texture (`pb_mapper/desktop_video` v2). [decoderHints]
 /// false configures Android's decoder without any of its decoder hints (low

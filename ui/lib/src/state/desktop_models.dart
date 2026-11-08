@@ -24,6 +24,144 @@ DesktopQuality desktopQualityFromWire(Object? value) => switch (value) {
   _ => DesktopQuality.balanced,
 };
 
+/// The largest picture a viewer asks for (D7), as Rust's `Resolution`: the
+/// host keeps the display's aspect ratio inside these bounds and never
+/// upscales. Fixed for a session, so a change reconnects.
+enum DesktopResolution {
+  p720('720p', 1280, 720),
+  p1080('1080p', 1920, 1080),
+  p1440('1440p', 2560, 1440),
+
+  /// The display's own size, up to 3840×2160.
+  native('native', 3840, 2160);
+
+  const DesktopResolution(this.wire, this.maxWidth, this.maxHeight);
+  final String wire;
+  final int maxWidth, maxHeight;
+}
+
+DesktopResolution desktopResolutionFromWire(Object? value) => DesktopResolution
+    .values
+    .firstWhere((r) => r.wire == value, orElse: () => DesktopResolution.p1080);
+
+/// The frame rates a viewer may choose over Auto (D8): each becomes the
+/// session's ceiling, every preset's included.
+const kMaxFpsChoices = [30, 60, 90, 120];
+
+/// [kMaxFpsChoices] up to a display of [displayHz], and [chosen] whatever
+/// it is, so the choice in force is always listed.
+List<int> maxFpsChoicesFor(double displayHz, {int chosen = 0}) => [
+  for (final fps in kMaxFpsChoices)
+    if (fps <= displayHz + 0.5 || fps == chosen) fps,
+];
+
+/// The viewer's codec preference (D6), one for the whole device: whether a
+/// computer's picture can be H.265 depends on this device's decoders.
+enum DesktopCodecPreference {
+  /// H.265 when both ends can, else H.264.
+  auto,
+  h264,
+}
+
+/// The largest picture one of this device's decoders takes.
+@immutable
+class DesktopDecoderLimit {
+  const DesktopDecoderLimit(this.maxWidth, this.maxHeight);
+  final int maxWidth, maxHeight;
+
+  /// What the protocol carries at most: no limit of the decoder's own.
+  static const largest = DesktopDecoderLimit(3840, 2160);
+
+  bool takes(DesktopResolution r) =>
+      r.maxWidth <= maxWidth && r.maxHeight <= maxHeight;
+
+  @override
+  bool operator ==(Object other) =>
+      other is DesktopDecoderLimit &&
+      other.maxWidth == maxWidth &&
+      other.maxHeight == maxHeight;
+  @override
+  int get hashCode => Object.hash(maxWidth, maxHeight);
+}
+
+/// What this device decodes natively, as the `pb_mapper/desktop_video`
+/// channel's `decoders` answers (I4), which never creates a decoder. A null
+/// codec has no hardware decoder here. Once H.265 failed to decode, the
+/// store keeps it out for the rest of the run ([withoutH265]).
+@immutable
+class DesktopDecoders {
+  const DesktopDecoders({this.h264, this.h265, this.displayMaxHz});
+
+  factory DesktopDecoders.fromJson(Map<String, Object?> json) {
+    DesktopDecoderLimit? limit(Object? value) => switch (value) {
+      {'max_width': final int w, 'max_height': final int h}
+          when w > 0 && h > 0 =>
+        DesktopDecoderLimit(w, h),
+      _ => null,
+    };
+    final hz = json['display_max_hz'];
+    return DesktopDecoders(
+      h264: limit(json['h264']),
+      h265: limit(json['h265']),
+      displayMaxHz: hz is num && hz.isFinite && hz > 0 ? hz.toDouble() : null,
+    );
+  }
+
+  /// No answer, or no channel (another platform): H.264 only, as before
+  /// the probe, at any size the protocol carries.
+  static const h264Only = DesktopDecoders(h264: DesktopDecoderLimit.largest);
+
+  final DesktopDecoderLimit? h264, h265;
+
+  /// The display's highest refresh rate; null when not reported.
+  final double? displayMaxHz;
+
+  DesktopDecoders withoutH265() =>
+      DesktopDecoders(h264: h264, displayMaxHz: displayMaxHz);
+
+  /// D6: H.265 is offered when the preference is Auto and the H.265 decoder
+  /// takes the chosen resolution.
+  bool offersH265(DesktopTarget target) =>
+      target.codec == DesktopCodecPreference.auto &&
+      (h265?.takes(target.resolution) ?? false);
+
+  /// D7: the decoder a session at [r] would use under [codec] takes it:
+  /// H.265 where it would be offered, else H.264 — H.264 alone once the
+  /// computer declined H.265 ([h265Declined]). Without either decoder, the
+  /// picture is JPEG, which Dart decodes at any size.
+  bool decodes(
+    DesktopResolution r,
+    DesktopCodecPreference codec, {
+    bool h265Declined = false,
+  }) =>
+      (h264 == null && h265 == null) ||
+      (h264?.takes(r) ?? false) ||
+      (codec == DesktopCodecPreference.auto &&
+          !h265Declined &&
+          (h265?.takes(r) ?? false));
+
+  /// The largest resolution up to [r] the H.264 decoder takes: what a
+  /// session asks for when it is not offered H.265. Without a limit known
+  /// for H.264, [r] itself.
+  DesktopResolution forH264(DesktopResolution r) {
+    final limit = h264;
+    if (limit == null) return r;
+    return DesktopResolution.values.lastWhere(
+      (c) => c.index <= r.index && limit.takes(c),
+      orElse: () => DesktopResolution.values.first,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is DesktopDecoders &&
+      other.h264 == h264 &&
+      other.h265 == h265 &&
+      other.displayMaxHz == displayMaxHz;
+  @override
+  int get hashCode => Object.hash(h264, h265, displayMaxHz);
+}
+
 enum DesktopPhase {
   idle,
   connecting,
@@ -123,9 +261,10 @@ class DesktopNotice {
   int get hashCode => Object.hash(code, message);
 }
 
-/// What to connect to. A remembered computer is named by [computerId] alone:
-/// its invitation stays in Rust's vault. A just-added computer carries both,
-/// and the invitation wins, because it is not in the vault yet.
+/// What to connect to, and how: everything a reconnect replays. A
+/// remembered computer is named by [computerId] alone: its invitation stays
+/// in Rust's vault. A just-added computer carries both, and the invitation
+/// wins, because it is not in the vault yet.
 @immutable
 class DesktopTarget {
   const DesktopTarget({
@@ -134,19 +273,41 @@ class DesktopTarget {
     this.computerId,
     this.relayOnly = false,
     this.quality = DesktopQuality.balanced,
+    this.resolution = DesktopResolution.p1080,
+    this.maxFps = 0,
+    this.codec = DesktopCodecPreference.auto,
   }) : assert(invitation != null || computerId != null);
   final String? invitation;
   final String name;
   final String? computerId;
   final bool relayOnly;
+
+  /// Live (D12); the store also keeps it apart, as the host reports it.
   final DesktopQuality quality;
 
-  DesktopTarget withQuality(DesktopQuality quality) => DesktopTarget(
+  /// Fixed for a session (D7, D8): a change connects again.
+  final DesktopResolution resolution;
+
+  /// 0: Auto; else one of [kMaxFpsChoices].
+  final int maxFps;
+
+  /// The device's preference, which the session takes at connect (D6).
+  final DesktopCodecPreference codec;
+
+  DesktopTarget copyWith({
+    DesktopQuality? quality,
+    DesktopResolution? resolution,
+    int? maxFps,
+    DesktopCodecPreference? codec,
+  }) => DesktopTarget(
     invitation: invitation,
     name: name,
     computerId: computerId,
     relayOnly: relayOnly,
-    quality: quality,
+    quality: quality ?? this.quality,
+    resolution: resolution ?? this.resolution,
+    maxFps: maxFps ?? this.maxFps,
+    codec: codec ?? this.codec,
   );
 
   @override
@@ -156,17 +317,29 @@ class DesktopTarget {
       other.name == name &&
       other.computerId == computerId &&
       other.relayOnly == relayOnly &&
-      other.quality == quality;
+      other.quality == quality &&
+      other.resolution == resolution &&
+      other.maxFps == maxFps &&
+      other.codec == codec;
   @override
-  int get hashCode =>
-      Object.hash(invitation, name, computerId, relayOnly, quality);
+  int get hashCode => Object.hash(
+    invitation,
+    name,
+    computerId,
+    relayOnly,
+    quality,
+    resolution,
+    maxFps,
+    codec,
+  );
 
   /// The invitation is a bearer secret: never in a log.
   @override
   String toString() =>
       'DesktopTarget($name, computer: $computerId, '
       'invitation: ${invitation == null ? 'none' : 'redacted'}, '
-      'relayOnly: $relayOnly, ${quality.name})';
+      'relayOnly: $relayOnly, ${quality.name}, ${resolution.wire}, '
+      'maxFps: $maxFps, ${codec.name})';
 }
 
 /// [code] is an FFI error code (`HOST_BUSY`) or a viewer stop reason
@@ -333,6 +506,9 @@ class DesktopPicture {
   });
   final int? textureId;
   final double aspectRatio;
+
+  /// The session's codec, `h264`, `h265` or `jpeg`; through a reconnect,
+  /// the last session's.
   final String codec;
 
   @override
@@ -561,6 +737,8 @@ class DesktopStats {
     this.encoderBitrateBps = 0,
     this.receivedBitrateBps = 0,
     this.sentBitrateBps,
+    this.speedRxBps,
+    this.speedTxBps,
     this.ackQueueMs,
     this.width = 0,
     this.height = 0,
@@ -580,11 +758,13 @@ class DesktopStats {
   });
 
   /// [stats] is `ViewerStatus.stats`; the decoder and the pause come from
-  /// the status around it.
+  /// the status around it, and so may the speed ([status]: `ViewerStatus`
+  /// itself), which is read from either.
   factory DesktopStats.fromJson(
     Map<String, dynamic> stats, {
     Map<String, dynamic> decoder = const {},
     bool paused = false,
+    Map<String, dynamic> status = const {},
   }) => DesktopStats(
     path: stats['path'] as String? ?? '',
     relayTransport: stats['relay_transport'] as String?,
@@ -610,6 +790,8 @@ class DesktopStats {
     encoderBitrateBps: stats['encoder_bitrate'] as int? ?? 0,
     receivedBitrateBps: stats['received_bitrate'] as int? ?? 0,
     sentBitrateBps: _int(stats['sent_bitrate']),
+    speedRxBps: _int(stats['speed_rx_bps'] ?? status['speed_rx_bps']),
+    speedTxBps: _int(stats['speed_tx_bps'] ?? status['speed_tx_bps']),
     ackQueueMs: _int(stats['ack_queue_ms']),
     width: stats['width'] as int? ?? 0,
     height: stats['height'] as int? ?? 0,
@@ -662,6 +844,13 @@ class DesktopStats {
   final int? encoderDwellMs;
   final int bitrateBps, encoderBitrateBps, receivedBitrateBps;
   final int? sentBitrateBps, ackQueueMs;
+
+  /// Speed (D10): the session's whole transfer rate each way, in bytes a
+  /// second, every message at the tunnel counted, as RustDesk's quality
+  /// monitor counts it; null when not reported.
+  final int? speedRxBps, speedTxBps;
+
+  /// The encoded size, and `h264`, `h265` or `jpeg`.
   final int width, height;
   final String codec;
   final String? decoder;
@@ -685,12 +874,15 @@ class DesktopStats {
   static const jpegMaxFps = 8;
 
   /// The highest rate this session can reach: the preset's ceiling, within
-  /// the viewer's display limit and, for JPEG, [jpegMaxFps].
-  int? get ceilingFps {
-    var ceiling = preset?.ceilingFps;
+  /// the viewer's display limit, or the frame rate its user [chosen] (D8),
+  /// which replaces every preset's ceiling; for JPEG at most [jpegMaxFps].
+  int? ceilingFps({int chosen = 0}) {
+    var ceiling = chosen > 0 ? chosen : preset?.ceilingFps;
     if (ceiling == null) return null;
     final limit = maxFps;
-    if (limit != null && limit > 0 && limit < ceiling) ceiling = limit;
+    if (chosen == 0 && limit != null && limit > 0 && limit < ceiling) {
+      ceiling = limit;
+    }
     if (codec == 'jpeg' && jpegMaxFps < ceiling) ceiling = jpegMaxFps;
     return ceiling;
   }
@@ -720,6 +912,8 @@ class DesktopStats {
       other.encoderBitrateBps == encoderBitrateBps &&
       other.receivedBitrateBps == receivedBitrateBps &&
       other.sentBitrateBps == sentBitrateBps &&
+      other.speedRxBps == speedRxBps &&
+      other.speedTxBps == speedTxBps &&
       other.ackQueueMs == ackQueueMs &&
       other.width == width &&
       other.height == height &&
@@ -760,6 +954,8 @@ class DesktopStats {
     encoderBitrateBps,
     receivedBitrateBps,
     sentBitrateBps,
+    speedRxBps,
+    speedTxBps,
     ackQueueMs,
     width,
     height,

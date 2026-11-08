@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import '../state/desktop_models.dart';
+import 'desktop_video.dart';
 import 'pb_mapper_ffi.dart';
 import 'pb_mapper_service.dart';
 
@@ -280,7 +281,9 @@ class DesktopSession {
   const DesktopSession({required this.videoSource, required this.codec});
   final int videoSource;
 
-  /// `h264` (a native consumer attaches) or `jpeg` ([DesktopApiClient.jpegFrames]).
+  /// `h264` or `h265` (a native consumer attaches), or `jpeg`
+  /// ([DesktopApiClient.jpegFrames]). Rust refuses an `h265` it did not
+  /// offer.
   final String codec;
 }
 
@@ -385,6 +388,7 @@ class DesktopViewerStatus {
         map(json['stats']),
         decoder: decoder,
         paused: paused,
+        status: json,
       ),
     );
   }
@@ -518,15 +522,22 @@ abstract interface class DesktopApiClient {
   Future<DesktopInvitationInfo> inspectInvitation(String text);
 
   /// Sends exactly one of `invitation` and `computer_id`: the invitation
-  /// when both are given.
+  /// when both are given. [h265] offers H.265 (D6); [resolution] and
+  /// [maxFps] (0: Auto) become the session's limits (D7, D8).
   Future<DesktopSession> connect(
     String? invitation, {
     String? computerId,
     required bool relayOnly,
     required DesktopQuality quality,
     required double refreshHz,
+    required bool h265,
+    required DesktopResolution resolution,
+    required int maxFps,
   });
   Future<void> disconnect();
+
+  /// What this device decodes natively (I4); never throws.
+  Future<DesktopDecoders> decoders();
 
   // ---- hot export and view leaf: synchronous, UI isolate only, never block
   DesktopViewerStatus? viewerStatus();
@@ -737,6 +748,9 @@ class DesktopApi implements DesktopApiClient {
     required bool relayOnly,
     required DesktopQuality quality,
     required double refreshHz,
+    required bool h265,
+    required DesktopResolution resolution,
+    required int maxFps,
   }) async {
     if (invitation == null && computerId == null) {
       throw const DesktopCallException(
@@ -752,6 +766,9 @@ class DesktopApi implements DesktopApiClient {
       'relay_only': relayOnly,
       'quality': quality.name,
       'refresh_hz': refreshHz,
+      'h265': h265,
+      'resolution': resolution.wire,
+      'max_fps': maxFps,
     });
     return DesktopSession(
       videoSource: data['video_source'] as int,
@@ -763,6 +780,9 @@ class DesktopApi implements DesktopApiClient {
   Future<void> disconnect() async {
     await _call('disconnect');
   }
+
+  @override
+  Future<DesktopDecoders> decoders() => probeDesktopDecoders();
 
   // ---- the hot export, the view leaf and the video exports: synchronous
 

@@ -45,6 +45,21 @@ String pathLabel(BuildContext context, String? path, {bool lan = false}) =>
       _ => '—',
     };
 
+/// A transfer rate in the largest binary unit it reaches, to three figures
+/// at most, so it never runs past nine characters and a fixed cell holds
+/// it: "512 B/s", "9.5 KiB/s", "286 KiB/s", "2.4 MiB/s".
+String formatSpeed(int bytesPerSecond) {
+  const units = ['B/s', 'KiB/s', 'MiB/s', 'GiB/s'];
+  var value = bytesPerSecond.toDouble();
+  var unit = 0;
+  while (value >= 999.5 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  final digits = unit == 0 || value >= 9.95 ? 0 : 1;
+  return '${value.toStringAsFixed(digits)} ${units[unit]}';
+}
+
 /// How long a viewer has been connected: just now, minutes, then hours.
 String formatSessionDuration(BuildContext context, Duration elapsed) {
   final l10n = context.l10n;

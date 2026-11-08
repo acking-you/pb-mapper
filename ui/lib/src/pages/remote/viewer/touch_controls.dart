@@ -245,7 +245,8 @@ class GutterButton extends StatelessWidget {
   }
 }
 
-/// The path and frame rate at a glance; a tap opens the quality panel.
+/// The path, frame rate and speed received at a glance; a tap opens the
+/// quality panel.
 class QualityGutterButton extends StatelessWidget {
   const QualityGutterButton({
     super.key,
@@ -274,20 +275,23 @@ class QualityGutterButton extends StatelessWidget {
       final (:degraded, :dot) = viewerLink(s, st);
       final path = pathLabel(context, s.path, lan: st.lan);
       final fps = s.connected ? st.presentedFps.round() : null;
+      final received = s.connected ? st.speedRxBps : null;
+      final speed = received == null ? '—' : formatSpeed(received);
+      final width = plate ? kGutterMin : 56.0;
       return MergeSemantics(
         child: Semantics(
           button: true,
           selected: selected,
           label: fps == null
               ? l10n.viewerQuality
-              : l10n.touchQualityA11y(path, fps),
+              : l10n.touchQualityA11y(path, fps, speed),
           child: Material(
             type: MaterialType.transparency,
             child: InkWell(
               onTap: onTap,
               borderRadius: const BorderRadius.all(Radius.circular(14)),
               child: Container(
-                width: plate ? kGutterMin : 56,
+                width: width,
                 padding: const EdgeInsets.symmetric(vertical: 8),
                 // Open, a plate lightens as a bare chip fills.
                 decoration: switch ((plate, selected)) {
@@ -304,48 +308,14 @@ class QualityGutterButton extends StatelessWidget {
                   ),
                   (false, false) => null,
                 },
+                // A bar shorter than the column shrinks it whole.
                 child: ExcludeSemantics(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                          color: dot,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        path,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          color: ViewerPalette.text,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        fps == null ? '—' : '$fps',
-                        style: mono(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                          color: degraded
-                              ? ViewerPalette.caution
-                              : ViewerPalette.text,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      const Text(
-                        'fps',
-                        style: TextStyle(
-                          fontSize: 10.5,
-                          color: ViewerPalette.textSecondary,
-                        ),
-                      ),
-                    ],
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: SizedBox(
+                      width: width,
+                      child: _figures(path, fps, speed, dot, degraded),
+                    ),
                   ),
                 ),
               ),
@@ -354,5 +324,57 @@ class QualityGutterButton extends StatelessWidget {
         ),
       );
     },
+  );
+
+  Widget _figures(
+    String path,
+    int? fps,
+    String speed,
+    Color dot,
+    bool degraded,
+  ) => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(
+        width: 8,
+        height: 8,
+        decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+      ),
+      const SizedBox(height: 3),
+      Text(
+        path,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 11, color: ViewerPalette.text),
+      ),
+      const SizedBox(height: 3),
+      Text(
+        fps == null ? '—' : '$fps',
+        style: mono(
+          fontSize: 14,
+          fontWeight: FontWeight.w500,
+          color: degraded ? ViewerPalette.caution : ViewerPalette.text,
+        ),
+      ),
+      const SizedBox(height: 3),
+      const Text(
+        'fps',
+        style: TextStyle(fontSize: 10.5, color: ViewerPalette.textSecondary),
+      ),
+      const SizedBox(height: 4),
+      // Shrunk rather than cut where "999 KiB/s" is too
+      // wide for the column.
+      FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Text(
+          speed,
+          maxLines: 1,
+          style: const TextStyle(
+            fontSize: 10.5,
+            color: ViewerPalette.textSecondary,
+          ),
+        ),
+      ),
+    ],
   );
 }

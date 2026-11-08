@@ -11,6 +11,7 @@ import '../../../state/viewer_prefs.dart';
 import '../../../theme/app_icons.dart';
 import '../../../theme/fonts.dart';
 import '../../../theme/viewer_palette.dart';
+import 'quality_panel.dart';
 import 'remote_input.dart';
 import 'remote_keys.dart';
 import 'remote_viewport.dart';
@@ -66,6 +67,27 @@ final class ViewerMenuItem extends ViewerMenuEntry {
   final FutureOr<void> Function() onSelected;
 }
 
+/// A choice of a few: a submenu on desktop, with [value] (the current
+/// choice) at its end, and on a touch screen a section of its own, as its
+/// [entries] laid out flat under [label].
+final class ViewerMenuSubmenu extends ViewerMenuEntry {
+  const ViewerMenuSubmenu({
+    required this.key,
+    required this.label,
+    required this.value,
+    required this.entries,
+    this.note,
+  });
+
+  final Key key;
+  final String label;
+  final String value;
+  final List<ViewerMenuEntry> entries;
+
+  /// Above the choices: what choosing one does.
+  final String? note;
+}
+
 /// What the menus and overlays act on, built by each viewer from its own
 /// explicit dependencies.
 final class ViewerActions {
@@ -76,6 +98,8 @@ final class ViewerActions {
     required this.viewport,
     required this.onDisconnect,
     required this.onQuality,
+    required this.onResolution,
+    required this.onMaxFps,
     required this.onTypeText,
     this.onBack,
     this.onGestureSheet,
@@ -93,6 +117,11 @@ final class ViewerActions {
 
   /// A live change of the picture preference (D12).
   final ValueChanged<DesktopQuality> onQuality;
+
+  /// The resolution (D7) and the maximum frame rate, 0 for Auto (D8): each
+  /// connects again at once.
+  final ValueChanged<DesktopResolution> onResolution;
+  final ValueChanged<int> onMaxFps;
   final VoidCallback onTypeText;
 
   /// Back to the list, the session kept; null where there is no list.
@@ -105,7 +134,9 @@ final class ViewerActions {
 }
 
 /// Scaling (local only, P1-4: the stage applies it to the viewport), the
-/// picture preference (live, D12), and the quality panel.
+/// picture preference (live, D12), what only a new session takes —
+/// resolution, maximum frame rate and codec — and the quality panel and
+/// monitor.
 List<ViewerMenuEntry> displayMenu(AppLocalizations l10n, ViewerActions a) => [
   ViewerMenuSection(l10n.viewerScaleLabel),
   for (final (mode, key, label) in [
@@ -121,14 +152,131 @@ List<ViewerMenuEntry> displayMenu(AppLocalizations l10n, ViewerActions a) => [
   const ViewerMenuDivider(),
   ViewerMenuSection(l10n.viewerQualityLabel),
   ..._qualityItems(l10n, a),
+  ..._sessionChoices(l10n, a),
   const ViewerMenuDivider(),
+  ..._figures(l10n, a, touch: false),
+];
+
+/// The quality panel and the quality monitor, each shown or not.
+List<ViewerMenuEntry> _figures(
+  AppLocalizations l10n,
+  ViewerActions a, {
+  required bool touch,
+}) => [
   ViewerMenuItem(
-    key: const Key('display-quality-panel'),
+    key: Key(touch ? 'more-quality-panel' : 'display-quality-panel'),
     label: l10n.viewerQuality,
     checked: a.prefs.qualityPanel,
     onSelected: () => a.prefs.setQualityPanel(!a.prefs.qualityPanel),
   ),
+  ViewerMenuItem(
+    key: Key(touch ? 'more-quality-monitor' : 'display-quality-monitor'),
+    label: l10n.viewerQualityMonitor,
+    checked: a.prefs.qualityMonitor,
+    onSelected: () => a.prefs.setQualityMonitor(!a.prefs.qualityMonitor),
+  ),
 ];
+
+/// What a session takes at connect, so a change connects again: the
+/// computer's resolution (D7) and maximum frame rate (D8), and this
+/// device's codec (D6). A resolution the decoder of the codec it would
+/// carry cannot take is shown disabled, and a rate above the display's is
+/// not offered.
+List<ViewerMenuEntry> _sessionChoices(AppLocalizations l10n, ViewerActions a) {
+  final target = a.desktop.session.value.target;
+  final resolution = target?.resolution ?? DesktopResolution.p1080;
+  final maxFps = target?.maxFps ?? 0;
+  final codec = a.prefs.codec;
+  String resolutionLabel(DesktopResolution r) =>
+      r == DesktopResolution.native ? l10n.viewerResolutionNative : r.wire;
+  String fpsLabel(int fps) => fps == 0 ? l10n.viewerMaxFpsAuto : '$fps fps';
+  // Auto names the codec the session decodes, as RustDesk's menu does.
+  final inUse = a.desktop.picture.value?.codec;
+  final codecValue = codec == DesktopCodecPreference.h264
+      ? 'H.264'
+      : inUse == null || inUse == 'jpeg'
+      ? l10n.viewerCodecAuto
+      : '${l10n.viewerCodecAuto} · ${codecLabel(inUse)}';
+  return [
+    ViewerMenuSubmenu(
+      key: const Key('display-resolution'),
+      label: l10n.viewerResolutionLabel,
+      value: resolutionLabel(resolution),
+      note: l10n.viewerReconnectsToApply,
+      entries: [
+        for (final r in DesktopResolution.values)
+          if (a.desktop.decodes(r))
+            ViewerMenuItem(
+              key: Key('resolution-${r.wire}'),
+              label: resolutionLabel(r),
+              detail: switch (r) {
+                DesktopResolution.p1080 => l10n.viewerResolutionDefault,
+                DesktopResolution.native => l10n.viewerResolutionNativeHint,
+                _ => null,
+              },
+              checked: resolution == r,
+              onSelected: () => a.onResolution(r),
+            )
+          else
+            // Why, on its own line: too long to stand at the row's end.
+            ViewerMenuItem(
+              key: Key('resolution-${r.wire}'),
+              label: resolutionLabel(r),
+              detail: l10n.viewerResolutionUnsupported,
+              checked: resolution == r,
+              enabled: false,
+              onSelected: () {},
+            ),
+      ],
+    ),
+    ViewerMenuSubmenu(
+      key: const Key('display-max-fps'),
+      label: l10n.viewerMaxFpsLabel,
+      value: fpsLabel(maxFps),
+      note: l10n.viewerReconnectsToApply,
+      entries: [
+        for (final fps in [
+          0,
+          ...maxFpsChoicesFor(a.desktop.displayMaxHz, chosen: maxFps),
+        ])
+          ViewerMenuItem(
+            key: Key('max-fps-$fps'),
+            label: fpsLabel(fps),
+            detail: fps == 0 ? l10n.viewerMaxFpsAutoHint : null,
+            checked: maxFps == fps,
+            onSelected: () => a.onMaxFps(fps),
+          ),
+      ],
+    ),
+    ViewerMenuSubmenu(
+      key: const Key('display-codec'),
+      label: l10n.viewerCodecLabel,
+      value: codecValue,
+      note: l10n.viewerReconnectsToApply,
+      entries: [
+        for (final (choice, label, detail) in [
+          (
+            DesktopCodecPreference.auto,
+            l10n.viewerCodecAuto,
+            l10n.viewerCodecAutoHint,
+          ),
+          (DesktopCodecPreference.h264, 'H.264', l10n.viewerCodecH264Hint),
+        ])
+          ViewerMenuItem(
+            key: Key('codec-${choice.name}'),
+            label: label,
+            detail: detail,
+            checked: codec == choice,
+            onSelected: () {
+              // The device's choice: kept, then taken by this session.
+              unawaited(a.prefs.setCodec(choice));
+              a.desktop.setCodec(choice);
+            },
+          ),
+      ],
+    ),
+  ];
+}
 
 List<ViewerMenuEntry> _qualityItems(AppLocalizations l10n, ViewerActions a) => [
   for (final (quality, label, detail) in [
@@ -246,12 +394,6 @@ List<ViewerMenuEntry> moreMenu(
   ViewerActions a, {
   required bool touch,
 }) {
-  final panel = ViewerMenuItem(
-    key: Key(touch ? 'more-quality-panel' : 'viewer-more-quality'),
-    label: l10n.viewerQuality,
-    checked: a.prefs.qualityPanel,
-    onSelected: () => a.prefs.setQualityPanel(!a.prefs.qualityPanel),
-  );
   if (!touch) {
     return [
       ViewerMenuItem(
@@ -261,7 +403,12 @@ List<ViewerMenuEntry> moreMenu(
         enabled: a.input.ready.value,
         onSelected: a.onTypeText,
       ),
-      panel,
+      ViewerMenuItem(
+        key: const Key('viewer-more-quality'),
+        label: l10n.viewerQuality,
+        checked: a.prefs.qualityPanel,
+        onSelected: () => a.prefs.setQualityPanel(!a.prefs.qualityPanel),
+      ),
       if (a.onBack case final back?)
         ViewerMenuItem(
           key: const Key('viewer-more-back'),
@@ -282,7 +429,9 @@ List<ViewerMenuEntry> moreMenu(
       ),
     ViewerMenuSection(l10n.viewerQualityLabel),
     ..._qualityItems(l10n, a),
-    panel,
+    ..._sessionChoices(l10n, a),
+    const ViewerMenuDivider(),
+    ..._figures(l10n, a, touch: true),
     const ViewerMenuDivider(),
     for (final (control, label) in [
       (false, l10n.viewerModeView),
@@ -404,7 +553,69 @@ Widget viewerMenuChild(
     width: width,
     child: _MenuItem(item: item, autofocus: autofocus),
   ),
+  final ViewerMenuSubmenu submenu => SizedBox(
+    width: width,
+    child: _Submenu(submenu: submenu, width: width + 12),
+  ),
 };
+
+/// A menu row on the graphite: 36 tall, r9, white fills for hover and
+/// press, in [ink].
+ButtonStyle _rowStyle(TextStyle base, Color ink) => ButtonStyle(
+  minimumSize: const WidgetStatePropertyAll(Size(0, 36)),
+  padding: const WidgetStatePropertyAll(
+    EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+  ),
+  shape: const WidgetStatePropertyAll(
+    RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(9))),
+  ),
+  backgroundColor: WidgetStateProperty.resolveWith(
+    (states) => states.contains(WidgetState.pressed)
+        ? _pressed
+        : states.contains(WidgetState.hovered) ||
+              states.contains(WidgetState.focused)
+        ? _hover
+        : Colors.transparent,
+  ),
+  overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+  foregroundColor: WidgetStatePropertyAll(ink),
+  iconColor: WidgetStatePropertyAll(ink),
+  textStyle: WidgetStatePropertyAll(base.copyWith(fontSize: 13.5)),
+);
+
+/// A submenu row: its label, then the current choice and a chevron; the
+/// choices open beside it, in a menu as wide as this one.
+class _Submenu extends StatelessWidget {
+  const _Submenu({required this.submenu, required this.width});
+
+  final ViewerMenuSubmenu submenu;
+  final double width;
+
+  @override
+  Widget build(BuildContext context) {
+    final base = Theme.of(context).textTheme.bodyMedium ?? const TextStyle();
+    final note = submenu.note;
+    return SubmenuButton(
+      key: submenu.key,
+      menuStyle: ViewerPalette.menuStyle,
+      style: _rowStyle(base, ViewerPalette.text),
+      menuChildren: [
+        if (note != null)
+          viewerMenuChild(ViewerMenuSection(note), width: width - 12),
+        for (final entry in submenu.entries)
+          viewerMenuChild(entry, width: width - 12),
+      ],
+      trailingIcon: Text(
+        submenu.value,
+        style: base.copyWith(fontSize: 12, color: ViewerPalette.textSecondary),
+      ),
+      submenuIcon: const WidgetStatePropertyAll(
+        Icon(AppIcons.chevronRight, size: AppIconSize.inline),
+      ),
+      child: Text(submenu.label),
+    );
+  }
+}
 
 class _MenuItem extends StatelessWidget {
   const _MenuItem({required this.item, required this.autofocus});
@@ -455,29 +666,7 @@ class _MenuItem extends StatelessWidget {
                       ),
               ),
             ),
-      style: ButtonStyle(
-        minimumSize: const WidgetStatePropertyAll(Size(0, 36)),
-        padding: const WidgetStatePropertyAll(
-          EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        ),
-        shape: const WidgetStatePropertyAll(
-          RoundedRectangleBorder(
-            borderRadius: BorderRadius.all(Radius.circular(9)),
-          ),
-        ),
-        backgroundColor: WidgetStateProperty.resolveWith(
-          (states) => states.contains(WidgetState.pressed)
-              ? _pressed
-              : states.contains(WidgetState.hovered) ||
-                    states.contains(WidgetState.focused)
-              ? _hover
-              : Colors.transparent,
-        ),
-        overlayColor: const WidgetStatePropertyAll(Colors.transparent),
-        foregroundColor: WidgetStatePropertyAll(ink),
-        iconColor: WidgetStatePropertyAll(ink),
-        textStyle: WidgetStatePropertyAll(base.copyWith(fontSize: 13.5)),
-      ),
+      style: _rowStyle(base, ink),
       child: switch (item.detail) {
         null => Text(item.label),
         final detail => Column(

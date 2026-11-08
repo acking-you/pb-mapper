@@ -123,6 +123,27 @@ void main() {
       expect(api.argsOf('control'), isEmpty);
       expect(store.session.value.controlling, isTrue);
 
+      // A move refused so is kept, and goes with the next fresh picture:
+      // the host always gets the last position.
+      api.failNext('input', 'NOT_FRESH');
+      expect(
+        store.send(DesktopInput.move(7, 7), geometryEpoch: epoch),
+        isFalse,
+      );
+      api.viewValue = const DesktopView(
+        generation: 3,
+        presentedFrameId: 2,
+        displayWidth: 1920,
+        displayHeight: 1080,
+        state: 2,
+        controlling: true,
+        controlAllowed: true,
+        fresh: true,
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(api.inputs.where((e) => e['x'] == 7), hasLength(2));
+      expect(api.inputs.last, {'kind': 'move', 'x': 7, 'y': 7});
+
       // Lost control ends it locally at once.
       api.failNext('input', 'NOT_CONTROLLING');
       expect(
@@ -519,21 +540,239 @@ void main() {
     store.dispose();
   });
 
-  test("a JPEG session's ceiling is the host's JPEG rate, whatever the "
-      'preset', () {
-    const h264 = DesktopStats(
-      codec: 'h264',
-      preset: DesktopQuality.balanced,
-      maxFps: 60,
+  test("a chosen frame rate replaces the preset's ceiling, Quality's too; a "
+      "JPEG session's ceiling is the host's JPEG rate whatever is asked", () {
+    const quality = DesktopStats(
+      codec: 'h265',
+      preset: DesktopQuality.quality,
+      maxFps: 120,
     );
     const jpeg = DesktopStats(
       codec: 'jpeg',
       preset: DesktopQuality.smooth,
       maxFps: 120,
     );
-    expect(h264.ceilingFps, 60);
-    expect(jpeg.ceilingFps, DesktopStats.jpegMaxFps);
+    expect(quality.ceilingFps(), 30);
+    expect(quality.ceilingFps(chosen: 120), 120);
+    expect(jpeg.ceilingFps(chosen: 60), DesktopStats.jpegMaxFps);
   });
+
+  test("the probe's answer decides what is offered and what is decodable; "
+      'no answer is H.264 alone', () {
+    final decoders = DesktopDecoders.fromJson({
+      'h264': {'max_width': 3840, 'max_height': 2160},
+      'h265': {'max_width': 1920, 'max_height': 1080},
+      'display_max_hz': 120.0,
+    });
+    DesktopTarget at(DesktopResolution r, [DesktopCodecPreference? codec]) =>
+        _target.copyWith(resolution: r, codec: codec);
+    expect(decoders.offersH265(at(DesktopResolution.p1080)), isTrue);
+    expect(decoders.offersH265(at(DesktopResolution.p1440)), isFalse);
+    expect(
+      decoders.offersH265(
+        at(DesktopResolution.p720, DesktopCodecPreference.h264),
+      ),
+      isFalse,
+    );
+    expect(maxFpsChoicesFor(decoders.displayMaxHz!), kMaxFpsChoices);
+    expect(maxFpsChoicesFor(59.94), [30, 60]);
+
+    // A phone whose AVC decoder stops at 1080p and whose HEVC one does not:
+    // 1440p decodes only while H.265 may be used — not once it failed here,
+    // nor once the computer answered it with H.264 — and a session that is
+    // not offered H.265 asks for what H.264 takes.
+    final phone = DesktopDecoders.fromJson({
+      'h264': {'max_width': 1920, 'max_height': 1080},
+      'h265': {'max_width': 2560, 'max_height': 1440},
+    });
+    const auto = DesktopCodecPreference.auto,
+        h264 = DesktopCodecPreference.h264;
+    expect(phone.decodes(DesktopResolution.p1440, auto), isTrue);
+    expect(phone.decodes(DesktopResolution.p1440, h264), isFalse);
+    expect(phone.decodes(DesktopResolution.native, auto), isFalse);
+    expect(phone.withoutH265().decodes(DesktopResolution.p1440, auto), isFalse);
+    expect(
+      phone.decodes(DesktopResolution.p1440, auto, h265Declined: true),
+      isFalse,
+    );
+    expect(phone.forH264(DesktopResolution.native), DesktopResolution.p1080);
+
+    // Garbage, or nothing, offers no H.265 and limits nothing.
+    final none = DesktopDecoders.fromJson({'h265': 'yes'});
+    expect(none.h265, isNull);
+    expect(
+      DesktopDecoders.h264Only.decodes(DesktopResolution.native, auto),
+      isTrue,
+    );
+  });
+
+  testWidgets(
+    'resolution, frame rate and codec connect again at once, keeping the '
+    'choice to view only; H.265 is offered where it decodes, a decoder '
+    'failure on it connects again on H.264 for the rest of the run, and '
+    'only a failure there ends the session',
+    (tester) async {
+      final api = FakeDesktopApi()
+        ..codec = 'h264'
+        ..hostH265 = true
+        ..decodersValue = const DesktopDecoders(
+          h264: DesktopDecoderLimit.largest,
+          h265: DesktopDecoderLimit(1920, 1080),
+        );
+      final textures = FakeTextures();
+      final store = DesktopStore(api, textures: textures.create);
+      final viewer = store.demand(DesktopDemand.viewer);
+      Map<String, Object?> last() => api.argsOf('connect').last;
+      Future<void> live() async {
+        api.viewerStatusValue = liveStatus();
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(store.session.value.phase, DesktopPhase.live);
+      }
+
+      await _live(tester, store, api);
+      expect(
+        last(),
+        allOf(
+          containsPair('h265', true),
+          containsPair('resolution', '1080p'),
+          containsPair('max_fps', 0),
+        ),
+      );
+      expect(store.picture.value?.codec, 'h265');
+
+      // Native is beyond the H.265 decoder: H.264 it is.
+      store.control(false);
+      store.setResolution(DesktopResolution.native);
+      await tester.pump();
+      expect(
+        last(),
+        allOf(
+          containsPair('resolution', 'native'),
+          containsPair('h265', false),
+        ),
+      );
+      await live();
+      expect(store.session.value.controlWanted, isFalse);
+      store.setMaxFps(120);
+      await tester.pump();
+      expect(last(), containsPair('max_fps', 120));
+      await live();
+
+      // Back at 1080p, H.265 again; the codec preference takes it away.
+      store.setResolution(DesktopResolution.p1080);
+      await tester.pump();
+      expect(last(), containsPair('h265', true));
+      await live();
+      store.setCodec(DesktopCodecPreference.h264);
+      await tester.pump();
+      expect(last(), containsPair('h265', false));
+      await live();
+      store.setCodec(DesktopCodecPreference.auto);
+      await tester.pump();
+      expect(last(), containsPair('h265', true));
+      await live();
+      expect(api.argsOf('connect'), hasLength(6));
+
+      // This device cannot decode it after all: connected again at once,
+      // on H.264, with nothing for the user to see.
+      api.viewerStatusValue = stoppedStatus('decoder_failed');
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(last(), containsPair('h265', false));
+      await live();
+      expect(store.session.value.failure, isNull);
+      expect(store.picture.value?.codec, 'h264');
+      expect(store.decoders.value?.h265, isNull);
+      expect(api.decodersProbed, 1);
+
+      // Nothing to change: no reconnect. A failure on H.264 ends it.
+      store.setCodec(DesktopCodecPreference.h264);
+      await tester.pump();
+      expect(api.argsOf('connect'), hasLength(7));
+      api.viewerStatusValue = stoppedStatus('decoder_failed');
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(store.session.value.end, DesktopEndReason.decoderFailed);
+      expect(api.argsOf('connect'), hasLength(7));
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
+
+  testWidgets(
+    'a computer that answers H.265 with H.264 is not offered it again, and '
+    'a size only H.265 decodes here connects again at once at the largest '
+    'H.264 does, the choice kept',
+    (tester) async {
+      final api = FakeDesktopApi()
+        ..codec = 'h264'
+        ..decodersValue = const DesktopDecoders(
+          h264: DesktopDecoderLimit(1920, 1080),
+          h265: DesktopDecoderLimit(2560, 1440),
+        );
+      final store = DesktopStore(api, textures: FakeTextures().create);
+      final viewer = store.demand(DesktopDemand.viewer);
+      List<(Object?, Object?)> asked() => [
+        for (final c in api.argsOf('connect')) (c['h265'], c['resolution']),
+      ];
+
+      await store.connect(
+        _target.copyWith(resolution: DesktopResolution.p1440),
+      );
+      await tester.pump();
+      api.viewerStatusValue = liveStatus();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(store.session.value.phase, DesktopPhase.live);
+      expect(asked(), [(true, '1440p'), (false, '1080p')]);
+      expect(store.session.value.target?.resolution, DesktopResolution.p1440);
+      expect(store.decodes(DesktopResolution.p1440), isFalse);
+      expect(store.decodes(DesktopResolution.p1080), isTrue);
+
+      // A reconnect asks for what this session decodes straight away.
+      api.viewerStatusValue = stoppedStatus('transport');
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(seconds: 1));
+      expect(asked().last, (false, '1080p'));
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
+
+  testWidgets(
+    'a decoder probe that does not answer holds the first connect only so '
+    'long, as H.264 alone, and none after it; its late answer is kept',
+    (tester) async {
+      final api = FakeDesktopApi()
+        ..codec = 'h264'
+        ..hostH265 = true
+        ..decodersGate = Completer()
+        ..decodersValue = const DesktopDecoders(
+          h264: DesktopDecoderLimit.largest,
+          h265: DesktopDecoderLimit.largest,
+        );
+      final store = DesktopStore(api, textures: FakeTextures().create);
+      final viewer = store.demand(DesktopDemand.viewer);
+
+      unawaited(store.connect(_target));
+      await tester.pump(const Duration(milliseconds: 1900));
+      expect(api.argsOf('connect'), isEmpty);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(api.argsOf('connect').single, containsPair('h265', false));
+      store.setMaxFps(60);
+      await tester.pump();
+      expect(api.argsOf('connect'), hasLength(2));
+
+      api.decodersGate!.complete();
+      await tester.pump();
+      store.setMaxFps(0);
+      await tester.pump();
+      expect(api.argsOf('connect').last, containsPair('h265', true));
+      expect(api.decodersProbed, 1);
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
 
   testWidgets(
     "the decoder's figures are read only while shown: a listener swapped in "

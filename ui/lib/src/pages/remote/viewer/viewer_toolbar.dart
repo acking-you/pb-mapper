@@ -286,7 +286,13 @@ class ViewerToolbar extends StatelessWidget {
             _ModeControl(desktop: desktop, labels: labels),
             separator,
             ListenableBuilder(
-              listenable: Listenable.merge([a.prefs, desktop.quality]),
+              listenable: Listenable.merge([
+                a.prefs,
+                desktop.quality,
+                desktop.session,
+                desktop.decoders,
+                desktop.picture,
+              ]),
               builder: (context, _) => ViewerMenuButton(
                 buttonKey: const Key('viewer-display'),
                 icon: AppIcons.remote,
@@ -433,9 +439,9 @@ class _ModeControl extends StatelessWidget {
   );
 }
 
-/// The path, round trip and frame rate, dashes while the connection is not
-/// up; when the picture lags, its delay. A tap opens or closes the quality
-/// panel.
+/// The path, round trip, frame rate and the speed received, dashes while
+/// the connection is not up; when the picture lags, its delay and the
+/// speed. A tap opens or closes the quality panel.
 class ToolbarStatusChip extends StatelessWidget {
   const ToolbarStatusChip({
     super.key,
@@ -467,11 +473,14 @@ class ToolbarStatusChip extends StatelessWidget {
       // a figure gaining a digit would shift every button.
       String cell(Object? figure, int width) =>
           '${figure ?? '—'}'.padLeft(width);
+      final received = s.connected ? st.speedRxBps : null;
+      final speed = cell(received == null ? null : formatSpeed(received), 9);
       final figures = degraded
-          ? '${cell(st.pictureLatencyMs, 4)} ms'
+          ? '${cell(st.pictureLatencyMs, 4)} ms · $speed'
           : s.connected
-          ? '${cell(st.rttMs, 3)} ms · ${cell(st.presentedFps.round(), 3)} fps'
-          : '${cell(null, 3)} ms · ${cell(null, 3)} fps';
+          ? '${cell(st.rttMs, 3)} ms · '
+                '${cell(st.presentedFps.round(), 3)} fps · $speed'
+          : '${cell(null, 3)} ms · ${cell(null, 3)} fps · $speed';
       return _Pressable(
         onTap: onTap,
         tooltip: l10n.viewerQuality,
