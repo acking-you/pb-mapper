@@ -4,7 +4,7 @@ import java.util.ArrayDeque
 
 /**
  * Worker-owned decoded pictures and the surface's presentation credits;
- * compressed H.264 reference frames are never dropped here.
+ * compressed reference frames, H.264 or H.265, are never dropped here.
  *
  * Up to [CREDITS] pictures may be released to the SurfaceTexture and not yet
  * consumed. Its queue is FIFO: each updateTexImage latches the oldest, so a
