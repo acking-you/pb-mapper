@@ -242,9 +242,33 @@ Value HevcLimit(IDXGIAdapter* adapter) {
 
 // The fastest refresh among the displays as they are set now: the viewer
 // presents at its display's rate, and the window may move to the fastest.
-// Windows reports whole hertz, 59 for 59.94.
+// The active display paths give the exact rate, 59.94 Hz as Android reports
+// it; a process outside the console session (a remote session) cannot query
+// them and falls back to the display modes, which round down to whole hertz.
 double DisplayMaxHz() {
   double fastest = 0;
+  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  LONG status = ERROR_INSUFFICIENT_BUFFER;
+  // A display arriving between the two calls outgrows the buffers: ask again.
+  while (status == ERROR_INSUFFICIENT_BUFFER) {
+    UINT32 path_count = 0, mode_count = 0;
+    status = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count);
+    if (status != ERROR_SUCCESS) break;
+    paths.resize(path_count);
+    modes.resize(mode_count);
+    status = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count, modes.data(), nullptr);
+    paths.resize(path_count);
+  }
+  if (status == ERROR_SUCCESS) {
+    for (const auto& path : paths) {
+      const auto& rate = path.targetInfo.refreshRate;
+      if (rate.Denominator) fastest = std::max(fastest, static_cast<double>(rate.Numerator) / rate.Denominator);
+    }
+  }
+  if (fastest > 1) return fastest;
+  // No path gave a rate: read the modes.
+  fastest = 0;
   EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
     MONITORINFOEXW info{};
     info.cbSize = sizeof(info);
