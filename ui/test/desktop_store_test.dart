@@ -522,6 +522,74 @@ void main() {
   });
 
   testWidgets(
+    "the decoder's figures are read only while shown: a listener swapped in "
+    'one frame keeps them, the last one leaving stops the timings, and a '
+    'read answered after its timer stopped is dropped',
+    (tester) async {
+      final api = FakeDesktopApi()..codec = 'h264';
+      final textures = FakeTextures();
+      final store = DesktopStore(
+        api,
+        textures: textures.create,
+        now: () => tester.binding.clock.now(),
+      );
+      final viewer = store.demand(DesktopDemand.viewer);
+      await _live(tester, store, api);
+      final texture = textures.created.single;
+      var decoded = 0;
+      Future<Map<String, Object?>> counting() async => {
+        'decoded': decoded += 60,
+      };
+      texture.statsAnswer = counting;
+      final figures = store.decoderStats;
+      void shown() {}
+
+      // The first listener reads at once; the next read gives a rate.
+      figures.addListener(shown);
+      await tester.pump();
+      expect(figures.value, isNull);
+      await tester.pump(const Duration(seconds: 1));
+      expect(figures.value?.decodedPerSecond, 60);
+
+      // A rebuild takes its listener out and puts it back: nothing restarts.
+      final reads = texture.statsTimings.length;
+      figures.removeListener(shown);
+      figures.addListener(shown);
+      await tester.pump();
+      expect(figures.value?.decodedPerSecond, 60);
+      expect(texture.statsTimings, hasLength(reads));
+
+      // The last listener leaves while a read is out: the timings stop, the
+      // figures go, and nothing reads meanwhile.
+      final slow = Completer<Map<String, Object?>>();
+      texture.statsAnswer = () => slow.future;
+      await tester.pump(const Duration(seconds: 1));
+      figures.removeListener(shown);
+      await tester.pump();
+      expect(texture.statsTimings.last, isFalse);
+      expect(figures.value, isNull);
+      final stopped = texture.statsTimings.length;
+      await tester.pump(const Duration(seconds: 2));
+      expect(texture.statsTimings, hasLength(stopped));
+
+      // Shown again: the slow read's answer is not measured against the new
+      // reads.
+      texture.statsAnswer = counting;
+      figures.addListener(shown);
+      await tester.pump(const Duration(milliseconds: 100));
+      slow.complete({'decoded': decoded + 600});
+      await tester.pump();
+      expect(figures.value, isNull);
+      await tester.pump(const Duration(milliseconds: 900));
+      expect(figures.value?.decodedPerSecond, 60);
+
+      figures.removeListener(shown);
+      viewer.dispose();
+      store.dispose();
+    },
+  );
+
+  testWidgets(
     'metrics do not notify session or hostView listeners, and AppStore is never notified',
     (tester) async {
       final api = FakePbMapperApi();
