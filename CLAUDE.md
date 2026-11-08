@@ -156,6 +156,12 @@ Nothing in the SDK crates knows it exists.
 - **`pb-mapper-client/`**: Both ends of a tunnel
   - `server/`: `register` — publishes a local service (`mod.rs`, `stream.rs`, `error.rs`)
   - `client/`: `connect` — subscribes and listens locally, plus `status.rs`
+  - `direct/` (feature `p2p`): direct sessions. `lan.rs` ranks interfaces
+    (netdev, read in the background) and judges from a peer's candidates
+    whether it shares a LAN; `candidates.rs` orders what is offered, LAN
+    first; `socket.rs` and `endpoint.rs` probe and dial each path as it
+    answers; `provider.rs` is the publishing end. A committed session's
+    `DirectLink` lives in `diagnostics/link.rs`
 
 - **`pb-mapper-desktop/`**: Endpoint-owned remote desktop, reached as
   `pb_mapper::desktop`; how it works is in `docs/remote-desktop.md`

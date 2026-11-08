@@ -839,6 +839,7 @@ numbers the UI, the acceptance tool and these docs use:
 | Name | Definition |
 | --- | --- |
 | `rtt_ms` | The last probe round trip, transport only |
+| `link` | On a direct path, the viewer tunnel's link, sampled once a second: `kind` (`lan`, `internet`, `private`), `family`, `via`, `peer`, `local_ip`, QUIC's own `rtt_ms` and `min_rtt_ms` (the network alone, rounded up), `setup_ms` and `same_lan`; null on the relay |
 | `queue_delay_ms` | The mean of the last three untainted probe RTTs minus the base RTT |
 | `picture_latency_ms` | Median over 2 s of host time (encoder submit to socket write) + `rtt_ms / 2` + viewer time (network receipt to compositor consumption). Each side uses its own clock and the network leg is an estimate; only a camera measures glass to glass. |
 | `presented_fps` | Accepted presentations per second |

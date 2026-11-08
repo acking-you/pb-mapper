@@ -111,7 +111,11 @@ the last attempt ended.
 
 - **A chip** beside each running tunnel's state, `PathChip`
   (`widgets/path.dart`): **Direct** in the signal blue with a bolt, for a
-  path of this computer's own past the relay; **Relay** and **Relay only** in
+  path of this computer's own past the relay; **LAN** in the success green
+  with the router, when that path stays within one local network (the SDK's
+  `DirectLink.kind`; internet and private paths stay **Direct**), its
+  tooltip adding the family, the other computer's address, QUIC's round
+  trip and the setup time; **Relay** and **Relay only** in
   grey with the relay's tower; both counted when a connection holds both;
   **Going direct…** breathing while a path is being set up. A share knows
   only the sessions that reached it directly, so it shows a chip only for
