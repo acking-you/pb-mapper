@@ -56,12 +56,14 @@ class VideoFeederTest {
         val gaps = AtomicInteger()
         val pausedChanges = ConcurrentLinkedQueue<Boolean>()
         val failures = ConcurrentLinkedQueue<String>()
+        val ends = ConcurrentLinkedQueue<VideoFeeder>()
         override fun awaitRoom(timeoutMs: Long) = feed.awaitRoom(timeoutMs)
         override fun offer(unit: FeedUnit) {
             if (feed.offer(unit) == FeedQueue.Admission.GAP) gaps.incrementAndGet()
         }
         override fun setPaused(paused: Boolean) { pausedChanges.add(paused) }
         override fun failed(message: String) { failures.add(message) }
+        override fun ended(feeder: VideoFeeder) { ends.add(feeder) }
     }
 
     private fun run(source: FakeSource, target: FeedTarget, pool: BufferPool): VideoFeeder =
@@ -146,7 +148,7 @@ class VideoFeederTest {
     }
 
     @Test
-    fun closedEndsTheThreadAndDetaches() {
+    fun closedEndsTheThreadDetachesAndTellsTheTarget() {
         val pool = BufferPool()
         val target = QueueTarget(FeedQueue(pool))
         val source = FakeSource(Step(CLOSED), Step(UNIT, frameId = 1, key = true))
@@ -155,6 +157,9 @@ class VideoFeederTest {
         feeder.join(5_000)
         assertFalse(feeder.isAlive)
         assertEquals(0L, source.detached.count)
+        // Nothing else tells the texture its source is gone: without this, it
+        // keeps holding the display's fastest refresh.
+        assertEquals(listOf(feeder), target.ends.toList())
         assertEquals(1, source.pulls.get())
         assertEquals(0, target.feed.size)
         assertEquals(0, target.failures.size)

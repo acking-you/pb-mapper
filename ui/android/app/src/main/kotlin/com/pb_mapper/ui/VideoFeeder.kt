@@ -22,6 +22,12 @@ internal interface FeedTarget {
     fun offer(unit: FeedUnit)
     fun setPaused(paused: Boolean)
     fun failed(message: String)
+
+    /**
+     * [feeder] has detached its consumer and its thread is exiting: the source
+     * closed, failed, or [VideoFeeder.close] stopped it. Called once, last.
+     */
+    fun ended(feeder: VideoFeeder)
 }
 
 internal const val FEED_QUEUE_MAX = 2
@@ -213,6 +219,7 @@ internal class VideoFeeder(
             target.failed(e.message ?: "Video feed failed")
         } finally {
             api.detach(consumer)
+            target.ended(this)
         }
     }
 

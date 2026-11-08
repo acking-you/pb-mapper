@@ -1099,9 +1099,11 @@ tool's case F turns them all off.
 While a texture has a source attached that is not paused, the window asks for
 the display's fastest mode at its current resolution (`preferredDisplayModeId`):
 at 120 Hz a picture released just after a frame began waits half as long for
-the next one. The window's own
-preference returns when the last such texture is paused or disposed. It costs
-battery only while video shows. The `stats` method of the
+the next one. The window's own preference returns when the last such texture
+is paused, loses its source or is disposed. A source that closes or fails ends
+its feeder, which tells the texture, even though Dart keeps the texture for its
+last picture and for Reconnect; destroying the activity disposes every texture.
+It costs battery only while video shows. The `stats` method of the
 `pb_mapper/desktop_video` channel reports `credits` and `surfacePending` (both
 the pictures released and not yet consumed) and `refreshHz` (the mode asked
 for while viewing, otherwise the display's current one).
