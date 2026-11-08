@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 /// v2.0 host advertises nothing else: it cannot tell, before thread C builds
 /// the backend, whether the privileged helper (`secure_desktop`) captures.
 pub(crate) const CAPABILITY_LOCK: &str = "lock";
+/// The viewer reads `Stats::encoder_dwell_ms`; a host writes it to no other.
+pub(crate) const CAPABILITY_ENCODER_DWELL: &str = "encoder_dwell";
 const MAX_CAPABILITIES: usize = 16;
 
 /// Capability lists hold at most 16 values of `[a-z0-9_]{1,32}`. A receiver
@@ -158,7 +160,13 @@ pub(crate) enum HostMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queue_delay_ms: Option<u32>,
         ack_queue_ms: u32,
+        /// The median time a unit stayed in the encoder, or the helper, from
+        /// submit to drain over the last second. Only to a viewer that listed
+        /// `encoder_dwell`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encoder_dwell_ms: Option<u32>,
         dropped_frames: u64,
+        /// Ticks skipped for transport backpressure or a full encoder.
         skipped_ticks: u64,
         keyframes: u64,
         frames: u64,
@@ -416,6 +424,7 @@ mod tests {
                 base_rtt_ms: None,
                 queue_delay_ms: Some(2),
                 ack_queue_ms: 0,
+                encoder_dwell_ms: Some(3),
                 dropped_frames: 0,
                 skipped_ticks: 1,
                 keyframes: 1,

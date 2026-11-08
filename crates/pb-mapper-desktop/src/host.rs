@@ -304,6 +304,8 @@ struct Request {
     codec: VideoCodec,
     limits: VideoLimits,
     quality: QualityPreset,
+    /// What the viewer listed; values this host does not know are ignored.
+    capabilities: Vec<String>,
 }
 
 /// The listener's side of the host: every connection's handshake and session.
@@ -359,6 +361,7 @@ impl Acceptor {
             request.codec,
             request.limits,
             request.quality,
+            &request.capabilities,
         );
         *self.session.lock() = Some(session.clone());
         let mut worker = worker::spawn_session(
@@ -444,6 +447,7 @@ impl Acceptor {
                     codec,
                     limits,
                     quality,
+                    capabilities,
                 },
             ));
         } else {

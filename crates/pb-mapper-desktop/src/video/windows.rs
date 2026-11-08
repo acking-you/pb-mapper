@@ -31,7 +31,9 @@ use windows_capture::{
     monitor::Monitor,
 };
 
-const MAX_IN_FLIGHT: usize = 3;
+/// Thread C's encoder bound decides how deep the pipeline runs; this only
+/// keeps a caller without it from queueing more.
+const MAX_IN_FLIGHT: usize = crate::worker::ENCODER_DEPTH;
 const MAX_ACCESS_UNIT: usize = 4 * 1024 * 1024;
 /// A static desktop still submits a verified repeat this often, which keeps a
 /// presented frame fresh enough to authorise input.

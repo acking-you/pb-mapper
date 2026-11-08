@@ -172,6 +172,20 @@ pub struct ViewerStats {
     pub target_fps: u32,
     /// 0 = none.
     pub fps_cap: u32,
+    /// The preset this session asked the host for.
+    pub preset: QualityPreset,
+    /// The session's `limits.max_fps`, a ceiling on every preset's.
+    pub max_fps: u32,
+    /// Host capture ticks skipped per second, for transport backpressure or
+    /// a full encoder.
+    pub skipped_per_s: f32,
+    /// The host's median time a unit stays in its encoder, or the helper,
+    /// from submit to drain. `None` from a host that reports none.
+    pub encoder_dwell_ms: Option<u32>,
+    /// What the host sent, in bits per second.
+    pub sent_bitrate: u32,
+    /// The host's receipt-based queue delay.
+    pub ack_queue_ms: Option<u32>,
     /// What the host expects to send: bits per frame × pace.
     pub bitrate: u32,
     pub encoder_bitrate: u32,
@@ -206,6 +220,12 @@ impl Default for ViewerStats {
             pace_fps: 0,
             target_fps: 0,
             fps_cap: 0,
+            preset: QualityPreset::default(),
+            max_fps: 0,
+            skipped_per_s: 0.0,
+            encoder_dwell_ms: None,
+            sent_bitrate: 0,
+            ack_queue_ms: None,
             bitrate: 0,
             encoder_bitrate: 0,
             received_bitrate: 0,
@@ -462,10 +482,14 @@ pub(crate) struct HostStats {
     pub fps_cap: u32,
     pub bitrate: u32,
     pub encoder_bitrate: u32,
+    pub sent_bitrate: u32,
     pub rtt_ms: Option<u32>,
     pub base_rtt_ms: Option<u32>,
     pub queue_delay_ms: Option<u32>,
+    pub ack_queue_ms: u32,
+    pub encoder_dwell_ms: Option<u32>,
     pub dropped_frames: u64,
+    pub skipped_ticks: u64,
     pub keyframes: u64,
     pub adaptation: Adaptation,
     pub rate_model: RateModel,
@@ -475,6 +499,11 @@ pub(crate) struct HostStats {
 /// write task's tick rolls the rates up once a second.
 pub(crate) struct ViewerStatsAcc {
     pub host: Option<HostStats>,
+    /// When the last `Stats` came, or the session started.
+    host_at: Instant,
+    /// Host ticks skipped per second between the last two `Stats`.
+    skipped_per_s: f32,
+    max_fps: u32,
     window_start: Instant,
     window_frames: u32,
     window_bytes: u64,
@@ -491,9 +520,12 @@ pub(crate) struct ViewerStatsAcc {
 /// How long a condition must hold before `degraded` changes.
 const DEGRADED_HOLD: Duration = Duration::from_secs(3);
 impl ViewerStatsAcc {
-    pub fn new(now: Instant) -> Self {
+    pub fn new(now: Instant, max_fps: u32) -> Self {
         Self {
             host: None,
+            host_at: now,
+            skipped_per_s: 0.0,
+            max_fps,
             window_start: now,
             window_frames: 0,
             window_bytes: 0,
@@ -528,6 +560,18 @@ impl ViewerStatsAcc {
         windowed_median(&mut self.host_ms, now, LATENCY_WINDOW)
     }
 
+    /// The host's `Stats`, with its skipped ticks turned into a rate since the
+    /// previous one, or since the session started.
+    pub fn on_host(&mut self, now: Instant, host: HostStats) {
+        let skipped = self.host.map_or(0, |last| last.skipped_ticks);
+        let elapsed = now.saturating_duration_since(self.host_at).as_secs_f32();
+        if elapsed > 0.0 {
+            self.skipped_per_s = host.skipped_ticks.saturating_sub(skipped) as f32 / elapsed;
+        }
+        self.host = Some(host);
+        self.host_at = now;
+    }
+
     /// `host_ms + rtt / 2 + viewer_ms`, once both medians exist.
     pub fn picture_latency(&mut self, now: Instant, viewer_ms: Option<u32>) -> Option<u32> {
         let rtt = self.host.and_then(|host| host.rtt_ms).unwrap_or(0);
@@ -549,6 +593,10 @@ impl ViewerStatsAcc {
             stats.pace_fps = host.pace_fps;
             stats.target_fps = host.target_fps;
             stats.fps_cap = host.fps_cap;
+            stats.skipped_per_s = self.skipped_per_s;
+            stats.encoder_dwell_ms = host.encoder_dwell_ms;
+            stats.sent_bitrate = host.sent_bitrate;
+            stats.ack_queue_ms = Some(host.ack_queue_ms);
             stats.bitrate = host.bitrate;
             stats.encoder_bitrate = host.encoder_bitrate;
             stats.adaptation = host.adaptation;
@@ -556,6 +604,7 @@ impl ViewerStatsAcc {
             stats.keyframes = host.keyframes;
             stats.dropped_frames = host.dropped_frames;
         }
+        stats.max_fps = self.max_fps;
         stats.host_ms = self.host_ms(now);
         stats.viewer_ms = viewer_ms;
         stats.picture_latency_ms = self.picture_latency(now, viewer_ms);

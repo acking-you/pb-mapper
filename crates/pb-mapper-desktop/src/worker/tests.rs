@@ -464,6 +464,20 @@ fn pacing_is_even_and_skips_ticks_without_bursts() {
     assert!(resumed[0].1);
     assert!(resumed[1..].iter().all(|(_, keyframe, _)| !keyframe));
     assert_eq!(h.state().record.state, SessionState::Streaming);
+
+    // An encoder that holds each unit for 45 ms, nearly three periods: no
+    // tick is skipped for it, and its dwell is published.
+    *h.fake.latency.lock() = Duration::from_millis(45);
+    let (before, skipped) = (h.captures().len(), h.state().skipped_ticks);
+    h.run(Duration::from_millis(2100), true);
+    let slow = h.captures().len() - before;
+    assert!((125..=127).contains(&slow), "{slow}");
+    assert_eq!(h.state().skipped_ticks, skipped);
+    let dwell = h.state().encoder_dwell.unwrap();
+    assert!(
+        (Duration::from_millis(45)..=Duration::from_millis(47)).contains(&dwell),
+        "{dwell:?}"
+    );
 }
 
 #[test]
