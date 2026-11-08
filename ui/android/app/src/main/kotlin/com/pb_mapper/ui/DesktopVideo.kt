@@ -173,7 +173,7 @@ class DesktopVideo(
         @Volatile var decoderName = ""
         private val pool = BufferPool()
         private val feed = FeedQueue(pool)
-        // Main thread only; the feeder of the attached source.
+        // Main thread only; the feeder of the attached source, until it ends.
         private var feeder: VideoFeeder? = null
         @Volatile private var consumer = 0L
         @Volatile private var paused = false
@@ -261,8 +261,10 @@ class DesktopVideo(
             feeder = null
         }
 
-        // Main thread. A paused source is behind the shell, not on screen; a
-        // stale request from an old feeder reads the current state, not its own.
+        // Main thread. The hold follows exactly: a source is attached (its
+        // feeder has not ended), it is not paused (a paused source is behind
+        // the shell, not on screen), and the texture is alive. A stale request
+        // from an old feeder reads the current state, not its own.
         private fun syncRefresh() {
             val showing = !closed && feeder != null && !paused
             if (showing == holdingRefresh) return
@@ -297,6 +299,18 @@ class DesktopVideo(
         override fun failed(message: String) {
             Log.w(TAG, message)
             lastRecovery = message
+        }
+
+        // The source closed or failed, so it is no longer attached. Dart keeps
+        // the texture for its last picture and Reconnect, which is no reason
+        // to keep the refresh. A feeder that attach or dispose stopped has
+        // already been replaced, and its end changes nothing.
+        override fun ended(feeder: VideoFeeder) {
+            main.post {
+                if (this.feeder !== feeder) return@post
+                this.feeder = null
+                syncRefresh()
+            }
         }
 
         private fun consumeSurface() {
