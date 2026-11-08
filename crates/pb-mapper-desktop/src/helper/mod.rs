@@ -18,7 +18,7 @@ pub(crate) mod worker;
 
 use crate::{Backend, DesktopContext, Input, Result, error};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use client::backend;
 #[cfg(feature = "windows-helper")]
@@ -97,6 +97,71 @@ fn update_required(protocol: u32, running: bool, pipe_present: impl FnOnce() -> 
     protocol != HELPER_PROTOCOL || (running && !pipe_present())
 }
 
+/// Whether the `installed` helper is another build than the one bundled
+/// beside this application, which installing would copy. A helper of this
+/// protocol still works, but the background host runs in it, so a new build
+/// reaches background sessions only once installed. False with no bundled
+/// helper (a development run), when either cannot be read, and for the
+/// installed application, whose bundled helper is the installed one.
+fn update_available(installed: &Path) -> bool {
+    let Some(bundled) = std::env::current_exe()
+        .ok()
+        .and_then(|executable| Some(executable.parent()?.join(EXECUTABLE)))
+    else {
+        return false;
+    };
+    !os::same_path(&bundled, installed) && other_build(digest(installed), digest(&bundled))
+}
+
+type Sha256 = [u8; 32];
+
+/// Two helper executables are other builds when both were read and their
+/// bytes differ.
+fn other_build(installed: Option<Sha256>, bundled: Option<Sha256>) -> bool {
+    matches!((installed, bundled), (Some(installed), Some(bundled)) if installed != bundled)
+}
+
+fn sha256(mut reader: impl std::io::Read) -> std::io::Result<Sha256> {
+    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => context.update(&buffer[..read]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let mut digest = [0; 32];
+    digest.copy_from_slice(context.finish().as_ref());
+    Ok(digest)
+}
+
+/// `path`'s SHA-256, read again only when its length or modification time
+/// changes: a status poll costs a metadata read.
+fn digest(path: &Path) -> Option<Sha256> {
+    type Entry = (PathBuf, u64, std::time::SystemTime, Sha256);
+    static DIGESTS: std::sync::Mutex<Vec<Entry>> = std::sync::Mutex::new(Vec::new());
+    let metadata = std::fs::metadata(path).ok()?;
+    let (length, modified) = (metadata.len(), metadata.modified().ok()?);
+    let cached = DIGESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(cached, l, m, _)| cached == path && *l == length && *m == modified)
+        .map(|entry| entry.3);
+    if cached.is_some() {
+        return cached;
+    }
+    let digest = sha256(std::fs::File::open(path).ok()?).ok()?;
+    let mut digests = DIGESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    digests.retain(|(cached, ..)| cached != path);
+    digests.push((path.to_path_buf(), length, modified, digest));
+    Some(digest)
+}
+
 #[derive(Default, Serialize)]
 pub struct Status {
     pub installed: bool,
@@ -113,6 +178,9 @@ pub struct Status {
     /// The installed helper is older than this build: installing again
     /// updates it in place, keeping its background hosting grant.
     pub update_required: bool,
+    /// The installed helper is another build of this protocol: it still
+    /// works, and installing again puts this build's host in the service.
+    pub update_available: bool,
     pub message: String,
 }
 impl Status {
@@ -176,6 +244,7 @@ pub fn status() -> Status {
                 installed_application: Some(config.ui_executable),
                 protocol,
                 update_required: update_required(protocol, running, || ipc::exists(PIPE)),
+                update_available: update_available(&config.helper_executable),
                 message: identity.err().map_or_else(
                     || {
                         "Helper requires the installed application; the UI stays unprivileged"
@@ -335,6 +404,24 @@ mod readiness_tests {
         status.protocol = HELPER_PROTOCOL;
         status.update_required = false;
         assert!(status.ensure_ready().is_ok());
+        // Another build of this protocol still works until it is updated.
+        status.update_available = true;
+        assert!(status.ensure_ready().is_ok());
+    }
+
+    #[test]
+    fn another_build_of_the_helper_is_offered_an_update() {
+        use super::{other_build, sha256};
+        let digest = |bytes: &[u8]| sha256(bytes).ok();
+        // Longer than one read, and differing only in its last byte.
+        let installed = vec![7; 200_000];
+        let mut bundled = installed.clone();
+        *bundled.last_mut().unwrap() = 8;
+        assert!(!other_build(digest(&installed), digest(&installed.clone())));
+        assert!(other_build(digest(&installed), digest(&bundled)));
+        // No bundled helper, or one that cannot be read, offers nothing.
+        assert!(!other_build(digest(&installed), None));
+        assert!(!other_build(None, digest(&bundled)));
     }
 
     #[test]

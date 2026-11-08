@@ -393,29 +393,48 @@ class FakeDesktopApi implements DesktopApiClient {
     return false;
   }
 
-  /// `start` resumes the service's host on the current relay, `test`, as the
-  /// FFI configures it from the settings: from another relay, with a new
-  /// invitation.
   @override
-  Future<DesktopBackground> backgroundAction(String action) async {
-    _log('background_action', {'action': action});
-    if (action == 'start') {
-      final b = _background;
-      _set(
-        background: () => DesktopBackground(
-          configured: true,
-          enabled: true,
-          service: b.service,
-          server: 'test',
-          invitation: b.matchesRelay ? b.invitation : movedInvitation,
-          autoStart: true,
-          displayId: b.displayId,
-          allowControl: b.allowControl,
-          host: DesktopHostStatus(controlAllowed: b.allowControl),
-        ),
-      );
-    }
+  Future<DesktopBackground> backgroundStatus() async {
+    _log('background_action', {'action': 'status'});
     return _background;
+  }
+
+  /// Resumes the service's host on the current relay, `test`, as the FFI
+  /// configures it from the settings: from another relay only when asked,
+  /// with a new invitation. A helper [available] says is not ready, or is
+  /// another build, is installed first, and the app restarts into it.
+  @override
+  Future<DesktopHostEnable> resumeBackground({bool moveRelay = false}) async {
+    _log('background_action', {'action': 'start', 'move_relay': moveRelay});
+    final b = _background;
+    if (!b.matchesRelay && !moveRelay) {
+      throw const DesktopCallException('RELAY_CHANGED', 'on another relay');
+    }
+    if (available.helper case final helper?
+        when helper.updateRequired ||
+            helper.updateAvailable ||
+            !helper.running ||
+            !helper.authorized ||
+            !helper.identityVerified) {
+      return const DesktopHostEnable(restart: true);
+    }
+    _set(
+      background: () => DesktopBackground(
+        configured: true,
+        enabled: true,
+        service: b.service,
+        server: 'test',
+        invitation: b.matchesRelay ? b.invitation : movedInvitation,
+        autoStart: true,
+        displayId: b.displayId,
+        allowControl: b.allowControl,
+        host: DesktopHostStatus(controlAllowed: b.allowControl),
+      ),
+    );
+    return DesktopHostEnable(
+      invitation: _background.invitation,
+      background: _background,
+    );
   }
 
   @override

@@ -366,8 +366,12 @@ enum Request {
     HelperAction {
         action: HelperVerb,
     },
+    /// `move_relay`: the owner confirmed that a `start` may move the host
+    /// to another relay or namespace, with a new invitation.
     BackgroundAction {
         action: BackgroundVerb,
+        #[serde(default)]
+        move_relay: bool,
     },
     HostStart(HostStart),
     HostStop {
@@ -413,7 +417,7 @@ enum HelperVerb {
 }
 
 /// The service's state, or its saved host resumed where the settings name
-/// now (`resume_background`).
+/// now (`resume_background`), through setup when the helper needs it.
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum BackgroundVerb {
@@ -646,62 +650,125 @@ async fn disable_legacy_startup(handle: &PbMapperHandle) -> Result<(), CtlError>
     .map_err(err)?
 }
 
+/// `status`: the service's state, asked of it. `start`: `resume_background`,
+/// answered as `host_enable` is, its `background` with `matches_relay`.
 async fn background_action(
     handle: &PbMapperHandle,
     verb: BackgroundVerb,
+    move_relay: bool,
 ) -> Result<Value, CtlError> {
-    let snapshot = match verb {
-        BackgroundVerb::Status => discover_background(&handle.desktop, query_background()).await,
+    match verb {
+        BackgroundVerb::Status => {
+            let snapshot = discover_background(&handle.desktop, query_background()).await;
+            let relay = handle.desktop.relay_scope(&handle.state).await;
+            Ok(with_relay_match(snapshot, relay.as_ref()))
+        }
         #[cfg(windows)]
-        BackgroundVerb::Start => resume_background(handle).await?,
+        BackgroundVerb::Start => {
+            let mut reply = resume_background(handle, move_relay).await?;
+            if reply["background"].is_object() {
+                let relay = handle.desktop.relay_scope(&handle.state).await;
+                reply["background"] = with_relay_match(reply["background"].take(), relay.as_ref());
+            }
+            Ok(reply)
+        }
         #[cfg(not(windows))]
-        BackgroundVerb::Start => return Err(err("background hosting requires Windows")),
-    };
-    let relay = handle.desktop.relay_scope(&handle.state).await;
-    Ok(with_relay_match(snapshot, relay.as_ref()))
+        BackgroundVerb::Start => {
+            let _ = move_relay;
+            Err(err("background hosting requires Windows"))
+        }
+    }
 }
 
 /// An explicit resume of the service's saved host: configured again from
 /// the settings, never started with the relay it was saved with, which the
 /// owner may have left. On the same relay and namespace the service keeps
-/// its identity, and an unchanged configuration only starts it again;
-/// anywhere else it makes a new one, so the invitation changes.
+/// its identity, and an unchanged configuration only starts it again.
+/// Anywhere else it makes a new one, so the invitation changes: refused with
+/// `RELAY_CHANGED` unless `move_relay` says the owner was asked. A helper
+/// that is not ready, or another build than this app's, resumes through
+/// setup instead (`enable_host`, which allows direct connections as setup
+/// always does), which installs, updates or enables it behind one consent
+/// prompt and may restart the app into it.
 #[cfg(windows)]
-async fn resume_background(handle: &PbMapperHandle) -> Result<Value, CtlError> {
+async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<Value, CtlError> {
     // As `enable_host`: the host slot, then the settings.
-    let slot = handle.desktop.host.lock().await;
+    let mut slot = handle.desktop.host.lock().await;
     if slot.is_some() {
         return Err(err(
             "stop local desktop sharing before starting the background host",
         ));
     }
     let config = handle.state.lock().await.get_config_status().await;
-    let credential = credential_text(process_credential()?)?;
-    let saved = handle.desktop.cache_background(query_background().await?);
-    let options = resume_options(&saved, config, credential)?;
+    let credential = process_credential()?;
+    let namespace = credential.key_id();
+    let credential = credential_text(credential)?;
+    let helper = tokio::task::spawn_blocking(desktop::helper::status)
+        .await
+        .map_err(err)?;
+    // A helper that cannot be asked resumes the host the card showed.
+    let saved = if helper.ensure_ready().is_ok() {
+        handle.desktop.cache_background(query_background().await?)
+    } else {
+        handle
+            .desktop
+            .background
+            .lock()
+            .snapshot
+            .clone()
+            .unwrap_or_else(|| unavailable_background(""))
+    };
+    let options = resume_options(&saved, config, namespace, credential, move_relay)?;
+    if helper_setup(&helper, true).is_some() {
+        let desktop::helper::background::Settings {
+            service,
+            display_id,
+            allow_control,
+            ..
+        } = options.settings;
+        return enable_host(handle, &mut slot, service, display_id, allow_control, true).await;
+    }
     disable_legacy_startup(handle).await?;
     let snapshot = desktop::helper::background::configure(options)
         .await
         .map_err(err)?;
-    Ok(handle
+    let snapshot = handle
         .desktop
-        .cache_background(serde_json::to_value(snapshot).map_err(err)?))
+        .cache_background(serde_json::to_value(snapshot).map_err(err)?);
+    Ok(json!({"restart": false, "invitation": snapshot["invitation"], "background": snapshot}))
 }
 
 /// What resuming the service's `saved` host configures: the service, display
-/// and permissions it saved, published through the relay, credential and
-/// carrier the settings name now, and restored at startup again.
+/// and permissions it saved, published through the relay, credential (of
+/// `namespace`) and carrier the settings name now, and restored at startup
+/// again. Moving it to another relay or namespace needs `move_relay`.
 #[cfg(windows)]
 fn resume_options(
     saved: &Value,
     config: crate::state::AppConfig,
+    namespace: u64,
     credential: String,
+    move_relay: bool,
 ) -> Result<desktop::helper::background::Options, CtlError> {
     let settings: desktop::helper::background::Settings =
         serde_json::from_value(saved["settings"].clone())
             .ok()
             .filter(|_| background_configured(saved))
             .ok_or_else(|| err("no saved background host to resume"))?;
+    let current = RelayScope {
+        server: config.server_address.clone(),
+        namespace: Some(namespace),
+    };
+    if !move_relay
+        && !saved["server"]
+            .as_str()
+            .is_some_and(|server| current.holds(server, saved["namespace"].as_u64()))
+    {
+        return Err(CtlError::new(
+            ErrorCode::RelayChanged,
+            "this computer is shared on another relay or credential namespace; moving it changes its invitation",
+        ));
+    }
     Ok(desktop::helper::background::Options {
         server: config.server_address,
         credential,
@@ -971,13 +1038,16 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             };
             return Ok(json!({"host": host, "busy": busy, "background": background}));
         }
-        Request::BackgroundAction { action } => return background_action(handle, action).await,
+        Request::BackgroundAction { action, move_relay } => {
+            return background_action(handle, action, move_relay).await;
+        }
         Request::HostEnable {
             service,
             display_id,
             allow_control,
         } => {
-            return enable_host(handle, service, display_id, allow_control, true).await;
+            let mut slot = state.host.lock().await;
+            return enable_host(handle, &mut slot, service, display_id, allow_control, true).await;
         }
         Request::HostRestore => {
             let directory = handle.state.lock().await.desktop_config_dir();
@@ -985,8 +1055,10 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                 .await?
                 .filter(|saved| saved.settings.background)
             {
+                let mut slot = state.host.lock().await;
                 return enable_host(
                     handle,
+                    &mut slot,
                     saved.settings.service,
                     saved.settings.display_id,
                     saved.settings.allow_control,
@@ -1490,19 +1562,16 @@ async fn restart_host(
 
 /// Stops the running local host before the service takes over. Its viewer
 /// reconnects by itself (`restarting`) only when the service resumes this
-/// host's invitation at once: the same identity and service, and a helper that
-/// needs no installation, which the owner may cancel. Otherwise it hears
-/// `host_stopped`, rather than retrying a host that may never come.
+/// host's invitation at once (`resumes_at_once`): the same identity and
+/// service, and a helper that needs no setup, which the owner may cancel.
+/// Otherwise it hears `host_stopped`, rather than retrying a host that may
+/// never come.
 #[cfg(windows)]
-async fn stop_for_handoff(
-    slot: &mut Option<Host>,
-    same_invitation: bool,
-    helper: &desktop::helper::Status,
-) -> Result<(), CtlError> {
+async fn stop_for_handoff(slot: &mut Option<Host>, resumes_at_once: bool) -> Result<(), CtlError> {
     let Some(host) = slot.take() else {
         return Ok(());
     };
-    let reason = if same_invitation && helper.ensure_ready().is_ok() {
+    let reason = if resumes_at_once {
         StopReason::Restarting
     } else {
         StopReason::HostStopped
@@ -1513,15 +1582,16 @@ async fn stop_for_handoff(
 /// The product has one durable host owner. Setup intent and any existing local
 /// identity survive the installed application's restart; only the service owns
 /// registration after the handoff. Internal SDK/local-host APIs remain separate.
+/// `slot` is the locked host lifecycle slot.
 #[cfg(windows)]
 async fn enable_host(
     handle: &PbMapperHandle,
+    slot: &mut Option<Host>,
     service: String,
     display_id: u32,
     allow_control: bool,
     allow_install: bool,
 ) -> Result<Value, CtlError> {
-    let mut slot = handle.desktop.host.lock().await;
     let (directory, config) = {
         let state = handle.state.lock().await;
         (state.desktop_config_dir(), state.get_config_status().await)
@@ -1572,17 +1642,17 @@ async fn enable_host(
     let helper = tokio::task::spawn_blocking(desktop::helper::status)
         .await
         .map_err(err)?;
+    let setup = helper_setup(&helper, allow_install);
     // Stop the old registration before enabling a service that could already
     // hold an automatic grant. No two owners may publish the same desktop.
-    stop_for_handoff(&mut slot, local.is_some(), &helper).await?;
+    stop_for_handoff(slot, local.is_some() && setup.is_none()).await?;
     *handle.desktop.host_identity.lock().await = None;
-    if helper.ensure_ready().is_err() {
+    if let Some(action) = setup {
         if !allow_install {
             return Err(err(
                 "desktop setup is waiting for the installed background service",
             ));
         }
-        let action = helper_setup_action(&helper);
         let installed =
             tokio::task::spawn_blocking(move || desktop::helper::request_installation(action))
                 .await
@@ -1639,14 +1709,28 @@ async fn enable_host(
     Ok(json!({"restart": false, "invitation": snapshot["invitation"], "background": snapshot}))
 }
 
-/// What setup asks of Windows for a helper that is not ready, in one prompt.
-/// Installing again also updates an outdated helper in place (D2); enabling
-/// leaves it outdated. Setup's install also turns a stopped or Disabled
-/// service on, which an update alone would leave off.
+/// What setup asks of Windows before the service can host, if anything: for
+/// a helper that is not ready, and, where the owner may be asked
+/// (`allow_install`), for another build than this app's, which still works
+/// but holds the old host. Startup's restore never asks.
+#[cfg(windows)]
+fn helper_setup(
+    helper: &desktop::helper::Status,
+    allow_install: bool,
+) -> Option<desktop::helper::Action> {
+    (helper.ensure_ready().is_err() || (allow_install && helper.update_available))
+        .then(|| helper_setup_action(helper))
+}
+
+/// What setup asks of Windows, in one prompt. Installing again also updates
+/// an outdated helper, or another build, in place (D2); enabling leaves it
+/// as it is. Setup's install also turns a stopped or Disabled service on,
+/// which an update alone would leave off.
 #[cfg(windows)]
 fn helper_setup_action(helper: &desktop::helper::Status) -> desktop::helper::Action {
     if !helper.installed
         || helper.update_required
+        || helper.update_available
         || !helper.authorized_application
         || (helper.running && !helper.identity_verified)
     {
@@ -1659,6 +1743,7 @@ fn helper_setup_action(helper: &desktop::helper::Status) -> desktop::helper::Act
 #[cfg(not(windows))]
 async fn enable_host(
     _: &PbMapperHandle,
+    _: &mut Option<Host>,
     _: String,
     _: u32,
     _: bool,
@@ -2251,6 +2336,8 @@ mod tests {
 
     /// Resuming publishes the saved host where the settings name now: the
     /// bug was a resume that kept publishing on the relay the owner had left.
+    /// Moving it there changes its invitation, so only a confirmed resume
+    /// may, whatever the card showed.
     #[cfg(windows)]
     #[test]
     fn resume_configures_the_saved_host_from_the_current_settings() {
@@ -2262,14 +2349,24 @@ mod tests {
             ..Default::default()
         };
         let nothing = unavailable_background("");
-        assert!(resume_options(&nothing, config.clone(), "key".into()).is_err());
+        assert!(resume_options(&nothing, config.clone(), 1, "key".into(), true).is_err());
         let mut saved = unavailable_background("");
         saved["configured"] = json!(true);
         saved["server"] = json!("old-relay:7666");
+        saved["namespace"] = json!(1);
         saved["settings"] = json!({"service": "desktop:study", "display_id": 2,
             "allow_control": true, "allow_direct": false, "auto_start": false});
+        let unconfirmed = resume_options(&saved, config.clone(), 1, "new-key".into(), false);
+        assert_eq!(unconfirmed.unwrap_err().code(), ErrorCode::RelayChanged);
+        // The same relay in another namespace is elsewhere too; in the same
+        // one it resumes unasked.
+        let mut here = saved.clone();
+        here["server"] = json!("new-relay:7666");
+        let other = resume_options(&here, config.clone(), 2, "new-key".into(), false);
+        assert_eq!(other.unwrap_err().code(), ErrorCode::RelayChanged);
+        assert!(resume_options(&here, config.clone(), 1, "new-key".into(), false).is_ok());
         assert_eq!(
-            resume_options(&saved, config, "new-key".into()).unwrap(),
+            resume_options(&saved, config, 1, "new-key".into(), true).unwrap(),
             Options {
                 server: "new-relay:7666".into(),
                 credential: "new-key".into(),
@@ -2444,9 +2541,9 @@ mod tests {
             // `Accepted` reaches the viewer before the host holds the session.
             until(|| host.status().viewer.is_some()).await;
             let mut slot = Some(host);
-            stop_for_handoff(&mut slot, same_invitation, &helper)
-                .await
-                .unwrap();
+            // As `enable_host` decides it.
+            let resumes_at_once = same_invitation && helper_setup(&helper, true).is_none();
+            stop_for_handoff(&mut slot, resumes_at_once).await.unwrap();
             assert!(slot.is_none());
             until(|| viewer.status().state == ViewerState::Stopped).await;
             let status = viewer.status();
@@ -2571,6 +2668,23 @@ mod tests {
             ..outdated
         };
         assert_eq!(helper_setup_action(&current), Action::Enable);
+        // Another build, ready: it hosts the old code, so an action the owner
+        // started installs this one; startup's restore uses it as it is.
+        let other_build = desktop::helper::Status {
+            running: true,
+            update_available: true,
+            ..current
+        };
+        assert_eq!(
+            helper_setup(&other_build, true),
+            Some(Action::Install { enable: true })
+        );
+        assert_eq!(helper_setup(&other_build, false), None);
+        let ready = desktop::helper::Status {
+            update_available: false,
+            ..other_build
+        };
+        assert_eq!(helper_setup(&ready, true), None);
     }
 
     #[test]

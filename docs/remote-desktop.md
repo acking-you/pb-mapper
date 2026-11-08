@@ -376,16 +376,24 @@ Changing the relay or credential in Settings does not move a host that is
 already published. A sharing or paused host stays on the relay and namespace
 it was published on until it is moved; the service, which restores its host
 when Windows starts, restores it there too, and the app's own startup never
-resumes a host on another relay. While Settings name another relay or
-credential, the host card names the relay the host is on and offers **Share on
-the current relay**, which asks first. Moving configures the service again with
+resumes a host on another relay. While Settings name another relay, or a
+credential of another namespace (another temporary credential, or the
+administrator key in place of a temporary one), the host card names the relay
+the host is on and offers **Share on the current relay**, which asks first.
+Moving configures the service again with
 the same service name, display and permissions through the relay, credential
 and carrier now in Settings (an app-owned host starts again the same way). The
 invitation is never reused on another relay or namespace, so moving creates a
 new one, and computers that saved the old one must add this computer again.
+The FFI enforces the question: it refuses a resume that would move the
+service's host (`RELAY_CHANGED`) unless the app says the owner confirmed it, so
+a card that has not read the new settings yet cannot move it unasked.
 **Start sharing** always configures the service from the current settings: on
 the same relay and namespace it keeps the invitation, and also takes a changed
-carrier or a renewed credential. When the service registers, its status and
+carrier or a renewed credential. A rotated administrator key is the same
+namespace, so the card does not flag it: a sharing host keeps the retired key
+until **Stop sharing** and **Start sharing** configure it from the settings
+again. When the service registers, its status and
 `service.log` name the relay it registered on.
 
 ## Windows helper and UAC boundary
@@ -467,6 +475,18 @@ that action. **Turn on remote control** explicitly restores automatic service
 startup, even when it must first install or update the helper, in the same
 consent prompt. Updating a disabled or stopped installation from the helper
 row preserves that state.
+
+The helper row offers **Update** when the installed helper speaks another
+helper protocol (`HELPER_PROTOCOL`), which this app never uses, and also when
+it is another build of this protocol: its executable is not byte-identical
+(SHA-256, read again only when its size or time changes) to the one bundled
+beside the running app. Another build still works, but the background host
+runs in the service and its capture worker, so a new build's host reaches
+background sessions only once it is installed. **Start sharing** for a paused
+background host whose helper is not ready, or is another build, goes through
+setup as **Turn on remote control** does: one consent prompt installs, updates
+or enables it, the app restarts into the installed copy when it installed one,
+and the host resumes there. The app's startup restore never installs or asks.
 
 Disable stops the service and disables its startup. Uninstall stops/deletes the
 service and removes its authorization configuration. Upgrade preserves files

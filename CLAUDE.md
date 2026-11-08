@@ -186,7 +186,8 @@ Nothing in the SDK crates knows it exists.
     it; the service side and the `pb-mapper-desktop-helper` binary need
     `--features windows-helper`. `HELPER_PROTOCOL` (`helper/mod.rs`) and the
     `.v<n>` pipe names change together; an installed helper of another
-    protocol is offered Update
+    protocol, or of another build (its executable differs from the one
+    bundled with the app), is offered Update
   - `dpapi.rs` (Windows): The one DPAPI call every Windows store uses, current
     user or machine scope; the FFI's vault and trust files go through it
   - `tests.rs`, `tests/session.rs`: Tests over a real relay and TLS, the second

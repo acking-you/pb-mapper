@@ -78,8 +78,9 @@ DesktopAdaptation _adaptationFromWire(Object? value) => switch (value) {
 enum DesktopDemand { page, viewer }
 
 /// The Windows helper service: not installed (or no helper on this
-/// platform), ready, stopped, needing an update (`update_required`), or
-/// running with an identity that cannot be verified.
+/// platform), ready, stopped, needing an update (`update_required`, or
+/// `update_available`: another build), or running with an identity that
+/// cannot be verified.
 enum DesktopHelperState { none, ready, stopped, outdated, unverified }
 
 enum DesktopNoticeCode { locked, lockFailed }

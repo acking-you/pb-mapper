@@ -64,6 +64,9 @@ pub enum ErrorCode {
     InputCongestion,
     /// The remembered computers are locked or cannot be read.
     VaultUnavailable,
+    /// Resuming would move this computer's host to the relay or namespace
+    /// the settings name now, which changes its invitation: ask first.
+    RelayChanged,
     /// Anything with no more specific answer.
     ///
     /// Also where a code this build does not recognise lands, so an older CLI

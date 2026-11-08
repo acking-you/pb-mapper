@@ -503,6 +503,7 @@ void main() {
           await settle(tester);
           expect(api.desktop.argsOf('background_action').last, {
             'action': 'start',
+            'move_relay': true,
           });
           expect(_key('host-other-relay'), findsNothing);
         }

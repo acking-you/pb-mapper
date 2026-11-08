@@ -336,8 +336,22 @@ void main() {
         {'action': 'status'},
       ]);
 
+      // A plain Start, from a card that did not know yet, is refused by Rust
+      // before anything moves, and the card then says where it is.
+      await store.resumeHost();
+      expect(api.argsOf('background_action').last, {
+        'action': 'start',
+        'move_relay': false,
+      });
+      expect(view().sharing, isFalse);
+      expect(view().error, isNull);
+      expect(view().otherRelay, 'old-relay:7666');
+
       await store.shareOnCurrentRelay();
-      expect(api.argsOf('background_action').last, {'action': 'start'});
+      expect(api.argsOf('background_action').last, {
+        'action': 'start',
+        'move_relay': true,
+      });
       expect(view().sharing, isTrue);
       expect(view().otherRelay, isNull);
       expect(view().invitation, FakeDesktopApi.movedInvitation);
