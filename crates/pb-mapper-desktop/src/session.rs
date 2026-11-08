@@ -6,7 +6,7 @@
 //! B-send writes the final `Stopped` when the session ends for a reason the
 //! viewer should hear.
 use crate::{
-    QualityPreset, VideoCodec, VideoLimits,
+    QualityPreset, VideoCodec, VideoLimits, VideoSize,
     credit::CreditLedger,
     idr::IdrReason,
     lane::LaneCommand,
@@ -158,6 +158,15 @@ impl Session {
     /// The preset the viewer chose last.
     pub fn quality(&self) -> QualityPreset {
         self.qos.lock().preset()
+    }
+
+    /// The size the encoder is expected to produce, told before thread C
+    /// starts: the first IDR gets that size's budget rather than the viewer's
+    /// bounds', and the first unit's size corrects it, as every later one does.
+    pub fn expect_video_size(&self, video: VideoSize) {
+        self.update_qos(Instant::now(), |qos| {
+            qos.set_video_size(video.width, video.height);
+        });
     }
 
     /// Change the controller and publish its targets to C. The targets are

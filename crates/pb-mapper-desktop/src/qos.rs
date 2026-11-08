@@ -120,6 +120,32 @@ fn pixel_scale(width: u32, height: u32) -> f64 {
         .clamp(PIXEL_SCALE_MIN, PIXEL_SCALE_MAX)
 }
 
+/// The size the hardware encoder makes of a `width` × `height` display for a
+/// viewer's bounds: fitted inside them, keeping its aspect ratio, never
+/// upscaled, and even, as NV12 needs. A session's bits per frame start from it.
+pub(crate) fn scaled_size(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
+    // Integer arithmetic avoids rounding beyond the renderer's bounds; at most
+    // one source edge pixel is lost to rounding. A degenerate display a
+    // backend reports must not divide by zero.
+    let (width, height) = (width.max(1), height.max(1));
+    let target_width = width.min(max_width);
+    let target_height = height.min(max_height);
+    let (width, height) = if u64::from(target_width) * u64::from(height)
+        <= u64::from(target_height) * u64::from(width)
+    {
+        (
+            target_width,
+            (u64::from(height) * u64::from(target_width) / u64::from(width)) as u32,
+        )
+    } else {
+        (
+            (u64::from(width) * u64::from(target_height) / u64::from(height)) as u32,
+            target_height,
+        )
+    };
+    ((width & !1).max(2), (height & !1).max(2))
+}
+
 /// What thread C is asked for, published after every change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TargetValues {
@@ -215,6 +241,9 @@ pub(crate) struct Qos {
     adaptation: Adaptation,
 }
 impl Qos {
+    /// Bits per frame start at the viewer's bounds, until `set_video_size`
+    /// says what the encoder produces: the host's expectation before the first
+    /// unit, then each unit's own size.
     pub fn new(
         limits: VideoLimits,
         codec: VideoCodec,
@@ -231,7 +260,6 @@ impl Qos {
             normal_fps: 1,
             ceiling_fps: 1,
             scale: 1.0,
-            // Until the first unit says what the encoded size is.
             pixel_scale: pixel_scale(limits.max_width, limits.max_height),
             fps: 1,
             quick: 0,
@@ -915,6 +943,14 @@ mod tests {
     }
 
     #[test]
+    fn gpu_output_dimensions_fit_renderer_without_upscaling() {
+        assert_eq!(scaled_size(2560, 1440, 1920, 1080), (1920, 1080));
+        assert_eq!(scaled_size(1280, 720, 1920, 1080), (1280, 720));
+        assert_eq!(scaled_size(3440, 1440, 1920, 1080), (1920, 802));
+        assert_eq!(scaled_size(1080, 1920, 1920, 1080), (606, 1080));
+    }
+
+    #[test]
     fn bits_per_frame_steps_and_one_way_latch() {
         let t0 = Instant::now();
         let s = |n: u64| t0 + Duration::from_secs(n);
@@ -938,6 +974,21 @@ mod tests {
         let auto = Qos::new(uhd, VideoCodec::H265, QualityPreset::Quality, false, t0);
         assert_eq!(auto.ceiling_fps, 30);
         assert_eq!((pixel_scale(7680, 4320), pixel_scale(640, 360)), (3.0, 0.4));
+        // The same bounds on a 1080p display encode 1080p: told so before the
+        // first unit, the first IDR is budgeted for that, not for the bounds,
+        // and a first unit of another size still corrects the budget.
+        let mut native = Qos::new(
+            VideoLimits { max_fps: 60, ..uhd },
+            VideoCodec::H264,
+            QualityPreset::Balanced,
+            false,
+            t0,
+        );
+        let (width, height) = scaled_size(1920, 1080, uhd.max_width, uhd.max_height);
+        native.set_video_size(width, height);
+        assert!((native.bpf - 66_667.0).abs() < 1.0);
+        native.set_video_size(3840, 2160);
+        assert!((native.bpf - 66_667.0 * 4f64.powf(0.75)).abs() < 1.0);
         let produced = |unique: u64, non_idr_frames: u64, non_idr_bytes: u64| ProducedSnapshot {
             frames: unique,
             unique,
