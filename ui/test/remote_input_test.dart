@@ -213,14 +213,14 @@ void main() {
   );
 
   testWidgets(
-    "the viewer's cursor is its own: no wait hands it back to an old report, "
-    'a new report or a hidden cursor is followed, and every report while '
-    'viewing only',
+    "the viewer's cursor is its own: no wait and no reopened viewer hands it "
+    'back to an old report, a new report or a hidden cursor is followed, and '
+    'every report while viewing only',
     (tester) async {
       final h = await ViewerHarness.live(tester);
       // The picture is 1920 px wide: a finger's pixel is a display pixel.
       h.viewport.layout(const Size(1920, 1080));
-      final machine = h.machine, input = h.input;
+      var machine = h.machine, input = h.input;
       Future<void> report(int x, int y, {bool visible = true}) async {
         h.api.viewValue = DesktopView(
           generation: 1,
@@ -256,6 +256,19 @@ void main() {
       h.sent();
       machine.down(2, const Offset(400, 100), _ms(3000));
       machine.up(2, const Offset(400, 100), _ms(3050));
+      expect(h.sent(), [
+        ['move 780,270', 'left↓', 'left↑'],
+      ]);
+
+      // Back, and the viewer opened again over the session, whose last
+      // report is still the one from before the stroke: it resumes there.
+      h.reopen();
+      machine = h.machine;
+      input = h.input;
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(input.cursor.dx * 1920, closeTo(780, 0.01));
+      machine.down(2, const Offset(400, 100), _ms(4000));
+      machine.up(2, const Offset(400, 100), _ms(4050));
       expect(h.sent(), [
         ['move 780,270', 'left↓', 'left↑'],
       ]);

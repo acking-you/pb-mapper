@@ -45,10 +45,9 @@ const _backspacesPerSequence = kSequenceMax ~/ 2;
 /// — a pressed button, a three-finger scroll's modifiers, a repeating key,
 /// a physical key — is tracked, and [releaseAll] gives it back.
 ///
-/// It also owns the remote cursor as this viewer knows it (D12): its own,
-/// which strokes, taps and the mouse move and which the cursor layer draws.
-/// The host's reports never take it back on a timer; it follows one only
-/// as RustDesk's viewer does, see [_onHostCursor].
+/// The cursor it moves is the session's ([DesktopStore.cursor], D12), not
+/// this viewer's: strokes, taps and the mouse move it, and a viewer opened
+/// again resumes it.
 final class RemoteInput implements RemotePointerSink {
   /// [onLocalCancel] cancels the local gesture in progress (the touch
   /// machine's `cancel`). [clock] is the viewer's one timeline for events
@@ -64,10 +63,8 @@ final class RemoteInput implements RemotePointerSink {
        clock = clock ?? _stopwatch() {
     _desktop.session.addListener(_onState);
     _desktop.geometry.addListener(_onState);
-    _desktop.hostCursor.addListener(_onHostCursor);
     _epoch = _desktop.geometry.value?.epoch;
     _ready.value = _live != null;
-    _onHostCursor();
   }
 
   static Duration Function() _stopwatch() {
@@ -81,18 +78,7 @@ final class RemoteInput implements RemotePointerSink {
   final Duration Function() clock;
 
   final _ready = ValueNotifier(false);
-  final _cursorChanges = _Notifier();
   int? _epoch;
-
-  Offset _cursor = const Offset(0.5, 0.5);
-
-  /// The arrow is drawn: the host showed its cursor, or this viewer moved
-  /// it since the host last said it is hidden.
-  bool _shown = false;
-
-  /// The last host report seen, and the geometry epoch it was seen in.
-  Offset? _report;
-  int? _reportEpoch;
 
   /// Physical keys whose down is held on the host, and those whose down
   /// went as a whole tap, so their up sends nothing.
@@ -113,66 +99,19 @@ final class RemoteInput implements RemotePointerSink {
   ValueListenable<bool> get ready => _ready;
 
   /// Fires when the cursor moves, shows or hides.
-  Listenable get cursorChanges => _cursorChanges;
+  Listenable get cursorChanges => _desktop.cursor;
 
   /// Where taps click and strokes start, normalised to the display.
   @override
-  Offset get cursor => _cursor;
+  Offset get cursor => _desktop.cursor.position;
 
   /// A local move: the arrow shows here.
   @override
-  set cursor(Offset normalized) {
-    if (normalized == _cursor && _shown) return;
-    _cursor = normalized;
-    _shown = true;
-    _cursorChanges.notify();
-  }
+  set cursor(Offset normalized) => _desktop.cursor.moveTo(normalized);
 
   /// Where the cursor layer draws the arrow; null while the host hides its
   /// cursor and this viewer has not moved it since.
-  Offset? get shownCursor => _shown ? _cursor : null;
-
-  /// A host report is followed only where it tells this viewer something
-  /// its own cursor cannot know (D12): the first of a connection or a
-  /// display, every one while viewing only, and else a new report more
-  /// than a pixel from this cursor — the remote user, a program or a clamp
-  /// moved it. The host never reports a position it injected for this
-  /// viewer, so an unchanged report is old news, however late it is read.
-  void _onHostCursor() {
-    final report = _desktop.hostCursor.value;
-    final g = _desktop.geometry.value;
-    if (report == null) {
-      // Hidden, off the shared display, or not reported yet.
-      _report = null;
-      if (_shown) {
-        _shown = false;
-        _cursorChanges.notify();
-      }
-      return;
-    }
-    final first = g == null || g.epoch != _reportEpoch;
-    final changed = first || report != _report;
-    _report = report;
-    _reportEpoch = g?.epoch;
-    final follow =
-        first ||
-        !_desktop.session.value.controlling ||
-        (changed && _apart(report, g));
-    if (!follow && _shown) return;
-    if (follow) _cursor = report;
-    _shown = true;
-    _cursorChanges.notify();
-  }
-
-  /// More than a display pixel from the pixel this cursor is sent as: the
-  /// host reports whole pixels, and this cursor keeps the fraction.
-  bool _apart(Offset report, DesktopGeometry? g) {
-    if (g == null) return true;
-    bool far(double reported, double local, int size) =>
-        ((reported * size).round() - (local * size).floor()).abs() > 1;
-    return far(report.dx, _cursor.dx, g.displayWidth) ||
-        far(report.dy, _cursor.dy, g.displayHeight);
-  }
+  Offset? get shownCursor => _desktop.cursor.shown;
 
   // -------------------------------------------------------------- pointer
 
@@ -441,9 +380,7 @@ final class RemoteInput implements RemotePointerSink {
     releaseAll();
     _desktop.session.removeListener(_onState);
     _desktop.geometry.removeListener(_onState);
-    _desktop.hostCursor.removeListener(_onHostCursor);
     _ready.dispose();
-    _cursorChanges.dispose();
   }
 
   // ---------------------------------------------------------------- inner
@@ -574,8 +511,4 @@ final class RemoteInput implements RemotePointerSink {
       : rune < 0x10000
       ? 3
       : 4;
-}
-
-class _Notifier extends ChangeNotifier {
-  void notify() => notifyListeners();
 }

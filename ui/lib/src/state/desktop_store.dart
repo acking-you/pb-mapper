@@ -99,6 +99,92 @@ class _SampledNotifier<T> extends ValueNotifier<T> {
   }
 }
 
+/// The remote cursor as this viewer knows it (D12): its own, which strokes,
+/// taps and the mouse move, and which the cursor layer draws. The store
+/// owns it for the session, not the viewer on screen, so a viewer opened
+/// again after Back resumes it where the last one left it.
+///
+/// The host's reports never take it back on a timer. One is followed only
+/// where it tells this viewer something its own cursor cannot know: the
+/// first of a connection or a display, every one while viewing only, and
+/// else a new report more than a pixel from this cursor — the remote user,
+/// a program or a clamp moved it. The host never reports a position it
+/// injected for this viewer, so a report already seen is old news, however
+/// late a viewer comes to it.
+final class DesktopCursor extends ChangeNotifier {
+  Offset _position = const Offset(0.5, 0.5);
+
+  /// The arrow is drawn: the host showed its cursor, or this viewer moved
+  /// it since the host last said it is hidden.
+  bool _shown = false;
+
+  /// The last host report seen, and the geometry epoch of the last one
+  /// that was not hidden.
+  Offset? _report;
+  int? _reportEpoch;
+
+  /// Where taps click and strokes start, normalised to the display.
+  Offset get position => _position;
+
+  /// Where the arrow is drawn; null while the host hides its cursor and
+  /// this viewer has not moved it since.
+  Offset? get shown => _shown ? _position : null;
+
+  /// A local move: the arrow shows here.
+  void moveTo(Offset normalized) {
+    if (normalized == _position && _shown) return;
+    _position = normalized;
+    _shown = true;
+    notifyListeners();
+  }
+
+  /// The host's cursor as the store last read it, null while hidden or
+  /// unknown, read against [g]. True when what is drawn changed.
+  bool _onReport(
+    Offset? report,
+    DesktopGeometry? g, {
+    required bool controlling,
+  }) {
+    if (report == _report) return false;
+    _report = report;
+    if (report == null) {
+      // Hidden, off the shared display, or not reported yet.
+      if (!_shown) return false;
+      _shown = false;
+      notifyListeners();
+      return true;
+    }
+    final first = g == null || g.epoch != _reportEpoch;
+    _reportEpoch = g?.epoch;
+    final follow = first || !controlling || _apart(report, g);
+    if (!follow && _shown) return false;
+    if (follow) _position = report;
+    _shown = true;
+    notifyListeners();
+    return true;
+  }
+
+  /// More than a display pixel from the pixel this cursor is sent as: the
+  /// host reports whole pixels, and this cursor keeps the fraction.
+  bool _apart(Offset report, DesktopGeometry? g) {
+    if (g == null) return true;
+    bool far(double reported, double local, int size) =>
+        ((reported * size).round() - (local * size).floor()).abs() > 1;
+    return far(report.dx, _position.dx, g.displayWidth) ||
+        far(report.dy, _position.dy, g.displayHeight);
+  }
+
+  /// Another computer: nothing of the last one's cursor carries over.
+  void _reset() {
+    _position = const Offset(0.5, 0.5);
+    _report = null;
+    _reportEpoch = null;
+    if (!_shown) return;
+    _shown = false;
+    notifyListeners();
+  }
+}
+
 /// Owns the desktop host and the viewer session, independently of
 /// navigation. It is not a `ChangeNotifier`: each concern is its own
 /// [ValueListenable], which changes only when its value does (D14). Nothing
@@ -138,7 +224,7 @@ class DesktopStore {
     _schedulePolling,
   );
   final _quality = ValueNotifier(DesktopQuality.balanced);
-  final _hostCursor = ValueNotifier<Offset?>(null);
+  final _cursor = DesktopCursor();
   final _decoders = ValueNotifier<DesktopDecoders?>(null);
 
   ValueListenable<DesktopHostView> get hostView => _hostView;
@@ -162,11 +248,10 @@ class DesktopStore {
   ValueListenable<DesktopDecoderStats?> get decoderStats => _decoder;
   ValueListenable<DesktopQuality> get quality => _quality;
 
-  /// The host's cursor, normalised to its display; null while hidden,
-  /// unknown, of another generation than [geometry], or not yet reported by
-  /// this connection. The view leaf publishes it, read every rendered frame
-  /// and every 16 ms (D11).
-  ValueListenable<Offset?> get hostCursor => _hostCursor;
+  /// The remote cursor, the session's: what the viewer moves, and the
+  /// host's reports where they say something new. The view leaf reports
+  /// them, read every rendered frame and every 16 ms (D11).
+  DesktopCursor get cursor => _cursor;
 
   /// What this device decodes natively, probed once, at the first connect
   /// (I4); null until then. H.265 leaves it for the rest of the run once a
@@ -950,9 +1035,11 @@ class DesktopStore {
     _cancelControlCooldown();
     _quality.value = target.quality;
     if (!sameComputer) {
-      // Another computer's last picture must not show under this one.
+      // Another computer's last picture and cursor must not carry over to
+      // this one.
       _hasPicture = false;
       _releaseMedia();
+      _cursor._reset();
     }
     _attemptSerial = serial;
     _setup = DesktopSetupStep.finding;
@@ -1373,17 +1460,15 @@ class DesktopStore {
   }
 
   /// The leaf runs every rendered frame, and from a timer at the rate the
-  /// host samples its cursor. A cursor change publishes [hostCursor], whose
-  /// repaint asks for the frame that draws it. A change of generation,
-  /// state or flags re-reads the status, which publishes it.
+  /// host samples its cursor. A report that moves [cursor] repaints it, and
+  /// asks for the frame that draws it. A change of generation, state or
+  /// flags re-reads the status, which publishes it.
   void _acceptView(DesktopView? view, {required bool inFrame}) {
     final previous = _view;
     _view = view;
-    final shown = _hostCursor.value;
-    _publishCursor();
     // After paint a repaint asks for no frame: ask for the one that draws
     // the new cursor.
-    if (inFrame && _hostCursor.value != shown) {
+    if (_publishCursor() && inFrame) {
       SchedulerBinding.instance.scheduleFrame();
     }
     if (view == null) return;
@@ -1415,11 +1500,14 @@ class DesktopStore {
     }
   }
 
-  /// Normalises the last leaf read against [geometry]: the one place the
-  /// host's cursor meets the display it moves on.
-  void _publishCursor() {
+  /// Normalises the last leaf read against [geometry], the one place the
+  /// host's cursor meets the display it moves on, and reports it to
+  /// [cursor]: null while hidden, unknown, of another generation than
+  /// [geometry], or not yet reported by this connection. True when what
+  /// [cursor] draws changed.
+  bool _publishCursor() {
     final view = _view, g = _geometry.value;
-    _hostCursor.value =
+    final report =
         view == null ||
             g == null ||
             !view.cursorVisible ||
@@ -1431,6 +1519,11 @@ class DesktopStore {
             (view.cursorX / g.displayWidth).clamp(0.0, 1.0),
             (view.cursorY / g.displayHeight).clamp(0.0, 1.0),
           );
+    return _cursor._onReport(
+      report,
+      g,
+      controlling: _session.value.controlling,
+    );
   }
 
   int _geometryEpoch = 0;
@@ -2122,7 +2215,7 @@ class DesktopStore {
     _stats.dispose();
     _decoder.dispose();
     _quality.dispose();
-    _hostCursor.dispose();
+    _cursor.dispose();
     _decoders.dispose();
   }
 }

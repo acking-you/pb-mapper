@@ -14,10 +14,14 @@ import 'fake_desktop_api.dart';
 class ViewerHarness {
   ViewerHarness._(this.api, this.store, this._demand, {required TouchMode mode})
     : touchMode = ValueNotifier(mode) {
-    input = RemoteInput(
+    _open();
+  }
+
+  void _open() {
+    final input = this.input = RemoteInput(
       desktop: store,
       latch: latch,
-      onLocalCancel: () => machine.cancel(input.clock()),
+      onLocalCancel: () => machine.cancel(this.input.clock()),
     );
     machine = TouchGestureMachine(
       sink: input,
@@ -26,6 +30,14 @@ class ViewerHarness {
       interactive: () => input.ready.value,
       haptic: (_) {},
     );
+  }
+
+  /// The viewer closes and opens again over the same session, as Back and
+  /// reopening it do: a new input core and touch machine.
+  void reopen() {
+    input.dispose();
+    machine.dispose();
+    _open();
   }
 
   static Future<ViewerHarness> live(
@@ -53,8 +65,8 @@ class ViewerHarness {
   final latch = ModifierLatch();
   final viewport = RemoteViewport();
   final ValueNotifier<TouchMode> touchMode;
-  late final RemoteInput input;
-  late final TouchGestureMachine machine;
+  late RemoteInput input;
+  late TouchGestureMachine machine;
 
   int _seen = 0;
 

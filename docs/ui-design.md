@@ -360,12 +360,14 @@ chroma, resolution) small and translucent at the picture's top right — left
 of the quality panel while that is open, under the minimap on a phone — and
 takes no touch, so a stroke may start under it.
 
-**The remote cursor** is the viewer's own (`remote_input.dart`): strokes,
-taps and the mouse move it, the arrow is drawn there, and no wait hands it
-back to the host. It follows a host report only where the report says
-something new: the first one of a connection or a display, any report while
-viewing only, and else a report that changed and lies more than a pixel from
-where this viewer put it — the remote user, a program or a clamp moved it.
+**The remote cursor** is the viewer's own: strokes, taps and the mouse move
+it, the arrow is drawn there, and no wait hands it back to the host. The
+store keeps it for the session (`DesktopCursor`), not the viewer on screen,
+so a viewer opened again after Back resumes it where the last one left it.
+It follows a host report only where the report says something new: the
+first one of a connection or a display, any report while viewing only, and
+else a report that changed and lies more than a pixel from where this
+viewer put it — the remote user, a program or a clamp moved it.
 The host reports nothing it injected for this viewer, so a lagging report
 can no longer pull the arrow, or the next stroke, back. A hidden cursor
 hides the arrow until this viewer moves it. A last move refused because the
@@ -586,7 +588,8 @@ CPU and memory without starting tunnels or reading settings.
   live), `desktop_store_test.dart` (the H.265 offer and its fallback, the
   choices that connect again, the last move kept for a fresh picture), and
   the input core's pure tests — `touch_gesture_test.dart`,
-  `remote_input_test.dart` (the cursor stays the viewer's own),
+  `remote_input_test.dart` (the cursor stays the viewer's own, a reopened
+  viewer's too),
   `remote_text_input_test.dart`, `remote_surface_test.dart`.
 
 To look at the design without a device, render the pages with their real
