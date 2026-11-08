@@ -124,7 +124,7 @@ Future<void> offerCarrierMove(
       actions: [
         TextButton(
           onPressed: () => Navigator.of(c).pop(false),
-          child: Text(l10n.carrierMoveLater),
+          child: Text(l10n.later),
         ),
         FilledButton(
           key: const Key('carrier-move-now'),
@@ -146,7 +146,7 @@ Future<void> offerCarrierMove(
   } else {
     showToast(
       here,
-      l10n.carrierMoveFailed(failed.join(', ')),
+      l10n.tunnelsRestartFailed(failed.join(', ')),
       kind: ToastKind.warning,
     );
   }
