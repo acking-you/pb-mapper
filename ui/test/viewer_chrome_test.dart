@@ -831,7 +831,7 @@ void main() {
 
   testWidgets(
     "a tablet's rotation keeps the zoom and the point at the centre, though "
-    'the gutters become bars',
+    'the gutters become bars, however short',
     (tester) async {
       _size(tester, const Size(1280, 800));
       final api = FakeDesktopApi();
@@ -866,6 +866,8 @@ void main() {
 
       for (final (size, framed) in [
         (const Size(800, 1280), true),
+        // Bars no taller than the quality button: it shrinks to fit them.
+        (const Size(1200, 830), true),
         (const Size(1280, 800), false),
       ]) {
         tester.view.physicalSize = size;
