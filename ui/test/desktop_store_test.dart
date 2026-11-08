@@ -336,8 +336,8 @@ void main() {
         {'action': 'status'},
       ]);
 
-      // A plain Start, from a card that did not know yet, is refused by Rust
-      // before anything moves, and the card then says where it is.
+      // A plain Start never moves it: the refusal (Rust's guard, which
+      // resume_options' test covers) changes nothing and is not an error.
       await store.resumeHost();
       expect(api.argsOf('background_action').last, {
         'action': 'start',
