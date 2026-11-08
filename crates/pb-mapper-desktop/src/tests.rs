@@ -71,6 +71,7 @@ async fn blocked_video_does_not_block_local_stop() {
             display_id: 1,
             allow_control: false,
             allow_direct: false,
+            lan_first: true,
         },
         Arc::new(move || {
             Ok(Box::new(LargeFrames {

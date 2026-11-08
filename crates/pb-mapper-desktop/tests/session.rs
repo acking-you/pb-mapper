@@ -148,6 +148,7 @@ async fn encoded_host(
             display_id: 1,
             allow_control: true,
             allow_direct: false,
+            lan_first: true,
         },
         Arc::new(move || {
             Ok(Box::new(Encoded {
@@ -332,6 +333,7 @@ async fn encrypted_desktop_direct_and_relay_enforce_grants_and_owned_teardown() 
                 display_id: 1,
                 allow_control: true,
                 allow_direct: true,
+                lan_first: true,
             },
             Arc::new(move || Ok(Box::new(Desktop(backend.clone())))),
         )

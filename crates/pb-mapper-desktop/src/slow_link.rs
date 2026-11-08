@@ -349,6 +349,7 @@ impl Rig {
                 display_id: 1,
                 allow_control: true,
                 allow_direct: false,
+                lan_first: true,
             },
             Arc::new(move || {
                 Ok(Box::new(SyntheticEncoder {

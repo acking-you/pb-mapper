@@ -40,6 +40,10 @@ pub struct HostOptions {
     pub display_id: u32,
     pub allow_control: bool,
     pub allow_direct: bool,
+    /// The registration's [`RegisterOptions::lan_first`]: probe a viewer's
+    /// addresses on a shared local network first. Which path a session
+    /// takes is the viewer's choice, under its own `ConnectOptions`.
+    pub lan_first: bool,
 }
 
 pub struct Host {
@@ -117,6 +121,7 @@ impl Host {
                 },
                 RegisterOptions {
                     allow_direct: options.allow_direct,
+                    lan_first: options.lan_first,
                     ..Default::default()
                 },
             )
@@ -514,6 +519,7 @@ mod trust_tests {
             display_id: 1,
             allow_control: false,
             allow_direct: false,
+            lan_first: true,
         }
     }
 

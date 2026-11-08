@@ -406,6 +406,7 @@ impl Supervisor {
                     display_id,
                     allow_control: settings.allow_control,
                     allow_direct: settings.allow_direct,
+                    lan_first: saved.options.lan_first,
                 },
                 Arc::new(move || super::super::client::service_backend(display_id)),
                 None,
@@ -613,6 +614,7 @@ mod tests {
                 allow_direct: false,
                 auto_start: true,
             },
+            lan_first: true,
         }
     }
     fn state(saved: Saved) -> Supervisor {
@@ -775,6 +777,7 @@ mod tests {
                     display_id: 1,
                     allow_control: false,
                     allow_direct: false,
+                    lan_first: true,
                 },
                 Arc::new(|| Ok(Box::new(Pixel))),
                 None,
@@ -922,6 +925,7 @@ mod tests {
                     display_id: 1,
                     allow_control: false,
                     allow_direct: false,
+                    lan_first: true,
                 },
                 Arc::new(|| Err(error("capture must never start in this test"))),
                 None,

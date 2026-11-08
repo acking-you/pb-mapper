@@ -35,11 +35,12 @@ pub(crate) fn record_input_failure(detail: &str) {
 /// listens on other pipes, so it is offered an update instead of being used.
 /// Any change to a request or a response bumps it, with both pipe names.
 /// 3: `VideoFormat` carries the encoder's GOP. 4: `Request::Input` carries
-/// the whole expected desktop.
-pub const HELPER_PROTOCOL: u32 = 4;
+/// the whole expected desktop. 5: the background host's `Options` carry
+/// `lan_first`.
+pub const HELPER_PROTOCOL: u32 = 5;
 
 const SERVICE: &str = "PbMapperDesktop";
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v4";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v5";
 const EXECUTABLE: &str = "pb-mapper-desktop-helper.exe";
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// The longest a helper drain may wait for encoder output.
@@ -371,9 +372,12 @@ mod readiness_tests {
         assert!(!serde_json::to_string(&old).unwrap().contains("protocol"));
         assert!(update_required(old.protocol(), true, || true));
         assert!(update_required(old.protocol(), false, || false));
-        // Protocol 3 sends input with its generation alone: it is outdated too.
-        let previous = installation(r#""schema":2,"protocol":3,"#).unwrap();
-        assert!(update_required(previous.protocol(), true, || true));
+        // Protocol 3 sends input with its generation alone, and protocol 4
+        // refuses the background host's `lan_first`: both are outdated too.
+        for outdated in [3, 4] {
+            let previous = installation(&format!(r#""schema":2,"protocol":{outdated},"#)).unwrap();
+            assert!(update_required(previous.protocol(), true, || true));
+        }
         let current =
             installation(&format!(r#""schema":2,"protocol":{HELPER_PROTOCOL},"#)).unwrap();
         assert_eq!(current.protocol(), HELPER_PROTOCOL);

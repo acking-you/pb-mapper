@@ -732,6 +732,7 @@ mod windows_test {
                         display_id: id,
                         allow_control: true,
                         allow_direct: false,
+                        lan_first: true,
                     },
                     Arc::new(move || {
                         Ok(Box::new(Guarded {

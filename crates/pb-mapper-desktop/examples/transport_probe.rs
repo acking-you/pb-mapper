@@ -140,6 +140,7 @@ async fn main() -> Result<()> {
                 display_id: 0,
                 allow_control: false,
                 allow_direct: false,
+                lan_first: true,
             },
         )
         .await?;
