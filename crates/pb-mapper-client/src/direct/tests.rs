@@ -182,12 +182,23 @@ impl Share {
     }
 }
 
+/// No handshake gets across: the session takes the relay, which carries and
+/// counts its bytes. The share is on a LAN of this end, by strong evidence
+/// (see the next test), so the miss is reported with where it went instead.
 #[tokio::test]
 async fn blocked_quic_selects_relay_and_dials_backend_once() {
     let share = Share::start("fallback").await;
-    let network = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+    let mut network = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+    Arc::get_mut(&mut network).unwrap().interfaces =
+        InterfaceSource::Fixed(Interfaces::new(vec![Interface::new(
+            "lan0",
+            InterfaceTier::Lan,
+            [("127.0.0.2".parse().unwrap(), 8)],
+        )]));
     network.block_quic();
-    let consumer = share.consumer(network, Diagnostics::default());
+    let diagnostics = Diagnostics::default();
+    let mut events = diagnostics.subscribe();
+    let consumer = share.consumer(network, diagnostics.clone());
     let prepared = tokio::time::timeout(
         Duration::from_secs(8),
         consumer.prepare("fallback", Instant::now() + Duration::from_secs(8)),
@@ -232,6 +243,26 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
     .await
     .expect("snapshot must drain beyond the control channel capacity");
     let _forward = share.forward(prepared).await;
+    let missed = loop {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let TunnelEventKind::LanMissed { evidence, took } = event.kind {
+            break (evidence, took);
+        }
+    };
+    assert_eq!(missed, (LanEvidence::PublicIpSubnet, None));
+    let metrics = diagnostics.metrics(RelayTransport::Tcp);
+    assert_eq!((metrics.lan.detected, metrics.lan.missed), (1, 1));
+    assert_eq!(
+        metrics.traffic.relay,
+        ByteCount {
+            sent: 12,
+            received: 12
+        }
+    );
     share.stop().await;
 }
 
@@ -320,52 +351,6 @@ async fn a_lan_is_dialed_on_its_first_answer_and_reported_while_open() {
     .await
     .unwrap();
     assert_eq!(read().active_lan, 0);
-    share.stop().await;
-}
-
-/// Strong evidence of a LAN that no handshake gets across: the miss says
-/// the session took the relay, which carries and counts its bytes.
-#[tokio::test]
-async fn a_missed_lan_is_reported_and_the_relay_counts_the_session() {
-    let share = Share::start("missed").await;
-    let mut network = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
-    Arc::get_mut(&mut network).unwrap().interfaces =
-        InterfaceSource::Fixed(Interfaces::new(vec![Interface::new(
-            "lan0",
-            InterfaceTier::Lan,
-            [("127.0.0.2".parse().unwrap(), 8)],
-        )]));
-    network.block_quic();
-    let diagnostics = Diagnostics::default();
-    let mut events = diagnostics.subscribe();
-    let consumer = share.consumer(network, diagnostics.clone());
-    let prepared = consumer
-        .prepare("missed", Instant::now() + Duration::from_secs(8))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(prepared.path, DataPath::Relay { .. }));
-    let _forward = share.forward(prepared).await;
-    let missed = loop {
-        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        if let TunnelEventKind::LanMissed { evidence, took } = event.kind {
-            break (evidence, took);
-        }
-    };
-    assert_eq!(missed, (LanEvidence::PublicIpSubnet, None));
-    let metrics = diagnostics.metrics(RelayTransport::Tcp);
-    assert_eq!((metrics.lan.detected, metrics.lan.missed), (1, 1));
-    assert_eq!(
-        metrics.traffic.relay,
-        ByteCount {
-            sent: 12,
-            received: 12
-        }
-    );
     share.stop().await;
 }
 
