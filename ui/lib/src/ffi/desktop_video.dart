@@ -31,7 +31,8 @@ typedef DesktopTextureFactory =
 bool get nativeDesktopVideo => Platform.isAndroid || Platform.isWindows;
 
 /// The channel-backed texture (`pb_mapper/desktop_video` v2). [decoderHints]
-/// false configures Android's decoder without its low-latency hint; only the
+/// false configures Android's decoder without any of its decoder hints (low
+/// latency, realtime priority, operating rate, frame rate); only the
 /// acceptance tool's case F sends it.
 Future<DesktopVideoTexture> createDesktopVideoTexture({
   required int instanceToken,
