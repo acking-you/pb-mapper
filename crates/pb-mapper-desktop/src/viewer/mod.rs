@@ -1472,7 +1472,7 @@ mod tests {
     async fn host_stats_reach_the_viewer_status() {
         let (viewer, mut host, _) = connect(accepted()).await;
         let viewer = viewer.unwrap();
-        let stats = |skipped_ticks| HostMessage::Stats {
+        let stats = |skipped_ticks, keyframes| HostMessage::Stats {
             capture_fps: 59.5,
             pace_fps: 60,
             target_fps: 60,
@@ -1487,22 +1487,23 @@ mod tests {
             encoder_dwell_ms: Some(3),
             dropped_frames: 0,
             skipped_ticks,
-            keyframes: 1,
+            keyframes,
             frames: 60,
             bytes: 500_000,
             adaptation: crate::Adaptation::Steady,
             rate_model: crate::RateModel::Nominal,
             gop: u32::MAX,
         };
-        let skipped = || viewer.status().stats.skipped_per_s;
-        send(&mut host, stats(10), None).await;
-        eventually(|| viewer.status().stats.sent_bitrate > 0).await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        // 30 more in at least 500 ms.
-        send(&mut host, stats(40), None).await;
-        eventually(|| skipped() <= 60.5).await;
+        let keyframes = || viewer.status().stats.keyframes;
+        send(&mut host, stats(10, 1), None).await;
+        eventually(|| keyframes() == 1).await;
+        // 30 more right behind it, as a link that held the first delivers
+        // them: the host sent the two at least `STATS_INTERVAL` apart.
+        send(&mut host, stats(40, 2), None).await;
+        eventually(|| keyframes() == 2).await;
         let json = serde_json::to_value(viewer.status().stats).unwrap();
-        assert!(skipped() >= 30.0, "{}", skipped());
+        let skipped = json["skipped_per_s"].as_f64().unwrap();
+        assert!((15.0..=30.0).contains(&skipped), "{skipped}");
         assert_eq!(json["preset"], "balanced");
         assert_eq!(json["max_fps"], 60);
         assert_eq!(json["sent_bitrate"], 3_900_000);

@@ -933,7 +933,7 @@ numbers the UI, the acceptance tool and these docs use:
 | `presented_fps` | Accepted presentations per second |
 | `received_fps` | Non-duplicate video records per second |
 | `preset`, `max_fps` | The preset this session asked for, and its `limits.max_fps`, which bounds every preset's ceiling |
-| `skipped_per_s` | Host capture ticks skipped per second, for transport backpressure or a full encoder |
+| `skipped_per_s` | Host capture ticks skipped per second, for transport backpressure or a full encoder, between the last two `Stats`: over at least the host's 1 s interval, however close together they arrive, and never above `max_fps` |
 | `encoder_dwell_ms` | The host's median time a unit stays in its encoder, or the helper's, from submit to output as the encoder measures it, over the last second; null from a host that reports none |
 | `sent_bitrate` | What the host sent over the last second, in bit/s |
 | `ack_queue_ms` | The host's receipt-based queue delay (the ack queue under send credit) |
