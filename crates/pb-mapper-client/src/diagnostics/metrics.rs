@@ -14,7 +14,7 @@ use pb_mapper_protocol::forward::ForwardTotals;
 use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
 use tokio::sync::watch;
-use tokio::time::{Duration, Instant, Interval, MissedTickBehavior};
+use tokio::time::{Duration, Instant};
 
 /// Application bytes: what the local service and the peer exchanged, after
 /// decryption and without framing. `sent` went from this end's local side
@@ -194,8 +194,9 @@ pub struct TunnelMetricsStream {
     transport: RelayTransport,
     /// Gone once the tunnel has stopped.
     revision: Option<watch::Receiver<u64>>,
-    tick: Interval,
     every: Duration,
+    /// When the latest sample was taken: the period and the gap run from
+    /// it, whatever made it due.
     last: Option<Instant>,
     next: Next,
 }
@@ -219,16 +220,13 @@ impl TunnelMetricsStream {
         transport: RelayTransport,
         every: Duration,
     ) -> Self {
-        let every = every.clamp(MIN_GAP, MAX_EVERY);
+        // No timer is made here: this may be called outside a runtime.
         let revision = diagnostics.revision();
-        let mut tick = tokio::time::interval_at(Instant::now() + every, every);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         Self {
             diagnostics,
             transport,
             revision,
-            tick,
-            every,
+            every: every.clamp(MIN_GAP, MAX_EVERY),
             last: None,
             next: Next::First,
         }
@@ -245,9 +243,10 @@ impl TunnelMetricsStream {
                         self.next = Next::Due;
                         continue;
                     };
+                    let period = self.last.map_or_else(Instant::now, |at| at + self.every);
                     // The tunnel's end is a change too: it drops the sender.
                     tokio::select! {
-                        _ = self.tick.tick() => {}
+                        () = tokio::time::sleep_until(period) => {}
                         changed = revision.changed() => {
                             if changed.is_err() {
                                 self.revision = None;
@@ -272,8 +271,6 @@ impl TunnelMetricsStream {
     fn sample(&mut self) -> TunnelMetrics {
         let now = Instant::now();
         self.last = Some(now);
-        // The period runs from the latest sample, whatever made it due.
-        self.tick.reset_at(now + self.every);
         if let Some(revision) = &mut self.revision {
             revision.borrow_and_update();
         }
@@ -292,6 +289,13 @@ mod tests {
     use super::*;
     use crate::diagnostics::TunnelEventKind;
     use pb_mapper_protocol::direct::SessionPath;
+
+    /// Node opens a stream from its JavaScript thread, outside any runtime.
+    #[test]
+    fn a_stream_is_opened_without_a_runtime() {
+        let diagnostics = Diagnostics::default();
+        let _stream = diagnostics.subscribe_metrics(RelayTransport::Tcp, Duration::from_secs(1));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn sessions_and_their_bytes_count_on_their_path_until_the_stream_ends() {

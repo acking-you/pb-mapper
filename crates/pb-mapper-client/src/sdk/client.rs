@@ -161,15 +161,13 @@ impl Client {
     /// [`Self::relay_diagnostics`] at once, then every `every` (100 ms to an
     /// hour), for as long as this client or a clone of it is kept.
     pub fn subscribe_relay_metrics(&self, every: std::time::Duration) -> RelayMetricsStream {
-        let every = every.clamp(
-            std::time::Duration::from_millis(100),
-            std::time::Duration::from_secs(60 * 60),
-        );
-        let mut tick = tokio::time::interval(every);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         RelayMetricsStream {
             client: Arc::downgrade(&self.inner),
-            tick,
+            every: every.clamp(
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_secs(60 * 60),
+            ),
+            due: None,
         }
     }
 
@@ -651,15 +649,20 @@ impl Client {
 /// of that client is gone, the stream ends at its next tick.
 pub struct RelayMetricsStream {
     client: std::sync::Weak<ClientInner>,
-    tick: tokio::time::Interval,
+    every: std::time::Duration,
+    /// When the next sample is due; the first is due at once.
+    due: Option<tokio::time::Instant>,
 }
 
 impl RelayMetricsStream {
-    /// The next sample: the first at once, then one a period. `None` once
-    /// the client is gone. Cancel-safe.
+    /// The next sample: the first at once, then one a period after the
+    /// last. `None` once the client is gone. Cancel-safe.
     pub async fn recv(&mut self) -> Option<super::RelayDiagnostics> {
-        self.tick.tick().await;
+        if let Some(due) = self.due {
+            tokio::time::sleep_until(due).await;
+        }
         let client = self.client.upgrade()?;
+        self.due = Some(tokio::time::Instant::now() + self.every);
         Some(client.endpoint.relay_diagnostics().await)
     }
 }
