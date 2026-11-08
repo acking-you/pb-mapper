@@ -113,6 +113,11 @@ pub enum VideoCodec {
     #[default]
     Jpeg,
     H264,
+    /// H.265 Main, 4:2:0. Never in a viewer's `codecs`: an older host
+    /// rejects a value it does not know. A viewer that can decode it says so
+    /// with the `h265` capability, and only a host that can encode it answers
+    /// with it.
+    H265,
 }
 
 /// What a viewer asks the host to favour. Each preset maps to bitrate and
@@ -147,23 +152,60 @@ impl VideoLimits {
         }
         Ok(())
     }
-    /// The one place a viewer's limits are derived: 1920x1080 at the display's
-    /// refresh rate, at most 120 fps. Android always asks for 60: the mode a
+    /// A viewer's limits by default: 1080p at the display's refresh rate.
+    pub fn for_viewer(refresh_hz: f64) -> Self {
+        Self::choose(refresh_hz, Resolution::default(), None)
+    }
+    /// The one place a viewer's limits are derived: `resolution`'s bounds, at
+    /// `max_fps` when its user chose one (30..=120), else at the display's
+    /// refresh rate, at most 120 fps. Android then asks for 60: the mode a
     /// phone reports at connect may be a power-saving 30 or 48 Hz, and its
     /// presenter asks for the highest mode while the viewer shows. A refresh
     /// rate that is not finite and positive counts as 60 Hz.
-    pub fn for_viewer(refresh_hz: f64) -> Self {
-        let fps = if cfg!(target_os = "android") {
+    pub fn choose(refresh_hz: f64, resolution: Resolution, max_fps: Option<u32>) -> Self {
+        let fps = if let Some(fps) = max_fps {
+            fps.clamp(30, 120)
+        } else if cfg!(target_os = "android") {
             60
         } else if refresh_hz.is_finite() && refresh_hz > 0.0 {
             refresh_hz.round().clamp(30.0, 120.0) as u32
         } else {
             60
         };
+        let (max_width, max_height) = resolution.bounds();
         Self {
-            max_width: 1920,
-            max_height: 1080,
+            max_width,
+            max_height,
             max_fps: fps,
+        }
+    }
+}
+
+/// The largest picture a viewer asks for. The host keeps the display's
+/// aspect ratio inside these bounds and never upscales, so a smaller display
+/// is sent at its own size whatever is chosen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Resolution {
+    #[serde(rename = "720p")]
+    P720,
+    #[default]
+    #[serde(rename = "1080p")]
+    P1080,
+    #[serde(rename = "1440p")]
+    P1440,
+    /// The display's own size, up to 3840x2160.
+    #[serde(rename = "native")]
+    Native,
+}
+
+impl Resolution {
+    /// Its bounds, width by height.
+    pub fn bounds(self) -> (u32, u32) {
+        match self {
+            Self::P720 => (1280, 720),
+            Self::P1080 => (1920, 1080),
+            Self::P1440 => (2560, 1440),
+            Self::Native => (3840, 2160),
         }
     }
 }
