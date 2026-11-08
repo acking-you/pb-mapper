@@ -546,7 +546,7 @@ class TouchGestureMachine {
     _wheelFrom = t;
     final offset = stick.ball - stick.centre;
     double axis(double carried, double along) {
-      final rate = joystickRate(along);
+      final rate = _rate(along);
       return rate == 0 ? 0 : carried + rate * seconds;
     }
 
@@ -572,7 +572,7 @@ class TouchGestureMachine {
   /// none within the dead zone, then from [kJoystickMinRate] just past it
   /// up to [kJoystickMaxRate] at the ring, on a quadratic so a small push
   /// reads a page and a full one flies.
-  static double joystickRate(double offset) {
+  static double _rate(double offset) {
     final past = offset.abs() - kJoystickDeadZone;
     if (past <= 0) return 0;
     final u = math.min(past / (kJoystickRadius - kJoystickDeadZone), 1.0);

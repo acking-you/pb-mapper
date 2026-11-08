@@ -50,7 +50,7 @@ class QualityPanel extends StatelessWidget {
   /// The native decoder's figures; read only while this panel shows.
   final ValueListenable<DesktopDecoderStats?>? decoder;
 
-  static const width = 256.0;
+  static const _width = 256.0;
 
   static String _codec(String codec) => switch (codec) {
     'h264' => 'H.264',
@@ -82,7 +82,7 @@ class QualityPanel extends StatelessWidget {
         _ => null,
       };
       return Container(
-        width: width,
+        width: _width,
         decoration: BoxDecoration(
           color: ViewerPalette.panel,
           borderRadius: BorderRadius.circular(14),
@@ -142,8 +142,8 @@ class QualityPanel extends StatelessWidget {
     ),
   );
 
-  /// The way, with what it carries: a LAN or an internet direct path and
-  /// its address family, or the relay and its carrier.
+  /// The path in full: a LAN or an internet direct path with its address
+  /// family, or the relay with its carrier.
   static String _path(
     BuildContext context,
     DesktopSessionView s,
