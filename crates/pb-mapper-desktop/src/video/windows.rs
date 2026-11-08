@@ -8,7 +8,7 @@
 
 use crate::{
     Display, Result, VideoCodec, error,
-    qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN},
+    qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
     worker::H265_ENCODER_FAILED,
 };
 use std::{
@@ -744,27 +744,6 @@ fn probe_h265(adapter: &IDXGIAdapter1) -> Result<()> {
         8_000_000,
     )
     .map(drop)
-}
-
-fn scaled_size(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
-    // Integer arithmetic avoids rounding beyond the renderer's bounds. NV12
-    // needs even dimensions; at most one source edge pixel is lost to rounding.
-    let target_width = width.min(max_width);
-    let target_height = height.min(max_height);
-    let (width, height) = if u64::from(target_width) * u64::from(height)
-        <= u64::from(target_height) * u64::from(width)
-    {
-        (
-            target_width,
-            (u64::from(height) * u64::from(target_width) / u64::from(width)) as u32,
-        )
-    } else {
-        (
-            (u64::from(width) * u64::from(target_height) / u64::from(height)) as u32,
-            target_height,
-        )
-    };
-    ((width & !1).max(2), (height & !1).max(2))
 }
 
 /// Keep the first GOP candidate the encoder accepts and reads back unchanged.
@@ -1587,13 +1566,6 @@ impl ParameterSets {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn gpu_output_dimensions_fit_renderer_without_upscaling() {
-        assert_eq!(scaled_size(2560, 1440, 1920, 1080), (1920, 1080));
-        assert_eq!(scaled_size(1280, 720, 1920, 1080), (1280, 720));
-        assert_eq!(scaled_size(3440, 1440, 1920, 1080), (1920, 802));
-        assert_eq!(scaled_size(1080, 1920, 1920, 1080), (606, 1080));
-    }
     #[test]
     fn an_encoder_that_never_asks_for_input_is_blamed_not_capture() {
         let h265_failed = |asked, image| {

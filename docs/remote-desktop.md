@@ -755,10 +755,12 @@ otherwise it chooses as before, H.264 when offered, else JPEG. `h265` in
 and this one still connect to each other, on H.264.
 
 The host asks the session's own backend. Thread C builds it as soon as the
-viewer holds the slot, and `Accepted` waits for its answer, at most 3 s (the
-viewer waits 5 s for `Accepted`); a later answer leaves that session on H.264.
-A viewer that does not offer H.265 hears `Accepted` at once, as before. The
-Windows backend probes the GPU that drives its display, by adapter LUID, once
+viewer holds the slot, and `Accepted` waits for its answers, at most 3 s in
+all (the viewer waits 5 s for `Accepted`): first the display it captures,
+which every viewer waits for and which sizes the first IDR's budget (see
+[QoS](#qos-frame-rate-and-bits-per-frame)), then whether it encodes H.265,
+which only a viewer that offers H.265 waits for. A later answer leaves that
+session on H.264. The Windows backend probes the GPU that drives its display, by adapter LUID, once
 per process: it enumerates hardware HEVC encoder MFTs for that adapter,
 activates the first that takes this pipeline's settings, with Main 4:2:0
 output and NV12 input at 1920×1080@60, and starts it streaming without
@@ -866,7 +868,12 @@ the picture changed (at least six unique frames), and ×0.95, ×0.90, ×0.85 or
 The result stays between the preset's floor and maximum. Every bits-per-frame
 figure is given at 1080p and scaled by the encoded pixels relative to 1080p
 to the power 0.75, within 0.4 and 3: 0.54 at 720p, 1.54 at 1440p and 2.83 at
-4K, since a picture's bits grow slower than its pixels.
+4K, since a picture's bits grow slower than its pixels. A session starts from
+the size the encoder will produce, the display the backend reported before
+`Accepted` fitted inside the viewer's bounds, so the first IDR has the
+session's budget even when the viewer asked for more than the display has
+(1440p or Native for a 1080p display); the first unit's size corrects it, and
+without a reported display the session starts from the bounds.
 
 | Preset | Frame rate (min / start / ceiling) | Bits per frame at 1080p (start / max / floor) | At 60 FPS (30 for Quality) |
 | --- | --- | --- | --- |
@@ -1066,7 +1073,7 @@ Windows cursor bitmap, and observing it never renews input authorisation.
 | fps cap | tick 250 ms; × 0.9 direct, × 0.8 relay; minimum 5; +5 after 3 s; ≥ 1 s between changes |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
 | Cursor | sampled every 16 ms; the controller's own move never reported |
-| Codec | `Accepted` waits at most 3 s for the backend's H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3 |
+| Codec | `Accepted` waits at most 3 s for the backend's display and H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3 |
 
 ### Diagnostics
 

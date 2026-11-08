@@ -1,10 +1,11 @@
 use crate::{
-    DesktopKind, HostPath, HostState, HostStatus, HostViewer, Invitation, QualityPreset, Result,
-    VideoCodec, VideoLimits, error, platform,
+    DesktopKind, Display, HostPath, HostState, HostStatus, HostViewer, Invitation, QualityPreset,
+    Result, VideoCodec, VideoLimits, VideoSize, error, platform,
     protocol::{
         CAPABILITY_H265, CAPABILITY_LOCK, HostMessage, RejectReason, SessionState, StopReason,
         ViewerMessage, valid_capabilities,
     },
+    qos::scaled_size,
     session::{self, Session, stop_message},
     shared::Policy,
     wire,
@@ -25,7 +26,7 @@ use std::{
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
-    sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore},
+    sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, oneshot},
     task::JoinSet,
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
@@ -35,10 +36,11 @@ use tokio_util::sync::CancellationToken;
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 /// A `Rejected` and the close after it.
 pub(crate) const REJECT_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
-/// How long `Accepted` waits for a new backend to say whether it encodes
-/// H.265, for a viewer that decodes it; the viewer waits 5 s for `Accepted`.
-/// A slower answer leaves that session on H.264.
-const H265_ANSWER_WAIT: Duration = Duration::from_secs(3);
+/// How long `Accepted` waits for a new backend to say which display it
+/// captures and, for a viewer that decodes H.265, whether it encodes H.265;
+/// the viewer waits 5 s for `Accepted`. A slower answer leaves that session on
+/// H.264, its first IDR budgeted for the viewer's bounds.
+const BACKEND_ANSWER_WAIT: Duration = Duration::from_secs(3);
 /// Connections in their handshake or session at once; one holds the viewer slot.
 const MAX_CONNECTIONS: usize = 8;
 
@@ -341,6 +343,8 @@ struct Admitted {
     permit: OwnedSemaphorePermit,
     request: Request,
     codec: VideoCodec,
+    /// The size the encoder is expected to produce.
+    video: VideoSize,
     prepared: worker::Prepared,
 }
 
@@ -355,6 +359,41 @@ fn choose_codec(codecs: &[VideoCodec], h265: bool) -> VideoCodec {
     } else {
         VideoCodec::Jpeg
     }
+}
+
+/// `factory`, telling the receiver which display the backend it builds
+/// captures, read on thread C as soon as it is built, before `prepare` asks it
+/// about H.265. The receiver hears nothing when the backend or its display
+/// fails.
+fn reporting_display(factory: &Factory) -> (Factory, oneshot::Receiver<Display>) {
+    let (report, display) = oneshot::channel();
+    let report = Mutex::new(Some(report));
+    let factory = factory.clone();
+    let reporting: Factory = Arc::new(move || {
+        let report = report.lock().take();
+        let mut backend = factory()?;
+        if let Some(report) = report
+            && let Ok(captured) = backend.display()
+        {
+            let _ = report.send(captured);
+        }
+        Ok(backend)
+    });
+    (reporting, display)
+}
+
+/// The size the encoder makes of `display` for `limits`, or the bounds
+/// themselves when the display is not known.
+fn expected_video(display: Option<&Display>, limits: VideoLimits) -> VideoSize {
+    let (width, height) = display.map_or((limits.max_width, limits.max_height), |display| {
+        scaled_size(
+            display.width,
+            display.height,
+            limits.max_width,
+            limits.max_height,
+        )
+    });
+    VideoSize { width, height }
 }
 
 /// The listener's side of the host: every connection's handshake and session.
@@ -397,6 +436,7 @@ impl Acceptor {
             permit,
             request,
             codec,
+            video,
             prepared,
         }) = accepted
         else {
@@ -409,6 +449,8 @@ impl Acceptor {
             max_width = request.limits.max_width,
             max_height = request.limits.max_height,
             max_fps = request.limits.max_fps,
+            width = video.width,
+            height = video.height,
             quality = ?request.quality,
         );
         let session = Session::new(
@@ -416,6 +458,7 @@ impl Acceptor {
             self.cancel.child_token(),
             codec,
             request.limits,
+            video,
             request.quality,
             &request.capabilities,
         );
@@ -447,17 +490,29 @@ impl Acceptor {
     }
 
     /// The handshake, then `Accepted` with the session's codec. Thread C starts
-    /// building the backend as soon as the viewer holds the slot; a viewer
-    /// that decodes H.265 hears `Accepted` once the backend said whether it
-    /// encodes H.265, unless an H.265 encoder already failed in this process.
+    /// building the backend as soon as the viewer holds the slot, and
+    /// `Accepted` waits until the backend said which display it captures,
+    /// which sizes the first IDR's budget, and, for a viewer that decodes
+    /// H.265, whether it encodes H.265, unless an H.265 encoder already
+    /// failed in this process.
     async fn accept_session(&self, socket: TcpStream) -> Option<Admitted> {
         let (mut stream, permit, request) = self.handshake(socket).await?;
         let offered = request
             .capabilities
             .iter()
             .any(|capability| capability == CAPABILITY_H265);
-        let mut prepared = worker::prepare(self.factory.clone(), offered && !worker::h265_failed());
-        let codec = choose_codec(&request.codecs, prepared.h265(H265_ANSWER_WAIT).await);
+        let (factory, display) = reporting_display(&self.factory);
+        let mut prepared = worker::prepare(factory, offered && !worker::h265_failed());
+        let deadline = tokio::time::Instant::now() + BACKEND_ANSWER_WAIT;
+        let display = tokio::time::timeout_at(deadline, display)
+            .await
+            .ok()
+            .and_then(|answer| answer.ok());
+        let video = expected_video(display.as_ref(), request.limits);
+        let h265 = prepared
+            .h265(deadline.saturating_duration_since(tokio::time::Instant::now()))
+            .await;
+        let codec = choose_codec(&request.codecs, h265);
         let accepted = HostMessage::Accepted {
             codec,
             limits: request.limits,
@@ -473,6 +528,7 @@ impl Acceptor {
             permit,
             request,
             codec,
+            video,
             prepared,
         })
     }
@@ -839,9 +895,11 @@ mod trust_tests {
     }
 
     /// A screen whose backend encodes H.265 until `broken`, then fails as a
-    /// GPU's H.265 encoder that stopped encoding does.
+    /// GPU's H.265 encoder that stopped encoding does. It keeps the bitrate
+    /// each H.265 picture was encoded at.
     struct Hevc {
         broken: Arc<AtomicBool>,
+        bitrates: Arc<Mutex<Vec<u32>>>,
     }
     impl crate::Backend for Hevc {
         fn display(&mut self) -> Result<crate::Display> {
@@ -855,13 +913,16 @@ mod trust_tests {
             _: &crate::DesktopContext,
             codec: VideoCodec,
             keyframe: bool,
-            _: crate::VideoRate,
+            rate: crate::VideoRate,
         ) -> Result<Option<crate::EncodedFrame>> {
             if codec == VideoCodec::H265 && self.broken.load(Ordering::SeqCst) {
                 return Err(error(format!(
                     "{}: the encoder stopped",
                     worker::H265_ENCODER_FAILED
                 )));
+            }
+            if codec == VideoCodec::H265 {
+                self.bitrates.lock().push(rate.bitrate);
             }
             Ok(Some(crate::EncodedFrame {
                 format: crate::VideoFormat {
@@ -895,13 +956,15 @@ mod trust_tests {
             None,
         );
         let broken = Arc::new(AtomicBool::new(false));
-        let encoder = broken.clone();
+        let bitrates = Arc::new(Mutex::new(Vec::new()));
+        let (encoder, encoded) = (broken.clone(), bitrates.clone());
         let host = Host::start_with_backend(
             &client,
             options(),
             Arc::new(move || {
                 Ok(Box::new(Hevc {
                     broken: encoder.clone(),
+                    bitrates: encoded.clone(),
                 }))
             }),
         )
@@ -956,6 +1019,14 @@ mod trust_tests {
             }
         };
         assert_eq!(reason, StopReason::CaptureFailed);
+        // Its first IDR was budgeted for the 10×10 display the backend
+        // reported, not for the viewer's 1080p bounds: the first unit's size
+        // changed nothing.
+        let encoded = bitrates.lock().clone();
+        assert!(
+            encoded.len() >= 3 && encoded.iter().all(|bitrate| *bitrate == encoded[0]),
+            "{encoded:?}"
+        );
         drop(viewer);
         until(|| host.status().viewer.is_none()).await;
         // The reconnect gets H.264, from this process on.

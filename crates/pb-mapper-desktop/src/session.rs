@@ -6,7 +6,7 @@
 //! B-send writes the final `Stopped` when the session ends for a reason the
 //! viewer should hear.
 use crate::{
-    QualityPreset, VideoCodec, VideoLimits,
+    QualityPreset, VideoCodec, VideoLimits, VideoSize,
     credit::CreditLedger,
     idr::IdrReason,
     lane::LaneCommand,
@@ -88,17 +88,20 @@ pub(crate) struct Session {
     ending: Mutex<Option<End>>,
 }
 impl Session {
+    /// `video` is the size the encoder is expected to produce: see `Qos::new`.
     pub fn new(
         policy: Arc<Policy>,
         cancel: CancellationToken,
         codec: VideoCodec,
         limits: VideoLimits,
+        video: VideoSize,
         quality: QualityPreset,
         capabilities: &[String],
     ) -> Arc<Self> {
         let now = Instant::now();
         let listed = |wanted: &str| capabilities.iter().any(|capability| capability == wanted);
-        let qos = Qos::new(limits, codec, quality, listed(CAPABILITY_FPS_OVERRIDE), now);
+        let fps_override = listed(CAPABILITY_FPS_OVERRIDE);
+        let qos = Qos::new(limits, video, codec, quality, fps_override, now);
         let targets = qos.targets(now);
         Arc::new(Self {
             shared: Arc::new(SessionShared::new(
@@ -933,6 +936,10 @@ mod tests {
             CancellationToken::new(),
             VideoCodec::H264,
             VideoLimits::for_viewer(60.0),
+            VideoSize {
+                width: 1920,
+                height: 1080,
+            },
             QualityPreset::Balanced,
             &[],
         );
@@ -1042,6 +1049,10 @@ mod tests {
             CancellationToken::new(),
             VideoCodec::Jpeg,
             VideoLimits::for_viewer(60.0),
+            VideoSize {
+                width: 1920,
+                height: 1080,
+            },
             QualityPreset::Balanced,
             &[],
         );
