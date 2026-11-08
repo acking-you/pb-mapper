@@ -29,6 +29,9 @@ tracing.workspace = true
 uni-stream.workspace = true
 serde = { workspace = true, features = ["derive"] }
 if-addrs = { version = "0.15", features = ["link-local"] }
+# Interface types and gateways, to put LAN candidates first. The same version
+# portmapper's netwatch already brings in.
+netdev = { version = "0.46.3", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 if-watch = { version = "3.2.2", default-features = false, features = ["tokio"] }
@@ -40,7 +43,7 @@ tokio = { workspace = true, features = ["test-util"] }
 [features]
 port-mapping = ["p2p", "dep:portmapper"]
 relay-quic = ["dep:quinn", "pb-mapper-protocol/relay-quic"]
-p2p = ["dep:quinn", "dep:rcgen", "dep:stun-proto", "dep:ring"]
+p2p = ["dep:quinn", "dep:rcgen", "dep:stun-proto", "dep:ring", "dep:netdev"]
 udp-timeout = ["uni-stream/udp-timeout", "pb-mapper-protocol/udp-timeout"]
 
 [lints]

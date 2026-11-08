@@ -14,7 +14,12 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, Instant};
 
+mod link;
 mod port_mapping;
+pub use link::{
+    AddressFamily, CandidateCounts, DirectLink, InterfaceTier, LanEvidence, LinkKind, LinkStats,
+    LinkVia, SetupTimings, StunOutcome,
+};
 pub use port_mapping::{
     PortMappingDiagnostics, PortMappingProtocol, PortMappingStage, PortMappingStatus,
 };
@@ -156,6 +161,16 @@ pub enum TunnelEventKind {
     SessionClosed { path: SessionPath },
     /// The gateway mapping of the tunnel's direct endpoint changed.
     PortMappingChanged { mapping: Box<PortMappingStatus> },
+    /// A direct setup found the peer on one of this end's local networks,
+    /// before any packet: its LAN addresses are probed first.
+    LanDetected { evidence: LanEvidence },
+    /// A direct session committed to a path: across `link`, over `family`,
+    /// to an address learned `via`.
+    PathSelected {
+        link: LinkKind,
+        family: AddressFamily,
+        via: LinkVia,
+    },
 }
 
 impl TunnelEventKind {
@@ -181,6 +196,8 @@ impl TunnelEventKind {
                 | Self::SessionOpened { .. }
                 | Self::SessionClosed { .. }
                 | Self::PortMappingChanged { .. }
+                | Self::LanDetected { .. }
+                | Self::PathSelected { .. }
         )
     }
 }
@@ -287,17 +304,34 @@ pub struct TunnelDiagnostics {
     pub events: Vec<TunnelEvent>,
 }
 
+/// How a tunnel's sessions travel. Non-exhaustive: fields are added as the
+/// SDK observes more.
 #[derive(Clone, Debug, Default, Serialize)]
+#[non_exhaustive]
 pub struct PathDiagnostics {
     pub direct_sessions: u64,
     pub relay_sessions: u64,
     pub active_direct: u64,
     pub active_relay: u64,
+    /// Direct sessions within one local network, open now and in all.
+    pub active_lan: u64,
+    pub lan_sessions: u64,
+    /// Setups that found the peer on a local network of this end, and those
+    /// of them that ended on another path or on the relay.
+    pub lan_detected: u64,
+    pub lan_missed: u64,
     pub fallbacks: u64,
     pub last_fallback: Option<String>,
+    /// Where the latest direct session this end set up runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_kind: Option<LinkKind>,
     /// The direct attempt in flight, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt: Option<DirectAttempt>,
+    /// The newest direct session open now: its path, how it was set up, and
+    /// QUIC's view of it as of this read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<DirectLink>,
 }
 
 #[derive(Clone)]
@@ -356,6 +390,12 @@ struct State {
     /// The stage and start of the latest direct attempt still in flight.
     attempt: Option<(DirectStage, Instant)>,
     in_flight: u32,
+    /// Direct sessions open now, oldest first, each held only while it is:
+    /// the connection is a clone, and Quinn has no weak one.
+    #[cfg(feature = "p2p")]
+    links: Vec<LiveLink>,
+    #[cfg(feature = "p2p")]
+    next_link: u64,
     seq: u64,
     events: VecDeque<Event>,
 }
@@ -459,6 +499,10 @@ impl Default for Diagnostics {
             network: None,
             attempt: None,
             in_flight: 0,
+            #[cfg(feature = "p2p")]
+            links: Vec::new(),
+            #[cfg(feature = "p2p")]
+            next_link: 0,
             seq: 0,
             events: VecDeque::new(),
         })))
@@ -585,6 +629,52 @@ impl Diagnostics {
         }
         state.record(TunnelEventKind::SessionClosed { path });
     }
+    /// A setup found the peer on one of this end's local networks.
+    #[cfg(feature = "p2p")]
+    pub(crate) fn lan_detected(&self, evidence: LanEvidence) {
+        let mut state = self.state();
+        state.direct.get_or_insert_default().lan_detected += 1;
+        state.record(TunnelEventKind::LanDetected { evidence });
+    }
+    /// A setup that found the peer on a local network ended elsewhere.
+    #[cfg(feature = "p2p")]
+    pub(crate) fn lan_missed(&self) {
+        self.state().direct.get_or_insert_default().lan_missed += 1;
+    }
+    /// A direct session is open on `link`: kept, with `connection` for its
+    /// live figures, until the guard drops.
+    #[cfg(feature = "p2p")]
+    pub(crate) fn link_opened(&self, link: DirectLink, connection: quinn::Connection) -> LinkGuard {
+        let mut state = self.state();
+        let lan = link.kind == LinkKind::Lan;
+        let p = state.direct.get_or_insert_default();
+        if lan {
+            p.active_lan += 1;
+            p.lan_sessions += 1;
+        }
+        state.next_link += 1;
+        let id = state.next_link;
+        state.record(TunnelEventKind::PathSelected {
+            link: link.kind,
+            family: link.family,
+            via: link.via,
+        });
+        // A provider holds at most 64 sessions; a consumer has no such cap,
+        // and the newest is what is shown.
+        if state.links.len() == 64 {
+            state.links.remove(0);
+        }
+        state.links.push(LiveLink {
+            id,
+            link,
+            connection,
+        });
+        LinkGuard {
+            diagnostics: self.clone(),
+            id,
+            lan,
+        }
+    }
     /// Begin a direct attempt; the guard reports its stages and outcome.
     #[cfg(feature = "p2p")]
     pub(crate) fn direct_attempt(&self) -> DirectAttemptGuard {
@@ -687,12 +777,17 @@ impl Diagnostics {
             elapsed_ms: ms(now.saturating_duration_since(started)),
             in_flight: state.in_flight,
         });
+        #[cfg(feature = "p2p")]
+        let link = state.links.last().map(LiveLink::sample);
+        #[cfg(not(feature = "p2p"))]
+        let link = None;
         TunnelDiagnostics {
             relay_transport: endpoint.transport(),
-            direct: state
-                .direct
-                .clone()
-                .map(|direct| PathDiagnostics { attempt, ..direct }),
+            direct: state.direct.clone().map(|direct| PathDiagnostics {
+                attempt,
+                link,
+                ..direct
+            }),
             port_mapping: state.port_mapping.clone(),
             sdk_version: env!("CARGO_PKG_VERSION"),
             last_attempt_phase: state.phase,
@@ -752,12 +847,18 @@ impl DirectAttemptGuard {
         state.attempt = Some((stage, self.started));
         state.record(TunnelEventKind::DirectStageChanged { stage });
     }
-    pub(crate) fn established(mut self) {
+    /// Time since the attempt began.
+    pub(crate) fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+    /// The attempt went direct, on a path of `kind`, after `setup`.
+    pub(crate) fn established(mut self, setup: Duration, kind: LinkKind) {
         self.settled = true;
-        let setup_ms = ms(self.started.elapsed());
-        self.diagnostics
-            .state()
-            .record(TunnelEventKind::DirectEstablished { setup_ms });
+        let mut state = self.diagnostics.state();
+        state.direct.get_or_insert_default().last_kind = Some(kind);
+        state.record(TunnelEventKind::DirectEstablished {
+            setup_ms: ms(setup),
+        });
     }
     /// Fall back to the relay for `reason`, the legacy label kept in
     /// [`PathDiagnostics::last_fallback`].
@@ -781,6 +882,60 @@ impl Drop for DirectAttemptGuard {
         }
         if !self.settled {
             state.record(TunnelEventKind::DirectAbandoned { stage: self.stage });
+        }
+    }
+}
+
+/// A direct session's path and the connection it runs on.
+#[cfg(feature = "p2p")]
+struct LiveLink {
+    id: u64,
+    link: DirectLink,
+    connection: quinn::Connection,
+}
+
+#[cfg(feature = "p2p")]
+impl LiveLink {
+    /// The link with QUIC's figures as they are now.
+    fn sample(&self) -> DirectLink {
+        let stats = self.connection.stats();
+        DirectLink {
+            stats: LinkStats {
+                rtt_us: micros(self.connection.rtt()),
+                min_rtt_us: micros(stats.path.min_rtt),
+                congestion_window: stats.path.cwnd,
+                mtu: stats.path.current_mtu,
+                sent_packets: stats.path.sent_packets,
+                lost_packets: stats.path.lost_packets,
+                congestion_events: stats.path.congestion_events,
+            },
+            ..self.link.clone()
+        }
+    }
+}
+
+#[cfg(feature = "p2p")]
+fn micros(time: Duration) -> u64 {
+    time.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+/// A direct session's link, forgotten, and its connection let go, when this
+/// drops with the session.
+#[cfg(feature = "p2p")]
+pub(crate) struct LinkGuard {
+    diagnostics: Diagnostics,
+    id: u64,
+    lan: bool,
+}
+
+#[cfg(feature = "p2p")]
+impl Drop for LinkGuard {
+    fn drop(&mut self) {
+        let mut state = self.diagnostics.state();
+        state.links.retain(|live| live.id != self.id);
+        if self.lan {
+            let p = state.direct.get_or_insert_default();
+            p.active_lan = p.active_lan.saturating_sub(1);
         }
     }
 }
@@ -870,7 +1025,7 @@ mod tests {
         assert_eq!((seen.stage, seen.in_flight), (DirectStage::Negotiating, 2));
         first.fell_back("direct_timeout_or_unreachable");
         assert_eq!(attempt_of(&diagnostics).unwrap().in_flight, 1);
-        second.established();
+        second.established(Duration::from_millis(40), LinkKind::Lan);
         assert_eq!(attempt_of(&diagnostics), None);
         let direct = diagnostics.snapshot(&endpoint).direct.unwrap();
         assert_eq!(direct.fallbacks, 1);

@@ -25,7 +25,7 @@ use stun_proto::{
         message::{BINDING, Message, MessageClass, MessageWrite, MessageWriteExt, MessageWriteVec},
     },
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 const PROBE: &[u8; 8] = b"\x10PBD\0\0\0\x01";
 const PROBE_LEN: usize = 8 + 16 + 16 + 1 + 32;
@@ -48,11 +48,15 @@ struct ProbeState {
     key: SessionSecret,
     nonce: [u8; 16],
     expires: tokio::time::Instant,
-    learned: Vec<SocketAddr>,
+    /// Proven paths, each with when it answered.
+    learned: Vec<(SocketAddr, tokio::time::Instant)>,
     /// Authenticated sources not yet proven, each owed one challenge with our
-    /// nonce on the next probe tick. One per ping: a replayed ping from a
-    /// spoofed source earns that address one packet, never a stream of them.
+    /// nonce on the next probe. One per ping: a replayed ping from a spoofed
+    /// source earns that address one packet, never a stream of them.
     triggered: Vec<SocketAddr>,
+    /// Woken when a path is proven or a source is owed a challenge, so the
+    /// session acts on it at once rather than at its next probe tick.
+    wake: Arc<Notify>,
 }
 struct StunPending {
     source: SocketAddr,
@@ -204,26 +208,28 @@ impl Socket {
                 0 if self.reply_allowed() => {
                     // A destination-dependent NAT may send from a different
                     // mapping than STUN found. Replying alone only validates
-                    // the path for the sender. Challenge this source on our
-                    // next probe tick before it can become a QUIC candidate.
-                    if !probe.learned.contains(&source)
+                    // the path for the sender. Challenge this source before
+                    // it can become a QUIC candidate.
+                    if !probe.learned.iter().any(|(addr, _)| *addr == source)
                         && !probe.triggered.contains(&source)
                         && probe.triggered.len() + probe.learned.len() < MAX_CANDIDATES
                     {
                         probe.triggered.push(source);
+                        probe.wake.notify_one();
                     }
                     let nonce = data[24..40].try_into().unwrap_or([0; 16]);
                     packet(id, nonce, true, probe.key)
                 }
                 1 if data[24..40] == probe.nonce
-                    && !probe.learned.contains(&source)
+                    && !probe.learned.iter().any(|(addr, _)| *addr == source)
                     && probe.learned.len() < MAX_CANDIDATES =>
                 {
                     probe.triggered.retain(|addr| *addr != source);
-                    probe.learned.push(source);
+                    probe.learned.push((source, tokio::time::Instant::now()));
                     probe
                         .triggered
                         .truncate(MAX_CANDIDATES - probe.learned.len());
+                    probe.wake.notify_one();
                     return;
                 }
                 _ => return,
@@ -285,7 +291,13 @@ impl Socket {
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr()
     }
-    pub fn authorize(&self, id: SessionId, key: SessionSecret, expires: tokio::time::Instant) {
+    pub fn authorize(
+        &self,
+        id: SessionId,
+        key: SessionSecret,
+        expires: tokio::time::Instant,
+        wake: Arc<Notify>,
+    ) {
         let mut probes = self
             .control
             .probes
@@ -304,8 +316,29 @@ impl Socket {
                 expires,
                 learned: Vec::new(),
                 triggered: Vec::new(),
+                wake,
             },
         );
+    }
+    /// What wakes `id`'s session, while it is authorized.
+    pub fn wake(&self, id: &SessionId) -> Option<Arc<Notify>> {
+        self.control
+            .probes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .map(|probe| probe.wake.clone())
+    }
+    /// The paths that have answered so far, and when each did.
+    pub fn learned(&self, id: &SessionId) -> Vec<(SocketAddr, tokio::time::Instant)> {
+        self.control
+            .probes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .filter(|p| p.expires > tokio::time::Instant::now())
+            .map(|probe| probe.learned.clone())
+            .unwrap_or_default()
     }
     pub fn forget(&self, id: &SessionId) {
         self.control
@@ -314,10 +347,12 @@ impl Socket {
             .unwrap_or_else(|e| e.into_inner())
             .remove(id);
     }
-    /// Send one authenticated probe to each candidate of this address family
-    /// and return the paths that have answered so far.
+    /// Send one authenticated probe to each source owed a challenge, then to
+    /// each candidate of this address family, in the order given. Returns
+    /// the candidates the system refused to send to: no route, or no
+    /// permission, as iOS answers until local network access is granted.
     pub fn probe(&self, id: SessionId, candidates: &[SocketAddr]) -> Vec<SocketAddr> {
-        let (bytes, triggered, learned) = {
+        let (bytes, triggered) = {
             let mut probes = self
                 .control
                 .probes
@@ -332,10 +367,10 @@ impl Socket {
             (
                 packet(id, probe.nonce, false, probe.key),
                 std::mem::take(&mut probe.triggered),
-                probe.learned.clone(),
             )
         };
         let family = self.local_addr().map(|local| local.is_ipv4());
+        let mut refused = Vec::new();
         for addr in triggered
             .iter()
             .chain(candidates.iter().filter(|addr| !triggered.contains(addr)))
@@ -344,9 +379,13 @@ impl Socket {
         {
             // Probes are retried every 120 ms. A congested or unreachable
             // candidate must never hold up cancellation or a healthy QUIC path.
-            let _ = self.inner.try_send_to(&bytes, *addr);
+            if let Err(error) = self.inner.try_send_to(&bytes, *addr)
+                && error.kind() != io::ErrorKind::WouldBlock
+            {
+                refused.push(*addr);
+            }
         }
-        learned
+        refused
     }
     /// STUN Binding over this socket. Responses arrive through the Quinn
     /// endpoint driver, which runs for as long as the endpoint exists.
@@ -470,8 +509,9 @@ mod tests {
             let id = [4; 16];
             let secret = SessionSecret([5; 32]);
             let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-            consumer.authorize(id, secret, deadline);
-            provider.authorize(id, secret, deadline);
+            let wake = Arc::new(Notify::new());
+            consumer.authorize(id, secret, deadline, wake.clone());
+            provider.authorize(id, secret, deadline, Arc::new(Notify::new()));
             consumer.inner.writable().await.unwrap();
             provider.inner.writable().await.unwrap();
             let mut buffer = [0; 1500];
@@ -480,7 +520,10 @@ mod tests {
             provider.probe(id, &[consumer.local_addr().unwrap()]);
             let (len, source) = consumer.inner.recv_from(&mut buffer).await.unwrap();
             consumer.handle_control(&buffer[..len], source);
-            assert!(consumer.probe(id, &[]).is_empty());
+            // The session hears at once that a source is owed a challenge.
+            wake.notified().await;
+            consumer.probe(id, &[]);
+            assert!(consumer.learned(&id).is_empty());
             // The provider receives our Pong and then our own challenge.
             for _ in 0..2 {
                 let (len, source) = provider.inner.recv_from(&mut buffer).await.unwrap();
@@ -488,7 +531,9 @@ mod tests {
             }
             let (len, source) = consumer.inner.recv_from(&mut buffer).await.unwrap();
             consumer.handle_control(&buffer[..len], source);
-            assert_eq!(consumer.probe(id, &[]), [provider.local_addr().unwrap()]);
+            wake.notified().await;
+            let learned: Vec<_> = consumer.learned(&id).into_iter().map(|(a, _)| a).collect();
+            assert_eq!(learned, [provider.local_addr().unwrap()]);
         })
         .await
         .unwrap();
@@ -503,6 +548,7 @@ mod tests {
             id,
             secret,
             tokio::time::Instant::now() + Duration::from_secs(1),
+            Arc::new(Notify::new()),
         );
         let source = "127.0.0.1:9000".parse().unwrap();
         socket.handle_probe(&packet(id, [8; 16], false, SessionSecret([9; 32])), source);
@@ -539,7 +585,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(2)).await;
         let nonce = socket.control.probes.lock().unwrap()[&id].nonce;
         socket.handle_probe(&packet(id, nonce, true, secret), source);
-        assert!(socket.probe(id, &[source]).is_empty());
+        assert!(socket.learned(&id).is_empty());
         assert!(
             socket.control.probes.lock().unwrap()[&id]
                 .learned

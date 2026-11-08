@@ -3,6 +3,7 @@ mod candidates;
 mod control;
 mod endpoint;
 mod identity;
+mod lan;
 #[cfg(feature = "port-mapping")]
 mod mapping;
 mod provider;
@@ -10,11 +11,15 @@ mod reports;
 mod socket;
 
 use crate::{
-    diagnostics::{Diagnostics, DirectStage},
+    diagnostics::{
+        CandidateCounts, Diagnostics, DirectLink, DirectStage, LanEvidence, LinkGuard, LinkKind,
+        LinkStats, LinkVia, SetupTimings, ms,
+    },
     endpoint::RelayEndpoint,
 };
 use control::{Control, io_error};
-use endpoint::Network;
+use endpoint::{Discovered, Network};
+use lan::Assessment;
 use pb_mapper_auth::ADMIN_NAMESPACE;
 use pb_mapper_core::checksum::Credential;
 use pb_mapper_protocol::{
@@ -24,7 +29,7 @@ use pb_mapper_protocol::{
     forward::StreamForward,
 };
 pub(crate) use provider::Provider;
-use std::{io, sync::Arc, time::Duration};
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::AsyncReadExt,
     sync::{Mutex, OnceCell},
@@ -202,7 +207,9 @@ impl Consumer {
         // Before a grant arrives no endpoint can have committed, so a failed
         // capability/control/discovery attempt can use the ordinary relay path.
         let mut attempt = self.diagnostics.direct_attempt();
+        let mut timings = SetupTimings::default();
         let negotiation = async {
+            let stage = Instant::now();
             let Some(control) = self.control(key).await? else {
                 return Ok(None);
             };
@@ -213,19 +220,25 @@ impl Consumer {
                 })
                 .await?
                 .clone();
+            timings.negotiate_ms = Some(ms(stage.elapsed()));
             attempt.stage(DirectStage::Discovering);
-            let peer = network.peer(control.capability.stun_addr).await;
+            let stage = Instant::now();
+            let discovered = network.peer(control.capability.stun_addr).await;
+            timings.discover_ms = Some(ms(stage.elapsed()));
+            let stage = Instant::now();
+            let peer = discovered.peer.clone();
             let Some(grant) = control.open(key.into(), self.is_datagram, peer).await? else {
                 return Ok(None);
             };
-            Ok::<_, io::Error>(Some((control, network, grant)))
+            timings.grant_ms = Some(ms(stage.elapsed()));
+            Ok::<_, io::Error>(Some((control, network, discovered, grant)))
         };
         let negotiation = tokio::time::timeout_at(
             deadline.min(Instant::now() + Duration::from_secs(3)),
             negotiation,
         )
         .await;
-        let (control, network, grant) = match negotiation {
+        let (control, network, discovered, grant) = match negotiation {
             Ok(Ok(Some(prepared))) => prepared,
             result => {
                 let reason = match result {
@@ -269,10 +282,14 @@ impl Consumer {
             id: grant.id,
             completed: false,
         };
+        let lan = Assessment::new(discovered.local.clone(), &grant.provider.candidates);
+        if let Some(evidence) = lan.evidence {
+            self.diagnostics.lan_detected(evidence);
+        }
         attempt.stage(DirectStage::Punching);
         let direct_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
         let candidate = tokio::time::timeout_at(direct_deadline, async {
-            let connection = network.connect(&grant, direct_deadline).await?;
+            let (connection, dialed) = network.connect(&grant, direct_deadline, &lan).await?;
             tracing::debug!(id=?grant.id, peer=%connection.remote_address(), "direct TLS connected");
             let guard = QuicGuard(connection);
             let (mut send, mut recv) = guard.0.open_bi().await.map_err(io_error)?;
@@ -283,13 +300,14 @@ impl Consumer {
             if recv.read_u8().await? != 1 {
                 return Err(io::Error::other("direct path was not ready"));
             }
-            Ok::<_, io::Error>((guard, send, recv))
+            Ok::<_, io::Error>((guard, send, recv, dialed))
         })
         .await;
-        if let Ok(Ok((connection, mut send, mut recv))) = candidate {
+        if let Ok(Ok((connection, mut send, mut recv, dialed))) = candidate {
             // From this point on, timeout/cancellation/ACK loss MUST NOT select relay.
             pending.completed = true;
             attempt.stage(DirectStage::Committing);
+            let committing = Instant::now();
             send.write_all(&[2]).await.map_err(io_error)?;
             if recv.read_u8().await? != 3 {
                 return Err(io::Error::other(
@@ -297,15 +315,41 @@ impl Consumer {
                 ));
             }
             let framing_key = endpoint::framing_key(&connection.0, &grant)?;
-            attempt.established();
+            let setup = attempt.elapsed();
+            let timings = SetupTimings {
+                first_pong_ms: dialed.first_pong.map(ms),
+                lan_first_pong_ms: dialed.lan_first_pong.map(ms),
+                handshake_ms: Some(ms(dialed.handshake)),
+                commit_ms: Some(ms(committing.elapsed())),
+                setup_ms: ms(setup),
+                ..stun_timings(timings, &discovered)
+            };
+            let candidates = CandidateCounts {
+                probed: dialed.probed,
+                answered: dialed.answered,
+                handshakes: dialed.handshakes,
+                ..counts(&discovered, &lan, &grant.provider.candidates)
+            };
+            let link = direct_link(
+                &connection.0,
+                &lan,
+                &grant.provider.candidates,
+                timings,
+                candidates,
+            );
+            if lan.evidence.is_some() && link.kind != LinkKind::Lan {
+                self.diagnostics.lan_missed();
+            }
+            attempt.established(setup, link.kind);
             self.cooldown().clear();
-            tracing::info!(event = "session_path_selected", path = "direct", service = %key, peer = %connection.0.remote_address());
+            log_path(key, &link);
             Ok(Some(Prepared {
                 path: DataPath::Quic {
                     connection,
                     send,
                     recv,
                     framing_key,
+                    link: Box::new(link),
                     _network: network,
                 },
                 grant,
@@ -314,6 +358,9 @@ impl Consumer {
             }))
         } else {
             tracing::debug!(reason = ?candidate.as_ref().map(|r| r.as_ref().map(|_| ())), "direct attempt failed before commit");
+            if lan.evidence.is_some() {
+                self.diagnostics.lan_missed();
+            }
             attempt.fell_back("direct_timeout_or_unreachable");
             self.cooldown().back_off(Instant::now());
             network.punching_failed();
@@ -373,6 +420,7 @@ enum DataPath {
         send: quinn::SendStream,
         recv: quinn::RecvStream,
         framing_key: [u8; 32],
+        link: Box<DirectLink>,
         _network: Arc<Network>,
     },
     Relay {
@@ -392,18 +440,30 @@ impl Prepared {
         mut local: L,
         credential: Credential,
     ) -> io::Result<()> {
-        let path = if matches!(self.path, DataPath::Quic { .. }) {
-            SessionPath::Direct
-        } else {
-            SessionPath::Relay
+        let (path, link) = match &self.path {
+            DataPath::Quic {
+                connection, link, ..
+            } => (
+                SessionPath::Direct,
+                Some(
+                    self.diagnostics
+                        .link_opened((**link).clone(), connection.0.clone()),
+                ),
+            ),
+            DataPath::Relay { .. } => (SessionPath::Relay, None),
         };
         let mut report = ConsumerReport {
             owner: self.owner,
             session: (&self.grant).into(),
             secret: self.grant.secret,
             path,
+            link: match &self.path {
+                DataPath::Quic { link, .. } => Some(summary(link)),
+                DataPath::Relay { .. } => None,
+            },
             seq: 0,
             diagnostics: self.diagnostics,
+            _link: link,
         };
         report.diagnostics.session_opened(path);
         report.active();
@@ -414,6 +474,7 @@ impl Prepared {
                     send,
                     recv,
                     framing_key,
+                    link: _,
                     _network,
                 } => forward_quic(local, send, recv, framing_key, None).await,
                 DataPath::Relay { mut socket, codec } => {
@@ -471,8 +532,10 @@ struct ConsumerReport {
     session: SessionSummary,
     secret: SessionSecret,
     path: SessionPath,
+    link: Option<LinkSummary>,
     seq: u64,
     diagnostics: Diagnostics,
+    _link: Option<LinkGuard>,
 }
 impl ConsumerReport {
     fn update(&mut self, state: SessionState) {
@@ -486,6 +549,7 @@ impl ConsumerReport {
                 path: self.path,
                 state,
                 reason: None,
+                link: self.link,
             },
         });
         self.owner.report_wake.notify_one();
@@ -548,6 +612,96 @@ async fn report_loop(
             }
         }
     }
+}
+
+/// The figures from before the search: discovery's, with how STUN went.
+fn stun_timings(timings: SetupTimings, discovered: &Discovered) -> SetupTimings {
+    SetupTimings {
+        stun_ms: discovered.stun_ms,
+        stun: discovered.stun,
+        ..timings
+    }
+}
+
+/// The candidates each end offered.
+fn counts(discovered: &Discovered, lan: &Assessment, peer: &[SocketAddr]) -> CandidateCounts {
+    let (local, local_lan, truncated) = discovered.counts;
+    CandidateCounts {
+        local,
+        local_lan,
+        truncated,
+        peer: peer.len() as u32,
+        peer_lan: peer.iter().filter(|addr| lan.is_lan(**addr)).count() as u32,
+        ..CandidateCounts::default()
+    }
+}
+
+/// What a committed session's path is, as this end sees it. `offered` is
+/// what the peer offered.
+fn direct_link(
+    connection: &quinn::Connection,
+    lan: &Assessment,
+    offered: &[SocketAddr],
+    timings: SetupTimings,
+    candidates: CandidateCounts,
+) -> DirectLink {
+    let peer = connection.remote_address();
+    let local_ip = connection.local_ip();
+    let interface = local_ip.and_then(|ip| lan.local.interfaces.local(ip));
+    DirectLink {
+        kind: lan.kind(local_ip, peer.ip()),
+        family: AddressFamily::of(peer.ip()),
+        via: via(peer, offered),
+        peer,
+        local_ip,
+        interface: interface.map(|interface| interface.name.clone()),
+        tier: interface.map(|interface| interface.tier),
+        same_lan: lan.evidence,
+        timings,
+        candidates,
+        stats: LinkStats::default(),
+    }
+}
+
+/// How the peer address was learned. A peer offers its router mapping, then
+/// what STUN saw, then its interfaces: two public IPv4 addresses in front
+/// mean the first is the mapping.
+fn via(peer: SocketAddr, offered: &[SocketAddr]) -> LinkVia {
+    let Some(index) = offered.iter().position(|addr| *addr == peer) else {
+        return LinkVia::PeerReflexive;
+    };
+    let public_v4 = |addr: &SocketAddr| addr.is_ipv4() && lan::is_global(addr.ip());
+    if !public_v4(&peer) {
+        LinkVia::Host
+    } else if index == 0 && offered.get(1).is_some_and(public_v4) {
+        LinkVia::Mapped
+    } else {
+        LinkVia::Public
+    }
+}
+
+/// What a report says of a path: no address.
+fn summary(link: &DirectLink) -> LinkSummary {
+    LinkSummary {
+        kind: link.kind,
+        family: link.family,
+    }
+}
+
+/// The line that says which way a session went, which the app's Logs page
+/// shows.
+fn log_path(service: &str, link: &DirectLink) {
+    tracing::info!(
+        event = "session_path_selected",
+        path = "direct",
+        service = %service,
+        peer = %link.peer,
+        kind = link.kind.as_str(),
+        family = link.family.as_str(),
+        local_ip = %link.local_ip.map_or_else(|| "-".to_string(), |ip| ip.to_string()),
+        evidence = link.same_lan.map_or("none", LanEvidence::as_str),
+        setup_ms = link.timings.setup_ms,
+    );
 }
 
 #[cfg(test)]

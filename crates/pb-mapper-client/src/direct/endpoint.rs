@@ -1,9 +1,11 @@
 use super::{
-    candidates::Candidates,
+    candidates::{Candidates, Host},
     identity::Identity,
+    lan::{Assessment, Interfaces, Local},
     socket::{self, Socket},
 };
-use pb_mapper_protocol::direct::{PeerInfo, SessionGrant, valid_candidate};
+use crate::diagnostics::{LanEvidence, StunOutcome, ms};
+use pb_mapper_protocol::direct::{PeerInfo, SessionGrant, SessionId};
 use std::{
     io,
     net::SocketAddr,
@@ -14,16 +16,56 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{Mutex, mpsc},
+    sync::{Mutex, Notify, mpsc},
     task::JoinSet,
     time::Instant,
 };
+
+/// How long a path that is not on the LAN waits after its first answer,
+/// when the peer has shown it shares this end's network: a LAN handshake
+/// that finishes in the meantime saves a handshake to every other path.
+pub(super) const LAN_HEAD_START: Duration = Duration::from_millis(150);
+/// When paths on the LAN are probed again after the first round, on any
+/// evidence of one: a first probe lost to Wi-Fi, or dropped by a firewall
+/// the peer's own probe had not opened yet, costs 20 ms, not 120.
+const LAN_REPROBES: [Duration; 2] = [Duration::from_millis(20), Duration::from_millis(50)];
 
 struct Discovery {
     at: Instant,
     server: SocketAddr,
     generation: (u64, u64),
     candidates: Candidates,
+    local: Arc<Local>,
+}
+
+/// What this end offers for one setup, and what that took.
+pub(super) struct Discovered {
+    pub peer: PeerInfo,
+    pub local: Arc<Local>,
+    /// Candidates offered, on a LAN interface, and left out past the limit.
+    pub counts: (u32, u32, u32),
+    pub stun: StunOutcome,
+    pub stun_ms: Option<u64>,
+}
+
+/// How the search for a path went, once one connected.
+pub(super) struct Dialed {
+    pub probed: u32,
+    pub answered: u32,
+    pub handshakes: u32,
+    /// From the start of the search to the first answer, and the first on a
+    /// local network.
+    pub first_pong: Option<Duration>,
+    pub lan_first_pong: Option<Duration>,
+    /// The winning handshake.
+    pub handshake: Duration,
+}
+
+/// Where this machine's interface table comes from.
+pub(super) enum InterfaceSource {
+    System,
+    #[cfg(test)]
+    Fixed(Interfaces),
 }
 
 pub(super) struct Network {
@@ -34,6 +76,7 @@ pub(super) struct Network {
     cached: Mutex<Option<Discovery>>,
     generation: AtomicU64,
     network: Arc<crate::network::NetworkHints>,
+    pub(super) interfaces: InterfaceSource,
     #[cfg(feature = "port-mapping")]
     mapper: Option<Mapper>,
 }
@@ -159,70 +202,117 @@ impl Network {
             cached: Mutex::new(None),
             generation: AtomicU64::new(0),
             network,
+            interfaces: InterfaceSource::System,
             #[cfg(feature = "port-mapping")]
             mapper,
         }))
     }
-    pub async fn peer(&self, stun: SocketAddr) -> PeerInfo {
+    pub async fn peer(&self, stun: SocketAddr) -> Discovered {
         let mut cached = self.cached.lock().await;
         let generation = (
             self.generation.load(Ordering::Acquire),
             self.network.generation(),
         );
+        let mapped = self.mapped_addr();
         if let Some(discovery) = &*cached
             && discovery.server == stun
             && discovery.generation == generation
             && discovery.at.elapsed() < Duration::from_secs(10)
         {
-            return PeerInfo {
-                certificate: self.identity.certificate.clone(),
-                candidates: discovery.candidates.select(self.mapped_addr()),
-            };
+            return self.discovered(discovery, mapped, StunOutcome::Cached, None);
         }
         let mut reflexive = None;
-        let mut hosts = Vec::new();
+        let mut stun_outcome = StunOutcome::Unavailable;
+        let started = Instant::now();
         for (socket, _) in &self.transports {
             if socket
                 .local_addr()
                 .is_ok_and(|a| a.is_ipv4() == stun.is_ipv4())
             {
                 match socket.mapped_addr(stun).await {
-                    Ok(addr) => reflexive = Some(addr),
-                    Err(error) => tracing::debug!(%error, "STUN discovery unavailable"),
-                }
-            }
-        }
-        if let Ok(interfaces) = if_addrs::get_if_addrs() {
-            for interface in interfaces {
-                let ip = interface.ip();
-                if ip.is_loopback() && !stun.ip().is_loopback() {
-                    continue;
-                }
-                for (socket, _) in &self.transports {
-                    if let Ok(local) = socket.local_addr() {
-                        if local.is_ipv4() != ip.is_ipv4() {
-                            continue;
-                        }
-                        let addr = SocketAddr::new(ip, local.port());
-                        if valid_candidate(&addr) {
-                            hosts.push(addr);
+                    Ok(addr) => {
+                        reflexive = Some(addr);
+                        stun_outcome = StunOutcome::Ok;
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "STUN discovery unavailable");
+                        if error.kind() == io::ErrorKind::TimedOut {
+                            stun_outcome = StunOutcome::Timeout;
                         }
                     }
                 }
             }
         }
+        let stun_ms = (stun_outcome != StunOutcome::Unavailable).then(|| ms(started.elapsed()));
+        let interfaces = match &self.interfaces {
+            InterfaceSource::System => Interfaces::system(self.network.generation()),
+            #[cfg(test)]
+            InterfaceSource::Fixed(table) => table.clone(),
+        };
+        let mut hosts = Vec::new();
+        for (index, interface) in interfaces.iter().enumerate() {
+            for &(ip, _) in &interface.addrs {
+                if ip.is_loopback() && !stun.ip().is_loopback() {
+                    continue;
+                }
+                for (socket, _) in &self.transports {
+                    if let Ok(local) = socket.local_addr()
+                        && local.is_ipv4() == ip.is_ipv4()
+                    {
+                        hosts.push(Host {
+                            addr: SocketAddr::new(ip, local.port()),
+                            tier: interface.tier,
+                            interface: index,
+                        });
+                    }
+                }
+            }
+        }
         let candidates = Candidates::new(reflexive, hosts);
-        let selected = candidates.select(self.mapped_addr());
-        tracing::debug!(%stun, candidates = ?selected, "direct candidates discovered");
-        *cached = Some(Discovery {
+        let local = Arc::new(Local {
+            interfaces,
+            public: reflexive.map(|addr| addr.ip()).into_iter().collect(),
+        });
+        let discovery = Discovery {
             at: Instant::now(),
             server: stun,
             generation,
             candidates,
-        });
-        PeerInfo {
-            certificate: self.identity.certificate.clone(),
-            candidates: selected,
+            local,
+        };
+        let discovered = self.discovered(&discovery, mapped, stun_outcome, stun_ms);
+        tracing::debug!(%stun, candidates = ?discovered.peer.candidates, "direct candidates discovered");
+        *cached = Some(discovery);
+        discovered
+    }
+    fn discovered(
+        &self,
+        discovery: &Discovery,
+        mapped: Option<SocketAddr>,
+        stun: StunOutcome,
+        stun_ms: Option<u64>,
+    ) -> Discovered {
+        let selected = discovery.candidates.select(mapped);
+        let mut local = discovery.local.clone();
+        // The router's address is where this end is seen from too.
+        if let Some(mapped) = mapped.map(|addr| addr.ip())
+            && !local.public.contains(&mapped)
+        {
+            Arc::make_mut(&mut local).public.push(mapped);
+        }
+        Discovered {
+            counts: (
+                selected.addrs.len() as u32,
+                selected.lan,
+                selected.truncated,
+            ),
+            peer: PeerInfo {
+                certificate: self.identity.certificate.clone(),
+                candidates: selected.addrs,
+            },
+            local,
+            stun,
+            stun_ms,
         }
     }
     #[cfg(test)]
@@ -269,26 +359,91 @@ impl Network {
                 .permissions
                 .allow(grant.consumer.certificate.clone(), deadline)?;
         }
+        // One wake for the session, whichever socket hears from the peer.
+        let wake = Arc::new(Notify::new());
         for (socket, _) in &self.transports {
-            socket.authorize(grant.id, grant.secret, deadline);
+            socket.authorize(grant.id, grant.secret, deadline, wake.clone());
         }
         Ok(())
     }
-    pub fn forget(&self, id: &pb_mapper_protocol::direct::SessionId) {
+    pub fn forget(&self, id: &SessionId) {
         for (socket, _) in &self.transports {
             socket.forget(id);
         }
     }
-    pub fn probe(&self, grant: &SessionGrant, provider: bool) -> Vec<SocketAddr> {
-        let peer = if provider {
-            &grant.consumer
-        } else {
-            &grant.provider
-        };
+    /// What wakes `id`'s session when a path answers or a source is owed a
+    /// challenge.
+    pub fn wake(&self, id: &SessionId) -> Arc<Notify> {
         self.transports
             .iter()
-            .flat_map(|(socket, _)| socket.probe(grant.id, &peer.candidates))
+            .find_map(|(socket, _)| socket.wake(id))
+            .unwrap_or_default()
+    }
+    /// Probe `candidates` in order, on the socket of each one's family, and
+    /// any source owed a challenge. Returns those the system refused.
+    pub fn probe(&self, id: SessionId, candidates: &[SocketAddr]) -> Vec<SocketAddr> {
+        self.transports
+            .iter()
+            .flat_map(|(socket, _)| socket.probe(id, candidates))
             .collect()
+    }
+    /// The paths that have answered so far, on both families, and when.
+    pub fn learned(&self, id: &SessionId) -> Vec<(SocketAddr, Instant)> {
+        self.transports
+            .iter()
+            .flat_map(|(socket, _)| socket.learned(id))
+            .collect()
+    }
+    /// How a peer's candidates are probed: every 120 ms all of them, those on
+    /// a local network first, and on evidence of one those again shortly
+    /// after the first round.
+    fn probing(candidates: &[SocketAddr], lan: &Assessment) -> (Vec<SocketAddr>, Vec<SocketAddr>) {
+        let ordered = lan.order(candidates);
+        let reprobed = ordered
+            .iter()
+            .copied()
+            .filter(|addr| lan.is_lan(*addr))
+            .collect();
+        (ordered, reprobed)
+    }
+    /// How many of `candidates` a socket of this end can probe.
+    pub fn reachable(&self, candidates: &[SocketAddr]) -> u32 {
+        candidates
+            .iter()
+            .filter(|addr| {
+                self.transports.iter().any(|(socket, _)| {
+                    socket
+                        .local_addr()
+                        .is_ok_and(|local| local.is_ipv4() == addr.is_ipv4())
+                })
+            })
+            .count() as u32
+    }
+    /// Keep probing a peer for the provider, which is dialed rather than
+    /// dialing: its probes open its own NAT and firewall for the consumer's,
+    /// and answer the sources the consumer's probes come from.
+    pub async fn keep_probing(&self, grant: &SessionGrant, lan: &Assessment) {
+        let id = grant.id;
+        let (ordered, reprobed) = Self::probing(&grant.consumer.candidates, lan);
+        let wake = self.wake(&id);
+        let started = Instant::now();
+        let mut reprobes = reprobe_times(started, lan.evidence, &reprobed);
+        let mut probes = tokio::time::interval(Duration::from_millis(120));
+        loop {
+            let reprobe = reprobes.first().copied();
+            tokio::select! {
+                _ = probes.tick() => {
+                    self.probe(id, &ordered);
+                }
+                () = sleep_until_some(reprobe) => {
+                    reprobes.remove(0);
+                    self.probe(id, &reprobed);
+                }
+                () = wake.notified() => {
+                    self.probe(id, &[]);
+                }
+            }
+        }
     }
     pub async fn accept(&self) -> Option<quinn::Connection> {
         self.incoming.lock().await.recv().await
@@ -312,49 +467,108 @@ impl Network {
             mapping.shutdown().await;
         }
     }
+    /// Dial the provider over each path as soon as it answers a probe, until
+    /// one handshake completes. Only paths that answered are raced: blind
+    /// QUIC flights to stale interface addresses can fill one shared UDP
+    /// socket's send queue and stall healthy sessions.
     pub async fn connect(
         &self,
         grant: &SessionGrant,
         deadline: Instant,
-    ) -> io::Result<quinn::Connection> {
+        lan: &Assessment,
+    ) -> io::Result<(quinn::Connection, Dialed)> {
+        let id = grant.id;
+        let started = Instant::now();
         let config = self.identity.client(&grant.provider.certificate)?;
+        let (ordered, reprobed) = Self::probing(&grant.provider.candidates, lan);
+        let probed = self.reachable(&ordered);
+        let wake = self.wake(&id);
+        let mut reprobes = reprobe_times(started, lan.evidence, &reprobed);
         let mut attempts = JoinSet::new();
         let mut tried = Vec::new();
+        // LAN handshakes started and failed, and whether the system refused
+        // to send to a LAN address: either way the head start is over.
+        let (mut lan_dialed, mut lan_failed, mut lan_refused) = (0, 0, false);
         let mut probe = tokio::time::interval(Duration::from_millis(120));
         loop {
+            let now = Instant::now();
+            let mut held: Option<Instant> = None;
+            for (addr, answered) in self.learned(&id) {
+                // At most 16 handshakes per setup: an attempt is bounded
+                // work, and the setup deadline ends the search anyway.
+                if tried.contains(&addr) || tried.len() >= 16 {
+                    continue;
+                }
+                let on_lan = lan.is_lan(addr);
+                let settled = lan_refused || (lan_dialed > 0 && lan_failed == lan_dialed);
+                let since = now.saturating_duration_since(answered);
+                if !dial_now(lan.evidence, on_lan, since, settled) {
+                    let at = answered + LAN_HEAD_START;
+                    held = Some(held.map_or(at, |held| held.min(at)));
+                    continue;
+                }
+                tried.push(addr);
+                let endpoint = self.transports.iter().find(|(socket, _)| {
+                    socket
+                        .local_addr()
+                        .is_ok_and(|a| a.is_ipv4() == addr.is_ipv4())
+                });
+                if let Some((_, endpoint)) = endpoint
+                    && let Ok(connecting) =
+                        endpoint.connect_with(config.clone(), addr, "pb-mapper.invalid")
+                {
+                    lan_dialed += u32::from(on_lan);
+                    attempts.spawn(async move {
+                        let dialed = Instant::now();
+                        (addr, connecting.await, dialed.elapsed())
+                    });
+                }
+            }
             tokio::select! {
                 () = tokio::time::sleep_until(deadline) => {
                     return Err(io::Error::new(io::ErrorKind::TimedOut, "direct path timed out"));
                 }
                 _ = probe.tick() => {
-                    // Only race paths that answered our authenticated probe.
-                    // Blind QUIC flights to stale interface addresses can fill
-                    // one shared UDP socket's send queue and stall healthy sessions.
-                    let candidates = self.probe(grant, false);
-                    // At most 16 handshakes per setup: an attempt is bounded
-                    // work, and the setup deadline ends the search anyway.
-                    for addr in candidates {
-                        if tried.contains(&addr) || tried.len() >= 16 {
-                            continue;
-                        }
-                        tried.push(addr);
-                        let endpoint = self.transports.iter().find(|(socket, _)| {
-                            socket.local_addr().is_ok_and(|a| a.is_ipv4() == addr.is_ipv4())
-                        });
-                        if let Some((_, endpoint)) = endpoint
-                            && let Ok(connecting) =
-                                endpoint.connect_with(config.clone(), addr, "pb-mapper.invalid")
-                        {
-                            attempts.spawn(connecting);
-                        }
-                    }
+                    let refused = self.probe(id, &ordered);
+                    lan_refused |= refused.iter().any(|addr| lan.is_lan(*addr));
                 }
+                () = sleep_until_some(reprobes.first().copied()) => {
+                    reprobes.remove(0);
+                    let refused = self.probe(id, &reprobed);
+                    lan_refused |= refused.iter().any(|addr| lan.is_lan(*addr));
+                }
+                // A source owed a challenge gets it now; a path that answered
+                // is dialed above.
+                () = wake.notified() => {
+                    self.probe(id, &[]);
+                }
+                () = sleep_until_some(held) => {}
                 Some(result) = attempts.join_next(), if !attempts.is_empty() => {
                     match result {
-                        Ok(Ok(connection)) => return Ok(connection),
+                        Ok((_, Ok(connection), handshake)) => {
+                            let learned = self.learned(&id);
+                            let first = |lan_only: bool| {
+                                learned
+                                    .iter()
+                                    .filter(|(addr, _)| !lan_only || lan.is_lan(*addr))
+                                    .map(|(_, at)| at.saturating_duration_since(started))
+                                    .min()
+                            };
+                            return Ok((connection, Dialed {
+                                probed,
+                                answered: learned.len() as u32,
+                                handshakes: tried.len() as u32,
+                                first_pong: first(false),
+                                lan_first_pong: first(true),
+                                handshake,
+                            }));
+                        }
                         // A systematic identity or config mismatch must be
                         // distinguishable from an unreachable path.
-                        Ok(Err(error)) => tracing::debug!(%error, "direct QUIC attempt failed"),
+                        Ok((addr, Err(error), _)) => {
+                            lan_failed += u32::from(lan.is_lan(addr));
+                            tracing::debug!(%error, %addr, "direct QUIC attempt failed");
+                        }
                         Err(error) => tracing::debug!(%error, "direct QUIC attempt aborted"),
                     }
                 }
@@ -362,6 +576,37 @@ impl Network {
         }
     }
 }
+/// Whether a path that answered `since` ago may be dialed now. Only strong
+/// evidence of a shared network holds a path off it back, and only for
+/// [`LAN_HEAD_START`] or until the LAN has failed.
+pub(super) fn dial_now(
+    evidence: Option<LanEvidence>,
+    on_lan: bool,
+    since: Duration,
+    lan_failed: bool,
+) -> bool {
+    on_lan || lan_failed || since >= LAN_HEAD_START || !evidence.is_some_and(LanEvidence::strong)
+}
+
+/// When LAN paths are probed again, on any evidence of a shared network.
+fn reprobe_times(
+    started: Instant,
+    evidence: Option<LanEvidence>,
+    lan: &[SocketAddr],
+) -> Vec<Instant> {
+    if evidence.is_none() || lan.is_empty() {
+        return Vec::new();
+    }
+    LAN_REPROBES.iter().map(|after| started + *after).collect()
+}
+
+async fn sleep_until_some(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
 impl Drop for Network {
     fn drop(&mut self) {
         for (_, ep) in &self.transports {
@@ -466,7 +711,7 @@ mod tests {
             let new = "192.0.2.10:40002".parse().unwrap();
             let (first, ()) =
                 tokio::join!(network.peer(server), respond(&stun, old, Some(&network)));
-            assert_eq!(first.candidates[0], old);
+            assert_eq!(first.peer.candidates[0], old);
 
             // Both waiters must share one fresh lookup; neither may reuse old.
             let (first, second, ()) = tokio::join!(
@@ -474,9 +719,10 @@ mod tests {
                 network.peer(server),
                 respond(&stun, new, None)
             );
+            let first = first.peer;
             assert_eq!(first.candidates[0], new);
-            assert_eq!(second.candidates, first.candidates);
-            assert_eq!(network.peer(server).await.candidates, first.candidates);
+            assert_eq!(second.peer.candidates, first.candidates);
+            assert_eq!(network.peer(server).await.peer.candidates, first.candidates);
             assert_eq!(
                 stun.try_recv_from(&mut [0; 2048]).unwrap_err().kind(),
                 io::ErrorKind::WouldBlock
@@ -487,11 +733,26 @@ mod tests {
             network.network.notify();
             let refreshed = "192.0.2.10:40003".parse().unwrap();
             let (peer, ()) = tokio::join!(network.peer(server), respond(&stun, refreshed, None));
-            assert_eq!(peer.candidates[0], refreshed);
+            assert_eq!(peer.peer.candidates[0], refreshed);
             network.shutdown().await;
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn only_strong_evidence_holds_other_paths_back_and_never_for_long() {
+        let strong = Some(LanEvidence::PublicIpSubnet);
+        let soon = Duration::from_millis(10);
+        // No evidence, or weak evidence, dials whatever answers at once.
+        assert!(dial_now(None, false, Duration::ZERO, false));
+        assert!(dial_now(Some(LanEvidence::Subnet), false, soon, false));
+        // Strong evidence: the LAN at once, the rest after the head start,
+        // or as soon as the LAN has failed.
+        assert!(dial_now(strong, true, Duration::ZERO, false));
+        assert!(!dial_now(strong, false, soon, false));
+        assert!(dial_now(strong, false, LAN_HEAD_START, false));
+        assert!(dial_now(strong, false, soon, true));
     }
 
     /// Where punching works, a tunnel that maps when needed never asks the

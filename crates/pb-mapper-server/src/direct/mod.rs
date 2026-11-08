@@ -1145,6 +1145,7 @@ mod tests {
                 path: SessionPath::Direct,
                 state: SessionState::Active,
                 reason: None,
+                link: None,
             },
         };
         state.observe(&admin, 1, update.clone(), true);

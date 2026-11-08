@@ -2,8 +2,12 @@ use super::{
     QuicGuard,
     control::io_error,
     endpoint::{self, Network},
+    lan::Assessment,
 };
-use crate::{diagnostics::Diagnostics, server::LocalControlWrite};
+use crate::{
+    diagnostics::{CandidateCounts, Diagnostics, LinkGuard, LinkKind, SetupTimings, ms},
+    server::LocalControlWrite,
+};
 use pb_mapper_core::config::ResolvedAddrs;
 use pb_mapper_protocol::{direct::*, forward::StreamForward};
 use std::{
@@ -293,13 +297,25 @@ async fn session<L: StreamProvider>(
 where
     L::Item: StreamForward,
 {
-    let deadline = Instant::now() + Duration::from_millis(grant.ttl_ms);
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(grant.ttl_ms);
     let _probe_guard = ProbeGuard {
         network: network.clone(),
         id: grant.id,
     };
-    grant.provider = network.peer(stun_addr).await;
+    let discovered = network.peer(stun_addr).await;
+    let discover_ms = ms(started.elapsed());
+    grant.provider = discovered.peer.clone();
     network.authorize(&grant, true, deadline)?;
+    let lan = Assessment::new(discovered.local.clone(), &grant.consumer.candidates);
+    if let Some(evidence) = lan.evidence {
+        diagnostics.lan_detected(evidence);
+    }
+    let missed = || {
+        if lan.evidence.is_some() {
+            diagnostics.lan_missed();
+        }
+    };
     let accept = DirectProviderMessage::Accept {
         id: grant.id,
         peer: grant.provider.clone(),
@@ -307,45 +323,49 @@ where
     send_until(&reply, accept, deadline).await?;
     let mut incoming: Option<Incoming> = None;
     let mut granted = false;
-    let mut probes = tokio::time::interval(Duration::from_millis(120));
-    loop {
-        if granted && incoming.is_some() {
-            break;
-        }
-        tokio::select! {
-            () = tokio::time::sleep_until(deadline) => {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "provider setup expired"));
+    let probing_started = Instant::now();
+    {
+        let probing = network.keep_probing(&grant, &lan);
+        tokio::pin!(probing);
+        loop {
+            if granted && incoming.is_some() {
+                break;
             }
-            _ = probes.tick() => {
-                network.probe(&grant, true);
-            }
-            event = events.recv() => match event {
-                Some(SessionEvent::Granted) => {
-                    tracing::debug!(id = ?grant.id, "direct grant accepted by provider");
-                    granted = true;
+            tokio::select! {
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "provider setup expired"));
                 }
-                Some(SessionEvent::Incoming(candidate)) if incoming.is_none() => {
-                    tracing::debug!(id = ?grant.id, "direct session bind received");
-                    match verify(&candidate, &grant) {
-                        Ok(()) => incoming = Some(candidate),
-                        Err(error) => tracing::debug!(%error, "direct session binding rejected"),
+                () = &mut probing => {}
+                event = events.recv() => match event {
+                    Some(SessionEvent::Granted) => {
+                        tracing::debug!(id = ?grant.id, "direct grant accepted by provider");
+                        granted = true;
                     }
+                    Some(SessionEvent::Incoming(candidate)) if incoming.is_none() => {
+                        tracing::debug!(id = ?grant.id, "direct session bind received");
+                        match verify(&candidate, &grant) {
+                            Ok(()) => incoming = Some(candidate),
+                            Err(error) => tracing::debug!(%error, "direct session binding rejected"),
+                        }
+                    }
+                    Some(SessionEvent::Relay) => {
+                        // The consumer chose the relay before any path committed:
+                        // the punch did not get through.
+                        network.punching_failed();
+                        missed();
+                        let selected = DirectProviderMessage::RelaySelected { id: grant.id };
+                        return send_until(&reply, selected, deadline).await;
+                    }
+                    Some(SessionEvent::Cancel) | None => return Ok(()),
+                    _ => {}
                 }
-                Some(SessionEvent::Relay) => {
-                    // The consumer chose the relay before any path committed:
-                    // the punch did not get through.
-                    network.punching_failed();
-                    let selected = DirectProviderMessage::RelaySelected { id: grant.id };
-                    return send_until(&reply, selected, deadline).await;
-                }
-                Some(SessionEvent::Cancel) | None => return Ok(()),
-                _ => {}
             }
         }
     }
     let Some(mut incoming) = incoming else {
         return Err(io::Error::other("missing prepared connection"));
     };
+    let committing = Instant::now();
     incoming.send.write_all(&[1]).await.map_err(io_error)?;
     // Keep the read future alive while processing probe ticks or coordination.
     {
@@ -364,6 +384,7 @@ where
                 }
                 event = events.recv() => match event {
                     Some(SessionEvent::Relay) => {
+                        missed();
                         let selected = DirectProviderMessage::RelaySelected { id: grant.id };
                         return send_until(&reply, selected, deadline).await;
                     }
@@ -386,16 +407,49 @@ where
     };
     incoming.send.write_all(&[3]).await.map_err(io_error)?;
     let framing = endpoint::framing_key(&incoming.connection.0, &grant)?;
+    let learned = network.learned(&grant.id);
+    let first = |lan_only: bool| {
+        learned
+            .iter()
+            .filter(|(addr, _)| !lan_only || lan.is_lan(*addr))
+            .map(|(_, at)| ms(at.saturating_duration_since(probing_started)))
+            .min()
+    };
+    let timings = SetupTimings {
+        discover_ms: Some(discover_ms),
+        first_pong_ms: first(false),
+        lan_first_pong_ms: first(true),
+        commit_ms: Some(ms(committing.elapsed())),
+        setup_ms: ms(started.elapsed()),
+        ..super::stun_timings(SetupTimings::default(), &discovered)
+    };
+    let candidates = CandidateCounts {
+        probed: network.reachable(&grant.consumer.candidates),
+        answered: learned.len() as u32,
+        ..super::counts(&discovered, &lan, &grant.consumer.candidates)
+    };
+    let link = super::direct_link(
+        &incoming.connection.0,
+        &lan,
+        &grant.consumer.candidates,
+        timings,
+        candidates,
+    );
+    if link.kind != LinkKind::Lan {
+        missed();
+    }
+    super::log_path(&grant.service, &link);
     let mut report = Report {
         reports,
         session: (&grant).into(),
         secret: grant.secret,
+        link: super::summary(&link),
         seq: 0,
+        _link: diagnostics.link_opened(link, incoming.connection.0.clone()),
         diagnostics,
     };
     report.diagnostics.session_opened(SessionPath::Direct);
     report.tick();
-    tracing::info!(event="session_path_selected",path="direct",service=%grant.service,peer=%incoming.connection.0.remote_address());
     let forwarding = super::forward_quic(local, incoming.send, incoming.recv, framing, idle);
     tokio::pin!(forwarding);
     let mut tick = tokio::time::interval(Duration::from_secs(15));
@@ -530,8 +584,10 @@ struct Report {
     reports: Arc<ProviderReports>,
     session: SessionSummary,
     secret: SessionSecret,
+    link: LinkSummary,
     seq: u64,
     diagnostics: Diagnostics,
+    _link: LinkGuard,
 }
 impl Report {
     fn update(&mut self, state: SessionState) {
@@ -545,6 +601,7 @@ impl Report {
                 path: SessionPath::Direct,
                 state,
                 reason: None,
+                link: Some(self.link),
             },
         });
     }
@@ -591,6 +648,7 @@ mod tests {
                     path: SessionPath::Direct,
                     state,
                     reason: None,
+                    link: None,
                 },
             }
         };
@@ -637,7 +695,7 @@ mod tests {
             is_datagram: false,
             consumer_key: 0,
             provider_key: 0,
-            consumer: consumer.peer(stun).await,
+            consumer: consumer.peer(stun).await.peer,
             provider: PeerInfo {
                 certificate: vec![],
                 candidates: vec![],
@@ -707,7 +765,10 @@ mod tests {
                 }
             }))
         };
-        let connection = consumer.connect(&grant, deadline).await.unwrap();
+        let (connection, _) = consumer
+            .connect(&grant, deadline, &Assessment::default())
+            .await
+            .unwrap();
         let (mut send, mut recv) = connection.open_bi().await.unwrap();
         send.write_all(&grant.id).await.unwrap();
         send.write_all(&endpoint::binding(&connection, &grant).unwrap())

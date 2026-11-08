@@ -25,12 +25,14 @@ pub use types::{
 /// The SDK version compiled into this process.
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use crate::diagnostics::{
-    DirectAttempt, DirectStage, EventsLagged, PathDiagnostics, PortMappingDiagnostics,
-    PortMappingProtocol, PortMappingStage, PortMappingStatus, RecoveryFailure, RecoveryPhase,
-    TunnelDiagnostics, TunnelEvent, TunnelEventKind, TunnelEvents,
+    AddressFamily, CandidateCounts, DirectAttempt, DirectLink, DirectStage, EventsLagged,
+    InterfaceTier, LanEvidence, LinkKind, LinkStats, LinkVia, PathDiagnostics,
+    PortMappingDiagnostics, PortMappingProtocol, PortMappingStage, PortMappingStatus,
+    RecoveryFailure, RecoveryPhase, SetupTimings, StunOutcome, TunnelDiagnostics, TunnelEvent,
+    TunnelEventKind, TunnelEvents,
 };
 pub use pb_mapper_protocol::direct::{
-    ObservedReport, SessionObservation, SessionPath, SessionState,
+    LinkSummary, ObservedReport, SessionObservation, SessionPath, SessionState,
 };
 
 pub use crate::relay::{
