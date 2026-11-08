@@ -12,8 +12,8 @@ use crate::{
     lane::LaneCommand,
     outgoing::OUTGOING_MAX_AGE,
     protocol::{
-        CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, HostMessage, StateReason, StateRecord,
-        StopReason, ViewerMessage,
+        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, HostMessage,
+        StateReason, StateRecord, StopReason, ViewerMessage,
     },
     qos::{QOS_TICK, Qos, TargetValues},
     shared::{CursorReport, EngineState, Policy, SessionShared, Targets},
@@ -76,6 +76,8 @@ pub(crate) struct Session {
     codec: VideoCodec,
     /// The viewer reads the encoder's dwell in `Stats`.
     encoder_dwell: bool,
+    /// The viewer reads a `Cursor`'s input watermark.
+    cursor_sequence: bool,
     /// When the session was accepted, for display only.
     pub started_unix_ms: u64,
     /// Send credit and QoS, shared by B-recv and B-send only.
@@ -108,6 +110,7 @@ impl Session {
             )),
             codec,
             encoder_dwell: listed(CAPABILITY_ENCODER_DWELL),
+            cursor_sequence: listed(CAPABILITY_CURSOR_SEQUENCE),
             started_unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| {
@@ -595,7 +598,9 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
 
     /// Write C's newest cursor report, once. It waits for its generation's
     /// `State`, and one of an older generation is stale. C never reports the
-    /// controller's own move coming back, so nothing here holds one back.
+    /// controller's own move coming back, so nothing here holds one back. Its
+    /// input watermark goes only to a viewer that reads it: an older one
+    /// rejects a field it does not know.
     async fn cursor(&mut self) -> Result<(), Abandoned> {
         let Some(report) = *self.cursor.borrow_and_update() else {
             return Ok(());
@@ -617,6 +622,10 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             x: cursor.x,
             y: cursor.y,
             visible: cursor.visible,
+            input_sequence: self
+                .session
+                .cursor_sequence
+                .then_some(report.input_sequence),
         };
         self.send(&message, None).await
     }
@@ -971,6 +980,7 @@ mod tests {
                     y: 6,
                     visible: true,
                 },
+                input_sequence: 0,
             })
         };
         let cursor = |message: &HostMessage| {
@@ -980,7 +990,8 @@ mod tests {
                     generation: 2,
                     x: 5,
                     y: 6,
-                    visible: true
+                    visible: true,
+                    ..
                 }
             )
         };
@@ -1032,6 +1043,59 @@ mod tests {
         assert!(rest.is_empty());
         drop(viewer);
         running.await.unwrap();
+    }
+
+    /// A cursor report carries the input watermark only to a viewer that
+    /// listed `cursor_sequence`: an older one rejects a field it does not know.
+    #[tokio::test]
+    async fn the_cursor_watermark_goes_only_to_a_viewer_that_reads_it() {
+        for listed in [false, true] {
+            let (viewer, host) = tokio::io::duplex(1 << 20);
+            let (read, write) = tokio::io::split(viewer);
+            let mut viewer = Viewer { read, write };
+            let capabilities = if listed {
+                vec![CAPABILITY_CURSOR_SEQUENCE.to_owned()]
+            } else {
+                vec![]
+            };
+            let session = Session::new(
+                Arc::new(Policy::new(true)),
+                CancellationToken::new(),
+                VideoCodec::H264,
+                VideoLimits::for_viewer(60.0),
+                QualityPreset::Balanced,
+                &capabilities,
+            );
+            let shared = session.shared.clone();
+            shared.state.send_replace(streaming(1));
+            shared.cursor.send_replace(Some(CursorReport {
+                serial: 1,
+                cursor: CursorUpdate {
+                    generation: 1,
+                    x: 5,
+                    y: 6,
+                    visible: true,
+                },
+                input_sequence: 9,
+            }));
+            let cancel = shared.cancel.clone();
+            let running = tokio::spawn(run(session, host, async move {
+                cancel.cancelled().await;
+                WorkerExit::Cancelled
+            }));
+            assert_eq!(state_generation(&viewer.next().await.0), 1);
+            let (cursor, _) = viewer.next().await;
+            assert!(
+                matches!(
+                    cursor,
+                    HostMessage::Cursor { input_sequence, .. }
+                        if input_sequence == listed.then_some(9)
+                ),
+                "{cursor:?}"
+            );
+            drop(viewer);
+            running.await.unwrap();
+        }
     }
 
     /// A viewer still writing when the host stops it hears why. Input that

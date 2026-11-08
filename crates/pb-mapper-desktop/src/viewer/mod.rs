@@ -30,9 +30,9 @@ pub use status::{
 use crate::{
     Input, Invitation, KeyframeReason, QualityPreset, Result, VideoCodec, VideoLimits, error,
     protocol::{
-        CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265, DesktopKind,
-        HostMessage, NoticeCode, RejectReason, Route, SessionState, StateRecord, VideoSize,
-        ViewerMessage, valid_capabilities,
+        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE,
+        CAPABILITY_H265, DesktopKind, HostMessage, NoticeCode, RejectReason, Route, SessionState,
+        StateRecord, VideoSize, ViewerMessage, valid_capabilities,
     },
     security, valid_service,
     video_sink::{VideoSink, VideoUnit},
@@ -112,7 +112,10 @@ impl ViewerConfig {
     }
     /// What this viewer reads and asks for, as `Authenticate.capabilities`.
     fn capabilities(&self) -> Vec<String> {
-        let mut capabilities = vec![CAPABILITY_ENCODER_DWELL.to_owned()];
+        let mut capabilities = vec![
+            CAPABILITY_ENCODER_DWELL.to_owned(),
+            CAPABILITY_CURSOR_SEQUENCE.to_owned(),
+        ];
         if self.codecs.contains(&VideoCodec::H265) {
             capabilities.push(CAPABILITY_H265.to_owned());
         }
@@ -1018,16 +1021,21 @@ impl Reader<'_> {
                 x,
                 y,
                 visible,
+                input_sequence,
             } => {
                 if generation == self.generation {
+                    let controlling = self.shared.state.lock().controlling();
                     let mut cursor = self.shared.cursor.lock();
-                    *cursor = CursorSlot {
-                        generation,
-                        x,
-                        y,
-                        visible,
-                        seq: cursor.seq + 1,
-                    };
+                    if !cursor.superseded(generation, input_sequence, controlling) {
+                        *cursor = CursorSlot {
+                            generation,
+                            x,
+                            y,
+                            visible,
+                            seq: cursor.seq + 1,
+                            ..*cursor
+                        };
+                    }
                 }
             }
             HostMessage::Stats {
@@ -1121,6 +1129,13 @@ impl Writer<'_> {
             }
             match self.shared.outbound.next(now, last_write) {
                 Next::Send(message) => {
+                    // Out of the queue, no barrier drops it: it reaches the
+                    // host, or the session ends.
+                    if let ViewerMessage::Input { event } = &message
+                        && matches!(event.input, Input::Move { .. })
+                    {
+                        self.shared.cursor.lock().moved = Some((event.generation, event.sequence));
+                    }
                     if let Err(failure) = wire::write_message(write, &message, None).await {
                         return Ended::failed(failure);
                     }
@@ -1421,7 +1436,10 @@ mod tests {
         };
         assert_eq!(token, TOKEN);
         assert_eq!(codecs, [VideoCodec::H264]);
-        assert_eq!(capabilities, [CAPABILITY_ENCODER_DWELL]);
+        assert_eq!(
+            capabilities,
+            [CAPABILITY_ENCODER_DWELL, CAPABILITY_CURSOR_SEQUENCE]
+        );
 
         // Receipts and probe echoes need no consumer at all.
         send(&mut host, state(1, false), None).await;
@@ -1539,6 +1557,7 @@ mod tests {
             capabilities,
             [
                 CAPABILITY_ENCODER_DWELL,
+                CAPABILITY_CURSOR_SEQUENCE,
                 CAPABILITY_H265,
                 CAPABILITY_FPS_OVERRIDE
             ]
@@ -1563,6 +1582,60 @@ mod tests {
             Viewer::over_stream_for_test(stream, TOKEN.into(), alone).await,
             Err(ConnectError::InvalidRequest)
         ));
+    }
+
+    /// A report the host sampled before it took this viewer's last move is set
+    /// aside while this viewer controls: the host never reports that move's
+    /// echo, so the cursor would stay where the host's pointer is not. One at
+    /// or after the move is taken, and so is any once control is given up.
+    #[tokio::test]
+    async fn a_cursor_report_older_than_the_last_move_is_set_aside_while_controlling() {
+        let (viewer, mut host, _) = connect(accepted()).await;
+        let viewer = viewer.unwrap();
+        send(&mut host, state(1, false), None).await;
+        send(&mut host, video(1, 1, 1, true), Some(&[1; 64])).await;
+        let consumer = viewer.video_sink().attach().unwrap();
+        pull(&consumer).await;
+        assert!(consumer.presented(1, 1));
+        viewer.request_control(true).unwrap();
+        until(&mut host, |m| {
+            matches!(m, ViewerMessage::Control { enabled: true })
+        })
+        .await;
+        send(&mut host, state(1, true), None).await;
+        eventually(|| viewer.status().controlling).await;
+
+        let cursor = |x, input_sequence| HostMessage::Cursor {
+            generation: 1,
+            x,
+            y: 0,
+            visible: true,
+            input_sequence: Some(input_sequence),
+        };
+        let seen = || {
+            let view = viewer.view();
+            (view.cursor_seq, view.cursor_x)
+        };
+        // The first report of a generation is taken, however old.
+        send(&mut host, cursor(10, 0), None).await;
+        eventually(|| seen().1 == 10).await;
+        let first = seen().0;
+        viewer.input(1, &[Input::Move { x: 20, y: 0 }]).unwrap();
+        let ViewerMessage::Input { event } =
+            until(&mut host, |m| matches!(m, ViewerMessage::Input { .. })).await
+        else {
+            unreachable!()
+        };
+        send(&mut host, cursor(30, event.sequence - 1), None).await;
+        send(&mut host, cursor(40, event.sequence), None).await;
+        eventually(|| seen().1 == 40).await;
+        assert_eq!(seen().0, first + 1, "the older report was taken");
+
+        viewer.request_control(false).unwrap();
+        send(&mut host, cursor(50, 0), None).await;
+        eventually(|| seen().1 == 50).await;
+        drop(host);
+        viewer.stop().await.unwrap();
     }
 
     /// Dart reconnects after 5 s without video while streaming: neither

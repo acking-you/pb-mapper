@@ -169,4 +169,6 @@ pub(crate) struct CursorUpdate {
 pub(crate) struct CursorReport {
     pub serial: u64,
     pub cursor: CursorUpdate,
+    /// The last input sequence C had taken off the lane when it sampled.
+    pub input_sequence: u64,
 }

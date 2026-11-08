@@ -376,7 +376,10 @@ first one of a connection or a display, any report while viewing only, and
 else a report that changed and lies more than a pixel from where this
 viewer put it — the remote user, a program or a clamp moved it.
 The host reports nothing it injected for this viewer, so a lagging report
-can no longer pull the arrow, or the next stroke, back. A hidden cursor
+can no longer pull the arrow, or the next stroke, back. Each report also
+says which of this viewer's inputs it reflects, and while this viewer
+controls, one taken before its newest move, which crossed that move on the
+way, is set aside: it neither moves nor hides the arrow. A hidden cursor
 hides the arrow until this viewer moves it. A last move refused because the
 picture went stale is sent with the next fresh picture.
 

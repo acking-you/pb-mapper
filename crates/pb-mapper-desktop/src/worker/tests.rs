@@ -690,6 +690,8 @@ fn the_cursor_reports_every_change_but_the_controllers_own_move() {
             (report.serial, cursor.generation, cursor.x, cursor.y)
         })
     };
+    // The last sequence C had taken when it sampled the last report.
+    let taken = |h: &Harness| h.shared.cursor.borrow().unwrap().input_sequence;
     h.send(LaneCommand::Control { enabled: true });
     h.step();
     h.present();
@@ -703,38 +705,52 @@ fn the_cursor_reports_every_change_but_the_controllers_own_move() {
     }
     assert_eq!(h.inputs(), 4);
     assert_eq!(reported(&h), Some((first, generation, 3, 3)));
+    // A move C takes but does not apply, for a frame newer than the one
+    // presented, counts as taken all the same.
+    h.presented.1 += 1;
+    h.input(MOVE);
+    h.presented.1 -= 1;
+    h.run(Duration::from_millis(20), true);
+    assert_eq!(h.inputs(), 4);
     // Someone else moves it: reported at the next sample, without a hold;
     // and back to where the controller left it, which is their move too.
     for (x, serial) in [(1, first + 1), (7, first + 2)] {
         *h.fake.pointer.lock() = (x, 3);
         h.run(Duration::from_millis(20), true);
         assert_eq!(reported(&h), Some((serial, generation, x, 3)));
+        assert_eq!(taken(&h), h.sequence);
     }
     // A move the OS stops short is reported where the pointer stopped, though
-    // the pointer did not move since the last sample.
+    // the pointer did not move since the last sample; and after each later
+    // move it stops there too, at that move's sequence, since the viewer sets
+    // aside a report older than its last move.
     *h.fake.clip.lock() = Some(8);
     for x in [8, 9] {
         h.input(Input::Move { x, y: 3 });
         h.run(Duration::from_millis(20), true);
     }
     assert_eq!(reported(&h), Some((first + 3, generation, 8, 3)));
+    h.input(Input::Move { x: 9, y: 3 });
+    h.run(Duration::from_millis(20), true);
+    assert_eq!(reported(&h), Some((first + 4, generation, 8, 3)));
+    assert_eq!(taken(&h), h.sequence);
     // Hiding is reported, and the controller's next move, which shows the
     // pointer again, is still its own.
     h.fake.hidden.store(true, Ordering::SeqCst);
     h.run(Duration::from_millis(20), true);
-    assert_eq!(reported(&h), Some((first + 4, generation, 0, 0)));
+    assert_eq!(reported(&h), Some((first + 5, generation, 0, 0)));
     h.fake.hidden.store(false, Ordering::SeqCst);
     h.input(Input::Move { x: 6, y: 3 });
     h.run(Duration::from_millis(20), true);
-    assert_eq!(reported(&h), Some((first + 4, generation, 0, 0)));
+    assert_eq!(reported(&h), Some((first + 5, generation, 0, 0)));
     // A new generation reports where the pointer is, though it did not move.
     h.input(Input::Move { x: 5, y: 5 });
     h.run(Duration::from_millis(20), true);
-    assert_eq!(reported(&h), Some((first + 4, generation, 0, 0)));
+    assert_eq!(reported(&h), Some((first + 5, generation, 0, 0)));
     h.fake.width.store(11, Ordering::SeqCst);
     h.run(Duration::from_millis(300), true);
     let (serial, moved, x, y) = reported(&h).unwrap();
-    assert!(serial > first + 4 && moved > generation);
+    assert!(serial > first + 5 && moved > generation);
     assert_eq!((x, y), (5, 5));
 }
 

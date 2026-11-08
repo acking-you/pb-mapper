@@ -260,6 +260,7 @@ struct Engine {
     /// A frame was produced since the last desktop change.
     streaming: bool,
     paused: bool,
+    /// The last input sequence taken off the lane, applied or not.
     sequence: u64,
     frame_id: u64,
     /// The next submit must be an IDR (new encoder, pause); the submit that
@@ -347,12 +348,16 @@ impl Engine {
         }
         self.state.record.control_allowed = shared.policy.allowed();
         if shared.lane.take_overflow() {
-            drop(shared.lane.drain());
+            for (command, _) in shared.lane.drain() {
+                if let LaneCommand::Input(event) = command {
+                    self.taken(&event);
+                }
+            }
             self.congested();
         }
         if shared.auth.lock().take_stale() {
             self.backend.release();
-            self.hold.drop_held();
+            self.drop_held();
         }
         self.release_if_stale(now);
         if self.hold.until.is_some_and(|until| now >= until) && !self.release_hold() {
@@ -425,7 +430,7 @@ impl Engine {
                 return;
             }
             // Ending control drops the whole hold: nothing in it was injected.
-            self.hold.drop_held();
+            self.drop_held();
         }
         match command {
             LaneCommand::Control { enabled } => self.control(enabled),
@@ -530,11 +535,34 @@ impl Engine {
         self.state.record.controlling = true;
     }
 
-    fn input(&mut self, event: InputEvent, now: Instant) {
+    /// Count `event` as taken off the lane, applied or not. A cursor report
+    /// carries the last sequence taken, which tells the viewer what the report
+    /// already reflects. False for a sequence already taken.
+    fn taken(&mut self, event: &InputEvent) -> bool {
         if event.sequence <= self.sequence {
-            return;
+            return false;
         }
         self.sequence = event.sequence;
+        if matches!(event.input, Input::Move { .. }) {
+            self.cursor.took_move();
+        }
+        true
+    }
+
+    /// Drop every held command, none of which was injected; held input
+    /// counts as taken.
+    fn drop_held(&mut self) {
+        for command in self.hold.release() {
+            if let LaneCommand::Input(event) = command {
+                self.taken(&event);
+            }
+        }
+    }
+
+    fn input(&mut self, event: InputEvent, now: Instant) {
+        if !self.taken(&event) {
+            return;
+        }
         // The injection boundary checks the desktop for every input; this
         // checks it only when a check is due.
         if (self.check_due(now) && !self.geometry(now))
@@ -602,7 +630,7 @@ impl Engine {
     /// is admitted again until a fresh presentation, so one release suffices.
     fn release_if_stale(&mut self, now: Instant) {
         if self.state.record.controlling && !self.shared.auth.lock().fresh(now) {
-            self.hold.drop_held();
+            self.drop_held();
             if !self.stale_released {
                 self.backend.release();
                 self.stale_released = true;
@@ -640,7 +668,7 @@ impl Engine {
     /// admits input, older units are not sent, and the next unit is an IDR.
     fn invalidate(&mut self) {
         self.backend.release();
-        self.hold.drop_held();
+        self.drop_held();
         self.cursor.invalidate();
         self.state.record.generation += 1;
         let generation = self.state.record.generation;
@@ -867,8 +895,10 @@ impl Engine {
     }
 
     /// Every `CURSOR_INTERVAL` while capturing; never while paused or
-    /// unavailable. Reported when it differs from the last report, unless it
-    /// is the echo of the controller's own move.
+    /// unavailable. Reported when it differs from the last report, or, equal
+    /// to it, once more after C takes a move, so the report carries that
+    /// move's sequence; never when it is the echo of the controller's own
+    /// move. `CursorEcho` holds the rule.
     fn sample_cursor(&mut self, now: Instant) {
         if self.paused || self.unavailable.is_some() || now < self.cursor_due {
             return;
@@ -885,7 +915,7 @@ impl Engine {
                     y: position.y,
                     visible: position.visible,
                 });
-                if let Some(report) = self.cursor.sample(cursor) {
+                if let Some(report) = self.cursor.sample(cursor, self.sequence) {
                     self.shared.cursor.send_replace(Some(report));
                 }
             }
@@ -1016,10 +1046,6 @@ impl DragHold {
         std::mem::take(&mut self.held)
     }
 
-    fn drop_held(&mut self) {
-        drop(self.release());
-    }
-
     fn injected(&mut self, input: &Input, now: Instant) {
         match *input {
             Input::Move { x, y } => self.pointer = Some((x, y)),
@@ -1043,9 +1069,14 @@ impl DragHold {
 /// the last report rather than the last sample is what reports a move the OS
 /// stopped short (a `ClipCursor`, an edge): the pointer stays where it was, but
 /// not where the controller put it. A sample equal to the last report has
-/// nothing to tell a viewer. A backend observes the pointer after every input
-/// it applied (see `Backend::cursor`), so the helper's, observed during a
-/// capture call, is never older than the last injection.
+/// nothing to tell a viewer, unless C took a move since. Every report carries
+/// the last input sequence C took, and the controller sets aside a report older
+/// than its newest move, which crossed it on the way; so after a move, a
+/// sample that is not its echo is reported again at the newer sequence, and a
+/// clamp or a pointer that stays hidden is still told. A backend observes the
+/// pointer after every input it applied (see `Backend::cursor`), so the
+/// helper's, observed during a capture call, is never older than the last
+/// injection.
 #[derive(Default)]
 struct CursorEcho {
     /// The last report.
@@ -1053,6 +1084,8 @@ struct CursorEcho {
     /// Where the last move in this generation put the pointer, until a report
     /// finds it elsewhere.
     injected: Option<(u32, u32)>,
+    /// C took a move off the lane, applied or not, since the last report.
+    moved: bool,
     serial: u64,
 }
 impl CursorEcho {
@@ -1060,24 +1093,35 @@ impl CursorEcho {
         self.injected = Some((x, y));
     }
 
+    fn took_move(&mut self) {
+        self.moved = true;
+    }
+
     /// A new generation: nothing in it was injected yet.
     fn invalidate(&mut self) {
         self.injected = None;
     }
 
-    /// The report to send for `cursor`, if any.
-    fn sample(&mut self, cursor: Option<CursorUpdate>) -> Option<CursorReport> {
-        let cursor = cursor.filter(|cursor| self.reported != Some(*cursor))?;
+    /// The report to send for `cursor`, sampled after the input of
+    /// `input_sequence`, if any.
+    fn sample(
+        &mut self,
+        cursor: Option<CursorUpdate>,
+        input_sequence: u64,
+    ) -> Option<CursorReport> {
+        let cursor = cursor.filter(|cursor| self.moved || self.reported != Some(*cursor))?;
         let at = (u32::try_from(cursor.x).ok(), u32::try_from(cursor.y).ok());
         if cursor.visible && self.injected.is_some_and(|(x, y)| at == (Some(x), Some(y))) {
             return None;
         }
         self.reported = Some(cursor);
         self.injected = None;
+        self.moved = false;
         self.serial += 1;
         Some(CursorReport {
             serial: self.serial,
             cursor,
+            input_sequence,
         })
     }
 }

@@ -486,6 +486,29 @@ pub(crate) struct CursorSlot {
     pub visible: bool,
     /// Advances with every update, so a reader can tell a new position.
     pub seq: u64,
+    /// The generation and sequence of the last move written to the host.
+    pub moved: Option<(u64, u64)>,
+}
+impl CursorSlot {
+    /// A report of `generation` the host sampled before it took the last move
+    /// this viewer wrote in that generation (`input_sequence` below the
+    /// move's) is superseded while this viewer controls: the host's pointer has
+    /// gone where this viewer put it since, and the host does not report that
+    /// echo, so taking the report would leave the cursor where the host's is
+    /// not. The first report of a generation is never superseded, nor is one
+    /// without a watermark (an older host).
+    pub fn superseded(
+        &self,
+        generation: u64,
+        input_sequence: Option<u64>,
+        controlling: bool,
+    ) -> bool {
+        controlling
+            && self.generation == generation
+            && input_sequence
+                .zip(self.moved)
+                .is_some_and(|(taken, moved)| moved.0 == generation && taken < moved.1)
+    }
 }
 
 /// The last host `Stats` message, as the viewer reports it.
