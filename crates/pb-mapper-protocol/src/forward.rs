@@ -2,6 +2,8 @@ use bytes::Bytes;
 use snafu::ResultExt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
@@ -36,6 +38,52 @@ pub trait DatagramReader {
 
 pub trait DatagramWriter {
     async fn send(&mut self, src: &[u8]) -> Result<()>;
+}
+
+/// Application bytes forwarded in each direction, as they pass: `sent` from
+/// the local end to the remote one, `received` back. Shared by whoever wants
+/// to read them while forwarding runs; each chunk or datagram costs one
+/// relaxed add.
+#[derive(Debug, Default)]
+pub struct ByteMeter {
+    sent: AtomicU64,
+    received: AtomicU64,
+}
+
+impl ByteMeter {
+    /// What has passed so far.
+    pub fn totals(&self) -> ForwardTotals {
+        ForwardTotals {
+            sent: self.sent.load(Ordering::Relaxed),
+            received: self.received.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Application bytes one forward moved: `sent` from the local end to the
+/// remote one, `received` back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ForwardTotals {
+    pub sent: u64,
+    pub received: u64,
+}
+
+/// Where one direction's bytes are counted: its own total, and the shared
+/// meter's counter for that direction when there is one.
+#[derive(Clone, Copy)]
+struct Tally<'a> {
+    own: &'a AtomicU64,
+    meter: Option<&'a AtomicU64>,
+}
+
+impl Tally<'_> {
+    fn add(self, n: usize) {
+        let n = n as u64;
+        self.own.fetch_add(n, Ordering::Relaxed);
+        if let Some(meter) = self.meter {
+            meter.fetch_add(n, Ordering::Relaxed);
+        }
+    }
 }
 
 const DEFAULT_TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -287,16 +335,35 @@ pub async fn copy<R: ForwardReader, W: ForwardWriter>(
 
 pub async fn transfer_datagrams<R: DatagramReader, W: DatagramWriter>(
     label: &'static str,
+    reader: R,
+    writer: W,
+) -> Result<usize> {
+    let own = AtomicU64::new(0);
+    transfer_counted(
+        label,
+        reader,
+        writer,
+        Tally {
+            own: &own,
+            meter: None,
+        },
+    )
+    .await
+}
+
+/// Relay datagrams until either side fails, counting each into `tally`.
+async fn transfer_counted<R: DatagramReader, W: DatagramWriter>(
+    label: &'static str,
     mut reader: R,
     mut writer: W,
+    tally: Tally<'_>,
 ) -> Result<usize> {
-    let mut _length: usize = 0;
     loop {
         let src = reader.recv().await?;
         let n = src.len();
         tracing::debug!("datagram forward {label} {n} bytes");
         writer.send(&src).await?;
-        _length += n;
+        tally.add(n);
     }
 }
 
@@ -317,27 +384,34 @@ pub async fn start_forward<
         server_reader,
         server_writer,
         ForwardTimeoutConfig::from_env(),
+        None,
     )
-    .await
+    .await;
 }
 
 /// Both directions are polled by the same forwarding task. A short, uncontended
 /// stack-owned lock makes the futures Send without allocating or queueing progress.
-struct ForwardActivity {
-    state: parking_lot::Mutex<(usize, Instant)>,
+struct ForwardActivity<'a> {
+    state: parking_lot::Mutex<(u64, Instant)>,
+    /// The shared meter's counter for this direction, if any.
+    meter: Option<&'a AtomicU64>,
 }
-impl ForwardActivity {
-    fn new() -> Self {
+impl<'a> ForwardActivity<'a> {
+    fn new(meter: Option<&'a AtomicU64>) -> Self {
         Self {
             state: parking_lot::Mutex::new((0, Instant::now())),
+            meter,
         }
     }
     fn record(&self, n: usize) {
+        if let Some(meter) = self.meter {
+            meter.fetch_add(n as u64, Ordering::Relaxed);
+        }
         let mut state = self.state.lock();
-        state.0 += n;
+        state.0 += n as u64;
         state.1 = Instant::now();
     }
-    fn snapshot(&self) -> (usize, Instant) {
+    fn snapshot(&self) -> (u64, Instant) {
         *self.state.lock()
     }
 }
@@ -345,7 +419,7 @@ impl ForwardActivity {
 async fn copy_with_activity<R: ForwardReader, W: ForwardWriter>(
     mut reader: R,
     mut writer: W,
-    activity: &ForwardActivity,
+    activity: &ForwardActivity<'_>,
 ) -> Result<usize> {
     let mut length = 0;
     loop {
@@ -372,9 +446,10 @@ async fn start_forward_with_config<
     server_reader: SR,
     server_writer: SW,
     config: ForwardTimeoutConfig,
-) {
-    let client_activity = ForwardActivity::new();
-    let server_activity = ForwardActivity::new();
+    meter: Option<&ByteMeter>,
+) -> ForwardTotals {
+    let client_activity = ForwardActivity::new(meter.map(|meter| &meter.sent));
+    let server_activity = ForwardActivity::new(meter.map(|meter| &meter.received));
     let client_to_server = copy_with_activity(client_reader, server_writer, &client_activity);
     let server_to_client = copy_with_activity(server_reader, client_writer, &server_activity);
     tokio::pin!(client_to_server, server_to_client);
@@ -418,16 +493,13 @@ async fn start_forward_with_config<
             }
         }
     }
-    handle_forward_final_result(
-        client_result,
-        client_activity.snapshot().0,
-        "client->server",
-    );
-    handle_forward_final_result(
-        server_result,
-        server_activity.snapshot().0,
-        "server->client",
-    );
+    let totals = ForwardTotals {
+        sent: client_activity.snapshot().0,
+        received: server_activity.snapshot().0,
+    };
+    handle_forward_final_result(client_result, totals.sent, "client->server");
+    handle_forward_final_result(server_result, totals.received, "server->client");
+    totals
 }
 
 fn reset_sleep(sleep: &mut Pin<&mut tokio::time::Sleep>, timeout: Duration) {
@@ -446,7 +518,7 @@ fn reset_sleep_at(
     }
 }
 
-fn handle_forward_final_result(result: Option<Result<usize>>, len: usize, detail: &'static str) {
+fn handle_forward_final_result(result: Option<Result<usize>>, len: u64, detail: &'static str) {
     if let Some(result) = result {
         handle_forward_result(result, detail);
     } else {
@@ -465,8 +537,41 @@ pub async fn start_datagram_forward<
     server_reader: ServerReader,
     server_writer: ServerWriter,
 ) {
-    let client_to_server = transfer_datagrams("udp->tcp", client_reader, server_writer);
-    let server_to_client = transfer_datagrams("tcp->udp", server_reader, client_writer);
+    datagram_forward(
+        client_reader,
+        client_writer,
+        server_reader,
+        server_writer,
+        None,
+    )
+    .await;
+}
+
+/// [`start_datagram_forward`], counting both directions: the first pair is
+/// the local end, so what it reads is sent.
+async fn datagram_forward<
+    ClientReader: DatagramReader,
+    ClientWriter: DatagramWriter,
+    ServerReader: DatagramReader,
+    ServerWriter: DatagramWriter,
+>(
+    client_reader: ClientReader,
+    client_writer: ClientWriter,
+    server_reader: ServerReader,
+    server_writer: ServerWriter,
+    meter: Option<&ByteMeter>,
+) -> ForwardTotals {
+    let (sent, received) = (AtomicU64::new(0), AtomicU64::new(0));
+    let sending = Tally {
+        own: &sent,
+        meter: meter.map(|meter| &meter.sent),
+    };
+    let receiving = Tally {
+        own: &received,
+        meter: meter.map(|meter| &meter.received),
+    };
+    let client_to_server = transfer_counted("udp->tcp", client_reader, server_writer, sending);
+    let server_to_client = transfer_counted("tcp->udp", server_reader, client_writer, receiving);
     tokio::select! {
         result = client_to_server =>{
             handle_forward_result( result,"udp->tcp");
@@ -474,6 +579,10 @@ pub async fn start_datagram_forward<
         result = server_to_client =>{
             handle_forward_result( result,"tcp->udp");
         }
+    }
+    ForwardTotals {
+        sent: sent.into_inner(),
+        received: received.into_inner(),
     }
 }
 
@@ -561,6 +670,37 @@ pub trait StreamForward: StreamSplit + Sized {
             remote_writer,
         )
     }
+
+    /// [`Self::forward_local_to_remote_with_codec`], counting the
+    /// application bytes it moves: into `meter` as they pass, and in the
+    /// totals it returns once both directions are done. Sent is local to
+    /// remote. A transport that does not implement it forwards as before and
+    /// counts nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_local_to_remote_metered<'a, R, W>(
+        codec: Option<DataCodec>,
+        framing_key: AesKeyType,
+        local_reader: Self::ReaderRef<'a>,
+        local_writer: Self::WriterRef<'a>,
+        remote_reader: R,
+        remote_writer: W,
+        meter: Option<Arc<ByteMeter>>,
+    ) -> Pin<Box<dyn Future<Output = Result<ForwardTotals>> + Send + 'a>>
+    where
+        R: AsyncReadExt + Unpin + Send + 'a,
+        W: AsyncWriteExt + Unpin + Send + 'a,
+    {
+        let _ = meter;
+        let forward = Self::forward_local_to_remote_with_codec(
+            codec,
+            framing_key,
+            local_reader,
+            local_writer,
+            remote_reader,
+            remote_writer,
+        );
+        Box::pin(async move { forward.await.map(|()| ForwardTotals::default()) })
+    }
 }
 
 impl StreamForward for TcpStreamImpl {
@@ -602,6 +742,31 @@ impl StreamForward for TcpStreamImpl {
         R: AsyncReadExt + Unpin + Send + 'a,
         W: AsyncWriteExt + Unpin + Send + 'a,
     {
+        let forward = Self::forward_local_to_remote_metered(
+            codec_key,
+            framing_key,
+            local_reader,
+            local_writer,
+            remote_reader,
+            remote_writer,
+            None,
+        );
+        Box::pin(async move { forward.await.map(|_| ()) })
+    }
+
+    fn forward_local_to_remote_metered<'a, R, W>(
+        codec_key: Option<DataCodec>,
+        framing_key: AesKeyType,
+        local_reader: Self::ReaderRef<'a>,
+        local_writer: Self::WriterRef<'a>,
+        remote_reader: R,
+        remote_writer: W,
+        meter: Option<Arc<ByteMeter>>,
+    ) -> Pin<Box<dyn Future<Output = Result<ForwardTotals>> + Send + 'a>>
+    where
+        R: AsyncReadExt + Unpin + Send + 'a,
+        W: AsyncWriteExt + Unpin + Send + 'a,
+    {
         Box::pin(async move {
             // Both the accepted subscriber socket and the publisher's target
             // socket pass here. Small RPC frames must not wait for Nagle's
@@ -613,30 +778,36 @@ impl StreamForward for TcpStreamImpl {
             let mut local_writer = local_writer;
             let mut remote_reader = remote_reader;
             let mut remote_writer = remote_writer;
-            match codec_key {
+            // Read here, inside any idle deadline the caller scoped this in.
+            let config = ForwardTimeoutConfig::from_env();
+            let totals = match codec_key {
                 Some(key) => {
                     let (decoder, encoder) = key.endpoint_codecs()?;
-                    start_forward(
+                    start_forward_with_config(
                         NormalForwardReader::new(&mut local_reader),
                         NormalForwardWriter::new(&mut local_writer),
                         CodecForwardReader::new(&mut remote_reader, decoder)
                             .with_checksum_key(framing_key),
                         CodecForwardWriter::new(&mut remote_writer, encoder)
                             .with_checksum_key(framing_key),
+                        config,
+                        meter.as_deref(),
                     )
-                    .await;
+                    .await
                 }
                 None => {
-                    start_forward(
+                    start_forward_with_config(
                         NormalForwardReader::new(&mut local_reader),
                         NormalForwardWriter::new(&mut local_writer),
                         NormalForwardReader::new(&mut remote_reader),
                         NormalForwardWriter::new(&mut remote_writer),
+                        config,
+                        meter.as_deref(),
                     )
-                    .await;
+                    .await
                 }
-            }
-            Ok(())
+            };
+            Ok(totals)
         })
     }
 }
@@ -680,35 +851,62 @@ impl StreamForward for UdpStreamImpl {
         R: AsyncReadExt + Unpin + Send + 'a,
         W: AsyncWriteExt + Unpin + Send + 'a,
     {
+        let forward = Self::forward_local_to_remote_metered(
+            codec_key,
+            framing_key,
+            local_reader,
+            local_writer,
+            remote_reader,
+            remote_writer,
+            None,
+        );
+        Box::pin(async move { forward.await.map(|_| ()) })
+    }
+
+    fn forward_local_to_remote_metered<'a, R, W>(
+        codec_key: Option<DataCodec>,
+        framing_key: AesKeyType,
+        local_reader: Self::ReaderRef<'a>,
+        local_writer: Self::WriterRef<'a>,
+        remote_reader: R,
+        remote_writer: W,
+        meter: Option<Arc<ByteMeter>>,
+    ) -> Pin<Box<dyn Future<Output = Result<ForwardTotals>> + Send + 'a>>
+    where
+        R: AsyncReadExt + Unpin + Send + 'a,
+        W: AsyncWriteExt + Unpin + Send + 'a,
+    {
         Box::pin(async move {
             let mut remote_reader = remote_reader;
             let mut remote_writer = remote_writer;
-            match codec_key {
+            let totals = match codec_key {
                 Some(key) => {
                     let (decoder, encoder) = key.endpoint_codecs()?;
-                    start_datagram_forward(
+                    datagram_forward(
                         local_reader,
                         local_writer,
                         CodecDatagramReader::new(&mut remote_reader, decoder)
                             .with_checksum_key(framing_key),
                         CodecDatagramWriter::new(&mut remote_writer, encoder)
                             .with_checksum_key(framing_key),
+                        meter.as_deref(),
                     )
-                    .await;
+                    .await
                 }
                 None => {
-                    start_datagram_forward(
+                    datagram_forward(
                         local_reader,
                         local_writer,
                         NormalDatagramReader::new(&mut remote_reader)
                             .with_checksum_key(framing_key),
                         NormalDatagramWriter::new(&mut remote_writer)
                             .with_checksum_key(framing_key),
+                        meter.as_deref(),
                     )
-                    .await;
+                    .await
                 }
-            }
-            Ok(())
+            };
+            Ok(totals)
         })
     }
 }
@@ -989,6 +1187,7 @@ mod tests {
                     tunnel_idle_timeout: Duration::from_secs(60 * 60),
                     half_close_idle_timeout: Duration::from_millis(20),
                 },
+                None,
             ),
         )
         .await
@@ -1016,6 +1215,7 @@ mod tests {
                     tunnel_idle_timeout: Duration::from_secs(60 * 60),
                     half_close_idle_timeout: Duration::from_secs(60),
                 },
+                None,
             ),
         )
         .await
@@ -1042,6 +1242,7 @@ mod tests {
                     tunnel_idle_timeout: Duration::from_secs(60 * 60),
                     half_close_idle_timeout: Duration::from_millis(200),
                 },
+                None,
             ),
         )
         .await
@@ -1072,6 +1273,7 @@ mod tests {
                     tunnel_idle_timeout: Duration::from_secs(60 * 60),
                     half_close_idle_timeout: Duration::from_millis(200),
                 },
+                None,
             ),
         )
         .await
@@ -1098,9 +1300,84 @@ mod tests {
                     tunnel_idle_timeout: Duration::from_millis(20),
                     half_close_idle_timeout: Duration::from_secs(60),
                 },
+                None,
             ),
         )
         .await
         .expect("inactive open tunnel did not stop after tunnel idle timeout");
+    }
+
+    /// Datagrams from a script, then a failure: a datagram forward ends only
+    /// when one side fails. The pause lets the other side drain first.
+    struct ScriptedDatagrams(VecDeque<&'static [u8]>);
+
+    impl DatagramReader for ScriptedDatagrams {
+        async fn recv(&mut self) -> Result<Bytes> {
+            match self.0.pop_front() {
+                Some(datagram) => Ok(Bytes::from_static(datagram)),
+                None => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Err(Error::MsgForward {
+                        action: "read",
+                        source: io::ErrorKind::ConnectionReset.into(),
+                    })
+                }
+            }
+        }
+    }
+
+    struct Discard;
+
+    impl DatagramWriter for Discard {
+        async fn send(&mut self, _: &[u8]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_metered_forward_counts_each_direction_into_its_totals_and_the_meter() {
+        let meter = ByteMeter::default();
+        let streamed = start_forward_with_config(
+            ScriptedReader::new([ReadAction::Data(b"abc".to_vec()), ReadAction::Eof]),
+            ScriptedWriter::default(),
+            ScriptedReader::new([ReadAction::Data(b"hello".to_vec()), ReadAction::Eof]),
+            ScriptedWriter::default(),
+            ForwardTimeoutConfig {
+                tunnel_idle_timeout: Duration::from_secs(60),
+                half_close_idle_timeout: Duration::from_secs(1),
+            },
+            Some(&meter),
+        )
+        .await;
+        assert_eq!(
+            streamed,
+            ForwardTotals {
+                sent: 3,
+                received: 5
+            }
+        );
+        // Sent is what the local end read; the meter adds up every forward.
+        let datagrams = datagram_forward(
+            ScriptedDatagrams(VecDeque::from([&b"ab"[..], b"cde", b"f"])),
+            Discard,
+            ScriptedDatagrams(VecDeque::from([&b"xyz"[..]])),
+            Discard,
+            Some(&meter),
+        )
+        .await;
+        assert_eq!(
+            datagrams,
+            ForwardTotals {
+                sent: 6,
+                received: 3
+            }
+        );
+        assert_eq!(
+            meter.totals(),
+            ForwardTotals {
+                sent: 9,
+                received: 8
+            }
+        );
     }
 }
