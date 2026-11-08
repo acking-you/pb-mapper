@@ -289,12 +289,19 @@ offers Reconnect where that can help.
   phone. The controls stand in the black gutters beside the picture — Back,
   the path and frame rate, and the input mode on one side; Keyboard,
   Shortcuts, Right click and More on the other. A tablet in portrait gets
-  bars, and a screen the picture fills gets plates over it. Overlays keep to
-  the fitted picture between the gutters. The keyboard brings a modifier bar
-  (Ctrl, Alt, Shift, Win, Esc, Tab, the F keys, arrows and paging) and,
-  while the picture is zoomed or covered, a minimap. Direct touch can add a
-  virtual mouse. The first session opens the gesture sheet by itself; a long
-  press on the input mode opens it again.
+  bars, and a screen the picture fills gets plates over it. The picture fits
+  between side gutters or bars, not under them (the viewport's frame), and
+  they stand on dark strips that let touches through: zoomed in, what lies
+  under a strip is dimmed, readable controls stay over a white page, and
+  every edge of the picture can be panned clear. Overlays keep to the fitted
+  picture between the gutters. The keyboard brings a modifier bar (Ctrl,
+  Alt, Shift, Win, Esc, Tab, the F keys, arrows and paging) and, while the
+  picture is zoomed or covered, a minimap. A long press turns the finger
+  into a joystick, a ring and a ball, which scrolls the way it is pushed;
+  lifted in place it right-clicks. The quality button opens the full
+  connection figures, which scroll on a landscape phone. Direct touch can
+  add a virtual mouse. The first session opens the gesture sheet by itself;
+  a long press on the input mode opens it again.
 
 How touch, the mouse and keys become remote input is in
 [the remote desktop's documentation](remote-desktop.md#gestures-keys-and-modifiers).
@@ -379,7 +386,11 @@ The viewer is dark whatever the app's theme, so a remote picture is never
 framed in white (`theme/viewer_palette.dart`). Its chrome is translucent
 graphite over the picture rather than the app's glass, since a blur over a
 live video would be redrawn every frame; `viewerTheme` gives its menus,
-dialogs and tooltips the same palette. Over its title bar the caption buttons
+dialogs and tooltips the same palette. A phone's gutters stand on
+`ViewerPalette.gutter`, black at 80 %, the lightest that keeps even
+secondary text above 4.5:1 over a white page. What the finger draws over the
+picture (the trackpad ring, the joystick's ring and ball) carries both a
+light and a dark edge, so it shows over white, black and anything between. Over its title bar the caption buttons
 take its dark tone and its 36 px height; in full screen they hide with it.
 
 Type is Google Sans Flex for prose (Segoe UI on Windows) and Geist Mono for

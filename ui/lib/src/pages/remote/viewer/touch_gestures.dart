@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -27,10 +28,26 @@ const kNavigateStart = Duration(milliseconds: 80);
 /// Mean finger travel per wheel notch of a three-finger scroll.
 const kThreeFingerNotchPx = 24.0;
 
+/// A long press's joystick: the radius of its ring, which is as far as the
+/// ball strays from the press point.
+const kJoystickRadius = 60.0;
+
+/// Within this of the press point along an axis, the ball scrolls nothing
+/// along it.
+const kJoystickDeadZone = 10.0;
+
+/// How often a deflected joystick sends the wheel.
+const kJoystickTick = Duration(milliseconds: 16);
+
+/// Wheel notches per second along an axis just past the dead zone, and with
+/// the ball at the ring.
+const kJoystickMinRate = 2.0;
+const kJoystickMaxRate = 25.0;
+
 enum HapticKind { press, select }
 
-/// The viewers' haptics: a long-press right click presses; a drag start
-/// clicks.
+/// The viewers' haptics: a long press's joystick presses; a drag start and
+/// a joystick's first scroll click.
 void viewerHaptic(HapticKind kind) => unawaited(switch (kind) {
   HapticKind.press => HapticFeedback.mediumImpact(),
   HapticKind.select => HapticFeedback.selectionClick(),
@@ -58,10 +75,37 @@ abstract interface class RemotePointerSink {
   void wheelEnd();
 }
 
+/// A long press's joystick, in the stage's coordinates: a ring fixed at
+/// the press point and the ball under the finger, kept inside it.
+@immutable
+class TouchJoystick {
+  const TouchJoystick({
+    required this.centre,
+    required this.ball,
+    this.active = false,
+  });
+
+  final Offset centre;
+  final Offset ball;
+
+  /// The ball has left the dead zone: a wheel burst is open.
+  final bool active;
+
+  @override
+  bool operator ==(Object other) =>
+      other is TouchJoystick &&
+      other.centre == centre &&
+      other.ball == ball &&
+      other.active == active;
+
+  @override
+  int get hashCode => Object.hash(centre, ball, active);
+}
+
 enum _Phase {
   idle,
 
-  /// The sequence started outside the picture in direct touch.
+  /// The sequence started outside the visible picture in direct touch.
   ignored,
 
   /// Not interactive: one finger pans the zoomed picture locally.
@@ -69,11 +113,10 @@ enum _Phase {
   firstDown,
   secondDown,
   stroke,
-  rightClicked,
   dragging,
 
-  /// Direct touch after a long press: the rest of the sequence is spent.
-  consumed,
+  /// After a long press: the finger steers the wheel.
+  joystick,
   navigate,
   scroll,
 }
@@ -101,6 +144,14 @@ typedef _Tap = ({
 /// runs from the first finger down to the last finger up, and its class
 /// only escalates — one finger, two (navigate), three or more (scroll) — so
 /// lifting a pinch finger never becomes a stroke or a drag.
+///
+/// A long press turns the finger into a joystick (D-S1). The ball steers
+/// the view as a browser's autoscroll does: pushed up, the remote page
+/// scrolls up, towards its top; pushed right, it scrolls right. The host's
+/// wheel is positive down and right, so each notch takes the sign of the
+/// ball's offset: the opposite of the three-finger swipe, where the content
+/// follows the fingers. Lifted without leaving the dead zone, it is a right
+/// click.
 class TouchGestureMachine {
   TouchGestureMachine({
     required RemotePointerSink sink,
@@ -122,11 +173,12 @@ class TouchGestureMachine {
 
   final _fingers = <int, _Finger>{};
   final _indicator = ValueNotifier<Offset?>(null);
+  final _joystick = ValueNotifier<TouchJoystick?>(null);
 
   _Phase _phase = _Phase.idle;
   bool _direct = false, _live = false, _strokeActive = false;
 
-  Duration? _graceAt, _longPressAt, _holdAt, _pressDueAt;
+  Duration? _graceAt, _longPressAt, _holdAt, _pressDueAt, _wheelAt;
 
   /// Trackpad: the last tap, consulted only by the next first finger.
   _Tap? _lastTap;
@@ -145,16 +197,26 @@ class TouchGestureMachine {
   List<Offset> _navStart = const [];
 
   double _scrollTravel = 0;
+
+  /// A wheel burst is open: three fingers, or a deflected joystick.
   bool _wheelStarted = false;
 
+  /// The joystick's wheel: accounted up to [_wheelFrom], with the notches'
+  /// fractions carried per axis.
+  Duration _wheelFrom = Duration.zero;
+  double _wheelX = 0, _wheelY = 0;
+
   /// The finger in trackpad mode, for the touch indicator; null between
-  /// sequences.
+  /// sequences and while the joystick shows.
   ValueListenable<Offset?> get indicatorPoint => _indicator;
+
+  /// A long press's joystick, in either mode; null otherwise.
+  ValueListenable<TouchJoystick?> get joystick => _joystick;
 
   /// The earliest pending deadline.
   Duration? get nextTimeout {
     Duration? first;
-    for (final d in [_graceAt, _longPressAt, _holdAt, _pressDueAt]) {
+    for (final d in [_graceAt, _longPressAt, _holdAt, _pressDueAt, _wheelAt]) {
       if (d != null && (first == null || d < first)) first = d;
     }
     return first;
@@ -183,9 +245,8 @@ class TouchGestureMachine {
           _Phase.firstDown ||
           _Phase.secondDown ||
           _Phase.stroke ||
-          _Phase.rightClicked ||
           _Phase.dragging ||
-          _Phase.consumed:
+          _Phase.joystick:
         _toNavigate(t);
         if (_fingers.length >= 3) _toScroll();
     }
@@ -202,7 +263,7 @@ class TouchGestureMachine {
     }
     final moved = finger.moved;
     switch (_phase) {
-      case _Phase.idle || _Phase.ignored || _Phase.consumed:
+      case _Phase.idle || _Phase.ignored:
         return;
       case _Phase.pan:
         if (moved) _viewport.panBy(delta);
@@ -231,11 +292,8 @@ class TouchGestureMachine {
       case _Phase.stroke:
         _indicator.value = local;
         _stroke(delta);
-      case _Phase.rightClicked:
-        _indicator.value = local;
-        if (!moved) return;
-        _phase = _Phase.stroke;
-        _stroke(delta);
+      case _Phase.joystick:
+        _steer(local, t);
       case _Phase.dragging when _direct:
         _sink.move(_pointAt(local));
       case _Phase.dragging:
@@ -295,14 +353,15 @@ class TouchGestureMachine {
         // The host holds this press past its double-click time (R-UI-3).
         if (!_pressSent) _sendDragPress();
         _sink.release(RemoteButton.left);
-      case _Phase.scroll:
+      case _Phase.joystick when !_wheelStarted:
+        // Never out of the dead zone: the long press was a right click.
+        _sink.click(RemoteButton.right, _direct ? _pressAt : _sink.cursor);
+      case _Phase.scroll || _Phase.joystick:
         if (_wheelStarted) _sink.wheelEnd();
       case _Phase.idle ||
           _Phase.ignored ||
           _Phase.pan ||
           _Phase.stroke ||
-          _Phase.rightClicked ||
-          _Phase.consumed ||
           _Phase.navigate:
         break;
     }
@@ -310,12 +369,12 @@ class TouchGestureMachine {
   }
 
   /// A pointer cancel, an epoch, mode or readiness change, or focus loss:
-  /// a sent press is released, a pending one dropped.
+  /// a sent press is released, a pending one dropped, a wheel burst ended.
   void cancel(Duration t) {
     if (_phase == _Phase.dragging && _pressSent) {
       _sink.release(RemoteButton.left);
     }
-    if (_phase == _Phase.scroll && _wheelStarted) _sink.wheelEnd();
+    if (_wheelStarted) _sink.wheelEnd();
     _fingers.clear();
     _lastTap = null;
     _end();
@@ -324,7 +383,10 @@ class TouchGestureMachine {
   /// Fires every deadline up to [t], in order.
   void timeout(Duration t) => _fireDue(t);
 
-  void dispose() => _indicator.dispose();
+  void dispose() {
+    _indicator.dispose();
+    _joystick.dispose();
+  }
 
   // ------------------------------------------------------------- phases
 
@@ -339,7 +401,10 @@ class TouchGestureMachine {
       return;
     }
     if (_direct) {
-      final n = _viewport.toNormalized(p);
+      // What lies under a gutter, or the keyboard, is not touched.
+      final n = _viewport.visibleRect.contains(p)
+          ? _viewport.toNormalized(p)
+          : null;
       if (n == null) {
         _phase = _Phase.ignored;
         return;
@@ -390,11 +455,14 @@ class TouchGestureMachine {
     if (_phase == _Phase.dragging && _pressSent) {
       _sink.release(RemoteButton.left);
     }
-    _graceAt = _longPressAt = _holdAt = _pressDueAt = null;
+    if (_wheelStarted) _sink.wheelEnd();
+    _wheelStarted = false;
+    _graceAt = _longPressAt = _holdAt = _pressDueAt = _wheelAt = null;
     _pressSent = false;
     _dragPending = false;
     _lastTap = null;
     _indicator.value = null;
+    _joystick.value = null;
     _setStroke(false);
     _phase = _Phase.navigate;
     _secondDownAt = t;
@@ -417,7 +485,7 @@ class TouchGestureMachine {
   }
 
   void _end() {
-    _graceAt = _longPressAt = _holdAt = _pressDueAt = null;
+    _graceAt = _longPressAt = _holdAt = _pressDueAt = _wheelAt = null;
     _pressSent = false;
     _dragPending = false;
     _wheelStarted = false;
@@ -425,6 +493,92 @@ class TouchGestureMachine {
     _setStroke(false);
     _phase = _Phase.idle;
     _indicator.value = null;
+    _joystick.value = null;
+  }
+
+  /// The finger held still: it becomes a joystick where it rests, so the
+  /// jitter of the hold opens no burst.
+  void _toJoystick() {
+    _graceAt = null;
+    final at = _fingers.values.single.last;
+    _indicator.value = null;
+    _setStroke(false);
+    _phase = _Phase.joystick;
+    _wheelX = _wheelY = 0;
+    _joystick.value = TouchJoystick(centre: at, ball: at);
+  }
+
+  /// The ball follows the finger inside the ring. Out of the dead zone it
+  /// opens the wheel burst once — in direct touch over the press point, so
+  /// the wheel reaches the window under the finger; in trackpad mode at the
+  /// cursor — and keeps the wheel ticking while it stays out.
+  void _steer(Offset local, Duration t) {
+    final stick = _joystick.value;
+    if (stick == null) return;
+    final offset = _clampToRing(local - stick.centre);
+    final out = _outOfDeadZone(offset);
+    if (out && !_wheelStarted) {
+      if (_direct) _sink.hover(_pressAt);
+      _sink.wheelStart();
+      _wheelStarted = true;
+      _haptic(HapticKind.select);
+    }
+    if (!out) {
+      _wheelAt = null;
+      _wheelX = _wheelY = 0;
+    } else if (_wheelAt == null) {
+      _wheelFrom = t;
+      _wheelAt = t + kJoystickTick;
+    }
+    _joystick.value = TouchJoystick(
+      centre: stick.centre,
+      ball: stick.centre + offset,
+      active: _wheelStarted,
+    );
+  }
+
+  /// The wheel for the time since the last tick, at the rate the ball's
+  /// offset gives each axis; whole notches go, fractions wait.
+  void _wheelTick(Duration t) {
+    final stick = _joystick.value;
+    if (_phase != _Phase.joystick || stick == null) return;
+    final seconds = (t - _wheelFrom).inMicroseconds / 1e6;
+    _wheelFrom = t;
+    final offset = stick.ball - stick.centre;
+    double axis(double carried, double along) {
+      final rate = _rate(along);
+      return rate == 0 ? 0 : carried + rate * seconds;
+    }
+
+    _wheelX = axis(_wheelX, offset.dx);
+    _wheelY = axis(_wheelY, offset.dy);
+    final h = _wheelX.truncate(), v = _wheelY.truncate();
+    _wheelX -= h;
+    _wheelY -= v;
+    if (h != 0 || v != 0) _sink.wheel(h, v);
+    _wheelAt = t + kJoystickTick;
+  }
+
+  static Offset _clampToRing(Offset offset) {
+    final d = offset.distance;
+    return d <= kJoystickRadius ? offset : offset * (kJoystickRadius / d);
+  }
+
+  static bool _outOfDeadZone(Offset offset) =>
+      offset.dx.abs() > kJoystickDeadZone ||
+      offset.dy.abs() > kJoystickDeadZone;
+
+  /// Signed wheel notches per second for a ball [offset] along one axis:
+  /// none within the dead zone, then from [kJoystickMinRate] just past it
+  /// up to [kJoystickMaxRate] at the ring, on a quadratic so a small push
+  /// reads a page and a full one flies.
+  static double _rate(double offset) {
+    final past = offset.abs() - kJoystickDeadZone;
+    if (past <= 0) return 0;
+    final u = math.min(past / (kJoystickRadius - kJoystickDeadZone), 1.0);
+    final rate =
+        kJoystickMinRate + (kJoystickMaxRate - kJoystickMinRate) * u * u;
+    return offset.isNegative ? -rate : rate;
   }
 
   void _setStroke(bool active) {
@@ -485,16 +639,13 @@ class TouchGestureMachine {
       } else if (due == _longPressAt) {
         _longPressAt = null;
         if (_phase == _Phase.firstDown) {
+          // Nothing is sent yet: a lift is a right click, a push scrolls.
           _haptic(HapticKind.press);
-          if (_direct) {
-            _graceAt = null;
-            _sink.click(RemoteButton.right, _pressAt);
-            _phase = _Phase.consumed;
-          } else {
-            _sink.click(RemoteButton.right, _sink.cursor);
-            _phase = _Phase.rightClicked;
-          }
+          _toJoystick();
         }
+      } else if (due == _wheelAt) {
+        _wheelAt = null;
+        _wheelTick(due);
       } else if (due == _holdAt) {
         _holdAt = null;
         if (_phase == _Phase.secondDown) {

@@ -35,12 +35,15 @@ String maskInvitation(String invitation) {
 bool carriesInvitation(String text) =>
     text.contains('pbd1.') || text.contains('"token"');
 
-/// `direct` and `relay` in words; anything else (not yet known) as a dash.
-String pathLabel(BuildContext context, String? path) => switch (path) {
-  'direct' => context.l10n.pathDirect,
-  'relay' => context.l10n.pathRelay,
-  _ => '—',
-};
+/// `direct` and `relay` in words, a direct path on one LAN ([lan]) as
+/// such; anything else (not yet known) as a dash.
+String pathLabel(BuildContext context, String? path, {bool lan = false}) =>
+    switch (path) {
+      'direct' when lan => context.l10n.pathLan,
+      'direct' => context.l10n.pathDirect,
+      'relay' => context.l10n.pathRelay,
+      _ => '—',
+    };
 
 /// How long a viewer has been connected: just now, minutes, then hours.
 String formatSessionDuration(BuildContext context, Duration elapsed) {

@@ -49,6 +49,43 @@ class GutterLayout {
       ? Rect.fromLTRB(0, lead.bottom, screen.width, trail.top)
       : Rect.fromLTRB(lead.right, 0, trail.left, screen.height);
 
+  /// The picture's frame: it fits and pans between side gutters or bars,
+  /// so no control ever stands over it. Plates stand over the picture,
+  /// which then fills the screen.
+  EdgeInsets frame(Size screen) => switch (kind) {
+    GutterKind.side => EdgeInsets.fromLTRB(
+      lead.right,
+      0,
+      screen.width - trail.left,
+      0,
+    ),
+    GutterKind.bars => EdgeInsets.fromLTRB(
+      0,
+      lead.bottom,
+      0,
+      screen.height - trail.top,
+    ),
+    GutterKind.overlay => EdgeInsets.zero,
+  };
+
+  /// The dark strips under side gutters or bars, from the screen's edge
+  /// (a cutout's too) to the frame; none for plates.
+  ({Rect lead, Rect trail})? strips(Size screen) {
+    final f = frame(screen);
+    final w = screen.width, h = screen.height;
+    return switch (kind) {
+      GutterKind.side => (
+        lead: Rect.fromLTRB(0, 0, f.left, h),
+        trail: Rect.fromLTRB(w - f.right, 0, w, h),
+      ),
+      GutterKind.bars => (
+        lead: Rect.fromLTRB(0, 0, w, f.top),
+        trail: Rect.fromLTRB(0, h - f.bottom, w, h),
+      ),
+      GutterKind.overlay => null,
+    };
+  }
+
   @override
   bool operator ==(Object other) =>
       other is GutterLayout &&
@@ -235,7 +272,7 @@ class QualityGutterButton extends StatelessWidget {
       final s = session.value;
       final st = stats.value;
       final (:degraded, :dot) = viewerLink(s, st);
-      final path = pathLabel(context, s.path);
+      final path = pathLabel(context, s.path, lan: st.lan);
       final fps = s.connected ? st.presentedFps.round() : null;
       return MergeSemantics(
         child: Semantics(
@@ -252,14 +289,21 @@ class QualityGutterButton extends StatelessWidget {
               child: Container(
                 width: plate ? kGutterMin : 56,
                 padding: const EdgeInsets.symmetric(vertical: 8),
-                decoration: plate
-                    ? _plate
-                    : selected
-                    ? const BoxDecoration(
-                        color: ViewerPalette.fill,
-                        borderRadius: BorderRadius.all(Radius.circular(14)),
-                      )
-                    : null,
+                // Open, a plate lightens as a bare chip fills.
+                decoration: switch ((plate, selected)) {
+                  (true, false) => _plate,
+                  (true, true) => _plate.copyWith(
+                    color: Color.alphaBlend(
+                      ViewerPalette.fillStrong,
+                      ViewerPalette.hint,
+                    ),
+                  ),
+                  (false, true) => const BoxDecoration(
+                    color: ViewerPalette.fill,
+                    borderRadius: BorderRadius.all(Radius.circular(14)),
+                  ),
+                  (false, false) => null,
+                },
                 child: ExcludeSemantics(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,

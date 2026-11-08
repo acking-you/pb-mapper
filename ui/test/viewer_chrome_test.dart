@@ -340,6 +340,87 @@ void main() {
     expect(find.text('60 fps'), findsOneWidget);
   });
 
+  testWidgets('the quality panel tells a LAN path, both round trips, the '
+      "three frame rates and the decoder's own rates apart, and scrolls on a "
+      'landscape phone', (tester) async {
+    _size(tester, const Size(851, 393));
+    final stats = ValueNotifier(
+      DesktopStats.fromJson({
+        'path': 'direct',
+        'rtt_ms': 37,
+        'presented_fps': 58.6,
+        'received_fps': 59.4,
+        'capture_fps': 60.0,
+        'link': {'kind': 'lan', 'family': 'ipv4', 'rtt_ms': 4},
+      }),
+    );
+    // Two reads of Android's decoder a second apart.
+    final decoder = ValueNotifier<DesktopDecoderStats?>(
+      DesktopDecoderStats.between(
+        {
+          'decoded': 100,
+          'timings': {
+            'surface_consume': {'samples': 100, 'mean_ms': 10.0},
+          },
+        },
+        {
+          'decoded': 160,
+          'timings': {
+            'surface_consume': {'samples': 160, 'mean_ms': 9.25},
+          },
+        },
+        const Duration(seconds: 1),
+      ),
+    );
+    await tester.pumpWidget(
+      _app(
+        Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            height: 369,
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: QualityPanel(
+                session: ValueNotifier(
+                  const DesktopSessionView(
+                    target: _target,
+                    phase: DesktopPhase.live,
+                    path: 'direct',
+                  ),
+                ),
+                stats: stats,
+                decoder: decoder,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    final l10n = AppLocalizations.of(
+      tester.element(find.byType(QualityPanel)),
+    )!;
+    Finder row(String id, String text) => find.descendant(
+      of: find.byKey(Key('quality-$id')),
+      matching: find.text(text),
+    );
+    expect(row('path', '${l10n.qualityPathLan} · IPv4'), findsOneWidget);
+    expect(row('link-rtt', '4 ms'), findsOneWidget);
+    expect(row('stream-rtt', '37 ms'), findsOneWidget);
+    expect(row('presented-fps', '59 fps'), findsOneWidget);
+    expect(row('received-fps', '59 fps'), findsOneWidget);
+    expect(row('capture-fps', '60 fps'), findsOneWidget);
+    expect(row('decoded', '60 /s'), findsOneWidget);
+    expect(row('surface', '8.0 ms'), findsOneWidget);
+    // What the host and the decoder do not report is left out.
+    expect(find.byKey(const Key('quality-sent-bitrate')), findsNothing);
+    expect(find.byKey(const Key('quality-credits')), findsNothing);
+    expect(
+      tester.getSize(find.byType(QualityPanel)).height,
+      lessThanOrEqualTo(369),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('the chip keeps its width as the figures change', (tester) async {
     // The toolbar is centred around the chip: a wider figure would move
     // every button.
@@ -620,6 +701,89 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       expect(disconnected, 1);
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
+    'beside a cutout the picture fits between the gutters, and zoomed in it '
+    'pans clear of them',
+    (tester) async {
+      _size(tester, const Size(851, 393));
+      tester.view.padding = const FakeViewPadding(left: 29);
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      await tester.pumpWidget(
+        _app(
+          TouchViewer(
+            desktop: store,
+            prefs: prefs,
+            title: 'Office',
+            onBack: () {},
+          ),
+        ),
+      );
+      await tester.pump(kHintDuration);
+      final viewport = tester
+          .widget<RemoteSurface>(find.byType(RemoteSurface))
+          .viewport;
+      Rect picture() => Rect.fromPoints(
+        viewport.toLocal(Offset.zero),
+        viewport.toLocal(const Offset(1, 1)),
+      );
+
+      // Fitted, the picture sits between the controls.
+      for (final control in [
+        'touch-back',
+        'touch-quality',
+        'touch-mode-toggle',
+        'touch-keyboard',
+        'touch-shortcuts',
+        'touch-right-click',
+        'touch-more',
+      ]) {
+        final rect = tester.getRect(find.byKey(Key(control)));
+        expect(
+          rect.deflate(0.01).overlaps(picture()),
+          isFalse,
+          reason: control,
+        );
+      }
+
+      // Pinched in, then pushed right as far as it goes: its left edge
+      // comes to rest at the left strip's, not under it.
+      final centre = picture().center;
+      final a = await tester.startGesture(centre - const Offset(30, 0));
+      final b = await tester.startGesture(centre + const Offset(30, 0));
+      await tester.pump(kNavigateStart);
+      for (var i = 0; i < 5; i++) {
+        await a.moveBy(const Offset(-15, 0));
+        await b.moveBy(const Offset(15, 0));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(viewport.scale, greaterThan(2));
+      for (var i = 0; i < 10; i++) {
+        await a.moveBy(const Offset(90, 0));
+        await b.moveBy(const Offset(90, 0));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await a.up();
+      await b.up();
+      final strip = tester.getRect(find.byKey(const Key('touch-gutter-lead')));
+      expect(strip.left, 0);
+      expect(picture().left, moreOrLessEquals(strip.right));
+      expect(api.argsOf('input'), isEmpty);
       expect(tester.takeException(), isNull);
 
       await tester.pumpWidget(const SizedBox.shrink());

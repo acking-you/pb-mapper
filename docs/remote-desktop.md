@@ -89,11 +89,38 @@ direct touch, and a long press on it shows the gestures.
 | --- | --- | --- |
 | Slide one finger | Moves the pointer | Drags from where it started |
 | Tap | Left click at the pointer, sent at once | Left click where tapped |
-| Long press (500 ms) | Right click | Right click where pressed |
+| Long press (500 ms), then lift | Right click at the pointer, on release | Right click where pressed, on release |
+| Long press, then push | Scrolls at the pointer, both ways | Scrolls the window under the finger |
 | Double-tap, hold (300 ms) and move | Drags | — (a double tap is a double click) |
 | Three-finger swipe up or down | Scrolls, a notch per 24 px | Scrolls |
 | Two fingers | Pan and pinch the picture here (1× to 8×); nothing is sent | Same |
 | Two-finger tap | Nothing | Nothing |
+
+**The long-press joystick.** A finger held still for 500 ms sends nothing: a
+haptic press, and its ball becomes a joystick, a 120 px ring fixed where the
+finger rests and the 44 px ball under the finger, kept inside the ring.
+Lifted without leaving a 10 px dead zone, the press is a right click. Pushed
+out of it, the ball opens a wheel burst (in direct touch after moving the
+remote pointer to the press point, so the wheel reaches the window under the
+finger; in trackpad mode at the pointer), and notches flow every 16 ms on the
+gesture machine's own deadline, on each axis whose offset passes the dead
+zone, at 2 notches a second just past it rising on a quadratic to 25 at the
+ring; fractions carry over. The ball steers the view as a browser's
+autoscroll does: pushed up, the page scrolls up, towards its top; pushed
+right, it scrolls right. The host's wheel is positive down and right, so a
+notch takes the sign of the ball's offset, the opposite of the three-finger
+swipe, where the content follows the fingers. Back in the dead zone nothing
+flows but the burst stays open; the lift ends it and clicks nothing. A second
+finger ends it and pans and pinches as two fingers always do; so do a
+pointer cancel, a mode change or focus loss. Three-finger scrolling stays as
+a fallback, though phones may take three fingers for themselves. Latched
+modifiers wrap the whole burst, so a latched Ctrl zooms the remote page.
+
+On a phone the picture fits between the side gutters or bars, which stand
+on dark strips; zoomed in, it pans with its edges stopping at the gutters,
+so every edge of the remote display can be brought clear of the controls.
+Direct touch ignores a finger that lands outside that frame, on what a
+strip covers.
 
 Changes from the PR #51 preview builds:
 
@@ -101,8 +128,9 @@ Changes from the PR #51 preview builds:
   now does nothing.
 - Drag was a press held before moving. In trackpad mode it is a double tap
   whose second touch is held, then moved.
-- Scrolling was a toolbar button. It is a three-finger swipe; the content
-  follows the fingers.
+- Scrolling was a toolbar button. It is a long press and a push, the
+  joystick above, with the three-finger swipe kept as a fallback; a long
+  press right-clicks when it is lifted rather than as its timer fires.
 - Trackpad is the default mode, and a tap clicks at once rather than after a
   wait for a possible double tap.
 - Zoom never changes mode: two fingers always move the picture, never the
@@ -936,6 +964,39 @@ other target is written; none of these logs an invitation, a key or a
 credential. The once-a-second `desktop_feedback_interval` is debug and is not
 written; the viewer's statistics carry those numbers. At 1 MiB the file
 becomes `service-host.log.1`, replacing the previous one.
+
+### The quality panel
+
+The viewer's connection-quality panel (the toolbar's chip, or the path and
+frame-rate button in a phone's gutter) shows these figures in four groups,
+and scrolls within a landscape phone's height. A row whose figure is not
+reported, by an older host, on the relay or on a platform without it, is
+left out; while the connection is down the core rows show dashes.
+
+- **Network**: the path (LAN direct or direct, with the address family, from
+  `link.kind` and `link.family`; or the relay and its carrier), the QUIC
+  link's own round trip (`link.rtt_ms`, with its lowest) beside the stream's
+  in-band one (`rtt_ms`, with its queueing), and the bitrate received and,
+  from the host, sent.
+- **Picture**: the picture delay with its host and viewer ends, the rate
+  presented, received and captured by the host, the resolution and codec,
+  and keyframes with those the viewer asked for.
+- **Host**: the preset with its ceiling (Quality stays at 30 by design, so a
+  30 under it is expected; Balanced reaches 60, Smooth 120, each within the
+  viewer's display limit), pace and target with any viewer cap, capture ticks
+  skipped a second, the encoder's dwell, its target bitrate and rate model,
+  and the adaptation.
+- **Decoder**: while the panel is open, the store reads the native decoder's
+  `stats` once a second and turns two reads into decoded and dropped
+  pictures a second, the mean from a picture's release to the surface to
+  Flutter consuming it, surface credits in use, low-latency decoding and the
+  refresh rate asked for (Android; Windows reports the counts only). Closing
+  the panel drops the decoder's timing accumulators.
+
+Read in order, the rates place a loss: capture below pace is the host's
+source or its capture gate; pace below the ceiling is the QoS controller
+(its startup hold included) or the viewer's cap; received below capture is
+the transport; presented below received is this device's presenter.
 
 ### The app's video path
 

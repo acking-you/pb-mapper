@@ -27,6 +27,11 @@ abstract final class ViewerPalette {
   /// Hints laid over the picture on a phone.
   static const Color hint = Color(0xDB18181A);
 
+  /// The touch viewer's side gutters and bars, over whatever of a zoomed
+  /// picture lies under them: the lightest black that keeps even secondary
+  /// text above 4.5:1 over a white page.
+  static const Color gutter = Color(0xCC000000);
+
   /// Hairlines on the dark chrome.
   static const Color edge = Color.fromRGBO(255, 255, 255, 0.08);
 

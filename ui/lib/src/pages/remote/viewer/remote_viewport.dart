@@ -17,14 +17,16 @@ const kFollowMargin = 0.15;
 /// Zoom and pan of the remote picture: local only, never sent to the host,
 /// and independent of the encoder (P1-4).
 ///
-/// The picture is laid out at [scene], the fit of [layoutSize], and
-/// transformed by [scale] and then [offset]: a normalised point `n` sits at
-/// `offset + n · scene · scale`. The soft keyboard and the modifier bar
-/// only occlude ([occlusion]); they never change [layoutSize] or [scene],
-/// so nothing relayouts and the texture is untouched while they move.
+/// The picture is laid out at [scene], the fit of [layoutSize] less its
+/// [frame], and transformed by [scale] and then [offset]: a normalised
+/// point `n` sits at `offset + n · scene · scale`. The soft keyboard and
+/// the modifier bar only occlude ([occlusion]); they never change
+/// [layoutSize] or [scene], so nothing relayouts and the texture is
+/// untouched while they move.
 final class RemoteViewport extends ChangeNotifier {
   Size _layoutSize = Size.zero;
   double _aspectRatio = 16 / 9;
+  EdgeInsets _frame = EdgeInsets.zero;
   EdgeInsets _occlusion = EdgeInsets.zero;
   double _scale = kMinScale;
   Offset _offset = Offset.zero;
@@ -46,6 +48,10 @@ final class RemoteViewport extends ChangeNotifier {
   /// From the surface's layout; the IME never changes it.
   Size get layoutSize => _layoutSize;
 
+  /// What stands around the picture for good: a phone's gutters, which it
+  /// fits and pans between; zero on desktop.
+  EdgeInsets get frame => _frame;
+
   /// What covers the bottom of the stage: the IME and the modifier bar on
   /// a phone; zero on desktop.
   EdgeInsets get occlusion => _occlusion;
@@ -57,22 +63,40 @@ final class RemoteViewport extends ChangeNotifier {
     _relayout(() => _aspectRatio = value);
   }
 
-  /// The picture fitted into [layoutSize], before [scale].
+  /// The picture fitted into [layoutSize] less [frame], before [scale].
   Size get scene {
-    if (_layoutSize.isEmpty) return Size.zero;
-    final width = math.min(
-      _layoutSize.width,
-      _layoutSize.height * _aspectRatio,
-    );
+    final room = _frameRect.size;
+    if (room.isEmpty) return Size.zero;
+    final width = math.min(room.width, room.height * _aspectRatio);
     return Size(width, width / _aspectRatio);
+  }
+
+  /// The picture as fitted, unzoomed: [scene] centred in the frame.
+  Rect get fittedRect {
+    final room = _frameRect;
+    final s = scene;
+    return Rect.fromLTWH(
+      room.left + (room.width - s.width) / 2,
+      room.top + (room.height - s.height) / 2,
+      s.width,
+      s.height,
+    );
   }
 
   double get scale => _scale;
   Offset get offset => _offset;
 
-  /// The stage minus what occludes it.
+  /// The stage minus its frame and what occludes it, side by side: the
+  /// keyboard rises over the bottom gutter rather than adding to it.
   Rect get visibleRect {
-    final r = _occlusion.deflateRect(Offset.zero & _layoutSize);
+    final size = _layoutSize;
+    final f = _frame, o = _occlusion;
+    final r = Rect.fromLTRB(
+      math.max(f.left, o.left),
+      math.max(f.top, o.top),
+      size.width - math.max(f.right, o.right),
+      size.height - math.max(f.bottom, o.bottom),
+    );
     return Rect.fromLTRB(
       r.left,
       r.top,
@@ -114,6 +138,13 @@ final class RemoteViewport extends ChangeNotifier {
   void layout(Size size) {
     if (size == _layoutSize) return;
     _relayout(() => _layoutSize = size);
+  }
+
+  /// The picture refits between the new gutters, keeping its scale and the
+  /// point at the centre of the visible rect.
+  void setFrame(EdgeInsets frame) {
+    if (frame == _frame) return;
+    _relayout(() => _frame = frame);
   }
 
   /// Re-bounds the offset only: the scene and the scale stay.
@@ -236,6 +267,16 @@ final class RemoteViewport extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------- inner
+
+  Rect get _frameRect {
+    final r = _frame.deflateRect(Offset.zero & _layoutSize);
+    return Rect.fromLTRB(
+      r.left,
+      r.top,
+      math.max(r.left, r.right),
+      math.max(r.top, r.bottom),
+    );
+  }
 
   /// One remote pixel per physical pixel in original-size mode.
   double get _modeScale {
