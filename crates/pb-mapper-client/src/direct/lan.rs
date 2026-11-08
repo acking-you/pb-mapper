@@ -2,12 +2,12 @@
 //!
 //! Candidates and probes go LAN first, and that is decided by what an
 //! interface is, not by how its addresses look: Ethernet or Wi-Fi with a
-//! gateway leads to a LAN; a VPN's TUN, a hypervisor's switch or a container
-//! bridge does not, however private its addresses. Addresses come from
-//! if-addrs, as they always have; what each interface is comes from netdev,
-//! which knows types and gateways but is slow to ask, so it is read in the
-//! background. Until it answers, and where it cannot tell, as on Android,
-//! names and address ranges decide.
+//! gateway leads to a LAN; a VPN's TUN, a hypervisor's internal switch or a
+//! container bridge does not, however private its addresses. Addresses come
+//! from if-addrs, as they always have; what each interface is comes from
+//! netdev, which knows types and gateways but is slow to ask, so it is read
+//! in the background. Until it answers, and where it cannot tell, as on
+//! Android, names and address ranges decide.
 //!
 //! Everything else is a pure function of an [`Interfaces`] table, which tests
 //! inject. Getting it wrong costs an order or a 150 ms head start; what is
@@ -111,7 +111,7 @@ impl Interfaces {
                     } else {
                         Kind::Unknown
                     };
-                    tier(kind, &[&found.name], None, true, &found.addrs)
+                    tier(kind, &[&found.name], None, None, &found.addrs)
                 });
                 // Windows sends from its temporary IPv6 address, so that one
                 // is offered for its /64.
@@ -306,14 +306,14 @@ enum Kind {
     Unknown,
 }
 
-/// Rank an interface. `labels` are its names and description, `gateway` is
-/// `None` where the system does not say, and `physical` is the system's
-/// judgment of the hardware behind it.
+/// Rank an interface. `labels` are its names and description; `gateway`,
+/// whether it has one, and `physical`, the system's judgment of the hardware
+/// behind it, are `None` where the system does not say.
 fn tier(
     kind: Kind,
     labels: &[&str],
     gateway: Option<bool>,
-    physical: bool,
+    physical: Option<bool>,
     addrs: &[(IpAddr, u8)],
 ) -> InterfaceTier {
     let labels: Vec<String> = labels.iter().map(|label| label.to_lowercase()).collect();
@@ -346,27 +346,33 @@ fn tier(
         })
     };
     let typed_physical = matches!(kind, Kind::Ethernet | Kind::Wireless);
+    // A Hyper-V switch is internal, unless the host's own LAN and its gateway
+    // were moved onto it: an external switch. That alone judges it, since
+    // "vEthernet" also starts like a Linux veth.
+    let hyper_v = named(&[], &["vethernet", "hyper-v"]);
     if kind == Kind::Virtual
-        || named(
-            &[
-                "tun", "tap", "wg", "zt", "br-", "veth", "vmnet", "virbr", "vboxnet", "docker",
-                "awdl", "llw", "anpi", "ipsec", "ppp", "gif", "stf", "bridge",
-            ],
-            &[
-                "wintun",
-                "utun",
-                "wireguard",
-                "tailscale",
-                "zerotier",
-                "vethernet",
-                "hyper-v",
-                "vmware",
-                "virtualbox",
-                "tap-windows",
-                "openvpn",
-            ],
-        )
-        || (typed_physical && !physical && gateway != Some(true))
+        || (hyper_v && gateway != Some(true))
+        || (!hyper_v
+            && named(
+                &[
+                    "tun", "tap", "wg", "zt", "br-", "veth", "vmnet", "virbr", "vboxnet",
+                    "docker", "awdl", "llw", "anpi", "ipsec", "ppp", "gif", "stf", "bridge",
+                ],
+                &[
+                    "wintun",
+                    "utun",
+                    "wireguard",
+                    "tailscale",
+                    "zerotier",
+                    "vmware",
+                    "virtualbox",
+                    "tap-windows",
+                    "openvpn",
+                ],
+            ))
+        // Ethernet or Wi-Fi only on the system's word: virtual hardware and
+        // no gateway. A MAC address or route it could not read says neither.
+        || (typed_physical && physical == Some(false) && gateway == Some(false))
         || (kind == Kind::Unknown && vpn_range())
     {
         return InterfaceTier::Virtual;
@@ -379,8 +385,9 @@ fn tier(
     });
     match gateway {
         Some(true) => InterfaceTier::Lan,
-        // Android hides gateways from apps: a Wi-Fi or Ethernet interface
-        // numbered from a private range is taken to lead to one.
+        // Android hides routes from apps, and a hotspot is its own gateway:
+        // a Wi-Fi or Ethernet interface numbered from a private range is
+        // taken to lead to a LAN.
         None if looks_physical && site_local => InterfaceTier::Lan,
         _ => InterfaceTier::Physical,
     }
@@ -455,7 +462,6 @@ impl Kinds {
     }
 
     fn read(generation: u64) -> Self {
-        use netdev::interface::types::InterfaceType as T;
         let mut kinds = Self {
             generation,
             known: Vec::new(),
@@ -487,35 +493,7 @@ impl Kinds {
                     .filter(|(_, flags)| flags.temporary)
                     .map(|(net, _)| IpAddr::V6(net.addr())),
             );
-            let kind = match interface.if_type {
-                T::Loopback => Kind::Loopback,
-                T::Ethernet
-                | T::Ethernet3Megabit
-                | T::FastEthernetT
-                | T::FastEthernetFx
-                | T::GigabitEthernet => Kind::Ethernet,
-                T::Wireless80211 => Kind::Wireless,
-                T::Wwan | T::Wwanpp | T::Wwanpp2 | T::Wman | T::GenericModem => Kind::Cellular,
-                T::Tunnel | T::ProprietaryVirtual | T::Ppp | T::Slip | T::PeerToPeerWireless => {
-                    Kind::Virtual
-                }
-                _ => Kind::Unknown,
-            };
-            let gateway = match &interface.gateway {
-                Some(gateway) if !gateway.ipv4.is_empty() || !gateway.ipv6.is_empty() => Some(true),
-                // Android hides routes from apps: no gateway says nothing.
-                _ if cfg!(target_os = "android") => None,
-                _ => Some(false),
-            };
-            let labels: Vec<&str> = [
-                Some(interface.name.as_str()),
-                interface.friendly_name.as_deref(),
-                interface.description.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
-            let tier = tier(kind, &labels, gateway, interface.is_physical(), &addrs);
+            let tier = rank(&interface, &addrs, cfg!(target_os = "android"));
             kinds.known.push(Known {
                 index: interface.index,
                 names: [Some(interface.name), interface.friendly_name]
@@ -527,6 +505,50 @@ impl Kinds {
         }
         kinds
     }
+}
+
+/// Rank an interface netdev read. `android`, because apps there are shown
+/// neither routes nor MAC addresses.
+fn rank(interface: &netdev::Interface, addrs: &[(IpAddr, u8)], android: bool) -> InterfaceTier {
+    use netdev::interface::types::InterfaceType as T;
+    let kind = match interface.if_type {
+        T::Loopback => Kind::Loopback,
+        T::Ethernet
+        | T::Ethernet3Megabit
+        | T::FastEthernetT
+        | T::FastEthernetFx
+        | T::GigabitEthernet => Kind::Ethernet,
+        T::Wireless80211 => Kind::Wireless,
+        T::Wwan | T::Wwanpp | T::Wwanpp2 | T::Wman | T::GenericModem => Kind::Cellular,
+        // netdev guesses peer-to-peer Wi-Fi from Android's names, and swlan
+        // is a hotspot's access point, not Wi-Fi Direct.
+        T::PeerToPeerWireless if interface.name.starts_with("swlan") => Kind::Wireless,
+        T::Tunnel | T::ProprietaryVirtual | T::Ppp | T::Slip | T::PeerToPeerWireless => {
+            Kind::Virtual
+        }
+        _ => Kind::Unknown,
+    };
+    let gateway = match &interface.gateway {
+        Some(gateway) if !gateway.ipv4.is_empty() || !gateway.ipv6.is_empty() => Some(true),
+        // No gateway says nothing where routes are hidden.
+        _ if android => None,
+        _ => Some(false),
+    };
+    // netdev takes a MAC address it could not read for a loopback adapter's,
+    // so only one it read says what hardware is behind the interface.
+    let physical = interface
+        .mac_addr
+        .filter(|mac| *mac != netdev::MacAddr::zero())
+        .map(|_| interface.is_physical());
+    let labels: Vec<&str> = [
+        Some(interface.name.as_str()),
+        interface.friendly_name.as_deref(),
+        interface.description.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    tier(kind, &labels, gateway, physical, addrs)
 }
 
 #[cfg(test)]
@@ -593,5 +615,70 @@ mod tests {
             None
         );
         assert_eq!(pc.assess(&[at("203.0.113.9")]), None);
+    }
+
+    #[test]
+    fn android_wifi_and_hotspots_lead_to_a_lan_unseen_mac_and_routes() {
+        use netdev::interface::types::InterfaceType as T;
+        // As netdev reads them for an app: no MAC address, no gateway.
+        let android = |if_type: T, name: &str| {
+            let interface = netdev::Interface {
+                name: name.into(),
+                if_type,
+                ..netdev::Interface::dummy()
+            };
+            rank(&interface, &[(ip("192.168.43.1"), 24)], true)
+        };
+        // A Wi-Fi client, and the access points of a hotspot.
+        for (if_type, name) in [
+            (T::Wireless80211, "wlan0"),
+            (T::PeerToPeerWireless, "swlan0"),
+            (T::Ethernet, "ap0"),
+            (T::Wireless80211, "wlan1"),
+        ] {
+            assert_eq!(android(if_type, name), InterfaceTier::Lan, "{name}");
+        }
+        assert_eq!(
+            android(T::PeerToPeerWireless, "p2p0"),
+            InterfaceTier::Virtual
+        );
+    }
+
+    #[test]
+    fn a_gateway_lifts_a_hyper_v_switch_but_never_a_vpn() {
+        let lan = [(ip("192.168.21.5"), 24)];
+        assert_eq!(
+            tier(Kind::Wireless, &["WLAN"], Some(true), Some(true), &lan),
+            InterfaceTier::Lan
+        );
+        // A TUN carrying the default route.
+        assert_eq!(
+            tier(
+                Kind::Unknown,
+                &["Clash", "Wintun Userspace Tunnel"],
+                Some(true),
+                None,
+                &[(ip("10.0.0.33"), 24)],
+            ),
+            InterfaceTier::Virtual
+        );
+        let hyper_v = |name, gateway| {
+            tier(
+                Kind::Ethernet,
+                &[name, "Hyper-V Virtual Ethernet Adapter"],
+                gateway,
+                Some(true),
+                &lan,
+            )
+        };
+        assert_eq!(
+            hyper_v("vEthernet (Default Switch)", Some(false)),
+            InterfaceTier::Virtual
+        );
+        // An external switch, which the host's LAN and gateway move onto.
+        assert_eq!(
+            hyper_v("vEthernet (External)", Some(true)),
+            InterfaceTier::Lan
+        );
     }
 }
