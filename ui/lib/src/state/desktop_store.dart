@@ -162,8 +162,9 @@ class DesktopStore {
   ValueListenable<DesktopQuality> get quality => _quality;
 
   /// The host's cursor, normalised to its display; null while hidden,
-  /// unknown or of another generation than [geometry]. The view leaf
-  /// publishes it, read every rendered frame and every 16 ms (D11).
+  /// unknown, of another generation than [geometry], or not yet reported by
+  /// this connection. The view leaf publishes it, read every rendered frame
+  /// and every 16 ms (D11).
   ValueListenable<Offset?> get hostCursor => _hostCursor;
 
   // ---------------------------------------------------------------- demand
@@ -980,8 +981,11 @@ class DesktopStore {
       _controlSuppressed = false;
       _cancelControlCooldown();
       _setup = DesktopSetupStep.firstPicture;
-      // A new Rust viewer: new sequences, so nothing older may be sent.
+      // A new Rust viewer: new sequences, so nothing older may be sent, and
+      // no cursor is known until it reports one.
       _invalidateInput();
+      _view = null;
+      _publishCursor();
       _bumpGeometry();
       if (!_visible) _pauseNative();
       try {
@@ -1280,9 +1284,21 @@ class DesktopStore {
       notice: status?.notice,
       capabilities: status?.capabilities ?? const [],
     );
-    if (_session.value.inputLive != _wasLive) {
-      _wasLive = _session.value.inputLive;
-      if (!_wasLive) _invalidateInput();
+    final session = _session.value;
+    if (session.inputLive != _wasLive) {
+      _wasLive = session.inputLive;
+      final geometry = _geometry.value;
+      if (_wasLive) {
+        _resendKept();
+      } else if (session.controlling && geometry != null) {
+        // Only the picture went stale: the newest move waits for the next
+        // fresh one.
+        final move = _takeMove()?.single;
+        _invalidateInput();
+        if (move is DesktopMove) _keep(move, geometry.epoch);
+      } else {
+        _invalidateInput();
+      }
     }
   }
 
@@ -1313,6 +1329,11 @@ class DesktopStore {
       SchedulerBinding.instance.scheduleFrame();
     }
     if (view == null) return;
+    if (_keptMove != null &&
+        view.fresh &&
+        view.presentedFrameId != _keptAtFrame) {
+      _resendKept();
+    }
     final structural =
         previous == null ||
         previous.generation != view.generation ||
@@ -1759,14 +1780,39 @@ class DesktopStore {
   /// The newest move not yet sent, with the input epoch it was sent in.
   (DesktopMove, int)? _pendingMove;
 
+  /// The newest move refused because the picture was not fresh, or held
+  /// back as it went stale, with the geometry epoch it belongs to. It goes
+  /// with the next fresh picture, so the last position always reaches the
+  /// host (D12); whatever else ends input drops it.
+  (DesktopMove, int)? _keptMove;
+
+  /// The presented frame the kept move was refused at: only a newer fresh
+  /// one sends it again.
+  int _keptAtFrame = 0;
+
   /// Running for 4 ms after a move went out; moves meanwhile coalesce.
   Timer? _moveGate;
 
   void _invalidateInput() {
     _inputEpoch++;
     _pendingMove = null;
+    _keptMove = null;
     _moveGate?.cancel();
     _moveGate = null;
+  }
+
+  void _keep(DesktopMove move, int geometryEpoch) {
+    _keptMove = (move, geometryEpoch);
+    _keptAtFrame = _view?.presentedFrameId ?? 0;
+  }
+
+  /// The kept move goes, now that the picture is fresh again.
+  void _resendKept() {
+    final kept = _keptMove;
+    // An open gate sends it with whatever waits behind it.
+    if (kept == null || _moveGate != null || !_accepts(kept.$2)) return;
+    _keptMove = null;
+    if (_deliver([kept.$1])) _moveGate = Timer(_moveInterval, _flushMove);
   }
 
   /// The user's choice between viewing and controlling. Control is asked
@@ -1839,8 +1885,8 @@ class DesktopStore {
       _geometry.value?.epoch == geometryEpoch;
 
   /// False when dropped: not live, or [geometryEpoch] is not the current
-  /// one. Moves are coalesced to one per 4 ms; a pending move goes before
-  /// any other input.
+  /// one. Moves are coalesced to one per 4 ms; a pending or kept move goes
+  /// before any other input.
   bool send(DesktopInput input, {required int geometryEpoch}) {
     if (!_accepts(geometryEpoch)) return false;
     if (input is DesktopMove) {
@@ -1848,6 +1894,8 @@ class DesktopStore {
         _pendingMove = (input, _inputEpoch);
         return true;
       }
+      // Newer than any kept move.
+      _keptMove = null;
       if (!_deliver([input])) return false;
       _moveGate = Timer(_moveInterval, _flushMove);
       return true;
@@ -1874,10 +1922,13 @@ class DesktopStore {
     return false;
   }
 
+  /// The newest move not sent yet: the pending one, else the kept one.
   List<DesktopInput>? _takeMove() {
-    final pending = _pendingMove;
+    final pending = _pendingMove, kept = _keptMove;
     _pendingMove = null;
-    return pending != null && pending.$2 == _inputEpoch ? [pending.$1] : null;
+    _keptMove = null;
+    if (pending != null && pending.$2 == _inputEpoch) return [pending.$1];
+    return kept != null && kept.$2 == _geometry.value?.epoch ? [kept.$1] : null;
   }
 
   /// The gate closes: the newest move waiting behind it goes, and opens the
@@ -1891,6 +1942,8 @@ class DesktopStore {
   }
 
   /// Rust stamps the frame id and sequence; Dart names only the generation.
+  /// `NOT_FRESH` drops the batch, but keeps its move for the next fresh
+  /// picture; any other refusal ends control.
   bool _deliver(List<DesktopInput> inputs) {
     final geometry = _geometry.value;
     if (geometry == null) return false;
@@ -1898,7 +1951,11 @@ class DesktopStore {
       _api.input(geometry.generation, [for (final i in inputs) i.toJson()]);
       return true;
     } on DesktopCallException catch (e) {
-      if (e.code != 'NOT_FRESH') _interruptInput();
+      if (e.code != 'NOT_FRESH') {
+        _interruptInput();
+      } else if (inputs.whereType<DesktopMove>().lastOrNull case final move?) {
+        _keep(move, geometry.epoch);
+      }
       return false;
     } catch (_) {
       _interruptInput();

@@ -56,14 +56,10 @@ void viewerHaptic(HapticKind kind) => unawaited(switch (kind) {
 /// Where the touch gestures send pointer intent: [RemoteInput], or a
 /// recorder in tests. Points are normalised to the picture.
 abstract interface class RemotePointerSink {
-  /// The local prediction of the remote cursor, which trackpad strokes
-  /// move and taps click at.
+  /// The remote cursor as this viewer has it, which trackpad strokes move
+  /// and taps click at: its own, never handed back to the host on a timer.
   Offset get cursor;
   set cursor(Offset normalized);
-
-  /// A trackpad stroke is moving [cursor], so the prediction is what the
-  /// cursor layer shows.
-  set strokeActive(bool active);
 
   void hover(Offset n);
   void move(Offset n);
@@ -176,7 +172,7 @@ class TouchGestureMachine {
   final _joystick = ValueNotifier<TouchJoystick?>(null);
 
   _Phase _phase = _Phase.idle;
-  bool _direct = false, _live = false, _strokeActive = false;
+  bool _direct = false, _live = false;
 
   Duration? _graceAt, _longPressAt, _holdAt, _pressDueAt, _wheelAt;
 
@@ -416,7 +412,6 @@ class TouchGestureMachine {
       return;
     }
     _indicator.value = p;
-    _setStroke(true);
     final tap = _lastTap;
     if (tap != null &&
         t - tap.upAt >= kDoubleTapMinTime &&
@@ -463,7 +458,6 @@ class TouchGestureMachine {
     _lastTap = null;
     _indicator.value = null;
     _joystick.value = null;
-    _setStroke(false);
     _phase = _Phase.navigate;
     _secondDownAt = t;
     _navigating = false;
@@ -490,7 +484,6 @@ class TouchGestureMachine {
     _dragPending = false;
     _wheelStarted = false;
     _navigating = false;
-    _setStroke(false);
     _phase = _Phase.idle;
     _indicator.value = null;
     _joystick.value = null;
@@ -502,7 +495,6 @@ class TouchGestureMachine {
     _graceAt = null;
     final at = _fingers.values.single.last;
     _indicator.value = null;
-    _setStroke(false);
     _phase = _Phase.joystick;
     _wheelX = _wheelY = 0;
     _joystick.value = TouchJoystick(centre: at, ball: at);
@@ -581,12 +573,6 @@ class TouchGestureMachine {
     return offset.isNegative ? -rate : rate;
   }
 
-  void _setStroke(bool active) {
-    if (active == _strokeActive) return;
-    _strokeActive = active;
-    _sink.strokeActive = active;
-  }
-
   // ------------------------------------------------------------ actions
 
   /// Direct touch: the picture point under the finger, pulled to the edge
@@ -617,7 +603,7 @@ class TouchGestureMachine {
 
   /// The trackpad drag's delayed press, at the double tap, then a move to
   /// where the finger took the cursor meanwhile. That point is read first:
-  /// the press puts the prediction back at the double tap.
+  /// the press puts the cursor back at the double tap.
   void _sendDragPress() {
     final to = _sink.cursor;
     _sink.press(RemoteButton.left, _pressAt, dragStart: true);

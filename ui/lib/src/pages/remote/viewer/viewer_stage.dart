@@ -34,7 +34,6 @@ class ViewerStage extends StatelessWidget {
     required this.picture,
     required this.jpegImage,
     required this.stats,
-    required this.hostCursor,
     required this.viewport,
     required this.input,
     required this.machine,
@@ -66,7 +65,6 @@ class ViewerStage extends StatelessWidget {
     picture: desktop.picture,
     jpegImage: desktop.jpegImage,
     stats: desktop.stats,
-    hostCursor: desktop.hostCursor,
     viewport: viewport,
     input: input,
     machine: machine,
@@ -83,7 +81,6 @@ class ViewerStage extends StatelessWidget {
   final ValueListenable<DesktopPicture?> picture;
   final ValueListenable<ui.Image?> jpegImage;
   final ValueListenable<DesktopStats> stats;
-  final ValueListenable<Offset?> hostCursor;
   final RemoteViewport viewport;
   final RemoteInput input;
   final TouchGestureMachine machine;
@@ -147,11 +144,7 @@ class ViewerStage extends StatelessWidget {
           ),
         ),
         GreyStill(session: session, viewport: viewport),
-        RemoteCursorLayer(
-          hostCursor: hostCursor,
-          viewport: viewport,
-          input: input,
-        ),
+        RemoteCursorLayer(viewport: viewport, input: input),
         if (touchIndicator) TouchIndicator(machine: machine),
         if (compact)
           _PictureFrame(viewport: viewport, child: _overlays)

@@ -174,11 +174,7 @@ void main() {
 
       h.api.viewValue = view(1, 480, 270);
       await tester.pumpWidget(
-        RemoteCursorLayer(
-          hostCursor: h.store.hostCursor,
-          viewport: h.viewport,
-          input: h.input,
-        ),
+        RemoteCursorLayer(viewport: h.viewport, input: h.input),
       );
       await tester.pump();
       expect(layer, arrowAt(const Offset(0.25, 0.25)));
@@ -211,6 +207,85 @@ void main() {
       await tester.pump();
       expect(layer, arrowAt(const Offset(0.25, 0.25)));
       expect(tester.binding.hasScheduledFrame, isFalse);
+
+      h.dispose();
+    },
+  );
+
+  testWidgets(
+    "the viewer's cursor is its own: no wait hands it back to an old report, "
+    'a new report or a hidden cursor is followed, and every report while '
+    'viewing only',
+    (tester) async {
+      final h = await ViewerHarness.live(tester);
+      // The picture is 1920 px wide: a finger's pixel is a display pixel.
+      h.viewport.layout(const Size(1920, 1080));
+      final machine = h.machine, input = h.input;
+      Future<void> report(int x, int y, {bool visible = true}) async {
+        h.api.viewValue = DesktopView(
+          generation: 1,
+          presentedFrameId: 1,
+          displayWidth: 1920,
+          displayHeight: 1080,
+          videoWidth: 1920,
+          videoHeight: 1080,
+          cursorX: x,
+          cursorY: y,
+          state: 2,
+          cursorVisible: visible,
+          controlling: true,
+          controlAllowed: true,
+          fresh: true,
+        );
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+
+      // The first report of a connection is followed.
+      await report(480, 270);
+      expect(input.shownCursor, const Offset(0.25, 0.25));
+
+      // A stroke takes it 300 px right; the host reports none of what this
+      // viewer injected. However long after, it stays, and a tap clicks
+      // there.
+      machine.down(1, const Offset(100, 100), _ms(0));
+      machine.move(1, const Offset(400, 100), _ms(50));
+      machine.up(1, const Offset(400, 100), _ms(100));
+      await tester.pump(const Duration(seconds: 2));
+      expect(input.shownCursor, input.cursor);
+      expect(input.cursor.dx * 1920, closeTo(780, 0.01));
+      h.sent();
+      machine.down(2, const Offset(400, 100), _ms(3000));
+      machine.up(2, const Offset(400, 100), _ms(3050));
+      expect(h.sent(), [
+        ['move 780,270', 'left↓', 'left↑'],
+      ]);
+
+      // A report within a pixel is the host's whole pixels: no move.
+      final local = input.cursor;
+      await report(781, 270);
+      expect(input.cursor, local);
+
+      // The remote user moved it: followed, and the next tap clicks there.
+      await report(1440, 810);
+      expect(input.cursor, const Offset(0.75, 0.75));
+      machine.down(3, const Offset(400, 100), _ms(5000));
+      machine.up(3, const Offset(400, 100), _ms(5050));
+      expect(h.sent().last, ['move 1440,810', 'left↓', 'left↑']);
+
+      // Hidden, there is no arrow, until this viewer moves it.
+      await report(1440, 810, visible: false);
+      expect(input.shownCursor, isNull);
+      machine.down(4, const Offset(400, 100), _ms(7000));
+      machine.move(4, const Offset(420, 100), _ms(7050));
+      machine.up(4, const Offset(420, 100), _ms(7100));
+      expect(input.shownCursor, isNotNull);
+
+      // Viewing only, every report is followed, within a pixel too.
+      h.store.control(false);
+      await tester.pump(const Duration(milliseconds: 500));
+      await report(1000, 500);
+      await report(1001, 500);
+      expect(input.cursor, const Offset(1001 / 1920, 500 / 1080));
 
       h.dispose();
     },

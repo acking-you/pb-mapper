@@ -123,6 +123,27 @@ void main() {
       expect(api.argsOf('control'), isEmpty);
       expect(store.session.value.controlling, isTrue);
 
+      // A move refused so is kept, and goes with the next fresh picture:
+      // the host always gets the last position.
+      api.failNext('input', 'NOT_FRESH');
+      expect(
+        store.send(DesktopInput.move(7, 7), geometryEpoch: epoch),
+        isFalse,
+      );
+      api.viewValue = const DesktopView(
+        generation: 3,
+        presentedFrameId: 2,
+        displayWidth: 1920,
+        displayHeight: 1080,
+        state: 2,
+        controlling: true,
+        controlAllowed: true,
+        fresh: true,
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(api.inputs.where((e) => e['x'] == 7), hasLength(2));
+      expect(api.inputs.last, {'kind': 'move', 'x': 7, 'y': 7});
+
       // Lost control ends it locally at once.
       api.failNext('input', 'NOT_CONTROLLING');
       expect(

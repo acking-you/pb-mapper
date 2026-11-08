@@ -189,7 +189,6 @@ void main() {
           picture: picture,
           jpegImage: ValueNotifier(null),
           stats: ValueNotifier(DesktopStats.none),
-          hostCursor: ValueNotifier(null),
           viewport: viewport,
           input: input,
           machine: machine,
