@@ -80,6 +80,10 @@ Then start the installed app.
   `relay_only` into `controller.json`, so the define decides. A local
   `controller.json` may still override `relay_only` and `seconds` (15..1800)
   without a rebuild.
+- An A/B run with LAN-first off adds `--dart-define=lanFirst=false` (the
+  default is true), and a local `controller.json` may override it as
+  `lan_first`. The host must have it off too: its Settings switch, read when
+  sharing starts.
 - `quality` (`quality`, `balanced` or `smooth`) is a report schema 2 define;
   the Stage 1 tool, built from tag `ovh-g1`, ignores it.
 - Two optional schema 2 defines label the report: `case` (for example
@@ -136,7 +140,7 @@ sensor), read it before and after the run with
 
 One JSON object:
 
-- `schema` (2), `case`, `quality`, `relay_only`, `decoder_hints`,
+- `schema` (2), `case`, `quality`, `relay_only`, `lan_first`, `decoder_hints`,
   `transport`, `seconds`, `warmup_seconds` (5).
 - `build`: the app version, build number and mode (`release`, `profile` or
   `debug`).

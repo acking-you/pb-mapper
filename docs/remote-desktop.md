@@ -390,7 +390,7 @@ service's host (`RELAY_CHANGED`) unless the app says the owner confirmed it, so
 a card that has not read the new settings yet cannot move it unasked.
 **Start sharing** always configures the service from the current settings: on
 the same relay and namespace it keeps the invitation, and also takes a changed
-carrier or a renewed credential. A rotated administrator key is the same
+carrier, a changed *Try the local network first* or a renewed credential. A rotated administrator key is the same
 namespace, so the card does not flag it: a sharing host keeps the retired key
 until **Stop sharing** and **Start sharing** configure it from the settings
 again. When the service registers, its status and
@@ -488,6 +488,11 @@ setup as **Turn on remote control** does: one consent prompt installs, updates
 or enables it, the app restarts into the installed copy when it installed one,
 and the host resumes there. The app's startup restore never installs or asks.
 
+Protocol 5 is the current one: the background host's `Options` carry
+`lan_first`, the app's *Try the local network first* when sharing started,
+which a protocol 4 helper would refuse. It is written only when off, so a
+grant saved with the default stays readable by an older helper.
+
 Disable stops the service and disables its startup. Uninstall stops/deletes the
 service and removes its authorization configuration. Upgrade preserves files
 used by an older open UI until the next normal reboot; uninstall deletes what
@@ -518,7 +523,10 @@ does not require Flutter or a POCOX runtime.
   literals. Discard that identity and stop its host to revoke durable access.
   `start` and `start_with_identity` use the platform's own backend and refuse
   before registering where `capabilities().host` is false: off Windows, or
-  without Media Foundation.
+  without Media Foundation. `HostOptions.lan_first` is the registration's
+  `RegisterOptions.lan_first`: it only orders the host's own probes, since the
+  viewer dials and so chooses the path. The app passes its Settings switch,
+  read when sharing starts.
 - `Host::status` returns a `HostStatus`: the state and its reason, whether
   control is allowed, the display and desktop kind, the capabilities, and the
   connected viewer (`HostViewer`: since when, direct or relay, controlling,
@@ -548,7 +556,9 @@ does not require Flutter or a POCOX runtime.
   POCOX itself remains separate work.
 - `Viewer::connect(&client, &invitation, options, ViewerConfig { codecs, limits,
   quality, progress })` uses `Client::connect_tcp` and the existing
-  registration, namespace, direct commit and pre-commit relay fallback. It
+  registration, namespace, direct commit and pre-commit relay fallback; its
+  `ConnectOptions.lan_first`, which the app takes from Settings at each
+  connect, decides whether a shared LAN is tried first. It
   returns once the host accepted, or fails with a typed `ConnectError`: identity
   changed, version mismatch, busy, denied, invalid request, cancelled, transport
   or protocol. `VideoLimits::for_viewer(refresh_hz)` derives the limits:
