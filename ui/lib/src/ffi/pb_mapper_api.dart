@@ -57,6 +57,10 @@ class ConfigStatus {
 
   /// How this computer reaches the relay.
   final RelayTransport relayTransport;
+
+  /// Whether this computer tries a local network it shares with the other
+  /// end first. Each tunnel and remote-desktop start takes it as it is then.
+  final bool lanFirst;
   final bool isolatedRelayAdminKeySet;
   final String isolatedRelayAdminKey;
 
@@ -65,6 +69,7 @@ class ConfigStatus {
     required this.keepAliveEnabled,
     required this.msgHeaderKey,
     this.relayTransport = RelayTransport.tcp,
+    this.lanFirst = true,
     this.isolatedRelayAdminKeySet = false,
     this.isolatedRelayAdminKey = '',
   });
@@ -78,6 +83,7 @@ class ConfigStatus {
       keepAliveEnabled: _asBool(map['keepAliveEnabled'], fallback: true),
       msgHeaderKey: _asString(map['msgHeaderKey']),
       relayTransport: RelayTransport.parse(map['relayTransport']),
+      lanFirst: _asBool(map['lanFirst'], fallback: true),
       isolatedRelayAdminKeySet: _asBool(
         map['isolatedRelayAdminKeySet'],
         fallback: false,
@@ -85,6 +91,14 @@ class ConfigStatus {
       isolatedRelayAdminKey: _asString(map['isolatedRelayAdminKey']),
     );
   }
+
+  /// Whether [other] reaches the same relay the same way. A change of
+  /// [lanFirst] alone is no reason to ask the relay anything again.
+  bool sameRelay(ConfigStatus other) =>
+      serverAddress == other.serverAddress &&
+      keepAliveEnabled == other.keepAliveEnabled &&
+      msgHeaderKey == other.msgHeaderKey &&
+      relayTransport == other.relayTransport;
 }
 
 class ServiceConfigInfo {
@@ -596,13 +610,15 @@ abstract interface class PbMapperApiClient {
   Future<ConfigStatus> fetchConfig();
   Future<String> revealIsolatedRelayAdminKey();
 
-  /// Save the relay settings. Its [OperationResult.data] carries a
-  /// [CarrierMove] under `move` when the carrier changed.
+  /// Save the relay settings, and whether this computer tries a shared local
+  /// network first. Its [OperationResult.data] carries a [CarrierMove] under
+  /// `move` when the carrier changed.
   Future<OperationResult> updateConfig({
     required String serverAddress,
     required bool keepAlive,
     required String msgHeaderKey,
     RelayTransport relayTransport = RelayTransport.tcp,
+    bool lanFirst = true,
   });
 
   /// Run a relay on [port]; with [quicPort], one that also takes QUIC there.
@@ -754,12 +770,14 @@ class PbMapperApi implements PbMapperApiClient {
     required bool keepAlive,
     required String msgHeaderKey,
     RelayTransport relayTransport = RelayTransport.tcp,
+    bool lanFirst = true,
   }) async {
     final result = await _service.updateConfig(
       serverAddress: serverAddress,
       keepAlive: keepAlive,
       msgHeaderKey: msgHeaderKey,
       relayTransport: relayTransport.name,
+      lanFirst: lanFirst,
     );
     return _resultFrom(result);
   }

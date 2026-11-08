@@ -12,10 +12,12 @@
 // status only, never images, invitations or credentials.
 //
 // Defines: setupUrl (a loopback controller.json), seconds (15..1800),
-// relayOnly, quality (quality | balanced | smooth), case (a label for the
-// run) and host (the host's GPU and refresh rate, which a viewer cannot see).
-// controller.json may override seconds and relay_only, and its decoder_hints
-// false (case F) configures the decoder without its low-latency hint.
+// relayOnly, lanFirst (default true; false for the A/B run with LAN-first
+// off), quality (quality | balanced | smooth), case (a label for the run)
+// and host (the host's GPU and refresh rate, which a viewer cannot see).
+// controller.json may override seconds, relay_only and lan_first, and its
+// decoder_hints false (case F) configures the decoder without its
+// low-latency hint.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -42,6 +44,7 @@ Future<void> main() async {
   final setup = Uri.parse(const String.fromEnvironment('setupUrl'));
   const defaultSeconds = int.fromEnvironment('seconds', defaultValue: 30);
   const defaultRelayOnly = bool.fromEnvironment('relayOnly');
+  const defaultLanFirst = bool.fromEnvironment('lanFirst', defaultValue: true);
   final quality =
       DesktopQuality.values.asNameMap()[const String.fromEnvironment(
         'quality',
@@ -60,6 +63,7 @@ Future<void> main() async {
   final config = await _fetchSetup(setup);
   final seconds = (config['seconds'] as int? ?? defaultSeconds).clamp(15, 1800);
   final relayOnly = config['relay_only'] as bool? ?? defaultRelayOnly;
+  final lanFirst = config['lan_first'] as bool? ?? defaultLanFirst;
   final decoderHints = config['decoder_hints'] as bool? ?? true;
 
   final service = PbMapperService();
@@ -92,6 +96,7 @@ Future<void> main() async {
       keepAlive: true,
       msgHeaderKey: config['credential'] as String,
       relayTransport: config['transport'] as String,
+      lanFirst: lanFirst,
     );
     if (update['success'] != true) {
       throw StateError('Acceptance configuration failed');
@@ -131,6 +136,7 @@ Future<void> main() async {
       'case': const String.fromEnvironment('case'),
       'quality': quality.name,
       'relay_only': relayOnly,
+      'lan_first': lanFirst,
       'decoder_hints': decoderHints,
       'transport': config['transport'],
       'seconds': seconds,

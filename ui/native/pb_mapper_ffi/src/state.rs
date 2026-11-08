@@ -257,6 +257,10 @@ pub struct AppConfig {
     /// How this computer reaches the relay: TCP, as a config saved before
     /// there was a choice, or QUIC. A tunnel keeps the one it started with.
     pub relay_transport: RelayTransport,
+    /// Whether this computer tries a local network it shares with the other
+    /// end first: on, as a config saved before there was a choice. Each
+    /// tunnel, remote-desktop connection and host takes it as it starts.
+    pub lan_first: bool,
 }
 
 impl Default for AppConfig {
@@ -266,7 +270,29 @@ impl Default for AppConfig {
             keep_alive_enabled: true,
             msg_header_key: String::new(),
             relay_transport: RelayTransport::Tcp,
+            lan_first: true,
         }
+    }
+}
+
+impl AppConfig {
+    /// Whether `other` reaches the same relay the same way: the same
+    /// address, keep-alive, credential and carrier. What the window keeps
+    /// about the relay, its client and what it said about QUIC, is kept for
+    /// these alone, so a preference of this computer's own, such as
+    /// `lan_first`, changes neither.
+    pub fn same_relay(&self, other: &Self) -> bool {
+        let Self {
+            server_address,
+            keep_alive_enabled,
+            msg_header_key,
+            relay_transport,
+            lan_first: _,
+        } = self;
+        *server_address == other.server_address
+            && *keep_alive_enabled == other.keep_alive_enabled
+            && *msg_header_key == other.msg_header_key
+            && *relay_transport == other.relay_transport
     }
 }
 
@@ -911,8 +937,8 @@ pub async fn register_service(
     //    early would release the key while the setup is still running.
     //    The credential and carrier are captured with the relay address so a
     //    later config change cannot pair a new key with the already-resolved
-    //    socket.
-    let (_claim, server_address, credential, relay_transport) = {
+    //    socket; LAN-first with them, as this computer's config says now.
+    let (_claim, server_address, credential, relay_transport, lan_first) = {
         let state = state.lock().await;
         let claim = state.claim_registering(&service_key)?;
         let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
@@ -921,6 +947,7 @@ pub async fn register_service(
             state.config.server_address.clone(),
             credential,
             state.config.relay_transport,
+            state.config.lan_first,
         )
     };
 
@@ -950,7 +977,7 @@ pub async fn register_service(
                 allow_direct,
                 idle_timeout: None,
                 port_mapping,
-                ..Default::default()
+                lan_first,
             },
         )
         .await
@@ -997,7 +1024,7 @@ pub async fn connect_service(
         allow_direct,
         port_mapping,
     } = direct;
-    let (_claim, server_address, credential, relay_transport) = {
+    let (_claim, server_address, credential, relay_transport, lan_first) = {
         let state = state.lock().await;
         let claim = state.claim_connecting(&service_key)?;
         let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
@@ -1006,6 +1033,7 @@ pub async fn connect_service(
             state.config.server_address.clone(),
             credential,
             state.config.relay_transport,
+            state.config.lan_first,
         )
     };
 
@@ -1051,7 +1079,7 @@ pub async fn connect_service(
                     PathPolicy::RelayOnly
                 },
                 port_mapping,
-                ..Default::default()
+                lan_first,
             },
         )
         .await
@@ -1740,5 +1768,26 @@ mod tests {
 
         drop(guard);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A config.json saved before LAN-first could be switched off loads with
+    /// it on, and a change of it alone leaves the relay settings the same.
+    #[test]
+    fn a_config_saved_before_the_switch_tries_the_lan_first() {
+        let saved: AppConfig = serde_json::from_str(
+            r#"{"server_address":"relay.example:7666","keep_alive_enabled":true,
+                "msg_header_key":"","relay_transport":"quic"}"#,
+        )
+        .unwrap();
+        assert!(saved.lan_first);
+        let off = AppConfig {
+            lan_first: false,
+            ..saved.clone()
+        };
+        assert!(off.same_relay(&saved));
+        assert!(!off.same_relay(&AppConfig {
+            relay_transport: RelayTransport::Tcp,
+            ..saved
+        }));
     }
 }

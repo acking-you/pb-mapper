@@ -13,6 +13,7 @@ use crate::error::CtlError;
 use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, parse_c_string};
+use crate::state::AppConfig;
 
 /// Get current app config.
 #[unsafe(no_mangle)]
@@ -36,6 +37,7 @@ pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) 
         "keepAliveEnabled": config.keep_alive_enabled,
         "msgHeaderKey": config.msg_header_key,
         "relayTransport": config.relay_transport,
+        "lanFirst": config.lan_first,
         "isolatedRelayAdminKeySet": isolated_admin_key_set,
     }))
 }
@@ -62,7 +64,10 @@ pub unsafe extern "C" fn pb_mapper_reveal_isolated_admin_key(
     }))
 }
 
-/// Update app config. `relay_transport` is `"tcp"` or `"quic"`.
+/// Update app config. `relay_transport` is `"tcp"` or `"quic"`; `lan_first`
+/// nonzero tries a local network shared with the other end first, from the
+/// next tunnel or remote-desktop start. A change of `lan_first` alone keeps
+/// what the window knows about the relay.
 ///
 /// When the carrier changes, `data.move` names this computer's tunnels on
 /// the saved relay, under the saved credential, still on the old carrier:
@@ -74,6 +79,7 @@ pub unsafe extern "C" fn pb_mapper_update_config(
     enable_keep_alive: c_int,
     msg_header_key: *const c_char,
     relay_transport: *const c_char,
+    lan_first: c_int,
 ) -> *mut c_char {
     if handle.is_null() {
         return err_null_handle();
@@ -118,12 +124,13 @@ pub unsafe extern "C" fn pb_mapper_update_config(
         let mut state = state.lock().await;
         let changed = state.get_config_status().await.relay_transport != relay_transport;
         state
-            .update_config(
-                server_address.clone(),
-                enable_keep_alive != 0,
+            .update_config(AppConfig {
+                server_address: server_address.clone(),
+                keep_alive_enabled: enable_keep_alive != 0,
                 msg_header_key,
                 relay_transport,
-            )
+                lan_first: lan_first != 0,
+            })
             .await?;
         let credential = match get_process_credential() {
             Ok(credential) if changed => credential,

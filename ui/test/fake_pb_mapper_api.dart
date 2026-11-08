@@ -85,11 +85,12 @@ class FakePbMapperApi implements PbMapperApiClient {
     required bool keepAlive,
     required String msgHeaderKey,
     RelayTransport relayTransport = RelayTransport.tcp,
+    bool lanFirst = true,
   }) async {
     calls.add(
-      relayTransport == RelayTransport.tcp
-          ? 'updateConfig($serverAddress)'
-          : 'updateConfig($serverAddress, ${relayTransport.name})',
+      'updateConfig($serverAddress'
+      '${relayTransport == RelayTransport.tcp ? '' : ', ${relayTransport.name}'}'
+      '${lanFirst ? '' : ', lan-first off'})',
     );
     if (_refused() case final refused?) return refused;
     final moved = relayTransport != config.relayTransport;
@@ -98,6 +99,7 @@ class FakePbMapperApi implements PbMapperApiClient {
       keepAliveEnabled: keepAlive,
       msgHeaderKey: msgHeaderKey,
       relayTransport: relayTransport,
+      lanFirst: lanFirst,
     );
     // As the Rust side names them: running tunnels on another carrier.
     bool other(RelayTransport? running) =>
@@ -618,6 +620,8 @@ class FakePbMapperApi implements PbMapperApiClient {
       serverAddress: config.serverAddress,
       keepAliveEnabled: config.keepAliveEnabled,
       msgHeaderKey: rotated,
+      relayTransport: config.relayTransport,
+      lanFirst: config.lanFirst,
     );
     return KeyRotation(
       key: rotated,
