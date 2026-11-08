@@ -707,9 +707,9 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
                 self.write_state(&engine).await?;
                 continue;
             }
-            // Every JPEG picture is independent; only an H.264 IDR uses the
-            // IDR headroom and taints probes.
-            let idr = head.keyframe && self.session.codec == VideoCodec::H264;
+            // Every JPEG picture is independent; only an H.264 or H.265 IDR
+            // uses the IDR headroom and taints probes.
+            let idr = head.keyframe && self.session.codec != VideoCodec::Jpeg;
             if !self.session.admissible(head.len, idr, now) {
                 return Ok(true);
             }

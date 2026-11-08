@@ -2,8 +2,8 @@ use crate::{
     DesktopKind, HostPath, HostState, HostStatus, HostViewer, Invitation, QualityPreset, Result,
     VideoCodec, VideoLimits, error, platform,
     protocol::{
-        CAPABILITY_LOCK, HostMessage, RejectReason, SessionState, StopReason, ViewerMessage,
-        valid_capabilities,
+        CAPABILITY_H265, CAPABILITY_LOCK, HostMessage, RejectReason, SessionState, StopReason,
+        ViewerMessage, valid_capabilities,
     },
     session::{self, Session, stop_message},
     shared::Policy,
@@ -35,6 +35,10 @@ use tokio_util::sync::CancellationToken;
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 /// A `Rejected` and the close after it.
 pub(crate) const REJECT_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long `Accepted` waits for a new backend to say whether it encodes
+/// H.265, for a viewer that decodes it; the viewer waits 5 s for `Accepted`.
+/// A slower answer leaves that session on H.264.
+const H265_ANSWER_WAIT: Duration = Duration::from_secs(3);
 /// Connections in their handshake or session at once; one holds the viewer slot.
 const MAX_CONNECTIONS: usize = 8;
 
@@ -320,13 +324,37 @@ fn capabilities() -> Vec<String> {
     }
 }
 
-/// What the viewer asked for in an accepted `Authenticate`.
+/// What the viewer asked for in a valid `Authenticate`.
 struct Request {
-    codec: VideoCodec,
+    /// One or two, never `h265`.
+    codecs: Vec<VideoCodec>,
     limits: VideoLimits,
     quality: QualityPreset,
     /// What the viewer listed; values this host does not know are ignored.
     capabilities: Vec<String>,
+}
+
+/// A viewer that holds the slot and heard `Accepted`, with its thread C
+/// waiting for the session.
+struct Admitted {
+    stream: TlsStream<TcpStream>,
+    permit: OwnedSemaphorePermit,
+    request: Request,
+    codec: VideoCodec,
+    prepared: worker::Prepared,
+}
+
+/// A session's codec: H.265 when the viewer decodes it and the backend
+/// encodes it (`h265`), else as every v2 host chooses: H.264 when listed,
+/// else JPEG.
+fn choose_codec(codecs: &[VideoCodec], h265: bool) -> VideoCodec {
+    if h265 {
+        VideoCodec::H265
+    } else if codecs.contains(&VideoCodec::H264) {
+        VideoCodec::H264
+    } else {
+        VideoCodec::Jpeg
+    }
 }
 
 /// The listener's side of the host: every connection's handshake and session.
@@ -362,15 +390,22 @@ impl Acceptor {
     async fn serve(self: Arc<Self>, socket: TcpStream) {
         let accepted = tokio::select! {
             () = self.cancel.cancelled() => return,
-            accepted = self.handshake(socket) => accepted,
+            accepted = self.accept_session(socket) => accepted,
         };
-        let Some((stream, permit, request)) = accepted else {
+        let Some(Admitted {
+            stream,
+            permit,
+            request,
+            codec,
+            prepared,
+        }) = accepted
+        else {
             return;
         };
         tracing::info!(
             target: "pb_mapper_desktop::session",
             event = "desktop_host_accepted",
-            codec = ?request.codec,
+            codec = ?codec,
             max_width = request.limits.max_width,
             max_height = request.limits.max_height,
             max_fps = request.limits.max_fps,
@@ -379,17 +414,16 @@ impl Acceptor {
         let session = Session::new(
             self.policy.clone(),
             self.cancel.child_token(),
-            request.codec,
+            codec,
             request.limits,
             request.quality,
             &request.capabilities,
         );
         *self.session.lock() = Some(session.clone());
-        let mut worker = worker::spawn_session(
+        let mut worker = prepared.start(
             session.shared.clone(),
-            self.factory.clone(),
             WorkerConfig {
-                codec: request.codec,
+                codec,
                 limits: request.limits,
                 nominal_fps: request.limits.max_fps,
                 admission: self.admission.clone(),
@@ -412,9 +446,39 @@ impl Acceptor {
         drop(permit);
     }
 
-    /// TLS, `Authenticate`, then `Accepted` or `Rejected`. The token is
-    /// checked first, so `busy` never tells a stranger that someone is
-    /// connected.
+    /// The handshake, then `Accepted` with the session's codec. Thread C starts
+    /// building the backend as soon as the viewer holds the slot; a viewer
+    /// that decodes H.265 hears `Accepted` once the backend said whether it
+    /// encodes H.265, unless an H.265 encoder already failed in this process.
+    async fn accept_session(&self, socket: TcpStream) -> Option<Admitted> {
+        let (mut stream, permit, request) = self.handshake(socket).await?;
+        let offered = request
+            .capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_H265);
+        let mut prepared = worker::prepare(self.factory.clone(), offered && !worker::h265_failed());
+        let codec = choose_codec(&request.codecs, prepared.h265(H265_ANSWER_WAIT).await);
+        let accepted = HostMessage::Accepted {
+            codec,
+            limits: request.limits,
+            nominal_fps: request.limits.max_fps,
+            quality: request.quality,
+            capabilities: self.capabilities.clone(),
+        };
+        wire::write_message(&mut stream, &accepted, None)
+            .await
+            .ok()?;
+        Some(Admitted {
+            stream,
+            permit,
+            request,
+            codec,
+            prepared,
+        })
+    }
+
+    /// TLS and `Authenticate`; `Rejected` when it fails. The token is checked
+    /// first, so `busy` never tells a stranger that someone is connected.
     async fn handshake(
         &self,
         socket: TcpStream,
@@ -441,31 +505,18 @@ impl Acceptor {
         let rejected = if !self.token_matches(&token) {
             RejectReason::Denied
         } else if !(1..=2).contains(&codecs.len())
+            // H.265 is the `h265` capability, never a codec offered.
+            || codecs.contains(&VideoCodec::H265)
             || limits.validate().is_err()
             || !valid_capabilities(&capabilities)
         {
             RejectReason::InvalidRequest
         } else if let Ok(permit) = self.slot.clone().try_acquire_owned() {
-            let codec = if codecs.contains(&VideoCodec::H264) {
-                VideoCodec::H264
-            } else {
-                VideoCodec::Jpeg
-            };
-            let accepted = HostMessage::Accepted {
-                codec,
-                limits,
-                nominal_fps: limits.max_fps,
-                quality,
-                capabilities: self.capabilities.clone(),
-            };
-            wire::write_message(&mut stream, &accepted, None)
-                .await
-                .ok()?;
             return Some((
                 stream,
                 permit,
                 Request {
-                    codec,
+                    codecs,
                     limits,
                     quality,
                     capabilities,
@@ -576,13 +627,24 @@ mod trust_tests {
         token: String,
         codecs: Vec<VideoCodec>,
     ) -> (Viewer, HostMessage) {
+        authenticate_with(client, invitation, token, codecs, vec![]).await
+    }
+
+    /// `authenticate`, listing `capabilities`.
+    async fn authenticate_with(
+        client: &Client,
+        invitation: &Invitation,
+        token: String,
+        codecs: Vec<VideoCodec>,
+        capabilities: Vec<String>,
+    ) -> (Viewer, HostMessage) {
         let mut viewer = tls(client, invitation).await.unwrap();
         let authenticate = ViewerMessage::Authenticate {
             token,
             codecs,
             limits: VideoLimits::for_viewer(60.0),
             quality: QualityPreset::Balanced,
-            capabilities: vec![],
+            capabilities,
         };
         wire::write_message(&mut viewer.stream, &authenticate, None)
             .await
@@ -774,6 +836,133 @@ mod trust_tests {
         assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
         host.stop().await.unwrap();
         assert_eq!(host.status().state, HostState::Stopped);
+    }
+
+    /// A screen whose backend encodes H.265 until `broken`, then fails as a
+    /// GPU's H.265 encoder that stopped encoding does.
+    struct Hevc {
+        broken: Arc<AtomicBool>,
+    }
+    impl crate::Backend for Hevc {
+        fn display(&mut self) -> Result<crate::Display> {
+            crate::Backend::display(&mut Screen)
+        }
+        fn capture(&mut self) -> Result<Vec<u8>> {
+            Ok(vec![1])
+        }
+        fn capture_video(
+            &mut self,
+            _: &crate::DesktopContext,
+            codec: VideoCodec,
+            keyframe: bool,
+            _: crate::VideoRate,
+        ) -> Result<Option<crate::EncodedFrame>> {
+            if codec == VideoCodec::H265 && self.broken.load(Ordering::SeqCst) {
+                return Err(error(format!(
+                    "{}: the encoder stopped",
+                    worker::H265_ENCODER_FAILED
+                )));
+            }
+            Ok(Some(crate::EncodedFrame {
+                format: crate::VideoFormat {
+                    codec,
+                    width: 10,
+                    height: 10,
+                    keyframe,
+                    ..crate::VideoFormat::default()
+                },
+                bytes: vec![1],
+            }))
+        }
+        fn input(&mut self, _: &crate::Input) -> Result<()> {
+            Err(error("read-only test backend"))
+        }
+        fn release(&mut self) {}
+        fn encodes_h265(&mut self) -> bool {
+            true
+        }
+    }
+
+    /// The only test that breaks an H.265 encoder: that turns H.265 off for
+    /// the whole test process.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn h265_needs_both_ends_and_ends_with_its_encoder() {
+        let relay = pb_mapper_testkit::Relay::start("desktop-h265").await;
+        let client = Client::from_credential(
+            relay.addr().to_string(),
+            pb_mapper_testkit::admin_credential(),
+            true,
+            None,
+        );
+        let broken = Arc::new(AtomicBool::new(false));
+        let encoder = broken.clone();
+        let host = Host::start_with_backend(
+            &client,
+            options(),
+            Arc::new(move || {
+                Ok(Box::new(Hevc {
+                    broken: encoder.clone(),
+                }))
+            }),
+        )
+        .await
+        .unwrap();
+        let invitation = host.invitation().clone();
+        let token = invitation.token_text();
+        let h265 = || vec![CAPABILITY_H265.to_string()];
+        let codec = |answer: &HostMessage| match answer {
+            HostMessage::Accepted { codec, .. } => Some(*codec),
+            _ => None,
+        };
+
+        // A viewer that does not decode H.265 gets what every v2 host gives.
+        let (viewer, answer) =
+            authenticate(&client, &invitation, token.clone(), vec![VideoCodec::H264]).await;
+        assert_eq!(codec(&answer), Some(VideoCodec::H264));
+        drop(viewer);
+        until(|| host.status().viewer.is_none()).await;
+        // H.265 is a capability, never a codec offered.
+        let (_, answer) =
+            authenticate(&client, &invitation, token.clone(), vec![VideoCodec::H265]).await;
+        assert_eq!(rejected(&answer), Some(RejectReason::InvalidRequest));
+
+        // Both ends can: H.265, and its video.
+        let (mut viewer, answer) = authenticate_with(
+            &client,
+            &invitation,
+            token.clone(),
+            vec![VideoCodec::H264],
+            h265(),
+        )
+        .await;
+        assert_eq!(codec(&answer), Some(VideoCodec::H265));
+        // The encoder fails once video flows: the session ends, and says so.
+        let mut videos = 0;
+        let reason = loop {
+            match next(&mut viewer).await {
+                Some(HostMessage::Video { seq, .. }) => {
+                    videos += 1;
+                    if videos == 3 {
+                        broken.store(true, Ordering::SeqCst);
+                    }
+                    let receipt = ViewerMessage::Received { seq };
+                    wire::write_message(&mut viewer.stream, &receipt, None)
+                        .await
+                        .unwrap();
+                }
+                Some(HostMessage::Stopped { reason, .. }) => break reason,
+                Some(_) => {}
+                None => panic!("closed without Stopped"),
+            }
+        };
+        assert_eq!(reason, StopReason::CaptureFailed);
+        drop(viewer);
+        until(|| host.status().viewer.is_none()).await;
+        // The reconnect gets H.264, from this process on.
+        let (_viewer, answer) =
+            authenticate_with(&client, &invitation, token, vec![VideoCodec::H264], h265()).await;
+        assert_eq!(codec(&answer), Some(VideoCodec::H264));
+        host.stop().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -12,6 +12,8 @@ struct RemoteBackend {
     /// From the `Start` response: the interactive session's values, which
     /// differ from this process's when it is the SYSTEM service in session 0.
     double_click: Option<crate::DoubleClickGuard>,
+    /// From the `H265` response.
+    h265: Option<bool>,
     /// The last capture's codec and rate, repeated by drains.
     codec: crate::VideoCodec,
     rate: crate::VideoRate,
@@ -66,6 +68,7 @@ impl RemoteBackend {
             cursor: None,
             pending: 0,
             double_click: None,
+            h265: None,
             codec: crate::VideoCodec::H264,
             rate: crate::VideoRate {
                 bitrate: 0,
@@ -114,6 +117,7 @@ impl RemoteBackend {
                 }
                 self.video = response.video;
                 self.double_click = response.double_click.or(self.double_click);
+                self.h265 = response.h265.or(self.h265);
                 Ok::<_, std::io::Error>(Ok(image))
             })
             .await
@@ -209,6 +213,11 @@ impl Backend for RemoteBackend {
     }
     fn pending_video(&self) -> usize {
         self.pending
+    }
+    /// The worker probes the GPU of the display it captures, in the
+    /// interactive session; the background host in session 0 cannot.
+    fn encodes_h265(&mut self) -> bool {
+        self.call(Request::H265 {}).is_ok() && self.h265 == Some(true)
     }
     fn input(&mut self, input: &Input) -> Result<()> {
         let context = self
@@ -313,6 +322,7 @@ mod tests {
             cursor: None,
             pending: 0,
             double_click: None,
+            h265: None,
         }
     }
 

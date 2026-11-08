@@ -456,6 +456,7 @@ impl Response {
             cursor: None,
             pending,
             double_click: None,
+            h265: None,
         }
     }
 }
@@ -477,6 +478,7 @@ fn serve(
         cursor: None,
         pending: 0,
         double_click: None,
+        h265: None,
     };
     if matches!(request, Request::Release {} | Request::Close {}) {
         backend.release();
@@ -521,6 +523,10 @@ fn serve(
             vec![]
         }
         Request::Attach { .. } => return Err(error("worker is already attached")),
+        Request::H265 {} => {
+            response.h265 = Some(backend.encodes_h265());
+            vec![]
+        }
         Request::ConfigureVideo {
             limits,
             nominal_fps,
@@ -543,7 +549,8 @@ fn serve(
             if expected != context
                 || wait_ms > DRAIN_WAIT_MAX_MS
                 || submit
-                    && (!(256_000..=40_000_000).contains(&rate.bitrate)
+                    && (!(crate::qos::ENCODER_BITRATE_MIN..=crate::qos::ENCODER_BITRATE_MAX)
+                        .contains(&rate.bitrate)
                         || !(1..=120).contains(&rate.pace_fps))
             {
                 return Err(error("invalid or stale video request"));
@@ -834,6 +841,7 @@ mod tests {
                         cursor: None,
                         pending: 0,
                         double_click: None,
+                        h265: None,
                     },
                     vec![],
                 ))

@@ -1,10 +1,10 @@
 # Embedded remote desktop (issue #50)
 
 The optional Rust SDK component and existing Flutter UI share a Windows screen
-through an existing pb-mapper deployment. The implementation includes GPU H.264
-video, native Windows/Android rendering, an opt-in Windows helper, and explicitly
-remembered host authorization. The relay needs no desktop-specific upgrade or
-additional rendezvous service.
+through an existing pb-mapper deployment. The implementation includes GPU H.265
+and H.264 video, native Windows/Android rendering, an opt-in Windows helper,
+and explicitly remembered host authorization. The relay needs no
+desktop-specific upgrade or additional rendezvous service.
 
 **Issue #50 is not complete.** The helper has not passed administrator-consent
 and standard-user credential-prompt acceptance under the default secure-desktop
@@ -73,7 +73,7 @@ is the Remote tab. How the page and the viewer are laid out is in
 There is one shared display and one viewer at a time. Input uses the shared
 display's physical coordinates, DPI, letterboxing and viewer transform,
 including negative monitor origins. A stale screen disables input while
-keeping the texture visible. The H.264 capture backend currently rejects
+keeping the texture visible. The GPU capture backend currently rejects
 rotated displays instead of presenting incorrect geometry. Cursor metadata
 shows a generic position indicator, not the original Windows cursor bitmap or
 shape.
@@ -488,10 +488,14 @@ setup as **Turn on remote control** does: one consent prompt installs, updates
 or enables it, the app restarts into the installed copy when it installed one,
 and the host resumes there. The app's startup restore never installs or asks.
 
-Protocol 5 is the current one: the background host's `Options` carry
-`lan_first`, the app's *Try the local network first* when sharing started,
-which a protocol 4 helper would refuse. It is written only when off, so a
-grant saved with the default stays readable by an older helper.
+Protocol 6 is the current one, with the pipes
+`pb-mapper.desktop-helper.v6` and `pb-mapper.desktop-background.v6`. Its video
+may be H.265, which a protocol 5 helper cannot parse, and `Request::H265`
+asks the worker whether it encodes H.265 on its display, which it probes in
+the interactive session. Protocol 5 added the background host's `lan_first`,
+the app's *Try the local network first* when sharing started, written only
+when off, so a grant saved with the default stays readable by an older
+helper.
 
 Disable stops the service and disables its startup. Uninstall stops/deletes the
 service and removes its authorization configuration. Upgrade preserves files
@@ -547,7 +551,10 @@ does not require Flutter or a POCOX runtime.
   capture at the rate it is given; `drain_video` and `pending_video` let the
   worker collect an asynchronous encoder's output between ticks. Each unit's
   `VideoFormat` carries `gop`, the GOP the encoder read back, so a unit relayed
-  by the helper reports it as well. A sticky link failure returns
+  by the helper reports it as well. `encodes_h265` says whether
+  `capture_video` can encode H.265 on the backend's display; the host asks a
+  session's backend right after building it, before it answers a viewer that
+  decodes H.265, and the default says no. A sticky link failure returns
   `NotConnected`, which ends the session instead of retrying.
 - `ControlAdmission::acquire` provides an optional embedder-controlled write
   lease. POCOX can pause its Computer Use writer when a human explicitly requests
@@ -679,21 +686,22 @@ switch, so it is retried at once. A failure before any unit since the last
 recovery is retried every 200 ms, and each retry captures right after its
 context check.
 
-Windows H.264 hosting uses DXGI Desktop Duplication, D3D11 textures and GPU NV12
-conversion, followed by a low-latency Media Foundation hardware encoder with no
-B-frame reordering. Each duplication frame is released at once, so no update is
-missed between ticks. Hosting requires Media Foundation and a compatible
-hardware H.264 MFT on the capture GPU, and reports an error when that path is
-unavailable; without Media Foundation the capabilities report no host, a
-host refuses to start, and the app restores no remembered sharing grant
-(it keeps it for a start where Media Foundation is installed) and retries
-nothing. JPEG remains an
-SDK compatibility path at up to 8 FPS; there is no promise that every hardware
-failure silently falls back to JPEG. The encoder runs at the session's nominal
-frame rate (the viewer's `max_fps`) and is never rebuilt for a frame rate,
-bitrate or preset change: the bitrate is set live, and sample times follow the
-real capture interval. GPU scaling preserves aspect ratio and never upscales;
-input and cursor coordinates still use the physical `Display` geometry.
+Windows hosting uses DXGI Desktop Duplication, D3D11 textures and GPU NV12
+conversion, followed by a low-latency Media Foundation hardware encoder, H.265
+or H.264 (see [H.265 and H.264](#h265-and-h264)), with no B-frame reordering.
+Each duplication frame is released at once, so no update is missed between
+ticks. Hosting requires Media Foundation and a compatible hardware H.264 MFT
+on the capture GPU, and reports an error when that path is unavailable;
+without Media Foundation the capabilities report no host, a host refuses to
+start, and the app restores no remembered sharing grant (it keeps it for a
+start where Media Foundation is installed) and retries nothing. H.265 is used
+only where the GPU encodes it. JPEG remains an SDK compatibility path at up to
+8 FPS; there is no promise that every hardware failure silently falls back to
+JPEG. The encoder runs at the session's nominal frame rate (the viewer's
+`max_fps`) and is never rebuilt for a frame rate, bitrate or preset change:
+the bitrate is set live, and sample times follow the real capture interval.
+GPU scaling preserves aspect ratio and never upscales; input and cursor
+coordinates still use the physical `Display` geometry.
 
 The GOP is infinite. Before its media types are set, the encoder tries GOP
 lengths `u32::MAX`, `0x7FFF_FFFF`, 65 535 and 3 600 and keeps the first one it
@@ -724,6 +732,58 @@ the period, so a paused or idle host costs no power, and a failed call only
 leaves timers coarse. Measured here, a 2 ms tokio sleep took 15.7 ms, 3.5 ms
 under the guard and 15.6 ms after it. Thread C paces on its own
 high-resolution waitable timer either way.
+
+### H.265 and H.264
+
+A viewer that decodes H.265 says so with the `h265` capability and still
+offers only `h264` or `jpeg` in `codecs`: an older host refuses a codec it does
+not know but ignores a capability. A host answers `Accepted { codec: h265 }`
+when the viewer listed `h265` and the session's backend encodes H.265;
+otherwise it chooses as before, H.264 when offered, else JPEG. `h265` in
+`codecs` is an invalid request. The ALPN does not change, so earlier v2 builds
+and this one still connect to each other, on H.264.
+
+The host asks the session's own backend. Thread C builds it as soon as the
+viewer holds the slot, and `Accepted` waits for its answer, at most 3 s (the
+viewer waits 5 s for `Accepted`); a later answer leaves that session on H.264.
+A viewer that does not offer H.265 hears `Accepted` at once, as before. The
+Windows backend probes the GPU that drives its display, by adapter LUID, once
+per process: it enumerates hardware HEVC encoder MFTs for that adapter,
+activates the first that takes this pipeline's settings, with Main 4:2:0
+output and NV12 input at 1920×1080@60, and starts it streaming without
+encoding a frame. Through the helper the worker answers (`Request::H265`): it
+probes the same way in the interactive session, whose displays the
+background host in session 0 cannot see. Measured here, a probe took 320 to
+350 ms in a fresh process (951 ms the first time after a build) and 0.4 ms
+once kept; the session's encoder then took about 200 ms to build, against
+280 ms for a cold H.264 one, so most of the probe is start-up the encoder
+would pay anyway.
+
+The H.265 encoder takes the H.264 encoder's settings: low latency, CBR, an
+infinite GOP, IDRs only on demand and the same bits per frame, which show as a
+better picture rather than a lower rate. Its output type is
+`MFVideoFormat_HEVC` with the Main profile, which allows B-frames: an encoder
+that implements `CODECAPI_AVEncMPVDefaultBPictureCount` must accept 0 and read
+0 back, or it is not used. NVIDIA's HEVC Encoder MFT answers `E_NOTIMPL` to
+that property; there the required low-latency mode keeps B-frames out, and
+every output is still checked against reordering.
+
+Every access unit is Annex B. An H.265 unit is a keyframe when it holds an
+IRAP picture, NAL types 16 to 21 (`(b0 >> 1) & 0x3f`; NVIDIA's IDRs are
+IDR_W_RADL, 19), and its parameter sets are the VPS (32), SPS (33) and PPS
+(34); H.264 keeps its IDR (5), SPS (7) and PPS (8). The encoder keeps the last
+parameter sets, in-band or from `MF_MT_MPEG_SEQUENCE_HEADER`, and puts them in
+front of a keyframe that comes without them, after its access unit delimiter.
+NVIDIA writes them in-band at every IDR, after the delimiter. Whatever treated
+H.264's IDRs specially treats H.265's alike: the IDR's send-credit headroom,
+probe tainting, on-demand IDRs and their rate limits.
+
+When a session's H.265 encoder fails to build or to encode (an error of the
+codec itself, rather than of the capture around it, including one the helper
+reports), the host turns H.265 off for the rest of its process and ends that
+session with `capture_failed`; the viewer's reconnect then gets H.264. The
+failure is logged as `desktop_h265_failed`, and each probe as
+`desktop_h265_probe`, on `pb_mapper_desktop::session`.
 
 ### Send credit
 
@@ -849,11 +909,37 @@ Measured on the development machine below with its NVIDIA GeForce RTX 5070 Ti
   bitrate change reads back exactly. The mean-bitrate read-back is stale until
   the first live change and is not evidence of the target.
 
+The same GPU's "NVIDIA HEVC Encoder MFT" (`video_bench --codec h265`):
+
+- Rate model: `nominal` too. `--pace 60,30,15,5` at nominal 60 and 4 Mbit/s
+  gave produced/expected 0.942 / 0.974 / 1.009 / 1.171, within the ±25% bound.
+- GOP `u32::MAX`, read back; 2 keyframes in 10 s (the initial IDR and the one
+  forced at 1.5 s, which came 3.6 ms after it was asked for). The B-frame
+  property answers `E_NOTIMPL`; every output came in order.
+- 1080p from the 2560×1440 desktop with the moving pattern: 59.6 unique
+  capture and encode FPS, a mean 1.65 ms encode, one unit in flight, IDRs of
+  168 to 178 KB. The SDK backend (`--backend`) delivered 58.1 FPS.
+- 4K (`--exact --max-width 3840 --max-height 2160`, the desktop upscaled,
+  since this display is 1440p): 59.7 FPS at a mean 3.1 ms encode, IDRs of
+  194 to 262 KB at 34 Mbit/s.
+- FFmpeg decodes each stream without error as HEVC Main, 4:2:0, with no
+  B-frames (`has_b_frames=0`) and every frame counted. NVIDIA writes an access
+  unit delimiter, then the VPS, SPS and PPS, then the IDR.
+- The largest units, against `wire::MAX_PAYLOAD` (4 MiB): fresh full-screen
+  noise (`--noise`) encoded at 4K and 80 Mbit/s, the encoder's bound, gave
+  IDRs of 3.74 MB at a nominal 60 FPS, 2.96 MB at 120 and 3.93 MB at 30
+  (H.264: 3.63 MB at 60 and at 30). Quality at 4K gives the encoder at most
+  34, 68 or 80 Mbit/s at a nominal 30, 60 or 120 FPS, so no IDR it can ask
+  for reached the limit, though the noise at 60 came within 11% of it. The
+  limit stays 4 MiB. An access unit above it is an encoder error: capture
+  unavailable for H.264, and for H.265 the end of the session and of H.265
+  for the process.
+
 AMD and Intel encoders have not been measured: this machine's AMD iGPU drives
 no display, so its encoder is unreachable from the capture adapter. Run
-`video_bench --pace 60,30,15,5` and `video_bench 60 60 --animate` on such a host
-before relying on the `nominal` default there; the latch handles a
-per-second-budget encoder.
+`video_bench --pace 60,30,15,5` and `video_bench 60 60 --animate`, each with
+`--codec h264` and `--codec h265`, on such a host before relying on the
+`nominal` default there; the latch handles a per-second-budget encoder.
 
 ### Viewer: newest decodable frame, fps cap and recovery
 
@@ -948,6 +1034,7 @@ input authorisation.
 | fps cap | tick 250 ms; × 0.9 direct, × 0.8 relay; minimum 5; +5 after 3 s; ≥ 1 s between changes |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
 | Cursor | sampled every 16 ms; echo held for 300 ms |
+| Codec | `Accepted` waits at most 3 s for the backend's H.265 answer; one probe per GPU and process |
 
 ### Diagnostics
 
@@ -999,7 +1086,9 @@ Each session's lifecycle is logged at info on `pb_mapper_desktop::session`:
 `desktop_host_accepted`, `desktop_host_rejected`, `desktop_host_session_ended`
 (reason, detail, seconds, frames, keyframes), `desktop_viewer_connected` and
 `desktop_viewer_ended` (reason, detail, seconds, keyframes,
-`keyframes_requested`, `backlog_drops`). The app also warns
+`keyframes_requested`, `backlog_drops`); a host also logs each H.265 probe as
+`desktop_h265_probe` (usable, ms, detail) and warns `desktop_h265_failed`
+when an H.265 encoder fails and H.265 is turned off. The app also warns
 `desktop_connect_failed` with the typed failure, and a native decoder's
 failure is warned as `desktop_decoder_error` on `pb_mapper_desktop::frames`
 with its text as the detail. Each line names itself in an `event` field, and
@@ -1175,8 +1264,11 @@ on the build before the split capture gate, the median delay and the guard:
 | 256 KiB/s link, 64 KiB frames, 30 s | Streaming throughout at both ends; capture held back (575 skipped ticks) instead of queueing, the link full at 2.09 Mbit/s received; control 8 ms, release 9 ms, revoke 3.5 ms (61, 47 and 15.7 ms before the timer guard); host stop 348 ms, which includes waiting for the viewer to read `Stopped` |
 
 `video_bench 10 60 --animate --max-width 1920 --max-height 1080` still reaches
-59.7 unique capture and encode FPS at a mean 1.7 ms encode with one unit in
-flight, and 58.2 FPS through the full backend (`--backend`).
+59.9 unique capture and encode FPS at a mean 1.9 ms encode with one unit in
+flight, and 58.2 FPS through the full backend (`--backend`). With
+`--codec h265` it reaches 59.6 FPS at a mean 1.65 ms, and 58.1 FPS through the
+backend; [Encoder rate model per GPU](#encoder-rate-model-per-gpu) has the 4K
+runs.
 
 Proposed phone criteria, which the owner decides: on a 60 Hz phone over direct
 Wi-Fi with Balanced, presented FPS p50 ≥ 55; present interval p95 ≤ 25 ms and
@@ -1388,7 +1480,11 @@ Local build artifacts do not constitute a published release. The
 probes; the deployed probe revokes its dedicated temporary credential on normal
 completion and removes its controller setup file. Never publish that file.
 `video_bench --pace 60,30,15,5` classifies the encoder's rate model and, like
-`video_bench 60 60 --animate`, prints its GOP and keyframe count.
+`video_bench 60 60 --animate`, prints its GOP and keyframe count, and the
+largest keyframe and access unit. `--codec h265` encodes H.265 and first
+prints the host's probe; `--exact` encodes exactly `--max-width` ×
+`--max-height`, upscaling a smaller display; `--noise` fills the display with
+fresh noise, the worst case for a unit's size.
 
 References: [issue #50](https://github.com/acking-you/pb-mapper/issues/50),
 [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput),

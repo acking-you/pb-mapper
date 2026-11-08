@@ -219,9 +219,8 @@ impl Harness {
         let clock: Clock = Arc::new(move || *time.lock());
         let fake = Fake::new(clock.clone());
         let shared = session(allowed);
-        let backend = fake.clone();
-        let factory: Factory = Arc::new(move || Ok(Box::new(backend.clone())));
-        let engine = Engine::start(&shared, &factory, config(admission), clock).unwrap();
+        let engine =
+            Engine::start(&shared, Box::new(fake.clone()), config(admission), clock).unwrap();
         Self {
             shared,
             engine,
@@ -330,7 +329,7 @@ async fn input_lane_runs_before_capture_and_never_after_stop() {
     fake.started = Some(started);
     let log = fake.log.clone();
     let factory: Factory = Arc::new(move || Ok(Box::new(fake.clone())));
-    let mut worker = spawn_session(shared.clone(), factory, config(None));
+    let mut worker = prepare(factory, false).start(shared.clone(), config(None));
     let wait_for = |what: &str, done: &dyn Fn() -> bool| {
         let until = Instant::now() + Duration::from_secs(2);
         while !done() {
@@ -591,11 +590,13 @@ fn a_capture_that_keeps_failing_is_retried_every_unavailable_retry() {
 #[tokio::test]
 async fn unavailable_backend_reports_failure_and_stops() {
     let shared = session(false);
-    let mut worker = spawn_session(
-        shared.clone(),
-        Arc::new(|| Err(error("desktop is locked"))),
-        config(None),
-    );
+    // Asked whether it encodes H.265, a backend that cannot be built says no
+    // at once, rather than when the host stops waiting.
+    let mut prepared = prepare(Arc::new(|| Err(error("desktop is locked"))), true);
+    let asked = Instant::now();
+    assert!(!prepared.h265(Duration::from_secs(5)).await);
+    assert!(asked.elapsed() < Duration::from_secs(2));
+    let mut worker = prepared.start(shared.clone(), config(None));
     let exit = tokio::time::timeout(Duration::from_secs(2), worker.exited())
         .await
         .unwrap();

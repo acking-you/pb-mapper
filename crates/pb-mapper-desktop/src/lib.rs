@@ -429,6 +429,13 @@ pub trait Backend: 'static {
     fn cursor(&mut self, _expected: &DesktopContext) -> Result<Option<CursorPosition>> {
         Ok(None)
     }
+    /// Whether `capture_video` can encode `VideoCodec::H265` on this
+    /// backend's display. Asked once a session, right after the backend is
+    /// built and before the host answers a viewer that decodes H.265; a
+    /// backend probes its GPU once and keeps the answer for its process.
+    fn encodes_h265(&mut self) -> bool {
+        false
+    }
     /// Drain finished output, then (encoder backends) submit at most one
     /// capture. The default captures one JPEG picture. A `keyframe` is asked
     /// for once: an encoder backend keeps it until a picture it submits
