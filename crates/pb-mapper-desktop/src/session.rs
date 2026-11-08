@@ -222,7 +222,11 @@ impl Session {
                 self.credit_changed.notify_one();
             }
             ViewerMessage::ProbeEcho { nonce } => {
-                self.update_qos(now, |qos| qos.on_probe_echo(nonce, now));
+                // The receipts' own queue, which a cut needs as its witness
+                // unless the probes' delay persists.
+                let base = self.qos.lock().base_rtt();
+                let ack_queue = base.map(|base| self.credit.lock().ack_queue(base, now));
+                self.update_qos(now, |qos| qos.on_probe_echo(nonce, now, ack_queue));
             }
             ViewerMessage::Presented {
                 generation,

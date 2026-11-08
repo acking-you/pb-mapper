@@ -3,8 +3,8 @@
 //! docs all read these definitions:
 //!
 //! - `rtt_ms`: the last probe round trip, transport only (host `Stats`).
-//! - `queue_delay_ms`: the mean of the host's last untainted probe round trips
-//!   minus its baseline.
+//! - `queue_delay_ms`: the median of the host's last untainted probe round
+//!   trips minus its baseline.
 //! - `picture_latency_ms`: `host_ms + rtt_ms / 2 + viewer_ms`, each a median
 //!   over 2 s. `host_ms` is encoder submit to socket write on the host;
 //!   `viewer_ms` is network receipt to presentation here. Each side uses its
