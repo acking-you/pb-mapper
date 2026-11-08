@@ -447,6 +447,14 @@ class DesktopStore {
           saved?.displayId,
       helper: _helperState(capabilities?.helper),
       viewer: host?.viewer ?? backgroundHost?.viewer,
+      // The running host's relay, else the background service's, when the
+      // settings name another one. A remembered grant for another relay is
+      // not configured at all.
+      otherRelay: host != null
+          ? (host.matchesRelay ? null : host.server)
+          : configuredBackground && !background!.matchesRelay
+          ? background.server
+          : null,
     );
     _schedulePolling();
   }
@@ -652,7 +660,10 @@ class DesktopStore {
     });
   }
 
-  /// Starts the remembered or configured host again.
+  /// Starts the remembered or configured host again. The background
+  /// service's is configured again from the settings, so on another relay
+  /// it gets a new invitation: the card asks first
+  /// ([DesktopHostView.otherRelay], [shareOnCurrentRelay]).
   Future<void> resumeHost() async {
     await _hostAction(enabling: true, () async {
       _cancelHostResume();
@@ -664,6 +675,38 @@ class DesktopStore {
       } else {
         await _api.restoreHost();
       }
+      if (!_hostCurrent(serial)) return;
+      await _readTrustAndHost(serial);
+    });
+  }
+
+  /// Shares on the relay the settings name now what is shared, or paused,
+  /// on another one ([DesktopHostView.otherRelay]), with a new invitation:
+  /// the background service's host resumes there, and a running local host
+  /// starts again there with its settings.
+  Future<void> shareOnCurrentRelay() async {
+    final local = _host?.host;
+    if (local == null) return resumeHost();
+    final saved = _trust?.saved;
+    await _hostAction(enabling: true, () async {
+      _cancelHostResume();
+      final serial = _hostSerial;
+      final display =
+          local.display?.id ??
+          saved?.displayId ??
+          _capabilities?.displays.firstOrNull?.id;
+      if (display == null) throw StateError('No display to share');
+      await _api.stopHost();
+      if (!_hostCurrent(serial)) return;
+      await _api.startHost(
+        service: local.service ?? saved?.service ?? 'desktop:computer',
+        displayId: display,
+        allowControl: local.controlAllowed,
+        relayOnly: saved?.relayOnly ?? false,
+        privileged: saved?.privileged ?? false,
+        remember: true,
+        autoStart: saved?.autoStart ?? true,
+      );
       if (!_hostCurrent(serial)) return;
       await _readTrustAndHost(serial);
     });

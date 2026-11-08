@@ -310,6 +310,64 @@ void main() {
     }
   });
 
+  testWidgets(
+    'a host on another relay says where, is not resumed by startup, and '
+    'moves to the current relay with a new invitation',
+    (tester) async {
+      // The background service's host, saved before Settings changed relay.
+      final api = FakeDesktopApi()
+        ..trust = const DesktopTrust(supported: true)
+        ..hostSnapshot = const DesktopHostSnapshot(
+          background: DesktopBackground(
+            configured: true,
+            service: 'desktop:here',
+            server: 'old-relay:7666',
+            invitation: FakeDesktopApi.backgroundInvitation,
+            displayId: 1,
+            matchesRelay: false,
+          ),
+        );
+      final store = DesktopStore(api);
+      DesktopHostView view() => store.hostView.value;
+      await store.restoreOnStartup();
+      expect(view().configured, isTrue);
+      expect(view().otherRelay, 'old-relay:7666');
+      expect(api.argsOf('background_action'), [
+        {'action': 'status'},
+      ]);
+
+      await store.shareOnCurrentRelay();
+      expect(api.argsOf('background_action').last, {'action': 'start'});
+      expect(view().sharing, isTrue);
+      expect(view().otherRelay, isNull);
+      expect(view().invitation, FakeDesktopApi.movedInvitation);
+      store.dispose();
+
+      // A running local host starts again on the current relay.
+      final local = FakeDesktopApi()
+        ..trust = const DesktopTrust(supported: true)
+        ..hostSnapshot = const DesktopHostSnapshot(
+          host: DesktopHostStatus(
+            controlAllowed: true,
+            display: DesktopDisplay(1, 'Display 1', 1920, 1080),
+            service: 'desktop:here',
+            invitation: FakeDesktopApi.localInvitation,
+            server: 'old-relay:7666',
+            matchesRelay: false,
+          ),
+        );
+      final next = DesktopStore(local);
+      await next.restoreOnStartup();
+      expect(next.hostView.value.otherRelay, 'old-relay:7666');
+      await next.shareOnCurrentRelay();
+      expect(local.ops, containsAllInOrder(['host_stop', 'host_start']));
+      expect(local.argsOf('host_start').single, containsPair('remember', true));
+      expect(next.hostView.value.sharing, isTrue);
+      expect(next.hostView.value.otherRelay, isNull);
+      next.dispose();
+    },
+  );
+
   testWidgets('quitting stops only this app\'s host and session, bounded', (
     tester,
   ) async {

@@ -651,6 +651,7 @@ class DesktopHostView {
     this.displayId,
     this.helper = DesktopHelperState.none,
     this.viewer,
+    this.otherRelay,
   });
 
   /// False until the first capabilities, host status and trust round trip.
@@ -683,6 +684,11 @@ class DesktopHostView {
   final DesktopHelperState helper;
   final DesktopHostViewer? viewer;
 
+  /// The relay this computer is shared or paused on, when the settings now
+  /// name another relay or credential; null while it is where they publish.
+  /// It stays there until moved, which changes its invitation.
+  final String? otherRelay;
+
   @override
   bool operator ==(Object other) =>
       other is DesktopHostView &&
@@ -701,7 +707,8 @@ class DesktopHostView {
       listEquals(other.displays, displays) &&
       other.displayId == displayId &&
       other.helper == helper &&
-      other.viewer == viewer;
+      other.viewer == viewer &&
+      other.otherRelay == otherRelay;
   @override
   int get hashCode => Object.hash(
     loaded,
@@ -720,6 +727,7 @@ class DesktopHostView {
     displayId,
     helper,
     viewer,
+    otherRelay,
   );
 
   @override
