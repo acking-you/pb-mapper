@@ -138,6 +138,27 @@ void main() {
     });
     expect(direct?.attempt, DirectStage.punching);
     expect((direct?.lastDirect, direct?.setupMs), (true, 230));
+    // `PathInfo` with a LAN link, as `a_lan_link_reaches_the_window_…` pins
+    // it: a LAN while a session is open on one, and once idle after it.
+    PathMode? mode(Map<String, Object?> path) => Tunnel.fromClient(
+      fakeClient(serviceKey: 'db', path: TunnelPath.maybeFrom(path)),
+    ).pathMode;
+    final lan = {
+      'activeDirect': 1,
+      'activeLan': 1,
+      'last': {'path': 'direct', 'setupMs': 140, 'kind': 'lan'},
+      'link': {'kind': 'lan', 'family': 'ipv4', 'rttMs': 4, 'setupMs': 140},
+    };
+    expect(mode(lan), PathMode.lan);
+    expect(TunnelPath.maybeFrom(lan)?.link?.rttMs, 4);
+    expect(mode({'last': lan['last']}), PathMode.lan);
+    expect(
+      mode({
+        'activeDirect': 1,
+        'link': {'kind': 'internet'},
+      }),
+      PathMode.direct,
+    );
   });
 
   test('a name that reads like another namespace keeps its own id', () {

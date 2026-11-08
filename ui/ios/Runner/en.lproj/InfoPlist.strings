@@ -1,2 +1,4 @@
 /* The camera permission prompt, for scanning a remote desktop invitation. */
 "NSCameraUsageDescription" = "pb-mapper uses the camera to scan another computer's remote desktop QR code. Nothing is saved or uploaded.";
+/* The local network prompt: direct connections to devices on the same network. */
+"NSLocalNetworkUsageDescription" = "pb-mapper connects straight to your other devices on this network when they share a service or desktop with you, instead of through the relay.";

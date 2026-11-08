@@ -151,7 +151,9 @@ class _SessionRow extends StatelessWidget {
                   color: s.isDirect
                       ? successColor(scheme)
                       : signalColor(scheme),
-                  label: s.isDirect
+                  label: s.isLan
+                      ? l10n.relayPathLan
+                      : s.isDirect
                       ? l10n.relayPathDirect
                       : l10n.relayPathRelay,
                 ),

@@ -21,6 +21,8 @@ import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/theme/fonts.dart';
 import 'package:pb_mapper_ui/src/theme/motion.dart';
 import 'package:pb_mapper_ui/src/widgets/carrier.dart';
+import 'package:pb_mapper_ui/src/widgets/path.dart'
+    show familyLabel, linkKindLabel;
 import 'package:pb_mapper_ui/src/widgets/status.dart';
 import 'package:pb_mapper_ui/src/widgets/surfaces.dart';
 
@@ -295,6 +297,22 @@ class _Facts extends StatelessWidget {
             text: tunnel.kind == TunnelKind.share
                 ? l10n.diagnosticsDirectSessions(sessions.direct)
                 : l10n.diagnosticsSessions(sessions.direct, sessions.relay),
+          ),
+        if (sessions?.link case final link?)
+          _Pill(
+            icon: link.kind == LinkKind.lan ? AppIcons.router : AppIcons.direct,
+            text: [
+              linkKindLabel(context, link.kind),
+              ?familyLabel(link.family),
+              if (link.rtt case final rtt?)
+                l10n.pathRoundTrip((rtt.inMicroseconds / 1000).ceil()),
+            ].join(' · '),
+            color: link.kind == LinkKind.lan ? successColor(scheme) : null,
+          )
+        else if (sessions != null && sessions.lan > 0)
+          _Pill(
+            icon: AppIcons.router,
+            text: l10n.pathLanSessions(sessions.lan),
           ),
         if (sessions != null && sessions.fallbacks > 0)
           _Pill(
@@ -626,6 +644,25 @@ _Reading _read(BuildContext context, TunnelEvent event) {
         },
         icon: AppIcons.router,
         tone: _mappingTone(status?.stage),
+      );
+    case 'lan_detected':
+      return (
+        title: l10n.tunnelEventTitle(event.kind),
+        detail: l10n.tunnelEventLanEvidence(event.evidence ?? ''),
+        icon: AppIcons.router,
+        tone: _Tone.signal,
+      );
+    case 'path_selected':
+      final lan = event.link == LinkKind.lan;
+      return (
+        title: l10n.tunnelEventTitle(event.kind),
+        detail: [
+          linkKindLabel(context, event.link),
+          ?familyLabel(event.family),
+          l10n.tunnelEventVia(event.via ?? ''),
+        ].join(' · '),
+        icon: lan ? AppIcons.router : AppIcons.direct,
+        tone: lan ? _Tone.ok : _Tone.signal,
       );
     case 'network_changed':
       return (

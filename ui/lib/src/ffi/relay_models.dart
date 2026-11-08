@@ -461,6 +461,7 @@ class DirectSession {
     required this.service,
     required this.transport,
     this.path,
+    this.pathKind,
     this.state,
     this.reason,
     this.ageMs,
@@ -477,6 +478,10 @@ class DirectSession {
   /// `direct` or `relay`: the path traffic takes now.
   final String? path;
 
+  /// `lan`, `internet` or `private`, as an end reported a direct path. Null
+  /// when neither end, or the relay, predates the report.
+  final String? pathKind;
+
   /// `active` or `closed`.
   final String? state;
   final String? reason;
@@ -490,11 +495,15 @@ class DirectSession {
 
   bool get isDirect => path == 'direct';
 
+  /// Direct within one local network.
+  bool get isLan => isDirect && pathKind == 'lan';
+
   factory DirectSession.fromMap(Map<String, dynamic> map) => DirectSession(
     id: '${map['id'] ?? ''}',
     service: '${map['service'] ?? ''}',
     transport: '${map['transport'] ?? ''}',
     path: map['path'] as String?,
+    pathKind: map['pathKind'] as String?,
     state: map['state'] as String?,
     reason: map['reason'] as String?,
     ageMs: _int(map['ageMs']),

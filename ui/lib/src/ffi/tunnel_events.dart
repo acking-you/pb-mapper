@@ -6,6 +6,7 @@
 library;
 
 import 'package:pb_mapper_ui/src/common/polling.dart' show FirstWhereOrNull;
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart' show LinkKind;
 
 /// What a tunnel's event feed delivers: the tunnel's diagnostics as they are
 /// now, and the event that brought them, if any. The first update carries
@@ -85,11 +86,42 @@ class SessionCounts {
   SessionCounts.fromMap(Map<String, dynamic> map)
     : direct = _int(map['direct_sessions']),
       relay = _int(map['relay_sessions']),
-      fallbacks = _int(map['fallbacks']);
+      lan = _int(map['lan_sessions']),
+      fallbacks = _int(map['fallbacks']),
+      link = switch (map['link']) {
+        final Map<dynamic, dynamic> link => DirectLinkInfo.fromMap(_map(link)),
+        _ => null,
+      };
 
   final int direct;
   final int relay;
+
+  /// Of the direct sessions, those within one local network.
+  final int lan;
   final int fallbacks;
+
+  /// The newest direct session open now.
+  final DirectLinkInfo? link;
+}
+
+/// A direct session's path, as the SDK reports it.
+class DirectLinkInfo {
+  DirectLinkInfo.fromMap(Map<String, dynamic> map)
+    : kind = LinkKind.parse(map['kind']),
+      family = map['family'] as String?,
+      rtt = switch (map['stats']) {
+        {'rtt_us': final num us} => Duration(microseconds: us.toInt()),
+        _ => null,
+      };
+
+  /// Null for a kind this app does not know yet.
+  final LinkKind? kind;
+
+  /// `ipv4` or `ipv6`.
+  final String? family;
+
+  /// QUIC's round trip, as of this report.
+  final Duration? rtt;
 }
 
 /// One event of a running tunnel.
@@ -131,6 +163,15 @@ class TunnelEvent {
 
   /// `session_opened` and `session_closed`: `direct` or `relay`.
   String? get path => detail['path'] as String?;
+
+  /// `lan_detected`: why the peer seemed to share this network.
+  String? get evidence => detail['evidence'] as String?;
+
+  /// `path_selected`: where the path runs, its family, and how its address
+  /// was learned.
+  LinkKind? get link => LinkKind.parse(detail['link']);
+  String? get family => detail['family'] as String?;
+  String? get via => detail['via'] as String?;
   Duration? get latency => _duration(detail['latency_ms']);
   Duration? get setup => _duration(detail['setup_ms']);
   Duration? get retryIn => _duration(detail['retry_in_ms']);
