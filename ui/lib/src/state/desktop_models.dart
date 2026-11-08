@@ -49,10 +49,12 @@ DesktopResolution desktopResolutionFromWire(Object? value) => DesktopResolution
 const kMaxFpsChoices = [30, 60, 90, 120];
 
 /// [kMaxFpsChoices] up to a display of [displayHz], and [chosen] whatever
-/// it is, so the choice in force is always listed.
+/// it is, so the choice in force is always listed. A hertz of slack keeps
+/// 60 for a 59.94 Hz display, which Windows reads as 59 where it cannot
+/// query the exact rate.
 List<int> maxFpsChoicesFor(double displayHz, {int chosen = 0}) => [
   for (final fps in kMaxFpsChoices)
-    if (fps <= displayHz + 0.5 || fps == chosen) fps,
+    if (fps <= displayHz + 1 || fps == chosen) fps,
 ];
 
 /// The viewer's codec preference (D6), one for the whole device: whether a

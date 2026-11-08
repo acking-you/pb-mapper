@@ -15,9 +15,11 @@ cross-NAT operation, or the same presentation rate on every target device.
 
 The performance milestone is **1080p direct viewing at or near 90 presented
 FPS**. Both endpoints prefer pb-mapper's existing direct path, with pre-commit
-relay fallback. A viewer asks for at most 1080p at its display's refresh rate
-(at most 60 FPS on Android) and a quality preset; the host chooses frame rate
-and bitrate within them. Balanced, the default, starts at about 4 Mbit/s and
+relay fallback. A viewer asks for 1080p by default (720p, 1440p or the native
+size up to 4K are choices kept per computer) at its display's refresh rate (at
+most 60 FPS on Android unless a maximum frame rate is chosen) and a quality
+preset; the host chooses frame rate and bitrate within them. Both ends prefer
+H.265 where their hardware has it, and fall back to H.264. Balanced, the default, starts at about 4 Mbit/s and
 never exceeds 60 FPS; only Smooth goes higher. A 60 Hz phone or VM cannot
 demonstrate 90 displayed FPS. Relay sessions may reduce frame rate and bitrate
 to preserve responsiveness; 90 FPS is not a relay acceptance requirement.
@@ -64,7 +66,12 @@ is the Remote tab. How the page and the viewer are laid out is in
    [Gestures, keys and modifiers](#gestures-keys-and-modifiers). The
    **Shortcuts** menu sends the system shortcuts this computer would keep
    for itself.
-6. **View** keeps watching without control; **Disconnect** ends the session.
+6. **Display** (on a phone, **More**) chooses the resolution and the maximum
+   frame rate for this computer, and the codec for this device; each
+   connects again at once. It also turns on the quality monitor, a small
+   readout of speed, frame rate, delay, bitrate, codec and resolution over
+   the picture.
+7. **View** keeps watching without control; **Disconnect** ends the session.
    **Back** returns to the list with the session paused. On the host, the
    viewer's line offers **Make view-only** and **Disconnect viewer**, and
    **Stop sharing** is always within reach while a viewer is connected (see
@@ -1075,6 +1082,8 @@ numbers the UI, the acceptance tool and these docs use:
 | `skipped_per_s` | Host capture ticks skipped per second, for transport backpressure or a full encoder, between the last two `Stats`: over at least the host's 1 s interval, however close together they arrive, and never above `max_fps` |
 | `encoder_dwell_ms` | The host's median time a unit stays in its encoder, or the helper's, from submit to output as the encoder measures it, over the last second; null from a host that reports none |
 | `sent_bitrate` | What the host sent over the last second, in bit/s |
+| `speed_rx_bps`, `speed_tx_bps` | Speed, as RustDesk counts it: bytes per second the session's tunnel carried each way over the last second, TLS and every message included. A session over a test stream has no tunnel, and reports the video payload it received and nothing sent |
+| `codec`, `width`, `height` | The codec the host answered (`h265`, `h264` or `jpeg`) and the encoded size |
 | `ack_queue_ms` | The host's receipt-based queue delay (the ack queue under send credit) |
 | `present_interval` | p50/p95/p99/max of the intervals between accepted presentations over the last 60 s, with the gaps over 100 and 250 ms |
 | `degraded` | For 3 s: queue delay ≥ 150 ms, picture latency ≥ 250 ms, or (at a pace of 10 or more) fewer than half the pace presented |
@@ -1139,11 +1148,12 @@ left out; while the connection is down the core rows show dashes.
 - **Network**: the path (LAN direct or direct, with the address family, from
   `link.kind` and `link.family`; or the relay and its carrier), the QUIC
   link's own round trip (`link.rtt_ms`, with its lowest) beside the stream's
-  in-band one (`rtt_ms`, with its queueing), and the bitrate received and,
-  from the host, sent.
+  in-band one (`rtt_ms`, with its queueing), Speed each way, and the bitrate
+  received and, from the host, sent.
 - **Picture**: the picture delay with its host and viewer ends, the rate
-  presented, received and captured by the host, the resolution and codec,
-  and keyframes with those the viewer asked for.
+  presented, received and captured by the host, the encoded resolution, the
+  codec (H.265, H.264 or JPEG) with its chroma, and keyframes with those the
+  viewer asked for.
 - **Host**: the preset with its ceiling (Quality stays at 30 by design, so a
   30 under it is expected; Balanced reaches 60, Smooth 120, each within the
   viewer's display limit; a maximum frame rate the viewer chose is every
@@ -1162,6 +1172,11 @@ Read in order, the rates place a loss: capture below pace is the host's
 source or its capture gate; pace below the ceiling is the QoS controller
 (its startup hold included) or the viewer's cap; received below capture is
 the transport; presented below received is this device's presenter.
+
+The chip on the toolbar, and the phone's quality button, show the speed
+received. The quality monitor, off at first and remembered per device, keeps
+RustDesk's few figures (speed, frame rate, delay, target bitrate, codec,
+chroma, resolution) small over the picture's top right and takes no touch.
 
 ### The app's video path
 
@@ -1182,21 +1197,82 @@ permission. No queued clicks or keys are replayed. A remembered computer
 reconnects by its id; a pasted invitation that was not remembered stays in
 memory only.
 
-Windows decodes H.264 with Media Foundation into D3D11 shared textures (or
-takes JPEG where Media Foundation is not installed), and Android with
-`MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer.
+Windows decodes H.265 or H.264 with Media Foundation into D3D11 shared
+textures (or takes JPEG where Media Foundation is not installed), and Android
+with `MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer.
 Capture, encoding, decoding and blocking FFI calls stay off the Dart UI
 isolate, and pinch and pan keep the same texture and decoder. On Android a
 decoder reset is acknowledged by the codec worker, keeps the Surface, and cannot
 close a newer codec; after a stall the renderer drops obsolete decoded pictures
-but keeps compressed H.264 references. The decoders pull video from the
-session's `VideoSink` themselves, so H.264 never crosses Dart: a Kotlin feeder
+but keeps compressed references. The decoders pull video from the session's
+`VideoSink` themselves, so compressed video never crosses Dart: a Kotlin feeder
 thread pulls through JNI on Android, and the runner's decoder thread through
 the `pb_mapper_desktop_video_*_v1` C exports on Windows. Each reports its
 presentations to `VideoConsumer::presented` directly. Dart reads only status,
 geometry, statistics and the latest cursor, through the per-frame view leaf.
 Other platforms, and Windows without Media Foundation, take JPEG, which Dart
 decodes off the UI isolate. Video bytes never become JSON or base64.
+
+### What the viewer decodes
+
+Before it connects, the app asks the native side through the
+`pb_mapper/desktop_video` channel's `decoders` method. The method takes no
+arguments and never creates a decoder, because a bad driver can hang there. It
+answers a map: `h264` and `h265`, each either `{max_width, max_height}` (the
+largest of the viewer's resolution bounds that codec decodes at) or null, and
+`display_max_hz`, the fastest refresh among the displays as they are set now.
+An error, or a platform without the channel, counts as H.264 only, and so does
+a probe that has not answered within 2 s, for the attempts made meanwhile; the
+app keeps its later answer. The app offers H.265 (the `h265` capability) only
+where this device decodes it at the chosen resolution, and a session never
+asks for a size its codec's decoder cannot take.
+
+On Windows the runner probes on its own thread, one probe at a time, and calls
+that arrive meanwhile share its answer. H.264 is reported, up to 3840×2160,
+wherever Media Foundation is installed, since the in-box decoder takes every
+bound. H.265 is reported where two conditions hold. First, `MFTEnumEx` finds a
+synchronous video decoder MFT for `MFVideoFormat_HEVC`, which the HEVC Video
+Extensions register and an unpackaged app finds. Second, Flutter's adapter has
+DXVA `HEVC_VLD_MAIN` to NV12. Its bound is the largest one the driver lists a
+decoder configuration for. The refresh comes from the active display paths as
+an exact fraction (59.94, not 59), so Windows and Android report the same mode
+alike. A process outside the console session, such as one in a remote
+session, cannot query the paths and reads the display modes' whole hertz
+instead; the app allows a hertz of slack, so 59 still offers 60.
+
+On Android, `DecoderProbe` reads `MediaCodecList(REGULAR_CODECS)` off the main
+thread. It takes hardware decoders only: `isHardwareAccelerated` on API 29 and
+later, otherwise not `OMX.google.*` or `c2.android.*`. For `video/avc` and
+`video/hevc` it reports the largest bound that `areSizeAndRateSupported`
+accepts at 60 fps. The refresh is the fastest rate `DisplayRefresh` would hold.
+
+**Units.** `PbDesktopVideoMetaV1.flags` and the JNI meta carry `FLAG_H265`
+(bit 4) on an H.265 unit. A unit carrying neither that bit nor the JPEG bit is
+H.264. The 56-byte layout and its asserts are unchanged. A native consumer
+configures its decoder from the unit's codec and rebuilds it when the codec or
+the size changes, which happens only at an IDR.
+
+On Windows, H.264 stays the in-box MFT and H.265 is the first decoder
+`MFTEnumEx` offers, activated from its `IMFActivate`. The activation is shut
+down after the transform is released, on every path, including a constructor
+that fails partway. Either decoder must be Direct3D 11 aware, and it runs in
+low-latency mode. The aperture check lets an H.265 decoder align its surface
+to 64 pixels, against H.264's 16, but the visible rectangle must still equal
+the authorized frame.
+
+On Android the codec thread configures `video/hevc` or `video/avc` from the
+unit. The key frame's parameter sets become the codec-specific data: for
+H.264, the SPS and PPS as csd-0 and csd-1; for H.265, the VPS, SPS and PPS
+together as csd-0.
+
+The FFI's `sps_size` reads an H.265 SPS (NAL type 33), cropped by its
+conformance window, for the geometry check. The test-source player recognises
+an H.265 clip by the VPS in its first unit and treats IRAP pictures (NAL types
+16 to 21) as its keyframes.
+
+When a picture fails to decode as H.265, the app connects again at once on
+H.264 and does not offer H.265 again until it restarts; only a failure on
+H.264 too ends the session.
 
 ### Android presentation and decoder
 

@@ -189,7 +189,10 @@ Nothing in the SDK crates knows it exists.
     consumer, which is also where a presentation is validated
   - `platform.rs`, `windows.rs`: Capabilities, displays, and the Windows
     backend (xcap displays, enigo input, the desktop binding)
-  - `video/windows.rs`: Desktop Duplication → D3D11 → Media Foundation H.264
+  - `video/windows.rs`: Desktop Duplication → D3D11 → Media Foundation H.265
+    or H.264. H.265 only for a viewer that lists the `h265` capability, on a
+    GPU whose hardware HEVC encoder passes a probe kept per adapter; one
+    encoder failure turns it off for the process
   - `helper/` (Windows): The opt-in UAC/Winlogon service and the UI's client to
     it; the service side and the `pb-mapper-desktop-helper` binary need
     `--features windows-helper`. `HELPER_PROTOCOL` (`helper/mod.rs`) and the
@@ -318,9 +321,12 @@ The design and its rules are in `docs/ui-design.md`.
     and `DesktopApi` over the FFI: lifecycle calls on a background isolate,
     the hot ops and the per-frame view on the UI isolate. Its failures carry
     the FFI `ErrorCode`; never match their text
-  - `desktop_video.dart`: The native H.264 decoder's Flutter texture, over
-    the `pb_mapper/desktop_video` channel. Dart binds it to a video source;
-    the decoder pulls the video from Rust itself
+  - `desktop_video.dart`: The native decoder's Flutter texture, over the
+    `pb_mapper/desktop_video` channel. Dart binds it to a video source; the
+    decoder pulls the video from Rust itself. The channel's `decoders`
+    method says, without creating a decoder, how large H.264 and H.265 this
+    device decodes in hardware and its fastest refresh; the store offers
+    H.265 and the frame-rate choices from it
   - `remote_computer_vault.dart`: `RemoteComputerVault`, the `computers_*`
     ops below, and on Android the `pb_mapper/keystore` channel that unlocks
     them; records cross without their invitations
@@ -352,9 +358,10 @@ The design and its rules are in `docs/ui-design.md`.
   - `desktop_video.rs`: Video goes from the viewer's `VideoSink` straight to
     its consumer. On Android, and on Windows where Media Foundation is
     installed, that is the native decoder (the runner's decoder thread in
-    `windows/runner/desktop_video.cpp`, the Android feeder), so H.264 never
-    passes through Dart; elsewhere, Windows without Media Foundation
-    included, it is Dart's JPEG isolate. The runner and this DLL delay-load
+    `windows/runner/desktop_video.cpp`, the Android feeder), so H.264 and
+    H.265 never pass through Dart; elsewhere, Windows without Media
+    Foundation included, it is Dart's JPEG isolate. A unit's
+    `PbDesktopVideoMetaV1.flags` say its codec (`FLAG_H265`, bit 4). The runner and this DLL delay-load
     `mfplat.dll`, so the app starts without it. `connect` returns a
     `video_source`; a consumer attaches to it and pulls with
     `pb_mapper_desktop_video_{attach,next,presented,keyframe,failed,report,detach}_v1`;
@@ -499,7 +506,11 @@ the reasoning):
   vault and opened by id, added by pasting or scanning an invitation. The
   viewer replaces the whole window: on a desktop a dark title bar and a
   floating toolbar; on a phone landscape gutters, a modifier bar and a
-  minimap. Back keeps the session paused for up to ten minutes
+  minimap. Its Display menu chooses each computer's resolution and maximum
+  frame rate and the device's codec, and turns on the quality monitor
+  (speed, frame rate, delay, bitrate, codec, resolution). The remote cursor
+  is the viewer's own (`DesktopCursor`, kept by the store for the session).
+  Back keeps the session paused for up to ten minutes
 - **Relay**: whether the relay answers and how fast, and who this computer is
   to it (administrator, temporary credential #n, or neither). Services, with
   Connect and the connections the relay holds; connections and direct

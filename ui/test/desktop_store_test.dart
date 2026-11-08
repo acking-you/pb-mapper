@@ -576,6 +576,7 @@ void main() {
     );
     expect(maxFpsChoicesFor(decoders.displayMaxHz!), kMaxFpsChoices);
     expect(maxFpsChoicesFor(59.94), [30, 60]);
+    expect(maxFpsChoicesFor(59), [30, 60]);
 
     // A phone whose AVC decoder stops at 1080p and whose HEVC one does not:
     // 1440p decodes only while H.265 may be used — not once it failed here,
