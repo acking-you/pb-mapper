@@ -54,7 +54,7 @@ All notable changes to this project will be documented in this file.
   - The bitrate scales with the encoded size.
   - A size this device cannot decode is shown disabled, with the reason.
 - The remote cursor now stays where the viewer puts it. Previously, the phone's arrow and its next stroke jumped back to a stale host position shortly after a move.
-  - The host no longer reports the pointer moves it made for the controlling viewer. It reports every other change at once: the remote user's moves, a program's, or a clamp at a screen edge. A report the host made before the viewer's latest move reached it no longer moves or hides the viewer's arrow.
+  - The host no longer reports the pointer moves it made for the controlling viewer. It reports every other change at once: the remote user's moves, a program's, or a clamp at a screen edge.
   - The viewer's cursor belongs to the session, so it survives Back.
   - A last move refused because the picture was stale is sent with the next fresh picture.
 - Update the Windows desktop service once more: it now speaks helper protocol 6, which carries H.265. The Remote desktop page offers **Update**.
