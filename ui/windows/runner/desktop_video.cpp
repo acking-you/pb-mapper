@@ -605,9 +605,14 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
     ComPtr<ID3D11VideoProcessor> processor;
     ComPtr<IMFDXGIDeviceManager> manager;
+    // What created an H.265 decoder, which must shut it down after use.
+    // Declared before `transform`, so its shutdown follows the decoder's
+    // release whether the Decoder is destroyed or its constructor throws.
+    struct Activation {
+      ComPtr<IMFActivate> object;
+      ~Activation() { if (object) object->ShutdownObject(); }
+    } activation;
     ComPtr<IMFTransform> transform;
-    // What created an H.265 decoder, which shuts it down after use.
-    ComPtr<IMFActivate> activate;
     std::map<LONGLONG, Frame> pending;
     uint64_t revision;
     uint32_t width, height;
@@ -634,8 +639,8 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       } else {
         const auto decoders = SyncDecoders(MFVideoFormat_HEVC);
         if (decoders.empty()) throw std::runtime_error("No H.265 decoder is installed");
-        activate = decoders.front();
-        Check(activate->ActivateObject(IID_PPV_ARGS(&transform)), "Create H.265 decoder");
+        activation.object = decoders.front();
+        Check(activation.object->ActivateObject(IID_PPV_ARGS(&transform)), "Create H.265 decoder");
       }
       ComPtr<IMFAttributes> attrs;
       UINT32 d3d11 = 0;
@@ -697,8 +702,6 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
         transform->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
         transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
       }
-      transform.Reset();
-      if (activate) activate->ShutdownObject();
     }
     // A discontinuity keeps the decoder: drop what it holds of the old
     // revision and let the IDR that follows reset its references.
