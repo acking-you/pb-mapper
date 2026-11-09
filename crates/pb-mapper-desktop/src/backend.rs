@@ -325,10 +325,6 @@ impl Waker {
     }
 }
 
-/// Begins the text of every H.265 encoder failure on the helper pipe, which
-/// still carries failures as text while the helper protocol is 6.
-pub(crate) const H265_ENCODER_FAILED: &str = "h265_encoder_failed";
-
 /// A backend failure of a known kind. Its text is the message alone, so a
 /// failure reads as it did before it carried a kind.
 #[derive(Debug)]

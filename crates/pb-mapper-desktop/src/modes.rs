@@ -196,6 +196,12 @@ pub(crate) struct Journal {
     path: Option<PathBuf>,
 }
 impl Journal {
+    /// The journal at `path`: the privileged worker's, in the helper's
+    /// protected directory, one per console session.
+    #[cfg(all(windows, feature = "windows-helper"))]
+    pub(crate) fn at(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
     /// The journal in a host's state directory.
     pub(crate) fn in_dir(dir: Option<PathBuf>) -> Self {
         Self {

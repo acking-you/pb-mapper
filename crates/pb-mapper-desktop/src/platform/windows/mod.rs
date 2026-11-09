@@ -85,11 +85,13 @@ impl Platform for Windows {
 #[cfg(feature = "windows-helper")]
 pub(crate) fn open_bound(
     display_id: u32,
+    display_device: Option<String>,
     session: crate::oop::proto::SessionIdentity,
+    journal: crate::modes::Journal,
 ) -> Result<crate::native::PlatformBackend<Windows>> {
     let mut binding = helper::worker::DesktopBinding::new(session)?;
     binding.enter(|| {})?;
-    let desktop = desktop::WinDesktop::bound(display_id, binding)?;
+    let desktop = desktop::WinDesktop::bound(display_id, display_device, binding)?;
     Ok(crate::native::PlatformBackend::from_parts(
         std::sync::Arc::new(()),
         Parts {
@@ -99,7 +101,7 @@ pub(crate) fn open_bound(
             still: still::XcapJpeg,
             desktop,
         },
-        crate::modes::Journal::default(),
+        journal,
     ))
 }
 

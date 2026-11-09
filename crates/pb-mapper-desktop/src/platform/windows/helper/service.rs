@@ -168,6 +168,7 @@ fn entry(_: Vec<OsString>) {
         runtime.block_on(async {
             let mut listener = pipe::bind(PIPE, Some(&config.owner_sid), true)?;
             status.set_service_status(state(ServiceState::Running, 0)).map_err(error)?;
+            restore_left_modes(&config);
             let mut background = tokio::spawn(super::background::run(stop.clone()));
             let capture = async {
                 loop {
@@ -209,7 +210,11 @@ async fn session(
     let request: Request = tokio::time::timeout(TIMEOUT, ipc::read_json(&mut caller))
         .await
         .map_err(error)??;
-    let Request::Start { display_id } = request else {
+    let Request::Start {
+        display_id,
+        display_device,
+    } = request
+    else {
         return Err(error("helper requires a start request"));
     };
     let (owner, session) = os::verify_client(&caller, config)?;
@@ -217,7 +222,11 @@ async fn session(
     session.check()?;
     let name = format!("{PIPE}.worker.{}", crate::security::secret()?);
     let mut private = pipe::bind(&name, None, true)?;
-    let child = spawn_worker(config, session.session, &name)?;
+    let child = spawn_worker(
+        config,
+        session.session,
+        &format!("worker {name} {}", std::process::id()),
+    )?;
     tokio::time::timeout(TIMEOUT, private.connect())
         .await
         .map_err(error)??;
@@ -241,6 +250,7 @@ async fn session(
     let attached = Request::Attach {
         display_id,
         session: session.clone(),
+        display_device,
     };
     tokio::time::timeout(TIMEOUT, ipc::write_json(&mut private, &attached))
         .await
@@ -269,15 +279,69 @@ async fn session(
     {
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
+    let exit = child.exit_code();
     drop(child); // Job close terminates a worker that failed to exit.
+    // Killed, failed, or a display mode still journalled: put it back.
+    if exit != Some(0) {
+        restore_modes(config, session.session);
+    }
     Ok(())
 }
+
+/// Start the `restore` worker in `session`, which puts back the display mode
+/// a worker there left journalled, and keep it until it ends.
+fn restore_modes(config: &Configuration, session: u32) {
+    match spawn_worker(config, session, &format!("restore {session}")) {
+        Ok(child) => {
+            tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now()
+                    + super::worker::RESTORE_FOR
+                    + Duration::from_secs(10);
+                while child.exit_code().is_none() && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            });
+        }
+        Err(failure) => os::record_service_event("restore_failed", &failure.to_string()),
+    }
+}
+
+/// At service start: a journal a worker left from before (the service
+/// crashed, or was stopped mid-change) is put back in its session.
+fn restore_left_modes(config: &Configuration) {
+    let Ok(entries) = os::install_root().and_then(std::fs::read_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let session = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("display-modes-"))
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|session| session.parse::<u32>().ok());
+        if let Some(session) = session
+            && super::worker::journal(session).is_ok_and(|journal| journal.pending())
+        {
+            restore_modes(config, session);
+        }
+    }
+}
+
 struct Child {
     _job: os::Handle,
     process: os::Handle,
     pid: u32,
 }
-fn spawn_worker(config: &Configuration, session: u32, pipe: &str) -> Result<Child> {
+impl Child {
+    /// `None` while it runs.
+    fn exit_code(&self) -> Option<u32> {
+        let mut code = 0;
+        unsafe { GetExitCodeProcess(self.process.raw(), &mut code) }.ok()?;
+        (code != STILL_ACTIVE.0 as u32).then_some(code)
+    }
+}
+/// The helper in `session` with `args`, in a job that ends it with the job.
+fn spawn_worker(config: &Configuration, session: u32, args: &str) -> Result<Child> {
     let privileges = os::ScopedPrivileges::new(&[
         SE_TCB_NAME,
         SE_ASSIGNPRIMARYTOKEN_NAME,
@@ -333,11 +397,7 @@ fn spawn_worker(config: &Configuration, session: u32, pipe: &str) -> Result<Chil
     }
     .map_err(error)?;
     let file = os::wide(&config.helper_executable);
-    let mut command = os::wide(format!(
-        "\"{}\" worker {pipe} {}",
-        config.helper_executable.display(),
-        std::process::id()
-    ));
+    let mut command = os::wide(format!("\"{}\" {args}", config.helper_executable.display()));
     let mut desktop = os::wide("winsta0\\default");
     let startup = STARTUPINFOW {
         cb: size_of::<STARTUPINFOW>() as u32,

@@ -183,12 +183,15 @@ impl WinDesktop {
         })
     }
     #[cfg(feature = "windows-helper")]
-    pub(crate) fn bound(id: u32, binding: DesktopBinding) -> Result<Self> {
-        let monitor = monitor_handle(id)?;
-        let name = {
-            let _dpi = DpiScope::enter();
-            current_display(id, monitor).map_or_else(|_| String::new(), |display| display.name)
+    /// The display of `id`, or, when that went stale, of the `device` name.
+    pub(crate) fn bound(id: u32, device: Option<String>, binding: DesktopBinding) -> Result<Self> {
+        let _dpi = DpiScope::enter();
+        let (id, monitor) = match monitor_handle(id) {
+            Ok(monitor) => (id, monitor),
+            Err(failure) => device.as_deref().and_then(by_name).ok_or(failure)?,
         };
+        let name = current_display(id, monitor)
+            .map_or_else(|_| device.unwrap_or_default(), |display| display.name);
         Ok(Self {
             id,
             name,

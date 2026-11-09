@@ -8,7 +8,6 @@
 
 use crate::{
     BackendError, Display, FailureKind, Result, VideoCodec,
-    backend::H265_ENCODER_FAILED,
     codec::annexb::{MAX_ACCESS_UNIT, Nal, ParameterSets, codec_name, nal, nal_ranges},
     error,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
@@ -606,13 +605,13 @@ fn late(submitted: Instant, previous: Option<Instant>, now: Instant) -> bool {
 
 /// An error of the hardware codec itself, rather than of the capture or the
 /// scaler around it. An H.265 one is `EncoderFailed`: thread C then ends the
-/// session, and this host offers H.265 no more. Its text still starts with
-/// `H265_ENCODER_FAILED`, which is how it crosses the helper pipe.
+/// session, and this host offers H.265 no more. Its kind crosses the
+/// helper pipe as it is.
 fn codec_error(kind: VideoCodec, failure: std::io::Error) -> std::io::Error {
     if kind == VideoCodec::H265 {
         BackendError::new(
             FailureKind::EncoderFailed { codec: kind },
-            format!("{H265_ENCODER_FAILED}: {failure}"),
+            failure.to_string(),
         )
         .into()
     } else {

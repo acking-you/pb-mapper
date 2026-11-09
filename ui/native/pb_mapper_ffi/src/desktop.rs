@@ -1374,6 +1374,7 @@ async fn start_background(handle: &PbMapperHandle, start: HostStart) -> Result<V
             settings: desktop::privileged::background::Settings {
                 service: start.service.clone(),
                 display_id: start.display_id,
+                display_device: display_device(start.display_id),
                 allow_control: start.allow_control,
                 allow_direct: !start.relay_only,
                 auto_start: start.auto_start,
@@ -1408,6 +1409,18 @@ async fn start_background(handle: &PbMapperHandle, start: HostStart) -> Result<V
         let _ = handle;
         Err(err("background hosting requires Windows"))
     }
+}
+
+/// The device name of the display `display_id` names now, which the service
+/// keeps beside the id: a reboot or a mode change may give the display
+/// another id, never another name.
+#[cfg(windows)]
+fn display_device(display_id: u32) -> Option<String> {
+    desktop::displays()
+        .ok()?
+        .into_iter()
+        .find(|display| display.id == display_id)
+        .map(|display| display.name)
 }
 
 /// The process credential, as the service stores it.
@@ -1756,6 +1769,7 @@ async fn enable_host(
         settings: desktop::privileged::background::Settings {
             service,
             display_id,
+            display_device: display_device(display_id),
             allow_control,
             allow_direct: true,
             auto_start: true,
@@ -2446,6 +2460,7 @@ mod tests {
                 settings: Settings {
                     service: "desktop:study".into(),
                     display_id: 2,
+                    display_device: None,
                     allow_control: true,
                     allow_direct: false,
                     auto_start: true,

@@ -70,7 +70,24 @@ impl Probe {
             None => display,
         }
     }
-    fn lose(&self, lost: bool) {
+    /// A display that offers its own size and a smaller one.
+    pub(crate) fn with_modes() -> (Self, Vec<Mode>) {
+        let probe = Self::default();
+        let display = Self::display();
+        let modes = vec![
+            Mode {
+                width: display.width,
+                height: display.height,
+            },
+            Mode {
+                width: 32,
+                height: 24,
+            },
+        ];
+        probe.0.lock().modes = modes.clone();
+        (probe, modes)
+    }
+    pub(crate) fn lose(&self, lost: bool) {
         self.0.lock().lost = lost;
     }
 }

@@ -1,8 +1,8 @@
 //! The helper service's own host: configured by the app, owned by the
 //! service, which keeps sharing while the app is closed.
 pub use crate::platform::windows::helper::background::{
-    Options, Settings, Snapshot, configure, configure_with_identity, end_session, revoke_scope,
-    set_control_allowed, status, stop,
+    Options, Settings, Snapshot, configure, configure_with_identity, end_session,
+    restore_display_mode, revoke_scope, set_control_allowed, status, stop,
 };
 use crate::{Host, Result, StopReason, error};
 use pb_mapper_client::sdk::RelayTransport;
@@ -155,6 +155,7 @@ mod tests {
                 settings: Settings {
                     service: "desktop:adopt".into(),
                     display_id: 1,
+                    display_device: None,
                     allow_control: false,
                     allow_direct: true,
                     auto_start: true,
