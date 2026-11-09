@@ -264,9 +264,9 @@ pub struct Host {
     admission: Option<Arc<dyn crate::ControlAdmission>>,
     shared: Arc<Shared>,
     cancel: CancellationToken,
-    /// Cancelled once a stop has finished, or the host was dropped: what a
-    /// status watch ends on.
-    done: CancellationToken,
+    /// The status a finished stop left, for watches that outlive the host;
+    /// dropped with the host, which ends them too.
+    last: tokio::sync::watch::Sender<Option<HostStatus>>,
     join: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl Host {
@@ -374,7 +374,7 @@ impl Host {
             admission,
             shared,
             cancel,
-            done: CancellationToken::new(),
+            last: tokio::sync::watch::Sender::new(None),
             join: AsyncMutex::new(Some(join)),
         })
     }
@@ -469,7 +469,7 @@ impl Host {
     pub(crate) fn status_handle(&self) -> HostStatusHandle {
         HostStatusHandle {
             shared: Arc::downgrade(&self.shared),
-            done: self.done.clone(),
+            last: self.last.subscribe(),
         }
     }
     /// The host's tunnel figures, sampled now: its viewers' sessions on each
@@ -540,7 +540,7 @@ impl Host {
         join.take();
         self.shared.registration.stop().await.map_err(error)?;
         self.shared.stopped.store(true, Ordering::Release);
-        self.done.cancel();
+        self.last.send_replace(Some(self.shared.status()));
         Ok(())
     }
 }
@@ -548,25 +548,26 @@ impl Drop for Host {
     fn drop(&mut self) {
         self.shared.policy.set(false);
         self.cancel.cancel();
-        self.done.cancel();
     }
 }
 
-/// A host's status, readable from any task while the host lives.
+/// A host's status, readable from any task while the host lives, and the
+/// status its stop left after.
 #[derive(Clone)]
 pub(crate) struct HostStatusHandle {
     shared: Weak<Shared>,
-    done: CancellationToken,
+    last: tokio::sync::watch::Receiver<Option<HostStatus>>,
 }
 impl HostStatusHandle {
     /// `None` once the host and what it ran are gone.
     pub(crate) fn status(&self) -> Option<HostStatus> {
         Some(self.shared.upgrade()?.status())
     }
-    /// Resolves once a stop has finished, its status `Stopped`, or the host
-    /// was dropped.
-    pub(crate) fn stopped(&self) -> tokio_util::sync::WaitForCancellationFutureOwned {
-        self.done.clone().cancelled_owned()
+    /// The `Stopped` status, once a stop has finished; `None` once the host
+    /// was dropped without one.
+    pub(crate) async fn stopped(mut self) -> Option<HostStatus> {
+        let _ = self.last.wait_for(Option::is_some).await;
+        self.last.borrow().clone()
     }
 }
 

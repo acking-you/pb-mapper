@@ -281,9 +281,10 @@ pub(crate) struct ViewerStateSlot {
     /// The app asked for control and has not revoked it since. The host's
     /// `controlling` counts only while this holds.
     control_requested: bool,
-    /// What the app last asked `request_control` for. A pause or congestion
-    /// ends control, clearing `control_requested`, but not this.
-    control_wanted: bool,
+    /// What the app last asked `request_control` for on this viewer; `None`
+    /// before it asked. A pause or congestion ends control, clearing
+    /// `control_requested`, but not this.
+    control_wanted: Option<bool>,
     /// A reason the viewer itself caused, until control is requested again.
     local_reason: Option<ViewerReason>,
     /// The last notice, its number in this session, and when it came.
@@ -494,7 +495,7 @@ impl Viewer {
                 link: None,
                 paused: false,
                 control_requested: false,
-                control_wanted: false,
+                control_wanted: None,
                 local_reason: None,
                 notice: None,
                 stopped: None,
@@ -723,7 +724,7 @@ impl Viewer {
                 };
             }
             state.control_requested = enabled;
-            state.control_wanted = enabled;
+            state.control_wanted = Some(enabled);
             if enabled {
                 state.local_reason = None;
             }

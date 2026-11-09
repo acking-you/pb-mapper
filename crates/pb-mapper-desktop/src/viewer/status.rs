@@ -102,10 +102,11 @@ pub struct ViewerStatus {
     pub message: String,
     pub control_allowed: bool,
     pub controlling: bool,
-    /// What the app last asked [`super::Viewer::request_control`] for. A pause,
-    /// input congestion, the host denying control or the session ending
-    /// leaves it as it was: control is wanted but not held until asked again.
-    pub control_wanted: bool,
+    /// What the app last asked [`super::Viewer::request_control`] for on this
+    /// viewer, `None` before it asked. A pause, input congestion, the host
+    /// denying control or the session ending leaves it as it was: control is
+    /// wanted but not held until asked again.
+    pub control_wanted: Option<bool>,
     /// A current, recently presented frame: input is possible.
     pub fresh: bool,
     pub paused: bool,

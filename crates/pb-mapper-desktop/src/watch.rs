@@ -10,12 +10,13 @@ impl Host {
     /// This host's status now, then each time it changes, sampled every
     /// `every`; a viewer's `since_ms` alone is no change. The stream ends,
     /// `changed()` failing, once a stop has finished, its last status
-    /// `Stopped`, or once the host was dropped. It never keeps the host or
+    /// `Stopped` even when the host is dropped at once after, or once the
+    /// host was dropped without a stop. It never keeps the host or
     /// its registration alive, and dropping every receiver ends its task.
     /// Needs a Tokio runtime.
     pub fn watch(&self, every: Duration) -> watch::Receiver<HostStatus> {
         let handle = self.status_handle();
-        let done = handle.stopped();
+        let done = handle.clone().stopped();
         spawn(
             every,
             self.status(),
@@ -45,7 +46,7 @@ impl Viewer {
             every,
             self.status(),
             move || Some(handle.status()),
-            std::future::pending(),
+            std::future::pending::<Option<ViewerStatus>>(),
             |status| status.state == ViewerState::Stopped,
             |value| {
                 if let Some(status) = value.as_object_mut() {
@@ -63,13 +64,14 @@ impl Viewer {
 
 /// A receiver of `first`, then of `status()` whenever its projection (its
 /// JSON value less what `project` removes) differs from the last one sent.
-/// The task ends after sending a status that is `last`, after the status read
-/// once `done` resolved, or when `status()` has nothing left to read.
+/// The task ends after sending a status that is `last`; once `done`
+/// resolves, after sending the status it gives, or else the one `status()`
+/// reads then; or when `status()` has nothing left to read.
 fn spawn<S: Serialize + Send + Sync + 'static>(
     every: Duration,
     first: S,
     status: impl Fn() -> Option<S> + Send + 'static,
-    done: impl Future<Output = ()> + Send + 'static,
+    done: impl Future<Output = Option<S>> + Send + 'static,
     last: fn(&S) -> bool,
     project: fn(&mut Value),
 ) -> watch::Receiver<S> {
@@ -86,12 +88,12 @@ fn spawn<S: Serialize + Send + Sync + 'static>(
         ticks.tick().await;
         tokio::pin!(done);
         loop {
-            let finished = tokio::select! {
-                _ = ticks.tick() => false,
-                () = &mut done => true,
+            let (finished, status) = tokio::select! {
+                _ = ticks.tick() => (false, status()),
+                final_status = &mut done => (true, final_status.or_else(&status)),
                 () = sender.closed() => return,
             };
-            let Some(status) = status() else {
+            let Some(status) = status else {
                 return;
             };
             let end = finished || last(&status);
@@ -239,5 +241,34 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// A host dropped as soon as its stop returned, here before the watch
+    /// task can run at all, still ends its stream on `Stopped`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_host_dropped_after_its_stop_ends_its_watch_stopped() {
+        let relay = pb_mapper_testkit::Relay::start("desktop-watch-stop").await;
+        let client = Client::from_credential(
+            relay.addr().to_string(),
+            pb_mapper_testkit::admin_credential(),
+            true,
+            None,
+        );
+        let mut options = HostOptions::new("desktop:watch-stop");
+        options.allow_direct = false;
+        let host = Host::builder(options)
+            .backend(|| Ok(Still))
+            .start(&client)
+            .await
+            .unwrap();
+        let mut hosting = host.watch(Duration::from_secs(3600));
+        host.stop().await.unwrap();
+        drop(host);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while hosting.changed().await.is_ok() {}
+        })
+        .await
+        .unwrap();
+        assert_eq!(hosting.borrow().state, HostState::Stopped);
     }
 }
