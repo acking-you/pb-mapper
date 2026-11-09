@@ -262,7 +262,7 @@ abstract final class RemoteScreenFixture {
     top += step;
     _text(
       c,
-      '   Compiling pb-mapper-desktop v0.10.2',
+      '   Compiling pb-mapper-desktop v0.11.0',
       Offset(left, top),
       size: size,
       color: text,

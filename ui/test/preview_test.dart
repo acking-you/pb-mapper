@@ -22,15 +22,12 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/pages/remote/invite_scanner.dart';
-import 'package:pb_mapper_ui/src/pages/remote/remote_page.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
-import 'package:pb_mapper_ui/src/state/remote_computers.dart';
-import 'package:pb_mapper_ui/src/state/remote_desktop.dart';
 import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
 
 import 'fake_desktop_api.dart';
 import 'fake_pb_mapper_api.dart';
-import 'fake_remote_computer_vault.dart';
+import 'remote_preview.dart';
 import 'remote_screen_fixture.dart';
 import 'support.dart';
 
@@ -271,164 +268,12 @@ Future<void> _relay(
   await finish(tester);
 }
 
-const _relayAddress = 'lb7666.top:7666';
-
-/// Four remembered computers: one online and used often, one online over
-/// the relay, one not sharing, one saved under another relay.
-FakeRemoteComputerVault _computers() =>
-    FakeRemoteComputerVault()
-      ..records.addAll([
-        RemoteComputer(
-          id: '${'a' * 31}1',
-          name: 'Office PC',
-          service: 'desktop:office-pc',
-          fingerprint: 'AB12-CD34-EF56-7890',
-          relay: _relayAddress,
-          namespace: 0,
-          lastConnectedAt: DateTime.now().subtract(const Duration(hours: 2)),
-          lastPath: 'direct',
-          lastControlAllowed: true,
-        ),
-        RemoteComputer(
-          id: '${'b' * 31}2',
-          name: 'Home server',
-          service: 'desktop:home-pc',
-          fingerprint: 'FFFF-0000-FFFF-0000',
-          relay: _relayAddress,
-          namespace: 0,
-          lastConnectedAt: DateTime.now().subtract(const Duration(days: 1)),
-          lastPath: 'relay',
-        ),
-        RemoteComputer(
-          id: '${'c' * 31}3',
-          name: 'Lab workstation',
-          service: 'desktop:lab-ws',
-          fingerprint: '1111-2222-3333-4444',
-          relay: _relayAddress,
-          namespace: 0,
-          lastConnectedAt: DateTime(2026, 11, 2, 10),
-        ),
-        const RemoteComputer(
-          id: 'dddddddddddddddddddddddddddddd04',
-          name: 'Parents laptop',
-          service: 'desktop:parents',
-          fingerprint: '5555-6666-7777-8888',
-          relay: 'other.example:7666',
-          namespace: 0,
-        ),
-      ]);
-
-/// A relay with two of [_computers] sharing. This computer can share its
-/// own desktop when [host], and a viewer is watching it when [viewed].
-FakePbMapperApi _remoteApi({bool host = true, bool viewed = false}) {
-  final api = FakePbMapperApi(
-    serverServices: ['desktop:office-pc', 'desktop:home-pc', 'nas-files'],
-  );
-  api.desktop.available = DesktopCapabilities(
-    host: host,
-    displays: const [
-      DesktopDisplay(1, 'Display 1', 2560, 1440),
-      DesktopDisplay(2, 'Display 2', 1920, 1080),
-    ],
-    helper: const DesktopHelper(
-      installed: true,
-      running: true,
-      authorized: true,
-      identityVerified: true,
-    ),
-  );
-  if (viewed) api.desktop.hostSnapshot = viewedHost(controlling: true);
-  // A 120 Hz display whose H.265 decoder takes 1440p and whose H.264 one
-  // stops at 1080p: Native is out of its reach.
-  api.desktop.decodersValue = const DesktopDecoders(
-    h264: DesktopDecoderLimit(1920, 1080),
-    h265: DesktopDecoderLimit(2560, 1440),
-    displayMaxHz: 120,
-  );
-  return api;
-}
-
-/// Lets the fake's picture decode: that takes real time, which a widget
-/// test's clock does not pass by itself.
-Future<void> _decode(WidgetTester tester) async {
-  for (var i = 0; i < 30; i++) {
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 10)),
-    );
-    await tester.pump(const Duration(milliseconds: 50));
-  }
-}
-
 /// Viewer settings whose gesture sheet was already seen, so a touch viewer
 /// does not open it by itself.
 Future<ViewerPrefs> _sheetSeen() async {
   final prefs = ViewerPrefs(persist: false);
   await prefs.setGestureSheetSeen(true);
   return prefs;
-}
-
-/// Opens Office PC from the Remote page. Unless [live] is false, the
-/// session goes live with [RemoteScreenFixture] on screen, in control when
-/// the host allows it.
-Future<RemoteDesktop> _view(
-  WidgetTester tester,
-  FakePbMapperApi api, {
-  bool live = true,
-  bool controlAllowed = true,
-}) async {
-  final png = await RemoteScreenFixture.png(tester);
-  final scope = AppScope.of(tester.element(find.byType(RemotePage)));
-  await scope.remote.open(scope.store.computers.computers.first);
-  await tester.pump(const Duration(milliseconds: 100));
-  if (live) {
-    api.desktop.viewerStatusValue = liveStatus(
-      controlling: controlAllowed,
-      controlAllowed: controlAllowed,
-      stats: const DesktopStats(
-        path: 'direct',
-        codec: 'h265',
-        presentedFps: 60,
-        rttMs: 18,
-        speedRxBps: 2516582,
-        speedTxBps: 18432,
-        encoderBitrateBps: 8000000,
-        width: 1920,
-        height: 1080,
-        preset: DesktopQuality.balanced,
-        maxFps: 120,
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 300));
-    api.desktop.emitJpeg(png, generation: 1, frameId: 1);
-  }
-  await _decode(tester);
-  return scope.remote;
-}
-
-const _windowManager = MethodChannel('window_manager');
-
-/// Runs [body] as Windows, where a computer can share its desktop: the app
-/// draws its own caption buttons, and the viewer its dark ones. Its window
-/// answers as a restored one.
-Future<void> _onWindows(
-  WidgetTester tester,
-  Future<void> Function() body,
-) async {
-  final messenger = tester.binding.defaultBinaryMessenger;
-  messenger.setMockMethodCallHandler(
-    _windowManager,
-    (call) async => switch (call.method) {
-      'isMaximized' || 'isFullScreen' => false,
-      _ => null,
-    },
-  );
-  debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-  try {
-    await body();
-  } finally {
-    debugDefaultTargetPlatformOverride = null;
-    messenger.setMockMethodCallHandler(_windowManager, null);
-  }
 }
 
 /// The app's face on Windows, Segoe UI, from this machine's own fonts: no
@@ -857,10 +702,10 @@ void main() {
     });
 
     _preview('remote setup', (tester) async {
-      await _onWindows(tester, () async {
+      await onWindows(tester, () async {
         await pumpApp(
           tester,
-          _remoteApi(),
+          previewRemoteApi(),
           page: AppPage.remote,
           size: const Size(1440, 900),
         );
@@ -874,24 +719,24 @@ void main() {
       ('dark', ThemeMode.dark),
     ]) {
       _preview('remote sharing $name', (tester) async {
-        await _onWindows(tester, () async {
-          final api = _remoteApi(viewed: true);
+        await onWindows(tester, () async {
+          final api = previewRemoteApi(viewed: true);
           await pumpApp(
             tester,
             api,
             page: AppPage.remote,
             themeMode: theme,
             size: const Size(1440, 900),
-            vault: _computers(),
+            vault: previewComputers(),
           );
           // A session left paused offers Back to picture, and its last
           // picture becomes the row's thumbnail: let that write finish.
-          final remote = await _view(tester, api);
+          final remote = await viewPreviewComputer(tester, api);
           remote.back();
           await tester.runAsync(
             () => Future<void>.delayed(const Duration(milliseconds: 500)),
           );
-          await _decode(tester);
+          await decodePreviewPicture(tester);
           await tester.tap(find.byKey(const Key('host-qr')));
           await settle(tester);
           await _capture(tester, 'remote_sharing_$name');
@@ -901,13 +746,13 @@ void main() {
     }
 
     _preview('remote add dialog', (tester) async {
-      await _onWindows(tester, () async {
+      await onWindows(tester, () async {
         await pumpApp(
           tester,
-          _remoteApi(),
+          previewRemoteApi(),
           page: AppPage.remote,
           size: const Size(1440, 900),
-          vault: _computers(),
+          vault: previewComputers(),
         );
         await tester.tap(find.byKey(const Key('remote-add')));
         await settle(tester);
@@ -935,8 +780,8 @@ void main() {
       ThemeMode theme = ThemeMode.light,
       Locale locale = const Locale('en'),
       ViewerPrefs? prefs,
-    }) => _onWindows(tester, () async {
-      final api = _remoteApi();
+    }) => onWindows(tester, () async {
+      final api = previewRemoteApi();
       // Held mid-connect, it stays on the Connecting overlay.
       if (!live) api.desktop.connectGate = Completer<void>();
       await pumpApp(
@@ -947,9 +792,14 @@ void main() {
         locale: locale,
         size: const Size(1440, 900),
         viewerPrefs: prefs,
-        vault: _computers(),
+        vault: previewComputers(),
       );
-      await _view(tester, api, live: live, controlAllowed: controlAllowed);
+      await viewPreviewComputer(
+        tester,
+        api,
+        live: live,
+        controlAllowed: controlAllowed,
+      );
       await act(api);
       await _capture(tester, name);
       api.desktop.connectGate?.complete();
@@ -1055,8 +905,12 @@ void main() {
     });
 
     _preview('sharing fallback over a dialog', (tester) async {
-      await _onWindows(tester, () async {
-        await pumpApp(tester, _remoteApi(viewed: true), page: AppPage.tunnels);
+      await onWindows(tester, () async {
+        await pumpApp(
+          tester,
+          previewRemoteApi(viewed: true),
+          page: AppPage.tunnels,
+        );
         await tester.tap(find.byKey(const Key('new-tunnel')));
         await settle(tester);
         await _capture(tester, 'sharing_fallback_dialog');
@@ -1065,7 +919,7 @@ void main() {
     });
 
     _preview('title bar on Windows at 125 %', (tester) async {
-      await _onWindows(tester, () async {
+      await onWindows(tester, () async {
         const size = Size(1180, 780), dpr = 1.25;
         for (final (suffix, theme) in const [
           ('', ThemeMode.light),
@@ -1073,7 +927,7 @@ void main() {
         ]) {
           await pumpApp(
             tester,
-            _remoteApi(viewed: true),
+            previewRemoteApi(viewed: true),
             page: AppPage.tunnels,
             size: size,
             themeMode: theme,
@@ -1104,10 +958,10 @@ void main() {
       InviteScanner.debugSupportedOverride = true;
       await pumpApp(
         tester,
-        _remoteApi(host: false),
+        previewRemoteApi(host: false),
         page: AppPage.remote,
         size: const Size(390, 844),
-        vault: _computers(),
+        vault: previewComputers(),
       );
       await _capture(tester, 'phone_remote_tab');
       await finish(tester);
@@ -1117,10 +971,10 @@ void main() {
       InviteScanner.debugSupportedOverride = true;
       await pumpApp(
         tester,
-        _remoteApi(host: false),
+        previewRemoteApi(host: false),
         page: AppPage.remote,
         size: const Size(390, 844),
-        vault: _computers(),
+        vault: previewComputers(),
       );
       final messenger = tester.binding.defaultBinaryMessenger;
       messenger.setMockMethodCallHandler(
@@ -1145,7 +999,7 @@ void main() {
       ThemeMode theme = ThemeMode.dark,
       Locale locale = const Locale('en'),
     }) async {
-      final api = _remoteApi(host: false);
+      final api = previewRemoteApi(host: false);
       await pumpApp(
         tester,
         api,
@@ -1154,9 +1008,9 @@ void main() {
         locale: locale,
         size: const Size(844, 390),
         viewerPrefs: prefs,
-        vault: _computers(),
+        vault: previewComputers(),
       );
-      await _view(tester, api);
+      await viewPreviewComputer(tester, api);
     }
 
     // The quality monitor and the quality panel over the picture, then the

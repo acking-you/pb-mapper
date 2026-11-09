@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/poster.png" alt="pb-mapper — P2P first, relay always: the desktop app's galaxy of this computer, its relay and every tunnel between them, the Tunnels page, and a phone connecting to a service on the relay" width="800" />
+<img src="docs/assets/poster.png" alt="pb-mapper — tunnels, remote desktop and one SDK: in front, the remote desktop viewer showing another computer with its quality monitor; behind it, the desktop app's galaxy of this computer, its relay and every tunnel; on an Android phone, the Remote tab with the computers it remembers" width="800" />
 
 <p>
   <a href="https://www.rust-lang.org/"><img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white"></a>
@@ -23,11 +23,13 @@
 
 ---
 
-**pb-mapper** reaches private TCP and UDP services behind NAT. Run `register`
-next to a service and `connect` wherever you need it, and the service appears on
-a local port. Each connection tries a **peer-to-peer QUIC path** first. If the
-network will not allow one, it falls back to the **relay** before a single
-byte is sent. Nobody picks a path by hand: the CLI and the SDKs decide per
+**pb-mapper** reaches private TCP and UDP services behind NAT, and lets you see
+and control another computer's screen over the same paths. Run `register` next
+to a service and `connect` wherever you need it, and the service appears on a
+local port. Each connection goes direct when it can, over a shared **LAN**
+first, otherwise over a hole-punched **peer-to-peer QUIC path**. If the network
+allows neither, it falls back to the **relay** before a single byte is sent.
+Nobody picks a path by hand: the CLI, the app and the SDKs decide per
 connection, and keep the tunnel up through relay restarts, outages and network
 changes.
 
@@ -37,13 +39,20 @@ changes.
    :9090         └──── fallback: relay.example.com:7666 ─────┘
 ```
 
+The **remote desktop** rides those same paths: share a Windows computer from
+the app, then view and control it from another computer or a phone, with
+hardware H.265/H.264 video (decoded natively on Windows and Android) and real
+keyboard and mouse. The **Rust SDK** hands
+all of it to your own app: tunnels, the remote desktop's encoded picture for
+your decoder, keyboard and mouse input, status streams and automatic recovery.
+
 ## Why pb-mapper
 
-**🧩 An SDK that handles the network for you.** `register` and `connect` are
-the whole API. Hole punching, mutually authenticated QUIC, relay fallback,
-reconnection, DNS refresh and recovery after a network change all happen inside
-them, for TCP and UDP alike. One process can hold any number of tunnels, each
-with its own credential.
+**🧭 Any TCP or UDP service, on the best path.** `register` and `connect` are
+the whole tunnel API. LAN detection, hole punching, mutually authenticated
+QUIC, relay fallback over TCP or QUIC, reconnection, DNS refresh and recovery
+after a network change all happen inside them, for TCP and UDP alike. One
+process can hold any number of tunnels, each with its own credential.
 
 **🔌 One TCP port relays everything; one UDP port punches for everything.**
 `7666/tcp` carries registration, subscription, status, administration and
@@ -61,6 +70,29 @@ remote control for an agent harness is the use case it was built for.
 interactive latency under **20 ms**, and the relay fallback matches frp's
 one-port-per-mapping setup in latency and stability. How fast your own setup
 is depends on the two networks and where the relay sits.
+
+**🖥️ Remote desktop on the same paths.** Turn on remote control on a Windows
+computer, hand over its invitation as text or a QR code, and view and control
+it from another computer or a phone. The host encodes in hardware, H.265 where
+both ends have it and H.264 otherwise, at the remote display's own size by
+default; a viewer with no native decoder (the app on macOS, Linux, iOS, or
+Windows without Media Foundation) gets JPEG at up to 8 FPS. Keyboard and mouse
+are real input, and the opt-in Windows helper also reaches UAC prompts and the
+owner's lock screen. Each session is TLS 1.3 pinned to the
+host's certificate by the invitation, so a relay credential alone can neither
+watch nor control. Like every tunnel it tries the LAN, then direct, then the
+relay; a lost connection is retried for up to two minutes, and Back keeps the
+session paused for up to ten.
+
+**🧩 One SDK for all of it.** The Rust crate `pb-mapper` carries the tunnels
+and, with its `desktop` feature, the whole remote desktop: a host in a few
+lines; the viewer's encoded video units (H.265, H.264 or JPEG, each with its
+keyframe flag, generation, frame id and timestamp) handed to the platform's
+own decoder; keyboard, mouse and text input; status and metrics streams for
+every tunnel, host and viewer; and `Supervisor`, the app's reconnect policy
+as a library, which carries a viewer through stalls, host restarts and an
+H.265 decoder failure (by falling back to H.264). The app, on desktop and
+phone, is built on the same SDK. The Node SDK covers tunnels.
 
 ## Quick start
 
@@ -152,7 +184,7 @@ Worth knowing:
 
 ```toml
 [dependencies]
-pb-mapper = "0.8"
+pb-mapper = "0.10"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -245,8 +277,103 @@ Node.js 18+ and Bun 1.1+. See [`js/README.md`](js/README.md) for the full API.
 | --- | --- |
 | CLI `pb-mapper` | `server`, `register`, `connect`, `status`, `admin` in one binary |
 | Agent Skill | Installs and verifies a relay, register and connect end to end (below) |
-| Flutter UI | Desktop and mobile GUI over a C ABI; uses the relay path for now |
+| Flutter app | Windows, macOS, Linux, Android and iOS over a C ABI: tunnels on the same paths as the CLI, the relay's services and credentials, and the remote desktop |
 | Relay library | `pb-mapper-server`, for embedding a relay in your own process |
+
+## Remote desktop
+
+Share a computer's screen and control it from another, over the relay,
+credentials and paths your tunnels already use; the relay needs nothing new.
+
+| Role | Where it runs today |
+| --- | --- |
+| Host | Windows with Media Foundation: GPU H.265 or H.264; the ordinary desktop, or also UAC prompts and the owner's lock screen through the opt-in helper |
+| Viewer in the app | Windows and Android decode H.265/H.264 natively; macOS, Linux and iOS (unverified) show the picture as JPEG, up to 8 FPS |
+| Viewer in the SDK | Any OS, with the decoder you bring |
+
+**In the app:** on Windows, open **Remote desktop** and choose **Turn on remote
+control** (or **Share the ordinary desktop only**, without the helper). Copy
+the `pbd1.` invitation privately, or show its QR code to a phone: whoever holds
+it can view, and control is a separate permission the host grants. On the
+other device, choose **Add computer** (**Scan to add** or **Paste invitation**
+on a phone) and **Connect**. The viewer's **Display** menu (on a phone,
+**More**) sets the resolution, maximum frame rate and codec, turns on the quality monitor (speed, frame rate,
+delay, bitrate, codec, resolution), and, while a desktop controls a Windows
+computer, changes that computer's resolution to **Fit local**.
+
+**In your app:**
+
+```toml
+# Not on crates.io yet: the remote desktop ships in the next release.
+pb-mapper = { git = "https://github.com/acking-you/pb-mapper", features = ["desktop"] }
+```
+
+```rust
+use std::time::Duration;
+
+use pb_mapper::desktop::{
+    Button, Decoders, Host, HostOptions, Input, Invitation, Pull, Resolution, Viewer, ViewerConfig,
+};
+use pb_mapper::ConnectOptions;
+
+// Host (Windows): share the primary display and allow control.
+let mut options = HostOptions::new("desktop:office");
+options.allow_control = true;
+let host = Host::builder(options).start(&client).await?;
+let invitation = host.invitation().encode(); // pbd1.…: keep it secret
+
+// Viewer (any OS): offer what your decoder takes; the remote display's own size by default.
+let decoders = Decoders { h264: Some((3840, 2160)), h265: None };
+let config = ViewerConfig::for_decoders(decoders, Resolution::default(), 60.0, None);
+let invitation = Invitation::decode(&invitation)?;
+let viewer = Viewer::connect(&client, &invitation, ConnectOptions::default(), config).await?;
+
+// The picture: Annex B access units for your decoder, on a thread of its own.
+let consumer = viewer.video_sink().attach()?;
+std::thread::spawn(move || {
+    let mut capacity = 1 << 20;
+    loop {
+        match consumer.next(Duration::from_millis(100), capacity) {
+            Pull::Unit(unit) => {
+                // Decode unit.bytes (unit.codec, unit.keyframe, unit.pts_us), show it, then:
+                consumer.presented(unit.generation, unit.frame_id);
+            }
+            Pull::NeedCapacity(needed) => capacity = needed,
+            Pull::Closed => break,
+            Pull::Timeout | Pull::Paused => {}
+        }
+    }
+});
+
+// Keyboard and mouse, in the host display's pixels. Input needs a presented
+// picture and control, which the host grants asynchronously if it allows it.
+while !viewer.status().fresh {
+    tokio::time::sleep(Duration::from_millis(10)).await;
+}
+viewer.request_control(true)?;
+while !viewer.status().controlling {
+    tokio::time::sleep(Duration::from_millis(10)).await;
+}
+let view = viewer.view();
+if let Some(point) = view.display_point(0.5, 0.5) {
+    let click = |down| Input::Button { button: Button::Left, down, drag_start: false };
+    viewer.input(view.generation, &[point, click(true), click(false)])?;
+}
+```
+
+`Host::watch` and `Viewer::watch` stream status, `supervisor::Supervisor`
+keeps a viewer connected, and `trust::TrustFile` keeps a host's invitation
+valid across restarts. Six examples cover them; `cargo run -p pb-mapper
+--features desktop --example desktop_loopback` runs a relay, a host and a
+viewer in one process on any OS. See the SDK's
+[Remote desktop section](crates/pb-mapper/README.md#remote-desktop) for the API
+and how to decode, and [docs/remote-desktop.md](docs/remote-desktop.md) for the
+helper, the video pipeline and measurements.
+
+Not yet: hosts on macOS, Linux or phones (the host is split by platform, ready
+for them), audio, clipboard, file transfer, and more than one viewer at a time.
+The helper's acceptance for UAC prompts under Windows' default secure-desktop
+policy, and for password entry on a locked screen, is still outstanding.
 
 ## Credentials and security
 
@@ -297,13 +424,15 @@ relay; upgrade them, or start the relay with `--direct-advertise PUBLIC_IP:7666`
 
 - [Optional QUIC relay](docs/relay-quic.zh-CN.md) (Chinese): TCP remains the default; CLI selection, Rust/Node SDKs, diagnostics and implementation
 - [User guide](docs/user-guide.md): every command and flag
+- [Remote desktop](docs/remote-desktop.md): the app, the Windows helper, the SDK, the video pipeline, measurements and limits
 - [Weak-network recovery](docs/weak-network-recovery.md): deadlines, resource bounds, fault tests
 - [Authentication and protocol v2](docs/authentication-v2.md)
 - [Direct connection design](docs/issue-13-direct-connect-design.zh-CN.md) (Chinese)
 - [Changelog](CHANGELOG.md)
 
 Repository layout: `crates/` holds the Rust workspace (core, auth, protocol,
-server, client, the `pb-mapper` SDK facade, Node-API binding, CLI and testkit);
+server, client, remote desktop, the `pb-mapper` SDK facade, Node-API binding,
+CLI and testkit);
 `js/` the npm package; `ui/` the Flutter app and its C ABI; `skills/` the agent
 workflows; `docker/`, `services/` and `scripts/` packaging and operations.
 
