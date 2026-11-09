@@ -193,7 +193,9 @@ control says nothing about it. Changing it reuses LAN-first's dialog, for
 the connections Rust names in `lanTransport`; a remote-desktop viewer takes
 it at its next connect. A path chip on TCP reads **LAN · TCP** (局域网 ·
 TCP), in Tunnels, in the galaxy's panel, and in the remote viewer's chip,
-overlay and quality panel; QUIC, the usual carrier, is never named. TCP
+overlay and quality panel; QUIC, the usual carrier, is never named. Two
+ends on one computer meet over loopback, which is no LAN, so their TCP
+path reads **Direct · TCP**. TCP
 keeps its figures in the kernel, so a TCP link's only round trip is its
 handshake's: the viewer's quality panel leaves out the network round trip
 for it rather than show a stale number as QUIC's.

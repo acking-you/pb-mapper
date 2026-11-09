@@ -38,7 +38,7 @@ void main() {
     await finish(tester);
   });
 
-  testWidgets('a LAN path over TCP names its carrier on the chip', (
+  testWidgets('a direct path over TCP names its carrier on the chip', (
     tester,
   ) async {
     await _open(
@@ -53,6 +53,17 @@ void main() {
               link: TunnelLink(kind: LinkKind.lan, transport: LanTransport.tcp),
             ),
           ),
+          // Both ends on this computer: loopback is no LAN.
+          fakeClient(
+            serviceKey: 'local',
+            path: const TunnelPath(
+              activeDirect: 1,
+              link: TunnelLink(
+                kind: LinkKind.private,
+                transport: LanTransport.tcp,
+              ),
+            ),
+          ),
           fakeClient(
             serviceKey: 'cam',
             path: const TunnelPath(
@@ -65,6 +76,7 @@ void main() {
       ),
     );
     expect(find.text('LAN · TCP'), findsOneWidget);
+    expect(find.text('Direct · TCP'), findsOneWidget);
     expect(find.text('LAN'), findsOneWidget);
     await finish(tester);
   });

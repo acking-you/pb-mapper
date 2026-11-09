@@ -254,13 +254,19 @@ bool _crossesRelay(PathMode? mode) => switch (mode) {
 
 /// What [tunnel]'s path is called, in a word or two; with the carrier when
 /// that is not the usual one: QUIC to the relay, which is reached over TCP
-/// unless said, or TCP within a LAN, which runs over QUIC unless said.
+/// unless said, or TCP on a direct path, which runs over QUIC unless said.
+/// TCP is only ever within a LAN, or on this computer's loopback, which is
+/// not a LAN and reads as direct.
 String pathLabel(BuildContext context, Tunnel tunnel) {
   final label = _pathLabel(context, tunnel);
   if (tunnel.overQuic && _crossesRelay(tunnel.pathMode)) {
     return '$label · ${RelayTransport.quic.label}';
   }
-  return _overTcp(tunnel.path?.link) && tunnel.pathMode == PathMode.lan
+  final direct = switch (tunnel.pathMode) {
+    PathMode.lan || PathMode.direct => true,
+    _ => false,
+  };
+  return direct && _overTcp(tunnel.path?.link)
       ? '$label · ${LanTransport.tcp.label}'
       : label;
 }
