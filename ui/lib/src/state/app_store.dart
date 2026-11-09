@@ -545,6 +545,7 @@ class AppStore extends ChangeNotifier {
       msgHeaderKey: credential.trim(),
       relayTransport: relayTransport ?? config.relayTransport,
       lanFirst: config.lanFirst,
+      lanTransport: config.lanTransport,
     );
     await _loadConfig();
     relay = null;
@@ -566,6 +567,24 @@ class AppStore extends ChangeNotifier {
       msgHeaderKey: config.msgHeaderKey,
       relayTransport: config.relayTransport,
       lanFirst: on,
+      lanTransport: config.lanTransport,
+    );
+    await _loadConfig();
+    return result;
+  }
+
+  /// What a local network this computer shares with the other end carries
+  /// for what it dials, saved at once as [setLanFirst] is. When it changed,
+  /// the result's `lanTransport` lists the connections on this relay, under
+  /// this credential, that starting again would change: see [restart].
+  Future<OperationResult> setLanTransport(LanTransport transport) async {
+    final result = await api.updateConfig(
+      serverAddress: config.serverAddress,
+      keepAlive: config.keepAliveEnabled,
+      msgHeaderKey: config.msgHeaderKey,
+      relayTransport: config.relayTransport,
+      lanFirst: config.lanFirst,
+      lanTransport: transport,
     );
     await _loadConfig();
     return result;

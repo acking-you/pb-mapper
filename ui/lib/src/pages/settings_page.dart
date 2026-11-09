@@ -571,20 +571,39 @@ class _DirectCard extends StatefulWidget {
 }
 
 class _DirectCardState extends State<_DirectCard> {
-  /// The value being saved, shown until the save is answered.
+  /// The values being saved, each shown until its save is answered.
   bool? _saving;
+  LanTransport? _savingTransport;
 
   AppStore get _store => widget.store;
 
   Future<void> _set(bool on) async {
     setState(() => _saving = on);
+    await _save(() => _store.setLanFirst(on), 'lanFirst');
+    if (mounted) setState(() => _saving = null);
+  }
+
+  Future<void> _setTransport(LanTransport transport) async {
+    if (_savingTransport != null || transport == _store.config.lanTransport) {
+      return;
+    }
+    setState(() => _savingTransport = transport);
+    await _save(() => _store.setLanTransport(transport), 'lanTransport');
+    if (mounted) setState(() => _savingTransport = null);
+  }
+
+  /// Save with [save], then offer to start again the tunnels its answer
+  /// names under [reachedBy].
+  Future<void> _save(
+    Future<OperationResult> Function() save,
+    String reachedBy,
+  ) async {
     // What the save writes, read before it: a later save may have replaced
     // the store's config by the time this one is answered.
     final relay = _store.config.serverAddress;
     final credential = _store.config.msgHeaderKey;
-    final result = await _store.setLanFirst(on);
+    final result = await save();
     if (!mounted) return;
-    setState(() => _saving = null);
     if (!result.success) {
       showToast(context, result.message, kind: ToastKind.error);
       return;
@@ -592,7 +611,7 @@ class _DirectCardState extends State<_DirectCard> {
     // Only the tunnels on the relay and credential just saved: a start
     // takes those, so one still on an earlier relay or credential would be
     // moved onto them, away from whoever reaches it there.
-    final reached = CarrierMove.fromMap(result.data['lanFirst']);
+    final reached = CarrierMove.fromMap(result.data[reachedBy]);
     if (reached.isEmpty) return;
     await _offerRestart(reached, relay: relay, credential: credential);
   }
@@ -653,18 +672,56 @@ class _DirectCardState extends State<_DirectCard> {
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
+    final theme = Theme.of(context);
     return GroupCard(
       title: l10n.settingsDirect,
       icon: AppIcons.direct,
       child: ListenableBuilder(
         listenable: _store,
-        builder: (context, _) => SwitchListTile(
-          key: const Key('settings-lan-first'),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-          title: Text(l10n.lanFirst),
-          subtitle: Text(l10n.lanFirstHelp),
-          value: _saving ?? _store.config.lanFirst,
-          onChanged: _saving == null ? _set : null,
+        builder: (context, _) => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SwitchListTile(
+              key: const Key('settings-lan-first'),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+              title: Text(l10n.lanFirst),
+              subtitle: Text(l10n.lanFirstHelp),
+              value: _saving ?? _store.config.lanFirst,
+              onChanged: _saving == null ? _set : null,
+            ),
+            const SizedBox(height: 10),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: _ChoiceRow(
+                label: l10n.lanTransport,
+                child: GlassSegmented<LanTransport>(
+                  key: const Key('settings-lan-transport'),
+                  expand: false,
+                  selected: _savingTransport ?? _store.config.lanTransport,
+                  onChanged: _setTransport,
+                  segments: [
+                    for (final transport in LanTransport.values)
+                      GlassSegment(
+                        key: Key('settings-lan-transport-${transport.name}'),
+                        value: transport,
+                        label: transport.label,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Text(
+                l10n.lanTransportHelp,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontSize: 12.5,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );

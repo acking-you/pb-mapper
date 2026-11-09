@@ -418,6 +418,7 @@ class PbMapperService {
     required String msgHeaderKey,
     required String relayTransport,
     bool lanFirst = true,
+    String lanTransport = 'quic',
   }) {
     return _runJsonOnWorker('updateConfig', {
       'serverAddress': serverAddress,
@@ -425,6 +426,7 @@ class PbMapperService {
       'msgHeaderKey': msgHeaderKey,
       'relayTransport': relayTransport,
       'lanFirst': lanFirst,
+      'lanTransport': lanTransport,
     });
   }
 
@@ -591,6 +593,7 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
   Pointer<Utf8>? arg1;
   Pointer<Utf8>? arg2;
   Pointer<Utf8>? arg3;
+  Pointer<Utf8>? arg4;
   Pointer<Utf8> result = nullptr;
 
   try {
@@ -675,6 +678,7 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
         arg1 = (params['serverAddress'] as String).toNativeUtf8();
         arg2 = (params['msgHeaderKey'] as String).toNativeUtf8();
         arg3 = (params['relayTransport'] as String? ?? 'tcp').toNativeUtf8();
+        arg4 = (params['lanTransport'] as String? ?? 'quic').toNativeUtf8();
         result = ffi.pbMapperUpdateConfig(
           handle,
           arg1,
@@ -682,6 +686,7 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
           arg2,
           arg3,
           (params['lanFirst'] as bool? ?? true) ? 1 : 0,
+          arg4,
         );
         break;
       case 'getServiceConfigs':
@@ -726,6 +731,9 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
     }
     if (arg2 != null && arg2 != nullptr) {
       calloc.free(arg2);
+    }
+    if (arg4 != null && arg4 != nullptr) {
+      calloc.free(arg4);
     }
     if (arg3 != null && arg3 != nullptr) {
       calloc.free(arg3);

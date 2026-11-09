@@ -29,10 +29,31 @@ class OperationResult {
   });
 }
 
+/// What a path within a local network this computer shares with the other
+/// end runs over, for what it dials: QUIC, as before there was a choice, or
+/// TCP, which falls back to QUIC when the other end's firewall stops it. A
+/// path across the internet is always QUIC.
+enum LanTransport {
+  quic,
+  tcp;
+
+  /// The transport [raw] names; QUIC for anything else, as the Rust side
+  /// defaults.
+  static LanTransport parse(Object? raw) =>
+      raw == 'tcp' ? LanTransport.tcp : LanTransport.quic;
+
+  /// What it is called, in any language.
+  String get label => switch (this) {
+    LanTransport.quic => 'QUIC',
+    LanTransport.tcp => 'TCP',
+  };
+}
+
 /// What saving the settings left to do: this computer's tunnels on that
 /// relay, under that credential, still on the carrier it had before (`move`)
-/// or, when they may go direct, on the LAN-first it had (`lanFirst`). Each
-/// keeps it until started again.
+/// or, when they may go direct, on the LAN-first it had (`lanFirst`), or the
+/// connections on the LAN transport they had (`lanTransport`). Each keeps it
+/// until started again.
 class CarrierMove {
   const CarrierMove({this.shares = const [], this.connections = const []});
 
@@ -62,6 +83,11 @@ class ConfigStatus {
   /// Whether this computer tries a local network it shares with the other
   /// end first. Each tunnel and remote-desktop start takes it as it is then.
   final bool lanFirst;
+
+  /// What such a network carries for what this computer dials. Each
+  /// connection and remote-desktop start takes it as it is then; as the
+  /// other end, this computer serves whichever is asked for.
+  final LanTransport lanTransport;
   final bool isolatedRelayAdminKeySet;
   final String isolatedRelayAdminKey;
 
@@ -71,6 +97,7 @@ class ConfigStatus {
     required this.msgHeaderKey,
     this.relayTransport = RelayTransport.tcp,
     this.lanFirst = true,
+    this.lanTransport = LanTransport.quic,
     this.isolatedRelayAdminKeySet = false,
     this.isolatedRelayAdminKey = '',
   });
@@ -85,6 +112,7 @@ class ConfigStatus {
       msgHeaderKey: _asString(map['msgHeaderKey']),
       relayTransport: RelayTransport.parse(map['relayTransport']),
       lanFirst: _asBool(map['lanFirst'], fallback: true),
+      lanTransport: LanTransport.parse(map['lanTransport']),
       isolatedRelayAdminKeySet: _asBool(
         map['isolatedRelayAdminKeySet'],
         fallback: false,
@@ -94,7 +122,8 @@ class ConfigStatus {
   }
 
   /// Whether [other] reaches the same relay the same way. A change of
-  /// [lanFirst] alone is no reason to ask the relay anything again.
+  /// [lanFirst] or [lanTransport] alone is no reason to ask the relay
+  /// anything again.
   bool sameRelay(ConfigStatus other) =>
       serverAddress == other.serverAddress &&
       keepAliveEnabled == other.keepAliveEnabled &&
@@ -288,6 +317,7 @@ class TunnelLink {
     this.family,
     this.peer,
     this.localIp,
+    this.transport = LanTransport.quic,
     this.rttMs,
     this.setupMs,
   });
@@ -302,7 +332,11 @@ class TunnelLink {
   final String? peer;
   final String? localIp;
 
-  /// QUIC's round trip, in whole milliseconds rounded up.
+  /// QUIC, or TCP within a local network.
+  final LanTransport transport;
+
+  /// The round trip, in whole milliseconds rounded up: QUIC's, or over TCP
+  /// its handshake's.
   final int? rttMs;
   final int? setupMs;
 
@@ -314,6 +348,7 @@ class TunnelLink {
       family: raw['family'] as String?,
       peer: raw['peer'] as String?,
       localIp: raw['localIp'] as String?,
+      transport: LanTransport.parse(raw['transport']),
       rttMs: number(raw['rttMs']),
       setupMs: number(raw['setupMs']),
     );
@@ -326,11 +361,13 @@ class TunnelLink {
       other.family == family &&
       other.peer == peer &&
       other.localIp == localIp &&
+      other.transport == transport &&
       other.rttMs == rttMs &&
       other.setupMs == setupMs;
 
   @override
-  int get hashCode => Object.hash(kind, family, peer, localIp, rttMs, setupMs);
+  int get hashCode =>
+      Object.hash(kind, family, peer, localIp, transport, rttMs, setupMs);
 }
 
 /// How a running tunnel's sessions travel: each TCP connection or UDP flow
@@ -611,15 +648,18 @@ abstract interface class PbMapperApiClient {
   Future<ConfigStatus> fetchConfig();
   Future<String> revealIsolatedRelayAdminKey();
 
-  /// Save the relay settings, and whether this computer tries a shared local
-  /// network first. Its [OperationResult.data] carries a [CarrierMove] under
-  /// `move` when the carrier changed, and under `lanFirst` when that did.
+  /// Save the relay settings, whether this computer tries a shared local
+  /// network first, and what such a network carries. Its
+  /// [OperationResult.data] carries a [CarrierMove] under `move` when the
+  /// carrier changed, under `lanFirst` when that did, and under
+  /// `lanTransport` when that did.
   Future<OperationResult> updateConfig({
     required String serverAddress,
     required bool keepAlive,
     required String msgHeaderKey,
     RelayTransport relayTransport = RelayTransport.tcp,
     bool lanFirst = true,
+    LanTransport lanTransport = LanTransport.quic,
   });
 
   /// Run a relay on [port]; with [quicPort], one that also takes QUIC there.
@@ -775,6 +815,7 @@ class PbMapperApi implements PbMapperApiClient {
     required String msgHeaderKey,
     RelayTransport relayTransport = RelayTransport.tcp,
     bool lanFirst = true,
+    LanTransport lanTransport = LanTransport.quic,
   }) async {
     final result = await _service.updateConfig(
       serverAddress: serverAddress,
@@ -782,6 +823,7 @@ class PbMapperApi implements PbMapperApiClient {
       msgHeaderKey: msgHeaderKey,
       relayTransport: relayTransport.name,
       lanFirst: lanFirst,
+      lanTransport: lanTransport.name,
     );
     return _resultFrom(result);
   }

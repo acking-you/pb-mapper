@@ -247,6 +247,7 @@ mod tests {
                         msg_header_key: pb_mapper_testkit::TEST_ADMIN_KEY.into(),
                         relay_transport: RelayTransport::Tcp,
                         lan_first: true,
+                        ..Default::default()
                     })
                     .await
             })

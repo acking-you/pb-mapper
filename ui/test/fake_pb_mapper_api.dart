@@ -86,25 +86,30 @@ class FakePbMapperApi implements PbMapperApiClient {
     required String msgHeaderKey,
     RelayTransport relayTransport = RelayTransport.tcp,
     bool lanFirst = true,
+    LanTransport lanTransport = LanTransport.quic,
   }) async {
     calls.add(
       'updateConfig($serverAddress'
       '${relayTransport == RelayTransport.tcp ? '' : ', ${relayTransport.name}'}'
-      '${lanFirst ? '' : ', lan-first off'})',
+      '${lanFirst ? '' : ', lan-first off'}'
+      '${lanTransport == LanTransport.quic ? '' : ', lan ${lanTransport.name}'})',
     );
     if (_refused() case final refused?) return refused;
     final moved = relayTransport != config.relayTransport;
     final lanFirstChanged = lanFirst != config.lanFirst;
+    final lanTransportChanged = lanTransport != config.lanTransport;
     config = ConfigStatus(
       serverAddress: serverAddress,
       keepAliveEnabled: keepAlive,
       msgHeaderKey: msgHeaderKey,
       relayTransport: relayTransport,
       lanFirst: lanFirst,
+      lanTransport: lanTransport,
     );
-    // As the Rust side names them: running tunnels on another carrier, and
-    // running tunnels that may go direct when LAN-first changed. The fake
-    // has one relay and credential, so none is on another.
+    // As the Rust side names them: running tunnels on another carrier,
+    // running tunnels that may go direct when LAN-first changed, and running
+    // connections that may when the LAN transport did. The fake has one
+    // relay and credential, so none is on another.
     bool other(RelayTransport? running) =>
         moved && running != null && running != relayTransport;
     bool reached(String status, bool allowDirect) =>
@@ -131,6 +136,14 @@ class FakePbMapperApi implements PbMapperApiClient {
           'connections': [
             for (final c in clients)
               if (reached(c.status, c.allowDirect)) c.serviceKey,
+          ],
+        },
+        'lanTransport': {
+          'shares': const <String>[],
+          'connections': [
+            for (final c in clients)
+              if (lanTransportChanged && c.status != 'stopped' && c.allowDirect)
+                c.serviceKey,
           ],
         },
       },
@@ -638,6 +651,7 @@ class FakePbMapperApi implements PbMapperApiClient {
       msgHeaderKey: rotated,
       relayTransport: config.relayTransport,
       lanFirst: config.lanFirst,
+      lanTransport: config.lanTransport,
     );
     return KeyRotation(
       key: rotated,

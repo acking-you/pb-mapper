@@ -290,6 +290,8 @@
   "lanFirstRestartNow": "Restart now",
   "lanFirstRestarted": "{count, plural, =1{1 tunnel} other{{count} tunnels}} started again with the new setting",
   "@lanFirstRestarted": {"placeholders": {"count": {"type": "int"}}},
+  "lanTransport": "LAN transport",
+  "lanTransportHelp": "TCP needs the other computer's firewall to let TCP in; where it does not, connections use QUIC. Affects only connections this computer makes; when connected to, this computer serves what the other end chose.",
   "settingsAppearance": "Appearance",
   "theme": "Theme",
   "themeSystem": "System",

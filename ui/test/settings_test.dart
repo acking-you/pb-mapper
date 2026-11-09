@@ -2,7 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart' show RelayTransport;
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart'
+    show LanTransport, RelayTransport;
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 
 import 'fake_pb_mapper_api.dart';
@@ -11,18 +12,22 @@ import 'support.dart';
 Future<void> _open(WidgetTester tester, FakePbMapperApi api) =>
     pumpApp(tester, api, page: AppPage.settings);
 
-/// Scroll the settings list until [target], perhaps not built yet, is shown.
-Future<void> _reveal(WidgetTester tester, Finder target) =>
-    tester.scrollUntilVisible(
-      target,
-      200,
-      scrollable: find
-          .descendant(
-            of: find.byKey(const Key('settings-list')),
-            matching: find.byType(Scrollable),
-          )
-          .first,
-    );
+/// Scroll the settings list until [target], perhaps not built yet, is shown
+/// whole: a scroll that stops with it on the edge leaves a tap off screen.
+Future<void> _reveal(WidgetTester tester, Finder target) async {
+  await tester.scrollUntilVisible(
+    target,
+    200,
+    scrollable: find
+        .descendant(
+          of: find.byKey(const Key('settings-list')),
+          matching: find.byType(Scrollable),
+        )
+        .first,
+  );
+  await tester.ensureVisible(target);
+  await tester.pump();
+}
 
 void main() {
   testWidgets('the relay form is filled from the saved config', (tester) async {
@@ -175,6 +180,35 @@ void main() {
     expect(api.calls.skip(1), ['registerService(nas)']);
     await finish(tester);
   });
+
+  testWidgets(
+    'the LAN transport applies at once to the connections it reaches',
+    (tester) async {
+      final api = FakePbMapperApi(
+        services: [fakeService(serviceKey: 'nas')],
+        clients: [
+          fakeClient(serviceKey: 'desk'),
+          fakeClient(serviceKey: 'relayed', allowDirect: false),
+        ],
+      );
+      await _open(tester, api);
+      final tcp = find.byKey(const Key('settings-lan-transport-tcp'));
+      await _reveal(tester, tcp);
+      await tester.tap(tcp);
+      await settle(tester);
+      expect(api.calls, ['updateConfig(lb7666.top:7666, lan tcp)']);
+      expect(api.config.lanTransport, LanTransport.tcp);
+      // A share serves whatever it is asked for: only the connection that may
+      // go direct is offered a restart.
+      await tester.tap(find.byKey(const Key('lan-first-restart-now')));
+      await settle(tester);
+      expect(api.calls.skip(1), [
+        'disconnectService(desk)',
+        'connectService(desk)',
+      ]);
+      await finish(tester);
+    },
+  );
 
   testWidgets('a string that is not a setup string is refused', (tester) async {
     final api = FakePbMapperApi();
