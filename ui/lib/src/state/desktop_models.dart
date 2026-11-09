@@ -838,6 +838,7 @@ class DesktopLink {
     this.via = '',
     this.peer,
     this.localIp,
+    this.tcp = false,
     this.rttMs,
     this.minRttMs,
     this.setupMs,
@@ -850,6 +851,7 @@ class DesktopLink {
     via: json['via'] as String? ?? '',
     peer: json['peer'] as String?,
     localIp: json['local_ip'] as String?,
+    tcp: json['transport'] == 'tcp',
     rttMs: _int(json['rtt_ms']),
     minRttMs: _int(json['min_rtt_ms']),
     setupMs: _int(json['setup_ms']),
@@ -867,8 +869,12 @@ class DesktopLink {
   final String via;
   final String? peer, localIp;
 
+  /// The path runs over TCP on a LAN rather than QUIC; an older host's
+  /// link says nothing and is QUIC.
+  final bool tcp;
+
   /// The QUIC path's own round trip, its lowest, and how long the path
-  /// took to set up.
+  /// took to set up. Over TCP the round trips are only the handshake's.
   final int? rttMs, minRttMs, setupMs;
 
   /// What showed both ends on one LAN: `ipv6_prefix`, `public_ip_subnet`
@@ -885,6 +891,7 @@ class DesktopLink {
       other.via == via &&
       other.peer == peer &&
       other.localIp == localIp &&
+      other.tcp == tcp &&
       other.rttMs == rttMs &&
       other.minRttMs == minRttMs &&
       other.setupMs == setupMs &&
@@ -896,6 +903,7 @@ class DesktopLink {
     via,
     peer,
     localIp,
+    tcp,
     rttMs,
     minRttMs,
     setupMs,
@@ -1062,6 +1070,9 @@ class DesktopStats {
 
   /// The direct path stays on one LAN.
   bool get lan => link?.lan == true;
+
+  /// The direct path runs over TCP rather than QUIC.
+  bool get tcp => link?.tcp == true;
 
   /// The host's rate for a JPEG session, whatever the preset (`qos.rs`
   /// `JPEG_MAX_FPS`).

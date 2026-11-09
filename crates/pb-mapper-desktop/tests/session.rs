@@ -368,6 +368,7 @@ async fn encrypted_desktop_direct_and_relay_enforce_grants_and_owned_teardown() 
                 "family",
                 "via",
                 "peer",
+                "transport",
                 "rtt_ms",
                 "min_rtt_ms",
                 "setup_ms",

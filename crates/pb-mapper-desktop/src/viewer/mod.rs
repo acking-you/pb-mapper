@@ -44,8 +44,8 @@ use crate::{
 use outbound::{Barrier, Lifecycle, ModeRequest, Next, Outbound};
 use parking_lot::Mutex;
 use pb_mapper_client::sdk::{
-    AddressFamily, Client, ConnectOptions, Connection, LanEvidence, LinkKind, LinkSample, LinkVia,
-    RelayTransport, TunnelMetrics, TunnelMetricsStream,
+    AddressFamily, Client, ConnectOptions, Connection, DirectTransport, LanEvidence, LinkKind,
+    LinkSample, LinkVia, RelayTransport, TunnelMetrics, TunnelMetricsStream,
 };
 use serde::Serialize;
 use status::{CursorSlot, HostStats, Traffic, ViewerStatsAcc, millis};
@@ -1389,9 +1389,14 @@ pub struct ViewerLink {
     pub via: LinkVia,
     pub peer: String,
     pub local_ip: Option<String>,
+    /// QUIC, or TCP on a LAN when this viewer's `ConnectOptions` asked for
+    /// it and the host let TCP in.
+    pub transport: DirectTransport,
     /// QUIC's round trip and its lowest, rounded up to whole milliseconds:
     /// the network alone, unlike `ViewerStats::rtt_ms`, which the host's
-    /// probe measures behind the video.
+    /// probe measures behind the video. TCP keeps its figures in the
+    /// kernel, so over TCP both are the handshake's round trip, measured
+    /// once at setup.
     pub rtt_ms: u32,
     pub min_rtt_ms: u32,
     pub setup_ms: u32,
@@ -1408,6 +1413,7 @@ impl From<&LinkSample> for ViewerLink {
             via: link.via,
             peer: link.peer.to_string(),
             local_ip: link.local_ip.map(|ip| ip.to_string()),
+            transport: link.transport,
             rtt_ms: ms(link.stats.rtt_us),
             min_rtt_ms: ms(link.stats.min_rtt_us),
             setup_ms: u32::try_from(link.setup_ms).unwrap_or(u32::MAX),

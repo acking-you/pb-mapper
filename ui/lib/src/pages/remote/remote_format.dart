@@ -36,14 +36,21 @@ bool carriesInvitation(String text) =>
     text.contains('pbd1.') || text.contains('"token"');
 
 /// `direct` and `relay` in words, a direct path on one LAN ([lan]) as
-/// such; anything else (not yet known) as a dash.
-String pathLabel(BuildContext context, String? path, {bool lan = false}) =>
-    switch (path) {
-      'direct' when lan => context.l10n.pathLan,
-      'direct' => context.l10n.pathDirect,
-      'relay' => context.l10n.pathRelay,
-      _ => '—',
-    };
+/// such, and one over TCP ([tcp]) with its carrier, since QUIC is the
+/// usual one; anything else (not yet known) as a dash.
+String pathLabel(
+  BuildContext context,
+  String? path, {
+  bool lan = false,
+  bool tcp = false,
+}) => switch (path) {
+  'direct' => [
+    lan ? context.l10n.pathLan : context.l10n.pathDirect,
+    if (tcp) 'TCP',
+  ].join(' · '),
+  'relay' => context.l10n.pathRelay,
+  _ => '—',
+};
 
 /// A transfer rate in the largest binary unit it reaches, to three figures
 /// at most, so it never runs past nine characters and a fixed cell holds

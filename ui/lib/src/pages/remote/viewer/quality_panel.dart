@@ -149,8 +149,9 @@ class QualityPanel extends StatelessWidget {
     ),
   );
 
-  /// The path in full: a LAN or an internet direct path with its address
-  /// family, or the relay with its carrier.
+  /// The path in full: a LAN or an internet direct path with its carrier
+  /// when that is TCP and its address family, or the relay with its
+  /// carrier.
   static String _path(
     BuildContext context,
     DesktopSessionView s,
@@ -167,6 +168,7 @@ class QualityPanel extends StatelessWidget {
     return switch (s.path) {
       'direct' => [
         st.lan ? l10n.qualityPathLan : l10n.pathDirect,
+        if (st.tcp) 'TCP',
         ?family,
       ].join(' · '),
       'relay' when transport != null && transport.isNotEmpty =>
@@ -182,7 +184,9 @@ class QualityPanel extends StatelessWidget {
   ) {
     final l10n = context.l10n;
     final link = st.link;
-    final linkRtt = link?.rttMs, lowest = link?.minRttMs;
+    // TCP's figures stay in the kernel: its link has only the handshake's
+    // round trip, which is no measure of the network now.
+    final linkRtt = st.tcp ? null : link?.rttMs, lowest = link?.minRttMs;
     final queued = st.queueDelayMs ?? 0;
     final sent = st.sentBitrateBps;
     final (down, up) = (st.speedRxBps, st.speedTxBps);

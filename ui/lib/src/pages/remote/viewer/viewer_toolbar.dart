@@ -462,7 +462,7 @@ class ToolbarStatusChip extends StatelessWidget {
       final s = session.value;
       final st = stats.value;
       final (:degraded, :dot) = viewerLink(s, st);
-      final path = pathLabel(context, s.path, lan: st.lan);
+      final path = pathLabel(context, s.path, lan: st.lan, tcp: st.tcp);
       // No word while the path is unknown, only its figures' dashes.
       final label = degraded
           ? l10n.viewerSlow(path)

@@ -439,6 +439,55 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('a LAN path over TCP names its carrier and shows no network '
+      'round trip, which TCP has only from its handshake', (tester) async {
+    _size(tester, const Size(1280, 800));
+    final session = ValueNotifier(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.live,
+        path: 'direct',
+      ),
+    );
+    final stats = ValueNotifier(
+      DesktopStats.fromJson({
+        'path': 'direct',
+        'rtt_ms': 9,
+        'link': {
+          'kind': 'lan',
+          'family': 'ipv4',
+          'transport': 'tcp',
+          'rtt_ms': 1,
+          'min_rtt_ms': 1,
+        },
+      }),
+    );
+    await tester.pumpWidget(
+      _app(
+        Align(
+          alignment: Alignment.topLeft,
+          child: QualityPanel(
+            session: session,
+            stats: stats,
+            decoder: ValueNotifier<DesktopDecoderStats?>(null),
+          ),
+        ),
+      ),
+    );
+    final l10n = AppLocalizations.of(
+      tester.element(find.byType(QualityPanel)),
+    )!;
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('quality-path')),
+        matching: find.text('${l10n.qualityPathLan} · TCP · IPv4'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('quality-link-rtt')), findsNothing);
+    expect(find.byKey(const Key('quality-stream-rtt')), findsOneWidget);
+  });
+
   testWidgets('the chip keeps its width as the figures change', (tester) async {
     // The toolbar is centred around the chip: a wider figure would move
     // every button.

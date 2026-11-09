@@ -1022,7 +1022,12 @@ class _DegradedPill extends StatelessWidget {
                   tint: ViewerPalette.chrome,
                   leading: _dot(ViewerPalette.caution),
                   text: context.l10n.viewerSlow(
-                    pathLabel(context, session.value.path, lan: st.lan),
+                    pathLabel(
+                      context,
+                      session.value.path,
+                      lan: st.lan,
+                      tcp: st.tcp,
+                    ),
                   ),
                   trailing: Text(
                     st.pictureLatencyMs == null

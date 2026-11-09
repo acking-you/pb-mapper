@@ -1414,12 +1414,9 @@ async fn connect(
             };
             // Configuration can wait behind other app operations. Keep that
             // wait inside the registered, cancellable attempt.
-            let (client, lan_first) = {
+            let (client, app) = {
                 let state = handle.state.lock().await;
-                (
-                    state.relay_client()?,
-                    state.get_config_status().await.lan_first,
-                )
+                (state.relay_client()?, state.get_config_status().await)
             };
             let options = ConnectOptions {
                 path: if relay_only {
@@ -1427,7 +1424,8 @@ async fn connect(
                 } else {
                     PathPolicy::Auto
                 },
-                lan_first,
+                lan_first: app.lan_first,
+                lan_transport: app.lan_transport,
                 ..Default::default()
             };
             let progress = Arc::new(move |next: ConnectStage| {
