@@ -6,14 +6,14 @@
 //! [`NativeBackend`] is this build's platform behind an opaque type.
 
 use crate::{
-    Backend, BackendCaps, BackendError, Description, DesktopContext, Display, DisplaySelection,
-    DoubleClickGuard, EncodedFrame, FailureKind, Input, Result, VideoCodec, VideoFormat,
-    VideoLimits, VideoRate, Waker, error,
+    Backend, BackendCaps, BackendError, Description, DesktopContext, DesktopKind, Display,
+    DisplaySelection, DoubleClickGuard, EncodedFrame, FailureKind, Input, Result, VideoCodec,
+    VideoFormat, VideoLimits, VideoRate, Waker, error,
     input::{cursor::confine, held::Held},
-    modes::{Mode, ModeList},
+    modes::{self, Guard, Journal, Mode, ModeList},
     platform::{
         self, CursorSource, Desktop, DisplayModes, Injector, Parts, Platform, StillCapture,
-        VideoSource,
+        VideoSource, no_modes,
     },
 };
 use std::{sync::Arc, time::Duration};
@@ -38,14 +38,29 @@ pub(crate) struct PlatformBackend<P: Platform> {
     /// so a backend no session drives (the helper's worker, a bench) is never
     /// without one.
     waker: Waker,
+    /// What this backend changed of its display's mode, journalled in
+    /// `journal`, which it replays first.
+    modes: Guard,
 }
 impl<P: Platform> PlatformBackend<P> {
     /// On thread C: the session's parts, for `display`.
-    pub(crate) fn open(grant: Arc<P::Grant>, display: &Display) -> Result<Self> {
+    pub(crate) fn open(grant: Arc<P::Grant>, display: &Display, journal: Journal) -> Result<Self> {
         let parts = P::open(&grant, display)?;
-        Ok(Self::from_parts(grant, parts))
+        Ok(Self::from_parts(grant, parts, journal))
     }
-    pub(crate) fn from_parts(grant: Arc<P::Grant>, parts: Parts<P>) -> Self {
+    /// What a host that crashed left changed is put back before this one
+    /// changes anything.
+    pub(crate) fn from_parts(grant: Arc<P::Grant>, mut parts: Parts<P>, journal: Journal) -> Self {
+        if <P::Modes as DisplayModes>::SUPPORTED {
+            let _scope = parts.desktop.scope();
+            if let Err(failure) = modes::recover(&mut parts.modes, &journal) {
+                tracing::warn!(
+                    target: "pb_mapper_desktop::session",
+                    event = "display_mode_journal_unreplayed",
+                    detail = %failure,
+                );
+            }
+        }
         Self {
             video: None,
             parts,
@@ -53,6 +68,7 @@ impl<P: Platform> PlatformBackend<P> {
             held: Held::default(),
             limits: UNCONFIGURED,
             waker: Waker(crate::scheduler::Wake::new()),
+            modes: Guard::new(journal),
         }
     }
     /// Bind to the input desktop. A switch, or a desktop this process cannot
@@ -91,7 +107,8 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             caps: BackendCaps {
                 h265: probe_h265 && P::Video::encodes(&display, VideoCodec::H265),
                 lock: self.parts.input.can_lock(),
-                display_modes: <P::Modes as DisplayModes>::SUPPORTED && modes.available(&display),
+                display_modes: <P::Modes as DisplayModes>::SUPPORTED
+                    && modes.available(&display.name),
                 os: Some(P::OS),
                 cursor: self.parts.cursor.mode(),
             },
@@ -274,19 +291,57 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         let _scope = self.parts.desktop.scope();
         self.parts.input.double_click()
     }
-    fn display_modes(&mut self, _expected: &DesktopContext) -> Result<Option<ModeList>> {
-        Ok(None)
+    fn display_modes(&mut self, expected: &DesktopContext) -> Result<Option<ModeList>> {
+        if !<P::Modes as DisplayModes>::SUPPORTED {
+            return Ok(None);
+        }
+        let _scope = self.parts.desktop.scope();
+        self.modes
+            .list(&mut self.parts.modes, &expected.display.name)
     }
-    fn set_display_mode(&mut self, _expected: &DesktopContext, _mode: Mode) -> Result<()> {
-        Err(BackendError::new(FailureKind::Unsupported, "display modes").into())
+    fn set_display_mode(&mut self, expected: &DesktopContext, mode: Mode) -> Result<()> {
+        if !<P::Modes as DisplayModes>::SUPPORTED {
+            return Err(no_modes());
+        }
+        let _scope = self.parts.desktop.scope();
+        if &self.context()? != expected {
+            return Err(error("desktop changed before a display mode change"));
+        }
+        if expected.desktop != DesktopKind::Ordinary {
+            return Err(BackendError::new(
+                FailureKind::SecureDesktop,
+                "the remote resolution cannot change on the secure desktop",
+            )
+            .into());
+        }
+        // Capture loses its device across the change; the source is built
+        // again at the new size.
+        self.video = None;
+        self.modes
+            .set(&mut self.parts.modes, &expected.display.name, mode)
     }
     fn restore_display_mode(&mut self) -> Result<bool> {
-        Ok(false)
+        if !<P::Modes as DisplayModes>::SUPPORTED {
+            return Ok(false);
+        }
+        let _scope = self.parts.desktop.scope();
+        let video = &mut self.video;
+        self.modes.restore(&mut self.parts.modes, || *video = None)
     }
 }
 impl<P: Platform> Drop for PlatformBackend<P> {
     fn drop(&mut self) {
         self.release();
+        // A backstop: thread C restores first. What fails here stays
+        // journalled, and the host tries again.
+        if let Err(failure) = self.restore_display_mode() {
+            tracing::warn!(
+                target: "pb_mapper_desktop::session",
+                event = "display_mode_not_restored",
+                detail = %failure,
+            );
+        }
+        self.modes.release();
         // The video source goes before the desktop binding, which restores
         // the thread's original desktop when it drops.
         self.video = None;
@@ -324,6 +379,7 @@ pub fn native_backend(display: &DisplaySelection) -> Result<NativeBackend> {
     Ok(NativeBackend(PlatformBackend::open(
         Arc::new(grant),
         &display,
+        Journal::in_dir(platform::Current::default_state_dir()),
     )?))
 }
 

@@ -51,6 +51,9 @@ pub enum ViewerReason {
     ControlDenied,
     InputCongestion,
     StalePresentation,
+    /// The host's display is changing mode; the picture returns at its new
+    /// size.
+    DisplayChanging,
     HostStopped,
     HostEnded,
     Restarting,
@@ -71,6 +74,7 @@ impl From<StateReason> for ViewerReason {
             StateReason::InputCongestion => Self::InputCongestion,
             StateReason::StalePresentation => Self::StalePresentation,
             StateReason::DisplayLost => Self::DisplayLost,
+            StateReason::DisplayChanging => Self::DisplayChanging,
         }
     }
 }

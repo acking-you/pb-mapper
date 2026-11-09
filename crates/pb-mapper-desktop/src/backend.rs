@@ -274,8 +274,11 @@ impl BackendCaps {
         let lock = self
             .lock
             .then(|| crate::protocol::CAPABILITY_LOCK.to_string());
+        let modes = self
+            .display_modes
+            .then(|| crate::protocol::CAPABILITY_DISPLAY_MODE.to_string());
         let os = self.os.map(|os| os.capability().to_string());
-        lock.into_iter().chain(os).collect()
+        lock.into_iter().chain(modes).chain(os).collect()
     }
 }
 

@@ -5,7 +5,9 @@
 //! serde ignores extra fields on an internally tagged unit variant. A v2.x
 //! peer sends a new message, field or value only after the other side listed
 //! the matching capability.
-use crate::{Display, InputEvent, KeyframeReason, QualityPreset, VideoCodec, VideoLimits};
+use crate::{
+    Display, InputEvent, KeyframeReason, QualityPreset, VideoCodec, VideoLimits, modes::ModeList,
+};
 use serde::{Deserialize, Serialize};
 
 /// The host captures and injects on a Windows backend that can lock it. The
@@ -23,6 +25,11 @@ pub(crate) const CAPABILITY_H265: &str = "h265";
 /// From a viewer: `limits.max_fps` is a frame rate its user chose, which
 /// replaces every quality preset's own ceiling for the session.
 pub(crate) const CAPABILITY_FPS_OVERRIDE: &str = "fps_override";
+/// Both ways: this end speaks display modes. A host lists it when its
+/// backend can change its display's mode; a viewer that listed it reads
+/// `StateRecord::modes`, `DisplayModeFailed` and `DisplayChanging`, and
+/// sends `DisplayMode` and `RestoreDisplayMode` only to a host that did.
+pub(crate) const CAPABILITY_DISPLAY_MODE: &str = "display_mode";
 const MAX_CAPABILITIES: usize = 16;
 
 /// Capability lists hold at most 16 values of `[a-z0-9_]{1,32}`. A receiver
@@ -101,6 +108,15 @@ pub(crate) enum ViewerMessage {
     },
     /// Only after `PING_IDLE` without any other message.
     Ping {},
+    /// Ordered input lane: change the host display's mode to one it listed
+    /// in `StateRecord::modes`. Only to a host that listed `display_mode`.
+    DisplayMode {
+        width: u32,
+        height: u32,
+    },
+    /// Ordered input lane: back to the display's original mode. Only to a
+    /// host that listed `display_mode`.
+    RestoreDisplayMode {},
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +237,10 @@ pub(crate) struct StateRecord {
     /// The encoded size of this generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<VideoSize>,
+    /// The display's modes, as they are in this generation. Only to a
+    /// viewer that listed `display_mode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<ModeList>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +269,9 @@ pub enum StateReason {
     InputCongestion,
     StalePresentation,
     DisplayLost,
+    /// Capture failed within the settle window of a display mode change.
+    /// Only to a viewer that listed `display_mode`.
+    DisplayChanging,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -284,6 +307,9 @@ pub enum RateModel {
 pub enum NoticeCode {
     Locked,
     LockFailed,
+    /// A display mode change or restore was refused, or failed. Only to a
+    /// viewer that listed `display_mode`.
+    DisplayModeFailed,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -374,6 +400,11 @@ mod tests {
                 event: event(Input::Lock {}),
             },
             ViewerMessage::Ping {},
+            ViewerMessage::DisplayMode {
+                width: 1920,
+                height: 1080,
+            },
+            ViewerMessage::RestoreDisplayMode {},
         ];
         for message in &viewer {
             rejects_extra_field::<ViewerMessage>(round_trip(message));
@@ -408,6 +439,20 @@ mod tests {
                 video: Some(VideoSize {
                     width: 1280,
                     height: 720,
+                }),
+                modes: Some(ModeList {
+                    current: crate::Mode {
+                        width: 1920,
+                        height: 1080,
+                    },
+                    original: crate::Mode {
+                        width: 2560,
+                        height: 1440,
+                    },
+                    supported: vec![crate::Mode {
+                        width: 1920,
+                        height: 1080,
+                    }],
                 }),
             }),
             HostMessage::Video {
@@ -454,6 +499,10 @@ mod tests {
             HostMessage::Notice {
                 code: NoticeCode::LockFailed,
                 message: "access denied".into(),
+            },
+            HostMessage::Notice {
+                code: NoticeCode::DisplayModeFailed,
+                message: "the remote resolution is still changing".into(),
             },
             HostMessage::Stopped {
                 reason: StopReason::HostEnded,

@@ -12,11 +12,12 @@
 mod tests;
 
 use crate::{
-    Backend, Button, ControlAdmission, ControlLease, Description, DesktopContext, EncodedFrame,
-    FailureKind, Input, InputEvent, Result, VideoCodec, VideoLimits, VideoRate, Waker, error,
-    failure_kind,
+    Backend, Button, ControlAdmission, ControlLease, Description, DesktopContext, DesktopKind,
+    EncodedFrame, FailureKind, Input, InputEvent, Result, VideoCodec, VideoLimits, VideoRate,
+    Waker, error, failure_kind,
     idr::IdrReason,
     lane::{LANE_CAPACITY, LaneCommand},
+    modes::{ModeCommand, ModeList, SETTLE},
     outgoing::{HostUnit, Push},
     pacer::Pacer,
     protocol::{NoticeCode, SessionState, StateReason, VideoSize},
@@ -294,6 +295,10 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     hold: DragHold,
     notice_serial: u64,
     notice_until: Option<Instant>,
+    /// Until when the display is still changing after a mode change: a
+    /// capture failure is `DisplayChanging` then, and no other change is
+    /// taken.
+    settle_until: Option<Instant>,
 }
 
 impl<B: Backend, K: Clock> Engine<B, K> {
@@ -341,6 +346,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             hold: DragHold::default(),
             notice_serial: 0,
             notice_until: None,
+            settle_until: None,
         })
     }
 
@@ -354,6 +360,11 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if policy != self.policy {
             self.policy = policy;
             self.release_control();
+            // Revoking control gives the owner their display back; a grant,
+            // which moves the epoch too, does not.
+            if !shared.policy.allowed() {
+                self.restore_mode(now);
+            }
         }
         self.state.record.control_allowed = shared.policy.allowed();
         if shared.lane.take_overflow() {
@@ -426,7 +437,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     }
 
     fn execute(&mut self, command: LaneCommand, now: Instant) {
-        if self.hold.until.is_some() {
+        // A display mode command is never held behind a drag, nor ends one.
+        if self.hold.until.is_some() && !matches!(command, LaneCommand::DisplayMode(_)) {
             if !matches!(
                 command,
                 LaneCommand::Release
@@ -452,6 +464,80 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 }
                 None => self.input(event, now),
             },
+            LaneCommand::DisplayMode(command) => self.display_mode(command, now),
+        }
+    }
+
+    /// A viewer's display mode change or restore, refused with a notice
+    /// unless it controls, the desktop is the ordinary one, a change names a
+    /// mode the viewer was offered, and the last change has settled. The
+    /// owner's restore needs no control. A change is a new context at the
+    /// next check, which follows at once: a new generation, an IDR, held
+    /// input released, the encoder built at the new size.
+    fn display_mode(&mut self, command: ModeCommand, now: Instant) {
+        let controls = self.state.record.controlling && self.allowed();
+        let refused = if command != ModeCommand::HostRestore && !controls {
+            Some("control of the remote computer is needed to change its resolution")
+        } else if self
+            .context
+            .as_ref()
+            .is_none_or(|context| context.desktop != DesktopKind::Ordinary)
+        {
+            Some("the remote resolution cannot change while the secure desktop shows")
+        } else if let ModeCommand::Set(mode) = command
+            && !self
+                .state
+                .record
+                .modes
+                .as_ref()
+                .is_some_and(|modes| modes.supported.contains(&mode))
+        {
+            Some("the remote display does not offer that resolution")
+        } else if self.settle_until.is_some_and(|until| now < until) {
+            Some("the remote resolution is still changing")
+        } else {
+            None
+        };
+        if let Some(refused) = refused {
+            return self.notice(NoticeCode::DisplayModeFailed, refused.into(), now);
+        }
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        let changed = match command {
+            ModeCommand::Set(mode) => self.backend.set_display_mode(&context, mode).map(|()| true),
+            ModeCommand::Restore | ModeCommand::HostRestore => self.backend.restore_display_mode(),
+        };
+        match changed {
+            Ok(changed) => self.mode_changed(changed, now),
+            Err(failure) if failure.kind() == io::ErrorKind::NotConnected => {
+                self.fatal = Some(failure.to_string());
+            }
+            Err(failure) => self.notice(NoticeCode::DisplayModeFailed, failure.to_string(), now),
+        }
+    }
+
+    /// Put the display back without being asked: control was revoked. A
+    /// failure stays journalled, and the session's end tries again.
+    fn restore_mode(&mut self, now: Instant) {
+        match self.backend.restore_display_mode() {
+            Ok(changed) => self.mode_changed(changed, now),
+            Err(failure) if failure.kind() == io::ErrorKind::NotConnected => {
+                self.fatal = Some(failure.to_string());
+            }
+            Err(failure) => tracing::warn!(
+                target: "pb_mapper_desktop::session",
+                event = "display_mode_not_restored",
+                detail = %failure,
+            ),
+        }
+    }
+
+    /// The display shows another mode: settle, and look at once.
+    fn mode_changed(&mut self, changed: bool, now: Instant) {
+        if changed {
+            self.settle_until = Some(now + SETTLE);
+            self.context_due = now;
         }
     }
 
@@ -720,6 +806,21 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 return false;
             }
         }
+        if changed {
+            // On a context change only, never per frame: the owner's own
+            // change reaches the viewer too.
+            self.state.record.modes = match self.backend.display_modes(&context) {
+                Ok(modes) => modes.filter(ModeList::valid),
+                Err(failure) => {
+                    tracing::debug!(
+                        target: "pb_mapper_desktop::session",
+                        event = "display_modes_unread",
+                        detail = %failure,
+                    );
+                    None
+                }
+            };
+        }
         self.state.record.display = Some(context.display.clone());
         self.state.record.desktop = context.desktop;
         self.context = Some(context);
@@ -759,7 +860,13 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         } else {
             now + UNAVAILABLE_RETRY
         };
-        self.unavailable = Some((unavailable_reason(&failure), failure.to_string()));
+        // A mode change costs the capture its device for a moment.
+        let reason = if self.settle_until.is_some_and(|until| now < until) {
+            StateReason::DisplayChanging
+        } else {
+            unavailable_reason(&failure)
+        };
+        self.unavailable = Some((reason, failure.to_string()));
     }
 
     /// Capturing, not paused, with a frame produced in this generation.
@@ -993,8 +1100,18 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     }
 }
 impl<B: Backend, K: Clock> Drop for Engine<B, K> {
+    /// The session ends, however it ends (a panic on thread C unwinds here
+    /// too): held input is released, and the owner's display gets its own
+    /// mode back. A failed restore stays journalled for the host to retry.
     fn drop(&mut self) {
         self.backend.release();
+        if let Err(failure) = self.backend.restore_display_mode() {
+            tracing::warn!(
+                target: "pb_mapper_desktop::session",
+                event = "display_mode_not_restored",
+                detail = %failure,
+            );
+        }
     }
 }
 

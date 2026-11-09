@@ -339,7 +339,11 @@ mod tests {
         };
         let probe = Probe::default();
         let parts = Synthetic::<false>::open(&probe, &Probe::display()).unwrap();
-        let mut backend = PlatformBackend::from_parts(std::sync::Arc::new(probe), parts);
+        let mut backend = PlatformBackend::from_parts(
+            std::sync::Arc::new(probe),
+            parts,
+            crate::modes::Journal::none(),
+        );
         let mut state = ServeState::new();
         let mut serve = |request| serve(&mut backend, request, &mut state).unwrap();
         let (started, _) = serve(Request::Start { display_id: 1 });

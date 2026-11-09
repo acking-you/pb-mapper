@@ -59,7 +59,7 @@ pub use host::{Access, Custom, DisplaySelection, Host, HostBuilder, HostOptions,
 pub use invite::{Invitation, InvitationError, InvitationFormat};
 pub use modes::{DisplayModeError, Mode, ModeList, ModeTarget};
 pub use native::{NativeBackend, native_backend};
-pub use platform::{HostSupport, UnsupportedReason, displays, host_support};
+pub use platform::{HostSupport, UnsupportedReason, displays, host_support, recover_display_modes};
 pub use protocol::{
     Adaptation, DesktopKind, NoticeCode, RateModel, RejectReason, Route, SessionState, StateReason,
     StopReason, VideoSize,
@@ -474,6 +474,10 @@ pub struct HostStatus {
     pub display: Option<Display>,
     pub desktop: DesktopKind,
     pub capabilities: Vec<String>,
+    /// The display's modes while a viewer has it changed: what the host's
+    /// owner may put back with `Host::restore_display_mode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_mode: Option<ModeList>,
 }
 /// The connected viewer, as the host sees it.
 #[derive(Clone, Debug, Serialize, Deserialize)]

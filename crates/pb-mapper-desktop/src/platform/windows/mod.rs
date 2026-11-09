@@ -95,6 +95,7 @@ pub(crate) fn open_bound(
             still: still::XcapJpeg,
             desktop,
         },
+        crate::modes::Journal::none(),
     ))
 }
 

@@ -5,13 +5,14 @@
 //! encoder does.
 
 use super::{
-    CursorSource, Desktop, HostSupport, Injector, NoModes, Parts, Platform, StillCapture,
+    CursorSource, Desktop, DisplayModes, HostSupport, Injector, Parts, Platform, StillCapture,
     VideoSource,
 };
 use crate::{
     BackendError, Button, CursorMode, DRAIN_POLL, Display, DisplaySelection, EncodedFrame,
     FailureKind, HostOs, Key, Result, VideoCodec, VideoFormat, VideoLimits, VideoRate, Waker,
     input::held::Pressed,
+    modes::{Mode, Setting},
 };
 use parking_lot::Mutex;
 use std::{
@@ -35,16 +36,38 @@ struct State {
     released: Vec<Pressed>,
     /// Submit to drain, per unit.
     latencies: Vec<Duration>,
+    /// The display's size now, once a mode changed it.
+    size: Option<Mode>,
+    /// The modes it offers; none, and it offers no change.
+    modes: Vec<Mode>,
+    /// Every mode set, and how often one was reset.
+    applied: Vec<Mode>,
+    resets: usize,
 }
 impl Probe {
+    /// A display device no real computer has, so that nothing here ever
+    /// reaches a real one's modes.
     pub(crate) fn display() -> Display {
         Display {
             id: 1,
-            name: "synthetic".into(),
+            name: r"\\.\DISPLAY901".into(),
             x: -1920,
             y: 0,
             width: 64,
             height: 48,
+        }
+    }
+    /// The display as it is now.
+    fn current(&self) -> Display {
+        let size = self.0.lock().size;
+        let display = Self::display();
+        match size {
+            Some(size) => Display {
+                width: size.width,
+                height: size.height,
+                ..display
+            },
+            None => display,
         }
     }
     fn lose(&self, lost: bool) {
@@ -59,7 +82,7 @@ impl<const PUSH: bool> Platform for Synthetic<PUSH> {
     type Video = SynVideo<PUSH>;
     type Input = SynInput;
     type Cursor = SynCursor;
-    type Modes = NoModes;
+    type Modes = SynModes;
     type Still = SynStill;
 
     fn support() -> HostSupport {
@@ -81,7 +104,7 @@ impl<const PUSH: bool> Platform for Synthetic<PUSH> {
         Ok(Parts {
             input: SynInput(probe.clone()),
             cursor: SynCursor(probe.clone()),
-            modes: NoModes,
+            modes: SynModes(probe.clone()),
             still: SynStill,
             desktop: SynDesktop(probe.clone()),
         })
@@ -105,7 +128,49 @@ impl Desktop for SynDesktop {
         if self.0.0.lock().lost {
             return Err(BackendError::new(FailureKind::DisplayLost, "display unplugged").into());
         }
-        Ok(Probe::display())
+        Ok(self.0.current())
+    }
+}
+
+/// Modes the test lists, and the size each change leaves the display at.
+pub(crate) struct SynModes(Probe);
+impl DisplayModes for SynModes {
+    const SUPPORTED: bool = true;
+    fn available(&mut self, _: &str) -> bool {
+        !self.0.0.lock().modes.is_empty()
+    }
+    fn list(&mut self, _: &str) -> Result<Vec<Mode>> {
+        Ok(self.0.0.lock().modes.clone())
+    }
+    fn current(&mut self, _: &str) -> Result<Setting> {
+        let display = self.0.current();
+        Ok(setting(Mode {
+            width: display.width,
+            height: display.height,
+        }))
+    }
+    fn target(&mut self, _: &str, mode: Mode) -> Result<Setting> {
+        Ok(setting(mode))
+    }
+    fn apply(&mut self, _: &str, setting: &Setting) -> Result<()> {
+        let mut state = self.0.0.lock();
+        state.size = Some(setting.size());
+        state.applied.push(setting.size());
+        Ok(())
+    }
+    fn reset(&mut self, _: &str, original: &Setting) -> Result<()> {
+        let mut state = self.0.0.lock();
+        state.size = Some(original.size());
+        state.resets += 1;
+        Ok(())
+    }
+}
+fn setting(mode: Mode) -> Setting {
+    Setting {
+        width: mode.width,
+        height: mode.height,
+        hz: 60,
+        bpp: 32,
     }
 }
 
@@ -151,7 +216,7 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
     /// on the encoder's own thread, which wakes thread C.
     fn submit(&mut self, keyframe: bool) -> Result<()> {
         self.frames += 1;
-        let display = Probe::display();
+        let display = self.probe.current();
         let frame = EncodedFrame {
             format: VideoFormat {
                 codec: self.codec,
@@ -251,7 +316,8 @@ mod tests {
     use super::*;
     use crate::{
         Backend, Host, HostOptions, Input, Pull, QualityPreset, StateReason, Viewer, ViewerConfig,
-        ViewerStatus, launch::Launcher, native::PlatformBackend, platform::fallback_caps,
+        ViewerStatus, launch::Launcher, modes::Journal, native::PlatformBackend,
+        platform::fallback_caps,
     };
     use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
     use pb_mapper_testkit::{Relay, admin_credential};
@@ -332,12 +398,22 @@ mod tests {
             Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
         let probe = Probe::default();
         let grant = Arc::new(probe.clone());
-        let backend =
-            PlatformBackend::<Synthetic<PUSH>>::open(grant.clone(), &Probe::display()).unwrap();
+        let backend = PlatformBackend::<Synthetic<PUSH>>::open(
+            grant.clone(),
+            &Probe::display(),
+            Journal::none(),
+        )
+        .unwrap();
         assert_eq!(backend.drain_poll().is_none(), PUSH);
         drop(backend);
         let launch = Arc::new(Launcher::new(
-            move || PlatformBackend::<Synthetic<PUSH>>::open(grant.clone(), &Probe::display()),
+            move || {
+                PlatformBackend::<Synthetic<PUSH>>::open(
+                    grant.clone(),
+                    &Probe::display(),
+                    Journal::none(),
+                )
+            },
             fallback_caps::<Synthetic<PUSH>>(),
         ));
         let mut options = HostOptions::new(format!("desktop:{name}"));
