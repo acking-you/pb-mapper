@@ -1,59 +1,16 @@
 # pb-mapper
 
-The optional `desktop` feature exposes `pb_mapper::desktop::{Host, HostOptions,
-HostIdentity, Viewer, Invitation}` for endpoint-owned screen sharing over an
-existing Client. Windows hosting includes GPU H.264 video and an opt-in privileged
-helper; the existing Flutter UI supplies Windows/Android native textures and
-separate view/control permissions. `Host::start` and `start_with_identity`
-use the platform's own capture and encoder, and refuse before registering
-where `capabilities().host` is false: off Windows, or on Windows without Media
-Foundation. `start_with_backend` and `start_with_backend_and_identity` take an
-embedder's own backend instead. The helper's real UAC acceptance and the 60+
-FPS end-to-end UI target are still unverified. See the
-[setup, measurements and support matrix](../../docs/remote-desktop.md).
-
-A host's `invitation()` encodes as a `pbd1.` string (`Invitation::encode`,
-`Invitation::decode`) that names the service, pins the host certificate's
-fingerprint and carries a bearer token. `Viewer::connect(&client, &invitation,
-options, ViewerConfig { codecs, limits, quality, progress })` returns once the
-host accepted, or fails with a typed `ConnectError`: identity changed, version
-mismatch, busy, denied and so on. Both ends speak desktop protocol v2, and an
-older peer fails at the handshake. `VideoLimits::for_viewer(refresh_hz)`
-bounds the encoded size and frame rate independently of the physical display
-geometry used for input; `set_quality` switches the `QualityPreset` live.
-
-Video goes to exactly one consumer: `viewer.video_sink().attach()` returns a
-`VideoConsumer` whose `next` blocks on the caller's thread, never on tokio. The
-sink keeps only the newest decodable frames: when the consumer falls behind it
-drops to the next IDR and caps the host's frame rate to what the consumer
-presents. The consumer reports each frame it actually showed with `presented`,
-asks for an IDR with `keyframe`, and reports a decoder error with
-`failed(message)`, which also asks for an IDR and keeps the message for the
-session's end. Requests are rate-limited, and a decoder that keeps failing
-ends the session with `decoder_failed`. Input is authorised only by a recent,
-validated presentation: `Viewer::input(generation, &inputs)` stamps the frame
-and sequence itself and fails with a typed `InputError`; transport receipts
-never grant input. `status()`, and per frame the allocation-free `view()`,
-report the session; `pause` and `resume` stop and restart video while the
-viewer is hidden.
-
-Desktop backends are constructed and retained on their capture/input worker;
-`Backend` need not be `Send`. Embedders coordinate other input writers with a
-`ControlAdmission` lease, acquired only for an explicit control request.
-`HostIdentity` permits an explicitly authorized restart, but its serialized form
-contains private keys and a bearer grant: storage and revocation belong to the
-embedding application. The UI uses Windows DPAPI. Ordinary SDK consumers incur
-none of these desktop dependencies unless the feature is enabled.
-
 Client SDK for [pb-mapper](https://github.com/acking-you/pb-mapper): publish a
 private TCP/UDP service with `register` and reach it on a local port with
 `connect`. Every connection goes peer to peer over QUIC when the networks allow
 it and falls back to the relay before any byte is sent when they do not.
 Reconnection, DNS refresh and recovery after network changes are automatic.
+With the `desktop` feature it also shares and views a remote desktop over the
+same relay ([Remote desktop](#remote-desktop)).
 
 ```toml
 [dependencies]
-pb-mapper = "0.8"
+pb-mapper = "0.10"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -107,6 +64,7 @@ Requires a Tokio runtime. The `pb-mapper` CLI and relay live in the
 | Choose the path | `RegisterOptions { allow_direct }`, `ConnectOptions { path: PathPolicy::{Auto, RelayOnly} }` |
 | Ask the router to map the direct port | `port_mapping: PortMapping::{Auto, Always, Off}` in either options; `Auto`, once punching fails, by default |
 | Try a shared Wi-Fi or LAN first | `lan_first` in either options, `true` by default; `false` probes in the peer's order and waits for nothing, while the LAN is still reported |
+| Carry a LAN path over TCP | `ConnectOptions { lan_transport: LanTransport::Tcp }`, `LanTransport::Quic` by default; the publisher serves it unless `RegisterOptions { lan_tcp: false }`; a path across the internet is always QUIC |
 | Reclaim abandoned TCP data connections | `register_with_idle_timeout`, `RegisterOptions { idle_timeout }` |
 | Listen to a tunnel | `subscribe()` for status, `subscribe_events()` for every event as it happens, `subscribe_metrics(every)` for sessions, bytes per path and round trips as they change, `diagnostics()` for a snapshot |
 | Watch the relay carrier | `Client::relay_diagnostics`, `Client::subscribe_relay_metrics(every)` |
@@ -114,6 +72,7 @@ Requires a Tokio runtime. The `pb-mapper` CLI and relay live in the
 | Inspect a namespace | `list_keys`, `service_status`, `sessions`, `remote_id` |
 | Manage credentials (administrator key) | `admin()`: `issue_key`, `show_key`, `reveal_key`, `renew_key`, `revoke_key`, `list_keys_all`, `gc_keys`, `auth_status` |
 | Operate the relay | `admin()`: `list_services_all`, `list_connections_all`, `retire_connections`, `set_legacy_protocol`, `rotate_root_key_to_file` |
+| Share or view a remote desktop | the `desktop` feature: [Remote desktop](#remote-desktop) |
 
 Each row has a runnable example in
 [`examples/`](https://github.com/acking-you/pb-mapper/tree/master/crates/pb-mapper/examples);
@@ -215,3 +174,82 @@ namespace-scoped observations, never authorization.
 To stay on the relay, pass `RegisterOptions { allow_direct: false, .. }` or
 `ConnectOptions { path: PathPolicy::RelayOnly }`, or build with
 `default-features = false`, which also drops quinn, rcgen and stun-proto.
+
+## Remote desktop
+
+```toml
+pb-mapper = { version = "0.10", features = ["desktop"] }
+```
+
+The `desktop` feature exposes `pb_mapper::desktop`: a host shares a display,
+and a viewer watches it and, when allowed, controls it, over the `Client` both
+already have. A host grants viewing through a secret `pbd1.` invitation, which
+names its service, pins its certificate's fingerprint for TLS 1.3 and carries
+a bearer token; control is a separate permission the host allows and the viewer
+asks for. Hosting is Windows today, with GPU H.264 and H.265 and an opt-in
+privileged helper for UAC and the lock screen; viewing runs anywhere. Both ends
+take the tunnel defaults: LAN first, then direct, then the relay. Nothing
+captures or injects until a host is started and an authorized viewer connects,
+and an SDK built without the feature carries none of it. The helper's real UAC
+acceptance and the 60+ FPS end-to-end UI target are still unverified. See the
+[setup, measurements and support matrix](../../docs/remote-desktop.md).
+
+| Need | API |
+| --- | --- |
+| Host this computer | `Host::builder(HostOptions::new("desktop:office")).start(&client)`; refused before registering where `host_support().host` is false (off Windows, or Windows without Media Foundation), `host_support().reason` saying why |
+| Choose what is shared | `HostOptions { display: DisplaySelection::{Primary, Id, Device}, access: Access::{Ordinary, Privileged}, allow_control }`, `displays()` |
+| Capture with your own code | `HostBuilder::backend(\|\| Ok(backend))` with a `Backend`, built and used on its session's thread, so it need not be `Send` |
+| Keep an invitation valid across restarts | `Host::identity()` and `HostBuilder::identity`; `trust::TrustFile` seals one with a `trust::Sealer` (`trust::CurrentUser` DPAPI on Windows); `restart`, `switch_display` and `rename` keep it |
+| Run a host | `status()`, `watch(every)`, `end_session()`, `set_control_allowed()`, `stop()`, `stop_with(StopReason)`, `metrics()` |
+| View | `Viewer::connect(&client, &invitation, ConnectOptions::default(), ViewerConfig::new(codecs))`, a typed `ConnectError`; `VideoLimits::choose(refresh_hz, resolution, max_fps)` bounds the picture |
+| Take the picture | `viewer.video_sink().attach()` → `VideoConsumer`: see [Decoding](#decoding) |
+| Control | `request_control(true)`, then `input(generation, &[Input])` in the host display's pixels and a typed `InputError`; `view().display_point(nx, ny)`, `Input::text_chunks(text)`, `release_input()` |
+| Follow a viewer | `status()`, `watch(every)`, the allocation-free `view()` per frame, `metrics()`, `subscribe_metrics(every)` |
+| Change a session live | `set_quality(QualityPreset)`, `pause()`, `resume()`, `request_keyframe(reason)` |
+| Stay connected | `supervisor::Supervisor`, the app's policy: backoff of 1 to 15 s within 120 s, a stall after 5 s without video, H.265 → H.264 after a decoder failure; or the pure `supervisor::Reconnect` under your own timers |
+| Share control with your own input | `HostBuilder::admission` with a `ControlAdmission`, whose lease is held only while a viewer controls |
+| Drive the privileged helper (Windows) | `privileged::{support, status, request_installation}`, `privileged::background` |
+
+| Example | Runs where | Shows |
+| --- | --- | --- |
+| `desktop_loopback` | any OS, no setup | A relay, a host of an example-defined `Backend` and a viewer in one process: control, a move, a click and chunked text the backend records, a preset change, pause and resume, status and metrics. `--serve` hosts the synthetic desktop for the examples below |
+| `desktop_host` | Windows; elsewhere it prints `host_support().reason` | `HostOptions::new`, `--display`, `--allow-control`, `--relay-only`, `--privileged`, `--identity DIR` (a `TrustFile`); the invitation; a `watch()` loop; Ctrl+C stops |
+| `desktop_viewer` | any OS | Every `ConnectError`; a thread recording Annex B to `remote.h264` for `ffplay`; status and metrics; `--resolution`, `--quality`, `--relay-only`, `--lan-transport` |
+| `desktop_control` | any OS, against a host you own | Taking control, `display_point`, batches, `text_chunks`, every `InputError`, `release_input` on the way out |
+| `desktop_supervised` | any OS, no setup | `Supervisor` through an H.265 decoder failure, a host restart, a stall and a stop |
+
+`cargo run -p pb-mapper --features desktop --example desktop_loopback` needs no
+relay of your own and runs in CI.
+
+### Decoding
+
+The SDK carries video and ships no decoder. Each `VideoUnit` is one Annex B
+access unit of H.264 or H.265, or one JPEG picture, with its codec, size,
+`keyframe`, `discontinuity`, `generation`, `frame_id` and `pts_us`. Offer only
+what you decode: `ViewerConfig.codecs` lists H.264 or JPEG or both, and H.265
+beside them when you decode it too, and the host picks one for the session.
+Decode with what the platform has (Media Foundation, VideoToolbox, MediaCodec,
+openh264, FFmpeg) on the consumer's own thread: `VideoConsumer::next` blocks,
+and never on Tokio. The sink keeps only the newest decodable units: when the
+consumer falls behind it drops to the next IDR and caps the host's frame rate
+to what the consumer presents.
+
+- After a `discontinuity`, drop what the decoder holds and start again at the
+  keyframe the sink hands out next.
+- Call `presented(generation, frame_id)` for each frame actually shown. Input
+  is authorised only by a recent presentation, never by transport receipts:
+  a viewer that never presents cannot control, by design.
+- Report a decoder error with `failed(message)`, which also asks for an IDR,
+  and ask for one alone with `keyframe(reason)`. Requests are rate-limited;
+  five errors in 30 s with nothing shown end the session with
+  `decoder_failed`, which `Supervisor` answers by connecting again without
+  H.265.
+- `Pull::NeedCapacity(n)` asks for a buffer of `n` bytes, `Pull::Paused` means
+  the viewer is paused (stop counting stalls), and `Pull::Closed` ends the
+  consumer.
+
+The host's identity is a private key and a bearer grant: whoever holds it can
+be the host its invitations name. Storing and revoking it belong to the
+embedding application; `trust::TrustFile` keeps one sealed per directory,
+bound to the relay and namespace it was made for, and deleting the file
+revokes it.
