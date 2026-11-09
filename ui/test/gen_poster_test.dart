@@ -1,9 +1,14 @@
 /// Derives the README posters from the app itself, rendered with the bundled
-/// fonts and fixture data: in front, the remote desktop viewer on Windows,
-/// in control of another computer with the quality monitor open; behind it,
-/// the galaxy of this computer, its relay and its tunnels; on an Android
-/// phone, the Remote tab's remembered computers. Beside them: the mark, the name and
-/// what pb-mapper and its SDK do.
+/// fonts and fixture data: in front, the remote desktop viewer in control of
+/// another computer, with the quality monitor open; behind it, the galaxy of
+/// this computer, its relay and its tunnels; on a phone, the Remote tab's
+/// remembered computers. Beside them: the mark, the name and what pb-mapper
+/// and its SDK do.
+///
+/// The poster is about every device, so its words name no operating system
+/// and neither does the remote screen ([RemoteScreenFixture]). The three
+/// screens are captured as three platforms: the galaxy as macOS, the viewer
+/// as Windows (where its H.265 figures are true) and the phone as Android.
 ///
 /// Opt-in, since PNG output differs a little across platforms:
 ///
@@ -127,11 +132,13 @@ const _english = _Copy(
     ('Relay', true),
     (' always.', false),
   ],
-  headline: 'Every private service,\nevery Windows PC,\none click away.',
+  headline: 'Every private service,\nevery device,\none click away.',
+  // Broken by hand, so that no line ends on a stranded word.
   body:
-      'Share a TCP or UDP service, or a Windows desktop, and open it '
-      'anywhere: direct over QUIC when the network allows, through your '
-      'relay when it does not. Hardware H.265/H.264, real keyboard and mouse.',
+      'Share a TCP or UDP service, or a whole desktop,\n'
+      'and open it from any device: direct over QUIC\n'
+      'when it can, through your relay when it cannot.\n'
+      'Hardware H.265/H.264, real keyboard and mouse.',
   second: 'All of it, in the SDK.',
   secondBody:
       'Tunnels, the picture and its codec data, keyboard and mouse, status '
@@ -153,13 +160,13 @@ const _english = _Copy(
 const _chinese = _Copy(
   locale: Locale('zh'),
   motto: [('P2P 直连', true), ('优先，', false), ('中继', true), ('兜底。', false)],
-  headline: '每个私有服务，\n每台 Windows 电脑，\n一键直达。',
+  headline: '每个私有服务，\n每台设备，\n一键直达。',
   // Broken by hand: Chinese wraps anywhere, and left alone it strands the
   // last character of a sentence on a line of its own.
   body:
-      '共享一台电脑上的 TCP / UDP 服务\n'
-      '或 Windows 桌面，在任何地方打开：\n'
-      '能直连就走 QUIC，打不通就走你的中继。\n'
+      '共享一项 TCP / UDP 服务，或整个桌面，\n'
+      '在任何设备上打开：能直连就走 QUIC，\n'
+      '打不通就走你自己的中继。\n'
       '画面硬件 H.265/H.264 编码，键盘鼠标真实操控。',
   second: '这一切，都在 SDK 里。',
   secondBody:

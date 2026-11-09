@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/poster.png" alt="pb-mapper — tunnels, remote desktop and one SDK: in front, the remote desktop viewer showing another computer with its quality monitor; behind it, the desktop app's galaxy of this computer, its relay and every tunnel; on an Android phone, the Remote tab with the computers it remembers" width="800" />
+<img src="docs/assets/poster.png" alt="pb-mapper — every private service and every device, one click away: in front, the remote desktop viewer in control of another computer, with its quality monitor; behind it, the app's galaxy of this computer, its relay and every tunnel; on a phone, the Remote tab with the computers it remembers" width="800" />
 
 <p>
   <a href="https://www.rust-lang.org/"><img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white"></a>
@@ -23,15 +23,15 @@
 
 ---
 
-**pb-mapper** reaches private TCP and UDP services behind NAT, and lets you see
-and control another computer's screen over the same paths. Run `register` next
-to a service and `connect` wherever you need it, and the service appears on a
-local port. Each connection goes direct when it can, over a shared **LAN**
-first, otherwise over a hole-punched **peer-to-peer QUIC path**. If the network
-allows neither, it falls back to the **relay** before a single byte is sent.
-Nobody picks a path by hand: the CLI, the app and the SDKs decide per
-connection, and keep the tunnel up through relay restarts, outages and network
-changes.
+**pb-mapper** opens what sits behind NAT from wherever you are: a private TCP
+or UDP service, or a whole computer with its screen, keyboard and mouse. Run
+`register` next to a service and `connect` wherever you need it, and the
+service appears on a local port. Each connection goes direct when it can, over
+a shared **LAN** first, otherwise over a hole-punched **peer-to-peer QUIC
+path**. If the network allows neither, it falls back to the **relay** before a
+single byte is sent. Nobody picks a path by hand: the CLI, the app and the SDKs
+decide per connection, and keep the tunnel up through relay restarts, outages
+and network changes.
 
 ```text
                  ┌──── direct: UDP hole punching + QUIC ────┐
@@ -39,12 +39,14 @@ changes.
    :9090         └──── fallback: relay.example.com:7666 ─────┘
 ```
 
-The **remote desktop** rides those same paths: share a Windows computer from
-the app, then view and control it from another computer or a phone, with
-hardware H.265/H.264 video (decoded natively on Windows and Android) and real
-keyboard and mouse. The **Rust SDK** hands
-all of it to your own app: tunnels, the remote desktop's encoded picture for
-your decoder, keyboard and mouse input, status streams and automatic recovery.
+The **remote desktop** rides those same paths, and it is built so that every
+device can be controlled from any other: share a computer from the app, then
+view and control it from another computer or a phone, with hardware
+H.265/H.264 video and real keyboard and mouse. Windows is the first computer
+that can be shared; [what runs where today](#remote-desktop) is below. The
+**Rust SDK** hands all of it to your own app: tunnels, the remote desktop's
+encoded picture for your decoder, keyboard and mouse input, status streams and
+automatic recovery.
 
 ## Why pb-mapper
 
@@ -71,18 +73,22 @@ interactive latency under **20 ms**, and the relay fallback matches frp's
 one-port-per-mapping setup in latency and stability. How fast your own setup
 is depends on the two networks and where the relay sits.
 
-**🖥️ Remote desktop on the same paths.** Turn on remote control on a Windows
-computer, hand over its invitation as text or a QR code, and view and control
-it from another computer or a phone. The host encodes in hardware, H.265 where
-both ends have it and H.264 otherwise, at the remote display's own size by
-default; a viewer with no native decoder (the app on macOS, Linux, iOS, or
-Windows without Media Foundation) gets JPEG at up to 8 FPS. Keyboard and mouse
-are real input, and the opt-in Windows helper also reaches UAC prompts and the
-owner's lock screen. Each session is TLS 1.3 pinned to the
-host's certificate by the invitation, so a relay credential alone can neither
-watch nor control. Like every tunnel it tries the LAN, then direct, then the
-relay; a lost connection is retried for up to two minutes, and Back keeps the
-session paused for up to ten.
+**🖥️ Remote desktop on the same paths.** Turn on remote control on a computer,
+hand over its invitation as text or a QR code, and view and control it from
+another computer or a phone. The goal is every device, controlled from any
+other: the protocol, the session, the viewer and the SDK name no operating
+system, and only capture, encoding and input are written per platform. Windows
+is the first host, and Linux, macOS and Android are the next. The host encodes
+in hardware, H.265 where both ends have it and H.264 otherwise, at the remote
+display's own size by default; the app decodes natively on Windows and
+Android, and shows JPEG at up to 8 FPS where it has no native decoder (macOS,
+Linux, iOS, or Windows without Media Foundation). Keyboard and mouse are real
+input, and on Windows the opt-in helper also reaches UAC prompts and the
+owner's lock screen. Each session is TLS 1.3 pinned to the host's certificate
+by the invitation, so a relay credential alone can neither watch nor control.
+Like every tunnel it tries the LAN, then direct, then the relay; a lost
+connection is retried for up to two minutes, and Back keeps the session paused
+for up to ten.
 
 **🧩 One SDK for all of it.** The Rust crate `pb-mapper` carries the tunnels
 and, with its `desktop` feature, the whole remote desktop: a host in a few
@@ -282,8 +288,13 @@ Node.js 18+ and Bun 1.1+. See [`js/README.md`](js/README.md) for the full API.
 
 ## Remote desktop
 
-Share a computer's screen and control it from another, over the relay,
+Share a computer's screen and control it from another device, over the relay,
 credentials and paths your tunnels already use; the relay needs nothing new.
+
+The aim is that every device can be controlled from any other. Everything
+above the operating system (the protocol, the session, QoS, the viewer and
+the SDK) is shared; a host adds only its own capture, encoder and input.
+Windows is the first, and this is what runs where today:
 
 | Role | Where it runs today |
 | --- | --- |
@@ -291,8 +302,9 @@ credentials and paths your tunnels already use; the relay needs nothing new.
 | Viewer in the app | Windows and Android decode H.265/H.264 natively; macOS, Linux and iOS (unverified) show the picture as JPEG, up to 8 FPS |
 | Viewer in the SDK | Any OS, with the decoder you bring |
 
-**In the app:** on Windows, open **Remote desktop** and choose **Turn on remote
-control** (or **Share the ordinary desktop only**, without the helper). Copy
+**In the app:** on the computer to share (Windows today), open **Remote
+desktop** and choose **Turn on remote control** (or **Share the ordinary
+desktop only**, without the helper). Copy
 the `pbd1.` invitation privately, or show its QR code to a phone: whoever holds
 it can view, and control is a separate permission the host grants. On the
 other device, choose **Add computer** (**Scan to add** or **Paste invitation**
@@ -315,7 +327,7 @@ use pb_mapper::desktop::{
 };
 use pb_mapper::ConnectOptions;
 
-// Host (Windows): share the primary display and allow control.
+// Host (Windows today): share the primary display and allow control.
 let mut options = HostOptions::new("desktop:office");
 options.allow_control = true;
 let host = Host::builder(options).start(&client).await?;
@@ -369,10 +381,13 @@ viewer in one process on any OS. See the SDK's
 and how to decode, and [docs/remote-desktop.md](docs/remote-desktop.md) for the
 helper, the video pipeline and measurements.
 
-Not yet: hosts on macOS, Linux or phones (the host is split by platform, ready
-for them), audio, clipboard, file transfer, and more than one viewer at a time.
-The helper's acceptance for UAC prompts under Windows' default secure-desktop
-policy, and for password entry on a locked screen, is still outstanding.
+Not yet: hosts on Linux, macOS or phones, audio, clipboard, file transfer, and
+more than one viewer at a time. The hosts are the way to every device: each
+is one backend behind a seam that already exists, and
+[Platforms](docs/remote-desktop.md#platforms) is the guide to writing the
+ones for Linux, macOS and Android. The helper's acceptance for UAC prompts
+under Windows' default secure-desktop policy, and for password entry on a
+locked screen, is still outstanding.
 
 ## Credentials and security
 

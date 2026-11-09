@@ -696,10 +696,13 @@ proxy-everything's (`ui/lib/src/updates/`):
 
 `docs/assets/poster.png` and `poster.zh-CN.png` are not drawn by hand: as in
 POCOX, `test/gen_poster_test.dart` renders the real pages from fixture data —
-the galaxy in the dark, the Tunnels page behind it, a phone connecting to a
-service on the relay — and sets them beside the name and what pb-mapper does.
-Change the app and the poster follows; change the words in that file. To
-regenerate both:
+in front the remote desktop viewer, in control of another computer with the
+quality monitor open; behind it the galaxy in the dark; on a phone the Remote
+tab and its remembered computers — and sets them beside the name and what
+pb-mapper and its SDK do. The poster is about every device: its words name no
+operating system, and neither does the remote screen it shows
+(`test/remote_screen_fixture.dart`). Change the app and the poster follows;
+change the words in that file. To regenerate both:
 
 ```sh
 cd ui

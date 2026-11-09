@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// A remote computer's screen for previews: the RemoteScreen artboard
 /// (wallpaper, desktop icons, a document window, a terminal and the taskbar)
 /// painted at the 1920×1080 display [liveStatus] reports and encoded as PNG.
+/// It stands for any computer: nothing on it names an operating system.
 ///
 /// It reaches the viewer through the fake JPEG path
 /// (`FakeDesktopApi.emitJpeg`): the decoder takes PNG as readily, so a
@@ -55,8 +56,8 @@ abstract final class RemoteScreenFixture {
   static void _icons(Canvas c) {
     var top = 3 * _h;
     for (final (label, color) in const [
-      ('This PC', Color(0xFF8FB8E0)),
-      ('Recycle Bin', Color(0xFFC9D3DC)),
+      ('Computer', Color(0xFF8FB8E0)),
+      ('Trash', Color(0xFFC9D3DC)),
       ('Projects', Color(0xFFE8C46A)),
     ]) {
       const side = 2.8 * _w, centre = 1.6 * _w + 2.5 * _w;
@@ -250,7 +251,7 @@ abstract final class RemoteScreenFixture {
     const text = Color(0xFFD4D4D4), size = 0.95 * _w, step = size * 1.7;
     final left = window.left + 1.2 * _w;
     var top = title.bottom + 1.6 * _h;
-    const prompt = r'PS C:\work\pb-mapper> ';
+    const prompt = r'~/work/pb-mapper $ ';
     _text(
       c,
       '${prompt}cargo build --release',
