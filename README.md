@@ -126,6 +126,14 @@ setup where the UDP port maps elsewhere, pass
 `--direct-advertise PUBLIC_IP:PORT`, and use `--direct-listen` to bind a
 different local address.
 
+Within one LAN a direct path runs over QUIC, or over TCP when the consumer asks
+(`connect --lan-transport tcp`, Settings → Direct connections → LAN transport in
+the app): TCP on the LAN first, then QUIC on the LAN, then QUIC across the
+internet, then the relay. The publisher serves TCP on demand on its LAN
+addresses only (`register --no-lan-tcp` refuses it), so a punched internet
+path is always QUIC. TCP needs the publisher's firewall to let it in; where it
+does not, the session takes QUIC on the LAN within 300 ms.
+
 Worth knowing:
 
 - **Direct sessions belong to the two endpoints.** A relay restart or a revoked
