@@ -62,6 +62,13 @@ pub enum ErrorCode {
     NotControlling,
     /// Control was revoked because input backed up on the remote computer.
     InputCongestion,
+    /// The remote computer offers no display modes: it cannot change its
+    /// resolution, or this session cannot reach it.
+    DisplayModeNotOffered,
+    /// None of the remote display's modes fits this computer's display.
+    DisplayModeNoFit,
+    /// The remote display does not offer that resolution.
+    DisplayModeNotListed,
     /// The remembered computers are locked or cannot be read.
     VaultUnavailable,
     /// Resuming would move this computer's host to the relay or namespace

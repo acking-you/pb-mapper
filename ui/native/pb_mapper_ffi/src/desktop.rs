@@ -16,9 +16,10 @@ use crate::{
 use pb_mapper::{
     Client, ConnectOptions, PathPolicy,
     desktop::{
-        self, Access, ConnectError, ConnectStage, Decoders, DesktopView, DisplaySelection, Host,
-        HostOptions, InputError, Invitation, InvitationError, InvitationFormat, KeyframeReason,
-        QualityPreset, Resolution, StopReason, Viewer, ViewerConfig,
+        self, Access, ConnectError, ConnectStage, Decoders, DesktopView, DisplayModeError,
+        DisplaySelection, Host, HostOptions, InputError, Invitation, InvitationError,
+        InvitationFormat, KeyframeReason, Mode, ModeTarget, QualityPreset, Resolution, StopReason,
+        Viewer, ViewerConfig,
     },
 };
 #[cfg(windows)]
@@ -297,7 +298,9 @@ impl DesktopState {
         Ok(())
     }
 
-    fn viewer_status(&self) -> Result<Value, CtlError> {
+    /// `local`, this computer's display, adds the mode that fits it best to
+    /// the remote display's modes, as `modes.fit_local`.
+    fn viewer_status(&self, local: Option<Mode>) -> Result<Value, CtlError> {
         // In the connect's order, so it sees the attempt or the viewer.
         let (viewer, stage) = {
             let pending = self.connecting.lock();
@@ -307,8 +310,18 @@ impl DesktopState {
             (self.viewer(), stage)
         };
         if let Some(viewer) = viewer {
-            return serde_json::to_value(viewer.status())
-                .map_err(|failure| CtlError::internal(failure.to_string()));
+            let status = viewer.status();
+            let fit_local = status
+                .modes
+                .as_ref()
+                .zip(local)
+                .and_then(|(modes, local)| modes.fit_local(local));
+            let mut value = serde_json::to_value(status)
+                .map_err(|failure| CtlError::internal(failure.to_string()))?;
+            if let Some(modes) = value.get_mut("modes").and_then(Value::as_object_mut) {
+                modes.insert("fit_local".into(), json!(fit_local));
+            }
+            return Ok(value);
         }
         Ok(match stage {
             Some(stage) => json!({"state": "connecting", "stage": stage}),
@@ -358,6 +371,9 @@ enum Request {
     TrustStatus,
     TrustRevoke,
     HostRestore,
+    /// Put back the display mode a viewer changed, of whichever host this
+    /// app shows: its own, or the background service's.
+    HostRestoreDisplayMode,
     HostEnable {
         service: String,
         display_id: u32,
@@ -487,7 +503,15 @@ enum Start {
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum ViewerRequest {
-    ViewerStatus,
+    ViewerStatus {
+        #[serde(default)]
+        local: Option<Mode>,
+    },
+    /// `"original"`, `{"fit_local": {"width", "height"}}` (this computer's
+    /// display) or `{"size": {"width", "height"}}`.
+    DisplayMode {
+        target: DisplayModeTarget,
+    },
     Control {
         enabled: bool,
     },
@@ -502,6 +526,24 @@ enum ViewerRequest {
     },
     Pause,
     Resume,
+}
+
+/// `ModeTarget` as the hot op takes it.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum DisplayModeTarget {
+    Original,
+    FitLocal(Mode),
+    Size(Mode),
+}
+impl From<DisplayModeTarget> for ModeTarget {
+    fn from(target: DisplayModeTarget) -> Self {
+        match target {
+            DisplayModeTarget::Original => Self::Original,
+            DisplayModeTarget::FitLocal(local) => Self::FitLocal(local),
+            DisplayModeTarget::Size(mode) => Self::Size(mode),
+        }
+    }
 }
 
 fn err(e: impl std::fmt::Display) -> CtlError {
@@ -541,6 +583,30 @@ fn input_error(failure: InputError) -> CtlError {
         InputError::Closed => ErrorCode::Io,
     };
     CtlError::new(code, failure.to_string())
+}
+
+fn display_mode_error(failure: DisplayModeError) -> CtlError {
+    let (code, message) = match failure {
+        DisplayModeError::NotOffered => (
+            ErrorCode::DisplayModeNotOffered,
+            "the remote computer cannot change its resolution",
+        ),
+        DisplayModeError::NotControlling => (
+            ErrorCode::NotControlling,
+            "control of the remote computer is needed to change its resolution",
+        ),
+        DisplayModeError::NoFit => (
+            ErrorCode::DisplayModeNoFit,
+            "no resolution of the remote display fits this display",
+        ),
+        DisplayModeError::NotListed => (
+            ErrorCode::DisplayModeNotListed,
+            "the remote display does not offer that resolution",
+        ),
+        // As every hot op of a closed session.
+        _ => (ErrorCode::Io, "desktop is disconnected"),
+    };
+    CtlError::new(code, message)
 }
 
 fn invitation_error(failure: InvitationError) -> CtlError {
@@ -1005,6 +1071,14 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
     match request {
         Request::Capabilities => {
             return tokio::task::spawn_blocking(|| {
+                // The app's first question: once per process, put back a
+                // display mode a host of this app left changed when it died.
+                static RECOVERED: std::sync::Once = std::sync::Once::new();
+                RECOVERED.call_once(|| {
+                    if let Err(failure) = desktop::recover_display_modes(None) {
+                        tracing::warn!(event = "display_modes_not_recovered", %failure);
+                    }
+                });
                 let displays = desktop::displays();
                 #[cfg(windows)]
                 let helper = serde_json::to_value(desktop::privileged::status()).ok();
@@ -1186,6 +1260,27 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                 .map_err(err)??;
             }
             host.set_control_allowed(allow_control);
+        }
+        Request::HostRestoreDisplayMode => {
+            let slot = state.host.lock().await;
+            if let Some(host) = slot.as_ref() {
+                return Ok(json!({"restored": host.restore_display_mode()}));
+            }
+            #[cfg(windows)]
+            if state
+                .background
+                .lock()
+                .snapshot
+                .as_ref()
+                .is_some_and(background_enabled)
+            {
+                let snapshot = desktop::privileged::background::restore_display_mode()
+                    .await
+                    .map_err(err)?;
+                state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
+                return Ok(json!({"restored": true}));
+            }
+            return Err(err("desktop is not shared"));
         }
         Request::HostEndSession => {
             let slot = state.host.lock().await;
@@ -1874,7 +1969,14 @@ pub unsafe extern "C" fn pb_mapper_desktop_viewer_call_json(
 fn viewer_call(state: &DesktopState, request: ViewerRequest) -> Result<Value, CtlError> {
     let viewer = state.viewer();
     match request {
-        ViewerRequest::ViewerStatus => return state.viewer_status(),
+        ViewerRequest::ViewerStatus { local } => return state.viewer_status(local),
+        ViewerRequest::DisplayMode { target } => {
+            let mode = viewer
+                .ok_or_else(disconnected)?
+                .set_display_mode(target.into())
+                .map_err(display_mode_error)?;
+            return Ok(json!({ "mode": mode }));
+        }
         ViewerRequest::Control { enabled } => match viewer {
             Some(viewer) => viewer.request_control(enabled).map_err(err)?,
             None if enabled => return Err(disconnected()),
@@ -2169,6 +2271,13 @@ mod tests {
         let input =
             json!({"op": "input", "generation": 1, "inputs": [{"kind": "move", "x": 1, "y": 1}]});
         assert_eq!(hot(handle, input.clone())["code"], "NOT_FRESH");
+        // This host offers no display modes, and says nothing of its OS.
+        let fit =
+            json!({"op": "display_mode", "target": {"fit_local": {"width": 1280, "height": 720}}});
+        assert_eq!(hot(handle, fit.clone())["code"], "DISPLAY_MODE_NOT_OFFERED");
+        let local = json!({"op": "viewer_status", "local": {"width": 1280, "height": 720}});
+        let status = &hot(handle, local)["data"];
+        assert!(status.get("modes").is_none() && status["host_os"].is_null());
         for request in [
             json!({"op": "control", "enabled": true}),
             json!({"op": "keyframe"}),
@@ -2262,7 +2371,7 @@ mod tests {
                     assert_eq!(hot(handle, request.clone()), expected, "{request}");
                     assert!(started.elapsed() < Duration::from_millis(10), "{request}");
                 }
-                for request in [json!({"op": "control", "enabled": true}), input] {
+                for request in [json!({"op": "control", "enabled": true}), input, fit] {
                     let started = Instant::now();
                     assert_eq!(hot(handle, request.clone())["code"], "IO", "{request}");
                     assert!(started.elapsed() < Duration::from_millis(10), "{request}");
@@ -2837,7 +2946,7 @@ mod tests {
         started.await.unwrap();
         // The attempt reports how far it got.
         assert_eq!(
-            state.viewer_status().unwrap(),
+            state.viewer_status(None).unwrap(),
             json!({"state": "connecting", "stage": "identity"})
         );
         tokio::time::timeout(Duration::from_secs(1), state.disconnect_viewer())
@@ -2853,6 +2962,6 @@ mod tests {
         );
         assert!(state.viewer.read().is_none());
         assert!(state.connecting.lock().is_none());
-        assert_eq!(state.viewer_status().unwrap(), Value::Null);
+        assert_eq!(state.viewer_status(None).unwrap(), Value::Null);
     }
 }
