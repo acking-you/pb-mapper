@@ -134,6 +134,7 @@ impl EngineState {
                 display: None,
                 desktop: DesktopKind::Ordinary,
                 video: None,
+                modes: None,
             },
             capture_fps: 0.0,
             encoder_dwell: None,

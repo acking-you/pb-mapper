@@ -584,17 +584,19 @@ void main() {
     expect(jpeg.ceilingFps(chosen: 60), DesktopStats.jpegMaxFps);
   });
 
-  test("the probe's answer decides what is offered and what is decodable; "
-      'no answer is H.264 alone', () {
+  test("the probe's answer decides what is offered and what fits; the "
+      'limits fit the decoder offered first; no answer is H.264 alone', () {
     final decoders = DesktopDecoders.fromJson({
       'h264': {'max_width': 3840, 'max_height': 2160},
-      'h265': {'max_width': 1920, 'max_height': 1080},
+      'h265': {'max_width': 1080, 'max_height': 1920},
       'display_max_hz': 120.0,
     });
-    DesktopTarget at(DesktopResolution r, [DesktopCodecPreference? codec]) =>
-        _target.copyWith(resolution: r, codec: codec);
-    expect(decoders.offersH265(at(DesktopResolution.p1080)), isTrue);
-    expect(decoders.offersH265(at(DesktopResolution.p1440)), isFalse);
+    DesktopTarget at(DesktopResolution? r, [DesktopCodecPreference? codec]) =>
+        _target.copyWith(resolution: (to: r), codec: codec);
+    // H.265 wherever it decodes, its limits fitted inside its decoder,
+    // which was probed upright.
+    expect(decoders.offersH265(at(null)), isTrue);
+    expect(decoders.limitsFor(null), (1920, 1080));
     expect(
       decoders.offersH265(
         at(DesktopResolution.p720, DesktopCodecPreference.h264),
@@ -606,9 +608,9 @@ void main() {
     expect(maxFpsChoicesFor(59), [30, 60]);
 
     // A phone whose AVC decoder stops at 1080p and whose HEVC one does not:
-    // 1440p decodes only while H.265 may be used — not once it failed here,
-    // nor once the computer answered it with H.264 — and a session that is
-    // not offered H.265 asks for what H.264 takes.
+    // 1440p fits only while H.265 may be used — not once it failed here,
+    // nor once the computer answered it with H.264. What fits is the
+    // remote display's picture once that is known.
     final phone = DesktopDecoders.fromJson({
       'h264': {'max_width': 1920, 'max_height': 1080},
       'h265': {'max_width': 2560, 'max_height': 1440},
@@ -618,12 +620,15 @@ void main() {
     expect(phone.decodes(DesktopResolution.p1440, auto), isTrue);
     expect(phone.decodes(DesktopResolution.p1440, h264), isFalse);
     expect(phone.decodes(DesktopResolution.native, auto), isFalse);
+    expect(
+      phone.decodes(DesktopResolution.native, auto, display: (2560, 1440)),
+      isTrue,
+    );
     expect(phone.withoutH265().decodes(DesktopResolution.p1440, auto), isFalse);
     expect(
       phone.decodes(DesktopResolution.p1440, auto, h265Declined: true),
       isFalse,
     );
-    expect(phone.forH264(DesktopResolution.native), DesktopResolution.p1080);
 
     // Garbage, or nothing, offers no H.265 and limits nothing.
     final none = DesktopDecoders.fromJson({'h265': 'yes'});
@@ -657,18 +662,20 @@ void main() {
         expect(store.session.value.phase, DesktopPhase.live);
       }
 
+      // The default, the display's own size, within the H.265 decoder.
       await _live(tester, store, api);
       expect(
         last(),
         allOf(
           containsPair('h265', true),
-          containsPair('resolution', '1080p'),
+          containsPair('limits', (1920, 1080)),
+          isNot(contains('resolution')),
           containsPair('max_fps', 0),
         ),
       );
       expect(store.picture.value?.codec, 'h265');
 
-      // Native is beyond the H.265 decoder: H.264 it is.
+      // A chosen size stays on H.265, fitted inside its decoder.
       store.control(false);
       store.setResolution(DesktopResolution.native);
       await tester.pump();
@@ -676,7 +683,8 @@ void main() {
         last(),
         allOf(
           containsPair('resolution', 'native'),
-          containsPair('h265', false),
+          containsPair('h265', true),
+          containsPair('limits', (1920, 1080)),
         ),
       );
       await live();
@@ -686,10 +694,10 @@ void main() {
       expect(last(), containsPair('max_fps', 120));
       await live();
 
-      // Back at 1080p, H.265 again; the codec preference takes it away.
-      store.setResolution(DesktopResolution.p1080);
+      // Back to the default; the codec preference takes H.265 away.
+      store.setResolution(null);
       await tester.pump();
-      expect(last(), containsPair('h265', true));
+      expect(last(), isNot(contains('resolution')));
       await live();
       store.setCodec(DesktopCodecPreference.h264);
       await tester.pump();
@@ -728,8 +736,8 @@ void main() {
 
   testWidgets(
     'a computer that answers H.265 with H.264 is not offered it again, and '
-    'a size only H.265 decodes here connects again at once at the largest '
-    'H.264 does, the choice kept',
+    'limits only H.265 decodes here connect again at once within the H.264 '
+    "decoder's, the choice kept; what fits follows the remote display",
     (tester) async {
       final api = FakeDesktopApi()
         ..codec = 'h264'
@@ -740,26 +748,83 @@ void main() {
       final store = DesktopStore(api, textures: FakeTextures().create);
       final viewer = store.demand(DesktopDemand.viewer);
       List<(Object?, Object?)> asked() => [
-        for (final c in api.argsOf('connect')) (c['h265'], c['resolution']),
+        for (final c in api.argsOf('connect')) (c['h265'], c['limits']),
       ];
 
       await store.connect(
-        _target.copyWith(resolution: DesktopResolution.p1440),
+        _target.copyWith(resolution: (to: DesktopResolution.p1440)),
       );
       await tester.pump();
+      expect(asked(), [(true, (2560, 1440)), (false, (1920, 1080))]);
+      expect(store.session.value.target?.resolution, DesktopResolution.p1440);
+      // Before the remote display is known, its bounds decide.
+      expect(store.decodes(DesktopResolution.p1440), isFalse);
+      expect(store.decodes(DesktopResolution.p1080), isTrue);
+      // A 1080p display is sent at 1080p whatever larger size is chosen.
       api.viewerStatusValue = liveStatus();
       await tester.pump(const Duration(milliseconds: 500));
       expect(store.session.value.phase, DesktopPhase.live);
-      expect(asked(), [(true, '1440p'), (false, '1080p')]);
-      expect(store.session.value.target?.resolution, DesktopResolution.p1440);
-      expect(store.decodes(DesktopResolution.p1440), isFalse);
-      expect(store.decodes(DesktopResolution.p1080), isTrue);
+      expect(store.decodes(DesktopResolution.p1440), isTrue);
 
       // A reconnect asks for what this session decodes straight away.
       api.viewerStatusValue = stoppedStatus('transport');
       await tester.pump(const Duration(milliseconds: 500));
       await tester.pump(const Duration(seconds: 1));
-      expect(asked().last, (false, '1080p'));
+      expect(asked().last, (false, (1920, 1080)));
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
+
+  testWidgets(
+    'the remote resolution changes live, never a reconnect, and a computer '
+    'that keeps Fit local asks for it again each time control is gained',
+    (tester) async {
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api, textures: FakeTextures().create);
+      final viewer = store.demand(DesktopDemand.viewer);
+      const modes = DisplayModeList(
+        current: DisplayMode(2560, 1440),
+        original: DisplayMode(2560, 1440),
+        supported: [DisplayMode(2560, 1440), DisplayMode(1920, 1080)],
+        fitLocal: DisplayMode(1920, 1080),
+      );
+      List<Object?> asked() => [
+        for (final call in api.argsOf('display_mode')) call['target'],
+      ];
+      Future<void> report({required bool controlling}) async {
+        api.viewerStatusValue = liveStatus(
+          controlling: controlling,
+          modes: modes,
+        );
+        await tester.pump(const Duration(milliseconds: 500));
+      }
+
+      await store.connect(_target.copyWith(fitLocal: true));
+      await tester.pump();
+      await report(controlling: false);
+      expect(asked(), isEmpty);
+      // Control gained: Fit local, once.
+      await report(controlling: true);
+      await report(controlling: true);
+      expect(asked(), [
+        {'fit_local': store.localDisplay!.toJson()},
+      ]);
+
+      // Another size: live, with no reconnect, and Fit local no longer
+      // kept, so a later gain asks nothing.
+      store.setDisplayMode(
+        const DisplayModeTarget.size(DisplayMode(2560, 1440)),
+      );
+      expect(asked().last, {
+        'size': {'width': 2560, 'height': 1440},
+      });
+      expect(api.argsOf('connect'), hasLength(1));
+      expect(store.session.value.target?.fitLocal, isFalse);
+      await report(controlling: false);
+      await report(controlling: true);
+      expect(asked(), hasLength(2));
 
       viewer.dispose();
       store.dispose();

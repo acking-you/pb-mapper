@@ -22,7 +22,7 @@ use crate::{
     VideoLimits, VideoRate, Waker,
     input::held::Pressed,
     launch::{Launch, Launcher},
-    modes::Mode,
+    modes::{Journal, Mode, Setting},
     native::PlatformBackend,
 };
 use serde::{Deserialize, Serialize};
@@ -76,14 +76,10 @@ pub(crate) trait Platform: Sized + 'static {
     /// stale.
     fn open(grant: &Self::Grant, display: &Display) -> Result<Parts<Self>>;
     /// Where an in-process host keeps what it must restore after a crash.
-    #[expect(
-        dead_code,
-        reason = "the display-mode journal (pf-modes) keeps its state there"
-    )]
     fn default_state_dir() -> Option<PathBuf>;
-    /// Restore what a crashed host left changed under `state_dir`; how many
+    /// Replay the display-mode journal under `state_dir`: restore what a
+    /// host left changed, unless its owner changed it since. How many
     /// entries it restored.
-    #[expect(dead_code, reason = "the display-mode journal (pf-modes) replays it")]
     fn recover(state_dir: &Path) -> Result<usize>;
 }
 
@@ -188,48 +184,53 @@ pub(crate) trait CursorSource: Sized {
     fn read(&mut self) -> Result<Option<(i32, i32, bool)>>;
 }
 
-#[expect(
-    dead_code,
-    reason = "display-mode changes (pf-modes) call them; no platform has modes yet"
-)]
+/// A display's modes, by its device name (`Display::name`), the key that
+/// stays when a mode change gives the display another id, and the only one
+/// a journal replay knows.
 pub(crate) trait DisplayModes: Sized {
     const SUPPORTED: bool;
     /// The runtime truth: `SUPPORTED && available()` gates everything.
-    fn available(&mut self, display: &Display) -> bool {
-        let _ = display;
+    fn available(&mut self, device: &str) -> bool {
+        let _ = device;
         Self::SUPPORTED
     }
     /// Physical pixels, deduplicated, largest first, at most 64.
-    fn list(&mut self, display: &Display) -> Result<Vec<Mode>>;
-    fn current(&mut self, display: &Display) -> Result<Mode>;
+    fn list(&mut self, device: &str) -> Result<Vec<Mode>>;
+    fn current(&mut self, device: &str) -> Result<Setting>;
+    /// What `apply` would set for `mode`: its refresh rate and depth.
+    fn target(&mut self, device: &str, mode: Mode) -> Result<Setting>;
     /// Dynamic: the OS must not keep it.
-    fn apply(&mut self, display: &Display, mode: Mode) -> Result<()>;
+    fn apply(&mut self, device: &str, setting: &Setting) -> Result<()>;
     /// Back to the user's own mode.
-    fn reset(&mut self, display: &Display, original: Mode) -> Result<()>;
+    fn reset(&mut self, device: &str, original: &Setting) -> Result<()>;
 }
 
-/// No mode changes.
+/// No mode changes: the unsupported platform's, and the first real platform
+/// without modes (Android, Wayland).
+#[cfg_attr(
+    windows,
+    expect(dead_code, reason = "only the platforms without modes use it")
+)]
 pub(crate) struct NoModes;
 impl DisplayModes for NoModes {
     const SUPPORTED: bool = false;
-    fn list(&mut self, _: &Display) -> Result<Vec<Mode>> {
+    fn list(&mut self, _: &str) -> Result<Vec<Mode>> {
         Err(no_modes())
     }
-    fn current(&mut self, _: &Display) -> Result<Mode> {
+    fn current(&mut self, _: &str) -> Result<Setting> {
         Err(no_modes())
     }
-    fn apply(&mut self, _: &Display, _: Mode) -> Result<()> {
+    fn target(&mut self, _: &str, _: Mode) -> Result<Setting> {
         Err(no_modes())
     }
-    fn reset(&mut self, _: &Display, _: Mode) -> Result<()> {
+    fn apply(&mut self, _: &str, _: &Setting) -> Result<()> {
+        Err(no_modes())
+    }
+    fn reset(&mut self, _: &str, _: &Setting) -> Result<()> {
         Err(no_modes())
     }
 }
-#[expect(
-    dead_code,
-    reason = "NoModes is only asked once modes exist (pf-modes)"
-)]
-fn no_modes() -> std::io::Error {
+pub(crate) fn no_modes() -> std::io::Error {
     BackendError::new(FailureKind::Unsupported, "display modes").into()
 }
 
@@ -306,12 +307,47 @@ pub(crate) async fn native_launch(options: &HostOptions) -> Result<Arc<dyn Launc
         Access::Ordinary => {
             let (grant, display) = Current::acquire(&options.display).await?;
             let grant = Arc::new(grant);
-            Ok(Arc::new(Launcher::new(
-                move || PlatformBackend::<Current>::open(grant.clone(), &display),
-                fallback_caps::<Current>(),
-            )))
+            let state_dir = options
+                .state_dir
+                .clone()
+                .or_else(Current::default_state_dir);
+            let journal = Journal::in_dir(state_dir.clone());
+            let replayed = journal.clone();
+            Ok(Arc::new(
+                Launcher::new(
+                    move || {
+                        PlatformBackend::<Current>::open(grant.clone(), &display, journal.clone())
+                    },
+                    fallback_caps::<Current>(),
+                )
+                .recovering(move || {
+                    if let Some(state_dir) = &state_dir {
+                        Current::recover(state_dir)?;
+                    }
+                    Ok(replayed.pending())
+                }),
+            ))
         }
+        // The helper's worker journals and replays in its protected
+        // directory; this host keeps nothing.
         Access::Privileged => privileged_launch(&options.display),
+    }
+}
+
+/// Put back the display modes a host of this process left changed: a
+/// crashed one, or one whose restore failed (the ordinary desktop was away).
+/// `state_dir` is the host's [`HostOptions::state_dir`]; `None` is this
+/// platform's own. A display whose mode its owner changed since is left as
+/// it is. How many were restored. A host replays its journal when it starts,
+/// and every session before it changes anything; an app calls this once
+/// when it starts too.
+pub fn recover_display_modes(state_dir: Option<&Path>) -> Result<usize> {
+    match state_dir
+        .map(Path::to_path_buf)
+        .or_else(Current::default_state_dir)
+    {
+        Some(state_dir) => Current::recover(&state_dir),
+        None => Ok(0),
     }
 }
 

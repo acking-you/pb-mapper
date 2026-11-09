@@ -21,7 +21,7 @@ use windows::Win32::{
 
 pub(crate) struct DpiScope(DPI_AWARENESS_CONTEXT);
 impl DpiScope {
-    fn enter() -> Self {
+    pub(crate) fn enter() -> Self {
         Self(unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) })
     }
 }
@@ -183,12 +183,15 @@ impl WinDesktop {
         })
     }
     #[cfg(feature = "windows-helper")]
-    pub(crate) fn bound(id: u32, binding: DesktopBinding) -> Result<Self> {
-        let monitor = monitor_handle(id)?;
-        let name = {
-            let _dpi = DpiScope::enter();
-            current_display(id, monitor).map_or_else(|_| String::new(), |display| display.name)
+    /// The display of `id`, or, when that went stale, of the `device` name.
+    pub(crate) fn bound(id: u32, device: Option<String>, binding: DesktopBinding) -> Result<Self> {
+        let _dpi = DpiScope::enter();
+        let (id, monitor) = match monitor_handle(id) {
+            Ok(monitor) => (id, monitor),
+            Err(failure) => device.as_deref().and_then(by_name).ok_or(failure)?,
         };
+        let name = current_display(id, monitor)
+            .map_or_else(|_| device.unwrap_or_default(), |display| display.name);
         Ok(Self {
             id,
             name,
@@ -235,5 +238,30 @@ impl Desktop for WinDesktop {
     }
     fn changed(&self) -> bool {
         self.binding.as_ref().is_some_and(DesktopBinding::changed)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// A mode change may give a display another handle: one gone stale is
+    /// found again by its device name. Reads monitor geometry only.
+    #[test]
+    fn a_stale_monitor_handle_is_found_again_by_its_device_name() {
+        // No display to read: a service session, or a headless runner.
+        let Ok(primary) = resolve(&DisplaySelection::Primary) else {
+            return;
+        };
+        let mut stale = WinDesktop {
+            id: 0,
+            name: primary.name.clone(),
+            monitor: HMONITOR(std::ptr::null_mut()),
+            binding: None,
+        };
+        let _dpi = DpiScope::enter();
+        assert_eq!(stale.display().unwrap(), primary);
+        assert_eq!(stale.id, primary.id);
     }
 }

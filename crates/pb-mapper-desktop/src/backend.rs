@@ -274,8 +274,11 @@ impl BackendCaps {
         let lock = self
             .lock
             .then(|| crate::protocol::CAPABILITY_LOCK.to_string());
+        let modes = self
+            .display_modes
+            .then(|| crate::protocol::CAPABILITY_DISPLAY_MODE.to_string());
         let os = self.os.map(|os| os.capability().to_string());
-        lock.into_iter().chain(os).collect()
+        lock.into_iter().chain(modes).chain(os).collect()
     }
 }
 
@@ -299,6 +302,12 @@ impl HostOs {
             Self::Android => "os_android",
         }
     }
+    /// The OS a host's capability value names.
+    pub(crate) fn from_capability(value: &str) -> Option<Self> {
+        [Self::Windows, Self::Macos, Self::Linux, Self::Android]
+            .into_iter()
+            .find(|os| os.capability() == value)
+    }
 }
 
 /// How the host reports the pointer. `Embedded`: drawn into the picture, so
@@ -321,10 +330,6 @@ impl Waker {
         self.0.notify();
     }
 }
-
-/// Begins the text of every H.265 encoder failure on the helper pipe, which
-/// still carries failures as text while the helper protocol is 6.
-pub(crate) const H265_ENCODER_FAILED: &str = "h265_encoder_failed";
 
 /// A backend failure of a known kind. Its text is the message alone, so a
 /// failure reads as it did before it carried a kind.

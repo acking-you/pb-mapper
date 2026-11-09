@@ -15,14 +15,24 @@ cross-NAT operation, or the same presentation rate on every target device.
 
 The performance milestone is **1080p direct viewing at or near 90 presented
 FPS**. Both endpoints prefer pb-mapper's existing direct path, with pre-commit
-relay fallback. A viewer asks for 1080p by default (720p, 1440p or the native
-size up to 4K are choices kept per computer) at its display's refresh rate (at
-most 60 FPS on Android unless a maximum frame rate is chosen) and a quality
-preset; the host chooses frame rate and bitrate within them. Both ends prefer
-H.265 where their hardware has it, and fall back to H.264. Balanced, the default, starts at about 4 Mbit/s and
-never exceeds 60 FPS; only Smooth goes higher. A 60 Hz phone or VM cannot
-demonstrate 90 displayed FPS. Relay sessions may reduce frame rate and bitrate
-to preserve responsiveness; 90 FPS is not a relay acceptance requirement.
+relay fallback. A viewer asks for the remote display's own size by default, up
+to 3840×2160 (720p, 1080p and 1440p are choices kept per computer), fitted
+inside the largest picture of the decoder it offers first, at its display's
+refresh rate (at most 60 FPS on Android unless a maximum frame rate is chosen)
+and a quality preset; the host chooses frame rate and bitrate within them. Both
+ends prefer H.265 where their hardware has it, and fall back to H.264: a phone
+whose H.265 decoder stops at 1080p keeps H.265 and is sent 1080p. Balanced, the
+default, starts at about 4 Mbit/s for a 1080p picture (6.2 at 1440p, 11.3 at
+4K, by the pixel scaling below) and never exceeds 60 FPS; only Smooth goes
+higher. A 60 Hz phone or VM cannot demonstrate 90 displayed FPS. Relay sessions
+may reduce frame rate and bitrate to preserve responsiveness; 90 FPS is not a
+relay acceptance requirement.
+
+Known limits of the native default: the bounds are landscape, so a portrait
+display is fitted into them (1440×2560 is sent at 1214×2160) until the decoder
+probes test rotated sizes; a display larger than 3840×2160 is fitted into 4K;
+and a 4K host at 60 FPS has not been measured, since the development PC's
+display is 2560×1440.
 
 **PR #51 remains merge-blocked on phone fluidity.** The receipt-credit pipeline
 below replaces the presentation-credit pipeline that stuttered on a physical
@@ -260,6 +270,61 @@ the Windows service shares with the app not running at all, nothing shows a
 viewer: the service cannot draw in the user's session. Keep the app in the
 tray to see who is connected.
 
+## Remote resolution
+
+The desktop viewer's Display menu holds **Remote resolution**: the remote
+display's own modes and **Fit local**, which change the *remote computer's*
+display mode, not only the picture. The phone viewer has no such menu; its
+screen says nothing about the size a desktop should run at.
+
+- A host offers it (the `display_mode` capability) where its platform changes
+  modes, which today is Windows, in an ordinary session or through the helper.
+  A viewer that did not list the capability is never sent the modes, and its
+  requests are protocol errors.
+- The state record carries the display's modes: the current one, the
+  original the host found, and up to 64 sizes at the current depth and
+  orientation, none below 800×600, largest first. The menu appears only while
+  this viewer holds control, since a mode change is as intrusive as input.
+- **Fit local** asks for this computer's display size when the remote lists
+  it, else the largest listed size inside it within 2 % of its shape.
+  **Original** asks the host to put back the mode it found.
+- The change is dynamic (`ChangeDisplaySettingsExW` without
+  `CDS_UPDATEREGISTRY`), so the registry, and the next login, keep the owner's
+  mode. Before changing anything the host journals the original:
+  `display-modes.json` in the app's state directory, or the helper's
+  `display-modes-<session>.json` under its protected installation.
+- For 3 s after a change the host reports `display_changing` while its capture
+  restarts (the viewer waits as for a capture restart) and refuses another
+  change with a `display_mode_failed` notice.
+- The host puts the display back when the session ends (disconnect, Stop
+  sharing, the host's exit), when control is revoked (Make view-only), and when
+  the owner presses **Restore** on the host card, which says the remote
+  resolution was changed; that needs no control. Releasing control, a paused
+  viewer and a fresh grant keep it. If the owner changed the mode in the
+  meantime, the host leaves the owner's choice and forgets its entry.
+- A host that ended without putting it back (a crash, a killed app or worker)
+  puts it back later from the journal: the app at its first desktop call, a
+  host when it starts and after each session, retrying every 2 s while the
+  display refuses. A helper worker that exits with modes outstanding exits
+  with code 3, and the service then runs `helper restore <session>`, which
+  tries for 10 minutes; the service does the same for every journal left at
+  its start. Hosts in one process share a claim per display: the first
+  original wins and the last holder puts it back. Two processes changing one
+  display at once is a known limit.
+- A remembered computer keeps **Fit local** (never a fixed size, which the
+  next display may not list) and applies it again whenever this viewer gains
+  control of it.
+
+The SDK side is `Viewer::set_display_mode(ModeTarget)`, which answers the mode
+it asked for or a `DisplayModeError` (`Closed`, `NotOffered`,
+`NotControlling`, `NoFit`, `NotListed`), the viewer status's `modes` and
+`host_os`, `Host::restore_display_mode()`, `HostStatus::display_mode` while
+the display is changed, and `recover_display_modes(state_dir)`. The wire
+messages are `display_mode {width, height}` and `restore_display_mode {}`.
+`examples/display_mode_probe.rs` is the hardware acceptance; it changes the
+display it runs on, so run it only where the owner agreed (see
+[the acceptance runbook](../scripts/test/desktop-ui-acceptance.md)).
+
 ## Remembered computers
 
 A controller can remember the computers it views, so it reconnects without
@@ -273,7 +338,12 @@ pasting an invitation again:
   `desktop-computers.bin`, sealed with AES-256-GCM under a data key that an
   Android Keystore key wraps (`desktop-computers.key`, unwrapped through the
   `pb_mapper/keystore` channel once per process). Other platforms cannot
-  remember computers, and the add form says so. At most 50 are kept.
+  remember computers, and the add form says so. At most 50 are kept. The
+  file is `{"version":2,…}`: a computer keeps a resolution only when one was
+  chosen, so a later change of the default needs no migration, and may keep
+  **Fit local** as its remote resolution. A version 1 file, which wrote 1080p
+  whether chosen or not, reads its 1080p (or none) as the default; it is
+  written back as version 2.
 - Invitations never return to Dart. The list carries names, services,
   fingerprints and when each was last used; opening one connects by its id,
   and Rust looks the invitation up.
@@ -495,20 +565,30 @@ setup as **Turn on remote control** does: one consent prompt installs, updates
 or enables it, the app restarts into the installed copy when it installed one,
 and the host resumes there. The app's startup restore never installs or asks.
 
-Protocol 6 is the current one, with the pipes
-`pb-mapper.desktop-helper.v6` and `pb-mapper.desktop-background.v6`. Its video
-may be H.265, which a protocol 5 helper cannot parse; `Request::H265` asks the
-worker whether it encodes H.265 on its display, which it probes in the
-interactive session; and the worker answers each input with the pointer as
-the input left it, so the host never reports the controller's own move back
-(see [Input and cursor](#input-and-cursor)). The worker accepts an encoder
-bitrate up to 80 Mbit/s. Protocol 5 added the background host's `lan_first`,
-the app's *Try the local network first* when sharing started, written only
-when off, so a grant saved with the default stays readable by an older
-helper. The platform split ([Platforms](#platforms)) keeps protocol 6: the
-request and response types moved to the neutral `oop` module unchanged, and
-the client still reads a worker's failure from its text. A saved grant that
-does not say `allow_direct` now reads as allowed, the default everywhere.
+Protocol 7 is the current one, with the pipes
+`pb-mapper.desktop-helper.v7` and `pb-mapper.desktop-background.v7`. It adds
+display modes ([Remote resolution](#remote-resolution)): `Start` and `Attach`
+name the display's device (`\\.\DISPLAY1`), which finds it again when its
+monitor handle went stale after a mode change; `DisplayModes`,
+`SetDisplayMode` and `RestoreDisplayMode` requests, the last also on the
+background pipe for the host card's Restore; and the worker's `restore
+<session>` mode. A response carries the failure's kind instead of the client
+reading it from the text, and the `Start` response carries what the worker's
+backend can do (`caps`). A worker that exits with a mode still changed exits
+with code 3.
+
+Protocol 6 made the video possibly H.265, which a protocol 5 helper cannot
+parse; `Request::H265` asks the worker whether it encodes H.265 on its
+display, which it probes in the interactive session; and the worker answers
+each input with the pointer as the input left it, so the host never reports
+the controller's own move back (see [Input and cursor](#input-and-cursor)).
+The worker accepts an encoder bitrate up to 80 Mbit/s. Protocol 5 added the
+background host's `lan_first`, the app's *Try the local network first* when
+sharing started, written only when off, so a grant saved with the default
+stays readable by an older helper. The platform split
+([Platforms](#platforms)) kept protocol 6: the request and response types
+moved to the neutral `oop` module unchanged. A saved grant that does not say
+`allow_direct` reads as allowed, the default everywhere.
 
 Disable stops the service and disables its startup. Uninstall stops/deletes the
 service and removes its authorization configuration. Upgrade preserves files
@@ -1394,11 +1474,18 @@ arguments and never creates a decoder, because a bad driver can hang there. It
 answers a map: `h264` and `h265`, each either `{max_width, max_height}` (the
 largest of the viewer's resolution bounds that codec decodes at) or null, and
 `display_max_hz`, the fastest refresh among the displays as they are set now.
-An error, or a platform without the channel, counts as H.264 only, and so does
-a probe that has not answered within 2 s, for the attempts made meanwhile; the
-app keeps its later answer. The app offers H.265 (the `h265` capability) only
-where this device decodes it at the chosen resolution, and a session never
-asks for a size its codec's decoder cannot take.
+An error counts as H.264 only, and so does a probe that has not answered within
+2 s, for the attempts made meanwhile; the app keeps its later answer. A
+platform without the channel (macOS, Linux) has no decoder to offer, and its
+picture is JPEG, which Dart decodes. The app passes the answer to `connect` as
+`decoders`, and the SDK's `ViewerConfig::for_decoders` makes the offer: H.265
+(the `h265` capability) wherever this device has its decoder, then H.264, else
+JPEG, with the limits fitted inside the largest picture of the decoder offered
+first (`VideoLimits::clamped`, which compares long edge with long edge). A
+computer that answers H.265 with H.264 is connected again at once without
+H.265 when the H.264 decoder cannot take those limits. The Display menu
+disables a chosen size whose picture of the remote display, once known, does
+not fit, and says how large the default goes here when it is limited.
 
 On Windows the runner probes on its own thread, one probe at a time, and calls
 that arrive meanwhile share its answer. H.264 is reported, up to 3840×2160,

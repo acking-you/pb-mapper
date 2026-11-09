@@ -28,17 +28,20 @@ pub use status::{
 };
 
 use crate::{
-    Input, Invitation, KeyframeReason, QualityPreset, Result, VideoCodec, VideoLimits, error,
+    HostOs, Input, Invitation, KeyframeReason, QualityPreset, Result, VideoCodec, VideoLimits,
+    error,
+    modes::{DisplayModeError, Mode, ModeList, ModeTarget},
     protocol::{
-        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE,
-        CAPABILITY_H265, DesktopKind, HostMessage, NoticeCode, RejectReason, Route, SessionState,
-        StateRecord, VideoSize, ViewerMessage, valid_capabilities,
+        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_DISPLAY_MODE, CAPABILITY_ENCODER_DWELL,
+        CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265, DesktopKind, HostMessage, NoticeCode,
+        RejectReason, Route, SessionState, StateRecord, VideoSize, ViewerMessage,
+        valid_capabilities,
     },
     security, valid_service,
     video_sink::{VideoSink, VideoUnit},
     wire,
 };
-use outbound::{Barrier, Lifecycle, Next, Outbound};
+use outbound::{Barrier, Lifecycle, ModeRequest, Next, Outbound};
 use parking_lot::Mutex;
 use pb_mapper_client::sdk::{
     AddressFamily, Client, ConnectOptions, Connection, LanEvidence, LinkKind, LinkSample, LinkVia,
@@ -89,6 +92,14 @@ pub struct ViewerConfig {
     /// Called as the connection passes each stage.
     pub progress: Option<Arc<dyn Fn(ConnectStage) + Send + Sync>>,
 }
+/// What a renderer decodes in hardware: the largest picture each decoder
+/// takes at 60 fps, in either orientation; `None` where it has none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Decoders {
+    pub h264: Option<(u32, u32)>,
+    pub h265: Option<(u32, u32)>,
+}
+
 impl ViewerConfig {
     /// A viewer of `codecs`, at the default resolution and the display's 60
     /// fps, with the balanced preset.
@@ -97,6 +108,43 @@ impl ViewerConfig {
             codecs,
             limits: VideoLimits::choose(60.0, crate::Resolution::default(), None),
             fps_override: false,
+            quality: QualityPreset::Balanced,
+            progress: None,
+        }
+    }
+    /// The offer for what the renderer decodes: H.265 where it decodes it,
+    /// then H.264 where it decodes that, else JPEG, which needs no decoder.
+    /// The limits are `resolution`'s at `max_fps`, or at the display's
+    /// `refresh_hz` (see [`VideoLimits::choose`]), fitted inside the largest
+    /// picture of the decoder the host picks first: so a phone keeps H.265
+    /// at the default size. A host that declines H.265 sends H.264 within
+    /// those limits, which the H.264 decoder may not take; connect again
+    /// without H.265 then.
+    pub fn for_decoders(
+        decoders: Decoders,
+        resolution: crate::Resolution,
+        refresh_hz: f64,
+        max_fps: Option<u32>,
+    ) -> Self {
+        let fallback = if decoders.h264.is_some() {
+            VideoCodec::H264
+        } else {
+            VideoCodec::Jpeg
+        };
+        let codecs = decoders
+            .h265
+            .map(|_| VideoCodec::H265)
+            .into_iter()
+            .chain([fallback])
+            .collect();
+        let limits = VideoLimits::choose(refresh_hz, resolution, max_fps);
+        Self {
+            codecs,
+            limits: match decoders.h265.or(decoders.h264) {
+                Some(largest) => limits.clamped(largest),
+                None => limits,
+            },
+            fps_override: max_fps.is_some(),
             quality: QualityPreset::Balanced,
             progress: None,
         }
@@ -127,6 +175,7 @@ impl ViewerConfig {
         let mut capabilities = vec![
             CAPABILITY_ENCODER_DWELL.to_owned(),
             CAPABILITY_CURSOR_SEQUENCE.to_owned(),
+            CAPABILITY_DISPLAY_MODE.to_owned(),
         ];
         if self.codecs.contains(&VideoCodec::H265) {
             capabilities.push(CAPABILITY_H265.to_owned());
@@ -292,6 +341,14 @@ impl ViewerStateSlot {
     }
     fn video_size(&self) -> Option<VideoSize> {
         self.host.as_ref()?.video
+    }
+    /// The host display's modes, from a host that offers them.
+    fn modes(&self) -> Option<&ModeList> {
+        self.capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_DISPLAY_MODE)
+            .then(|| self.host.as_ref()?.modes.as_ref())
+            .flatten()
     }
 }
 
@@ -580,6 +637,11 @@ impl ViewerStatusHandle {
                 .0
                 .map(|at| millis(now.saturating_duration_since(at.max(state.entered_streaming)))),
             quality: state.quality,
+            modes: state.modes().cloned(),
+            host_os: state
+                .capabilities
+                .iter()
+                .find_map(|capability| HostOs::from_capability(capability)),
             capabilities: state.capabilities.clone(),
             notice: state
                 .notice
@@ -725,6 +787,49 @@ impl Viewer {
     pub fn set_quality(&self, preset: QualityPreset) {
         self.shared.state.lock().quality = preset;
         self.shared.outbound.quality(preset);
+    }
+
+    /// Change the host display's real mode, live: never a reconnect. The
+    /// picture comes back at the new size in a new generation, from an IDR.
+    /// `FitLocal` takes the mode that best fits this viewer's display
+    /// (`ModeList::fit_local`); `Original` puts back the mode the host found.
+    /// Needs a host that offers modes and control of it. The request is
+    /// queued like `set_quality`, the newest replacing one not yet sent, and
+    /// never awaits: the host answers with the new `State`, or a
+    /// `DisplayModeFailed` notice when it refuses. Returns the mode asked
+    /// for; nothing is sent when the display already shows it.
+    pub fn set_display_mode(
+        &self,
+        target: ModeTarget,
+    ) -> std::result::Result<Mode, DisplayModeError> {
+        let (mode, request) = {
+            let state = self.shared.state.lock();
+            if self.cancel.is_cancelled() || state.stopped.is_some() {
+                return Err(DisplayModeError::Closed);
+            }
+            let modes = state.modes().ok_or(DisplayModeError::NotOffered)?;
+            if !state.controlling() {
+                return Err(DisplayModeError::NotControlling);
+            }
+            let mode = match target {
+                ModeTarget::Original => modes.original,
+                ModeTarget::FitLocal(local) => {
+                    modes.fit_local(local).ok_or(DisplayModeError::NoFit)?
+                }
+                ModeTarget::Size(mode) if modes.supported.contains(&mode) => mode,
+                ModeTarget::Size(_) => return Err(DisplayModeError::NotListed),
+            };
+            let request = (mode != modes.current).then_some(if target == ModeTarget::Original {
+                ModeRequest::Restore
+            } else {
+                ModeRequest::Set(mode)
+            });
+            (mode, request)
+        };
+        if let Some(request) = request {
+            self.shared.outbound.display_mode(request);
+        }
+        Ok(mode)
     }
 
     /// The viewer is hidden: control ends, the host stops capturing, and the
@@ -1048,6 +1153,9 @@ impl Reader<'_> {
                         || !(1..=MAX_DISPLAY).contains(&display.height)
                 }) {
                     return Err(Ended::protocol("invalid display geometry"));
+                }
+                if host.modes.as_ref().is_some_and(|modes| !modes.valid()) {
+                    return Err(Ended::protocol("invalid display modes"));
                 }
                 self.generation = host.generation;
                 // The sink first, so nothing of an old generation is accepted
@@ -1378,6 +1486,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
             }),
+            modes: None,
         })
     }
 
@@ -1485,7 +1594,11 @@ mod tests {
         assert_eq!(codecs, [VideoCodec::H264]);
         assert_eq!(
             capabilities,
-            [CAPABILITY_ENCODER_DWELL, CAPABILITY_CURSOR_SEQUENCE]
+            [
+                CAPABILITY_ENCODER_DWELL,
+                CAPABILITY_CURSOR_SEQUENCE,
+                CAPABILITY_DISPLAY_MODE
+            ]
         );
 
         // Receipts and probe echoes need no consumer at all.
@@ -1605,6 +1718,7 @@ mod tests {
             [
                 CAPABILITY_ENCODER_DWELL,
                 CAPABILITY_CURSOR_SEQUENCE,
+                CAPABILITY_DISPLAY_MODE,
                 CAPABILITY_H265,
                 CAPABILITY_FPS_OVERRIDE
             ]
@@ -1629,6 +1743,95 @@ mod tests {
             Viewer::over_stream_for_test(stream, TOKEN.into(), alone).await,
             Err(ConnectError::InvalidRequest)
         ));
+    }
+
+    /// The offer follows the decoders, and the limits the one the host picks
+    /// first: a phone whose H.265 decoder stops at 1080p, probed upright,
+    /// keeps H.265 at the default size. Without a decoder, JPEG.
+    #[test]
+    fn the_offer_and_limits_follow_the_decoders() {
+        let native = |decoders| {
+            ViewerConfig::for_decoders(decoders, crate::Resolution::default(), 60.0, None)
+        };
+        let phone = native(Decoders {
+            h264: Some((3840, 2160)),
+            h265: Some((1080, 1920)),
+        });
+        assert_eq!(phone.codecs, [VideoCodec::H265, VideoCodec::H264]);
+        let bounds = |config: &ViewerConfig| (config.limits.max_width, config.limits.max_height);
+        assert_eq!(bounds(&phone), (1920, 1080));
+        let none = native(Decoders::default());
+        assert!(
+            none.capabilities()
+                .contains(&CAPABILITY_DISPLAY_MODE.to_owned())
+        );
+        assert_eq!(
+            (none.codecs.as_slice(), bounds(&none)),
+            (&[VideoCodec::Jpeg][..], (3840, 2160))
+        );
+    }
+
+    /// A host that did not list `display_mode` is never asked for a mode,
+    /// even one whose state carries modes; one that did is asked, live, and
+    /// only while this viewer controls it.
+    #[tokio::test]
+    async fn display_modes_are_asked_only_of_a_host_that_offers_them() {
+        let mode = |width, height| Mode { width, height };
+        for offered in [false, true] {
+            let mut answer = accepted();
+            if let HostMessage::Accepted { capabilities, .. } = &mut answer
+                && offered
+            {
+                capabilities.push(CAPABILITY_DISPLAY_MODE.into());
+            }
+            let (viewer, mut host, _) = connect(answer).await;
+            let viewer = viewer.unwrap();
+            let with_modes = |controlling| {
+                let HostMessage::State(mut record) = state(1, controlling) else {
+                    unreachable!()
+                };
+                record.modes = Some(ModeList {
+                    current: mode(1920, 1080),
+                    original: mode(1920, 1080),
+                    supported: vec![mode(1920, 1080), mode(1280, 720)],
+                });
+                HostMessage::State(record)
+            };
+            send(&mut host, with_modes(false), None).await;
+            eventually(|| viewer.status().generation == 1).await;
+            assert_eq!(viewer.status().modes.is_some(), offered);
+            let smaller = ModeTarget::Size(mode(1280, 720));
+            if !offered {
+                assert_eq!(
+                    viewer.set_display_mode(smaller),
+                    Err(DisplayModeError::NotOffered)
+                );
+                continue;
+            }
+            assert_eq!(
+                viewer.set_display_mode(smaller),
+                Err(DisplayModeError::NotControlling)
+            );
+            viewer.request_control(true).unwrap();
+            send(&mut host, with_modes(true), None).await;
+            eventually(|| viewer.status().controlling).await;
+            assert_eq!(
+                viewer.set_display_mode(ModeTarget::Size(mode(800, 600))),
+                Err(DisplayModeError::NotListed)
+            );
+            assert_eq!(viewer.set_display_mode(smaller), Ok(mode(1280, 720)));
+            until(&mut host, |message| {
+                matches!(
+                    message,
+                    ViewerMessage::DisplayMode {
+                        width: 1280,
+                        height: 720
+                    }
+                )
+            })
+            .await;
+            viewer.stop().await.unwrap();
+        }
     }
 
     /// A report the host sampled before it took this viewer's last move is set

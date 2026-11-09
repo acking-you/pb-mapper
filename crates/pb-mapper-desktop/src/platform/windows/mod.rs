@@ -10,12 +10,13 @@ pub mod dpapi;
 pub(crate) mod helper;
 pub(crate) mod input;
 pub(crate) mod mf;
+pub(crate) mod modes;
 pub(crate) mod still;
 pub(crate) mod timer;
 pub mod video;
 pub(crate) mod waiter;
 
-use super::{HostSupport, NoModes, Parts, Platform, UnsupportedReason, VideoSource};
+use super::{HostSupport, Parts, Platform, UnsupportedReason, VideoSource};
 use crate::{
     DRAIN_POLL, Display, DisplaySelection, EncodedFrame, HostOs, Result, VideoCodec, VideoLimits,
     VideoRate, Waker,
@@ -35,7 +36,7 @@ impl Platform for Windows {
     type Video = video::Encoder;
     type Input = input::WinInput;
     type Cursor = cursor::WinCursor;
-    type Modes = NoModes;
+    type Modes = modes::WinModes;
     type Still = still::XcapJpeg;
 
     /// A Windows host encodes H.264 with Media Foundation, and H.265 where
@@ -62,7 +63,7 @@ impl Platform for Windows {
         Ok(Parts {
             input: input::WinInput::new()?,
             cursor: cursor::WinCursor,
-            modes: NoModes,
+            modes: modes::WinModes,
             still: still::XcapJpeg,
             desktop,
         })
@@ -71,8 +72,11 @@ impl Platform for Windows {
         std::env::var_os("LOCALAPPDATA")
             .map(|local| PathBuf::from(local).join("pb-mapper").join("desktop"))
     }
-    fn recover(_: &Path) -> Result<usize> {
-        Ok(0)
+    fn recover(state_dir: &Path) -> Result<usize> {
+        crate::modes::recover(
+            &mut modes::WinModes,
+            &crate::modes::Journal::in_dir(Some(state_dir.to_path_buf())),
+        )
     }
 }
 
@@ -81,20 +85,23 @@ impl Platform for Windows {
 #[cfg(feature = "windows-helper")]
 pub(crate) fn open_bound(
     display_id: u32,
+    display_device: Option<String>,
     session: crate::oop::proto::SessionIdentity,
+    journal: crate::modes::Journal,
 ) -> Result<crate::native::PlatformBackend<Windows>> {
     let mut binding = helper::worker::DesktopBinding::new(session)?;
     binding.enter(|| {})?;
-    let desktop = desktop::WinDesktop::bound(display_id, binding)?;
+    let desktop = desktop::WinDesktop::bound(display_id, display_device, binding)?;
     Ok(crate::native::PlatformBackend::from_parts(
         std::sync::Arc::new(()),
         Parts {
             input: input::WinInput::new()?,
             cursor: cursor::WinCursor,
-            modes: NoModes,
+            modes: modes::WinModes,
             still: still::XcapJpeg,
             desktop,
         },
+        journal,
     ))
 }
 

@@ -588,6 +588,8 @@ class DesktopStore {
           saved?.displayId,
       helper: _helperState(capabilities?.helper),
       viewer: host?.viewer ?? backgroundHost?.viewer,
+      unsupportedReason: capabilities?.reason,
+      displayMode: host?.displayMode ?? backgroundHost?.displayMode,
       // The running host's relay, else the background service's, when the
       // settings name another one. A remembered grant for another relay is
       // not configured at all.
@@ -917,6 +919,11 @@ class DesktopStore {
   /// Disconnects the viewer; hosting continues (D15). Never waits.
   Future<void> endViewerSession() => _immediate(_api.endViewerSession);
 
+  /// Puts this computer's display mode back, which a viewer changed (Q3).
+  /// Never waits.
+  Future<void> restoreHostDisplayMode() =>
+      _immediate(_api.restoreHostDisplayMode);
+
   Future<void> _immediate(Future<void> Function() action) async {
     if (_disposed) return;
     try {
@@ -1004,6 +1011,9 @@ class DesktopStore {
   /// This computer answered an offer of H.265 with H.264 (an older build,
   /// no encoder, or one that failed): its sessions are H.264 from then on.
   bool _h265Declined = false;
+
+  /// Control is not held: a kept Fit local is due at the next gain (R19).
+  bool _fitLocalDue = true;
   Future<DesktopDecoders>? _probing;
   int _reconnectAttempt = 0, _protocolStops = 0;
   Timer? _retryTimer;
@@ -1082,26 +1092,26 @@ class DesktopStore {
       final target = _target;
       if (_disposed || target == null || serial != _serial) return;
       final h265 = _offeredH265 = _offersH265(decoders, target);
-      // Never a size the decoder of the codec asked for cannot take.
-      final resolution = h265
-          ? target.resolution
-          : decoders.forH264(target.resolution);
+      // Rust fits the limits inside the decoder offered first: never a
+      // size it cannot take.
+      final offer = h265 ? decoders : decoders.withoutH265();
       final session = await _api.connect(
         target.invitation,
         computerId: target.computerId,
         relayOnly: target.relayOnly,
         quality: _quality.value,
         refreshHz: _refreshHz(),
-        h265: h265,
-        resolution: resolution,
+        decoders: offer,
+        resolution: target.resolution,
         maxFps: target.maxFps,
       );
       if (_disposed || serial != _serial) return;
       if (h265 && session.codec == 'h264') {
         _h265Declined = true;
-        if (decoders.forH264(resolution) != resolution) {
-          // Only H.265 decodes this size here: again at once, at the
-          // largest H.264 does. The computer keeps the choice.
+        final (width, height) = offer.limitsFor(target.resolution);
+        if (!(decoders.h264?.takes(width, height) ?? true)) {
+          // Only H.265 decodes these limits here: again at once, within
+          // H.264's. The computer keeps the choice.
           _reconnectNow();
           return;
         }
@@ -1301,24 +1311,41 @@ class DesktopStore {
   bool _offersH265(DesktopDecoders? decoders, DesktopTarget target) =>
       !_h265Declined && (decoders?.offersH265(target) ?? false);
 
-  /// D7: a session at [r] would decode here, judged by the codec it would
-  /// carry — H.265 where it would be offered, else H.264. Before the probe
-  /// has answered, every size.
-  bool decodes(DesktopResolution r) {
+  /// D7: a session at [r] (null: the default) would decode here at its own
+  /// size, judged by the codec it would carry — H.265 where it would be
+  /// offered, else H.264 — and by the remote display once it is known.
+  /// Before the probe has answered, every size.
+  bool decodes(DesktopResolution? r) {
     final decoders = _decoders.value;
     if (decoders == null) return true;
     return decoders.decodes(
       r,
       _target?.codec ?? DesktopCodecPreference.auto,
       h265Declined: _h265Declined,
+      display: _remoteDisplay(),
     );
+  }
+
+  /// The largest picture of the decoder a session here is fitted inside
+  /// (D7): what the default is limited to where [decodes] says it does not
+  /// fit. Null for JPEG.
+  DesktopDecoderLimit? decoderLimit() => _decoders.value?.limitFor(
+    _target?.codec ?? DesktopCodecPreference.auto,
+    h265Declined: _h265Declined,
+  );
+
+  (int, int)? _remoteDisplay() {
+    final geometry = _geometry.value;
+    return geometry == null
+        ? null
+        : (geometry.displayWidth, geometry.displayHeight);
   }
 
   void _pollStatus({bool resumed = false}) {
     if (_disposed || !_sessionActive) return;
     DesktopViewerStatus? status;
     try {
-      status = _api.viewerStatus();
+      status = _api.viewerStatus(local: _localDisplay());
     } catch (_) {
       return;
     }
@@ -1365,6 +1392,7 @@ class DesktopStore {
           _setup = null;
         }
         _maybeRequestControl(status);
+        _reapplyFitLocal(status);
         if (_visible &&
             !status.paused &&
             status.decoderState != 'failed' &&
@@ -1374,6 +1402,27 @@ class DesktopStore {
     }
     _sampleStats(status);
     _publishSession();
+  }
+
+  /// R19: a computer that keeps Fit local gets it again each time this
+  /// viewer gains control, once the host's modes say what fits; a choice
+  /// made since stands until control ends.
+  void _reapplyFitLocal(DesktopViewerStatus status) {
+    if (!status.controlling) {
+      _fitLocalDue = true;
+      return;
+    }
+    final modes = status.modes;
+    if (!_fitLocalDue || _target?.fitLocal != true || modes == null) return;
+    _fitLocalDue = false;
+    final local = _localDisplay();
+    final fit = modes.fitLocal;
+    if (local == null || fit == null || fit == modes.current) return;
+    try {
+      _api.setDisplayMode(DisplayModeTarget.fitLocal(local));
+    } on DesktopCallException {
+      // Refused or not offered now: the next gain tries again.
+    }
   }
 
   static DesktopSetupStep _setupFor(String? stage) => switch (stage) {
@@ -1474,6 +1523,7 @@ class DesktopStore {
       path: path == null || path.isEmpty ? null : path,
       notice: status?.notice,
       capabilities: status?.capabilities ?? const [],
+      displayModes: status?.modes,
     );
     final session = _session.value;
     if (session.inputLive != _wasLive) {
@@ -1971,6 +2021,21 @@ class DesktopStore {
     }
   }
 
+  /// This computer's display in physical pixels, as Fit local fits it (R8);
+  /// null where it cannot be read.
+  DisplayMode? _localDisplay() {
+    try {
+      final views = ui.PlatformDispatcher.instance.views;
+      if (views.isEmpty) return null;
+      final size = views.first.display.size;
+      return size.isEmpty
+          ? null
+          : DisplayMode(size.width.round(), size.height.round());
+    } catch (_) {
+      return null;
+    }
+  }
+
   // --------------------------------------------------------------- input
 
   int _inputEpoch = 0;
@@ -2078,10 +2143,30 @@ class DesktopStore {
     _publishSession();
   }
 
-  /// The encoded size's bound (D7), fixed for a session: a change connects
-  /// again at once.
-  void setResolution(DesktopResolution resolution) =>
-      _setLimits(_target?.copyWith(resolution: resolution));
+  /// The encoded size's bound (D7), null for the default, fixed for a
+  /// session: a change connects again at once.
+  void setResolution(DesktopResolution? resolution) =>
+      _setLimits(_target?.copyWith(resolution: (to: resolution)));
+
+  /// The remote display's real mode (R8), live: never a reconnect, never
+  /// the session's limits. The picture comes back at the new size; a host
+  /// that refuses says so in a notice. A Fit local choice is asked for again
+  /// whenever control is gained (R19); any other choice ends that. The mode
+  /// asked for, or null when nothing was sent.
+  DisplayMode? setDisplayMode(DisplayModeTarget target) {
+    final current = _target;
+    if (_disposed || !_sessionActive || current == null) return null;
+    _target = current.copyWith(fitLocal: target.fitsLocal);
+    _publishSession();
+    try {
+      return _api.setDisplayMode(target);
+    } on DesktopCallException {
+      return null;
+    }
+  }
+
+  /// This computer's display, which Fit local fits; null where unknown.
+  DisplayMode? get localDisplay => _localDisplay();
 
   /// The frame rate's ceiling (D8), 0 for Auto, fixed for a session: a
   /// change connects again at once.

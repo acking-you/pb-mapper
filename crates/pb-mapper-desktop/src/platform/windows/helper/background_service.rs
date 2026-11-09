@@ -315,6 +315,11 @@ impl Supervisor {
                     self.persist_restriction(root).await?;
                 }
             }
+            Command::RestoreDisplayMode {} => {
+                if let Some(host) = &self.host {
+                    host.restore_display_mode();
+                }
+            }
         }
         Ok(self.snapshot())
     }
@@ -398,15 +403,19 @@ impl Supervisor {
         self.pending = Some(tokio::spawn(async move {
             let client = client(&saved.options)?;
             let settings = saved.options.settings;
-            let display_id = settings.display_id;
+            let (display_id, device) = (settings.display_id, settings.display_device);
             let mut options = HostOptions::new(settings.service);
-            options.display = crate::DisplaySelection::Id(display_id);
+            // The worker finds a display whose id went stale by its name.
+            options.display = match &device {
+                Some(device) => crate::DisplaySelection::Device(device.clone()),
+                None => crate::DisplaySelection::Id(display_id),
+            };
             options.access = crate::Access::Privileged;
             options.allow_control = settings.allow_control;
             options.allow_direct = settings.allow_direct;
             options.lan_first = saved.options.lan_first;
             let launch = Arc::new(crate::launch::Launcher::new(
-                move || super::super::service_backend(display_id),
+                move || super::super::service_backend(display_id, device.clone()),
                 super::super::fallback_caps(),
             ));
             Host::builder(options)
@@ -611,6 +620,7 @@ mod tests {
             settings: Settings {
                 service: "desktop:background-test".into(),
                 display_id: 1,
+                display_device: None,
                 allow_control: false,
                 allow_direct: false,
                 auto_start: true,

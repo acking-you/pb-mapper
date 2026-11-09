@@ -7,7 +7,7 @@ use super::{
     ipc,
     proto::{DRAIN_WAIT_MAX_MS, Request, Response, TIMEOUT},
 };
-use crate::{Backend, DesktopContext, Result, error};
+use crate::{Backend, DesktopContext, Result, error, failure_kind};
 
 /// What the worker keeps across requests.
 pub(crate) struct ServeState {
@@ -33,13 +33,17 @@ impl ServeState {
 pub(crate) async fn exchange<P, A>(
     pipe: &mut P,
     display_id: u32,
+    display_device: Option<String>,
     mut serve: impl FnMut(Request) -> A,
 ) -> Result<()>
 where
     P: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     A: std::future::Future<Output = Result<(Response, Vec<u8>)>>,
 {
-    let mut request = Request::Start { display_id };
+    let mut request = Request::Start {
+        display_id,
+        display_device,
+    };
     loop {
         let close = matches!(request, Request::Close {});
         let (response, image) = tokio::time::timeout(TIMEOUT, serve(request))
@@ -59,15 +63,13 @@ where
 }
 
 impl Response {
-    pub(crate) fn failed(error: String, pending: u32) -> Self {
+    /// The answer to a request that failed, with the failure's kind.
+    pub(crate) fn failed(failure: &std::io::Error, pending: u32) -> Self {
         Self {
-            context: None,
-            error: Some(error),
-            video: None,
-            cursor: None,
+            error: Some(failure.to_string()),
+            failure: failure_kind(failure),
             pending,
-            double_click: None,
-            h265: None,
+            ..Self::empty()
         }
     }
 }
@@ -80,17 +82,14 @@ pub(crate) fn serve<B: Backend>(
     request: Request,
     state: &mut ServeState,
 ) -> Result<(Response, Vec<u8>)> {
-    let mut response = Response {
-        context: None,
-        error: None,
-        video: None,
-        cursor: None,
-        pending: 0,
-        double_click: None,
-        h265: None,
-    };
+    let mut response = Response::empty();
     if matches!(request, Request::Release {} | Request::Close {}) {
         backend.release();
+        return Ok((response, vec![]));
+    }
+    // Whatever desktop is bound now: what this worker changed goes back.
+    if let Request::RestoreDisplayMode {} = request {
+        response.restored = Some(backend.restore_display_mode()?);
         return Ok((response, vec![]));
     }
     if let Request::Input {
@@ -127,11 +126,27 @@ pub(crate) fn serve<B: Backend>(
     let image = match request {
         Request::Start { .. } => {
             // This worker runs in the interactive session: its settings are
-            // the user's, which the service in session 0 cannot read.
+            // the user's, which the service in session 0 cannot read. What
+            // it can do is said at once, never H.265, which costs a probe.
             response.double_click = backend.double_click_guard();
+            response.caps = Some((&backend.describe(false)?.caps).into());
             vec![]
         }
-        Request::Context {} | Request::Release {} | Request::Close {} | Request::Input { .. } => {
+        Request::Context {}
+        | Request::Release {}
+        | Request::Close {}
+        | Request::Input { .. }
+        | Request::RestoreDisplayMode {} => vec![],
+        Request::DisplayModes { expected } => {
+            if expected != context {
+                return Err(error("stale display mode request"));
+            }
+            response.modes = backend.display_modes(&expected)?;
+            vec![]
+        }
+        Request::SetDisplayMode { expected, mode } => {
+            // The backend checks the bound desktop is still `expected`.
+            backend.set_display_mode(&expected, mode)?;
             vec![]
         }
         Request::Attach { .. } => return Err(error("worker is already attached")),
@@ -295,19 +310,8 @@ mod tests {
         }
         let (mut host, mut worker) = tokio::io::duplex(1 << 16);
         let exchange = tokio::spawn(async move {
-            exchange(&mut worker, 1, |_| async {
-                Ok((
-                    Response {
-                        context: None,
-                        error: None,
-                        video: None,
-                        cursor: None,
-                        pending: 0,
-                        double_click: None,
-                        h265: None,
-                    },
-                    vec![],
-                ))
+            exchange(&mut worker, 1, None, |_| async {
+                Ok((Response::empty(), vec![]))
             })
             .await
         });
@@ -339,10 +343,17 @@ mod tests {
         };
         let probe = Probe::default();
         let parts = Synthetic::<false>::open(&probe, &Probe::display()).unwrap();
-        let mut backend = PlatformBackend::from_parts(std::sync::Arc::new(probe), parts);
+        let mut backend = PlatformBackend::from_parts(
+            std::sync::Arc::new(probe),
+            parts,
+            crate::modes::Journal::default(),
+        );
         let mut state = ServeState::new();
         let mut serve = |request| serve(&mut backend, request, &mut state).unwrap();
-        let (started, _) = serve(Request::Start { display_id: 1 });
+        let (started, _) = serve(Request::Start {
+            display_id: 1,
+            display_device: None,
+        });
         serve(Request::ConfigureVideo {
             limits: VideoLimits::for_viewer(60.0),
             nominal_fps: 60,

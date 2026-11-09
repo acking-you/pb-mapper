@@ -35,6 +35,7 @@ class DesktopViewer extends StatefulWidget {
     this.onDisconnect,
     this.onQuality,
     this.onResolution,
+    this.onDisplayMode,
     this.onMaxFps,
     this.onReconnect,
     this.onPasteNewInvite,
@@ -54,7 +55,10 @@ class DesktopViewer extends StatefulWidget {
   final ValueChanged<DesktopQuality>? onQuality;
 
   /// Defaults: `desktop.setResolution` and `desktop.setMaxFps`.
-  final ValueChanged<DesktopResolution>? onResolution;
+  final ValueChanged<DesktopResolution?>? onResolution;
+
+  /// The remote resolution (R8); null: straight to the store.
+  final ValueChanged<DisplayModeTarget>? onDisplayMode;
   final ValueChanged<int>? onMaxFps;
 
   /// Default: connects the session's target again.
@@ -209,6 +213,8 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
     onDisconnect: _disconnect,
     onQuality: (q) => (widget.onQuality ?? _desktop.setQuality)(q),
     onResolution: (r) => (widget.onResolution ?? _desktop.setResolution)(r),
+    onDisplayMode: (target) =>
+        (widget.onDisplayMode ?? _desktop.setDisplayMode)(target),
     onMaxFps: (fps) => (widget.onMaxFps ?? _desktop.setMaxFps)(fps),
     onTypeText: () => unawaited(_typeText()),
     onBack: widget.onBack == null ? null : () => widget.onBack?.call(),

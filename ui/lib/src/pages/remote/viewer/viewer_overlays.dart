@@ -567,6 +567,10 @@ class ViewerOverlayLayer extends StatelessWidget {
                         DesktopNoticeCode.locked => context.l10n.shortcutLocked,
                         DesktopNoticeCode.lockFailed =>
                           context.l10n.shortcutLockFailed(notice.message),
+                        DesktopNoticeCode.displayModeFailed =>
+                          context.l10n.viewerRemoteResolutionFailed(
+                            notice.message,
+                          ),
                       },
                     ),
                   ),

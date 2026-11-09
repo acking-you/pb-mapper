@@ -5,13 +5,14 @@
 //! encoder does.
 
 use super::{
-    CursorSource, Desktop, HostSupport, Injector, NoModes, Parts, Platform, StillCapture,
+    CursorSource, Desktop, DisplayModes, HostSupport, Injector, Parts, Platform, StillCapture,
     VideoSource,
 };
 use crate::{
     BackendError, Button, CursorMode, DRAIN_POLL, Display, DisplaySelection, EncodedFrame,
     FailureKind, HostOs, Key, Result, VideoCodec, VideoFormat, VideoLimits, VideoRate, Waker,
     input::held::Pressed,
+    modes::{Mode, Setting},
 };
 use parking_lot::Mutex;
 use std::{
@@ -35,19 +36,58 @@ struct State {
     released: Vec<Pressed>,
     /// Submit to drain, per unit.
     latencies: Vec<Duration>,
+    /// The display's size now, once a mode changed it.
+    size: Option<Mode>,
+    /// The modes it offers; none, and it offers no change.
+    modes: Vec<Mode>,
+    /// Every mode set, and how often one was reset.
+    applied: Vec<Mode>,
+    resets: usize,
 }
 impl Probe {
+    /// A display device no real computer has, so that nothing here ever
+    /// reaches a real one's modes.
     pub(crate) fn display() -> Display {
         Display {
             id: 1,
-            name: "synthetic".into(),
+            name: r"\\.\DISPLAY901".into(),
             x: -1920,
             y: 0,
             width: 64,
             height: 48,
         }
     }
-    fn lose(&self, lost: bool) {
+    /// The display as it is now.
+    fn current(&self) -> Display {
+        let size = self.0.lock().size;
+        let display = Self::display();
+        match size {
+            Some(size) => Display {
+                width: size.width,
+                height: size.height,
+                ..display
+            },
+            None => display,
+        }
+    }
+    /// A display that offers its own size and a smaller one.
+    pub(crate) fn with_modes() -> (Self, Vec<Mode>) {
+        let probe = Self::default();
+        let display = Self::display();
+        let modes = vec![
+            Mode {
+                width: display.width,
+                height: display.height,
+            },
+            Mode {
+                width: 32,
+                height: 24,
+            },
+        ];
+        probe.0.lock().modes = modes.clone();
+        (probe, modes)
+    }
+    pub(crate) fn lose(&self, lost: bool) {
         self.0.lock().lost = lost;
     }
 }
@@ -59,7 +99,7 @@ impl<const PUSH: bool> Platform for Synthetic<PUSH> {
     type Video = SynVideo<PUSH>;
     type Input = SynInput;
     type Cursor = SynCursor;
-    type Modes = NoModes;
+    type Modes = SynModes;
     type Still = SynStill;
 
     fn support() -> HostSupport {
@@ -81,7 +121,7 @@ impl<const PUSH: bool> Platform for Synthetic<PUSH> {
         Ok(Parts {
             input: SynInput(probe.clone()),
             cursor: SynCursor(probe.clone()),
-            modes: NoModes,
+            modes: SynModes(probe.clone()),
             still: SynStill,
             desktop: SynDesktop(probe.clone()),
         })
@@ -105,7 +145,49 @@ impl Desktop for SynDesktop {
         if self.0.0.lock().lost {
             return Err(BackendError::new(FailureKind::DisplayLost, "display unplugged").into());
         }
-        Ok(Probe::display())
+        Ok(self.0.current())
+    }
+}
+
+/// Modes the test lists, and the size each change leaves the display at.
+pub(crate) struct SynModes(Probe);
+impl DisplayModes for SynModes {
+    const SUPPORTED: bool = true;
+    fn available(&mut self, _: &str) -> bool {
+        !self.0.0.lock().modes.is_empty()
+    }
+    fn list(&mut self, _: &str) -> Result<Vec<Mode>> {
+        Ok(self.0.0.lock().modes.clone())
+    }
+    fn current(&mut self, _: &str) -> Result<Setting> {
+        let display = self.0.current();
+        Ok(setting(Mode {
+            width: display.width,
+            height: display.height,
+        }))
+    }
+    fn target(&mut self, _: &str, mode: Mode) -> Result<Setting> {
+        Ok(setting(mode))
+    }
+    fn apply(&mut self, _: &str, setting: &Setting) -> Result<()> {
+        let mut state = self.0.0.lock();
+        state.size = Some(setting.size());
+        state.applied.push(setting.size());
+        Ok(())
+    }
+    fn reset(&mut self, _: &str, original: &Setting) -> Result<()> {
+        let mut state = self.0.0.lock();
+        state.size = Some(original.size());
+        state.resets += 1;
+        Ok(())
+    }
+}
+fn setting(mode: Mode) -> Setting {
+    Setting {
+        width: mode.width,
+        height: mode.height,
+        hz: 60,
+        bpp: 32,
     }
 }
 
@@ -151,7 +233,7 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
     /// on the encoder's own thread, which wakes thread C.
     fn submit(&mut self, keyframe: bool) -> Result<()> {
         self.frames += 1;
-        let display = Probe::display();
+        let display = self.probe.current();
         let frame = EncodedFrame {
             format: VideoFormat {
                 codec: self.codec,
@@ -251,7 +333,8 @@ mod tests {
     use super::*;
     use crate::{
         Backend, Host, HostOptions, Input, Pull, QualityPreset, StateReason, Viewer, ViewerConfig,
-        ViewerStatus, launch::Launcher, native::PlatformBackend, platform::fallback_caps,
+        ViewerStatus, launch::Launcher, modes::Journal, native::PlatformBackend,
+        platform::fallback_caps,
     };
     use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
     use pb_mapper_testkit::{Relay, admin_credential};
@@ -332,12 +415,22 @@ mod tests {
             Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
         let probe = Probe::default();
         let grant = Arc::new(probe.clone());
-        let backend =
-            PlatformBackend::<Synthetic<PUSH>>::open(grant.clone(), &Probe::display()).unwrap();
+        let backend = PlatformBackend::<Synthetic<PUSH>>::open(
+            grant.clone(),
+            &Probe::display(),
+            Journal::default(),
+        )
+        .unwrap();
         assert_eq!(backend.drain_poll().is_none(), PUSH);
         drop(backend);
         let launch = Arc::new(Launcher::new(
-            move || PlatformBackend::<Synthetic<PUSH>>::open(grant.clone(), &Probe::display()),
+            move || {
+                PlatformBackend::<Synthetic<PUSH>>::open(
+                    grant.clone(),
+                    &Probe::display(),
+                    Journal::default(),
+                )
+            },
             fallback_caps::<Synthetic<PUSH>>(),
         ));
         let mut options = HostOptions::new(format!("desktop:{name}"));
@@ -397,5 +490,233 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_pushed_platform_is_drained_when_it_wakes_thread_c() {
         session::<true>("desktop-synthetic-push").await;
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod modes_tests {
+    use super::*;
+    use crate::{
+        DisplayModeError, Host, HostOptions, ModeTarget, NoticeCode, Pull, StateReason, Viewer,
+        ViewerConfig, ViewerReason, ViewerStatus, launch::Launcher, modes::Journal,
+        native::PlatformBackend, platform::fallback_caps,
+    };
+    use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
+    use pb_mapper_testkit::{Relay, admin_credential};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    async fn until(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A controlling viewer that presents every unit at once.
+    struct Controlling {
+        viewer: Viewer,
+        stop: Arc<AtomicBool>,
+        renderer: std::thread::JoinHandle<()>,
+    }
+    impl Controlling {
+        async fn connect(client: &Client, host: &Host) -> Self {
+            let options = ConnectOptions {
+                path: PathPolicy::RelayOnly,
+                ..Default::default()
+            };
+            let config = ViewerConfig::new(vec![VideoCodec::H264]);
+            let viewer = Viewer::connect(client, host.invitation(), options, config)
+                .await
+                .unwrap();
+            let consumer = viewer.video_sink().attach().unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let done = stop.clone();
+            let renderer = std::thread::spawn(move || {
+                while !done.load(Ordering::Acquire) {
+                    if let Pull::Unit(unit) = consumer.next(Duration::from_millis(20), 4 << 20) {
+                        consumer.presented(unit.generation, unit.frame_id);
+                    }
+                }
+            });
+            let this = Self {
+                viewer,
+                stop,
+                renderer,
+            };
+            this.control().await;
+            this
+        }
+        async fn control(&self) {
+            self.until(|status| status.fresh).await;
+            self.viewer.request_control(true).unwrap();
+            self.until(|status| status.controlling && status.fresh)
+                .await;
+        }
+        async fn until(&self, condition: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
+            until(|| condition(&self.viewer.status())).await;
+            self.viewer.status()
+        }
+        /// The display is `width` wide, presented in a generation after
+        /// `since`.
+        async fn shows(&self, width: u32, since: u64) -> ViewerStatus {
+            self.until(|status| {
+                status.display.as_ref().is_some_and(|d| d.width == width)
+                    && status.video.is_some_and(|video| video.width == width)
+                    && status.generation > since
+                    && status.fresh
+            })
+            .await
+        }
+        async fn stop(self) {
+            self.viewer.stop().await.unwrap();
+            self.stop.store(true, Ordering::Release);
+            self.renderer.join().unwrap();
+        }
+    }
+
+    /// The remote resolution, end to end on a synthetic display: a viewer
+    /// fits its display and sees the new size in a new generation, from an
+    /// IDR; a second change while the first settles is refused with a
+    /// notice, and a capture failure then is `DisplayChanging`. The owner's
+    /// re-grant keeps the mode; a revoke, the session's end and the owner's
+    /// Restore put it back; a mode the owner chose meanwhile is left alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_remote_resolution_changes_live_and_goes_back() {
+        let relay = Relay::start("desktop-synthetic-modes").await;
+        let client =
+            Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
+        let (probe, modes) = Probe::with_modes();
+        let (own, small) = (modes[0], modes[1]);
+        let dir = std::env::temp_dir().join(format!("pb-desktop-modes-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let journal = Journal::in_dir(Some(dir.clone()));
+        let (grant, opened) = (Arc::new(probe.clone()), journal.clone());
+        let (replayed, replaying) = (probe.clone(), journal.clone());
+        let launch = Launcher::new(
+            move || {
+                PlatformBackend::<Synthetic<false>>::open(
+                    grant.clone(),
+                    &Probe::display(),
+                    opened.clone(),
+                )
+            },
+            fallback_caps::<Synthetic<false>>(),
+        )
+        .recovering(move || {
+            crate::modes::recover(&mut SynModes(replayed.clone()), &replaying)?;
+            Ok(replaying.pending())
+        });
+        let mut options = HostOptions::new("desktop:synthetic-modes");
+        options.allow_control = true;
+        options.allow_direct = false;
+        let host = Host::builder(options)
+            .launch(Arc::new(launch))
+            .start(&client)
+            .await
+            .unwrap();
+        let resets = || probe.0.lock().resets;
+        let shows_owners =
+            |status: &ViewerStatus| status.display.as_ref().is_some_and(|d| d.width == 48);
+
+        // Fit the viewer's display: a new generation at the new size.
+        let watching = Controlling::connect(&client, &host).await;
+        let before = watching.viewer.status();
+        let listed = before.modes.clone().unwrap();
+        assert_eq!(
+            (listed.current, listed.supported.clone()),
+            (own, modes.clone())
+        );
+        assert_eq!(
+            watching
+                .viewer
+                .set_display_mode(ModeTarget::FitLocal(small)),
+            Ok(small)
+        );
+        let fitted = watching.shows(small.width, before.generation).await;
+        assert_eq!(fitted.modes.unwrap().original, own);
+        assert_eq!(host.status().display_mode.unwrap().current, small);
+
+        // Too soon for another change: refused, and said so.
+        assert_eq!(
+            watching.viewer.set_display_mode(ModeTarget::Original),
+            Ok(own)
+        );
+        watching
+            .until(|status| {
+                status
+                    .notice
+                    .as_ref()
+                    .is_some_and(|notice| notice.code == NoticeCode::DisplayModeFailed)
+            })
+            .await;
+        // A capture failure while it settles is the display changing.
+        probe.lose(true);
+        until(|| host.status().reason == Some(StateReason::DisplayChanging)).await;
+        watching
+            .until(|status| status.reason == Some(ViewerReason::DisplayChanging))
+            .await;
+        probe.lose(false);
+        let settled = watching.until(|status| status.fresh).await;
+
+        // A re-grant ends control and keeps the mode; a revoke restores it.
+        host.set_control_allowed(true);
+        watching.until(|status| !status.controlling).await;
+        assert_eq!((probe.current().width, resets()), (small.width, 0));
+        watching.control().await;
+        host.set_control_allowed(false);
+        watching.shows(own.width, settled.generation).await;
+        assert_eq!(resets(), 1);
+        assert_eq!(
+            watching.viewer.set_display_mode(ModeTarget::Size(small)),
+            Err(DisplayModeError::NotControlling)
+        );
+
+        // The owner picks another size meanwhile: never fought.
+        host.set_control_allowed(true);
+        watching.control().await;
+        tokio::time::sleep(crate::modes::SETTLE).await;
+        let generation = watching.viewer.status().generation;
+        watching
+            .viewer
+            .set_display_mode(ModeTarget::Size(small))
+            .unwrap();
+        watching.shows(small.width, generation).await;
+        probe.0.lock().size = Some(Mode {
+            width: 48,
+            height: 36,
+        });
+        watching.until(shows_owners).await;
+        watching.stop().await;
+        until(|| host.status().viewer.is_none()).await;
+        assert_eq!((probe.current().width, resets()), (48, 1));
+
+        // The session's end puts the display back, and so does the owner.
+        for owner in [false, true] {
+            let watching = Controlling::connect(&client, &host).await;
+            let generation = watching.viewer.status().generation;
+            watching
+                .viewer
+                .set_display_mode(ModeTarget::Size(small))
+                .unwrap();
+            watching.shows(small.width, generation).await;
+            if owner {
+                // The owner's Restore needs no control, but waits out the
+                // settle window like any change.
+                tokio::time::sleep(crate::modes::SETTLE).await;
+                assert!(host.restore_display_mode());
+                watching.until(shows_owners).await;
+            }
+            watching.stop().await;
+            until(|| host.status().viewer.is_none()).await;
+            until(|| probe.current().width == 48).await;
+        }
+        assert_eq!(resets(), 3);
+        assert!(!journal.pending());
+        host.stop().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

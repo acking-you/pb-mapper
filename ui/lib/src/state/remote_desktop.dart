@@ -221,6 +221,7 @@ class RemoteDesktop {
           resolution: c.resolution,
           maxFps: c.maxFps,
           codec: prefs.codec,
+          fitLocal: c.displayMode == RememberedDisplayMode.fitLocal,
         ),
       ),
     );
@@ -265,9 +266,10 @@ class RemoteDesktop {
           computerId: id,
           relayOnly: result.relayOnly,
           quality: previous?.quality ?? DesktopQuality.balanced,
-          resolution: previous?.resolution ?? DesktopResolution.p1080,
+          resolution: previous?.resolution,
           maxFps: previous?.maxFps ?? 0,
           codec: prefs.codec,
+          fitLocal: previous?.displayMode == RememberedDisplayMode.fitLocal,
         ),
       ),
     );
@@ -341,8 +343,9 @@ class RemoteDesktop {
     if (id != null) await computers.setQuality(id, quality);
   }
 
-  /// Connects again at once (D7), and is kept for a remembered computer.
-  Future<void> setResolution(DesktopResolution resolution) async {
+  /// Connects again at once (D7), and is kept for a remembered computer;
+  /// null is the default again.
+  Future<void> setResolution(DesktopResolution? resolution) async {
     desktop.setResolution(resolution);
     final id = rememberedComputer?.id;
     if (id != null) await computers.setResolution(id, resolution);
@@ -353,6 +356,19 @@ class RemoteDesktop {
     desktop.setMaxFps(fps);
     final id = rememberedComputer?.id;
     if (id != null) await computers.setMaxFps(id, fps);
+  }
+
+  /// The remote resolution (R8), live; a remembered computer keeps Fit
+  /// local, and only that (R19).
+  Future<void> setDisplayMode(DisplayModeTarget target) async {
+    if (desktop.setDisplayMode(target) == null) return;
+    final id = rememberedComputer?.id;
+    if (id != null) {
+      await computers.setDisplayMode(
+        id,
+        target.fitsLocal ? RememberedDisplayMode.fitLocal : null,
+      );
+    }
   }
 
   /// Disconnects the store at once, before any await, so the picture is
@@ -448,8 +464,11 @@ class RemoteDesktop {
       namespace: _credentialKeyId(),
       relayOnly: target.relayOnly,
       quality: chosen?.quality ?? DesktopQuality.balanced,
-      resolution: chosen?.resolution ?? DesktopResolution.p1080,
+      resolution: chosen?.resolution,
       maxFps: chosen?.maxFps ?? 0,
+      displayMode: chosen?.fitLocal == true
+          ? RememberedDisplayMode.fitLocal
+          : null,
       replaceId: target.replaceId,
     );
     if (record != null) {

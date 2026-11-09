@@ -36,9 +36,8 @@ pub(crate) fn record_input_failure(detail: &str) {
     os::record_service_event("input_failed", detail);
 }
 
-/// What a session through the helper can do when its worker does not
-/// describe itself in time: it locks the workstation, as the helper always
-/// can.
+/// What a session through the helper can do until its worker's `Start`
+/// answer says: it locks the workstation, as the helper always can.
 fn fallback_caps() -> BackendCaps {
     BackendCaps {
         lock: true,
@@ -51,26 +50,33 @@ fn fallback_caps() -> BackendCaps {
 /// Refused before the host registers unless the helper is ready.
 pub(crate) fn launch(selection: &DisplaySelection) -> Result<Arc<dyn Launch>> {
     status().ensure_ready()?;
-    let display_id = super::desktop::resolve(selection)?.id;
+    let display = super::desktop::resolve(selection)?;
+    let device = (!display.name.is_empty()).then_some(display.name);
     Ok(Arc::new(Launcher::new(
-        move || backend(display_id),
+        move || backend(display.id, device.clone()),
         fallback_caps(),
     )))
 }
 
 /// Connect from the dedicated SDK capture worker. No automatic privilege
 /// escalation or fallback: failure is observable at the viewer and local UI.
-pub(crate) fn backend(display_id: u32) -> Result<RemoteBackend<NamedPipeClient>> {
+pub(crate) fn backend(
+    display_id: u32,
+    display_device: Option<String>,
+) -> Result<RemoteBackend<NamedPipeClient>> {
     status().ensure_ready()?;
     let config = configuration()?;
-    connect_backend(display_id, &config)
+    connect_backend(display_id, display_device, &config)
 }
 
 /// The background supervisor uses the same bounded IPC as the UI. The server
 /// independently accepts only its own kernel-reported PID, never arbitrary
 /// SYSTEM callers, and binds the worker to the approved owner's current login.
 #[cfg(feature = "windows-helper")]
-fn service_backend(display_id: u32) -> Result<RemoteBackend<NamedPipeClient>> {
+fn service_backend(
+    display_id: u32,
+    display_device: Option<String>,
+) -> Result<RemoteBackend<NamedPipeClient>> {
     let config = configuration()?;
     if os::current_sid()? != "S-1-5-18"
         || os::session(std::process::id())? != 0
@@ -78,11 +84,12 @@ fn service_backend(display_id: u32) -> Result<RemoteBackend<NamedPipeClient>> {
     {
         return Err(error("background capture requires the installed service"));
     }
-    connect_backend(display_id, &config)
+    connect_backend(display_id, display_device, &config)
 }
 
 fn connect_backend(
     display_id: u32,
+    display_device: Option<String>,
     config: &Configuration,
 ) -> Result<RemoteBackend<NamedPipeClient>> {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -94,7 +101,7 @@ fn connect_backend(
         os::verify_server(&pipe, &config.helper_executable, None)?;
         pipe
     };
-    RemoteBackend::start(runtime, pipe, display_id, fallback_caps())
+    RemoteBackend::start(runtime, pipe, display_id, display_device, fallback_caps())
 }
 
 /// The helper IPC this build speaks. A helper installed by an older build
@@ -104,10 +111,20 @@ fn connect_backend(
 /// the whole expected desktop. 5: the background host's `Options` carry
 /// `lan_first`. 6: video may be H.265, `Request::H265` asks the worker
 /// whether it encodes it, and an applied input answers with the pointer.
-pub const HELPER_PROTOCOL: u32 = 6;
+/// 7: display modes (`DisplayModes`, `SetDisplayMode`,
+/// `RestoreDisplayMode`); `Start` and `Attach` name the display's device;
+/// a response carries its failure's kind, and `Start` the worker's caps;
+/// the background host's `Settings` keep the device and it restores on
+/// request.
+pub const HELPER_PROTOCOL: u32 = 7;
+
+/// What a worker exits with when a display mode it changed is still
+/// journalled: the service then starts a `restore` worker.
+#[cfg(feature = "windows-helper")]
+pub(crate) const RESTORE_PENDING: u32 = 3;
 
 const SERVICE: &str = "PbMapperDesktop";
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v6";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v7";
 const EXECUTABLE: &str = "pb-mapper-desktop-helper.exe";
 
 #[derive(Serialize, Deserialize)]
@@ -339,6 +356,7 @@ pub fn run() -> Result<()> {
             worker::run(pipe, parent.parse().map_err(error)?)
         }
         [mode, parent] if mode == "restart-ui" => restart::run(parent.parse().map_err(error)?),
+        [mode, session] if mode == "restore" => worker::restore(session.parse().map_err(error)?),
         [mode, source, sid] if mode == "install" => {
             install::install(&PathBuf::from(source), sid, false)
         }
@@ -376,9 +394,9 @@ mod readiness_tests {
         assert!(update_required(old.protocol(), true, || true));
         assert!(update_required(old.protocol(), false, || false));
         // Protocol 3 sends input with its generation alone, protocol 4
-        // refuses the background host's `lan_first`, and protocol 5 H.265:
-        // all are outdated too.
-        for outdated in [3, 4, 5] {
+        // refuses the background host's `lan_first`, protocol 5 H.265, and
+        // protocol 6 display modes: all are outdated too.
+        for outdated in [3, 4, 5, 6] {
             let previous = installation(&format!(r#""schema":2,"protocol":{outdated},"#)).unwrap();
             assert!(update_required(previous.protocol(), true, || true));
         }

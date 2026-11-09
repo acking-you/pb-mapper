@@ -353,6 +353,36 @@ statements stay until the owner accepts fluidity.
 8. Compatibility (ALPN `pb-mapper/desktop/2`): the new viewer against a PR #51
    host ends on the "update pb-mapper" message; a PR #51 viewer against the
    new host fails at the TLS handshake, never mid-session.
+9. Picture size and remote resolution. These change the host's display mode:
+   run them on a VM or a host whose owner agreed, never on a computer you do
+   not own.
+   - Default: with no resolution chosen, the quality panel shows the host
+     display's own size (a 2560×1440 host is sent 2560×1440, not 1080p); on
+     a phone whose H.265 decoder stops at 1080p, the codec stays H.265 and the
+     picture is 1080p; the Display menu says how large the default goes.
+   - The phone viewer has no Remote resolution. On the desktop viewer it
+     appears only while controlling a Windows host, and lists that display's
+     modes and Fit local.
+   - Fit local changes the host's display within 3 s, without a reconnect;
+     the host card says the resolution was changed and offers Restore, which
+     works without control. Original puts it back.
+   - Disconnect, Stop sharing and Make view-only each put it back; Release
+     control, Back to list (paused) and a fresh grant keep it.
+   - Change the host's resolution in Windows Settings while fitted, then
+     disconnect: the owner's choice stays.
+   - With Fit local chosen on a remembered computer, reconnect: it is applied
+     again once control is gained. A chosen fixed size is not remembered.
+   - End the host app from Task Manager while fitted, then start it again:
+     the display is back at its own mode once the app is open again.
+   - `display_mode_probe <config.json>` (built with
+     `cargo build --release -p pb-mapper-desktop --example display_mode_probe`,
+     against a local relay with a throwaway key) records every display's
+     mode, runs Fit local with Original, disconnect, revoke and a killed host,
+     checks each display is back after each, and prints
+     `display_mode_probe passed` with the modes before and after. `--list`
+     only prints the modes, and `--restore` puts every display back. Add
+     `--owner-change --fullscreen-check` only in the VM, and record the
+     `CDS_FULLSCREEN` line.
 
 Secure-desktop and UAC acceptance of the helper is a separate matrix in
 [windows-helper-acceptance.md](windows-helper-acceptance.md).

@@ -10,10 +10,12 @@ use crate::{
     credit::CreditLedger,
     idr::IdrReason,
     lane::LaneCommand,
+    modes::{Mode, ModeCommand},
     outgoing::OUTGOING_MAX_AGE,
     protocol::{
-        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, HostMessage,
-        StateReason, StateRecord, StopReason, ViewerMessage,
+        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_DISPLAY_MODE, CAPABILITY_ENCODER_DWELL,
+        CAPABILITY_FPS_OVERRIDE, HostMessage, NoticeCode, StateReason, StateRecord, StopReason,
+        ViewerMessage,
     },
     qos::{QOS_TICK, Qos, TargetValues},
     shared::{CursorReport, EngineState, Policy, SessionShared, Targets},
@@ -78,6 +80,9 @@ pub(crate) struct Session {
     encoder_dwell: bool,
     /// The viewer reads a `Cursor`'s input watermark.
     cursor_sequence: bool,
+    /// Both ends listed `display_mode`: the viewer reads the modes and may
+    /// change them.
+    display_mode: bool,
     /// When the session was accepted, for display only.
     pub started_unix_ms: u64,
     /// Send credit and QoS, shared by B-recv and B-send only.
@@ -90,6 +95,8 @@ pub(crate) struct Session {
     ending: Mutex<Option<End>>,
 }
 impl Session {
+    /// `capabilities` are the viewer's; `display_modes`, whether the host
+    /// listed `display_mode` in `Accepted`.
     pub fn new(
         policy: Arc<Policy>,
         cancel: CancellationToken,
@@ -97,6 +104,7 @@ impl Session {
         limits: VideoLimits,
         quality: QualityPreset,
         capabilities: &[String],
+        display_modes: bool,
     ) -> Arc<Self> {
         let now = Instant::now();
         let listed = |wanted: &str| capabilities.iter().any(|capability| capability == wanted);
@@ -111,6 +119,7 @@ impl Session {
             codec,
             encoder_dwell: listed(CAPABILITY_ENCODER_DWELL),
             cursor_sequence: listed(CAPABILITY_CURSOR_SEQUENCE),
+            display_mode: display_modes && listed(CAPABILITY_DISPLAY_MODE),
             started_unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| {
@@ -290,8 +299,35 @@ impl Session {
                 }
             }
             ViewerMessage::Ping {} => {}
+            // Thread C decides, and answers a refusal with a notice.
+            ViewerMessage::DisplayMode { width, height } => {
+                self.display_mode(ModeCommand::Set(Mode { width, height }))?;
+            }
+            ViewerMessage::RestoreDisplayMode {} => self.display_mode(ModeCommand::Restore)?,
         }
         Ok(())
+    }
+
+    /// Only from a viewer this host offered display modes.
+    fn display_mode(&self, command: ModeCommand) -> Result<(), String> {
+        if !self.display_mode {
+            return Err("a display mode request without the capability".into());
+        }
+        self.shared.lane.push(LaneCommand::DisplayMode(command));
+        Ok(())
+    }
+
+    /// What a viewer that does not read display modes is told instead: no
+    /// modes, and a display still changing as the capture failure it is.
+    fn for_viewer(&self, record: &StateRecord) -> StateRecord {
+        let mut record = record.clone();
+        if !self.display_mode {
+            record.modes = None;
+            if record.reason == Some(StateReason::DisplayChanging) {
+                record.reason = Some(StateReason::CaptureFailed);
+            }
+        }
+        record
     }
 }
 
@@ -519,11 +555,14 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             && *serial > self.notice_serial
         {
             self.notice_serial = *serial;
-            let notice = HostMessage::Notice {
-                code: *code,
-                message: message.clone(),
-            };
-            self.send(&notice, None).await?;
+            // A display mode notice only to a viewer that reads them.
+            if *code != NoticeCode::DisplayModeFailed || self.session.display_mode {
+                let notice = HostMessage::Notice {
+                    code: *code,
+                    message: message.clone(),
+                };
+                self.send(&notice, None).await?;
+            }
         }
         if now >= self.next_tick {
             self.next_tick = now + QOS_TICK;
@@ -565,7 +604,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     /// control request: that shows as its reason until the engine state
     /// changes.
     async fn write_state(&mut self, engine: &EngineState) -> Result<(), Abandoned> {
-        let record = &engine.record;
+        let record = &self.session.for_viewer(&engine.record);
         let denied = self.session.control_denied.swap(false, Ordering::AcqRel);
         if !denied && self.written.as_ref() == Some(record) {
             return Ok(());
@@ -953,6 +992,7 @@ mod tests {
             VideoLimits::for_viewer(60.0),
             QualityPreset::Balanced,
             &[],
+            false,
         );
         let shared = session.shared.clone();
         shared.state.send_replace(streaming(1));
@@ -1065,6 +1105,7 @@ mod tests {
                 VideoLimits::for_viewer(60.0),
                 QualityPreset::Balanced,
                 &capabilities,
+                false,
             );
             let shared = session.shared.clone();
             shared.state.send_replace(streaming(1));
@@ -1098,6 +1139,144 @@ mod tests {
         }
     }
 
+    /// A viewer that did not list `display_mode` gets a `State` a stage6
+    /// viewer's strict record parses (no modes; a display still changing is
+    /// the capture failure it is) and never the display mode notice; a
+    /// request it sends anyway breaks the protocol. One that listed it gets
+    /// all of it, and its request reaches thread C.
+    #[tokio::test]
+    async fn display_modes_reach_only_a_viewer_that_listed_them() {
+        /// What a stage6 viewer accepted as a `State`, as strictly.
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Stage6Record {
+            t: String,
+            state: SessionState,
+            #[serde(default)]
+            reason: Option<Stage6Reason>,
+            message: String,
+            control_allowed: bool,
+            controlling: bool,
+            generation: u64,
+            #[serde(default)]
+            display: Option<Display>,
+            desktop: crate::DesktopKind,
+            #[serde(default)]
+            video: Option<VideoSize>,
+        }
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Stage6Reason {
+            SecureDesktop,
+            HelperUnavailable,
+            CaptureFailed,
+            InputFailed,
+            ControlDenied,
+            InputCongestion,
+            StalePresentation,
+            DisplayLost,
+        }
+        let mode = |width, height| Mode { width, height };
+        for listed in [false, true] {
+            let (viewer, host) = tokio::io::duplex(1 << 20);
+            let (mut read, mut write) = tokio::io::split(viewer);
+            let capabilities = if listed {
+                vec![CAPABILITY_DISPLAY_MODE.to_owned()]
+            } else {
+                vec![]
+            };
+            let session = Session::new(
+                Arc::new(Policy::new(true)),
+                CancellationToken::new(),
+                VideoCodec::H264,
+                VideoLimits::for_viewer(60.0),
+                QualityPreset::Balanced,
+                &capabilities,
+                true,
+            );
+            let shared = session.shared.clone();
+            let mut engine = streaming(1);
+            engine.record.state = SessionState::CaptureUnavailable;
+            engine.record.reason = Some(StateReason::DisplayChanging);
+            engine.record.modes = Some(crate::ModeList {
+                current: mode(1920, 1080),
+                original: mode(2560, 1440),
+                supported: vec![mode(2560, 1440), mode(1920, 1080)],
+            });
+            engine.notice = Some((NoticeCode::DisplayModeFailed, "still changing".into(), 1));
+            shared.state.send_replace(engine);
+            let cancel = shared.cancel.clone();
+            let running = tokio::spawn(run(session, host, async move {
+                cancel.cancelled().await;
+                WorkerExit::Cancelled
+            }));
+            // Everything up to the first `Stats`, as JSON.
+            let mut seen = Vec::new();
+            loop {
+                let message: serde_json::Value =
+                    wire::read_header(&mut read, Duration::from_secs(5))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                if message["t"] == "stats" {
+                    break;
+                }
+                seen.push(message);
+            }
+            let state = seen.iter().find(|m| m["t"] == "state").unwrap();
+            let notice = seen.iter().any(|m| m["t"] == "notice");
+            if listed {
+                assert_eq!(state["reason"], "display_changing");
+                assert_eq!(state["modes"]["original"]["width"], 2560);
+                assert!(notice);
+            } else {
+                let stage6: Stage6Record = serde_json::from_value(state.clone()).unwrap();
+                assert_eq!(stage6.reason, Some(Stage6Reason::CaptureFailed));
+                assert!(!notice);
+            }
+
+            let request = ViewerMessage::DisplayMode {
+                width: 1920,
+                height: 1080,
+            };
+            wire::write_message(&mut write, &request, None)
+                .await
+                .unwrap();
+            if listed {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !shared.lane.drain().iter().any(|(command, _)| {
+                        matches!(
+                            command,
+                            LaneCommand::DisplayMode(ModeCommand::Set(set)) if *set == mode(1920, 1080)
+                        )
+                    }) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                shared.cancel.cancel();
+            } else {
+                let stopped = loop {
+                    let message: HostMessage = wire::read_header(&mut read, Duration::from_secs(5))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if let HostMessage::Stopped { reason, .. } = message {
+                        break reason;
+                    }
+                    if let HostMessage::Video { .. } = message {
+                        wire::read_payload(&mut read).await.unwrap();
+                    }
+                };
+                assert_eq!(stopped, StopReason::ProtocolError);
+            }
+            drop((read, write));
+            running.await.unwrap();
+        }
+    }
+
     /// A viewer still writing when the host stops it hears why. Input that
     /// reaches a closed socket resets the connection, and the reset discards
     /// a `Stopped` the viewer has not read yet; so the host reads on until the
@@ -1117,6 +1296,7 @@ mod tests {
             VideoLimits::for_viewer(60.0),
             QualityPreset::Balanced,
             &[],
+            false,
         );
         let cancel = session.shared.cancel.clone();
         let running = tokio::spawn(run(session.clone(), host, async move {

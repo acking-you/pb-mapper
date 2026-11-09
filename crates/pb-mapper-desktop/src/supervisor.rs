@@ -369,6 +369,8 @@ mod tests {
             last_video_age_ms: None,
             quality: QualityPreset::Balanced,
             capabilities: Vec::new(),
+            modes: None,
+            host_os: None,
             notice: None,
             decoder: DecoderInfo::default(),
             stats: ViewerStats {

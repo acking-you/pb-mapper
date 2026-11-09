@@ -5,7 +5,7 @@ use crate::{HostStatus, Result, error};
 use pb_mapper_client::sdk::RelayTransport;
 use serde::{Deserialize, Serialize};
 
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v6";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v7";
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const FILE_NAME: &str = "background-host.dpapi";
 const REVOKED_MARKER: &str = "background-host.revoked";
@@ -15,6 +15,10 @@ const REVOKED_MARKER: &str = "background-host.revoked";
 pub struct Settings {
     pub service: String,
     pub display_id: u32,
+    /// The display's device name (`\\.\DISPLAY1`), which finds it again
+    /// when its id went stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_device: Option<String>,
     pub allow_control: bool,
     /// On when a saved grant does not say, as every path defaults: LAN
     /// first, then direct, then the relay.
@@ -95,6 +99,8 @@ enum Command {
     Permission {
         allow_control: bool,
     },
+    /// Put back the display mode a viewer changed.
+    RestoreDisplayMode {},
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -174,6 +180,10 @@ pub async fn revoke_scope(server: String, namespace: Option<u64>) -> Result<Snap
 pub async fn set_control_allowed(allow_control: bool) -> Result<Snapshot> {
     call(Command::Permission { allow_control }).await
 }
+/// Put back the display mode a viewer of the background host changed.
+pub async fn restore_display_mode() -> Result<Snapshot> {
+    call(Command::RestoreDisplayMode {}).await
+}
 
 #[cfg(feature = "windows-helper")]
 #[path = "background_service.rs"]
@@ -198,6 +208,7 @@ mod tests {
             settings: Settings {
                 service: "desktop:study".into(),
                 display_id: 1,
+                display_device: None,
                 allow_control: false,
                 allow_direct: true,
                 auto_start: true,

@@ -1,6 +1,8 @@
 // The values the desktop store publishes, and the ones the FFI returns that
 // the store passes on unchanged. Every one is immutable with value equality,
 // so a `ValueNotifier` holding it notifies only on a real change (D14).
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 
 /// The quality preset (D12). The names are the wire names.
@@ -26,23 +28,166 @@ DesktopQuality desktopQualityFromWire(Object? value) => switch (value) {
 
 /// The largest picture a viewer asks for (D7), as Rust's `Resolution`: the
 /// host keeps the display's aspect ratio inside these bounds and never
-/// upscales. Fixed for a session, so a change reconnects.
+/// upscales. Fixed for a session, so a change reconnects. None chosen
+/// (null) is the default, [native].
 enum DesktopResolution {
   p720('720p', 1280, 720),
   p1080('1080p', 1920, 1080),
   p1440('1440p', 2560, 1440),
 
-  /// The display's own size, up to 3840×2160.
+  /// The display's own size, up to 3840×2160: the default.
   native('native', 3840, 2160);
 
   const DesktopResolution(this.wire, this.maxWidth, this.maxHeight);
   final String wire;
   final int maxWidth, maxHeight;
+
+  /// The picture a session at [r] sends of a [display] (width, height):
+  /// the display fitted inside the bounds, never upscaled; the bounds
+  /// themselves while the display is not known.
+  static (int, int) pictureOf(DesktopResolution? r, (int, int)? display) {
+    final bounds = r ?? native;
+    if (display == null || display.$1 <= 0 || display.$2 <= 0) {
+      return (bounds.maxWidth, bounds.maxHeight);
+    }
+    final scale = [
+      1.0,
+      bounds.maxWidth / display.$1,
+      bounds.maxHeight / display.$2,
+    ].reduce((a, b) => a < b ? a : b);
+    return ((display.$1 * scale).floor(), (display.$2 * scale).floor());
+  }
 }
 
-DesktopResolution desktopResolutionFromWire(Object? value) => DesktopResolution
-    .values
-    .firstWhere((r) => r.wire == value, orElse: () => DesktopResolution.p1080);
+/// Null when there is none, or for a value this build does not know: the
+/// default.
+DesktopResolution? desktopResolutionFromWire(Object? value) {
+  for (final r in DesktopResolution.values) {
+    if (r.wire == value) return r;
+  }
+  return null;
+}
+
+/// A display mode's size in physical pixels: the remote resolution (R8),
+/// the host display's real mode, which changes live, apart from the picture
+/// size above.
+@immutable
+class DisplayMode {
+  const DisplayMode(this.width, this.height);
+
+  static DisplayMode? fromJson(Object? value) => switch (value) {
+    {'width': final int width, 'height': final int height} => DisplayMode(
+      width,
+      height,
+    ),
+    _ => null,
+  };
+
+  final int width, height;
+
+  Map<String, Object?> toJson() => {'width': width, 'height': height};
+
+  String get label => '$width×$height';
+
+  @override
+  bool operator ==(Object other) =>
+      other is DisplayMode && other.width == width && other.height == height;
+  @override
+  int get hashCode => Object.hash(width, height);
+  @override
+  String toString() => label;
+}
+
+/// The remote display's modes, from a host that offers them (R17): what it
+/// shows, what it showed before a viewer changed it, the sizes it takes,
+/// largest first, and the one that best fits this computer's display.
+@immutable
+class DisplayModeList {
+  const DisplayModeList({
+    required this.current,
+    required this.original,
+    this.supported = const [],
+    this.fitLocal,
+  });
+
+  static DisplayModeList? fromJson(Object? value) {
+    if (value is! Map) return null;
+    final current = DisplayMode.fromJson(value['current']);
+    final original = DisplayMode.fromJson(value['original']);
+    if (current == null || original == null) return null;
+    return DisplayModeList(
+      current: current,
+      original: original,
+      supported: [
+        for (final mode in value['supported'] as List? ?? const [])
+          ?DisplayMode.fromJson(mode),
+      ],
+      fitLocal: DisplayMode.fromJson(value['fit_local']),
+    );
+  }
+
+  final DisplayMode current, original;
+  final List<DisplayMode> supported;
+
+  /// Null where none fits, or this computer's display is not known.
+  final DisplayMode? fitLocal;
+
+  /// A viewer changed it, and it is not back yet.
+  bool get changed => current != original;
+
+  @override
+  bool operator ==(Object other) =>
+      other is DisplayModeList &&
+      other.current == current &&
+      other.original == original &&
+      listEquals(other.supported, supported) &&
+      other.fitLocal == fitLocal;
+  @override
+  int get hashCode =>
+      Object.hash(current, original, Object.hashAll(supported), fitLocal);
+}
+
+/// What a viewer asks the remote display to show.
+sealed class DisplayModeTarget {
+  const DisplayModeTarget();
+
+  /// What it showed before a viewer changed it.
+  const factory DisplayModeTarget.original() = _OriginalMode;
+
+  /// The mode that best fits this computer's display of [local] size.
+  const factory DisplayModeTarget.fitLocal(DisplayMode local) = _FitLocalMode;
+
+  /// One of the modes it offers.
+  const factory DisplayModeTarget.size(DisplayMode mode) = _SizeMode;
+
+  /// The FFI's `target`.
+  Object toJson();
+
+  /// Fit local, which a computer keeps (R19).
+  bool get fitsLocal => false;
+}
+
+final class _OriginalMode extends DisplayModeTarget {
+  const _OriginalMode();
+  @override
+  Object toJson() => 'original';
+}
+
+final class _FitLocalMode extends DisplayModeTarget {
+  const _FitLocalMode(this.local);
+  final DisplayMode local;
+  @override
+  bool get fitsLocal => true;
+  @override
+  Object toJson() => {'fit_local': local.toJson()};
+}
+
+final class _SizeMode extends DisplayModeTarget {
+  const _SizeMode(this.mode);
+  final DisplayMode mode;
+  @override
+  Object toJson() => {'size': mode.toJson()};
+}
 
 /// The frame rates a viewer may choose over Auto (D8): each becomes the
 /// session's ceiling, every preset's included.
@@ -74,8 +219,23 @@ class DesktopDecoderLimit {
   /// What the protocol carries at most: no limit of the decoder's own.
   static const largest = DesktopDecoderLimit(3840, 2160);
 
-  bool takes(DesktopResolution r) =>
-      r.maxWidth <= maxWidth && r.maxHeight <= maxHeight;
+  /// A picture of [width] by [height] fits, in either orientation: the
+  /// probe reports one, and a decoder takes both.
+  bool takes(int width, int height) =>
+      math.max(width, height) <= math.max(maxWidth, maxHeight) &&
+      math.min(width, height) <= math.min(maxWidth, maxHeight);
+
+  /// [bounds] fitted inside this decoder as Rust's `VideoLimits::clamped`
+  /// fits them: the long edge within the longer side, the short within the
+  /// shorter.
+  (int, int) clamp((int, int) bounds) {
+    final long = math.max(maxWidth, maxHeight);
+    final short = math.min(maxWidth, maxHeight);
+    final (w, h) = bounds;
+    return w >= h
+        ? (math.min(w, long), math.min(h, short))
+        : (math.min(w, short), math.min(h, long));
+  }
 
   @override
   bool operator ==(Object other) =>
@@ -121,37 +281,46 @@ class DesktopDecoders {
   DesktopDecoders withoutH265() =>
       DesktopDecoders(h264: h264, displayMaxHz: displayMaxHz);
 
-  /// D6: H.265 is offered when the preference is Auto and the H.265 decoder
-  /// takes the chosen resolution.
+  /// D6: H.265 is offered when the preference is Auto and there is an
+  /// H.265 decoder: Rust fits the session's limits inside its largest
+  /// picture, so a phone keeps H.265 at the default size.
   bool offersH265(DesktopTarget target) =>
-      target.codec == DesktopCodecPreference.auto &&
-      (h265?.takes(target.resolution) ?? false);
+      target.codec == DesktopCodecPreference.auto && h265 != null;
 
-  /// D7: the decoder a session at [r] would use under [codec] takes it:
-  /// H.265 where it would be offered, else H.264 — H.264 alone once the
-  /// computer declined H.265 ([h265Declined]). Without either decoder, the
-  /// picture is JPEG, which Dart decodes at any size.
-  bool decodes(
-    DesktopResolution r,
+  /// The decoder whose largest picture bounds a session under [codec]:
+  /// H.265's where it would be offered, else H.264's — H.264's alone once
+  /// the computer declined H.265 ([h265Declined]). Null for JPEG, which
+  /// Dart decodes at any size.
+  DesktopDecoderLimit? limitFor(
     DesktopCodecPreference codec, {
     bool h265Declined = false,
-  }) =>
-      (h264 == null && h265 == null) ||
-      (h264?.takes(r) ?? false) ||
-      (codec == DesktopCodecPreference.auto &&
-          !h265Declined &&
-          (h265?.takes(r) ?? false));
+  }) => codec == DesktopCodecPreference.auto && !h265Declined && h265 != null
+      ? h265
+      : h264;
 
-  /// The largest resolution up to [r] the H.264 decoder takes: what a
-  /// session asks for when it is not offered H.265. Without a limit known
-  /// for H.264, [r] itself.
-  DesktopResolution forH264(DesktopResolution r) {
-    final limit = h264;
-    if (limit == null) return r;
-    return DesktopResolution.values.lastWhere(
-      (c) => c.index <= r.index && limit.takes(c),
-      orElse: () => DesktopResolution.values.first,
+  /// The limits Rust's `ViewerConfig::for_decoders` asks for at [r] when
+  /// these decoders are offered.
+  (int, int) limitsFor(DesktopResolution? r) {
+    final bounds = (
+      (r ?? DesktopResolution.native).maxWidth,
+      (r ?? DesktopResolution.native).maxHeight,
     );
+    return (h265 ?? h264)?.clamp(bounds) ?? bounds;
+  }
+
+  /// D7: the picture a session at [r] sends of a [display] (null while not
+  /// known) fits the decoder that bounds it ([limitFor]). One that does not
+  /// is fitted inside that decoder instead.
+  bool decodes(
+    DesktopResolution? r,
+    DesktopCodecPreference codec, {
+    bool h265Declined = false,
+    (int, int)? display,
+  }) {
+    final limit = limitFor(codec, h265Declined: h265Declined);
+    if (limit == null) return true;
+    final (width, height) = DesktopResolution.pictureOf(r, display);
+    return limit.takes(width, height);
   }
 
   @override
@@ -223,7 +392,7 @@ enum DesktopDemand { page, viewer }
 /// cannot be verified.
 enum DesktopHelperState { none, ready, stopped, outdated, unverified }
 
-enum DesktopNoticeCode { locked, lockFailed }
+enum DesktopNoticeCode { locked, lockFailed, displayModeFailed }
 
 @immutable
 class DesktopDisplay {
@@ -275,9 +444,10 @@ class DesktopTarget {
     this.computerId,
     this.relayOnly = false,
     this.quality = DesktopQuality.balanced,
-    this.resolution = DesktopResolution.p1080,
+    this.resolution,
     this.maxFps = 0,
     this.codec = DesktopCodecPreference.auto,
+    this.fitLocal = false,
   }) : assert(invitation != null || computerId != null);
   final String? invitation;
   final String name;
@@ -287,8 +457,9 @@ class DesktopTarget {
   /// Live (D12); the store also keeps it apart, as the host reports it.
   final DesktopQuality quality;
 
-  /// Fixed for a session (D7, D8): a change connects again.
-  final DesktopResolution resolution;
+  /// Fixed for a session (D7, D8): a change connects again. Null: the
+  /// default, the display's own size.
+  final DesktopResolution? resolution;
 
   /// 0: Auto; else one of [kMaxFpsChoices].
   final int maxFps;
@@ -296,20 +467,28 @@ class DesktopTarget {
   /// The device's preference, which the session takes at connect (D6).
   final DesktopCodecPreference codec;
 
+  /// The computer keeps Fit local as its remote resolution (R19): this
+  /// viewer asks for it whenever it gains control.
+  final bool fitLocal;
+
+  /// [resolution] is replaced when given, null included: `(to: null)` is
+  /// the default again.
   DesktopTarget copyWith({
     DesktopQuality? quality,
-    DesktopResolution? resolution,
+    ({DesktopResolution? to})? resolution,
     int? maxFps,
     DesktopCodecPreference? codec,
+    bool? fitLocal,
   }) => DesktopTarget(
     invitation: invitation,
     name: name,
     computerId: computerId,
     relayOnly: relayOnly,
     quality: quality ?? this.quality,
-    resolution: resolution ?? this.resolution,
+    resolution: resolution == null ? this.resolution : resolution.to,
     maxFps: maxFps ?? this.maxFps,
     codec: codec ?? this.codec,
+    fitLocal: fitLocal ?? this.fitLocal,
   );
 
   @override
@@ -322,7 +501,8 @@ class DesktopTarget {
       other.quality == quality &&
       other.resolution == resolution &&
       other.maxFps == maxFps &&
-      other.codec == codec;
+      other.codec == codec &&
+      other.fitLocal == fitLocal;
   @override
   int get hashCode => Object.hash(
     invitation,
@@ -333,6 +513,7 @@ class DesktopTarget {
     resolution,
     maxFps,
     codec,
+    fitLocal,
   );
 
   /// The invitation is a bearer secret: never in a log.
@@ -340,7 +521,7 @@ class DesktopTarget {
   String toString() =>
       'DesktopTarget($name, computer: $computerId, '
       'invitation: ${invitation == null ? 'none' : 'redacted'}, '
-      'relayOnly: $relayOnly, ${quality.name}, ${resolution.wire}, '
+      'relayOnly: $relayOnly, ${quality.name}, ${resolution?.wire ?? 'default'}, '
       'maxFps: $maxFps, ${codec.name})';
 }
 
@@ -381,6 +562,7 @@ class DesktopSessionView {
     this.path,
     this.notice,
     this.capabilities = const [],
+    this.displayModes,
   });
   final DesktopTarget? target;
   final DesktopPhase phase;
@@ -401,6 +583,10 @@ class DesktopSessionView {
 
   /// What the host offers beyond the base protocol, such as `lock`.
   final List<String> capabilities;
+
+  /// The remote display's modes, from a host that offers them (R17), with
+  /// the one that fits this computer's display.
+  final DisplayModeList? displayModes;
 
   bool get inputLive => fresh && controlling;
 
@@ -438,7 +624,8 @@ class DesktopSessionView {
       other.paused == paused &&
       other.path == path &&
       other.notice == notice &&
-      listEquals(other.capabilities, capabilities);
+      listEquals(other.capabilities, capabilities) &&
+      other.displayModes == displayModes;
   @override
   int get hashCode => Object.hash(
     target,
@@ -458,6 +645,7 @@ class DesktopSessionView {
     path,
     notice,
     Object.hashAll(capabilities),
+    displayModes,
   );
 }
 
@@ -1134,6 +1322,8 @@ class DesktopHostView {
     this.helper = DesktopHelperState.none,
     this.viewer,
     this.otherRelay,
+    this.unsupportedReason,
+    this.displayMode,
   });
 
   /// False until the first capabilities, host status and trust round trip.
@@ -1171,6 +1361,14 @@ class DesktopHostView {
   /// It stays there until moved, which changes its invitation.
   final String? otherRelay;
 
+  /// Why this computer cannot host, as Rust says it: `platform`,
+  /// `media_foundation_missing`, `no_display` or `permission_missing`.
+  final String? unsupportedReason;
+
+  /// A viewer changed this display's mode: what it is, and what the
+  /// owner's Restore puts back.
+  final DisplayModeList? displayMode;
+
   @override
   bool operator ==(Object other) =>
       other is DesktopHostView &&
@@ -1190,7 +1388,9 @@ class DesktopHostView {
       other.displayId == displayId &&
       other.helper == helper &&
       other.viewer == viewer &&
-      other.otherRelay == otherRelay;
+      other.otherRelay == otherRelay &&
+      other.unsupportedReason == unsupportedReason &&
+      other.displayMode == displayMode;
   @override
   int get hashCode => Object.hash(
     loaded,
@@ -1210,6 +1410,8 @@ class DesktopHostView {
     helper,
     viewer,
     otherRelay,
+    unsupportedReason,
+    displayMode,
   );
 
   @override

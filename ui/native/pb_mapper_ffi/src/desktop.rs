@@ -16,9 +16,10 @@ use crate::{
 use pb_mapper::{
     Client, ConnectOptions, PathPolicy,
     desktop::{
-        self, Access, ConnectError, ConnectStage, DesktopView, DisplaySelection, Host, HostOptions,
-        InputError, Invitation, InvitationError, InvitationFormat, KeyframeReason, QualityPreset,
-        Resolution, StopReason, VideoCodec, VideoLimits, Viewer, ViewerConfig,
+        self, Access, ConnectError, ConnectStage, Decoders, DesktopView, DisplayModeError,
+        DisplaySelection, Host, HostOptions, InputError, Invitation, InvitationError,
+        InvitationFormat, KeyframeReason, Mode, ModeTarget, QualityPreset, Resolution, StopReason,
+        Viewer, ViewerConfig,
     },
 };
 #[cfg(windows)]
@@ -297,7 +298,9 @@ impl DesktopState {
         Ok(())
     }
 
-    fn viewer_status(&self) -> Result<Value, CtlError> {
+    /// `local`, this computer's display, adds the mode that fits it best to
+    /// the remote display's modes, as `modes.fit_local`.
+    fn viewer_status(&self, local: Option<Mode>) -> Result<Value, CtlError> {
         // In the connect's order, so it sees the attempt or the viewer.
         let (viewer, stage) = {
             let pending = self.connecting.lock();
@@ -307,8 +310,18 @@ impl DesktopState {
             (self.viewer(), stage)
         };
         if let Some(viewer) = viewer {
-            return serde_json::to_value(viewer.status())
-                .map_err(|failure| CtlError::internal(failure.to_string()));
+            let status = viewer.status();
+            let fit_local = status
+                .modes
+                .as_ref()
+                .zip(local)
+                .and_then(|(modes, local)| modes.fit_local(local));
+            let mut value = serde_json::to_value(status)
+                .map_err(|failure| CtlError::internal(failure.to_string()))?;
+            if let Some(modes) = value.get_mut("modes").and_then(Value::as_object_mut) {
+                modes.insert("fit_local".into(), json!(fit_local));
+            }
+            return Ok(value);
         }
         Ok(match stage {
             Some(stage) => json!({"state": "connecting", "stage": stage}),
@@ -358,6 +371,9 @@ enum Request {
     TrustStatus,
     TrustRevoke,
     HostRestore,
+    /// Put back the display mode a viewer changed, of whichever host this
+    /// app shows: its own, or the background service's.
+    HostRestoreDisplayMode,
     HostEnable {
         service: String,
         display_id: u32,
@@ -402,17 +418,40 @@ enum Request {
         #[serde(default)]
         quality: QualityPreset,
         refresh_hz: f64,
-        /// Offer H.265 too: the app's decoder probe found a decoder for it
-        /// that takes `resolution`, and it has not failed this run.
+        /// What the runner decodes in hardware, as its probe found it, H.265
+        /// left out once it failed this run: the offer, and the largest
+        /// picture of each decoder, which bounds the limits.
+        decoders: DecoderOffer,
+        /// Absent: the SDK's default, the display's own size.
         #[serde(default)]
-        h265: bool,
-        #[serde(default)]
-        resolution: Resolution,
+        resolution: Option<Resolution>,
         /// 0 is Auto; otherwise the user's own rate, see `valid_max_fps`.
         #[serde(default)]
         max_fps: u32,
     },
     Disconnect,
+}
+
+/// Each decoder's largest picture as `[width, height]`; `null` for none.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecoderOffer {
+    h264: Option<[u32; 2]>,
+    h265: Option<[u32; 2]>,
+}
+impl DecoderOffer {
+    fn decoders(&self) -> Result<Decoders, CtlError> {
+        let size = |largest: Option<[u32; 2]>| match largest {
+            Some([width, height]) if width == 0 || height == 0 => Err(CtlError::invalid_argument(
+                "a decoder's largest picture must not be empty",
+            )),
+            largest => Ok(largest.map(|[width, height]| (width, height))),
+        };
+        Ok(Decoders {
+            h264: size(self.h264)?,
+            h265: size(self.h265)?,
+        })
+    }
 }
 
 /// What the helper card asks of Windows. Setup's own install and enable go
@@ -464,7 +503,15 @@ enum Start {
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum ViewerRequest {
-    ViewerStatus,
+    ViewerStatus {
+        #[serde(default)]
+        local: Option<Mode>,
+    },
+    /// `"original"`, `{"fit_local": {"width", "height"}}` (this computer's
+    /// display) or `{"size": {"width", "height"}}`.
+    DisplayMode {
+        target: DisplayModeTarget,
+    },
     Control {
         enabled: bool,
     },
@@ -479,6 +526,24 @@ enum ViewerRequest {
     },
     Pause,
     Resume,
+}
+
+/// `ModeTarget` as the hot op takes it.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum DisplayModeTarget {
+    Original,
+    FitLocal(Mode),
+    Size(Mode),
+}
+impl From<DisplayModeTarget> for ModeTarget {
+    fn from(target: DisplayModeTarget) -> Self {
+        match target {
+            DisplayModeTarget::Original => Self::Original,
+            DisplayModeTarget::FitLocal(local) => Self::FitLocal(local),
+            DisplayModeTarget::Size(mode) => Self::Size(mode),
+        }
+    }
 }
 
 fn err(e: impl std::fmt::Display) -> CtlError {
@@ -518,6 +583,30 @@ fn input_error(failure: InputError) -> CtlError {
         InputError::Closed => ErrorCode::Io,
     };
     CtlError::new(code, failure.to_string())
+}
+
+fn display_mode_error(failure: DisplayModeError) -> CtlError {
+    let (code, message) = match failure {
+        DisplayModeError::NotOffered => (
+            ErrorCode::DisplayModeNotOffered,
+            "the remote computer cannot change its resolution",
+        ),
+        DisplayModeError::NotControlling => (
+            ErrorCode::NotControlling,
+            "control of the remote computer is needed to change its resolution",
+        ),
+        DisplayModeError::NoFit => (
+            ErrorCode::DisplayModeNoFit,
+            "no resolution of the remote display fits this display",
+        ),
+        DisplayModeError::NotListed => (
+            ErrorCode::DisplayModeNotListed,
+            "the remote display does not offer that resolution",
+        ),
+        // As every hot op of a closed session.
+        _ => (ErrorCode::Io, "desktop is disconnected"),
+    };
+    CtlError::new(code, message)
 }
 
 fn invitation_error(failure: InvitationError) -> CtlError {
@@ -977,24 +1066,19 @@ fn capabilities_json(support: desktop::HostSupport) -> Value {
     })
 }
 
-/// Whether this runner decodes H.264 natively: Windows where Media
-/// Foundation is installed. Android's runner always does.
-fn native_h264_decoder() -> bool {
-    #[cfg(windows)]
-    {
-        desktop::windows::media_foundation()
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
 async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlError> {
     let state = &handle.desktop;
     match request {
         Request::Capabilities => {
             return tokio::task::spawn_blocking(|| {
+                // The app's first question: once per process, put back a
+                // display mode a host of this app left changed when it died.
+                static RECOVERED: std::sync::Once = std::sync::Once::new();
+                RECOVERED.call_once(|| {
+                    if let Err(failure) = desktop::recover_display_modes(None) {
+                        tracing::warn!(event = "display_modes_not_recovered", %failure);
+                    }
+                });
                 let displays = desktop::displays();
                 #[cfg(windows)]
                 let helper = serde_json::to_value(desktop::privileged::status()).ok();
@@ -1177,6 +1261,27 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             }
             host.set_control_allowed(allow_control);
         }
+        Request::HostRestoreDisplayMode => {
+            let slot = state.host.lock().await;
+            if let Some(host) = slot.as_ref() {
+                return Ok(json!({"restored": host.restore_display_mode()}));
+            }
+            #[cfg(windows)]
+            if state
+                .background
+                .lock()
+                .snapshot
+                .as_ref()
+                .is_some_and(background_enabled)
+            {
+                let snapshot = desktop::privileged::background::restore_display_mode()
+                    .await
+                    .map_err(err)?;
+                state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
+                return Ok(json!({"restored": true}));
+            }
+            return Err(err("desktop is not shared"));
+        }
         Request::HostEndSession => {
             let slot = state.host.lock().await;
             if let Some(host) = slot.as_ref() {
@@ -1226,7 +1331,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             relay_only,
             quality,
             refresh_hz,
-            h265,
+            decoders,
             resolution,
             max_fps,
         } => {
@@ -1235,6 +1340,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                     "max_fps must be 0 (Auto) or 30..=120",
                 ));
             }
+            let decoders = decoders.decoders()?;
             // A pasted invitation is checked before anything waits; a
             // remembered one is read inside the cancellable attempt.
             let target = match (invitation, computer_id) {
@@ -1248,25 +1354,18 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                     ));
                 }
             };
-            // Android, and Windows where Media Foundation is installed,
-            // decode H.264 natively, and H.265 where the app found a decoder;
-            // elsewhere Dart decodes JPEG.
-            let codecs = if cfg!(target_os = "android") || native_h264_decoder() {
-                if h265 {
-                    vec![VideoCodec::H265, VideoCodec::H264]
-                } else {
-                    vec![VideoCodec::H264]
-                }
-            } else {
-                vec![VideoCodec::Jpeg]
-            };
+            // The runner's own decoders, which Dart probed: none where it
+            // has no native video, and Dart decodes JPEG.
             let chosen_fps = (max_fps != 0).then_some(max_fps);
             let (viewer, source) = connect(handle, target, relay_only, |progress| ViewerConfig {
-                codecs,
-                limits: VideoLimits::choose(refresh_hz, resolution, chosen_fps),
-                fps_override: chosen_fps.is_some(),
                 quality,
                 progress: Some(progress),
+                ..ViewerConfig::for_decoders(
+                    decoders,
+                    resolution.unwrap_or_default(),
+                    refresh_hz,
+                    chosen_fps,
+                )
             })
             .await?;
             return Ok(json!({"video_source": source, "codec": viewer.status().stats.codec}));
@@ -1370,6 +1469,7 @@ async fn start_background(handle: &PbMapperHandle, start: HostStart) -> Result<V
             settings: desktop::privileged::background::Settings {
                 service: start.service.clone(),
                 display_id: start.display_id,
+                display_device: display_device(start.display_id),
                 allow_control: start.allow_control,
                 allow_direct: !start.relay_only,
                 auto_start: start.auto_start,
@@ -1404,6 +1504,18 @@ async fn start_background(handle: &PbMapperHandle, start: HostStart) -> Result<V
         let _ = handle;
         Err(err("background hosting requires Windows"))
     }
+}
+
+/// The device name of the display `display_id` names now, which the service
+/// keeps beside the id: a reboot or a mode change may give the display
+/// another id, never another name.
+#[cfg(windows)]
+fn display_device(display_id: u32) -> Option<String> {
+    desktop::displays()
+        .ok()?
+        .into_iter()
+        .find(|display| display.id == display_id)
+        .map(|display| display.name)
 }
 
 /// The process credential, as the service stores it.
@@ -1752,6 +1864,7 @@ async fn enable_host(
         settings: desktop::privileged::background::Settings {
             service,
             display_id,
+            display_device: display_device(display_id),
             allow_control,
             allow_direct: true,
             auto_start: true,
@@ -1856,7 +1969,14 @@ pub unsafe extern "C" fn pb_mapper_desktop_viewer_call_json(
 fn viewer_call(state: &DesktopState, request: ViewerRequest) -> Result<Value, CtlError> {
     let viewer = state.viewer();
     match request {
-        ViewerRequest::ViewerStatus => return state.viewer_status(),
+        ViewerRequest::ViewerStatus { local } => return state.viewer_status(local),
+        ViewerRequest::DisplayMode { target } => {
+            let mode = viewer
+                .ok_or_else(disconnected)?
+                .set_display_mode(target.into())
+                .map_err(display_mode_error)?;
+            return Ok(json!({ "mode": mode }));
+        }
         ViewerRequest::Control { enabled } => match viewer {
             Some(viewer) => viewer.request_control(enabled).map_err(err)?,
             None if enabled => return Err(disconnected()),
@@ -1989,6 +2109,7 @@ pub unsafe extern "C" fn pb_mapper_desktop_view_v1(
 mod tests {
     use super::*;
     use base64::Engine as _;
+    use pb_mapper::desktop::{VideoCodec, VideoLimits};
     use std::{
         ffi::{CStr, CString},
         future::Future,
@@ -2150,6 +2271,13 @@ mod tests {
         let input =
             json!({"op": "input", "generation": 1, "inputs": [{"kind": "move", "x": 1, "y": 1}]});
         assert_eq!(hot(handle, input.clone())["code"], "NOT_FRESH");
+        // This host offers no display modes, and says nothing of its OS.
+        let fit =
+            json!({"op": "display_mode", "target": {"fit_local": {"width": 1280, "height": 720}}});
+        assert_eq!(hot(handle, fit.clone())["code"], "DISPLAY_MODE_NOT_OFFERED");
+        let local = json!({"op": "viewer_status", "local": {"width": 1280, "height": 720}});
+        let status = &hot(handle, local)["data"];
+        assert!(status.get("modes").is_none() && status["host_os"].is_null());
         for request in [
             json!({"op": "control", "enabled": true}),
             json!({"op": "keyframe"}),
@@ -2243,7 +2371,7 @@ mod tests {
                     assert_eq!(hot(handle, request.clone()), expected, "{request}");
                     assert!(started.elapsed() < Duration::from_millis(10), "{request}");
                 }
-                for request in [json!({"op": "control", "enabled": true}), input] {
+                for request in [json!({"op": "control", "enabled": true}), input, fit] {
                     let started = Instant::now();
                     assert_eq!(hot(handle, request.clone())["code"], "IO", "{request}");
                     assert!(started.elapsed() < Duration::from_millis(10), "{request}");
@@ -2441,6 +2569,7 @@ mod tests {
                 settings: Settings {
                     service: "desktop:study".into(),
                     display_id: 2,
+                    display_device: None,
                     allow_control: true,
                     allow_direct: false,
                     auto_start: true,
@@ -2659,8 +2788,11 @@ mod tests {
                         relay_only: false,
                         quality: QualityPreset::Balanced,
                         refresh_hz: 60.0,
-                        h265: true,
-                        resolution: Resolution::P1440,
+                        decoders: DecoderOffer {
+                            h264: Some([3840, 2160]),
+                            h265: Some([2560, 1440]),
+                        },
+                        resolution: Some(Resolution::P1440),
                         max_fps,
                     },
                 )
@@ -2730,8 +2862,11 @@ mod tests {
                     relay_only: false,
                     quality: QualityPreset::Balanced,
                     refresh_hz: 60.0,
-                    h265: false,
-                    resolution: Resolution::default(),
+                    decoders: DecoderOffer {
+                        h264: None,
+                        h265: None,
+                    },
+                    resolution: None,
                     max_fps: 0,
                 },
             ))
@@ -2811,7 +2946,7 @@ mod tests {
         started.await.unwrap();
         // The attempt reports how far it got.
         assert_eq!(
-            state.viewer_status().unwrap(),
+            state.viewer_status(None).unwrap(),
             json!({"state": "connecting", "stage": "identity"})
         );
         tokio::time::timeout(Duration::from_secs(1), state.disconnect_viewer())
@@ -2827,6 +2962,6 @@ mod tests {
         );
         assert!(state.viewer.read().is_none());
         assert!(state.connecting.lock().is_none());
-        assert_eq!(state.viewer_status().unwrap(), Value::Null);
+        assert_eq!(state.viewer_status(None).unwrap(), Value::Null);
     }
 }

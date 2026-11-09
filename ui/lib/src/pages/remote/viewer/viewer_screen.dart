@@ -127,6 +127,8 @@ class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
                         unawaited(remote.setQuality(quality)),
                     onResolution: (resolution) =>
                         unawaited(remote.setResolution(resolution)),
+                    onDisplayMode: (target) =>
+                        unawaited(remote.setDisplayMode(target)),
                     onMaxFps: (fps) => unawaited(remote.setMaxFps(fps)),
                     onReconnect: () => unawaited(remote.reconnect()),
                     onPasteNewInvite: paste,
@@ -141,6 +143,8 @@ class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
                         unawaited(remote.setQuality(quality)),
                     onResolution: (resolution) =>
                         unawaited(remote.setResolution(resolution)),
+                    onDisplayMode: (target) =>
+                        unawaited(remote.setDisplayMode(target)),
                     onMaxFps: (fps) => unawaited(remote.setMaxFps(fps)),
                     onReconnect: () => unawaited(remote.reconnect()),
                     onPasteNewInvite: paste,

@@ -1,11 +1,13 @@
 use crate::{
     Backend, BackendCaps, DesktopKind, Display, HostPath, HostState, HostStatus, HostViewer,
-    Invitation, QualityPreset, Result, VideoCodec, VideoLimits, VideoSize, error,
-    launch::{Launch, Launcher},
+    Invitation, ModeList, QualityPreset, Result, VideoCodec, VideoLimits, VideoSize, error,
+    lane::LaneCommand,
+    launch::{Launch, Launcher, Recovery},
+    modes::ModeCommand,
     platform,
     protocol::{
-        CAPABILITY_H265, HostMessage, RejectReason, SessionState, StopReason, ViewerMessage,
-        valid_capabilities,
+        CAPABILITY_DISPLAY_MODE, CAPABILITY_H265, HostMessage, RejectReason, SessionState,
+        StopReason, ViewerMessage, valid_capabilities,
     },
     qos::scaled_size,
     security::HostIdentity,
@@ -49,6 +51,9 @@ pub(crate) const REJECT_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 const BACKEND_ANSWER_WAIT: Duration = Duration::from_secs(3);
 /// Connections in their handshake or session at once; one holds the viewer slot.
 const MAX_CONNECTIONS: usize = 8;
+/// How often a display mode a session could not put back is tried again
+/// while no session is live.
+const RESTORE_RETRY: Duration = Duration::from_secs(2);
 
 /// Which display a host shares.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -235,6 +240,11 @@ struct Shared {
     session: Mutex<Option<Live>>,
     stopped: AtomicBool,
     registration: Registration,
+    /// The display-mode journal may name a display to put back, which the
+    /// host-lived retry replays while no session is live.
+    restore_pending: AtomicBool,
+    /// Wakes that retry at once.
+    restore: tokio::sync::Notify,
 }
 /// The session in the viewer slot, with what its backend can do.
 struct Live {
@@ -335,8 +345,15 @@ impl Host {
             session: Mutex::new(None),
             stopped: AtomicBool::new(false),
             registration,
+            // What a host of this process left changed, replayed at once:
+            // a restart too starts here.
+            restore_pending: AtomicBool::new(true),
+            restore: tokio::sync::Notify::new(),
         });
         let cancel = CancellationToken::new();
+        if let Some(recovery) = launch.recovery() {
+            tokio::spawn(restore_retry(shared.clone(), recovery, cancel.clone()));
+        }
         let acceptor = Arc::new(Acceptor {
             tls,
             token: invitation.token_text(),
@@ -474,8 +491,29 @@ impl Host {
                 .end(StopReason::HostEnded, stop_message(StopReason::HostEnded));
         }
     }
+    /// Put this computer's display back in its own mode, which a viewer
+    /// changed: at once in the live session, whether or not it controls
+    /// (refused only on the secure desktop or while a change settles, which
+    /// the viewer hears), else by replaying the journal. False when there is
+    /// nothing to ask: no session, and no journal this host replays.
+    pub fn restore_display_mode(&self) -> bool {
+        if let Some(live) = self.shared.session.lock().as_ref() {
+            return live
+                .session
+                .shared
+                .lane
+                .push(LaneCommand::DisplayMode(ModeCommand::HostRestore));
+        }
+        if self.launch.recovery().is_none() {
+            return false;
+        }
+        self.shared.restore_pending.store(true, Ordering::Release);
+        self.shared.restore.notify_one();
+        true
+    }
     /// "Make view-only" and back. Revocation gates every later input at the
-    /// edge, and the worker releases held input within one backend step.
+    /// edge, and the worker releases held input within one backend step. It
+    /// also puts the display's own mode back, which a grant does not.
     pub fn set_control_allowed(&self, allowed: bool) {
         self.shared.policy.set(allowed);
         if let Some(live) = self.shared.session.lock().as_ref() {
@@ -554,6 +592,7 @@ impl Shared {
                 display: None,
                 desktop: DesktopKind::Ordinary,
                 capabilities: self.fallback.clone(),
+                display_mode: None,
             };
         };
         let record = session.shared.state.borrow().record.clone();
@@ -581,6 +620,7 @@ impl Shared {
             display: record.display,
             desktop: record.desktop,
             capabilities,
+            display_mode: record.modes.filter(ModeList::changed),
         }
     }
     /// The one viewer's path, sampled from the registration's sessions,
@@ -593,6 +633,41 @@ impl Shared {
             HostPath::Relay
         } else {
             HostPath::Unknown
+        }
+    }
+}
+
+/// The host-lived retry of a display mode a session could not put back (the
+/// ordinary desktop was away, say): while the journal may still name one
+/// and no session is live, replay it, off the runtime, every
+/// `RESTORE_RETRY` and at once when asked. A live session's backend replays
+/// it itself. Ends with the host.
+async fn restore_retry(shared: Arc<Shared>, recovery: Recovery, cancel: CancellationToken) {
+    loop {
+        if shared.restore_pending.load(Ordering::Acquire) && shared.session.lock().is_none() {
+            let recovery = recovery.clone();
+            match tokio::task::spawn_blocking(move || recovery()).await {
+                Ok(Ok(pending)) => shared.restore_pending.store(pending, Ordering::Release),
+                Ok(Err(failure)) => tracing::warn!(
+                    target: "pb_mapper_desktop::session",
+                    event = "display_mode_not_restored",
+                    detail = %failure,
+                ),
+                Err(_) => {}
+            }
+        }
+        // Idle until asked once nothing is left.
+        let retry = async {
+            if shared.restore_pending.load(Ordering::Acquire) {
+                tokio::time::sleep(RESTORE_RETRY).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            () = shared.restore.notified() => {}
+            () = retry => {}
         }
     }
 }
@@ -711,6 +786,9 @@ impl Acceptor {
             request.limits,
             request.quality,
             &request.capabilities,
+            capabilities
+                .iter()
+                .any(|capability| capability == CAPABILITY_DISPLAY_MODE),
         );
         session.expect_video_size(video);
         *self.shared.session.lock() = Some(Live {
@@ -740,6 +818,10 @@ impl Acceptor {
             slot.take();
         }
         drop(slot);
+        // Thread C put the display back as the session ended, unless it
+        // could not: the retry looks.
+        self.shared.restore_pending.store(true, Ordering::Release);
+        self.shared.restore.notify_one();
         drop(permit);
     }
 

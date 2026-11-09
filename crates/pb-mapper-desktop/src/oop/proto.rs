@@ -1,7 +1,10 @@
 //! The out-of-process backend's protocol: one request, one response and
 //! one byte record (a unit or a still), in order, per call of the
 //! `Backend` it carries. A change to any of it bumps the helper protocol.
-use crate::{DesktopContext, Input};
+use crate::{
+    BackendCaps, CursorMode, DesktopContext, FailureKind, HostOs, Input,
+    modes::{Mode, ModeList},
+};
 use serde::{Deserialize, Serialize};
 
 /// The longest one call may take, and a worker may wait to start.
@@ -23,12 +26,18 @@ pub(crate) struct SessionIdentity {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", deny_unknown_fields, rename_all = "snake_case")]
 pub(crate) enum Request {
+    /// `display_device`, the display's name, finds it again when its id
+    /// went stale.
     Start {
         display_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_device: Option<String>,
     },
     Attach {
         display_id: u32,
         session: SessionIdentity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_device: Option<String>,
     },
     // Struct variants throughout: serde ignores extra fields on an internally
     // tagged unit variant, which would undo `deny_unknown_fields`.
@@ -64,8 +73,19 @@ pub(crate) enum Request {
         input: Input,
     },
     /// Whether the worker encodes H.265 on its display, which it probes in
-    /// the interactive session.
+    /// the interactive session: asked only for a viewer that decodes it.
     H265 {},
+    /// The bound display's modes, answered in `modes`.
+    DisplayModes {
+        expected: DesktopContext,
+    },
+    /// Journalled in the helper's protected directory first.
+    SetDisplayMode {
+        expected: DesktopContext,
+        mode: Mode,
+    },
+    /// Answered in `restored`.
+    RestoreDisplayMode {},
     Release {},
     Close {},
 }
@@ -74,6 +94,9 @@ pub(crate) enum Request {
 pub(crate) struct Response {
     pub context: Option<DesktopContext>,
     pub error: Option<String>,
+    /// What kind of failure `error` is, when the worker's backend said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<FailureKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<crate::VideoFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,7 +107,66 @@ pub(crate) struct Response {
     /// interactive session, read by the worker, which runs in it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub double_click: Option<crate::DoubleClickGuard>,
+    /// In the `Start` response: what the worker's backend can do, H.265
+    /// aside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<StartCaps>,
     /// In the `H265` response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub h265: Option<bool>,
+    /// In the `DisplayModes` response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<ModeList>,
+    /// In the `RestoreDisplayMode` response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored: Option<bool>,
+}
+impl Response {
+    pub(crate) fn empty() -> Self {
+        Self {
+            context: None,
+            error: None,
+            failure: None,
+            video: None,
+            cursor: None,
+            pending: 0,
+            double_click: None,
+            caps: None,
+            h265: None,
+            modes: None,
+            restored: None,
+        }
+    }
+}
+
+/// What a worker's backend can do, as its `Start` answer says: never H.265,
+/// which costs a probe and is asked only when a viewer decodes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StartCaps {
+    pub lock: bool,
+    pub display_modes: bool,
+    pub os: Option<HostOs>,
+    pub cursor: CursorMode,
+}
+impl From<&BackendCaps> for StartCaps {
+    fn from(caps: &BackendCaps) -> Self {
+        Self {
+            lock: caps.lock,
+            display_modes: caps.display_modes,
+            os: caps.os,
+            cursor: caps.cursor,
+        }
+    }
+}
+impl From<StartCaps> for BackendCaps {
+    fn from(caps: StartCaps) -> Self {
+        Self {
+            h265: false,
+            lock: caps.lock,
+            display_modes: caps.display_modes,
+            os: caps.os,
+            cursor: caps.cursor,
+        }
+    }
 }

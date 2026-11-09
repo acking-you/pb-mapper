@@ -34,7 +34,9 @@ const MAX_COMPUTERS: usize = 50;
 /// Fifty records with their invitations fit many times over.
 const LIMIT: u64 = 256 * 1024;
 const KEY_LIMIT: u64 = 1024;
-const VERSION: u32 = 1;
+/// 2: a resolution is written only when chosen, and a remembered "fit
+/// local" display mode may be. Version 1 is read, never written.
+const VERSION: u32 = 2;
 const DPAPI_FILE: &str = "desktop-computers.dpapi";
 const SEALED_FILE: &str = "desktop-computers.bin";
 const KEY_FILE: &str = "desktop-computers.key";
@@ -90,13 +92,18 @@ enum Request {
         namespace: u64,
         relay_only: bool,
         quality: QualityPreset,
+        /// Absent: the default, whatever it is when the computer connects.
         #[serde(default)]
-        resolution: Resolution,
+        resolution: Option<Resolution>,
         #[serde(default)]
         max_fps: u32,
         #[serde(default)]
+        display_mode: Option<RememberedMode>,
+        #[serde(default)]
         replace_id: Option<String>,
     },
+    /// A field left out stays as it is; `resolution` or `display_mode`
+    /// given as `null` goes back to the default.
     #[serde(rename = "computers_update")]
     Update {
         id: String,
@@ -104,8 +111,10 @@ enum Request {
         name: Option<String>,
         #[serde(default)]
         quality: Option<QualityPreset>,
-        #[serde(default)]
-        resolution: Option<Resolution>,
+        #[serde(default, deserialize_with = "given")]
+        resolution: Option<Option<Resolution>>,
+        #[serde(default, deserialize_with = "given")]
+        display_mode: Option<Option<RememberedMode>>,
         #[serde(default)]
         max_fps: Option<u32>,
         #[serde(default)]
@@ -117,6 +126,25 @@ enum Request {
     },
     #[serde(rename = "computers_forget")]
     Forget { id: String },
+}
+
+/// A field that is present, `null` included, as `Some`: left out, it is
+/// `None` by `#[serde(default)]`.
+fn given<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// The display mode re-applied when this computer is controlled again. Only
+/// "fit local" is remembered: an exact size belongs to the display it was
+/// chosen for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RememberedMode {
+    FitLocal,
 }
 
 /// A remembered computer as Dart sees it: never its invitation.
@@ -131,13 +159,15 @@ struct Record {
     namespace: u64,
     relay_only: bool,
     quality: QualityPreset,
-    /// The largest picture asked of it; a file from before the choice
-    /// existed reads as the default, 1080p.
-    #[serde(default)]
-    resolution: Resolution,
+    /// The largest picture asked of it, when one was chosen; `None` follows
+    /// the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolution: Option<Resolution>,
     /// Its maximum frame rate: 0 is Auto, see `valid_max_fps`.
     #[serde(default)]
     max_fps: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_mode: Option<RememberedMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_connected_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -353,7 +383,7 @@ fn unreadable() -> CtlError {
     CtlError::protocol("the remembered computers cannot be read")
 }
 
-/// `{"version":1,"computers":[{…record, "invitation":"pbd1.…"}]}`.
+/// `{"version":2,"computers":[{…record, "invitation":"pbd1.…"}]}`.
 fn encode(computers: &[Computer]) -> Result<Vec<u8>, CtlError> {
     let entries = computers
         .iter()
@@ -378,7 +408,7 @@ fn decode(plain: &[u8]) -> Result<Vec<Computer>, CtlError> {
         computers: Vec<Value>,
     }
     let stored: Stored = serde_json::from_slice(plain).map_err(|_| unreadable())?;
-    if stored.version != VERSION || stored.computers.len() > MAX_COMPUTERS {
+    if !(1..=VERSION).contains(&stored.version) || stored.computers.len() > MAX_COMPUTERS {
         return Err(unreadable());
     }
     stored
@@ -390,7 +420,13 @@ fn decode(plain: &[u8]) -> Result<Vec<Computer>, CtlError> {
                 .and_then(|entry| entry.remove("invitation"))
                 .and_then(|text| Invitation::decode(text.as_str()?).ok())
                 .ok_or_else(unreadable)?;
-            let record: Record = serde_json::from_value(entry).map_err(|_| unreadable())?;
+            let mut record: Record = serde_json::from_value(entry).map_err(|_| unreadable())?;
+            // Version 1 wrote a resolution whether chosen or not, and its
+            // default was 1080p: that, or none, follows today's default.
+            // The others were chosen.
+            if stored.version == 1 && record.resolution == Some(Resolution::P1080) {
+                record.resolution = None;
+            }
             record.check().map_err(|_| unreadable())?;
             if invitation.service != record.service
                 || invitation.short_fingerprint() != record.fingerprint
@@ -532,6 +568,7 @@ fn apply(
             quality,
             resolution,
             max_fps,
+            display_mode,
             replace_id,
         } => {
             let record = Record {
@@ -545,6 +582,7 @@ fn apply(
                 quality,
                 resolution,
                 max_fps,
+                display_mode,
                 last_connected_ms: None,
                 last_path: None,
                 last_control_allowed: None,
@@ -556,6 +594,7 @@ fn apply(
             name,
             quality,
             resolution,
+            display_mode,
             max_fps,
             last_connected_ms,
             last_path,
@@ -569,6 +608,9 @@ fn apply(
             }
             if let Some(resolution) = resolution {
                 record.resolution = resolution;
+            }
+            if let Some(display_mode) = display_mode {
+                record.display_mode = display_mode;
             }
             if let Some(max_fps) = max_fps {
                 record.max_fps = max_fps;
@@ -705,12 +747,14 @@ mod tests {
         )
         .unwrap();
         assert!(record.get("invitation").is_none());
+        // Nothing chosen yet: no resolution, and Auto.
         assert_eq!(
-            (&record["resolution"], &record["max_fps"]),
-            (&json!("1080p"), &json!(0))
+            (record.get("resolution"), &record["max_fps"]),
+            (None, &json!(0))
         );
         let renamed = request(json!({"op": "computers_update", "id": id, "name": "Desk",
-            "last_connected_ms": 5, "resolution": "native", "max_fps": 120}));
+            "last_connected_ms": 5, "resolution": "1440p", "max_fps": 120,
+            "display_mode": "fit_local"}));
         run(&mut slot, None, renamed).unwrap();
         let unbounded = request(json!({"op": "computers_update", "id": id, "max_fps": 240}));
         let refused = run(&mut slot, None, unbounded);
@@ -718,21 +762,42 @@ mod tests {
         let listed = run(&mut slot, None, request(json!({"op": "computers_list"}))).unwrap();
         assert_eq!(listed[0]["name"], "Desk");
         assert_eq!(
-            (&listed[0]["resolution"], &listed[0]["max_fps"]),
-            (&json!("native"), &json!(120))
+            (
+                &listed[0]["resolution"],
+                &listed[0]["max_fps"],
+                &listed[0]["display_mode"]
+            ),
+            (&json!("1440p"), &json!(120), &json!("fit_local"))
         );
         assert!(listed[0].get("invitation").is_none());
-        // A computer remembered before either choice existed reads as the
-        // defaults.
-        let earlier = json!({"version": 1, "computers": [{"id": id, "name": "Office",
-            "service": "desktop:office", "fingerprint": fingerprint, "relay": "relay:7666",
-            "namespace": 3, "relay_only": false, "quality": "balanced",
-            "invitation": current.encode()}]});
-        let decoded = decode(&serde_json::to_vec(&earlier).unwrap()).unwrap();
+        // Back to the default is a null; a field left out stays.
+        let reset = request(json!({"op": "computers_update", "id": id, "resolution": null}));
+        let record = run(&mut slot, None, reset).unwrap();
         assert_eq!(
-            (decoded[0].record.resolution, decoded[0].record.max_fps),
-            (Resolution::P1080, 0)
+            (record.get("resolution"), &record["display_mode"]),
+            (None, &json!("fit_local"))
         );
+
+        // Version 1 wrote 1080p, its default, whether chosen or not: that,
+        // or nothing, follows today's default; another size was chosen.
+        // The vault is written back as version 2.
+        let earlier = |resolution: Value| {
+            let mut entry = json!({"id": id, "name": "Office", "service": "desktop:office",
+                "fingerprint": fingerprint, "relay": "relay:7666", "namespace": 3,
+                "relay_only": false, "quality": "balanced", "invitation": current.encode()});
+            if !resolution.is_null() {
+                entry["resolution"] = resolution;
+            }
+            entry
+        };
+        let v1 = json!({"version": 1, "computers":
+            [earlier(json!("1080p")), earlier(Value::Null), earlier(json!("1440p"))]});
+        let decoded = decode(&serde_json::to_vec(&v1).unwrap()).unwrap();
+        let resolutions: Vec<_> = decoded.iter().map(|c| c.record.resolution).collect();
+        assert_eq!(resolutions, [None, None, Some(Resolution::P1440)]);
+        let rewritten: Value = serde_json::from_slice(&encode(&decoded).unwrap()).unwrap();
+        assert_eq!(rewritten["version"], 2);
+        assert!(rewritten["computers"][0].get("resolution").is_none());
 
         // The file holds neither the record nor the invitation in the clear.
         let sealed = std::fs::read(directory.join(SEALED_FILE)).unwrap();

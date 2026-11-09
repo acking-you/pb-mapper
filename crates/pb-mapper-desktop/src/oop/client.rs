@@ -7,15 +7,15 @@ use super::{
     proto::{DRAIN_WAIT_MAX_MS, Request, Response, TIMEOUT},
 };
 use crate::{
-    Backend, BackendCaps, Description, DesktopContext, Input, Result, Waker, error,
+    Backend, BackendCaps, BackendError, Description, DesktopContext, Input, Result, Waker, error,
     modes::{Mode, ModeList},
 };
 
 pub(crate) struct RemoteBackend<T: Transport> {
     runtime: tokio::runtime::Runtime,
     pipe: Option<T>,
-    /// What the worker's backend can do. Protocol 6 does not say; the
-    /// connector knows its worker.
+    /// What the worker's backend can do, as its `Start` answer said; what
+    /// the connector expects of its worker until then.
     caps: BackendCaps,
     context: Option<DesktopContext>,
     video: Option<crate::VideoFormat>,
@@ -27,6 +27,12 @@ pub(crate) struct RemoteBackend<T: Transport> {
     double_click: Option<crate::DoubleClickGuard>,
     /// From the `H265` response.
     h265: Option<bool>,
+    /// From the last `DisplayModes` or `RestoreDisplayMode` response.
+    modes: Option<ModeList>,
+    restored: Option<bool>,
+    /// This client changed the worker's display mode and has not asked it
+    /// back since: a session's end asks only then.
+    changed_mode: bool,
     /// The last capture's codec and rate, repeated by drains.
     codec: crate::VideoCodec,
     rate: crate::VideoRate,
@@ -34,16 +40,22 @@ pub(crate) struct RemoteBackend<T: Transport> {
     failed: bool,
 }
 impl<T: Transport> RemoteBackend<T> {
-    /// Start the worker on `display_id`, over `pipe`, whose calls `runtime`
-    /// drives; `caps` is what its backend can do.
+    /// Start the worker on `display_id`, found again by `display_device`
+    /// when that id went stale, over `pipe`, whose calls `runtime` drives.
+    /// `caps` is what the connector expects of the worker, which its
+    /// `Start` answer replaces.
     pub(crate) fn start(
         runtime: tokio::runtime::Runtime,
         pipe: T,
         display_id: u32,
+        display_device: Option<String>,
         caps: BackendCaps,
     ) -> Result<Self> {
         let mut backend = Self::new(runtime, pipe, caps);
-        backend.call(Request::Start { display_id })?;
+        backend.call(Request::Start {
+            display_id,
+            display_device,
+        })?;
         Ok(backend)
     }
     fn new(runtime: tokio::runtime::Runtime, pipe: T, caps: BackendCaps) -> Self {
@@ -57,6 +69,9 @@ impl<T: Transport> RemoteBackend<T> {
             pending: 0,
             double_click: None,
             h265: None,
+            modes: None,
+            restored: None,
+            changed_mode: false,
             codec: crate::VideoCodec::H264,
             rate: crate::VideoRate {
                 bitrate: 0,
@@ -70,17 +85,21 @@ impl<T: Transport> RemoteBackend<T> {
     /// One request and its response. A lost or stalled pipe fails every later
     /// call with `NotConnected`, which ends the session: a reinstalled or
     /// crashed helper never leaves a viewer waiting. The desktop and pointer
-    /// the helper last reported stay until a response reports others: Release
-    /// and Close report no desktop; Context, Capture and Video observe the
-    /// pointer, and so does an applied input when the worker could read it,
-    /// so the pointer is never older than the last input; and an error
-    /// answers the request, not the desktop. The engine's own context checks
-    /// notice a desktop change.
+    /// the helper last reported stay until a response reports others: Release,
+    /// Close and RestoreDisplayMode report no desktop; Context, Capture and
+    /// Video observe the pointer, and so does an applied input when the
+    /// worker could read it, so the pointer is never older than the last
+    /// input; and an error, of the kind the worker said, answers the
+    /// request, not the desktop. The engine's own context checks notice a
+    /// desktop change.
     fn call(&mut self, request: Request) -> Result<Vec<u8>> {
         if self.failed {
             return Err(disconnected("helper disconnected; restart desktop sharing"));
         }
-        let reports = !matches!(request, Request::Release {} | Request::Close {});
+        let reports = !matches!(
+            request,
+            Request::Release {} | Request::Close {} | Request::RestoreDisplayMode {}
+        );
         let observes = matches!(
             request,
             Request::Context {} | Request::Capture {} | Request::Video { .. }
@@ -98,8 +117,8 @@ impl<T: Transport> RemoteBackend<T> {
                 self.pending = response.pending as usize;
                 if let Some(reason) = response.error {
                     self.video = None;
-                    return Ok(Err(match legacy_kind(&reason) {
-                        Some(kind) => crate::BackendError::new(kind, reason).into(),
+                    return Ok(Err(match response.failure {
+                        Some(kind) => BackendError::new(kind, reason).into(),
                         None => error(reason),
                     }));
                 }
@@ -111,7 +130,12 @@ impl<T: Transport> RemoteBackend<T> {
                 }
                 self.video = response.video;
                 self.double_click = response.double_click.or(self.double_click);
+                if let Some(caps) = response.caps {
+                    self.caps = caps.into();
+                }
                 self.h265 = response.h265.or(self.h265);
+                self.modes = response.modes;
+                self.restored = response.restored;
                 Ok::<_, std::io::Error>(Ok(image))
             })
             .await
@@ -152,25 +176,6 @@ impl<T: Transport> RemoteBackend<T> {
             .video
             .take()
             .map(|format| crate::EncodedFrame { format, bytes }))
-    }
-}
-/// The kind of a worker failure, which helper protocol 6 carries only as the
-/// worker backend's text.
-fn legacy_kind(text: &str) -> Option<crate::FailureKind> {
-    use crate::FailureKind;
-    if text.starts_with("secure_desktop_requires_helper") {
-        Some(FailureKind::SecureDesktop)
-    } else if text.starts_with(crate::backend::H265_ENCODER_FAILED) {
-        Some(FailureKind::EncoderFailed {
-            codec: crate::VideoCodec::H265,
-        })
-    } else if text.contains("display is unavailable")
-        || text.contains("no longer available")
-        || text.contains("output disappeared")
-    {
-        Some(FailureKind::DisplayLost)
-    } else {
-        None
     }
 }
 fn disconnected(failure: impl std::fmt::Display) -> std::io::Error {
@@ -228,9 +233,10 @@ impl<T: Transport> Backend for RemoteBackend<T> {
     fn pending_video(&self) -> usize {
         self.pending
     }
-    /// The worker probes the GPU of the display it captures, in the
-    /// interactive session, which the background host in session 0 cannot;
-    /// it is asked only for a viewer that decodes H.265.
+    /// What the worker said it can do when it started; it probes the GPU of
+    /// the display it captures, in the interactive session, which the
+    /// background host in session 0 cannot, and is asked about H.265 only
+    /// for a viewer that decodes it.
     fn describe(&mut self, probe_h265: bool) -> Result<Description> {
         let display = self.display()?;
         let h265 = probe_h265 && self.call(Request::H265 {}).is_ok() && self.h265 == Some(true);
@@ -291,14 +297,32 @@ impl<T: Transport> Backend for RemoteBackend<T> {
     fn double_click_guard(&mut self) -> Option<crate::DoubleClickGuard> {
         self.double_click
     }
-    fn display_modes(&mut self, _expected: &DesktopContext) -> Result<Option<ModeList>> {
-        Ok(None)
+    fn display_modes(&mut self, expected: &DesktopContext) -> Result<Option<ModeList>> {
+        if !self.caps.display_modes {
+            return Ok(None);
+        }
+        self.call(Request::DisplayModes {
+            expected: expected.clone(),
+        })?;
+        Ok(self.modes.take())
     }
-    fn set_display_mode(&mut self, _expected: &DesktopContext, _mode: Mode) -> Result<()> {
-        Err(crate::BackendError::new(crate::FailureKind::Unsupported, "display modes").into())
+    fn set_display_mode(&mut self, expected: &DesktopContext, mode: Mode) -> Result<()> {
+        self.call(Request::SetDisplayMode {
+            expected: expected.clone(),
+            mode,
+        })?;
+        self.changed_mode = true;
+        Ok(())
     }
+    /// The worker puts back what it changed; one never changed through this
+    /// client is not asked. The worker restores again when it ends.
     fn restore_display_mode(&mut self) -> Result<bool> {
-        Ok(false)
+        if !self.changed_mode {
+            return Ok(false);
+        }
+        self.call(Request::RestoreDisplayMode {})?;
+        self.changed_mode = false;
+        Ok(self.restored.take().unwrap_or(false))
     }
 }
 impl<T: Transport> Drop for RemoteBackend<T> {
@@ -341,26 +365,17 @@ mod tests {
                 }
             });
         });
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
         (
-            RemoteBackend::new(runtime, pipe, BackendCaps::default()),
+            RemoteBackend::new(runtime(), pipe, BackendCaps::default()),
             helper,
         )
     }
 
-    fn empty() -> Response {
-        Response {
-            context: None,
-            error: None,
-            video: None,
-            cursor: None,
-            pending: 0,
-            double_click: None,
-            h265: None,
-        }
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
     }
 
     fn desktop() -> DesktopContext {
@@ -378,10 +393,9 @@ mod tests {
         }
     }
 
-    /// The desktop kind crosses the pipe as protocol 6 wrote its string, and
-    /// a protocol 6 worker's failure texts read back as their kinds.
+    /// The desktop kind crosses the pipe as it always did.
     #[test]
-    fn protocol_6_desktops_and_failures_read_as_kinds() {
+    fn the_desktop_kind_crosses_the_pipe_as_its_string() {
         let secure = DesktopContext {
             desktop: crate::DesktopKind::Secure,
             ..desktop()
@@ -395,22 +409,91 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ordinary, desktop());
-        use crate::FailureKind::{DisplayLost, EncoderFailed, SecureDesktop};
-        for (text, kind) in [
-            ("secure_desktop_requires_helper: UAC", Some(SecureDesktop)),
-            ("display is unavailable", Some(DisplayLost)),
-            ("selected display is no longer available", Some(DisplayLost)),
-            ("selected GPU output disappeared", Some(DisplayLost)),
-            (
-                "h265_encoder_failed: hardware video encoder stalled",
-                Some(EncoderFailed {
-                    codec: crate::VideoCodec::H265,
-                }),
-            ),
-            ("desktop capture delivered no image", None),
-        ] {
-            assert_eq!(legacy_kind(text), kind, "{text}");
-        }
+    }
+
+    /// Protocol 7 over a pipe to a worker serving a synthetic display: its
+    /// `Start` answer says what it can do, H.265 is asked only for a viewer
+    /// that decodes it, its modes cross, a change and its restore apply
+    /// there, and a failure reads back as the kind the worker gave it.
+    #[test]
+    fn protocol_7_carries_caps_modes_and_failure_kinds() {
+        use crate::{
+            native::PlatformBackend,
+            platform::{
+                Platform,
+                synthetic::{Probe, Synthetic},
+            },
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let (probe, modes) = Probe::with_modes();
+        let journal = std::env::temp_dir().join(format!("pb-desktop-oop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&journal);
+        let asked_h265 = Arc::new(AtomicUsize::new(0));
+        let (pipe, mut worker) = tokio::io::duplex(1 << 16);
+        let (worker_probe, worker_journal, asked) =
+            (probe.clone(), journal.clone(), asked_h265.clone());
+        let helper = std::thread::spawn(move || {
+            runtime().block_on(async move {
+                // The service reads the host's `Start`; the worker answers.
+                let Request::Start { display_device, .. } =
+                    ipc::read_json(&mut worker).await.unwrap()
+                else {
+                    panic!("expected Start");
+                };
+                let parts = Synthetic::<false>::open(&worker_probe, &Probe::display()).unwrap();
+                let mut backend = PlatformBackend::from_parts(
+                    Arc::new(worker_probe),
+                    parts,
+                    crate::modes::Journal::in_dir(Some(worker_journal)),
+                );
+                let mut state = super::super::server::ServeState::new();
+                super::super::server::exchange(&mut worker, 1, display_device, |request| {
+                    if matches!(request, Request::H265 {}) {
+                        asked.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let answer = super::super::server::serve(&mut backend, request, &mut state)
+                        .unwrap_or_else(|failure| (Response::failed(&failure, 0), vec![]));
+                    async move { Ok(answer) }
+                })
+                .await
+                .unwrap();
+            });
+        });
+        let mut backend = RemoteBackend::start(
+            runtime(),
+            pipe,
+            1,
+            Some(Probe::display().name),
+            BackendCaps::default(),
+        )
+        .unwrap();
+        let described = backend.describe(false).unwrap();
+        assert!(described.caps.display_modes && !described.caps.h265);
+        assert_eq!(described.caps.os, Some(crate::HostOs::Linux));
+        assert_eq!(asked_h265.load(Ordering::SeqCst), 0);
+        backend.describe(true).unwrap();
+        assert_eq!(asked_h265.load(Ordering::SeqCst), 1);
+
+        let context = backend.context().unwrap();
+        let listed = backend.display_modes(&context).unwrap().unwrap();
+        assert_eq!(listed.supported, modes);
+        backend.set_display_mode(&context, modes[1]).unwrap();
+        assert_eq!(backend.display().unwrap().width, modes[1].width);
+        assert!(backend.restore_display_mode().unwrap());
+        assert_eq!(backend.display().unwrap().width, Probe::display().width);
+
+        probe.lose(true);
+        let lost = backend.context().unwrap_err();
+        assert_eq!(
+            crate::failure_kind(&lost),
+            Some(crate::FailureKind::DisplayLost)
+        );
+        drop(backend);
+        helper.join().unwrap();
+        let _ = std::fs::remove_dir_all(journal);
     }
 
     #[test]
@@ -426,7 +509,7 @@ mod tests {
         // at the pointer, and the rest report both.
         let reported = desktop.clone();
         let (mut backend, helper) = remote(move |request| {
-            let mut response = empty();
+            let mut response = Response::empty();
             match request {
                 Request::Input { .. } => response.error = Some("lock failed".into()),
                 Request::Release {} | Request::Close {} => {}
@@ -465,7 +548,7 @@ mod tests {
                 gop: u32::MAX,
                 ..crate::VideoFormat::default()
             }),
-            ..empty()
+            ..Response::empty()
         });
         let rate = crate::VideoRate {
             bitrate: 4_000_000,

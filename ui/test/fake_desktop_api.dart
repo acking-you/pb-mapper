@@ -13,6 +13,7 @@ DesktopViewerStatus liveStatus({
   bool fresh = true,
   int lastVideoAgeMs = 16,
   DesktopStats stats = const DesktopStats(path: 'direct', codec: 'h264'),
+  DisplayModeList? modes,
 }) => DesktopViewerStatus(
   state: 'streaming',
   controlAllowed: controlAllowed,
@@ -25,6 +26,7 @@ DesktopViewerStatus liveStatus({
   videoHeight: 1080,
   presentedFrameId: 1,
   lastVideoAgeMs: lastVideoAgeMs,
+  modes: modes,
   stats: stats,
 );
 
@@ -320,6 +322,12 @@ class FakeDesktopApi implements DesktopApiClient {
   }
 
   @override
+  Future<bool> restoreHostDisplayMode() async {
+    _log('host_restore_display_mode');
+    return true;
+  }
+
+  @override
   Future<void> endViewerSession() async {
     _log('host_end_session');
     if (hostSnapshot.host case final host?) {
@@ -488,11 +496,12 @@ class FakeDesktopApi implements DesktopApiClient {
     required bool relayOnly,
     required DesktopQuality quality,
     required double refreshHz,
-    required bool h265,
-    required DesktopResolution resolution,
+    required DesktopDecoders decoders,
+    DesktopResolution? resolution,
     required int maxFps,
   }) async {
     final epoch = _epoch;
+    final h265 = decoders.h265 != null;
     calls.add((
       'connect',
       {
@@ -503,8 +512,10 @@ class FakeDesktopApi implements DesktopApiClient {
         'relay_only': relayOnly,
         'quality': quality.name,
         'refresh_hz': refreshHz,
+        // Offered, and the limits Rust would ask for with this offer.
         'h265': h265,
-        'resolution': resolution.wire,
+        'limits': decoders.limitsFor(resolution),
+        'resolution': ?resolution?.wire,
         'max_fps': maxFps,
       },
     ));
@@ -554,8 +565,8 @@ class FakeDesktopApi implements DesktopApiClient {
   }
 
   @override
-  DesktopViewerStatus? viewerStatus() {
-    _log('viewer_status');
+  DesktopViewerStatus? viewerStatus({DisplayMode? local}) {
+    _log('viewer_status', {'local': ?local});
     return viewerStatusValue;
   }
 
@@ -607,6 +618,25 @@ class FakeDesktopApi implements DesktopApiClient {
   bool requestKeyframe() {
     _log('keyframe');
     return true;
+  }
+
+  /// Answers what Rust would ask for, as long as the status lists modes;
+  /// the host's answer, a new status, is the test's to give.
+  @override
+  DisplayMode setDisplayMode(DisplayModeTarget target) {
+    _log('display_mode', {'target': target.toJson()});
+    final modes = viewerStatusValue?.modes;
+    if (modes == null) {
+      throw const DesktopCallException('DISPLAY_MODE_NOT_OFFERED');
+    }
+    return switch (target.toJson()) {
+      {'fit_local': _} => modes.fitLocal ?? modes.current,
+      {'size': {'width': final int w, 'height': final int h}} => DisplayMode(
+        w,
+        h,
+      ),
+      _ => modes.original,
+    };
   }
 
   @override

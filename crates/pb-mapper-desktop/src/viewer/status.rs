@@ -19,7 +19,8 @@
 //!   and nothing sent.
 use super::ConnectStage;
 use crate::{
-    Display, QualityPreset, VideoCodec,
+    Display, HostOs, QualityPreset, VideoCodec,
+    modes::ModeList,
     protocol::{Adaptation, DesktopKind, NoticeCode, RateModel, StateReason, StopReason},
 };
 use serde::Serialize;
@@ -51,6 +52,9 @@ pub enum ViewerReason {
     ControlDenied,
     InputCongestion,
     StalePresentation,
+    /// The host's display is changing mode; the picture returns at its new
+    /// size.
+    DisplayChanging,
     HostStopped,
     HostEnded,
     Restarting,
@@ -71,6 +75,7 @@ impl From<StateReason> for ViewerReason {
             StateReason::InputCongestion => Self::InputCongestion,
             StateReason::StalePresentation => Self::StalePresentation,
             StateReason::DisplayLost => Self::DisplayLost,
+            StateReason::DisplayChanging => Self::DisplayChanging,
         }
     }
 }
@@ -115,6 +120,12 @@ pub struct ViewerStatus {
     /// streaming. `None` before the first record.
     pub last_video_age_ms: Option<u64>,
     pub quality: QualityPreset,
+    /// The host display's modes, from a host that offers them: what
+    /// `Viewer::set_display_mode` may ask for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modes: Option<ModeList>,
+    /// The host's operating system, where it says.
+    pub host_os: Option<HostOs>,
     /// What the host advertised.
     pub capabilities: Vec<String>,
     pub notice: Option<NoticeInfo>,

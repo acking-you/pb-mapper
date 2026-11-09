@@ -1,5 +1,6 @@
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -203,6 +204,7 @@ void main() {
             onQuality: (_) {},
             onResolution: (_) {},
             onMaxFps: (_) {},
+            onDisplayMode: (_) {},
             onTypeText: () {},
           ),
         ),
@@ -472,6 +474,79 @@ void main() {
     await tester.pump();
     expect(tester.getSize(chip).width, width);
   });
+
+  testWidgets(
+    "the remote resolution is a desktop runner's, shown only while this "
+    'viewer controls a host offering more than one mode; Fit local changes '
+    'the remote display live',
+    (tester) async {
+      _size(tester, const Size(1280, 800));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      const modes = DisplayModeList(
+        current: DisplayMode(2560, 1440),
+        original: DisplayMode(2560, 1440),
+        supported: [DisplayMode(2560, 1440), DisplayMode(1920, 1080)],
+        fitLocal: DisplayMode(1920, 1080),
+      );
+      final submenu = find.byKey(const Key('display-remote-resolution'));
+      Future<bool> offered(
+        TargetPlatform platform, {
+        required bool controlling,
+      }) async {
+        debugDefaultTargetPlatformOverride = platform;
+        api.viewerStatusValue = liveStatus(
+          controlling: controlling,
+          modes: modes,
+        );
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pumpWidget(
+          _app(
+            DesktopViewer(
+              desktop: store,
+              prefs: ViewerPrefs(persist: false),
+              title: 'Office',
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.tap(find.byKey(const Key('viewer-display')));
+        await tester.pump(const Duration(milliseconds: 300));
+        final shown = submenu.evaluate().isNotEmpty;
+        if (!shown) {
+          await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+          await tester.pump(const Duration(milliseconds: 300));
+        }
+        return shown;
+      }
+
+      expect(await offered(TargetPlatform.android, controlling: true), isFalse);
+      expect(
+        await offered(TargetPlatform.windows, controlling: false),
+        isFalse,
+      );
+      expect(await offered(TargetPlatform.windows, controlling: true), isTrue);
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: tester.getCenter(submenu));
+      await mouse.moveBy(const Offset(4, 0));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.byKey(const Key('remote-resolution-fit')));
+      await tester.pump();
+      expect(api.argsOf('display_mode').single['target'], {
+        'fit_local': store.localDisplay!.toJson(),
+      });
+      expect(api.argsOf('connect'), hasLength(1));
+
+      debugDefaultTargetPlatformOverride = null;
+      await mouse.removePointer();
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
 
   testWidgets(
     'the pointer maps to display pixels and nothing is sent unless input is '
