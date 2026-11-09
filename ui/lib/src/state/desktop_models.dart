@@ -68,6 +68,127 @@ DesktopResolution? desktopResolutionFromWire(Object? value) {
   return null;
 }
 
+/// A display mode's size in physical pixels: the remote resolution (R8),
+/// the host display's real mode, which changes live, apart from the picture
+/// size above.
+@immutable
+class DisplayMode {
+  const DisplayMode(this.width, this.height);
+
+  static DisplayMode? fromJson(Object? value) => switch (value) {
+    {'width': final int width, 'height': final int height} => DisplayMode(
+      width,
+      height,
+    ),
+    _ => null,
+  };
+
+  final int width, height;
+
+  Map<String, Object?> toJson() => {'width': width, 'height': height};
+
+  String get label => '$width×$height';
+
+  @override
+  bool operator ==(Object other) =>
+      other is DisplayMode && other.width == width && other.height == height;
+  @override
+  int get hashCode => Object.hash(width, height);
+  @override
+  String toString() => label;
+}
+
+/// The remote display's modes, from a host that offers them (R17): what it
+/// shows, what it showed before a viewer changed it, the sizes it takes,
+/// largest first, and the one that best fits this computer's display.
+@immutable
+class DisplayModeList {
+  const DisplayModeList({
+    required this.current,
+    required this.original,
+    this.supported = const [],
+    this.fitLocal,
+  });
+
+  static DisplayModeList? fromJson(Object? value) {
+    if (value is! Map) return null;
+    final current = DisplayMode.fromJson(value['current']);
+    final original = DisplayMode.fromJson(value['original']);
+    if (current == null || original == null) return null;
+    return DisplayModeList(
+      current: current,
+      original: original,
+      supported: [
+        for (final mode in value['supported'] as List? ?? const [])
+          ?DisplayMode.fromJson(mode),
+      ],
+      fitLocal: DisplayMode.fromJson(value['fit_local']),
+    );
+  }
+
+  final DisplayMode current, original;
+  final List<DisplayMode> supported;
+
+  /// Null where none fits, or this computer's display is not known.
+  final DisplayMode? fitLocal;
+
+  /// A viewer changed it, and it is not back yet.
+  bool get changed => current != original;
+
+  @override
+  bool operator ==(Object other) =>
+      other is DisplayModeList &&
+      other.current == current &&
+      other.original == original &&
+      listEquals(other.supported, supported) &&
+      other.fitLocal == fitLocal;
+  @override
+  int get hashCode =>
+      Object.hash(current, original, Object.hashAll(supported), fitLocal);
+}
+
+/// What a viewer asks the remote display to show.
+sealed class DisplayModeTarget {
+  const DisplayModeTarget();
+
+  /// What it showed before a viewer changed it.
+  const factory DisplayModeTarget.original() = _OriginalMode;
+
+  /// The mode that best fits this computer's display of [local] size.
+  const factory DisplayModeTarget.fitLocal(DisplayMode local) = _FitLocalMode;
+
+  /// One of the modes it offers.
+  const factory DisplayModeTarget.size(DisplayMode mode) = _SizeMode;
+
+  /// The FFI's `target`.
+  Object toJson();
+
+  /// Fit local, which a computer keeps (R19).
+  bool get fitsLocal => false;
+}
+
+final class _OriginalMode extends DisplayModeTarget {
+  const _OriginalMode();
+  @override
+  Object toJson() => 'original';
+}
+
+final class _FitLocalMode extends DisplayModeTarget {
+  const _FitLocalMode(this.local);
+  final DisplayMode local;
+  @override
+  bool get fitsLocal => true;
+  @override
+  Object toJson() => {'fit_local': local.toJson()};
+}
+
+final class _SizeMode extends DisplayModeTarget {
+  const _SizeMode(this.mode);
+  final DisplayMode mode;
+  @override
+  Object toJson() => {'size': mode.toJson()};
+}
+
 /// The frame rates a viewer may choose over Auto (D8): each becomes the
 /// session's ceiling, every preset's included.
 const kMaxFpsChoices = [30, 60, 90, 120];
@@ -271,7 +392,7 @@ enum DesktopDemand { page, viewer }
 /// cannot be verified.
 enum DesktopHelperState { none, ready, stopped, outdated, unverified }
 
-enum DesktopNoticeCode { locked, lockFailed }
+enum DesktopNoticeCode { locked, lockFailed, displayModeFailed }
 
 @immutable
 class DesktopDisplay {
@@ -326,6 +447,7 @@ class DesktopTarget {
     this.resolution,
     this.maxFps = 0,
     this.codec = DesktopCodecPreference.auto,
+    this.fitLocal = false,
   }) : assert(invitation != null || computerId != null);
   final String? invitation;
   final String name;
@@ -345,6 +467,10 @@ class DesktopTarget {
   /// The device's preference, which the session takes at connect (D6).
   final DesktopCodecPreference codec;
 
+  /// The computer keeps Fit local as its remote resolution (R19): this
+  /// viewer asks for it whenever it gains control.
+  final bool fitLocal;
+
   /// [resolution] is replaced when given, null included: `(to: null)` is
   /// the default again.
   DesktopTarget copyWith({
@@ -352,6 +478,7 @@ class DesktopTarget {
     ({DesktopResolution? to})? resolution,
     int? maxFps,
     DesktopCodecPreference? codec,
+    bool? fitLocal,
   }) => DesktopTarget(
     invitation: invitation,
     name: name,
@@ -361,6 +488,7 @@ class DesktopTarget {
     resolution: resolution == null ? this.resolution : resolution.to,
     maxFps: maxFps ?? this.maxFps,
     codec: codec ?? this.codec,
+    fitLocal: fitLocal ?? this.fitLocal,
   );
 
   @override
@@ -373,7 +501,8 @@ class DesktopTarget {
       other.quality == quality &&
       other.resolution == resolution &&
       other.maxFps == maxFps &&
-      other.codec == codec;
+      other.codec == codec &&
+      other.fitLocal == fitLocal;
   @override
   int get hashCode => Object.hash(
     invitation,
@@ -384,6 +513,7 @@ class DesktopTarget {
     resolution,
     maxFps,
     codec,
+    fitLocal,
   );
 
   /// The invitation is a bearer secret: never in a log.
@@ -432,6 +562,7 @@ class DesktopSessionView {
     this.path,
     this.notice,
     this.capabilities = const [],
+    this.displayModes,
   });
   final DesktopTarget? target;
   final DesktopPhase phase;
@@ -452,6 +583,10 @@ class DesktopSessionView {
 
   /// What the host offers beyond the base protocol, such as `lock`.
   final List<String> capabilities;
+
+  /// The remote display's modes, from a host that offers them (R17), with
+  /// the one that fits this computer's display.
+  final DisplayModeList? displayModes;
 
   bool get inputLive => fresh && controlling;
 
@@ -489,7 +624,8 @@ class DesktopSessionView {
       other.paused == paused &&
       other.path == path &&
       other.notice == notice &&
-      listEquals(other.capabilities, capabilities);
+      listEquals(other.capabilities, capabilities) &&
+      other.displayModes == displayModes;
   @override
   int get hashCode => Object.hash(
     target,
@@ -509,6 +645,7 @@ class DesktopSessionView {
     path,
     notice,
     Object.hashAll(capabilities),
+    displayModes,
   );
 }
 
@@ -1185,6 +1322,8 @@ class DesktopHostView {
     this.helper = DesktopHelperState.none,
     this.viewer,
     this.otherRelay,
+    this.unsupportedReason,
+    this.displayMode,
   });
 
   /// False until the first capabilities, host status and trust round trip.
@@ -1222,6 +1361,14 @@ class DesktopHostView {
   /// It stays there until moved, which changes its invitation.
   final String? otherRelay;
 
+  /// Why this computer cannot host, as Rust says it: `platform`,
+  /// `media_foundation_missing`, `no_display` or `permission_missing`.
+  final String? unsupportedReason;
+
+  /// A viewer changed this display's mode: what it is, and what the
+  /// owner's Restore puts back.
+  final DisplayModeList? displayMode;
+
   @override
   bool operator ==(Object other) =>
       other is DesktopHostView &&
@@ -1241,7 +1388,9 @@ class DesktopHostView {
       other.displayId == displayId &&
       other.helper == helper &&
       other.viewer == viewer &&
-      other.otherRelay == otherRelay;
+      other.otherRelay == otherRelay &&
+      other.unsupportedReason == unsupportedReason &&
+      other.displayMode == displayMode;
   @override
   int get hashCode => Object.hash(
     loaded,
@@ -1261,6 +1410,8 @@ class DesktopHostView {
     helper,
     viewer,
     otherRelay,
+    unsupportedReason,
+    displayMode,
   );
 
   @override

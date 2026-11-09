@@ -555,6 +555,8 @@ class _SharingCard extends StatelessWidget {
             controlAllowed: v.controlAllowed,
             desktop: desktop,
           ),
+        if (v.displayMode case final mode?)
+          _DisplayModeNotice(mode: mode, desktop: desktop),
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -695,6 +697,48 @@ class _SharingCard extends StatelessWidget {
 /// This computer is shared, or paused, on another relay than the settings
 /// name: it stays there until moved. Moving it changes its invitation, so
 /// the action asks first.
+/// A viewer changed this display's mode, and the session keeps it while
+/// the viewer pauses (Q3): the owner may put it back here. It goes back by
+/// itself when the session ends.
+class _DisplayModeNotice extends StatelessWidget {
+  const _DisplayModeNotice({required this.mode, required this.desktop});
+
+  final DisplayModeList mode;
+  final DesktopStore desktop;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final scheme = Theme.of(context).colorScheme;
+    return Row(
+      key: const Key('host-display-mode'),
+      children: [
+        Icon(
+          AppIcons.remote,
+          size: AppIconSize.inline,
+          color: scheme.onSurfaceVariant,
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            l10n.hostDisplayModeChanged(mode.current.label),
+            style: const TextStyle(fontSize: 13, height: 1.5),
+          ),
+        ),
+        TextButton(
+          key: const Key('host-display-mode-restore'),
+          style: TextButton.styleFrom(
+            minimumSize: const Size(0, 36),
+            textStyle: buttonLabel(context, 13, weight: FontWeight.w600),
+          ),
+          onPressed: () => unawaited(desktop.restoreHostDisplayMode()),
+          child: Text(l10n.hostDisplayModeRestore),
+        ),
+      ],
+    );
+  }
+}
+
 class _OtherRelayNotice extends StatelessWidget {
   const _OtherRelayNotice({
     required this.relay,

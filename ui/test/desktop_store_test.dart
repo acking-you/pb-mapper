@@ -778,6 +778,60 @@ void main() {
   );
 
   testWidgets(
+    'the remote resolution changes live, never a reconnect, and a computer '
+    'that keeps Fit local asks for it again each time control is gained',
+    (tester) async {
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api, textures: FakeTextures().create);
+      final viewer = store.demand(DesktopDemand.viewer);
+      const modes = DisplayModeList(
+        current: DisplayMode(2560, 1440),
+        original: DisplayMode(2560, 1440),
+        supported: [DisplayMode(2560, 1440), DisplayMode(1920, 1080)],
+        fitLocal: DisplayMode(1920, 1080),
+      );
+      List<Object?> asked() => [
+        for (final call in api.argsOf('display_mode')) call['target'],
+      ];
+      Future<void> report({required bool controlling}) async {
+        api.viewerStatusValue = liveStatus(
+          controlling: controlling,
+          modes: modes,
+        );
+        await tester.pump(const Duration(milliseconds: 500));
+      }
+
+      await store.connect(_target.copyWith(fitLocal: true));
+      await tester.pump();
+      await report(controlling: false);
+      expect(asked(), isEmpty);
+      // Control gained: Fit local, once.
+      await report(controlling: true);
+      await report(controlling: true);
+      expect(asked(), [
+        {'fit_local': store.localDisplay!.toJson()},
+      ]);
+
+      // Another size: live, with no reconnect, and Fit local no longer
+      // kept, so a later gain asks nothing.
+      store.setDisplayMode(
+        const DisplayModeTarget.size(DisplayMode(2560, 1440)),
+      );
+      expect(asked().last, {
+        'size': {'width': 2560, 'height': 1440},
+      });
+      expect(api.argsOf('connect'), hasLength(1));
+      expect(store.session.value.target?.fitLocal, isFalse);
+      await report(controlling: false);
+      await report(controlling: true);
+      expect(asked(), hasLength(2));
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
+
+  testWidgets(
     'a decoder probe that does not answer holds the first connect only so '
     'long, as H.264 alone, and none after it; its late answer is kept',
     (tester) async {

@@ -221,6 +221,7 @@ class RemoteDesktop {
           resolution: c.resolution,
           maxFps: c.maxFps,
           codec: prefs.codec,
+          fitLocal: c.displayMode == RememberedDisplayMode.fitLocal,
         ),
       ),
     );
@@ -268,6 +269,7 @@ class RemoteDesktop {
           resolution: previous?.resolution,
           maxFps: previous?.maxFps ?? 0,
           codec: prefs.codec,
+          fitLocal: previous?.displayMode == RememberedDisplayMode.fitLocal,
         ),
       ),
     );
@@ -354,6 +356,19 @@ class RemoteDesktop {
     desktop.setMaxFps(fps);
     final id = rememberedComputer?.id;
     if (id != null) await computers.setMaxFps(id, fps);
+  }
+
+  /// The remote resolution (R8), live; a remembered computer keeps Fit
+  /// local, and only that (R19).
+  Future<void> setDisplayMode(DisplayModeTarget target) async {
+    if (desktop.setDisplayMode(target) == null) return;
+    final id = rememberedComputer?.id;
+    if (id != null) {
+      await computers.setDisplayMode(
+        id,
+        target.fitsLocal ? RememberedDisplayMode.fitLocal : null,
+      );
+    }
   }
 
   /// Disconnects the store at once, before any await, so the picture is
@@ -451,6 +466,9 @@ class RemoteDesktop {
       quality: chosen?.quality ?? DesktopQuality.balanced,
       resolution: chosen?.resolution,
       maxFps: chosen?.maxFps ?? 0,
+      displayMode: chosen?.fitLocal == true
+          ? RememberedDisplayMode.fitLocal
+          : null,
       replaceId: target.replaceId,
     );
     if (record != null) {

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -101,6 +102,7 @@ final class ViewerActions {
     required this.onResolution,
     required this.onMaxFps,
     required this.onTypeText,
+    required this.onDisplayMode,
     this.onBack,
     this.onGestureSheet,
     this.onReconnect,
@@ -123,6 +125,9 @@ final class ViewerActions {
   final ValueChanged<DesktopResolution?> onResolution;
   final ValueChanged<int> onMaxFps;
   final VoidCallback onTypeText;
+
+  /// The remote display's real mode (R8): live, never a reconnect.
+  final ValueChanged<DisplayModeTarget> onDisplayMode;
 
   /// Back to the list, the session kept; null where there is no list.
   final VoidCallback? onBack;
@@ -153,9 +158,70 @@ List<ViewerMenuEntry> displayMenu(AppLocalizations l10n, ViewerActions a) => [
   ViewerMenuSection(l10n.viewerQualityLabel),
   ..._qualityItems(l10n, a),
   ..._sessionChoices(l10n, a),
+  ..._remoteResolution(l10n, a),
   const ViewerMenuDivider(),
   ..._figures(l10n, a, touch: false),
 ];
+
+/// The remote display's real mode, as RustDesk's Resolution menu offers it
+/// (R8, R18): on a desktop runner only, while this viewer controls a host
+/// that offers more than one mode. Fit local where it differs from now, the
+/// original where a viewer changed it, then every mode offered. Live: never
+/// a reconnect; the host puts its own mode back when the session ends.
+List<ViewerMenuEntry> _remoteResolution(
+  AppLocalizations l10n,
+  ViewerActions a,
+) {
+  final session = a.desktop.session.value;
+  final modes = session.displayModes;
+  if (!desktopRunner ||
+      modes == null ||
+      !session.controlling ||
+      modes.supported.length < 2) {
+    return const [];
+  }
+  final fit = modes.fitLocal;
+  final local = a.desktop.localDisplay;
+  return [
+    ViewerMenuSubmenu(
+      key: const Key('display-remote-resolution'),
+      label: l10n.viewerRemoteResolution,
+      value: modes.current.label,
+      note: l10n.viewerRemoteResolutionNote,
+      entries: [
+        if (fit != null && local != null && fit != modes.current)
+          ViewerMenuItem(
+            key: const Key('remote-resolution-fit'),
+            label: l10n.viewerRemoteResolutionFit(fit.label),
+            onSelected: () =>
+                a.onDisplayMode(DisplayModeTarget.fitLocal(local)),
+          ),
+        if (modes.changed)
+          ViewerMenuItem(
+            key: const Key('remote-resolution-original'),
+            label: l10n.viewerRemoteResolutionOriginal(modes.original.label),
+            onSelected: () =>
+                a.onDisplayMode(const DisplayModeTarget.original()),
+          ),
+        for (final mode in modes.supported)
+          ViewerMenuItem(
+            key: Key('remote-resolution-${mode.width}x${mode.height}'),
+            label: mode.label,
+            checked: mode == modes.current,
+            onSelected: () => a.onDisplayMode(DisplayModeTarget.size(mode)),
+          ),
+      ],
+    ),
+  ];
+}
+
+/// Windows, macOS and Linux: where a viewer sits at a display of its own
+/// that Fit local can match.
+bool get desktopRunner => const {
+  TargetPlatform.windows,
+  TargetPlatform.macOS,
+  TargetPlatform.linux,
+}.contains(defaultTargetPlatform);
 
 /// The quality panel and the quality monitor, each shown or not.
 List<ViewerMenuEntry> _figures(

@@ -63,11 +63,16 @@ class DesktopCapabilities {
     this.displays = const [],
     this.message = '',
     this.helper,
+    this.reason,
   });
   final bool host;
   final List<DesktopDisplay> displays;
   final String message;
   final DesktopHelper? helper;
+
+  /// Why this computer cannot host: `platform`, `media_foundation_missing`,
+  /// `no_display` or `permission_missing`; null when it can.
+  final String? reason;
 }
 
 /// A host's `HostStatus`. The local host's also carries its [service] and
@@ -86,6 +91,7 @@ class DesktopHostStatus {
     this.service,
     this.invitation,
     this.server,
+    this.displayMode,
     this.matchesRelay = true,
   });
   factory DesktopHostStatus.fromJson(
@@ -116,6 +122,7 @@ class DesktopHostStatus {
     service: service,
     invitation: invitation,
     server: server,
+    displayMode: DisplayModeList.fromJson(status['display_mode']),
     matchesRelay: matchesRelay,
   );
 
@@ -139,6 +146,9 @@ class DesktopHostStatus {
   /// unknown.
   final bool matchesRelay;
 
+  /// A viewer changed this display's mode, and it is not back yet.
+  final DisplayModeList? displayMode;
+
   DesktopHostStatus copyWith({
     bool? controlAllowed,
     DesktopHostViewer? Function()? viewer,
@@ -157,6 +167,7 @@ class DesktopHostStatus {
     service: service ?? this.service,
     invitation: invitation ?? this.invitation,
     server: server,
+    displayMode: displayMode,
     matchesRelay: matchesRelay,
   );
 }
@@ -334,6 +345,8 @@ class DesktopViewerStatus {
     this.presentedFrameId,
     this.lastVideoAgeMs,
     this.quality = DesktopQuality.balanced,
+    this.modes,
+    this.hostOs,
     this.capabilities = const [],
     this.notice,
     this.decoderState = 'ok',
@@ -352,6 +365,7 @@ class DesktopViewerStatus {
     final noticeCode = switch (notice['code']) {
       'locked' => DesktopNoticeCode.locked,
       'lock_failed' => DesktopNoticeCode.lockFailed,
+      'display_mode_failed' => DesktopNoticeCode.displayModeFailed,
       _ => null,
     };
     return DesktopViewerStatus(
@@ -376,6 +390,8 @@ class DesktopViewerStatus {
           : presented['frame_id'] as int?,
       lastVideoAgeMs: json['last_video_age_ms'] as int?,
       quality: desktopQualityFromWire(json['quality']),
+      modes: DisplayModeList.fromJson(json['modes']),
+      hostOs: json['host_os'] as String?,
       capabilities: [
         for (final c in json['capabilities'] as List? ?? const []) c as String,
       ],
@@ -419,6 +435,12 @@ class DesktopViewerStatus {
   /// Since the last video record of any generation.
   final int? lastVideoAgeMs;
   final DesktopQuality quality;
+
+  /// The remote display's modes, from a host that offers them (R17).
+  final DisplayModeList? modes;
+
+  /// `windows`, `macos`, `linux` or `android`, where the host says.
+  final String? hostOs;
   final List<String> capabilities;
   final DesktopNotice? notice;
 
@@ -461,6 +483,8 @@ class DesktopViewerStatus {
         ? this.lastVideoAgeMs
         : lastVideoAgeMs(),
     quality: quality ?? this.quality,
+    modes: modes,
+    hostOs: hostOs,
     capabilities: capabilities,
     notice: notice,
     decoderState: decoderState ?? this.decoderState,
@@ -492,6 +516,11 @@ abstract interface class DesktopApiClient {
 
   /// Ends the current viewer's session; hosting continues (D15).
   Future<void> endViewerSession();
+
+  /// Puts back this computer's display mode, which a viewer changed
+  /// (R17): the app's own host, or the background service's. False when
+  /// nothing was there to ask.
+  Future<bool> restoreHostDisplayMode();
 
   /// Restarts the host on another display; returns the new invitation.
   Future<String> setHostDisplay(int displayId);
@@ -542,7 +571,8 @@ abstract interface class DesktopApiClient {
   Future<DesktopDecoders> decoders();
 
   // ---- hot export and view leaf: synchronous, UI isolate only, never block
-  DesktopViewerStatus? viewerStatus();
+  /// [local], this computer's display, fills [DisplayModeList.fitLocal].
+  DesktopViewerStatus? viewerStatus({DisplayMode? local});
   DesktopView? view();
   void control(bool enabled);
   void release();
@@ -552,6 +582,13 @@ abstract interface class DesktopApiClient {
   void input(int generation, List<Map<String, Object?>> inputs);
   bool requestKeyframe();
   void setQuality(DesktopQuality quality);
+
+  /// Changes the remote display's mode, live, never a reconnect (R8); returns
+  /// the mode asked for. Throws [DesktopCallException]
+  /// `DISPLAY_MODE_NOT_OFFERED`, `NOT_CONTROLLING`, `DISPLAY_MODE_NO_FIT`,
+  /// `DISPLAY_MODE_NOT_LISTED` or, once closed, `IO`. The host refuses with
+  /// a `displayModeFailed` notice.
+  DisplayMode setDisplayMode(DisplayModeTarget target);
   void pause();
   void resume();
   int instanceToken();
@@ -585,6 +622,7 @@ class DesktopApi implements DesktopApiClient {
     final data = await _call('capabilities');
     return DesktopCapabilities(
       host: (data['capabilities'] as Map?)?['host'] == true,
+      reason: (data['capabilities'] as Map?)?['reason'] as String?,
       displays: [
         for (final d in data['displays'] as List? ?? [])
           DesktopDisplay.fromJson(Map<String, dynamic>.from(d as Map)),
@@ -674,6 +712,10 @@ class DesktopApi implements DesktopApiClient {
   Future<void> endViewerSession() async {
     await _call('host_end_session');
   }
+
+  @override
+  Future<bool> restoreHostDisplayMode() async =>
+      (await _call('host_restore_display_mode'))['restored'] == true;
 
   @override
   Future<String> setHostDisplay(int displayId) async =>
@@ -813,8 +855,8 @@ class DesktopApi implements DesktopApiClient {
   static final _view = calloc<PbDesktopViewV1>();
 
   @override
-  DesktopViewerStatus? viewerStatus() {
-    final data = _hot('viewer_status');
+  DesktopViewerStatus? viewerStatus({DisplayMode? local}) {
+    final data = _hot('viewer_status', {'local': ?local?.toJson()});
     return data is Map
         ? DesktopViewerStatus.fromJson(Map<String, dynamic>.from(data))
         : null;
@@ -841,6 +883,16 @@ class DesktopApi implements DesktopApiClient {
   @override
   void setQuality(DesktopQuality quality) =>
       _hot('quality', {'preset': quality.name});
+
+  @override
+  DisplayMode setDisplayMode(DisplayModeTarget target) {
+    final data = _hot('display_mode', {'target': target.toJson()});
+    final mode = data is Map ? DisplayMode.fromJson(data['mode']) : null;
+    if (mode == null) {
+      throw const DesktopCallException('INTERNAL', 'no display mode answered');
+    }
+    return mode;
+  }
 
   @override
   void pause() => _hot('pause');

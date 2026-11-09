@@ -33,6 +33,9 @@ class _RemotePageState extends State<RemotePage> {
   DesktopDemandHandle? _demand;
   bool _hostUnsupported = false, _hasComputers = false;
 
+  /// Why this computer cannot host, as Rust says it.
+  String? _unsupportedReason;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -63,11 +66,17 @@ class _RemotePageState extends State<RemotePage> {
     final host = store.desktop.hostView.value;
     final unsupported = host.loaded && !host.supported;
     final any = store.computers.computers.isNotEmpty;
-    if (unsupported == _hostUnsupported && any == _hasComputers) return;
+    final reason = host.unsupportedReason;
+    if (unsupported == _hostUnsupported &&
+        any == _hasComputers &&
+        reason == _unsupportedReason) {
+      return;
+    }
     if (!mounted) return;
     setState(() {
       _hostUnsupported = unsupported;
       _hasComputers = any;
+      _unsupportedReason = reason;
     });
   }
 
@@ -115,7 +124,7 @@ class _RemotePageState extends State<RemotePage> {
         content = [
           const RemoteComputerList(),
           const SizedBox(height: 14),
-          const _HostUnsupportedNote(),
+          _HostUnsupportedNote(_unsupportedReason),
         ];
       } else if (twoColumns) {
         content = [
@@ -161,17 +170,22 @@ class _RemotePageState extends State<RemotePage> {
       const CompactComputerList(),
       if (_hostUnsupported) ...[
         const SizedBox(height: 12),
-        const _HostUnsupportedNote(),
+        _HostUnsupportedNote(_unsupportedReason),
       ],
     ],
   );
 }
 
-/// Why there is no host card: phones view and control but are not
-/// controlled; macOS and Linux cannot share yet; Windows shares only where
-/// Media Foundation is installed.
+/// Why there is no host card, as Rust says it ([reason]): Windows shares
+/// only where Media Foundation is installed and a display is there; on
+/// another platform, phones view and control but are not controlled, and
+/// macOS and Linux cannot share yet.
 class _HostUnsupportedNote extends StatelessWidget {
-  const _HostUnsupportedNote();
+  const _HostUnsupportedNote(this.reason);
+
+  /// `platform`, `media_foundation_missing`, `no_display` or
+  /// `permission_missing`.
+  final String? reason;
 
   @override
   Widget build(BuildContext context) {
@@ -180,11 +194,12 @@ class _HostUnsupportedNote extends StatelessWidget {
     final phone =
         defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS;
-    final note = phone
-        ? l10n.remoteMobileHostNote
-        : defaultTargetPlatform == TargetPlatform.windows
-        ? l10n.hostNeedsMediaFoundation
-        : l10n.hostUnsupported;
+    final note = switch (reason) {
+      'media_foundation_missing' => l10n.hostNeedsMediaFoundation,
+      'no_display' => l10n.hostNoDisplay,
+      'permission_missing' => l10n.hostPermissionMissing,
+      _ => phone ? l10n.remoteMobileHostNote : l10n.hostUnsupported,
+    };
     final style = TextStyle(fontSize: 12.5, color: quietText(scheme));
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
