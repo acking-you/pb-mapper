@@ -5,7 +5,10 @@
 //! logoff or a reboot. A reset is a NULL DEVMODE, the mode in the registry,
 //! which is the user's own and which no host here ever writes, then the
 //! original dynamically where that differs. Every call runs per-monitor DPI
-//! aware, so sizes are physical pixels.
+//! aware, so sizes are physical pixels. A change's scope is the login's
+//! logon time and the monitor's device interface name: a dynamic mode ends
+//! with the login, and a monitor plugged in later under the same
+//! `\\.\DISPLAYn` starts at its own registry mode.
 
 use super::desktop::{DpiScope, display_lost};
 use crate::{
@@ -14,14 +17,24 @@ use crate::{
     platform::DisplayModes,
 };
 use windows::{
-    Win32::Graphics::Gdi::{
-        CDS_TEST, CDS_TYPE, ChangeDisplaySettingsExW, DEVMODE_FIELD_FLAGS, DEVMODEW,
-        DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH,
-        ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS, ENUM_DISPLAY_SETTINGS_MODE,
-        EnumDisplaySettingsExW,
+    Win32::{
+        Graphics::Gdi::{
+            CDS_TEST, CDS_TYPE, ChangeDisplaySettingsExW, DEVMODE_FIELD_FLAGS, DEVMODEW,
+            DISP_CHANGE_SUCCESSFUL, DISPLAY_DEVICEW, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
+            DM_PELSHEIGHT, DM_PELSWIDTH, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
+            ENUM_DISPLAY_SETTINGS_MODE, EnumDisplayDevicesW, EnumDisplaySettingsExW,
+        },
+        System::RemoteDesktop::{
+            ProcessIdToSessionId, WTSFreeMemory, WTSINFOEXW, WTSQuerySessionInformationW,
+            WTSSessionInfoEx,
+        },
     },
-    core::PCWSTR,
+    core::{PCWSTR, PWSTR},
 };
+
+/// `EnumDisplayDevicesW`'s flag for a monitor's device interface name
+/// (`WindowsAndMessaging`, a feature this crate does not otherwise need).
+const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 1;
 
 /// No mode is offered below this.
 const MIN_SIZE: (u32, u32) = (800, 600);
@@ -210,6 +223,58 @@ impl DisplayModes for WinModes {
         }
         Ok(())
     }
+    fn scope(&mut self, device: &str) -> Result<String> {
+        Ok(format!(
+            "logon {}; monitor {}",
+            logon_time()?,
+            monitor(device)?
+        ))
+    }
+}
+
+/// The device interface name of the monitor on `device`, which names that
+/// monitor instance; `DisplayLost` when none is attached.
+fn monitor(device: &str) -> Result<String> {
+    let name = wide(device);
+    let mut found = DISPLAY_DEVICEW {
+        cb: size_of::<DISPLAY_DEVICEW>() as u32,
+        ..Default::default()
+    };
+    let attached = unsafe {
+        EnumDisplayDevicesW(
+            PCWSTR(name.as_ptr()),
+            0,
+            &mut found,
+            EDD_GET_DEVICE_INTERFACE_NAME,
+        )
+    };
+    let id = &found.DeviceID;
+    let id = String::from_utf16_lossy(&id[..id.iter().position(|c| *c == 0).unwrap_or(id.len())]);
+    if !attached.as_bool() || id.is_empty() {
+        return Err(display_lost("no monitor is attached to the display"));
+    }
+    Ok(id)
+}
+
+/// When this process's login began, which names that login: a session id
+/// is reused after a logoff.
+fn logon_time() -> Result<i64> {
+    let mut session = 0;
+    unsafe { ProcessIdToSessionId(std::process::id(), &mut session) }.map_err(error)?;
+    let mut buffer = PWSTR::null();
+    let mut len = 0;
+    unsafe { WTSQuerySessionInformationW(None, session, WTSSessionInfoEx, &mut buffer, &mut len) }
+        .map_err(error)?;
+    let logon = (len as usize >= size_of::<WTSINFOEXW>()).then(|| {
+        // SAFETY: WTS answered at least a WTSINFOEXW; level 1 is the only
+        // level it defines.
+        let info = unsafe { &*buffer.0.cast::<WTSINFOEXW>() };
+        (info.Level == 1).then_some(unsafe { info.Data.WTSInfoExLevel1.LogonTime })
+    });
+    unsafe { WTSFreeMemory(buffer.0.cast()) };
+    logon
+        .flatten()
+        .ok_or_else(|| error("the login's start cannot be read"))
 }
 
 #[cfg(test)]
