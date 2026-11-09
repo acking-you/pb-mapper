@@ -16,8 +16,10 @@
 // no lan_first), quality (quality | balanced | smooth), codec (auto | h264:
 // whether H.265 is offered where this device decodes it), resolution (720p |
 // 1080p | 1440p | native), maxFps (0 for Auto, else 30 | 60 | 90 | 120), case
-// (a label for the run) and host (the host's GPU and refresh rate, which a
-// viewer cannot see). The report names the decoders the probe found.
+// (a label for the run), host (the host's GPU and refresh rate, which a
+// viewer cannot see) and appDir (where the native library keeps this run's
+// configuration; the app support directory's desktop-acceptance by default).
+// The report names the decoders the probe found.
 // controller.json may override seconds and relay_only. `deployed` always
 // writes the host's lan_first into it, so the A/B run with LAN-first off
 // switches it off on the host. Its decoder_hints false (case F) configures
@@ -86,8 +88,10 @@ Future<void> main() async {
 
   final service = PbMapperService();
   service.ensureInitialized();
-  final support = await getApplicationSupportDirectory();
-  final directory = '${support.path}/desktop-acceptance';
+  const appDir = String.fromEnvironment('appDir');
+  final directory = appDir.isNotEmpty
+      ? appDir
+      : '${(await getApplicationSupportDirectory()).path}/desktop-acceptance';
   await Directory(directory).create(recursive: true);
   await service.setAppDirectoryPath(directory);
   final api = DesktopApi();

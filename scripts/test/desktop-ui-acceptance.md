@@ -122,6 +122,9 @@ flutter build windows --release --target tool/desktop_viewer_acceptance.dart `
   --dart-define=quality=balanced
 ```
 
+The tool keeps its configuration in the app support directory's
+`desktop-acceptance`, never in the app's own; `--dart-define=appDir=DIR` puts
+it in DIR instead, for example a scratch directory beside the test relay's.
 Launch it from its build directory. The report reaches the bootstrap directly
 over loopback. Restore the normal entry before producing any product artifact:
 `flutter build windows --release --target lib/main.dart`.
