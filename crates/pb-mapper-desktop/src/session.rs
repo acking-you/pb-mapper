@@ -549,21 +549,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     /// One pass. Returns when to look again if nothing wakes B-send first.
     async fn pass(&mut self) -> Result<Instant, Abandoned> {
         let now = Instant::now();
-        let engine = self.state.borrow_and_update().clone();
-        self.write_state(&engine).await?;
-        if let Some((code, message, serial)) = &engine.notice
-            && *serial > self.notice_serial
-        {
-            self.notice_serial = *serial;
-            // A display mode notice only to a viewer that reads them.
-            if *code != NoticeCode::DisplayModeFailed || self.session.display_mode {
-                let notice = HostMessage::Notice {
-                    code: *code,
-                    message: message.clone(),
-                };
-                self.send(&notice, None).await?;
-            }
-        }
+        let engine = self.write_engine().await?;
         if now >= self.next_tick {
             self.next_tick = now + QOS_TICK;
             self.session.tick(now);
@@ -598,6 +584,27 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             _ = self.cursor.changed() => {}
             () = tokio::time::sleep_until(wake_at.into()) => {}
         }
+    }
+
+    /// What the engine published last, after writing its `State` and its
+    /// notice, each only if new.
+    async fn write_engine(&mut self) -> Result<EngineState, Abandoned> {
+        let engine = self.state.borrow_and_update().clone();
+        self.write_state(&engine).await?;
+        if let Some((code, message, serial)) = &engine.notice
+            && *serial > self.notice_serial
+        {
+            self.notice_serial = *serial;
+            // A display mode notice only to a viewer that reads them.
+            if *code != NoticeCode::DisplayModeFailed || self.session.display_mode {
+                let notice = HostMessage::Notice {
+                    code: *code,
+                    message: message.clone(),
+                };
+                self.send(&notice, None).await?;
+            }
+        }
+        Ok(engine)
     }
 
     /// Write `State` when the engine's record changed, or to report a refused
@@ -682,6 +689,14 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             let Some(head) = shared.outgoing.peek_meta() else {
                 return Ok(false);
             };
+            // C publishes a unit's state before the unit can be taken, which
+            // may be after this pass wrote its own. That state goes first: a
+            // unit behind an older `State`, one that still says connecting,
+            // is no IDR the viewer waits for.
+            if self.state.has_changed().unwrap_or(false) {
+                self.write_engine().await?;
+                continue;
+            }
             let now = Instant::now();
             let stated = self
                 .written
@@ -701,14 +716,9 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
                 continue;
             }
             if head.generation > stated {
-                let engine = self.state.borrow_and_update().clone();
-                if engine.record.generation < head.generation {
-                    // C publishes the new generation's state after the unit;
-                    // that change wakes B-send again.
-                    return Ok(false);
-                }
-                self.write_state(&engine).await?;
-                continue;
+                // C has yet to publish this generation's state; that change
+                // wakes B-send again.
+                return Ok(false);
             }
             // Every JPEG picture is independent; only an H.264 or H.265 IDR
             // uses the IDR headroom and taints probes.
@@ -1081,6 +1091,62 @@ mod tests {
         let mut rest = vec![];
         viewer.read.read_to_end(&mut rest).await.unwrap();
         assert!(rest.is_empty());
+        drop(viewer);
+        running.await.unwrap();
+    }
+
+    /// C publishes `streaming` and its first unit while B-send is in the
+    /// middle of a pass that already wrote `connecting`. The unit still
+    /// follows its own `State`: a viewer that saw it behind `connecting`
+    /// would wait for another IDR, its decoder recovering.
+    #[tokio::test]
+    async fn a_unit_follows_the_state_it_was_published_with() {
+        // A stream this small makes every write wait for the viewer's read,
+        // so the pass stops in its cursor, between its `State` and its video.
+        let (viewer, host) = tokio::io::duplex(16);
+        let (read, write) = tokio::io::split(viewer);
+        let mut viewer = Viewer { read, write };
+        let session = Session::new(
+            Arc::new(Policy::new(true)),
+            CancellationToken::new(),
+            VideoCodec::H264,
+            VideoLimits::for_viewer(60.0),
+            QualityPreset::Balanced,
+            &[],
+            false,
+        );
+        let shared = session.shared.clone();
+        shared.cursor.send_replace(Some(CursorReport {
+            serial: 1,
+            cursor: CursorUpdate {
+                generation: 1,
+                x: 5,
+                y: 6,
+                visible: true,
+            },
+            input_sequence: 0,
+        }));
+        let cancel = shared.cancel.clone();
+        let running = tokio::spawn(run(session.clone(), host, async move {
+            cancel.cancelled().await;
+            WorkerExit::Cancelled
+        }));
+        let state = |message: HostMessage| match message {
+            HostMessage::State(record) => record.state,
+            other => panic!("expected state, got {other:?}"),
+        };
+
+        assert_eq!(state(viewer.next().await.0), SessionState::Connecting);
+        shared.state.send_replace(streaming(1));
+        shared.outgoing.push(unit(1, 1, true));
+        assert!(matches!(
+            viewer.next().await.0,
+            HostMessage::Cursor { generation: 1, .. }
+        ));
+        assert_eq!(state(viewer.next().await.0), SessionState::Streaming);
+        assert_eq!(video(&viewer.next().await.0), (1, 1, 1));
+
+        shared.cancel.cancel();
         drop(viewer);
         running.await.unwrap();
     }
