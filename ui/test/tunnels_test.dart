@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 
 import 'fake_pb_mapper_api.dart';
@@ -34,6 +35,37 @@ void main() {
     await tester.tap(find.byKey(const Key('tunnels-open-relay')));
     await settle(tester);
     expect(find.byKey(const Key('relay-list')), findsOneWidget);
+    await finish(tester);
+  });
+
+  testWidgets('a LAN path over TCP names its carrier on the chip', (
+    tester,
+  ) async {
+    await _open(
+      tester,
+      FakePbMapperApi(
+        clients: [
+          fakeClient(
+            serviceKey: 'nas',
+            path: const TunnelPath(
+              activeDirect: 1,
+              activeLan: 1,
+              link: TunnelLink(kind: LinkKind.lan, transport: LanTransport.tcp),
+            ),
+          ),
+          fakeClient(
+            serviceKey: 'cam',
+            path: const TunnelPath(
+              activeDirect: 1,
+              activeLan: 1,
+              link: TunnelLink(kind: LinkKind.lan),
+            ),
+          ),
+        ],
+      ),
+    );
+    expect(find.text('LAN · TCP'), findsOneWidget);
+    expect(find.text('LAN'), findsOneWidget);
     await finish(tester);
   });
 
