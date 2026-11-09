@@ -518,7 +518,6 @@ impl HostStatusHandle {
         self.shared.status()
     }
     /// Whether the host stopped, or was dropped.
-    #[expect(dead_code, reason = "Host::watch (pf-sdk) ends with the host")]
     pub(crate) fn stopped(&self) -> bool {
         self.shared.stopped.load(Ordering::Acquire) || self.cancel.is_cancelled()
     }

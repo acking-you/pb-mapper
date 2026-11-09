@@ -508,7 +508,6 @@ pub(crate) struct ViewerStatusHandle {
 }
 impl ViewerStatusHandle {
     /// Whether the session has ended.
-    #[expect(dead_code, reason = "Viewer::watch (pf-sdk) ends with the viewer")]
     pub(crate) fn stopped(&self) -> bool {
         self.shared.state.lock().viewer_state() == ViewerState::Stopped
     }
