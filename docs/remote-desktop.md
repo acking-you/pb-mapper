@@ -574,11 +574,13 @@ does not require Flutter or a POCOX runtime.
   capture at the rate it is given; `drain_video` and `pending_video` let the
   worker collect an asynchronous encoder's output between ticks. Each unit's
   `VideoFormat` carries `gop`, the GOP the encoder read back, so a unit relayed
-  by the helper reports it as well. `describe(probe_h265)` runs once, right
-  after the backend is built and within the 3 s before the host answers the
-  viewer: the display it captures and its `BackendCaps` (H.265, asked only for
-  a viewer that decodes it; lock; the OS), from which the session's
-  `Accepted` capabilities are built; a description that misses the 3 s uses
+  by the helper reports it as well. `describe(probe_h265)` runs right after
+  the backend is built and within the 3 s before the host answers the viewer:
+  first unprobed, for the display it captures (which sizes the first IDR) and
+  its `BackendCaps` (lock, the OS), from which the session's `Accepted`
+  capabilities are built; then, only for a viewer that decodes H.265 while no
+  H.265 encoder has failed in this process, probed, for H.265 alone, so a slow
+  probe never costs the display. A description that misses the 3 s uses
   what its launcher falls back to. `bind(waker)` hands a pushing source the
   session's wake, and `drain_poll()` says whether thread C polls the encoder
   (`Some`, every 2 ms while units are pending) or waits to be woken (`None`).

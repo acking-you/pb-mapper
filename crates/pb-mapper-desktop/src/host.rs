@@ -377,9 +377,21 @@ impl Host {
     /// stops, telling its viewer `reason`, and the new one starts; a refused
     /// change (`ErrorKind::InvalidInput`) ends this host too, since it was
     /// handed over: check a new service with [`HostIdentity::invitation`]
-    /// first to keep it.
+    /// first to keep it. It registers through the client this host started
+    /// with; [`Self::restart_on`] takes the one the relay settings name now.
     pub async fn restart(
         self,
+        reason: StopReason,
+        change: impl FnOnce(&mut HostOptions),
+    ) -> Result<Host> {
+        let client = self.client.clone();
+        self.restart_on(&client, reason, change).await
+    }
+    /// [`Self::restart`] through `client`: the relay credential and carrier
+    /// as they are now, after a key rotation or a carrier change.
+    pub async fn restart_on(
+        self,
+        client: &Client,
         reason: StopReason,
         change: impl FnOnce(&mut HostOptions),
     ) -> Result<Host> {
@@ -411,7 +423,7 @@ impl Host {
                 native: self.native,
             },
         };
-        builder.start(&self.client).await
+        builder.start(client).await
     }
     /// Share another display; the viewer hears `Restarting` and reconnects.
     pub async fn switch_display(self, display: DisplaySelection) -> Result<Host> {
@@ -735,8 +747,12 @@ impl Acceptor {
             .capabilities
             .iter()
             .any(|capability| capability == CAPABILITY_H265);
-        let mut prepared = self.launch.prepare(offered && !worker::h265_failed());
-        let description = tokio::time::timeout(BACKEND_ANSWER_WAIT, &mut prepared.description)
+        // Never H.265 again in this process once one of its encoders failed,
+        // whatever a backend says.
+        let probe = offered && !worker::h265_failed();
+        let mut prepared = self.launch.prepare(probe);
+        let deadline = tokio::time::Instant::now() + BACKEND_ANSWER_WAIT;
+        let description = tokio::time::timeout_at(deadline, &mut prepared.description)
             .await
             .ok()
             .and_then(|answer| answer.ok())
@@ -747,7 +763,14 @@ impl Acceptor {
         );
         let caps =
             description.map_or_else(|| self.launch.fallback_caps(), |described| described.caps);
-        let codec = choose_codec(&request.codecs, offered && caps.h265);
+        let h265 = match prepared.h265.as_mut() {
+            Some(answer) => matches!(
+                tokio::time::timeout_at(deadline, answer).await,
+                Ok(Ok(true))
+            ),
+            None => false,
+        };
+        let codec = choose_codec(&request.codecs, probe && h265);
         let capabilities = caps.values();
         let accepted = HostMessage::Accepted {
             codec,
@@ -1174,12 +1197,13 @@ mod trust_tests {
             Err(error("read-only test backend"))
         }
         fn release(&mut self) {}
-        /// It encodes H.265 and can lock, and says nothing of its OS.
-        fn describe(&mut self, probe_h265: bool) -> Result<crate::Description> {
+        /// It can lock, says nothing of its OS, and answers H.265 from a cache,
+        /// whether asked or not: the host keeps H.265 off after a failure anyway.
+        fn describe(&mut self, _: bool) -> Result<crate::Description> {
             Ok(crate::Description {
                 display: self.display()?,
                 caps: BackendCaps {
-                    h265: probe_h265,
+                    h265: true,
                     lock: true,
                     ..BackendCaps::default()
                 },

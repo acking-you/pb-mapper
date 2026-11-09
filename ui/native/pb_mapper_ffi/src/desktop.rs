@@ -1590,7 +1590,10 @@ async fn restart_host(
         .identity
         .invitation(settings.service.clone())
         .map_err(|failure| CtlError::invalid_argument(failure.to_string()))?;
-    let config = handle.state.lock().await.get_config_status().await;
+    let (config, client) = {
+        let state = handle.state.lock().await;
+        (state.get_config_status().await, state.relay_client()?)
+    };
     let credential = process_credential()?;
     if config.server_address != local.scope.relay || credential.key_id() != local.scope.namespace {
         return Err(err(
@@ -1605,11 +1608,12 @@ async fn restart_host(
         return Err(err("desktop is not shared"));
     };
     *state.host_identity.lock().await = None;
-    // The same identity, source and live policy; the old registration goes
-    // before the new one.
+    // The same identity, source and live policy, on the relay client the
+    // settings name now (a rotated key, another carrier); the old
+    // registration goes before the new one.
     let options = host_options(&settings, config.lan_first);
     let host = host
-        .restart(reason, |restarted| *restarted = options)
+        .restart_on(&client, reason, |restarted| *restarted = options)
         .await
         .map_err(err)?;
     if let Some(saved) = persisted {

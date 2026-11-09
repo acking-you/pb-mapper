@@ -138,25 +138,33 @@ impl WorkerHandle {
 /// then waits for `start`. Dropped unstarted, it drops the backend on its own
 /// thread.
 pub(crate) struct Prepared {
-    /// The backend's description. Nothing arrives when it could not be
+    /// The backend's description, H.265 unprobed: the display that sizes the
+    /// first IDR, and the capabilities. Nothing arrives when it could not be
     /// built.
     pub description: oneshot::Receiver<Result<Description>>,
+    /// Whether it encodes H.265, when asked: probed after the description,
+    /// so a slow probe never costs the display.
+    pub h265: Option<oneshot::Receiver<bool>>,
     pub start: oneshot::Sender<(Arc<SessionShared>, WorkerConfig)>,
     pub thread: tokio::task::JoinHandle<WorkerExit>,
 }
 
-/// Start thread C on `factory`'s backend, which describes itself at once,
-/// probing H.265 when `probe_h265`.
+/// Start thread C on `factory`'s backend, which describes itself at once, and
+/// then, when `probe_h265`, says whether it encodes H.265.
 pub(crate) fn prepare<B, F>(factory: F, probe_h265: bool) -> Prepared
 where
     B: Backend,
     F: FnOnce() -> Result<B> + Send + 'static,
 {
-    let (answer, description) = oneshot::channel();
+    let (described, description) = oneshot::channel();
+    let (probed, h265) = oneshot::channel();
     let (start, started) = oneshot::channel::<(Arc<SessionShared>, WorkerConfig)>();
     let thread = tokio::task::spawn_blocking(move || {
         let backend = factory().map(|mut backend| {
-            let _ = answer.send(backend.describe(probe_h265));
+            let _ = described.send(backend.describe(false));
+            if probe_h265 {
+                let _ = probed.send(backend.describe(true).is_ok_and(|probed| probed.caps.h265));
+            }
             backend
         });
         let Ok((shared, config)) = started.blocking_recv() else {
@@ -166,6 +174,7 @@ where
     });
     Prepared {
         description,
+        h265: probe_h265.then_some(h265),
         start,
         thread,
     }

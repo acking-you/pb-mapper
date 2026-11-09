@@ -33,11 +33,13 @@ pub trait Backend: 'static {
             desktop: DesktopKind::Ordinary,
         })
     }
-    /// Once, on thread C, right after the backend is built and before the
-    /// host answers the viewer, which waits for it at most 3 s. `probe_h265`:
-    /// the viewer decodes H.265 and no H.265 encoder failed in this process;
-    /// a backend probes its GPU once and keeps the answer for its process.
-    /// Default: the context's display, and no capabilities.
+    /// On thread C, right after the backend is built and before the host
+    /// answers the viewer, which waits at most 3 s for both answers: first
+    /// with `probe_h265` false, whose display sizes the first IDR and whose
+    /// caps go into `Accepted`; then, only when the viewer decodes H.265 and no
+    /// H.265 encoder failed in this process, again with true, of which only
+    /// `caps.h265` is read. A backend probes its GPU once and keeps the answer
+    /// for its process. Default: the context's display, and no capabilities.
     fn describe(&mut self, probe_h265: bool) -> Result<Description> {
         let _ = probe_h265;
         Ok(Description {
