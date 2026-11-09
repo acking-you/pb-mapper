@@ -132,7 +132,9 @@ class RemoteDesktop {
   final ViewerPrefs prefs;
   final String Function() _relayAddress;
 
-  /// The credential a computer is remembered under (D29).
+  /// The credential a new computer is opened under, as the settings say,
+  /// for [sharing]. It is remembered under the one its session went
+  /// through, which only Rust knows (D29).
   final int Function() _credentialKeyId;
   final DateTime Function() _now;
 
@@ -158,15 +160,18 @@ class RemoteDesktop {
 
   /// Where the open or opening computer shares, for the viewer's presence
   /// line (D22): under which service, on which relay, for which credential.
-  ({String service, String relay, int namespace})? get sharing =>
-      switch (_current) {
-        final current? => (
-          service: current.service,
-          relay: current.relay,
-          namespace: current.namespace,
-        ),
-        null => null,
-      };
+  /// Once remembered, the relay and credential are the ones Rust recorded
+  /// from the live session, not those the settings named when it opened.
+  ({String service, String relay, int namespace})? get sharing {
+    final current = _current;
+    if (current == null) return null;
+    final remembered = rememberedComputer;
+    return (
+      service: current.service,
+      relay: remembered?.relay ?? current.relay,
+      namespace: remembered?.namespace ?? current.namespace,
+    );
+  }
 
   /// The remembered computer the session is, as the list stands now: one
   /// added with Remember on is from its first picture. A session connected
@@ -460,8 +465,6 @@ class RemoteDesktop {
       name: target.name,
       service: target.service,
       fingerprint: target.fingerprint,
-      relay: _relayAddress(),
-      namespace: _credentialKeyId(),
       relayOnly: target.relayOnly,
       quality: chosen?.quality ?? DesktopQuality.balanced,
       resolution: chosen?.resolution,

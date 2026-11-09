@@ -127,8 +127,6 @@ void main() {
       name: 'Office',
       service: _office.service,
       fingerprint: _office.fingerprint,
-      relay: 'relay.example:7666',
-      namespace: 0,
       relayOnly: false,
       quality: DesktopQuality.balanced,
     );
@@ -225,8 +223,6 @@ void main() {
       name: 'Office',
       service: _office.service,
       fingerprint: _office.fingerprint,
-      relay: 'relay.example:7666',
-      namespace: 0,
       relayOnly: false,
       quality: DesktopQuality.balanced,
     );
@@ -254,8 +250,6 @@ void main() {
       name: 'Office',
       service: reissued.service,
       fingerprint: reissued.fingerprint,
-      relay: 'relay.example:7666',
-      namespace: 0,
       relayOnly: false,
       quality: DesktopQuality.balanced,
       replaceId: id,

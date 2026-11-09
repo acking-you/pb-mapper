@@ -75,9 +75,23 @@ struct Live {
     viewer: Arc<Viewer>,
     /// Its video source in the registry.
     source: u64,
-    /// The invitation that passed the certificate pin: what remembering this
-    /// computer stores.
-    invitation: Invitation,
+    /// What remembering this computer stores.
+    connected: Connected,
+}
+
+/// What a viewer connected to, and the relay scope of the attempt that
+/// connected it: what remembering the computer stores. A remembered computer
+/// belongs to the relay and credential its session went through, not to the
+/// settings as they are when it is remembered.
+#[derive(Clone)]
+pub(crate) struct Connected {
+    /// The invitation that passed the certificate pin.
+    pub(crate) invitation: Invitation,
+    /// The relay address the attempt's relay client was made for.
+    pub(crate) relay: String,
+    /// The namespace that client's credential owns: a temporary key's id, 0
+    /// for the administrator key.
+    pub(crate) namespace: u64,
 }
 
 /// A connect between its registration and its outcome.
@@ -194,11 +208,12 @@ impl DesktopState {
         Some(scope)
     }
 
-    pub(crate) fn current_invitation(&self) -> Option<Invitation> {
+    /// The live viewer's computer and the relay scope it was reached through.
+    pub(crate) fn connected(&self) -> Option<Connected> {
         self.viewer
             .read()
             .as_ref()
-            .map(|live| live.invitation.clone())
+            .map(|live| live.connected.clone())
     }
 
     fn viewer(&self) -> Option<Arc<Viewer>> {
@@ -214,7 +229,7 @@ impl DesktopState {
         connect: impl FnOnce(Arc<AtomicU8>) -> F,
     ) -> Result<(Arc<Viewer>, u64), CtlError>
     where
-        F: std::future::Future<Output = Result<(Viewer, Invitation), CtlError>>,
+        F: std::future::Future<Output = Result<(Viewer, Connected), CtlError>>,
     {
         let cancel = CancellationToken::new();
         let stage = Arc::new(AtomicU8::new(STAGE_NONE));
@@ -254,7 +269,7 @@ impl DesktopState {
             } else {
                 false
             };
-            let (viewer, invitation) = result?;
+            let (viewer, connected) = result?;
             let mut slot = self.viewer.write();
             if cancel.is_cancelled()
                 || self.viewer_epoch.load(Ordering::Acquire) != epoch
@@ -270,7 +285,7 @@ impl DesktopState {
                 *slot = Some(Live {
                     viewer: viewer.clone(),
                     source,
-                    invitation,
+                    connected,
                 });
                 return Ok((viewer, source));
             }
@@ -1461,7 +1476,14 @@ async fn connect(
                     tracing::warn!(event = "desktop_connect_failed", failure = ?failure);
                     connect_error(failure)
                 })?;
-            Ok((viewer, invitation))
+            // The scope this attempt's client was made for, read under the
+            // same lock: a later change of the settings is not this session's.
+            let connected = Connected {
+                invitation,
+                relay: app.server_address,
+                namespace: client.credential_namespace(),
+            };
+            Ok((viewer, connected))
         })
         .await
 }
@@ -2207,6 +2229,14 @@ mod tests {
             .unwrap()
     }
 
+    fn connected() -> Connected {
+        Connected {
+            invitation: invitation(),
+            relay: "relay:7666".into(),
+            namespace: 0,
+        }
+    }
+
     /// One host record: a `u32` big-endian length, then JSON.
     async fn send(host: &mut DuplexStream, message: Value) {
         let bytes = serde_json::to_vec(&message).unwrap();
@@ -2268,7 +2298,7 @@ mod tests {
             let (open, opened) = tokio::sync::oneshot::channel::<()>();
             let connecting = handle.desktop.connect_viewer(|_| async {
                 opened.await.unwrap();
-                Ok((viewer, invitation()))
+                Ok((viewer, connected()))
             });
             // Hidden while connecting: the session starts paused.
             let hiding = async {
@@ -2920,7 +2950,7 @@ mod tests {
         let state = Arc::new(DesktopState::default());
         let (viewer, _host) = scripted_viewer().await;
         state
-            .connect_viewer(|_| async { Ok((viewer, invitation())) })
+            .connect_viewer(|_| async { Ok((viewer, connected())) })
             .await
             .unwrap();
         // The last viewer's stop is held: its host never closes.
@@ -2944,7 +2974,7 @@ mod tests {
                 state
                     .connect_viewer(|_| async {
                         let _ = entered.send(());
-                        std::future::pending::<Result<(Viewer, Invitation), CtlError>>().await
+                        std::future::pending::<Result<(Viewer, Connected), CtlError>>().await
                     })
                     .await
             }
@@ -2980,7 +3010,7 @@ mod tests {
                 .connect_viewer(|stage| async move {
                     stage.store(stage_code(ConnectStage::Identity), Ordering::Release);
                     let _ = entered.send(());
-                    std::future::pending::<Result<(Viewer, Invitation), CtlError>>().await
+                    std::future::pending::<Result<(Viewer, Connected), CtlError>>().await
                 })
                 .await
         });

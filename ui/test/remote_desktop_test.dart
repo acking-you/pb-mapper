@@ -75,8 +75,6 @@ void main() {
         'id': id,
         'service': 'desktop:home',
         'fingerprint': _fingerprint,
-        'relay': 'relay.example:7666',
-        'namespace': 3,
         'replace_id': null,
       });
       expect(computers.byId(id)?.name, 'home');

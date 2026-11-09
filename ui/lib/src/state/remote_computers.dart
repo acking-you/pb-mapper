@@ -84,10 +84,10 @@ class RemoteComputer {
   /// The host certificate's short form, `AB12-CD34-EF56-7890`.
   final String fingerprint;
 
-  /// The relay address it was remembered under.
+  /// The relay address the session it was remembered from went through.
   final String relay;
 
-  /// The key id of the credential it was remembered under (0: the
+  /// The key id of the credential that session went through (0: the
   /// administrator key). Desktop trust binds to the credential, and since a
   /// temporary key can be issued into a shared namespace, this is not
   /// necessarily the namespace its services are in (D29).
@@ -345,8 +345,6 @@ class RemoteComputerStore extends ChangeNotifier {
     required String name,
     required String service,
     required String fingerprint,
-    required String relay,
-    required int namespace,
     required bool relayOnly,
     required DesktopQuality quality,
     DesktopResolution? resolution,
@@ -365,8 +363,6 @@ class RemoteComputerStore extends ChangeNotifier {
         name: name,
         service: service,
         fingerprint: fingerprint,
-        relay: relay,
-        namespace: namespace,
         relayOnly: relayOnly,
         quality: quality,
         resolution: resolution,

@@ -23,8 +23,15 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
   String? listFails;
 
   /// The live session's service and short fingerprint, as Rust's
-  /// `current_invitation()`; null accepts any.
+  /// `connected()`; null accepts any.
   (String service, String fingerprint)? live;
+
+  /// The relay and credential the live session went through, as Rust's
+  /// `connected()`: what a remembered record is stored under.
+  final ({String relay, int namespace}) liveScope = (
+    relay: 'relay.example:7666',
+    namespace: 0,
+  );
 
   /// While set, [rememberSession] keeps its answer until it completes: a
   /// vault that has remembered but answers late.
@@ -60,8 +67,6 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
     required String name,
     required String service,
     required String fingerprint,
-    required String relay,
-    required int namespace,
     required bool relayOnly,
     required DesktopQuality quality,
     DesktopResolution? resolution,
@@ -75,8 +80,6 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
         'id': id,
         'service': service,
         'fingerprint': fingerprint,
-        'relay': relay,
-        'namespace': namespace,
         'replace_id': replaceId,
       },
     ));
@@ -91,8 +94,8 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
       name: name,
       service: service,
       fingerprint: fingerprint,
-      relay: relay,
-      namespace: namespace,
+      relay: liveScope.relay,
+      namespace: liveScope.namespace,
       relayOnly: relayOnly,
       quality: quality,
       resolution: resolution,

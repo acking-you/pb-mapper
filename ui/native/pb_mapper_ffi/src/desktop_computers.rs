@@ -11,6 +11,7 @@
 //! pin, and `connect` resolves an id here. Nothing logs an invitation.
 use crate::{
     desktop::{
+        Connected,
         trust::{protect, write_private},
         valid_max_fps,
     },
@@ -88,8 +89,6 @@ enum Request {
         service: String,
         /// The short form, `AB12-CD34-EF56-7890`.
         fingerprint: String,
-        relay: String,
-        namespace: u64,
         relay_only: bool,
         quality: QualityPreset,
         /// Absent: the default, whatever it is when the computer connects.
@@ -315,10 +314,9 @@ impl Vault {
         &mut self,
         record: Record,
         replace_id: Option<String>,
-        current: Option<&Invitation>,
+        current: &Invitation,
     ) -> Result<Value, CtlError> {
         record.check()?;
-        let current = current.ok_or_else(|| CtlError::invalid_argument("no connected session"))?;
         if current.service != record.service || current.short_fingerprint() != record.fingerprint {
             return Err(CtlError::invalid_argument(
                 "the connected session is a different computer",
@@ -532,7 +530,7 @@ fn apply(
     slot: &mut Option<Vault>,
     directory: &Path,
     platform: Platform,
-    current: Option<Invitation>,
+    current: Option<Connected>,
     request: Request,
 ) -> Result<Value, CtlError> {
     let keystore = || {
@@ -562,8 +560,6 @@ fn apply(
             name,
             service,
             fingerprint,
-            relay,
-            namespace,
             relay_only,
             quality,
             resolution,
@@ -571,13 +567,17 @@ fn apply(
             display_mode,
             replace_id,
         } => {
+            // The relay and credential are the session's, as its invitation
+            // is: what it went through, not what the settings say now.
+            let current =
+                current.ok_or_else(|| CtlError::invalid_argument("no connected session"))?;
             let record = Record {
                 id,
                 name,
                 service,
                 fingerprint,
-                relay,
-                namespace,
+                relay: current.relay,
+                namespace: current.namespace,
                 relay_only,
                 quality,
                 resolution,
@@ -587,7 +587,7 @@ fn apply(
                 last_path: None,
                 last_control_allowed: None,
             };
-            open(slot, directory, platform)?.remember(record, replace_id, current.as_ref())
+            open(slot, directory, platform)?.remember(record, replace_id, &current.invitation)
         }
         Request::Update {
             id,
@@ -637,7 +637,7 @@ pub(crate) async fn call(handle: &PbMapperHandle, request: Value) -> Result<Valu
     let request: Request = serde_json::from_value(request)
         .map_err(|_| CtlError::invalid_argument("invalid remembered computers request"))?;
     let directory = handle.state.lock().await.desktop_config_dir();
-    let current = handle.desktop.current_invitation();
+    let current = handle.desktop.connected();
     tokio::task::spawn_blocking(move || {
         apply(&mut VAULT.lock(), &directory, PLATFORM, current, request)
     })
@@ -685,8 +685,8 @@ mod tests {
     fn remember(id: &str, service: &str, fingerprint: &str) -> Request {
         request(
             json!({"op": "computers_remember", "id": id, "name": "Office",
-            "service": service, "fingerprint": fingerprint, "relay": "relay:7666",
-            "namespace": 3, "relay_only": false, "quality": "balanced"}),
+            "service": service, "fingerprint": fingerprint, "relay_only": false,
+            "quality": "balanced"}),
         )
     }
 
@@ -703,13 +703,17 @@ mod tests {
         };
         let platform = Platform::Keystore;
         let mut slot = None;
-        let current = HostIdentity::generate()
-            .unwrap()
-            .invitation("desktop:office".into())
-            .unwrap();
-        let fingerprint = current.short_fingerprint();
+        let current = Connected {
+            invitation: HostIdentity::generate()
+                .unwrap()
+                .invitation("desktop:office".into())
+                .unwrap(),
+            relay: "relay-a:7666".into(),
+            namespace: 9,
+        };
+        let fingerprint = current.invitation.short_fingerprint();
         let id = "0123456789abcdef0123456789abcdef";
-        let run = |slot: &mut Option<Vault>, current: Option<&Invitation>, request: Request| {
+        let run = |slot: &mut Option<Vault>, current: Option<&Connected>, request: Request| {
             apply(slot, &directory, platform, current.cloned(), request)
         };
 
@@ -747,6 +751,16 @@ mod tests {
         )
         .unwrap();
         assert!(record.get("invitation").is_none());
+        // Remembered under the relay and credential the session went
+        // through, which Dart cannot name.
+        assert_eq!(
+            (&record["relay"], &record["namespace"]),
+            (&json!("relay-a:7666"), &json!(9))
+        );
+        let scoped = json!({"op": "computers_remember", "id": id, "name": "Office",
+            "service": "desktop:office", "fingerprint": fingerprint, "relay_only": false,
+            "quality": "balanced", "relay": "relay-b:7666"});
+        assert!(serde_json::from_value::<Request>(scoped).is_err());
         // Nothing chosen yet: no resolution, and Auto.
         assert_eq!(
             (record.get("resolution"), &record["max_fps"]),
@@ -784,7 +798,7 @@ mod tests {
         let earlier = |resolution: Value| {
             let mut entry = json!({"id": id, "name": "Office", "service": "desktop:office",
                 "fingerprint": fingerprint, "relay": "relay:7666", "namespace": 3,
-                "relay_only": false, "quality": "balanced", "invitation": current.encode()});
+                "relay_only": false, "quality": "balanced", "invitation": current.invitation.encode()});
             if !resolution.is_null() {
                 entry["resolution"] = resolution;
             }
@@ -801,7 +815,10 @@ mod tests {
 
         // The file holds neither the record nor the invitation in the clear.
         let sealed = std::fs::read(directory.join(SEALED_FILE)).unwrap();
-        for secret in [b"desktop:office".as_slice(), current.encode().as_bytes()] {
+        for secret in [
+            b"desktop:office".as_slice(),
+            current.invitation.encode().as_bytes(),
+        ] {
             assert!(!sealed.windows(secret.len()).any(|bytes| bytes == secret));
         }
 
@@ -811,7 +828,7 @@ mod tests {
         let found = lookup(&mut reopened, &directory, platform, id)
             .unwrap()
             .unwrap();
-        assert_eq!(found.encode(), current.encode());
+        assert_eq!(found.encode(), current.invitation.encode());
         assert!(
             lookup(&mut reopened, &directory, platform, &"f".repeat(32))
                 .unwrap()

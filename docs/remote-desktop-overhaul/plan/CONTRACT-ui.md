@@ -461,16 +461,19 @@ again (the store keeps no token).
   `computers_` is routed **before** deserialising into `Request` to
   `desktop_computers::call(handle: &PbMapperHandle, op: &str, request: serde_json::Value) -> Result<Value, CtlError>`
   (an `async fn`, run under the same `block_on`).
-- `DesktopState` keeps the decoded invitation of the live viewer session:
-  set when `connect_viewer` succeeds, cleared by `disconnect_viewer`:
-  `pub(crate) fn current_invitation(&self) -> Option<desktop::Invitation>`.
+- `DesktopState` keeps the decoded invitation of the live viewer session,
+  with the relay address and credential namespace its connect attempt went
+  through: set when `connect_viewer` succeeds, cleared by
+  `disconnect_viewer`: `pub(crate) fn connected(&self) -> Option<Connected>`.
   `desktop::Invitation` is `Clone` and redacts its token (perf §4.9).
 
 Why: `computers_remember` (§5.3) stores the invitation of the session that
 has already passed the TLS pin, so the token never re-enters Dart. Because a
 fast switch can deliver a late `live` of the previous computer, the request
 also names the expected `service` and short `fingerprint`, and Rust refuses
-to store `current_invitation()` under an id when they differ (§5.3).
+to store `connected()` under an id when they differ (§5.3). The record's
+`relay` and `namespace` are the session's too, never the settings at the
+moment of remembering.
 
 **R-UI-7 (WP-D). Retry semantics the overlays read.**
 
@@ -908,7 +911,7 @@ class RemoteComputerStore extends ChangeNotifier {
   /// connected; the vault refuses when the live session is another one (§5.3).
   Future<RemoteComputer?> rememberSession({required String id, required String name,
       required String service, required String fingerprint,
-      required String relay, required int namespace, required bool relayOnly,
+      required bool relayOnly,   // relay and namespace: the live session's, as Rust recorded them
       required DesktopQuality quality, String? replaceId});   // null on failure; a replaced record with another id
                                                               // loses its last picture (file, cache eviction, version)
   Future<void> rename(String id, String name);
@@ -990,7 +993,7 @@ abstract interface class RemoteComputerVault {
   Future<List<RemoteComputer>> list();
   Future<RemoteComputer> rememberSession({required String id, required String name,
       required String service, required String fingerprint,
-      required String relay, required int namespace, required bool relayOnly,
+      required bool relayOnly,
       required DesktopQuality quality, String? replaceId});
   Future<RemoteComputer> update(String id, {String? name, DesktopQuality? quality,
       DateTime? lastConnectedAt, String? lastPath, bool? lastControlAllowed});
@@ -1048,7 +1051,7 @@ only logged.
 | `computers_unlock` | `key: b64` (32 bytes), `wrapped?: b64` | `{}`; writes `desktop-computers.key` when `wrapped` is given | `INVALID_ARGUMENT` (key length), `IO` |
 | `computers_reset` | — | `{}`; drops the cached list and deletes `desktop-computers.dpapi` (Windows) or `desktop-computers.bin` (Android); on Android the unlocked key stays installed and `desktop-computers.key` is kept. Allowed on DPAPI as well as on Keystore | `IO`; `INVALID_ARGUMENT` on unsupported platforms |
 | `computers_list` | — | `[record]` | `IO`, `PROTOCOL` (undecryptable) |
-| `computers_remember` | `id, name, service, fingerprint, relay, namespace, relay_only, quality, replace_id?` | `record`; stores `DesktopState::current_invitation()` (R-UI-6) encoded `pbd1`, **only if** its `service` and `short_fingerprint()` equal the request's; `replace_id` replaces that entry in place | `INVALID_ARGUMENT` ("no connected session", "the connected session is a different computer", "at most 50 remembered computers"), `IO` |
+| `computers_remember` | `id, name, service, fingerprint, relay_only, quality, replace_id?` | `record`; stores `DesktopState::connected()` (R-UI-6): its invitation encoded `pbd1`, and its relay and namespace as the record's, **only if** its `service` and `short_fingerprint()` equal the request's; `replace_id` replaces that entry in place | `INVALID_ARGUMENT` ("no connected session", "the connected session is a different computer", "at most 50 remembered computers"), `IO` |
 | `computers_update` | `id, name?, quality?, last_connected_ms?, last_path?, last_control_allowed?` | `record` | `NOT_FOUND`, `INVALID_ARGUMENT` (the record check, e.g. a name of more than 128 Unicode scalar values; the store treats it as a refused change, not a vault failure), `IO` |
 | `computers_forget` | `id` | `{}` (idempotent) | `IO` |
 
@@ -1207,7 +1210,7 @@ Rules:
 - `RemoteDesktop` listens to `desktop.session`.
   - First `phase == live && hasPicture` of a target: if a remember is
     pending for that `computerId` → `computers.rememberSession(id, name,
-    service, fingerprint, relay: relayAddress(), namespace: ownNamespace(),
+    service, fingerprint,
     relayOnly, quality, replaceId)` (D20: after the TLS pin and the first
     picture, never before; the vault refuses if the live session is another
     computer, §5.3); then, for a remembered computer, `recordSession(id, at:
