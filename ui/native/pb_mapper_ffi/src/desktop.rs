@@ -768,34 +768,28 @@ fn resume_options(
     credential: String,
     move_relay: bool,
 ) -> Result<desktop::privileged::background::Options, CtlError> {
-    let settings: desktop::privileged::background::Settings =
-        serde_json::from_value(saved["settings"].clone())
-            .ok()
-            .filter(|_| background_configured(saved))
-            .ok_or_else(|| err("no saved background host to resume"))?;
-    let current = RelayScope {
-        server: config.server_address.clone(),
-        namespace: Some(namespace),
+    use desktop::privileged::background::{Options, ResumeTarget, Snapshot};
+    // Only what a resume reads, from the snapshot the card showed.
+    let saved = Snapshot {
+        configured: background_configured(saved),
+        settings: serde_json::from_value(saved["settings"].clone()).ok(),
+        server: saved["server"].as_str().map(Into::into),
+        namespace: saved["namespace"].as_u64(),
+        ..Snapshot::default()
     };
-    if !move_relay
-        && !saved["server"]
-            .as_str()
-            .is_some_and(|server| current.holds(server, saved["namespace"].as_u64()))
-    {
-        return Err(CtlError::new(
-            ErrorCode::RelayChanged,
-            "this computer is shared on another relay or credential namespace; moving it changes its invitation",
-        ));
-    }
-    Ok(desktop::privileged::background::Options {
+    let target = ResumeTarget {
         server: config.server_address,
+        namespace,
         credential,
         relay_transport: config.relay_transport,
-        settings: desktop::privileged::background::Settings {
-            auto_start: true,
-            ..settings
-        },
         lan_first: config.lan_first,
+    };
+    Options::resume(&saved, target, move_relay).map_err(|failure| {
+        if failure.kind() == std::io::ErrorKind::PermissionDenied {
+            CtlError::new(ErrorCode::RelayChanged, failure.to_string())
+        } else {
+            err(failure)
+        }
     })
 }
 
@@ -1596,10 +1590,7 @@ async fn restart_host(
         .identity
         .invitation(settings.service.clone())
         .map_err(|failure| CtlError::invalid_argument(failure.to_string()))?;
-    let (config, client) = {
-        let state = handle.state.lock().await;
-        (state.get_config_status().await, state.relay_client()?)
-    };
+    let config = handle.state.lock().await.get_config_status().await;
     let credential = process_credential()?;
     if config.server_address != local.scope.relay || credential.key_id() != local.scope.namespace {
         return Err(err(
@@ -1610,12 +1601,17 @@ async fn restart_host(
         .remembered
         .then(|| trust::Saved::new(&local.scope, settings.clone(), &local.identity))
         .transpose()?;
-    // One owner at a time: the old registration goes before the new one.
-    if let Some(host) = slot.take() {
-        host.stop_with(reason).await.map_err(err)?;
-    }
+    let Some(host) = slot.take() else {
+        return Err(err("desktop is not shared"));
+    };
     *state.host_identity.lock().await = None;
-    let host = launch(&client, &settings, config.lan_first, local.identity.clone()).await?;
+    // The same identity, source and live policy; the old registration goes
+    // before the new one.
+    let options = host_options(&settings, config.lan_first);
+    let host = host
+        .restart(reason, |restarted| *restarted = options)
+        .await
+        .map_err(err)?;
     if let Some(saved) = persisted {
         let directory = local.scope.directory.clone();
         let stored = tokio::task::spawn_blocking(move || trust::save(&directory, &saved))
@@ -1630,25 +1626,6 @@ async fn restart_host(
     *slot = Some(host);
     *state.host_identity.lock().await = Some(LocalIdentity { settings, ..local });
     Ok(json!({"invitation": invitation}))
-}
-
-/// Stops the running local host before the service takes over. Its viewer
-/// reconnects by itself (`restarting`) only when the service resumes this
-/// host's invitation at once (`resumes_at_once`): the same identity and
-/// service, and a helper that needs no setup, which the owner may cancel.
-/// Otherwise it hears `host_stopped`, rather than retrying a host that may
-/// never come.
-#[cfg(windows)]
-async fn stop_for_handoff(slot: &mut Option<Host>, resumes_at_once: bool) -> Result<(), CtlError> {
-    let Some(host) = slot.take() else {
-        return Ok(());
-    };
-    let reason = if resumes_at_once {
-        StopReason::Restarting
-    } else {
-        StopReason::HostStopped
-    };
-    host.stop_with(reason).await.map_err(err)
 }
 
 /// The product has one durable host owner. Setup intent and any existing local
@@ -1715,9 +1692,20 @@ async fn enable_host(
         .await
         .map_err(err)?;
     let setup = helper_setup(&helper, allow_install);
-    // Stop the old registration before enabling a service that could already
-    // hold an automatic grant. No two owners may publish the same desktop.
-    stop_for_handoff(slot, local.is_some() && setup.is_none()).await?;
+    // No two owners may publish the same desktop: the local host stops before
+    // a service that could already hold an automatic grant is enabled. It
+    // is adopted, and its viewer reconnects, only when the service resumes
+    // its invitation at once: the same identity and service, and a helper
+    // that needs no setup, which the owner may cancel.
+    let adopted = match slot.take() {
+        Some(host) if local.is_some() && setup.is_none() => Some(host),
+        host => {
+            if let Some(host) = host {
+                host.stop().await.map_err(err)?;
+            }
+            None
+        }
+    };
     *handle.desktop.host_identity.lock().await = None;
     if let Some(action) = setup {
         if !allow_install {
@@ -1753,23 +1741,23 @@ async fn enable_host(
             return Ok(json!({"restart": true}));
         }
     }
-    let snapshot = desktop::privileged::background::configure_with_identity(
-        desktop::privileged::background::Options {
-            server: config.server_address,
-            credential,
-            relay_transport: config.relay_transport,
-            settings: desktop::privileged::background::Settings {
-                service,
-                display_id,
-                allow_control,
-                allow_direct: true,
-                auto_start: true,
-            },
-            lan_first: config.lan_first,
+    let options = desktop::privileged::background::Options {
+        server: config.server_address,
+        credential,
+        relay_transport: config.relay_transport,
+        settings: desktop::privileged::background::Settings {
+            service,
+            display_id,
+            allow_control,
+            allow_direct: true,
+            auto_start: true,
         },
-        identity,
-    )
-    .await
+        lan_first: config.lan_first,
+    };
+    let snapshot = match adopted {
+        Some(host) => desktop::privileged::background::adopt(host, options, true).await,
+        None => desktop::privileged::background::configure_with_identity(options, identity).await,
+    }
     .map_err(err)?;
     let snapshot = handle
         .desktop
@@ -2512,115 +2500,6 @@ mod tests {
             assert!(trust::load(&directory).unwrap().is_none());
             std::fs::remove_dir(&directory).unwrap();
         });
-    }
-
-    /// Poll `condition` for up to 5 s.
-    #[cfg(windows)]
-    async fn until(mut condition: impl FnMut() -> bool) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !condition() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    /// A one-pixel desktop, enough to hold a viewer's session open.
-    #[cfg(windows)]
-    struct Pixel;
-    #[cfg(windows)]
-    impl desktop::Backend for Pixel {
-        fn display(&mut self) -> desktop::Result<desktop::Display> {
-            Ok(desktop::Display {
-                id: 1,
-                name: "handoff".into(),
-                x: 0,
-                y: 0,
-                width: 10,
-                height: 10,
-            })
-        }
-        fn capture(&mut self) -> desktop::Result<Vec<u8>> {
-            Ok(vec![1])
-        }
-        fn input(&mut self, _: &desktop::Input) -> desktop::Result<()> {
-            Ok(())
-        }
-        fn release(&mut self) {}
-    }
-
-    /// Turning on remote control hands the running local host to the service.
-    /// Its viewer reconnects by itself only when the service resumes the same
-    /// invitation at once. A cancelled installation or another invitation
-    /// would leave it retrying a host that never comes, so it ends instead.
-    #[cfg(windows)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn handoff_lets_the_viewer_reconnect_only_to_the_same_invitation() {
-        use desktop::{ViewerReason, ViewerState, privileged::Status};
-        // The tunnel's framing and codec read the process credential, which
-        // other tests change.
-        let _credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
-            .lock()
-            .await;
-        pb_mapper_core::checksum::set_process_msg_header_key(Some(
-            pb_mapper_testkit::TEST_ADMIN_KEY,
-        ))
-        .unwrap();
-        let relay = pb_mapper_testkit::Relay::start("ffi-handoff").await;
-        let client = Client::from_credential(
-            relay.addr().to_string(),
-            pb_mapper_testkit::admin_credential(),
-            true,
-            None,
-        );
-        let ready = || Status {
-            installed: true,
-            running: true,
-            authorized_application: true,
-            identity_verified: true,
-            ..Default::default()
-        };
-        for (same_invitation, helper, heard) in [
-            (true, ready(), ViewerReason::Restarting),
-            (true, Status::default(), ViewerReason::HostStopped),
-            (false, ready(), ViewerReason::HostStopped),
-        ] {
-            let mut options = HostOptions::new("desktop:handoff");
-            options.allow_direct = false;
-            let host = Host::builder(options)
-                .backend(|| Ok(Pixel))
-                .start(&client)
-                .await
-                .unwrap();
-            let viewer = Viewer::connect(
-                &client,
-                host.invitation(),
-                ConnectOptions {
-                    path: PathPolicy::RelayOnly,
-                    ..Default::default()
-                },
-                ViewerConfig {
-                    codecs: vec![VideoCodec::Jpeg],
-                    limits: VideoLimits::for_viewer(60.0),
-                    fps_override: false,
-                    quality: QualityPreset::Balanced,
-                    progress: None,
-                },
-            )
-            .await
-            .unwrap();
-            // `Accepted` reaches the viewer before the host holds the session.
-            until(|| host.status().viewer.is_some()).await;
-            let mut slot = Some(host);
-            // As `enable_host` decides it.
-            let resumes_at_once = same_invitation && helper_setup(&helper, true).is_none();
-            stop_for_handoff(&mut slot, resumes_at_once).await.unwrap();
-            assert!(slot.is_none());
-            until(|| viewer.status().state == ViewerState::Stopped).await;
-            let status = viewer.status();
-            assert_eq!(status.reason, Some(heard), "{}", status.message);
-        }
     }
 
     #[cfg(windows)]

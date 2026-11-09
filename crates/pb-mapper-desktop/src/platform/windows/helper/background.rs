@@ -16,8 +16,14 @@ pub struct Settings {
     pub service: String,
     pub display_id: u32,
     pub allow_control: bool,
+    /// On when a saved grant does not say, as every path defaults: LAN
+    /// first, then direct, then the relay.
+    #[serde(default = "allow_direct_by_default")]
     pub allow_direct: bool,
     pub auto_start: bool,
+}
+fn allow_direct_by_default() -> bool {
+    true
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

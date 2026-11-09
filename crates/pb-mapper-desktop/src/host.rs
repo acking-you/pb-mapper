@@ -373,9 +373,11 @@ impl Host {
     }
     /// Host again with changed options, under the same identity, so a saved
     /// invitation stays valid, with the same backend source, admission and
-    /// live control policy. The changed options are checked first, so a
-    /// refused change leaves this host running; then this host stops,
-    /// telling its viewer `reason`, and the new one starts.
+    /// live control policy. The changed options are checked before this host
+    /// stops, telling its viewer `reason`, and the new one starts; a refused
+    /// change (`ErrorKind::InvalidInput`) ends this host too, since it was
+    /// handed over: check a new service with [`HostIdentity::invitation`]
+    /// first to keep it.
     pub async fn restart(
         self,
         reason: StopReason,
@@ -427,7 +429,14 @@ impl Host {
     /// started, whether it runs direct or through the relay, and whether it
     /// controls, has paused, and which quality it chose.
     pub fn status(&self) -> HostStatus {
-        self.shared.status()
+        self.status_handle().status()
+    }
+    /// What reads this host's status, apart from the host.
+    pub(crate) fn status_handle(&self) -> HostStatusHandle {
+        HostStatusHandle {
+            shared: self.shared.clone(),
+            cancel: self.cancel.clone(),
+        }
     }
     /// The host's tunnel figures, sampled now: its viewers' sessions on each
     /// path, the bytes they carried, the relay's health and the direct link.
@@ -483,6 +492,23 @@ impl Drop for Host {
     fn drop(&mut self) {
         self.shared.policy.set(false);
         self.cancel.cancel();
+    }
+}
+
+/// A host's status, readable from any task until the host is gone.
+#[derive(Clone)]
+pub(crate) struct HostStatusHandle {
+    shared: Arc<Shared>,
+    cancel: CancellationToken,
+}
+impl HostStatusHandle {
+    pub(crate) fn status(&self) -> HostStatus {
+        self.shared.status()
+    }
+    /// Whether the host stopped, or was dropped.
+    #[expect(dead_code, reason = "Host::watch (pf-sdk) ends with the host")]
+    pub(crate) fn stopped(&self) -> bool {
+        self.shared.stopped.load(Ordering::Acquire) || self.cancel.is_cancelled()
     }
 }
 

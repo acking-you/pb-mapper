@@ -19,6 +19,7 @@ mod input;
 mod invite;
 mod lane;
 mod launch;
+mod mapping;
 mod modes;
 mod native;
 // Only the Windows helper speaks it until another platform has an agent.
@@ -36,11 +37,14 @@ mod session;
 mod shared;
 #[cfg(test)]
 mod slow_link;
+pub mod supervisor;
 #[cfg(test)]
 mod tests;
 mod timer;
+pub mod trust;
 mod video_sink;
 mod viewer;
+mod watch;
 mod wire;
 mod worker;
 

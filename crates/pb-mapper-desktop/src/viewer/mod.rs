@@ -70,6 +70,7 @@ const MAX_DISPLAY: u32 = 32768;
 const DECODER_FAILED: &str = "the remote picture could not be decoded";
 
 /// How a viewer connects.
+#[derive(Clone)]
 pub struct ViewerConfig {
     /// The codecs the renderer decodes, in preference order: one or two of
     /// H.264 and JPEG, and `H265` beside them when it decodes that too. H.265
@@ -89,6 +90,17 @@ pub struct ViewerConfig {
     pub progress: Option<Arc<dyn Fn(ConnectStage) + Send + Sync>>,
 }
 impl ViewerConfig {
+    /// A viewer of `codecs`, at the default resolution and the display's 60
+    /// fps, with the balanced preset.
+    pub fn new(codecs: Vec<VideoCodec>) -> Self {
+        Self {
+            codecs,
+            limits: VideoLimits::choose(60.0, crate::Resolution::default(), None),
+            fps_override: false,
+            quality: QualityPreset::Balanced,
+            progress: None,
+        }
+    }
     /// H.265 at most once, and beside one or two codecs every host knows.
     fn validate(&self) -> std::result::Result<(), ConnectError> {
         let offered = self.wire_codecs().len();
@@ -476,6 +488,32 @@ impl Viewer {
 
     /// The session for polls: never waits on the network.
     pub fn status(&self) -> ViewerStatus {
+        self.status_handle().status()
+    }
+
+    /// What reads this viewer's status, apart from the viewer.
+    pub(crate) fn status_handle(&self) -> ViewerStatusHandle {
+        ViewerStatusHandle {
+            shared: self.shared.clone(),
+            sink: self.sink.clone(),
+        }
+    }
+}
+
+/// A viewer's status, readable from any task until the viewer is gone.
+#[derive(Clone)]
+pub(crate) struct ViewerStatusHandle {
+    shared: Arc<ViewerShared>,
+    sink: Arc<VideoSink>,
+}
+impl ViewerStatusHandle {
+    /// Whether the session has ended.
+    #[expect(dead_code, reason = "Viewer::watch (pf-sdk) ends with the viewer")]
+    pub(crate) fn stopped(&self) -> bool {
+        self.shared.state.lock().viewer_state() == ViewerState::Stopped
+    }
+
+    pub(crate) fn status(&self) -> ViewerStatus {
         let now = Instant::now();
         let sink = self.sink.snapshot(now);
         let mut stats = ViewerStats::default();
@@ -552,7 +590,9 @@ impl Viewer {
             stats,
         }
     }
+}
 
+impl Viewer {
     /// The per-vsync view: no allocation, no waiting.
     pub fn view(&self) -> DesktopView {
         let now = Instant::now();
