@@ -1,5 +1,8 @@
 //! Uses published Apache-2.0 xcap and MIT enigo. No RustDesk source is copied.
-use crate::{Backend, Button, CursorPosition, DesktopContext, Display, Input, Key, Result, error};
+use crate::{
+    Backend, BackendError, Button, CursorPosition, DesktopContext, DesktopKind, Display,
+    FailureKind, Input, Key, Result, error,
+};
 use enigo::{Axis, Direction, Enigo, Keyboard, Mouse};
 use std::collections::HashSet;
 use windows::Win32::{
@@ -68,9 +71,14 @@ fn available() -> Result<()> {
     Ok(())
 }
 fn ordinary_desktop_unavailable() -> std::io::Error {
-    error(
+    BackendError::new(
+        FailureKind::SecureDesktop,
         "secure_desktop_requires_helper: This sharing session uses ordinary desktop access. UAC and the lock screen require the authorized Windows service. Prepare full desktop access on the host and restart sharing; otherwise the picture resumes when the ordinary desktop returns.",
     )
+    .into()
+}
+fn display_lost(message: &str) -> std::io::Error {
+    BackendError::new(FailureKind::DisplayLost, message).into()
 }
 fn describe(monitor: &xcap::Monitor) -> Result<Display> {
     Ok(Display {
@@ -88,7 +96,7 @@ fn monitor_handle(id: u32) -> Result<HMONITOR> {
         .into_iter()
         .find(|m| m.as_raw_hmonitor() as usize as u32 == id)
         .map(|m| HMONITOR(m.as_raw_hmonitor()))
-        .ok_or_else(|| error("selected display is no longer available"))
+        .ok_or_else(|| display_lost("selected display is no longer available"))
 }
 fn current_display(id: u32, monitor: HMONITOR) -> Result<Display> {
     let mut info = MONITORINFOEXW::default();
@@ -99,7 +107,7 @@ fn current_display(id: u32, monitor: HMONITOR) -> Result<Display> {
     let width = u32::try_from(rect.right - rect.left).map_err(error)?;
     let height = u32::try_from(rect.bottom - rect.top).map_err(error)?;
     if width == 0 || height == 0 {
-        return Err(error("display is unavailable"));
+        return Err(display_lost("display is unavailable"));
     }
     let length = info
         .szDevice
@@ -178,7 +186,9 @@ impl Desktop {
             .into_iter()
             .find(|m| m.id().ok() == Some(self.id))
             .ok_or_else(|| {
-                error("Selected display is no longer available; stop sharing and select a display")
+                display_lost(
+                    "Selected display is no longer available; stop sharing and select a display",
+                )
             })
     }
 }
@@ -204,7 +214,7 @@ impl Backend for Desktop {
             desktop: self
                 .secure
                 .as_ref()
-                .map_or_else(|| "ordinary".into(), |s| s.name().into()),
+                .map_or(DesktopKind::Ordinary, |s| s.kind()),
         })
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<CursorPosition>> {

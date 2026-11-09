@@ -110,7 +110,10 @@ impl RemoteBackend {
                 self.pending = response.pending as usize;
                 if let Some(reason) = response.error {
                     self.video = None;
-                    return Ok(Err(error(reason)));
+                    return Ok(Err(match legacy_kind(&reason) {
+                        Some(kind) => crate::BackendError::new(kind, reason).into(),
+                        None => error(reason),
+                    }));
                 }
                 if reports {
                     self.context = response.context;
@@ -161,6 +164,25 @@ impl RemoteBackend {
             .video
             .take()
             .map(|format| crate::EncodedFrame { format, bytes }))
+    }
+}
+/// The kind of a worker failure, which helper protocol 6 carries only as the
+/// worker backend's text.
+fn legacy_kind(text: &str) -> Option<crate::FailureKind> {
+    use crate::FailureKind;
+    if text.starts_with("secure_desktop_requires_helper") {
+        Some(FailureKind::SecureDesktop)
+    } else if text.starts_with(crate::backend::H265_ENCODER_FAILED) {
+        Some(FailureKind::EncoderFailed {
+            codec: crate::VideoCodec::H265,
+        })
+    } else if text.contains("display is unavailable")
+        || text.contains("no longer available")
+        || text.contains("output disappeared")
+    {
+        Some(FailureKind::DisplayLost)
+    } else {
+        None
     }
 }
 fn disconnected(failure: impl std::fmt::Display) -> std::io::Error {
@@ -340,7 +362,42 @@ mod tests {
                 height: 64,
             },
             generation: 1,
-            desktop: "ordinary".into(),
+            desktop: crate::DesktopKind::Ordinary,
+        }
+    }
+
+    /// The desktop kind crosses the pipe as protocol 6 wrote its string, and
+    /// a protocol 6 worker's failure texts read back as their kinds.
+    #[test]
+    fn protocol_6_desktops_and_failures_read_as_kinds() {
+        let secure = DesktopContext {
+            desktop: crate::DesktopKind::Secure,
+            ..desktop()
+        };
+        assert_eq!(
+            serde_json::to_string(&secure).unwrap(),
+            r#"{"display":{"id":1,"name":"helper","x":0,"y":0,"width":64,"height":64},"generation":1,"desktop":"secure"}"#
+        );
+        let ordinary: DesktopContext = serde_json::from_str(
+            r#"{"display":{"id":1,"name":"helper","x":0,"y":0,"width":64,"height":64},"generation":1,"desktop":"ordinary"}"#,
+        )
+        .unwrap();
+        assert_eq!(ordinary, desktop());
+        use crate::FailureKind::{DisplayLost, EncoderFailed, SecureDesktop};
+        for (text, kind) in [
+            ("secure_desktop_requires_helper: UAC", Some(SecureDesktop)),
+            ("display is unavailable", Some(DisplayLost)),
+            ("selected display is no longer available", Some(DisplayLost)),
+            ("selected GPU output disappeared", Some(DisplayLost)),
+            (
+                "h265_encoder_failed: hardware video encoder stalled",
+                Some(EncoderFailed {
+                    codec: crate::VideoCodec::H265,
+                }),
+            ),
+            ("desktop capture delivered no image", None),
+        ] {
+            assert_eq!(legacy_kind(text), kind, "{text}");
         }
     }
 

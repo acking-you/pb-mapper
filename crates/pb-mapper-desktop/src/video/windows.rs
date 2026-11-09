@@ -7,9 +7,10 @@
 //! the capture worker's desktop thread.
 
 use crate::{
-    Display, Result, VideoCodec, error,
+    BackendError, Display, FailureKind, Result, VideoCodec,
+    backend::H265_ENCODER_FAILED,
+    error,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
-    worker::H265_ENCODER_FAILED,
 };
 use std::{
     collections::VecDeque,
@@ -251,7 +252,12 @@ impl Encoder {
             .map_err(error)?
             .into_iter()
             .find(|m| m.as_raw_hmonitor() as usize as u32 == display.id)
-            .ok_or_else(|| error("selected GPU output disappeared"))?;
+            .ok_or_else(|| {
+                std::io::Error::from(BackendError::new(
+                    FailureKind::DisplayLost,
+                    "selected GPU output disappeared",
+                ))
+            })?;
         let capture = DxgiDuplicationApi::new_options(monitor, &[DxgiDuplicationFormat::Bgra8])
             .map_err(error)?;
         let desc = capture.duplication_desc();
@@ -599,11 +605,16 @@ fn late(submitted: Instant, previous: Option<Instant>, now: Instant) -> bool {
 }
 
 /// An error of the hardware codec itself, rather than of the capture or the
-/// scaler around it. An H.265 one starts with `H265_ENCODER_FAILED`: thread C
-/// then ends the session, and this host offers H.265 no more.
+/// scaler around it. An H.265 one is `EncoderFailed`: thread C then ends the
+/// session, and this host offers H.265 no more. Its text still starts with
+/// `H265_ENCODER_FAILED`, which is how it crosses the helper pipe.
 fn codec_error(kind: VideoCodec, failure: std::io::Error) -> std::io::Error {
     if kind == VideoCodec::H265 {
-        error(format!("{H265_ENCODER_FAILED}: {failure}"))
+        BackendError::new(
+            FailureKind::EncoderFailed { codec: kind },
+            format!("{H265_ENCODER_FAILED}: {failure}"),
+        )
+        .into()
     } else {
         failure
     }
@@ -1569,9 +1580,10 @@ mod tests {
     #[test]
     fn an_encoder_that_never_asks_for_input_is_blamed_not_capture() {
         let h265_failed = |asked, image| {
-            unsubmitted(VideoCodec::H265, asked, image)
-                .to_string()
-                .starts_with(H265_ENCODER_FAILED)
+            crate::failure_kind(&unsubmitted(VideoCodec::H265, asked, image))
+                == Some(FailureKind::EncoderFailed {
+                    codec: VideoCodec::H265,
+                })
         };
         // Asked, and capture had no image: capture is stuck, and is retried
         // with H.265 still on.

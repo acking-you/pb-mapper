@@ -224,11 +224,11 @@ impl DesktopBinding {
     pub fn generation(&self) -> u64 {
         self.state.generation
     }
-    pub fn name(&self) -> &str {
+    pub fn kind(&self) -> crate::DesktopKind {
         if self.state.name == "winlogon" {
-            "secure"
+            crate::DesktopKind::Secure
         } else {
-            "ordinary"
+            crate::DesktopKind::Ordinary
         }
     }
     pub fn enter(&mut self, before_switch: impl FnOnce()) -> Result<()> {
@@ -801,7 +801,7 @@ mod tests {
                 height: 64,
             },
             generation: 1,
-            desktop: "ordinary".into(),
+            desktop: crate::DesktopKind::Ordinary,
         };
         let mut backend = Bound {
             context: expected.clone(),

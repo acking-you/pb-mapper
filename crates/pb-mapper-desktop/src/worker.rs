@@ -12,13 +12,13 @@
 mod tests;
 
 use crate::{
-    Backend, Button, ControlAdmission, ControlLease, DesktopContext, EncodedFrame, Input,
-    InputEvent, Result, VideoCodec, VideoLimits, VideoRate, error,
+    Backend, Button, ControlAdmission, ControlLease, DesktopContext, EncodedFrame, FailureKind,
+    Input, InputEvent, Result, VideoCodec, VideoLimits, VideoRate, error, failure_kind,
     idr::IdrReason,
     lane::{LANE_CAPACITY, LaneCommand},
     outgoing::{HostUnit, Push},
     pacer::Pacer,
-    protocol::{DesktopKind, NoticeCode, SessionState, StateReason, VideoSize},
+    protocol::{NoticeCode, SessionState, StateReason, VideoSize},
     scheduler::Waiter,
     shared::{CursorReport, CursorUpdate, EngineState, InputWaitStats, SessionShared},
     timer::TimerResolution,
@@ -37,10 +37,6 @@ use tokio::sync::oneshot;
 pub(crate) type Factory = Arc<dyn Fn() -> Result<Box<dyn Backend>> + Send + Sync>;
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
-/// Begins the text of every failure of an H.265 encoder to build or to encode,
-/// as opposed to the capture around it: the backend's, or the helper's, as it
-/// crosses the pipe.
-pub(crate) const H265_ENCODER_FAILED: &str = "h265_encoder_failed";
 /// An H.265 encoder failed in this process.
 static H265_FAILED: AtomicBool = AtomicBool::new(false);
 
@@ -712,11 +708,7 @@ impl Engine {
             }
         }
         self.state.record.display = Some(context.display.clone());
-        self.state.record.desktop = if context.desktop == "secure" {
-            DesktopKind::Secure
-        } else {
-            DesktopKind::Ordinary
-        };
+        self.state.record.desktop = context.desktop;
         self.context = Some(context);
         self.unavailable = None;
         self.streaming = false;
@@ -734,7 +726,12 @@ impl Engine {
         let message = failure.to_string();
         if failure.kind() == io::ErrorKind::NotConnected {
             self.fatal = Some(message);
-        } else if self.codec == VideoCodec::H265 && message.starts_with(H265_ENCODER_FAILED) {
+        } else if self.codec == VideoCodec::H265
+            && failure_kind(&failure)
+                == Some(FailureKind::EncoderFailed {
+                    codec: VideoCodec::H265,
+                })
+        {
             H265_FAILED.store(true, Ordering::Release);
             tracing::warn!(
                 target: "pb_mapper_desktop::session",
@@ -1128,16 +1125,10 @@ impl CursorEcho {
 
 /// A capture failure's reason for the viewer.
 fn unavailable_reason(failure: &io::Error) -> StateReason {
-    let message = failure.to_string();
-    if message.starts_with("secure_desktop_requires_helper") {
-        StateReason::SecureDesktop
-    } else if message.contains("display is unavailable")
-        || message.contains("no longer available")
-        || message.contains("output disappeared")
-    {
-        StateReason::DisplayLost
-    } else {
-        StateReason::CaptureFailed
+    match failure_kind(failure) {
+        Some(FailureKind::SecureDesktop) => StateReason::SecureDesktop,
+        Some(FailureKind::DisplayLost) => StateReason::DisplayLost,
+        _ => StateReason::CaptureFailed,
     }
 }
 

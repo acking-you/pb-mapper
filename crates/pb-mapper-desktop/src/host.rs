@@ -918,10 +918,11 @@ mod trust_tests {
             rate: crate::VideoRate,
         ) -> Result<Option<crate::EncodedFrame>> {
             if codec == VideoCodec::H265 && self.broken.load(Ordering::SeqCst) {
-                return Err(error(format!(
-                    "{}: the encoder stopped",
-                    worker::H265_ENCODER_FAILED
-                )));
+                return Err(crate::BackendError::new(
+                    crate::FailureKind::EncoderFailed { codec },
+                    "the encoder stopped",
+                )
+                .into());
             }
             if codec == VideoCodec::H265 {
                 self.bitrates.lock().push(rate.bitrate);

@@ -6,6 +6,7 @@
 //! installed, authorized helper handles UAC/Winlogon on its bound desktop.
 
 mod auth;
+mod backend;
 mod credit;
 #[cfg(windows)]
 pub mod dpapi;
@@ -41,6 +42,7 @@ pub mod video {
 use serde::{Deserialize, Serialize};
 use std::{io, time::Duration};
 
+pub use backend::{BackendError, FailureKind, failure_kind};
 pub use host::{Host, HostOptions};
 pub use invite::{Invitation, InvitationError, InvitationFormat};
 pub use platform::{capabilities, displays, media_foundation, native_backend};
@@ -273,7 +275,7 @@ pub struct EncodedFrame {
 pub struct DesktopContext {
     pub display: Display,
     pub generation: u64,
-    pub desktop: String,
+    pub desktop: DesktopKind,
 }
 
 /// Deliberately small, platform-independent input vocabulary. Text is Unicode
@@ -421,7 +423,7 @@ pub trait Backend: 'static {
         Ok(DesktopContext {
             display: self.display()?,
             generation: 0,
-            desktop: "ordinary".into(),
+            desktop: DesktopKind::Ordinary,
         })
     }
     fn capture(&mut self) -> Result<Vec<u8>>;
