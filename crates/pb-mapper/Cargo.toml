@@ -49,5 +49,25 @@ tokio-util.workspace = true
 name = "port_mapping"
 required-features = ["port-mapping"]
 
+[[example]]
+name = "desktop_loopback"
+required-features = ["desktop"]
+
+[[example]]
+name = "desktop_host"
+required-features = ["desktop"]
+
+[[example]]
+name = "desktop_viewer"
+required-features = ["desktop"]
+
+[[example]]
+name = "desktop_control"
+required-features = ["desktop"]
+
+[[example]]
+name = "desktop_supervised"
+required-features = ["desktop"]
+
 [lints]
 workspace = true
