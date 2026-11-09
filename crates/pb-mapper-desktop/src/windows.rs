@@ -1,12 +1,12 @@
 //! Uses published Apache-2.0 xcap and MIT enigo. No RustDesk source is copied.
+use crate::input::held::{Held, Pressed};
 use crate::{
     Backend, BackendError, Button, CursorPosition, DesktopContext, DesktopKind, Display,
     FailureKind, Input, Key, Result, error,
 };
 use enigo::{Axis, Direction, Enigo, Keyboard, Mouse};
-use std::collections::HashSet;
 use windows::Win32::{
-    Foundation::{CloseHandle, GetLastError, HANDLE, POINT},
+    Foundation::{CloseHandle, GetLastError, HANDLE},
     Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFOEXW},
     Security::{
         GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
@@ -145,8 +145,7 @@ pub(super) fn create(id: u32) -> Result<Box<dyn Backend>> {
         id,
         monitor_handle: monitor_handle(id)?,
         input: Enigo::new(&enigo::Settings::default()).map_err(error)?,
-        buttons: HashSet::new(),
-        keys: HashSet::new(),
+        held: Held::default(),
         secure: None,
         encoder: None,
         video_limits: UNCONFIGURED,
@@ -156,8 +155,7 @@ struct Desktop {
     id: u32,
     monitor_handle: HMONITOR,
     input: Enigo,
-    buttons: HashSet<Button>,
-    keys: HashSet<Key>,
+    held: Held,
     secure: Option<crate::helper::worker::DesktopBinding>,
     encoder: Option<(DesktopContext, crate::video::windows::Encoder)>,
     video_limits: crate::VideoLimits,
@@ -166,7 +164,7 @@ impl Desktop {
     fn prepare(&mut self) -> Result<()> {
         let Some(secure) = &mut self.secure else {
             return available().inspect_err(|_| {
-                release_input(&mut self.input, &mut self.buttons, &mut self.keys);
+                release_input(&mut self.input, &mut self.held);
                 // A secure desktop transition can invalidate DXGI duplication
                 // without changing monitor geometry. Rebuild on return to the
                 // ordinary desktop rather than retaining old encoder resources.
@@ -174,7 +172,7 @@ impl Desktop {
             });
         };
         secure.enter(|| {
-            release_input(&mut self.input, &mut self.buttons, &mut self.keys);
+            release_input(&mut self.input, &mut self.held);
             // DXGI/MFT/COM resources belong to the old desktop thread. Destroy
             // them before binding, including a name change without an event.
             self.encoder = None;
@@ -239,9 +237,10 @@ impl Backend for Desktop {
         }
         let showing =
             cursor.flags.0 & CURSOR_SHOWING.0 != 0 && cursor.flags.0 & CURSOR_SUPPRESSED.0 == 0;
-        Ok(Some(relative_cursor(
+        let point = cursor.ptScreenPos;
+        Ok(Some(crate::input::cursor::confine(
             &expected.display,
-            cursor.ptScreenPos,
+            (point.x, point.y),
             showing,
         )))
     }
@@ -376,9 +375,9 @@ impl Backend for Desktop {
                     .map_err(native_input_error)?;
             }
             Input::Button { button, down, .. } => {
-                apply_held(&mut self.buttons, *button, *down, |direction| {
+                self.held.button(*button, *down, |down| {
                     self.input
-                        .button(button_code(*button), direction)
+                        .button(button_code(*button), direction(down))
                         .map_err(native_input_error)
                 })?;
             }
@@ -398,9 +397,9 @@ impl Backend for Desktop {
                 }
             }
             Input::Key { key, down } => {
-                apply_held(&mut self.keys, *key, *down, |direction| {
+                self.held.key(*key, *down, |down| {
                     self.input
-                        .key(key_code(*key), direction)
+                        .key(key_code(*key), direction(down))
                         .map_err(native_input_error)
                 })?;
             }
@@ -414,7 +413,7 @@ impl Backend for Desktop {
         Ok(())
     }
     fn release(&mut self) {
-        release_input(&mut self.input, &mut self.buttons, &mut self.keys);
+        release_input(&mut self.input, &mut self.held);
     }
     /// This process runs in the interactive session (the helper's worker does
     /// too), so these are the signed-in user's settings.
@@ -497,64 +496,22 @@ fn native_input_error(failure: impl std::fmt::Display) -> std::io::Error {
     ))
 }
 
-fn release_input(input: &mut Enigo, buttons: &mut HashSet<Button>, keys: &mut HashSet<Key>) {
-    buttons.retain(|button| {
-        input
-            .button(button_code(*button), Direction::Release)
-            .is_err()
-    });
-    keys.retain(|key| input.key(key_code(*key), Direction::Release).is_err());
-}
-
-fn apply_held<T: Copy + Eq + std::hash::Hash>(
-    held: &mut HashSet<T>,
-    value: T,
-    down: bool,
-    inject: impl FnOnce(Direction) -> Result<()>,
-) -> Result<()> {
-    // A failed native call can have partially applied input. Preserve the
-    // release obligation until a subsequent key/button-up succeeds.
+fn direction(down: bool) -> Direction {
     if down {
-        held.insert(value);
-    }
-    inject(if down {
         Direction::Press
     } else {
         Direction::Release
-    })?;
-    if !down {
-        held.remove(&value);
     }
-    Ok(())
 }
 
-#[test]
-fn failed_native_input_retains_the_release_obligation() {
-    let mut held = HashSet::new();
-    assert!(apply_held(&mut held, 1, true, |_| Err(error("partial press"))).is_err());
-    assert!(held.contains(&1));
-    assert!(apply_held(&mut held, 1, false, |_| Err(error("blocked release"))).is_err());
-    assert!(held.contains(&1));
-    assert!(apply_held(&mut held, 1, false, |_| Ok(())).is_ok());
-    assert!(held.is_empty());
-}
-
-fn relative_cursor(display: &Display, point: POINT, showing: bool) -> CursorPosition {
-    let x = i64::from(point.x) - i64::from(display.x);
-    let y = i64::from(point.y) - i64::from(display.y);
-    if !showing || x < 0 || y < 0 || x >= i64::from(display.width) || y >= i64::from(display.height)
-    {
-        // Do not disclose the cursor location on a different monitor.
-        return CursorPosition::default();
-    }
-    let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) else {
-        return CursorPosition::default();
-    };
-    CursorPosition {
-        x,
-        y,
-        visible: true,
-    }
+fn release_input(input: &mut Enigo, held: &mut Held) {
+    held.release(|pressed| {
+        match pressed {
+            Pressed::Button(button) => input.button(button_code(button), Direction::Release),
+            Pressed::Key(key) => input.key(key_code(key), Direction::Release),
+        }
+        .map_err(error)
+    });
 }
 
 #[cfg(feature = "windows-helper")]
@@ -568,8 +525,7 @@ pub(crate) fn create_privileged(
         id,
         monitor_handle: monitor_handle(id)?,
         input: Enigo::new(&enigo::Settings::default()).map_err(error)?,
-        buttons: HashSet::new(),
-        keys: HashSet::new(),
+        held: Held::default(),
         secure: Some(binding),
         encoder: None,
         video_limits: UNCONFIGURED,
@@ -721,39 +677,5 @@ mod key_tests {
         assert_eq!(key_code(Key::Z), enigo::Key::Z);
         assert_eq!(key_code(Key::Digit0), enigo::Key::Num0);
         assert_eq!(key_code(Key::Digit9), enigo::Key::Num9);
-    }
-}
-
-#[cfg(test)]
-mod cursor_tests {
-    use super::*;
-    #[test]
-    fn pointer_coordinates_are_physical_and_confined_to_the_selected_display() {
-        let display = Display {
-            id: 1,
-            name: "left monitor".into(),
-            x: -1920,
-            y: -200,
-            width: 1920,
-            height: 1080,
-        };
-        let point = POINT { x: -100, y: 300 };
-        assert_eq!(
-            relative_cursor(&display, point, true),
-            CursorPosition {
-                x: 1820,
-                y: 500,
-                visible: true
-            }
-        );
-        // Both an off-display cursor and an OS-hidden cursor withhold position.
-        assert_eq!(
-            relative_cursor(&display, POINT { x: 0, y: 300 }, true),
-            CursorPosition::default()
-        );
-        assert_eq!(
-            relative_cursor(&display, point, false),
-            CursorPosition::default()
-        );
     }
 }

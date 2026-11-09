@@ -7,6 +7,10 @@
 
 mod auth;
 mod backend;
+// Neutral: only the Windows encoder and injector use them until another
+// platform lands.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod codec;
 mod credit;
 #[cfg(windows)]
 pub mod dpapi;
@@ -14,6 +18,8 @@ pub mod dpapi;
 pub mod helper;
 mod host;
 mod idr;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod input;
 mod invite;
 mod lane;
 mod outgoing;
