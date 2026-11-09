@@ -314,12 +314,13 @@ screen says nothing about the size a desktop should run at.
   modes outstanding exits with code 3, and the service then runs `helper
   restore <session>`, which tries for 10 minutes; the service does the same
   for every journal left at its start. The service ends that run, and waits
-  until it is gone, before it starts another worker in the session, which
-  replays the journal itself: the two never act on one journal. Hosts in one
-  process share a claim per display, with the first original and the latest
-  mode set: the last holder puts the original back, whichever host set the
-  mode the display shows. Two unrelated processes changing one display at
-  once is a known limit.
+  until it is gone, only once another worker in the session has started and
+  been verified, just before it attaches it; the worker replays the journal
+  itself, and one that fails to attach hands it back to a new run. The two
+  never act on one journal. Hosts in one process share a claim per display,
+  with the first original and the latest mode set: the last holder puts the
+  original back, whichever host set the mode the display shows. Two
+  unrelated processes changing one display at once is a known limit.
 - A remembered computer keeps **Fit local** (never a fixed size, which the
   next display may not list) and applies it again whenever this viewer gains
   control of it.

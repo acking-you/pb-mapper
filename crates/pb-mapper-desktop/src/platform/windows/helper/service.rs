@@ -227,9 +227,6 @@ async fn session(
     session.check()?;
     let name = format!("{PIPE}.worker.{}", crate::security::secret()?);
     let mut private = pipe::bind(&name, None, true)?;
-    // Never beside a restore run on the session's journal: the worker
-    // replays it itself as it opens.
-    restores.end(session.session).await;
     let child = spawn_worker(
         config,
         session.session,
@@ -260,9 +257,20 @@ async fn session(
         session: session.clone(),
         display_device,
     };
-    tokio::time::timeout(TIMEOUT, ipc::write_json(&mut private, &attached))
+    // The session's journal passes from its restore run to this worker,
+    // which replays it as it opens: the run ends only now, once the worker
+    // is up and verified, never beside it. A worker that never attaches
+    // hands the journal back to a restore run.
+    restores.end(session.session).await;
+    if let Err(failure) = tokio::time::timeout(TIMEOUT, ipc::write_json(&mut private, &attached))
         .await
-        .map_err(error)??;
+        .map_err(error)
+        .and_then(|written| written)
+    {
+        drop(child);
+        restores.start(config, session.session).await;
+        return Err(failure);
+    }
     let watch = async {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
@@ -298,8 +306,9 @@ async fn session(
 
 /// The `restore` workers, at most one per console session, each putting
 /// back the display mode a worker there left journalled. A worker never
-/// runs beside one in its session: both act on the session's journal, so
-/// the run ends, and is gone, before a worker starts there.
+/// acts beside one in its session: both act on the session's journal, so
+/// the run ends, and is gone, just before a started and verified worker is
+/// attached there, and starts again if that attach fails.
 #[derive(Clone, Default)]
 struct Restores(Arc<Mutex<Vec<Run>>>);
 struct Run {

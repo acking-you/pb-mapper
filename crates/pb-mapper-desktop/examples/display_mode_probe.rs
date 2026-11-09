@@ -77,7 +77,10 @@ mod probe {
         process::Stdio,
         time::{Duration, Instant},
     };
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::{
+        io::{AsyncBufReadExt, BufReader},
+        signal::windows::CtrlC,
+    };
     use windows::{
         Win32::Graphics::Gdi::{
             CDS_FULLSCREEN, CDS_TEST, CDS_TYPE, ChangeDisplaySettingsExW, DEVMODEW,
@@ -202,6 +205,9 @@ mod probe {
             )
             .into());
         }
+        // One Ctrl-C receiver for the whole run: while none is alive, the
+        // console's default handler ends the process at once, mid-restore.
+        let mut interrupt = tokio::signal::windows::ctrl_c()?;
         let before = every_display()?;
         print("before", &before)?;
         let probe = Probe {
@@ -212,7 +218,13 @@ mod probe {
         };
         let outcome = tokio::select! {
             outcome = probe.cases(fit, flag("--owner-change")) => outcome,
-            _ = tokio::signal::ctrl_c() => Err("interrupted".into()),
+            _ = interrupt.recv() => {
+                eprintln!(
+                    "interrupted: putting every display back (Ctrl-C again stops waiting \
+                     for the ordinary desktop)"
+                );
+                Err("interrupted".into())
+            }
         };
         let outcome = match outcome {
             Ok(fit) if flag("--fullscreen-check") => probe.fullscreen_check(fit),
@@ -220,7 +232,7 @@ mod probe {
         };
         // Whatever happened, every display ends at its recorded mode; the
         // cases' hosts and child are gone by now.
-        let put_back = probe.put_back().await;
+        let put_back = probe.put_back(&mut interrupt).await;
         match every_display() {
             Ok(after) => print("after", &after)?,
             Err(failure) => println!("after: the displays cannot be read now ({failure})"),
@@ -363,8 +375,9 @@ mod probe {
 
         /// Every display back at its recorded mode, trying every 2 s while
         /// it cannot be (the lock screen or a UAC prompt shows), for up to
-        /// `PUT_BACK_FOR`; a Ctrl-C stops the wait.
-        async fn put_back(&self) -> Result<()> {
+        /// `PUT_BACK_FOR`. A Ctrl-C stops the wait; one pressed during an
+        /// attempt is kept, and stops it once that attempt has finished.
+        async fn put_back(&self, interrupt: &mut CtrlC) -> Result<()> {
             let until = Instant::now() + PUT_BACK_FOR;
             let mut said = None;
             loop {
@@ -387,7 +400,7 @@ mod probe {
                 }
                 tokio::select! {
                     () = tokio::time::sleep(Duration::from_secs(2)) => {}
-                    _ = tokio::signal::ctrl_c() => {
+                    _ = interrupt.recv() => {
                         return Err("stopped waiting to put the displays back".into());
                     }
                 }
