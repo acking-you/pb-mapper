@@ -173,8 +173,14 @@ async fn main() -> Outcome {
             _ = every.tick() => {
                 let stats = viewer.status().stats;
                 let direct = viewer.metrics().map(|metrics| metrics.sessions.active_direct > 0);
+                // A direct path's link: where it runs, and over QUIC or TCP.
+                let link = stats
+                    .link
+                    .as_ref()
+                    .map(|link| format!(" ({:?}, {})", link.kind, link.transport.as_str()))
+                    .unwrap_or_default();
                 println!(
-                    "  {} {:.0} fps, latency {:?} ms, {} kbit/s{}",
+                    "  {}{link} {:.0} fps, latency {:?} ms, {} kbit/s{}",
                     stats.path,
                     stats.presented_fps,
                     stats.picture_latency_ms,
