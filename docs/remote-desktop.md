@@ -34,10 +34,12 @@ probes test rotated sizes; a display larger than 3840×2160 is fitted into 4K;
 and a 4K host at 60 FPS has not been measured, since the development PC's
 display is 2560×1440.
 
-**PR #51 remains merge-blocked on phone fluidity.** The receipt-credit pipeline
+**The owner accepted real-device fluidity on 2026-11-10**, lifting PR #51's
+merge block: after testing the stage7 build (Windows `8f800b3`, Android
+`ae3df37`) they reported that everything works. The receipt-credit pipeline
 below replaces the presentation-credit pipeline that stuttered on a physical
-phone, but it has not been measured on one. The block stays until the user
-accepts real-device fluidity; see
+phone; the acceptance rests on the owner's own use, not on the instrumented
+phone run proposed under Performance. For the block's history, see
 [the block and its evidence](validation/desktop-input-backpressure.md).
 
 ## Use the UI
@@ -1664,8 +1666,8 @@ p99 ≤ 50 ms; after a 5 s warm-up no gap over 250 ms and at most one over 100 m
 a minute; picture latency p50 ≤ 80 ms with a camera check; keyframes equal to
 one plus those requested; never unresponsive; and `input_wait` within its gate.
 Relay and cellular runs must show no burst-and-stall pattern, at least 30 FPS
-through the relay, and no resolution change. The merge block above stands until
-the owner accepts such a run.
+through the relay, and no resolution change. The owner lifted the merge block
+on 2026-11-10 on their own use of the stage7 build, without such a run.
 
 ### Earlier builds: presentation credit
 

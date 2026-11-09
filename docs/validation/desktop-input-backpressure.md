@@ -1,5 +1,11 @@
 # Installed input and asynchronous video regression
 
+**Merge block lifted — 2026-11-10:** the owner tested the stage7 build (Windows
+`8f800b3`, Android `ae3df37`), reported that everything works, and asked for
+PR #51 to be merged. This rests on the owner's own use, not on the instrumented
+phone run proposed in `docs/remote-desktop.md`. The record of 2026-11-06
+follows unchanged.
+
 **Merge blocked — 2026-11-06:** the user reports that remote desktop remains
 severely choppy even with direct connectivity, below 30 fps, while RustDesk is
 visibly smoother with a higher frame rate. These are user observations, not an
@@ -160,6 +166,10 @@ No invitations, relay credentials or screen contents are included here.
 问题优先级为 **P0 / 合并阻塞**：**流畅度问题没有解决并通过真机验收之前，
 不得合并 PR #51。** 连通性、编译、单元测试通过不能解除这个阻塞。
 
+**2026-11-10 更新：** 房主测试 stage7 构建（Windows `8f800b3`、安卓 `ae3df37`）后
+反馈一切正常，并要求合并 PR #51，合并阻塞据此解除。这一认可基于房主的实际
+使用，没有补录下文所述的真机帧时间采样与 RustDesk 对照。
+
 用户要求本轮只记录、提交与交接，不继续优化。后续接手者应独立完成定位与
 修复，不依赖本轮代理继续工作。本轮没有定位视频卡顿的最终根因。
 
@@ -224,4 +234,5 @@ No invitations, relay credentials or screen contents are included here.
 卡顿的根因，且同条件下达到用户认可的流畅度与 RustDesk 对照表现。30 fps
 不能被当成自动通过门槛，平均帧率也不能掩盖长停顿或严重画质退化。
 补齐实测证据并获得用户对体验的认可后，才可重新评估合并；本轮状态为未通过。
+（2026-11-10：房主已认可体验，阻塞解除，见上文“用户要求与阻塞状态”。）
 远程安全桌面、SCM/系统重启、休眠恢复等既有未验收项仍然有效。

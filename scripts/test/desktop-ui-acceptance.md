@@ -234,8 +234,9 @@ Also confirm that the native single-instance tokens match in the debug log.
 
 ### Stage 3: full acceptance
 
-The pass criteria are proposals; the owner decides, and the merge-block
-statements stay until the owner accepts fluidity.
+The pass criteria are proposals; the owner decides. The owner accepted
+fluidity on 2026-11-10, on their own use of the stage7 build, which lifted
+PR #51's merge block.
 
 1. Performance:
    - A: direct Wi-Fi, Balanced, 60 Hz: presented fps p50 ≥ 55, interval p95
