@@ -6,10 +6,22 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Optional encrypted remote desktop endpoints for pb-mapper"
+documentation = "https://docs.rs/pb-mapper-desktop"
+readme = "README.md"
+keywords = ["remote-desktop", "screen-sharing", "tunnel", "h265", "p2p"]
+categories = ["network-programming", "multimedia::video"]
+publish = ["crates-io"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 pb-mapper-client = { workspace = true, features = ["p2p"] }
+pb-mapper-core.workspace = true
 quinn.workspace = true
 rcgen.workspace = true
 tokio-rustls.workspace = true
@@ -25,7 +37,6 @@ subtle.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-pb-mapper-core.workspace = true
 xcap.workspace = true
 windows-capture.workspace = true
 enigo.workspace = true

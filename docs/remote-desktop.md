@@ -505,7 +505,10 @@ the input left it, so the host never reports the controller's own move back
 bitrate up to 80 Mbit/s. Protocol 5 added the background host's `lan_first`,
 the app's *Try the local network first* when sharing started, written only
 when off, so a grant saved with the default stays readable by an older
-helper.
+helper. The platform split ([Platforms](#platforms)) keeps protocol 6: the
+request and response types moved to the neutral `oop` module unchanged, and
+the client still reads a worker's failure from its text. A saved grant that
+does not say `allow_direct` now reads as allowed, the default everywhere.
 
 Disable stops the service and disables its startup. Uninstall stops/deletes the
 service and removes its authorization configuration. Upgrade preserves files
@@ -531,16 +534,26 @@ SoftwareSASGeneration or other security policy is changed.
 include desktop capture, codec or input dependencies. Flutter opts in; the SDK
 does not require Flutter or a POCOX runtime.
 
-- `Host::start` creates an ephemeral host. `start_with_backend` accepts an
-  embedder backend. `start_with_identity` and `start_with_backend_and_identity`
-  resume an explicitly authorized `HostIdentity` without changing `HostOptions`
-  literals. Discard that identity and stop its host to revoke durable access.
-  `start` and `start_with_identity` use the platform's own backend and refuse
-  before registering where `capabilities().host` is false: off Windows, or
-  without Media Foundation. `HostOptions.lan_first` is the registration's
-  `RegisterOptions.lan_first`: it only orders the host's own probes, since the
-  viewer dials and so chooses the path. The app passes its Settings switch,
-  read when sharing starts.
+- `Host::builder(HostOptions::new(service))` starts a host:
+  `.identity(saved)` resumes an explicitly authorized `HostIdentity` (discard
+  it and stop its host to revoke durable access), `.admission(..)` takes the
+  write lease below, and `.backend(factory)` captures with an embedder's
+  backend instead of the platform's; `Host::start(client, options)` is the
+  plain case. The platform's own host refuses before registering where
+  `host_support().host` is false (its `reason` says why: off Windows, or
+  without Media Foundation), or where `Access::Privileged` asks for a helper
+  that is not ready. `HostOptions` is non-exhaustive: `new` takes every path
+  default from `RegisterOptions::default()`, so a host is reached on a shared
+  LAN first (QUIC, or TCP when the viewer asks and `lan_tcp` allows), then
+  directly, then through the relay. `display` is a `DisplaySelection`:
+  primary, a runtime id, or the device name (`\\.\DISPLAY1`), which survives a
+  reboot or a mode change. `lan_first` only orders the host's own probes,
+  since the viewer dials and so chooses the path. The app passes its Settings
+  switch, read when sharing starts. `Host::restart`, `switch_display` and
+  `rename` host again under the same identity, source, admission and live
+  control policy, the old registration stopped first;
+  `privileged::background::adopt` hands a running host to the helper service
+  under its invitation.
 - `Host::status` returns a `HostStatus`: the state and its reason, whether
   control is allowed, the display and desktop kind, the capabilities, and the
   connected viewer (`HostViewer`: since when, direct or relay, controlling,
@@ -561,12 +574,20 @@ does not require Flutter or a POCOX runtime.
   capture at the rate it is given; `drain_video` and `pending_video` let the
   worker collect an asynchronous encoder's output between ticks. Each unit's
   `VideoFormat` carries `gop`, the GOP the encoder read back, so a unit relayed
-  by the helper reports it as well. `encodes_h265` says whether
-  `capture_video` can encode H.265 on the backend's display; the host asks a
-  session's backend right after building it, before it answers a viewer that
-  decodes H.265, and the default says no. `cursor` reports the pointer as the
-  inputs the backend applied left it. A sticky link failure returns
-  `NotConnected`, which ends the session instead of retrying.
+  by the helper reports it as well. `describe(probe_h265)` runs once, right
+  after the backend is built and within the 3 s before the host answers the
+  viewer: the display it captures and its `BackendCaps` (H.265, asked only for
+  a viewer that decodes it; lock; the OS), from which the session's
+  `Accepted` capabilities are built; a description that misses the 3 s uses
+  what its launcher falls back to. `bind(waker)` hands a pushing source the
+  session's wake, and `drain_poll()` says whether thread C polls the encoder
+  (`Some`, every 2 ms while units are pending) or waits to be woken (`None`).
+  `capture` (a JPEG still) is optional. `cursor` reports the pointer as the
+  inputs the backend applied left it. A failure carries a `FailureKind`
+  (`failure_kind(&error)`): secure desktop, display lost, encoder failed, ...;
+  a sticky link failure returns `NotConnected`, which ends the session instead
+  of retrying. `native_backend(&selection)` is this platform's own backend, an
+  opaque `NativeBackend` an embedder may decorate.
 - `ControlAdmission::acquire` provides an optional embedder-controlled write
   lease. POCOX can pause its Computer Use writer when a human explicitly requests
   control. Lease drop releases admission on end-control, revocation, disconnect
@@ -627,6 +648,126 @@ does not require Flutter or a POCOX runtime.
   registration/connection. Drop initiates cancellation. Coordinator loss or
   relay credential revocation does not forcibly close an established direct
   endpoint; local desktop stop does.
+
+## Platforms
+
+The host is split by platform at compile time; the engine, the session,
+QoS, credit, the protocol, the viewer and the SDK name no operating system.
+Windows is the one platform implemented. This section is the guide for the
+next ones (Linux, macOS, Android), in the spirit of RustDesk's per-platform
+services but monomorphised: no per-frame dynamic dispatch.
+
+### The two seams
+
+- `Backend` (`backend.rs`, public) is a session's picture source and input
+  sink, owned by its thread C and never `Send`. Embedders implement it; the
+  helper's client (`oop::client::RemoteBackend`) and the platform glue
+  implement it too. Thread C is `Engine<B: Backend, K: Clock>`, so every
+  tick, input and clock read is a static call. The one dynamic call on a
+  host's session path is `Launch::prepare`, once per admitted session
+  (`launch.rs`); `Box<dyn Backend>` still works, through a forwarding impl
+  that `clippy::missing_trait_methods` keeps complete.
+- `Platform` (`platform/mod.rs`, crate-private) names a session's parts as
+  associated types: `Desktop` (the binding and geometry, with a scope held
+  around every OS call), `Video` (capture and encode fused, as a
+  `VideoSource`), `Input` (an `Injector`), `Cursor`, `Modes`
+  (`DisplayModes`; `NoModes` where a display's mode cannot change) and
+  `Still`; plus `Grant`, consent and resources acquired once per host by an
+  async `acquire` (a portal dialog, MediaProjection consent), never per
+  session. `PlatformBackend<P>` (`native.rs`) is the neutral glue: the desktop
+  checks around each capture, pointer read and input, the release obligation
+  of held input (`input/held.rs`), input validation, pointer confinement
+  (`input/cursor.rs`) and the video source's lifetime live there once.
+  Compile-time facts are associated consts (`Injector::LOCK`,
+  `CursorSource::MODE`, `VideoSource::DRAIN`); what varies by machine is a
+  method (`can_lock`, `mode`, `available`), which `describe` reports per
+  session. Failures carry a `FailureKind`, never a text to parse.
+
+`platform::Current` is the build's platform: `windows::Windows`, else
+`unsupported::Unsupported`, whose parts are uninhabited and which refuses
+before a host registers (`HostSupport::reason` is `platform`). The only
+platform `cfg`s above `platform/` are the viewer's Android 60 FPS rule, the
+public `windows` module, the `privileged` facade's Windows operations, and
+lint allowances for neutral code (`codec`, `oop`) that only Windows uses yet.
+
+```
+crates/pb-mapper-desktop/src/
+  backend.rs  native.rs  launch.rs  modes.rs     the seams and the glue
+  codec/annexb.rs                                Annex B NAL scan, parameter sets
+  input/{held,cursor}.rs                         release obligation, confinement
+  oop/{proto,ipc,client,server}.rs               the out-of-process backend
+  platform/mod.rs  unsupported.rs  waiter.rs     traits, Current, facade
+  platform/windows/{desktop,video,input,cursor,still,waiter,timer,mf,dpapi}.rs
+  platform/windows/helper/                       service, install, worker, pipes
+  privileged/                                    public helper facade
+```
+
+| Part | Windows |
+| --- | --- |
+| `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope |
+| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video.rs`), drained every 2 ms |
+| `Input` | enigo, `SetCursorPos` for absolute moves, `LockWorkStation` |
+| `Cursor` | `GetCursorInfo` |
+| `Modes` / `Still` | `NoModes` / xcap JPEG |
+
+### Adding an operating system
+
+1. `platform/<os>/` implementing `Platform` and its parts; dependencies under
+   `[target.'cfg(..)'.dependencies]`.
+2. An arm of `Current` (Linux instead picks X11 or Wayland once per host).
+3. Its `HostSupport`: whether it can host now, and why not.
+4. A CI job running the crate's tests on that OS, and an acceptance
+   procedure on hardware.
+5. New wire vocabulary only behind a capability: `os_<os>` already exists;
+   a port adds what it needs, such as `cursor_embedded`, `PermissionMissing`
+   or `ConsentRevoked` states, or a portal's display picker.
+
+A capture and encoder that are separate on a platform join statically:
+`Pipeline<C: Capturer, E: Encoder<Frame = C::Frame, Device = C::Device>>`
+implements `VideoSource`, so a CPU copy between them would be a type error.
+These traits arrive with the first split platform (X11), not before:
+
+```rust
+trait Capturer { type Grant; type Frame; type Device;
+    fn open(grant: &Self::Grant, display: &Display, waker: &Waker) -> Result<Self>;
+    fn device(&self) -> &Self::Device;
+    fn acquire(&mut self) -> Result<Acquired<Self::Frame>>; } // New | Unchanged | WouldBlock
+trait Encoder { type Frame; type Device; const DRAIN: Option<Duration>;
+    fn encodes(device: &Self::Device, codec: VideoCodec) -> bool;
+    fn open(device: &Self::Device, size: VideoSize, codec: VideoCodec,
+            limits: VideoLimits, rate: VideoRate) -> Result<Self>;
+    fn set_rate(&mut self, rate: VideoRate) -> Result<()>;
+    fn submit(&mut self, frame: &Self::Frame, keyframe: bool, duplicate: bool) -> Result<()>;
+    fn drain(&mut self) -> Result<Option<EncodedFrame>>;
+    fn pending(&self) -> usize; fn codec(&self) -> VideoCodec; }
+```
+
+- **Linux, X11** (the first split platform): MIT-SHM capture plus XDamage,
+  pulled like Windows; VA-API encode (openh264 as the fallback); input through
+  enigo's XTest backend and `XWarpPointer`; RandR modes through x11rb; xcap
+  stills. Lock is per desktop environment, so `can_lock` asks at run time.
+- **Linux, Wayland**: one portal session (ScreenCast and RemoteDesktop) as the
+  `Grant`, with a restore token sealed by the host's trust store so the dialog
+  appears once; PipeWire DMA-BUFs into VA-API (or one GStreamer pipeline), a
+  pushing source (`DRAIN = None`) that wakes thread C; input through the
+  portal or libei; the cursor embedded or separate as the portal grants;
+  `NoModes`; the portal picks the display.
+- **macOS**: ScreenCaptureKit into VideoToolbox, zero-copy and pushing;
+  `CGEventPost`, with keys on the main queue; `CGDisplay` modes with
+  `kCGConfigureForAppOnly`, which reverts by itself; TCC permissions as the
+  `Grant`, which `HostSupport` reports when missing.
+- **Android**: MediaProjection's VirtualDisplay writes into MediaCodec's input
+  surface, so the platform implements `VideoSource` directly and has no
+  still (`NoStill`) and no modes; input through an AccessibilityService;
+  no cursor (`CursorMode::None`); consent once per host, as the `Grant`.
+
+A privileged agent on another OS (a root systemd unit for the greeter, a
+LaunchDaemon with a LaunchAgent) serves `PlatformBackend<P>` through `oop`
+over its own transport and peer check; the protocol, framing, client and
+server are already neutral and tested over an in-memory duplex on every
+target. Hosting on a new OS needs nothing from viewers; viewing on one needs a
+native decoder in that Flutter runner, attached to the existing video consumer
+exports.
 
 ## Video pipeline and performance model
 
