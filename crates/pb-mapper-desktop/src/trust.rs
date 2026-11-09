@@ -4,7 +4,7 @@
 //!
 //! A [`HostIdentity`] is a private key and a bearer grant: whoever holds it
 //! can be the host its invitation names. [`TrustFile`] keeps one sealed by a
-//! [`Sealer`] (on Windows, [`CurrentUser`] DPAPI, as the app does), bound to
+//! [`Sealer`] (on Windows, `CurrentUser` DPAPI, as the app does), bound to
 //! the relay and namespace it was made for, beside the embedder's own
 //! settings. Restarting with it keeps every saved invitation valid; revoking
 //! it is deleting the file.
