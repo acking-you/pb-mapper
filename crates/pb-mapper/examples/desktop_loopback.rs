@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 use desktop_support::{LocalRelay, Panel, Synthetic};
 use pb_mapper::ConnectOptions;
 use pb_mapper::desktop::{
-    Button, Host, HostOptions, HostState, Input, InputError, QualityPreset, VideoCodec, Viewer,
-    ViewerConfig, ViewerState, ViewerStatus,
+    Button, DesktopView, Host, HostOptions, HostState, Input, InputError, QualityPreset,
+    VideoCodec, Viewer, ViewerConfig, ViewerState, ViewerStatus,
 };
 
 type Outcome<T = ()> = Result<T, Box<dyn Error>>;
@@ -86,21 +86,17 @@ async fn main() -> Outcome {
     //    display's pixels, and text goes in chunks the host accepts.
     viewer.request_control(true)?;
     until(&viewer, "control", |status| status.controlling).await?;
-    let point = viewer
-        .view()
-        .display_point(0.25, 0.75)
-        .ok_or("no display to point at")?;
-    send(&viewer, std::slice::from_ref(&point)).await?;
+    send(&viewer, |view| Some(vec![view.display_point(0.25, 0.75)?])).await?;
     let click = [true, false].map(|down| Input::Button {
         button: Button::Left,
         down,
         drag_start: false,
     });
-    send(&viewer, &click).await?;
+    send(&viewer, |_| Some(click.to_vec())).await?;
     let text = "Hello from the loopback desktop. ".repeat(40);
     let chunks: Vec<Input> = Input::text_chunks(&text).collect();
     for chunk in &chunks {
-        send(&viewer, std::slice::from_ref(chunk)).await?;
+        send(&viewer, |_| Some(vec![chunk.clone()])).await?;
     }
     let sent = 1 + click.len() + chunks.len();
     let started = Instant::now();
@@ -188,11 +184,16 @@ async fn main() -> Outcome {
     Ok(())
 }
 
-/// Queue one batch, waiting out a picture that is not current yet.
-async fn send(viewer: &Viewer, batch: &[Input]) -> Outcome {
+/// Queue the batch `batch` makes of the current view, under that view's
+/// generation, so its points belong to the display they were taken from.
+/// While no picture of a generation is current yet, the batch is made again
+/// from a newer view.
+async fn send(viewer: &Viewer, batch: impl Fn(&DesktopView) -> Option<Vec<Input>>) -> Outcome {
     let started = Instant::now();
     loop {
-        match viewer.input(viewer.view().generation, batch) {
+        let view = viewer.view();
+        let inputs = batch(&view).ok_or("no display to point at")?;
+        match viewer.input(view.generation, &inputs) {
             Ok(()) => return Ok(()),
             Err(InputError::NotFresh) if started.elapsed() < Duration::from_secs(5) => {
                 tokio::time::sleep(Duration::from_millis(10)).await;

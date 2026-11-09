@@ -24,8 +24,8 @@ use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
 
 use pb_mapper::desktop::{
-    Button, Input, InputError, Invitation, Key, Pull, VideoCodec, Viewer, ViewerConfig,
-    ViewerStatus,
+    Button, DesktopView, Input, InputError, Invitation, Key, Pull, VideoCodec, Viewer,
+    ViewerConfig, ViewerStatus,
 };
 use pb_mapper::{Client, ClientConfig, ConnectOptions};
 
@@ -101,26 +101,29 @@ async fn control(viewer: &Viewer, click: bool, text: Option<&str>, enter: bool) 
     // A circle around the centre, in display pixels from video fractions.
     for step in 0..=48u8 {
         let angle = f32::from(step) / 48.0 * TAU;
-        let view = viewer.view();
-        let point = view
-            .display_point(0.5 + 0.1 * angle.cos(), 0.5 + 0.1 * angle.sin())
-            .ok_or("the host has not described its display")?;
-        send(viewer, &[point]).await?;
+        let (x, y) = (0.5 + 0.1 * angle.cos(), 0.5 + 0.1 * angle.sin());
+        send(viewer, |view| Some(vec![view.display_point(x, y)?])).await?;
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
     if click {
-        let centre = viewer.view().display_point(0.5, 0.5).ok_or("no display")?;
         let press = |down| Input::Button {
             button: Button::Left,
             down,
             drag_start: false,
         };
         // One batch: the move and the click arrive together, in order.
-        send(viewer, &[centre, press(true), press(false)]).await?;
+        send(viewer, |view| {
+            Some(vec![
+                view.display_point(0.5, 0.5)?,
+                press(true),
+                press(false),
+            ])
+        })
+        .await?;
     }
     if let Some(text) = text {
         for chunk in Input::text_chunks(text) {
-            send(viewer, &[chunk]).await?;
+            send(viewer, |_| Some(vec![chunk.clone()])).await?;
         }
     }
     if enter {
@@ -128,7 +131,7 @@ async fn control(viewer: &Viewer, click: bool, text: Option<&str>, enter: bool) 
             key: Key::Enter,
             down,
         };
-        send(viewer, &[key(true), key(false)]).await?;
+        send(viewer, |_| Some(vec![key(true), key(false)])).await?;
     }
     // Revoking control, or releasing input, discards input still queued:
     // give the last batch a moment to leave first.
@@ -138,20 +141,28 @@ async fn control(viewer: &Viewer, click: bool, text: Option<&str>, enter: bool) 
     Ok(())
 }
 
-/// Queue one batch, meeting every way input can be refused.
-async fn send(viewer: &Viewer, batch: &[Input]) -> Outcome {
+/// Queue the batch `batch` makes of the current view, under that view's
+/// generation: its points belong to the display of the picture they were
+/// taken from. Meets every way input can be refused.
+async fn send(viewer: &Viewer, batch: impl Fn(&DesktopView) -> Option<Vec<Input>>) -> Outcome {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(10) {
-        match viewer.input(viewer.view().generation, batch) {
+        let view = viewer.view();
+        let inputs = batch(&view).ok_or("the host has not described its display")?;
+        match viewer.input(view.generation, &inputs) {
             Ok(()) => return Ok(()),
-            // No current picture yet (a new generation, a pause): wait for
-            // the renderer to present one.
+            // No current picture of this generation yet (a new display, the
+            // secure desktop, a pause): wait for the renderer to present one,
+            // then make the batch again from its view.
             Err(InputError::NotFresh) => tokio::time::sleep(Duration::from_millis(10)).await,
             // Revoked by the host, or by congestion, which drops queued
-            // input: ask again, and send once granted.
+            // input: ask again, and leave this batch unsent. Input is never
+            // replayed: the screen may have moved on since it was meant.
             Err(InputError::NotControlling | InputError::Congestion) => {
                 viewer.request_control(true)?;
                 until(viewer, "control again", |status| status.controlling).await?;
+                println!("control was lost and won back; that input was dropped");
+                return Ok(());
             }
             Err(InputError::Closed) => return Err("the session ended".into()),
             // Outside the display, more than 1024 bytes of text, a wheel
