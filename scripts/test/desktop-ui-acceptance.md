@@ -20,7 +20,7 @@ On the Windows host, from the repository root, in three terminals:
 cargo build --release -p pb-mapper-desktop --example deployed --example video_bench
 target/release/examples/deployed.exe APP_CONFIG_PATH target/desktop-acceptance serve 600 --tcp --control --feedback-log
 node scripts/test/desktop-bootstrap.cjs target/desktop-acceptance        # after "host_ready"
-target/release/examples/video_bench.exe 600 60 --pattern-only            # moving content
+target/release/examples/video_bench.exe 300 60 --pattern-only            # moving content, 300 s at most
 ```
 
 - `APP_CONFIG_PATH` is an existing local app configuration that may issue a
@@ -376,11 +376,15 @@ statements stay until the owner accepts fluidity.
      the display is back at its own mode once the app is open again.
    - `display_mode_probe <config.json>` (built with
      `cargo build --release -p pb-mapper-desktop --example display_mode_probe`,
-     against a local relay with a throwaway key) records every display's
-     mode, runs Fit local with Original, disconnect, revoke and a killed host,
-     checks each display is back after each, and prints
-     `display_mode_probe passed` with the modes before and after. `--list`
-     only prints the modes, and `--restore` puts every display back. Add
+     against a local relay with a throwaway key) first replays a journal an
+     interrupted run left, then records every display's mode, runs Fit local
+     with Original, disconnect, revoke and a killed host, checks each display
+     is back after each, and prints the modes before and after, the input
+     messages it sent (0) and `display_mode_probe passed`. Fit local always
+     changes the mode (on a 1920x1080 display, the largest smaller mode). On
+     a failure or Ctrl-C it kills its child host and waits for the ordinary
+     desktop to put every display back. `--list` only prints the modes, and
+     `--restore` puts every display back. Add
      `--owner-change --fullscreen-check` only in the VM, and record the
      `CDS_FULLSCREEN` line.
 
