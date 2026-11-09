@@ -195,15 +195,25 @@ pub(super) fn load(directory: &Path) -> Result<Option<Saved>, CtlError> {
     }
     Ok(Some(saved))
 }
+/// A display id that does not resolve now (a monitor undocked, or replugged
+/// under a new id while sharing) keeps the device the stored grant names for
+/// the same id, so `load` finds the display again once it is back.
 pub(super) fn save(directory: &Path, saved: &Saved) -> Result<(), CtlError> {
-    file(directory)
-        .save(&Remembered {
-            scope: saved.scope.clone(),
-            settings: saved.settings.clone(),
-            identity: saved.identity.clone(),
-            display_device: saved.display_device.clone(),
-        })
-        .map_err(err)
+    let file = file(directory);
+    let display_device = saved.display_device.clone().or_else(|| {
+        file.load()
+            .ok()
+            .flatten()
+            .filter(|stored| stored.settings.display_id == saved.settings.display_id)
+            .and_then(|stored| stored.display_device)
+    });
+    file.save(&Remembered {
+        scope: saved.scope.clone(),
+        settings: saved.settings.clone(),
+        identity: saved.identity.clone(),
+        display_device,
+    })
+    .map_err(err)
 }
 /// Replaces `path` with `bytes` all at once, so a crash leaves the old file
 /// or the new one, never a torn one.
@@ -326,6 +336,59 @@ mod tests {
             Some(ErrorCode::Io)
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A display that is not attached when a grant is saved again keeps the
+    /// device name it had, so it is found again when it comes back.
+    #[test]
+    fn a_display_away_at_a_save_keeps_its_device() {
+        let root =
+            std::env::temp_dir().join(format!("pb-desktop-trust-device-{}", std::process::id()));
+        let scope = Scope {
+            directory: root.clone(),
+            relay: "relay:7666".into(),
+            namespace: 1,
+        };
+        let settings = Settings {
+            service: "desktop:docked".into(),
+            // No display has this id here.
+            display_id: u32::MAX,
+            allow_control: false,
+            relay_only: false,
+            privileged: false,
+            auto_start: true,
+            background: false,
+        };
+        let identity = HostIdentity::generate().unwrap();
+        let docked = Saved {
+            display_device: Some(r"\\.\DISPLAY99".into()),
+            ..Saved::new(&scope, settings.clone(), &identity).unwrap()
+        };
+        save(&root, &docked).unwrap();
+        let undocked = Saved::new(&scope, settings, &identity).unwrap();
+        assert_eq!(undocked.display_device, None);
+        save(&root, &undocked).unwrap();
+        let stored = load(&root).unwrap().unwrap();
+        assert_eq!(stored.display_device.as_deref(), Some(r"\\.\DISPLAY99"));
+        // Another display chosen meanwhile names its own device, or none.
+        let moved = Saved {
+            settings: Settings {
+                display_id: u32::MAX - 1,
+                ..stored.settings.clone()
+            },
+            ..stored
+        };
+        save(
+            &root,
+            &Saved {
+                display_device: None,
+                ..moved
+            },
+        )
+        .unwrap();
+        assert_eq!(load(&root).unwrap().unwrap().display_device, None);
+        revoke(&root).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]
