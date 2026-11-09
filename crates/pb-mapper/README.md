@@ -218,7 +218,7 @@ acceptance and the 60+ FPS end-to-end UI target are still unverified. See the
 | `desktop_viewer` | any OS | `ViewerConfig::for_decoders` for an H.264 decoder; every `ConnectError`; a thread recording Annex B to `remote.h264` for `ffplay`; status and metrics; `--resolution`, `--quality`, `--relay-only`, `--lan-transport` |
 | `desktop_control` | any OS, against a host you own | Taking control, `display_point`, batches, `text_chunks`, every `InputError`, `release_input` on the way out |
 | `desktop_supervised` | any OS, no setup | `Supervisor` through an H.265 decoder failure, a host restart, a stall and a stop |
-| `desktop_display_mode` | any OS, against a host you own; `desktop_loopback --serve` is the safe one | The host display's `ModeList`; `--fit WxH`, `--mode WxH`, `--original`; every `DisplayModeError`; a refusal's notice; the mode put back at the disconnect |
+| `desktop_display_mode` | any OS, against a host you own; `desktop_loopback --serve` is the safe one | The host display's `ModeList`; `--fit WxH`, `--mode WxH`, `--original`; a `DisplayModeError` the viewer refuses with, and the host's refusal notice; the mode put back at the disconnect |
 
 `cargo run -p pb-mapper --features desktop --example desktop_loopback` needs no
 relay of your own and runs in CI.
@@ -227,11 +227,11 @@ relay of your own and runs in CI.
 
 The SDK carries video and ships no decoder. Each `VideoUnit` is one Annex B
 access unit of H.264 or H.265, or one JPEG picture, with its codec, size,
+`keyframe`, `discontinuity`, `generation`, `frame_id` and `pts_us`. Offer only
 what you decode: `ViewerConfig::for_decoders(Decoders { h264, h265 }, ..)`
 makes the offer and fits the picture inside each decoder's largest size; by
 hand, `ViewerConfig.codecs` lists H.264 or JPEG or both, and H.265 beside them
 when you decode it too. The host picks one for the session.
-beside them when you decode it too, and the host picks one for the session.
 Decode with what the platform has (Media Foundation, VideoToolbox, MediaCodec,
 openh264, FFmpeg) on the consumer's own thread: `VideoConsumer::next` blocks,
 and never on Tokio. The sink keeps only the newest decodable units: when the

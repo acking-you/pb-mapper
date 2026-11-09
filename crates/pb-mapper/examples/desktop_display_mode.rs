@@ -24,8 +24,8 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 
 use pb_mapper::desktop::{
-    Decoders, DisplayModeError, Invitation, Mode, ModeList, ModeTarget, NoticeCode, Pull,
-    Resolution, Viewer, ViewerConfig, ViewerStatus,
+    Decoders, Invitation, Mode, ModeList, ModeTarget, NoticeCode, Pull, Resolution, Viewer,
+    ViewerConfig, ViewerStatus,
 };
 use pb_mapper::{Client, ClientConfig, ConnectOptions};
 
@@ -90,15 +90,7 @@ async fn main() -> Outcome {
         Ok(mode) => mode,
         Err(failure) => {
             viewer.stop().await?;
-            return Err(match failure {
-                DisplayModeError::NotOffered => "the host offers no display modes",
-                DisplayModeError::NotControlling => "control was lost before the change",
-                DisplayModeError::NoFit => "no mode of the host's fits that size",
-                DisplayModeError::NotListed => "the host does not list that mode",
-                DisplayModeError::Closed => "the session ended",
-                _ => "the change was refused",
-            }
-            .into());
+            return Err(failure.into());
         }
     };
     println!("asked for {}x{}", mode.width, mode.height);

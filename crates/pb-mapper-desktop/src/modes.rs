@@ -120,6 +120,18 @@ pub enum DisplayModeError {
     /// The session has ended.
     Closed,
 }
+impl std::fmt::Display for DisplayModeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotOffered => "the host offers no display modes",
+            Self::NotControlling => "this viewer does not control the host",
+            Self::NoFit => "no mode of the host's display fits that size",
+            Self::NotListed => "the host does not list that mode",
+            Self::Closed => "the session has ended",
+        })
+    }
+}
+impl std::error::Error for DisplayModeError {}
 
 /// A display mode command for thread C, in order with input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
