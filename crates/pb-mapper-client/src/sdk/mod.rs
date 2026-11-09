@@ -19,8 +19,8 @@ pub use error::{Error, Result};
 pub use handle::{Connection, Registration};
 pub(crate) use types::DirectPolicy;
 pub use types::{
-    ConnectOptions, LegacyProtocol, PathPolicy, PortMapping, RegisterOptions, RemoteId,
-    ServiceConnection, Transport, TunnelStatus,
+    ConnectOptions, LanTransport, LegacyProtocol, PathPolicy, PortMapping, RegisterOptions,
+    RemoteId, ServiceConnection, Transport, TunnelStatus,
 };
 
 /// The SDK version compiled into this process.

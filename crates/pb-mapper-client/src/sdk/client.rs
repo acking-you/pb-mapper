@@ -26,7 +26,7 @@ use super::admin::Admin;
 use super::error::{AddressSnafu, Result, StatusSnafu};
 use super::handle::{Connection, LiveTunnel, Registration};
 use super::types::{RemoteId, ServiceConnection, Transport, TunnelStatus};
-use super::{ConnectOptions, DirectPolicy, PathPolicy, PortMapping, RegisterOptions};
+use super::{ConnectOptions, DirectPolicy, LanTransport, PathPolicy, PortMapping, RegisterOptions};
 use crate::client::run_client_side_cli_recovering_with_path;
 use crate::client::status::get_status_with_credential;
 use crate::server::{ServerTunnelOptions, StatusCallback, run_server_side_cli_recovering};
@@ -291,6 +291,7 @@ impl Client {
             idle_timeout,
             port_mapping,
             lan_first,
+            lan_tcp,
         } = options;
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
@@ -306,7 +307,13 @@ impl Client {
             .prepare_worker(&request.key, &request.local_addr)
             .await?;
         let credential = self.credential();
-        let direct = worker.direct_policy(allow_direct, port_mapping, lan_first);
+        let direct = worker.direct_policy(
+            allow_direct,
+            port_mapping,
+            lan_first,
+            LanTransport::Quic,
+            lan_tcp,
+        );
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_server_side_cli_recovering::<TcpStreamProvider>(
@@ -402,6 +409,8 @@ impl Client {
             options.path == PathPolicy::Auto,
             options.port_mapping,
             options.lan_first,
+            options.lan_transport,
+            false,
         );
         let handle = worker.spawn(move |context| async move {
             context.remote_addr.start();
@@ -481,6 +490,8 @@ impl Client {
             options.path == PathPolicy::Auto,
             options.port_mapping,
             options.lan_first,
+            options.lan_transport,
+            false,
         );
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
@@ -752,12 +763,16 @@ struct TunnelWorker {
 impl TunnelWorker {
     /// How this tunnel's direct setups go, if it has any: how it maps its
     /// direct endpoint's port and whether it tries a shared local network
-    /// first, both noted in its diagnostics from the start.
+    /// first, both noted in its diagnostics from the start; and what that
+    /// network carries: what a consumer asks for, and whether a provider
+    /// serves TCP.
     fn direct_policy(
         &self,
         direct: bool,
         port_mapping: PortMapping,
         lan_first: bool,
+        lan_transport: LanTransport,
+        lan_tcp: bool,
     ) -> DirectPolicy {
         let port_mapping = if direct && cfg!(feature = "port-mapping") {
             port_mapping
@@ -775,6 +790,12 @@ impl TunnelWorker {
         DirectPolicy {
             port_mapping,
             lan_first,
+            lan_transport: if direct {
+                lan_transport
+            } else {
+                LanTransport::Quic
+            },
+            lan_tcp: direct && lan_tcp,
         }
     }
 

@@ -554,6 +554,7 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
                 },
                 port_mapping: args.port_mapping.into(),
                 lan_first: args.lan_first,
+                ..Default::default()
             },
         )
         .await?;

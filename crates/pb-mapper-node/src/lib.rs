@@ -1283,6 +1283,7 @@ impl Client {
             idle_timeout: Some(Duration::from_millis(idle_timeout_ms as u64)),
             port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
             lan_first: request.lan_first.unwrap_or(true),
+            ..Default::default()
         };
         let registration = self
             .inner
@@ -1311,6 +1312,7 @@ impl Client {
                     path,
                     port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
                     lan_first: request.lan_first.unwrap_or(true),
+                    ..Default::default()
                 },
             )
             .await
