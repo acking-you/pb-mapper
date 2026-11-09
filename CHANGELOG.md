@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.11.0] - 2026-11-10
 - Ask for the remote display's own size by default. A viewer that has not chosen a resolution asks for the remote display's own size, up to 4K, fitted inside the largest picture this device's decoder takes, instead of 1080p; 720p, 1080p and 1440p stay choices kept per computer, and the Display menu says how large the default goes on this device. A phone whose H.265 decoder stops at 1080p keeps H.265 and is sent 1080p. A computer remembered by an earlier version with 1080p reads as the default, since that version wrote 1080p whether it was chosen or not; choose 1080p again to keep it. Displays above 4K are still fitted into 3840×2160, a portrait display is still sent in landscape bounds, and 4K at 60 FPS has not been measured.
 - Change the remote computer's resolution from the desktop viewer. While you control a Windows computer, **Display → Remote resolution** lists its display's modes and **Fit local**, which picks this display's size or the nearest it offers; **Original** puts its own back. The change is dynamic and never written to the registry. The host puts its mode back when the session ends, when control is revoked, or from **Restore** on its card, which says the resolution was changed; after a crash, the next start does it. A change the owner makes meanwhile is left alone. A remembered computer keeps Fit local and applies it again whenever you gain control. Phones do not offer it.
 - Update the Windows desktop service once more: display modes need helper protocol 7 (`.v7` pipes), and **Update** installs it.

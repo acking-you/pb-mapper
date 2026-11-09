@@ -184,7 +184,7 @@ Worth knowing:
 
 ```toml
 [dependencies]
-pb-mapper = "0.10"
+pb-mapper = "0.11"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -304,8 +304,7 @@ computer, changes that computer's resolution to **Fit local**.
 **In your app:**
 
 ```toml
-# Not on crates.io yet: the remote desktop ships in the next release.
-pb-mapper = { git = "https://github.com/acking-you/pb-mapper", features = ["desktop"] }
+pb-mapper = { version = "0.11", features = ["desktop"] }
 ```
 
 ```rust

@@ -111,7 +111,7 @@ relay 只公布 UDP 端口号，客户端把它和自己拨通 relay 时用的�
 
 ```toml
 [dependencies]
-pb-mapper = "0.10"
+pb-mapper = "0.11"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -218,8 +218,7 @@ for (let s = conn.status(); s !== "stopped" && !s.startsWith("failed");) {
 **在你的应用里：**
 
 ```toml
-# 尚未发布到 crates.io：远程桌面随下一个版本发布
-pb-mapper = { git = "https://github.com/acking-you/pb-mapper", features = ["desktop"] }
+pb-mapper = { version = "0.11", features = ["desktop"] }
 ```
 
 ```rust

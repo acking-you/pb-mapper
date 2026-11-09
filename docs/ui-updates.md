@@ -82,9 +82,10 @@ tray menus during background status updates. Build 917 also fixes native popup
 reopening and preserves late menu clicks. Build 918 repairs Windows session
 privilege adjustment and distinguishes session-query failures from an absent
 owner login. Build 919 replaces the separate installed-app launch with an
-acknowledged, automatic restart after helper installation. The next distribution
-must use at least 920. The build counter is
-independent of the public version.
+acknowledged, automatic restart after helper installation. Builds 920 to 927
+were consumed by later issue #50 test distributions (version 0.10.2), and
+0.11.0 uses 928. The next distribution must use at least 929. The build counter
+is independent of the public version.
 
 To verify the complete Android build without publishing a release, run
 `release-ui.yml` with `android_verify_only=true` against the desired branch.
