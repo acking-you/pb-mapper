@@ -1873,4 +1873,43 @@ mod tests {
             ..saved
         }));
     }
+
+    /// A new handle's state holds the defaults and no credential until it is
+    /// told its directory, and then takes that directory's configuration.
+    #[tokio::test]
+    async fn a_state_reads_nothing_until_its_directory_arrives() {
+        let _guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+        set_process_msg_header_key(None).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "pb-mapper-ffi-test-unloaded-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(root.join("pb-mapper-ui")).unwrap();
+        let saved = AppConfig {
+            server_address: "relay.example:7666".into(),
+            msg_header_key: pb_mapper_testkit::TEST_ADMIN_KEY.into(),
+            ..AppConfig::default()
+        };
+        std::fs::write(
+            root.join("pb-mapper-ui").join("config.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+
+        let mut state = PbMapperState::unloaded();
+        assert!(state.config == AppConfig::default());
+        assert!(!pb_mapper_core::checksum::process_credential_configured());
+
+        state
+            .set_app_directory_path(Some(root.to_string_lossy().into_owned()))
+            .unwrap();
+        assert!(state.config == saved);
+        assert!(pb_mapper_core::checksum::process_credential_configured());
+
+        set_process_msg_header_key(None).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

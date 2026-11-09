@@ -27,13 +27,14 @@ impl PbMapperState {
         self.local_server_status_refreshing
             .store(false, Ordering::Release);
     }
-    pub fn new(app_directory_path: Option<String>) -> Self {
-        let config_dir = Self::get_config_dir(&app_directory_path);
-        tracing::info!("Using config directory: {:?}", config_dir);
-
+    /// A state that has read nothing: the default configuration and no
+    /// credential, until `set_app_directory_path` names its directory. Every
+    /// client sends that first (the app an empty path on desktop, meaning the
+    /// platform's own), so the FFI handle starts here rather than reading a
+    /// directory it may never be pointed at.
+    pub fn unloaded() -> Self {
         let local_server_status_cache = Arc::new(RwLock::new(LocalServerStatus::default()));
-
-        let mut state = Self {
+        Self {
             server_handle: None,
             server_auth: None,
             server_shutdown_token: None,
@@ -48,25 +49,21 @@ impl PbMapperState {
             service_runtime: HashMap::new(),
             client_runtime: HashMap::new(),
             config: AppConfig::default(),
-            config_dir,
-            app_directory_path,
+            config_dir: Self::get_config_dir(&None),
+            app_directory_path: None,
             local_server_status_cache,
             local_server_status_last_update: Arc::new(RwLock::new(None)),
             local_server_status_refreshing: Arc::new(AtomicBool::new(false)),
             registering: Arc::new(SyncMutex::new(HashSet::new())),
             connecting: Arc::new(SyncMutex::new(HashSet::new())),
-        };
-        state.config = state.load_config().unwrap_or_else(|e| {
-            tracing::warn!("Could not load config: {}, using defaults", e);
-            AppConfig::default()
-        });
-        tracing::info!(
-            "Loaded configuration: server_address={}, keep_alive={}, msg_header_key_set={}",
-            state.config.server_address,
-            state.config.keep_alive_enabled,
-            !state.config.msg_header_key.is_empty()
-        );
-        if let Err(e) = state.apply_msg_header_key_env() {
+        }
+    }
+
+    /// A state that loads the configuration in `app_directory_path` at once.
+    #[cfg(test)]
+    pub fn new(app_directory_path: Option<String>) -> Self {
+        let mut state = Self::unloaded();
+        if let Err(e) = state.set_app_directory_path(app_directory_path) {
             tracing::error!("Failed to apply MSG_HEADER_KEY during init: {}", e);
         }
         state
@@ -75,6 +72,7 @@ impl PbMapperState {
     pub fn set_app_directory_path(&mut self, path: Option<String>) -> Result<(), CtlError> {
         self.app_directory_path = path;
         self.config_dir = Self::get_config_dir(&self.app_directory_path);
+        tracing::info!("Using config directory: {:?}", self.config_dir);
 
         // Reload config from new location if exists
         match self.load_config() {
@@ -83,6 +81,12 @@ impl PbMapperState {
                 tracing::warn!("Failed to reload config after setting app dir: {}", e);
             }
         }
+        tracing::info!(
+            "Loaded configuration: server_address={}, keep_alive={}, msg_header_key_set={}",
+            self.config.server_address,
+            self.config.keep_alive_enabled,
+            !self.config.msg_header_key.is_empty()
+        );
         self.apply_msg_header_key_env()?;
 
         Ok(())

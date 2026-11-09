@@ -41,7 +41,8 @@ pub extern "C" fn pb_mapper_create() -> *mut PbMapperHandle {
         Err(_) => return ptr::null_mut(),
     };
 
-    let state = PbMapperState::new(None);
+    // Nothing is read until `pb_mapper_set_app_dir` says from where.
+    let state = PbMapperState::unloaded();
     let handle = PbMapperHandle {
         desktop: Default::default(),
         tunnel_events: Default::default(),
@@ -96,7 +97,9 @@ pub unsafe extern "C" fn pb_mapper_destroy(handle: *mut PbMapperHandle) {
     }
 }
 
-/// Set app directory path (mobile only). Empty or null resets to default.
+/// Set the app directory and load the configuration in it; empty or null
+/// means the platform's default directory. A new handle has read nothing, so
+/// every client calls this first.
 ///
 /// # Safety
 /// `handle` must be valid. `path` must be valid C string or null.
