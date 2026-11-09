@@ -69,6 +69,56 @@ pub fn native_backend(id: u32) -> Result<Box<dyn Backend>> {
     }
 }
 
+/// The platform's own capture and input for `options`. Refused before the
+/// host registers where there are none, so that no service is published only
+/// to fail every viewer at its encoder.
+pub(crate) fn native_launch(
+    options: &crate::HostOptions,
+) -> Result<std::sync::Arc<dyn crate::launch::Launch>> {
+    if !capabilities().host {
+        return Err(crate::error(if cfg!(windows) {
+            "Desktop hosting requires Windows Media Foundation"
+        } else {
+            "Desktop hosting currently requires Windows"
+        }));
+    }
+    #[cfg(windows)]
+    {
+        use crate::{Access, BackendCaps, DisplaySelection, HostOs, launch::Launcher};
+        let id = match &options.display {
+            DisplaySelection::Id(id) => *id,
+            DisplaySelection::Primary => windows::primary()?.id,
+            DisplaySelection::Device(name) => {
+                displays()?
+                    .into_iter()
+                    .find(|display| &display.name == name)
+                    .ok_or_else(|| crate::error("selected display is no longer available"))?
+                    .id
+            }
+        };
+        // The native desktop and the helper both lock the workstation.
+        let fallback = BackendCaps {
+            lock: true,
+            os: Some(HostOs::Windows),
+            ..BackendCaps::default()
+        };
+        Ok(match options.access {
+            Access::Ordinary => {
+                std::sync::Arc::new(Launcher::new(move || windows::create(id), fallback))
+            }
+            Access::Privileged => {
+                crate::helper::status().ensure_ready()?;
+                std::sync::Arc::new(Launcher::new(move || crate::helper::backend(id), fallback))
+            }
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = options;
+        Err(crate::error("Desktop hosting currently requires Windows"))
+    }
+}
+
 #[cfg(windows)]
 #[path = "windows.rs"]
 pub(crate) mod windows;

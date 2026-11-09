@@ -64,25 +64,19 @@ async fn blocked_video_does_not_block_local_stop() {
     let count = Arc::new(AtomicU32::new(0));
     let wake = Arc::new(Notify::new());
     let (captures, signal) = (count.clone(), wake.clone());
-    let host = Host::start_with_backend(
-        &client,
-        HostOptions {
-            service: "desktop:slow".into(),
-            display_id: 1,
-            allow_control: false,
-            allow_direct: false,
-            lan_first: true,
-        },
-        Arc::new(move || {
-            Ok(Box::new(LargeFrames {
+    let mut options = HostOptions::new("desktop:slow");
+    options.allow_direct = false;
+    let host = Host::builder(options)
+        .backend(move || {
+            Ok(LargeFrames {
                 count: captures.clone(),
                 wake: signal.clone(),
                 configured: false,
-            }))
-        }),
-    )
-    .await
-    .unwrap();
+            })
+        })
+        .start(&client)
+        .await
+        .unwrap();
     let (socket, connection) = client
         .connect_tcp(
             host.invitation().service.clone(),

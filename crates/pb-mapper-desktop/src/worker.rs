@@ -12,8 +12,9 @@
 mod tests;
 
 use crate::{
-    Backend, Button, ControlAdmission, ControlLease, DesktopContext, EncodedFrame, FailureKind,
-    Input, InputEvent, Result, VideoCodec, VideoLimits, VideoRate, error, failure_kind,
+    Backend, Button, ControlAdmission, ControlLease, Description, DesktopContext, EncodedFrame,
+    FailureKind, Input, InputEvent, Result, VideoCodec, VideoLimits, VideoRate, Waker, error,
+    failure_kind,
     idr::IdrReason,
     lane::{LANE_CAPACITY, LaneCommand},
     outgoing::{HostUnit, Push},
@@ -34,8 +35,18 @@ use std::{
 };
 use tokio::sync::oneshot;
 
-pub(crate) type Factory = Arc<dyn Fn() -> Result<Box<dyn Backend>> + Send + Sync>;
-type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+/// Thread C's time. Sessions run on `Monotonic`; tests step their own.
+pub(crate) trait Clock: Send + 'static {
+    fn now(&self) -> Instant;
+}
+/// The monotonic clock.
+pub(crate) struct Monotonic;
+impl Clock for Monotonic {
+    #[inline]
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
 
 /// An H.265 encoder failed in this process.
 static H265_FAILED: AtomicBool = AtomicBool::new(false);
@@ -60,8 +71,6 @@ pub(crate) const ENCODER_DEPTH: usize = 4;
 const LEASE_RENEW_MIN: Duration = Duration::from_millis(250);
 const CONTEXT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 const UNAVAILABLE_RETRY: Duration = Duration::from_millis(200);
-/// How often the ordinary backend's encoder is polled while it holds units.
-const DRAIN_POLL: Duration = Duration::from_millis(2);
 /// The longest the helper may block one drain call for encoder output.
 const HELPER_DRAIN_WAIT_MAX: Duration = Duration::from_millis(4);
 const CURSOR_INTERVAL: Duration = Duration::from_millis(16);
@@ -125,25 +134,29 @@ impl WorkerHandle {
 }
 
 /// Thread C before its session: it builds the backend at once, so that the
-/// host can ask what it encodes before it answers the viewer, then waits for
-/// `start`. Dropped unstarted, it drops the backend on its own thread.
+/// host can ask what it captures and encodes before it answers the viewer,
+/// then waits for `start`. Dropped unstarted, it drops the backend on its own
+/// thread.
 pub(crate) struct Prepared {
-    /// The backend's answer to `encodes_h265`, when it was asked.
-    h265: Option<oneshot::Receiver<bool>>,
-    start: oneshot::Sender<(Arc<SessionShared>, WorkerConfig)>,
-    thread: tokio::task::JoinHandle<WorkerExit>,
+    /// The backend's description. Nothing arrives when it could not be
+    /// built.
+    pub description: oneshot::Receiver<Result<Description>>,
+    pub start: oneshot::Sender<(Arc<SessionShared>, WorkerConfig)>,
+    pub thread: tokio::task::JoinHandle<WorkerExit>,
 }
 
-/// Start thread C on `factory`'s backend, asking it whether it encodes H.265
-/// when `probe_h265`.
-pub(crate) fn prepare(factory: Factory, probe_h265: bool) -> Prepared {
-    let (answer, h265) = oneshot::channel();
+/// Start thread C on `factory`'s backend, which describes itself at once,
+/// probing H.265 when `probe_h265`.
+pub(crate) fn prepare<B, F>(factory: F, probe_h265: bool) -> Prepared
+where
+    B: Backend,
+    F: FnOnce() -> Result<B> + Send + 'static,
+{
+    let (answer, description) = oneshot::channel();
     let (start, started) = oneshot::channel::<(Arc<SessionShared>, WorkerConfig)>();
     let thread = tokio::task::spawn_blocking(move || {
         let backend = factory().map(|mut backend| {
-            if probe_h265 {
-                let _ = answer.send(backend.encodes_h265());
-            }
+            let _ = answer.send(backend.describe(probe_h265));
             backend
         });
         let Ok((shared, config)) = started.blocking_recv() else {
@@ -152,22 +165,13 @@ pub(crate) fn prepare(factory: Factory, probe_h265: bool) -> Prepared {
         run(&shared, backend, config)
     });
     Prepared {
-        h265: probe_h265.then_some(h265),
+        description,
         start,
         thread,
     }
 }
 
 impl Prepared {
-    /// Whether the backend encodes H.265: false when it was not asked, could
-    /// not be built, or has not answered within `wait`.
-    pub async fn h265(&mut self, wait: Duration) -> bool {
-        let Some(answer) = self.h265.take() else {
-            return false;
-        };
-        matches!(tokio::time::timeout(wait, answer).await, Ok(Ok(true)))
-    }
-
     /// Run the session. Whoever cancels `shared.cancel`, C is woken at once.
     pub fn start(self, shared: Arc<SessionShared>, config: WorkerConfig) -> WorkerHandle {
         let (cancel, wake) = (shared.cancel.clone(), shared.wake.clone());
@@ -195,14 +199,13 @@ impl Prepared {
     }
 }
 
-fn run(
+fn run<B: Backend>(
     shared: &Arc<SessionShared>,
-    backend: Result<Box<dyn Backend>>,
+    backend: Result<B>,
     config: WorkerConfig,
 ) -> WorkerExit {
-    let clock: Clock = Arc::new(Instant::now);
     let started = Waiter::new(&shared.wake)
-        .and_then(|waiter| Ok((waiter, Engine::start(shared, backend?, config, clock)?)));
+        .and_then(|waiter| Ok((waiter, Engine::start(shared, backend?, config, Monotonic)?)));
     let (waiter, mut engine) = match started {
         Ok(started) => started,
         Err(failure) => {
@@ -235,10 +238,10 @@ enum Step {
 
 /// The engine of thread C: its backend, the desktop generation and the
 /// control grant, the pacer and the published state.
-struct Engine {
+struct Engine<B: Backend, K: Clock = Monotonic> {
     shared: Arc<SessionShared>,
-    backend: Box<dyn Backend>,
-    clock: Clock,
+    backend: B,
+    clock: K,
     codec: VideoCodec,
     limits: VideoLimits,
     nominal_fps: u32,
@@ -284,16 +287,17 @@ struct Engine {
     notice_until: Option<Instant>,
 }
 
-impl Engine {
+impl<B: Backend, K: Clock> Engine<B, K> {
     fn start(
         shared: &Arc<SessionShared>,
-        mut backend: Box<dyn Backend>,
+        mut backend: B,
         config: WorkerConfig,
-        clock: Clock,
+        clock: K,
     ) -> Result<Self> {
         config.limits.validate()?;
+        backend.bind(Waker(shared.wake.clone()));
         backend.configure_video(config.limits, config.nominal_fps)?;
-        let now = clock();
+        let now = clock.now();
         let pace_fps = shared.targets.pace_fps.load(Ordering::Acquire).max(1);
         Ok(Self {
             shared: shared.clone(),
@@ -333,7 +337,7 @@ impl Engine {
 
     fn iterate(&mut self) -> Step {
         let shared = self.shared.clone();
-        let now = (self.clock)();
+        let now = self.clock.now();
         if shared.cancel.is_cancelled() {
             return Step::Exit(WorkerExit::Cancelled);
         }
@@ -371,7 +375,7 @@ impl Engine {
         if let Some(failure) = self.fatal.take() {
             return Step::Exit(WorkerExit::CaptureFailed(failure));
         }
-        let now = (self.clock)();
+        let now = self.clock.now();
         self.sample_cursor(now);
         self.window.roll(now, &mut self.state);
         // Fine process timers while capturing serve the network tasks too;
@@ -405,7 +409,7 @@ impl Engine {
             if self.shared.cancel.is_cancelled() {
                 return false;
             }
-            let now = (self.clock)();
+            let now = self.clock.now();
             self.window.wait(now.saturating_duration_since(received));
             self.execute(command, now);
         }
@@ -476,7 +480,7 @@ impl Engine {
             if self.shared.cancel.is_cancelled() {
                 return false;
             }
-            let now = (self.clock)();
+            let now = self.clock.now();
             match command {
                 // The press that started the hold has waited it out.
                 LaneCommand::Input(event) if index == 0 => self.input(event, now),
@@ -754,6 +758,13 @@ impl Engine {
         !self.paused && self.unavailable.is_none() && self.streaming
     }
 
+    /// When to poll the encoder again after `at`. A push source wakes thread
+    /// C itself when it has output, so it is never polled sooner than the
+    /// next context check.
+    fn drain_after(&self, at: Instant) -> Instant {
+        at + self.backend.drain_poll().unwrap_or(CONTEXT_CHECK_INTERVAL)
+    }
+
     /// At most one backend capture or drain call.
     fn capture_step(&mut self, now: Instant) {
         let shared = self.shared.clone();
@@ -765,7 +776,7 @@ impl Engine {
                 && let Some(context) = &self.context
             {
                 let result = self.backend.drain_video(context, Duration::ZERO);
-                self.drain_due = (self.clock)() + DRAIN_POLL;
+                self.drain_due = self.drain_after(self.clock.now());
                 match result {
                     Ok(Some(frame)) => {
                         self.window.dwell(frame.format.encode_us);
@@ -815,8 +826,8 @@ impl Engine {
                     self.keyframe = false;
                     self.shared.idr.lock().answered(now);
                 }
-                let done = (self.clock)();
-                self.drain_due = done + DRAIN_POLL;
+                let done = self.clock.now();
+                self.drain_due = self.drain_after(done);
                 self.produced(result, done);
             } else {
                 // Transport backpressure or a full encoder, never
@@ -827,7 +838,7 @@ impl Engine {
         } else if self.backend.pending_video() > 0 {
             let wait = HELPER_DRAIN_WAIT_MAX.min(self.pacer.next().saturating_duration_since(now));
             let result = self.backend.drain_video(&context, wait);
-            let done = (self.clock)();
+            let done = self.clock.now();
             let drained = matches!(result, Ok(Some(_)));
             // The ordinary backend returns at once: poll it again shortly. A
             // helper that waited the whole time is polled again at once, and so
@@ -836,7 +847,7 @@ impl Engine {
                 if drained || (!wait.is_zero() && done.saturating_duration_since(now) >= wait) {
                     done
                 } else {
-                    done + DRAIN_POLL
+                    self.drain_after(done)
                 };
             self.produced(result, done);
         }
@@ -972,7 +983,7 @@ impl Engine {
             .min(self.cursor_due)
     }
 }
-impl Drop for Engine {
+impl<B: Backend, K: Clock> Drop for Engine<B, K> {
     fn drop(&mut self) {
         self.backend.release();
     }

@@ -133,17 +133,14 @@ async fn main() -> Result<()> {
     let consumer_server = consumer_override.unwrap_or(&server).to_string();
     if args.iter().any(|arg| arg == "--host") {
         let start = Instant::now();
-        let host = pb_mapper_desktop::Host::start(
-            &admin_client,
-            pb_mapper_desktop::HostOptions {
-                service: format!("desktop:registration-probe-{}", std::process::id()),
-                display_id: 0,
-                allow_control: false,
-                allow_direct: false,
-                lan_first: true,
-            },
-        )
-        .await?;
+        let mut options = pb_mapper_desktop::HostOptions::new(format!(
+            "desktop:registration-probe-{}",
+            std::process::id()
+        ));
+        // Registration alone is measured: no display is captured.
+        options.display = pb_mapper_desktop::DisplaySelection::Id(0);
+        options.allow_direct = false;
+        let host = pb_mapper_desktop::Host::start(&admin_client, options).await?;
         println!(
             "host_registered carrier={:?} elapsed_ms={}",
             admin_client.relay_transport(),

@@ -13,8 +13,8 @@
 //! selftest viewer take it, and `controller.json` hands it to the phone tool.
 use pb_mapper_client::sdk::{Client, ClientConfig, ConnectOptions, PathPolicy, RelayTransport};
 use pb_mapper_desktop::{
-    Host, HostOptions, Pull, QualityPreset, VideoCodec, VideoLimits, Viewer, ViewerConfig,
-    ViewerState,
+    DisplaySelection, Host, HostOptions, Pull, QualityPreset, VideoCodec, VideoLimits, Viewer,
+    ViewerConfig, ViewerState,
 };
 use serde::Deserialize;
 use std::{
@@ -115,7 +115,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = async {
         let client = Client::new(ClientConfig { server: config.server_address.clone(), credential: key.credential.clone(), keep_alive: true, namespace: None })?.with_relay_transport(config.relay_transport)?;
         let display = pb_mapper_desktop::displays()?.into_iter().next().ok_or("no display")?;
-        let host = Host::start(&client, HostOptions { service: format!("desktop:acceptance-{}",std::process::id()), display_id:display.id, allow_control:args.iter().any(|arg| arg == "--control"),allow_direct:true,lan_first:config.lan_first }).await?;
+        let mut options = HostOptions::new(format!("desktop:acceptance-{}", std::process::id()));
+        options.display = DisplaySelection::Id(display.id);
+        options.allow_control = args.iter().any(|arg| arg == "--control");
+        options.lan_first = config.lan_first;
+        let host = Host::start(&client, options).await?;
         // The phone tool follows `lan_first` as it follows the carrier, so
         // both ends run the host's arm and the report records it.
         let controller = serde_json::json!({"server":config.server_address,"credential":key.credential,"transport":config.relay_transport,"lan_first":config.lan_first,"invitation":host.invitation().encode(),"decoder_hints":!args.iter().any(|arg| arg == "--no-decoder-hints")});

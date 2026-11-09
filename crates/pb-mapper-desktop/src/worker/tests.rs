@@ -16,6 +16,17 @@ const LIMITS: VideoLimits = VideoLimits {
 };
 const MOVE: Input = Input::Move { x: 3, y: 3 };
 
+/// The fake backend's own reading of the engine's time.
+type Time = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// A clock the test sets.
+struct Manual(Arc<Mutex<Instant>>);
+impl Clock for Manual {
+    fn now(&self) -> Instant {
+        *self.0.lock()
+    }
+}
+
 /// What the fake backend was asked to do, at the engine's clock.
 #[derive(Default)]
 struct Log {
@@ -31,7 +42,7 @@ struct Log {
 #[derive(Clone)]
 struct Fake {
     log: Arc<Mutex<Log>>,
-    clock: Clock,
+    clock: Time,
     width: Arc<AtomicU32>,
     fail_input: Arc<AtomicBool>,
     fail_lock: Arc<AtomicBool>,
@@ -61,7 +72,7 @@ struct Fake {
     discard: Arc<AtomicBool>,
 }
 impl Fake {
-    fn new(clock: Clock) -> Self {
+    fn new(clock: Time) -> Self {
         Self {
             log: Arc::default(),
             clock,
@@ -222,7 +233,7 @@ fn config(admission: Option<Arc<dyn ControlAdmission>>) -> WorkerConfig {
 /// and the test plays B-recv and B-send through `shared`.
 struct Harness {
     shared: Arc<SessionShared>,
-    engine: Engine,
+    engine: Engine<Fake, Manual>,
     now: Arc<Mutex<Instant>>,
     fake: Fake,
     sequence: u64,
@@ -234,11 +245,16 @@ impl Harness {
     fn new(allowed: bool, admission: Option<Arc<dyn ControlAdmission>>) -> Self {
         let now = Arc::new(Mutex::new(Instant::now()));
         let time = now.clone();
-        let clock: Clock = Arc::new(move || *time.lock());
+        let clock: Time = Arc::new(move || *time.lock());
         let fake = Fake::new(clock.clone());
         let shared = session(allowed);
-        let engine =
-            Engine::start(&shared, Box::new(fake.clone()), config(admission), clock).unwrap();
+        let engine = Engine::start(
+            &shared,
+            fake.clone(),
+            config(admission),
+            Manual(now.clone()),
+        )
+        .unwrap();
         Self {
             shared,
             engine,
@@ -346,8 +362,7 @@ async fn input_lane_runs_before_capture_and_never_after_stop() {
     fake.delay = Duration::from_millis(30);
     fake.started = Some(started);
     let log = fake.log.clone();
-    let factory: Factory = Arc::new(move || Ok(Box::new(fake.clone())));
-    let mut worker = prepare(factory, false).start(shared.clone(), config(None));
+    let mut worker = prepare(move || Ok(fake), false).start(shared.clone(), config(None));
     let wait_for = |what: &str, done: &dyn Fn() -> bool| {
         let until = Instant::now() + Duration::from_secs(2);
         while !done() {
@@ -608,11 +623,12 @@ fn a_capture_that_keeps_failing_is_retried_every_unavailable_retry() {
 #[tokio::test]
 async fn unavailable_backend_reports_failure_and_stops() {
     let shared = session(false);
-    // Asked whether it encodes H.265, a backend that cannot be built says no
-    // at once, rather than when the host stops waiting.
-    let mut prepared = prepare(Arc::new(|| Err(error("desktop is locked"))), true);
+    // A backend that cannot be built describes nothing, and says so at once
+    // rather than when the host stops waiting.
+    let mut prepared = prepare(|| Err::<Fake, _>(error("desktop is locked")), true);
     let asked = Instant::now();
-    assert!(!prepared.h265(Duration::from_secs(5)).await);
+    let described = tokio::time::timeout(Duration::from_secs(5), &mut prepared.description).await;
+    assert!(matches!(described, Ok(Err(_))));
     assert!(asked.elapsed() < Duration::from_secs(2));
     let mut worker = prepared.start(shared.clone(), config(None));
     let exit = tokio::time::timeout(Duration::from_secs(2), worker.exited())

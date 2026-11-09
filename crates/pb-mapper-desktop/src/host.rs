@@ -1,15 +1,18 @@
 use crate::{
-    DesktopKind, Display, HostPath, HostState, HostStatus, HostViewer, Invitation, QualityPreset,
-    Result, VideoCodec, VideoLimits, VideoSize, error, platform,
+    Backend, BackendCaps, DesktopKind, Display, HostPath, HostState, HostStatus, HostViewer,
+    Invitation, QualityPreset, Result, VideoCodec, VideoLimits, VideoSize, error,
+    launch::{Launch, Launcher},
+    platform,
     protocol::{
-        CAPABILITY_H265, CAPABILITY_LOCK, HostMessage, RejectReason, SessionState, StopReason,
-        ViewerMessage, valid_capabilities,
+        CAPABILITY_H265, HostMessage, RejectReason, SessionState, StopReason, ViewerMessage,
+        valid_capabilities,
     },
     qos::scaled_size,
+    security::HostIdentity,
     session::{self, Session, stop_message},
     shared::Policy,
     wire,
-    worker::{self, Factory, WorkerConfig},
+    worker::{self, WorkerConfig},
 };
 use parking_lot::Mutex;
 use pb_mapper_client::sdk::{
@@ -17,6 +20,8 @@ use pb_mapper_client::sdk::{
     TunnelMetricsStream,
 };
 use std::{
+    marker::PhantomData,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -26,7 +31,7 @@ use std::{
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
-    sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, oneshot},
+    sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore},
     task::JoinSet,
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
@@ -36,93 +41,258 @@ use tokio_util::sync::CancellationToken;
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 /// A `Rejected` and the close after it.
 pub(crate) const REJECT_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
-/// How long `Accepted` waits for a new backend to say which display it
-/// captures and, for a viewer that decodes H.265, whether it encodes H.265;
-/// the viewer waits 5 s for `Accepted`. A slower answer leaves that session on
-/// H.264, its first IDR budgeted for the viewer's bounds.
+/// How long `Accepted` waits for a new backend to describe itself: which
+/// display it captures, what it can do and, for a viewer that decodes H.265,
+/// whether it encodes H.265; the viewer waits 5 s for `Accepted`. A slower
+/// answer leaves that session on H.264, its first IDR budgeted for the
+/// viewer's bounds, with the capabilities its launcher falls back to.
 const BACKEND_ANSWER_WAIT: Duration = Duration::from_secs(3);
 /// Connections in their handshake or session at once; one holds the viewer slot.
 const MAX_CONNECTIONS: usize = 8;
 
+/// Which display a host shares.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DisplaySelection {
+    /// The primary display.
+    #[default]
+    Primary,
+    /// The display of this [`Display::id`]. The id belongs to the running
+    /// system: a reboot or a mode change may give the display another one.
+    Id(u32),
+    /// The display of this [`Display::name`] (`\\.\DISPLAY1` on Windows),
+    /// which stays the same: the key to keep when a choice is saved.
+    Device(String),
+}
+
+/// How a host reaches the desktop it shares.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Access {
+    /// This process's own desktop, as its user.
+    #[default]
+    Ordinary,
+    /// The installed, authorized privileged helper, which also reaches the
+    /// secure desktop (UAC and the lock screen). Windows only.
+    Privileged,
+}
+
+/// What a host shares and how. Build it with [`HostOptions::new`], which
+/// takes every path default from [`RegisterOptions::default`]: a viewer on the
+/// same local network first, then a direct path, then the relay.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct HostOptions {
+    /// The registered service: `desktop:` and up to 128 ASCII letters,
+    /// digits, `.`, `_`, `:` or `-`.
     pub service: String,
-    pub display_id: u32,
+    pub display: DisplaySelection,
+    pub access: Access,
+    /// Whether a viewer may take control. Off by default: viewing only.
     pub allow_control: bool,
+    /// The registration's [`RegisterOptions::allow_direct`].
     pub allow_direct: bool,
     /// The registration's [`RegisterOptions::lan_first`]: probe a viewer's
     /// addresses on a shared local network first. Which path a session
     /// takes is the viewer's choice, under its own `ConnectOptions`.
     pub lan_first: bool,
+    /// The registration's [`RegisterOptions::lan_tcp`]: serve a viewer on the
+    /// same local network over TCP when it asks.
+    pub lan_tcp: bool,
+    /// Where an in-process host keeps what it must restore after a crash;
+    /// `None` is the platform's own directory. A privileged host never uses
+    /// it: the helper keeps its own, protected.
+    pub state_dir: Option<PathBuf>,
+}
+impl HostOptions {
+    pub fn new(service: impl Into<String>) -> Self {
+        let register = RegisterOptions::default();
+        Self {
+            service: service.into(),
+            display: DisplaySelection::default(),
+            access: Access::default(),
+            allow_control: false,
+            allow_direct: register.allow_direct,
+            lan_first: register.lan_first,
+            lan_tcp: register.lan_tcp,
+            state_dir: None,
+        }
+    }
+}
+
+/// The platform's own capture and input, through [`HostOptions::access`].
+pub struct Native;
+/// An embedder's backends, each built by the factory on its session's own
+/// thread.
+pub struct Custom<B, F> {
+    factory: F,
+    _backend: PhantomData<fn() -> B>,
+}
+/// What a host starts from once its source is known: the platform's own
+/// (`native`, which a restart builds again for its new options), an
+/// embedder's, or one the crate built itself (the background host's helper
+/// client).
+pub(crate) struct Launched {
+    launch: Arc<dyn Launch>,
+    native: bool,
+}
+
+/// How a [`Host`] is started: [`Host::builder`], then any of `identity`,
+/// `admission` and `backend`, then `start`.
+pub struct HostBuilder<S = Native> {
+    options: HostOptions,
+    identity: Option<HostIdentity>,
+    admission: Option<Arc<dyn crate::ControlAdmission>>,
+    source: S,
+}
+impl<S> HostBuilder<S> {
+    /// Resume an explicitly authorized grant: the host keeps this identity,
+    /// and so the invitation a viewer saved. Without one it generates a new
+    /// identity. Revoke durable access by discarding the saved identity.
+    pub fn identity(mut self, identity: HostIdentity) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+    /// Coordinate control with the embedding application's other input
+    /// writers.
+    pub fn admission(mut self, admission: Arc<dyn crate::ControlAdmission>) -> Self {
+        self.admission = Some(admission);
+        self
+    }
+    /// Capture and inject with the embedder's backends instead of the
+    /// platform's.
+    pub fn backend<B, F>(self, factory: F) -> HostBuilder<Custom<B, F>>
+    where
+        B: Backend,
+        F: Fn() -> Result<B> + Send + Sync + 'static,
+    {
+        self.source(Custom {
+            factory,
+            _backend: PhantomData,
+        })
+    }
+    pub(crate) fn launch(self, launch: Arc<dyn Launch>) -> HostBuilder<Launched> {
+        self.source(Launched {
+            launch,
+            native: false,
+        })
+    }
+    fn source<T>(self, source: T) -> HostBuilder<T> {
+        HostBuilder {
+            options: self.options,
+            identity: self.identity,
+            admission: self.admission,
+            source,
+        }
+    }
+}
+impl HostBuilder<Native> {
+    /// Refused before registering where this platform cannot host, or the
+    /// privileged helper is not ready.
+    pub async fn start(self, client: &Client) -> Result<Host> {
+        let launch = platform::native_launch(&self.options)?;
+        let mut native = self.launch(launch);
+        native.source.native = true;
+        native.start(client).await
+    }
+}
+impl<B, F> HostBuilder<Custom<B, F>>
+where
+    B: Backend,
+    F: Fn() -> Result<B> + Send + Sync + 'static,
+{
+    pub async fn start(self, client: &Client) -> Result<Host> {
+        let HostBuilder {
+            options,
+            identity,
+            admission,
+            source,
+        } = self;
+        HostBuilder {
+            options,
+            identity,
+            admission,
+            source: Launched {
+                launch: Arc::new(Launcher::new(source.factory, BackendCaps::default())),
+                native: false,
+            },
+        }
+        .start(client)
+        .await
+    }
+}
+impl HostBuilder<Launched> {
+    pub(crate) async fn start(self, client: &Client) -> Result<Host> {
+        Host::launch(client, self).await
+    }
+}
+
+/// What a host's status reads, shared with its acceptor.
+struct Shared {
+    policy: Arc<Policy>,
+    /// What sessions list when their backend did not describe itself.
+    fallback: Vec<String>,
+    /// The session holding the single viewer slot, if any.
+    session: Mutex<Option<Live>>,
+    stopped: AtomicBool,
+    registration: Registration,
+}
+/// The session in the viewer slot, with what its backend can do.
+struct Live {
+    session: Arc<Session>,
+    capabilities: Vec<String>,
 }
 
 pub struct Host {
     invitation: Invitation,
-    policy: Arc<Policy>,
-    capabilities: Vec<String>,
-    /// The session holding the single viewer slot, if any.
-    session: Arc<Mutex<Option<Arc<Session>>>>,
-    stopped: AtomicBool,
+    identity: HostIdentity,
+    options: HostOptions,
+    client: Client,
+    launch: Arc<dyn Launch>,
+    /// The platform's own source, which a restart builds again for the
+    /// options it restarts with.
+    native: bool,
+    admission: Option<Arc<dyn crate::ControlAdmission>>,
+    shared: Arc<Shared>,
     cancel: CancellationToken,
-    registration: Registration,
     join: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl Host {
-    pub async fn start(client: &Client, options: HostOptions) -> Result<Self> {
-        let factory = native_factory(options.display_id)?;
-        Self::start_with_backend(client, options, factory).await
-    }
-    pub async fn start_with_backend(
-        client: &Client,
-        options: HostOptions,
-        factory: Factory,
-    ) -> Result<Self> {
-        Self::start_with_admission(client, options, factory, None).await
-    }
-    pub async fn start_with_admission(
-        client: &Client,
-        options: HostOptions,
-        factory: Factory,
-        admission: Option<Arc<dyn crate::ControlAdmission>>,
-    ) -> Result<Self> {
-        Self::start_with_backend_and_identity(
-            client,
+    pub fn builder(options: HostOptions) -> HostBuilder {
+        HostBuilder {
             options,
-            factory,
+            identity: None,
+            admission: None,
+            source: Native,
+        }
+    }
+    /// `Host::builder(options).start(client)`: the platform's own capture,
+    /// under a new identity.
+    pub async fn start(client: &Client, options: HostOptions) -> Result<Self> {
+        Self::builder(options).start(client).await
+    }
+    async fn launch(client: &Client, builder: HostBuilder<Launched>) -> Result<Self> {
+        let HostBuilder {
+            options,
+            identity,
             admission,
-            crate::HostIdentity::generate()?,
-        )
-        .await
-    }
-    /// Resume a previously and explicitly authorized grant. Dropping or stopping
-    /// this host closes sessions; revoke durable access by discarding the saved
-    /// identity and generating a new one before the next start.
-    pub async fn start_with_identity(
-        client: &Client,
-        options: HostOptions,
-        identity: crate::HostIdentity,
-    ) -> Result<Self> {
-        let factory = native_factory(options.display_id)?;
-        Self::start_with_backend_and_identity(client, options, factory, None, identity).await
-    }
-    pub async fn start_with_backend_and_identity(
-        client: &Client,
-        options: HostOptions,
-        factory: Factory,
-        admission: Option<Arc<dyn crate::ControlAdmission>>,
-        identity: crate::HostIdentity,
-    ) -> Result<Self> {
+            source: Launched { launch, native },
+        } = builder;
         if !crate::valid_service(&options.service) {
             return Err(error(
                 "desktop service must start with desktop: and contain at most 128 ASCII letters, numbers, periods, hyphens, underscores or colons",
             ));
         }
+        let identity = match identity {
+            Some(identity) => identity,
+            None => HostIdentity::generate()?,
+        };
         let tls = identity.acceptor()?;
         let invitation = identity.invitation(options.service.clone())?;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let registration = client
             .register_with_options(
                 RegisterRequest {
-                    key: options.service,
+                    key: options.service.clone(),
                     local_addr: listener.local_addr()?.to_string(),
                     transport: Transport::Tcp,
                     codec: true,
@@ -131,6 +301,7 @@ impl Host {
                 RegisterOptions {
                     allow_direct: options.allow_direct,
                     lan_first: options.lan_first,
+                    lan_tcp: options.lan_tcp,
                     ..Default::default()
                 },
             )
@@ -155,29 +326,34 @@ impl Host {
                     .map_or(String::new(), |detail| format!("; {detail}")),
             )));
         }
-        let policy = Arc::new(Policy::new(options.allow_control));
-        let session = Arc::new(Mutex::new(None));
+        let shared = Arc::new(Shared {
+            policy: Arc::new(Policy::new(options.allow_control)),
+            fallback: launch.fallback_caps().values(),
+            session: Mutex::new(None),
+            stopped: AtomicBool::new(false),
+            registration,
+        });
         let cancel = CancellationToken::new();
         let acceptor = Arc::new(Acceptor {
             tls,
             token: invitation.token_text(),
-            factory,
-            admission,
-            policy: policy.clone(),
-            capabilities: capabilities(),
-            session: session.clone(),
+            launch: launch.clone(),
+            admission: admission.clone(),
+            shared: shared.clone(),
             slot: Arc::new(Semaphore::new(1)),
             cancel: cancel.clone(),
         });
         let join = tokio::spawn(acceptor.accept(listener));
         Ok(Self {
             invitation,
-            policy,
-            capabilities: capabilities(),
-            session,
-            stopped: AtomicBool::new(false),
+            identity,
+            options,
+            client: client.clone(),
+            launch,
+            native,
+            admission,
+            shared,
             cancel,
-            registration,
             join: AsyncMutex::new(Some(join)),
         })
     }
@@ -185,13 +361,140 @@ impl Host {
     pub fn invitation(&self) -> &Invitation {
         &self.invitation
     }
+    /// The identity behind the invitation, which a restart keeps. Saving it
+    /// remembers the grant; it is a secret.
+    pub fn identity(&self) -> &HostIdentity {
+        &self.identity
+    }
+    /// The options this host started with. Its live control policy is in
+    /// [`Self::status`].
+    pub fn options(&self) -> &HostOptions {
+        &self.options
+    }
+    /// Host again with changed options, under the same identity, so a saved
+    /// invitation stays valid, with the same backend source, admission and
+    /// live control policy. The changed options are checked first, so a
+    /// refused change leaves this host running; then this host stops,
+    /// telling its viewer `reason`, and the new one starts.
+    pub async fn restart(
+        self,
+        reason: StopReason,
+        change: impl FnOnce(&mut HostOptions),
+    ) -> Result<Host> {
+        let mut options = self.options.clone();
+        options.allow_control = self.shared.policy.allowed();
+        change(&mut options);
+        let invalid = |failure: std::io::Error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, failure.to_string())
+        };
+        if !crate::valid_service(&options.service) {
+            return Err(invalid(error("invalid desktop service")));
+        }
+        self.identity
+            .invitation(options.service.clone())
+            .map_err(invalid)?;
+        let launch = if self.native {
+            platform::native_launch(&options)?
+        } else {
+            self.launch.clone()
+        };
+        // One owner at a time: this registration goes before the new one.
+        self.stop_with(reason).await?;
+        let builder = HostBuilder {
+            options,
+            identity: Some(self.identity.clone()),
+            admission: self.admission.clone(),
+            source: Launched {
+                launch,
+                native: self.native,
+            },
+        };
+        builder.start(&self.client).await
+    }
+    /// Share another display; the viewer hears `Restarting` and reconnects.
+    pub async fn switch_display(self, display: DisplaySelection) -> Result<Host> {
+        self.restart(StopReason::Restarting, |options| options.display = display)
+            .await
+    }
+    /// Publish under another service; the viewer, whose invitation names the
+    /// old one, hears `HostStopped`.
+    pub async fn rename(self, service: impl Into<String>) -> Result<Host> {
+        let service = service.into();
+        self.restart(StopReason::HostStopped, |options| options.service = service)
+            .await
+    }
     /// The host's state and its viewer, if one is connected: when its session
     /// started, whether it runs direct or through the relay, and whether it
     /// controls, has paused, and which quality it chose.
     pub fn status(&self) -> HostStatus {
+        self.shared.status()
+    }
+    /// The host's tunnel figures, sampled now: its viewers' sessions on each
+    /// path, the bytes they carried, the relay's health and the direct link.
+    pub fn metrics(&self) -> TunnelMetrics {
+        self.shared.registration.metrics()
+    }
+    /// [`Self::metrics`] at once, then every `every` and as the tunnel
+    /// changes, until hosting stops: see [`TunnelMetricsStream`].
+    pub fn subscribe_metrics(&self, every: Duration) -> TunnelMetricsStream {
+        self.shared.registration.subscribe_metrics(every)
+    }
+    /// "Disconnect": end the connected viewer's session; it hears
+    /// `Stopped{host_ended}`. Hosting continues, and the viewer may connect
+    /// again with the same invitation.
+    pub fn end_session(&self) {
+        if let Some(live) = self.shared.session.lock().as_ref() {
+            live.session
+                .end(StopReason::HostEnded, stop_message(StopReason::HostEnded));
+        }
+    }
+    /// "Make view-only" and back. Revocation gates every later input at the
+    /// edge, and the worker releases held input within one backend step.
+    pub fn set_control_allowed(&self, allowed: bool) {
+        self.shared.policy.set(allowed);
+        if let Some(live) = self.shared.session.lock().as_ref() {
+            live.session.shared.wake.notify();
+        }
+    }
+    /// Stop hosting; a connected viewer hears `Stopped{host_stopped}`.
+    pub async fn stop(&self) -> Result<()> {
+        self.stop_with(StopReason::HostStopped).await
+    }
+    /// Stop hosting, telling a connected viewer why: `Restarting` when sharing
+    /// resumes at once with the same identity (a display switch), so it
+    /// reconnects; `Revoked` when its access was withdrawn.
+    pub async fn stop_with(&self, reason: StopReason) -> Result<()> {
+        self.shared.policy.set(false);
+        if let Some(live) = self.shared.session.lock().as_ref() {
+            live.session.end(reason, stop_message(reason));
+        }
+        self.cancel.cancel();
+        let mut join = self.join.lock().await;
+        if let Some(task) = join.as_mut() {
+            let _ = task.await;
+        }
+        join.take();
+        self.shared.registration.stop().await.map_err(error)?;
+        self.shared.stopped.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+impl Drop for Host {
+    fn drop(&mut self) {
+        self.shared.policy.set(false);
+        self.cancel.cancel();
+    }
+}
+
+impl Shared {
+    fn status(&self) -> HostStatus {
         let control_allowed = self.policy.allowed();
-        let capabilities = self.capabilities.clone();
-        let Some(session) = self.session.lock().clone() else {
+        let live = self
+            .session
+            .lock()
+            .as_ref()
+            .map(|live| (live.session.clone(), live.capabilities.clone()));
+        let Some((session, capabilities)) = live else {
             return HostStatus {
                 state: if self.stopped.load(Ordering::Acquire) {
                     HostState::Stopped
@@ -204,7 +507,7 @@ impl Host {
                 viewer: None,
                 display: None,
                 desktop: DesktopKind::Ordinary,
-                capabilities,
+                capabilities: self.fallback.clone(),
             };
         };
         let record = session.shared.state.borrow().record.clone();
@@ -234,16 +537,6 @@ impl Host {
             capabilities,
         }
     }
-    /// The host's tunnel figures, sampled now: its viewers' sessions on each
-    /// path, the bytes they carried, the relay's health and the direct link.
-    pub fn metrics(&self) -> TunnelMetrics {
-        self.registration.metrics()
-    }
-    /// [`Self::metrics`] at once, then every `every` and as the tunnel
-    /// changes, until hosting stops: see [`TunnelMetricsStream`].
-    pub fn subscribe_metrics(&self, every: Duration) -> TunnelMetricsStream {
-        self.registration.subscribe_metrics(every)
-    }
     /// The one viewer's path, sampled from the registration's sessions,
     /// which it counts on the relay as well as direct.
     fn path(&self) -> HostPath {
@@ -255,74 +548,6 @@ impl Host {
         } else {
             HostPath::Unknown
         }
-    }
-    /// "Disconnect": end the connected viewer's session; it hears
-    /// `Stopped{host_ended}`. Hosting continues, and the viewer may connect
-    /// again with the same invitation.
-    pub fn end_session(&self) {
-        if let Some(session) = self.session.lock().as_ref() {
-            session.end(StopReason::HostEnded, stop_message(StopReason::HostEnded));
-        }
-    }
-    /// "Make view-only" and back. Revocation gates every later input at the
-    /// edge, and the worker releases held input within one backend step.
-    pub fn set_control_allowed(&self, allowed: bool) {
-        self.policy.set(allowed);
-        if let Some(session) = self.session.lock().as_ref() {
-            session.shared.wake.notify();
-        }
-    }
-    /// Stop hosting; a connected viewer hears `Stopped{host_stopped}`.
-    pub async fn stop(&self) -> Result<()> {
-        self.stop_with(StopReason::HostStopped).await
-    }
-    /// Stop hosting, telling a connected viewer why: `Restarting` when sharing
-    /// resumes at once with the same identity (a display switch), so it
-    /// reconnects; `Revoked` when its access was withdrawn.
-    pub async fn stop_with(&self, reason: StopReason) -> Result<()> {
-        self.policy.set(false);
-        if let Some(session) = self.session.lock().as_ref() {
-            session.end(reason, stop_message(reason));
-        }
-        self.cancel.cancel();
-        let mut join = self.join.lock().await;
-        if let Some(task) = join.as_mut() {
-            let _ = task.await;
-        }
-        join.take();
-        self.registration.stop().await.map_err(error)?;
-        self.stopped.store(true, Ordering::Release);
-        Ok(())
-    }
-}
-impl Drop for Host {
-    fn drop(&mut self) {
-        self.policy.set(false);
-        self.cancel.cancel();
-    }
-}
-
-/// The platform's own capture and encoder for `display_id`. Refused before
-/// the host registers where there are none, so that no service is published
-/// only to fail every viewer at its encoder.
-fn native_factory(display_id: u32) -> Result<Factory> {
-    if !platform::capabilities().host {
-        return Err(error(if cfg!(windows) {
-            "Desktop hosting requires Windows Media Foundation"
-        } else {
-            "Desktop hosting currently requires Windows"
-        }));
-    }
-    Ok(Arc::new(move || platform::native_backend(display_id)))
-}
-
-/// What every Windows backend can do: the native desktop and the helper both
-/// lock the workstation.
-fn capabilities() -> Vec<String> {
-    if cfg!(windows) {
-        vec![CAPABILITY_LOCK.into()]
-    } else {
-        Vec::new()
     }
 }
 
@@ -345,6 +570,8 @@ struct Admitted {
     codec: VideoCodec,
     /// The size the encoder is expected to produce.
     video: VideoSize,
+    /// What `Accepted` listed.
+    capabilities: Vec<String>,
     prepared: worker::Prepared,
 }
 
@@ -359,27 +586,6 @@ fn choose_codec(codecs: &[VideoCodec], h265: bool) -> VideoCodec {
     } else {
         VideoCodec::Jpeg
     }
-}
-
-/// `factory`, telling the receiver which display the backend it builds
-/// captures, read on thread C as soon as it is built, before `prepare` asks it
-/// about H.265. The receiver hears nothing when the backend or its display
-/// fails.
-fn reporting_display(factory: &Factory) -> (Factory, oneshot::Receiver<Display>) {
-    let (report, display) = oneshot::channel();
-    let report = Mutex::new(Some(report));
-    let factory = factory.clone();
-    let reporting: Factory = Arc::new(move || {
-        let report = report.lock().take();
-        let mut backend = factory()?;
-        if let Some(report) = report
-            && let Ok(captured) = backend.display()
-        {
-            let _ = report.send(captured);
-        }
-        Ok(backend)
-    });
-    (reporting, display)
 }
 
 /// The size the encoder makes of `display` for `limits`, or the bounds
@@ -400,11 +606,9 @@ fn expected_video(display: Option<&Display>, limits: VideoLimits) -> VideoSize {
 struct Acceptor {
     tls: TlsAcceptor,
     token: String,
-    factory: Factory,
+    launch: Arc<dyn Launch>,
     admission: Option<Arc<dyn crate::ControlAdmission>>,
-    policy: Arc<Policy>,
-    capabilities: Vec<String>,
-    session: Arc<Mutex<Option<Arc<Session>>>>,
+    shared: Arc<Shared>,
     /// The single viewer slot.
     slot: Arc<Semaphore>,
     cancel: CancellationToken,
@@ -437,6 +641,7 @@ impl Acceptor {
             request,
             codec,
             video,
+            capabilities,
             prepared,
         }) = accepted
         else {
@@ -454,7 +659,7 @@ impl Acceptor {
             quality = ?request.quality,
         );
         let session = Session::new(
-            self.policy.clone(),
+            self.shared.policy.clone(),
             self.cancel.child_token(),
             codec,
             request.limits,
@@ -462,7 +667,10 @@ impl Acceptor {
             &request.capabilities,
         );
         session.expect_video_size(video);
-        *self.session.lock() = Some(session.clone());
+        *self.shared.session.lock() = Some(Live {
+            session: session.clone(),
+            capabilities,
+        });
         let mut worker = prepared.start(
             session.shared.clone(),
             WorkerConfig {
@@ -478,10 +686,10 @@ impl Acceptor {
             async move { worker.exited().await },
         )
         .await;
-        let mut slot = self.session.lock();
+        let mut slot = self.shared.session.lock();
         if slot
             .as_ref()
-            .is_some_and(|held| Arc::ptr_eq(held, &session))
+            .is_some_and(|held| Arc::ptr_eq(&held.session, &session))
         {
             slot.take();
         }
@@ -489,36 +697,38 @@ impl Acceptor {
         drop(permit);
     }
 
-    /// The handshake, then `Accepted` with the session's codec. Thread C starts
-    /// building the backend as soon as the viewer holds the slot, and
-    /// `Accepted` waits until the backend said which display it captures,
-    /// which sizes the first IDR's budget, and, for a viewer that decodes
-    /// H.265, whether it encodes H.265, unless an H.265 encoder already
-    /// failed in this process.
+    /// The handshake, then `Accepted` with the session's codec and
+    /// capabilities. Thread C starts building the backend as soon as the
+    /// viewer holds the slot, and `Accepted` waits until the backend described
+    /// itself: which display it captures, which sizes the first IDR's budget;
+    /// what it can do; and, for a viewer that decodes H.265, whether it
+    /// encodes H.265, unless an H.265 encoder already failed in this process.
     async fn accept_session(&self, socket: TcpStream) -> Option<Admitted> {
         let (mut stream, permit, request) = self.handshake(socket).await?;
         let offered = request
             .capabilities
             .iter()
             .any(|capability| capability == CAPABILITY_H265);
-        let (factory, display) = reporting_display(&self.factory);
-        let mut prepared = worker::prepare(factory, offered && !worker::h265_failed());
-        let deadline = tokio::time::Instant::now() + BACKEND_ANSWER_WAIT;
-        let display = tokio::time::timeout_at(deadline, display)
+        let mut prepared = self.launch.prepare(offered && !worker::h265_failed());
+        let description = tokio::time::timeout(BACKEND_ANSWER_WAIT, &mut prepared.description)
             .await
             .ok()
-            .and_then(|answer| answer.ok());
-        let video = expected_video(display.as_ref(), request.limits);
-        let h265 = prepared
-            .h265(deadline.saturating_duration_since(tokio::time::Instant::now()))
-            .await;
-        let codec = choose_codec(&request.codecs, h265);
+            .and_then(|answer| answer.ok())
+            .and_then(Result::ok);
+        let video = expected_video(
+            description.as_ref().map(|described| &described.display),
+            request.limits,
+        );
+        let caps =
+            description.map_or_else(|| self.launch.fallback_caps(), |described| described.caps);
+        let codec = choose_codec(&request.codecs, offered && caps.h265);
+        let capabilities = caps.values();
         let accepted = HostMessage::Accepted {
             codec,
             limits: request.limits,
             nominal_fps: request.limits.max_fps,
             quality: request.quality,
-            capabilities: self.capabilities.clone(),
+            capabilities: capabilities.clone(),
         };
         wire::write_message(&mut stream, &accepted, None)
             .await
@@ -529,6 +739,7 @@ impl Acceptor {
             request,
             codec,
             video,
+            capabilities,
             prepared,
         })
     }
@@ -611,7 +822,7 @@ impl Acceptor {
 #[allow(clippy::unwrap_used)]
 mod trust_tests {
     use super::*;
-    use crate::{protocol::StateRecord, security};
+    use crate::security;
     use pb_mapper_client::sdk::{ConnectOptions, Connection, PathPolicy};
     use std::sync::atomic::AtomicU32;
     use tokio_rustls::client::TlsStream as ClientStream;
@@ -637,13 +848,9 @@ mod trust_tests {
         fn release(&mut self) {}
     }
     fn options() -> HostOptions {
-        HostOptions {
-            service: "desktop:remembered".into(),
-            display_id: 1,
-            allow_control: false,
-            allow_direct: false,
-            lan_first: true,
-        }
+        let mut options = HostOptions::new("desktop:remembered");
+        options.allow_direct = false;
+        options
     }
 
     /// A scripted v2 viewer: its TLS stream, and the tunnel it rides on.
@@ -748,11 +955,12 @@ mod trust_tests {
         );
         let backends = Arc::new(AtomicU32::new(0));
         let created = backends.clone();
-        let factory: Factory = Arc::new(move || {
-            created.fetch_add(1, Ordering::Relaxed);
-            Ok(Box::new(Screen))
-        });
-        let host = Host::start_with_backend(&client, options(), factory)
+        let host = Host::builder(options())
+            .backend(move || {
+                created.fetch_add(1, Ordering::Relaxed);
+                Ok(Screen)
+            })
+            .start(&client)
             .await
             .unwrap();
         let invitation = host.invitation().clone();
@@ -819,20 +1027,18 @@ mod trust_tests {
             true,
             None,
         );
-        let host = Host::start_with_backend(
-            &client,
-            HostOptions {
-                allow_control: true,
-                ..options()
-            },
-            Arc::new(|| Ok(Box::new(Screen))),
-        )
-        .await
-        .unwrap();
+        let mut options = options();
+        options.allow_control = true;
+        let host = Host::builder(options)
+            .backend(|| Ok(Screen))
+            .start(&client)
+            .await
+            .unwrap();
         let status = host.status();
         assert_eq!(status.state, HostState::Waiting);
         assert!(status.viewer.is_none() && status.control_allowed);
-        assert_eq!(status.capabilities, capabilities());
+        // An embedder's backend that describes nothing can do nothing more.
+        assert!(status.capabilities.is_empty());
 
         let invitation = host.invitation().clone();
         let token = invitation.token_text();
@@ -942,9 +1148,70 @@ mod trust_tests {
             Err(error("read-only test backend"))
         }
         fn release(&mut self) {}
-        fn encodes_h265(&mut self) -> bool {
-            true
+        /// It encodes H.265 and can lock, and says nothing of its OS.
+        fn describe(&mut self, probe_h265: bool) -> Result<crate::Description> {
+            Ok(crate::Description {
+                display: self.display()?,
+                caps: BackendCaps {
+                    h265: probe_h265,
+                    lock: true,
+                    ..BackendCaps::default()
+                },
+            })
         }
+    }
+
+    /// A backend slower to describe itself than `Accepted` waits leaves its
+    /// session with what its launcher falls back to.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_late_description_falls_back_to_the_launcher() {
+        struct Late;
+        impl crate::Backend for Late {
+            fn display(&mut self) -> Result<crate::Display> {
+                crate::Backend::display(&mut Screen)
+            }
+            fn input(&mut self, _: &crate::Input) -> Result<()> {
+                Err(error("read-only test backend"))
+            }
+            fn release(&mut self) {}
+            fn describe(&mut self, _: bool) -> Result<crate::Description> {
+                std::thread::sleep(BACKEND_ANSWER_WAIT + Duration::from_millis(500));
+                Ok(crate::Description {
+                    display: self.display()?,
+                    caps: BackendCaps::default(),
+                })
+            }
+        }
+        let relay = pb_mapper_testkit::Relay::start("desktop-late").await;
+        let client = Client::from_credential(
+            relay.addr().to_string(),
+            pb_mapper_testkit::admin_credential(),
+            true,
+            None,
+        );
+        let fallback = BackendCaps {
+            lock: true,
+            os: Some(crate::HostOs::Windows),
+            ..BackendCaps::default()
+        };
+        let host = Host::builder(options())
+            .launch(Arc::new(Launcher::new(|| Ok(Late), fallback)))
+            .start(&client)
+            .await
+            .unwrap();
+        let invitation = host.invitation().clone();
+        let (_viewer, answer) = authenticate(
+            &client,
+            &invitation,
+            invitation.token_text(),
+            vec![VideoCodec::Jpeg],
+        )
+        .await;
+        let HostMessage::Accepted { capabilities, .. } = answer else {
+            panic!("{answer:?}");
+        };
+        assert_eq!(capabilities, ["lock", "os_windows"]);
+        host.stop().await.unwrap();
     }
 
     /// The only test that breaks an H.265 encoder: that turns H.265 off for
@@ -961,23 +1228,29 @@ mod trust_tests {
         let broken = Arc::new(AtomicBool::new(false));
         let bitrates = Arc::new(Mutex::new(Vec::new()));
         let (encoder, encoded) = (broken.clone(), bitrates.clone());
-        let host = Host::start_with_backend(
-            &client,
-            options(),
-            Arc::new(move || {
-                Ok(Box::new(Hevc {
+        let host = Host::builder(options())
+            .backend(move || {
+                Ok(Hevc {
                     broken: encoder.clone(),
                     bitrates: encoded.clone(),
-                }))
-            }),
-        )
-        .await
-        .unwrap();
+                })
+            })
+            .start(&client)
+            .await
+            .unwrap();
         let invitation = host.invitation().clone();
         let token = invitation.token_text();
         let h265 = || vec![CAPABILITY_H265.to_string()];
         let codec = |answer: &HostMessage| match answer {
-            HostMessage::Accepted { codec, .. } => Some(*codec),
+            HostMessage::Accepted {
+                codec,
+                capabilities,
+                ..
+            } => {
+                // What this session's backend described, nothing more.
+                assert_eq!(capabilities, &[crate::protocol::CAPABILITY_LOCK]);
+                Some(*codec)
+            }
             _ => None,
         };
 
@@ -1050,56 +1323,62 @@ mod trust_tests {
         );
         let identity = crate::HostIdentity::generate().unwrap();
         let saved = identity.encode_secret().unwrap();
-        let factory: Factory = Arc::new(|| Ok(Box::new(Screen)));
-        let host = Host::start_with_backend_and_identity(
-            &client,
-            options(),
-            factory.clone(),
-            None,
-            identity,
-        )
-        .await
-        .unwrap();
+        let start = |identity| {
+            Host::builder(options())
+                .identity(identity)
+                .backend(|| Ok(Screen))
+                .start(&client)
+        };
+        let host = start(identity).await.unwrap();
         // What the viewer keeps is the pbd1 text.
         let invitation = Invitation::decode(&host.invitation().encode()).unwrap();
         host.stop().await.unwrap();
-        let resumed = Host::start_with_backend_and_identity(
-            &client,
-            options(),
-            factory.clone(),
-            None,
-            crate::HostIdentity::decode_secret(&saved).unwrap(),
-        )
-        .await
-        .unwrap();
-        let (mut viewer, answer) = authenticate(
-            &client,
-            &invitation,
-            invitation.token_text(),
-            vec![VideoCodec::Jpeg],
-        )
-        .await;
-        assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
-        assert!(matches!(
-            next(&mut viewer).await,
-            Some(HostMessage::State(StateRecord {
-                control_allowed: false,
-                ..
-            }))
-        ));
-        drop(viewer);
-        resumed.stop().await.unwrap();
+        let resumed = start(crate::HostIdentity::decode_secret(&saved).unwrap())
+            .await
+            .unwrap();
+        let viewer = async |control_allowed: bool| {
+            let (mut viewer, answer) = authenticate(
+                &client,
+                &invitation,
+                invitation.token_text(),
+                vec![VideoCodec::Jpeg],
+            )
+            .await;
+            assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+            let Some(HostMessage::State(state)) = next(&mut viewer).await else {
+                panic!("no state");
+            };
+            assert_eq!(state.control_allowed, control_allowed);
+            viewer
+        };
+        let mut watching = viewer(false).await;
+
+        // Another display keeps the identity, the backend and the live
+        // control policy; the viewer hears why it may reconnect.
+        resumed.set_control_allowed(true);
+        let switched = resumed
+            .switch_display(crate::DisplaySelection::Id(2))
+            .await
+            .unwrap();
+        loop {
+            match next(&mut watching).await {
+                Some(HostMessage::Stopped { reason, .. }) => {
+                    assert_eq!(reason, StopReason::Restarting);
+                    break;
+                }
+                Some(_) => {}
+                None => panic!("closed without Stopped"),
+            }
+        }
+        assert_eq!(switched.invitation().encode(), invitation.encode());
+        assert_eq!(switched.options().display, crate::DisplaySelection::Id(2));
+        drop(viewer(true).await);
+        switched.stop().await.unwrap();
 
         // A new identity revokes the remembered invitation: the pin fails.
-        let replacement = Host::start_with_backend_and_identity(
-            &client,
-            options(),
-            factory,
-            None,
-            crate::HostIdentity::generate().unwrap(),
-        )
-        .await
-        .unwrap();
+        let replacement = start(crate::HostIdentity::generate().unwrap())
+            .await
+            .unwrap();
         let failure = tls(&client, &invitation).await.err().unwrap();
         assert_eq!(
             security::handshake_failure(&failure),

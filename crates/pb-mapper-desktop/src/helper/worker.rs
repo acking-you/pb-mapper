@@ -527,7 +527,11 @@ fn serve(
         }
         Request::Attach { .. } => return Err(error("worker is already attached")),
         Request::H265 {} => {
-            response.h265 = Some(backend.encodes_h265());
+            response.h265 = Some(
+                backend
+                    .describe(true)
+                    .is_ok_and(|described| described.caps.h265),
+            );
             vec![]
         }
         Request::ConfigureVideo {

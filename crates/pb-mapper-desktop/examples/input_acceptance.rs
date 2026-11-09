@@ -26,9 +26,10 @@ fn main() {
 mod windows_test {
     use pb_mapper_client::sdk::{Client, ClientConfig, ConnectOptions, PathPolicy, RelayTransport};
     use pb_mapper_desktop::{
-        Backend, Button, CursorPosition, DesktopContext, DesktopView, Display, DoubleClickGuard,
-        EncodedFrame, Host, HostOptions, Input, Pull, QualityPreset, Result, VideoCodec,
-        VideoLimits, VideoRate, Viewer, ViewerConfig,
+        Backend, Button, CursorPosition, Description, DesktopContext, DesktopView, Display,
+        DisplaySelection, DoubleClickGuard, EncodedFrame, Host, HostOptions, Input, Mode, ModeList,
+        Pull, QualityPreset, Result, VideoCodec, VideoLimits, VideoRate, Viewer, ViewerConfig,
+        Waker,
     };
     use pb_mapper_testkit::Relay;
     use std::{
@@ -233,9 +234,32 @@ mod windows_test {
             Ok(value)
         }
     }
+    #[deny(clippy::missing_trait_methods)]
     impl Backend for Guarded {
+        fn describe(&mut self, probe_h265: bool) -> Result<Description> {
+            self.state.check()?;
+            self.inner.describe(probe_h265)
+        }
+        fn bind(&mut self, waker: Waker) {
+            self.inner.bind(waker);
+        }
         fn configure_video(&mut self, limits: VideoLimits, nominal_fps: u32) -> Result<()> {
             self.inner.configure_video(limits, nominal_fps)
+        }
+        fn capture_consistent(&mut self, expected: &DesktopContext) -> Result<Vec<u8>> {
+            self.timed(|inner| inner.capture_consistent(expected))
+        }
+        fn drain_poll(&self) -> Option<Duration> {
+            self.inner.drain_poll()
+        }
+        fn display_modes(&mut self, expected: &DesktopContext) -> Result<Option<ModeList>> {
+            self.inner.display_modes(expected)
+        }
+        fn set_display_mode(&mut self, expected: &DesktopContext, mode: Mode) -> Result<()> {
+            self.inner.set_display_mode(expected, mode)
+        }
+        fn restore_display_mode(&mut self) -> Result<bool> {
+            self.inner.restore_display_mode()
         }
         fn display(&mut self) -> Result<Display> {
             self.state.check()?;
@@ -725,23 +749,19 @@ mod windows_test {
                 };
                 let backend_state = state.clone();
                 let id = display.id;
-                let host = Host::start_with_backend(
-                    &client,
-                    HostOptions {
-                        service: "desktop:owned-input-acceptance".into(),
-                        display_id: id,
-                        allow_control: true,
-                        allow_direct: false,
-                        lan_first: true,
-                    },
-                    Arc::new(move || {
-                        Ok(Box::new(Guarded {
+                let mut options = HostOptions::new("desktop:owned-input-acceptance");
+                options.display = DisplaySelection::Id(id);
+                options.allow_control = true;
+                options.allow_direct = false;
+                let host = Host::builder(options)
+                    .backend(move || {
+                        Ok(Guarded {
                             inner: pb_mapper_desktop::native_backend(id)?,
                             state: backend_state.clone(),
-                        }))
-                    }),
-                )
-                .await?;
+                        })
+                    })
+                    .start(&client)
+                    .await?;
                 // Use the product's native GPU path with a small input-acceptance
                 // workload. Debug JPEG resizing can hold the capture thread for a
                 // second per frame, and input waits behind it.

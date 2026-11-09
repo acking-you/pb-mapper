@@ -141,26 +141,21 @@ async fn encoded_host(
     bytes: usize,
 ) -> Host {
     let (observed, cursor) = (observed.clone(), cursor.clone());
-    Host::start_with_backend(
-        client,
-        HostOptions {
-            service: service.into(),
-            display_id: 1,
-            allow_control: true,
-            allow_direct: false,
-            lan_first: true,
-        },
-        Arc::new(move || {
-            Ok(Box::new(Encoded {
+    let mut options = HostOptions::new(service);
+    options.allow_control = true;
+    options.allow_direct = false;
+    Host::builder(options)
+        .backend(move || {
+            Ok(Encoded {
                 observed: observed.clone(),
                 cursor: cursor.clone(),
                 bytes,
                 frames: 0,
-            }))
-        }),
-    )
-    .await
-    .unwrap()
+            })
+        })
+        .start(client)
+        .await
+        .unwrap()
 }
 
 /// The same host and pin with another bearer token, as a well-formed `pbd1`.
@@ -327,19 +322,13 @@ async fn encrypted_desktop_direct_and_relay_enforce_grants_and_owned_teardown() 
         };
         let observed = Arc::new(Observation::default());
         let backend = observed.clone();
-        let host = Host::start_with_backend(
-            &client,
-            HostOptions {
-                service: "desktop:test".into(),
-                display_id: 1,
-                allow_control: true,
-                allow_direct: true,
-                lan_first: true,
-            },
-            Arc::new(move || Ok(Box::new(Desktop(backend.clone())))),
-        )
-        .await
-        .unwrap();
+        let mut host_options = HostOptions::new("desktop:test");
+        host_options.allow_control = true;
+        let host = Host::builder(host_options)
+            .backend(move || Ok(Desktop(backend.clone())))
+            .start(&client)
+            .await
+            .unwrap();
         // A valid relay credential does not grant desktop access.
         let intruder = Viewer::connect(
             &client,

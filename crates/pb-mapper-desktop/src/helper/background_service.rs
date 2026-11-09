@@ -399,20 +399,27 @@ impl Supervisor {
             let client = client(&saved.options)?;
             let settings = saved.options.settings;
             let display_id = settings.display_id;
-            Host::start_with_backend_and_identity(
-                &client,
-                HostOptions {
-                    service: settings.service,
-                    display_id,
-                    allow_control: settings.allow_control,
-                    allow_direct: settings.allow_direct,
-                    lan_first: saved.options.lan_first,
-                },
-                Arc::new(move || super::super::client::service_backend(display_id)),
-                None,
-                saved.identity,
-            )
-            .await
+            let mut options = HostOptions::new(settings.service);
+            options.display = crate::DisplaySelection::Id(display_id);
+            options.access = crate::Access::Privileged;
+            options.allow_control = settings.allow_control;
+            options.allow_direct = settings.allow_direct;
+            options.lan_first = saved.options.lan_first;
+            // The worker locks the workstation, as the helper always can.
+            let fallback = crate::BackendCaps {
+                lock: true,
+                os: Some(crate::HostOs::Windows),
+                ..crate::BackendCaps::default()
+            };
+            let launch = Arc::new(crate::launch::Launcher::new(
+                move || super::super::client::service_backend(display_id),
+                fallback,
+            ));
+            Host::builder(options)
+                .identity(saved.identity)
+                .launch(launch)
+                .start(&client)
+                .await
         }));
     }
 }
@@ -770,21 +777,14 @@ mod tests {
             (Command::Stop {}, ViewerReason::HostStopped),
             (revoke, ViewerReason::Revoked),
         ] {
-            let host = Host::start_with_backend_and_identity(
-                &client,
-                HostOptions {
-                    service: saved.options.settings.service.clone(),
-                    display_id: 1,
-                    allow_control: false,
-                    allow_direct: false,
-                    lan_first: true,
-                },
-                Arc::new(|| Ok(Box::new(Pixel))),
-                None,
-                saved.identity.clone(),
-            )
-            .await
-            .unwrap();
+            let mut options = HostOptions::new(saved.options.settings.service.clone());
+            options.allow_direct = false;
+            let host = Host::builder(options)
+                .identity(saved.identity.clone())
+                .backend(|| Ok(Pixel))
+                .start(&client)
+                .await
+                .unwrap();
             let viewer = Viewer::connect(
                 &client,
                 host.invitation(),
@@ -919,20 +919,13 @@ mod tests {
         let original_secret = original.identity.encode_secret().unwrap();
         let mut supervisor = state(original.clone());
         supervisor.pending = Some(tokio::spawn(async move {
-            Host::start_with_backend_and_identity(
-                &client(&original.options)?,
-                HostOptions {
-                    service: original.options.settings.service,
-                    display_id: 1,
-                    allow_control: false,
-                    allow_direct: false,
-                    lan_first: true,
-                },
-                Arc::new(|| Err(error("capture must never start in this test"))),
-                None,
-                original.identity,
-            )
-            .await
+            let mut options = HostOptions::new(original.options.settings.service.clone());
+            options.allow_direct = false;
+            Host::builder(options)
+                .identity(original.identity)
+                .backend(|| Err::<Pixel, _>(error("capture must never start in this test")))
+                .start(&client(&original.options)?)
+                .await
         }));
         let (mut socket, _) = tokio::time::timeout(Duration::from_secs(2), blackhole.accept())
             .await

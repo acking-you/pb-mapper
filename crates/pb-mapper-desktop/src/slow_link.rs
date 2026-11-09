@@ -342,28 +342,23 @@ impl Rig {
         let local = client(relay.addr());
         let probe = Arc::new(Probe::default());
         let source = probe.clone();
-        let host = Host::start_with_backend(
-            &local,
-            HostOptions {
-                service: format!("desktop:{name}"),
-                display_id: 1,
-                allow_control: true,
-                allow_direct: false,
-                lan_first: true,
-            },
-            Arc::new(move || {
-                Ok(Box::new(SyntheticEncoder {
+        let mut options = HostOptions::new(format!("desktop:{name}"));
+        options.allow_control = true;
+        options.allow_direct = false;
+        let host = Host::builder(options)
+            .backend(move || {
+                Ok(SyntheticEncoder {
                     probe: source.clone(),
                     sizes,
                     latency,
                     nominal_fps: 0,
                     frames: 0,
                     pending: VecDeque::new(),
-                }))
-            }),
-        )
-        .await
-        .unwrap();
+                })
+            })
+            .start(&local)
+            .await
+            .unwrap();
         let remote = client(match shape {
             Some(shape) => shaped_link(relay.addr(), shape).await,
             None => relay.addr(),

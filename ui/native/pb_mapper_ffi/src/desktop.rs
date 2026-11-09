@@ -16,9 +16,9 @@ use crate::{
 use pb_mapper::{
     Client, ConnectOptions, PathPolicy,
     desktop::{
-        self, ConnectError, ConnectStage, DesktopView, Host, HostOptions, InputError, Invitation,
-        InvitationError, InvitationFormat, KeyframeReason, QualityPreset, Resolution, StopReason,
-        VideoCodec, VideoLimits, Viewer, ViewerConfig,
+        self, Access, ConnectError, ConnectStage, DesktopView, DisplaySelection, Host, HostOptions,
+        InputError, Invitation, InvitationError, InvitationFormat, KeyframeReason, QualityPreset,
+        Resolution, StopReason, VideoCodec, VideoLimits, Viewer, ViewerConfig,
     },
 };
 #[cfg(windows)]
@@ -1514,34 +1514,26 @@ async fn launch(
     lan_first: bool,
     identity: desktop::HostIdentity,
 ) -> Result<Host, CtlError> {
-    let display_id = settings.display_id;
-    let options = HostOptions {
-        service: settings.service.clone(),
-        display_id,
-        allow_control: settings.allow_control,
-        allow_direct: !settings.relay_only,
-        lan_first,
-    };
-    if settings.privileged {
-        #[cfg(windows)]
-        {
-            desktop::helper::status().ensure_ready().map_err(err)?;
-            return Host::start_with_backend_and_identity(
-                client,
-                options,
-                Arc::new(move || desktop::helper::backend(display_id)),
-                None,
-                identity,
-            )
-            .await
-            .map_err(err);
-        }
-        #[cfg(not(windows))]
-        return Err(err("the helper requires Windows"));
-    }
-    Host::start_with_identity(client, options, identity)
+    Host::builder(host_options(settings, lan_first))
+        .identity(identity)
+        .start(client)
         .await
         .map_err(err)
+}
+
+/// The SDK's options for the app's saved `settings`.
+fn host_options(settings: &trust::Settings, lan_first: bool) -> HostOptions {
+    let mut options = HostOptions::new(settings.service.clone());
+    options.display = DisplaySelection::Id(settings.display_id);
+    options.access = if settings.privileged {
+        Access::Privileged
+    } else {
+        Access::Ordinary
+    };
+    options.allow_control = settings.allow_control;
+    options.allow_direct = !settings.relay_only;
+    options.lan_first = lan_first;
+    options
 }
 
 /// `host_set_display` and `host_rename`: the running local host again, with
@@ -2562,19 +2554,13 @@ mod tests {
             (true, Status::default(), ViewerReason::HostStopped),
             (false, ready(), ViewerReason::HostStopped),
         ] {
-            let host = Host::start_with_backend(
-                &client,
-                HostOptions {
-                    service: "desktop:handoff".into(),
-                    display_id: 1,
-                    allow_control: false,
-                    allow_direct: false,
-                    lan_first: true,
-                },
-                Arc::new(|| Ok(Box::new(Pixel))),
-            )
-            .await
-            .unwrap();
+            let mut options = HostOptions::new("desktop:handoff");
+            options.allow_direct = false;
+            let host = Host::builder(options)
+                .backend(|| Ok(Pixel))
+                .start(&client)
+                .await
+                .unwrap();
             let viewer = Viewer::connect(
                 &client,
                 host.invitation(),

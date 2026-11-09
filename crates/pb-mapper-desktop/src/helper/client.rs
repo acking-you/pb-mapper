@@ -240,9 +240,20 @@ impl Backend for RemoteBackend {
         self.pending
     }
     /// The worker probes the GPU of the display it captures, in the
-    /// interactive session; the background host in session 0 cannot.
-    fn encodes_h265(&mut self) -> bool {
-        self.call(Request::H265 {}).is_ok() && self.h265 == Some(true)
+    /// interactive session, which the background host in session 0 cannot;
+    /// it is asked only for a viewer that decodes H.265.
+    fn describe(&mut self, probe_h265: bool) -> Result<crate::Description> {
+        let display = self.display()?;
+        let h265 = probe_h265 && self.call(Request::H265 {}).is_ok() && self.h265 == Some(true);
+        Ok(crate::Description {
+            display,
+            caps: crate::BackendCaps {
+                h265,
+                lock: true,
+                os: Some(crate::HostOs::Windows),
+                ..crate::BackendCaps::default()
+            },
+        })
     }
     fn input(&mut self, input: &Input) -> Result<()> {
         let context = self

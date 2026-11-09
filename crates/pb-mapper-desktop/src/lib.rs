@@ -22,6 +22,8 @@ mod idr;
 mod input;
 mod invite;
 mod lane;
+mod launch;
+mod modes;
 mod outgoing;
 mod pacer;
 mod platform;
@@ -46,11 +48,15 @@ pub mod video {
 }
 
 use serde::{Deserialize, Serialize};
-use std::{io, time::Duration};
+use std::io;
 
-pub use backend::{BackendError, FailureKind, failure_kind};
-pub use host::{Host, HostOptions};
+pub use backend::{
+    Backend, BackendCaps, BackendError, CursorMode, DRAIN_POLL, Description, FailureKind, HostOs,
+    Waker, failure_kind,
+};
+pub use host::{Access, Custom, DisplaySelection, Host, HostBuilder, HostOptions, Native};
 pub use invite::{Invitation, InvitationError, InvitationFormat};
+pub use modes::{DisplayModeError, Mode, ModeList, ModeTarget};
 pub use platform::{capabilities, displays, media_foundation, native_backend};
 pub use protocol::{
     Adaptation, DesktopKind, NoticeCode, RateModel, RejectReason, Route, SessionState, StateReason,
@@ -408,116 +414,6 @@ pub struct InputEvent {
     pub frame_id: u64,
     pub sequence: u64,
     pub input: Input,
-}
-
-/// A host backend lives only on its capture/input worker. Embedders may provide
-/// another backend (including a separately authorized helper) without changing
-/// networking, trust, or the viewer. `display` must fail on inaccessible desktops
-/// and change geometry on display changes. `release` must release every held key.
-/// A sticky, unrecoverable link failure must return `io::ErrorKind::NotConnected`,
-/// which ends the session instead of retrying the capture.
-pub trait Backend: 'static {
-    /// Called once before a session captures frames, and again only for a new
-    /// context or display or an encoder recovery; never for an fps, bitrate or
-    /// preset change. Backends must keep input coordinates in physical desktop
-    /// pixels when scaling their video output.
-    fn configure_video(&mut self, limits: VideoLimits, _nominal_fps: u32) -> Result<()> {
-        limits.validate()
-    }
-    fn display(&mut self) -> Result<Display>;
-    fn context(&mut self) -> Result<DesktopContext> {
-        Ok(DesktopContext {
-            display: self.display()?,
-            generation: 0,
-            desktop: DesktopKind::Ordinary,
-        })
-    }
-    fn capture(&mut self) -> Result<Vec<u8>>;
-    /// Report a pointer for the expected desktop, including when no video frame
-    /// changed, as it stands after every input this backend applied: thread C
-    /// takes a report at the position it last injected for the controller's
-    /// own move coming back, and never sends it. A desktop transition must
-    /// fail instead of reporting another desktop's pointer. Backends without
-    /// pointer metadata return `None`.
-    fn cursor(&mut self, _expected: &DesktopContext) -> Result<Option<CursorPosition>> {
-        Ok(None)
-    }
-    /// Whether `capture_video` can encode `VideoCodec::H265` on this
-    /// backend's display. Asked once a session, right after the backend is
-    /// built and before the host answers a viewer that decodes H.265; a
-    /// backend probes its GPU once and keeps the answer for its process.
-    fn encodes_h265(&mut self) -> bool {
-        false
-    }
-    /// Drain finished output, then (encoder backends) submit at most one
-    /// capture. The default captures one JPEG picture. A `keyframe` is asked
-    /// for once: an encoder backend keeps it until a picture it submits
-    /// carries it, and replaces output it discards with an IDR.
-    fn capture_video(
-        &mut self,
-        expected: &DesktopContext,
-        _codec: VideoCodec,
-        _keyframe: bool,
-        _rate: VideoRate,
-    ) -> Result<Option<EncodedFrame>> {
-        Ok(Some(EncodedFrame {
-            format: VideoFormat {
-                codec: VideoCodec::Jpeg,
-                width: expected.display.width,
-                height: expected.display.height,
-                keyframe: true,
-                ..VideoFormat::default()
-            },
-            bytes: self.capture_consistent(expected)?,
-        }))
-    }
-    /// Retrieve already submitted asynchronous encoder output without capturing
-    /// or submitting another image. `wait` bounds a long-poll (the helper); the
-    /// ordinary backend never blocks. Synchronous backends have nothing to drain.
-    fn drain_video(
-        &mut self,
-        _expected: &DesktopContext,
-        _wait: Duration,
-    ) -> Result<Option<EncodedFrame>> {
-        Ok(None)
-    }
-    /// Units submitted to the encoder and not yet output (the submit gate).
-    fn pending_video(&self) -> usize {
-        0
-    }
-    fn capture_consistent(&mut self, expected: &DesktopContext) -> Result<Vec<u8>> {
-        if &self.context()? != expected {
-            return Err(error("desktop changed before capture"));
-        }
-        let frame = self.capture()?;
-        if &self.context()? != expected {
-            return Err(error(
-                "desktop changed during capture; waiting for a current frame",
-            ));
-        }
-        Ok(frame)
-    }
-    fn input(&mut self, event: &Input) -> Result<()>;
-    /// Validate the desktop at the final injection boundary. Backends that can
-    /// switch desktops must override this without switching again after checking.
-    fn input_in_context(&mut self, expected: &DesktopContext, event: &Input) -> Result<()> {
-        if &self.context()? != expected {
-            self.release();
-            return Err(error("desktop changed before input"));
-        }
-        event.validate(&expected.display)?;
-        self.input(event)
-    }
-    /// Renew held input only after the controller has presented a current frame.
-    fn presented(&mut self, _expected: &DesktopContext) -> Result<()> {
-        Ok(())
-    }
-    fn release(&mut self);
-    /// The OS double-click time and box of the interactive session; `None`
-    /// means a drag-start press is never held.
-    fn double_click_guard(&mut self) -> Option<DoubleClickGuard> {
-        None
-    }
 }
 
 impl Input {

@@ -132,6 +132,18 @@ pub(super) fn displays() -> Result<Vec<Display>> {
         .map(describe)
         .collect()
 }
+/// The primary display, or the first when Windows names none.
+pub(super) fn primary() -> Result<Display> {
+    let _dpi = DpiScope::enter();
+    available()?;
+    let monitors = xcap::Monitor::all().map_err(error)?;
+    monitors
+        .iter()
+        .find(|monitor| monitor.is_primary().unwrap_or(false))
+        .or(monitors.first())
+        .ok_or_else(|| display_lost("no display is available"))
+        .and_then(describe)
+}
 /// The encoder's limits until `configure_video`, which every session calls
 /// before it captures.
 const UNCONFIGURED: crate::VideoLimits = crate::VideoLimits {
@@ -349,8 +361,17 @@ impl Backend for Desktop {
     }
     /// The helper's worker answers the same way, in the interactive session
     /// where it encodes.
-    fn encodes_h265(&mut self) -> bool {
-        crate::video::windows::h265_available(self.id)
+    fn describe(&mut self, probe_h265: bool) -> Result<crate::Description> {
+        let display = self.display()?;
+        Ok(crate::Description {
+            caps: crate::BackendCaps {
+                h265: probe_h265 && crate::video::windows::h265_available(self.id),
+                lock: true,
+                os: Some(crate::HostOs::Windows),
+                ..crate::BackendCaps::default()
+            },
+            display,
+        })
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         let context = self.context()?;
