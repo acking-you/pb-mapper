@@ -4,7 +4,7 @@
 //! privileged agent can connect it over its own transport.
 use super::{
     Transport, ipc,
-    proto::{DRAIN_WAIT_MAX_MS, Request, Response, TIMEOUT},
+    proto::{DRAIN_WAIT_MAX_MS, Request, Response},
 };
 use crate::{
     Backend, BackendCaps, BackendError, Description, DesktopContext, Input, Result, Waker, error,
@@ -105,8 +105,9 @@ impl<T: Transport> RemoteBackend<T> {
             Request::Context {} | Request::Capture {} | Request::Video { .. }
         );
         let applies = matches!(request, Request::Input { .. });
+        let bound = request.timeout();
         let result = self.runtime.block_on(async {
-            tokio::time::timeout(TIMEOUT, async {
+            tokio::time::timeout(bound, async {
                 let pipe = self
                     .pipe
                     .as_mut()

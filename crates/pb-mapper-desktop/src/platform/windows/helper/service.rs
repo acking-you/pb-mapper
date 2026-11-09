@@ -2,7 +2,10 @@ use super::*;
 use crate::oop::proto::{Request, TIMEOUT};
 use std::{
     ffi::OsString,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio::net::windows::named_pipe::NamedPipeServer;
@@ -168,7 +171,8 @@ fn entry(_: Vec<OsString>) {
         runtime.block_on(async {
             let mut listener = pipe::bind(PIPE, Some(&config.owner_sid), true)?;
             status.set_service_status(state(ServiceState::Running, 0)).map_err(error)?;
-            restore_left_modes(&config);
+            let restores = Restores::default();
+            restore_left_modes(&config, &restores).await;
             let mut background = tokio::spawn(super::background::run(stop.clone()));
             let capture = async {
                 loop {
@@ -177,7 +181,7 @@ fn entry(_: Vec<OsString>) {
                     // so another process can never claim the pipe name in between.
                     let next = pipe::bind(PIPE, Some(&config.owner_sid), false)?;
                     let connection = std::mem::replace(&mut listener, next);
-                    let _ = session(connection, &config, stop.clone(), &sessions).await;
+                    let _ = session(connection, &config, stop.clone(), &sessions, &restores).await;
                 }
                 Ok::<_, std::io::Error>(())
             };
@@ -206,6 +210,7 @@ async fn session(
     config: &Configuration,
     stop: CancellationToken,
     sessions: &SessionEvents,
+    restores: &Restores,
 ) -> Result<()> {
     let request: Request = tokio::time::timeout(TIMEOUT, ipc::read_json(&mut caller))
         .await
@@ -222,6 +227,9 @@ async fn session(
     session.check()?;
     let name = format!("{PIPE}.worker.{}", crate::security::secret()?);
     let mut private = pipe::bind(&name, None, true)?;
+    // Never beside a restore run on the session's journal: the worker
+    // replays it itself as it opens.
+    restores.end(session.session).await;
     let child = spawn_worker(
         config,
         session.session,
@@ -283,32 +291,81 @@ async fn session(
     drop(child); // Job close terminates a worker that failed to exit.
     // Killed, failed, or a display mode still journalled: put it back.
     if exit != Some(0) {
-        restore_modes(config, session.session);
+        restores.start(config, session.session).await;
     }
     Ok(())
 }
 
-/// Start the `restore` worker in `session`, which puts back the display mode
-/// a worker there left journalled, and keep it until it ends.
-fn restore_modes(config: &Configuration, session: u32) {
-    match spawn_worker(config, session, &format!("restore {session}")) {
-        Ok(child) => {
-            tokio::spawn(async move {
-                let deadline = tokio::time::Instant::now()
-                    + super::worker::RESTORE_FOR
-                    + Duration::from_secs(10);
-                while child.exit_code().is_none() && tokio::time::Instant::now() < deadline {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+/// The `restore` workers, at most one per console session, each putting
+/// back the display mode a worker there left journalled. A worker never
+/// runs beside one in its session: both act on the session's journal, so
+/// the run ends, and is gone, before a worker starts there.
+#[derive(Clone, Default)]
+struct Restores(Arc<Mutex<Vec<Run>>>);
+struct Run {
+    session: u32,
+    serial: u64,
+    child: Child,
+}
+static RUNS: AtomicU64 = AtomicU64::new(0);
+impl Restores {
+    fn runs(&self) -> MutexGuard<'_, Vec<Run>> {
+        self.0.lock().unwrap_or_else(|_| std::process::abort())
+    }
+
+    /// Start the run in `session`, after ending one still there, and keep it
+    /// until it exits or overruns its ten minutes.
+    async fn start(&self, config: &Configuration, session: u32) {
+        self.end(session).await;
+        let child = match spawn_worker(config, session, &format!("restore {session}")) {
+            Ok(child) => child,
+            Err(failure) => {
+                return os::record_service_event("restore_failed", &failure.to_string());
+            }
+        };
+        let serial = RUNS.fetch_add(1, Ordering::Relaxed);
+        self.runs().push(Run {
+            session,
+            serial,
+            child,
+        });
+        let runs = self.clone();
+        tokio::spawn(async move {
+            let deadline =
+                tokio::time::Instant::now() + super::worker::RESTORE_FOR + Duration::from_secs(10);
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let mut runs = runs.runs();
+                // Gone already: a worker's start ended it.
+                let Some(at) = runs.iter().position(|run| run.serial == serial) else {
+                    return;
+                };
+                if runs[at].child.exit_code().is_some() || tokio::time::Instant::now() >= deadline {
+                    // Dropped: its job ends one that overran.
+                    runs.swap_remove(at);
+                    return;
                 }
-            });
+            }
+        });
+    }
+
+    /// End the run in `session`, if there is one, and wait until it is gone.
+    async fn end(&self, session: u32) {
+        let run = {
+            let mut runs = self.runs();
+            runs.iter()
+                .position(|run| run.session == session)
+                .map(|at| runs.swap_remove(at))
+        };
+        if let Some(run) = run {
+            run.child.end().await;
         }
-        Err(failure) => os::record_service_event("restore_failed", &failure.to_string()),
     }
 }
 
 /// At service start: a journal a worker left from before (the service
 /// crashed, or was stopped mid-change) is put back in its session.
-fn restore_left_modes(config: &Configuration) {
+async fn restore_left_modes(config: &Configuration, restores: &Restores) {
     let Ok(entries) = os::install_root().and_then(std::fs::read_dir) else {
         return;
     };
@@ -322,13 +379,13 @@ fn restore_left_modes(config: &Configuration) {
         if let Some(session) = session
             && super::worker::journal(session).is_ok_and(|journal| journal.pending())
         {
-            restore_modes(config, session);
+            restores.start(config, session).await;
         }
     }
 }
 
 struct Child {
-    _job: os::Handle,
+    job: os::Handle,
     process: os::Handle,
     pid: u32,
 }
@@ -338,6 +395,16 @@ impl Child {
         let mut code = 0;
         unsafe { GetExitCodeProcess(self.process.raw(), &mut code) }.ok()?;
         (code != STILL_ACTIVE.0 as u32).then_some(code)
+    }
+    /// End it now, and wait until it is gone: two seconds at most.
+    async fn end(self) {
+        let _ = unsafe { TerminateJobObject(self.job.raw(), 1) };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while unsafe { WaitForSingleObject(self.process.raw(), 0) } == WAIT_TIMEOUT
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
     }
 }
 /// The helper in `session` with `args`, in a job that ends it with the job.
@@ -441,7 +508,7 @@ fn spawn_worker(config: &Configuration, session: u32, args: &str) -> Result<Chil
         return Err(error("could not resume desktop worker"));
     }
     Ok(Child {
-        _job: job,
+        job,
         process: handle,
         pid: process.dwProcessId,
     })
