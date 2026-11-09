@@ -18,7 +18,10 @@
 //! };
 //!
 //! let file = TrustFile::<_, String>::new("state".into(), CurrentUser::TRUST);
-//! let scope = RelayScope { relay: client.server().into(), namespace: 0 };
+//! let scope = RelayScope {
+//!     relay: client.server().into(),
+//!     namespace: client.credential_namespace(),
+//! };
 //! let service = "desktop:office".to_string();
 //! let mut builder = Host::builder(HostOptions::new(service.clone()));
 //! if let Some(saved) = file.load()?.filter(|saved| saved.matches(&scope)) {
@@ -99,7 +102,8 @@ impl Sealer for CurrentUser {
     }
 }
 
-/// Where a grant was made: a relay address and the credential's namespace.
+/// Where a grant was made: a relay address and the credential's namespace
+/// (`Client::credential_namespace`).
 /// A grant is resumed only where it was made.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayScope {

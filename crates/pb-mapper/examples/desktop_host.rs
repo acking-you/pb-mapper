@@ -63,12 +63,13 @@ async fn main() -> Outcome {
         namespace: None,
     })?;
 
-    // A remembered grant resumes only on the relay it was made for, under the
-    // same service; its display is found by device name, which outlives ids.
+    // A remembered grant resumes only on the relay and credential it was made
+    // for, under the same service; its display is found by device name, which
+    // outlives ids.
     let file = identity.map(|directory| TrustFile::<_, String>::new(directory, sealer()));
     let scope = RelayScope {
         relay: server,
-        namespace: client.namespace().unwrap_or_default(),
+        namespace: client.credential_namespace(),
     };
     let remembered = match &file {
         Some(file) => file

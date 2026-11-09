@@ -198,6 +198,15 @@ impl Client {
         self.inner.namespace
     }
 
+    /// The namespace this client's credential owns: a temporary key's id, or
+    /// 0 for the administrator key. Unlike [`Self::namespace`], which an
+    /// administrator sets to reach into another, it tells credentials apart:
+    /// what something made through this client, such as a remembered desktop
+    /// grant, is scoped to.
+    pub fn credential_namespace(&self) -> u64 {
+        self.credential().key_id()
+    }
+
     pub(crate) fn credential(&self) -> Credential {
         *self
             .inner
