@@ -205,10 +205,11 @@ pub(crate) trait DisplayModes: Sized {
     fn reset(&mut self, device: &str, original: &Setting) -> Result<()>;
 }
 
-/// No mode changes.
-#[expect(
-    dead_code,
-    reason = "for the first platform without modes (Android, Wayland); Unsupported only names it"
+/// No mode changes: the unsupported platform's, and the first real platform
+/// without modes (Android, Wayland).
+#[cfg_attr(
+    windows,
+    expect(dead_code, reason = "only the platforms without modes use it")
 )]
 pub(crate) struct NoModes;
 impl DisplayModes for NoModes {
