@@ -1004,6 +1004,7 @@ pub async fn register_service(
                 idle_timeout: None,
                 port_mapping,
                 lan_first,
+                ..Default::default()
             },
         )
         .await
@@ -1106,6 +1107,7 @@ pub async fn connect_service(
                 },
                 port_mapping,
                 lan_first,
+                ..Default::default()
             },
         )
         .await

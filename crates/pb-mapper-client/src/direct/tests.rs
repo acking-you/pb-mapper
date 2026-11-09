@@ -137,6 +137,8 @@ impl Share {
             crate::sdk::DirectPolicy {
                 port_mapping: PortMapping::Off,
                 lan_first: true,
+                lan_transport: crate::sdk::LanTransport::Quic,
+                lan_tcp: false,
             },
         );
         consumer
