@@ -1082,26 +1082,26 @@ class DesktopStore {
       final target = _target;
       if (_disposed || target == null || serial != _serial) return;
       final h265 = _offeredH265 = _offersH265(decoders, target);
-      // Never a size the decoder of the codec asked for cannot take.
-      final resolution = h265
-          ? target.resolution
-          : decoders.forH264(target.resolution);
+      // Rust fits the limits inside the decoder offered first: never a
+      // size it cannot take.
+      final offer = h265 ? decoders : decoders.withoutH265();
       final session = await _api.connect(
         target.invitation,
         computerId: target.computerId,
         relayOnly: target.relayOnly,
         quality: _quality.value,
         refreshHz: _refreshHz(),
-        h265: h265,
-        resolution: resolution,
+        decoders: offer,
+        resolution: target.resolution,
         maxFps: target.maxFps,
       );
       if (_disposed || serial != _serial) return;
       if (h265 && session.codec == 'h264') {
         _h265Declined = true;
-        if (decoders.forH264(resolution) != resolution) {
-          // Only H.265 decodes this size here: again at once, at the
-          // largest H.264 does. The computer keeps the choice.
+        final (width, height) = offer.limitsFor(target.resolution);
+        if (!(decoders.h264?.takes(width, height) ?? true)) {
+          // Only H.265 decodes these limits here: again at once, within
+          // H.264's. The computer keeps the choice.
           _reconnectNow();
           return;
         }
@@ -1301,17 +1301,34 @@ class DesktopStore {
   bool _offersH265(DesktopDecoders? decoders, DesktopTarget target) =>
       !_h265Declined && (decoders?.offersH265(target) ?? false);
 
-  /// D7: a session at [r] would decode here, judged by the codec it would
-  /// carry — H.265 where it would be offered, else H.264. Before the probe
-  /// has answered, every size.
-  bool decodes(DesktopResolution r) {
+  /// D7: a session at [r] (null: the default) would decode here at its own
+  /// size, judged by the codec it would carry — H.265 where it would be
+  /// offered, else H.264 — and by the remote display once it is known.
+  /// Before the probe has answered, every size.
+  bool decodes(DesktopResolution? r) {
     final decoders = _decoders.value;
     if (decoders == null) return true;
     return decoders.decodes(
       r,
       _target?.codec ?? DesktopCodecPreference.auto,
       h265Declined: _h265Declined,
+      display: _remoteDisplay(),
     );
+  }
+
+  /// The largest picture of the decoder a session here is fitted inside
+  /// (D7): what the default is limited to where [decodes] says it does not
+  /// fit. Null for JPEG.
+  DesktopDecoderLimit? decoderLimit() => _decoders.value?.limitFor(
+    _target?.codec ?? DesktopCodecPreference.auto,
+    h265Declined: _h265Declined,
+  );
+
+  (int, int)? _remoteDisplay() {
+    final geometry = _geometry.value;
+    return geometry == null
+        ? null
+        : (geometry.displayWidth, geometry.displayHeight);
   }
 
   void _pollStatus({bool resumed = false}) {
@@ -2078,10 +2095,10 @@ class DesktopStore {
     _publishSession();
   }
 
-  /// The encoded size's bound (D7), fixed for a session: a change connects
-  /// again at once.
-  void setResolution(DesktopResolution resolution) =>
-      _setLimits(_target?.copyWith(resolution: resolution));
+  /// The encoded size's bound (D7), null for the default, fixed for a
+  /// session: a change connects again at once.
+  void setResolution(DesktopResolution? resolution) =>
+      _setLimits(_target?.copyWith(resolution: (to: resolution)));
 
   /// The frame rate's ceiling (D8), 0 for Auto, fixed for a session: a
   /// change connects again at once.

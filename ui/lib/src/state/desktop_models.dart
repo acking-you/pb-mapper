@@ -1,6 +1,8 @@
 // The values the desktop store publishes, and the ones the FFI returns that
 // the store passes on unchanged. Every one is immutable with value equality,
 // so a `ValueNotifier` holding it notifies only on a real change (D14).
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 
 /// The quality preset (D12). The names are the wire names.
@@ -26,23 +28,45 @@ DesktopQuality desktopQualityFromWire(Object? value) => switch (value) {
 
 /// The largest picture a viewer asks for (D7), as Rust's `Resolution`: the
 /// host keeps the display's aspect ratio inside these bounds and never
-/// upscales. Fixed for a session, so a change reconnects.
+/// upscales. Fixed for a session, so a change reconnects. None chosen
+/// (null) is the default, [native].
 enum DesktopResolution {
   p720('720p', 1280, 720),
   p1080('1080p', 1920, 1080),
   p1440('1440p', 2560, 1440),
 
-  /// The display's own size, up to 3840×2160.
+  /// The display's own size, up to 3840×2160: the default.
   native('native', 3840, 2160);
 
   const DesktopResolution(this.wire, this.maxWidth, this.maxHeight);
   final String wire;
   final int maxWidth, maxHeight;
+
+  /// The picture a session at [r] sends of a [display] (width, height):
+  /// the display fitted inside the bounds, never upscaled; the bounds
+  /// themselves while the display is not known.
+  static (int, int) pictureOf(DesktopResolution? r, (int, int)? display) {
+    final bounds = r ?? native;
+    if (display == null || display.$1 <= 0 || display.$2 <= 0) {
+      return (bounds.maxWidth, bounds.maxHeight);
+    }
+    final scale = [
+      1.0,
+      bounds.maxWidth / display.$1,
+      bounds.maxHeight / display.$2,
+    ].reduce((a, b) => a < b ? a : b);
+    return ((display.$1 * scale).floor(), (display.$2 * scale).floor());
+  }
 }
 
-DesktopResolution desktopResolutionFromWire(Object? value) => DesktopResolution
-    .values
-    .firstWhere((r) => r.wire == value, orElse: () => DesktopResolution.p1080);
+/// Null when there is none, or for a value this build does not know: the
+/// default.
+DesktopResolution? desktopResolutionFromWire(Object? value) {
+  for (final r in DesktopResolution.values) {
+    if (r.wire == value) return r;
+  }
+  return null;
+}
 
 /// The frame rates a viewer may choose over Auto (D8): each becomes the
 /// session's ceiling, every preset's included.
@@ -74,8 +98,23 @@ class DesktopDecoderLimit {
   /// What the protocol carries at most: no limit of the decoder's own.
   static const largest = DesktopDecoderLimit(3840, 2160);
 
-  bool takes(DesktopResolution r) =>
-      r.maxWidth <= maxWidth && r.maxHeight <= maxHeight;
+  /// A picture of [width] by [height] fits, in either orientation: the
+  /// probe reports one, and a decoder takes both.
+  bool takes(int width, int height) =>
+      math.max(width, height) <= math.max(maxWidth, maxHeight) &&
+      math.min(width, height) <= math.min(maxWidth, maxHeight);
+
+  /// [bounds] fitted inside this decoder as Rust's `VideoLimits::clamped`
+  /// fits them: the long edge within the longer side, the short within the
+  /// shorter.
+  (int, int) clamp((int, int) bounds) {
+    final long = math.max(maxWidth, maxHeight);
+    final short = math.min(maxWidth, maxHeight);
+    final (w, h) = bounds;
+    return w >= h
+        ? (math.min(w, long), math.min(h, short))
+        : (math.min(w, short), math.min(h, long));
+  }
 
   @override
   bool operator ==(Object other) =>
@@ -121,37 +160,46 @@ class DesktopDecoders {
   DesktopDecoders withoutH265() =>
       DesktopDecoders(h264: h264, displayMaxHz: displayMaxHz);
 
-  /// D6: H.265 is offered when the preference is Auto and the H.265 decoder
-  /// takes the chosen resolution.
+  /// D6: H.265 is offered when the preference is Auto and there is an
+  /// H.265 decoder: Rust fits the session's limits inside its largest
+  /// picture, so a phone keeps H.265 at the default size.
   bool offersH265(DesktopTarget target) =>
-      target.codec == DesktopCodecPreference.auto &&
-      (h265?.takes(target.resolution) ?? false);
+      target.codec == DesktopCodecPreference.auto && h265 != null;
 
-  /// D7: the decoder a session at [r] would use under [codec] takes it:
-  /// H.265 where it would be offered, else H.264 — H.264 alone once the
-  /// computer declined H.265 ([h265Declined]). Without either decoder, the
-  /// picture is JPEG, which Dart decodes at any size.
-  bool decodes(
-    DesktopResolution r,
+  /// The decoder whose largest picture bounds a session under [codec]:
+  /// H.265's where it would be offered, else H.264's — H.264's alone once
+  /// the computer declined H.265 ([h265Declined]). Null for JPEG, which
+  /// Dart decodes at any size.
+  DesktopDecoderLimit? limitFor(
     DesktopCodecPreference codec, {
     bool h265Declined = false,
-  }) =>
-      (h264 == null && h265 == null) ||
-      (h264?.takes(r) ?? false) ||
-      (codec == DesktopCodecPreference.auto &&
-          !h265Declined &&
-          (h265?.takes(r) ?? false));
+  }) => codec == DesktopCodecPreference.auto && !h265Declined && h265 != null
+      ? h265
+      : h264;
 
-  /// The largest resolution up to [r] the H.264 decoder takes: what a
-  /// session asks for when it is not offered H.265. Without a limit known
-  /// for H.264, [r] itself.
-  DesktopResolution forH264(DesktopResolution r) {
-    final limit = h264;
-    if (limit == null) return r;
-    return DesktopResolution.values.lastWhere(
-      (c) => c.index <= r.index && limit.takes(c),
-      orElse: () => DesktopResolution.values.first,
+  /// The limits Rust's `ViewerConfig::for_decoders` asks for at [r] when
+  /// these decoders are offered.
+  (int, int) limitsFor(DesktopResolution? r) {
+    final bounds = (
+      (r ?? DesktopResolution.native).maxWidth,
+      (r ?? DesktopResolution.native).maxHeight,
     );
+    return (h265 ?? h264)?.clamp(bounds) ?? bounds;
+  }
+
+  /// D7: the picture a session at [r] sends of a [display] (null while not
+  /// known) fits the decoder that bounds it ([limitFor]). One that does not
+  /// is fitted inside that decoder instead.
+  bool decodes(
+    DesktopResolution? r,
+    DesktopCodecPreference codec, {
+    bool h265Declined = false,
+    (int, int)? display,
+  }) {
+    final limit = limitFor(codec, h265Declined: h265Declined);
+    if (limit == null) return true;
+    final (width, height) = DesktopResolution.pictureOf(r, display);
+    return limit.takes(width, height);
   }
 
   @override
@@ -275,7 +323,7 @@ class DesktopTarget {
     this.computerId,
     this.relayOnly = false,
     this.quality = DesktopQuality.balanced,
-    this.resolution = DesktopResolution.p1080,
+    this.resolution,
     this.maxFps = 0,
     this.codec = DesktopCodecPreference.auto,
   }) : assert(invitation != null || computerId != null);
@@ -287,8 +335,9 @@ class DesktopTarget {
   /// Live (D12); the store also keeps it apart, as the host reports it.
   final DesktopQuality quality;
 
-  /// Fixed for a session (D7, D8): a change connects again.
-  final DesktopResolution resolution;
+  /// Fixed for a session (D7, D8): a change connects again. Null: the
+  /// default, the display's own size.
+  final DesktopResolution? resolution;
 
   /// 0: Auto; else one of [kMaxFpsChoices].
   final int maxFps;
@@ -296,9 +345,11 @@ class DesktopTarget {
   /// The device's preference, which the session takes at connect (D6).
   final DesktopCodecPreference codec;
 
+  /// [resolution] is replaced when given, null included: `(to: null)` is
+  /// the default again.
   DesktopTarget copyWith({
     DesktopQuality? quality,
-    DesktopResolution? resolution,
+    ({DesktopResolution? to})? resolution,
     int? maxFps,
     DesktopCodecPreference? codec,
   }) => DesktopTarget(
@@ -307,7 +358,7 @@ class DesktopTarget {
     computerId: computerId,
     relayOnly: relayOnly,
     quality: quality ?? this.quality,
-    resolution: resolution ?? this.resolution,
+    resolution: resolution == null ? this.resolution : resolution.to,
     maxFps: maxFps ?? this.maxFps,
     codec: codec ?? this.codec,
   );
@@ -340,7 +391,7 @@ class DesktopTarget {
   String toString() =>
       'DesktopTarget($name, computer: $computerId, '
       'invitation: ${invitation == null ? 'none' : 'redacted'}, '
-      'relayOnly: $relayOnly, ${quality.name}, ${resolution.wire}, '
+      'relayOnly: $relayOnly, ${quality.name}, ${resolution?.wire ?? 'default'}, '
       'maxFps: $maxFps, ${codec.name})';
 }
 

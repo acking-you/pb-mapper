@@ -265,7 +265,7 @@ class RemoteDesktop {
           computerId: id,
           relayOnly: result.relayOnly,
           quality: previous?.quality ?? DesktopQuality.balanced,
-          resolution: previous?.resolution ?? DesktopResolution.p1080,
+          resolution: previous?.resolution,
           maxFps: previous?.maxFps ?? 0,
           codec: prefs.codec,
         ),
@@ -341,8 +341,9 @@ class RemoteDesktop {
     if (id != null) await computers.setQuality(id, quality);
   }
 
-  /// Connects again at once (D7), and is kept for a remembered computer.
-  Future<void> setResolution(DesktopResolution resolution) async {
+  /// Connects again at once (D7), and is kept for a remembered computer;
+  /// null is the default again.
+  Future<void> setResolution(DesktopResolution? resolution) async {
     desktop.setResolution(resolution);
     final id = rememberedComputer?.id;
     if (id != null) await computers.setResolution(id, resolution);
@@ -448,7 +449,7 @@ class RemoteDesktop {
       namespace: _credentialKeyId(),
       relayOnly: target.relayOnly,
       quality: chosen?.quality ?? DesktopQuality.balanced,
-      resolution: chosen?.resolution ?? DesktopResolution.p1080,
+      resolution: chosen?.resolution,
       maxFps: chosen?.maxFps ?? 0,
       replaceId: target.replaceId,
     );

@@ -120,7 +120,7 @@ final class ViewerActions {
 
   /// The resolution (D7) and the maximum frame rate, 0 for Auto (D8): each
   /// connects again at once.
-  final ValueChanged<DesktopResolution> onResolution;
+  final ValueChanged<DesktopResolution?> onResolution;
   final ValueChanged<int> onMaxFps;
   final VoidCallback onTypeText;
 
@@ -179,16 +179,21 @@ List<ViewerMenuEntry> _figures(
 
 /// What a session takes at connect, so a change connects again: the
 /// computer's resolution (D7) and maximum frame rate (D8), and this
-/// device's codec (D6). A resolution the decoder of the codec it would
-/// carry cannot take is shown disabled, and a rate above the display's is
-/// not offered.
+/// device's codec (D6). A size the decoder of the codec it would carry
+/// cannot take at the remote display's size is shown disabled; the
+/// default, which Rust fits inside that decoder, says how large it goes
+/// here. A rate above the display's is not offered.
 List<ViewerMenuEntry> _sessionChoices(AppLocalizations l10n, ViewerActions a) {
   final target = a.desktop.session.value.target;
-  final resolution = target?.resolution ?? DesktopResolution.p1080;
+  final resolution = target?.resolution;
   final maxFps = target?.maxFps ?? 0;
   final codec = a.prefs.codec;
-  String resolutionLabel(DesktopResolution r) =>
-      r == DesktopResolution.native ? l10n.viewerResolutionNative : r.wire;
+  String resolutionLabel(DesktopResolution? r) => switch (r) {
+    null => l10n.viewerResolutionDefault,
+    DesktopResolution.native => l10n.viewerResolutionNative,
+    _ => r.wire,
+  };
+  final limit = a.desktop.decodes(null) ? null : a.desktop.decoderLimit();
   String fpsLabel(int fps) => fps == 0 ? l10n.viewerMaxFpsAuto : '$fps fps';
   // Auto names the codec the session decodes, as RustDesk's menu does.
   final inUse = a.desktop.picture.value?.codec;
@@ -204,16 +209,22 @@ List<ViewerMenuEntry> _sessionChoices(AppLocalizations l10n, ViewerActions a) {
       value: resolutionLabel(resolution),
       note: l10n.viewerReconnectsToApply,
       entries: [
+        ViewerMenuItem(
+          key: const Key('resolution-default'),
+          label: l10n.viewerResolutionDefaultNative,
+          detail: limit == null
+              ? l10n.viewerResolutionNativeHint
+              : l10n.viewerResolutionLimited(
+                  '${limit.maxWidth}×${limit.maxHeight}',
+                ),
+          checked: resolution == null,
+          onSelected: () => a.onResolution(null),
+        ),
         for (final r in DesktopResolution.values)
           if (a.desktop.decodes(r))
             ViewerMenuItem(
               key: Key('resolution-${r.wire}'),
               label: resolutionLabel(r),
-              detail: switch (r) {
-                DesktopResolution.p1080 => l10n.viewerResolutionDefault,
-                DesktopResolution.native => l10n.viewerResolutionNativeHint,
-                _ => null,
-              },
               checked: resolution == r,
               onSelected: () => a.onResolution(r),
             )

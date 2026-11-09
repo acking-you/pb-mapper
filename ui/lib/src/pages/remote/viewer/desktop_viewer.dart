@@ -54,7 +54,7 @@ class DesktopViewer extends StatefulWidget {
   final ValueChanged<DesktopQuality>? onQuality;
 
   /// Defaults: `desktop.setResolution` and `desktop.setMaxFps`.
-  final ValueChanged<DesktopResolution>? onResolution;
+  final ValueChanged<DesktopResolution?>? onResolution;
   final ValueChanged<int>? onMaxFps;
 
   /// Default: connects the session's target again.

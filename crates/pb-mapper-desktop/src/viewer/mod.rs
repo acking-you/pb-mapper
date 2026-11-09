@@ -89,6 +89,14 @@ pub struct ViewerConfig {
     /// Called as the connection passes each stage.
     pub progress: Option<Arc<dyn Fn(ConnectStage) + Send + Sync>>,
 }
+/// What a renderer decodes in hardware: the largest picture each decoder
+/// takes at 60 fps, in either orientation; `None` where it has none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Decoders {
+    pub h264: Option<(u32, u32)>,
+    pub h265: Option<(u32, u32)>,
+}
+
 impl ViewerConfig {
     /// A viewer of `codecs`, at the default resolution and the display's 60
     /// fps, with the balanced preset.
@@ -97,6 +105,43 @@ impl ViewerConfig {
             codecs,
             limits: VideoLimits::choose(60.0, crate::Resolution::default(), None),
             fps_override: false,
+            quality: QualityPreset::Balanced,
+            progress: None,
+        }
+    }
+    /// The offer for what the renderer decodes: H.265 where it decodes it,
+    /// then H.264 where it decodes that, else JPEG, which needs no decoder.
+    /// The limits are `resolution`'s at `max_fps`, or at the display's
+    /// `refresh_hz` (see [`VideoLimits::choose`]), fitted inside the largest
+    /// picture of the decoder the host picks first: so a phone keeps H.265
+    /// at the default size. A host that declines H.265 sends H.264 within
+    /// those limits, which the H.264 decoder may not take; connect again
+    /// without H.265 then.
+    pub fn for_decoders(
+        decoders: Decoders,
+        resolution: crate::Resolution,
+        refresh_hz: f64,
+        max_fps: Option<u32>,
+    ) -> Self {
+        let fallback = if decoders.h264.is_some() {
+            VideoCodec::H264
+        } else {
+            VideoCodec::Jpeg
+        };
+        let codecs = decoders
+            .h265
+            .map(|_| VideoCodec::H265)
+            .into_iter()
+            .chain([fallback])
+            .collect();
+        let limits = VideoLimits::choose(refresh_hz, resolution, max_fps);
+        Self {
+            codecs,
+            limits: match decoders.h265.or(decoders.h264) {
+                Some(largest) => limits.clamped(largest),
+                None => limits,
+            },
+            fps_override: max_fps.is_some(),
             quality: QualityPreset::Balanced,
             progress: None,
         }
@@ -1622,6 +1667,28 @@ mod tests {
             Viewer::over_stream_for_test(stream, TOKEN.into(), alone).await,
             Err(ConnectError::InvalidRequest)
         ));
+    }
+
+    /// The offer follows the decoders, and the limits the one the host picks
+    /// first: a phone whose H.265 decoder stops at 1080p, probed upright,
+    /// keeps H.265 at the default size. Without a decoder, JPEG.
+    #[test]
+    fn the_offer_and_limits_follow_the_decoders() {
+        let native = |decoders| {
+            ViewerConfig::for_decoders(decoders, crate::Resolution::default(), 60.0, None)
+        };
+        let phone = native(Decoders {
+            h264: Some((3840, 2160)),
+            h265: Some((1080, 1920)),
+        });
+        assert_eq!(phone.codecs, [VideoCodec::H265, VideoCodec::H264]);
+        let bounds = |config: &ViewerConfig| (config.limits.max_width, config.limits.max_height);
+        assert_eq!(bounds(&phone), (1920, 1080));
+        let none = native(Decoders::default());
+        assert_eq!(
+            (none.codecs.as_slice(), bounds(&none)),
+            (&[VideoCodec::Jpeg][..], (3840, 2160))
+        );
     }
 
     /// A report the host sampled before it took this viewer's last move is set

@@ -16,9 +16,9 @@ use crate::{
 use pb_mapper::{
     Client, ConnectOptions, PathPolicy,
     desktop::{
-        self, Access, ConnectError, ConnectStage, DesktopView, DisplaySelection, Host, HostOptions,
-        InputError, Invitation, InvitationError, InvitationFormat, KeyframeReason, QualityPreset,
-        Resolution, StopReason, VideoCodec, VideoLimits, Viewer, ViewerConfig,
+        self, Access, ConnectError, ConnectStage, Decoders, DesktopView, DisplaySelection, Host,
+        HostOptions, InputError, Invitation, InvitationError, InvitationFormat, KeyframeReason,
+        QualityPreset, Resolution, StopReason, Viewer, ViewerConfig,
     },
 };
 #[cfg(windows)]
@@ -402,17 +402,40 @@ enum Request {
         #[serde(default)]
         quality: QualityPreset,
         refresh_hz: f64,
-        /// Offer H.265 too: the app's decoder probe found a decoder for it
-        /// that takes `resolution`, and it has not failed this run.
+        /// What the runner decodes in hardware, as its probe found it, H.265
+        /// left out once it failed this run: the offer, and the largest
+        /// picture of each decoder, which bounds the limits.
+        decoders: DecoderOffer,
+        /// Absent: the SDK's default, the display's own size.
         #[serde(default)]
-        h265: bool,
-        #[serde(default)]
-        resolution: Resolution,
+        resolution: Option<Resolution>,
         /// 0 is Auto; otherwise the user's own rate, see `valid_max_fps`.
         #[serde(default)]
         max_fps: u32,
     },
     Disconnect,
+}
+
+/// Each decoder's largest picture as `[width, height]`; `null` for none.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecoderOffer {
+    h264: Option<[u32; 2]>,
+    h265: Option<[u32; 2]>,
+}
+impl DecoderOffer {
+    fn decoders(&self) -> Result<Decoders, CtlError> {
+        let size = |largest: Option<[u32; 2]>| match largest {
+            Some([width, height]) if width == 0 || height == 0 => Err(CtlError::invalid_argument(
+                "a decoder's largest picture must not be empty",
+            )),
+            largest => Ok(largest.map(|[width, height]| (width, height))),
+        };
+        Ok(Decoders {
+            h264: size(self.h264)?,
+            h265: size(self.h265)?,
+        })
+    }
 }
 
 /// What the helper card asks of Windows. Setup's own install and enable go
@@ -977,19 +1000,6 @@ fn capabilities_json(support: desktop::HostSupport) -> Value {
     })
 }
 
-/// Whether this runner decodes H.264 natively: Windows where Media
-/// Foundation is installed. Android's runner always does.
-fn native_h264_decoder() -> bool {
-    #[cfg(windows)]
-    {
-        desktop::windows::media_foundation()
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
 async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlError> {
     let state = &handle.desktop;
     match request {
@@ -1226,7 +1236,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             relay_only,
             quality,
             refresh_hz,
-            h265,
+            decoders,
             resolution,
             max_fps,
         } => {
@@ -1235,6 +1245,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                     "max_fps must be 0 (Auto) or 30..=120",
                 ));
             }
+            let decoders = decoders.decoders()?;
             // A pasted invitation is checked before anything waits; a
             // remembered one is read inside the cancellable attempt.
             let target = match (invitation, computer_id) {
@@ -1248,25 +1259,18 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                     ));
                 }
             };
-            // Android, and Windows where Media Foundation is installed,
-            // decode H.264 natively, and H.265 where the app found a decoder;
-            // elsewhere Dart decodes JPEG.
-            let codecs = if cfg!(target_os = "android") || native_h264_decoder() {
-                if h265 {
-                    vec![VideoCodec::H265, VideoCodec::H264]
-                } else {
-                    vec![VideoCodec::H264]
-                }
-            } else {
-                vec![VideoCodec::Jpeg]
-            };
+            // The runner's own decoders, which Dart probed: none where it
+            // has no native video, and Dart decodes JPEG.
             let chosen_fps = (max_fps != 0).then_some(max_fps);
             let (viewer, source) = connect(handle, target, relay_only, |progress| ViewerConfig {
-                codecs,
-                limits: VideoLimits::choose(refresh_hz, resolution, chosen_fps),
-                fps_override: chosen_fps.is_some(),
                 quality,
                 progress: Some(progress),
+                ..ViewerConfig::for_decoders(
+                    decoders,
+                    resolution.unwrap_or_default(),
+                    refresh_hz,
+                    chosen_fps,
+                )
             })
             .await?;
             return Ok(json!({"video_source": source, "codec": viewer.status().stats.codec}));
@@ -1989,6 +1993,7 @@ pub unsafe extern "C" fn pb_mapper_desktop_view_v1(
 mod tests {
     use super::*;
     use base64::Engine as _;
+    use pb_mapper::desktop::{VideoCodec, VideoLimits};
     use std::{
         ffi::{CStr, CString},
         future::Future,
@@ -2659,8 +2664,11 @@ mod tests {
                         relay_only: false,
                         quality: QualityPreset::Balanced,
                         refresh_hz: 60.0,
-                        h265: true,
-                        resolution: Resolution::P1440,
+                        decoders: DecoderOffer {
+                            h264: Some([3840, 2160]),
+                            h265: Some([2560, 1440]),
+                        },
+                        resolution: Some(Resolution::P1440),
                         max_fps,
                     },
                 )
@@ -2730,8 +2738,11 @@ mod tests {
                     relay_only: false,
                     quality: QualityPreset::Balanced,
                     refresh_hz: 60.0,
-                    h265: false,
-                    resolution: Resolution::default(),
+                    decoders: DecoderOffer {
+                        h264: None,
+                        h265: None,
+                    },
+                    resolution: None,
                     max_fps: 0,
                 },
             ))

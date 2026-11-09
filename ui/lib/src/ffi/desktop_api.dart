@@ -522,16 +522,18 @@ abstract interface class DesktopApiClient {
   Future<DesktopInvitationInfo> inspectInvitation(String text);
 
   /// Sends exactly one of `invitation` and `computer_id`: the invitation
-  /// when both are given. [h265] offers H.265 (D6); [resolution] and
-  /// [maxFps] (0: Auto) become the session's limits (D7, D8).
+  /// when both are given. [decoders] is the offer (D6): H.265 where it has
+  /// a decoder, H.264 where it has one, else JPEG; the limits are
+  /// [resolution]'s (null: the default) and [maxFps] (0: Auto), fitted
+  /// inside the largest picture of the decoder offered first (D7, D8).
   Future<DesktopSession> connect(
     String? invitation, {
     String? computerId,
     required bool relayOnly,
     required DesktopQuality quality,
     required double refreshHz,
-    required bool h265,
-    required DesktopResolution resolution,
+    required DesktopDecoders decoders,
+    DesktopResolution? resolution,
     required int maxFps,
   });
   Future<void> disconnect();
@@ -748,8 +750,8 @@ class DesktopApi implements DesktopApiClient {
     required bool relayOnly,
     required DesktopQuality quality,
     required double refreshHz,
-    required bool h265,
-    required DesktopResolution resolution,
+    required DesktopDecoders decoders,
+    DesktopResolution? resolution,
     required int maxFps,
   }) async {
     if (invitation == null && computerId == null) {
@@ -758,6 +760,8 @@ class DesktopApi implements DesktopApiClient {
         'an invitation or a remembered computer is required',
       );
     }
+    List<int>? largest(DesktopDecoderLimit? limit) =>
+        limit == null ? null : [limit.maxWidth, limit.maxHeight];
     final data = await _call('connect', {
       if (invitation != null)
         'invitation': invitation
@@ -766,8 +770,11 @@ class DesktopApi implements DesktopApiClient {
       'relay_only': relayOnly,
       'quality': quality.name,
       'refresh_hz': refreshHz,
-      'h265': h265,
-      'resolution': resolution.wire,
+      'decoders': {
+        'h264': largest(decoders.h264),
+        'h265': largest(decoders.h265),
+      },
+      'resolution': ?resolution?.wire,
       'max_fps': maxFps,
     });
     return DesktopSession(
@@ -781,8 +788,11 @@ class DesktopApi implements DesktopApiClient {
     await _call('disconnect');
   }
 
+  /// A runner without native video has no decoder to offer: its picture is
+  /// JPEG, which Dart decodes.
   @override
-  Future<DesktopDecoders> decoders() => probeDesktopDecoders();
+  Future<DesktopDecoders> decoders() async =>
+      nativeDesktopVideo ? probeDesktopDecoders() : const DesktopDecoders();
 
   // ---- the hot export, the view leaf and the video exports: synchronous
 

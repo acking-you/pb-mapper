@@ -17,6 +17,20 @@ const kMaxRememberedComputers = 50;
 /// which is what Rust counts; a character can be several.
 const kComputerNameMax = 128;
 
+/// The remote resolution a computer keeps (R19): only "fit local", since an
+/// exact size belongs to the display it was chosen for.
+enum RememberedDisplayMode {
+  fitLocal('fit_local');
+
+  const RememberedDisplayMode(this.wire);
+  final String wire;
+}
+
+RememberedDisplayMode? rememberedDisplayModeFromWire(Object? value) =>
+    value == RememberedDisplayMode.fitLocal.wire
+    ? RememberedDisplayMode.fitLocal
+    : null;
+
 /// A computer this device remembers, as Dart sees it: never its invitation,
 /// which stays in Rust's vault and is used by [id].
 @immutable
@@ -30,15 +44,16 @@ class RemoteComputer {
     required this.namespace,
     this.relayOnly = false,
     this.quality = DesktopQuality.balanced,
-    this.resolution = DesktopResolution.p1080,
+    this.resolution,
     this.maxFps = 0,
+    this.displayMode,
     this.lastConnectedAt,
     this.lastPath,
     this.lastControlAllowed,
   });
 
-  /// A record saved before resolution and frame rate were chosen has
-  /// neither: it is 1080p at Auto, as it was viewed then.
+  /// A record holds a resolution only where one was chosen, and a frame
+  /// rate of 0 is Auto: without either, the defaults.
   factory RemoteComputer.fromJson(Map<String, dynamic> json) => RemoteComputer(
     id: json['id'] as String,
     name: json['name'] as String,
@@ -50,6 +65,7 @@ class RemoteComputer {
     quality: desktopQualityFromWire(json['quality']),
     resolution: desktopResolutionFromWire(json['resolution']),
     maxFps: json['max_fps'] as int? ?? 0,
+    displayMode: rememberedDisplayModeFromWire(json['display_mode']),
     lastConnectedAt: switch (json['last_connected_ms']) {
       final int ms => DateTime.fromMillisecondsSinceEpoch(ms),
       _ => null,
@@ -82,8 +98,14 @@ class RemoteComputer {
   /// (D12), the resolution (D7) and the maximum frame rate, 0 for Auto
   /// (D8).
   final DesktopQuality quality;
-  final DesktopResolution resolution;
+
+  /// Null: the default, the display's own size.
+  final DesktopResolution? resolution;
   final int maxFps;
+
+  /// The remote resolution re-applied when this computer is controlled
+  /// again (R19).
+  final RememberedDisplayMode? displayMode;
   final DateTime? lastConnectedAt;
 
   /// `direct` or `relay`.
@@ -103,6 +125,7 @@ class RemoteComputer {
       other.quality == quality &&
       other.resolution == resolution &&
       other.maxFps == maxFps &&
+      other.displayMode == displayMode &&
       other.lastConnectedAt == lastConnectedAt &&
       other.lastPath == lastPath &&
       other.lastControlAllowed == lastControlAllowed;
@@ -118,6 +141,7 @@ class RemoteComputer {
     quality,
     resolution,
     maxFps,
+    displayMode,
     lastConnectedAt,
     lastPath,
     lastControlAllowed,
@@ -325,8 +349,9 @@ class RemoteComputerStore extends ChangeNotifier {
     required int namespace,
     required bool relayOnly,
     required DesktopQuality quality,
-    DesktopResolution resolution = DesktopResolution.p1080,
+    DesktopResolution? resolution,
     int maxFps = 0,
+    RememberedDisplayMode? displayMode,
     String? replaceId,
   }) async {
     await load();
@@ -346,6 +371,7 @@ class RemoteComputerStore extends ChangeNotifier {
         quality: quality,
         resolution: resolution,
         maxFps: maxFps,
+        displayMode: displayMode,
         replaceId: replaceId,
       );
       _put(record, replacing: replaceId);
@@ -371,8 +397,9 @@ class RemoteComputerStore extends ChangeNotifier {
     String id, {
     String? name,
     DesktopQuality? quality,
-    DesktopResolution? resolution,
+    ({DesktopResolution? to})? resolution,
     int? maxFps,
+    ({RememberedDisplayMode? to})? displayMode,
     DateTime? lastConnectedAt,
     String? lastPath,
     bool? lastControlAllowed,
@@ -386,6 +413,7 @@ class RemoteComputerStore extends ChangeNotifier {
           quality: quality,
           resolution: resolution,
           maxFps: maxFps,
+          displayMode: displayMode,
           lastConnectedAt: lastConnectedAt,
           lastPath: lastPath,
           lastControlAllowed: lastControlAllowed,
@@ -414,8 +442,13 @@ class RemoteComputerStore extends ChangeNotifier {
   Future<void> setQuality(String id, DesktopQuality quality) =>
       _update(id, quality: quality);
 
-  Future<void> setResolution(String id, DesktopResolution resolution) =>
-      _update(id, resolution: resolution);
+  /// Null: the default again.
+  Future<void> setResolution(String id, DesktopResolution? resolution) =>
+      _update(id, resolution: (to: resolution));
+
+  /// Null: none is re-applied.
+  Future<void> setDisplayMode(String id, RememberedDisplayMode? mode) =>
+      _update(id, displayMode: (to: mode));
 
   Future<void> setMaxFps(String id, int fps) => _update(id, maxFps: fps);
 

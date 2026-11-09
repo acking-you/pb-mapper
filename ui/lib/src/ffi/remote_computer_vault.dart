@@ -29,16 +29,18 @@ abstract interface class RemoteComputerVault {
     required int namespace,
     required bool relayOnly,
     required DesktopQuality quality,
-    required DesktopResolution resolution,
+    DesktopResolution? resolution,
     required int maxFps,
+    RememberedDisplayMode? displayMode,
     String? replaceId,
   });
   Future<RemoteComputer> update(
     String id, {
     String? name,
     DesktopQuality? quality,
-    DesktopResolution? resolution,
+    ({DesktopResolution? to})? resolution,
     int? maxFps,
+    ({RememberedDisplayMode? to})? displayMode,
     DateTime? lastConnectedAt,
     String? lastPath,
     bool? lastControlAllowed,
@@ -90,8 +92,9 @@ final class UnavailableRemoteComputerVault implements RemoteComputerVault {
     required int namespace,
     required bool relayOnly,
     required DesktopQuality quality,
-    required DesktopResolution resolution,
+    DesktopResolution? resolution,
     required int maxFps,
+    RememberedDisplayMode? displayMode,
     String? replaceId,
   }) => Future.error(_refused);
   @override
@@ -99,8 +102,9 @@ final class UnavailableRemoteComputerVault implements RemoteComputerVault {
     String id, {
     String? name,
     DesktopQuality? quality,
-    DesktopResolution? resolution,
+    ({DesktopResolution? to})? resolution,
     int? maxFps,
+    ({RememberedDisplayMode? to})? displayMode,
     DateTime? lastConnectedAt,
     String? lastPath,
     bool? lastControlAllowed,
@@ -236,8 +240,9 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
     required int namespace,
     required bool relayOnly,
     required DesktopQuality quality,
-    required DesktopResolution resolution,
+    DesktopResolution? resolution,
     required int maxFps,
+    RememberedDisplayMode? displayMode,
     String? replaceId,
   }) => _record('computers_remember', {
     'id': id,
@@ -248,8 +253,9 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
     'namespace': namespace,
     'relay_only': relayOnly,
     'quality': quality.name,
-    'resolution': resolution.wire,
+    'resolution': ?resolution?.wire,
     'max_fps': maxFps,
+    'display_mode': ?displayMode?.wire,
     'replace_id': ?replaceId,
   });
 
@@ -258,8 +264,9 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
     String id, {
     String? name,
     DesktopQuality? quality,
-    DesktopResolution? resolution,
+    ({DesktopResolution? to})? resolution,
     int? maxFps,
+    ({RememberedDisplayMode? to})? displayMode,
     DateTime? lastConnectedAt,
     String? lastPath,
     bool? lastControlAllowed,
@@ -267,8 +274,10 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
     'id': id,
     'name': ?name,
     'quality': ?quality?.name,
-    'resolution': ?resolution?.wire,
+    // A null goes back to the default; left out, it stays.
+    if (resolution != null) 'resolution': resolution.to?.wire,
     'max_fps': ?maxFps,
+    if (displayMode != null) 'display_mode': displayMode.to?.wire,
     'last_connected_ms': ?lastConnectedAt?.millisecondsSinceEpoch,
     'last_path': ?lastPath,
     'last_control_allowed': ?lastControlAllowed,

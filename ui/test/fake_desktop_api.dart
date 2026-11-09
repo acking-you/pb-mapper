@@ -488,11 +488,12 @@ class FakeDesktopApi implements DesktopApiClient {
     required bool relayOnly,
     required DesktopQuality quality,
     required double refreshHz,
-    required bool h265,
-    required DesktopResolution resolution,
+    required DesktopDecoders decoders,
+    DesktopResolution? resolution,
     required int maxFps,
   }) async {
     final epoch = _epoch;
+    final h265 = decoders.h265 != null;
     calls.add((
       'connect',
       {
@@ -503,8 +504,10 @@ class FakeDesktopApi implements DesktopApiClient {
         'relay_only': relayOnly,
         'quality': quality.name,
         'refresh_hz': refreshHz,
+        // Offered, and the limits Rust would ask for with this offer.
         'h265': h265,
-        'resolution': resolution.wire,
+        'limits': decoders.limitsFor(resolution),
+        'resolution': ?resolution?.wire,
         'max_fps': maxFps,
       },
     ));

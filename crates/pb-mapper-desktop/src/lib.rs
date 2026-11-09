@@ -67,9 +67,9 @@ pub use protocol::{
 pub use security::HostIdentity;
 pub use video_sink::{AttachError, Pull, VideoConsumer, VideoSink, VideoUnit};
 pub use viewer::{
-    ConnectError, ConnectStage, DecoderInfo, DecoderState, DesktopView, InputError, IntervalStats,
-    NoticeInfo, PresentedInfo, VideoInfo, Viewer, ViewerConfig, ViewerLink, ViewerReason,
-    ViewerState, ViewerStats, ViewerStatus,
+    ConnectError, ConnectStage, DecoderInfo, DecoderState, Decoders, DesktopView, InputError,
+    IntervalStats, NoticeInfo, PresentedInfo, VideoInfo, Viewer, ViewerConfig, ViewerLink,
+    ViewerReason, ViewerState, ViewerStats, ViewerStatus,
 };
 
 /// What only a Windows build has.
@@ -172,7 +172,8 @@ impl VideoLimits {
         }
         Ok(())
     }
-    /// A viewer's limits by default: 1080p at the display's refresh rate.
+    /// A viewer's limits by default: the display's own size, up to
+    /// 3840x2160, at the display's refresh rate.
     pub fn for_viewer(refresh_hz: f64) -> Self {
         Self::choose(refresh_hz, Resolution::default(), None)
     }
@@ -199,21 +200,39 @@ impl VideoLimits {
             max_fps: fps,
         }
     }
+    /// These bounds fitted inside a decoder's largest picture, in either
+    /// orientation: the long edge within the longer of `max`'s sides, the
+    /// short edge within the shorter. Never below 2x2.
+    pub fn clamped(self, max: (u32, u32)) -> Self {
+        let (long, short) = (max.0.max(max.1), max.0.min(max.1));
+        let (max_width, max_height) = if self.max_width >= self.max_height {
+            (self.max_width.min(long), self.max_height.min(short))
+        } else {
+            (self.max_width.min(short), self.max_height.min(long))
+        };
+        Self {
+            max_width: max_width.max(2),
+            max_height: max_height.max(2),
+            ..self
+        }
+    }
 }
 
 /// The largest picture a viewer asks for. The host keeps the display's
 /// aspect ratio inside these bounds and never upscales, so a smaller display
-/// is sent at its own size whatever is chosen.
+/// is sent at its own size whatever is chosen. The bounds are landscape: a
+/// portrait display is fitted into them as well, and a display larger than
+/// 3840x2160 into 4K.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Resolution {
     #[serde(rename = "720p")]
     P720,
-    #[default]
     #[serde(rename = "1080p")]
     P1080,
     #[serde(rename = "1440p")]
     P1440,
-    /// The display's own size, up to 3840x2160.
+    /// The display's own size, up to 3840x2160: the default.
+    #[default]
     #[serde(rename = "native")]
     Native,
 }

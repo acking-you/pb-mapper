@@ -15,14 +15,24 @@ cross-NAT operation, or the same presentation rate on every target device.
 
 The performance milestone is **1080p direct viewing at or near 90 presented
 FPS**. Both endpoints prefer pb-mapper's existing direct path, with pre-commit
-relay fallback. A viewer asks for 1080p by default (720p, 1440p or the native
-size up to 4K are choices kept per computer) at its display's refresh rate (at
-most 60 FPS on Android unless a maximum frame rate is chosen) and a quality
-preset; the host chooses frame rate and bitrate within them. Both ends prefer
-H.265 where their hardware has it, and fall back to H.264. Balanced, the default, starts at about 4 Mbit/s and
-never exceeds 60 FPS; only Smooth goes higher. A 60 Hz phone or VM cannot
-demonstrate 90 displayed FPS. Relay sessions may reduce frame rate and bitrate
-to preserve responsiveness; 90 FPS is not a relay acceptance requirement.
+relay fallback. A viewer asks for the remote display's own size by default, up
+to 3840×2160 (720p, 1080p and 1440p are choices kept per computer), fitted
+inside the largest picture of the decoder it offers first, at its display's
+refresh rate (at most 60 FPS on Android unless a maximum frame rate is chosen)
+and a quality preset; the host chooses frame rate and bitrate within them. Both
+ends prefer H.265 where their hardware has it, and fall back to H.264: a phone
+whose H.265 decoder stops at 1080p keeps H.265 and is sent 1080p. Balanced, the
+default, starts at about 4 Mbit/s for a 1080p picture (6.2 at 1440p, 11.3 at
+4K, by the pixel scaling below) and never exceeds 60 FPS; only Smooth goes
+higher. A 60 Hz phone or VM cannot demonstrate 90 displayed FPS. Relay sessions
+may reduce frame rate and bitrate to preserve responsiveness; 90 FPS is not a
+relay acceptance requirement.
+
+Known limits of the native default: the bounds are landscape, so a portrait
+display is fitted into them (1440×2560 is sent at 1214×2160) until the decoder
+probes test rotated sizes; a display larger than 3840×2160 is fitted into 4K;
+and a 4K host at 60 FPS has not been measured, since the development PC's
+display is 2560×1440.
 
 **PR #51 remains merge-blocked on phone fluidity.** The receipt-credit pipeline
 below replaces the presentation-credit pipeline that stuttered on a physical
@@ -273,7 +283,12 @@ pasting an invitation again:
   `desktop-computers.bin`, sealed with AES-256-GCM under a data key that an
   Android Keystore key wraps (`desktop-computers.key`, unwrapped through the
   `pb_mapper/keystore` channel once per process). Other platforms cannot
-  remember computers, and the add form says so. At most 50 are kept.
+  remember computers, and the add form says so. At most 50 are kept. The
+  file is `{"version":2,…}`: a computer keeps a resolution only when one was
+  chosen, so a later change of the default needs no migration, and may keep
+  **Fit local** as its remote resolution. A version 1 file, which wrote 1080p
+  whether chosen or not, reads its 1080p (or none) as the default; it is
+  written back as version 2.
 - Invitations never return to Dart. The list carries names, services,
   fingerprints and when each was last used; opening one connects by its id,
   and Rust looks the invitation up.
@@ -1394,11 +1409,18 @@ arguments and never creates a decoder, because a bad driver can hang there. It
 answers a map: `h264` and `h265`, each either `{max_width, max_height}` (the
 largest of the viewer's resolution bounds that codec decodes at) or null, and
 `display_max_hz`, the fastest refresh among the displays as they are set now.
-An error, or a platform without the channel, counts as H.264 only, and so does
-a probe that has not answered within 2 s, for the attempts made meanwhile; the
-app keeps its later answer. The app offers H.265 (the `h265` capability) only
-where this device decodes it at the chosen resolution, and a session never
-asks for a size its codec's decoder cannot take.
+An error counts as H.264 only, and so does a probe that has not answered within
+2 s, for the attempts made meanwhile; the app keeps its later answer. A
+platform without the channel (macOS, Linux) has no decoder to offer, and its
+picture is JPEG, which Dart decodes. The app passes the answer to `connect` as
+`decoders`, and the SDK's `ViewerConfig::for_decoders` makes the offer: H.265
+(the `h265` capability) wherever this device has its decoder, then H.264, else
+JPEG, with the limits fitted inside the largest picture of the decoder offered
+first (`VideoLimits::clamped`, which compares long edge with long edge). A
+computer that answers H.265 with H.264 is connected again at once without
+H.265 when the H.264 decoder cannot take those limits. The Display menu
+disables a chosen size whose picture of the remote display, once known, does
+not fit, and says how large the default goes here when it is limited.
 
 On Windows the runner probes on its own thread, one probe at a time, and calls
 that arrive meanwhile share its answer. H.264 is reported, up to 3840×2160,
