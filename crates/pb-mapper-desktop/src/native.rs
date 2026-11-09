@@ -34,7 +34,10 @@ pub(crate) struct PlatformBackend<P: Platform> {
     grant: Arc<P::Grant>,
     held: Held,
     limits: VideoLimits,
-    waker: Option<Waker>,
+    /// A pushing source's wake: a session's once bound, else one of its own,
+    /// so a backend no session drives (the helper's worker, a bench) is never
+    /// without one.
+    waker: Waker,
 }
 impl<P: Platform> PlatformBackend<P> {
     /// On thread C: the session's parts, for `display`.
@@ -49,7 +52,7 @@ impl<P: Platform> PlatformBackend<P> {
             grant,
             held: Held::default(),
             limits: UNCONFIGURED,
-            waker: None,
+            waker: Waker(crate::scheduler::Wake::new()),
         }
     }
     /// Bind to the input desktop. A switch, or a desktop this process cannot
@@ -60,11 +63,6 @@ impl<P: Platform> PlatformBackend<P> {
             release(held, input);
             *video = None;
         })
-    }
-    fn waker(&self) -> Result<&Waker> {
-        self.waker
-            .as_ref()
-            .ok_or_else(|| error("video source opened before its session was bound"))
     }
 }
 fn release<I: Injector>(held: &mut Held, input: &mut I) {
@@ -101,7 +99,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         })
     }
     fn bind(&mut self, waker: Waker) {
-        self.waker = Some(waker);
+        self.waker = waker;
     }
     fn configure_video(&mut self, limits: VideoLimits, _nominal_fps: u32) -> Result<()> {
         limits.validate()?;
@@ -175,7 +173,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
                 codec,
                 self.limits,
                 rate,
-                self.waker()?,
+                &self.waker,
             )?;
             self.video = Some((expected.clone(), source));
         }
@@ -323,10 +321,10 @@ pub fn native_backend(display: &DisplaySelection) -> Result<NativeBackend> {
         .into());
     };
     let (grant, display) = acquired?;
-    let mut backend = PlatformBackend::open(Arc::new(grant), &display)?;
-    // A backend outside a session has no wake; a pull source never uses it.
-    backend.bind(Waker(crate::scheduler::Wake::new()));
-    Ok(NativeBackend(backend))
+    Ok(NativeBackend(PlatformBackend::open(
+        Arc::new(grant),
+        &display,
+    )?))
 }
 
 #[deny(clippy::missing_trait_methods)]

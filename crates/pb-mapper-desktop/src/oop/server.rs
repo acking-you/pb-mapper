@@ -324,4 +324,45 @@ mod tests {
         answer(&mut host).await.unwrap();
         exchange.await.unwrap().unwrap();
     }
+
+    /// A worker builds its backend apart from any session, and no thread C
+    /// binds it: its video must still encode.
+    #[test]
+    fn a_worker_backend_encodes_without_a_session() {
+        use crate::{
+            VideoCodec, VideoLimits, VideoRate,
+            native::PlatformBackend,
+            platform::{
+                Platform,
+                synthetic::{Probe, Synthetic},
+            },
+        };
+        let probe = Probe::default();
+        let parts = Synthetic::<false>::open(&probe, &Probe::display()).unwrap();
+        let mut backend = PlatformBackend::from_parts(std::sync::Arc::new(probe), parts);
+        let mut state = ServeState::new();
+        let mut serve = |request| serve(&mut backend, request, &mut state).unwrap();
+        let (started, _) = serve(Request::Start { display_id: 1 });
+        serve(Request::ConfigureVideo {
+            limits: VideoLimits::for_viewer(60.0),
+            nominal_fps: 60,
+        });
+        let video = |keyframe| Request::Video {
+            expected: started.context.clone().unwrap(),
+            codec: VideoCodec::H264,
+            submit: true,
+            keyframe,
+            rate: VideoRate {
+                bitrate: crate::qos::ENCODER_BITRATE_MIN,
+                pace_fps: 60,
+            },
+            wait_ms: 0,
+        };
+        // The first submit fills the encoder; the next drains its unit.
+        let (first, _) = serve(video(true));
+        assert!(first.error.is_none() && first.video.is_none());
+        let (second, bytes) = serve(video(false));
+        assert_eq!(second.video.unwrap().codec, VideoCodec::H264);
+        assert!(!bytes.is_empty());
+    }
 }
