@@ -392,7 +392,7 @@ impl Consumer {
         })
         .await;
         // What TCP came to, with its attempts still in flight let go.
-        let tcp_missed = tcp.outcome();
+        let tcp_missed = tcp.outcome(Instant::now());
         drop(tcp);
         if let Ok(Ok((mut conn, dialed))) = candidate {
             // From this point on, timeout/cancellation/ACK loss MUST NOT select relay.

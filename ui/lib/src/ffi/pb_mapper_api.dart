@@ -63,6 +63,12 @@ class CarrierMove {
   bool get isEmpty => shares.isEmpty && connections.isEmpty;
   int get length => shares.length + connections.length;
 
+  /// The tunnels in this or [other], each once.
+  CarrierMove union(CarrierMove other) => CarrierMove(
+    shares: {...shares, ...other.shares}.toList(),
+    connections: {...connections, ...other.connections}.toList(),
+  );
+
   factory CarrierMove.fromMap(Object? raw) {
     final map = raw is Map ? raw : const {};
     return CarrierMove(

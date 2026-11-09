@@ -91,9 +91,11 @@ pub(super) struct Network {
     incoming: Mutex<mpsc::Receiver<Arrival>>,
     arrivals: mpsc::Sender<Arrival>,
     acceptors: Vec<tokio_util::task::AbortOnDropHandle<()>>,
-    /// A provider's TCP listeners, opened the first time a consumer on a
-    /// shared network asks for TCP: `None` if they could not be.
+    /// A provider's TCP listeners, each set opened the first time a consumer
+    /// asks for TCP: on a shared network, wherever the relay is, or on this
+    /// computer under a relay on loopback. `None` if they could not be.
     lan_tcp: std::sync::OnceLock<Option<tcp::Acceptor>>,
+    local_tcp: std::sync::OnceLock<Option<tcp::Acceptor>>,
     cached: Mutex<Option<Discovery>>,
     generation: AtomicU64,
     network: Arc<crate::network::NetworkHints>,
@@ -228,6 +230,7 @@ impl Network {
             arrivals: tx,
             acceptors,
             lan_tcp: std::sync::OnceLock::new(),
+            local_tcp: std::sync::OnceLock::new(),
             cached: Mutex::new(None),
             generation: AtomicU64::new(0),
             network,
@@ -238,11 +241,17 @@ impl Network {
             tcp_redirect: std::sync::OnceLock::new(),
         }))
     }
-    /// This end's TCP acceptor, opened on first use: listening on loopback
-    /// alone when the relay is on it, else on every interface, admitting
-    /// only what [`tcp::Acceptor::offer`] lets in.
+    /// This end's TCP acceptor for a consumer on its LAN, listening on every
+    /// interface, or with `loopback` for one on this computer, listening on
+    /// loopback alone; opened on first use, and admitting only what
+    /// [`tcp::Acceptor::offer`] lets in.
     pub fn lan_tcp(&self, loopback: bool) -> Option<&tcp::Acceptor> {
-        self.lan_tcp
+        let acceptor = if loopback {
+            &self.local_tcp
+        } else {
+            &self.lan_tcp
+        };
+        acceptor
             .get_or_init(|| {
                 let udp: Vec<_> = self
                     .transports
@@ -258,7 +267,7 @@ impl Network {
     /// Whether TCP listeners were ever opened.
     #[cfg(test)]
     pub fn lan_tcp_opened(&self) -> bool {
-        self.lan_tcp.get().is_some()
+        self.lan_tcp.get().is_some() || self.local_tcp.get().is_some()
     }
     pub async fn peer(&self, stun: SocketAddr) -> Discovered {
         let mut cached = self.cached.lock().await;
@@ -527,7 +536,8 @@ impl Network {
     /// QUIC flights to stale interface addresses can fill one shared UDP
     /// socket's send queue and stall healthy sessions. TCP needs no probe,
     /// its connect being its own test: `tcp`'s attempts run from the start,
-    /// and with LAN-first on every QUIC path waits out their head start.
+    /// and with LAN-first on every QUIC path waits out their head start,
+    /// then those off the LAN wait for QUIC on it as after their answer.
     pub async fn connect(
         &self,
         grant: &SessionGrant,
@@ -568,8 +578,10 @@ impl Network {
         };
         loop {
             let now = Instant::now();
-            // While TCP has its head start, no QUIC path is dialed.
+            // While TCP has its head start, no QUIC path is dialed; after it,
+            // QUIC on the LAN still goes before the paths off it.
             let tcp_holds = tcp.holds(lan.prefers(), now);
+            let tcp_released = tcp.released(lan.prefers());
             let mut held: Option<Instant> = tcp_holds;
             let learned = self.learned(&id);
             // A LAN path that answered an authenticated probe is proof of
@@ -583,6 +595,7 @@ impl Network {
                 }
                 let on_lan = lan.is_lan(addr);
                 let settled = lan_refused || (lan_dialed > 0 && lan_failed == lan_dialed);
+                let answered = tcp_released.map_or(answered, |released| answered.max(released));
                 let since = now.saturating_duration_since(answered);
                 if !dial_now(hold, on_lan, since, settled) {
                     let at = answered + LAN_HEAD_START;

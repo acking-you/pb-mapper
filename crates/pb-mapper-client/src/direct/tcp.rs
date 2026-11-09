@@ -186,9 +186,9 @@ impl Admission {
 pub(super) struct Acceptor {
     /// Each listener's address.
     local: Vec<SocketAddr>,
-    /// Whether they listen on loopback alone, as when the relay itself is on
-    /// loopback: tests, and a local check, then never raise a firewall
-    /// prompt.
+    /// Whether they listen on loopback alone, for a consumer on this
+    /// computer under a relay on loopback: tests, and a local check, then
+    /// never raise a firewall prompt.
     loopback: bool,
     admission: Arc<Mutex<Admission>>,
     _listeners: Vec<AbortOnDropHandle<()>>,
@@ -417,6 +417,8 @@ pub(super) struct Race {
     miss: Option<LanTcpMiss>,
     /// The end of the head start.
     until: Instant,
+    /// When the last attempt finished, once every one has.
+    settled: Option<Instant>,
     /// Attempts started, and whether one connected.
     dialed: u32,
     won: bool,
@@ -430,6 +432,7 @@ impl Race {
             asked: false,
             miss: None,
             until: Instant::now(),
+            settled: None,
             dialed: 0,
             won: false,
         }
@@ -455,6 +458,7 @@ impl Race {
             asked: true,
             miss: None,
             until: Instant::now() + TCP_HEAD_START,
+            settled: None,
             dialed: addrs.len() as u32,
             won: false,
         }
@@ -476,12 +480,26 @@ impl Race {
         (lan_first && self.pending() && now < self.until).then_some(self.until)
     }
 
+    /// When the head start ended, with LAN-first on and attempts made: at
+    /// its end, or when the last attempt failed before then. QUIC paths off
+    /// the LAN wait for QUIC on it from then, not from their own answer,
+    /// which may have come while TCP held every QUIC path back.
+    pub fn released(&self, lan_first: bool) -> Option<Instant> {
+        (lan_first && self.dialed > 0).then(|| {
+            self.settled
+                .map_or(self.until, |settled| settled.min(self.until))
+        })
+    }
+
     /// The next attempt to finish, or never when none is in flight.
     pub async fn next(&mut self) -> Result<Won, LanTcpMiss> {
         let finished = match self.attempts.join_next().await {
             Some(joined) => joined.unwrap_or(Err(LanTcpMiss::Handshake)),
             None => std::future::pending().await,
         };
+        if self.attempts.is_empty() {
+            self.settled = Some(Instant::now());
+        }
         self.won |= finished.is_ok();
         finished
     }
@@ -497,10 +515,12 @@ impl Race {
         };
     }
 
-    /// Why a session that asked for TCP did not get it: none when it did not
-    /// ask, or did. Attempts still in flight when another path won timed out.
-    pub fn outcome(&self) -> Option<LanTcpMiss> {
-        if !self.asked || self.won {
+    /// Why a session that asked for TCP did not get it, as of `now`: none
+    /// when it did not ask, or did. An attempt still in flight when another
+    /// path won missed only once its head start was over: before then, with
+    /// LAN-first off, QUIC just won a fair race. After, it timed out.
+    pub fn outcome(&self, now: Instant) -> Option<LanTcpMiss> {
+        if !self.asked || self.won || (self.pending() && now < self.until) {
             return None;
         }
         self.miss.or(self.pending().then_some(LanTcpMiss::TimedOut))
@@ -529,4 +549,31 @@ pub(super) fn targets(
         .copied()
         .filter(|addr| is_lan(*addr) || (loopback && addr.ip().is_loopback()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With LAN-first off, QUIC can win a fair race while TCP is still
+    /// connecting: TCP missed nothing, and is not paused, until its head
+    /// start is over, even if another of its attempts was refused.
+    #[tokio::test]
+    async fn an_attempt_in_flight_misses_only_once_its_head_start_is_over() {
+        let mut attempts = JoinSet::new();
+        attempts.spawn(std::future::pending::<Result<Won, LanTcpMiss>>());
+        let mut race = Race {
+            attempts,
+            asked: true,
+            until: Instant::now() + TCP_HEAD_START,
+            dialed: 1,
+            ..Race::idle()
+        };
+        let early = race.until - Duration::from_millis(1);
+        assert_eq!(race.outcome(early), None);
+        assert_eq!(race.outcome(race.until), Some(LanTcpMiss::TimedOut));
+        race.record(LanTcpMiss::Refused);
+        assert_eq!(race.outcome(early), None);
+        assert_eq!(race.outcome(race.until), Some(LanTcpMiss::Refused));
+    }
 }

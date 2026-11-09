@@ -493,10 +493,11 @@ fn verify(incoming: &Incoming, grant: &SessionGrant) -> io::Result<()> {
     incoming.conn.verify_binding(grant, &incoming.tag)
 }
 /// Serve TCP within a LAN to a consumer that asked for it, when this end
-/// does and the two share a network, as the offer showed or, with the relay
-/// on loopback, as loopback: this end's LAN addresses go into its answer,
-/// and its listeners admit connections while the returned guard lives. A
-/// session across the internet is never offered TCP.
+/// does and the two share a network: as the offer showed, wherever the relay
+/// is, with this end's LAN addresses; or, with neither evidence of one nor
+/// anything but a relay on loopback, as this computer, with loopback ones.
+/// They go into its answer, and its listeners admit connections while the
+/// returned guard lives. A session across the internet is never offered TCP.
 fn offer_tcp(
     network: &Network,
     grant: &mut SessionGrant,
@@ -504,18 +505,17 @@ fn offer_tcp(
     stun: std::net::SocketAddr,
     serve: bool,
 ) -> Option<tcp::Offered> {
-    let loopback = stun.ip().is_loopback();
-    let shared = lan.evidence.is_some()
-        || (loopback
-            && grant
-                .consumer
-                .candidates
-                .iter()
-                .any(|addr| addr.ip().is_loopback()));
-    if !serve || grant.consumer.lan_tcp.is_none() || !shared {
+    let local = lan.evidence.is_none()
+        && stun.ip().is_loopback()
+        && grant
+            .consumer
+            .candidates
+            .iter()
+            .any(|addr| addr.ip().is_loopback());
+    if !serve || grant.consumer.lan_tcp.is_none() || (lan.evidence.is_none() && !local) {
         return None;
     }
-    let (offered, addrs) = network.lan_tcp(loopback)?.offer(&lan.local.interfaces);
+    let (offered, addrs) = network.lan_tcp(local)?.offer(&lan.local.interfaces);
     if addrs.is_empty() {
         return None;
     }
