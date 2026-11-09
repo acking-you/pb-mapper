@@ -335,6 +335,7 @@ impl DirectState {
             provider: PeerInfo {
                 certificate: vec![],
                 candidates: vec![],
+                lan_tcp: None,
             },
             secret: SessionSecret::random(),
             ttl_ms: SETUP_TTL_MS,
@@ -896,6 +897,7 @@ mod tests {
         let peer_info = PeerInfo {
             certificate: vec![1],
             candidates: vec![],
+            lan_tcp: None,
         };
 
         // Both consumers reach the one provider; the grant names the namespace and
@@ -1049,10 +1051,12 @@ mod tests {
             consumer: PeerInfo {
                 certificate: vec![1],
                 candidates: vec![],
+                lan_tcp: None,
             },
             provider: PeerInfo {
                 certificate: vec![2],
                 candidates: vec![],
+                lan_tcp: None,
             },
             secret: SessionSecret::random(),
             ttl_ms: SETUP_TTL_MS,

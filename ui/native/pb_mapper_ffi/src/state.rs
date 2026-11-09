@@ -27,9 +27,9 @@ use tokio_util::sync::CancellationToken;
 use pb_mapper_auth::{AuthConfig, AuthRuntime};
 use pb_mapper_client::sdk::{
     AddressFamily, Client, ConnectOptions, ConnectRequest, Connection, DirectLink, DirectStage,
-    LanEvidence, LinkKind, LinkVia, PathPolicy, PortMapping, RecoveryFailure, RegisterOptions,
-    RegisterRequest, Registration, RelayTransport, RemoteId, StunOutcome, Transport,
-    TunnelDiagnostics, TunnelEventKind, TunnelStatus,
+    DirectTransport, LanEvidence, LanTransport, LinkKind, LinkVia, PathPolicy, PortMapping,
+    RecoveryFailure, RegisterOptions, RegisterRequest, Registration, RelayTransport, RemoteId,
+    StunOutcome, Transport, TunnelDiagnostics, TunnelEventKind, TunnelStatus,
 };
 use pb_mapper_core::checksum::{
     Credential, get_process_credential, parse_credential, set_process_msg_header_key,
@@ -261,6 +261,12 @@ pub struct AppConfig {
     /// end first: on, as a config saved before there was a choice. Each
     /// tunnel, remote-desktop connection and host takes it as it starts.
     pub lan_first: bool,
+    /// What a path within a local network this computer shares with the
+    /// other end runs over, for what this computer dials: QUIC, as a config
+    /// saved before there was a choice, or TCP. Each connection and
+    /// remote-desktop connection takes it as it starts; as a provider this
+    /// computer serves whichever the other end asks for.
+    pub lan_transport: LanTransport,
 }
 
 impl Default for AppConfig {
@@ -271,6 +277,7 @@ impl Default for AppConfig {
             msg_header_key: String::new(),
             relay_transport: RelayTransport::Tcp,
             lan_first: true,
+            lan_transport: LanTransport::Quic,
         }
     }
 }
@@ -280,7 +287,7 @@ impl AppConfig {
     /// address, keep-alive, credential and carrier. What the window keeps
     /// about the relay, its client and what it said about QUIC, is kept for
     /// these alone, so a preference of this computer's own, such as
-    /// `lan_first`, changes neither.
+    /// `lan_first` or `lan_transport`, changes neither.
     pub fn same_relay(&self, other: &Self) -> bool {
         let Self {
             server_address,
@@ -288,6 +295,7 @@ impl AppConfig {
             msg_header_key,
             relay_transport,
             lan_first: _,
+            lan_transport: _,
         } = self;
         *server_address == other.server_address
             && *keep_alive_enabled == other.keep_alive_enabled
@@ -407,13 +415,16 @@ pub struct PathLink {
     pub family: AddressFamily,
     /// How the peer address was learned.
     pub via: LinkVia,
+    /// `quic`, or `tcp` within a local network.
+    pub transport: DirectTransport,
     pub peer: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interface: Option<String>,
-    /// QUIC's round trip now and its lowest, rounded up to whole
-    /// milliseconds, so that a LAN never reads 0.
+    /// The round trip now and its lowest, rounded up to whole
+    /// milliseconds, so that a LAN never reads 0: QUIC's, or over TCP the
+    /// handshake's for both.
     pub rtt_ms: u64,
     pub min_rtt_ms: u64,
     pub setup_ms: u64,
@@ -447,6 +458,7 @@ impl From<&DirectLink> for PathLink {
             kind: link.kind,
             family: link.family,
             via: link.via,
+            transport: link.transport,
             peer: link.peer.to_string(),
             local_ip: link.local_ip.map(|ip| ip.to_string()),
             interface: link.interface.clone(),
@@ -1051,7 +1063,7 @@ pub async fn connect_service(
         allow_direct,
         port_mapping,
     } = direct;
-    let (_claim, server_address, credential, relay_transport, lan_first) = {
+    let (_claim, server_address, credential, relay_transport, lan_first, lan_transport) = {
         let state = state.lock().await;
         let claim = state.claim_connecting(&service_key)?;
         let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
@@ -1061,6 +1073,7 @@ pub async fn connect_service(
             credential,
             state.config.relay_transport,
             state.config.lan_first,
+            state.config.lan_transport,
         )
     };
 
@@ -1107,7 +1120,7 @@ pub async fn connect_service(
                 },
                 port_mapping,
                 lan_first,
-                ..Default::default()
+                lan_transport,
             },
         )
         .await
@@ -1186,6 +1199,7 @@ mod tests {
                 kind: LinkKind::Lan,
                 family: AddressFamily::Ipv4,
                 via: LinkVia::Host,
+                transport: DirectTransport::Quic,
                 peer: "192.168.21.100:53000".into(),
                 local_ip: Some("192.168.21.5".into()),
                 interface: Some("WLAN".into()),
@@ -1833,8 +1847,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A config.json saved before LAN-first could be switched off loads with
-    /// it on, and a change of it alone leaves the relay settings the same.
+    /// A config.json saved before LAN-first could be switched off, or the
+    /// LAN transport chosen, loads with LAN-first on over QUIC; and a change
+    /// of either alone leaves the relay settings the same.
     #[test]
     fn a_config_saved_before_the_switch_tries_the_lan_first() {
         let saved: AppConfig = serde_json::from_str(
@@ -1843,11 +1858,16 @@ mod tests {
         )
         .unwrap();
         assert!(saved.lan_first);
+        assert_eq!(saved.lan_transport, LanTransport::Quic);
         let off = AppConfig {
             lan_first: false,
+            lan_transport: LanTransport::Tcp,
             ..saved.clone()
         };
         assert!(off.same_relay(&saved));
+        let written = serde_json::to_string(&off).unwrap();
+        assert!(written.contains(r#""lan_transport":"tcp""#));
+        assert!(serde_json::from_str::<AppConfig>(&written).unwrap() == off);
         assert!(!off.same_relay(&AppConfig {
             relay_transport: RelayTransport::Tcp,
             ..saved

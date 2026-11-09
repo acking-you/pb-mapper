@@ -126,6 +126,35 @@ and how a path is reported, do not change.
   every tunnel and the remote desktop as they next start. Running tunnels are
   offered a restart.
 
+A path within one LAN runs over QUIC by default, as every direct path does.
+The connecting end can choose TCP for it instead: TLS 1.3 over TCP, with the
+same certificates and session binding as QUIC. The order is then TCP on the
+LAN, QUIC on the LAN, QUIC across the internet, and the relay. With LAN-first
+on, QUIC waits 300 ms for TCP; with it off, the two race. The publisher serves
+TCP by default but opens its TCP listener only when a consumer on its LAN first
+asks, on the direct port's number where it is free, and offers it on its LAN
+addresses only: a path across the internet, punched or not, is always QUIC.
+A publisher, or a relay, from before this choice leaves the session on QUIC.
+
+TCP needs the publisher's firewall to let TCP in. QUIC does not need that: the
+publisher's own probes open its firewall for the consumer's packets. Nothing
+adds a firewall rule, so on Windows the first TCP listener raises the firewall
+prompt on the publisher's desktop, and a background service gets none. Until
+TCP is allowed, a session that asked for it takes QUIC on the LAN within the
+300 ms, and later sessions stop asking for a while (10 s, doubling to 5 min),
+without the relay's pause.
+
+- CLI: `connect --lan-transport tcp` (default `quic`); `register --no-lan-tcp`
+  refuses TCP.
+- Rust SDK: `lan_transport: LanTransport::Tcp` in `ConnectOptions`;
+  `lan_tcp: false` in `RegisterOptions`.
+- Node: `lanTransport: "tcp"` in the `connect` request; `lanTcp: false` in the
+  `register` request.
+- App: **Settings → Direct connections → LAN transport**, QUIC or TCP, for the
+  connections and remote-desktop sessions this computer makes as they next
+  start; as a publisher or host it serves whichever the other end asks for. A
+  path on TCP reads **LAN · TCP**.
+
 To watch a tunnel, Rust handles have `subscribe_events()` and Node handles
 `subscribeEvents()`: the outcomes a tunnel kept, then every event as it
 happens, including relay phases, direct stages and each change of the port

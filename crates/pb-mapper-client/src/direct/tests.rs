@@ -3,9 +3,12 @@ use super::*;
 use crate::{
     diagnostics::{ByteCount, InterfaceTier, StunOutcome, TunnelEventKind},
     relay::RelayTransport,
-    sdk::{Client, PortMapping, RegisterOptions, RegisterRequest, Registration, Transport},
+    sdk::{
+        Client, LanTransport, PortMapping, RegisterOptions, RegisterRequest, Registration,
+        Transport,
+    },
 };
-use endpoint::InterfaceSource;
+use endpoint::{Arrival, InterfaceSource};
 use lan::{Interface, Interfaces};
 use pb_mapper_auth::{AuthConfig, AuthRuntime};
 use pb_mapper_core::config::ResolvedAddrs;
@@ -60,7 +63,7 @@ struct Share {
 }
 
 impl Share {
-    async fn start(key: &str) -> Self {
+    async fn start(key: &str, lan_tcp: bool) -> Self {
         let credential = Credential::Admin(pb_mapper_core::checksum::gen_random_key());
         let state_dir = std::env::temp_dir().join(format!(
             "pb-direct-{key}-{}-{}",
@@ -105,6 +108,7 @@ impl Share {
                 },
                 RegisterOptions {
                     allow_direct: true,
+                    lan_tcp,
                     ..Default::default()
                 },
             )
@@ -125,8 +129,13 @@ impl Share {
         }
     }
 
-    /// A consumer of the share over `network`.
-    fn consumer(&self, network: Arc<Network>, diagnostics: Diagnostics) -> Arc<Consumer> {
+    /// A consumer of the share over `network`, asking for `lan_transport`.
+    fn consumer(
+        &self,
+        network: Arc<Network>,
+        diagnostics: Diagnostics,
+        lan_transport: LanTransport,
+    ) -> Arc<Consumer> {
         let consumer = Consumer::new(
             RelayEndpoint::fixed(ResolvedAddrs::from(self.relay)),
             self.credential,
@@ -137,7 +146,7 @@ impl Share {
             crate::sdk::DirectPolicy {
                 port_mapping: PortMapping::Off,
                 lan_first: true,
-                lan_transport: crate::sdk::LanTransport::Quic,
+                lan_transport,
                 lan_tcp: false,
             },
         );
@@ -187,12 +196,10 @@ impl Share {
     }
 }
 
-/// No handshake gets across: the session takes the relay, which carries and
-/// counts its bytes. The share is on a LAN of this end, by strong evidence
-/// (see the next test), so the miss is reported with where it went instead.
-#[tokio::test]
-async fn blocked_quic_selects_relay_and_dials_backend_once() {
-    let share = Share::start("fallback").await;
+/// A consumer's endpoint on which this machine's loopback stands in for a
+/// LAN: injected as one, its subnet holds the share's 127.0.0.1, which is
+/// also what the relay's STUN sees of this end.
+fn lan_network() -> Arc<Network> {
     let mut network = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
     Arc::get_mut(&mut network).unwrap().interfaces =
         InterfaceSource::Fixed(Interfaces::new(vec![Interface::new(
@@ -200,10 +207,49 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
             InterfaceTier::Lan,
             [("127.0.0.2".parse().unwrap(), 8)],
         )]));
+    network
+}
+
+/// Prepare one session of `share` through `consumer`.
+async fn prepare(consumer: &Arc<Consumer>, key: &str) -> Prepared {
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        consumer.prepare(key, Instant::now() + Duration::from_secs(8)),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap()
+}
+
+/// The next event of `kind` that `events` delivers.
+async fn next<T>(
+    events: &mut crate::diagnostics::TunnelEvents,
+    kind: impl Fn(TunnelEventKind) -> Option<T>,
+) -> T {
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let Some(found) = kind(event.kind) {
+            return found;
+        }
+    }
+}
+
+/// No handshake gets across: the session takes the relay, which carries and
+/// counts its bytes. The share is on a LAN of this end, by strong evidence
+/// (see the next test), so the miss is reported with where it went instead.
+#[tokio::test]
+async fn blocked_quic_selects_relay_and_dials_backend_once() {
+    let share = Share::start("fallback", true).await;
+    let network = lan_network();
     network.block_quic();
     let diagnostics = Diagnostics::default();
     let mut events = diagnostics.subscribe();
-    let consumer = share.consumer(network, diagnostics.clone());
+    let consumer = share.consumer(network, diagnostics.clone(), LanTransport::Quic);
     let prepared = tokio::time::timeout(
         Duration::from_secs(8),
         consumer.prepare("fallback", Instant::now() + Duration::from_secs(8)),
@@ -282,27 +328,22 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
 
 /// Strong evidence of one LAN: the LAN path is dialed on its first answer,
 /// the paths off it wait, and the session says where it runs while it is
-/// open. This machine's loopback stands in for the LAN: injected as one, its
-/// subnet holds the share's 127.0.0.1, which is also what the relay's STUN
-/// sees of this end.
+/// open. A publisher that serves TCP opens nothing for a consumer that does
+/// not ask for it.
 #[tokio::test]
 async fn a_lan_is_dialed_on_its_first_answer_and_reported_while_open() {
-    let share = Share::start("lan").await;
-    let mut network = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
-    Arc::get_mut(&mut network).unwrap().interfaces =
-        InterfaceSource::Fixed(Interfaces::new(vec![Interface::new(
-            "lan0",
-            InterfaceTier::Lan,
-            [("127.0.0.2".parse().unwrap(), 8)],
-        )]));
+    let share = Share::start("lan", true).await;
+    let network = lan_network();
     let diagnostics = Diagnostics::default();
-    let consumer = share.consumer(network, diagnostics.clone());
-    let prepared = consumer
-        .prepare("lan", Instant::now() + Duration::from_secs(8))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(prepared.path, DataPath::Quic { .. }));
+    let consumer = share.consumer(network, diagnostics.clone(), LanTransport::Quic);
+    let prepared = prepare(&consumer, "lan").await;
+    assert!(matches!(
+        prepared.path,
+        DataPath::Direct {
+            conn: DirectConn::Quic { .. },
+            ..
+        }
+    ));
     let forward = share.forward(prepared).await;
     let read = || {
         diagnostics
@@ -368,6 +409,121 @@ async fn a_lan_is_dialed_on_its_first_answer_and_reported_while_open() {
     share.stop().await;
 }
 
+/// Asked for, TCP carries a session within the LAN: it is dialed first, the
+/// QUIC paths wait, the bytes go over it with the backend dialed once, and
+/// the session says so.
+#[tokio::test]
+async fn a_lan_asked_for_tcp_runs_over_it() {
+    let share = Share::start("tcp", true).await;
+    let diagnostics = Diagnostics::default();
+    let mut events = diagnostics.subscribe();
+    let consumer = share.consumer(lan_network(), diagnostics.clone(), LanTransport::Tcp);
+    let prepared = prepare(&consumer, "tcp").await;
+    assert!(matches!(
+        prepared.path,
+        DataPath::Direct {
+            conn: DirectConn::Tcp { .. },
+            ..
+        }
+    ));
+    let _forward = share.forward(prepared).await;
+    let selected = next(&mut events, |kind| match kind {
+        TunnelEventKind::PathSelected {
+            link, transport, ..
+        } => Some((link, transport)),
+        _ => None,
+    })
+    .await;
+    assert_eq!(selected, (LinkKind::Lan, DirectTransport::Tcp));
+    let direct = diagnostics
+        .snapshot(&RelayEndpoint::shared("127.0.0.1:1"))
+        .direct
+        .unwrap();
+    let link = direct.link.unwrap();
+    assert_eq!(
+        (link.kind, link.transport),
+        (LinkKind::Lan, DirectTransport::Tcp)
+    );
+    assert!(link.stats.rtt_us > 0, "the handshake's round trip");
+    assert_eq!((direct.active_lan_tcp, direct.lan_tcp_sessions), (1, 1));
+    let traffic = diagnostics.metrics(RelayTransport::Tcp).traffic;
+    assert_eq!(traffic.lan.sent, 12);
+    share.stop().await;
+}
+
+/// A publisher that does not serve TCP answers as one that predates it: the
+/// consumer that asked takes QUIC on the LAN and says why; nothing pauses.
+#[tokio::test]
+async fn a_publisher_without_tcp_leaves_the_lan_on_quic() {
+    let share = Share::start("no-tcp", false).await;
+    let diagnostics = Diagnostics::default();
+    let mut events = diagnostics.subscribe();
+    let consumer = share.consumer(lan_network(), diagnostics.clone(), LanTransport::Tcp);
+    let prepared = prepare(&consumer, "no-tcp").await;
+    assert!(matches!(
+        prepared.path,
+        DataPath::Direct {
+            conn: DirectConn::Quic { .. },
+            ..
+        }
+    ));
+    let missed = next(&mut events, |kind| match kind {
+        TunnelEventKind::LanTcpMissed { reason, took } => Some((reason, took)),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        missed,
+        (LanTcpMiss::NotOffered, Some(DirectTransport::Quic))
+    );
+    assert!(!consumer.tcp_cooldown().active(Instant::now()));
+    let _forward = share.forward(prepared).await;
+    share.stop().await;
+}
+
+/// TCP refused: QUIC on the LAN carries the session within the head start.
+/// The relay is not paused, as direct worked; TCP is, so later sessions do
+/// not pay the head start again.
+#[tokio::test]
+async fn refused_tcp_falls_back_to_quic_on_the_lan_and_pauses_tcp_alone() {
+    let share = Share::start("refused", true).await;
+    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let network = lan_network();
+    network
+        .tcp_redirect
+        .set(closed.local_addr().unwrap())
+        .unwrap();
+    drop(closed);
+    let diagnostics = Diagnostics::default();
+    let mut events = diagnostics.subscribe();
+    let consumer = share.consumer(network, diagnostics.clone(), LanTransport::Tcp);
+    let prepared = prepare(&consumer, "refused").await;
+    assert!(matches!(
+        prepared.path,
+        DataPath::Direct {
+            conn: DirectConn::Quic { .. },
+            ..
+        }
+    ));
+    let (reason, took) = next(&mut events, |kind| match kind {
+        TunnelEventKind::LanTcpMissed { reason, took } => Some((reason, took)),
+        _ => None,
+    })
+    .await;
+    // Windows tries a refused connect again for a second or two, so the
+    // head start can run out before it says so.
+    assert!(
+        matches!(reason, LanTcpMiss::Refused | LanTcpMiss::TimedOut),
+        "{reason:?}"
+    );
+    assert_eq!(took, Some(DirectTransport::Quic));
+    assert!(consumer.tcp_cooldown().active(Instant::now()));
+    let metrics = diagnostics.metrics(RelayTransport::Tcp);
+    assert_eq!(metrics.direct_cooldown_ms, None);
+    let _forward = share.forward(prepared).await;
+    share.stop().await;
+}
+
 #[tokio::test]
 async fn peer_certificate_and_session_binding_are_both_required() {
     let provider = Network::new(true, PortMapping::Off, &Diagnostics::default()).unwrap();
@@ -406,13 +562,17 @@ async fn peer_certificate_and_session_binding_are_both_required() {
     provider.authorize(&grant, true, deadline).unwrap();
     consumer.authorize(&grant, false, deadline).unwrap();
     let no_lan = Assessment::default();
+    let quic = tcp::Race::idle;
+    let mut race = quic();
     let (outgoing, incoming) = tokio::join!(
-        consumer.connect(&grant, deadline, &no_lan),
+        consumer.connect(&grant, deadline, &no_lan, &mut race),
         tokio::time::timeout_at(deadline, provider.accept())
     );
     let (outgoing, _) = outgoing.unwrap();
-    let incoming = incoming.unwrap().unwrap();
-    let tag = endpoint::binding(&outgoing, &grant).unwrap();
+    let Some(Arrival::Quic(incoming)) = incoming.unwrap() else {
+        panic!("expected a QUIC arrival");
+    };
+    let tag = outgoing.binding(&grant).unwrap();
     endpoint::verify_binding(&incoming, &grant, &tag).unwrap();
     let mut wrong = grant.clone();
     wrong.service = "another-service".into();
@@ -421,36 +581,98 @@ async fn peer_certificate_and_session_binding_are_both_required() {
     stranger
         .authorize(&grant, false, Instant::now() + Duration::from_secs(3))
         .unwrap();
-    if let Ok((connection, _)) = stranger
-        .connect(&grant, Instant::now() + Duration::from_millis(500), &no_lan)
+    if let Ok((DirectConn::Quic { connection, .. }, _)) = stranger
+        .connect(
+            &grant,
+            Instant::now() + Duration::from_millis(500),
+            &no_lan,
+            &mut quic(),
+        )
         .await
     {
         // TLS 1.3 client completion can precede the server's client-cert decision.
-        tokio::time::timeout(Duration::from_secs(1), connection.closed())
+        tokio::time::timeout(Duration::from_secs(1), connection.0.closed())
             .await
             .unwrap();
     }
-    while let Ok(Some(accepted)) =
-        tokio::time::timeout(Duration::from_millis(50), provider.accept()).await
-    {
-        let identity = accepted
-            .peer_identity()
-            .unwrap()
-            .downcast::<Vec<quinn::rustls::pki_types::CertificateDer<'static>>>()
-            .unwrap();
-        assert_eq!(
-            identity[0].as_ref(),
-            grant.consumer.certificate,
-            "only the granted identity may reach application accept"
-        );
-    }
+    // Only the granted identity may reach application accept.
+    let only_granted = || async {
+        while let Ok(Some(accepted)) =
+            tokio::time::timeout(Duration::from_millis(100), provider.accept()).await
+        {
+            assert_eq!(
+                presented(&accepted).as_deref(),
+                Some(grant.consumer.certificate.as_slice())
+            );
+        }
+    };
+    only_granted().await;
     let other_provider = Network::new(true, PortMapping::Off, &Diagnostics::default()).unwrap();
     wrong.provider.certificate = other_provider.identity.certificate.clone();
     assert!(
         consumer
-            .connect(&wrong, Instant::now() + Duration::from_millis(500), &no_lan)
+            .connect(
+                &wrong,
+                Instant::now() + Duration::from_millis(500),
+                &no_lan,
+                &mut quic()
+            )
             .await
             .is_err(),
         "server certificate must match grant"
     );
+
+    // Over TCP: the same identity and binding, under TCP's own label.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    provider
+        .identity
+        .permissions
+        .allow(grant.consumer.certificate.clone(), deadline)
+        .unwrap();
+    let (_offered, addrs) = provider
+        .lan_tcp(true)
+        .unwrap()
+        .offer(&Interfaces::default());
+    let client = |network: &Network| {
+        network
+            .identity
+            .tcp_client(&grant.provider.certificate)
+            .unwrap()
+    };
+    race = tcp::Race::start(&addrs[..1], client(&consumer));
+    let (outgoing, incoming) = tokio::join!(
+        race.next(),
+        tokio::time::timeout_at(deadline, provider.accept())
+    );
+    let outgoing = outgoing.unwrap().stream;
+    let Some(Arrival::Tcp {
+        stream: incoming, ..
+    }) = incoming.unwrap()
+    else {
+        panic!("expected a TCP arrival");
+    };
+    let tag = endpoint::binding(&*outgoing, &grant).unwrap();
+    endpoint::verify_binding(&*incoming, &grant, &tag).unwrap();
+    let quic_label = endpoint::tag(&*outgoing, b"pb-mapper/direct/1", &grant).unwrap();
+    assert!(
+        endpoint::verify_binding(&*incoming, &grant, &quic_label).is_err(),
+        "a binding made for QUIC is worthless over TCP"
+    );
+    let _ = tcp::Race::start(&addrs[..1], client(&stranger))
+        .next()
+        .await;
+    only_granted().await;
+}
+
+/// The one certificate an accepted connection presented.
+fn presented(arrival: &Arrival) -> Option<Vec<u8>> {
+    match arrival {
+        Arrival::Quic(connection) => connection
+            .peer_identity()?
+            .downcast::<Vec<quinn::rustls::pki_types::CertificateDer<'static>>>()
+            .ok()?
+            .first()
+            .map(|certificate| certificate.to_vec()),
+        Arrival::Tcp { stream, .. } => tcp::peer_certificate(stream).map(<[u8]>::to_vec),
+    }
 }

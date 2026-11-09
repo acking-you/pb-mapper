@@ -371,18 +371,25 @@ test.skipIf(!hasRelay)(
     const connections = [];
     try {
       await registration.waitReady(READY_MS);
-      for (const path of [undefined, "relay-only"]) {
+      for (const [path, lanTransport] of [[undefined, undefined], ["relay-only"], [undefined, "tcp"]]) {
         const localAddr = await reserveListenAddress();
         const connection = await client.connect({
-          key: "direct", localAddr, transport: "tcp", path,
+          key: "direct", localAddr, transport: "tcp", path, lanTransport,
         });
         connections.push(connection);
         await connection.waitReady(READY_MS);
         const payload = Buffer.alloc(32_000, 0x37);
         expect((await echoRoundTrip(localAddr, payload)).equals(payload)).toBe(true);
-        if (path === undefined) {
+        if (lanTransport === "tcp") {
+          // Loopback stands in for the LAN, as the relay is on it.
+          const diagnostics = connection.diagnostics();
+          expect(diagnostics.lanTransport).toBe("tcp");
+          expect(diagnostics.direct.lanTcpSessions).toBe(1);
+        } else if (path === undefined) {
           const diagnostics = connection.diagnostics();
           expect(diagnostics.direct.directSessions).toBe(1);
+          expect(diagnostics.lanTransport).toBe("quic");
+          expect(diagnostics.direct.lanTcpSessions).toBe(0);
           expect(
             diagnostics.events.some((event) => event.kind === "direct_established"),
           ).toBe(true);

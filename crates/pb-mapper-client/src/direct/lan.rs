@@ -163,6 +163,39 @@ impl Interfaces {
             .filter(|interface| interface.local_network())
             .find(|interface| interface.holds(peer))
     }
+
+    /// This end's addresses on its local networks, where TCP is offered:
+    /// one IPv4 address per LAN or physical interface, never a global one,
+    /// then one address per IPv6 /64. No other interface, and no address a
+    /// peer across the internet could reach this end at, is ever among them.
+    pub fn lan_addrs(&self) -> Vec<IpAddr> {
+        let lan = || self.0.iter().filter(|interface| interface.local_network());
+        let mut addrs: Vec<IpAddr> = lan()
+            .filter_map(|interface| {
+                interface.addrs.iter().map(|&(ip, _)| ip).find(|ip| {
+                    ip.is_ipv4() && !is_global(*ip) && !ip.is_loopback() && !link_local(*ip)
+                })
+            })
+            .collect();
+        let mut prefixes: Vec<(IpAddr, u8)> = Vec::new();
+        for (ip, len) in lan().flat_map(|interface| interface.addrs.iter().copied()) {
+            if !ip.is_ipv6() || ip.is_loopback() || link_local(ip) {
+                continue;
+            }
+            if !prefixes.iter().any(|&(own, len)| same_prefix(own, ip, len)) {
+                prefixes.push((ip, len));
+                addrs.push(ip);
+            }
+        }
+        addrs
+    }
+}
+
+fn link_local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_unicast_link_local(),
+    }
 }
 
 /// What this end knows of its own networks when a setup starts.
@@ -647,6 +680,27 @@ mod tests {
             None
         );
         assert_eq!(pc.assess(&[at("203.0.113.9")]), None);
+    }
+
+    /// TCP is offered where a peer on the WLAN reaches it, and nowhere a peer
+    /// across the internet could: not the VPN or the hypervisor, and not a
+    /// LAN interface's public IPv4.
+    #[test]
+    fn tcp_is_offered_on_the_lan_alone() {
+        let mut interfaces = this_pc().interfaces.0;
+        interfaces.push(Interface::new(
+            "Ethernet",
+            InterfaceTier::Lan,
+            [(ip("120.24.33.5"), 24), (ip("fe80::1"), 64)],
+        ));
+        // The temporary first, as Windows sends from it; its /64 once.
+        assert_eq!(
+            Interfaces::new(interfaces).lan_addrs(),
+            [
+                ip("192.168.21.5"),
+                ip("2408:8256:3100:820:bcec:a6b4:ae1d:f125")
+            ]
+        );
     }
 
     /// LAN-first off changes what this end does, not what it sees: the

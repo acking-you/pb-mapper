@@ -101,6 +101,11 @@ class AppStore extends ChangeNotifier {
 
   bool _checking = false;
   int _relayAsk = 0;
+
+  /// The config writes, one after another: each sends the whole config,
+  /// taking what it does not change from [config], which must then be what
+  /// the write before it left rather than what was there when it was asked.
+  Future<void> _configWrites = Future.value();
   bool _started = false;
   bool _disposed = false;
   ChangeSubscription? _subscription;
@@ -539,14 +544,16 @@ class AppStore extends ChangeNotifier {
     required bool keepAlive,
     RelayTransport? relayTransport,
   }) async {
-    final result = await api.updateConfig(
-      serverAddress: address.trim(),
-      keepAlive: keepAlive,
-      msgHeaderKey: credential.trim(),
-      relayTransport: relayTransport ?? config.relayTransport,
-      lanFirst: config.lanFirst,
+    final result = await _writeConfig(
+      () => api.updateConfig(
+        serverAddress: address.trim(),
+        keepAlive: keepAlive,
+        msgHeaderKey: credential.trim(),
+        relayTransport: relayTransport ?? config.relayTransport,
+        lanFirst: config.lanFirst,
+        lanTransport: config.lanTransport,
+      ),
     );
-    await _loadConfig();
     relay = null;
     _notify();
     await checkRelay(force: true);
@@ -559,16 +566,45 @@ class AppStore extends ChangeNotifier {
   /// and a running remote-desktop host keep what they started with; when it
   /// changed, the result's `lanFirst` lists the tunnels on this relay, under
   /// this credential, that starting again would change: see [restart].
-  Future<OperationResult> setLanFirst(bool on) async {
-    final result = await api.updateConfig(
+  Future<OperationResult> setLanFirst(bool on) => _writeConfig(
+    () => api.updateConfig(
       serverAddress: config.serverAddress,
       keepAlive: config.keepAliveEnabled,
       msgHeaderKey: config.msgHeaderKey,
       relayTransport: config.relayTransport,
       lanFirst: on,
-    );
-    await _loadConfig();
-    return result;
+      lanTransport: config.lanTransport,
+    ),
+  );
+
+  /// What a local network this computer shares with the other end carries
+  /// for what it dials, saved at once as [setLanFirst] is. When it changed,
+  /// the result's `lanTransport` lists the connections on this relay, under
+  /// this credential, that starting again would change: see [restart].
+  Future<OperationResult> setLanTransport(LanTransport transport) =>
+      _writeConfig(
+        () => api.updateConfig(
+          serverAddress: config.serverAddress,
+          keepAlive: config.keepAliveEnabled,
+          msgHeaderKey: config.msgHeaderKey,
+          relayTransport: config.relayTransport,
+          lanFirst: config.lanFirst,
+          lanTransport: transport,
+        ),
+      );
+
+  /// Run [write] once the writes before it are answered and read back, so
+  /// the config it fills in from is theirs, then read back its own.
+  Future<OperationResult> _writeConfig(
+    Future<OperationResult> Function() write,
+  ) {
+    final written = _configWrites.then((_) async {
+      final result = await write();
+      await _loadConfig();
+      return result;
+    });
+    _configWrites = written.then((_) {}, onError: (_) {});
+    return written;
   }
 
   /// Start [move]'s tunnels again, so that they reach the relay over the

@@ -79,6 +79,14 @@ When both ends share a Wi-Fi or LAN, direct setup tries that network first:
 nothing waits for the LAN; it is still detected and reported, and
 `diagnostics().lanFirst` says which the tunnel runs with.
 
+A path within that LAN runs over QUIC unless the connection asks for TCP with
+`lanTransport: "tcp"`: TCP is then tried first, 300 ms ahead of QUIC with
+`lanFirst` on, and the session falls back to QUIC on the LAN when the
+publisher's firewall stops TCP. A path across the internet is always QUIC.
+Registrations serve TCP on demand, on their LAN addresses only; `lanTcp: false`
+refuses it. `diagnostics().lanTransport` says what a connection asks for, and
+a direct link's `transport` what it runs over.
+
 ## Listening for changes
 
 Three feeds, all free of credentials and payload. The status:

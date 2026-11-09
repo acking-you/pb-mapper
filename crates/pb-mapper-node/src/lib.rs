@@ -360,6 +360,9 @@ pub struct JsLinkSample {
     pub family: String,
     /// `host`, `public`, `mapped` or `peer_reflexive`.
     pub via: String,
+    /// `quic`, or `tcp` within a local network. Over TCP the round trips are
+    /// the handshake's, and the rest is zero.
+    pub transport: String,
     pub peer: String,
     pub local_ip: Option<String>,
     /// `ipv6_prefix`, `public_ip_subnet` or `subnet`.
@@ -433,6 +436,7 @@ impl From<sdk::TunnelMetrics> for JsTunnelMetrics {
                 kind: link.kind.as_str().into(),
                 family: link.family.as_str().into(),
                 via: link.via.as_str().into(),
+                transport: link.transport.as_str().into(),
                 peer: link.peer.to_string(),
                 local_ip: link.local_ip.map(|ip| ip.to_string()),
                 same_lan: link.same_lan.map(|evidence| evidence.as_str().into()),
@@ -481,6 +485,10 @@ pub struct JsPathDiagnostics {
     /// Direct sessions within one local network, open now and in all.
     pub active_lan: f64,
     pub lan_sessions: f64,
+    /// Direct sessions over TCP, which only a local network carries, open
+    /// now and in all.
+    pub active_lan_tcp: f64,
+    pub lan_tcp_sessions: f64,
     /// Setups that found the peer on a local network, and those of them that
     /// ended on another path or on the relay.
     pub lan_detected: f64,
@@ -506,6 +514,9 @@ pub struct JsDirectLink {
     /// How the peer address was learned: `host`, `public`, `mapped` or
     /// `peer_reflexive`.
     pub via: String,
+    /// `quic`, or `tcp` within a local network. Over TCP the round trips are
+    /// the handshake's, and the rest is zero.
+    pub transport: String,
     pub peer: String,
     pub local_ip: Option<String>,
     /// The local interface the path leaves by, and its tier: `lan`,
@@ -573,6 +584,7 @@ impl From<sdk::DirectLink> for JsDirectLink {
             kind: link.kind.as_str().into(),
             family: link.family.as_str().into(),
             via: link.via.as_str().into(),
+            transport: link.transport.as_str().into(),
             peer: link.peer.to_string(),
             local_ip: link.local_ip.map(|ip| ip.to_string()),
             interface: link.interface,
@@ -630,8 +642,8 @@ pub struct JsTunnelEvent {
     /// `direct_fallback` and `stopped`, the last event of a stream. Steps,
     /// from `subscribeEvents()` only: `phase_changed`, `direct_stage_changed`,
     /// `direct_abandoned`, `session_opened`, `session_closed`,
-    /// `port_mapping_changed`, `lan_detected`, `path_selected` and
-    /// `lan_missed`. A kind added by a later SDK reads `unknown`.
+    /// `port_mapping_changed`, `lan_detected`, `path_selected`, `lan_missed`
+    /// and `lan_tcp_missed`. A kind added by a later SDK reads `unknown`.
     pub kind: String,
     /// `relay_ready`: setup latency of the answering relay.
     pub latency_ms: Option<f64>,
@@ -648,7 +660,9 @@ pub struct JsTunnelEvent {
     pub stage: Option<String>,
     /// `direct_fallback`: why: `direct_not_offered`,
     /// `direct_negotiation_failed`, `direct_negotiation_timeout` or
-    /// `direct_timeout_or_unreachable`.
+    /// `direct_timeout_or_unreachable`. `lan_tcp_missed`: why TCP was not
+    /// the path: `not_offered`, `no_shared_lan`, `refused`, `timed_out` or
+    /// `handshake`.
     pub reason: Option<String>,
     /// `phase_changed`: the relay attempt's new phase.
     pub phase: Option<String>,
@@ -672,8 +686,10 @@ pub struct JsTunnelEvent {
     pub link: Option<String>,
     pub family: Option<String>,
     pub via: Option<String>,
+    /// `path_selected`: `quic`, or `tcp` within a local network.
+    pub transport: Option<String>,
     /// `lan_missed`: where the session went instead, `internet` or
-    /// `private`; absent when it took the relay.
+    /// `private`; `lan_tcp_missed`: `quic`. Absent when it took the relay.
     pub took: Option<String>,
     /// lan_detected: whether this end's LAN-first is on, so the peer's
     /// LAN addresses are probed first.
@@ -704,6 +720,7 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
             link: None,
             family: None,
             via: None,
+            transport: None,
             took: None,
             preferred: None,
         };
@@ -784,16 +801,28 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 js.preferred = Some(preferred);
                 "lan_detected"
             }
-            sdk::TunnelEventKind::PathSelected { link, family, via } => {
+            sdk::TunnelEventKind::PathSelected {
+                link,
+                family,
+                via,
+                transport,
+                ..
+            } => {
                 js.link = Some(link.as_str().into());
                 js.family = Some(family.as_str().into());
                 js.via = Some(via.as_str().into());
+                js.transport = Some(transport.as_str().into());
                 "path_selected"
             }
             sdk::TunnelEventKind::LanMissed { evidence, took, .. } => {
                 js.evidence = Some(evidence.as_str().into());
                 js.took = took.map(|link| link.as_str().into());
                 "lan_missed"
+            }
+            sdk::TunnelEventKind::LanTcpMissed { reason, took, .. } => {
+                js.reason = Some(reason.as_str().into());
+                js.took = took.map(|transport| transport.as_str().into());
+                "lan_tcp_missed"
             }
             _ => "unknown",
         }
@@ -808,6 +837,10 @@ pub struct JsTunnelDiagnostics {
     /// Whether direct setups try a shared local network first: the
     /// tunnel's lanFirst, and never without direct.
     pub lan_first: bool,
+    /// What direct setups ask a shared local network to carry, `quic` or
+    /// `tcp`: a connection's lanTransport; `quic` without direct, and for a
+    /// registration, which serves what each consumer asks for.
+    pub lan_transport: String,
     pub direct: Option<JsPathDiagnostics>,
     /// Application bytes on each path, as `metrics().traffic`.
     pub traffic: JsPathTraffic,
@@ -847,6 +880,8 @@ impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
                 active_relay: number(d.active_relay),
                 active_lan: number(d.active_lan),
                 lan_sessions: number(d.lan_sessions),
+                active_lan_tcp: number(d.active_lan_tcp),
+                lan_tcp_sessions: number(d.lan_tcp_sessions),
                 lan_detected: number(d.lan_detected),
                 lan_missed: number(d.lan_missed),
                 fallbacks: number(d.fallbacks),
@@ -863,6 +898,7 @@ impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
             relay_rtt_ms: value.relay_rtt_ms.map(number),
             relay_transport: transport_name(value.relay_transport),
             lan_first: value.lan_first,
+            lan_transport: value.lan_transport.as_str().into(),
             sdk_version: value.sdk_version.to_string(),
             last_attempt_phase: value.last_attempt_phase.as_str().to_string(),
             attempts: number(value.attempts),
@@ -922,6 +958,16 @@ fn parse_transport(raw: &str) -> Result<Transport> {
     }
 }
 
+fn parse_lan_transport(raw: Option<&str>) -> Result<sdk::LanTransport> {
+    match raw.unwrap_or("quic") {
+        "quic" => Ok(sdk::LanTransport::Quic),
+        "tcp" => Ok(sdk::LanTransport::Tcp),
+        other => Err(invalid_argument(format!(
+            "lanTransport must be \"quic\" or \"tcp\", got {other}"
+        ))),
+    }
+}
+
 fn parse_port_mapping(raw: Option<&str>) -> Result<sdk::PortMapping> {
     match raw.unwrap_or("auto") {
         "off" => Ok(sdk::PortMapping::Off),
@@ -971,6 +1017,11 @@ pub struct JsRegisterRequest {
     /// the order the consumer offered them. Ignored when direct is not
     /// allowed.
     pub lan_first: Option<bool>,
+    /// Serve a consumer that asks for TCP within a local network shared with
+    /// it (default `true`): a TCP listener opens the first time one asks,
+    /// offered on LANs only. `false` leaves such a consumer on QUIC. Ignored
+    /// when direct is not allowed.
+    pub lan_tcp: Option<bool>,
     pub key: String,
     pub local_addr: String,
     pub transport: String,
@@ -1006,6 +1057,11 @@ pub struct JsConnectRequest {
     /// there, hold other paths back up to 150 ms for it. `false` dials every
     /// path as soon as it answers. Ignored on the relay-only path.
     pub lan_first: Option<bool>,
+    /// What a path within a local network shared with the publisher runs
+    /// over: "quic" (default), or "tcp", tried 300 ms ahead of QUIC and
+    /// falling back to it. A path across the internet is always QUIC.
+    /// Ignored on the relay-only path.
+    pub lan_transport: Option<String>,
     pub key: String,
     pub local_addr: String,
     pub transport: String,
@@ -1253,6 +1309,7 @@ impl Client {
             allow_direct: request.allow_direct.unwrap_or(true),
             port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
             lan_first: request.lan_first.unwrap_or(true),
+            lan_tcp: request.lan_tcp.unwrap_or(true),
             ..Default::default()
         };
         let registration = self
@@ -1283,7 +1340,7 @@ impl Client {
             idle_timeout: Some(Duration::from_millis(idle_timeout_ms as u64)),
             port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
             lan_first: request.lan_first.unwrap_or(true),
-            ..Default::default()
+            lan_tcp: request.lan_tcp.unwrap_or(true),
         };
         let registration = self
             .inner
@@ -1312,7 +1369,7 @@ impl Client {
                     path,
                     port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
                     lan_first: request.lan_first.unwrap_or(true),
-                    ..Default::default()
+                    lan_transport: parse_lan_transport(request.lan_transport.as_deref())?,
                 },
             )
             .await

@@ -795,15 +795,16 @@ impl TunnelWorker {
                 crate::network::NetworkHints::shared().generation(),
             );
         }
-        self.diagnostics.prefer_lan(lan_first);
+        let lan_transport = if direct {
+            lan_transport
+        } else {
+            LanTransport::Quic
+        };
+        self.diagnostics.prefer_lan(lan_first, lan_transport);
         DirectPolicy {
             port_mapping,
             lan_first,
-            lan_transport: if direct {
-                lan_transport
-            } else {
-                LanTransport::Quic
-            },
+            lan_transport,
             lan_tcp: direct && lan_tcp,
         }
     }

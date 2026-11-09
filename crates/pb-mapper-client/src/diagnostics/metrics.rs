@@ -9,7 +9,7 @@
 
 use super::{Diagnostics, LanEvidence, LinkStats, LinkVia, RecoveryPhase};
 use crate::relay::RelayTransport;
-pub use pb_mapper_protocol::direct::{AddressFamily, LinkKind};
+pub use pb_mapper_protocol::direct::{AddressFamily, DirectTransport, LinkKind};
 use pb_mapper_protocol::forward::ForwardTotals;
 use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
@@ -132,6 +132,7 @@ pub struct LinkSample {
     pub kind: LinkKind,
     pub family: AddressFamily,
     pub via: LinkVia,
+    pub transport: DirectTransport,
     pub peer: SocketAddr,
     pub local_ip: Option<IpAddr>,
     /// What suggested a shared network before the setup, if anything.
@@ -312,7 +313,14 @@ mod tests {
         let first = stream.recv().await.unwrap();
         assert_eq!(first.sessions, SessionCounts::default());
 
-        let lan = diagnostics.session_opened(SessionPath::Direct, Some(LinkKind::Lan));
+        let lan = diagnostics.session_opened(
+            SessionPath::Direct,
+            Some(pb_mapper_protocol::direct::LinkSummary {
+                kind: LinkKind::Lan,
+                family: AddressFamily::Ipv4,
+                transport: DirectTransport::Quic,
+            }),
+        );
         let relay = diagnostics.session_opened(SessionPath::Relay, None);
         lan.meter().add_sent(100);
         relay.meter().add_received(7);

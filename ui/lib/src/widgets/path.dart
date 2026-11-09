@@ -4,6 +4,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart' show LanTransport;
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
@@ -252,13 +253,20 @@ bool _crossesRelay(PathMode? mode) => switch (mode) {
 };
 
 /// What [tunnel]'s path is called, in a word or two; with the carrier when
-/// that is QUIC, TCP being what a relay is reached over unless said.
+/// that is not the usual one: QUIC to the relay, which is reached over TCP
+/// unless said, or TCP within a LAN, which runs over QUIC unless said.
 String pathLabel(BuildContext context, Tunnel tunnel) {
   final label = _pathLabel(context, tunnel);
-  return tunnel.overQuic && _crossesRelay(tunnel.pathMode)
-      ? '$label · ${RelayTransport.quic.label}'
+  if (tunnel.overQuic && _crossesRelay(tunnel.pathMode)) {
+    return '$label · ${RelayTransport.quic.label}';
+  }
+  return _overTcp(tunnel.path?.link) && tunnel.pathMode == PathMode.lan
+      ? '$label · ${LanTransport.tcp.label}'
       : label;
 }
+
+/// Whether a direct [link] runs over TCP rather than QUIC.
+bool _overTcp(TunnelLink? link) => link?.transport == LanTransport.tcp;
 
 String _pathLabel(BuildContext context, Tunnel tunnel) {
   final l10n = context.l10n;
@@ -340,12 +348,14 @@ String _pathDetail(BuildContext context, Tunnel tunnel) {
 }
 
 /// [said], and under it the direct link open now: where it runs, over
-/// which family, to which address, and its round trip.
+/// which family and, when it is TCP, which carrier, to which address, and
+/// its round trip.
 String _withLink(BuildContext context, String said, TunnelPath? path) {
   final link = path?.link;
   if (link == null) return said;
   final facts = [
     linkKindLabel(context, link.kind),
+    if (_overTcp(link)) LanTransport.tcp.label,
     ?familyLabel(link.family),
     ?link.peer,
     if (link.rttMs case final rtt?) context.l10n.pathRoundTrip(rtt),

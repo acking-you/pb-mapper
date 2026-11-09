@@ -12,7 +12,12 @@
 //!   audit or egress policy: `RegisterOptions { allow_direct: false, .. }`;
 //! * a consumer on a network where UDP is known to be blocked, or one that
 //!   wants the relay's exact pre-direct protocol: `PathPolicy::RelayOnly`;
-//! * a publisher whose clients disappear without closing: an idle deadline.
+//! * a publisher whose clients disappear without closing: an idle deadline;
+//! * a consumer on a LAN with a TCP-friendly firewall, or a middlebox that
+//!   mangles UDP: `ConnectOptions { lan_transport: LanTransport::Tcp, .. }`,
+//!   which the publisher serves unless it set `lan_tcp: false`. A path across
+//!   the internet stays QUIC, and TCP that does not get through falls back to
+//!   QUIC on the LAN within 300 ms.
 //!
 //! A direct path is chosen per connection and only when both ends allow it, so
 //! either side opting out is enough to keep that tunnel on the relay.
@@ -20,8 +25,8 @@
 use std::time::Duration;
 
 use pb_mapper::{
-    Client, ClientConfig, ConnectOptions, ConnectRequest, PathPolicy, RegisterOptions,
-    RegisterRequest, Transport,
+    Client, ClientConfig, ConnectOptions, ConnectRequest, LanTransport, PathPolicy,
+    RegisterOptions, RegisterRequest, Transport,
 };
 
 #[tokio::main]
@@ -98,12 +103,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
         .await?;
+    // Consumer: as the default, but a path within a LAN it shares with the
+    // publisher runs over TCP rather than QUIC.
+    let lan_tcp = client
+        .connect_with_options(
+            ConnectRequest {
+                key: "default".into(),
+                local_addr: "127.0.0.1:9093".into(),
+                transport: Transport::Tcp,
+            },
+            ConnectOptions {
+                lan_transport: LanTransport::Tcp,
+                ..Default::default()
+            },
+        )
+        .await?;
     relayed.wait_ready().await?;
     auto.wait_ready().await?;
-    println!("relay only at 127.0.0.1:9091, direct first at 127.0.0.1:9092");
+    lan_tcp.wait_ready().await?;
+    println!(
+        "relay only at 127.0.0.1:9091, direct first at 127.0.0.1:9092, TCP on a LAN at 127.0.0.1:9093"
+    );
 
     tokio::signal::ctrl_c().await?;
-    for connection in [relayed, auto] {
+    for connection in [relayed, auto, lan_tcp] {
         connection.stop().await?;
     }
     for registration in [audited, default_with_idle, explicit_default] {

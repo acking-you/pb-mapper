@@ -340,6 +340,25 @@ impl PbMapperState {
         })
     }
 
+    /// This computer's connections on `relay` under `credential` that may
+    /// go direct and started asking a shared local network for another
+    /// carrier than `lan_transport`: the ones to start again for it to reach
+    /// them. A share serves whichever carrier its consumers ask for, so no
+    /// start changes it.
+    pub fn on_other_lan_transport(
+        &self,
+        relay: &str,
+        endpoint: Option<&ResolvedAddrs>,
+        credential: Credential,
+        lan_transport: LanTransport,
+    ) -> RelayTunnels {
+        let mut found = self.started_otherwise(relay, endpoint, credential, |runtime| {
+            runtime.pin.allow_direct && runtime.handle.diagnostics().lan_transport != lan_transport
+        });
+        found.shares.clear();
+        found
+    }
+
     /// This computer's tunnels on `relay` under `credential` that `differs`
     /// picks. A start takes the relay and credential configured now, so a
     /// tunnel on another relay or credential is never named: starting it

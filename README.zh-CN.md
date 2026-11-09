@@ -91,6 +91,8 @@ MSG_HEADER_KEY='pbmt1_…' pb-mapper connect tcp --key web --addr 127.0.0.1:9090
 
 relay 只公布 UDP 端口号，客户端把它和自己拨通 relay 时用的地址配对，所以 1:1 NAT、端口转发都不用额外配置。如果 UDP 端口被映射到别处，用 `--direct-advertise 公网IP:端口` 指定；用 `--direct-listen` 绑定其他本地地址。
 
+同一局域网内的直连默认走 QUIC，消费端也可以选择 TCP（`connect --lan-transport tcp`，或应用里的「设置 → 直连 → 局域网传输」）：先局域网 TCP，再局域网 QUIC，再互联网 QUIC，最后中继。提供端按需提供 TCP，而且只提交局域网地址（`register --no-lan-tcp` 可拒绝），所以打洞的互联网路径始终是 QUIC。TCP 需要提供端防火墙允许入站 TCP；不通时会话在 300 ms 内改走局域网 QUIC。
+
 需要了解的边界：
 
 - **直连会话归两端所有。** relay 重启或凭据吊销只阻止新的建连，不会切断已建立的直连；停止本地隧道才会关闭它。中继连接则在吊销时立即关闭。

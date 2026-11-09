@@ -251,6 +251,8 @@
   "lanFirstRestartBody": "有 {count} 条运行中的隧道仍沿用启动时的设置。重新启动后即采用新设置，经它们打开的连接会重新建立。",
   "lanFirstRestartNow": "立即重启",
   "lanFirstRestarted": "{count} 条隧道已按新设置重新启动",
+  "lanTransport": "局域网传输",
+  "lanTransportHelp": "TCP 需要对方防火墙允许入站 TCP；不通时自动改用 QUIC。只影响本机发起的连接；本机被连接时按对方的选择提供。",
   "settingsAppearance": "外观",
   "theme": "主题",
   "themeSystem": "跟随系统",

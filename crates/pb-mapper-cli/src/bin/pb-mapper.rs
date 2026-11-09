@@ -25,7 +25,7 @@ use pb_mapper_auth::{
 };
 use pb_mapper_client::client::handle_status_cli_scoped;
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, PathPolicy, PortMapping, RegisterOptions,
+    Client, ConnectOptions, ConnectRequest, LanTransport, PathPolicy, PortMapping, RegisterOptions,
     RegisterRequest, TunnelDiagnostics, TunnelEventKind, TunnelEvents, TunnelMetrics, TunnelStatus,
 };
 use pb_mapper_core::checksum::set_process_msg_header_key;
@@ -168,6 +168,15 @@ struct RegisterArgs {
         conflicts_with = "relay_only"
     )]
     lan_first: bool,
+    /// Refuse a consumer that asks for TCP within a local network shared
+    /// with it; it then takes QUIC. Otherwise a TCP listener opens the first
+    /// time one asks, on the direct port's number, offered on LANs only.
+    #[arg(
+        long = "no-lan-tcp",
+        action = clap::ArgAction::SetFalse,
+        conflicts_with = "relay_only"
+    )]
+    lan_tcp: bool,
     /// Transport used by the local service.
     #[arg(value_enum)]
     transport: Transport,
@@ -218,6 +227,16 @@ struct ConnectArgs {
         conflicts_with = "relay_only"
     )]
     lan_first: bool,
+    /// What a path within a local network shared with the publisher runs
+    /// over: `quic` (the default), or `tcp`, tried 300 ms ahead of QUIC and
+    /// falling back to it. A path across the internet is always QUIC.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = LanTransportArg::Quic,
+        conflicts_with = "relay_only"
+    )]
+    lan_transport: LanTransportArg,
     /// Transport exposed by the local listener.
     #[arg(value_enum)]
     transport: Transport,
@@ -279,6 +298,21 @@ impl From<PortMappingArg> for PortMapping {
             PortMappingArg::Off => Self::Off,
             PortMappingArg::Auto => Self::Auto,
             PortMappingArg::Always => Self::Always,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum LanTransportArg {
+    Quic,
+    Tcp,
+}
+
+impl From<LanTransportArg> for LanTransport {
+    fn from(value: LanTransportArg) -> Self {
+        match value {
+            LanTransportArg::Quic => Self::Quic,
+            LanTransportArg::Tcp => Self::Tcp,
         }
     }
 }
@@ -521,6 +555,7 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
                 allow_direct: !args.relay_only && RegisterOptions::default().allow_direct,
                 port_mapping: args.port_mapping.into(),
                 lan_first: args.lan_first,
+                lan_tcp: args.lan_tcp,
                 ..Default::default()
             },
         )
@@ -554,7 +589,7 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
                 },
                 port_mapping: args.port_mapping.into(),
                 lan_first: args.lan_first,
-                ..Default::default()
+                lan_transport: args.lan_transport.into(),
             },
         )
         .await?;
@@ -603,6 +638,9 @@ async fn monitor_tunnel(
                     }
                     TunnelEventKind::LanMissed { .. } => {
                         tracing::info!(event = "tunnel_lan_missed", detail = %serde_json::to_string(&event.kind)?, "direct setup found the LAN but did not stay on it");
+                    }
+                    TunnelEventKind::LanTcpMissed { .. } => {
+                        tracing::info!(event = "tunnel_lan_tcp_missed", detail = %serde_json::to_string(&event.kind)?, "direct setup asked for TCP on the LAN and took another way");
                     }
                     _ => {}
                 },
@@ -816,11 +854,22 @@ mod tests {
             panic!("expected register command");
         };
         assert!(!defaults.relay_only);
-        assert!(defaults.lan_first);
+        assert!(defaults.lan_first && defaults.lan_tcp);
         assert_eq!(defaults.relay.relay_transport, RelayTransportArg::Tcp);
         assert!(
             Cli::try_parse_from(register.iter().chain(&["--allow-direct"])).is_ok(),
             "0.7 opt-in flag is accepted"
+        );
+        let Command::Register(no_tcp) =
+            Cli::try_parse_from(register.iter().chain(&["--no-lan-tcp"]))
+                .unwrap()
+                .command
+        else {
+            panic!("expected register command");
+        };
+        assert!(!no_tcp.lan_tcp && no_tcp.lan_first);
+        assert!(
+            Cli::try_parse_from(register.iter().chain(&["--relay-only", "--no-lan-tcp"])).is_err()
         );
         let Command::Register(lan_first_off) =
             Cli::try_parse_from(register.iter().chain(&["--no-lan-first"]))
@@ -885,6 +934,23 @@ mod tests {
         assert!(!lan_first_off.lan_first);
         assert!(
             Cli::try_parse_from(connect.iter().chain(&["--relay-only", "--no-lan-first"])).is_err()
+        );
+        assert_eq!(defaults.lan_transport, LanTransportArg::Quic);
+        let Command::Connect(tcp) =
+            Cli::try_parse_from(connect.iter().chain(&["--lan-transport", "tcp"]))
+                .unwrap()
+                .command
+        else {
+            panic!("expected connect command");
+        };
+        assert_eq!(LanTransport::from(tcp.lan_transport), LanTransport::Tcp);
+        assert!(
+            Cli::try_parse_from(
+                connect
+                    .iter()
+                    .chain(&["--relay-only", "--lan-transport", "tcp"])
+            )
+            .is_err()
         );
     }
 

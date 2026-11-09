@@ -2,8 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, DirectStage, FallbackReason, PathPolicy,
-    RegisterOptions, RegisterRequest, Transport, TunnelEventKind,
+    Client, ConnectOptions, ConnectRequest, DirectStage, DirectTransport, FallbackReason,
+    LanTransport, PathPolicy, RegisterOptions, RegisterRequest, Transport, TunnelEventKind,
 };
 use pb_mapper_server::DirectServerConfig;
 use pb_mapper_testkit::{READY_TIMEOUT, Relay, admin_credential, reserve_addr};
@@ -193,6 +193,17 @@ async fn direct_survives_coordinator_loss(carrier: pb_mapper_client::sdk::RelayT
 
 #[tokio::test]
 async fn udp_direct_preserves_datagrams_and_revocation_leaves_active_session_owned_by_client() {
+    udp_direct(LanTransport::Quic).await;
+}
+
+/// The same over TCP within the LAN, which loopback stands in for here: the
+/// datagrams keep their boundaries on a TLS stream as on QUIC's.
+#[tokio::test]
+async fn udp_direct_over_lan_tcp_preserves_datagrams() {
+    udp_direct(LanTransport::Tcp).await;
+}
+
+async fn udp_direct(lan_transport: LanTransport) {
     use std::time::Duration;
     use tokio::net::UdpSocket;
     let relay = Relay::start_with_direct(
@@ -246,6 +257,7 @@ async fn udp_direct_preserves_datagrams_and_revocation_leaves_active_session_own
             },
             ConnectOptions {
                 path: PathPolicy::Auto,
+                lan_transport,
                 ..Default::default()
             },
         )
@@ -264,7 +276,15 @@ async fn udp_direct_preserves_datagrams_and_revocation_leaves_active_session_own
             .unwrap();
         assert_eq!(&response[..len], &payload);
     }
-    assert_eq!(connection.diagnostics().direct.unwrap().active_direct, 1);
+    let direct = connection.diagnostics().direct.unwrap();
+    assert_eq!(direct.active_direct, 1);
+    // Over QUIC, which of this machine's addresses wins varies; TCP is offered
+    // on loopback alone, as the relay is on it.
+    let transport = match lan_transport {
+        LanTransport::Quic => DirectTransport::Quic,
+        LanTransport::Tcp => DirectTransport::Tcp,
+    };
+    assert_eq!(direct.link.unwrap().transport, transport);
     let observation = tokio::time::timeout(READY_TIMEOUT, async {
         loop {
             let sessions = client.sessions().await.unwrap();
