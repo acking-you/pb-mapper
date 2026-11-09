@@ -219,6 +219,9 @@ class DesktopDecoderLimit {
   /// What the protocol carries at most: no limit of the decoder's own.
   static const largest = DesktopDecoderLimit(3840, 2160);
 
+  /// 1080p: what a session asks for when nothing better is known.
+  static const p1080 = DesktopDecoderLimit(1920, 1080);
+
   /// A picture of [width] by [height] fits, in either orientation: the
   /// probe reports one, and a decoder takes both.
   bool takes(int width, int height) =>
@@ -269,9 +272,10 @@ class DesktopDecoders {
     );
   }
 
-  /// No answer, or no channel (another platform): H.264 only, as before
-  /// the probe, at any size the protocol carries.
-  static const h264Only = DesktopDecoders(h264: DesktopDecoderLimit.largest);
+  /// No answer (a probe that failed or has not answered yet): H.264 only,
+  /// at 1080p, what every session asked for before the probe. A device
+  /// that decodes more says so when it answers.
+  static const h264Only = DesktopDecoders(h264: DesktopDecoderLimit.p1080);
 
   final DesktopDecoderLimit? h264, h265;
 

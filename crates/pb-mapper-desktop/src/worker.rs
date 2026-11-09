@@ -533,12 +533,33 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
     }
 
-    /// The display shows another mode: settle, and look at once.
+    /// After a mode command reached the backend: the modes are read again
+    /// at once, which a paused session's capture would not do, so the
+    /// owner's card never keeps a change already put back. A change also
+    /// settles, and the context is checked at once.
     fn mode_changed(&mut self, changed: bool, now: Instant) {
+        if let Some(context) = self.context.clone() {
+            self.read_modes(&context);
+        }
         if changed {
             self.settle_until = Some(now + SETTLE);
             self.context_due = now;
         }
+    }
+
+    /// The display's modes as the backend reads them now.
+    fn read_modes(&mut self, context: &DesktopContext) {
+        self.state.record.modes = match self.backend.display_modes(context) {
+            Ok(modes) => modes.filter(ModeList::valid),
+            Err(failure) => {
+                tracing::debug!(
+                    target: "pb_mapper_desktop::session",
+                    event = "display_modes_unread",
+                    detail = %failure,
+                );
+                None
+            }
+        };
     }
 
     /// When an admitted left press that starts a drag follows a click within
@@ -809,17 +830,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if changed {
             // On a context change only, never per frame: the owner's own
             // change reaches the viewer too.
-            self.state.record.modes = match self.backend.display_modes(&context) {
-                Ok(modes) => modes.filter(ModeList::valid),
-                Err(failure) => {
-                    tracing::debug!(
-                        target: "pb_mapper_desktop::session",
-                        event = "display_modes_unread",
-                        detail = %failure,
-                    );
-                    None
-                }
-            };
+            self.read_modes(&context);
         }
         self.state.record.display = Some(context.display.clone());
         self.state.record.desktop = context.desktop;

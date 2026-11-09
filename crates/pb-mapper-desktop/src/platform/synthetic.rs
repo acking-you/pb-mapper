@@ -181,6 +181,9 @@ impl DisplayModes for SynModes {
         state.resets += 1;
         Ok(())
     }
+    fn scope(&mut self, _: &str) -> Result<String> {
+        Ok("synthetic".into())
+    }
 }
 fn setting(mode: Mode) -> Setting {
     Setting {
@@ -705,9 +708,15 @@ mod modes_tests {
             watching.shows(small.width, generation).await;
             if owner {
                 // The owner's Restore needs no control, but waits out the
-                // settle window like any change.
+                // settle window like any change. The host's card follows at
+                // once, even while the viewer pauses.
                 tokio::time::sleep(crate::modes::SETTLE).await;
+                watching.viewer.pause();
+                until(|| host.status().viewer.is_some_and(|viewer| viewer.paused)).await;
                 assert!(host.restore_display_mode());
+                until(|| host.status().display_mode.is_none()).await;
+                assert_eq!(probe.current().width, 48);
+                watching.viewer.resume();
                 watching.until(shows_owners).await;
             }
             watching.stop().await;

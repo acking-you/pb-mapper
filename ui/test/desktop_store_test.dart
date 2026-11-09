@@ -630,12 +630,17 @@ void main() {
       isFalse,
     );
 
-    // Garbage, or nothing, offers no H.265 and limits nothing.
+    // Garbage offers no H.265; no answer is H.264 at 1080p, as before the
+    // probe.
     final none = DesktopDecoders.fromJson({'h265': 'yes'});
     expect(none.h265, isNull);
     expect(
-      DesktopDecoders.h264Only.decodes(DesktopResolution.native, auto),
+      DesktopDecoders.h264Only.decodes(DesktopResolution.p1080, auto),
       isTrue,
+    );
+    expect(
+      DesktopDecoders.h264Only.decodes(DesktopResolution.p1440, auto),
+      isFalse,
     );
   });
 
@@ -826,6 +831,13 @@ void main() {
       await report(controlling: true);
       expect(asked(), hasLength(2));
 
+      // Fit local picked in control: sent once, never again by a poll that
+      // still shows the old size while the host switches.
+      store.setDisplayMode(DisplayModeTarget.fitLocal(store.localDisplay!));
+      await report(controlling: true);
+      await report(controlling: true);
+      expect(asked(), hasLength(3));
+
       viewer.dispose();
       store.dispose();
     },
@@ -833,7 +845,8 @@ void main() {
 
   testWidgets(
     'a decoder probe that does not answer holds the first connect only so '
-    'long, as H.264 alone, and none after it; its late answer is kept',
+    'long, as H.264 alone at 1080p, and none after it; its late answer is '
+    'kept',
     (tester) async {
       final api = FakeDesktopApi()
         ..codec = 'h264'
@@ -850,7 +863,13 @@ void main() {
       await tester.pump(const Duration(milliseconds: 1900));
       expect(api.argsOf('connect'), isEmpty);
       await tester.pump(const Duration(milliseconds: 100));
-      expect(api.argsOf('connect').single, containsPair('h265', false));
+      expect(
+        api.argsOf('connect').single,
+        allOf(
+          containsPair('h265', false),
+          containsPair('limits', (1920, 1080)),
+        ),
+      );
       store.setMaxFps(60);
       await tester.pump();
       expect(api.argsOf('connect'), hasLength(2));

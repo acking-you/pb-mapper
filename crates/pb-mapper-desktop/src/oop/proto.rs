@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 
 /// The longest one call may take, and a worker may wait to start.
 pub(crate) const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// The longest a call that may switch a display mode takes: a switch blocks
+/// while the display retrains its link, a reset may be two switches, and
+/// the journal is synced first; `Start` replays a journal a killed worker
+/// left. A call that outlives it ends the session, and the worker's
+/// backend, dropped with it, puts the mode back or leaves it journalled.
+pub(crate) const MODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 /// The longest a drain may wait for encoder output.
 pub(crate) const DRAIN_WAIT_MAX_MS: u32 = 4;
 
@@ -88,6 +94,18 @@ pub(crate) enum Request {
     RestoreDisplayMode {},
     Release {},
     Close {},
+}
+impl Request {
+    /// How long this call may take, on both ends of the pipe.
+    pub(crate) fn timeout(&self) -> std::time::Duration {
+        match self {
+            Self::Start { .. }
+            | Self::DisplayModes { .. }
+            | Self::SetDisplayMode { .. }
+            | Self::RestoreDisplayMode {} => MODE_TIMEOUT,
+            _ => TIMEOUT,
+        }
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

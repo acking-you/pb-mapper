@@ -4,12 +4,14 @@
 //! session ends.
 //!
 //! Every change is journalled before it is made ([`Journal`]), so a host
-//! that crashed is undone at its next start. One process keeps one claim per
-//! display it changed, with the first original: two hosts on one display
-//! share it, and the last to restore puts it back ([`Guard`]). A display
-//! whose mode its owner changed meanwhile is never changed back.
+//! that crashed is undone at its next start, within the login and on the
+//! monitor it was made on: a dynamic mode ends with either. One process
+//! keeps one claim per display it changed, with the first original and the
+//! latest mode set: two hosts on one display share it, and the last to
+//! restore puts it back ([`Guard`]). A display whose mode its owner changed
+//! meanwhile is never changed back.
 
-use crate::{Result, error, platform::DisplayModes};
+use crate::{FailureKind, Result, error, failure_kind, platform::DisplayModes};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
@@ -23,6 +25,8 @@ const MAX_MODES: usize = 64;
 const MAX_SIDE: u32 = 32_768;
 /// The most displays one journal names.
 const MAX_ENTRIES: usize = 16;
+/// The longest scope an entry keeps.
+const MAX_SCOPE: usize = 512;
 /// The in-process journal's file in its state directory.
 pub(crate) const JOURNAL: &str = "display-modes.json";
 /// How long after a change a capture failure is the display still changing,
@@ -150,11 +154,13 @@ impl Setting {
     }
 }
 
-/// One display a host changed: what to put back, and what it set.
+/// One display a host changed: what to put back, what it set, and the
+/// [`DisplayModes::scope`] the change lives in.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Entry {
     pub device: String,
+    pub scope: String,
     pub original: Setting,
     pub applied: Setting,
     pub pid: u32,
@@ -168,12 +174,16 @@ struct Stored {
     entries: Vec<Entry>,
 }
 impl Stored {
-    const VERSION: u32 = 1;
+    /// 2 added the scope; a version 1 file is discarded, never replayed.
+    const VERSION: u32 = 2;
     fn valid(&self) -> bool {
         self.version == Self::VERSION
             && self.entries.len() <= MAX_ENTRIES
             && self.entries.iter().all(|entry| {
-                valid_device(&entry.device) && entry.original.valid() && entry.applied.valid()
+                valid_device(&entry.device)
+                    && entry.scope.len() <= MAX_SCOPE
+                    && entry.original.valid()
+                    && entry.applied.valid()
             })
     }
 }
@@ -297,11 +307,13 @@ fn no_journal() -> std::io::Error {
     .into()
 }
 
-/// One display this process changed, with the first original and how many
-/// backends hold it changed.
+/// One display this process changed: the first original, the latest mode
+/// any holder set, which the journal names too, and how many backends hold
+/// it changed.
 struct Claim {
     device: String,
     original: Setting,
+    applied: Setting,
     holders: usize,
 }
 
@@ -335,11 +347,10 @@ pub(crate) struct Guard {
     journal: Journal,
     applied: Option<Applied>,
 }
-#[derive(Clone)]
+/// The display a backend holds changed, and the original it put there.
 struct Applied {
     device: String,
     original: Setting,
-    applied: Setting,
 }
 
 impl Guard {
@@ -396,6 +407,7 @@ impl Guard {
         }
         let mut claims = claims();
         let target = modes.target(device, mode)?;
+        let scope = modes.scope(device)?;
         let claimed = claims.iter().position(|claim| claim.device == device);
         // The first original wins: this backend's own, another host's in
         // this process, else what the display shows now.
@@ -413,6 +425,7 @@ impl Guard {
             device,
             Some(Entry {
                 device: device.to_owned(),
+                scope,
                 original,
                 applied: target,
                 pid: std::process::id(),
@@ -424,62 +437,70 @@ impl Guard {
             let _ = self.journal.put(device, before);
             return Err(failure);
         }
-        if self.applied.is_none() {
-            match claimed {
-                Some(at) => claims[at].holders += 1,
-                None => claims.push(Claim {
-                    device: device.to_owned(),
-                    original,
-                    holders: 1,
-                }),
+        match claimed {
+            Some(at) => {
+                claims[at].applied = target;
+                if self.applied.is_none() {
+                    claims[at].holders += 1;
+                }
             }
+            None => claims.push(Claim {
+                device: device.to_owned(),
+                original,
+                applied: target,
+                holders: 1,
+            }),
         }
         self.applied = Some(Applied {
             device: device.to_owned(),
             original,
-            applied: target,
         });
         Ok(())
     }
 
     /// Put back what this backend changed, `before` running first.
     /// `Ok(false)`: nothing was changed, another host of this process still
-    /// shows its mode there and puts it back when it ends, or the owner
-    /// changed the mode meanwhile, who is never fought. A failure keeps
-    /// both the change and its journal entry, to be tried again.
+    /// holds the display changed and puts it back when it ends, or the
+    /// owner changed the mode meanwhile, who is never fought. The last
+    /// holder compares the display with the latest mode any holder set. A
+    /// failure keeps both the change and its journal entry, to be tried
+    /// again.
     pub(crate) fn restore<M: DisplayModes>(
         &mut self,
         modes: &mut M,
         before: impl FnOnce(),
     ) -> Result<bool> {
-        let Some(applied) = self.applied.clone() else {
+        let Some(device) = self.applied.as_ref().map(|applied| applied.device.clone()) else {
             return Ok(false);
         };
         let mut claims = claims();
-        let shared = claims
-            .iter()
-            .any(|claim| claim.device == applied.device && claim.holders > 1);
-        if !shared {
-            let current = modes.current(&applied.device)?;
-            if current.size() == applied.applied.size() {
-                before();
-                modes.reset(&applied.device, &applied.original)?;
-            }
-            // Put back, or changed by its owner: either way not ours now.
-            if let Err(failure) = self.journal.put(&applied.device, None) {
-                tracing::warn!(
-                    target: "pb_mapper_desktop::session",
-                    event = "display_mode_journal_unwritten",
-                    detail = %failure,
-                );
-            }
-            unclaim(&mut claims, &applied.device);
+        let Some(claim) = claims.iter().find(|claim| claim.device == device) else {
             self.applied = None;
-            return Ok(current.size() == applied.applied.size());
+            return Ok(false);
+        };
+        let (original, latest) = (claim.original, claim.applied);
+        if claim.holders > 1 {
+            unclaim(&mut claims, &device);
+            self.applied = None;
+            return Ok(false);
         }
-        unclaim(&mut claims, &applied.device);
+        let current = modes.current(&device)?;
+        let ours = current.size() == latest.size();
+        if ours {
+            before();
+            modes.reset(&device, &original)?;
+        }
+        // Put back, or changed by its owner: either way not ours now.
+        if let Err(failure) = self.journal.put(&device, None) {
+            tracing::warn!(
+                target: "pb_mapper_desktop::session",
+                event = "display_mode_journal_unwritten",
+                detail = %failure,
+            );
+        }
+        unclaim(&mut claims, &device);
         self.applied = None;
-        Ok(false)
+        Ok(ours)
     }
 
     /// Give up the claim, leaving the journal: what a restore that failed
@@ -497,11 +518,14 @@ impl Drop for Guard {
 }
 
 /// Put back what `journal` says a host changed and did not restore: an
-/// entry whose display still shows what was set is reset to its original;
-/// one whose display shows anything else is dropped, since its owner, a
-/// logoff or a reboot changed it since; one that cannot be read or reset
-/// now is kept for the next try. A display a live backend of this process
-/// holds is left to it. How many were restored.
+/// entry whose display still shows what was set, in the scope it was set
+/// in, is reset to its original. One is dropped whose display shows
+/// anything else (its owner changed it since), is gone, or now has another
+/// login or monitor: its dynamic mode went with them, and replaying it
+/// would force a mode on a monitor that never had it. One that cannot be
+/// read or reset now (the secure desktop shows, say) is kept for the next
+/// try, warned of once. A display a live backend of this process holds is
+/// left to it. How many were restored.
 pub(crate) fn recover<M: DisplayModes>(modes: &mut M, journal: &Journal) -> Result<usize> {
     let claims = claims();
     let entries = journal.read();
@@ -515,8 +539,11 @@ pub(crate) fn recover<M: DisplayModes>(modes: &mut M, journal: &Journal) -> Resu
             kept.push(entry.clone());
             continue;
         }
-        let outcome = modes.current(&entry.device).and_then(|current| {
-            let shows = current.size() == entry.applied.size();
+        let outcome = modes.scope(&entry.device).and_then(|scope| {
+            if scope != entry.scope {
+                return Ok(false);
+            }
+            let shows = modes.current(&entry.device)?.size() == entry.applied.size();
             if shows {
                 modes.reset(&entry.device, &entry.original)?;
             }
@@ -525,21 +552,48 @@ pub(crate) fn recover<M: DisplayModes>(modes: &mut M, journal: &Journal) -> Resu
         match outcome {
             Ok(true) => restored += 1,
             Ok(false) => {}
+            Err(failure) if failure_kind(&failure) == Some(FailureKind::DisplayLost) => {}
             Err(failure) => {
-                tracing::warn!(
-                    target: "pb_mapper_desktop::session",
-                    event = "display_mode_not_restored",
-                    device = %entry.device,
-                    detail = %failure,
-                );
+                not_restored(&entry.device, &failure);
                 kept.push(entry.clone());
+                continue;
             }
         }
+        settled(&entry.device);
     }
     if kept != entries {
         journal.write(&kept)?;
     }
     Ok(restored)
+}
+
+/// The failure last warned of per display, so a replay that keeps failing
+/// the same way warns once, not at every retry.
+static WARNED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+fn not_restored(device: &str, failure: &std::io::Error) {
+    let detail = failure.to_string();
+    let mut warned = WARNED.lock().unwrap_or_else(PoisonError::into_inner);
+    let new = !warned
+        .iter()
+        .any(|(seen, said)| seen == device && *said == detail);
+    if new {
+        warned.retain(|(seen, _)| seen != device);
+        warned.push((device.to_owned(), detail));
+        tracing::warn!(
+            target: "pb_mapper_desktop::session",
+            event = "display_mode_not_restored",
+            device = %device,
+            detail = %failure,
+        );
+    }
+}
+
+fn settled(device: &str) {
+    WARNED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|(seen, _)| seen != device);
 }
 
 #[cfg(test)]
@@ -605,18 +659,36 @@ mod tests {
         assert_eq!(list.fit_local(mode(1000, 1000)), None);
     }
 
-    /// A display the test steers: what it shows, and each reset.
+    /// A display the test steers: what it shows, its scope, whether it is
+    /// attached, and each reset.
     struct Steered {
         current: Setting,
+        scope: &'static str,
+        gone: bool,
         resets: Vec<Setting>,
+    }
+    fn steered() -> Steered {
+        Steered {
+            current: setting(2560, 1440),
+            scope: "login 1, monitor A",
+            gone: false,
+            resets: Vec::new(),
+        }
     }
     impl DisplayModes for Steered {
         const SUPPORTED: bool = true;
         fn list(&mut self, _: &str) -> Result<Vec<Mode>> {
-            Ok(vec![mode(2560, 1440), mode(1920, 1080)])
+            Ok(vec![mode(2560, 1440), mode(1920, 1080), mode(1280, 720)])
         }
         fn current(&mut self, _: &str) -> Result<Setting> {
+            if self.gone {
+                return Err(crate::BackendError::new(FailureKind::DisplayLost, "gone").into());
+            }
             Ok(self.current)
+        }
+        fn scope(&mut self, device: &str) -> Result<String> {
+            self.current(device)?;
+            Ok(self.scope.to_owned())
         }
         fn target(&mut self, _: &str, mode: Mode) -> Result<Setting> {
             Ok(setting(mode.width, mode.height))
@@ -641,15 +713,13 @@ mod tests {
 
     /// A crashed host's journal is replayed once: its display is reset and
     /// the journal cleared. A display its owner changed since is left alone,
-    /// and a journal that fails validation is discarded unread.
+    /// as is one now under another login or monitor, or gone; and a journal
+    /// that fails validation is discarded unread.
     #[test]
     fn a_crashed_hosts_journal_resets_once_and_never_fights_the_owner() {
         let journal = journal("recover");
         let device = r"\\.\DISPLAY911";
-        let mut display = Steered {
-            current: setting(2560, 1440),
-            resets: Vec::new(),
-        };
+        let mut display = steered();
         let mut crashed = Guard::new(journal.clone());
         crashed.set(&mut display, device, mode(1920, 1080)).unwrap();
         assert_eq!(display.current.size(), mode(1920, 1080));
@@ -670,10 +740,23 @@ mod tests {
         assert_eq!(display.resets.len(), 1);
         assert!(!journal.pending());
 
+        // Another monitor on that device name, or none: dropped, not reset.
+        let changes: [fn(&mut Steered); 2] =
+            [|d| d.scope = "login 1, monitor B", |d| d.gone = true];
+        for change in changes {
+            let mut display = steered();
+            let mut crashed = Guard::new(journal.clone());
+            crashed.set(&mut display, device, mode(1920, 1080)).unwrap();
+            drop(crashed);
+            change(&mut display);
+            assert_eq!(recover(&mut display, &journal).unwrap(), 0);
+            assert!(display.resets.is_empty() && !journal.pending());
+        }
+
         // A journal naming no display device is never acted on.
         let path = journal.path.clone().unwrap();
         let forged = format!(
-            r#"{{"version":1,"entries":[{{"device":"C:\\Windows","original":{},"applied":{},"pid":1,"at_unix_ms":1}}]}}"#,
+            r#"{{"version":2,"entries":[{{"device":"C:\\Windows","scope":"login 1, monitor A","original":{},"applied":{},"pid":1,"at_unix_ms":1}}]}}"#,
             serde_json::to_string(&setting(2560, 1440)).unwrap(),
             serde_json::to_string(&setting(1280, 720)).unwrap(),
         );
@@ -682,5 +765,25 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(display.resets.len(), 1);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Two hosts of one process on one display: the first to end leaves it
+    /// to the other, and the last puts the original back whoever set the
+    /// mode it shows.
+    #[test]
+    fn the_last_of_two_hosts_on_a_display_puts_its_original_back() {
+        let journal = journal("shared");
+        let device = r"\\.\DISPLAY912";
+        let mut display = steered();
+        let (mut first, mut second) = (Guard::new(journal.clone()), Guard::new(journal.clone()));
+        first.set(&mut display, device, mode(1920, 1080)).unwrap();
+        second.set(&mut display, device, mode(1280, 720)).unwrap();
+        assert!(!second.restore(&mut display, || {}).unwrap());
+        assert_eq!(display.current.size(), mode(1280, 720));
+        assert!(journal.pending());
+        assert!(first.restore(&mut display, || {}).unwrap());
+        assert_eq!(display.resets, [setting(2560, 1440)]);
+        assert!(!journal.pending());
+        let _ = std::fs::remove_dir_all(journal.path.unwrap().parent().unwrap());
     }
 }

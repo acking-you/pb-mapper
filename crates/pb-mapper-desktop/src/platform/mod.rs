@@ -203,6 +203,11 @@ pub(crate) trait DisplayModes: Sized {
     fn apply(&mut self, device: &str, setting: &Setting) -> Result<()>;
     /// Back to the user's own mode.
     fn reset(&mut self, device: &str, original: &Setting) -> Result<()>;
+    /// What a dynamic mode of `device` lives as long as: the login and the
+    /// monitor attached there now. A journal entry made under another scope
+    /// is stale, its mode gone with that login or monitor. A display that is
+    /// not attached fails with `FailureKind::DisplayLost`.
+    fn scope(&mut self, device: &str) -> Result<String>;
 }
 
 /// No mode changes: the unsupported platform's, and the first real platform
@@ -227,6 +232,9 @@ impl DisplayModes for NoModes {
         Err(no_modes())
     }
     fn reset(&mut self, _: &str, _: &Setting) -> Result<()> {
+        Err(no_modes())
+    }
+    fn scope(&mut self, _: &str) -> Result<String> {
         Err(no_modes())
     }
 }

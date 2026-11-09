@@ -51,9 +51,11 @@ pub(crate) const REJECT_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 const BACKEND_ANSWER_WAIT: Duration = Duration::from_secs(3);
 /// Connections in their handshake or session at once; one holds the viewer slot.
 const MAX_CONNECTIONS: usize = 8;
-/// How often a display mode a session could not put back is tried again
-/// while no session is live.
+/// How soon a display mode a session could not put back is tried again
+/// while no session is live; each try that leaves it doubles the wait, up to
+/// `RESTORE_RETRY_MAX`.
 const RESTORE_RETRY: Duration = Duration::from_secs(2);
+const RESTORE_RETRY_MAX: Duration = Duration::from_secs(60);
 
 /// Which display a host shares.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -640,35 +642,47 @@ impl Shared {
 
 /// The host-lived retry of a display mode a session could not put back (the
 /// ordinary desktop was away, say): while the journal may still name one
-/// and no session is live, replay it, off the runtime, every
-/// `RESTORE_RETRY` and at once when asked. A live session's backend replays
-/// it itself. Ends with the host.
+/// and no session is live, replay it, off the runtime, backing off from
+/// `RESTORE_RETRY` to `RESTORE_RETRY_MAX`, and at once when asked. A
+/// failure is warned of when it changes, never at every try. A live
+/// session's backend replays it itself. Ends with the host.
 async fn restore_retry(shared: Arc<Shared>, recovery: Recovery, cancel: CancellationToken) {
+    let mut wait = RESTORE_RETRY;
+    let mut warned = None;
     loop {
         if shared.restore_pending.load(Ordering::Acquire) && shared.session.lock().is_none() {
             let recovery = recovery.clone();
             match tokio::task::spawn_blocking(move || recovery()).await {
-                Ok(Ok(pending)) => shared.restore_pending.store(pending, Ordering::Release),
-                Ok(Err(failure)) => tracing::warn!(
-                    target: "pb_mapper_desktop::session",
-                    event = "display_mode_not_restored",
-                    detail = %failure,
-                ),
+                Ok(Ok(pending)) => {
+                    shared.restore_pending.store(pending, Ordering::Release);
+                    warned = None;
+                }
+                Ok(Err(failure)) => {
+                    let detail = failure.to_string();
+                    if warned.as_ref() != Some(&detail) {
+                        tracing::warn!(
+                            target: "pb_mapper_desktop::session",
+                            event = "display_mode_not_restored",
+                            detail = %detail,
+                        );
+                        warned = Some(detail);
+                    }
+                }
                 Err(_) => {}
             }
         }
         // Idle until asked once nothing is left.
         let retry = async {
             if shared.restore_pending.load(Ordering::Acquire) {
-                tokio::time::sleep(RESTORE_RETRY).await;
+                tokio::time::sleep(wait).await;
             } else {
                 std::future::pending::<()>().await;
             }
         };
         tokio::select! {
             () = cancel.cancelled() => return,
-            () = shared.restore.notified() => {}
-            () = retry => {}
+            () = shared.restore.notified() => wait = RESTORE_RETRY,
+            () = retry => wait = (wait * 2).min(RESTORE_RETRY_MAX),
         }
     }
 }

@@ -304,13 +304,23 @@ screen says nothing about the size a desktop should run at.
   meantime, the host leaves the owner's choice and forgets its entry.
 - A host that ended without putting it back (a crash, a killed app or worker)
   puts it back later from the journal: the app at its first desktop call, a
-  host when it starts and after each session, retrying every 2 s while the
-  display refuses. A helper worker that exits with modes outstanding exits
-  with code 3, and the service then runs `helper restore <session>`, which
-  tries for 10 minutes; the service does the same for every journal left at
-  its start. Hosts in one process share a claim per display: the first
-  original wins and the last holder puts it back. Two processes changing one
-  display at once is a known limit.
+  host when it starts and after each session, retrying while the display
+  refuses (the secure desktop shows, say), from every 2 s backing off to once
+  a minute, and warning once per failure. A journal entry keeps the scope a
+  dynamic mode lives in, the login and the monitor (its logon time and the
+  monitor's device interface name on Windows): an entry from another login,
+  for another monitor now under the same `\\.\DISPLAYn`, or for a display
+  that is gone is dropped, never replayed. A helper worker that exits with
+  modes outstanding exits with code 3, and the service then runs `helper
+  restore <session>`, which tries for 10 minutes; the service does the same
+  for every journal left at its start. The service ends that run, and waits
+  until it is gone, only once another worker in the session has started and
+  been verified, just before it attaches it; the worker replays the journal
+  itself, and one that fails to attach hands it back to a new run. The two
+  never act on one journal. Hosts in one process share a claim per display,
+  with the first original and the latest mode set: the last holder puts the
+  original back, whichever host set the mode the display shows. Two
+  unrelated processes changing one display at once is a known limit.
 - A remembered computer keeps **Fit local** (never a fixed size, which the
   next display may not list) and applies it again whenever this viewer gains
   control of it.
@@ -575,7 +585,11 @@ background pipe for the host card's Restore; and the worker's `restore
 <session>` mode. A response carries the failure's kind instead of the client
 reading it from the text, and the `Start` response carries what the worker's
 backend can do (`caps`). A worker that exits with a mode still changed exits
-with code 3.
+with code 3. `Start` and the display-mode requests may take 20 s instead of
+the 3 s of every other call, on both ends: a switch blocks while the display
+retrains, and a reset may be two. A call that still overruns ends the
+session, and the worker's backend, dropped with it, puts the mode back or
+leaves it journalled.
 
 Protocol 6 made the video possibly H.265, which a protocol 5 helper cannot
 parse; `Request::H265` asks the worker whether it encodes H.265 on its

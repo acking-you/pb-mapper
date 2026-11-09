@@ -26,7 +26,7 @@ impl ServeState {
 }
 
 /// Hand the host's requests to the desktop-bound thread, one at a time, until
-/// `Close`. Each answer is bounded by `TIMEOUT`, but the wait for the next
+/// `Close`. Each answer is bounded by [`Request::timeout`], but the wait for the next
 /// request is not: a host whose viewer is paused sends nothing for as long as
 /// the pause lasts. The pipe closing ends that wait, and the service closes
 /// it when its caller's pipe closes, or when the owner or its login ends.
@@ -46,7 +46,7 @@ where
     };
     loop {
         let close = matches!(request, Request::Close {});
-        let (response, image) = tokio::time::timeout(TIMEOUT, serve(request))
+        let (response, image) = tokio::time::timeout(request.timeout(), serve(request))
             .await
             .map_err(error)??;
         tokio::time::timeout(TIMEOUT, async {
