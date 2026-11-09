@@ -71,9 +71,11 @@
 //! units, or JPEG pictures, for a decoder the integrator brings. Around them
 //! are status streams (`Host::watch`, `Viewer::watch`), a reconnecting
 //! `desktop::supervisor::Supervisor` with the app's policy, input helpers
-//! (`DesktopView::display_point`, `Input::text_chunks`) and a sealed store
-//! for a host's identity (`desktop::trust`). Both ends take the same path
-//! defaults as every tunnel: LAN first, then direct, then the relay.
+//! (`DesktopView::display_point`, `Input::text_chunks`), the host display's
+//! mode (`Viewer::set_display_mode`, put back when the viewer leaves) and a
+//! sealed store for a host's identity (`desktop::trust`). Both ends take
+//! the same path defaults as every tunnel: LAN first, then direct, then the
+//! relay.
 //! `cargo run -p pb-mapper --features desktop --example desktop_loopback`
 //! runs a host and a viewer in one process on any OS.
 #![cfg_attr(docsrs, feature(doc_cfg))]

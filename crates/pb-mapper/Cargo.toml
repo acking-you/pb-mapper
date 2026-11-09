@@ -69,5 +69,9 @@ required-features = ["desktop"]
 name = "desktop_supervised"
 required-features = ["desktop"]
 
+[[example]]
+name = "desktop_display_mode"
+required-features = ["desktop"]
+
 [lints]
 workspace = true

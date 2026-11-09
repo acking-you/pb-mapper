@@ -7,14 +7,15 @@
 //!
 //! The host's `Backend` is the example's own (`desktop_support`): it makes
 //! small fake H.264 units and records the input it receives, so nothing
-//! touches this computer's screen, keyboard or mouse. The viewer takes a
-//! picture, takes control, moves, clicks and types, changes the preset,
-//! pauses and resumes, then prints what it saw. It exits 0 when every step
-//! did what it should.
+//! touches this computer's screen, keyboard, mouse or display modes. The
+//! viewer takes a picture, takes control, moves, clicks and types, changes
+//! the preset, pauses and resumes, fits the host's display to its own size
+//! and sees the host put it back when it disconnects, then prints what it
+//! saw. It exits 0 when every step did what it should.
 //!
 //! With `--serve` it only hosts, until Ctrl+C, and prints what another
 //! process needs to view or control the synthetic desktop: run
-//! `desktop_viewer` or `desktop_control` against it.
+//! `desktop_viewer`, `desktop_control` or `desktop_display_mode` against it.
 
 mod desktop_support;
 
@@ -22,11 +23,11 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use desktop_support::{LocalRelay, Panel, Synthetic};
+use desktop_support::{LocalRelay, MODES, Panel, Synthetic};
 use pb_mapper::ConnectOptions;
 use pb_mapper::desktop::{
-    Button, DesktopView, Host, HostOptions, HostState, Input, InputError, QualityPreset,
-    VideoCodec, Viewer, ViewerConfig, ViewerState, ViewerStatus,
+    Button, DesktopView, Host, HostOptions, HostState, Input, InputError, Mode, ModeTarget,
+    QualityPreset, VideoCodec, Viewer, ViewerConfig, ViewerState, ViewerStatus,
 };
 
 type Outcome<T = ()> = Result<T, Box<dyn Error>>;
@@ -155,7 +156,37 @@ async fn main() -> Outcome {
     })
     .await?;
 
-    // 6. What the session measured over two seconds, and the tunnel under it.
+    // 6. Fit the host's display to this viewer's, as a desktop app's "Fit
+    //    local" does. A mode change needs control, which the pause ended.
+    viewer.request_control(true)?;
+    let status = until(&viewer, "control and the host's modes", |status| {
+        status.controlling && status.modes.is_some()
+    })
+    .await?;
+    let modes = status.modes.ok_or("the host offers no display modes")?;
+    let local = Mode {
+        width: 1024,
+        height: 576,
+    };
+    let fitted = viewer
+        .set_display_mode(ModeTarget::FitLocal(local))
+        .map_err(|failure| format!("no mode change: {failure:?}"))?;
+    until(&viewer, "the picture at the fitted size", |status| {
+        status.fresh
+            && status.display.as_ref().is_some_and(|display| {
+                (display.width, display.height) == (fitted.width, fitted.height)
+            })
+    })
+    .await?;
+    if panel.mode() != fitted {
+        return Err("the backend's display is not at the fitted mode".into());
+    }
+    println!(
+        "fitted the host's {}x{} display to {}x{} for this viewer",
+        modes.original.width, modes.original.height, fitted.width, fitted.height
+    );
+
+    // 7. What the session measured over two seconds, and the tunnel under it.
     tokio::time::sleep(Duration::from_secs(2)).await;
     let status = viewer.status();
     let stats = &status.stats;
@@ -174,8 +205,20 @@ async fn main() -> Outcome {
         );
     }
 
+    // 8. Disconnect: the host puts its display back as the session ends.
     viewer.release_input()?;
     viewer.stop().await?;
+    let started = Instant::now();
+    while panel.mode() != MODES[0] {
+        if started.elapsed() > Duration::from_secs(10) {
+            return Err("the host did not put its display back".into());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    println!(
+        "the host put its display back to {}x{} when the viewer left",
+        MODES[0].width, MODES[0].height
+    );
     let presented = renderer.join().map_err(|_| "the renderer panicked")?;
     host.stop().await?;
     host_log.await?;
@@ -250,8 +293,8 @@ async fn serve_until_ctrl_c(relay: LocalRelay, host: Host, panel: &Panel) -> Out
         "  PB_MAPPER_DESKTOP_INVITATION={}",
         host.invitation().encode()
     );
-    println!("run desktop_viewer or desktop_control. Ctrl+C stops.");
-    let mut seen = 0;
+    println!("run desktop_viewer, desktop_control or desktop_display_mode. Ctrl+C stops.");
+    let (mut seen, mut mode) = (0, panel.mode());
     let mut ticks = tokio::time::interval(Duration::from_millis(200));
     loop {
         tokio::select! {
@@ -262,6 +305,10 @@ async fn serve_until_ctrl_c(relay: LocalRelay, host: Host, panel: &Panel) -> Out
                     println!("  input: {input:?}");
                 }
                 seen = inputs.len();
+                if panel.mode() != mode {
+                    mode = panel.mode();
+                    println!("  display mode: {}x{}", mode.width, mode.height);
+                }
             }
         }
     }

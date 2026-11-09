@@ -24,8 +24,8 @@ use std::io::{BufWriter, Write};
 use std::time::Duration;
 
 use pb_mapper::desktop::{
-    ConnectError, Invitation, Pull, QualityPreset, Resolution, VideoCodec, VideoLimits, Viewer,
-    ViewerConfig, ViewerState,
+    ConnectError, Decoders, Invitation, Pull, QualityPreset, Resolution, Viewer, ViewerConfig,
+    ViewerState,
 };
 use pb_mapper::{Client, ClientConfig, ConnectOptions, LanTransport, PathPolicy};
 
@@ -34,7 +34,7 @@ type Outcome<T = ()> = Result<T, Box<dyn Error>>;
 #[tokio::main]
 async fn main() -> Outcome {
     let mut invitation = std::env::var("PB_MAPPER_DESKTOP_INVITATION").ok();
-    let mut resolution = Resolution::P1080;
+    let mut resolution = Resolution::default();
     let mut quality = QualityPreset::Balanced;
     let mut options = ConnectOptions::default();
     let mut seconds = None;
@@ -86,9 +86,14 @@ async fn main() -> Outcome {
         namespace: None,
     })?;
 
-    // H.264 only, at this display's frame rate within the chosen bounds.
-    let mut config = ViewerConfig::new(vec![VideoCodec::H264]);
-    config.limits = VideoLimits::choose(60.0, resolution, None);
+    // What this recorder decodes: H.264 up to 4K, no H.265 (ffplay plays the
+    // file later). The offer and the limits follow from it, at the display's
+    // own size by default, at 60 fps.
+    let decoders = Decoders {
+        h264: Some((3840, 2160)),
+        h265: None,
+    };
+    let mut config = ViewerConfig::for_decoders(decoders, resolution, 60.0, None);
     config.quality = quality;
     println!("connecting to {}", invitation.service);
     let viewer = match Viewer::connect(&client, &invitation, options, config).await {

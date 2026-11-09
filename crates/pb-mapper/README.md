@@ -201,22 +201,24 @@ acceptance and the 60+ FPS end-to-end UI target are still unverified. See the
 | Capture with your own code | `HostBuilder::backend(\|\| Ok(backend))` with a `Backend`, built and used on its session's thread, so it need not be `Send` |
 | Keep an invitation valid across restarts | `Host::identity()` and `HostBuilder::identity`; `trust::TrustFile` seals one with a `trust::Sealer` (`trust::CurrentUser` DPAPI on Windows); `restart`, `switch_display` and `rename` keep it |
 | Run a host | `status()`, `watch(every)`, `end_session()`, `set_control_allowed()`, `stop()`, `stop_with(StopReason)`, `metrics()` |
-| View | `Viewer::connect(&client, &invitation, ConnectOptions::default(), ViewerConfig::new(codecs))`, a typed `ConnectError`; `VideoLimits::choose(refresh_hz, resolution, max_fps)` bounds the picture |
+| View | `Viewer::connect(&client, &invitation, ConnectOptions::default(), config)`, a typed `ConnectError`; `config` from `ViewerConfig::for_decoders(decoders, resolution, refresh_hz, max_fps)`, the display's own size by default, or `ViewerConfig::new(codecs)` |
 | Take the picture | `viewer.video_sink().attach()` → `VideoConsumer`: see [Decoding](#decoding) |
 | Control | `request_control(true)`, then `input(generation, &[Input])` in the host display's pixels and a typed `InputError`; `view().display_point(nx, ny)`, `Input::text_chunks(text)`, `release_input()` |
 | Follow a viewer | `status()`, `watch(every)`, the allocation-free `view()` per frame, `metrics()`, `subscribe_metrics(every)` |
 | Change a session live | `set_quality(QualityPreset)`, `pause()`, `resume()`, `request_keyframe(reason)` |
-| Stay connected | `supervisor::Supervisor`, the app's policy: backoff of 1 to 15 s within 120 s, a stall after 5 s without video, H.265 → H.264 after a decoder failure; or the pure `supervisor::Reconnect` under your own timers |
+| Change the host display's mode | `Viewer::set_display_mode(ModeTarget::{FitLocal(Mode), Size(Mode), Original})` while controlling, a typed `DisplayModeError`; `ViewerStatus.modes` (`ModeList::fit_local`), `HostStatus.display_mode`, `Host::restore_display_mode()`. The host puts the mode back when its viewer leaves or loses control, and `recover_display_modes(state_dir)` after a crash; an own `Backend` implements `display_modes`, `set_display_mode` and `restore_display_mode` |
+| Stay connected | `supervisor::Supervisor`, the app's policy: backoff of 1 to 15 s within 120 s, a stall after 5 s without video, H.265 → H.264 after a decoder failure, keeping the preset and the app's control choice; or the pure `supervisor::Reconnect` under your own timers |
 | Share control with your own input | `HostBuilder::admission` with a `ControlAdmission`, whose lease is held only while a viewer controls |
 | Drive the privileged helper (Windows) | `privileged::{support, status, request_installation}`, `privileged::background` |
 
 | Example | Runs where | Shows |
 | --- | --- | --- |
-| `desktop_loopback` | any OS, no setup | A relay, a host of an example-defined `Backend` and a viewer in one process: control, a move, a click and chunked text the backend records, a preset change, pause and resume, status and metrics. `--serve` hosts the synthetic desktop for the examples below |
+| `desktop_loopback` | any OS, no setup | A relay, a host of an example-defined `Backend` and a viewer in one process: control, a move, a click and chunked text the backend records, a preset change, pause and resume, a display fitted to the viewer and put back when it leaves, status and metrics. `--serve` hosts the synthetic desktop for the examples below |
 | `desktop_host` | Windows; elsewhere it prints `host_support().reason` | `HostOptions::new`, `--display`, `--allow-control`, `--relay-only`, `--privileged`, `--identity DIR` (a `TrustFile`); the invitation; a `watch()` loop; Ctrl+C stops |
-| `desktop_viewer` | any OS | Every `ConnectError`; a thread recording Annex B to `remote.h264` for `ffplay`; status and metrics; `--resolution`, `--quality`, `--relay-only`, `--lan-transport` |
+| `desktop_viewer` | any OS | `ViewerConfig::for_decoders` for an H.264 decoder; every `ConnectError`; a thread recording Annex B to `remote.h264` for `ffplay`; status and metrics; `--resolution`, `--quality`, `--relay-only`, `--lan-transport` |
 | `desktop_control` | any OS, against a host you own | Taking control, `display_point`, batches, `text_chunks`, every `InputError`, `release_input` on the way out |
 | `desktop_supervised` | any OS, no setup | `Supervisor` through an H.265 decoder failure, a host restart, a stall and a stop |
+| `desktop_display_mode` | any OS, against a host you own; `desktop_loopback --serve` is the safe one | The host display's `ModeList`; `--fit WxH`, `--mode WxH`, `--original`; every `DisplayModeError`; a refusal's notice; the mode put back at the disconnect |
 
 `cargo run -p pb-mapper --features desktop --example desktop_loopback` needs no
 relay of your own and runs in CI.
@@ -225,8 +227,10 @@ relay of your own and runs in CI.
 
 The SDK carries video and ships no decoder. Each `VideoUnit` is one Annex B
 access unit of H.264 or H.265, or one JPEG picture, with its codec, size,
-`keyframe`, `discontinuity`, `generation`, `frame_id` and `pts_us`. Offer only
-what you decode: `ViewerConfig.codecs` lists H.264 or JPEG or both, and H.265
+what you decode: `ViewerConfig::for_decoders(Decoders { h264, h265 }, ..)`
+makes the offer and fits the picture inside each decoder's largest size; by
+hand, `ViewerConfig.codecs` lists H.264 or JPEG or both, and H.265 beside them
+when you decode it too. The host picks one for the session.
 beside them when you decode it too, and the host picks one for the session.
 Decode with what the platform has (Media Foundation, VideoToolbox, MediaCodec,
 openh264, FFmpeg) on the consumer's own thread: `VideoConsumer::next` blocks,
