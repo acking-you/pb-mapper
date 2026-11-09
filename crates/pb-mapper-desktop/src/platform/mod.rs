@@ -206,6 +206,10 @@ pub(crate) trait DisplayModes: Sized {
 }
 
 /// No mode changes.
+#[expect(
+    dead_code,
+    reason = "for the first platform without modes (Android, Wayland); Unsupported only names it"
+)]
 pub(crate) struct NoModes;
 impl DisplayModes for NoModes {
     const SUPPORTED: bool = false;

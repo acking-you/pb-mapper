@@ -190,6 +190,7 @@ fn valid_device(device: &str) -> bool {
 /// durably: a file in the host's state directory, or, for the privileged
 /// worker, in the helper's protected one. Without one, a backend changes no
 /// mode.
+/// The default journal is none: no mode is ever changed.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Journal {
     path: Option<PathBuf>,
@@ -200,10 +201,6 @@ impl Journal {
         Self {
             path: dir.map(|dir| dir.join(JOURNAL)),
         }
-    }
-    /// No journal: no mode is ever changed.
-    pub(crate) fn none() -> Self {
-        Self::default()
     }
 
     /// Whether it still names a display to put back.

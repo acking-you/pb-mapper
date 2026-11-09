@@ -342,7 +342,7 @@ mod tests {
         let mut backend = PlatformBackend::from_parts(
             std::sync::Arc::new(probe),
             parts,
-            crate::modes::Journal::none(),
+            crate::modes::Journal::default(),
         );
         let mut state = ServeState::new();
         let mut serve = |request| serve(&mut backend, request, &mut state).unwrap();

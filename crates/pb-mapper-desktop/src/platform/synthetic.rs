@@ -401,7 +401,7 @@ mod tests {
         let backend = PlatformBackend::<Synthetic<PUSH>>::open(
             grant.clone(),
             &Probe::display(),
-            Journal::none(),
+            Journal::default(),
         )
         .unwrap();
         assert_eq!(backend.drain_poll().is_none(), PUSH);
@@ -411,7 +411,7 @@ mod tests {
                 PlatformBackend::<Synthetic<PUSH>>::open(
                     grant.clone(),
                     &Probe::display(),
-                    Journal::none(),
+                    Journal::default(),
                 )
             },
             fallback_caps::<Synthetic<PUSH>>(),
