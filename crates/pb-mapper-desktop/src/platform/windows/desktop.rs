@@ -123,7 +123,7 @@ fn current_display(id: u32, monitor: HMONITOR) -> Result<Display> {
         height,
     })
 }
-pub(super) fn displays() -> Result<Vec<Display>> {
+pub(crate) fn displays() -> Result<Vec<Display>> {
     let _dpi = DpiScope::enter();
     available()?;
     xcap::Monitor::all()
@@ -133,7 +133,7 @@ pub(super) fn displays() -> Result<Vec<Display>> {
         .collect()
 }
 /// The primary display, or the first when Windows names none.
-pub(super) fn primary() -> Result<Display> {
+pub(crate) fn primary() -> Result<Display> {
     let _dpi = DpiScope::enter();
     available()?;
     let monitors = xcap::Monitor::all().map_err(error)?;
@@ -151,7 +151,7 @@ const UNCONFIGURED: crate::VideoLimits = crate::VideoLimits {
     max_height: 1080,
     max_fps: 60,
 };
-pub(super) fn create(id: u32) -> Result<Box<dyn Backend>> {
+pub(crate) fn create(id: u32) -> Result<Box<dyn Backend>> {
     available()?;
     Ok(Box::new(Desktop {
         id,

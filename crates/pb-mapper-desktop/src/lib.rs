@@ -12,10 +12,6 @@ mod backend;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod codec;
 mod credit;
-#[cfg(windows)]
-pub mod dpapi;
-#[cfg(windows)]
-pub mod helper;
 mod host;
 mod idr;
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -42,10 +38,6 @@ mod video_sink;
 mod viewer;
 mod wire;
 mod worker;
-#[cfg(windows)]
-pub mod video {
-    pub mod windows;
-}
 
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -57,7 +49,13 @@ pub use backend::{
 pub use host::{Access, Custom, DisplaySelection, Host, HostBuilder, HostOptions, Native};
 pub use invite::{Invitation, InvitationError, InvitationFormat};
 pub use modes::{DisplayModeError, Mode, ModeList, ModeTarget};
+#[cfg(windows)]
+pub use platform::windows::{dpapi, helper};
 pub use platform::{capabilities, displays, media_foundation, native_backend};
+#[cfg(windows)]
+pub mod video {
+    pub use crate::platform::windows::video as windows;
+}
 pub use protocol::{
     Adaptation, DesktopKind, NoticeCode, RateModel, RejectReason, Route, SessionState, StateReason,
     StopReason, VideoSize,

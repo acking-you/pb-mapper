@@ -4,9 +4,11 @@
 //! including its locked desktop; another login never inherits that grant.
 //! There is no arbitrary command execution, file or clipboard API.
 pub mod background;
+#[path = "../../../oop/client.rs"]
 mod client;
 #[cfg(feature = "windows-helper")]
 mod install;
+#[path = "../../../oop/ipc.rs"]
 mod ipc;
 mod os;
 #[cfg(feature = "windows-helper")]

@@ -120,5 +120,4 @@ pub(crate) fn native_launch(
 }
 
 #[cfg(windows)]
-#[path = "windows.rs"]
 pub(crate) mod windows;
