@@ -270,6 +270,61 @@ the Windows service shares with the app not running at all, nothing shows a
 viewer: the service cannot draw in the user's session. Keep the app in the
 tray to see who is connected.
 
+## Remote resolution
+
+The desktop viewer's Display menu holds **Remote resolution**: the remote
+display's own modes and **Fit local**, which change the *remote computer's*
+display mode, not only the picture. The phone viewer has no such menu; its
+screen says nothing about the size a desktop should run at.
+
+- A host offers it (the `display_mode` capability) where its platform changes
+  modes, which today is Windows, in an ordinary session or through the helper.
+  A viewer that did not list the capability is never sent the modes, and its
+  requests are protocol errors.
+- The state record carries the display's modes: the current one, the
+  original the host found, and up to 64 sizes at the current depth and
+  orientation, none below 800×600, largest first. The menu appears only while
+  this viewer holds control, since a mode change is as intrusive as input.
+- **Fit local** asks for this computer's display size when the remote lists
+  it, else the largest listed size inside it within 2 % of its shape.
+  **Original** asks the host to put back the mode it found.
+- The change is dynamic (`ChangeDisplaySettingsExW` without
+  `CDS_UPDATEREGISTRY`), so the registry, and the next login, keep the owner's
+  mode. Before changing anything the host journals the original:
+  `display-modes.json` in the app's state directory, or the helper's
+  `display-modes-<session>.json` under its protected installation.
+- For 3 s after a change the host reports `display_changing` while its capture
+  restarts (the viewer waits as for a capture restart) and refuses another
+  change with a `display_mode_failed` notice.
+- The host puts the display back when the session ends (disconnect, Stop
+  sharing, the host's exit), when control is revoked (Make view-only), and when
+  the owner presses **Restore** on the host card, which says the remote
+  resolution was changed; that needs no control. Releasing control, a paused
+  viewer and a fresh grant keep it. If the owner changed the mode in the
+  meantime, the host leaves the owner's choice and forgets its entry.
+- A host that ended without putting it back (a crash, a killed app or worker)
+  puts it back later from the journal: the app at its first desktop call, a
+  host when it starts and after each session, retrying every 2 s while the
+  display refuses. A helper worker that exits with modes outstanding exits
+  with code 3, and the service then runs `helper restore <session>`, which
+  tries for 10 minutes; the service does the same for every journal left at
+  its start. Hosts in one process share a claim per display: the first
+  original wins and the last holder puts it back. Two processes changing one
+  display at once is a known limit.
+- A remembered computer keeps **Fit local** (never a fixed size, which the
+  next display may not list) and applies it again whenever this viewer gains
+  control of it.
+
+The SDK side is `Viewer::set_display_mode(ModeTarget)`, which answers the mode
+it asked for or a `DisplayModeError` (`Closed`, `NotOffered`,
+`NotControlling`, `NoFit`, `NotListed`), the viewer status's `modes` and
+`host_os`, `Host::restore_display_mode()`, `HostStatus::display_mode` while
+the display is changed, and `recover_display_modes(state_dir)`. The wire
+messages are `display_mode {width, height}` and `restore_display_mode {}`.
+`examples/display_mode_probe.rs` is the hardware acceptance; it changes the
+display it runs on, so run it only where the owner agreed (see
+[the acceptance runbook](../scripts/test/desktop-ui-acceptance.md)).
+
 ## Remembered computers
 
 A controller can remember the computers it views, so it reconnects without
@@ -510,20 +565,30 @@ setup as **Turn on remote control** does: one consent prompt installs, updates
 or enables it, the app restarts into the installed copy when it installed one,
 and the host resumes there. The app's startup restore never installs or asks.
 
-Protocol 6 is the current one, with the pipes
-`pb-mapper.desktop-helper.v6` and `pb-mapper.desktop-background.v6`. Its video
-may be H.265, which a protocol 5 helper cannot parse; `Request::H265` asks the
-worker whether it encodes H.265 on its display, which it probes in the
-interactive session; and the worker answers each input with the pointer as
-the input left it, so the host never reports the controller's own move back
-(see [Input and cursor](#input-and-cursor)). The worker accepts an encoder
-bitrate up to 80 Mbit/s. Protocol 5 added the background host's `lan_first`,
-the app's *Try the local network first* when sharing started, written only
-when off, so a grant saved with the default stays readable by an older
-helper. The platform split ([Platforms](#platforms)) keeps protocol 6: the
-request and response types moved to the neutral `oop` module unchanged, and
-the client still reads a worker's failure from its text. A saved grant that
-does not say `allow_direct` now reads as allowed, the default everywhere.
+Protocol 7 is the current one, with the pipes
+`pb-mapper.desktop-helper.v7` and `pb-mapper.desktop-background.v7`. It adds
+display modes ([Remote resolution](#remote-resolution)): `Start` and `Attach`
+name the display's device (`\\.\DISPLAY1`), which finds it again when its
+monitor handle went stale after a mode change; `DisplayModes`,
+`SetDisplayMode` and `RestoreDisplayMode` requests, the last also on the
+background pipe for the host card's Restore; and the worker's `restore
+<session>` mode. A response carries the failure's kind instead of the client
+reading it from the text, and the `Start` response carries what the worker's
+backend can do (`caps`). A worker that exits with a mode still changed exits
+with code 3.
+
+Protocol 6 made the video possibly H.265, which a protocol 5 helper cannot
+parse; `Request::H265` asks the worker whether it encodes H.265 on its
+display, which it probes in the interactive session; and the worker answers
+each input with the pointer as the input left it, so the host never reports
+the controller's own move back (see [Input and cursor](#input-and-cursor)).
+The worker accepts an encoder bitrate up to 80 Mbit/s. Protocol 5 added the
+background host's `lan_first`, the app's *Try the local network first* when
+sharing started, written only when off, so a grant saved with the default
+stays readable by an older helper. The platform split
+([Platforms](#platforms)) kept protocol 6: the request and response types
+moved to the neutral `oop` module unchanged. A saved grant that does not say
+`allow_direct` reads as allowed, the default everywhere.
 
 Disable stops the service and disables its startup. Uninstall stops/deletes the
 service and removes its authorization configuration. Upgrade preserves files
