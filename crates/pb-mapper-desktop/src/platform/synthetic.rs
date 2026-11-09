@@ -492,3 +492,231 @@ mod tests {
         session::<true>("desktop-synthetic-push").await;
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod modes_tests {
+    use super::*;
+    use crate::{
+        DisplayModeError, Host, HostOptions, ModeTarget, NoticeCode, Pull, StateReason, Viewer,
+        ViewerConfig, ViewerReason, ViewerStatus, launch::Launcher, modes::Journal,
+        native::PlatformBackend, platform::fallback_caps,
+    };
+    use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
+    use pb_mapper_testkit::{Relay, admin_credential};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    async fn until(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A controlling viewer that presents every unit at once.
+    struct Controlling {
+        viewer: Viewer,
+        stop: Arc<AtomicBool>,
+        renderer: std::thread::JoinHandle<()>,
+    }
+    impl Controlling {
+        async fn connect(client: &Client, host: &Host) -> Self {
+            let options = ConnectOptions {
+                path: PathPolicy::RelayOnly,
+                ..Default::default()
+            };
+            let config = ViewerConfig::new(vec![VideoCodec::H264]);
+            let viewer = Viewer::connect(client, host.invitation(), options, config)
+                .await
+                .unwrap();
+            let consumer = viewer.video_sink().attach().unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let done = stop.clone();
+            let renderer = std::thread::spawn(move || {
+                while !done.load(Ordering::Acquire) {
+                    if let Pull::Unit(unit) = consumer.next(Duration::from_millis(20), 4 << 20) {
+                        consumer.presented(unit.generation, unit.frame_id);
+                    }
+                }
+            });
+            let this = Self {
+                viewer,
+                stop,
+                renderer,
+            };
+            this.control().await;
+            this
+        }
+        async fn control(&self) {
+            self.until(|status| status.fresh).await;
+            self.viewer.request_control(true).unwrap();
+            self.until(|status| status.controlling && status.fresh)
+                .await;
+        }
+        async fn until(&self, condition: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
+            until(|| condition(&self.viewer.status())).await;
+            self.viewer.status()
+        }
+        /// The display is `width` wide, presented in a generation after
+        /// `since`.
+        async fn shows(&self, width: u32, since: u64) -> ViewerStatus {
+            self.until(|status| {
+                status.display.as_ref().is_some_and(|d| d.width == width)
+                    && status.video.is_some_and(|video| video.width == width)
+                    && status.generation > since
+                    && status.fresh
+            })
+            .await
+        }
+        async fn stop(self) {
+            self.viewer.stop().await.unwrap();
+            self.stop.store(true, Ordering::Release);
+            self.renderer.join().unwrap();
+        }
+    }
+
+    /// The remote resolution, end to end on a synthetic display: a viewer
+    /// fits its display and sees the new size in a new generation, from an
+    /// IDR; a second change while the first settles is refused with a
+    /// notice, and a capture failure then is `DisplayChanging`. The owner's
+    /// re-grant keeps the mode; a revoke, the session's end and the owner's
+    /// Restore put it back; a mode the owner chose meanwhile is left alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_remote_resolution_changes_live_and_goes_back() {
+        let relay = Relay::start("desktop-synthetic-modes").await;
+        let client =
+            Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
+        let (probe, modes) = Probe::with_modes();
+        let (own, small) = (modes[0], modes[1]);
+        let dir = std::env::temp_dir().join(format!("pb-desktop-modes-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let journal = Journal::in_dir(Some(dir.clone()));
+        let (grant, opened) = (Arc::new(probe.clone()), journal.clone());
+        let (replayed, replaying) = (probe.clone(), journal.clone());
+        let launch = Launcher::new(
+            move || {
+                PlatformBackend::<Synthetic<false>>::open(
+                    grant.clone(),
+                    &Probe::display(),
+                    opened.clone(),
+                )
+            },
+            fallback_caps::<Synthetic<false>>(),
+        )
+        .recovering(move || {
+            crate::modes::recover(&mut SynModes(replayed.clone()), &replaying)?;
+            Ok(replaying.pending())
+        });
+        let mut options = HostOptions::new("desktop:synthetic-modes");
+        options.allow_control = true;
+        options.allow_direct = false;
+        let host = Host::builder(options)
+            .launch(Arc::new(launch))
+            .start(&client)
+            .await
+            .unwrap();
+        let resets = || probe.0.lock().resets;
+        let shows_owners =
+            |status: &ViewerStatus| status.display.as_ref().is_some_and(|d| d.width == 48);
+
+        // Fit the viewer's display: a new generation at the new size.
+        let watching = Controlling::connect(&client, &host).await;
+        let before = watching.viewer.status();
+        let listed = before.modes.clone().unwrap();
+        assert_eq!(
+            (listed.current, listed.supported.clone()),
+            (own, modes.clone())
+        );
+        assert_eq!(
+            watching
+                .viewer
+                .set_display_mode(ModeTarget::FitLocal(small)),
+            Ok(small)
+        );
+        let fitted = watching.shows(small.width, before.generation).await;
+        assert_eq!(fitted.modes.unwrap().original, own);
+        assert_eq!(host.status().display_mode.unwrap().current, small);
+
+        // Too soon for another change: refused, and said so.
+        assert_eq!(
+            watching.viewer.set_display_mode(ModeTarget::Original),
+            Ok(own)
+        );
+        watching
+            .until(|status| {
+                status
+                    .notice
+                    .as_ref()
+                    .is_some_and(|notice| notice.code == NoticeCode::DisplayModeFailed)
+            })
+            .await;
+        // A capture failure while it settles is the display changing.
+        probe.lose(true);
+        until(|| host.status().reason == Some(StateReason::DisplayChanging)).await;
+        watching
+            .until(|status| status.reason == Some(ViewerReason::DisplayChanging))
+            .await;
+        probe.lose(false);
+        let settled = watching.until(|status| status.fresh).await;
+
+        // A re-grant ends control and keeps the mode; a revoke restores it.
+        host.set_control_allowed(true);
+        watching.until(|status| !status.controlling).await;
+        assert_eq!((probe.current().width, resets()), (small.width, 0));
+        watching.control().await;
+        host.set_control_allowed(false);
+        watching.shows(own.width, settled.generation).await;
+        assert_eq!(resets(), 1);
+        assert_eq!(
+            watching.viewer.set_display_mode(ModeTarget::Size(small)),
+            Err(DisplayModeError::NotControlling)
+        );
+
+        // The owner picks another size meanwhile: never fought.
+        host.set_control_allowed(true);
+        watching.control().await;
+        tokio::time::sleep(crate::modes::SETTLE).await;
+        let generation = watching.viewer.status().generation;
+        watching
+            .viewer
+            .set_display_mode(ModeTarget::Size(small))
+            .unwrap();
+        watching.shows(small.width, generation).await;
+        probe.0.lock().size = Some(Mode {
+            width: 48,
+            height: 36,
+        });
+        watching.until(shows_owners).await;
+        watching.stop().await;
+        until(|| host.status().viewer.is_none()).await;
+        assert_eq!((probe.current().width, resets()), (48, 1));
+
+        // The session's end puts the display back, and so does the owner.
+        for owner in [false, true] {
+            let watching = Controlling::connect(&client, &host).await;
+            let generation = watching.viewer.status().generation;
+            watching
+                .viewer
+                .set_display_mode(ModeTarget::Size(small))
+                .unwrap();
+            watching.shows(small.width, generation).await;
+            if owner {
+                // The owner's Restore needs no control, but waits out the
+                // settle window like any change.
+                tokio::time::sleep(crate::modes::SETTLE).await;
+                assert!(host.restore_display_mode());
+                watching.until(shows_owners).await;
+            }
+            watching.stop().await;
+            until(|| host.status().viewer.is_none()).await;
+            until(|| probe.current().width == 48).await;
+        }
+        assert_eq!(resets(), 3);
+        assert!(!journal.pending());
+        host.stop().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

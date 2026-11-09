@@ -9,11 +9,12 @@
 //! 4. input, in order, preceded by the presentation it references;
 //! 5. pause or resume;
 //! 6. the latest presentation, at most every `PRESENTED_SEND_MIN_INTERVAL`;
-//! 7. the latest keyframe request, fps cap, quality and path;
+//! 7. the latest keyframe request, fps cap, quality, path and display mode;
 //! 8. a ping after `PING_IDLE` without any other message.
 use super::InputError;
 use crate::{
     Input, InputEvent, KeyframeReason, QualityPreset,
+    modes::Mode,
     protocol::{Route, ViewerMessage},
 };
 use std::{
@@ -47,6 +48,13 @@ pub(crate) enum Barrier {
 pub(crate) enum Lifecycle {
     Pause,
     Resume,
+}
+
+/// A change of the host display's mode, or the way back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModeRequest {
+    Set(Mode),
+    Restore,
 }
 
 // Releases are state, not a queue of gestures. Repeated focus/pointer-cancel
@@ -96,6 +104,7 @@ struct Slots {
     fps_cap: Option<u32>,
     quality: Option<QualityPreset>,
     route: Option<Route>,
+    display_mode: Option<ModeRequest>,
 }
 impl Slots {
     /// Whether `(generation, frame_id)` is newer than the last presentation written.
@@ -189,6 +198,9 @@ impl Outbound {
     }
     pub fn route(&self, route: Route) {
         self.update(|slots| slots.route = Some(route));
+    }
+    pub fn display_mode(&self, request: ModeRequest) {
+        self.update(|slots| slots.display_mode = Some(request));
     }
 
     /// Queue one batch of input, all under the queue lock so sequences follow
@@ -334,6 +346,15 @@ impl Outbound {
         }
         if let Some(route) = slots.route.take() {
             return Next::Send(ViewerMessage::Path { route });
+        }
+        if let Some(request) = slots.display_mode.take() {
+            return Next::Send(match request {
+                ModeRequest::Set(mode) => ViewerMessage::DisplayMode {
+                    width: mode.width,
+                    height: mode.height,
+                },
+                ModeRequest::Restore => ViewerMessage::RestoreDisplayMode {},
+            });
         }
         if now >= ping {
             return Next::Send(ViewerMessage::Ping {});

@@ -986,3 +986,22 @@ fn drag_start_press_waits_out_the_double_click_time() {
     h.run(ms(700), true);
     assert_eq!(h.inputs(), injected);
 }
+
+/// A viewer's display mode command is refused with a notice while it does
+/// not control, before the backend is asked; the owner's restore needs no
+/// control, and with nothing changed it says nothing.
+#[test]
+fn a_display_mode_change_needs_control_but_the_owners_restore_does_not() {
+    let mut h = Harness::new(true, None);
+    h.present();
+    h.send(LaneCommand::DisplayMode(ModeCommand::Set(crate::Mode {
+        width: 10,
+        height: 10,
+    })));
+    h.step();
+    let (code, _, serial) = h.state().notice.unwrap();
+    assert_eq!(code, NoticeCode::DisplayModeFailed);
+    h.send(LaneCommand::DisplayMode(ModeCommand::HostRestore));
+    h.step();
+    assert_eq!(h.state().notice.map(|notice| notice.2), Some(serial));
+}

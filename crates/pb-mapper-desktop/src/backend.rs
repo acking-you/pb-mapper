@@ -302,6 +302,12 @@ impl HostOs {
             Self::Android => "os_android",
         }
     }
+    /// The OS a host's capability value names.
+    pub(crate) fn from_capability(value: &str) -> Option<Self> {
+        [Self::Windows, Self::Macos, Self::Linux, Self::Android]
+            .into_iter()
+            .find(|os| os.capability() == value)
+    }
 }
 
 /// How the host reports the pointer. `Embedded`: drawn into the picture, so
