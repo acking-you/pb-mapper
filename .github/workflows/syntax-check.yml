@@ -144,6 +144,12 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-features
 
+      # The SDK's desktop quickstart: a relay, a host of a synthetic backend
+      # and a viewer in one process, through control, input, a preset change
+      # and pause. It exits non-zero when a step does not do what it should.
+      - name: Run the desktop loopback example
+        run: cargo run -p pb-mapper --features desktop --example desktop_loopback
+
       # The SDK release refuses to publish unless the docs build cleanly, so
       # a broken doc link has to fail here, not on the release tag.
       - name: Build docs
