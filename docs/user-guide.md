@@ -386,10 +386,11 @@ cd ui
 flutter run
 ```
 
-On first launch it asks where your relay is and for this computer's credential. You can also copy a setup string from another computer and choose **Import setup from clipboard** to fill both fields and carry over its relay transport and keep-alive preference. Nothing is saved until you continue. It then offers to share a service or connect to one. After that it has five pages:
+On first launch it asks where your relay is and for this computer's credential. You can also copy a setup string from another computer and choose **Import setup from clipboard** to fill both fields and carry over its relay transport and keep-alive preference. Nothing is saved until you continue. It then offers to share a service or connect to one. After that it has six pages:
 
 - **Overview**: a galaxy of your tunnels. This computer and the relay are two stars; each tunnel and each service on the relay is a planet, green when running. A running tunnel is an arc of light: into the relay's star when its traffic goes through the relay, or, lit end to end, past the relay to the service's own planet when it goes direct. Click a planet to start, stop, edit or connect it; its panel draws the route and says why it is the relay when direct did not work.
 - **Tunnels**: what this computer shares and what it connects to. Each running tunnel says which way its traffic goes: **Direct**, **Relay**, both with their counts, **Going direct…** while a path is being set up, or **Relay only**. **New tunnel** opens one form with a Share/Connect switch: a service key, a local address, and TCP or UDP.
+- **Remote desktop**: share this computer (a Windows PC today) and view or control the computers you remember, each added by pasting or scanning its invitation; see [remote desktop](remote-desktop.md).
 - **Relay**: whether the relay answers, its services and connections, and with the administrator key its credentials and security.
 - **Logs**: the Rust log, filtered by level and keyword.
 - **Settings**: the relay address and credential, a setup string to paste on another computer, theme and language.

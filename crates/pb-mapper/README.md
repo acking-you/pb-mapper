@@ -79,6 +79,21 @@ Each row has a runnable example in
 `cargo run -p pb-mapper --example quickstart` runs a relay in-process, so it
 needs no setup.
 
+| Example | Shows |
+| --- | --- |
+| [`quickstart`](https://github.com/acking-you/pb-mapper/blob/master/crates/pb-mapper/examples/quickstart.rs) | An embedded relay, a published echo service, a direct round trip, and the path it took |
+| [`register_tcp`](https://github.com/acking-you/pb-mapper/blob/master/crates/pb-mapper/examples/register_tcp.rs) / [`connect_tcp`](https://github.com/acking-you/pb-mapper/blob/master/crates/pb-mapper/examples/connect_tcp.rs) | The two ends of a TCP tunnel, with the live direct/relay split |
+| [`udp`](https://github.com/acking-you/pb-mapper/blob/master/crates/pb-mapper/examples/udp.rs) | Both ends of a UDP tunnel, such as a game server |
+| [`path_options`](https://github.com/acking-you/pb-mapper/blob/master/crates/pb-mapper/examples/path_options.rs) | `allow_direct: false`, `PathPolicy::RelayOnly`, idle deadlines |
+| [`port_mapping`](https://github.com/acking-you/pb-mapper/blob/master/crates/pb-mapper/examples/port_mapping.rs) | `PortMapping::{Auto, Always, Off}`: the punch that failed, the router found, the lease and its renewals |
+| [`watch_events`](https://github.com/acking-you/pb-mapper/blob/master/crates/pb-mapper/examples/watch_events.rs) | Status stream, event history, live direct stage, JSON diagnostics |
+| [`status`](https://github.com/acking-you/pb-mapper/blob/master/crates/pb-mapper/examples/status.rs) | Services, control connections and sessions in a namespace |
+| [`admin_credentials`](https://github.com/acking-you/pb-mapper/blob/master/crates/pb-mapper/examples/admin_credentials.rs) | Issue, show, reveal, renew, list, revoke and collect credentials |
+| [`admin_inventory`](https://github.com/acking-you/pb-mapper/blob/master/crates/pb-mapper/examples/admin_inventory.rs) | Every tenant's services and connections, retiring stuck ones, root-key rotation |
+| [`remote_control`](https://github.com/acking-you/pb-mapper/blob/master/crates/pb-mapper/examples/remote_control.rs) | The agent-harness pattern: one credential per session, isolated, revoked at the end |
+
+The remote desktop's examples are [below](#remote-desktop).
+
 ## Paths
 
 When hole punching fails, a tunnel asks this network's router to map its
