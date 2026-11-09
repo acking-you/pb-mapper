@@ -23,7 +23,7 @@ use std::{
     marker::PhantomData,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -254,6 +254,9 @@ pub struct Host {
     admission: Option<Arc<dyn crate::ControlAdmission>>,
     shared: Arc<Shared>,
     cancel: CancellationToken,
+    /// Cancelled once a stop has finished, or the host was dropped: what a
+    /// status watch ends on.
+    done: CancellationToken,
     join: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl Host {
@@ -354,6 +357,7 @@ impl Host {
             admission,
             shared,
             cancel,
+            done: CancellationToken::new(),
             join: AsyncMutex::new(Some(join)),
         })
     }
@@ -441,13 +445,14 @@ impl Host {
     /// started, whether it runs direct or through the relay, and whether it
     /// controls, has paused, and which quality it chose.
     pub fn status(&self) -> HostStatus {
-        self.status_handle().status()
+        self.shared.status()
     }
-    /// What reads this host's status, apart from the host.
+    /// What reads this host's status apart from the host, without keeping
+    /// it, or its registration, alive.
     pub(crate) fn status_handle(&self) -> HostStatusHandle {
         HostStatusHandle {
-            shared: self.shared.clone(),
-            cancel: self.cancel.clone(),
+            shared: Arc::downgrade(&self.shared),
+            done: self.done.clone(),
         }
     }
     /// The host's tunnel figures, sampled now: its viewers' sessions on each
@@ -497,6 +502,7 @@ impl Host {
         join.take();
         self.shared.registration.stop().await.map_err(error)?;
         self.shared.stopped.store(true, Ordering::Release);
+        self.done.cancel();
         Ok(())
     }
 }
@@ -504,22 +510,25 @@ impl Drop for Host {
     fn drop(&mut self) {
         self.shared.policy.set(false);
         self.cancel.cancel();
+        self.done.cancel();
     }
 }
 
-/// A host's status, readable from any task until the host is gone.
+/// A host's status, readable from any task while the host lives.
 #[derive(Clone)]
 pub(crate) struct HostStatusHandle {
-    shared: Arc<Shared>,
-    cancel: CancellationToken,
+    shared: Weak<Shared>,
+    done: CancellationToken,
 }
 impl HostStatusHandle {
-    pub(crate) fn status(&self) -> HostStatus {
-        self.shared.status()
+    /// `None` once the host and what it ran are gone.
+    pub(crate) fn status(&self) -> Option<HostStatus> {
+        Some(self.shared.upgrade()?.status())
     }
-    /// Whether the host stopped, or was dropped.
-    pub(crate) fn stopped(&self) -> bool {
-        self.shared.stopped.load(Ordering::Acquire) || self.cancel.is_cancelled()
+    /// Resolves once a stop has finished, its status `Stopped`, or the host
+    /// was dropped.
+    pub(crate) fn stopped(&self) -> tokio_util::sync::WaitForCancellationFutureOwned {
+        self.done.clone().cancelled_owned()
     }
 }
 

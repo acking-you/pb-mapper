@@ -232,9 +232,13 @@ pub(crate) struct ViewerStateSlot {
     /// The app asked for control and has not revoked it since. The host's
     /// `controlling` counts only while this holds.
     control_requested: bool,
+    /// What the app last asked `request_control` for. A pause or congestion
+    /// ends control, clearing `control_requested`, but not this.
+    control_wanted: bool,
     /// A reason the viewer itself caused, until control is requested again.
     local_reason: Option<ViewerReason>,
-    notice: Option<(NoticeCode, String, Instant)>,
+    /// The last notice, its number in this session, and when it came.
+    notice: Option<(NoticeCode, String, u64, Instant)>,
     stopped: Option<(Option<ViewerReason>, String)>,
     /// When the session last became streaming: video is due only from then,
     /// so a pause or unavailable capture never counts as time without it.
@@ -433,6 +437,7 @@ impl Viewer {
                 link: None,
                 paused: false,
                 control_requested: false,
+                control_wanted: false,
                 local_reason: None,
                 notice: None,
                 stopped: None,
@@ -507,11 +512,6 @@ pub(crate) struct ViewerStatusHandle {
     sink: Arc<VideoSink>,
 }
 impl ViewerStatusHandle {
-    /// Whether the session has ended.
-    pub(crate) fn stopped(&self) -> bool {
-        self.shared.state.lock().viewer_state() == ViewerState::Stopped
-    }
-
     pub(crate) fn status(&self) -> ViewerStatus {
         let now = Instant::now();
         let sink = self.sink.snapshot(now);
@@ -564,6 +564,7 @@ impl ViewerStatusHandle {
             },
             control_allowed: state.control_allowed(),
             controlling: state.controlling(),
+            control_wanted: state.control_wanted,
             fresh,
             paused: state.paused,
             generation,
@@ -580,11 +581,15 @@ impl ViewerStatusHandle {
                 .map(|at| millis(now.saturating_duration_since(at.max(state.entered_streaming)))),
             quality: state.quality,
             capabilities: state.capabilities.clone(),
-            notice: state.notice.as_ref().map(|(code, message, at)| NoticeInfo {
-                code: *code,
-                message: message.clone(),
-                age_ms: millis(now.saturating_duration_since(*at)),
-            }),
+            notice: state
+                .notice
+                .as_ref()
+                .map(|(code, message, seq, at)| NoticeInfo {
+                    code: *code,
+                    message: message.clone(),
+                    seq: *seq,
+                    age_ms: millis(now.saturating_duration_since(*at)),
+                }),
             decoder: sink.decoder,
             stats,
         }
@@ -656,6 +661,7 @@ impl Viewer {
                 };
             }
             state.control_requested = enabled;
+            state.control_wanted = enabled;
             if enabled {
                 state.local_reason = None;
             }
@@ -1119,7 +1125,9 @@ impl Reader<'_> {
                 self.shared.stats.lock().on_host(Instant::now(), host);
             }
             HostMessage::Notice { code, message } => {
-                self.shared.state.lock().notice = Some((code, message, Instant::now()));
+                let mut state = self.shared.state.lock();
+                let seq = state.notice.as_ref().map_or(1, |(_, _, seq, _)| seq + 1);
+                state.notice = Some((code, message, seq, Instant::now()));
             }
             HostMessage::Stopped { reason, message } => {
                 return Err(Ended::Stopped(reason.into(), message));

@@ -16,10 +16,12 @@
 //!    invitation;
 //! 3. the capture hangs: no video for 5 s is a stall, which the supervisor
 //!    ends and retries like a timeout;
-//! 4. the host stops: nothing to retry, so the supervisor gives up.
+//! 4. the user goes view-only, which the supervisor leaves so, and the
+//!    host stops: nothing to retry, so the supervisor gives up.
 //!
-//! The control choice and the preset carry over each reconnect. Against
-//! your own host, drop the script: `next` and `ended` are the whole loop.
+//! The control choice and the preset carry over each reconnect, as the
+//! viewer last had them. Against your own host, drop the script: `next` and
+//! `ended` are the whole loop.
 
 mod desktop_support;
 
@@ -93,6 +95,14 @@ async fn main() -> Outcome {
                 }
                 4 => {
                     picture_with_control(&viewer).await?;
+                    // The user's choice is the viewer's: the supervisor
+                    // never takes back control the user gave up.
+                    println!("{}   the user goes view-only", at());
+                    viewer.request_control(false)?;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if viewer.status().controlling {
+                        return Err("the supervisor took control back".into());
+                    }
                     println!("{}   the host stops", at());
                     if let Some(host) = host.take() {
                         host.stop().await?;

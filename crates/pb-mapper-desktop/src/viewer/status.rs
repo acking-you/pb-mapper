@@ -97,6 +97,10 @@ pub struct ViewerStatus {
     pub message: String,
     pub control_allowed: bool,
     pub controlling: bool,
+    /// What the app last asked [`super::Viewer::request_control`] for. A pause,
+    /// input congestion, the host denying control or the session ending
+    /// leaves it as it was: control is wanted but not held until asked again.
+    pub control_wanted: bool,
     /// A current, recently presented frame: input is possible.
     pub fresh: bool,
     pub paused: bool,
@@ -136,6 +140,9 @@ pub struct PresentedInfo {
 pub struct NoticeInfo {
     pub code: NoticeCode,
     pub message: String,
+    /// The notice's number in this session: a notice repeated word for word
+    /// is a new one.
+    pub seq: u64,
     pub age_ms: u64,
 }
 

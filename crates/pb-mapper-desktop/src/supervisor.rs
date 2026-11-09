@@ -199,7 +199,7 @@ pub struct Supervisor {
     config: ViewerConfig,
     reconnect: Reconnect,
     next: Next,
-    /// Control is wanted.
+    /// Control is wanted: the choice the next viewer is handed.
     control: bool,
 }
 impl Supervisor {
@@ -251,15 +251,34 @@ impl Supervisor {
     }
     /// Resolves with `viewer`'s last status once it stopped or stalled; it
     /// is stopped on a stall. Meanwhile it follows the session: a live
-    /// picture starts a new run of failures, the preset is kept, and while
-    /// control is wanted it is asked for whenever the host allows it and a
-    /// picture is current.
+    /// picture starts a new run of failures, and the preset and the control
+    /// choice follow the viewer's. The remembered choice is handed to the
+    /// viewer once its picture is current; from then on the choice is what
+    /// the app last asked [`Viewer::request_control`] for
+    /// ([`ViewerStatus::control_wanted`]), so revoking control sticks.
+    /// Control that is wanted but was lost on the host's side (a pause, input
+    /// congestion, a refusal) is asked for again, at most once a second;
+    /// the host's input failing or the host allowing none ends the wish, as
+    /// in the app.
     pub async fn ended(&mut self, viewer: &Viewer) -> ViewerStatus {
         let mut ticks = tokio::time::interval(POLL);
+        // The remembered choice is this viewer's; from then on the viewer's
+        // own wish is the choice.
+        let mut handed = false;
         let mut asked: Option<Instant> = None;
         loop {
             ticks.tick().await;
             let status = viewer.status();
+            if handed {
+                self.control = status.control_wanted;
+            } else if status.control_wanted {
+                handed = true;
+            } else if status.fresh {
+                self.control &= status.control_allowed;
+                asked = Some(Instant::now());
+                // A viewer that stopped meanwhile leaves the choice as it was.
+                handed = !self.control || viewer.request_control(true).is_ok();
+            }
             let stalled = self.reconnect.stalled(&status);
             if stalled || status.state == ViewerState::Stopped {
                 if stalled {
@@ -273,15 +292,14 @@ impl Supervisor {
             if status.state == ViewerState::Streaming && status.presented.is_some() {
                 self.reconnect.connected();
             }
+            if !status.control_wanted {
+                continue;
+            }
             if status.reason == Some(ViewerReason::InputFailed)
                 || (status.fresh && !status.control_allowed)
             {
-                // The host's input failed, or it allows none: never won back
-                // by itself.
-                self.control = false;
-            }
-            if self.control
-                && status.fresh
+                let _ = viewer.request_control(false);
+            } else if status.fresh
                 && !status.controlling
                 && asked.is_none_or(|at| at.elapsed() >= CONTROL_RETRY)
             {
@@ -290,8 +308,9 @@ impl Supervisor {
             }
         }
     }
-    /// Whether control is wanted: asked for on every later viewer once its
-    /// picture is current. Call it beside [`Viewer::request_control`].
+    /// The control choice the next viewer starts with, asked for once its
+    /// picture is current. During [`Self::ended`] the choice follows the
+    /// viewer's own wish instead: call [`Viewer::request_control`] there.
     pub fn remember_control(&mut self, enabled: bool) {
         self.control = enabled;
     }
@@ -339,6 +358,7 @@ mod tests {
             message: String::new(),
             control_allowed: false,
             controlling: false,
+            control_wanted: false,
             fresh: false,
             paused: false,
             generation: 1,
@@ -496,5 +516,91 @@ mod tests {
                 assert_eq!(got, expected, "{case}, at {at} s");
             }
         }
+    }
+
+    struct Screen;
+    impl crate::Backend for Screen {
+        fn display(&mut self) -> crate::Result<crate::Display> {
+            Ok(crate::Display {
+                id: 1,
+                name: "supervised".into(),
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            })
+        }
+        fn capture(&mut self) -> crate::Result<Vec<u8>> {
+            Ok(vec![1; 64])
+        }
+        fn input(&mut self, _: &crate::Input) -> crate::Result<()> {
+            Ok(())
+        }
+        fn release(&mut self) {}
+    }
+
+    /// The user's "view only" is theirs: the supervisor hands control to a
+    /// new viewer, then never takes it back by itself, and the next viewer
+    /// would start without it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn control_follows_what_the_viewer_last_asked() {
+        use pb_mapper_client::sdk::PathPolicy;
+        let relay = pb_mapper_testkit::Relay::start("desktop-supervisor").await;
+        let client = Client::from_credential(
+            relay.addr().to_string(),
+            pb_mapper_testkit::admin_credential(),
+            true,
+            None,
+        );
+        let mut options = crate::HostOptions::new("desktop:supervised");
+        options.allow_direct = false;
+        options.allow_control = true;
+        let host = crate::Host::builder(options)
+            .backend(|| Ok(Screen))
+            .start(&client)
+            .await
+            .unwrap();
+        let mut supervisor = Supervisor::new(
+            client.clone(),
+            host.invitation().clone(),
+            ConnectOptions {
+                path: PathPolicy::RelayOnly,
+                ..Default::default()
+            },
+            ViewerConfig::new(vec![VideoCodec::Jpeg]),
+        );
+        supervisor.remember_control(true);
+        let viewer = supervisor.next().await.unwrap().unwrap();
+        let consumer = viewer.video_sink().attach().unwrap();
+        let renderer = std::thread::spawn(move || {
+            loop {
+                match consumer.next(Duration::from_millis(50), 1 << 20) {
+                    crate::Pull::Unit(unit) => {
+                        consumer.presented(unit.generation, unit.frame_id);
+                    }
+                    crate::Pull::Closed => break,
+                    _ => {}
+                }
+            }
+        });
+        let script = async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !viewer.status().controlling {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            viewer.request_control(false).unwrap();
+            // Longer than a poll and the pause between requests together.
+            tokio::time::sleep(POLL + CONTROL_RETRY * 2).await;
+            assert!(!viewer.status().controlling, "control was taken back");
+            host.stop().await.unwrap();
+        };
+        let (ended, ()) = tokio::join!(supervisor.ended(&viewer), script);
+        assert_eq!(ended.reason, Some(ViewerReason::HostStopped));
+        assert!(!supervisor.control);
+        assert!(supervisor.next().await.is_none());
+        renderer.join().unwrap();
     }
 }
