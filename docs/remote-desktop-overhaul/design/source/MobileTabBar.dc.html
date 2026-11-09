@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>手机底栏</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<nav aria-label="底部导航" style="width: 100%; height: 84px; box-sizing: border-box; padding: 6px 8px 26px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); background: rgba(251,251,250,0.96); border-top: 1px solid #E4E4E2; font-family: Inter, 'Noto Sans SC', system-ui, sans-serif">
+  <a href="#" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: #6E6E73; text-decoration: none; font-size: 11px">
+    <span style="width: 52px; height: 28px; display: flex; align-items: center; justify-content: center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><ellipse cx="12" cy="12" rx="10" ry="4.5" transform="rotate(-25 12 12)"></ellipse></svg></span>总览
+  </a>
+  <a href="#" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: #6E6E73; text-decoration: none; font-size: 11px">
+    <span style="width: 52px; height: 28px; display: flex; align-items: center; justify-content: center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h14l-3-3"></path><path d="M20 16H6l3 3"></path></svg></span>隧道
+  </a>
+  <a href="#" aria-current="page" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: #1D1D1F; text-decoration: none; font-size: 11px; font-weight: 600">
+    <span style="width: 52px; height: 28px; border-radius: 14px; background: rgba(0,0,0,0.07); display: flex; align-items: center; justify-content: center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="13" rx="2"></rect><path d="M8 21h8M12 17v4"></path></svg></span>远程
+  </a>
+  <a href="#" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: #6E6E73; text-decoration: none; font-size: 11px">
+    <span style="width: 52px; height: 28px; display: flex; align-items: center; justify-content: center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M5 12a7 7 0 0 1 14 0"></path><path d="M8.5 12a3.5 3.5 0 0 1 7 0"></path><path d="M12 13v8"></path></svg></span>中继
+  </a>
+  <a href="#" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: #6E6E73; text-decoration: none; font-size: 11px">
+    <span style="width: 52px; height: 28px; display: flex; align-items: center; justify-content: center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></span>设置
+  </a>
+</nav>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":84}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

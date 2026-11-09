@@ -11,8 +11,12 @@ import 'support.dart';
 
 /// A tunnel's diagnostics, shaped as `pb_mapper_tunnel_events_call_json`
 /// answers with them.
-Map<String, dynamic> tunnelDiagnostics({Map<String, dynamic>? mapping}) => {
+Map<String, dynamic> tunnelDiagnostics({
+  Map<String, dynamic>? mapping,
+  bool? lanFirst,
+}) => {
   'relay_transport': 'tcp',
+  'lan_first': ?lanFirst,
   'last_setup_latency_ms': 42,
   'consecutive_failures': 0,
   'direct': {'direct_sessions': 2, 'relay_sessions': 0, 'fallbacks': 0},
@@ -46,33 +50,40 @@ TunnelEventsUpdate tunnelEvent(
 });
 
 void main() {
-  test('cancelling a reader closes it in Rust, waking a pending read', () async {
-    final reading = Completer<void>();
-    final pending = Completer<Map<String, dynamic>>();
-    final requests = <String>[];
-    Map<String, dynamic> ok(Map<String, dynamic> data) => {
-      'success': true,
-      'data': data,
-    };
-    final stream = tunnelEventStream((request) async {
-      requests.add(request['op'] as String);
-      switch (request['op']) {
-        case 'subscribe':
-          return ok({'id': 1, 'diagnostics': tunnelDiagnostics()});
-        case 'next':
-          reading.complete();
-          return pending.future;
-        case 'close':
-          pending.complete(ok({'type': 'closed'}));
-          return ok({'type': 'closed'});
-      }
-      throw StateError('unexpected ${request['op']}');
-    }, serviceKey: 'web', share: true);
-    final subscription = stream.listen((_) {});
-    await reading.future;
-    await subscription.cancel().timeout(const Duration(seconds: 1));
-    expect(requests, ['subscribe', 'next', 'close']);
-  });
+  test(
+    'cancelling a reader closes it in Rust, waking a pending read',
+    () async {
+      final reading = Completer<void>();
+      final pending = Completer<Map<String, dynamic>>();
+      final requests = <String>[];
+      Map<String, dynamic> ok(Map<String, dynamic> data) => {
+        'success': true,
+        'data': data,
+      };
+      final stream = tunnelEventStream(
+        (request) async {
+          requests.add(request['op'] as String);
+          switch (request['op']) {
+            case 'subscribe':
+              return ok({'id': 1, 'diagnostics': tunnelDiagnostics()});
+            case 'next':
+              reading.complete();
+              return pending.future;
+            case 'close':
+              pending.complete(ok({'type': 'closed'}));
+              return ok({'type': 'closed'});
+          }
+          throw StateError('unexpected ${request['op']}');
+        },
+        serviceKey: 'web',
+        share: true,
+      );
+      final subscription = stream.listen((_) {});
+      await reading.future;
+      await subscription.cancel().timeout(const Duration(seconds: 1));
+      expect(requests, ['subscribe', 'next', 'close']);
+    },
+  );
 
   testWidgets(
     'diagnostics follow a running tunnel live and are not offered for a stopped one',
@@ -117,8 +128,14 @@ void main() {
         ..add(
           tunnelEvent(
             3,
-            {'kind': 'port_mapping_changed', 'mapping': mappingStatus('active')},
-            diagnostics: tunnelDiagnostics(mapping: mappingStatus('active')),
+            {
+              'kind': 'port_mapping_changed',
+              'mapping': mappingStatus('active'),
+            },
+            diagnostics: tunnelDiagnostics(
+              mapping: mappingStatus('active'),
+              lanFirst: false,
+            ),
           ),
         );
       await tester.tap(find.byKey(const Key('menu-share:web')));
@@ -133,9 +150,33 @@ void main() {
         tester.widget<Text>(find.byKey(const Key('port-mapping-stage'))).data,
         'Mapped',
       );
+      expect(find.text(':52183 → 203.0.113.7:52183'), findsOneWidget);
+      expect(find.byKey(const Key('traffic-relay')), findsNothing);
+      // A tunnel started with LAN-first off says so.
+      expect(find.byKey(const Key('lan-first-off')), findsOneWidget);
+
+      // A sample between events keeps the figures live, and alone does
+      // not lose what the events said.
+      feed.add(
+        TunnelEventsUpdate.fromMap({
+          'type': 'metrics',
+          'metrics': {
+            'sessions': {'direct': 2, 'relay': 1, 'lan': 0},
+            'traffic': {
+              'relay': {'sent': 2048, 'received': 4096},
+              'direct': {'sent': 10, 'received': 20},
+              'lan': {'sent': 0, 'received': 0},
+            },
+            'relay': {'rtt_ms': 12, 'consecutive_failures': 0},
+          },
+        }),
+      );
+      await settle(tester);
+      expect(find.byKey(const Key('traffic-relay')), findsOneWidget);
+      expect(find.byKey(const Key('traffic-direct')), findsOneWidget);
       expect(
-        find.text(':52183 → 203.0.113.7:52183'),
-        findsOneWidget,
+        tester.widget<Text>(find.byKey(const Key('port-mapping-stage'))).data,
+        'Mapped',
       );
       expect(tester.takeException(), isNull);
 

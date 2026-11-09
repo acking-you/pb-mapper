@@ -337,7 +337,7 @@ List<Link> _links(String planetId, Tunnel tunnel, String? service) {
   if (tunnel.kind == TunnelKind.share || service == null) return [relay];
   final direct = Link(planetId: planetId, targetId: service, direct: true);
   return switch (tunnel.pathMode) {
-    PathMode.direct => [direct],
+    PathMode.direct || PathMode.lan => [direct],
     PathMode.mixed => [relay, direct],
     _ => [relay],
   };

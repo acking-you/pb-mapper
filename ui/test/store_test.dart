@@ -21,6 +21,16 @@ Future<AppStore> _started(
   return store;
 }
 
+class _CountingApi extends FakePbMapperApi {
+  int serviceReads = 0;
+
+  @override
+  Future<List<ServiceConfigInfo>> getServiceConfigs() {
+    serviceReads++;
+    return super.getServiceConfigs();
+  }
+}
+
 void main() {
   test(
     'what there is to connect to leaves out what this computer shares',
@@ -99,13 +109,16 @@ void main() {
       connection(const TunnelPath(activeDirect: 1), status: 'failed').pathMode,
       isNull,
     );
-    // A share knows only the sessions that reached it directly.
-    expect(Tunnel.fromService(fakeService(serviceKey: 'web')).pathMode, isNull);
+    // A share shows the sessions reaching it now, on either path.
+    PathMode? share(TunnelPath? path) =>
+        Tunnel.fromService(fakeService(serviceKey: 'web', path: path)).pathMode;
+    expect(share(null), isNull);
+    expect(share(const TunnelPath(relaySessions: 3)), isNull);
+    expect(share(const TunnelPath(activeDirect: 2)), PathMode.direct);
+    expect(share(const TunnelPath(activeRelay: 1)), PathMode.relay);
     expect(
-      Tunnel.fromService(
-        fakeService(serviceKey: 'web', path: const TunnelPath(activeDirect: 2)),
-      ).pathMode,
-      PathMode.direct,
+      share(const TunnelPath(activeDirect: 1, activeRelay: 1)),
+      PathMode.mixed,
     );
   });
 
@@ -128,6 +141,27 @@ void main() {
     });
     expect(direct?.attempt, DirectStage.punching);
     expect((direct?.lastDirect, direct?.setupMs), (true, 230));
+    // `PathInfo` with a LAN link, as `a_lan_link_reaches_the_window_…` pins
+    // it: a LAN while a session is open on one, and once idle after it.
+    PathMode? mode(Map<String, Object?> path) => Tunnel.fromClient(
+      fakeClient(serviceKey: 'db', path: TunnelPath.maybeFrom(path)),
+    ).pathMode;
+    final lan = {
+      'activeDirect': 1,
+      'activeLan': 1,
+      'last': {'path': 'direct', 'setupMs': 140, 'kind': 'lan'},
+      'link': {'kind': 'lan', 'family': 'ipv4', 'rttMs': 4, 'setupMs': 140},
+    };
+    expect(mode(lan), PathMode.lan);
+    expect(TunnelPath.maybeFrom(lan)?.link?.rttMs, 4);
+    expect(mode({'last': lan['last']}), PathMode.lan);
+    expect(
+      mode({
+        'activeDirect': 1,
+        'link': {'kind': 'internet'},
+      }),
+      PathMode.direct,
+    );
   });
 
   test('a name that reads like another namespace keeps its own id', () {
@@ -271,9 +305,9 @@ void main() {
   });
 
   test(
-    'a tunnel that fails after it settled is seen without an event',
+    'a running tunnel is read again without an event, a stopped one is not',
     () async {
-      final api = FakePbMapperApi(services: [fakeService(serviceKey: 'web')]);
+      final api = _CountingApi()..services = [fakeService(serviceKey: 'web')];
       final store = AppStore(
         api: api,
         changes: const Stream.empty(),
@@ -281,12 +315,20 @@ void main() {
       );
       addTearDown(store.dispose);
       await store.start();
-      expect(store.shares.single.health, TunnelHealth.running);
 
-      // What the Rust side reports once a read has made it probe again.
-      api.services = [fakeService(serviceKey: 'web', status: 'failed')];
+      // A session count, which no change event carries.
+      api.services = [
+        fakeService(serviceKey: 'web', path: const TunnelPath(activeDirect: 2)),
+      ];
       await Future<void>.delayed(const Duration(milliseconds: 120));
-      expect(store.shares.single.health, TunnelHealth.failed);
+      expect(store.shares.single.path?.activeDirect, 2);
+
+      api.services = [fakeService(serviceKey: 'web', status: 'stopped')];
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      expect(store.shares.single.health, TunnelHealth.stopped);
+      final reads = api.serviceReads;
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(api.serviceReads, reads);
     },
   );
 

@@ -44,7 +44,14 @@ class SettingsPage extends StatelessWidget {
             children: [
               RelayCard(store: scope.store),
               const SizedBox(height: 16),
+              _DirectCard(store: scope.store),
+              const SizedBox(height: 16),
               _AppearanceCard(prefs: scope.prefs),
+              // A compact window's bar has no Logs: it lives here.
+              if (!ShellLayout.wideOf(context)) ...[
+                const SizedBox(height: 16),
+                const _LogsRow(),
+              ],
               const SizedBox(height: 16),
               _AboutCard(updates: scope.updates, prefs: scope.prefs),
             ],
@@ -320,7 +327,7 @@ class _RelayCardState extends State<RelayCard> {
                     setState(() => _showCredential = !_showCredential),
                 icon: Icon(
                   _showCredential ? AppIcons.hide : AppIcons.show,
-                  size: 17,
+                  size: AppIconSize.button,
                 ),
               ),
             ),
@@ -550,6 +557,183 @@ class _SetupStringDialogState extends State<_SetupStringDialog> {
   }
 }
 
+/// How this computer tries the paths to another: a property of this
+/// computer, not of the relay, so it is saved at once and the relay is asked
+/// nothing. Tunnels and the remote desktop take it as they start; the
+/// running tunnels Rust names as reached by it are offered a restart.
+class _DirectCard extends StatefulWidget {
+  const _DirectCard({required this.store});
+
+  final AppStore store;
+
+  @override
+  State<_DirectCard> createState() => _DirectCardState();
+}
+
+class _DirectCardState extends State<_DirectCard> {
+  /// What is being saved, shown until the save and the restart it offers
+  /// are done: the card takes one change at a time.
+  ({bool lanFirst, LanTransport lanTransport})? _saving;
+
+  AppStore get _store => widget.store;
+
+  Future<void> _set(bool on) => _change((
+    lanFirst: on,
+    lanTransport: _store.config.lanTransport,
+  ), () => _store.setLanFirst(on));
+
+  Future<void> _setTransport(LanTransport transport) => _change((
+    lanFirst: _store.config.lanFirst,
+    lanTransport: transport,
+  ), () => _store.setLanTransport(transport));
+
+  Future<void> _change(
+    ({bool lanFirst, LanTransport lanTransport}) shown,
+    Future<OperationResult> Function() save,
+  ) async {
+    if (_saving != null) return;
+    setState(() => _saving = shown);
+    await _save(save);
+    if (mounted) setState(() => _saving = null);
+  }
+
+  /// Save with [save], then offer to start again the tunnels its answer
+  /// names as reached by either setting.
+  Future<void> _save(Future<OperationResult> Function() save) async {
+    final result = await save();
+    // What the save wrote: the store read it back before answering, and
+    // starts no other write until then. One queued behind a relay change
+    // writes that relay, not the one there when it was asked for.
+    final relay = _store.config.serverAddress;
+    final credential = _store.config.msgHeaderKey;
+    if (!mounted) return;
+    if (!result.success) {
+      showToast(context, result.message, kind: ToastKind.error);
+      return;
+    }
+    // Only the tunnels on the relay and credential just saved: a start
+    // takes those, so one still on an earlier relay or credential would be
+    // moved onto them, away from whoever reaches it there.
+    final reached = CarrierMove.fromMap(
+      result.data['lanFirst'],
+    ).union(CarrierMove.fromMap(result.data['lanTransport']));
+    if (reached.isEmpty) return;
+    await _offerRestart(reached, relay: relay, credential: credential);
+  }
+
+  Future<void> _offerRestart(
+    CarrierMove reached, {
+    required String relay,
+    required String credential,
+  }) async {
+    final l10n = context.l10n;
+    final here = Navigator.of(context).context;
+    final now = await showDialog<bool>(
+      context: here,
+      builder: (c) => AlertDialog(
+        key: const Key('lan-first-restart'),
+        icon: const Icon(AppIcons.refresh),
+        title: Text(l10n.lanFirstRestartTitle),
+        content: SizedBox(
+          width: 420,
+          child: Text(l10n.lanFirstRestartBody(reached.length)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(c).pop(false),
+            child: Text(l10n.later),
+          ),
+          FilledButton(
+            key: const Key('lan-first-restart-now'),
+            onPressed: () => Navigator.of(c).pop(true),
+            child: Text(l10n.lanFirstRestartNow),
+          ),
+        ],
+      ),
+    );
+    if (now != true || !here.mounted) return;
+    final failed = await _store.restart(
+      shares: reached.shares,
+      connections: reached.connections,
+      relay: relay,
+      credential: credential,
+    );
+    if (!here.mounted) return;
+    if (failed.isEmpty) {
+      showToast(
+        here,
+        l10n.lanFirstRestarted(reached.length),
+        kind: ToastKind.success,
+      );
+    } else {
+      showToast(
+        here,
+        l10n.tunnelsRestartFailed(failed.join(', ')),
+        kind: ToastKind.warning,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    return GroupCard(
+      title: l10n.settingsDirect,
+      icon: AppIcons.direct,
+      child: ListenableBuilder(
+        listenable: _store,
+        builder: (context, _) => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SwitchListTile(
+              key: const Key('settings-lan-first'),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+              title: Text(l10n.lanFirst),
+              subtitle: Text(l10n.lanFirstHelp),
+              value: _saving?.lanFirst ?? _store.config.lanFirst,
+              onChanged: _saving == null ? _set : null,
+            ),
+            const SizedBox(height: 10),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: _ChoiceRow(
+                label: l10n.lanTransport,
+                child: GlassSegmented<LanTransport>(
+                  key: const Key('settings-lan-transport'),
+                  expand: false,
+                  selected: _saving?.lanTransport ?? _store.config.lanTransport,
+                  onChanged: _setTransport,
+                  segments: [
+                    for (final transport in LanTransport.values)
+                      GlassSegment(
+                        key: Key('settings-lan-transport-${transport.name}'),
+                        value: transport,
+                        label: transport.label,
+                        enabled: _saving == null,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Text(
+                l10n.lanTransportHelp,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontSize: 12.5,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _AppearanceCard extends StatelessWidget {
   const _AppearanceCard({required this.prefs});
 
@@ -614,6 +798,53 @@ class _AppearanceCard extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The way to Logs on a compact window.
+class _LogsRow extends StatelessWidget {
+  const _LogsRow();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    final muted = theme.colorScheme.onSurfaceVariant;
+    return GroupCard(
+      padding: EdgeInsets.zero,
+      child: InkWell(
+        key: const Key('settings-logs'),
+        onTap: () => AppScope.of(context).go(AppPage.logs),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 14, 14, 14),
+          child: Row(
+            children: [
+              Icon(AppIcons.logs, size: AppIconSize.button, color: muted),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(l10n.navLogs, style: theme.textTheme.titleMedium),
+                    const SizedBox(height: 2),
+                    Text(
+                      l10n.settingsLogsHint,
+                      style: theme.textTheme.bodySmall?.copyWith(color: muted),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(
+                AppIcons.chevronRight,
+                size: AppIconSize.inline,
+                color: muted,
+              ),
+            ],
+          ),
         ),
       ),
     );

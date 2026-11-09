@@ -14,23 +14,27 @@ pub use admin::{
     Admin, AuthStatusInfo, ConnectionInfo, ConnectionPage, IssuedKey, KeyListPage, KeyMetadata,
     ServiceInfo, ServicePage,
 };
-pub use client::{Client, ClientConfig, ConnectRequest, RegisterRequest};
+pub use client::{Client, ClientConfig, ConnectRequest, RegisterRequest, RelayMetricsStream};
 pub use error::{Error, Result};
 pub use handle::{Connection, Registration};
+pub(crate) use types::DirectPolicy;
 pub use types::{
-    ConnectOptions, LegacyProtocol, PathPolicy, PortMapping, RegisterOptions, RemoteId,
-    ServiceConnection, Transport, TunnelStatus,
+    ConnectOptions, LanTransport, LegacyProtocol, PathPolicy, PortMapping, RegisterOptions,
+    RemoteId, ServiceConnection, Transport, TunnelStatus,
 };
 
 /// The SDK version compiled into this process.
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use crate::diagnostics::{
-    DirectAttempt, DirectStage, EventsLagged, PathDiagnostics, PortMappingDiagnostics,
+    AddressFamily, ByteCount, CandidateCounts, DirectAttempt, DirectLink, DirectStage,
+    EventsLagged, FallbackReason, InterfaceTier, LanCounts, LanEvidence, LanTcpMiss, LinkKind,
+    LinkSample, LinkStats, LinkVia, PathDiagnostics, PathTraffic, PortMappingDiagnostics,
     PortMappingProtocol, PortMappingStage, PortMappingStatus, RecoveryFailure, RecoveryPhase,
-    TunnelDiagnostics, TunnelEvent, TunnelEventKind, TunnelEvents,
+    RelayHealth, SessionCounts, SetupTimings, StunOutcome, TunnelDiagnostics, TunnelEvent,
+    TunnelEventKind, TunnelEvents, TunnelMetrics, TunnelMetricsStream,
 };
 pub use pb_mapper_protocol::direct::{
-    ObservedReport, SessionObservation, SessionPath, SessionState,
+    DirectTransport, LinkSummary, ObservedReport, SessionObservation, SessionPath, SessionState,
 };
 
 pub use crate::relay::{

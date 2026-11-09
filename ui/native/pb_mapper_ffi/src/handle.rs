@@ -15,6 +15,7 @@ use crate::state::PbMapperState;
 
 /// Opaque handle for the pb-mapper runtime and shared state.
 pub struct PbMapperHandle {
+    pub(crate) desktop: crate::desktop::DesktopState,
     /// The window's readers of tunnel events.
     pub(crate) tunnel_events: crate::tunnel_events::TunnelEventReaders,
     pub(crate) runtime: Runtime,
@@ -40,8 +41,10 @@ pub extern "C" fn pb_mapper_create() -> *mut PbMapperHandle {
         Err(_) => return ptr::null_mut(),
     };
 
-    let state = PbMapperState::new(None);
+    // Nothing is read until `pb_mapper_set_app_dir` says from where.
+    let state = PbMapperState::unloaded();
     let handle = PbMapperHandle {
+        desktop: Default::default(),
         tunnel_events: Default::default(),
         runtime,
         state: Arc::new(Mutex::new(state)),
@@ -90,10 +93,13 @@ pub unsafe extern "C" fn pb_mapper_start_control_server(
 pub unsafe extern "C" fn pb_mapper_destroy(handle: *mut PbMapperHandle) {
     if !handle.is_null() {
         unsafe { drop(Box::from_raw(handle)) };
+        crate::logging::pb_mapper_shutdown_logging();
     }
 }
 
-/// Set app directory path (mobile only). Empty or null resets to default.
+/// Set the app directory and load the configuration in it; empty or null
+/// means the platform's default directory. A new handle has read nothing, so
+/// every client calls this first.
 ///
 /// # Safety
 /// `handle` must be valid. `path` must be valid C string or null.
@@ -116,6 +122,9 @@ pub unsafe extern "C" fn pb_mapper_set_app_dir(
     };
 
     let handle = unsafe { &*handle };
+    // Configure before loading the saved state so configuration errors and all
+    // subsequent native diagnostics reach the same directory as its files.
+    crate::disk_log::configure(&PbMapperState::get_config_dir(&path_opt));
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;

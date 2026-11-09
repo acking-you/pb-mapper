@@ -1,0 +1,254 @@
+{
+  "date": "2026-11-06",
+  "source_revision": "9be7e0b3e45a92142bb1069f093147a7dde9081e",
+  "environment": "Windows 11, Ryzen 9 9950X, RTX 5070 Ti; local production FFI viewers and installed background helper; dedicated owned Tk input fixture",
+  "helper_sha256": "f13833e9675b4496b8deaf907af112ae03399d9d3b18dfe7d1d74b3794cade76",
+  "native_ui_presentation_measured": false,
+  "phone_performance_measured": false,
+  "desktop_access_comparison": [
+    {
+      "case": "original",
+      "access": "0x181",
+      "sent": 0,
+      "win32_error": 5,
+      "received": []
+    },
+    {
+      "case": "journal_playback",
+      "access": "0x1a1",
+      "sent": 2,
+      "win32_error": 0,
+      "received": [
+        "down",
+        "up"
+      ]
+    }
+  ],
+  "uiaccess_candidate_failed": {
+    "viewer_build": 922,
+    "helper_sha256": "964a717a10bf416ce43093f4af4c34f0799745576a0d74277c34f7b86da3e8fe",
+    "simulated_presentation_ack": true,
+    "native_ui_presentation_measured": false,
+    "move_roundtrip_ms": 110.0,
+    "success": false,
+    "error": "Timed out: owned window button-up; messages=['input_failed: Windows rejected remote input (Win32=5); check the desktop service log']",
+    "frames": 39,
+    "messages": [
+      "input_failed: Windows rejected remote input (Win32=5); check the desktop service log"
+    ],
+    "all_event_counts": {
+      "wheel": 0,
+      "key_down": 0,
+      "up": 0,
+      "right_up": 0,
+      "key_up": 0,
+      "move": 0,
+      "right_down": 0,
+      "down": 0
+    }
+  },
+  "installed_direct_input": {
+    "viewer_build": 925,
+    "helper_sha256": "f13833e9675b4496b8deaf907af112ae03399d9d3b18dfe7d1d74b3794cade76",
+    "simulated_presentation_ack": true,
+    "native_ui_presentation_measured": false,
+    "move_roundtrip_ms": 2.482,
+    "left_click_verified": true,
+    "right_click_verified": true,
+    "wheel_verified": true,
+    "key_verified": true,
+    "text_verified": true,
+    "drag_movement": {
+      "requested_hz": 30,
+      "sent": 15,
+      "send_seconds": 0.467,
+      "observed_distinct_positions": 15,
+      "mean_observed_ms": 3.222,
+      "p95_observed_ms": 5.012,
+      "max_observed_ms": 5.012
+    },
+    "drag_verified": true,
+    "movement": [
+      {
+        "requested_hz": 30,
+        "sent": 45,
+        "send_seconds": 1.467,
+        "observed_distinct_positions": 45,
+        "mean_observed_ms": 3.369,
+        "p95_observed_ms": 5.102,
+        "max_observed_ms": 6.884
+      },
+      {
+        "requested_hz": 60,
+        "sent": 45,
+        "send_seconds": 0.735,
+        "observed_distinct_positions": 45,
+        "mean_observed_ms": 3.117,
+        "p95_observed_ms": 4.758,
+        "max_observed_ms": 6.224
+      }
+    ],
+    "success": true,
+    "event_counts": {
+      "right_down": 1,
+      "wheel": 1,
+      "right_up": 1,
+      "key_down": 17,
+      "down": 2,
+      "up": 2,
+      "key_up": 17,
+      "move": 104
+    },
+    "path": "direct",
+    "frames": 124,
+    "messages": [],
+    "all_event_counts": {
+      "right_down": 1,
+      "wheel": 1,
+      "right_up": 1,
+      "key_down": 17,
+      "down": 2,
+      "up": 2,
+      "key_up": 17,
+      "move": 104
+    }
+  },
+  "legacy_viewer_relay_input": {
+    "viewer_build": 922,
+    "helper_sha256": "f13833e9675b4496b8deaf907af112ae03399d9d3b18dfe7d1d74b3794cade76",
+    "simulated_presentation_ack": true,
+    "native_ui_presentation_measured": false,
+    "left_click_verified": true,
+    "right_click_verified": true,
+    "wheel_verified": true,
+    "key_verified": true,
+    "text_verified": true,
+    "drag_verified": true,
+    "success": true,
+    "event_counts": {
+      "move": 73,
+      "down": 2,
+      "key_up": 17,
+      "key_down": 17,
+      "right_down": 1,
+      "up": 2,
+      "right_up": 1,
+      "wheel": 1
+    },
+    "path": "relay",
+    "frames": 63,
+    "messages": [],
+    "all_event_counts": {
+      "move": 73,
+      "down": 2,
+      "key_up": 17,
+      "key_down": 17,
+      "right_down": 1,
+      "up": 2,
+      "right_up": 1,
+      "wheel": 1
+    }
+  },
+  "repeated_connections": {
+    "source_revision": "9be7e0b3e45a92142bb1069f093147a7dde9081e",
+    "relay_transport": "tcp",
+    "ffi_sha256": "875a14a86a3188ebd702b34b1ab0693f43a90058674c5e69e96426f80bd26191",
+    "tests": [
+      {
+        "policy": "auto",
+        "actual_paths": [
+          "direct"
+        ],
+        "seconds": 3.002,
+        "received_frames": 234,
+        "decoded_frames": 0,
+        "unique_frame_ids": 234,
+        "generations": [
+          4
+        ],
+        "dimensions": [
+          [
+            1920,
+            1080
+          ]
+        ],
+        "input_requested": false,
+        "simulated_presentation_ack": true,
+        "native_ui_presentation_measured": false
+      },
+      {
+        "policy": "relay",
+        "actual_paths": [
+          "relay"
+        ],
+        "seconds": 3.003,
+        "received_frames": 108,
+        "decoded_frames": 0,
+        "unique_frame_ids": 108,
+        "generations": [
+          4
+        ],
+        "dimensions": [
+          [
+            1920,
+            1080
+          ]
+        ],
+        "input_requested": false,
+        "simulated_presentation_ack": true,
+        "native_ui_presentation_measured": false
+      },
+      {
+        "policy": "relay",
+        "actual_paths": [
+          "relay"
+        ],
+        "seconds": 3.028,
+        "received_frames": 92,
+        "decoded_frames": 0,
+        "unique_frame_ids": 92,
+        "generations": [
+          4
+        ],
+        "dimensions": [
+          [
+            1920,
+            1080
+          ]
+        ],
+        "input_requested": false,
+        "simulated_presentation_ack": true,
+        "native_ui_presentation_measured": false
+      },
+      {
+        "policy": "relay",
+        "actual_paths": [
+          "relay"
+        ],
+        "seconds": 3.009,
+        "received_frames": 72,
+        "decoded_frames": 0,
+        "unique_frame_ids": 72,
+        "generations": [
+          4
+        ],
+        "dimensions": [
+          [
+            1920,
+            1080
+          ]
+        ],
+        "input_requested": false,
+        "simulated_presentation_ack": true,
+        "native_ui_presentation_measured": false
+      }
+    ]
+  },
+  "measurement_limits": [
+    "Input latency is measured by observing the actual Windows cursor; video presentation ACKs are simulated.",
+    "High-resolution input timings use Python perf_counter. Earlier monotonic/GetTickCount-based burst timings are excluded.",
+    "Relay transport in these standalone acceptance probes is an isolated TCP override; the saved app configuration stays QUIC.",
+    "A separate standalone FFI probe with the saved QUIC carrier still returns Windows socket error 10054. This is not evidence of a diagnosed product-wide QUIC failure.",
+    "Normal 925 UI launch and background-sharing state were verified; no secure-desktop or physical-phone input claim is made."
+  ]
+}

@@ -1,16 +1,20 @@
 import 'dart:async';
 
 /// Read a running tunnel's events through [call], which runs one operation of
-/// `pb_mapper_tunnel_events_call_json` and answers with its envelope.
+/// `pb_mapper_tunnel_events_call_json` and answers with its envelope. With
+/// [metricsEvery], its metrics are sampled that often too, and whenever a
+/// session opens or closes, each sample an answer of its own.
 ///
-/// The reader asks for the next event only once the last has been taken, and
-/// not while the subscription is paused, so nothing queues on either side of
-/// the boundary. Cancelling closes the reader in Rust, which also wakes a read
-/// that is waiting on a quiet tunnel. The stream ends when the tunnel stops.
+/// The reader asks for the next answer only once the last has been taken,
+/// and not while the subscription is paused, so nothing queues on either side
+/// of the boundary. Cancelling closes the reader in Rust, which also wakes a
+/// read that is waiting on a quiet tunnel. The stream ends when the tunnel
+/// stops.
 Stream<Map<String, dynamic>> tunnelEventStream(
   Future<Map<String, dynamic>> Function(Map<String, dynamic> request) call, {
   required String serviceKey,
   required bool share,
+  Duration? metricsEvery,
 }) {
   late final StreamController<Map<String, dynamic>> controller;
   Future<void>? reading;
@@ -36,6 +40,7 @@ Stream<Map<String, dynamic>> tunnelEventStream(
         'op': 'subscribe',
         'kind': share ? 'share' : 'connect',
         'key': serviceKey,
+        if (metricsEvery != null) 'metrics_ms': metricsEvery.inMilliseconds,
       });
       id = opened['id'];
       if (!cancelled) controller.add(opened);

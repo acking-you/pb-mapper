@@ -10,6 +10,8 @@ pub fn random_session_id() -> SessionId {
 
 pub const DIRECT_VERSION: u16 = 1;
 pub const MAX_CANDIDATES: usize = 8;
+/// The most TCP addresses a provider offers: its LAN addresses only.
+pub const MAX_LAN_TCP: usize = 4;
 pub const MAX_CERT_LEN: usize = 2048;
 pub const SETUP_TTL_MS: u64 = 8_000;
 
@@ -61,6 +63,12 @@ pub fn stun_target(advertised: SocketAddr, relay: IpAddr) -> SocketAddr {
 pub struct PeerInfo {
     pub certificate: Vec<u8>,
     pub candidates: Vec<SocketAddr>,
+    /// TCP within a local network. From a consumer, empty: it asks for it.
+    /// From a provider: its TCP listener's addresses on its LAN interfaces,
+    /// never a public one. Absent whenever neither, and from endpoints and
+    /// relays that predate it, which then carry the session over QUIC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan_tcp: Option<Vec<SocketAddr>>,
 }
 
 impl PeerInfo {
@@ -69,6 +77,10 @@ impl PeerInfo {
             && self.certificate.len() <= MAX_CERT_LEN
             && self.candidates.len() <= MAX_CANDIDATES
             && self.candidates.iter().all(valid_candidate)
+            && self
+                .lan_tcp
+                .as_ref()
+                .is_none_or(|addrs| addrs.len() <= MAX_LAN_TCP && addrs.iter().all(valid_candidate))
     }
 }
 
@@ -178,6 +190,107 @@ pub struct SessionReport {
     pub path: SessionPath,
     pub state: SessionState,
     pub reason: Option<String>,
+    /// What a direct session's path is, as the reporting end saw it. Absent
+    /// from relayed sessions and from endpoints that predate it; a relay
+    /// that predates it drops it, as it re-serializes only what it parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkSummary>,
+}
+
+/// A direct path in a few words, with no address: reports must not carry
+/// candidates.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinkSummary {
+    pub kind: LinkKind,
+    pub family: AddressFamily,
+    /// Absent for QUIC, as from every endpoint that predates TCP.
+    #[serde(default, skip_serializing_if = "DirectTransport::is_quic")]
+    pub transport: DirectTransport,
+}
+
+/// What a direct path runs over: QUIC, or TCP within a local network.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectTransport {
+    #[default]
+    Quic,
+    Tcp,
+    /// A carrier added by a later version.
+    #[serde(other)]
+    Unknown,
+}
+
+impl DirectTransport {
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Quic => "quic",
+            Self::Tcp => "tcp",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn is_quic(&self) -> bool {
+        *self == Self::Quic
+    }
+}
+
+/// Where a direct path runs.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkKind {
+    /// Within one local network: the peer is on the subnet, or the IPv6 /64,
+    /// of a physical interface of this end.
+    Lan,
+    /// Across the internet, between public addresses.
+    Internet,
+    /// Between private addresses that are not on one local network: a VPN,
+    /// a routed private network, a carrier's NAT, or this machine.
+    Private,
+    /// A kind added by a later version.
+    #[serde(other)]
+    Unknown,
+}
+
+impl LinkKind {
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lan => "lan",
+            Self::Internet => "internet",
+            Self::Private => "private",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AddressFamily {
+    Ipv4,
+    Ipv6,
+    /// A family added by a later version.
+    #[serde(other)]
+    Unknown,
+}
+
+impl AddressFamily {
+    pub fn of(addr: IpAddr) -> Self {
+        if addr.to_canonical().is_ipv4() {
+            Self::Ipv4
+        } else {
+            Self::Ipv6
+        }
+    }
+
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ipv4 => "ipv4",
+            Self::Ipv6 => "ipv6",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Metadata claimed by an authenticated endpoint. It never authorizes setup.
@@ -295,6 +408,81 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(&response).unwrap(),
             br#"{"Service":{"key":"legacy","connections":[]}}"#
+        );
+
+        // LAN TCP: a peer that neither asks nor serves writes what it always
+        // has, and what it always wrote reads as neither.
+        let quic = br#"{"certificate":[1],"candidates":["192.168.1.5:41234"]}"#;
+        let mut peer = super::PeerInfo {
+            certificate: vec![1],
+            candidates: vec!["192.168.1.5:41234".parse().unwrap()],
+            lan_tcp: None,
+        };
+        assert_eq!(serde_json::to_vec(&peer).unwrap(), quic);
+        assert_eq!(
+            serde_json::from_slice::<super::PeerInfo>(quic).unwrap(),
+            peer
+        );
+        peer.lan_tcp = Some(vec![]);
+        assert!(
+            serde_json::to_string(&peer)
+                .unwrap()
+                .ends_with(r#","lan_tcp":[]}"#)
+        );
+        peer.lan_tcp = Some(vec!["192.168.1.5:41234".parse().unwrap(); 5]);
+        assert!(!peer.valid(), "at most four TCP addresses");
+    }
+
+    /// A report without a link reads exactly as before, so an old relay and
+    /// old peers see nothing new; one with a kind this build does not know
+    /// still decodes, so a later endpoint cannot break the session list.
+    #[test]
+    fn a_session_report_link_is_optional_and_tolerates_later_kinds() {
+        use super::{
+            AddressFamily, DirectTransport, LinkKind, LinkSummary, SessionPath, SessionReport,
+        };
+        let mut report = SessionReport {
+            id: [7; 16],
+            seq: 3,
+            path: SessionPath::Direct,
+            state: super::SessionState::Active,
+            reason: None,
+            link: None,
+        };
+        let id = serde_json::to_string(&[7u8; 16]).unwrap();
+        assert_eq!(
+            serde_json::to_string(&report).unwrap(),
+            format!(r#"{{"id":{id},"seq":3,"path":"direct","state":"active","reason":null}}"#)
+        );
+        report.link = Some(LinkSummary {
+            kind: LinkKind::Lan,
+            family: AddressFamily::Ipv4,
+            transport: DirectTransport::Quic,
+        });
+        // A QUIC path reads as it did before there was a choice.
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.ends_with(r#","link":{"kind":"lan","family":"ipv4"}}"#));
+        let later = json.replace(
+            r#""lan","family":"ipv4""#,
+            r#""mesh","family":"ipv9","transport":"sctp""#,
+        );
+        let parsed: SessionReport = serde_json::from_str(&later).unwrap();
+        assert_eq!(
+            parsed.link,
+            Some(LinkSummary {
+                kind: LinkKind::Unknown,
+                family: AddressFamily::Unknown,
+                transport: DirectTransport::Unknown,
+            })
+        );
+        report.link = Some(LinkSummary {
+            transport: DirectTransport::Tcp,
+            ..parsed.link.unwrap()
+        });
+        assert!(
+            serde_json::to_string(&report)
+                .unwrap()
+                .ends_with(r#""transport":"tcp"}}"#)
         );
     }
 

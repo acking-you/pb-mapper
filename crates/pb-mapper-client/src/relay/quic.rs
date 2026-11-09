@@ -355,12 +355,12 @@ impl Pool {
             .map(|entry| describe(&entry.shared, entry.pooled))
             .collect();
         RelayDiagnostics {
-            transport: RelayTransport::Quic,
             connections_created: state.created,
             streams_opened: state.opened,
             streams_reused: state.reused,
             last_error: state.error.clone(),
             connections,
+            ..RelayDiagnostics::empty(RelayTransport::Quic)
         }
     }
 }
@@ -368,11 +368,13 @@ impl Pool {
 fn describe(shared: &QuicConnection, pooled: bool) -> QuicConnectionDiagnostics {
     let connection = &shared.connection;
     let stats = connection.stats();
+    let micros = |time: std::time::Duration| time.as_micros().min(u64::MAX.into()) as u64;
     QuicConnectionDiagnostics {
         connection_id: connection.stable_id() as u64,
         peer_addr: connection.remote_address(),
         pooled,
-        rtt_us: connection.rtt().as_micros().min(u64::MAX.into()) as u64,
+        rtt_us: micros(connection.rtt()),
+        min_rtt_us: micros(stats.path.min_rtt),
         congestion_window: stats.path.cwnd,
         mtu: stats.path.current_mtu,
         sent_packets: stats.path.sent_packets,
@@ -380,6 +382,8 @@ fn describe(shared: &QuicConnection, pooled: bool) -> QuicConnectionDiagnostics 
         congestion_events: stats.path.congestion_events,
         sent_bytes: stats.udp_tx.bytes,
         received_bytes: stats.udp_rx.bytes,
+        lost_bytes: stats.path.lost_bytes,
+        bandwidth_bps: stats.path.bandwidth_estimate,
     }
 }
 

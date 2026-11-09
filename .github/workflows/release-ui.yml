@@ -113,16 +113,16 @@ jobs:
           }
           Rename-Item $setup[0].FullName "pb-mapper-windows-x86_64-setup.exe"
           Rename-Item $zip[0].FullName "pb-mapper-windows-x86_64.zip"
-      - name: Verify Windows bundle uses latest FFI
+      - name: Verify Windows bundle uses latest native components
         run: |
-          $src = "ui/native/windows/x64/pb_mapper_ffi.dll"
-          $dst = "ui/build/windows/x64/runner/Release/pb_mapper_ffi.dll"
-          if (!(Test-Path $src)) { throw "FFI source dll not found: $src" }
-          if (!(Test-Path $dst)) { throw "FFI dll not found in built UI bundle: $dst" }
-          $srcHash = (Get-FileHash -Algorithm SHA256 $src).Hash
-          $dstHash = (Get-FileHash -Algorithm SHA256 $dst).Hash
-          if ($srcHash -ne $dstHash) {
-            throw "FFI hash mismatch. source=$srcHash bundle=$dstHash"
+          foreach ($name in @("pb_mapper_ffi.dll", "pb-mapper-desktop-helper.exe")) {
+            $src = "ui/native/windows/x64/$name"
+            $dst = "ui/build/windows/x64/runner/Release/$name"
+            if (!(Test-Path $src)) { throw "Native component source missing: $src" }
+            if (!(Test-Path $dst)) { throw "Native component missing in UI bundle: $dst" }
+            if ((Get-FileHash -Algorithm SHA256 $src).Hash -ne (Get-FileHash -Algorithm SHA256 $dst).Hash) {
+              throw "Native component hash mismatch: $name"
+            }
           }
       - name: Upload Windows artifacts
         uses: softprops/action-gh-release@v2

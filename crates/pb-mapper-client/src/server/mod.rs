@@ -156,6 +156,8 @@ struct ControlRegistration {
 struct ControlLeaseState {
     last_rx_at: Instant,
     last_pong_at: Option<Instant>,
+    /// The latest heartbeat written, by sequence number, and when.
+    ping: Option<(u64, Instant)>,
 }
 
 impl ControlLeaseState {
@@ -163,6 +165,7 @@ impl ControlLeaseState {
         Self {
             last_rx_at: Instant::now(),
             last_pong_at: None,
+            ping: None,
         }
     }
 
@@ -174,6 +177,18 @@ impl ControlLeaseState {
         let now = Instant::now();
         self.last_rx_at = now;
         self.last_pong_at = Some(now);
+    }
+
+    fn ping_sent(&mut self, seq: u64) {
+        self.ping = Some((seq, Instant::now()));
+    }
+
+    /// The pong to heartbeat `seq`: its round trip, when it answers the
+    /// latest heartbeat written.
+    fn record_pong_to(&mut self, seq: u64) -> Option<Duration> {
+        self.record_pong();
+        let (_, at) = self.ping.take_if(|(sent, _)| *sent == seq)?;
+        Some(at.elapsed())
     }
 
     fn last_rx_age(&self) -> Duration {
@@ -562,7 +577,7 @@ async fn run_server_side_cli_pool<LocalStream>(
         Diagnostics::default(),
         None,
         false,
-        crate::sdk::PortMapping::Off,
+        crate::sdk::DirectPolicy::RELAY,
     )
     .await;
 }
@@ -579,7 +594,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
     diagnostics: Diagnostics,
     idle_timeout: Option<Duration>,
     allow_direct: bool,
-    port_mapping: crate::sdk::PortMapping,
+    policy: crate::sdk::DirectPolicy,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
@@ -605,11 +620,11 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
             shutdown.clone(),
             idle_timeout,
             diagnostics.clone(),
-            port_mapping,
+            policy,
         )
     });
     #[cfg(not(feature = "p2p"))]
-    let _ = (allow_direct, port_mapping);
+    let _ = (allow_direct, policy);
     let mut workers = JoinSet::new();
     // Every worker reports here, and the pool's aggregate is what the caller is
     // told: one healthy control connection is a reachable service, whichever
@@ -1087,6 +1102,7 @@ where
     let lease_state = Arc::new(tokio::sync::Mutex::new(ControlLeaseState::new()));
     let writer_key = key.clone();
     let writer_registration = registration;
+    let writer_lease = lease_state.clone();
     let mut writer_handle = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         let mut msg_writer = match session.continuation_writer(&mut writer) {
             Ok(writer) => writer,
@@ -1111,6 +1127,9 @@ where
                         .map_err(|_| Status::SendPing)?;
                 }
                 LocalControlWrite::Ping { seq } => {
+                    // Timed from the write, not the tick: the round trip
+                    // leaves out this queue.
+                    writer_lease.lock().await.ping_sent(seq);
                     snafu_error_get_or_return!(
                         handle_ping_interval(
                             &mut msg_writer,
@@ -1190,6 +1209,7 @@ where
                             idle_timeout,
                         },
                         remote_addr.clone(),
+                        &diagnostics,
                         key.clone(),
                         registration.conn_id,
                         &write_tx,
@@ -1376,6 +1396,7 @@ async fn handle_request<LocalStream: StreamProvider>(
     msg: &[u8],
     target: StreamConnect,
     relay_endpoint: RelayEndpoint,
+    diagnostics: &Diagnostics,
     key: Arc<str>,
     conn_id: u32,
     write_tx: &tokio::sync::mpsc::Sender<LocalControlWrite>,
@@ -1436,6 +1457,7 @@ where
                 })?;
             let key = key.clone();
             let stream_shutdown = shutdown.clone();
+            let diagnostics = diagnostics.clone();
             // Tracked rather than detached: a cancelled registration must take its
             // in-flight forwarded sessions with it, so `stop()` returning means no
             // stream of this tunnel is still moving bytes.
@@ -1447,6 +1469,7 @@ where
                     target,
                     permit,
                     relay_endpoint,
+                    diagnostics,
                 );
                 tokio::select! {
                     () = stream_shutdown.cancelled() => {}
@@ -1465,7 +1488,10 @@ where
             );
         }
         LocalServer::PongV2 { seq } => {
-            lease_state.lock().await.record_pong();
+            let rtt = lease_state.lock().await.record_pong_to(seq);
+            if let Some(rtt) = rtt {
+                diagnostics.relay_rtt(&relay_endpoint, rtt);
+            }
             tracing::debug!(
                 event = "local_server_pong_received",
                 key = %key,

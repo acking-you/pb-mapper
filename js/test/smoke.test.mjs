@@ -42,3 +42,12 @@ test("idle deadline rejects invalid JS numbers and UDP before spawning a worker"
   await expect(client.registerWithIdleTimeout({ ...request, transport: "udp" }, 0))
     .rejects.toThrow(/requires TCP/);
 });
+
+test("connect rejects a LAN transport other than quic or tcp before spawning a worker", async () => {
+  const client = new Client({
+    server: "127.0.0.1:7666",
+    credential: "0123456789abcdefghijklmnopqrstuv",
+  });
+  const request = { key: "probe", localAddr: "127.0.0.1:1", transport: "tcp" };
+  await expect(client.connect({ ...request, lanTransport: "sctp" })).rejects.toThrow(/lanTransport/);
+});

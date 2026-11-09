@@ -233,7 +233,7 @@ pub(crate) async fn run_client_side_cli_recovering<LocalListener: ListenerProvid
         diagnostics,
         crate::sdk::PathPolicy::RelayOnly,
         false,
-        crate::sdk::PortMapping::Off,
+        crate::sdk::DirectPolicy::RELAY,
     )
     .await;
 }
@@ -251,7 +251,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     diagnostics: Diagnostics,
     path: crate::sdk::PathPolicy,
     is_datagram: bool,
-    port_mapping: crate::sdk::PortMapping,
+    policy: crate::sdk::DirectPolicy,
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
@@ -283,11 +283,11 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
             is_datagram,
             keep_alive,
             diagnostics.clone(),
-            port_mapping,
+            policy,
         )
     });
     #[cfg(not(feature = "p2p"))]
-    let _ = (path, is_datagram, port_mapping);
+    let _ = (path, is_datagram, policy);
     let mut retry_backoff = RetryBackoff::new(Duration::from_millis(100), Duration::from_secs(2));
     let mut stream_tasks = JoinSet::new();
     let setup_slots = Arc::new(Semaphore::new(64));
@@ -371,17 +371,20 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                     probes.spawn(async move {
                         let _permit = probe_remote.control_permit().await;
                         let started = Instant::now();
-                        let mut carrier = None;
-                        let result = probe_remote_key(&probe_remote, &probe_key, namespace, credential, budget, &mut carrier).await;
-                        (started, started.elapsed(), result, carrier)
+                        let mut trace = ProbeTrace::default();
+                        let result = probe_remote_key(&probe_remote, &probe_key, namespace, credential, budget, &mut trace).await;
+                        (started, started.elapsed(), result, trace)
                     });
                 }
                 Some(result) = probes.join_next() => {
-                    let (started, elapsed, result, carrier) = match result {
+                    let (started, elapsed, result, ProbeTrace { carrier, rtt }) = match result {
                         Ok(result) => result,
                         Err(error) if error.is_cancelled() => continue,
-                        Err(error) => (Instant::now(), Duration::ZERO, Err(ProbeFailure::transient(error.to_string())), None),
+                        Err(error) => (Instant::now(), Duration::ZERO, Err(ProbeFailure::transient(error.to_string())), ProbeTrace::default()),
                     };
+                    if let Some(rtt) = rtt {
+                        diagnostics.relay_rtt(&remote_addr, rtt);
+                    }
                     match result {
                         Ok(()) => {
                             timing.lock().await.record(elapsed);
@@ -528,13 +531,22 @@ impl std::fmt::Display for ProbeFailure {
     }
 }
 
+/// What a probe learned besides its verdict: the carrier it went over, to
+/// blame if the relay did not answer, and the round trip of its latest
+/// exchange that the relay did answer.
+#[derive(Default)]
+struct ProbeTrace {
+    carrier: Option<CarrierId>,
+    rtt: Option<Duration>,
+}
+
 async fn probe_remote_key(
     remote_addr: &RelayEndpoint,
     key: &str,
     namespace: Option<u64>,
     credential: Credential,
     timeout: Duration,
-    carrier: &mut Option<CarrierId>,
+    trace: &mut ProbeTrace,
 ) -> std::result::Result<(), ProbeFailure> {
     match tokio::time::timeout(timeout, async {
         // Resolved once, here, so a name that does not resolve is reported
@@ -548,7 +560,7 @@ async fn probe_remote_key(
                 kind: RecoveryFailure::Dns,
                 protocol_replied: false,
             })?;
-        probe_remote_key_once(remote_addr, &addresses, key, namespace, credential, carrier).await
+        probe_remote_key_once(remote_addr, &addresses, key, namespace, credential, trace).await
     })
     .await
     {
@@ -568,7 +580,7 @@ async fn probe_remote_key_once(
     key: &str,
     namespace: Option<u64>,
     credential: Credential,
-    carrier: &mut Option<CarrierId>,
+    trace: &mut ProbeTrace,
 ) -> std::result::Result<(), ProbeFailure> {
     match fetch_remote_status(
         remote_addr,
@@ -579,7 +591,7 @@ async fn probe_remote_key_once(
         },
         namespace,
         credential,
-        carrier,
+        trace,
     )
     .await
     {
@@ -619,7 +631,7 @@ async fn probe_remote_key_once(
         PbConnStatusReq::Keys,
         namespace,
         credential,
-        carrier,
+        trace,
     )
     .await?;
     let PbConnStatusResp::Keys(keys) = status_resp else {
@@ -645,10 +657,10 @@ async fn fetch_remote_status(
     req: PbConnStatusReq,
     namespace: Option<u64>,
     credential: Credential,
-    carrier: &mut Option<CarrierId>,
+    trace: &mut ProbeTrace,
 ) -> std::result::Result<PbConnStatusResp, ProbeFailure> {
     let mut stream = remote_addr
-        .connect_addresses(addresses, credential, carrier)
+        .connect_addresses(addresses, credential, &mut trace.carrier)
         .await
         .map_err(|error| match error {
             crate::relay::ConnectError::Rejected { response } => ProbeFailure {
@@ -659,9 +671,18 @@ async fn fetch_remote_status(
             },
             error => ProbeFailure::transient(format!("connect remote stream failed: {error}")),
         })?;
-    get_status_with_credential(&mut stream, req, namespace, &credential)
-        .await
-        .map_err(|error| ProbeFailure::from_status_error("get status failed", error))
+    // The exchange alone, on a connected stream: one round trip and the
+    // relay's handling of it.
+    let asked = Instant::now();
+    let status = get_status_with_credential(&mut stream, req, namespace, &credential).await;
+    let answered = match &status {
+        Ok(_) => true,
+        Err(error) => error.remote_retryable().is_some(),
+    };
+    if answered {
+        trace.rtt = Some(asked.elapsed());
+    }
+    status.map_err(|error| ProbeFailure::from_status_error("get status failed", error))
 }
 
 pub async fn handle_status_cli_scoped<A: ToSocketAddrs>(

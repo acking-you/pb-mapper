@@ -67,8 +67,8 @@ class TrayManagerPlugin : public flutter::Plugin {
   std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> g_converter;
 
   flutter::PluginRegistrarWindows* registrar;
-  NOTIFYICONDATA nid;
-  NOTIFYICONIDENTIFIER niif;
+  NOTIFYICONDATA nid{};
+  NOTIFYICONIDENTIFIER niif{};
   // do create pop-up menu only once.
   HMENU hMenu = CreatePopupMenu();
   bool tray_icon_setted = false;
@@ -436,6 +436,9 @@ void TrayManagerPlugin::PopUpContextMenu(
   }
   TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, static_cast<int>(x),
                  static_cast<int>(y), 0, hWnd, NULL);
+  // Win32's notification-icon menu contract requires this benign message;
+  // without it the next popup can appear and immediately disappear.
+  PostMessage(hWnd, WM_NULL, 0, 0);
   result->Success(flutter::EncodableValue(true));
 }
 

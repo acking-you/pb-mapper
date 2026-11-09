@@ -33,6 +33,11 @@ export declare class Admin {
 export declare class Client {
   constructor(config: JsClientConfig)
   relayDiagnostics(): Promise<JsRelayDiagnostics>
+  /**
+   * `relayDiagnostics()` at once, then every `everyMs` (one second when
+   * absent; 100 ms to an hour), read one at a time.
+   */
+  subscribeRelayMetrics(everyMs?: number | undefined | null): RelayMetricsReader
   /** The relay carrier this client uses: `tcp` or `quic`. */
   relayTransport(): string
   /**
@@ -79,6 +84,18 @@ export declare class Connection {
    */
   subscribeEvents(): TunnelEvents
   /**
+   * Its sessions, bytes per path, relay health and direct link,
+   * sampled now: the part of `diagnostics()` that keeps changing.
+   */
+  metrics(): JsTunnelMetrics
+  /**
+   * `metrics()` at once, then every `everyMs` (one second when
+   * absent; 100 ms to an hour) and whenever the tunnel changes,
+   * until it stops. One second suits a panel on screen; lists
+   * and logs need five or more.
+   */
+  subscribeMetrics(everyMs?: number | undefined | null): TunnelMetricsReader
+  /**
    * Resolves with the next status this tunnel reports, rendered as
    * `status()` renders it: an event listener for status changes.
    *
@@ -124,6 +141,18 @@ export declare class Registration {
    */
   subscribeEvents(): TunnelEvents
   /**
+   * Its sessions, bytes per path, relay health and direct link,
+   * sampled now: the part of `diagnostics()` that keeps changing.
+   */
+  metrics(): JsTunnelMetrics
+  /**
+   * `metrics()` at once, then every `everyMs` (one second when
+   * absent; 100 ms to an hour) and whenever the tunnel changes,
+   * until it stops. One second suits a panel on screen; lists
+   * and logs need five or more.
+   */
+  subscribeMetrics(everyMs?: number | undefined | null): TunnelMetricsReader
+  /**
    * Resolves with the next status this tunnel reports, rendered as
    * `status()` renders it: an event listener for status changes.
    *
@@ -149,6 +178,21 @@ export declare class Registration {
 }
 
 /**
+ * A relay carrier's diagnostics, sampled as they are read: one at once,
+ * then one a period, for as long as the client is kept.
+ */
+export declare class RelayMetricsReader {
+  /**
+   * The next sample, or `null` once the client is gone or `close()` was
+   * called. Rejects when `timeoutMs` passes first. Calls are served one
+   * at a time.
+   */
+  next(timeoutMs?: number | undefined | null): Promise<JsRelayDiagnostics | null>
+  /** Stop reading: a pending `next()` resolves with `null`, as do later ones. */
+  close(): void
+}
+
+/**
  * A tunnel's events, read one at a time: the outcomes it kept, then every
  * event as it happens. Nothing queues on the JS side while no one reads.
  */
@@ -160,6 +204,23 @@ export declare class TunnelEvents {
    * first, which loses no event. Calls are served one at a time.
    */
   next(timeoutMs?: number | undefined | null): Promise<JsTunnelEvent | null>
+  /** Stop reading: a pending `next()` resolves with `null`, as do later ones. */
+  close(): void
+}
+
+/**
+ * A tunnel's metrics, sampled as they are read: one at once, then one a
+ * period and one whenever a session opens or closes or the tunnel changes,
+ * never two within 100 ms. Each is taken when `next()` resolves, so nothing
+ * queues and a slow reader gets fewer, fresher samples.
+ */
+export declare class TunnelMetricsReader {
+  /**
+   * The next sample, or `null` once the tunnel has stopped (after one
+   * last sample) or `close()` was called. Rejects when `timeoutMs` passes
+   * first, which loses nothing. Calls are served one at a time.
+   */
+  next(timeoutMs?: number | undefined | null): Promise<JsTunnelMetrics | null>
   /** Stop reading: a pending `next()` resolves with `null`, as do later ones. */
   close(): void
 }
@@ -181,6 +242,28 @@ export interface JsAuthStatus {
   authSuccesses: number
   authFailures: number
   serverInstanceId: string
+}
+
+/**
+ * Application bytes, after decryption and without framing: `sent` from
+ * this end's local side, `received` back.
+ */
+export interface JsByteCount {
+  sent: number
+  received: number
+}
+
+/** The addresses a direct setup worked with. */
+export interface JsCandidateCounts {
+  local: number
+  localLan: number
+  /** Left out past the wire's limit of 8. */
+  truncated: number
+  peer: number
+  peerLan: number
+  probed: number
+  answered: number
+  handshakes: number
 }
 
 export interface JsClientConfig {
@@ -217,6 +300,20 @@ export interface JsConnectRequest {
    * Ignored on the relay-only path.
    */
   portMapping?: string
+  /**
+   * Try a local network shared with the publisher first (default `true`):
+   * probe its addresses there first, and once that network is known to be
+   * there, hold other paths back up to 150 ms for it. `false` dials every
+   * path as soon as it answers. Ignored on the relay-only path.
+   */
+  lanFirst?: boolean
+  /**
+   * What a path within a local network shared with the publisher runs
+   * over: "quic" (default), or "tcp", tried 300 ms ahead of QUIC and
+   * falling back to it. A path across the internet is always QUIC.
+   * Ignored on the relay-only path.
+   */
+  lanTransport?: string
   key: string
   localAddr: string
   transport: string
@@ -232,6 +329,56 @@ export interface JsDirectAttempt {
   elapsedMs: number
   /** Attempts in flight, this one included. */
   inFlight: number
+}
+
+/** A direct session's path, as `diagnostics().direct.link` reports it. */
+export interface JsDirectLink {
+  /** `lan`, `internet` or `private`. */
+  kind: string
+  /** `ipv4` or `ipv6`. */
+  family: string
+  /**
+   * How the peer address was learned: `host`, `public`, `mapped` or
+   * `peer_reflexive`.
+   */
+  via: string
+  /**
+   * `quic`, or `tcp` within a local network. Over TCP the round trips are
+   * the handshake's, and the rest is zero.
+   */
+  transport: string
+  peer: string
+  localIp?: string
+  /**
+   * The local interface the path leaves by, and its tier: `lan`,
+   * `physical`, `cellular`, `virtual` or `loopback`.
+   */
+  interface?: string
+  tier?: string
+  /**
+   * `ipv6_prefix`, `public_ip_subnet` or `subnet`: what suggested a shared
+   * network before the setup.
+   */
+  sameLan?: string
+  timings: JsSetupTimings
+  candidates: JsCandidateCounts
+  /** QUIC's view of the path as of this read. */
+  rttUs: number
+  minRttUs: number
+  congestionWindow: number
+  mtu: number
+  sentPackets: number
+  lostPackets: number
+  congestionEvents: number
+  /**
+   * UDP bytes on the wire each way, and lost: QUIC's headers and probes
+   * included, so more than the application's.
+   */
+  sentBytes: number
+  receivedBytes: number
+  lostBytes: number
+  /** The congestion controller's estimate of the path, in bits per second. */
+  bandwidthBps?: number
 }
 
 export interface JsIssuedKey {
@@ -251,16 +398,89 @@ export interface JsKeyMetadata {
   label?: string
 }
 
+/**
+ * Setups that found the peer on a local network, and those that ended
+ * elsewhere.
+ */
+export interface JsLanCounts {
+  detected: number
+  missed: number
+}
+
+/** The newest direct session open now, with QUIC's view of it. */
+export interface JsLinkSample {
+  /** `lan`, `internet` or `private`. */
+  kind: string
+  /** `ipv4` or `ipv6`. */
+  family: string
+  /** `host`, `public`, `mapped` or `peer_reflexive`. */
+  via: string
+  /**
+   * `quic`, or `tcp` within a local network. Over TCP the round trips are
+   * the handshake's, and the rest is zero.
+   */
+  transport: string
+  peer: string
+  localIp?: string
+  /** `ipv6_prefix`, `public_ip_subnet` or `subnet`. */
+  sameLan?: string
+  setupMs: number
+  rttUs: number
+  minRttUs: number
+  congestionWindow: number
+  mtu: number
+  sentPackets: number
+  lostPackets: number
+  congestionEvents: number
+  /** UDP bytes on the wire, QUIC's overhead included. */
+  sentBytes: number
+  receivedBytes: number
+  lostBytes: number
+  bandwidthBps?: number
+}
+
 /** Recovery counters from the running SDK, with no credential or payload data. */
 export interface JsPathDiagnostics {
   directSessions: number
   relaySessions: number
   activeDirect: number
   activeRelay: number
+  /** Direct sessions within one local network, open now and in all. */
+  activeLan: number
+  lanSessions: number
+  /**
+   * Direct sessions over TCP, which only a local network carries, open
+   * now and in all.
+   */
+  activeLanTcp: number
+  lanTcpSessions: number
+  /**
+   * Setups that found the peer on a local network, and those of them that
+   * ended on another path or on the relay.
+   */
+  lanDetected: number
+  lanMissed: number
   fallbacks: number
   lastFallback?: string
+  /**
+   * `lan`, `internet` or `private`: where the latest direct session this
+   * end set up runs.
+   */
+  lastKind?: string
   /** The direct attempt in flight, if any. */
   attempt?: JsDirectAttempt
+  /** The newest direct session open now. */
+  link?: JsDirectLink
+}
+
+/**
+ * A tunnel's application bytes by path, over its life; `direct` includes
+ * `lan`.
+ */
+export interface JsPathTraffic {
+  relay: JsByteCount
+  direct: JsByteCount
+  lan: JsByteCount
 }
 
 export interface JsPortMappingDiagnostics {
@@ -301,13 +521,18 @@ export interface JsQuicConnectionDiagnostics {
    */
   pooled: boolean
   rttUs: number
+  minRttUs: number
   congestionWindow: number
   mtu: number
   sentPackets: number
   lostPackets: number
   congestionEvents: number
+  /** UDP bytes each way, and lost, of every tunnel on the connection. */
   sentBytes: number
   receivedBytes: number
+  lostBytes: number
+  /** The congestion controller's estimate of the path, in bits per second. */
+  bandwidthBps?: number
 }
 
 export interface JsRegisterRequest {
@@ -322,6 +547,20 @@ export interface JsRegisterRequest {
    * Ignored when direct is not allowed.
    */
   portMapping?: string
+  /**
+   * Probe a consumer's addresses on a local network shared with it first,
+   * and again 20 and 50 ms later (default `true`). `false` probes them in
+   * the order the consumer offered them. Ignored when direct is not
+   * allowed.
+   */
+  lanFirst?: boolean
+  /**
+   * Serve a consumer that asks for TCP within a local network shared with
+   * it (default `true`): a TCP listener opens the first time one asks,
+   * offered on LANs only. `false` leaves such a consumer on QUIC. Ignored
+   * when direct is not allowed.
+   */
+  lanTcp?: boolean
   key: string
   localAddr: string
   transport: string
@@ -336,6 +575,26 @@ export interface JsRelayDiagnostics {
   streamsReused: number
   lastError?: string
   connections: Array<JsQuicConnectionDiagnostics>
+  /**
+   * The smoothed round trip of every tunnel's control exchanges with
+   * this relay over this carrier, the relay's handling included.
+   */
+  controlRttMs?: number
+}
+
+/** How a tunnel's relay is doing, as its own attempts and probes see it. */
+export interface JsRelayHealth {
+  /** `tcp` or `quic`. */
+  transport: string
+  /** The relay attempt's phase, as `lastAttemptPhase` names it. */
+  phase: string
+  consecutiveFailures: number
+  /**
+   * The smoothed round trip of the tunnel's control exchanges with the
+   * relay, the relay's handling included.
+   */
+  rttMs?: number
+  lastSuccessAgeMs?: number
 }
 
 export interface JsRemoteId {
@@ -361,9 +620,52 @@ export interface JsServiceInfo {
   connectionCount: number
 }
 
+/** A tunnel's sessions on each path: open now, and since it started. */
+export interface JsSessionCounts {
+  activeRelay: number
+  activeDirect: number
+  activeLan: number
+  relay: number
+  direct: number
+  lan: number
+}
+
+/**
+ * How long each stage of a direct setup took on this end; a stage it did
+ * not run is absent.
+ */
+export interface JsSetupTimings {
+  negotiateMs?: number
+  discoverMs?: number
+  stunMs?: number
+  /** `ok`, `timeout`, `unavailable` or `cached`. */
+  stun: string
+  grantMs?: number
+  firstPongMs?: number
+  lanFirstPongMs?: number
+  handshakeMs?: number
+  commitMs?: number
+  setupMs: number
+}
+
 export interface JsTunnelDiagnostics {
   relayTransport: string
+  /**
+   * Whether direct setups try a shared local network first: the
+   * tunnel's lanFirst, and never without direct.
+   */
+  lanFirst: boolean
+  /**
+   * What direct setups ask a shared local network to carry, `quic` or
+   * `tcp`: a connection's lanTransport; `quic` without direct, and for a
+   * registration, which serves what each consumer asks for.
+   */
+  lanTransport: string
   direct?: JsPathDiagnostics
+  /** Application bytes on each path, as `metrics().traffic`. */
+  traffic: JsPathTraffic
+  /** The smoothed round trip of control exchanges with the relay. */
+  relayRttMs?: number
   /** Present when the tunnel maps its direct endpoint's port. */
   portMapping?: JsPortMappingDiagnostics
   sdkVersion: string
@@ -400,8 +702,9 @@ export interface JsTunnelEvent {
    * `relay_failed`, `network_changed`, `direct_established`,
    * `direct_fallback` and `stopped`, the last event of a stream. Steps,
    * from `subscribeEvents()` only: `phase_changed`, `direct_stage_changed`,
-   * `direct_abandoned`, `session_opened`, `session_closed` and
-   * `port_mapping_changed`.
+   * `direct_abandoned`, `session_opened`, `session_closed`,
+   * `port_mapping_changed`, `lan_detected`, `path_selected`, `lan_missed`
+   * and `lan_tcp_missed`. A kind added by a later SDK reads `unknown`.
    */
   kind: string
   /** `relay_ready`: setup latency of the answering relay. */
@@ -421,10 +724,74 @@ export interface JsTunnelEvent {
    * stage at which it was given up.
    */
   stage?: string
+  /**
+   * `direct_fallback`: why: `direct_not_offered`,
+   * `direct_negotiation_failed`, `direct_negotiation_timeout` or
+   * `direct_timeout_or_unreachable`. `lan_tcp_missed`: why TCP was not
+   * the path: `not_offered`, `no_shared_lan`, `refused`, `timed_out` or
+   * `handshake`.
+   */
+  reason?: string
   /** `phase_changed`: the relay attempt's new phase. */
   phase?: string
-  /** `session_opened`, `session_closed`: `direct` or `relay`. */
+  /**
+   * `session_opened`, `session_closed`: the session's number in this
+   * tunnel, and `direct` or `relay`.
+   */
+  session?: number
   path?: string
+  /**
+   * `session_closed`: how long it was open, and the application bytes it
+   * carried, sent from this end's local side and received.
+   */
+  durationMs?: number
+  sentBytes?: number
+  receivedBytes?: number
   /** `port_mapping_changed`: the mapping as it now stands. */
   mapping?: JsPortMappingStatus
+  /**
+   * `lan_detected`, `lan_missed`: `ipv6_prefix`, `public_ip_subnet` or
+   * `subnet`.
+   */
+  evidence?: string
+  /**
+   * `path_selected`, and a direct `session_opened` or `session_closed`:
+   * `lan`, `internet` or `private`; with `path_selected`, `ipv4` or
+   * `ipv6`, and how the peer address was learned.
+   */
+  link?: string
+  family?: string
+  via?: string
+  /** `path_selected`: `quic`, or `tcp` within a local network. */
+  transport?: string
+  /**
+   * `lan_missed`: where the session went instead, `internet` or
+   * `private`; `lan_tcp_missed`: `quic`. Absent when it took the relay.
+   */
+  took?: string
+  /**
+   * lan_detected: whether this end's LAN-first is on, so the peer's
+   * LAN addresses are probed first.
+   */
+  preferred?: boolean
+}
+
+/** What a running tunnel keeps measuring, sampled at once. */
+export interface JsTunnelMetrics {
+  uptimeMs: number
+  /** The `seq` of the tunnel's latest event. */
+  eventSeq: number
+  sessions: JsSessionCounts
+  traffic: JsPathTraffic
+  relay: JsRelayHealth
+  link?: JsLinkSample
+  lan: JsLanCounts
+  /**
+   * How long new sessions still go straight to the relay after a
+   * fallback, and how many have.
+   */
+  directCooldownMs?: number
+  cooldownSkips: number
+  /** Whether direct setups try a shared local network first. */
+  lanFirst: boolean
 }

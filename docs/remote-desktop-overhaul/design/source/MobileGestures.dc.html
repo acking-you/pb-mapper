@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>手机 · 操作方式</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; position: relative; overflow: hidden; background: #8A8A88; font-family: Inter, 'Noto Sans SC', system-ui, sans-serif; color: #1D1D1F">
+  <section role="dialog" aria-modal="true" aria-labelledby="g-title" style="position: absolute; left: 0; right: 0; top: 48px; bottom: 0; border-radius: 24px 24px 0 0; background: #FFFFFF; padding: 8px 20px 34px; display: flex; flex-direction: column; gap: 14px">
+    <div style="width: 36px; height: 5px; border-radius: 3px; background: #D1D1CF; align-self: center"></div>
+    <div style="display: flex; align-items: center">
+      <h2 id="g-title" style="margin: 0; flex: 1; font-size: 20px; font-weight: 600">操作方式</h2>
+      <button type="button" aria-label="关闭" style="width: 36px; height: 36px; border-radius: 18px; border: none; background: #F2F2F0; color: #4A4A4D; display: flex; align-items: center; justify-content: center">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg>
+      </button>
+    </div>
+
+    <div role="radiogroup" aria-label="操作方式" style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px; padding: 3px; border-radius: 12px; background: #EAEAE8">
+      <button type="button" role="radio" aria-checked="true" style="height: 38px; border-radius: 9px; border: none; background: #FFFFFF; color: #1D1D1F; font: inherit; font-size: 14px; font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.08)">触控板</button>
+      <button type="button" role="radio" aria-checked="false" style="height: 38px; border-radius: 9px; border: none; background: transparent; color: #4A4A4D; font: inherit; font-size: 14px">直接触摸</button>
+    </div>
+    <div style="font-size: 13px; color: #4A4A4D; line-height: 1.5">手指在屏幕任意位置滑动来移动光标，适合精细操作。</div>
+
+    <ul style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column">
+      <li style="display: flex; align-items: center; gap: 14px; height: 54px; border-bottom: 1px solid #EFEFED">
+        <span style="width: 40px; height: 40px; border-radius: 12px; background: #F2F2F0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#1D1D1F" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="16" r="3" fill="#1D1D1F"></circle><path d="M10 13l9-7M19 6h-4M19 6v4"></path></svg></span>
+        <span style="flex: 1; font-size: 15px; font-weight: 600">单指滑动</span><span style="font-size: 14px; color: #4A4A4D">移动光标</span>
+      </li>
+      <li style="display: flex; align-items: center; gap: 14px; height: 54px; border-bottom: 1px solid #EFEFED">
+        <span style="width: 40px; height: 40px; border-radius: 12px; background: #F2F2F0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#1D1D1F" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="#1D1D1F"></circle><circle cx="12" cy="12" r="7" stroke-dasharray="2 3"></circle></svg></span>
+        <span style="flex: 1; font-size: 15px; font-weight: 600">单指轻点</span><span style="font-size: 14px; color: #4A4A4D">左键单击</span>
+      </li>
+      <li style="display: flex; align-items: center; gap: 14px; height: 54px; border-bottom: 1px solid #EFEFED">
+        <span style="width: 40px; height: 40px; border-radius: 12px; background: #F2F2F0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#1D1D1F" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="#1D1D1F"></circle><circle cx="12" cy="12" r="6.5"></circle><circle cx="12" cy="12" r="9.5" stroke-opacity="0.4"></circle></svg></span>
+        <span style="flex: 1; font-size: 15px; font-weight: 600">长按</span><span style="font-size: 14px; color: #4A4A4D">右键单击</span>
+      </li>
+      <li style="display: flex; align-items: center; gap: 14px; height: 54px; border-bottom: 1px solid #EFEFED">
+        <span style="width: 40px; height: 40px; border-radius: 12px; background: #F2F2F0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#1D1D1F" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="16" r="3" fill="#1D1D1F"></circle><circle cx="7" cy="16" r="5.5" stroke-dasharray="2 2.5"></circle><path d="M12 11l7-6M19 5h-4M19 5v4"></path></svg></span>
+        <span style="flex: 1; font-size: 15px; font-weight: 600">轻点两下并按住移动</span><span style="font-size: 14px; color: #4A4A4D">拖拽</span>
+      </li>
+      <li style="display: flex; align-items: center; gap: 14px; height: 54px; border-bottom: 1px solid #EFEFED">
+        <span style="width: 40px; height: 40px; border-radius: 12px; background: #F2F2F0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#1D1D1F" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="12" r="2.2" fill="#1D1D1F"></circle><circle cx="12" cy="12" r="2.2" fill="#1D1D1F"></circle><circle cx="18" cy="12" r="2.2" fill="#1D1D1F"></circle><path d="M12 7V2M10 4l2-2 2 2M12 17v5M10 20l2 2 2-2"></path></svg></span>
+        <span style="flex: 1; font-size: 15px; font-weight: 600">三指上下滑动</span><span style="font-size: 14px; color: #4A4A4D">滚轮</span>
+      </li>
+      <li style="display: flex; align-items: center; gap: 14px; height: 54px; border-bottom: 1px solid #EFEFED">
+        <span style="width: 40px; height: 40px; border-radius: 12px; background: #F2F2F0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#1D1D1F" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="13" r="2.4" fill="#1D1D1F"></circle><circle cx="15" cy="13" r="2.4" fill="#1D1D1F"></circle><path d="M12 3v4M10 5l2-2 2 2M3 13h2M21 13h-2M4 11l-1 2 1 2M20 11l1 2-1 2"></path></svg></span>
+        <span style="flex: 1; font-size: 15px; font-weight: 600">双指移动</span><span style="font-size: 14px; color: #4A4A4D">移动画面</span>
+      </li>
+      <li style="display: flex; align-items: center; gap: 14px; height: 54px">
+        <span style="width: 40px; height: 40px; border-radius: 12px; background: #F2F2F0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#1D1D1F" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="15" r="2.4" fill="#1D1D1F"></circle><circle cx="15" cy="9" r="2.4" fill="#1D1D1F"></circle><path d="M6 18l-3 3M3 18v3h3M18 6l3-3M18 3h3v3"></path></svg></span>
+        <span style="flex: 1; font-size: 15px; font-weight: 600">双指捏合</span><span style="font-size: 14px; color: #4A4A4D">缩放画面</span>
+      </li>
+    </ul>
+
+    <div style="border-radius: 14px; background: #F4F4F2; padding: 12px 14px; font-size: 13px; line-height: 1.6; color: #4A4A4D">直接触摸：点到哪里就在哪里点击，单指拖动即拖拽，其余手势相同。适合点按钮和菜单。</div>
+
+    <label style="display: flex; align-items: center; gap: 12px; padding: 4px 0">
+      <span style="flex: 1">
+        <span style="display: block; font-size: 15px">显示虚拟鼠标</span>
+        <span style="display: block; font-size: 12.5px; color: #6E6E73; margin-top: 2px">直接触摸时提供左右键和滚轮</span>
+      </span>
+      <input type="checkbox" role="switch" aria-label="显示虚拟鼠标" style="width: 40px; height: 24px; accent-color: #1D1D1F; margin: 0">
+    </label>
+
+    <button type="button" style="margin-top: auto; height: 48px; border-radius: 24px; border: none; background: #1D1D1F; color: #FFFFFF; font: inherit; font-size: 15px; font-weight: 600">知道了</button>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

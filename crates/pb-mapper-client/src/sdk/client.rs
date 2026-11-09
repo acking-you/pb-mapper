@@ -26,7 +26,7 @@ use super::admin::Admin;
 use super::error::{AddressSnafu, Result, StatusSnafu};
 use super::handle::{Connection, LiveTunnel, Registration};
 use super::types::{RemoteId, ServiceConnection, Transport, TunnelStatus};
-use super::{ConnectOptions, PathPolicy, PortMapping, RegisterOptions};
+use super::{ConnectOptions, DirectPolicy, LanTransport, PathPolicy, PortMapping, RegisterOptions};
 use crate::client::run_client_side_cli_recovering_with_path;
 use crate::client::status::get_status_with_credential;
 use crate::server::{ServerTunnelOptions, StatusCallback, run_server_side_cli_recovering};
@@ -158,6 +158,19 @@ impl Client {
         self.inner.endpoint.relay_diagnostics().await
     }
 
+    /// [`Self::relay_diagnostics`] at once, then every `every` (100 ms to an
+    /// hour), for as long as this client or a clone of it is kept.
+    pub fn subscribe_relay_metrics(&self, every: std::time::Duration) -> RelayMetricsStream {
+        RelayMetricsStream {
+            client: Arc::downgrade(&self.inner),
+            every: every.clamp(
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_secs(60 * 60),
+            ),
+            due: None,
+        }
+    }
+
     /// The UDP port the relay offers QUIC on, or `None` when it offers none:
     /// one started without a QUIC listener, or one from before QUIC. Asked
     /// over TCP whatever this client's carrier, so a TCP client can learn
@@ -183,6 +196,15 @@ impl Client {
 
     pub fn namespace(&self) -> Option<u64> {
         self.inner.namespace
+    }
+
+    /// The namespace this client's credential owns: a temporary key's id, or
+    /// 0 for the administrator key. Unlike [`Self::namespace`], which an
+    /// administrator sets to reach into another, it tells credentials apart:
+    /// what something made through this client, such as a remembered desktop
+    /// grant, is scoped to.
+    pub fn credential_namespace(&self) -> u64 {
+        self.credential().key_id()
     }
 
     pub(crate) fn credential(&self) -> Credential {
@@ -277,6 +299,8 @@ impl Client {
             allow_direct,
             idle_timeout,
             port_mapping,
+            lan_first,
+            lan_tcp,
         } = options;
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
@@ -292,11 +316,13 @@ impl Client {
             .prepare_worker(&request.key, &request.local_addr)
             .await?;
         let credential = self.credential();
-        let port_mapping = worker.port_mapping(if allow_direct {
-            port_mapping
-        } else {
-            PortMapping::Off
-        });
+        let direct = worker.direct_policy(
+            allow_direct,
+            port_mapping,
+            lan_first,
+            LanTransport::Quic,
+            lan_tcp,
+        );
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_server_side_cli_recovering::<TcpStreamProvider>(
@@ -310,7 +336,7 @@ impl Client {
                     context.diagnostics,
                     idle_timeout,
                     allow_direct,
-                    port_mapping,
+                    direct,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
@@ -325,7 +351,7 @@ impl Client {
                     context.diagnostics,
                     idle_timeout,
                     allow_direct,
-                    port_mapping,
+                    direct,
                 )
             }),
         };
@@ -342,6 +368,111 @@ impl Client {
     pub async fn connect(&self, request: ConnectRequest) -> Result<Connection> {
         self.connect_with_options(request, ConnectOptions::default())
             .await
+    }
+
+    /// Open one owned TCP session without reserving or exposing a forwarding port.
+    /// Keep the returned connection alive for the lifetime of the stream. Setup
+    /// uses the same direct commit/fallback rules as `connect`; after setup no
+    /// application bytes are replayed and a closed stream is never reconnected.
+    pub async fn connect_tcp(
+        &self,
+        key: impl Into<String>,
+        options: ConnectOptions,
+    ) -> Result<(tokio::net::TcpStream, Connection)> {
+        use crate::client::stream::{StreamSetup, handle_local_stream};
+        use tokio::{
+            net::{TcpListener, TcpStream},
+            sync::{Mutex, Semaphore, mpsc},
+        };
+        use uni_stream::stream::TcpStreamImpl;
+
+        let key = key.into();
+        if key.trim().is_empty() || (options.path == PathPolicy::Auto && !cfg!(feature = "p2p")) {
+            return Err(Error::invalid_config(
+                "invalid service key or unavailable direct support",
+            ));
+        }
+        check_port_mapping(options.port_mapping)?;
+        let io_error = |error: std::io::Error| Error::protocol(error.to_string());
+        // Retain the bound socket until our own connection has been accepted;
+        // there is no reserve/drop/rebind race or reusable external listener.
+        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_error)?;
+        let stream = TcpStream::connect(listener.local_addr().map_err(io_error)?)
+            .await
+            .map_err(io_error)?;
+        let peer = stream.local_addr().map_err(io_error)?;
+        let accepted = loop {
+            let (candidate, address) = listener.accept().await.map_err(io_error)?;
+            if address == peer {
+                break candidate;
+            }
+        };
+        drop(listener);
+        stream.set_nodelay(true).map_err(io_error)?;
+        accepted.set_nodelay(true).map_err(io_error)?;
+        let worker = self.prepare_worker(&key, "127.0.0.1:0").await?;
+        let credential = self.credential();
+        let keep_alive = self.inner.keep_alive;
+        let namespace = self.inner.namespace;
+        let policy = worker.direct_policy(
+            options.path == PathPolicy::Auto,
+            options.port_mapping,
+            options.lan_first,
+            options.lan_transport,
+            false,
+        );
+        let handle = worker.spawn(move |context| async move {
+            context.remote_addr.start();
+            #[cfg(feature = "p2p")]
+            let direct = (options.path == PathPolicy::Auto).then(|| {
+                crate::direct::Consumer::new(
+                    context.remote_addr.clone(),
+                    credential,
+                    namespace,
+                    false,
+                    keep_alive,
+                    context.diagnostics.clone(),
+                    policy,
+                )
+            });
+            #[cfg(not(feature = "p2p"))]
+            let _ = policy;
+            let (events, mut ready) = mpsc::channel(1);
+            let Ok(permit) = Arc::new(Semaphore::new(1)).acquire_owned().await else {
+                return;
+            };
+            let setup = StreamSetup {
+                permit,
+                events,
+                timing: Arc::new(Mutex::new(Default::default())),
+                diagnostics: context.diagnostics,
+                #[cfg(feature = "p2p")]
+                direct,
+            };
+            let forward = handle_local_stream(
+                TcpStreamImpl::new(accepted),
+                context.key,
+                context.remote_addr,
+                keep_alive,
+                namespace,
+                credential,
+                setup,
+            );
+            tokio::pin!(forward);
+            loop {
+                tokio::select! {
+                    () = context.shutdown.cancelled() => break,
+                    Some(_) = ready.recv() => (context.status_callback)("connected"),
+                    result = &mut forward => {
+                        if let Err(error) = result {
+                            (context.status_callback)(&format!("failed: {error}"));
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+        Ok((stream, Connection::new(handle, key)))
     }
 
     /// Select direct-first or the relay-only protocol for this tunnel only.
@@ -364,10 +495,13 @@ impl Client {
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
-        let port_mapping = worker.port_mapping(match options.path {
-            PathPolicy::Auto => options.port_mapping,
-            PathPolicy::RelayOnly => PortMapping::Off,
-        });
+        let direct = worker.direct_policy(
+            options.path == PathPolicy::Auto,
+            options.port_mapping,
+            options.lan_first,
+            options.lan_transport,
+            false,
+        );
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_client_side_cli_recovering_with_path::<TcpListenerProvider>(
@@ -382,7 +516,7 @@ impl Client {
                     context.diagnostics,
                     options.path,
                     is_datagram,
-                    port_mapping,
+                    direct,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
@@ -398,7 +532,7 @@ impl Client {
                     context.diagnostics,
                     options.path,
                     is_datagram,
-                    port_mapping,
+                    direct,
                 )
             }),
         };
@@ -526,6 +660,32 @@ impl Client {
     }
 }
 
+/// A relay carrier's [`RelayDiagnostics`](super::RelayDiagnostics), sampled
+/// as time passes: from [`Client::subscribe_relay_metrics`].
+///
+/// Each sample is taken when it is returned: nothing runs in the background
+/// and nothing queues. It does not keep its client alive; once every clone
+/// of that client is gone, the stream ends at its next tick.
+pub struct RelayMetricsStream {
+    client: std::sync::Weak<ClientInner>,
+    every: std::time::Duration,
+    /// When the next sample is due; the first is due at once.
+    due: Option<tokio::time::Instant>,
+}
+
+impl RelayMetricsStream {
+    /// The next sample: the first at once, then one a period after the
+    /// last. `None` once the client is gone. Cancel-safe.
+    pub async fn recv(&mut self) -> Option<super::RelayDiagnostics> {
+        if let Some(due) = self.due {
+            tokio::time::sleep_until(due).await;
+        }
+        let client = self.client.upgrade()?;
+        self.due = Some(tokio::time::Instant::now() + self.every);
+        Some(client.endpoint.relay_diagnostics().await)
+    }
+}
+
 /// Whether `error` says the carrier failed, rather than that the relay
 /// answered with a refusal.
 pub(crate) fn is_carrier_failure(error: &Error) -> bool {
@@ -610,19 +770,43 @@ struct TunnelWorker {
 }
 
 impl TunnelWorker {
-    /// How this tunnel maps its direct endpoint's port, noted in its
-    /// diagnostics from the start when it may.
-    fn port_mapping(&self, mode: PortMapping) -> PortMapping {
-        let mode = if cfg!(feature = "port-mapping") {
-            mode
+    /// How this tunnel's direct setups go, if it has any: how it maps its
+    /// direct endpoint's port and whether it tries a shared local network
+    /// first, both noted in its diagnostics from the start; and what that
+    /// network carries: what a consumer asks for, and whether a provider
+    /// serves TCP.
+    fn direct_policy(
+        &self,
+        direct: bool,
+        port_mapping: PortMapping,
+        lan_first: bool,
+        lan_transport: LanTransport,
+        lan_tcp: bool,
+    ) -> DirectPolicy {
+        let port_mapping = if direct && cfg!(feature = "port-mapping") {
+            port_mapping
         } else {
             PortMapping::Off
         };
-        if mode != PortMapping::Off {
-            self.diagnostics
-                .port_mapping_requested(mode, crate::network::NetworkHints::shared().generation());
+        let lan_first = direct && lan_first;
+        if port_mapping != PortMapping::Off {
+            self.diagnostics.port_mapping_requested(
+                port_mapping,
+                crate::network::NetworkHints::shared().generation(),
+            );
         }
-        mode
+        let lan_transport = if direct {
+            lan_transport
+        } else {
+            LanTransport::Quic
+        };
+        self.diagnostics.prefer_lan(lan_first, lan_transport);
+        DirectPolicy {
+            port_mapping,
+            lan_first,
+            lan_transport,
+            lan_tcp: direct && lan_tcp,
+        }
     }
 
     fn spawn<F, Fut>(self, start: F) -> LiveTunnel

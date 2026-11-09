@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'fake_desktop_api.dart';
 
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 
@@ -9,6 +10,8 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 /// what later reads return, so a view can be driven through a whole flow:
 /// register, see it listed, stop it, see it stopped.
 class FakePbMapperApi implements PbMapperApiClient {
+  @override
+  final FakeDesktopApi desktop = FakeDesktopApi();
   FakePbMapperApi({
     this.services = const [],
     this.clients = const [],
@@ -39,6 +42,14 @@ class FakePbMapperApi implements PbMapperApiClient {
   /// before it arrives.
   Duration configDelay = Duration.zero;
 
+  /// Make reading the config fail.
+  bool configFails = false;
+
+  /// Holds a forced relay check until it completes, standing in for a relay
+  /// that has not answered yet. Other calls go on meanwhile, as the Rust
+  /// side's do: it asks the relay without holding its state lock.
+  Completer<void>? relayGate;
+
   /// Every call that changes something, in order, so a test can assert what
   /// the view asked for rather than only what it drew.
   final List<String> calls = [];
@@ -58,6 +69,7 @@ class FakePbMapperApi implements PbMapperApiClient {
   @override
   Future<ConfigStatus> fetchConfig() async {
     if (configDelay > Duration.zero) await Future<void>.delayed(configDelay);
+    if (configFails) throw StateError('reading the config failed');
     return config;
   }
 
@@ -73,23 +85,35 @@ class FakePbMapperApi implements PbMapperApiClient {
     required bool keepAlive,
     required String msgHeaderKey,
     RelayTransport relayTransport = RelayTransport.tcp,
+    bool lanFirst = true,
+    LanTransport lanTransport = LanTransport.quic,
   }) async {
     calls.add(
-      relayTransport == RelayTransport.tcp
-          ? 'updateConfig($serverAddress)'
-          : 'updateConfig($serverAddress, ${relayTransport.name})',
+      'updateConfig($serverAddress'
+      '${relayTransport == RelayTransport.tcp ? '' : ', ${relayTransport.name}'}'
+      '${lanFirst ? '' : ', lan-first off'}'
+      '${lanTransport == LanTransport.quic ? '' : ', lan ${lanTransport.name}'})',
     );
     if (_refused() case final refused?) return refused;
     final moved = relayTransport != config.relayTransport;
+    final lanFirstChanged = lanFirst != config.lanFirst;
+    final lanTransportChanged = lanTransport != config.lanTransport;
     config = ConfigStatus(
       serverAddress: serverAddress,
       keepAliveEnabled: keepAlive,
       msgHeaderKey: msgHeaderKey,
       relayTransport: relayTransport,
+      lanFirst: lanFirst,
+      lanTransport: lanTransport,
     );
-    // As the Rust side names them: running tunnels on another carrier.
+    // As the Rust side names them: running tunnels on another carrier,
+    // running tunnels that may go direct when LAN-first changed, and running
+    // connections that may when the LAN transport did. The fake has one
+    // relay and credential, so none is on another.
     bool other(RelayTransport? running) =>
         moved && running != null && running != relayTransport;
+    bool reached(String status, bool allowDirect) =>
+        lanFirstChanged && status != 'stopped' && allowDirect;
     return OperationResult(
       success: true,
       message: 'ok',
@@ -102,6 +126,24 @@ class FakePbMapperApi implements PbMapperApiClient {
           'connections': [
             for (final c in clients)
               if (other(c.relayTransport)) c.serviceKey,
+          ],
+        },
+        'lanFirst': {
+          'shares': [
+            for (final s in services)
+              if (reached(s.status, s.allowDirect)) s.serviceKey,
+          ],
+          'connections': [
+            for (final c in clients)
+              if (reached(c.status, c.allowDirect)) c.serviceKey,
+          ],
+        },
+        'lanTransport': {
+          'shares': const <String>[],
+          'connections': [
+            for (final c in clients)
+              if (lanTransportChanged && c.status != 'stopped' && c.allowDirect)
+                c.serviceKey,
           ],
         },
       },
@@ -177,8 +219,12 @@ class FakePbMapperApi implements PbMapperApiClient {
       link ?? RelayLink(transport: config.relayTransport);
 
   @override
-  Future<ServerStatusDetail> forceRefreshServerStatus() async =>
-      getServerStatusDetail();
+  Future<ServerStatusDetail> forceRefreshServerStatus() async {
+    if (relayGate case final gate? when !gate.isCompleted) {
+      await gate.future;
+    }
+    return getServerStatusDetail();
+  }
 
   /// What the relay is holding, keyed by service. Absent means none.
   Map<String, List<ServiceConnInfo>> conns;
@@ -188,7 +234,9 @@ class FakePbMapperApi implements PbMapperApiClient {
       conns[serviceKey] ?? const [];
 
   @override
-  Future<List<ServiceConfigInfo>> getServiceConfigs() async => services;
+  Future<List<ServiceConfigInfo>> getServiceConfigs() async {
+    return services;
+  }
 
   @override
   Future<ServiceStatusSignal> getServiceStatus(String serviceKey) async =>
@@ -258,7 +306,9 @@ class FakePbMapperApi implements PbMapperApiClient {
   }
 
   @override
-  Future<List<ClientConfigInfo>> getClientConfigs() async => clients;
+  Future<List<ClientConfigInfo>> getClientConfigs() async {
+    return clients;
+  }
 
   @override
   Future<ClientStatusSignal> getClientStatus(String serviceKey) async =>
@@ -334,6 +384,7 @@ class FakePbMapperApi implements PbMapperApiClient {
   Stream<TunnelEventsUpdate> tunnelEvents({
     required String serviceKey,
     required bool share,
+    Duration? metricsEvery,
   }) => tunnelEventFeed;
 
   // --- The relay as a whole.
@@ -598,6 +649,9 @@ class FakePbMapperApi implements PbMapperApiClient {
       serverAddress: config.serverAddress,
       keepAliveEnabled: config.keepAliveEnabled,
       msgHeaderKey: rotated,
+      relayTransport: config.relayTransport,
+      lanFirst: config.lanFirst,
+      lanTransport: config.lanTransport,
     );
     return KeyRotation(
       key: rotated,

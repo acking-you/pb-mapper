@@ -224,7 +224,7 @@ async fn run(
         )),
 
         Command::Status => {
-            let detail = state.lock().await.get_server_status_detail().await?;
+            let detail = state::get_server_status_detail(state).await?;
             Ok(proto::Response::ok(
                 Some(serde_json::to_value(detail).unwrap_or_else(|_| json!({}))),
                 None,
@@ -248,7 +248,7 @@ async fn run(
         }
 
         Command::Connections { key } => {
-            let conns = state.lock().await.get_service_conns(key).await?;
+            let conns = state::get_service_conns(state, key).await?;
             Ok(proto::Response::ok(
                 Some(json!({ "connections": conns })),
                 None,
@@ -264,6 +264,7 @@ async fn run(
                     "serverAddress": config.server_address,
                     "keepAliveEnabled": config.keep_alive_enabled,
                     "relayTransport": config.relay_transport,
+                    "lanFirst": config.lan_first,
                     "msgHeaderKeySet": !config.msg_header_key.is_empty(),
                     "isolatedRelayAdminKeySet": isolated_admin_key.is_some(),
                 })),

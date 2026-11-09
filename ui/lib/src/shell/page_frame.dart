@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
+import 'package:pb_mapper_ui/src/shell/sharing_indicator.dart';
 import 'package:pb_mapper_ui/src/shell/window_chrome.dart';
+import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 
 /// Which layout a page is being shown in, for the pieces that differ: a title
 /// bar inside the rounded sheet beside the rail, or across the top of the
@@ -32,9 +35,16 @@ class PrimaryAction {
   final VoidCallback onPressed;
 }
 
+/// A page's title bar in the sheet beside the rail, and across the top of a
+/// compact window (below any top padding). The window's caption buttons take
+/// the same height (`app.dart`), so the two cannot drift apart.
+const double kPageBarHeight = 58;
+const double kCompactPageBarHeight = 54;
+
 /// A page: its title bar and its body. The bar is window chrome too — its
-/// empty space drags the window, and on Windows and Linux it carries the
-/// caption buttons.
+/// empty space drags the window, and on Windows and Linux it keeps room at
+/// its end for the caption buttons, which the app draws above every page
+/// ([WindowControls]).
 class PageFrame extends StatelessWidget {
   const PageFrame({
     super.key,
@@ -43,6 +53,8 @@ class PageFrame extends StatelessWidget {
     this.actions = const [],
     this.primary,
     this.overlay = false,
+    this.onBack,
+    this.sharingIndicator = true,
   });
 
   final String title;
@@ -56,9 +68,19 @@ class PageFrame extends StatelessWidget {
   /// galaxy): the bar floats over it instead of cutting a strip off the top.
   final bool overlay;
 
+  /// A back button at the start of the bar, for a page reached from
+  /// another rather than from the navigation.
+  final VoidCallback? onBack;
+
+  /// Whether the bar carries the capsule shown while this computer is
+  /// viewed (D15). A page that offers the same controls itself turns it
+  /// off.
+  final bool sharingIndicator;
+
   /// The bar's height, for a body that lays things out beneath it.
-  static double barHeight(BuildContext context) =>
-      ShellLayout.wideOf(context) ? 58 : 54 + MediaQuery.paddingOf(context).top;
+  static double barHeight(BuildContext context) => ShellLayout.wideOf(context)
+      ? kPageBarHeight
+      : kCompactPageBarHeight + MediaQuery.paddingOf(context).top;
 
   @override
   Widget build(BuildContext context) {
@@ -68,6 +90,8 @@ class PageFrame extends StatelessWidget {
       actions: actions,
       primary: primary,
       inSheet: wide,
+      onBack: onBack,
+      sharingIndicator: sharingIndicator,
     );
     if (overlay) {
       return Stack(
@@ -87,27 +111,39 @@ class PageFrame extends StatelessWidget {
   }
 }
 
+/// The bar width from which the primary action carries its label: a 560
+/// window across the top of a phone.
+const double _labelledPrimaryWidth = 560;
+
 class _TitleBar extends StatelessWidget {
   const _TitleBar({
     required this.title,
     required this.actions,
     required this.primary,
     required this.inSheet,
+    required this.onBack,
+    required this.sharingIndicator,
   });
 
   final String title;
   final List<Widget> actions;
   final PrimaryAction? primary;
   final bool inSheet;
+  final VoidCallback? onBack;
+  final bool sharingIndicator;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final height = inSheet ? 58.0 : 54.0;
+    final height = inSheet ? kPageBarHeight : kCompactPageBarHeight;
+    final onBack = this.onBack;
     // Across the top of the window the traffic lights sit at its corner;
-    // inside the sheet the rail has already made room for them.
-    final lead = (inSheet ? 0 : trafficLightInset) + (inSheet ? 22.0 : 16.0);
-    final roomy = MediaQuery.sizeOf(context).width >= 560;
+    // inside the sheet the rail has already made room for them. A back
+    // button brings its own margin.
+    final lead =
+        (inSheet ? 0 : trafficLightInset) +
+        (inSheet ? 22.0 : 16.0) -
+        (onBack == null ? 0 : 12);
     final primary = this.primary;
     final bar = SizedBox(
       height: height,
@@ -116,58 +152,80 @@ class _TitleBar extends StatelessWidget {
         alignment: AlignmentDirectional.centerStart,
         children: [
           const Positioned.fill(child: WindowDragArea()),
-          Padding(
-            padding: EdgeInsetsDirectional.only(start: lead, end: 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: IgnorePointer(
-                    child: Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleLarge?.copyWith(
-                        fontSize: inSheet ? 19 : 18,
+          // The capsule's form and the primary action's label follow the
+          // whole bar's width (beside the rail, the sheet's), not the
+          // window's and not the padded row's: a narrow window's sheet has
+          // no room for both the label and the capsule.
+          LayoutBuilder(
+            builder: (context, box) => Padding(
+              // The caption buttons are drawn over the bar's end, in the
+              // window's corner, which is the bar's in every layout that
+              // draws them: the sheet runs to the window's edges, and a
+              // compact page fills it.
+              padding: EdgeInsetsDirectional.only(
+                start: lead,
+                end: drawsCaptionButtons ? kCaptionButtonsWidth + 16 : 8,
+              ),
+              child: Row(
+                children: [
+                  if (onBack != null) ...[
+                    IconButton(
+                      key: const Key('page-back'),
+                      tooltip: context.l10n.back,
+                      onPressed: onBack,
+                      icon: const Icon(AppIcons.back, size: AppIconSize.button),
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                  Expanded(
+                    child: IgnorePointer(
+                      child: Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleLarge?.copyWith(
+                          fontSize: inSheet ? 19 : 18,
+                        ),
                       ),
                     ),
                   ),
-                ),
-                ...actions,
-                if (primary != null) ...[
-                  const SizedBox(width: 6),
-                  if (roomy)
-                    FilledButton.icon(
-                      key: primary.key,
-                      onPressed: primary.onPressed,
-                      style: FilledButton.styleFrom(
-                        minimumSize: const Size(0, 38),
-                        padding: const EdgeInsetsDirectional.fromSTEB(
-                          14,
-                          0,
-                          18,
-                          0,
+                  if (sharingIndicator) ...[
+                    const SizedBox(width: 12),
+                    SharingIndicator(form: sharingFormFor(box.maxWidth)),
+                  ],
+                  ...actions,
+                  if (primary != null) ...[
+                    const SizedBox(width: 6),
+                    if (box.maxWidth >= _labelledPrimaryWidth)
+                      FilledButton.icon(
+                        key: primary.key,
+                        onPressed: primary.onPressed,
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size(0, 38),
+                          padding: const EdgeInsetsDirectional.fromSTEB(
+                            14,
+                            0,
+                            18,
+                            0,
+                          ),
                         ),
+                        icon: Icon(primary.icon, size: 18),
+                        label: Text(primary.label),
+                      )
+                    else
+                      IconButton.filled(
+                        key: primary.key,
+                        tooltip: primary.label,
+                        onPressed: primary.onPressed,
+                        style: IconButton.styleFrom(
+                          backgroundColor: theme.colorScheme.primary,
+                          foregroundColor: theme.colorScheme.onPrimary,
+                        ),
+                        icon: Icon(primary.icon),
                       ),
-                      icon: Icon(primary.icon, size: 18),
-                      label: Text(primary.label),
-                    )
-                  else
-                    IconButton.filled(
-                      key: primary.key,
-                      tooltip: primary.label,
-                      onPressed: primary.onPressed,
-                      style: IconButton.styleFrom(
-                        backgroundColor: theme.colorScheme.primary,
-                        foregroundColor: theme.colorScheme.onPrimary,
-                      ),
-                      icon: Icon(primary.icon),
-                    ),
+                  ],
                 ],
-                if (drawsCaptionButtons) ...[
-                  const SizedBox(width: 10),
-                  const CaptionButtons(height: 36),
-                ],
-              ],
+              ),
             ),
           ),
         ],

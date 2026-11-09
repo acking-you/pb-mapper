@@ -371,7 +371,11 @@ class _TunnelMenu extends StatelessWidget {
       enabled: enabled,
       child: Row(
         children: [
-          Icon(icon, size: 17, color: danger ? scheme.error : null),
+          Icon(
+            icon,
+            size: AppIconSize.button,
+            color: danger ? scheme.error : null,
+          ),
           const SizedBox(width: 10),
           Text(label, style: danger ? TextStyle(color: scheme.error) : null),
         ],

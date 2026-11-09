@@ -7,7 +7,8 @@
 //!
 //! Every connection accepted on the local port first tries a direct QUIC path
 //! to the publisher and falls back to the relay before any byte is sent if it
-//! cannot be set up. This prints how many took each path whenever that changes.
+//! cannot be set up. This follows the tunnel's metrics and prints how many
+//! took each path, and the bytes each carried, whenever that changes.
 
 use std::time::Duration;
 
@@ -40,20 +41,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     connection.wait_ready().await?;
     println!("`{}` is reachable at {local_addr}", connection.key());
 
+    // A sample a second, and one as each connection opens or closes.
+    let mut metrics = connection.subscribe_metrics(Duration::from_secs(1));
     let mut last = None;
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             result = tokio::signal::ctrl_c() => { result?; break; }
-            _ = tick.tick() => {
-                let Some(path) = connection.diagnostics().direct else { continue };
-                let split = (path.direct_sessions, path.relay_sessions, path.fallbacks);
-                if last != Some(split) {
+            sample = metrics.recv() => {
+                let Some(sample) = sample else { break };
+                let (sessions, traffic) = (sample.sessions, sample.traffic);
+                if last != Some((sessions, traffic)) {
                     println!(
-                        "connections so far: {} direct, {} relay ({} fell back); open now: {} direct, {} relay",
-                        split.0, split.1, split.2, path.active_direct, path.active_relay
+                        "connections so far: {} direct, {} relay; open now: {} direct, {} relay; \
+                         bytes direct {}/{}, relay {}/{} (sent/received)",
+                        sessions.direct,
+                        sessions.relay,
+                        sessions.active_direct,
+                        sessions.active_relay,
+                        traffic.direct.sent,
+                        traffic.direct.received,
+                        traffic.relay.sent,
+                        traffic.relay.received,
                     );
-                    last = Some(split);
+                    last = Some((sessions, traffic));
                 }
             }
         }

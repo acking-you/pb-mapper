@@ -140,11 +140,16 @@ async fn watch(
                         println!("{}  direct   open, set up in {setup_ms} ms", stamp());
                     }
                     // The cue `Auto` waits for: the punch did not get through.
-                    TunnelEventKind::DirectFallback { stage: DirectStage::Punching } => {
+                    TunnelEventKind::DirectFallback { stage: DirectStage::Punching, .. } => {
                         println!("{}  relay    the punch did not get through", stamp());
                     }
-                    TunnelEventKind::DirectFallback { stage } => {
-                        println!("{}  relay    direct gave way at {}", stamp(), stage.as_str());
+                    TunnelEventKind::DirectFallback { stage, reason, .. } => {
+                        println!(
+                            "{}  relay    direct gave way at {}: {}",
+                            stamp(),
+                            stage.as_str(),
+                            reason.as_str()
+                        );
                     }
                     TunnelEventKind::Stopped => println!("{}  stopped", stamp()),
                     _ => {}

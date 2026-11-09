@@ -3,7 +3,13 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 
 export 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart'
-    show DirectStage, PortMappingMode, RelayTransport, TunnelPath;
+    show
+        DirectStage,
+        LinkKind,
+        PortMappingMode,
+        RelayTransport,
+        TunnelLink,
+        TunnelPath;
 
 /// Which end of a tunnel this computer is.
 enum TunnelKind {
@@ -123,6 +129,7 @@ class Tunnel {
   /// session tries a direct path before the relay; for a share, whether it
   /// lets connections reach it that way.
   final bool allowDirect;
+
   /// When it asks the router to map its direct port; see [PortMappingMode].
   final PortMappingMode portMapping;
 
@@ -137,24 +144,32 @@ class Tunnel {
   bool get overQuic => relayTransport == RelayTransport.quic;
 
   /// Which way its traffic goes, for a tunnel that is up; null otherwise,
-  /// and for a share no connection has reached directly.
+  /// and for a share no connection is reaching now.
   PathMode? get pathMode {
     if (health != TunnelHealth.running) return null;
     if (!allowDirect) return PathMode.relayOnly;
     final path = this.path;
+    // Direct, within one local network when any session open now is.
+    PathMode direct(bool lan) => lan ? PathMode.lan : PathMode.direct;
+    final open = ((path?.activeDirect ?? 0) > 0, (path?.activeRelay ?? 0) > 0);
     if (kind == TunnelKind.share) {
-      // A share cannot tell the sessions that came through the relay apart.
-      return path != null && path.activeDirect > 0 ? PathMode.direct : null;
+      // A share is reached, and makes no attempts of its own.
+      return switch (open) {
+        (true, true) => PathMode.mixed,
+        (true, false) => direct((path?.activeLan ?? 0) > 0),
+        (false, true) => PathMode.relay,
+        (false, false) => null,
+      };
     }
     if (path == null) return PathMode.directFirst;
-    return switch ((path.activeDirect > 0, path.activeRelay > 0)) {
+    return switch (open) {
       (true, true) => PathMode.mixed,
-      (true, false) => PathMode.direct,
+      (true, false) => direct(path.activeLan > 0),
       (false, true) => PathMode.relay,
       // Idle: an attempt under way, or how the last one ended.
       (false, false) when path.attempt != null => PathMode.trying,
       (false, false) => switch (path.lastDirect) {
-        true => PathMode.direct,
+        true => direct(path.lastKind == LinkKind.lan),
         false => PathMode.relay,
         null => PathMode.directFirst,
       },
@@ -237,6 +252,10 @@ enum PathMode {
 
   /// Straight between the two computers, now or last time.
   direct,
+
+  /// Straight between the two computers within one local network, now or
+  /// last time.
+  lan,
 
   /// Through the relay, now or last time.
   relay,

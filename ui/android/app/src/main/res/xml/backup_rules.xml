@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and earlier: the same exclusions as
+     data_extraction_rules.xml, for Auto Backup. -->
+<full-backup-content>
+    <exclude domain="root" path="app_flutter/" />
+    <exclude domain="file" path="." />
+</full-backup-content>

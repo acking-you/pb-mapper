@@ -133,7 +133,8 @@ typedef _PbMapperDeleteClientConfigDart =
 typedef _PbMapperGetConfigNative = Pointer<Utf8> Function(Pointer<Void> handle);
 typedef _PbMapperGetConfigDart = Pointer<Utf8> Function(Pointer<Void> handle);
 
-/// `relayTransport` is `tcp` or `quic`.
+/// `relayTransport` is `tcp` or `quic`; `lanFirst` is 1 or 0; `lanTransport`
+/// is `quic` or `tcp`.
 typedef _PbMapperUpdateConfigNative =
     Pointer<Utf8> Function(
       Pointer<Void> handle,
@@ -141,6 +142,8 @@ typedef _PbMapperUpdateConfigNative =
       Int32 enableKeepAlive,
       Pointer<Utf8> msgHeaderKey,
       Pointer<Utf8> relayTransport,
+      Int32 lanFirst,
+      Pointer<Utf8> lanTransport,
     );
 typedef _PbMapperUpdateConfigDart =
     Pointer<Utf8> Function(
@@ -149,6 +152,8 @@ typedef _PbMapperUpdateConfigDart =
       int enableKeepAlive,
       Pointer<Utf8> msgHeaderKey,
       Pointer<Utf8> relayTransport,
+      int lanFirst,
+      Pointer<Utf8> lanTransport,
     );
 
 typedef _PbMapperGetServiceConfigsNative =
@@ -197,7 +202,170 @@ typedef _PbMapperInitLoggingDart = void Function();
 typedef _PbMapperFreeStringNative = Void Function(Pointer<Utf8> s);
 typedef _PbMapperFreeStringDart = void Function(Pointer<Utf8> s);
 
+/// `PbDesktopViewV1`: what the viewer shows this frame, filled by the
+/// per-frame leaf `pb_mapper_desktop_view_v1`. 56 bytes, native layout.
+final class PbDesktopViewV1 extends Struct {
+  @Uint64()
+  external int generation;
+
+  /// 0 = none.
+  @Uint64()
+  external int presentedFrameId;
+
+  /// Increments per new cursor.
+  @Uint64()
+  external int cursorSeq;
+
+  /// `UINT32_MAX` = none.
+  @Uint32()
+  external int presentedAgeMs;
+
+  /// Physical pixels of `generation`: the input space.
+  @Uint32()
+  external int displayWidth;
+  @Uint32()
+  external int displayHeight;
+
+  /// The encoded size.
+  @Uint32()
+  external int videoWidth;
+  @Uint32()
+  external int videoHeight;
+
+  /// Physical pixels relative to the display.
+  @Int32()
+  external int cursorX;
+  @Int32()
+  external int cursorY;
+
+  /// 0 none, 1 connecting, 2 streaming, 3 capture unavailable, 4 paused,
+  /// 5 stopped.
+  @Uint8()
+  external int state;
+
+  /// Bit 0 cursor visible, 1 controlling, 2 control allowed, 3 secure
+  /// desktop, 4 fresh, 5 paused.
+  @Uint8()
+  external int flags;
+
+  @Array(2)
+  external Array<Uint8> reserved;
+}
+
+/// `PbDesktopVideoMetaV1`: what `pb_mapper_desktop_video_next_v1` says about
+/// the unit it copied. 56 bytes.
+final class PbDesktopVideoMetaV1 extends Struct {
+  @Uint64()
+  external int generation;
+  @Uint64()
+  external int frameId;
+
+  /// The transport sequence, for trace correlation.
+  @Uint64()
+  external int seq;
+  @Uint64()
+  external int ptsUs;
+
+  /// Since network receipt, measured at the pop.
+  @Uint64()
+  external int ageUs;
+  @Uint32()
+  external int width;
+  @Uint32()
+  external int height;
+
+  /// Bytes written; on `NEED_CAPACITY` the bytes needed.
+  @Uint32()
+  external int len;
+
+  /// Bit 0 keyframe, 1 discontinuity, 2 JPEG, 3 duplicate, 4 H.265; a
+  /// unit with neither 2 nor 4 is H.264.
+  @Uint32()
+  external int flags;
+}
+
+/// The return codes every video export shares (and the JNI functions).
+abstract final class PbVideo {
+  static const unit = 1;
+  static const timeout = 0;
+  static const closed = -1;
+  static const needCapacity = -2;
+  static const paused = -3;
+  static const notAttached = -4;
+  static const invalid = -5;
+  static const alreadyAttached = -6;
+}
+
 class PbMapperFFI {
+  late final pbMapperDesktopCall = lib
+      .lookupFunction<
+        Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>),
+        Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)
+      >('pb_mapper_desktop_call_json');
+
+  /// The viewer's hot ops. Synchronous and never blocks: safe on the UI
+  /// isolate.
+  late final pbMapperDesktopViewerCall = lib
+      .lookupFunction<
+        Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>),
+        Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)
+      >('pb_mapper_desktop_viewer_call_json');
+
+  /// 1 a viewer, 0 none (zeroed), -1 a null pointer or a caught panic. A
+  /// leaf for every rendered frame; the UI isolate only.
+  late final pbMapperDesktopView = lib
+      .lookupFunction<
+        Int32 Function(Pointer<Void>, Pointer<PbDesktopViewV1>),
+        int Function(Pointer<Void>, Pointer<PbDesktopViewV1>)
+      >('pb_mapper_desktop_view_v1', isLeaf: true);
+
+  /// `> 0` the consumer id; otherwise `CLOSED` or `ALREADY_ATTACHED`.
+  late final pbMapperDesktopVideoAttach = lib
+      .lookupFunction<Int64 Function(Uint64), int Function(int)>(
+        'pb_mapper_desktop_video_attach_v1',
+        isLeaf: true,
+      );
+
+  /// Blocks up to the timeout: never on the UI isolate.
+  late final pbMapperDesktopVideoNext = lib
+      .lookupFunction<
+        Int32 Function(
+          Uint64,
+          Uint32,
+          Pointer<Uint8>,
+          Uint32,
+          Pointer<PbDesktopVideoMetaV1>,
+        ),
+        int Function(
+          int,
+          int,
+          Pointer<Uint8>,
+          int,
+          Pointer<PbDesktopVideoMetaV1>,
+        )
+      >('pb_mapper_desktop_video_next_v1');
+
+  /// 1 accepted, 0 rejected, or `CLOSED`. Non-blocking.
+  late final pbMapperDesktopVideoPresented = lib
+      .lookupFunction<
+        Int32 Function(Uint64, Uint64, Uint64),
+        int Function(int, int, int)
+      >('pb_mapper_desktop_video_presented_v1', isLeaf: true);
+
+  /// Idempotent; wakes a `next` blocked on the consumer.
+  late final pbMapperDesktopVideoDetach = lib
+      .lookupFunction<Void Function(Uint64), void Function(int)>(
+        'pb_mapper_desktop_video_detach_v1',
+        isLeaf: true,
+      );
+
+  /// The address of a static: native code that reached the same copy of the
+  /// library reads the same value (D9).
+  late final pbMapperDesktopInstanceToken = lib
+      .lookupFunction<Uint64 Function(), int Function()>(
+        'pb_mapper_desktop_instance_token_v1',
+        isLeaf: true,
+      );
   static PbMapperFFI? _instance;
   static DynamicLibrary? _lib;
 
@@ -402,6 +570,11 @@ class PbMapperFFI {
   late final pbMapperInitLogging = lib
       .lookupFunction<_PbMapperInitLoggingNative, _PbMapperInitLoggingDart>(
         'pb_mapper_init_logging',
+      );
+
+  late final pbMapperShutdownLogging = lib
+      .lookupFunction<Void Function(), void Function()>(
+        'pb_mapper_shutdown_logging',
       );
 
   late final pbMapperFreeString = lib

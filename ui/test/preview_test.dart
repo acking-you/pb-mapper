@@ -5,40 +5,72 @@
 /// ```sh
 /// PB_MAPPER_UI_PREVIEW_DIR=/tmp/pbm flutter test test/preview_test.dart
 /// ```
+///
+/// The remote desktop previews show [RemoteScreenFixture] as the remote
+/// computer's picture, delivered through the fake JPEG path.
 library;
 
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
+import 'package:pb_mapper_ui/src/pages/remote/invite_scanner.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
+import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
 
+import 'fake_desktop_api.dart';
 import 'fake_pb_mapper_api.dart';
+import 'remote_preview.dart';
+import 'remote_screen_fixture.dart';
 import 'support.dart';
 
 final String? _dir = Platform.environment['PB_MAPPER_UI_PREVIEW_DIR'];
 
-Future<void> _capture(WidgetTester tester, String name) async {
+Future<void> _capture(
+  WidgetTester tester,
+  String name, {
+  double pixelRatio = 1.5,
+}) async {
   final boundary = tester.renderObject<RenderRepaintBoundary>(
     find.byKey(appRootKey),
   );
   await tester.runAsync(() async {
-    final image = await boundary.toImage(pixelRatio: 1.5);
+    final image = await boundary.toImage(pixelRatio: pixelRatio);
     final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
     File('$_dir/$name.png').writeAsBytesSync(bytes!.buffer.asUint8List());
   });
 }
+
+/// A preview, drawn with real shadows: `flutter test` otherwise paints an
+/// elevation's shadow as a solid block.
+void _preview(String description, WidgetTesterCallback body) =>
+    testWidgets(description, (tester) async {
+      debugDisableShadows = false;
+      try {
+        await body(tester);
+      } finally {
+        debugDisableShadows = true;
+      }
+    });
 
 FakePbMapperApi _busy() => FakePbMapperApi(
   services: [
     fakeService(
       serviceKey: 'nas-files',
       localAddress: '127.0.0.1:5000',
-      path: const TunnelPath(activeDirect: 2, directSessions: 5),
+      path: const TunnelPath(
+        activeDirect: 2,
+        activeRelay: 1,
+        directSessions: 5,
+        relaySessions: 2,
+      ),
     ),
     fakeService(
       serviceKey: 'home-ssh',
@@ -236,6 +268,32 @@ Future<void> _relay(
   await finish(tester);
 }
 
+/// Viewer settings whose gesture sheet was already seen, so a touch viewer
+/// does not open it by itself.
+Future<ViewerPrefs> _sheetSeen() async {
+  final prefs = ViewerPrefs(persist: false);
+  await prefs.setGestureSheetSeen(true);
+  return prefs;
+}
+
+/// The app's face on Windows, Segoe UI, from this machine's own fonts: no
+/// other machine has it, and there a Windows preview's words are boxes.
+Future<void> _loadSegoeUi() async {
+  final fonts = Directory(
+    '${Platform.environment['SystemRoot'] ?? r'C:\Windows'}/Fonts',
+  );
+  final files = [
+    for (final name in ['segoeui.ttf', 'seguisb.ttf', 'segoeuib.ttf'])
+      File('${fonts.path}/$name'),
+  ].where((file) => file.existsSync());
+  if (files.isEmpty) return;
+  final loader = FontLoader('Segoe UI');
+  for (final file in files) {
+    loader.addFont(Future.value(ByteData.sublistView(file.readAsBytesSync())));
+  }
+  await loader.load();
+}
+
 void main() {
   if (_dir == null) {
     test('previews are opt-in', () {}, skip: 'set PB_MAPPER_UI_PREVIEW_DIR');
@@ -245,17 +303,21 @@ void main() {
   setUpAll(() async {
     Directory(_dir!).createSync(recursive: true);
     await loadRealFonts();
+    await _loadSegoeUi();
   });
 
   for (final (name, size) in [
     ('desktop', const Size(1280, 820)),
     ('phone', const Size(390, 844)),
   ]) {
-    testWidgets('port mapping $name', (tester) async {
+    _preview('port mapping $name', (tester) async {
       final api =
           FakePbMapperApi(
               services: [
-                fakeService(serviceKey: 'nas-files', portMapping: PortMappingMode.always),
+                fakeService(
+                  serviceKey: 'nas-files',
+                  portMapping: PortMappingMode.always,
+                ),
               ],
             )
             ..tunnelEventFeed = Stream.fromIterable([
@@ -263,18 +325,24 @@ void main() {
                 (1, {'kind': 'relay_ready', 'latency_ms': 38}),
                 (2, {'kind': 'direct_stage_changed', 'stage': 'punching'}),
                 (3, {'kind': 'direct_fallback', 'stage': 'punching'}),
-                (4, {
-                  'kind': 'port_mapping_changed',
-                  'mapping': {'stage': 'discovering'},
-                }),
-                (5, {
-                  'kind': 'port_mapping_changed',
-                  'mapping': {'stage': 'requesting', 'protocol': 'pcp'},
-                }),
-                (6, {
-                  'kind': 'port_mapping_changed',
-                  'mapping': _activeMapping,
-                }),
+                (
+                  4,
+                  {
+                    'kind': 'port_mapping_changed',
+                    'mapping': {'stage': 'discovering'},
+                  },
+                ),
+                (
+                  5,
+                  {
+                    'kind': 'port_mapping_changed',
+                    'mapping': {'stage': 'requesting', 'protocol': 'pcp'},
+                  },
+                ),
+                (
+                  6,
+                  {'kind': 'port_mapping_changed', 'mapping': _activeMapping},
+                ),
                 (7, {'kind': 'direct_established', 'setup_ms': 184}),
               ])
                 TunnelEventsUpdate.fromMap({
@@ -301,6 +369,24 @@ void main() {
                     },
                   },
                 }),
+              // The second's sample: what each path carried by then.
+              TunnelEventsUpdate.fromMap({
+                'type': 'metrics',
+                'metrics': {
+                  'sessions': {'direct': 3, 'relay': 1, 'lan': 0},
+                  'traffic': {
+                    'relay': {'sent': 81920, 'received': 1258291},
+                    'direct': {'sent': 2411724, 'received': 48234496},
+                    'lan': {'sent': 0, 'received': 0},
+                  },
+                  'relay': {'rtt_ms': 31, 'consecutive_failures': 0},
+                  'link': {
+                    'kind': 'internet',
+                    'family': 'ipv4',
+                    'stats': {'rtt_us': 23400},
+                  },
+                },
+              }),
             ]);
       await pumpApp(
         tester,
@@ -334,25 +420,25 @@ void main() {
     ('light', ThemeMode.light),
     ('dark', ThemeMode.dark),
   ]) {
-    testWidgets('overview $name', (tester) async {
+    _preview('overview $name', (tester) async {
       await pumpApp(tester, _busy(), themeMode: theme);
       await _capture(tester, 'overview_$name');
       await finish(tester);
     });
 
-    testWidgets('tunnels $name', (tester) async {
+    _preview('tunnels $name', (tester) async {
       await pumpApp(tester, _busy(), themeMode: theme, page: AppPage.tunnels);
       await _capture(tester, 'tunnels_$name');
       await finish(tester);
     });
 
-    testWidgets('settings $name', (tester) async {
+    _preview('settings $name', (tester) async {
       await pumpApp(tester, _busy(), themeMode: theme, page: AppPage.settings);
       await _capture(tester, 'settings_$name');
       await finish(tester);
     });
 
-    testWidgets('editor $name', (tester) async {
+    _preview('editor $name', (tester) async {
       await pumpApp(tester, _busy(), themeMode: theme, page: AppPage.tunnels);
       await tester.tap(find.byKey(const Key('new-tunnel')));
       await settle(tester);
@@ -362,7 +448,7 @@ void main() {
       await finish(tester);
     });
 
-    testWidgets('setup $name', (tester) async {
+    _preview('setup $name', (tester) async {
       await pumpApp(
         tester,
         FakePbMapperApi(
@@ -380,7 +466,7 @@ void main() {
     });
   }
 
-  testWidgets('overview selected', (tester) async {
+  _preview('overview selected', (tester) async {
     await pumpApp(tester, _busy(), themeMode: ThemeMode.dark);
     await tester.tap(find.byKey(const Key('galaxy-canvas')));
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
@@ -391,7 +477,7 @@ void main() {
   });
 
   for (final key in ['office-rdp', 'media-server']) {
-    testWidgets('overview path $key', (tester) async {
+    _preview('overview path $key', (tester) async {
       await pumpApp(tester, _busy(), themeMode: ThemeMode.dark);
       await tester.tap(find.byKey(const Key('galaxy-canvas')));
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
@@ -407,7 +493,7 @@ void main() {
     });
   }
 
-  testWidgets('empty overview', (tester) async {
+  _preview('empty overview', (tester) async {
     await pumpApp(
       tester,
       FakePbMapperApi(serverServices: ['build-cache']),
@@ -417,25 +503,25 @@ void main() {
     await finish(tester);
   });
 
-  testWidgets('phone overview', (tester) async {
+  _preview('phone overview', (tester) async {
     await pumpApp(tester, _busy(), size: const Size(393, 852));
     await _capture(tester, 'phone_overview');
     await finish(tester);
   });
 
-  testWidgets('relay services light', (tester) async {
+  _preview('relay services light', (tester) async {
     await _relay(tester, 'relay_services_light');
   });
 
-  testWidgets('relay services dark', (tester) async {
+  _preview('relay services dark', (tester) async {
     await _relay(tester, 'relay_services_dark', theme: ThemeMode.dark);
   });
 
-  testWidgets('relay connections', (tester) async {
+  _preview('relay connections', (tester) async {
     await _relay(tester, 'relay_connections_light', section: 'connections');
   });
 
-  testWidgets('relay credentials', (tester) async {
+  _preview('relay credentials', (tester) async {
     await _relay(
       tester,
       'relay_credentials_dark',
@@ -444,27 +530,27 @@ void main() {
     );
   });
 
-  testWidgets('relay security', (tester) async {
+  _preview('relay security', (tester) async {
     await _relay(tester, 'relay_security_light', section: 'security');
   });
 
-  testWidgets('relay this computer', (tester) async {
+  _preview('relay this computer', (tester) async {
     await _relay(tester, 'relay_local_light', section: 'local');
   });
 
-  testWidgets('relay over quic light', (tester) async {
+  _preview('relay over quic light', (tester) async {
     await _relay(tester, 'relay_quic_light', quic: true);
   });
 
-  testWidgets('relay over quic dark', (tester) async {
+  _preview('relay over quic dark', (tester) async {
     await _relay(tester, 'relay_quic_dark', quic: true, theme: ThemeMode.dark);
   });
 
-  testWidgets('relay offering quic to tcp', (tester) async {
+  _preview('relay offering quic to tcp', (tester) async {
     await _relay(tester, 'relay_offers_quic_light');
   });
 
-  testWidgets('phone relay quic zh', (tester) async {
+  _preview('phone relay quic zh', (tester) async {
     await _relay(
       tester,
       'phone_relay_quic_zh',
@@ -474,13 +560,52 @@ void main() {
     );
   });
 
-  testWidgets('settings quic', (tester) async {
+  _preview('settings quic', (tester) async {
     await pumpApp(tester, _overQuic(_busy()), page: AppPage.settings);
     await _capture(tester, 'settings_quic_light');
     await finish(tester);
   });
 
-  testWidgets('settings quic on a relay without it', (tester) async {
+  _preview('settings lan first', (tester) async {
+    Future<void> reveal() => tester.scrollUntilVisible(
+      find.byKey(const Key('settings-lan-first')),
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byKey(const Key('settings-list')),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await pumpApp(tester, _busy(), page: AppPage.settings);
+    await reveal();
+    await _capture(tester, 'settings_lan_first_light');
+    // Turned off with tunnels running: the offer to restart them.
+    await tester.tap(find.byKey(const Key('settings-lan-first')));
+    await settle(tester);
+    await _capture(tester, 'settings_lan_first_restart_light');
+    await finish(tester);
+
+    await pumpApp(
+      tester,
+      _busy(),
+      page: AppPage.settings,
+      themeMode: ThemeMode.dark,
+      size: const Size(393, 852),
+      locale: const Locale('zh'),
+    );
+    await reveal();
+    // Mid-screen, clear of the bottom bar.
+    await Scrollable.ensureVisible(
+      tester.element(find.byKey(const Key('settings-lan-first'))),
+      alignment: 0.5,
+    );
+    await settle(tester);
+    await _capture(tester, 'settings_lan_first_phone_zh_dark');
+    await finish(tester);
+  });
+
+  _preview('settings quic on a relay without it', (tester) async {
     await pumpApp(
       tester,
       _overQuic(_busy())..relayQuicPort = null,
@@ -491,13 +616,13 @@ void main() {
     await finish(tester);
   });
 
-  testWidgets('tunnels over quic', (tester) async {
+  _preview('tunnels over quic', (tester) async {
     await pumpApp(tester, _overQuic(_busy()), page: AppPage.tunnels);
     await _capture(tester, 'tunnels_quic_light');
     await finish(tester);
   });
 
-  testWidgets('relay this computer with quic', (tester) async {
+  _preview('relay this computer with quic', (tester) async {
     final api = _relayBusy()
       ..localRelayPort = 7666
       ..localRelayQuicPort = 7667;
@@ -510,7 +635,7 @@ void main() {
     await finish(tester);
   });
 
-  testWidgets('carrier move dialog', (tester) async {
+  _preview('carrier move dialog', (tester) async {
     final api = _relayBusy()
       ..clients = [
         for (final c in _busy().clients)
@@ -528,11 +653,11 @@ void main() {
     await finish(tester);
   });
 
-  testWidgets('relay as a temporary credential', (tester) async {
+  _preview('relay as a temporary credential', (tester) async {
     await _relay(tester, 'relay_temporary_light', role: RelayRole.temporary);
   });
 
-  testWidgets('relay issue dialog', (tester) async {
+  _preview('relay issue dialog', (tester) async {
     await pumpApp(tester, _relayBusy(), page: AppPage.relay);
     await tester.tap(find.byKey(const Key('relay-issue')));
     await settle(tester);
@@ -540,7 +665,7 @@ void main() {
     await finish(tester);
   });
 
-  testWidgets('phone relay zh', (tester) async {
+  _preview('phone relay zh', (tester) async {
     await _relay(
       tester,
       'phone_relay_zh',
@@ -549,7 +674,7 @@ void main() {
     );
   });
 
-  testWidgets('phone relay credentials', (tester) async {
+  _preview('phone relay credentials', (tester) async {
     await _relay(
       tester,
       'phone_relay_credentials',
@@ -558,7 +683,7 @@ void main() {
     );
   });
 
-  testWidgets('phone tunnels zh', (tester) async {
+  _preview('phone tunnels zh', (tester) async {
     await pumpApp(
       tester,
       _busy(),
@@ -568,6 +693,385 @@ void main() {
     );
     await _capture(tester, 'phone_tunnels_zh');
     await finish(tester);
+  });
+
+  group('remote desktop', () {
+    tearDown(() {
+      InviteScanner.debugSupportedOverride = null;
+      InviteScanner.debugFakeCamera = false;
+    });
+
+    _preview('remote setup', (tester) async {
+      await onWindows(tester, () async {
+        await pumpApp(
+          tester,
+          previewRemoteApi(),
+          page: AppPage.remote,
+          size: const Size(1440, 900),
+        );
+        await _capture(tester, 'remote_setup_light');
+        await finish(tester);
+      });
+    });
+
+    for (final (name, theme) in [
+      ('light', ThemeMode.light),
+      ('dark', ThemeMode.dark),
+    ]) {
+      _preview('remote sharing $name', (tester) async {
+        await onWindows(tester, () async {
+          final api = previewRemoteApi(viewed: true);
+          await pumpApp(
+            tester,
+            api,
+            page: AppPage.remote,
+            themeMode: theme,
+            size: const Size(1440, 900),
+            vault: previewComputers(),
+          );
+          // A session left paused offers Back to picture, and its last
+          // picture becomes the row's thumbnail: let that write finish.
+          final remote = await viewPreviewComputer(tester, api);
+          remote.back();
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 500)),
+          );
+          await decodePreviewPicture(tester);
+          await tester.tap(find.byKey(const Key('host-qr')));
+          await settle(tester);
+          await _capture(tester, 'remote_sharing_$name');
+          await finish(tester);
+        });
+      });
+    }
+
+    _preview('remote add dialog', (tester) async {
+      await onWindows(tester, () async {
+        await pumpApp(
+          tester,
+          previewRemoteApi(),
+          page: AppPage.remote,
+          size: const Size(1440, 900),
+          vault: previewComputers(),
+        );
+        await tester.tap(find.byKey(const Key('remote-add')));
+        await settle(tester);
+        await tester.enterText(
+          find.byKey(const Key('add-invite')),
+          'pbd1.studio-pc.k7Hq-SECRET-Zx2Q',
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        await settle(tester);
+        await tester.tap(find.byKey(const Key('add-more')));
+        await settle(tester);
+        await _capture(tester, 'remote_add_dialog_light');
+        await finish(tester);
+      });
+    });
+
+    /// The desktop viewer over Office PC at 1440×900, as Windows: [act]
+    /// brings it to the state captured as [name].
+    Future<void> desktopViewer(
+      WidgetTester tester,
+      String name,
+      Future<void> Function(FakePbMapperApi api) act, {
+      bool live = true,
+      bool controlAllowed = true,
+      ThemeMode theme = ThemeMode.light,
+      Locale locale = const Locale('en'),
+      ViewerPrefs? prefs,
+    }) => onWindows(tester, () async {
+      final api = previewRemoteApi();
+      // Held mid-connect, it stays on the Connecting overlay.
+      if (!live) api.desktop.connectGate = Completer<void>();
+      await pumpApp(
+        tester,
+        api,
+        page: AppPage.remote,
+        themeMode: theme,
+        locale: locale,
+        size: const Size(1440, 900),
+        viewerPrefs: prefs,
+        vault: previewComputers(),
+      );
+      await viewPreviewComputer(
+        tester,
+        api,
+        live: live,
+        controlAllowed: controlAllowed,
+      );
+      await act(api);
+      await _capture(tester, name);
+      api.desktop.connectGate?.complete();
+      await finish(tester);
+    });
+
+    // Display, its Resolution submenu open: Native is beyond this device's
+    // decoders.
+    for (final (name, theme, locale) in [
+      ('viewer_display_menu', ThemeMode.light, const Locale('en')),
+      ('viewer_display_menu_zh_dark', ThemeMode.dark, const Locale('zh')),
+    ]) {
+      _preview('viewer display menu $name', (tester) async {
+        await desktopViewer(tester, name, theme: theme, locale: locale, (
+          _,
+        ) async {
+          await tester.tap(find.byKey(const Key('viewer-display')));
+          await tester.pump(const Duration(milliseconds: 400));
+          // A mouse opens a submenu by hovering it, as on Windows.
+          final mouse = await tester.createGesture(
+            kind: PointerDeviceKind.mouse,
+          );
+          await mouse.addPointer(
+            location: tester.getCenter(
+              find.byKey(const Key('display-resolution')),
+            ),
+          );
+          await mouse.moveBy(const Offset(4, 0));
+          await tester.pump(const Duration(milliseconds: 400));
+          await mouse.removePointer();
+          await tester.pump();
+        });
+      });
+    }
+
+    _preview('viewer quality monitor', (tester) async {
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setQualityMonitor(true);
+      await prefs.setQualityPanel(true);
+      await desktopViewer(
+        tester,
+        'viewer_quality_monitor',
+        prefs: prefs,
+        (_) async => tester.pump(const Duration(seconds: 2)),
+      );
+    });
+
+    _preview('viewer connecting', (tester) async {
+      await desktopViewer(
+        tester,
+        'viewer_connecting',
+        live: false,
+        (_) async {},
+      );
+    });
+
+    _preview('viewer shortcuts', (tester) async {
+      await desktopViewer(
+        tester,
+        'viewer_shortcuts_dark',
+        theme: ThemeMode.dark,
+        (_) async {
+          await tester.tap(find.byKey(const Key('viewer-shortcuts')));
+          await tester.pump(const Duration(milliseconds: 400));
+        },
+      );
+    });
+
+    _preview('viewer reconnect', (tester) async {
+      await desktopViewer(tester, 'viewer_reconnect', (api) async {
+        api.desktop.viewerStatusValue = stoppedStatus('transport');
+        await tester.pump(const Duration(milliseconds: 500));
+      });
+    });
+
+    _preview('viewer identity', (tester) async {
+      await desktopViewer(tester, 'viewer_identity', (api) async {
+        // The connection drops, and the computer that answers the retry is
+        // not the one remembered.
+        api.desktop
+          ..viewerStatusValue = stoppedStatus('transport')
+          ..failNext('connect', 'IDENTITY_CHANGED');
+        await tester.pump(const Duration(seconds: 3));
+        await settle(tester);
+      });
+    });
+
+    _preview('viewer collapsed, view only', (tester) async {
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await desktopViewer(
+        tester,
+        'viewer_collapsed_view_only',
+        controlAllowed: false,
+        (_) async {
+          // Unpinned, the toolbar folds away once the pointer leaves it.
+          await tester.tap(find.byKey(const Key('viewer-pin')));
+          await mouse.addPointer(location: const Offset(700, 500));
+          await tester.pump(const Duration(milliseconds: 2600));
+          await tester.pump(const Duration(milliseconds: 400));
+        },
+      );
+      await mouse.removePointer();
+    });
+
+    _preview('sharing fallback over a dialog', (tester) async {
+      await onWindows(tester, () async {
+        await pumpApp(
+          tester,
+          previewRemoteApi(viewed: true),
+          page: AppPage.tunnels,
+        );
+        await tester.tap(find.byKey(const Key('new-tunnel')));
+        await settle(tester);
+        await _capture(tester, 'sharing_fallback_dialog');
+        await finish(tester);
+      });
+    });
+
+    _preview('title bar on Windows at 125 %', (tester) async {
+      await onWindows(tester, () async {
+        const size = Size(1180, 780), dpr = 1.25;
+        for (final (suffix, theme) in const [
+          ('', ThemeMode.light),
+          ('_dark', ThemeMode.dark),
+        ]) {
+          await pumpApp(
+            tester,
+            previewRemoteApi(viewed: true),
+            page: AppPage.tunnels,
+            size: size,
+            themeMode: theme,
+          );
+          tester.view
+            ..devicePixelRatio = dpr
+            ..physicalSize = size * dpr;
+          await settle(tester);
+          final mouse = await tester.createGesture(
+            kind: PointerDeviceKind.mouse,
+          );
+          await mouse.addPointer(
+            location: tester.getCenter(find.byKey(const Key('caption-close'))),
+          );
+          await tester.pump();
+          await _capture(
+            tester,
+            'title_bar_windows_125$suffix',
+            pixelRatio: dpr,
+          );
+          await mouse.removePointer();
+          await finish(tester);
+        }
+      });
+    });
+
+    _preview('phone remote tab', (tester) async {
+      InviteScanner.debugSupportedOverride = true;
+      await pumpApp(
+        tester,
+        previewRemoteApi(host: false),
+        page: AppPage.remote,
+        size: const Size(390, 844),
+        vault: previewComputers(),
+      );
+      await _capture(tester, 'phone_remote_tab');
+      await finish(tester);
+    });
+
+    _preview('phone add from the clipboard', (tester) async {
+      InviteScanner.debugSupportedOverride = true;
+      await pumpApp(
+        tester,
+        previewRemoteApi(host: false),
+        page: AppPage.remote,
+        size: const Size(390, 844),
+        vault: previewComputers(),
+      );
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async => call.method == 'Clipboard.getData'
+            ? {'text': 'pbd1.studio-pc.k7Hq-SECRET-Zx2Q'}
+            : null,
+      );
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+      await tester.tap(find.byKey(const Key('remote-paste')));
+      await settle(tester);
+      await _capture(tester, 'phone_add_paste');
+      await finish(tester);
+    });
+
+    /// The touch viewer over Office PC on a landscape phone.
+    Future<void> phoneViewer(
+      WidgetTester tester,
+      ViewerPrefs prefs, {
+      ThemeMode theme = ThemeMode.dark,
+      Locale locale = const Locale('en'),
+    }) async {
+      final api = previewRemoteApi(host: false);
+      await pumpApp(
+        tester,
+        api,
+        page: AppPage.remote,
+        themeMode: theme,
+        locale: locale,
+        size: const Size(844, 390),
+        viewerPrefs: prefs,
+        vault: previewComputers(),
+      );
+      await viewPreviewComputer(tester, api);
+    }
+
+    // The quality monitor and the quality panel over the picture, then the
+    // More panel's picture choices.
+    for (final (name, theme, locale) in [
+      ('phone_viewer_monitor', ThemeMode.light, const Locale('en')),
+      ('phone_viewer_monitor_zh_dark', ThemeMode.dark, const Locale('zh')),
+    ]) {
+      _preview('phone viewer, $name', (tester) async {
+        final prefs = await _sheetSeen();
+        await prefs.setQualityMonitor(true);
+        await prefs.setQualityPanel(true);
+        await phoneViewer(tester, prefs, theme: theme, locale: locale);
+        await tester.pump(const Duration(seconds: 4));
+        await _capture(tester, name);
+        await prefs.setQualityPanel(false);
+        await tester.tap(find.byKey(const Key('touch-more')));
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.scrollUntilVisible(
+          find.byKey(const Key('resolution-native')),
+          100,
+          scrollable: find.byType(Scrollable).last,
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        await _capture(tester, '${name}_more');
+        await finish(tester);
+      });
+    }
+
+    _preview('phone viewer, trackpad', (tester) async {
+      await phoneViewer(tester, await _sheetSeen());
+      // Past the mode hint.
+      await tester.pump(const Duration(seconds: 4));
+      await _capture(tester, 'phone_viewer_trackpad');
+      await finish(tester);
+    });
+
+    _preview('phone viewer, keyboard with Ctrl locked', (tester) async {
+      await phoneViewer(tester, await _sheetSeen());
+      await tester.pump(const Duration(seconds: 4));
+      await tester.tap(find.byKey(const Key('touch-keyboard')));
+      tester.view.viewInsets = const FakeViewPadding(bottom: 190);
+      addTearDown(tester.view.resetViewInsets);
+      await tester.pump(const Duration(milliseconds: 300));
+      // Tapped twice: locked.
+      for (var i = 0; i < 2; i++) {
+        await tester.tap(find.byKey(const Key('modifier-control')));
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 300));
+      await _capture(tester, 'phone_viewer_keyboard');
+      await finish(tester);
+    });
+
+    _preview('phone gesture sheet', (tester) async {
+      // The first session opens the sheet by itself.
+      await phoneViewer(tester, ViewerPrefs(persist: false));
+      await tester.pump(const Duration(milliseconds: 500));
+      await _capture(tester, 'phone_gesture_sheet');
+      await finish(tester);
+    });
   });
 }
 

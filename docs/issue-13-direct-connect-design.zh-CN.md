@@ -118,6 +118,7 @@ Rust 已升级到官方 [1.99.1](https://doc.rust-lang.org/releases.html#version
 | `pb-mapper-server/src/direct/{mod,stun}.rs` | 现有路由 manager 内串行处理许可和中继选择；独立、有界的 STUN Binding 服务 |
 | `pb-mapper-client/src/direct/{control,provider}.rs` | 消费端持久 PBM2 控制连接；提供端复用注册通道，数据任务归注册句柄持有 |
 | `pb-mapper-client/src/direct/{socket,endpoint,identity}.rs` | 单 UDP 收包者、STUN/认证探测/QUIC 分流、候选、相互 TLS 认证和 exporter 绑定 |
+| `pb-mapper-client/src/direct/{lan,candidates}.rs` | 网卡分级、同网证据、局域网先行的候选顺序 |
 | `pb-mapper-client/src/direct/{mod,reports}.rs` | 提交与回退边界、现有泛型转发器、状态合并和重连上报 |
 | `pb-mapper-client/src/sdk/{client,types}.rs` | 保留旧入口，增加 `ConnectOptions` / `RegisterOptions` |
 
@@ -164,7 +165,7 @@ sequenceDiagram
 
 ## 5. 网络、身份和资源边界
 
-每个本地句柄按 IPv4/IPv6 共享 UDP endpoint，每条业务流独立 QUIC connection。Quinn 的 endpoint 驱动是 socket 唯一的读者：在它的批量接收缓冲区内原地识别并移除 STUN/探测包，QUIC 包不经额外任务、通道、分配或拷贝直接交给 Quinn，保留批量接收、GRO、ECN 与源/目的地址。端点不广告 QUIC bit greasing（RFC 9287），所有 QUIC 包都带固定位，而 STUN 与探测包从不设置它，分流因此是精确的。Windows 在 ICMP 不可达后报告的 `ConnectionReset` 交给 Quinn 按其规则忽略，不会停止整个端点。STUN 校验来源、transaction ID、cookie、method/class、长度和地址族；HMAC probe 校验 id、nonce、类型和许可时限。只向收到认证 Pong 的路径发送 QUIC 握手，避免无效接口候选填满共享发送队列。探测发送不等待拥塞候选；重试 tick 驱动后续探测。
+每个本地句柄按 IPv4/IPv6 共享 UDP endpoint，每条业务流独立 QUIC connection。Quinn 的 endpoint 驱动是 socket 唯一的读者：在它的批量接收缓冲区内原地识别并移除 STUN/探测包，QUIC 包不经额外任务、通道、分配或拷贝直接交给 Quinn，保留批量接收、GRO、ECN 与源/目的地址。端点不广告 QUIC bit greasing（RFC 9287），所有 QUIC 包都带固定位，而 STUN 与探测包从不设置它，分流因此是精确的。Windows 在 ICMP 不可达后报告的 `ConnectionReset` 交给 Quinn 按其规则忽略，不会停止整个端点。STUN 校验来源、transaction ID、cookie、method/class、长度和地址族；HMAC probe 校验 id、nonce、类型和许可时限。只向收到认证 Pong 的路径发送 QUIC 握手，避免无效接口候选填满共享发送队列。探测发送不等待拥塞候选；重试 tick 驱动后续探测，而某条路径回应 Pong 时立即唤醒会话去拨号，不等下一个 tick。
 
 TLS 1.3 使用 `quinn::rustls`，双方验证许可中的证书、证书有效期/EKU和握手签名，关闭 0-RTT。SessionBind 的 HMAC 绑定 TLS exporter、服务、namespace、角色 key ID、generation、两端证书摘要，阻止跨会话混用。QUIC 始终加密；`--codec` 仍决定现有中继加密，不关闭 QUIC TLS。UDP 使用原有带长度边界的可靠流封装，未改成 QUIC DATAGRAM。
 
@@ -176,14 +177,31 @@ TLS 1.3 使用 `quinn::rustls`，双方验证许可中的证书、证书有效�
 | 已授权直连尝试 | 最多 2 秒；剩余预算留给中继 |
 | 原有 relay-only setup | 保持最多 5 秒及已有配置上限 |
 | 候选 / 缓存 | 最多 8 个，缓存 10 秒；消费端网络变化提示清除缓存 |
-| HMAC 探测 | 每 120 ms 重试；收包驱动最多回复 128 个/秒 |
+| HMAC 探测 | 每 120 ms 重试；局域网优先开启时局域网候选在前，有同网证据时另在 +20、+50 ms 补发；收包驱动最多回复 128 个/秒 |
+| 局域网先行 | 局域网优先开启（默认）且有强证据，或已有局域网路径回应认证探测时，非局域网路径在自身回应后最多晚 150 ms 拨号 |
 | STUN 服务 | 每 IP 20 个/秒、总计 1000 个/秒，来源表最多 1024 项，包小于 1024 字节 |
 | 提供端会话 / TLS 待握手 | 每注册句柄最多 64 / 每地址族最多 64 |
 | QUIC 数据 | 每连接一个双向流、无单向流和 DATAGRAM；流控窗口 8 MiB（默认 1.25 MB 在 100 ms RTT 下把单流限制在约 100 Mbit/s），只有本地读得比对端发得慢时才实际占用；15 秒保活，60 秒无网络响应超时 |
 | server 授权 / 观测 | 各最多 4096 条；授权到期即释放；观测每 namespace 最多 1024 条，120 秒无更新清理，满额时优先淘汰已关闭历史 |
 | namespace 配额 | 直连 setup 计入活跃流上限并消耗新流速率令牌；提交后的直连不经过 relay，也无法被 relay 权威跟踪，因此不占活跃中继流额度，其并发由速率令牌与每注册句柄 64 个会话约束 |
 
-相同 LAN 和本地 IPv6 候选均保留；未指定、多播、广播、link-local 候选拒绝。候选预算先保留网关映射与 STUN 地址，再交替选择 IPv6/IPv4 网卡地址，IPv6 优先使用非 ULA、非 loopback 地址，避免虚拟网卡挤掉 IPv6。认证 Ping 的实际来源进入有界待验证表，由已有探测 tick 发起自身 nonce 挑战；只有收到匹配 Pong 的地址才能进入 QUIC 握手。认证、nonce、许可过期和候选上限仍适用。
+候选按网卡是什么排序，而不是按地址大小。先保留网关映射与 STUN 地址；然后每个局域网网卡（有网关的以太网或 Wi-Fi）一个 IPv4 地址，每个局域网 IPv6 /64 一个地址（Windows 把临时地址列为 /128，全局和 ULA 地址一律按 /64 计，并优先 Windows 发包所用的临时地址）；其余地址按网卡等级（无网关的物理网卡、蜂窝、虚拟、回环）交替选择 IPv6/IPv4，等级内 IPv6 优先非 ULA、非 loopback。同一 /64 的其他地址不再占名额；总数仍不超过 8，被截掉的数量计入指标。以开发机为例，WLAN 的 IPv4 从第 6 位升到第 2 位，排在 VPN 的 wintun 和 Hyper-V 交换机之前。未指定、多播、广播、link-local 候选拒绝。认证 Ping 的实际来源进入有界待验证表，并立即发起自身 nonce 挑战；只有收到匹配 Pong 的地址才能进入 QUIC 握手。认证、nonce、许可过期和候选上限仍适用。
+
+网卡地址仍来自 if-addrs；网卡类型与网关来自 netdev，在独立线程读取，结果保留到网络变化为止，绝不阻塞建连：netdev 会为网关 MAC 向 Windows 发 ARP，开发机上实测一次读取 1.2–3.2 秒。读取完成前，以及 netdev 无法判断时（Android 不向应用暴露网关和 MAC 地址），按名称与地址段判断：wintun、utun、tun、tap、wg、tailscale、zt、docker、br-、veth、virbr、vmnet 等以及 100.64/10、198.18/15 视为虚拟；vEthernet / Hyper-V 视为虚拟，除非 netdev 报告它有网关（外部交换机承载本机局域网）；rmnet、ccmni、pdp、wwan、clat、v4- 视为蜂窝；wlan、swlan、ap、eth、en 等带私网 IPv4 或全局/ULA IPv6 的视为局域网，包括 Android 热点。以太网或 Wi-Fi 只有在系统确实报告为虚拟硬件且无网关时才降为虚拟，读不到的 MAC 或网关不算。判断错误只影响顺序和至多 150 ms 的先行，不影响认证。
+
+拿到许可后，每端只凭对端提交的候选判断是否同处一个局域网，不额外发包。对端的全局 IPv6 落在本端某个局域网 /64 内，或对端候选同时包含本端的公网地址（同一 NAT 之后）与本端局域网子网内的地址，为强证据；仅子网相同为弱证据，因为 192.168.1.0/24 这类网段在无数家庭重复。与本端相同的地址、虚拟网卡的子网都不算证据。局域网优先开启时（默认），局域网候选先探测；有任何证据时再在 +20、+50 ms 补发，以免首包丢在 Wi-Fi 上，或在对端出站探测打开防火墙之前被丢弃。每条路径一回应就拨 QUIC。一旦确知局域网存在——强证据，或某条局域网路径已回应认证探测——非局域网路径在自身回应后最多等待 150 ms；局域网握手完成、局域网握手全部失败，或系统拒绝向局域网地址发送（iOS 未授予本地网络权限、无路由）都会提前结束等待。认证回应是证明而不只是证据：两个家庭的私网子网恰好相同时，对方的局域网地址永远不会回应 HMAC 探测，等待因此不会发生，谁先回应先拨谁；同一局域网上即使证据只是弱证据（STUN 失败、TUN 或 fake-IP 代理改写了反射地址、多出口），局域网路径通常最先回应，从此由它胜出，省去另一条握手。2 秒直连预算、3 秒协商、8 秒 TTL、冷却、16 次握手上限、提交与回退规则和认证都不变；不使用 mDNS、组播或广播。回环上的同一场景，建连从 765788c 的 140–144 ms（冷启动 184 ms）降到 20–22 ms；注入局域网网卡表、有强证据时冷启动 30–44 ms，只握手一次。
+
+局域网优先可以关闭，默认开启。它是每一端自己的本地策略，不改变线协议，新旧版本、开关不同的两端照常互通：
+
+| 入口 | 开关 |
+|---|---|
+| Rust SDK | `ConnectOptions.lan_first`、`RegisterOptions.lan_first`，默认 `true`（两者的 `Default` 都是手写的，`..Default::default()` 不会把它变成 `false`） |
+| CLI | `register` / `connect` 的 `--no-lan-first`，与 `--relay-only` 互斥；没有环境变量 |
+| Node | `register` / `connect` 请求的 `lanFirst?: boolean`，默认 `true` |
+| 远程桌面 | 共享端 `HostOptions.lan_first`；查看端沿用 `ConnectOptions` |
+| 应用 | 设置 →“直连”→“优先尝试局域网”，即 `AppConfig.lan_first`（旧的 config.json 读作开启），经 `pb_mapper_update_config` 保存，隧道、远程桌面连接与共享在下次启动时采用；后台共享经 helper 协议 5 的 `Options.lan_first` 带给服务 |
+
+关闭后，本端按对端提交的顺序探测，不在 +20、+50 ms 补发，也不让任何路径等待。保持不变的有：本端提交的候选与网卡分级（8 个名额里局域网地址不被 VPN、Hyper-V 挤掉，这是修正而非偏好）、每个 /64 一个地址、收到回应即拨号、同网证据的判断、`LinkKind` / `DirectLink` / `SessionReport.link`、各项计数与耗时、`lan_detected` / `lan_missed`，以及 `lan_detected` / `path_selected` 事件。关闭时 `lan_missed` 计的是预期中的结果。选路由拨号的消费端决定：提供端接受第一个通过验证的入站连接，它的开关只影响自己的探测顺序与补发。所以 A/B 对比要两端都关闭。
 
 可选 `port-mapping` feature 使用独立的 `portmapper` 库（PCP/NAT-PMP/UPnP），不依赖 iroh 运行时；默认构建不包含该依赖，运行时还需 SDK `with_port_mapping(true)` 或 CLI `--port-mapping` 显式开启。租约跟随直连 UDP endpoint，发现不阻塞会话协商，续租与失败重试由独立任务负责。真实网络变更使旧映射立即失效并重新发现网关；协调连接重连不释放租约。停止时有界等待释放；进程被强杀等情况下只能依靠网关租约过期。缓存的 STUN/网卡地址与即时租约分开，租约更新不会受十秒候选缓存阻挡；网络代数也防止发现过程覆盖并发的失效通知。
 
@@ -197,11 +215,15 @@ TLS 1.3 使用 `quinn::rustls`，双方验证许可中的证书、证书有效�
 
 ```text
 server_instance, id, service, is_datagram, restored
-consumer/provider: { report: { id, seq, path, state, reason }, age_ms } | null
+consumer/provider: { report: { id, seq, path, state, reason, link? }, age_ms } | null
 stale, conflicting
 ```
 
+`link` 为 `{ kind: lan | internet | private, family: ipv4 | ipv6 }`，只说明直连走在哪类网络上，不含地址。没有它的报告与以前逐字节相同；旧端点不发送它，旧 relay 重新序列化报告时丢弃它，后续版本新增的种类与地址族解析为 `unknown`。
+
 两端每 15 秒和状态变化时合并上报，队列满时保留最新状态，不能反压数据。45 秒缺少任一端新报告标记 stale，双方路径或状态不一致标记 conflicting。server 重启或控制面失联超过保留期后，按仍有效的凭据恢复端点观测，标记 restored；该记录绝不构成新的授权。被撤销的凭据不能继续上报，历史记录最终过期，但这不代表数据已经关闭。
+
+每个已提交的直连会话在本端诊断里保留一份 `DirectLink`，会话结束即释放，其中持有的 Quinn 连接克隆随之丢弃（这个 Quinn 分支没有弱引用）。它记录 `kind`、`family`、`via`（host、public、mapped、peer_reflexive）、对端地址、本端地址及其网卡名和等级、同网证据、各阶段耗时（negotiate、discover、STUN 及其结果 ok/timeout/unavailable/cached、grant、first_pong、lan_first_pong、handshake、commit、setup）、候选计数（含被截断数），以及读取时的 QUIC rtt、min_rtt、cwnd、MTU、收发与丢包、拥塞事件。`PathDiagnostics` 另计 `active_lan`、`lan_sessions`、`lan_detected`、`lan_missed`、`last_kind`；实时事件新增 `lan_detected` 与 `path_selected`；`session_path_selected` 日志行增加 `kind`、`family`、`local_ip`、`evidence`、`setup_ms`。这些经 FFI、Node 和远程桌面的 `ViewerStats.link` 到达界面。
 
 观测不包含 secret、证书或候选。新协议回退会话可显示消费端 relay 报告；提供端沿用原有中继控制，因此没有对应的新观测时明确显示单端/stale。旧 relay-only 会话继续使用原有 service/admin 查询。此版不提供会话吞吐统计、控制在线推断或服务端关闭直连命令。
 

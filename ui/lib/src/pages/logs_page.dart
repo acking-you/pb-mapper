@@ -6,6 +6,7 @@ import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/common/log_manager.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
+import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/shell/page_frame.dart';
 import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
@@ -151,11 +152,11 @@ class _LogsPageState extends State<LogsPage> {
       onChanged: _onSearch,
       decoration: InputDecoration(
         hintText: l10n.logsFilter,
-        prefixIcon: const Icon(AppIcons.search, size: 17),
+        prefixIcon: const Icon(AppIcons.search, size: AppIconSize.inline),
         suffixIcon: _keyword.isEmpty
             ? null
             : IconButton(
-                icon: const Icon(AppIcons.close, size: 15),
+                icon: const Icon(AppIcons.close, size: AppIconSize.inline),
                 onPressed: () {
                   _search.clear();
                   _keyword = '';
@@ -164,8 +165,12 @@ class _LogsPageState extends State<LogsPage> {
               ),
       ),
     );
-    return PageFrame(
+    // On a compact window Logs lives inside Settings, so it leads back there.
+    final compact = !ShellLayout.wideOf(context);
+    void back() => AppScope.of(context).go(AppPage.settings);
+    final page = PageFrame(
       title: l10n.navLogs,
+      onBack: compact ? back : null,
       actions: [
         IconButton(
           key: const Key('logs-copy'),
@@ -280,6 +285,13 @@ class _LogsPageState extends State<LogsPage> {
           ],
         ),
       ),
+    );
+    return PopScope(
+      canPop: !compact,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) back();
+      },
+      child: page,
     );
   }
 

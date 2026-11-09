@@ -2,6 +2,8 @@
 // This replaces the old generated bindings layer and keeps UI code simple.
 
 import 'dart:async';
+import 'desktop_api.dart';
+export 'desktop_api.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:pb_mapper_ui/src/common/polling.dart' show FirstWhereOrNull;
@@ -27,9 +29,31 @@ class OperationResult {
   });
 }
 
-/// What saving the relay settings left to do: this computer's tunnels on
-/// that relay, under that credential, still on the carrier it had before.
-/// Each keeps it until started again.
+/// What a path within a local network this computer shares with the other
+/// end runs over, for what it dials: QUIC, as before there was a choice, or
+/// TCP, which falls back to QUIC when the other end's firewall stops it. A
+/// path across the internet is always QUIC.
+enum LanTransport {
+  quic,
+  tcp;
+
+  /// The transport [raw] names; QUIC for anything else, as the Rust side
+  /// defaults.
+  static LanTransport parse(Object? raw) =>
+      raw == 'tcp' ? LanTransport.tcp : LanTransport.quic;
+
+  /// What it is called, in any language.
+  String get label => switch (this) {
+    LanTransport.quic => 'QUIC',
+    LanTransport.tcp => 'TCP',
+  };
+}
+
+/// What saving the settings left to do: this computer's tunnels on that
+/// relay, under that credential, still on the carrier it had before (`move`)
+/// or, when they may go direct, on the LAN-first it had (`lanFirst`), or the
+/// connections on the LAN transport they had (`lanTransport`). Each keeps it
+/// until started again.
 class CarrierMove {
   const CarrierMove({this.shares = const [], this.connections = const []});
 
@@ -38,6 +62,12 @@ class CarrierMove {
 
   bool get isEmpty => shares.isEmpty && connections.isEmpty;
   int get length => shares.length + connections.length;
+
+  /// The tunnels in this or [other], each once.
+  CarrierMove union(CarrierMove other) => CarrierMove(
+    shares: {...shares, ...other.shares}.toList(),
+    connections: {...connections, ...other.connections}.toList(),
+  );
 
   factory CarrierMove.fromMap(Object? raw) {
     final map = raw is Map ? raw : const {};
@@ -55,6 +85,15 @@ class ConfigStatus {
 
   /// How this computer reaches the relay.
   final RelayTransport relayTransport;
+
+  /// Whether this computer tries a local network it shares with the other
+  /// end first. Each tunnel and remote-desktop start takes it as it is then.
+  final bool lanFirst;
+
+  /// What such a network carries for what this computer dials. Each
+  /// connection and remote-desktop start takes it as it is then; as the
+  /// other end, this computer serves whichever is asked for.
+  final LanTransport lanTransport;
   final bool isolatedRelayAdminKeySet;
   final String isolatedRelayAdminKey;
 
@@ -63,6 +102,8 @@ class ConfigStatus {
     required this.keepAliveEnabled,
     required this.msgHeaderKey,
     this.relayTransport = RelayTransport.tcp,
+    this.lanFirst = true,
+    this.lanTransport = LanTransport.quic,
     this.isolatedRelayAdminKeySet = false,
     this.isolatedRelayAdminKey = '',
   });
@@ -76,6 +117,8 @@ class ConfigStatus {
       keepAliveEnabled: _asBool(map['keepAliveEnabled'], fallback: true),
       msgHeaderKey: _asString(map['msgHeaderKey']),
       relayTransport: RelayTransport.parse(map['relayTransport']),
+      lanFirst: _asBool(map['lanFirst'], fallback: true),
+      lanTransport: LanTransport.parse(map['lanTransport']),
       isolatedRelayAdminKeySet: _asBool(
         map['isolatedRelayAdminKeySet'],
         fallback: false,
@@ -83,6 +126,15 @@ class ConfigStatus {
       isolatedRelayAdminKey: _asString(map['isolatedRelayAdminKey']),
     );
   }
+
+  /// Whether [other] reaches the same relay the same way. A change of
+  /// [lanFirst] or [lanTransport] alone is no reason to ask the relay
+  /// anything again.
+  bool sameRelay(ConfigStatus other) =>
+      serverAddress == other.serverAddress &&
+      keepAliveEnabled == other.keepAliveEnabled &&
+      msgHeaderKey == other.msgHeaderKey &&
+      relayTransport == other.relayTransport;
 }
 
 class ServiceConfigInfo {
@@ -247,36 +299,124 @@ enum DirectStage {
       DirectStage.values.firstWhereOrNull((stage) => stage.name == raw);
 }
 
+/// Where a direct path runs.
+enum LinkKind {
+  /// Within one local network.
+  lan,
+
+  /// Across the internet.
+  internet,
+
+  /// Between private addresses not on one local network: a VPN, say.
+  private;
+
+  /// Null for a kind this app does not know yet.
+  static LinkKind? parse(Object? raw) =>
+      values.firstWhereOrNull((kind) => kind.name == raw);
+}
+
+/// A direct session's path, as the SDK saw it set up.
+@immutable
+class TunnelLink {
+  const TunnelLink({
+    this.kind,
+    this.family,
+    this.peer,
+    this.localIp,
+    this.transport = LanTransport.quic,
+    this.rttMs,
+    this.setupMs,
+  });
+
+  /// Null for a kind this app does not know yet.
+  final LinkKind? kind;
+
+  /// `ipv4` or `ipv6`.
+  final String? family;
+
+  /// The other computer's address, and this one's, the path runs between.
+  final String? peer;
+  final String? localIp;
+
+  /// QUIC, or TCP within a local network.
+  final LanTransport transport;
+
+  /// The round trip, in whole milliseconds rounded up: QUIC's, or over TCP
+  /// its handshake's.
+  final int? rttMs;
+  final int? setupMs;
+
+  static TunnelLink? maybeFrom(Object? raw) {
+    if (raw is! Map) return null;
+    int? number(Object? value) => value == null ? null : _asInt(value);
+    return TunnelLink(
+      kind: LinkKind.parse(raw['kind']),
+      family: raw['family'] as String?,
+      peer: raw['peer'] as String?,
+      localIp: raw['localIp'] as String?,
+      transport: LanTransport.parse(raw['transport']),
+      rttMs: number(raw['rttMs']),
+      setupMs: number(raw['setupMs']),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is TunnelLink &&
+      other.kind == kind &&
+      other.family == family &&
+      other.peer == peer &&
+      other.localIp == localIp &&
+      other.transport == transport &&
+      other.rttMs == rttMs &&
+      other.setupMs == setupMs;
+
+  @override
+  int get hashCode =>
+      Object.hash(kind, family, peer, localIp, transport, rttMs, setupMs);
+}
+
 /// How a running tunnel's sessions travel: each TCP connection or UDP flow
 /// through it goes direct or through the relay, decided as it opens. A
-/// connection counts both and its attempts; a share counts only the
-/// sessions that reach it directly.
+/// connection and a share both count every session on each path; a
+/// connection also counts its direct attempts, which a share does not make.
 @immutable
 class TunnelPath {
   const TunnelPath({
     this.activeDirect = 0,
     this.activeRelay = 0,
+    this.activeLan = 0,
     this.directSessions = 0,
     this.relaySessions = 0,
+    this.lanSessions = 0,
     this.attempt,
     this.lastDirect,
+    this.lastKind,
     this.setupMs,
     this.fallbackStage,
+    this.link,
   });
 
-  /// Sessions open now, on each path.
+  /// Sessions open now, on each path, and of the direct ones those within
+  /// one local network.
   final int activeDirect;
   final int activeRelay;
+  final int activeLan;
 
-  /// Sessions opened since the tunnel started, on each path.
+  /// Sessions opened since the tunnel started, on each path, and of the
+  /// direct ones those within one local network.
   final int directSessions;
   final int relaySessions;
+  final int lanSessions;
 
   /// The stage reached by a direct attempt in flight.
   final DirectStage? attempt;
 
   /// How the latest attempt ended: direct, the relay, or none yet.
   final bool? lastDirect;
+
+  /// Where the latest direct path ran.
+  final LinkKind? lastKind;
 
   /// How long the latest direct path took to set up.
   final int? setupMs;
@@ -285,6 +425,9 @@ class TunnelPath {
   /// its sessions straight to the relay for a while before trying again.
   final DirectStage? fallbackStage;
 
+  /// The newest direct session open now.
+  final TunnelLink? link;
+
   static TunnelPath? maybeFrom(Object? raw) {
     if (raw is! Map) return null;
     final last = raw['last'];
@@ -292,18 +435,22 @@ class TunnelPath {
     return TunnelPath(
       activeDirect: _asInt(raw['activeDirect']),
       activeRelay: _asInt(raw['activeRelay']),
+      activeLan: _asInt(raw['activeLan']),
       directSessions: _asInt(raw['directSessions']),
       relaySessions: _asInt(raw['relaySessions']),
+      lanSessions: _asInt(raw['lanSessions']),
       attempt: DirectStage.parse(raw['attempt']),
       lastDirect: switch (lastPath) {
         'direct' => true,
         'relay' => false,
         _ => null,
       },
+      lastKind: last is Map ? LinkKind.parse(last['kind']) : null,
       setupMs: last is Map && last['setupMs'] != null
           ? _asInt(last['setupMs'])
           : null,
       fallbackStage: last is Map ? DirectStage.parse(last['stage']) : null,
+      link: TunnelLink.maybeFrom(raw['link']),
     );
   }
 
@@ -312,23 +459,31 @@ class TunnelPath {
       other is TunnelPath &&
       other.activeDirect == activeDirect &&
       other.activeRelay == activeRelay &&
+      other.activeLan == activeLan &&
       other.directSessions == directSessions &&
       other.relaySessions == relaySessions &&
+      other.lanSessions == lanSessions &&
       other.attempt == attempt &&
       other.lastDirect == lastDirect &&
+      other.lastKind == lastKind &&
       other.setupMs == setupMs &&
-      other.fallbackStage == fallbackStage;
+      other.fallbackStage == fallbackStage &&
+      other.link == link;
 
   @override
   int get hashCode => Object.hash(
     activeDirect,
     activeRelay,
+    activeLan,
     directSessions,
     relaySessions,
+    lanSessions,
     attempt,
     lastDirect,
+    lastKind,
     setupMs,
     fallbackStage,
+    link,
   );
 }
 
@@ -493,18 +648,24 @@ class ServiceConnInfo {
 /// forgets a method fails to compile here; a fake that inherited from the real
 /// class would quietly fall through to the FFI instead.
 abstract interface class PbMapperApiClient {
+  DesktopApiClient get desktop;
   Future<OperationResult> setAppDirectoryPath(String path);
 
   Future<ConfigStatus> fetchConfig();
   Future<String> revealIsolatedRelayAdminKey();
 
-  /// Save the relay settings. Its [OperationResult.data] carries a
-  /// [CarrierMove] under `move` when the carrier changed.
+  /// Save the relay settings, whether this computer tries a shared local
+  /// network first, and what such a network carries. Its
+  /// [OperationResult.data] carries a [CarrierMove] under `move` when the
+  /// carrier changed, under `lanFirst` when that did, and under
+  /// `lanTransport` when that did.
   Future<OperationResult> updateConfig({
     required String serverAddress,
     required bool keepAlive,
     required String msgHeaderKey,
     RelayTransport relayTransport = RelayTransport.tcp,
+    bool lanFirst = true,
+    LanTransport lanTransport = LanTransport.quic,
   });
 
   /// Run a relay on [port]; with [quicPort], one that also takes QUIC there.
@@ -560,12 +721,15 @@ abstract interface class PbMapperApiClient {
   Future<OperationResult> deleteClientConfig(String serviceKey);
 
   /// A running share's ([share]) or connection's events as they happen, each
-  /// with its diagnostics as they stand by then; the first update carries
-  /// the diagnostics alone. Fails at once for a tunnel that is not running,
-  /// and ends when it stops. Cancelling ends the reader in Rust.
+  /// with its diagnostics and metrics as they stand by then; the first update
+  /// carries those alone. With [metricsEvery], updates of fresh metrics alone
+  /// come that often too, and as sessions open and close. Fails at once for a
+  /// tunnel that is not running, and ends when it stops. Cancelling ends the
+  /// reader in Rust.
   Stream<TunnelEventsUpdate> tunnelEvents({
     required String serviceKey,
     required bool share,
+    Duration? metricsEvery,
   });
 
   // --- The relay as a whole (`pb_mapper_relay_call_json`). Each throws a
@@ -614,6 +778,8 @@ abstract interface class PbMapperApiClient {
 }
 
 class PbMapperApi implements PbMapperApiClient {
+  @override
+  final DesktopApiClient desktop = DesktopApi();
   static final PbMapperApi _instance = PbMapperApi._internal();
   factory PbMapperApi() => _instance;
   PbMapperApi._internal();
@@ -654,12 +820,16 @@ class PbMapperApi implements PbMapperApiClient {
     required bool keepAlive,
     required String msgHeaderKey,
     RelayTransport relayTransport = RelayTransport.tcp,
+    bool lanFirst = true,
+    LanTransport lanTransport = LanTransport.quic,
   }) async {
     final result = await _service.updateConfig(
       serverAddress: serverAddress,
       keepAlive: keepAlive,
       msgHeaderKey: msgHeaderKey,
       relayTransport: relayTransport.name,
+      lanFirst: lanFirst,
+      lanTransport: lanTransport.name,
     );
     return _resultFrom(result);
   }
@@ -879,8 +1049,13 @@ class PbMapperApi implements PbMapperApiClient {
   Stream<TunnelEventsUpdate> tunnelEvents({
     required String serviceKey,
     required bool share,
+    Duration? metricsEvery,
   }) => _service
-      .tunnelEvents(serviceKey: serviceKey, share: share)
+      .tunnelEvents(
+        serviceKey: serviceKey,
+        share: share,
+        metricsEvery: metricsEvery,
+      )
       .map(TunnelEventsUpdate.fromMap);
 
   OperationResult _resultFrom(Map<String, dynamic> result) {

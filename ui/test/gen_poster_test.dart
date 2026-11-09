@@ -1,7 +1,9 @@
 /// Derives the README posters from the app itself, rendered with the bundled
-/// fonts and fixture data: in front, the galaxy of this computer and its
-/// relay; behind it, the Tunnels page; on the phone, a connection being made
-/// in one step. Beside them: the mark, the name and what pb-mapper does.
+/// fonts and fixture data: in front, the remote desktop viewer on Windows,
+/// in control of another computer with the quality monitor open; behind it,
+/// the galaxy of this computer, its relay and its tunnels; on an Android
+/// phone, the Remote tab's remembered computers. Beside them: the mark, the name and
+/// what pb-mapper and its SDK do.
 ///
 /// Opt-in, since PNG output differs a little across platforms:
 ///
@@ -22,11 +24,19 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
+import 'package:pb_mapper_ui/src/pages/remote/invite_scanner.dart';
+import 'package:pb_mapper_ui/src/pages/remote/remote_page.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_title_bar.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
+import 'package:pb_mapper_ui/src/ffi/remote_computer_vault.dart';
+import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
+import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/widgets/brand_mark.dart';
 
 import 'fake_pb_mapper_api.dart';
+import 'remote_preview.dart';
+import 'remote_screen_fixture.dart';
 import 'support.dart';
 
 /// The poster's layout size; it is written at [_outputScale] times this.
@@ -37,19 +47,38 @@ const _outputScale = 1.25;
 /// placed in the poster.
 const _captureScale = 2.0;
 
-/// The desktop screens' logical size, and the phone's.
-const _desktop = Size(1040, 720);
+/// The desktop screens' logical size, and the phone's. The viewer is as tall
+/// as its title bar and the remote picture at its width, so the picture fills
+/// it; the galaxy's window is shorter, so its stars clear the window in front.
+const _windowWidth = 1040.0;
+final _viewer = Size(
+  _windowWidth,
+  kViewerTitleBarHeight +
+      _windowWidth *
+          RemoteScreenFixture.size.height /
+          RemoteScreenFixture.size.width,
+);
+const _galaxy = Size(_windowWidth, 600);
 const _phone = Size(393, 852);
 
-/// Where the screens sit in the poster. Windows keep the desktop screens'
-/// proportions; the phone's frame adds its bezel around the screen's.
-const _back = Rect.fromLTWH(890, 62, 600, 415.4);
-const _front = Rect.fromLTWH(640, 284, 850, 588.5);
+/// The Android status bar's height on the phone, in its logical pixels.
+const _statusBar = 32.0;
+
+/// Where the screens sit in the poster. Windows keep their screens'
+/// proportions; the phone's frame adds its bezel around the screen's, and
+/// its top clears the viewer's toolbar.
+const _back = Rect.fromLTWH(890, 62, 600, 346.2);
+final _front = Rect.fromLTWH(
+  640,
+  306,
+  850,
+  850 * _viewer.height / _viewer.width,
+);
 const _bezel = 9.0;
 const _phoneWidth = 262.0;
 final _phoneRect = Rect.fromLTWH(
   566,
-  392,
+  398,
   _phoneWidth,
   (_phoneWidth - 2 * _bezel) * _phone.height / _phone.width + 2 * _bezel,
 );
@@ -98,21 +127,25 @@ const _english = _Copy(
     ('Relay', true),
     (' always.', false),
   ],
-  headline: 'Every private service,\none click away.',
+  headline: 'Every private service,\nevery Windows PC,\none click away.',
   body:
-      'Share a TCP or UDP service from one computer and open it on any '
-      'other: direct over QUIC when the network allows, through your relay '
-      'when it does not.',
-  second: 'Your tunnels, as a galaxy.',
+      'Share a TCP or UDP service, or a Windows desktop, and open it '
+      'anywhere: direct over QUIC when the network allows, through your '
+      'relay when it does not. Hardware H.265/H.264, real keyboard and mouse.',
+  second: 'All of it, in the SDK.',
   secondBody:
-      'The app draws this computer, the relay and every tunnel between '
-      'them. Click a planet to start, stop, edit or connect it.',
+      'Tunnels, the picture and its codec data, keyboard and mouse, status '
+      'streams and automatic recovery: the app runs on the Rust SDK, and so '
+      'can yours.',
+  // Two rows of three, paired by column: the paths, the picture, the SDK
+  // and the hands on it.
   chips: [
-    (LucideIcons.zap300, 'Direct over QUIC'),
-    (LucideIcons.radioTower300, 'Relay fallback'),
-    (LucideIcons.arrowLeftRight300, 'TCP & UDP'),
-    (LucideIcons.keyRound300, 'Revocable keys'),
-    (LucideIcons.code300, 'Rust & Node SDKs'),
+    (AppIcons.direct, 'QUIC direct'),
+    (AppIcons.remote, 'Remote desktop'),
+    (LucideIcons.code400, 'Rust & Node SDKs'),
+    (AppIcons.relay, 'Relay fallback'),
+    (LucideIcons.film400, 'H.265 / H.264'),
+    (AppIcons.keyboard, 'Keyboard & mouse'),
   ],
   output: '../docs/assets/poster.png',
 );
@@ -120,24 +153,26 @@ const _english = _Copy(
 const _chinese = _Copy(
   locale: Locale('zh'),
   motto: [('P2P 直连', true), ('优先，', false), ('中继', true), ('兜底。', false)],
-  headline: '每个私有服务，\n一键直达。',
+  headline: '每个私有服务，\n每台 Windows 电脑，\n一键直达。',
   // Broken by hand: Chinese wraps anywhere, and left alone it strands the
   // last character of a sentence on a line of its own.
   body:
-      '在一台电脑上共享 TCP / UDP 服务，\n'
-      '在另一台电脑上打开：能直连就走 QUIC 直连，\n'
-      '打不通就自动走你的中继。',
-  second: '你的隧道，是一片星系。',
+      '共享一台电脑上的 TCP / UDP 服务\n'
+      '或 Windows 桌面，在任何地方打开：\n'
+      '能直连就走 QUIC，打不通就走你的中继。\n'
+      '画面硬件 H.265/H.264 编码，键盘鼠标真实操控。',
+  second: '这一切，都在 SDK 里。',
   secondBody:
-      '这台电脑、中继和其间的每条隧道，\n'
-      '都画成一片星系。点一颗行星，\n'
-      '就能启动、停止、编辑或连接它。',
+      '隧道、画面与编解码数据、键盘鼠标、\n'
+      '状态流和自动恢复：应用就建在 Rust SDK\n'
+      '之上，你的程序也可以。',
   chips: [
-    (LucideIcons.zap300, 'QUIC 直连'),
-    (LucideIcons.radioTower300, '中继兜底'),
-    (LucideIcons.arrowLeftRight300, 'TCP 与 UDP'),
-    (LucideIcons.keyRound300, '可吊销密钥'),
-    (LucideIcons.code300, 'Rust 与 Node SDK'),
+    (AppIcons.direct, 'QUIC 直连'),
+    (AppIcons.remote, '远程桌面'),
+    (LucideIcons.code400, 'Rust 与 Node SDK'),
+    (AppIcons.relay, '中继兜底'),
+    (LucideIcons.film400, 'H.265 / H.264'),
+    (AppIcons.keyboard, '键盘鼠标'),
   ],
   output: '../docs/assets/poster.zh-CN.png',
 );
@@ -155,7 +190,7 @@ FakePbMapperApi _api(Locale locale) => FakePbMapperApi(
     fakeService(serviceKey: 'home-ssh', localAddress: '127.0.0.1:22'),
     fakeService(serviceKey: 'jellyfin', localAddress: '127.0.0.1:8096'),
     fakeService(
-      serviceKey: 'grafana',
+      serviceKey: 'wiki',
       localAddress: '127.0.0.1:3000',
       status: 'retrying',
       message: locale.languageCode == 'zh'
@@ -175,46 +210,85 @@ FakePbMapperApi _api(Locale locale) => FakePbMapperApi(
     'nas-files',
     'home-ssh',
     'jellyfin',
-    'grafana',
+    'wiki',
     'office-rdp',
     'lab-db',
     'build-cache',
     'media-server',
-    'gpu-notebook',
   ],
   conns: {
     'office-rdp': [fakeConn(connId: 41), fakeConn(connId: 42)],
   },
 );
 
-/// The app on [platform] at [size], on [page], after [arrange].
+/// The relay the remote desktop's shots name: the galaxy's.
+const _relay = 'relay.example.com:7666';
+
+/// [previewRemoteApi] against [_relay], on a device that views and does not
+/// share.
+FakePbMapperApi _remoteApi() {
+  final api = previewRemoteApi(host: false);
+  api.config = const ConfigStatus(
+    serverAddress: _relay,
+    keepAliveEnabled: true,
+    msgHeaderKey: '',
+  );
+  return api;
+}
+
+/// A direct session's figures: H.265 at 60 FPS over 1080p, within the
+/// Balanced preset's 4–8 Mbit/s in `docs/remote-desktop.md`.
+const _stats = DesktopStats(
+  path: 'direct',
+  codec: 'h265',
+  presentedFps: 60,
+  receivedFps: 60,
+  captureFps: 60,
+  rttMs: 11,
+  speedRxBps: 590000,
+  speedTxBps: 6100,
+  encoderBitrateBps: 4600000,
+  receivedBitrateBps: 4700000,
+  width: 1920,
+  height: 1080,
+  preset: DesktopQuality.balanced,
+  maxFps: 60,
+);
+
+/// The app on [platform] at [size], on [page], after [arrange]: by default
+/// against [_api], otherwise against [api] with [vault] and [prefs].
 Future<ui.Image> _shot(
   WidgetTester tester, {
   required _Copy copy,
   required TargetPlatform platform,
   required Size size,
   required AppPage page,
+  FakePbMapperApi? api,
+  RemoteComputerVault? vault,
+  ViewerPrefs? prefs,
   ThemeMode theme = ThemeMode.light,
   EdgeInsets safeArea = EdgeInsets.zero,
-  Future<void> Function(WidgetTester tester)? arrange,
+  Future<void> Function(WidgetTester tester, FakePbMapperApi api)? arrange,
 }) async {
-  debugDefaultTargetPlatformOverride = platform;
-  try {
+  Future<ui.Image> shoot() async {
+    final app = api ?? _api(copy.locale);
     tester.view.padding = tester.view.viewPadding = FakeViewPadding(
       top: safeArea.top,
       bottom: safeArea.bottom,
     );
     await pumpApp(
       tester,
-      _api(copy.locale),
+      app,
       page: page,
       size: size,
       themeMode: theme,
       locale: copy.locale,
+      vault: vault,
+      viewerPrefs: prefs,
     );
     if (arrange != null) {
-      await arrange(tester);
-      await settle(tester);
+      await arrange(tester, app);
+      await tester.pump();
     }
     final boundary = tester.renderObject<RenderRepaintBoundary>(
       find.byKey(appRootKey),
@@ -224,6 +298,16 @@ Future<ui.Image> _shot(
     );
     await finish(tester);
     return image!;
+  }
+
+  try {
+    if (platform == TargetPlatform.windows) {
+      late ui.Image image;
+      await onWindows(tester, () async => image = await shoot());
+      return image;
+    }
+    debugDefaultTargetPlatformOverride = platform;
+    return await shoot();
   } finally {
     debugDefaultTargetPlatformOverride = null;
     tester.view
@@ -260,18 +344,20 @@ Widget _screen(ui.Image image) => RawImage(
   filterQuality: FilterQuality.high,
 );
 
-/// A desktop window: the captured screen, with the macOS window controls in
-/// the strip the rail leaves for them, and a hairline edge.
+/// A desktop window: the captured screen with a hairline edge and, when
+/// [lights], the macOS window controls in the strip the rail leaves for
+/// them. A Windows screen draws its own caption buttons.
 class _Window extends StatelessWidget {
-  const _Window(this.screen);
+  const _Window(this.screen, {this.lights = true});
 
   final ui.Image screen;
+  final bool lights;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final scale = constraints.maxWidth / _desktop.width;
+        final scale = constraints.maxWidth / _windowWidth;
         const colors = [
           Color(0xFFFF5F57),
           Color(0xFFFEBC2E),
@@ -288,19 +374,20 @@ class _Window extends StatelessWidget {
               children: [
                 _screen(screen),
                 // The rail's 46 pt drag strip is where the lights go.
-                for (final (i, color) in colors.indexed)
-                  Positioned(
-                    left: (20 + i * 20 - 6) * scale,
-                    top: (23 - 6) * scale,
-                    width: 12 * scale,
-                    height: 12 * scale,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: color,
-                        shape: BoxShape.circle,
+                if (lights)
+                  for (final (i, color) in colors.indexed)
+                    Positioned(
+                      left: (20 + i * 20 - 6) * scale,
+                      top: (23 - 6) * scale,
+                      width: 12 * scale,
+                      height: 12 * scale,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: color,
+                          shape: BoxShape.circle,
+                        ),
                       ),
                     ),
-                  ),
                 DecoratedBox(
                   decoration: BoxDecoration(
                     borderRadius: shape,
@@ -316,8 +403,8 @@ class _Window extends StatelessWidget {
   }
 }
 
-/// The phone: the captured screen in an ink frame, with a status bar around
-/// its island.
+/// The phone, an Android one as captured: the screen in an ink frame, with
+/// a status bar around its punch-hole camera.
 class _Phone extends StatelessWidget {
   const _Phone(this.screen);
 
@@ -325,7 +412,12 @@ class _Phone extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const radius = 44.0;
+    const radius = 36.0;
+    final bar = (_phoneWidth - 2 * _bezel) / _phone.width * _statusBar;
+    Widget status(IconData icon) => Padding(
+      padding: const EdgeInsets.only(left: 3),
+      child: Icon(icon, size: 11, color: _ink),
+    );
     return DecoratedBox(
       decoration: BoxDecoration(
         color: _ink,
@@ -341,43 +433,35 @@ class _Phone extends StatelessWidget {
             children: [
               _screen(screen),
               Positioned(
-                top: 6,
+                top: 0,
                 left: 0,
                 right: 0,
-                height: 24,
-                child: Row(
+                height: bar,
+                child: Stack(
+                  alignment: Alignment.center,
                   children: [
-                    const SizedBox(width: 28),
-                    Text(
-                      '9:41',
-                      style: _style(13, weight: FontWeight.w600, height: 1),
+                    Row(
+                      children: [
+                        const SizedBox(width: 18),
+                        Text(
+                          '9:30',
+                          style: _style(11, weight: FontWeight.w500, height: 1),
+                        ),
+                        const Spacer(),
+                        status(LucideIcons.wifi400),
+                        status(LucideIcons.signal400),
+                        status(LucideIcons.batteryFull400),
+                        const SizedBox(width: 16),
+                      ],
                     ),
-                    const Spacer(),
                     Container(
-                      width: _phoneWidth * 0.3,
-                      height: 22,
+                      width: 10,
+                      height: 10,
                       decoration: BoxDecoration(
                         color: _ink,
-                        borderRadius: BorderRadius.circular(11),
+                        shape: BoxShape.circle,
                       ),
                     ),
-                    const Spacer(),
-                    Container(
-                      width: 22,
-                      height: 11,
-                      padding: const EdgeInsets.all(2),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: _ink, width: 1.2),
-                        borderRadius: BorderRadius.circular(3),
-                      ),
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: _ink,
-                          borderRadius: BorderRadius.circular(1.5),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 22),
                   ],
                 ),
               ),
@@ -399,7 +483,7 @@ class _Chip extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       height: 34,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(17),
@@ -408,7 +492,7 @@ class _Chip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 16, color: _signal),
+          Icon(icon, size: AppIconSize.inline, color: _signal),
           const SizedBox(width: 7),
           Text(label, style: _style(14, weight: FontWeight.w500, height: 1)),
         ],
@@ -420,14 +504,14 @@ class _Chip extends StatelessWidget {
 class _Poster extends StatelessWidget {
   const _Poster({
     required this.copy,
+    required this.viewer,
     required this.galaxy,
-    required this.tunnels,
     required this.phone,
   });
 
   final _Copy copy;
+  final ui.Image viewer;
   final ui.Image galaxy;
-  final ui.Image tunnels;
   final ui.Image phone;
 
   @override
@@ -560,10 +644,13 @@ class _Poster extends StatelessWidget {
               ],
             ),
           ),
-          // Behind: every tunnel; in front: the galaxy; on the phone, a
-          // connection being made.
-          Positioned.fromRect(rect: _back, child: _Window(tunnels)),
-          Positioned.fromRect(rect: _front, child: _Window(galaxy)),
+          // Behind: the tunnels, as a galaxy; in front: another computer,
+          // in control; on the phone, the computers it views.
+          Positioned.fromRect(rect: _back, child: _Window(galaxy)),
+          Positioned.fromRect(
+            rect: _front,
+            child: _Window(viewer, lights: false),
+          ),
           Positioned.fromRect(rect: _phoneRect, child: _Phone(phone)),
         ],
       ),
@@ -571,38 +658,66 @@ class _Poster extends StatelessWidget {
   }
 }
 
+/// Gives Office PC, the featured computer, its last picture, as a session
+/// leaves it behind, and lets it decode.
+Future<void> _rememberPicture(WidgetTester tester) async {
+  final computers = AppScope.of(
+    tester.element(find.byType(RemotePage)),
+  ).store.computers;
+  final id = computers.computers.first.id;
+  final png = await RemoteScreenFixture.png(tester);
+  computers.thumbnailFile(id)!.writeAsBytesSync(png);
+  computers.thumbnailWritten(id);
+  await decodePreviewPicture(tester);
+}
+
+DateTime _thisMorning() {
+  final now = DateTime.now();
+  return DateTime(now.year, now.month, now.day, 9, 12);
+}
+
 Future<void> _render(WidgetTester tester, _Copy copy) async {
+  // The viewer: Windows, where H.265 is decoded in hardware.
+  final monitor = ViewerPrefs(persist: false);
+  await monitor.setQualityMonitor(true);
+  final viewer = await _shot(
+    tester,
+    copy: copy,
+    platform: TargetPlatform.windows,
+    size: _viewer,
+    page: AppPage.remote,
+    api: _remoteApi(),
+    vault: previewComputers(relay: _relay),
+    prefs: monitor,
+    arrange: (tester, api) async {
+      await viewPreviewComputer(tester, api, stats: _stats);
+      // Past the toolbar's entrance and the monitor's first sample.
+      await tester.pump(const Duration(seconds: 2));
+    },
+  );
   final galaxy = await _shot(
     tester,
     copy: copy,
     platform: TargetPlatform.macOS,
-    size: _desktop,
+    size: _galaxy,
     page: AppPage.overview,
     theme: ThemeMode.dark,
   );
-  final tunnels = await _shot(
-    tester,
-    copy: copy,
-    platform: TargetPlatform.macOS,
-    size: _desktop,
-    page: AppPage.tunnels,
-  );
+  // The phone: Android, which views and remembers computers as Windows
+  // does, and scans an invitation's QR code.
+  InviteScanner.debugSupportedOverride = true;
   final phone = await _shot(
     tester,
     copy: copy,
-    platform: TargetPlatform.iOS,
+    platform: TargetPlatform.android,
     size: _phone,
-    page: AppPage.tunnels,
-    safeArea: const EdgeInsets.only(top: 54, bottom: 34),
-    // Connect to a service on the relay: pick it, and the form is done.
-    arrange: (tester) async {
-      await tester.tap(find.byKey(const Key('new-tunnel')));
-      await settle(tester);
-      await tester.tap(find.byKey(const Key('tunnel-kind-connect')));
-      await settle(tester);
-      await tester.tap(find.byKey(const Key('suggestion-media-server')));
-    },
-  );
+    page: AppPage.remote,
+    api: _remoteApi(),
+    // Last used this morning, before the phone's 9:30.
+    vault: previewComputers(relay: _relay, officeUsed: _thisMorning()),
+    safeArea: const EdgeInsets.only(top: _statusBar, bottom: 28),
+    arrange: (tester, _) => _rememberPicture(tester),
+  ).whenComplete(() => InviteScanner.debugSupportedOverride = null);
 
   tester.view
     ..physicalSize = _poster
@@ -614,8 +729,8 @@ Future<void> _render(WidgetTester tester, _Copy copy) async {
         textDirection: TextDirection.ltr,
         child: _Poster(
           copy: copy,
+          viewer: viewer,
           galaxy: galaxy,
-          tunnels: tunnels,
           phone: phone,
         ),
       ),
@@ -636,15 +751,26 @@ Future<void> _render(WidgetTester tester, _Copy copy) async {
   tester.view.reset();
 }
 
-/// The screens are captured as macOS and iOS, whose CJK chain leads with
-/// PingFang SC. The test has no such face and would draw some of its glyphs
-/// as boxes, so the bundled subset stands in for it.
+/// The galaxy is captured as macOS, whose CJK chain leads with PingFang SC.
+/// The test has no such face and would draw some of its glyphs as boxes, so
+/// the bundled subset stands in for it.
 Future<void> _standInForPingFang() async {
   final loader = FontLoader('PingFang SC');
   for (final weight in ['Regular', 'Medium', 'SemiBold']) {
     loader.addFont(
       rootBundle.load('assets/fonts/NotoSansSC-$weight.subset.ttf'),
     );
+  }
+  await loader.load();
+}
+
+/// The viewer is captured as Windows, whose face is Segoe UI. No machine
+/// but a Windows one has it, so the poster's own face stands in, the same
+/// on every machine.
+Future<void> _standInForSegoeUi() async {
+  final loader = FontLoader('Segoe UI');
+  for (final weight in ['Regular', 'Medium', 'SemiBold', 'Bold']) {
+    loader.addFont(rootBundle.load('assets/fonts/GoogleSansFlex-$weight.ttf'));
   }
   await loader.load();
 }
@@ -656,6 +782,7 @@ void main() {
     if (skip) return;
     await loadRealFonts();
     await _standInForPingFang();
+    await _standInForSegoeUi();
   });
 
   for (final copy in [_english, _chinese]) {

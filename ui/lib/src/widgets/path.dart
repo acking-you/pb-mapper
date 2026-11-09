@@ -4,6 +4,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart' show LanTransport;
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
@@ -35,7 +36,7 @@ class PathChip extends StatelessWidget {
         color: scheme.onSurfaceVariant,
       ),
     );
-    Widget icon = Icon(pathIcon(mode), size: 13, color: color);
+    Widget icon = Icon(pathIcon(mode), size: AppIconSize.inline, color: color);
     if (mode == PathMode.trying) icon = _Breathing(child: icon);
     return Tooltip(
       message: pathDetail(context, tunnel),
@@ -73,15 +74,18 @@ class PathRoute extends StatelessWidget {
     if (mode == null) return const SizedBox.shrink();
     final scheme = Theme.of(context).colorScheme;
     final direct = switch (mode) {
-      PathMode.direct || PathMode.mixed || PathMode.trying => true,
+      PathMode.direct ||
+      PathMode.lan ||
+      PathMode.mixed ||
+      PathMode.trying => true,
       _ => false,
     };
     final throughRelay = switch (mode) {
-      PathMode.direct || PathMode.trying => false,
+      PathMode.direct || PathMode.lan || PathMode.trying => false,
       _ => true,
     };
     final muted = scheme.onSurfaceVariant;
-    final signal = signalColor(scheme);
+    final signal = pathColor(scheme, mode);
     Widget end(IconData icon) => Icon(icon, size: 18, color: muted);
     return SizedBox(
       key: Key('route-${tunnel.id}'),
@@ -108,7 +112,7 @@ class PathRoute extends StatelessWidget {
                     : const Alignment(0, 0.95),
                 child: Icon(
                   AppIcons.relay,
-                  size: 14,
+                  size: AppIconSize.inline,
                   color: throughRelay ? muted : muted.withValues(alpha: 0.45),
                 ),
               ),
@@ -224,9 +228,11 @@ class _BreathingState extends State<_Breathing>
 }
 
 /// The colour of a path: the signal blue for a path of its own, past the
-/// relay, as live tunnels are drawn; a neutral grey for the relay.
+/// relay, as live tunnels are drawn, and green within one local network; a
+/// neutral grey for the relay.
 Color pathColor(ColorScheme scheme, PathMode mode) => switch (mode) {
   PathMode.direct || PathMode.mixed || PathMode.trying => signalColor(scheme),
+  PathMode.lan => successColor(scheme),
   PathMode.relay ||
   PathMode.relayOnly ||
   PathMode.directFirst => scheme.outline,
@@ -234,6 +240,7 @@ Color pathColor(ColorScheme scheme, PathMode mode) => switch (mode) {
 
 IconData pathIcon(PathMode mode) => switch (mode) {
   PathMode.direct || PathMode.trying || PathMode.directFirst => AppIcons.direct,
+  PathMode.lan => AppIcons.router,
   PathMode.mixed => AppIcons.mixedPath,
   PathMode.relay || PathMode.relayOnly => AppIcons.relay,
 };
@@ -246,13 +253,26 @@ bool _crossesRelay(PathMode? mode) => switch (mode) {
 };
 
 /// What [tunnel]'s path is called, in a word or two; with the carrier when
-/// that is QUIC, TCP being what a relay is reached over unless said.
+/// that is not the usual one: QUIC to the relay, which is reached over TCP
+/// unless said, or TCP on a direct path, which runs over QUIC unless said.
+/// TCP is only ever within a LAN, or on this computer's loopback, which is
+/// not a LAN and reads as direct.
 String pathLabel(BuildContext context, Tunnel tunnel) {
   final label = _pathLabel(context, tunnel);
-  return tunnel.overQuic && _crossesRelay(tunnel.pathMode)
-      ? '$label · ${RelayTransport.quic.label}'
+  if (tunnel.overQuic && _crossesRelay(tunnel.pathMode)) {
+    return '$label · ${RelayTransport.quic.label}';
+  }
+  final direct = switch (tunnel.pathMode) {
+    PathMode.lan || PathMode.direct => true,
+    _ => false,
+  };
+  return direct && _overTcp(tunnel.path?.link)
+      ? '$label · ${LanTransport.tcp.label}'
       : label;
 }
+
+/// Whether a direct [link] runs over TCP rather than QUIC.
+bool _overTcp(TunnelLink? link) => link?.transport == LanTransport.tcp;
 
 String _pathLabel(BuildContext context, Tunnel tunnel) {
   final l10n = context.l10n;
@@ -264,6 +284,10 @@ String _pathLabel(BuildContext context, Tunnel tunnel) {
     PathMode.direct when tunnel.kind == TunnelKind.share =>
       l10n.pathShareDirect(path?.activeDirect ?? 0),
     PathMode.direct => l10n.pathDirect,
+    PathMode.lan when tunnel.kind == TunnelKind.share => l10n.pathLanSessions(
+      path?.activeLan ?? 0,
+    ),
+    PathMode.lan => l10n.pathLan,
     PathMode.relay => l10n.pathRelay,
     PathMode.mixed => l10n.pathMixed(
       path?.activeDirect ?? 0,
@@ -292,13 +316,22 @@ String _pathDetail(BuildContext context, Tunnel tunnel) {
       return l10n.pathDirectFirstDetail;
     case PathMode.trying:
       return l10n.pathTryingDetail(_stage(context, path?.attempt));
-    case PathMode.direct when share:
-      return l10n.pathShareDirectDetail(path?.activeDirect ?? 0);
-    case PathMode.direct:
-      final setup = path?.setupMs;
-      return setup == null
-          ? l10n.pathDirectDetail
-          : '${l10n.pathDirectDetail} ${l10n.pathSetup(setup)}';
+    case PathMode.direct || PathMode.lan when share:
+      return _withLink(
+        context,
+        l10n.pathShareDirectDetail(path?.activeDirect ?? 0),
+        path,
+      );
+    case PathMode.direct || PathMode.lan:
+      final said = tunnel.pathMode == PathMode.lan
+          ? l10n.pathLanDetail
+          : l10n.pathDirectDetail;
+      final setup = path?.link?.setupMs ?? path?.setupMs;
+      return _withLink(
+        context,
+        setup == null ? said : '$said ${l10n.pathSetup(setup)}',
+        path,
+      );
     case PathMode.mixed:
       return l10n.pathMixedDetail(
         path?.activeDirect ?? 0,
@@ -319,6 +352,33 @@ String _pathDetail(BuildContext context, Tunnel tunnel) {
       return '';
   }
 }
+
+/// [said], and under it the direct link open now: where it runs, over
+/// which family and, when it is TCP, which carrier, to which address, and
+/// its round trip.
+String _withLink(BuildContext context, String said, TunnelPath? path) {
+  final link = path?.link;
+  if (link == null) return said;
+  final facts = [
+    linkKindLabel(context, link.kind),
+    if (_overTcp(link)) LanTransport.tcp.label,
+    ?familyLabel(link.family),
+    ?link.peer,
+    if (link.rttMs case final rtt?) context.l10n.pathRoundTrip(rtt),
+  ];
+  return '$said\n${facts.join(' · ')}';
+}
+
+/// What a direct path's kind is called.
+String linkKindLabel(BuildContext context, LinkKind? kind) =>
+    context.l10n.pathLinkKind(kind?.name ?? '');
+
+/// `IPv4` or `IPv6`, for the SDK's `ipv4` and `ipv6`.
+String? familyLabel(String? family) => switch (family) {
+  'ipv4' => 'IPv4',
+  'ipv6' => 'IPv6',
+  _ => null,
+};
 
 String _stage(BuildContext context, DirectStage? stage) {
   final l10n = context.l10n;

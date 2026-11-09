@@ -37,10 +37,60 @@ pub enum ErrorCode {
     AddressInUse,
     /// The server did not answer in time.
     Timeout,
-    /// The server answered with something this version did not expect.
+    /// The server answered with something this version did not expect, or
+    /// stored data cannot be read as what it should be: the remembered
+    /// computers, or the remembered sharing grant.
     Protocol,
     /// Reading or writing local configuration failed.
     Io,
+    /// The remote computer speaks another remote desktop protocol: update
+    /// pb-mapper on both computers.
+    VersionMismatch,
+    /// The remote computer's certificate is not the one its invitation pins.
+    IdentityChanged,
+    /// The remote computer is already serving another viewer.
+    HostBusy,
+    /// The remote computer refused the invitation.
+    AccessDenied,
+    /// A pb-mapper setup string was given where a desktop invitation belongs.
+    SetupString,
+    /// The text is not a desktop invitation.
+    InvalidInvitation,
+    /// Input needs a freshly presented picture of the current desktop.
+    NotFresh,
+    /// Input was sent without control of the remote computer.
+    NotControlling,
+    /// Control was revoked because input backed up on the remote computer.
+    InputCongestion,
+    /// The remote computer offers no display modes: it cannot change its
+    /// resolution, or this session cannot reach it.
+    DisplayModeNotOffered,
+    /// None of the remote display's modes fits this computer's display.
+    DisplayModeNoFit,
+    /// The remote display does not offer that resolution.
+    DisplayModeNotListed,
+    /// The remembered computers are locked or cannot be read.
+    VaultUnavailable,
+    /// Resuming would move this computer's host to the relay or namespace
+    /// the settings name now, which changes its invitation: ask first.
+    RelayChanged,
+    /// The Windows desktop service is older than this app: set it up again.
+    HelperOutdated,
+    /// The Windows desktop service is not installed.
+    HelperMissing,
+    /// The Windows desktop service is installed but not running; it may be
+    /// restarting.
+    HelperStopped,
+    /// The Windows desktop service serves another installed copy of the app
+    /// for this user, so this one cannot use or ask it: set it up again from
+    /// this one.
+    HelperForeignApp,
+    /// The Windows desktop service belongs to another Windows user, or its
+    /// installation cannot be read: this app cannot set it up again.
+    HelperOtherOwner,
+    /// The running Windows desktop service cannot be shown to be the
+    /// protected helper.
+    HelperUnverified,
     /// Anything with no more specific answer.
     ///
     /// Also where a code this build does not recognise lands, so an older CLI
@@ -95,6 +145,7 @@ constructors! {
     timeout => Timeout,
     protocol => Protocol,
     io => Io,
+    vault_unavailable => VaultUnavailable,
     internal => Internal,
 }
 

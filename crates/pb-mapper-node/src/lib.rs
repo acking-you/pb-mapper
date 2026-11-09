@@ -91,6 +91,35 @@ pub struct JsPortMappingDiagnostics {
     pub failures: f64,
 }
 
+/// One `next()` of a reader: `receive`, unless the reader was closed first,
+/// which resolves with `null`, or `timeout_ms` passed, a rejection naming
+/// `what` that loses nothing, `receive` being cancel-safe.
+async fn read_next<T>(
+    closed: &tokio_util::sync::CancellationToken,
+    timeout_ms: Option<u32>,
+    what: &str,
+    receive: impl std::future::Future<Output = Result<Option<T>>>,
+) -> Result<Option<T>> {
+    let receive = async {
+        match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms.into()), receive)
+                .await
+                .map_err(|_| Error::from_reason(format!("no {what} within {ms} ms")))?,
+            None => receive.await,
+        }
+    };
+    tokio::select! {
+        biased;
+        () = closed.cancelled() => Ok(None),
+        result = receive => result,
+    }
+}
+
+/// A reader's period: `everyMs`, one second when absent.
+fn period(every_ms: Option<u32>) -> Duration {
+    Duration::from_millis(every_ms.map_or(1_000, u64::from))
+}
+
 /// A tunnel's events, read one at a time: the outcomes it kept, then every
 /// event as it happens. Nothing queues on the JS side while no one reads.
 #[napi]
@@ -107,7 +136,7 @@ impl TunnelEvents {
     /// first, which loses no event. Calls are served one at a time.
     #[napi]
     pub async fn next(&self, timeout_ms: Option<u32>) -> Result<Option<JsTunnelEvent>> {
-        let receive = async {
+        read_next(&self.closed, timeout_ms, "tunnel event", async {
             match self.events.lock().await.recv().await {
                 Some(Ok(event)) => Ok(Some(event.into())),
                 Some(Err(lagged)) => Err(Error::from_reason(format!(
@@ -115,20 +144,66 @@ impl TunnelEvents {
                 ))),
                 None => Ok(None),
             }
-        };
-        let receive = async {
-            match timeout_ms {
-                Some(ms) => tokio::time::timeout(Duration::from_millis(ms.into()), receive)
-                    .await
-                    .map_err(|_| Error::from_reason(format!("no tunnel event within {ms} ms")))?,
-                None => receive.await,
-            }
-        };
-        tokio::select! {
-            biased;
-            () = self.closed.cancelled() => Ok(None),
-            result = receive => result,
-        }
+        })
+        .await
+    }
+
+    /// Stop reading: a pending `next()` resolves with `null`, as do later ones.
+    #[napi]
+    pub fn close(&self) {
+        self.closed.cancel();
+    }
+}
+
+/// A tunnel's metrics, sampled as they are read: one at once, then one a
+/// period and one whenever a session opens or closes or the tunnel changes,
+/// never two within 100 ms. Each is taken when `next()` resolves, so nothing
+/// queues and a slow reader gets fewer, fresher samples.
+#[napi]
+pub struct TunnelMetricsReader {
+    stream: tokio::sync::Mutex<sdk::TunnelMetricsStream>,
+    closed: tokio_util::sync::CancellationToken,
+}
+
+#[napi]
+impl TunnelMetricsReader {
+    /// The next sample, or `null` once the tunnel has stopped (after one
+    /// last sample) or `close()` was called. Rejects when `timeoutMs` passes
+    /// first, which loses nothing. Calls are served one at a time.
+    #[napi]
+    pub async fn next(&self, timeout_ms: Option<u32>) -> Result<Option<JsTunnelMetrics>> {
+        read_next(&self.closed, timeout_ms, "tunnel metrics", async {
+            Ok(self.stream.lock().await.recv().await.map(Into::into))
+        })
+        .await
+    }
+
+    /// Stop reading: a pending `next()` resolves with `null`, as do later ones.
+    #[napi]
+    pub fn close(&self) {
+        self.closed.cancel();
+    }
+}
+
+/// A relay carrier's diagnostics, sampled as they are read: one at once,
+/// then one a period, for as long as the client is kept.
+#[napi]
+pub struct RelayMetricsReader {
+    stream: tokio::sync::Mutex<sdk::RelayMetricsStream>,
+    closed: tokio_util::sync::CancellationToken,
+}
+
+#[napi]
+impl RelayMetricsReader {
+    /// The next sample, or `null` once the client is gone or `close()` was
+    /// called. Rejects when `timeoutMs` passes first. Calls are served one
+    /// at a time.
+    #[napi]
+    pub async fn next(&self, timeout_ms: Option<u32>) -> Result<Option<JsRelayDiagnostics>> {
+        read_next(&self.closed, timeout_ms, "relay metrics", async {
+            Ok(self.stream.lock().await.recv().await.map(Into::into))
+        })
+        .await
     }
 
     /// Stop reading: a pending `next()` resolves with `null`, as do later ones.
@@ -146,6 +221,9 @@ pub struct JsRelayDiagnostics {
     pub streams_reused: f64,
     pub last_error: Option<String>,
     pub connections: Vec<JsQuicConnectionDiagnostics>,
+    /// The smoothed round trip of every tunnel's control exchanges with
+    /// this relay over this carrier, the relay's handling included.
+    pub control_rtt_ms: Option<f64>,
 }
 
 #[napi(object)]
@@ -156,13 +234,18 @@ pub struct JsQuicConnectionDiagnostics {
     /// streams already on it.
     pub pooled: bool,
     pub rtt_us: f64,
+    pub min_rtt_us: f64,
     pub congestion_window: f64,
     pub mtu: u32,
     pub sent_packets: f64,
     pub lost_packets: f64,
     pub congestion_events: f64,
+    /// UDP bytes each way, and lost, of every tunnel on the connection.
     pub sent_bytes: f64,
     pub received_bytes: f64,
+    pub lost_bytes: f64,
+    /// The congestion controller's estimate of the path, in bits per second.
+    pub bandwidth_bps: Option<f64>,
 }
 
 /// The name of a relay carrier, as the JS API spells it.
@@ -190,6 +273,7 @@ impl From<sdk::RelayDiagnostics> for JsRelayDiagnostics {
                     peer_addr: connection.peer_addr.to_string(),
                     pooled: connection.pooled,
                     rtt_us: number(connection.rtt_us),
+                    min_rtt_us: number(connection.min_rtt_us),
                     congestion_window: number(connection.congestion_window),
                     mtu: connection.mtu.into(),
                     sent_packets: number(connection.sent_packets),
@@ -197,8 +281,185 @@ impl From<sdk::RelayDiagnostics> for JsRelayDiagnostics {
                     congestion_events: number(connection.congestion_events),
                     sent_bytes: number(connection.sent_bytes),
                     received_bytes: number(connection.received_bytes),
+                    lost_bytes: number(connection.lost_bytes),
+                    bandwidth_bps: connection.bandwidth_bps.map(number),
                 })
                 .collect(),
+            control_rtt_ms: value.control_rtt_ms.map(number),
+        }
+    }
+}
+
+/// Application bytes, after decryption and without framing: `sent` from
+/// this end's local side, `received` back.
+#[napi(object)]
+pub struct JsByteCount {
+    pub sent: f64,
+    pub received: f64,
+}
+
+impl From<sdk::ByteCount> for JsByteCount {
+    fn from(value: sdk::ByteCount) -> Self {
+        Self {
+            sent: number(value.sent),
+            received: number(value.received),
+        }
+    }
+}
+
+/// A tunnel's application bytes by path, over its life; `direct` includes
+/// `lan`.
+#[napi(object)]
+pub struct JsPathTraffic {
+    pub relay: JsByteCount,
+    pub direct: JsByteCount,
+    pub lan: JsByteCount,
+}
+
+impl From<sdk::PathTraffic> for JsPathTraffic {
+    fn from(value: sdk::PathTraffic) -> Self {
+        Self {
+            relay: value.relay.into(),
+            direct: value.direct.into(),
+            lan: value.lan.into(),
+        }
+    }
+}
+
+/// A tunnel's sessions on each path: open now, and since it started.
+#[napi(object)]
+pub struct JsSessionCounts {
+    pub active_relay: f64,
+    pub active_direct: f64,
+    pub active_lan: f64,
+    pub relay: f64,
+    pub direct: f64,
+    pub lan: f64,
+}
+
+/// How a tunnel's relay is doing, as its own attempts and probes see it.
+#[napi(object)]
+pub struct JsRelayHealth {
+    /// `tcp` or `quic`.
+    pub transport: String,
+    /// The relay attempt's phase, as `lastAttemptPhase` names it.
+    pub phase: String,
+    pub consecutive_failures: f64,
+    /// The smoothed round trip of the tunnel's control exchanges with the
+    /// relay, the relay's handling included.
+    pub rtt_ms: Option<f64>,
+    pub last_success_age_ms: Option<f64>,
+}
+
+/// The newest direct session open now, with QUIC's view of it.
+#[napi(object)]
+pub struct JsLinkSample {
+    /// `lan`, `internet` or `private`.
+    pub kind: String,
+    /// `ipv4` or `ipv6`.
+    pub family: String,
+    /// `host`, `public`, `mapped` or `peer_reflexive`.
+    pub via: String,
+    /// `quic`, or `tcp` within a local network. Over TCP the round trips are
+    /// the handshake's, and the rest is zero.
+    pub transport: String,
+    pub peer: String,
+    pub local_ip: Option<String>,
+    /// `ipv6_prefix`, `public_ip_subnet` or `subnet`.
+    pub same_lan: Option<String>,
+    pub setup_ms: f64,
+    pub rtt_us: f64,
+    pub min_rtt_us: f64,
+    pub congestion_window: f64,
+    pub mtu: u32,
+    pub sent_packets: f64,
+    pub lost_packets: f64,
+    pub congestion_events: f64,
+    /// UDP bytes on the wire, QUIC's overhead included.
+    pub sent_bytes: f64,
+    pub received_bytes: f64,
+    pub lost_bytes: f64,
+    pub bandwidth_bps: Option<f64>,
+}
+
+/// Setups that found the peer on a local network, and those that ended
+/// elsewhere.
+#[napi(object)]
+pub struct JsLanCounts {
+    pub detected: f64,
+    pub missed: f64,
+}
+
+/// What a running tunnel keeps measuring, sampled at once.
+#[napi(object)]
+pub struct JsTunnelMetrics {
+    pub uptime_ms: f64,
+    /// The `seq` of the tunnel's latest event.
+    pub event_seq: f64,
+    pub sessions: JsSessionCounts,
+    pub traffic: JsPathTraffic,
+    pub relay: JsRelayHealth,
+    pub link: Option<JsLinkSample>,
+    pub lan: JsLanCounts,
+    /// How long new sessions still go straight to the relay after a
+    /// fallback, and how many have.
+    pub direct_cooldown_ms: Option<f64>,
+    pub cooldown_skips: f64,
+    /// Whether direct setups try a shared local network first.
+    pub lan_first: bool,
+}
+
+impl From<sdk::TunnelMetrics> for JsTunnelMetrics {
+    fn from(value: sdk::TunnelMetrics) -> Self {
+        let sessions = value.sessions;
+        let relay = value.relay;
+        Self {
+            uptime_ms: number(value.uptime_ms),
+            event_seq: number(value.event_seq),
+            sessions: JsSessionCounts {
+                active_relay: number(sessions.active_relay),
+                active_direct: number(sessions.active_direct),
+                active_lan: number(sessions.active_lan),
+                relay: number(sessions.relay),
+                direct: number(sessions.direct),
+                lan: number(sessions.lan),
+            },
+            traffic: value.traffic.into(),
+            relay: JsRelayHealth {
+                transport: transport_name(relay.transport),
+                phase: relay.phase.as_str().into(),
+                consecutive_failures: number(relay.consecutive_failures),
+                rtt_ms: relay.rtt_ms.map(number),
+                last_success_age_ms: relay.last_success_age_ms.map(number),
+            },
+            link: value.link.map(|link| JsLinkSample {
+                kind: link.kind.as_str().into(),
+                family: link.family.as_str().into(),
+                via: link.via.as_str().into(),
+                transport: link.transport.as_str().into(),
+                peer: link.peer.to_string(),
+                local_ip: link.local_ip.map(|ip| ip.to_string()),
+                same_lan: link.same_lan.map(|evidence| evidence.as_str().into()),
+                setup_ms: number(link.setup_ms),
+                rtt_us: number(link.stats.rtt_us),
+                min_rtt_us: number(link.stats.min_rtt_us),
+                congestion_window: number(link.stats.congestion_window),
+                mtu: link.stats.mtu.into(),
+                sent_packets: number(link.stats.sent_packets),
+                lost_packets: number(link.stats.lost_packets),
+                congestion_events: number(link.stats.congestion_events),
+                sent_bytes: number(link.stats.sent_bytes),
+                received_bytes: number(link.stats.received_bytes),
+                lost_bytes: number(link.stats.lost_bytes),
+                bandwidth_bps: link.stats.bandwidth_bps.map(number),
+            }),
+            lan: JsLanCounts {
+                detected: number(value.lan.detected),
+                missed: number(value.lan.missed),
+            },
+            direct_cooldown_ms: value.direct_cooldown_ms.map(number),
+            cooldown_skips: number(value.cooldown_skips),
+            lan_first: value.lan_first,
         }
     }
 }
@@ -221,10 +482,149 @@ pub struct JsPathDiagnostics {
     pub relay_sessions: f64,
     pub active_direct: f64,
     pub active_relay: f64,
+    /// Direct sessions within one local network, open now and in all.
+    pub active_lan: f64,
+    pub lan_sessions: f64,
+    /// Direct sessions over TCP, which only a local network carries, open
+    /// now and in all.
+    pub active_lan_tcp: f64,
+    pub lan_tcp_sessions: f64,
+    /// Setups that found the peer on a local network, and those of them that
+    /// ended on another path or on the relay.
+    pub lan_detected: f64,
+    pub lan_missed: f64,
     pub fallbacks: f64,
     pub last_fallback: Option<String>,
+    /// `lan`, `internet` or `private`: where the latest direct session this
+    /// end set up runs.
+    pub last_kind: Option<String>,
     /// The direct attempt in flight, if any.
     pub attempt: Option<JsDirectAttempt>,
+    /// The newest direct session open now.
+    pub link: Option<JsDirectLink>,
+}
+
+/// A direct session's path, as `diagnostics().direct.link` reports it.
+#[napi(object)]
+pub struct JsDirectLink {
+    /// `lan`, `internet` or `private`.
+    pub kind: String,
+    /// `ipv4` or `ipv6`.
+    pub family: String,
+    /// How the peer address was learned: `host`, `public`, `mapped` or
+    /// `peer_reflexive`.
+    pub via: String,
+    /// `quic`, or `tcp` within a local network. Over TCP the round trips are
+    /// the handshake's, and the rest is zero.
+    pub transport: String,
+    pub peer: String,
+    pub local_ip: Option<String>,
+    /// The local interface the path leaves by, and its tier: `lan`,
+    /// `physical`, `cellular`, `virtual` or `loopback`.
+    pub interface: Option<String>,
+    pub tier: Option<String>,
+    /// `ipv6_prefix`, `public_ip_subnet` or `subnet`: what suggested a shared
+    /// network before the setup.
+    pub same_lan: Option<String>,
+    pub timings: JsSetupTimings,
+    pub candidates: JsCandidateCounts,
+    /// QUIC's view of the path as of this read.
+    pub rtt_us: f64,
+    pub min_rtt_us: f64,
+    pub congestion_window: f64,
+    pub mtu: u32,
+    pub sent_packets: f64,
+    pub lost_packets: f64,
+    pub congestion_events: f64,
+    /// UDP bytes on the wire each way, and lost: QUIC's headers and probes
+    /// included, so more than the application's.
+    pub sent_bytes: f64,
+    pub received_bytes: f64,
+    pub lost_bytes: f64,
+    /// The congestion controller's estimate of the path, in bits per second.
+    pub bandwidth_bps: Option<f64>,
+}
+
+/// How long each stage of a direct setup took on this end; a stage it did
+/// not run is absent.
+#[napi(object)]
+pub struct JsSetupTimings {
+    pub negotiate_ms: Option<f64>,
+    pub discover_ms: Option<f64>,
+    pub stun_ms: Option<f64>,
+    /// `ok`, `timeout`, `unavailable` or `cached`.
+    pub stun: String,
+    pub grant_ms: Option<f64>,
+    pub first_pong_ms: Option<f64>,
+    pub lan_first_pong_ms: Option<f64>,
+    pub handshake_ms: Option<f64>,
+    pub commit_ms: Option<f64>,
+    pub setup_ms: f64,
+}
+
+/// The addresses a direct setup worked with.
+#[napi(object)]
+pub struct JsCandidateCounts {
+    pub local: u32,
+    pub local_lan: u32,
+    /// Left out past the wire's limit of 8.
+    pub truncated: u32,
+    pub peer: u32,
+    pub peer_lan: u32,
+    pub probed: u32,
+    pub answered: u32,
+    pub handshakes: u32,
+}
+
+impl From<sdk::DirectLink> for JsDirectLink {
+    fn from(link: sdk::DirectLink) -> Self {
+        let timings = link.timings;
+        let candidates = link.candidates;
+        Self {
+            kind: link.kind.as_str().into(),
+            family: link.family.as_str().into(),
+            via: link.via.as_str().into(),
+            transport: link.transport.as_str().into(),
+            peer: link.peer.to_string(),
+            local_ip: link.local_ip.map(|ip| ip.to_string()),
+            interface: link.interface,
+            tier: link.tier.map(|tier| tier.as_str().into()),
+            same_lan: link.same_lan.map(|evidence| evidence.as_str().into()),
+            timings: JsSetupTimings {
+                negotiate_ms: timings.negotiate_ms.map(number),
+                discover_ms: timings.discover_ms.map(number),
+                stun_ms: timings.stun_ms.map(number),
+                stun: timings.stun.as_str().into(),
+                grant_ms: timings.grant_ms.map(number),
+                first_pong_ms: timings.first_pong_ms.map(number),
+                lan_first_pong_ms: timings.lan_first_pong_ms.map(number),
+                handshake_ms: timings.handshake_ms.map(number),
+                commit_ms: timings.commit_ms.map(number),
+                setup_ms: number(timings.setup_ms),
+            },
+            candidates: JsCandidateCounts {
+                local: candidates.local,
+                local_lan: candidates.local_lan,
+                truncated: candidates.truncated,
+                peer: candidates.peer,
+                peer_lan: candidates.peer_lan,
+                probed: candidates.probed,
+                answered: candidates.answered,
+                handshakes: candidates.handshakes,
+            },
+            rtt_us: number(link.stats.rtt_us),
+            min_rtt_us: number(link.stats.min_rtt_us),
+            congestion_window: number(link.stats.congestion_window),
+            mtu: link.stats.mtu.into(),
+            sent_packets: number(link.stats.sent_packets),
+            lost_packets: number(link.stats.lost_packets),
+            congestion_events: number(link.stats.congestion_events),
+            sent_bytes: number(link.stats.sent_bytes),
+            received_bytes: number(link.stats.received_bytes),
+            lost_bytes: number(link.stats.lost_bytes),
+            bandwidth_bps: link.stats.bandwidth_bps.map(number),
+        }
+    }
 }
 
 /// One event of a tunnel. In `diagnostics().events` consecutive repeats fold
@@ -241,8 +641,9 @@ pub struct JsTunnelEvent {
     /// `relay_failed`, `network_changed`, `direct_established`,
     /// `direct_fallback` and `stopped`, the last event of a stream. Steps,
     /// from `subscribeEvents()` only: `phase_changed`, `direct_stage_changed`,
-    /// `direct_abandoned`, `session_opened`, `session_closed` and
-    /// `port_mapping_changed`.
+    /// `direct_abandoned`, `session_opened`, `session_closed`,
+    /// `port_mapping_changed`, `lan_detected`, `path_selected`, `lan_missed`
+    /// and `lan_tcp_missed`. A kind added by a later SDK reads `unknown`.
     pub kind: String,
     /// `relay_ready`: setup latency of the answering relay.
     pub latency_ms: Option<f64>,
@@ -257,12 +658,42 @@ pub struct JsTunnelEvent {
     /// `direct_stage_changed`: the stage it entered; `direct_abandoned`: the
     /// stage at which it was given up.
     pub stage: Option<String>,
+    /// `direct_fallback`: why: `direct_not_offered`,
+    /// `direct_negotiation_failed`, `direct_negotiation_timeout` or
+    /// `direct_timeout_or_unreachable`. `lan_tcp_missed`: why TCP was not
+    /// the path: `not_offered`, `no_shared_lan`, `refused`, `timed_out` or
+    /// `handshake`.
+    pub reason: Option<String>,
     /// `phase_changed`: the relay attempt's new phase.
     pub phase: Option<String>,
-    /// `session_opened`, `session_closed`: `direct` or `relay`.
+    /// `session_opened`, `session_closed`: the session's number in this
+    /// tunnel, and `direct` or `relay`.
+    pub session: Option<f64>,
     pub path: Option<String>,
+    /// `session_closed`: how long it was open, and the application bytes it
+    /// carried, sent from this end's local side and received.
+    pub duration_ms: Option<f64>,
+    pub sent_bytes: Option<f64>,
+    pub received_bytes: Option<f64>,
     /// `port_mapping_changed`: the mapping as it now stands.
     pub mapping: Option<JsPortMappingStatus>,
+    /// `lan_detected`, `lan_missed`: `ipv6_prefix`, `public_ip_subnet` or
+    /// `subnet`.
+    pub evidence: Option<String>,
+    /// `path_selected`, and a direct `session_opened` or `session_closed`:
+    /// `lan`, `internet` or `private`; with `path_selected`, `ipv4` or
+    /// `ipv6`, and how the peer address was learned.
+    pub link: Option<String>,
+    pub family: Option<String>,
+    pub via: Option<String>,
+    /// `path_selected`: `quic`, or `tcp` within a local network.
+    pub transport: Option<String>,
+    /// `lan_missed`: where the session went instead, `internet` or
+    /// `private`; `lan_tcp_missed`: `quic`. Absent when it took the relay.
+    pub took: Option<String>,
+    /// lan_detected: whether this end's LAN-first is on, so the peer's
+    /// LAN addresses are probed first.
+    pub preferred: Option<bool>,
 }
 
 impl From<sdk::TunnelEvent> for JsTunnelEvent {
@@ -277,9 +708,21 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
             retry_in_ms: None,
             setup_ms: None,
             stage: None,
+            reason: None,
             phase: None,
+            session: None,
             path: None,
+            duration_ms: None,
+            sent_bytes: None,
+            received_bytes: None,
             mapping: None,
+            evidence: None,
+            link: None,
+            family: None,
+            via: None,
+            transport: None,
+            took: None,
+            preferred: None,
         };
         js.kind = match event.kind {
             sdk::TunnelEventKind::RelayReady { latency_ms } => {
@@ -299,8 +742,9 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 js.setup_ms = Some(number(setup_ms));
                 "direct_established"
             }
-            sdk::TunnelEventKind::DirectFallback { stage } => {
+            sdk::TunnelEventKind::DirectFallback { stage, reason, .. } => {
                 js.stage = Some(stage.as_str().to_string());
+                js.reason = Some(reason.as_str().into());
                 "direct_fallback"
             }
             sdk::TunnelEventKind::Stopped => "stopped",
@@ -316,18 +760,71 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 js.stage = Some(stage.as_str().into());
                 "direct_abandoned"
             }
-            sdk::TunnelEventKind::SessionOpened { path } => {
+            sdk::TunnelEventKind::SessionOpened {
+                session,
+                path,
+                link,
+                ..
+            } => {
+                js.session = Some(number(session));
                 js.path = Some(path_name(path).into());
+                js.link = link.map(|link| link.as_str().into());
                 "session_opened"
             }
-            sdk::TunnelEventKind::SessionClosed { path } => {
+            sdk::TunnelEventKind::SessionClosed {
+                session,
+                path,
+                link,
+                duration_ms,
+                sent_bytes,
+                received_bytes,
+                ..
+            } => {
+                js.session = Some(number(session));
                 js.path = Some(path_name(path).into());
+                js.link = link.map(|link| link.as_str().into());
+                js.duration_ms = Some(number(duration_ms));
+                js.sent_bytes = Some(number(sent_bytes));
+                js.received_bytes = Some(number(received_bytes));
                 "session_closed"
             }
             sdk::TunnelEventKind::PortMappingChanged { mapping } => {
                 js.mapping = Some((*mapping).into());
                 "port_mapping_changed"
             }
+            sdk::TunnelEventKind::LanDetected {
+                evidence,
+                preferred,
+                ..
+            } => {
+                js.evidence = Some(evidence.as_str().into());
+                js.preferred = Some(preferred);
+                "lan_detected"
+            }
+            sdk::TunnelEventKind::PathSelected {
+                link,
+                family,
+                via,
+                transport,
+                ..
+            } => {
+                js.link = Some(link.as_str().into());
+                js.family = Some(family.as_str().into());
+                js.via = Some(via.as_str().into());
+                js.transport = Some(transport.as_str().into());
+                "path_selected"
+            }
+            sdk::TunnelEventKind::LanMissed { evidence, took, .. } => {
+                js.evidence = Some(evidence.as_str().into());
+                js.took = took.map(|link| link.as_str().into());
+                "lan_missed"
+            }
+            sdk::TunnelEventKind::LanTcpMissed { reason, took, .. } => {
+                js.reason = Some(reason.as_str().into());
+                js.took = took.map(|transport| transport.as_str().into());
+                "lan_tcp_missed"
+            }
+            _ => "unknown",
         }
         .to_string();
         js
@@ -337,7 +834,18 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
 #[napi(object)]
 pub struct JsTunnelDiagnostics {
     pub relay_transport: String,
+    /// Whether direct setups try a shared local network first: the
+    /// tunnel's lanFirst, and never without direct.
+    pub lan_first: bool,
+    /// What direct setups ask a shared local network to carry, `quic` or
+    /// `tcp`: a connection's lanTransport; `quic` without direct, and for a
+    /// registration, which serves what each consumer asks for.
+    pub lan_transport: String,
     pub direct: Option<JsPathDiagnostics>,
+    /// Application bytes on each path, as `metrics().traffic`.
+    pub traffic: JsPathTraffic,
+    /// The smoothed round trip of control exchanges with the relay.
+    pub relay_rtt_ms: Option<f64>,
     /// Present when the tunnel maps its direct endpoint's port.
     pub port_mapping: Option<JsPortMappingDiagnostics>,
     pub sdk_version: String,
@@ -370,15 +878,27 @@ impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
                 relay_sessions: number(d.relay_sessions),
                 active_direct: number(d.active_direct),
                 active_relay: number(d.active_relay),
+                active_lan: number(d.active_lan),
+                lan_sessions: number(d.lan_sessions),
+                active_lan_tcp: number(d.active_lan_tcp),
+                lan_tcp_sessions: number(d.lan_tcp_sessions),
+                lan_detected: number(d.lan_detected),
+                lan_missed: number(d.lan_missed),
                 fallbacks: number(d.fallbacks),
                 last_fallback: d.last_fallback,
+                last_kind: d.last_kind.map(|kind| kind.as_str().into()),
                 attempt: d.attempt.map(|attempt| JsDirectAttempt {
                     stage: attempt.stage.as_str().to_string(),
                     elapsed_ms: number(attempt.elapsed_ms),
                     in_flight: attempt.in_flight,
                 }),
+                link: d.link.map(JsDirectLink::from),
             }),
+            traffic: value.traffic.into(),
+            relay_rtt_ms: value.relay_rtt_ms.map(number),
             relay_transport: transport_name(value.relay_transport),
+            lan_first: value.lan_first,
+            lan_transport: value.lan_transport.as_str().into(),
             sdk_version: value.sdk_version.to_string(),
             last_attempt_phase: value.last_attempt_phase.as_str().to_string(),
             attempts: number(value.attempts),
@@ -438,6 +958,16 @@ fn parse_transport(raw: &str) -> Result<Transport> {
     }
 }
 
+fn parse_lan_transport(raw: Option<&str>) -> Result<sdk::LanTransport> {
+    match raw.unwrap_or("quic") {
+        "quic" => Ok(sdk::LanTransport::Quic),
+        "tcp" => Ok(sdk::LanTransport::Tcp),
+        other => Err(invalid_argument(format!(
+            "lanTransport must be \"quic\" or \"tcp\", got {other}"
+        ))),
+    }
+}
+
 fn parse_port_mapping(raw: Option<&str>) -> Result<sdk::PortMapping> {
     match raw.unwrap_or("auto") {
         "off" => Ok(sdk::PortMapping::Off),
@@ -482,6 +1012,16 @@ pub struct JsRegisterRequest {
     /// port: "auto" once punching through fails (default), "always", or "off".
     /// Ignored when direct is not allowed.
     pub port_mapping: Option<String>,
+    /// Probe a consumer's addresses on a local network shared with it first,
+    /// and again 20 and 50 ms later (default `true`). `false` probes them in
+    /// the order the consumer offered them. Ignored when direct is not
+    /// allowed.
+    pub lan_first: Option<bool>,
+    /// Serve a consumer that asks for TCP within a local network shared with
+    /// it (default `true`): a TCP listener opens the first time one asks,
+    /// offered on LANs only. `false` leaves such a consumer on QUIC. Ignored
+    /// when direct is not allowed.
+    pub lan_tcp: Option<bool>,
     pub key: String,
     pub local_addr: String,
     pub transport: String,
@@ -512,6 +1052,16 @@ pub struct JsConnectRequest {
     /// port: "auto" once punching through fails (default), "always", or "off".
     /// Ignored on the relay-only path.
     pub port_mapping: Option<String>,
+    /// Try a local network shared with the publisher first (default `true`):
+    /// probe its addresses there first, and once that network is known to be
+    /// there, hold other paths back up to 150 ms for it. `false` dials every
+    /// path as soon as it answers. Ignored on the relay-only path.
+    pub lan_first: Option<bool>,
+    /// What a path within a local network shared with the publisher runs
+    /// over: "quic" (default), or "tcp", tried 300 ms ahead of QUIC and
+    /// falling back to it. A path across the internet is always QUIC.
+    /// Ignored on the relay-only path.
+    pub lan_transport: Option<String>,
     pub key: String,
     pub local_addr: String,
     pub transport: String,
@@ -715,6 +1265,16 @@ impl Client {
         self.inner.relay_diagnostics().await.into()
     }
 
+    /// `relayDiagnostics()` at once, then every `everyMs` (one second when
+    /// absent; 100 ms to an hour), read one at a time.
+    #[napi]
+    pub fn subscribe_relay_metrics(&self, every_ms: Option<u32>) -> RelayMetricsReader {
+        RelayMetricsReader {
+            stream: tokio::sync::Mutex::new(self.inner.subscribe_relay_metrics(period(every_ms))),
+            closed: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
     /// The relay carrier this client uses: `tcp` or `quic`.
     #[napi]
     pub fn relay_transport(&self) -> String {
@@ -748,6 +1308,8 @@ impl Client {
         let options = sdk::RegisterOptions {
             allow_direct: request.allow_direct.unwrap_or(true),
             port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
+            lan_first: request.lan_first.unwrap_or(true),
+            lan_tcp: request.lan_tcp.unwrap_or(true),
             ..Default::default()
         };
         let registration = self
@@ -777,6 +1339,8 @@ impl Client {
             allow_direct: request.allow_direct.unwrap_or(true),
             idle_timeout: Some(Duration::from_millis(idle_timeout_ms as u64)),
             port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
+            lan_first: request.lan_first.unwrap_or(true),
+            lan_tcp: request.lan_tcp.unwrap_or(true),
         };
         let registration = self
             .inner
@@ -804,6 +1368,8 @@ impl Client {
                 sdk::ConnectOptions {
                     path,
                     port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
+                    lan_first: request.lan_first.unwrap_or(true),
+                    lan_transport: parse_lan_transport(request.lan_transport.as_deref())?,
                 },
             )
             .await
@@ -923,6 +1489,25 @@ macro_rules! tunnel_class {
             pub fn subscribe_events(&self) -> TunnelEvents {
                 TunnelEvents {
                     events: tokio::sync::Mutex::new(self.inner.subscribe_events()),
+                    closed: tokio_util::sync::CancellationToken::new(),
+                }
+            }
+
+            /// Its sessions, bytes per path, relay health and direct link,
+            /// sampled now: the part of `diagnostics()` that keeps changing.
+            #[napi]
+            pub fn metrics(&self) -> JsTunnelMetrics {
+                self.inner.metrics().into()
+            }
+
+            /// `metrics()` at once, then every `everyMs` (one second when
+            /// absent; 100 ms to an hour) and whenever the tunnel changes,
+            /// until it stops. One second suits a panel on screen; lists
+            /// and logs need five or more.
+            #[napi]
+            pub fn subscribe_metrics(&self, every_ms: Option<u32>) -> TunnelMetricsReader {
+                TunnelMetricsReader {
+                    stream: tokio::sync::Mutex::new(self.inner.subscribe_metrics(period(every_ms))),
                     closed: tokio_util::sync::CancellationToken::new(),
                 }
             }

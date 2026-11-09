@@ -37,7 +37,11 @@ class CarrierChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(carrierIcon(carrier), size: 13, color: scheme.onSurfaceVariant),
+          Icon(
+            carrierIcon(carrier),
+            size: AppIconSize.inline,
+            color: scheme.onSurfaceVariant,
+          ),
           const SizedBox(width: 5),
           Text(
             carrier.label,
@@ -120,7 +124,7 @@ Future<void> offerCarrierMove(
       actions: [
         TextButton(
           onPressed: () => Navigator.of(c).pop(false),
-          child: Text(l10n.carrierMoveLater),
+          child: Text(l10n.later),
         ),
         FilledButton(
           key: const Key('carrier-move-now'),
@@ -142,7 +146,7 @@ Future<void> offerCarrierMove(
   } else {
     showToast(
       here,
-      l10n.carrierMoveFailed(failed.join(', ')),
+      l10n.tunnelsRestartFailed(failed.join(', ')),
       kind: ToastKind.warning,
     );
   }

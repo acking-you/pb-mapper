@@ -1,8 +1,9 @@
-import 'dart:async' show Timer, unawaited;
+import 'dart:async' show Completer, Timer, unawaited;
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:pb_mapper_ui/src/state/desktop_models.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -12,12 +13,31 @@ class TrayStatus {
   final int registeredServices;
   final int connectedClients;
 
+  /// This computer as a remote desktop host, while it shares; null when it
+  /// does not.
+  final DesktopHostView? host;
+
   const TrayStatus({
     required this.serverAvailable,
     required this.activeConnections,
     required this.registeredServices,
     required this.connectedClients,
+    this.host,
   });
+
+  /// Someone is connected to this computer's desktop (D15).
+  bool get viewed => host?.viewer != null;
+
+  /// What sharing this computer amounts to right now, or null when it is
+  /// not shared.
+  String? hostLine(TrayStrings strings) {
+    final host = this.host;
+    if (host == null) return null;
+    final viewer = host.viewer;
+    if (viewer == null) return strings.hostSharing;
+    if (viewer.paused) return strings.hostPaused;
+    return viewer.controlling ? strings.hostControlled : strings.hostViewed;
+  }
 
   bool get hasConnections =>
       activeConnections > 0 || registeredServices > 0 || connectedClients > 0;
@@ -50,6 +70,12 @@ class TrayStrings {
     required this.open,
     required this.refresh,
     required this.quit,
+    required this.hostSharing,
+    required this.hostViewed,
+    required this.hostControlled,
+    required this.hostPaused,
+    required this.disconnectViewer,
+    required this.stopSharing,
   });
 
   final String offline;
@@ -59,6 +85,12 @@ class TrayStrings {
   final String open;
   final String refresh;
   final String quit;
+  final String hostSharing;
+  final String hostViewed;
+  final String hostControlled;
+  final String hostPaused;
+  final String disconnectViewer;
+  final String stopSharing;
 }
 
 class TrayService with TrayListener {
@@ -79,17 +111,46 @@ class TrayService with TrayListener {
   Future<TrayStatus> Function()? _statusProvider;
   VoidCallback? _showApp;
   VoidCallback? _quitApp;
+  VoidCallback? _disconnectViewer;
+  VoidCallback? _stopSharing;
   bool _iconSupported = true;
   bool _toolTipSupported = true;
   bool _contextMenuSupported = true;
   TrayStrings? _strings;
+  // Windows can deliver WM_COMMAND after the popup has returned. Every item
+  // is retained, and each menu is built from these same instances, so a
+  // closing click still resolves to the same action.
+  final _statusItem = MenuItem(key: 'status', disabled: true);
+  final _hostItem = MenuItem(key: 'host', disabled: true);
+  final _disconnectViewerItem = MenuItem(key: 'disconnect-viewer');
+  final _stopSharingItem = MenuItem(key: 'stop-sharing');
+  final _openItem = MenuItem(key: 'open');
+  final _refreshItem = MenuItem(key: 'refresh');
+  final _quitItem = MenuItem(key: 'quit');
+  final _separators = [MenuItem.separator(), MenuItem.separator()];
+  final _menu = Menu();
+  String? _renderedIcon, _renderedToolTip;
+  ({
+    String status,
+    String? host,
+    bool viewed,
+    String disconnectViewer,
+    String stopSharing,
+    String open,
+    String refresh,
+    String quit,
+  })?
+  _renderedMenu;
+  Future<void>? _rendering;
+  bool _dirty = false, _menuOpen = false;
+  int _statusRequest = 0, _lifecycle = 0;
 
   /// Replaces the strings and redraws, so a language switch reaches the tray
   /// without waiting for the next status poll.
   Future<void> updateStrings(TrayStrings strings) async {
     _strings = strings;
     if (_initialized) {
-      await _applyStatus(_status);
+      await _scheduleRender();
     }
   }
 
@@ -97,27 +158,35 @@ class TrayService with TrayListener {
     required Future<TrayStatus> Function() statusProvider,
     required VoidCallback showApp,
     required VoidCallback quitApp,
+    required VoidCallback onDisconnectViewer,
+    required VoidCallback onStopSharing,
     required TrayStrings strings,
   }) async {
     if (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS) {
       return;
     }
     _strings = strings;
-    if (_initialized) {
-      _statusProvider = statusProvider;
-      _showApp = showApp;
-      _quitApp = quitApp;
-      return;
-    }
-
     _statusProvider = statusProvider;
     _showApp = showApp;
     _quitApp = quitApp;
+    _disconnectViewer = onDisconnectViewer;
+    _stopSharing = onStopSharing;
+    if (_initialized) {
+      await refreshStatus();
+      return;
+    }
 
     _trayManager.addListener(this);
-    await _applyStatus(_status);
-    _startPolling();
     _initialized = true;
+    final lifecycle = _lifecycle;
+    try {
+      await _applyStatus(_status);
+      if (!_initialized || lifecycle != _lifecycle) return;
+      _startPolling();
+    } catch (_) {
+      dispose();
+      rethrow;
+    }
   }
 
   void dispose() {
@@ -125,6 +194,11 @@ class TrayService with TrayListener {
     _statusTimer = null;
     _trayManager.removeListener(this);
     _initialized = false;
+    _statusRequest++;
+    _lifecycle++;
+    _dirty = false;
+    _renderedIcon = _renderedToolTip = null;
+    _renderedMenu = null;
   }
 
   void _startPolling() {
@@ -136,33 +210,87 @@ class TrayService with TrayListener {
   }
 
   Future<void> refreshStatus() async {
-    if (_statusProvider == null) {
+    if (!_initialized || _statusProvider == null) {
       return;
     }
+    final request = ++_statusRequest;
+    TrayStatus next;
     try {
-      final next = await _statusProvider!();
-      await _applyStatus(next);
+      next = await _statusProvider!();
     } catch (_) {
-      await _applyStatus(
-        const TrayStatus(
-          serverAvailable: false,
-          activeConnections: 0,
-          registeredServices: 0,
-          connectedClients: 0,
-        ),
+      next = const TrayStatus(
+        serverAvailable: false,
+        activeConnections: 0,
+        registeredServices: 0,
+        connectedClients: 0,
       );
+    }
+    // A slower older read must never overwrite the most recent observation.
+    if (!_initialized || request != _statusRequest) return;
+    try {
+      await _applyStatus(next);
+    } catch (error) {
+      debugPrint('Tray refresh failed: $error');
     }
   }
 
-  Future<void> _applyStatus(TrayStatus next) async {
+  Future<void> _applyStatus(TrayStatus next) {
     _status = next;
+    return _scheduleRender();
+  }
+
+  Future<void> _scheduleRender() {
+    _dirty = true;
+    if (_rendering != null) return _rendering!;
+    if (!_initialized || _menuOpen) return Future<void>.value();
+    final completion = Completer<void>();
+    _rendering = completion.future;
+    unawaited(_drainRender(completion));
+    return completion.future;
+  }
+
+  Future<void> _drainRender(Completer<void> completion) async {
+    try {
+      while (_initialized && _dirty && !_menuOpen) {
+        _dirty = false;
+        await _renderStatus();
+      }
+      completion.complete();
+    } catch (error, stack) {
+      _dirty = true;
+      completion.completeError(error, stack);
+    } finally {
+      _rendering = null;
+    }
+  }
+
+  Future<void> _renderStatus() async {
     final strings = _strings;
-    if (strings == null) {
+    if (!_initialized || strings == null) {
       return;
     }
-    final statusText = next.displayText(strings);
-    final iconPath = _iconFor(next);
-    if (_iconSupported) {
+    final lifecycle = _lifecycle;
+    final statusText = _status.displayText(strings);
+    final hostLine = _status.hostLine(strings);
+    final viewed = _status.viewed;
+    // Someone watching this computer is the first thing the tray says.
+    final toolTip = hostLine == null
+        ? statusText
+        : viewed
+        ? '$hostLine · $statusText'
+        : '$statusText · $hostLine';
+    final iconPath = _iconFor(_status);
+    final menuLabels = (
+      status: statusText,
+      host: hostLine,
+      viewed: viewed,
+      disconnectViewer: strings.disconnectViewer,
+      stopSharing: strings.stopSharing,
+      open: strings.open,
+      refresh: strings.refresh,
+      quit: strings.quit,
+    );
+    if (_iconSupported && _renderedIcon != iconPath) {
       await _invokeTrayMethod(
         // A template image is black plus alpha, and macOS tints it to match
         // the menu bar: light in dark mode, dark in light mode, inverted while
@@ -173,31 +301,46 @@ class TrayService with TrayListener {
         onUnsupported: () => _iconSupported = false,
         methodName: 'setIcon',
       );
+      if (!_initialized || lifecycle != _lifecycle) return;
+      _renderedIcon = iconPath;
     }
-    if (_toolTipSupported) {
+    if (_toolTipSupported && _renderedToolTip != toolTip) {
       await _invokeTrayMethod(
-        action: () => _trayManager.setToolTip(statusText),
+        action: () => _trayManager.setToolTip(toolTip),
         onUnsupported: () => _toolTipSupported = false,
         methodName: 'setToolTip',
       );
+      if (!_initialized || lifecycle != _lifecycle) return;
+      _renderedToolTip = toolTip;
     }
-    if (_contextMenuSupported) {
+    if (_contextMenuSupported && _renderedMenu != menuLabels) {
+      _statusItem.label = statusText;
+      _hostItem.label = hostLine;
+      _disconnectViewerItem.label = strings.disconnectViewer;
+      _stopSharingItem.label = strings.stopSharing;
+      _openItem.label = strings.open;
+      _refreshItem.label = strings.refresh;
+      _quitItem.label = strings.quit;
+      _menu.items = [
+        _statusItem,
+        if (hostLine != null) ...[
+          _hostItem,
+          if (viewed) _disconnectViewerItem,
+          _stopSharingItem,
+        ],
+        _separators[0],
+        _openItem,
+        _refreshItem,
+        _separators[1],
+        _quitItem,
+      ];
       await _invokeTrayMethod(
-        action: () => _trayManager.setContextMenu(
-          Menu(
-            items: [
-              MenuItem(key: 'status', label: statusText, disabled: true),
-              MenuItem.separator(),
-              MenuItem(key: 'open', label: strings.open),
-              MenuItem(key: 'refresh', label: strings.refresh),
-              MenuItem.separator(),
-              MenuItem(key: 'quit', label: strings.quit),
-            ],
-          ),
-        ),
+        action: () => _trayManager.setContextMenu(_menu),
         onUnsupported: () => _contextMenuSupported = false,
         methodName: 'setContextMenu',
       );
+      if (!_initialized || lifecycle != _lifecycle) return;
+      _renderedMenu = menuLabels;
     }
   }
 
@@ -230,6 +373,11 @@ class TrayService with TrayListener {
   }
 
   String _iconFor(TrayStatus status) {
+    // Being watched outranks the rest: a shared computer's window is usually
+    // hidden in the tray, so this is where it shows (D15).
+    if (status.viewed) {
+      return _assetPath('assets/tray/tray_active');
+    }
     if (!status.serverAvailable) {
       return _assetPath('assets/tray/tray_offline');
     }
@@ -273,11 +421,29 @@ class TrayService with TrayListener {
   }
 
   void _popUpContextMenu() {
-    if (!_contextMenuSupported) {
+    if (!_initialized || !_contextMenuSupported || _menuOpen) {
       return;
     }
+    // Reserve synchronously: repeated clicks must not nest native menu loops.
+    _menuOpen = true;
     unawaited(
-      _invokeTrayMethod(
+      _showMenu().catchError((Object error) {
+        debugPrint('Tray menu failed: $error');
+      }),
+    );
+  }
+
+  Future<void> _showMenu() async {
+    final lifecycle = _lifecycle;
+    try {
+      // Finish any in-flight native update before opening the menu. While
+      // TrackPopupMenu is running, collect desired state without replacing its
+      // HMENU entries or the Dart menu IDs used to dispatch the user's click.
+      await _rendering;
+      if (!_initialized || lifecycle != _lifecycle) return;
+      await _renderStatus();
+      if (!_initialized || lifecycle != _lifecycle) return;
+      await _invokeTrayMethod(
         // Win32 requires the menu's owner to be the foreground window before
         // TrackPopupMenu, or the menu stays on screen when the user clicks
         // away. bringAppToFront is the plugin's only route to
@@ -286,8 +452,11 @@ class TrayService with TrayListener {
         action: () => _trayManager.popUpContextMenu(bringAppToFront: true),
         onUnsupported: () => _contextMenuSupported = false,
         methodName: 'popUpContextMenu',
-      ),
-    );
+      );
+    } finally {
+      _menuOpen = false;
+      if (_initialized && _dirty) await _scheduleRender();
+    }
   }
 
   @override
@@ -301,6 +470,12 @@ class TrayService with TrayListener {
         break;
       case 'quit':
         _quitApp?.call();
+        break;
+      case 'disconnect-viewer':
+        _disconnectViewer?.call();
+        break;
+      case 'stop-sharing':
+        _stopSharing?.call();
         break;
     }
   }

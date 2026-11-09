@@ -4,17 +4,32 @@
 //! and a short history of what happened to it ([`TunnelEvent`]), so a caller can
 //! show recovery as it unfolds instead of a bare "retrying"; [`TunnelEvents`]
 //! delivers each event as it happens. All are written only on control-path
-//! transitions, never per packet.
+//! transitions, never per packet: the one per-packet figure, a session's
+//! bytes, is a relaxed atomic its forwarding loop adds to and a read sums.
+//! [`TunnelMetrics`] is the part that keeps changing, for sampling.
 
 use crate::endpoint::RelayEndpoint;
-use pb_mapper_protocol::direct::SessionPath;
+use crate::relay::RelayTransport;
+use pb_mapper_protocol::direct::{DirectTransport, LinkSummary, SessionPath};
+use pb_mapper_protocol::forward::ByteMeter;
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::time::{Duration, Instant};
 
+mod link;
+mod metrics;
 mod port_mapping;
+pub use link::{
+    AddressFamily, CandidateCounts, DirectLink, InterfaceTier, LanEvidence, LinkKind, LinkStats,
+    LinkVia, SetupTimings, StunOutcome,
+};
+use metrics::Bucket;
+pub use metrics::{
+    ByteCount, LanCounts, LinkSample, PathTraffic, RelayHealth, SessionCounts, TunnelMetrics,
+    TunnelMetricsStream,
+};
 pub use port_mapping::{
     PortMappingDiagnostics, PortMappingProtocol, PortMappingStage, PortMappingStatus,
 };
@@ -103,6 +118,72 @@ impl DirectStage {
     }
 }
 
+/// Why a direct attempt gave way to the relay. Serialized, like
+/// [`Self::as_str`], as the label [`PathDiagnostics::last_fallback`] has
+/// always carried.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FallbackReason {
+    /// The relay or the publisher does not offer direct, or offers another
+    /// version of it.
+    #[serde(rename = "direct_not_offered")]
+    NotOffered,
+    /// Asking for direct, opening its control link, discovering this end's
+    /// addresses or the grant failed.
+    #[serde(rename = "direct_negotiation_failed")]
+    NegotiationFailed,
+    /// Those took longer than their budget of 3 s.
+    #[serde(rename = "direct_negotiation_timeout")]
+    NegotiationTimeout,
+    /// No path through both NATs was set up in time.
+    #[serde(rename = "direct_timeout_or_unreachable")]
+    Unreachable,
+}
+
+impl FallbackReason {
+    /// Stable diagnostic label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotOffered => "direct_not_offered",
+            Self::NegotiationFailed => "direct_negotiation_failed",
+            Self::NegotiationTimeout => "direct_negotiation_timeout",
+            Self::Unreachable => "direct_timeout_or_unreachable",
+        }
+    }
+}
+
+/// Why a direct setup that asked for TCP within a local network did not run
+/// over it, and took QUIC or the relay instead.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LanTcpMiss {
+    /// The publisher offered none: it, or the relay, predates TCP; it does
+    /// not serve it; or it shares no network with this end as it sees it.
+    NotOffered,
+    /// It offered addresses, none on a network of this end's.
+    NoSharedLan,
+    /// Its address refused the connection, or could not be reached.
+    Refused,
+    /// Nothing answered in time: a firewall dropping it, typically.
+    TimedOut,
+    /// TCP connected, and TLS failed.
+    Handshake,
+}
+
+impl LanTcpMiss {
+    /// Stable diagnostic label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotOffered => "not_offered",
+            Self::NoSharedLan => "no_shared_lan",
+            Self::Refused => "refused",
+            Self::TimedOut => "timed_out",
+            Self::Handshake => "handshake",
+        }
+    }
+}
+
 /// The direct attempt a tunnel is making right now.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 pub struct DirectAttempt {
@@ -120,8 +201,12 @@ pub struct DirectAttempt {
 /// as delivered to [`TunnelEvents`]. The rest are steps along the way,
 /// delivered live only: kept, they would crowd the outcomes out of a history
 /// of 16.
+///
+/// Non-exhaustive: kinds are added as the SDK observes more, so a `match`
+/// needs a wildcard arm.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TunnelEventKind {
     /// The relay answered for the first time, or again after failures.
     RelayReady { latency_ms: u64 },
@@ -135,8 +220,12 @@ pub enum TunnelEventKind {
     NetworkChanged,
     /// A session took the direct path.
     DirectEstablished { setup_ms: u64 },
-    /// A session gave up on direct at `stage` and used the relay.
-    DirectFallback { stage: DirectStage },
+    /// A session gave up on direct at `stage`, for `reason`, and used the
+    /// relay.
+    DirectFallback {
+        stage: DirectStage,
+        reason: FallbackReason,
+    },
     /// The tunnel stopped, and whatever it was cleaning up has reported. The
     /// last event of every stream.
     Stopped,
@@ -150,12 +239,53 @@ pub enum TunnelEventKind {
     /// fallback: its setup was cancelled, or it failed after committing, when
     /// the relay can no longer take its place.
     DirectAbandoned { stage: DirectStage },
-    /// A session opened on `path`.
-    SessionOpened { path: SessionPath },
-    /// A session on `path` closed.
-    SessionClosed { path: SessionPath },
+    /// Session number `session` of this tunnel opened on `path`; a direct
+    /// one across `link`.
+    SessionOpened {
+        session: u64,
+        path: SessionPath,
+        link: Option<LinkKind>,
+    },
+    /// Session `session` closed, after `duration_ms`, having carried these
+    /// application bytes: sent from this end's local side, and received.
+    SessionClosed {
+        session: u64,
+        path: SessionPath,
+        link: Option<LinkKind>,
+        duration_ms: u64,
+        sent_bytes: u64,
+        received_bytes: u64,
+    },
     /// The gateway mapping of the tunnel's direct endpoint changed.
     PortMappingChanged { mapping: Box<PortMappingStatus> },
+    /// A direct setup found the peer on one of this end's local networks,
+    /// before any packet. With preferred, this end's LAN-first is on: the
+    /// peer's LAN addresses are probed first.
+    LanDetected {
+        evidence: LanEvidence,
+        preferred: bool,
+    },
+    /// A direct session committed to a path: across `link`, over `family`,
+    /// to an address learned `via`, carried by `transport`.
+    PathSelected {
+        link: LinkKind,
+        family: AddressFamily,
+        via: LinkVia,
+        transport: DirectTransport,
+    },
+    /// A direct setup that found the peer on a local network, by
+    /// `evidence`, did not end there: it took a path across `took`, or the
+    /// relay when `None`.
+    LanMissed {
+        evidence: LanEvidence,
+        took: Option<LinkKind>,
+    },
+    /// A direct setup that asked for TCP within a local network did not get
+    /// it, for `reason`: it took `took`, or the relay when `None`.
+    LanTcpMissed {
+        reason: LanTcpMiss,
+        took: Option<DirectTransport>,
+    },
 }
 
 impl TunnelEventKind {
@@ -163,7 +293,16 @@ impl TunnelEventKind {
     fn folds_into(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::RelayFailed { failure: a, .. }, Self::RelayFailed { failure: b, .. }) => a == b,
-            (Self::DirectFallback { stage: a }, Self::DirectFallback { stage: b }) => a == b,
+            (
+                Self::DirectFallback {
+                    stage: a,
+                    reason: x,
+                },
+                Self::DirectFallback {
+                    stage: b,
+                    reason: y,
+                },
+            ) => (a, x) == (b, y),
             (Self::RelayReady { .. }, Self::RelayReady { .. })
             | (Self::NetworkChanged, Self::NetworkChanged)
             | (Self::DirectEstablished { .. }, Self::DirectEstablished { .. }) => true,
@@ -181,6 +320,10 @@ impl TunnelEventKind {
                 | Self::SessionOpened { .. }
                 | Self::SessionClosed { .. }
                 | Self::PortMappingChanged { .. }
+                | Self::LanDetected { .. }
+                | Self::PathSelected { .. }
+                | Self::LanMissed { .. }
+                | Self::LanTcpMissed { .. }
         )
     }
 }
@@ -260,8 +403,22 @@ impl std::error::Error for EventsLagged {}
 pub struct TunnelDiagnostics {
     /// The carrier this tunnel reaches the relay over, fixed when it started.
     pub relay_transport: crate::relay::RelayTransport,
+    /// Whether its direct setups try a shared local network first: its
+    /// lan_first option, and never for a tunnel without direct.
+    pub lan_first: bool,
+    /// What its direct setups ask a shared local network to carry: its
+    /// lan_transport option, and QUIC for a tunnel without direct and for
+    /// a publisher, which serves what each consumer asks for.
+    pub lan_transport: crate::sdk::LanTransport,
+    /// How its sessions travel, on the relay and direct alike: present once
+    /// one has opened or a direct attempt has begun.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direct: Option<PathDiagnostics>,
+    /// Its application bytes on each path; see [`TunnelMetrics::traffic`].
+    pub traffic: PathTraffic,
+    /// The smoothed round trip of its control exchanges with the relay; see
+    /// [`RelayHealth::rtt_ms`].
+    pub relay_rtt_ms: Option<u64>,
     /// Present when the tunnel maps its direct endpoint's port: asked for,
     /// with direct allowed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -287,17 +444,40 @@ pub struct TunnelDiagnostics {
     pub events: Vec<TunnelEvent>,
 }
 
+/// How a tunnel's sessions travel. Both ends count every session, on the
+/// relay as well as direct. Non-exhaustive: fields are added as the SDK
+/// observes more.
 #[derive(Clone, Debug, Default, Serialize)]
+#[non_exhaustive]
 pub struct PathDiagnostics {
     pub direct_sessions: u64,
     pub relay_sessions: u64,
     pub active_direct: u64,
     pub active_relay: u64,
+    /// Direct sessions within one local network, open now and in all.
+    pub active_lan: u64,
+    pub lan_sessions: u64,
+    /// Direct sessions over TCP, which only a local network carries, open
+    /// now and in all.
+    pub active_lan_tcp: u64,
+    pub lan_tcp_sessions: u64,
+    /// Setups that found the peer on a local network of this end, and those
+    /// of them that ended on another path or on the relay.
+    pub lan_detected: u64,
+    pub lan_missed: u64,
     pub fallbacks: u64,
+    /// Why the latest fallback happened: [`FallbackReason::as_str`].
     pub last_fallback: Option<String>,
+    /// Where the latest direct session this end set up runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_kind: Option<LinkKind>,
     /// The direct attempt in flight, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt: Option<DirectAttempt>,
+    /// The newest direct session open now: its path, how it was set up, and
+    /// its carrier's view of it as of this read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<DirectLink>,
 }
 
 #[derive(Clone)]
@@ -329,14 +509,42 @@ enum Lifecycle {
     Closed,
 }
 
+/// A session open now: its bytes are read from its meter until it closes.
+struct OpenSession {
+    path: SessionPath,
+    link: Option<LinkSummary>,
+    opened: Instant,
+    meter: Arc<ByteMeter>,
+}
+
 struct State {
     lifecycle: Lifecycle,
+    started: Instant,
     /// Cleanups that hold the stream open past a stop.
     cleanups: usize,
     /// Present while someone subscribes: a tunnel nobody listens to sends
     /// nothing, and records no live-only event.
     stream: Option<broadcast::Sender<Event>>,
+    /// Bumped on every recorded event, whoever subscribes, so a metrics
+    /// stream samples a change at once; dropped when the event stream ends,
+    /// which ends the metrics streams too.
+    revision: Option<watch::Sender<u64>>,
+    /// The counters behind [`TunnelDiagnostics::direct`] and
+    /// [`TunnelMetrics::sessions`].
     direct: Option<PathDiagnostics>,
+    sessions: HashMap<u64, OpenSession>,
+    next_session: u64,
+    /// The bytes of the sessions that have closed, by [`Bucket`].
+    closed: [ByteCount; Bucket::ALL],
+    /// The smoothed round trip of control exchanges with the relay.
+    relay_rtt: Option<Duration>,
+    /// Until when sessions skip direct after a fallback, and how many have.
+    cooldown: Option<Instant>,
+    cooldown_skips: u64,
+    /// Whether direct setups try a shared local network first.
+    lan_first: bool,
+    /// What they ask a shared local network to carry.
+    lan_transport: crate::sdk::LanTransport,
     port_mapping: Option<PortMappingDiagnostics>,
     phase: RecoveryPhase,
     /// The phase last announced to subscribers. A ready tunnel's routine
@@ -356,14 +564,26 @@ struct State {
     /// The stage and start of the latest direct attempt still in flight.
     attempt: Option<(DirectStage, Instant)>,
     in_flight: u32,
+    /// Direct sessions open now, oldest first, each held only while it is:
+    /// the connection is a clone, and Quinn has no weak one.
+    #[cfg(feature = "p2p")]
+    links: Vec<LiveLink>,
+    #[cfg(feature = "p2p")]
+    next_link: u64,
     seq: u64,
     events: VecDeque<Event>,
 }
 
 impl State {
     fn record(&mut self, kind: TunnelEventKind) {
+        if self.lifecycle == Lifecycle::Closed {
+            return;
+        }
+        if let Some(revision) = &self.revision {
+            revision.send_modify(|revision| *revision = revision.wrapping_add(1));
+        }
         let live_only = kind.is_live_only();
-        if self.lifecycle == Lifecycle::Closed || (live_only && self.stream.is_none()) {
+        if live_only && self.stream.is_none() {
             return;
         }
         self.seq = self.seq.wrapping_add(1);
@@ -432,7 +652,70 @@ impl State {
             self.record(TunnelEventKind::Stopped);
             self.lifecycle = Lifecycle::Closed;
             self.stream = None;
+            self.revision = None;
         }
+    }
+
+    /// Application bytes by path: the closed sessions', and so far the
+    /// open ones'.
+    fn traffic(&self) -> PathTraffic {
+        let mut buckets = self.closed;
+        for session in self.sessions.values() {
+            let bucket = Bucket::of(session.path, session.link.map(|link| link.kind)).index();
+            buckets[bucket] = buckets[bucket].add(session.meter.totals());
+        }
+        Bucket::traffic(buckets)
+    }
+
+    fn metrics(&self, transport: RelayTransport, now: Instant) -> TunnelMetrics {
+        let none = PathDiagnostics::default();
+        let paths = self.direct.as_ref().unwrap_or(&none);
+        #[cfg(feature = "p2p")]
+        let link = self.links.last().map(LiveLink::metrics);
+        #[cfg(not(feature = "p2p"))]
+        let link = None;
+        TunnelMetrics {
+            uptime_ms: ms(now.saturating_duration_since(self.started)),
+            event_seq: self.seq,
+            sessions: SessionCounts {
+                active_relay: paths.active_relay,
+                active_direct: paths.active_direct,
+                active_lan: paths.active_lan,
+                relay: paths.relay_sessions,
+                direct: paths.direct_sessions,
+                lan: paths.lan_sessions,
+            },
+            traffic: self.traffic(),
+            relay: RelayHealth {
+                transport,
+                phase: self.phase,
+                consecutive_failures: self.failures,
+                rtt_ms: self.relay_rtt.map(ms),
+                last_success_age_ms: self
+                    .success
+                    .map(|time| ms(now.saturating_duration_since(time))),
+            },
+            link,
+            lan: LanCounts {
+                detected: paths.lan_detected,
+                missed: paths.lan_missed,
+            },
+            direct_cooldown_ms: self
+                .cooldown
+                .filter(|until| *until > now)
+                .map(|until| ms(until - now)),
+            cooldown_skips: self.cooldown_skips,
+            lan_first: self.lan_first,
+        }
+    }
+}
+
+/// Fold `sample` into the smoothed round trip `smoothed`, as TCP does
+/// (RFC 6298): an eighth of each new sample.
+pub(crate) fn smooth(smoothed: Option<Duration>, sample: Duration) -> Duration {
+    match smoothed {
+        None => sample,
+        Some(smoothed) => (smoothed * 7 + sample) / 8,
     }
 }
 
@@ -443,9 +726,19 @@ impl Default for Diagnostics {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(State {
             lifecycle: Lifecycle::Running,
+            started: Instant::now(),
             cleanups: 0,
             stream: None,
+            revision: Some(watch::channel(0).0),
             direct: None,
+            sessions: HashMap::new(),
+            next_session: 0,
+            closed: [ByteCount::default(); Bucket::ALL],
+            relay_rtt: None,
+            cooldown: None,
+            cooldown_skips: 0,
+            lan_first: false,
+            lan_transport: crate::sdk::LanTransport::Quic,
             port_mapping: None,
             phase: RecoveryPhase::Starting,
             announced: RecoveryPhase::Starting,
@@ -459,6 +752,10 @@ impl Default for Diagnostics {
             network: None,
             attempt: None,
             in_flight: 0,
+            #[cfg(feature = "p2p")]
+            links: Vec::new(),
+            #[cfg(feature = "p2p")]
+            next_link: 0,
             seq: 0,
             events: VecDeque::new(),
         })))
@@ -486,6 +783,23 @@ impl Diagnostics {
             receiver,
         }
     }
+    /// What changes with every recorded event; `None` once the tunnel has
+    /// stopped and its cleanup has reported.
+    fn revision(&self) -> Option<watch::Receiver<u64>> {
+        self.state().revision.as_ref().map(watch::Sender::subscribe)
+    }
+    /// The figures that keep changing, sampled now.
+    pub(crate) fn metrics(&self, transport: RelayTransport) -> TunnelMetrics {
+        self.state().metrics(transport, Instant::now())
+    }
+    /// Sample [`Self::metrics`] every `every`, and as the tunnel changes.
+    pub(crate) fn subscribe_metrics(
+        &self,
+        transport: RelayTransport,
+        every: Duration,
+    ) -> TunnelMetricsStream {
+        TunnelMetricsStream::new(self.clone(), transport, every)
+    }
     /// The tunnel stopped. Later reports from its workers are ignored, and the
     /// stream ends once every cleanup still running has reported.
     pub(crate) fn stop(&self) {
@@ -502,6 +816,13 @@ impl Diagnostics {
     pub(crate) fn defer_close(&self) -> DeferClose {
         self.state().cleanups += 1;
         DeferClose(self.clone())
+    }
+    /// Whether this tunnel's direct setups try a shared local network first,
+    /// and what they ask it to carry.
+    pub(crate) fn prefer_lan(&self, prefer: bool, transport: crate::sdk::LanTransport) {
+        let mut state = self.state();
+        state.lan_first = prefer;
+        state.lan_transport = transport;
     }
     /// This tunnel may map its direct endpoint's port: once that opens, or
     /// (`Auto`) once punching through has failed.
@@ -559,9 +880,22 @@ impl Diagnostics {
             .as_ref()
             .is_some_and(|p| p.active_direct != 0)
     }
-    #[cfg(feature = "p2p")]
-    pub(crate) fn session_opened(&self, path: SessionPath) {
+    /// A session opened on `path`, a direct one across `link`: counted
+    /// until the guard drops, its bytes through the guard's meter.
+    pub(crate) fn session_opened(
+        &self,
+        path: SessionPath,
+        link: Option<LinkSummary>,
+    ) -> SessionGuard {
+        let meter = Arc::new(ByteMeter::default());
         let mut state = self.state();
+        state.next_session += 1;
+        let id = state.next_session;
+        let direct = |kind: fn(&LinkSummary) -> bool| {
+            path == SessionPath::Direct && link.as_ref().is_some_and(kind)
+        };
+        let lan = direct(|link| link.kind == LinkKind::Lan);
+        let tcp = direct(|link| link.transport == DirectTransport::Tcp);
         let p = state.direct.get_or_insert_default();
         match path {
             SessionPath::Direct => {
@@ -573,17 +907,130 @@ impl Diagnostics {
                 p.active_relay += 1;
             }
         }
-        state.record(TunnelEventKind::SessionOpened { path });
+        if lan {
+            p.lan_sessions += 1;
+            p.active_lan += 1;
+        }
+        if tcp {
+            p.lan_tcp_sessions += 1;
+            p.active_lan_tcp += 1;
+        }
+        state.sessions.insert(
+            id,
+            OpenSession {
+                path,
+                link,
+                opened: Instant::now(),
+                meter: meter.clone(),
+            },
+        );
+        state.record(TunnelEventKind::SessionOpened {
+            session: id,
+            path,
+            link: link.map(|link| link.kind),
+        });
+        SessionGuard {
+            diagnostics: self.clone(),
+            id,
+            meter,
+        }
     }
-    #[cfg(feature = "p2p")]
-    pub(crate) fn session_closed(&self, path: SessionPath) {
+    fn session_closed(&self, id: u64) {
         let mut state = self.state();
+        let Some(session) = state.sessions.remove(&id) else {
+            return;
+        };
+        let totals = session.meter.totals();
+        let bucket = Bucket::of(session.path, session.link.map(|link| link.kind)).index();
+        state.closed[bucket] = state.closed[bucket].add(totals);
         let p = state.direct.get_or_insert_default();
-        match path {
+        match session.path {
             SessionPath::Direct => p.active_direct = p.active_direct.saturating_sub(1),
             SessionPath::Relay => p.active_relay = p.active_relay.saturating_sub(1),
         }
-        state.record(TunnelEventKind::SessionClosed { path });
+        if bucket == Bucket::DirectLan.index() {
+            p.active_lan = p.active_lan.saturating_sub(1);
+        }
+        if session
+            .link
+            .is_some_and(|link| link.transport == DirectTransport::Tcp)
+        {
+            p.active_lan_tcp = p.active_lan_tcp.saturating_sub(1);
+        }
+        state.record(TunnelEventKind::SessionClosed {
+            session: id,
+            path: session.path,
+            link: session.link.map(|link| link.kind),
+            duration_ms: ms(session.opened.elapsed()),
+            sent_bytes: totals.sent,
+            received_bytes: totals.received,
+        });
+    }
+    /// A setup found the peer on one of this end's local networks.
+    #[cfg(feature = "p2p")]
+    pub(crate) fn lan_detected(&self, evidence: LanEvidence, preferred: bool) {
+        let mut state = self.state();
+        state.direct.get_or_insert_default().lan_detected += 1;
+        state.record(TunnelEventKind::LanDetected {
+            evidence,
+            preferred,
+        });
+    }
+    /// A setup that found the peer on a local network, by `evidence`, took
+    /// a path across `took` instead, or the relay.
+    #[cfg(feature = "p2p")]
+    pub(crate) fn lan_missed(&self, evidence: LanEvidence, took: Option<LinkKind>) {
+        let mut state = self.state();
+        state.direct.get_or_insert_default().lan_missed += 1;
+        state.record(TunnelEventKind::LanMissed { evidence, took });
+    }
+    /// A setup that asked for TCP within a local network did not get it,
+    /// for `reason`, and took `took` instead, or the relay.
+    #[cfg(feature = "p2p")]
+    pub(crate) fn lan_tcp_missed(&self, reason: LanTcpMiss, took: Option<DirectTransport>) {
+        self.state()
+            .record(TunnelEventKind::LanTcpMissed { reason, took });
+    }
+    /// Direct is paused after a fallback until `until`, or no longer.
+    #[cfg(feature = "p2p")]
+    pub(crate) fn direct_cooldown(&self, until: Option<Instant>) {
+        self.state().cooldown = until;
+    }
+    /// A session went straight to the relay because direct is paused.
+    #[cfg(feature = "p2p")]
+    pub(crate) fn cooldown_skip(&self) {
+        self.state().cooldown_skips += 1;
+    }
+    /// A control exchange with `endpoint` took `rtt`, there and back: this
+    /// tunnel's figure, and the endpoint's, which its other tunnels share.
+    pub(crate) fn relay_rtt(&self, endpoint: &RelayEndpoint, rtt: Duration) {
+        endpoint.control_rtt(rtt);
+        let mut state = self.state();
+        state.relay_rtt = Some(smooth(state.relay_rtt, rtt));
+    }
+    /// A direct session is open on `link`: kept, with `probe` for its live
+    /// figures, until the guard drops.
+    #[cfg(feature = "p2p")]
+    pub(crate) fn link_opened(&self, link: DirectLink, probe: LinkProbe) -> LinkGuard {
+        let mut state = self.state();
+        state.next_link += 1;
+        let id = state.next_link;
+        state.record(TunnelEventKind::PathSelected {
+            link: link.kind,
+            family: link.family,
+            via: link.via,
+            transport: link.transport,
+        });
+        // A provider holds at most 64 sessions; a consumer has no such cap,
+        // and the newest is what is shown.
+        if state.links.len() == 64 {
+            state.links.remove(0);
+        }
+        state.links.push(LiveLink { id, link, probe });
+        LinkGuard {
+            diagnostics: self.clone(),
+            id,
+        }
     }
     /// Begin a direct attempt; the guard reports its stages and outcome.
     #[cfg(feature = "p2p")]
@@ -687,12 +1134,21 @@ impl Diagnostics {
             elapsed_ms: ms(now.saturating_duration_since(started)),
             in_flight: state.in_flight,
         });
+        #[cfg(feature = "p2p")]
+        let link = state.links.last().map(LiveLink::sample);
+        #[cfg(not(feature = "p2p"))]
+        let link = None;
         TunnelDiagnostics {
             relay_transport: endpoint.transport(),
-            direct: state
-                .direct
-                .clone()
-                .map(|direct| PathDiagnostics { attempt, ..direct }),
+            lan_first: state.lan_first,
+            lan_transport: state.lan_transport,
+            direct: state.direct.clone().map(|direct| PathDiagnostics {
+                attempt,
+                link,
+                ..direct
+            }),
+            traffic: state.traffic(),
+            relay_rtt_ms: state.relay_rtt.map(ms),
             port_mapping: state.port_mapping.clone(),
             sdk_version: env!("CARGO_PKG_VERSION"),
             last_attempt_phase: state.phase,
@@ -752,22 +1208,31 @@ impl DirectAttemptGuard {
         state.attempt = Some((stage, self.started));
         state.record(TunnelEventKind::DirectStageChanged { stage });
     }
-    pub(crate) fn established(mut self) {
-        self.settled = true;
-        let setup_ms = ms(self.started.elapsed());
-        self.diagnostics
-            .state()
-            .record(TunnelEventKind::DirectEstablished { setup_ms });
+    /// Time since the attempt began.
+    pub(crate) fn elapsed(&self) -> Duration {
+        self.started.elapsed()
     }
-    /// Fall back to the relay for `reason`, the legacy label kept in
-    /// [`PathDiagnostics::last_fallback`].
-    pub(crate) fn fell_back(mut self, reason: &str) {
+    /// The attempt went direct, on a path of `kind`, after `setup`.
+    pub(crate) fn established(mut self, setup: Duration, kind: LinkKind) {
+        self.settled = true;
+        let mut state = self.diagnostics.state();
+        state.direct.get_or_insert_default().last_kind = Some(kind);
+        state.record(TunnelEventKind::DirectEstablished {
+            setup_ms: ms(setup),
+        });
+    }
+    /// Fall back to the relay for `reason`, whose label
+    /// [`PathDiagnostics::last_fallback`] keeps.
+    pub(crate) fn fell_back(mut self, reason: FallbackReason) {
         self.settled = true;
         let mut state = self.diagnostics.state();
         let p = state.direct.get_or_insert_default();
         p.fallbacks += 1;
-        p.last_fallback = Some(reason.into());
-        state.record(TunnelEventKind::DirectFallback { stage: self.stage });
+        p.last_fallback = Some(reason.as_str().into());
+        state.record(TunnelEventKind::DirectFallback {
+            stage: self.stage,
+            reason,
+        });
     }
 }
 
@@ -785,13 +1250,121 @@ impl Drop for DirectAttemptGuard {
     }
 }
 
-/// A session open on a path, closed when this drops.
+/// Where a direct session's live figures come from.
 #[cfg(feature = "p2p")]
-pub(crate) struct PathUsage(pub Diagnostics, pub SessionPath);
+pub(crate) enum LinkProbe {
+    /// QUIC's own, read from the connection as they are now.
+    Quic(quinn::Connection),
+    /// TCP keeps its figures in the kernel; the round trip of the
+    /// connection's handshake stands in for them.
+    Tcp { handshake_rtt: Duration },
+}
+
+/// A direct session's path and what its figures are read from.
 #[cfg(feature = "p2p")]
-impl Drop for PathUsage {
+struct LiveLink {
+    id: u64,
+    link: DirectLink,
+    probe: LinkProbe,
+}
+
+#[cfg(feature = "p2p")]
+impl LiveLink {
+    /// The carrier's figures as they are now.
+    fn stats(&self) -> LinkStats {
+        let connection = match &self.probe {
+            LinkProbe::Quic(connection) => connection,
+            LinkProbe::Tcp { handshake_rtt } => {
+                return LinkStats {
+                    rtt_us: micros(*handshake_rtt),
+                    min_rtt_us: micros(*handshake_rtt),
+                    ..LinkStats::default()
+                };
+            }
+        };
+        let stats = connection.stats();
+        LinkStats {
+            rtt_us: micros(connection.rtt()),
+            min_rtt_us: micros(stats.path.min_rtt),
+            congestion_window: stats.path.cwnd,
+            mtu: stats.path.current_mtu,
+            sent_packets: stats.path.sent_packets,
+            lost_packets: stats.path.lost_packets,
+            congestion_events: stats.path.congestion_events,
+            sent_bytes: stats.udp_tx.bytes,
+            received_bytes: stats.udp_rx.bytes,
+            lost_bytes: stats.path.lost_bytes,
+            bandwidth_bps: stats.path.bandwidth_estimate,
+        }
+    }
+
+    /// The link with its carrier's figures as they are now.
+    fn sample(&self) -> DirectLink {
+        DirectLink {
+            stats: self.stats(),
+            ..self.link.clone()
+        }
+    }
+
+    /// What [`TunnelMetrics::link`] reports of it, figures as they are now.
+    fn metrics(&self) -> LinkSample {
+        let link = &self.link;
+        LinkSample {
+            kind: link.kind,
+            family: link.family,
+            via: link.via,
+            transport: link.transport,
+            peer: link.peer,
+            local_ip: link.local_ip,
+            same_lan: link.same_lan,
+            setup_ms: link.timings.setup_ms,
+            stats: self.stats(),
+        }
+    }
+}
+
+#[cfg(feature = "p2p")]
+fn micros(time: Duration) -> u64 {
+    time.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+/// A direct session's link, forgotten, and its connection let go, when this
+/// drops with the session.
+#[cfg(feature = "p2p")]
+pub(crate) struct LinkGuard {
+    diagnostics: Diagnostics,
+    id: u64,
+}
+
+#[cfg(feature = "p2p")]
+impl Drop for LinkGuard {
     fn drop(&mut self) {
-        self.0.session_closed(self.1);
+        self.diagnostics
+            .state()
+            .links
+            .retain(|live| live.id != self.id);
+    }
+}
+
+/// A session open on a path, from [`Diagnostics::session_opened`]: its
+/// forwarding counts into [`Self::meter`], and dropping it closes the
+/// session with the bytes counted, however the forwarding ended.
+pub(crate) struct SessionGuard {
+    diagnostics: Diagnostics,
+    id: u64,
+    meter: Arc<ByteMeter>,
+}
+
+impl SessionGuard {
+    /// Where the session's forwarding counts its bytes.
+    pub(crate) fn meter(&self) -> Arc<ByteMeter> {
+        self.meter.clone()
+    }
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.diagnostics.session_closed(self.id);
     }
 }
 
@@ -868,9 +1441,9 @@ mod tests {
         let second = diagnostics.direct_attempt();
         let seen = attempt_of(&diagnostics).unwrap();
         assert_eq!((seen.stage, seen.in_flight), (DirectStage::Negotiating, 2));
-        first.fell_back("direct_timeout_or_unreachable");
+        first.fell_back(FallbackReason::Unreachable);
         assert_eq!(attempt_of(&diagnostics).unwrap().in_flight, 1);
-        second.established();
+        second.established(Duration::from_millis(40), LinkKind::Lan);
         assert_eq!(attempt_of(&diagnostics), None);
         let direct = diagnostics.snapshot(&endpoint).direct.unwrap();
         assert_eq!(direct.fallbacks, 1);
@@ -884,7 +1457,8 @@ mod tests {
             [
                 (
                     TunnelEventKind::DirectFallback {
-                        stage: DirectStage::Punching
+                        stage: DirectStage::Punching,
+                        reason: FallbackReason::Unreachable,
                     },
                     1
                 ),

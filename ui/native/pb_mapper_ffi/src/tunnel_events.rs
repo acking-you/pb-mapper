@@ -1,19 +1,25 @@
-//! A running tunnel's events, read by the window one at a time.
+//! A running tunnel's events, and its metrics, read by the window one at a
+//! time.
 //!
 //! One export, [`pb_mapper_tunnel_events_call_json`], takes `{"op": …, …}`
 //! as `pb_mapper_relay_call_json` does:
 //!
-//! - `subscribe {kind: "share" | "connect", key}` → `{id, diagnostics}`;
+//! - `subscribe {kind: "share" | "connect", key, metrics_ms?}` → `{id,
+//!   diagnostics, metrics}`. With `metrics_ms`, the reader also samples the
+//!   tunnel's metrics that often, and whenever a session opens or closes;
 //! - `next {id, timeout_ms}` waits up to `timeout_ms` (at most 30 s) and
-//!   answers `{type: "event", event, diagnostics}`, `{type: "lagged",
-//!   skipped, diagnostics}` when the reader fell behind, `{type: "idle"}`, or
-//!   `{type: "closed"}` once the tunnel has stopped or the reader closed;
+//!   answers `{type: "event", event, diagnostics, metrics}`, `{type:
+//!   "metrics", metrics}` when a sample is due, `{type: "lagged", skipped,
+//!   diagnostics, metrics}` when the reader fell behind, `{type: "idle"}`,
+//!   or `{type: "closed"}` once the tunnel has stopped or the reader closed;
 //! - `close {id}` ends a reader, waking a pending `next`.
 //!
-//! Each answer carries the tunnel's diagnostics as they are by then, so a
-//! reader never keeps a state of its own. A reader holds its tunnel weakly:
-//! it never keeps one running. Calls run on Dart's worker isolates, so the
-//! handle must outlive every call in flight.
+//! Each event answer carries the tunnel's diagnostics and metrics as they
+//! are by then, so a reader never keeps a state of its own; a metrics answer
+//! carries only the sample, which is what keeps a panel's figures live
+//! between events. A reader holds its tunnel weakly: it never keeps one
+//! running. Calls run on Dart's worker isolates, so the handle must outlive
+//! every call in flight.
 
 use std::{
     collections::HashMap,
@@ -25,7 +31,9 @@ use std::{
     time::Duration,
 };
 
-use pb_mapper_client::sdk::{TunnelDiagnostics, TunnelEvent, TunnelEvents};
+use pb_mapper_client::sdk::{
+    TunnelDiagnostics, TunnelEvent, TunnelEvents, TunnelMetrics, TunnelMetricsStream,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -60,6 +68,8 @@ impl Drop for TunnelEventReaders {
 
 struct Reader {
     events: tokio::sync::Mutex<TunnelEvents>,
+    /// Present when the reader asked for samples.
+    metrics: Option<tokio::sync::Mutex<TunnelMetricsStream>>,
     tunnel: Weak<TunnelHandle>,
     closed: CancellationToken,
 }
@@ -68,14 +78,59 @@ impl Reader {
     fn diagnostics(&self) -> Option<TunnelDiagnostics> {
         self.tunnel.upgrade().map(|tunnel| tunnel.diagnostics())
     }
+
+    fn metrics(&self) -> Option<TunnelMetrics> {
+        self.tunnel.upgrade().map(|tunnel| tunnel.metrics())
+    }
+
+    /// The next event, or a sample when one is due first. An event wins a
+    /// tie; once the samples end, with the tunnel, only events are left.
+    async fn receive(&self) -> Received {
+        let mut events = self.events.lock().await;
+        let mut samples = match &self.metrics {
+            Some(metrics) => Some(metrics.lock().await),
+            None => None,
+        };
+        loop {
+            let sample = async {
+                match samples.as_mut() {
+                    Some(samples) => samples.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                biased;
+                event = events.recv() => return Received::Event(event),
+                sample = sample => match sample {
+                    Some(sample) => return Received::Sample(Box::new(sample)),
+                    None => samples = None,
+                },
+            }
+        }
+    }
+}
+
+enum Received {
+    Event(Option<Result<TunnelEvent, pb_mapper_client::sdk::EventsLagged>>),
+    Sample(Box<TunnelMetrics>),
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Request {
-    Subscribe { kind: TunnelKind, key: String },
-    Next { id: u64, timeout_ms: u32 },
-    Close { id: u64 },
+    Subscribe {
+        kind: TunnelKind,
+        key: String,
+        #[serde(default)]
+        metrics_ms: Option<u32>,
+    },
+    Next {
+        id: u64,
+        timeout_ms: u32,
+    },
+    Close {
+        id: u64,
+    },
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -91,10 +146,15 @@ enum Next {
     Event {
         event: TunnelEvent,
         diagnostics: Option<TunnelDiagnostics>,
+        metrics: Option<TunnelMetrics>,
+    },
+    Metrics {
+        metrics: TunnelMetrics,
     },
     Lagged {
         skipped: u64,
         diagnostics: Option<TunnelDiagnostics>,
+        metrics: Option<TunnelMetrics>,
     },
     Idle,
     Closed,
@@ -131,24 +191,37 @@ pub unsafe extern "C" fn pb_mapper_tunnel_events_call_json(
 async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlError> {
     let readers = &handle.tunnel_events;
     match request {
-        Request::Subscribe { kind, key } => {
+        Request::Subscribe {
+            kind,
+            key,
+            metrics_ms,
+        } => {
             let reader = {
                 let state = handle.state.lock().await;
                 let tunnel = state.running_tunnel(matches!(kind, TunnelKind::Share), &key)?;
                 Reader {
                     events: tokio::sync::Mutex::new(tunnel.subscribe_events()),
+                    metrics: metrics_ms.map(|ms| {
+                        let every = Duration::from_millis(ms.into());
+                        tokio::sync::Mutex::new(tunnel.subscribe_metrics(every))
+                    }),
                     tunnel: Arc::downgrade(tunnel),
                     closed: CancellationToken::new(),
                 }
             };
             let diagnostics = reader.diagnostics();
+            // A stream's first sample comes at once: this answer takes it.
+            let metrics = match &reader.metrics {
+                Some(samples) => samples.lock().await.recv().await,
+                None => reader.metrics(),
+            };
             let mut open = readers.open.lock();
             if open.len() >= MAX_READERS {
                 return Err(CtlError::invalid_argument("too many tunnel event readers"));
             }
             let id = readers.last_id.fetch_add(1, Ordering::Relaxed) + 1;
             open.insert(id, Arc::new(reader));
-            Ok(json!({ "id": id, "diagnostics": diagnostics }))
+            Ok(json!({ "id": id, "diagnostics": diagnostics, "metrics": metrics }))
         }
         Request::Next { id, timeout_ms } => {
             let Some(reader) = readers.open.lock().get(&id).cloned() else {
@@ -158,15 +231,19 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             let next = tokio::select! {
                 biased;
                 () = reader.closed.cancelled() => Next::Closed,
-                received = tokio::time::timeout(wait, async {
-                    reader.events.lock().await.recv().await
-                }) => match received {
-                    Ok(Some(Ok(event))) => Next::Event { event, diagnostics: reader.diagnostics() },
-                    Ok(Some(Err(lagged))) => Next::Lagged {
+                received = tokio::time::timeout(wait, reader.receive()) => match received {
+                    Ok(Received::Event(Some(Ok(event)))) => Next::Event {
+                        event,
+                        diagnostics: reader.diagnostics(),
+                        metrics: reader.metrics(),
+                    },
+                    Ok(Received::Event(Some(Err(lagged)))) => Next::Lagged {
                         skipped: lagged.skipped,
                         diagnostics: reader.diagnostics(),
+                        metrics: reader.metrics(),
                     },
-                    Ok(None) => Next::Closed,
+                    Ok(Received::Event(None)) => Next::Closed,
+                    Ok(Received::Sample(metrics)) => Next::Metrics { metrics: *metrics },
                     Err(_) => Next::Idle,
                 },
             };
@@ -210,6 +287,7 @@ mod tests {
         ));
         let handle = PbMapperHandle {
             tunnel_events: Default::default(),
+            desktop: Default::default(),
             runtime: tokio::runtime::Runtime::new().unwrap(),
             state: Arc::new(tokio::sync::Mutex::new(crate::state::PbMapperState::new(
                 Some(root.display().to_string()),
@@ -247,14 +325,22 @@ mod tests {
                 .await
                 .unwrap();
             let tunnel = Arc::new(TunnelHandle::Share(registration));
-            handle.tunnel_events.open.lock().insert(
-                1,
+            let reader = |metrics: Option<u64>| {
                 Arc::new(Reader {
                     events: tokio::sync::Mutex::new(tunnel.subscribe_events()),
+                    metrics: metrics.map(|ms| {
+                        tokio::sync::Mutex::new(tunnel.subscribe_metrics(Duration::from_millis(ms)))
+                    }),
                     tunnel: Arc::downgrade(&tunnel),
                     closed: CancellationToken::new(),
-                }),
-            );
+                })
+            };
+            handle.tunnel_events.open.lock().insert(1, reader(None));
+            handle
+                .tunnel_events
+                .open
+                .lock()
+                .insert(2, reader(Some(100)));
             let next = |timeout_ms| call(&handle, Request::Next { id: 1, timeout_ms });
             // The history first, each answer with the state as it is by then.
             let first = next(1).await.unwrap();
@@ -270,6 +356,25 @@ mod tests {
             .await;
             call(&handle, Request::Close { id: 1 }).await.unwrap();
             assert_eq!(pending.await.unwrap()["type"], "closed");
+            // A reader that asked for samples gets them while the tunnel
+            // is quiet: past the history, figures every period.
+            let sampled = loop {
+                let answer = call(
+                    &handle,
+                    Request::Next {
+                        id: 2,
+                        timeout_ms: 5_000,
+                    },
+                )
+                .await
+                .unwrap();
+                if answer["type"] != "event" {
+                    break answer;
+                }
+            };
+            assert_eq!(sampled["type"], "metrics");
+            assert_eq!(sampled["metrics"]["relay"]["transport"], "tcp");
+            call(&handle, Request::Close { id: 2 }).await.unwrap();
             assert!(handle.tunnel_events.open.lock().is_empty());
             let TunnelHandle::Share(registration) = &*tunnel else {
                 unreachable!()

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12 and later. Neither cloud backup nor a device-to-device
+     transfer carries the app's secrets to another phone:
+     - app_flutter/ (the "root" domain) is getApplicationDocumentsDirectory(),
+       where the Rust side keeps the relay credential, the tunnels, the
+       remembered computers' vault, desktop trust and the persisted logs;
+     - the "file" domain is getApplicationSupportDirectory(), which holds
+       the remembered computers' last pictures.
+     Shared preferences (theme, viewer choices) are still backed up. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="app_flutter/" />
+        <exclude domain="file" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="app_flutter/" />
+        <exclude domain="file" path="." />
+    </device-transfer>
+</data-extraction-rules>

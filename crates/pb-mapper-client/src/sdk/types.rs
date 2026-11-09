@@ -181,15 +181,75 @@ impl PortMapping {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+/// What a direct path within a local network runs over. A path across the
+/// internet is always QUIC: TCP is offered only between ends that share a
+/// LAN, so a hole-punched path never takes it.
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LanTransport {
+    /// The default: QUIC over the same UDP socket as every other direct path,
+    /// which the provider's own probes open through its firewall.
+    #[default]
+    Quic,
+    /// TLS 1.3 over TCP, tried first, 300 ms ahead of every QUIC path while
+    /// LAN-first is on, and raced with them while it is off. It needs the
+    /// provider's firewall to let inbound TCP in; where it does not, or the
+    /// provider does not serve it, the session takes QUIC as it would have.
+    Tcp,
+}
+
+impl LanTransport {
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Quic => "quic",
+            Self::Tcp => "tcp",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct ConnectOptions {
     pub path: PathPolicy,
     /// `Auto` by default, and ignored on the relay-only path.
     pub port_mapping: PortMapping,
+    /// Try a local network this end shares with the publisher first. On, the
+    /// publisher's addresses on that network are probed ahead of the others
+    /// and again 20 and 50 ms later; and once the network is known to be
+    /// there, by strong evidence or by an answer from a path on it, a path
+    /// off it waits up to 150 ms after its own answer before it is dialed,
+    /// unless a LAN handshake completes or every LAN path fails first. Off,
+    /// the publisher's addresses are probed in the order it offered them and
+    /// every path that answers is dialed at once. What either end offers,
+    /// and how a path is reported, are the same either way.
+    ///
+    /// On by default. It is this end's policy alone: nothing about it crosses
+    /// the wire, and the publisher follows its own. Ignored on the relay-only
+    /// path.
+    pub lan_first: bool,
+    /// What a path within a local network this end shares with the publisher
+    /// runs over: QUIC by default. Unlike `lan_first` it crosses the wire, as
+    /// a request: `Tcp` asks the publisher for its TCP addresses on the LAN,
+    /// which it gives under its own [`RegisterOptions::lan_tcp`]. A publisher
+    /// or relay that does not, and every path across the internet, leaves
+    /// the session on QUIC. Ignored on the relay-only path.
+    pub lan_transport: LanTransport,
+}
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            path: PathPolicy::default(),
+            port_mapping: PortMapping::Auto,
+            lan_first: true,
+            lan_transport: LanTransport::Quic,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(not(feature = "p2p"), derive(Default))]
 pub struct RegisterOptions {
     /// Accept direct sessions from authorized consumers. Defaults to `true`
     /// with the `p2p` feature. Allowing it costs nothing until a consumer asks:
@@ -198,15 +258,57 @@ pub struct RegisterOptions {
     pub idle_timeout: Option<std::time::Duration>,
     /// `Auto` by default, and ignored unless `allow_direct`.
     pub port_mapping: PortMapping,
+    /// Try a local network this end shares with a consumer first: probe the
+    /// consumer's addresses on it ahead of the others, and again 20 and 50 ms
+    /// later. Off, they are probed in the order the consumer offered them.
+    /// Which path a session takes is the dialing consumer's choice, under its
+    /// own [`ConnectOptions::lan_first`].
+    ///
+    /// On by default. It is this end's policy alone, and nothing about it
+    /// crosses the wire. Ignored unless `allow_direct`.
+    pub lan_first: bool,
+    /// Serve a consumer that asks for [`LanTransport::Tcp`] and shares a
+    /// local network with this end: open a TCP listener for direct sessions
+    /// the first time one asks, and offer its addresses on that network only.
+    /// Off, such a consumer gets QUIC, as from a publisher that predates it.
+    ///
+    /// On by default; nothing listens until a consumer asks. Ignored unless
+    /// `allow_direct`.
+    pub lan_tcp: bool,
 }
 
-#[cfg(feature = "p2p")]
 impl Default for RegisterOptions {
     fn default() -> Self {
         Self {
-            allow_direct: true,
+            allow_direct: cfg!(feature = "p2p"),
             idle_timeout: None,
             port_mapping: PortMapping::Auto,
+            lan_first: true,
+            lan_tcp: true,
         }
     }
+}
+
+/// How a tunnel's direct setups go, as its options say, carried from the SDK
+/// to the direct core. It exists without `p2p` as well, since the workers
+/// that carry it do, though only the direct core reads it.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(feature = "p2p"), allow(dead_code))]
+pub(crate) struct DirectPolicy {
+    pub port_mapping: PortMapping,
+    pub lan_first: bool,
+    /// What a consumer asks a shared LAN to carry.
+    pub lan_transport: LanTransport,
+    /// Whether a provider serves TCP on a shared LAN to a consumer that asks.
+    pub lan_tcp: bool,
+}
+
+impl DirectPolicy {
+    /// The relay-only workers', which never set up a direct path.
+    pub const RELAY: Self = Self {
+        port_mapping: PortMapping::Off,
+        lan_first: true,
+        lan_transport: LanTransport::Quic,
+        lan_tcp: false,
+    };
 }

@@ -36,7 +36,9 @@ void main() {
           tester.widget<GlassSegmented<PortMappingMode>>(control).selected;
       bool held() => tester
           .widget<IgnorePointer>(
-            find.ancestor(of: control, matching: find.byType(IgnorePointer)).first,
+            find
+                .ancestor(of: control, matching: find.byType(IgnorePointer))
+                .first,
           )
           .ignoring;
       expect(mode(), PortMappingMode.auto);

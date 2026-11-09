@@ -39,6 +39,13 @@ rather than clearing the tray.
 
 ## Rebasing
 
+The Windows popup also posts `WM_NULL` after `TrackPopupMenu`, as required by
+[the Win32 tray-menu contract](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-trackpopupmenu),
+so reopening does not immediately dismiss it. Icon structures are zero-initialized
+before the first reload. The app serializes/de-duplicates native tray updates,
+defers them while a popup is open, and keeps command IDs stable after closing;
+the plugin's Dart API remains unchanged.
+
 `git diff` this directory against a fresh copy of the pub cache version. The
 changes are confined to `windows/tray_manager_plugin.cpp` and
 `windows/CMakeLists.txt`. If upstream picks these up, drop the

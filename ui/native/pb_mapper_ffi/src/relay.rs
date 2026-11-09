@@ -28,6 +28,7 @@ use crate::error::CtlError;
 use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, parse_c_string};
+use crate::state::AppConfig;
 
 /// Long enough for an inventory paged across a large relay, short enough
 /// that a relay that stopped answering is reported rather than waited on.
@@ -93,14 +94,15 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
                 .ok();
             let mut state = state.lock().await;
             let mut save_error = None;
-            let saved = state.get_config_status().await == config
+            // Only the relay settings matter: a preference of this
+            // computer's changed meanwhile is kept as it is now.
+            let current = state.get_config_status().await;
+            let saved = current.same_relay(&config)
                 && match state
-                    .update_config(
-                        config.server_address.clone(),
-                        config.keep_alive_enabled,
-                        key,
-                        config.relay_transport,
-                    )
+                    .update_config(AppConfig {
+                        msg_header_key: key,
+                        ..current
+                    })
                     .await
                 {
                     Ok(()) => true,
@@ -485,11 +487,20 @@ fn session_json(session: &SessionObservation) -> Value {
         .filter_map(|report| report.as_ref())
         .min_by_key(|report| report.age_ms);
     let id: String = session.id[..6].iter().map(|b| format!("{b:02x}")).collect();
+    // What the ends said of a direct path, the latest first: absent where
+    // both ends, or the relay, predate it.
+    let link = latest.and_then(|report| report.report.link).or_else(|| {
+        reports
+            .iter()
+            .find_map(|report| report.as_ref()?.report.link)
+    });
     json!({
         "id": id,
         "service": session.service,
         "transport": if session.is_datagram { "UDP" } else { "TCP" },
         "path": latest.map(|report| format!("{:?}", report.report.path).to_lowercase()),
+        "pathKind": link.map(|link| link.kind.as_str()),
+        "family": link.map(|link| link.family.as_str()),
         "state": latest.map(|report| format!("{:?}", report.report.state).to_lowercase()),
         "reason": latest.and_then(|report| report.report.reason.clone()),
         "ageMs": latest.map(|report| report.age_ms),

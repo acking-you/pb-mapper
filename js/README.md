@@ -47,8 +47,11 @@ The relay carrier remains TCP by default. Set `relayTransport: "quic"` in
 `--quic-listen IP:UDPPORT`; authenticated discovery still needs its TCP port,
 and `await client.relayQuicPort()` asks over it whether QUIC is offered (`null`
 when not). `await client.relayDiagnostics()` exposes pooled connection reuse,
-RTT, loss and byte counters; tunnel `diagnostics().relayTransport` shows the
-selected carrier. This setting is independent of the direct/relay policy.
+RTT, loss, bandwidth and byte counters, and `controlRttMs`, the smoothed
+round trip of every tunnel's control exchanges over either carrier;
+`client.subscribeRelayMetrics(everyMs)` samples it as time passes. Tunnel
+`diagnostics().relayTransport` shows the selected carrier. This setting is
+independent of the direct/relay policy.
 
 `register` allows direct sessions and `connect` uses `path: "auto"` by
 default: try UDP hole punching and mutually authenticated QUIC, and fall back
@@ -70,9 +73,23 @@ renewed while the tunnel runs and released when it stops, and
 `diagnostics().portMapping` says where it stands (`standby` until a punch
 fails).
 
+When both ends share a Wi-Fi or LAN, direct setup tries that network first:
+`lanFirst: true`, the default for `register` and `connect`. With
+`lanFirst: false` the peer's addresses are probed in the order offered and
+nothing waits for the LAN; it is still detected and reported, and
+`diagnostics().lanFirst` says which the tunnel runs with.
+
+A path within that LAN runs over QUIC unless the connection asks for TCP with
+`lanTransport: "tcp"`: TCP is then tried first, 300 ms ahead of QUIC with
+`lanFirst` on, and the session falls back to QUIC on the LAN when the
+publisher's firewall stops TCP. A path across the internet is always QUIC.
+Registrations serve TCP on demand, on their LAN addresses only; `lanTcp: false`
+refuses it. `diagnostics().lanTransport` says what a connection asks for, and
+a direct link's `transport` what it runs over.
+
 ## Listening for changes
 
-Two feeds, both free of credentials and payload. The status:
+Three feeds, all free of credentials and payload. The status:
 
 ```ts
 // Resolves on every status change; once the tunnel settles as "stopped" or
@@ -105,9 +122,35 @@ says how many it missed: read `diagnostics()` and keep reading.
 `next(timeoutMs)` rejects when the time passes first, without losing an
 event. A stream carries the steps as well as the outcomes: `phase_changed`,
 `direct_stage_changed`, `direct_abandoned`, `session_opened`,
-`session_closed` and `port_mapping_changed`, whose `mapping` is the mapping as it now stands.
+`session_closed` (with `durationMs`, `sentBytes` and `receivedBytes`),
+`lan_detected`, `path_selected`, `lan_missed` (with where the session went
+instead, `took`) and `port_mapping_changed`, whose `mapping` is the mapping as it now stands.
 `release_sent` there is a PCP or NAT-PMP deletion the router does not
-acknowledge; `released` is one UPnP confirmed.
+acknowledge; `released` is one UPnP confirmed. A `direct_fallback` says
+why in `reason`; a kind added by a later version reads `unknown`.
+
+And the figures that keep changing: `metrics()` reads them now, and
+`subscribeMetrics(everyMs)` samples them at once, then every `everyMs` (one
+second by default) and whenever a session opens or closes, until the tunnel
+stops.
+
+```ts
+const metrics = conn.subscribeMetrics(1000);
+try {
+  for (let sample; (sample = await metrics.next()) !== null;) {
+    const { relay, direct } = sample.traffic;
+    console.log(sample.sessions, relay.sent, relay.received, direct.sent, sample.relay.rttMs);
+  }
+} finally {
+  metrics.close();
+}
+```
+
+A sample is taken when `next()` resolves, so nothing queues and a slow
+reader gets fewer, fresher ones. `traffic` counts the application's bytes on
+each path (`direct` includes `lan`; sent is what this end's local side sent),
+on both ends and for every session, a relay-only one included. One second
+suits a panel on screen; lists and logs need five or more.
 
 `diagnostics()` is a credential-free snapshot for dashboards and logs:
 
@@ -120,6 +163,7 @@ acknowledge; `released` is one UPnP confirmed.
 - `direct`: sessions per path, active sessions, fallbacks, and the attempt in
   flight with its stage (`negotiating`, `discovering`, `punching`,
   `committing`);
+- `traffic` and `relayRttMs`, as `metrics()` reports them;
 - recovery counters: attempts, consecutive failures, setup latency, next retry.
 
 Call `client.notifyNetworkChange()` from the host's network-change or resume

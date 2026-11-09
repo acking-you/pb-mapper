@@ -47,6 +47,8 @@ struct RelayState {
     network: Arc<NetworkHints>,
     control_slots: Arc<Semaphore>,
     data_slots: Arc<Semaphore>,
+    /// The smoothed round trip of every tunnel's control exchanges here.
+    control_rtt: StdMutex<Option<Duration>>,
     #[cfg(test)]
     resolver: Option<TestResolver>,
 }
@@ -150,6 +152,7 @@ impl RelayEndpoint {
             network: NetworkHints::shared(),
             control_slots: Arc::new(Semaphore::new(CONTROL_SETUPS)),
             data_slots: Arc::new(Semaphore::new(DATA_SETUPS)),
+            control_rtt: StdMutex::new(None),
             #[cfg(test)]
             resolver: None,
         }))
@@ -405,10 +408,24 @@ impl RelayEndpoint {
     }
     pub(crate) async fn relay_diagnostics(&self) -> crate::relay::RelayDiagnostics {
         #[cfg(feature = "relay-quic")]
-        if let Some(pool) = &self.0.quic {
-            return pool.diagnostics();
+        let diagnostics = match &self.0.quic {
+            Some(pool) => pool.diagnostics(),
+            None => crate::relay::RelayDiagnostics::empty(self.transport()),
+        };
+        #[cfg(not(feature = "relay-quic"))]
+        let diagnostics = crate::relay::RelayDiagnostics::empty(self.transport());
+        crate::relay::RelayDiagnostics {
+            control_rtt_ms: self.control_rtt_now().map(crate::diagnostics::ms),
+            ..diagnostics
         }
-        crate::relay::RelayDiagnostics::empty(self.transport())
+    }
+    /// A control exchange here took `rtt`, there and back.
+    pub(crate) fn control_rtt(&self, rtt: Duration) {
+        let mut smoothed = self.0.control_rtt.lock().unwrap_or_else(|e| e.into_inner());
+        *smoothed = Some(crate::diagnostics::smooth(*smoothed, rtt));
+    }
+    fn control_rtt_now(&self) -> Option<Duration> {
+        *self.0.control_rtt.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 

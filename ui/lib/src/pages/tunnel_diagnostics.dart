@@ -1,11 +1,13 @@
 /// A running tunnel's diagnostics, opened from its menu and from the galaxy's
-/// details panel: how it reaches the relay, how its sessions travel, its port
-/// mapping, and what happened to it, as it happens. The whole of it copies as
-/// one JSON report.
+/// details panel: how it reaches the relay, how its sessions travel and what
+/// they carry, its port mapping, and what happened to it, as it happens. Its
+/// figures are sampled every second while it is open. The whole of it copies
+/// as one JSON report.
 library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -21,6 +23,8 @@ import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/theme/fonts.dart';
 import 'package:pb_mapper_ui/src/theme/motion.dart';
 import 'package:pb_mapper_ui/src/widgets/carrier.dart';
+import 'package:pb_mapper_ui/src/widgets/path.dart'
+    show familyLabel, linkKindLabel;
 import 'package:pb_mapper_ui/src/widgets/status.dart';
 import 'package:pb_mapper_ui/src/widgets/surfaces.dart';
 
@@ -57,6 +61,9 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
   /// Ages are said relative to now, so they are said again now and then.
   late final Timer _clock;
   TunnelDiagnostics? _diagnostics;
+
+  /// The figures that keep changing, sampled every second.
+  TunnelMetrics? _metrics;
   final List<_Received> _events = [];
   int _missed = 0;
   Object? _error;
@@ -68,6 +75,7 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
         .tunnelEvents(
           serviceKey: widget.tunnel.key,
           share: widget.tunnel.kind == TunnelKind.share,
+          metricsEvery: const Duration(seconds: 1),
         )
         .listen(
           _receive,
@@ -84,6 +92,7 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
     if (!mounted) return;
     setState(() {
       _diagnostics = update.diagnostics ?? _diagnostics;
+      _metrics = update.metrics ?? _metrics;
       _missed += update.missed;
       final event = update.event;
       if (event != null &&
@@ -105,6 +114,7 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
     final report = {
       'tunnel': {'kind': widget.tunnel.kind.name, 'key': widget.tunnel.key},
       'diagnostics': _diagnostics?.raw,
+      'metrics': _metrics?.raw,
       'events': [for (final received in _events) received.event.raw],
       if (_missed > 0) 'missed': _missed,
     };
@@ -112,11 +122,7 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
       ClipboardData(text: const JsonEncoder.withIndent('  ').convert(report)),
     );
     if (!mounted) return;
-    showToast(
-      context,
-      context.l10n.diagnosticsCopied,
-      kind: ToastKind.success,
-    );
+    showToast(context, context.l10n.diagnosticsCopied, kind: ToastKind.success);
   }
 
   @override
@@ -150,7 +156,11 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _Facts(tunnel: widget.tunnel, diagnostics: diagnostics),
+                  _Facts(
+                    diagnostics: diagnostics,
+                    metrics: _metrics,
+                    allowDirect: widget.tunnel.allowDirect,
+                  ),
                   const SizedBox(height: 16),
                   _Heading(l10n.portMapping),
                   _PortMapping(
@@ -266,55 +276,119 @@ class _Header extends StatelessWidget {
   }
 }
 
-/// The tunnel at a glance: its carrier, the relay, and its sessions.
+/// The tunnel at a glance: its carrier, the relay, its sessions and what
+/// each path carried. The figures that keep changing come from the latest
+/// [metrics] sample once there is one, the rest from [diagnostics].
 class _Facts extends StatelessWidget {
-  const _Facts({required this.tunnel, required this.diagnostics});
+  const _Facts({
+    required this.diagnostics,
+    required this.metrics,
+    required this.allowDirect,
+  });
 
-  final Tunnel tunnel;
   final TunnelDiagnostics diagnostics;
+  final TunnelMetrics? metrics;
+  final bool allowDirect;
 
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final scheme = Theme.of(context).colorScheme;
+    final metrics = this.metrics;
     final sessions = diagnostics.direct;
+    final failures = metrics?.relayFailures ?? diagnostics.consecutiveFailures;
+    final direct = metrics?.directSessions ?? sessions?.direct;
+    final relayed = metrics?.relaySessions ?? sessions?.relay;
+    final lan = metrics?.lanSessions ?? sessions?.lan ?? 0;
+    // A sample says whether a direct session is open now; without one, the
+    // snapshot does.
+    final link = metrics == null ? sessions?.link : metrics.link;
     return Wrap(
       spacing: 6,
       runSpacing: 6,
       children: [
         CarrierChip(carrier: RelayTransport.parse(diagnostics.relayTransport)),
-        if (diagnostics.consecutiveFailures > 0)
+        if (failures > 0)
           _Pill(
             icon: AppIcons.warning,
-            text: l10n.diagnosticsRelayFailures(
-              diagnostics.consecutiveFailures,
-            ),
+            text: l10n.diagnosticsRelayFailures(failures),
             color: cautionColor(scheme),
           )
-        else if (diagnostics.lastSetup case final setup?)
+        else if (metrics?.relayRtt case final rtt?)
           _Pill(
             icon: AppIcons.relay,
-            text: l10n.diagnosticsRelay(_ms(setup)),
-          ),
-        if (sessions != null)
+            text: l10n.diagnosticsRelay(
+              l10n.pathRoundTrip(math.max(1, rtt.inMilliseconds)),
+            ),
+          )
+        else if (diagnostics.lastSetup case final setup?)
+          _Pill(icon: AppIcons.relay, text: l10n.diagnosticsRelay(_ms(setup))),
+        if (direct != null && relayed != null && direct + relayed > 0)
           _Pill(
             icon: AppIcons.direct,
-            text: tunnel.kind == TunnelKind.share
-                ? l10n.diagnosticsDirectSessions(sessions.direct)
-                : l10n.diagnosticsSessions(sessions.direct, sessions.relay),
+            text: l10n.diagnosticsSessions(direct, relayed),
           ),
+        if (link != null)
+          _Pill(
+            icon: link.kind == LinkKind.lan ? AppIcons.router : AppIcons.direct,
+            text: [
+              linkKindLabel(context, link.kind),
+              ?familyLabel(link.family),
+              if (link.rtt case final rtt?)
+                l10n.pathRoundTrip((rtt.inMicroseconds / 1000).ceil()),
+            ].join(' · '),
+            color: link.kind == LinkKind.lan ? successColor(scheme) : null,
+          )
+        else if (lan > 0)
+          _Pill(icon: AppIcons.router, text: l10n.pathLanSessions(lan)),
+        if (metrics != null && !metrics.relay.isEmpty)
+          _Pill(
+            key: const Key('traffic-relay'),
+            icon: AppIcons.relay,
+            text: _traffic(context, l10n.pathRelay, metrics.relay),
+          ),
+        // Named the LAN when all of it crossed one.
+        if (metrics != null && !metrics.direct.isEmpty)
+          metrics.lan.sent == metrics.direct.sent &&
+                  metrics.lan.received == metrics.direct.received
+              ? _Pill(
+                  key: const Key('traffic-direct'),
+                  icon: AppIcons.router,
+                  text: _traffic(context, l10n.pathLan, metrics.direct),
+                  color: successColor(scheme),
+                )
+              : _Pill(
+                  key: const Key('traffic-direct'),
+                  icon: AppIcons.direct,
+                  text: _traffic(context, l10n.pathDirect, metrics.direct),
+                ),
         if (sessions != null && sessions.fallbacks > 0)
           _Pill(
             icon: AppIcons.mixedPath,
             text: l10n.diagnosticsFallbacks(sessions.fallbacks),
+          ),
+        // Said only when off: on is the default, with nothing to note.
+        if (allowDirect && diagnostics.lanFirst == false)
+          _Pill(
+            key: const Key('lan-first-off'),
+            icon: AppIcons.router,
+            text: l10n.diagnosticsLanFirstOff,
           ),
       ],
     );
   }
 }
 
+/// What [path] carried: sent from this computer's side, and received.
+String _traffic(BuildContext context, String path, ByteCount bytes) =>
+    context.l10n.diagnosticsTraffic(
+      path,
+      formatBytes(bytes.sent),
+      formatBytes(bytes.received),
+    );
+
 class _Pill extends StatelessWidget {
-  const _Pill({required this.icon, required this.text, this.color});
+  const _Pill({super.key, required this.icon, required this.text, this.color});
 
   final IconData icon;
   final String text;
@@ -327,20 +401,26 @@ class _Pill extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
       decoration: BoxDecoration(
-        color: color?.withValues(alpha: 0.12) ?? softWash(scheme, strength: 1.3),
+        color:
+            color?.withValues(alpha: 0.12) ?? softWash(scheme, strength: 1.3),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 13, color: ink),
+          Icon(icon, size: AppIconSize.inline, color: ink),
           const SizedBox(width: 5),
-          Text(
-            text,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
-              color: ink,
+          // Never wider than the panel, however long a figure gets.
+          Flexible(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: ink,
+              ),
             ),
           ),
         ],
@@ -485,7 +565,9 @@ class _PortMapping extends StatelessWidget {
               key: const Key('port-mapping-address'),
               style: mono(
                 fontSize: 13,
-                color: status.active ? scheme.onSurface : onSurfaceMuted(scheme),
+                color: status.active
+                    ? scheme.onSurface
+                    : onSurfaceMuted(scheme),
               ),
             ),
           ],
@@ -534,7 +616,7 @@ class _Missed extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(AppIcons.info, size: 14, color: caution),
+          Icon(AppIcons.info, size: AppIconSize.inline, color: caution),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -619,9 +701,7 @@ _Reading _read(BuildContext context, TunnelEvent event) {
     case 'port_mapping_changed':
       final status = event.mapping;
       return (
-        title: status == null
-            ? l10n.portMapping
-            : _stageLabel(context, status),
+        title: status == null ? l10n.portMapping : _stageLabel(context, status),
         detail: switch (status) {
           PortMappingStatus(:final error?) => error,
           PortMappingStatus(:final externalAddress?, :final protocol) => [
@@ -632,6 +712,40 @@ _Reading _read(BuildContext context, TunnelEvent event) {
         },
         icon: AppIcons.router,
         tone: _mappingTone(status?.stage),
+      );
+    case 'lan_detected':
+      return (
+        title: l10n.tunnelEventTitle(event.kind),
+        detail: [
+          l10n.tunnelEventLanEvidence(event.evidence ?? ''),
+          if (event.preferred == false) l10n.diagnosticsLanFirstOff,
+        ].join(' · '),
+        icon: AppIcons.router,
+        tone: event.preferred == false ? _Tone.quiet : _Tone.signal,
+      );
+    case 'lan_missed':
+      // Where it went instead: across another network, or the relay.
+      final took = event.took;
+      return (
+        title: l10n.tunnelEventTitle(event.kind),
+        detail: [
+          l10n.tunnelEventLanEvidence(event.evidence ?? ''),
+          took == null ? l10n.pathRelay : linkKindLabel(context, took),
+        ].join(' · '),
+        icon: took == null ? AppIcons.relay : AppIcons.direct,
+        tone: _Tone.quiet,
+      );
+    case 'path_selected':
+      final lan = event.link == LinkKind.lan;
+      return (
+        title: l10n.tunnelEventTitle(event.kind),
+        detail: [
+          linkKindLabel(context, event.link),
+          ?familyLabel(event.family),
+          l10n.tunnelEventVia(event.via ?? ''),
+        ].join(' · '),
+        icon: lan ? AppIcons.router : AppIcons.direct,
+        tone: lan ? _Tone.ok : _Tone.signal,
       );
     case 'network_changed':
       return (
@@ -727,7 +841,11 @@ class _EventRowState extends State<_EventRow> {
                     color: color.withValues(alpha: 0.13),
                     shape: BoxShape.circle,
                   ),
-                  child: Icon(reading.icon, size: 15, color: color),
+                  child: Icon(
+                    reading.icon,
+                    size: AppIconSize.inline,
+                    color: color,
+                  ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(

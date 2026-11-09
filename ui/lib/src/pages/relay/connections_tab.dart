@@ -151,7 +151,9 @@ class _SessionRow extends StatelessWidget {
                   color: s.isDirect
                       ? successColor(scheme)
                       : signalColor(scheme),
-                  label: s.isDirect
+                  label: s.isLan
+                      ? l10n.relayPathLan
+                      : s.isDirect
                       ? l10n.relayPathDirect
                       : l10n.relayPathRelay,
                 ),
@@ -209,7 +211,7 @@ class _RoutingTableState extends State<_RoutingTable> {
               ),
               icon: Icon(
                 _open ? AppIcons.chevronDown : AppIcons.chevronRight,
-                size: 15,
+                size: AppIconSize.inline,
               ),
               label: Text(l10n.relayRoutingHint),
             ),

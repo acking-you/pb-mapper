@@ -9,6 +9,13 @@
 //! A tunnel's state is what its own worker reports, the same worker the CLI
 //! runs, so nothing here asks the relay about it; `watch_tunnel` emits the
 //! change events. Only the embedded relay's figures are cached.
+//!
+//! A question to the relay takes the state lock only for the settings and
+//! client it asks with, and again, briefly, to keep what it learned about
+//! QUIC; it asks without it, as a tunnel's setup does: the
+//! window checks the relay every few seconds, and a relay that is slow or
+//! silent would otherwise hold every other call for as long as the check
+//! waits.
 
 use super::*;
 
@@ -46,13 +53,11 @@ impl PbMapperState {
     pub(crate) fn relay_client(&self) -> Result<Client, CtlError> {
         let mut cached = self.relay_client.lock();
         if let Some((config, client)) = cached.as_ref()
-            && *config == self.config
+            && config.same_relay(&self.config)
         {
             return Ok(client.clone());
         }
-        let credential = get_process_credential().map_err(|error| {
-            CtlError::invalid_argument(format!("This computer has no usable credential: {error}"))
-        })?;
+        let credential = process_credential()?;
         let client = Client::from_credential(
             &self.config.server_address,
             credential,
@@ -65,21 +70,15 @@ impl PbMapperState {
         Ok(client)
     }
 
-    pub async fn update_config(
-        &mut self,
-        server_address: String,
-        keep_alive: bool,
-        msg_header_key: String,
-        relay_transport: RelayTransport,
-    ) -> Result<(), CtlError> {
-        let msg_header_key = normalize_msg_header_key(msg_header_key)?;
-        let previous = self.config.clone();
+    /// Save `candidate` as this computer's config, its credential checked
+    /// and in effect for the process. What is cached about the relay is
+    /// dropped only when the relay settings changed.
+    pub async fn update_config(&mut self, candidate: AppConfig) -> Result<(), CtlError> {
         let candidate = AppConfig {
-            server_address,
-            keep_alive_enabled: keep_alive,
-            msg_header_key,
-            relay_transport,
+            msg_header_key: normalize_msg_header_key(candidate.msg_header_key)?,
+            ..candidate
         };
+        let previous = self.config.clone();
         self.write_config_file(&candidate)?;
         self.config = candidate;
         if let Err(error) = self.apply_msg_header_key_env() {
@@ -88,7 +87,9 @@ impl PbMapperState {
             let _ = self.apply_msg_header_key_env();
             return Err(error);
         }
-        self.reset_status_caches().await;
+        if !previous.same_relay(&self.config) {
+            self.reset_status_caches().await;
+        }
         Ok(())
     }
 
@@ -285,122 +286,153 @@ impl PbMapperState {
         });
     }
 
-    /// The periodic check: the relay's holdings, and what it said about QUIC
-    /// for these settings, asking only if it has not said yet.
-    pub async fn get_server_status_detail(&self) -> Result<ServerStatusDetail, CtlError> {
-        self.refresh_server_status(false).await
-    }
-
-    /// The connections the server holds for one key, from the protocol's own
-    /// structured query rather than the Debug dump in `server_map`.
-    pub async fn get_service_conns(
-        &self,
-        service_key: String,
-    ) -> Result<Vec<ServiceConnInfo>, CtlError> {
-        let server_addr = self.config.server_address.clone();
-        let client = self.relay_client()?;
-        match tokio::time::timeout(FORCE_REFRESH_TIMEOUT, client.service_status(&service_key)).await
-        {
-            Ok(result) => result
-                .map(|connections| {
-                    connections
-                        .into_iter()
-                        .map(|c| ServiceConnInfo {
-                            conn_id: c.conn_id,
-                            generation: c.generation,
-                            protocol_version: c.protocol_version,
-                            healthy: c.healthy,
-                            last_rx_age_ms: c.last_rx_age_ms,
-                        })
-                        .collect()
-                })
-                .map_err(sdk_error),
-            Err(_) => Err(CtlError::timeout(format!(
-                "Timed out asking {server_addr} about {service_key}"
-            ))),
-        }
-    }
-
-    /// Perform a blocking status refresh — waits for the actual network result
-    /// instead of returning stale cache — and asks the relay about QUIC again.
-    pub async fn force_refresh_server_status(&self) -> Result<ServerStatusDetail, CtlError> {
-        self.refresh_server_status(true).await
-    }
-
-    /// Ask the relay what it holds. What it says about QUIC is asked only
-    /// when `force`d or not yet known for these settings.
-    async fn refresh_server_status(&self, force: bool) -> Result<ServerStatusDetail, CtlError> {
-        let unavailable = |error: String| ServerStatusDetail {
-            server_available: false,
-            registered_services: Vec::new(),
-            server_map: String::new(),
-            active_connections: String::new(),
-            idle_connections: String::new(),
-            error: Some(error),
-            latency_ms: None,
-            quic_port: None,
-            quic_known: false,
-        };
-        let client = match self.relay_client() {
-            Ok(client) => client,
-            Err(error) => return Ok(unavailable(error.to_string())),
-        };
-        let known = self
-            .quic_offer
-            .lock()
+    /// What the relay said about QUIC for the current settings, if it has.
+    fn known_quic_offer(&self) -> Option<Option<u16>> {
+        self.quic_offer
             .as_ref()
-            .filter(|(config, _)| *config == self.config)
-            .map(|(_, port)| *port);
+            .filter(|(config, _)| config.same_relay(&self.config))
+            .map(|(_, port)| *port)
+    }
 
-        let (answer, mut asked) = fetch_real_status(&client, force || known.is_none()).await;
-        // Over QUIC, a relay that does not answer at all may still answer
-        // over TCP, and then it is UDP that does not get through. Asked here,
-        // on that failure only, so the window can say what to open; not of a
-        // relay already known to offer no QUIC, which the refusal says.
-        let quic_unanswered = self.config.relay_transport == RelayTransport::Quic
-            && matches!(&answer, Err(error) if matches!(
-                error.code(),
-                ErrorCode::ServerUnreachable | ErrorCode::Timeout
-            ));
-        if quic_unanswered && asked.is_none() && known != Some(None) {
-            asked = client.relay_quic_port().await.ok();
+    /// Keeps what the relay said about QUIC under `config`, the settings it
+    /// was asked under, unless they have changed since: an answer about the
+    /// old settings must not replace what the new ones were told. Two checks
+    /// under the same settings may land in either order; both are the same
+    /// relay's answer a moment apart, and the next forced check asks again.
+    fn remember_quic_offer(&mut self, config: AppConfig, port: Option<u16>) {
+        if config.same_relay(&self.config) {
+            self.quic_offer = Some((config, port));
         }
-        if let Some(port) = asked {
-            *self.quic_offer.lock() = Some((self.config.clone(), port));
-        }
-        let quic = asked.or(known);
-        let detail = match answer {
-            Ok((services, remote_id, latency)) => ServerStatusDetail {
-                server_available: true,
-                registered_services: services,
-                server_map: remote_id.server_map,
-                active_connections: remote_id.active,
-                idle_connections: remote_id.idle,
-                error: None,
-                latency_ms: Some(latency.as_millis() as u64),
+    }
+}
+
+/// The periodic check: the relay's holdings, and what it said about QUIC for
+/// these settings, asking only if it has not said yet.
+pub async fn get_server_status_detail(
+    state: &Arc<Mutex<PbMapperState>>,
+) -> Result<ServerStatusDetail, CtlError> {
+    refresh_server_status(state, false).await
+}
+
+/// Perform a blocking status refresh — waits for the actual network result
+/// instead of returning stale cache — and asks the relay about QUIC again.
+pub async fn force_refresh_server_status(
+    state: &Arc<Mutex<PbMapperState>>,
+) -> Result<ServerStatusDetail, CtlError> {
+    refresh_server_status(state, true).await
+}
+
+/// The connections the server holds for one key, from the protocol's own
+/// structured query rather than the Debug dump in `server_map`.
+pub async fn get_service_conns(
+    state: &Arc<Mutex<PbMapperState>>,
+    service_key: String,
+) -> Result<Vec<ServiceConnInfo>, CtlError> {
+    let (server_addr, client) = {
+        let state = state.lock().await;
+        (state.config.server_address.clone(), state.relay_client()?)
+    };
+    match tokio::time::timeout(FORCE_REFRESH_TIMEOUT, client.service_status(&service_key)).await {
+        Ok(result) => result
+            .map(|connections| {
+                connections
+                    .into_iter()
+                    .map(|c| ServiceConnInfo {
+                        conn_id: c.conn_id,
+                        generation: c.generation,
+                        protocol_version: c.protocol_version,
+                        healthy: c.healthy,
+                        last_rx_age_ms: c.last_rx_age_ms,
+                    })
+                    .collect()
+            })
+            .map_err(sdk_error),
+        Err(_) => Err(CtlError::timeout(format!(
+            "Timed out asking {server_addr} about {service_key}"
+        ))),
+    }
+}
+
+/// Ask the relay what it holds. What it says about QUIC is asked only when
+/// `force`d or not yet known for these settings.
+async fn refresh_server_status(
+    state: &Arc<Mutex<PbMapperState>>,
+    force: bool,
+) -> Result<ServerStatusDetail, CtlError> {
+    let unavailable = |error: String| ServerStatusDetail {
+        server_available: false,
+        registered_services: Vec::new(),
+        server_map: String::new(),
+        active_connections: String::new(),
+        idle_connections: String::new(),
+        error: Some(error),
+        latency_ms: None,
+        quic_port: None,
+        quic_known: false,
+    };
+    // The settings the question is asked under, and the client and what is
+    // known about QUIC that go with them.
+    let (config, client, known) = {
+        let state = state.lock().await;
+        (
+            state.config.clone(),
+            state.relay_client(),
+            state.known_quic_offer(),
+        )
+    };
+    let client = match client {
+        Ok(client) => client,
+        Err(error) => return Ok(unavailable(error.to_string())),
+    };
+
+    let (answer, mut asked) = fetch_real_status(&client, force || known.is_none()).await;
+    // Over QUIC, a relay that does not answer at all may still answer
+    // over TCP, and then it is UDP that does not get through. Asked here,
+    // on that failure only, so the window can say what to open; not of a
+    // relay already known to offer no QUIC, which the refusal says.
+    let quic_unanswered = config.relay_transport == RelayTransport::Quic
+        && matches!(&answer, Err(error) if matches!(
+            error.code(),
+            ErrorCode::ServerUnreachable | ErrorCode::Timeout
+        ));
+    if quic_unanswered && asked.is_none() && known != Some(None) {
+        asked = client.relay_quic_port().await.ok();
+    }
+    if let Some(port) = asked {
+        state.lock().await.remember_quic_offer(config, port);
+    }
+    let quic = asked.or(known);
+    let detail = match answer {
+        Ok((services, remote_id, latency)) => ServerStatusDetail {
+            server_available: true,
+            registered_services: services,
+            server_map: remote_id.server_map,
+            active_connections: remote_id.active,
+            idle_connections: remote_id.idle,
+            error: None,
+            latency_ms: Some(latency.as_millis() as u64),
+            quic_port: quic.flatten(),
+            quic_known: quic.is_some(),
+        },
+        Err(e) => {
+            tracing::warn!("Relay status refresh failed: {}", e);
+            let error = match asked {
+                // Shown after "The relay isn't answering:", so it leads
+                // with what does not get through.
+                Some(Some(port)) if quic_unanswered => format!(
+                    "QUIC on UDP port {port} does not get through, though the relay \
+                     answers over TCP. Open UDP {port} on the relay's firewall and on this \
+                     network, or choose TCP"
+                ),
+                _ => e.to_string(),
+            };
+            ServerStatusDetail {
                 quic_port: quic.flatten(),
                 quic_known: quic.is_some(),
-            },
-            Err(e) => {
-                tracing::warn!("Relay status refresh failed: {}", e);
-                let error = match asked {
-                    // Shown after "The relay isn't answering:", so it leads
-                    // with what does not get through.
-                    Some(Some(port)) if quic_unanswered => format!(
-                        "QUIC on UDP port {port} does not get through, though the relay \
-                         answers over TCP. Open UDP {port} on the relay's firewall and on this \
-                         network, or choose TCP"
-                    ),
-                    _ => e.to_string(),
-                };
-                ServerStatusDetail {
-                    quic_port: quic.flatten(),
-                    quic_known: quic.is_some(),
-                    ..unavailable(error)
-                }
+                ..unavailable(error)
             }
-        };
+        }
+    };
 
-        Ok(detail)
-    }
+    Ok(detail)
 }

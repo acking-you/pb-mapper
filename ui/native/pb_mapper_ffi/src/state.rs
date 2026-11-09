@@ -26,9 +26,10 @@ use tokio_util::sync::CancellationToken;
 
 use pb_mapper_auth::{AuthConfig, AuthRuntime};
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, Connection, DirectStage, PathPolicy, PortMapping,
+    AddressFamily, Client, ConnectOptions, ConnectRequest, Connection, DirectLink, DirectStage,
+    DirectTransport, LanEvidence, LanTransport, LinkKind, LinkVia, PathPolicy, PortMapping,
     RecoveryFailure, RegisterOptions, RegisterRequest, Registration, RelayTransport, RemoteId,
-    Transport, TunnelDiagnostics, TunnelEventKind, TunnelStatus,
+    StunOutcome, Transport, TunnelDiagnostics, TunnelEventKind, TunnelStatus,
 };
 use pb_mapper_core::checksum::{
     Credential, get_process_credential, parse_credential, set_process_msg_header_key,
@@ -256,6 +257,16 @@ pub struct AppConfig {
     /// How this computer reaches the relay: TCP, as a config saved before
     /// there was a choice, or QUIC. A tunnel keeps the one it started with.
     pub relay_transport: RelayTransport,
+    /// Whether this computer tries a local network it shares with the other
+    /// end first: on, as a config saved before there was a choice. Each
+    /// tunnel, remote-desktop connection and host takes it as it starts.
+    pub lan_first: bool,
+    /// What a path within a local network this computer shares with the
+    /// other end runs over, for what this computer dials: QUIC, as a config
+    /// saved before there was a choice, or TCP. Each connection and
+    /// remote-desktop connection takes it as it starts; as a provider this
+    /// computer serves whichever the other end asks for.
+    pub lan_transport: LanTransport,
 }
 
 impl Default for AppConfig {
@@ -265,7 +276,31 @@ impl Default for AppConfig {
             keep_alive_enabled: true,
             msg_header_key: String::new(),
             relay_transport: RelayTransport::Tcp,
+            lan_first: true,
+            lan_transport: LanTransport::Quic,
         }
+    }
+}
+
+impl AppConfig {
+    /// Whether `other` reaches the same relay the same way: the same
+    /// address, keep-alive, credential and carrier. What the window keeps
+    /// about the relay, its client and what it said about QUIC, is kept for
+    /// these alone, so a preference of this computer's own, such as
+    /// `lan_first` or `lan_transport`, changes neither.
+    pub fn same_relay(&self, other: &Self) -> bool {
+        let Self {
+            server_address,
+            keep_alive_enabled,
+            msg_header_key,
+            relay_transport,
+            lan_first: _,
+            lan_transport: _,
+        } = self;
+        *server_address == other.server_address
+            && *keep_alive_enabled == other.keep_alive_enabled
+            && *msg_header_key == other.msg_header_key
+            && *relay_transport == other.relay_transport
     }
 }
 
@@ -322,38 +357,139 @@ pub struct ClientConfigInfo {
 /// How a running tunnel's sessions travel: each TCP connection or UDP flow
 /// through it takes a direct path or the relay, decided when it opens.
 ///
-/// A connection counts both paths and its direct attempts. A share counts
-/// only the sessions that reached it directly: the rest come in over its
-/// registration with the relay, which does not tell them apart.
-#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// A connection and a share both count every session on each path; a
+/// connection also counts its direct attempts, which a share does not make.
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PathInfo {
-    /// Sessions open now, on each path.
+    /// Sessions open now, on each path, and of the direct ones those within
+    /// one local network.
     pub active_direct: u64,
     pub active_relay: u64,
-    /// Sessions opened since the tunnel started, on each path.
+    pub active_lan: u64,
+    /// Sessions opened since the tunnel started, on each path, and of the
+    /// direct ones those within one local network.
     pub direct_sessions: u64,
     pub relay_sessions: u64,
+    pub lan_sessions: u64,
     /// The stage reached by a direct attempt in flight.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt: Option<DirectStage>,
     /// How the latest attempt ended.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last: Option<PathOutcome>,
+    /// The newest direct session open now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<PathLink>,
+    /// The application bytes its sessions carried on each path, `sent`
+    /// from this computer's side; `direct` includes `lan`.
+    pub traffic: pb_mapper_client::sdk::PathTraffic,
+    /// The smoothed round trip of its control exchanges with the relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_rtt_ms: Option<u64>,
 }
 
 /// How a direct attempt ended.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(tag = "path", rename_all = "camelCase")]
 pub enum PathOutcome {
-    /// It went direct, set up in this long.
+    /// It went direct, set up in this long, over a path of this kind.
     Direct {
         #[serde(rename = "setupMs")]
         setup_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<LinkKind>,
     },
     /// It gave way to the relay at this stage. Later sessions go straight to
     /// the relay for a while (10 s, doubling to 5 min) before trying again.
     Relay { stage: DirectStage },
+}
+
+/// A direct session's path: the SDK's [`DirectLink`], as the window reads
+/// it.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PathLink {
+    /// `lan`, `internet` or `private`.
+    pub kind: LinkKind,
+    pub family: AddressFamily,
+    /// How the peer address was learned.
+    pub via: LinkVia,
+    /// `quic`, or `tcp` within a local network.
+    pub transport: DirectTransport,
+    pub peer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+    /// The round trip now and its lowest, rounded up to whole
+    /// milliseconds, so that a LAN never reads 0: QUIC's, or over TCP the
+    /// handshake's for both.
+    pub rtt_ms: u64,
+    pub min_rtt_ms: u64,
+    pub setup_ms: u64,
+    /// What suggested a shared network before the setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub same_lan: Option<LanEvidence>,
+    /// The stages of the setup on this end; one it did not run is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negotiate_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discover_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stun_ms: Option<u64>,
+    pub stun: StunOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_pong_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lan_first_pong_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handshake_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_ms: Option<u64>,
+}
+
+impl From<&DirectLink> for PathLink {
+    fn from(link: &DirectLink) -> Self {
+        let timings = link.timings;
+        Self {
+            kind: link.kind,
+            family: link.family,
+            via: link.via,
+            transport: link.transport,
+            peer: link.peer.to_string(),
+            local_ip: link.local_ip.map(|ip| ip.to_string()),
+            interface: link.interface.clone(),
+            rtt_ms: link.stats.rtt_us.div_ceil(1000),
+            min_rtt_ms: link.stats.min_rtt_us.div_ceil(1000),
+            setup_ms: timings.setup_ms,
+            same_lan: link.same_lan,
+            negotiate_ms: timings.negotiate_ms,
+            discover_ms: timings.discover_ms,
+            stun_ms: timings.stun_ms,
+            stun: timings.stun,
+            grant_ms: timings.grant_ms,
+            first_pong_ms: timings.first_pong_ms,
+            lan_first_pong_ms: timings.lan_first_pong_ms,
+            handshake_ms: timings.handshake_ms,
+            commit_ms: timings.commit_ms,
+        }
+    }
+}
+
+/// What a change of a tunnel's path is worth telling the window about:
+/// which paths are in use, the LAN among them, an attempt, and how the last
+/// one ended; not the counts, nor the link's live figures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PathShape {
+    direct: bool,
+    relay: bool,
+    lan: bool,
+    attempt: Option<DirectStage>,
+    last_direct: Option<bool>,
+    last_kind: Option<LinkKind>,
 }
 
 impl PathInfo {
@@ -366,32 +502,43 @@ impl PathInfo {
             .iter()
             .rev()
             .find_map(|event| match event.kind {
-                TunnelEventKind::DirectEstablished { setup_ms } => {
-                    Some(PathOutcome::Direct { setup_ms })
-                }
-                TunnelEventKind::DirectFallback { stage } => Some(PathOutcome::Relay { stage }),
+                TunnelEventKind::DirectEstablished { setup_ms } => Some(PathOutcome::Direct {
+                    setup_ms,
+                    kind: direct.last_kind,
+                }),
+                TunnelEventKind::DirectFallback { stage, .. } => Some(PathOutcome::Relay { stage }),
                 _ => None,
             });
         Some(Self {
             active_direct: direct.active_direct,
             active_relay: direct.active_relay,
+            active_lan: direct.active_lan,
             direct_sessions: direct.direct_sessions,
             relay_sessions: direct.relay_sessions,
+            lan_sessions: direct.lan_sessions,
             attempt: direct.attempt.map(|attempt| attempt.stage),
             last,
+            link: direct.link.as_ref().map(PathLink::from),
+            traffic: diagnostics.traffic,
+            relay_rtt_ms: diagnostics.relay_rtt_ms,
         })
     }
 
-    /// What a change of is worth telling the window about: which paths are
-    /// in use, an attempt and how the last one ended, but not the counts.
-    fn shape(&self) -> (bool, bool, Option<DirectStage>, Option<bool>) {
-        (
-            self.active_direct > 0,
-            self.active_relay > 0,
-            self.attempt,
-            self.last
+    fn shape(&self) -> PathShape {
+        let last_kind = match self.last {
+            Some(PathOutcome::Direct { kind, .. }) => kind,
+            _ => None,
+        };
+        PathShape {
+            direct: self.active_direct > 0,
+            relay: self.active_relay > 0,
+            lan: self.active_lan > 0,
+            attempt: self.attempt,
+            last_direct: self
+                .last
                 .map(|last| matches!(last, PathOutcome::Direct { .. })),
-        )
+            last_kind,
+        }
     }
 }
 
@@ -531,6 +678,8 @@ struct PinnedTunnel {
     relay: String,
     /// The namespace a connection subscribes in, when not its credential's own.
     namespace: Option<u64>,
+    /// Whether it may go direct: only then does LAN-first reach it.
+    allow_direct: bool,
 }
 
 impl PinnedTunnel {
@@ -579,6 +728,23 @@ impl TunnelHandle {
         match self {
             Self::Share(handle) => handle.subscribe_events(),
             Self::Connect(handle) => handle.subscribe_events(),
+        }
+    }
+
+    pub(crate) fn metrics(&self) -> pb_mapper_client::sdk::TunnelMetrics {
+        match self {
+            Self::Share(handle) => handle.metrics(),
+            Self::Connect(handle) => handle.metrics(),
+        }
+    }
+
+    pub(crate) fn subscribe_metrics(
+        &self,
+        every: std::time::Duration,
+    ) -> pb_mapper_client::sdk::TunnelMetricsStream {
+        match self {
+            Self::Share(handle) => handle.subscribe_metrics(every),
+            Self::Connect(handle) => handle.subscribe_metrics(every),
         }
     }
 
@@ -677,10 +843,12 @@ struct TunnelRuntime {
 }
 
 /// This computer's tunnels on one relay, as rotating that relay's
-/// administrator key leaves them. See [`PbMapperState::tunnels_on`].
+/// administrator key leaves them (see [`PbMapperState::tunnels_on`]), or
+/// as a change of carrier or LAN-first does, which strands none.
 #[derive(Default, Debug)]
 pub struct RelayTunnels {
-    /// On the retired administrator key: they start again on the new one.
+    /// To start again: on the retired administrator key, to start on the
+    /// new one, or started with the setting this computer just left.
     pub shares: Vec<String>,
     pub connections: Vec<String>,
     /// On another credential, a temporary one, which the rotation erased.
@@ -704,7 +872,6 @@ struct RegisterCommit {
     protocol: String,
     enable_encryption: bool,
     enable_keep_alive: bool,
-    allow_direct: bool,
     port_mapping: PortMapping,
     handle: Registration,
     pin: PinnedTunnel,
@@ -717,7 +884,6 @@ struct ConnectCommit {
     local_address: String,
     protocol: String,
     enable_keep_alive: bool,
-    allow_direct: bool,
     port_mapping: PortMapping,
     handle: Connection,
     pin: PinnedTunnel,
@@ -754,7 +920,7 @@ pub struct PbMapperState {
     /// What the relay said about QUIC for these settings: asked again only by
     /// a forced check (Settings' Test) or a change of settings, not every
     /// periodic one, since a relay from before QUIC logs the question.
-    quic_offer: SyncMutex<Option<(AppConfig, Option<u16>)>>,
+    quic_offer: Option<(AppConfig, Option<u16>)>,
     registered_services: Arc<RwLock<HashMap<String, ServiceInfo>>>,
     active_connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
     service_runtime: HashMap<String, TunnelRuntime>,
@@ -774,6 +940,16 @@ pub struct PbMapperState {
 mod configuration;
 mod runtime;
 mod status;
+
+pub use status::{force_refresh_server_status, get_server_status_detail, get_service_conns};
+
+/// This computer's credential, or `INVALID_ARGUMENT` saying it has none,
+/// which no retry can mend.
+pub(crate) fn process_credential() -> Result<Credential, CtlError> {
+    get_process_credential().map_err(|error| {
+        CtlError::invalid_argument(format!("This computer has no usable credential: {error}"))
+    })
+}
 
 /// Registers a service, holding the state lock only for the bookkeeping.
 ///
@@ -799,8 +975,8 @@ pub async fn register_service(
     //    early would release the key while the setup is still running.
     //    The credential and carrier are captured with the relay address so a
     //    later config change cannot pair a new key with the already-resolved
-    //    socket.
-    let (_claim, server_address, credential, relay_transport) = {
+    //    socket; LAN-first with them, as this computer's config says now.
+    let (_claim, server_address, credential, relay_transport, lan_first) = {
         let state = state.lock().await;
         let claim = state.claim_registering(&service_key)?;
         let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
@@ -809,6 +985,7 @@ pub async fn register_service(
             state.config.server_address.clone(),
             credential,
             state.config.relay_transport,
+            state.config.lan_first,
         )
     };
 
@@ -838,6 +1015,8 @@ pub async fn register_service(
                 allow_direct,
                 idle_timeout: None,
                 port_mapping,
+                lan_first,
+                ..Default::default()
             },
         )
         .await
@@ -853,7 +1032,6 @@ pub async fn register_service(
             protocol,
             enable_encryption,
             enable_keep_alive,
-            allow_direct,
             port_mapping,
             handle,
             pin: PinnedTunnel {
@@ -861,6 +1039,7 @@ pub async fn register_service(
                 endpoint: remote_addrs,
                 relay: server_address,
                 namespace: None,
+                allow_direct,
             },
         })
         .await
@@ -884,7 +1063,7 @@ pub async fn connect_service(
         allow_direct,
         port_mapping,
     } = direct;
-    let (_claim, server_address, credential, relay_transport) = {
+    let (_claim, server_address, credential, relay_transport, lan_first, lan_transport) = {
         let state = state.lock().await;
         let claim = state.claim_connecting(&service_key)?;
         let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
@@ -893,6 +1072,8 @@ pub async fn connect_service(
             state.config.server_address.clone(),
             credential,
             state.config.relay_transport,
+            state.config.lan_first,
+            state.config.lan_transport,
         )
     };
 
@@ -938,6 +1119,8 @@ pub async fn connect_service(
                     PathPolicy::RelayOnly
                 },
                 port_mapping,
+                lan_first,
+                lan_transport,
             },
         )
         .await
@@ -951,7 +1134,6 @@ pub async fn connect_service(
             local_address,
             protocol,
             enable_keep_alive,
-            allow_direct,
             port_mapping,
             handle,
             pin: PinnedTunnel {
@@ -959,6 +1141,7 @@ pub async fn connect_service(
                 endpoint: remote_addrs,
                 relay: server_address,
                 namespace,
+                allow_direct,
             },
         })
         .await
@@ -997,6 +1180,83 @@ mod tests {
         ));
         let state = PbMapperState::new(Some(root.to_string_lossy().into_owned()));
         (guard, Arc::new(Mutex::new(state)), root)
+    }
+
+    /// The window reads a LAN link's kind, address and figures, and hears
+    /// when a tunnel's path turns to a LAN, but not when its round trip moves.
+    #[test]
+    fn a_lan_link_reaches_the_window_and_changes_its_shape() {
+        let lan = PathInfo {
+            active_direct: 1,
+            active_lan: 1,
+            direct_sessions: 1,
+            lan_sessions: 1,
+            last: Some(PathOutcome::Direct {
+                setup_ms: 140,
+                kind: Some(LinkKind::Lan),
+            }),
+            link: Some(PathLink {
+                kind: LinkKind::Lan,
+                family: AddressFamily::Ipv4,
+                via: LinkVia::Host,
+                transport: DirectTransport::Quic,
+                peer: "192.168.21.100:53000".into(),
+                local_ip: Some("192.168.21.5".into()),
+                interface: Some("WLAN".into()),
+                rtt_ms: 4,
+                min_rtt_ms: 3,
+                setup_ms: 140,
+                same_lan: Some(LanEvidence::PublicIpSubnet),
+                negotiate_ms: Some(12),
+                discover_ms: None,
+                stun_ms: None,
+                stun: StunOutcome::Cached,
+                grant_ms: Some(40),
+                first_pong_ms: Some(3),
+                lan_first_pong_ms: Some(3),
+                handshake_ms: Some(5),
+                commit_ms: Some(2),
+            }),
+            ..PathInfo::default()
+        };
+        let json = serde_json::to_value(&lan).unwrap();
+        assert_eq!(
+            (&json["activeLan"], &json["lanSessions"]),
+            (&1.into(), &1.into())
+        );
+        assert_eq!(
+            json["last"],
+            serde_json::json!({ "path": "direct", "setupMs": 140, "kind": "lan" })
+        );
+        let link = &json["link"];
+        assert_eq!(
+            (
+                &link["kind"],
+                &link["localIp"],
+                &link["sameLan"],
+                &link["rttMs"]
+            ),
+            (
+                &"lan".into(),
+                &"192.168.21.5".into(),
+                &"public_ip_subnet".into(),
+                &4.into()
+            )
+        );
+        assert!(link.get("discoverMs").is_none());
+
+        let mut internet = lan.clone();
+        internet.active_lan = 0;
+        internet.last = Some(PathOutcome::Direct {
+            setup_ms: 140,
+            kind: Some(LinkKind::Internet),
+        });
+        assert_ne!(lan.shape(), internet.shape());
+        let mut slower = lan.clone();
+        if let Some(link) = &mut slower.link {
+            link.rtt_ms = 40;
+        }
+        assert_eq!(lan.shape(), slower.shape());
     }
 
     #[tokio::test]
@@ -1040,9 +1300,10 @@ mod tests {
     /// start again. One on another credential would land in the
     /// administrator's namespace under the new key, so it is only named; one
     /// on another relay is left alone. The relay is known by its address as
-    /// well as by how it was written.
+    /// well as by how it was written. A change of carrier or LAN-first
+    /// restarts the same ones, and LAN-first only those that may go direct.
     #[tokio::test]
-    async fn a_rotation_restarts_only_the_relays_tunnels_on_the_retired_key() {
+    async fn a_change_restarts_only_the_relays_tunnels_on_its_key() {
         let (_process_credential_guard, state, root) = temp_state("rotation-tunnels").await;
         let retired = pb_mapper_core::checksum::parse_credential(&"a".repeat(32)).unwrap();
         let other = pb_mapper_core::checksum::parse_credential(&"b".repeat(32)).unwrap();
@@ -1070,6 +1331,7 @@ mod tests {
                 endpoint: ResolvedAddrs::from(addr),
                 relay: name.to_owned(),
                 namespace: None,
+                allow_direct: true,
             },
         };
         let mut state = state.lock().await;
@@ -1090,6 +1352,35 @@ mod tests {
         assert_eq!(found.shares, ["web"]);
         assert_eq!(found.connections, ["db"]);
         assert_eq!(found.stranded, ["cam"]);
+
+        // The handle runs on TCP, trying the LAN first, so leaving either
+        // reaches every tunnel on the relay and key; the others stay put.
+        let endpoint = ResolvedAddrs::from(relay);
+        let to_quic = state.on_other_carrier(
+            "relay.example:7666",
+            Some(&endpoint),
+            retired,
+            RelayTransport::Quic,
+        );
+        assert_eq!(to_quic.shares, ["web"]);
+        assert_eq!(to_quic.connections, ["db"]);
+        let lan_off =
+            state.on_other_lan_first("relay.example:7666", Some(&endpoint), retired, false);
+        assert_eq!(lan_off.shares, ["web"]);
+        assert_eq!(lan_off.connections, ["db"]);
+        // Those already running with the setting are not offered.
+        let lan_on = state.on_other_lan_first("relay.example:7666", Some(&endpoint), retired, true);
+        assert!(lan_on.shares.is_empty() && lan_on.connections.is_empty());
+        // One kept on the relay is not offered: no start would change it.
+        state
+            .service_runtime
+            .get_mut("web")
+            .unwrap()
+            .pin
+            .allow_direct = false;
+        let lan_off =
+            state.on_other_lan_first("relay.example:7666", Some(&endpoint), retired, false);
+        assert!(lan_off.shares.is_empty());
         drop(state);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1191,7 +1482,7 @@ mod tests {
             infos
                 .iter()
                 .find(|(name, _)| name == key)
-                .and_then(|(_, path)| *path)
+                .and_then(|(_, path)| path.clone())
                 .unwrap_or_else(|| panic!("{key} reports no path"))
         };
         let clients: Vec<_> = state
@@ -1209,7 +1500,14 @@ mod tests {
 
         let direct = path("direct", &clients);
         assert_eq!((direct.active_direct, direct.active_relay), (1, 0));
-        assert!(matches!(direct.last, Some(PathOutcome::Direct { .. })));
+        assert!(matches!(
+            direct.last,
+            Some(PathOutcome::Direct { kind: Some(_), .. })
+        ));
+        assert!(
+            direct.link.is_some(),
+            "an open direct session reports its link"
+        );
         assert_eq!(path("direct", &shares).active_direct, 1);
 
         // The relay asked the share, which declined: no grant came back.
@@ -1223,9 +1521,13 @@ mod tests {
         );
         // As the window reads it; `store_test.dart` parses this same shape.
         assert_eq!(
-            serde_json::to_value(relayed).unwrap()["last"],
+            serde_json::to_value(&relayed).unwrap()["last"],
             serde_json::json!({ "path": "relay", "stage": "discovering" })
         );
+        assert_eq!(relayed.traffic.relay.sent, 4);
+        // The share counts the session the relay brought it, too.
+        let reached = path("relayed", &shares);
+        assert_eq!((reached.active_direct, reached.active_relay), (0, 1));
 
         drop(sessions);
         drop(state);
@@ -1313,6 +1615,9 @@ mod tests {
         .unwrap();
         assert_eq!(&echoed, b"quic");
 
+        let detail = force_refresh_server_status(&state).await.unwrap();
+        assert!(detail.server_available, "{:?}", detail.error);
+        assert!(detail.quic_port.is_some());
         {
             let state = state.lock().await;
             let share = &state.get_service_configs().await[0];
@@ -1342,9 +1647,6 @@ mod tests {
             assert_eq!(read(Some(true.into())), PortMapping::Always);
             assert_eq!(read(Some(false.into())), PortMapping::Off);
             assert_eq!(read(Some("off".into())), PortMapping::Off);
-            let detail = state.force_refresh_server_status().await.unwrap();
-            assert!(detail.server_available, "{:?}", detail.error);
-            assert!(detail.quic_port.is_some());
             let admin = parse_credential(pb_mapper_testkit::TEST_ADMIN_KEY).unwrap();
             let moving =
                 state.on_other_carrier(&relay.addr().to_string(), None, admin, RelayTransport::Tcp);
@@ -1405,7 +1707,7 @@ mod tests {
             state.config.relay_transport = RelayTransport::Quic;
         }
 
-        let detail = state.lock().await.get_server_status_detail().await.unwrap();
+        let detail = get_server_status_detail(&state).await.unwrap();
         assert!(!detail.server_available);
         assert_eq!(detail.quic_port, Some(blocked));
         let error = detail.error.unwrap();
@@ -1542,6 +1844,72 @@ mod tests {
             .expect("connecting the same key must not be blocked by registering it");
 
         drop(guard);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A config.json saved before LAN-first could be switched off, or the
+    /// LAN transport chosen, loads with LAN-first on over QUIC; and a change
+    /// of either alone leaves the relay settings the same.
+    #[test]
+    fn a_config_saved_before_the_switch_tries_the_lan_first() {
+        let saved: AppConfig = serde_json::from_str(
+            r#"{"server_address":"relay.example:7666","keep_alive_enabled":true,
+                "msg_header_key":"","relay_transport":"quic"}"#,
+        )
+        .unwrap();
+        assert!(saved.lan_first);
+        assert_eq!(saved.lan_transport, LanTransport::Quic);
+        let off = AppConfig {
+            lan_first: false,
+            lan_transport: LanTransport::Tcp,
+            ..saved.clone()
+        };
+        assert!(off.same_relay(&saved));
+        let written = serde_json::to_string(&off).unwrap();
+        assert!(written.contains(r#""lan_transport":"tcp""#));
+        assert!(serde_json::from_str::<AppConfig>(&written).unwrap() == off);
+        assert!(!off.same_relay(&AppConfig {
+            relay_transport: RelayTransport::Tcp,
+            ..saved
+        }));
+    }
+
+    /// A new handle's state holds the defaults and no credential until it is
+    /// told its directory, and then takes that directory's configuration.
+    #[tokio::test]
+    async fn a_state_reads_nothing_until_its_directory_arrives() {
+        let _guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+        set_process_msg_header_key(None).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "pb-mapper-ffi-test-unloaded-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(root.join("pb-mapper-ui")).unwrap();
+        let saved = AppConfig {
+            server_address: "relay.example:7666".into(),
+            msg_header_key: pb_mapper_testkit::TEST_ADMIN_KEY.into(),
+            ..AppConfig::default()
+        };
+        std::fs::write(
+            root.join("pb-mapper-ui").join("config.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+
+        let mut state = PbMapperState::unloaded();
+        assert!(state.config == AppConfig::default());
+        assert!(!pb_mapper_core::checksum::process_credential_configured());
+
+        state
+            .set_app_directory_path(Some(root.to_string_lossy().into_owned()))
+            .unwrap();
+        assert!(state.config == saved);
+        assert!(pb_mapper_core::checksum::process_credential_configured());
+
+        set_process_msg_header_key(None).unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 }

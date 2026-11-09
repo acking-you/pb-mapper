@@ -176,6 +176,10 @@ class _ServiceRowState extends State<_ServiceRow> {
         label: l10n.openAt(connection.localAddress),
         shrinks: true,
       );
+    } else if (remote.isDesktop) {
+      // A tunnel to a remote desktop's service is useless: it is viewed
+      // from Remote desktop (D26).
+      trailing = const SizedBox.shrink();
     } else {
       trailing = FilledButton.tonal(
         key: Key('connect-${row.id}'),
@@ -268,7 +272,7 @@ class _ServiceRowState extends State<_ServiceRow> {
                       ),
                       icon: Icon(
                         _open ? AppIcons.chevronDown : AppIcons.chevronRight,
-                        size: 15,
+                        size: AppIconSize.inline,
                       ),
                       label: Text(l10n.connectionsHeld(held.length)),
                     ),
@@ -338,7 +342,7 @@ class _ServiceMenu extends StatelessWidget {
           value: _ServiceAction.copyKey,
           child: Row(
             children: [
-              const Icon(AppIcons.copy, size: 17),
+              const Icon(AppIcons.copy, size: AppIconSize.button),
               const SizedBox(width: 10),
               Text(l10n.copyKey),
             ],
@@ -350,7 +354,11 @@ class _ServiceMenu extends StatelessWidget {
             value: _ServiceAction.retire,
             child: Row(
               children: [
-                Icon(AppIcons.unlink, size: 17, color: scheme.error),
+                Icon(
+                  AppIcons.unlink,
+                  size: AppIconSize.button,
+                  color: scheme.error,
+                ),
                 const SizedBox(width: 10),
                 Text(
                   l10n.relayRetireAll,
