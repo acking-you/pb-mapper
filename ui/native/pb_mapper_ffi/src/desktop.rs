@@ -716,18 +716,42 @@ async fn query_background_for_helper(
         snapshot["service_disabled"] = json!(true);
         return Ok(snapshot);
     }
+    // Whose it is comes first: running or not, another user's helper, or one
+    // whose installation cannot be read, stays out of this app's reach.
+    if !helper.authorized_application && !helper.owned_by_user {
+        return Err(helper_not_ready(desktop::privileged::NotReady::OtherOwner));
+    }
     if !helper.running {
-        return Err(err(
+        return Err(CtlError::new(
+            ErrorCode::HelperStopped,
             "background service is unavailable and may restart; disable it before starting local sharing",
         ));
     }
     if !helper.authorized_application {
-        return Err(err(
+        return Err(CtlError::new(
+            ErrorCode::HelperForeignApp,
             "open the installed application to check background sharing, or disable its service before starting local sharing",
         ));
     }
-    helper.ensure_ready().map_err(err)?;
+    if let Some(reason) = helper.not_ready() {
+        return Err(helper_not_ready(reason));
+    }
     query.await
+}
+
+/// A helper that cannot be used, with the code the window explains it by.
+#[cfg(windows)]
+fn helper_not_ready(reason: desktop::privileged::NotReady) -> CtlError {
+    use desktop::privileged::NotReady;
+    let code = match &reason {
+        NotReady::Outdated => ErrorCode::HelperOutdated,
+        NotReady::NotInstalled => ErrorCode::HelperMissing,
+        NotReady::Stopped => ErrorCode::HelperStopped,
+        NotReady::ForeignApplication => ErrorCode::HelperForeignApp,
+        NotReady::OtherOwner => ErrorCode::HelperOtherOwner,
+        NotReady::Unverified(_) => ErrorCode::HelperUnverified,
+    };
+    CtlError::new(code, reason.to_string())
 }
 
 async fn discover_background(
@@ -2674,9 +2698,15 @@ mod tests {
         assert_eq!(disabled["settings"]["auto_start"], true);
         assert_eq!(disabled["service_disabled"], true);
 
-        // Stopped with automatic recovery pending and Running under another
-        // authorized application both leave a potentially active grant unknown.
-        for (running, startup_disabled) in [(false, false), (true, true)] {
+        // Stopped with automatic recovery pending, Running under another
+        // authorized application, and another user's (whose it is is said
+        // first, even while it is stopped) all leave a potentially active
+        // grant unknown.
+        for (running, startup_disabled, owned_by_user, code) in [
+            (false, false, true, ErrorCode::HelperStopped),
+            (true, true, true, ErrorCode::HelperForeignApp),
+            (false, false, false, ErrorCode::HelperOtherOwner),
+        ] {
             let result = tokio::time::timeout(
                 Duration::from_secs(1),
                 query_background_for_helper(
@@ -2684,6 +2714,7 @@ mod tests {
                         installed: true,
                         running,
                         startup_disabled,
+                        owned_by_user,
                         ..Default::default()
                     },
                     std::future::pending(),
@@ -2691,7 +2722,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(result.is_err());
+            assert_eq!(result.as_ref().map_err(CtlError::code).err(), Some(code));
             let observed = discover_background(&state, async { result }).await;
             assert!(background_configured(&observed));
             assert_eq!(observed["service_disabled"], false);
@@ -2713,7 +2744,10 @@ mod tests {
             async { panic!("unverified service must not receive management requests") },
         )
         .await;
-        assert!(unverified.is_err());
+        assert_eq!(
+            unverified.as_ref().map_err(CtlError::code).err(),
+            Some(ErrorCode::HelperUnverified)
+        );
         let observed = discover_background(&state, async { unverified }).await;
         assert!(background_configured(&observed));
         assert!(background_enabled(&observed));

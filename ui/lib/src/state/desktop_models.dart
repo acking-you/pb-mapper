@@ -1365,7 +1365,11 @@ class DesktopHostView {
   /// A grant is remembered but cannot be read: Windows cannot unlock it, or
   /// it is invalid. Nothing can share until it is revoked; [error] says why.
   final bool trustUnreadable;
-  final String? service, invitation, error;
+  final String? service, invitation;
+
+  /// Why the last host action, or the remembered grant, failed: its FFI
+  /// code (`HELPER_FOREIGN_APP`) and message.
+  final DesktopFailure? error;
   final List<DesktopDisplay> displays;
   final int? displayId;
   final DesktopHelperState helper;

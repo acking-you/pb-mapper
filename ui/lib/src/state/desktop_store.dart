@@ -21,6 +21,11 @@ const kSequenceMax = 16;
 
 const _backoffSeconds = [1, 2, 4, 8, 15];
 
+/// A failed call as the views show it: the FFI's code, or `INTERNAL`.
+DesktopFailure _failureOf(Object error) => error is DesktopCallException
+    ? DesktopFailure(error.code, error.message)
+    : DesktopFailure('INTERNAL', error.toString());
+
 /// How long a run of failed attempts goes on before the session ends as
 /// [DesktopEndReason.unreachable]: a host that is off or not sharing, a
 /// hand-off (`restarting`) that never completes, a host that stays busy.
@@ -437,11 +442,11 @@ class DesktopStore {
 
   /// Why the remembered grant could not be read. It stays until a read
   /// succeeds, which for a grant Windows cannot unlock only Revoke brings.
-  String? _trustError;
+  DesktopFailure? _trustError;
   DesktopHostSnapshot? _host;
   bool _hostStatusRead = false, _hostBusy = false;
   bool _enabling = false, _restarting = false, _startupRestored = false;
-  String? _hostError;
+  DesktopFailure? _hostError;
   int _hostSerial = 0, _hostResumeAttempt = 0;
   int _hostReads = 0, _hostApplied = 0;
   Timer? _hostResumeTimer;
@@ -475,7 +480,7 @@ class DesktopStore {
       await _discoverBackground();
       await _readHost();
     } catch (e) {
-      if (!_disposed) _hostError = e.toString();
+      if (!_disposed) _hostError = _failureOf(e);
       _publishHost();
     } finally {
       _hostLoading = null;
@@ -489,12 +494,12 @@ class DesktopStore {
   /// for. Any other failure is thrown, for the caller to retry.
   Future<DesktopTrust?> _readTrust(int serial) async {
     DesktopTrust? trust;
-    String? error;
+    DesktopFailure? error;
     try {
       trust = await _api.trustStatus();
     } on DesktopCallException catch (e) {
       if (e.code != 'PROTOCOL') rethrow;
-      error = e.toString();
+      error = _failureOf(e);
     }
     if (_hostCurrent(serial)) {
       _trust = trust;
@@ -630,7 +635,17 @@ class DesktopStore {
       await action();
       return true;
     } catch (e) {
-      if (!_disposed) _hostError = e.toString();
+      if (_disposed) return false;
+      final failure = _hostError = _failureOf(e);
+      // A helper refusal means the service changed since the page read it:
+      // read it again, so the More menu offers what the card's hint names.
+      if (failure.code.startsWith('HELPER_')) {
+        try {
+          _capabilities = await _api.capabilities();
+        } catch (_) {
+          // Keep the last answer.
+        }
+      }
       return false;
     } finally {
       _hostBusy = false;
@@ -693,7 +708,7 @@ class DesktopStore {
       }
     } catch (e) {
       if (!_hostCurrent(serial)) return;
-      _hostError = e.toString();
+      _hostError = _failureOf(e);
       _scheduleHostResume(serial, _restoreStartupHost);
     }
     _publishHost();
@@ -722,7 +737,7 @@ class DesktopStore {
       await _readTrustAndHost(serial);
     } catch (e) {
       if (!_hostCurrent(serial)) return;
-      _hostError = e.toString();
+      _hostError = _failureOf(e);
       _scheduleHostResume(serial, _resumePendingHost);
     }
     _publishHost();
@@ -898,7 +913,7 @@ class DesktopStore {
       if (!_hostCurrent(serial)) return;
       await _readTrustAndHost(serial);
     } catch (e) {
-      if (_hostCurrent(serial)) _hostError = e.toString();
+      if (_hostCurrent(serial)) _hostError = _failureOf(e);
     }
     _publishHost();
   }
@@ -929,7 +944,7 @@ class DesktopStore {
     try {
       await action();
     } catch (e) {
-      if (!_disposed) _hostError = e.toString();
+      if (!_disposed) _hostError = _failureOf(e);
     }
     await _readHost();
   }
@@ -962,7 +977,7 @@ class DesktopStore {
       _hostError = null;
       await _readTrustAndHost(serial);
     } catch (e) {
-      if (_hostCurrent(serial)) _hostError = e.toString();
+      if (_hostCurrent(serial)) _hostError = _failureOf(e);
     }
     _publishHost();
   }
@@ -1137,14 +1152,10 @@ class DesktopStore {
       }
       if (_disposed || serial != _serial) return;
       _pollStatus();
-    } on DesktopCallException catch (e) {
-      if (_disposed || serial != _serial) return;
-      _attemptSerial = null;
-      _connectFailed(DesktopFailure(e.code, e.message));
     } catch (e) {
       if (_disposed || serial != _serial) return;
       _attemptSerial = null;
-      _connectFailed(DesktopFailure('INTERNAL', e.toString()));
+      _connectFailed(_failureOf(e));
     } finally {
       if (_attemptSerial == serial) _attemptSerial = null;
       if (!_disposed && serial == _serial) {

@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/pages/remote/invite_qr.dart';
@@ -189,7 +190,7 @@ class _HostError extends StatelessWidget {
     if (error == null) return const SizedBox.shrink();
     final scheme = Theme.of(context).colorScheme;
     final text = Text(
-      error,
+      _hostErrorText(context.l10n, view, error),
       key: const Key('host-error'),
       style: TextStyle(fontSize: 12.5, color: scheme.error),
     );
@@ -216,6 +217,42 @@ class _HostError extends StatelessWidget {
       ],
     );
   }
+}
+
+/// The host's [failure] as [view]'s card says it: a helper that cannot be
+/// used is explained with the action that mends it there; anything else is
+/// its message.
+///
+/// Setting the service up again is Turn on remote control on the setup card
+/// and More's Install elsewhere, except while this app shares the desktop
+/// itself, which Install refuses (`helper_action`): then it is Stop sharing,
+/// then Turn on remote control. A stopped service is turned on by setup;
+/// elsewhere More can only disable it. Another user's service is beyond
+/// every action here.
+String _hostErrorText(
+  AppLocalizations l10n,
+  DesktopHostView view,
+  DesktopFailure failure,
+) {
+  final phase = hostCardPhase(view);
+  final setup = phase != HostCardPhase.sharing && phase != HostCardPhase.paused;
+  final local = view.sharing && !view.background;
+  final install = setup || local
+      ? l10n.hostEnable
+      : '${l10n.more} › ${l10n.hostHelperInstall}';
+  String reinstall(String hint) =>
+      local ? l10n.hostErrorStopFirst(hint, l10n.hostStop) : hint;
+  return switch (failure.code) {
+    'HELPER_FOREIGN_APP' => reinstall(l10n.hostErrorHelperForeignApp(install)),
+    'HELPER_OUTDATED' => reinstall(l10n.hostErrorHelperOutdated(install)),
+    'HELPER_MISSING' => reinstall(l10n.hostErrorHelperMissing(install)),
+    'HELPER_UNVERIFIED' => reinstall(l10n.hostErrorHelperUnverified(install)),
+    'HELPER_OTHER_OWNER' => l10n.hostErrorHelperOtherOwner,
+    'HELPER_STOPPED' => l10n.hostErrorHelperStopped(
+      setup ? l10n.hostEnable : '${l10n.more} › ${l10n.hostHelperDisable}',
+    ),
+    _ => failure.toString(),
+  };
 }
 
 /// Revokes the invitation once the user confirms it.

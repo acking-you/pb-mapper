@@ -74,6 +74,23 @@ pub enum ErrorCode {
     /// Resuming would move this computer's host to the relay or namespace
     /// the settings name now, which changes its invitation: ask first.
     RelayChanged,
+    /// The Windows desktop service is older than this app: set it up again.
+    HelperOutdated,
+    /// The Windows desktop service is not installed.
+    HelperMissing,
+    /// The Windows desktop service is installed but not running; it may be
+    /// restarting.
+    HelperStopped,
+    /// The Windows desktop service serves another installed copy of the app
+    /// for this user, so this one cannot use or ask it: set it up again from
+    /// this one.
+    HelperForeignApp,
+    /// The Windows desktop service belongs to another Windows user, or its
+    /// installation cannot be read: this app cannot set it up again.
+    HelperOtherOwner,
+    /// The running Windows desktop service cannot be shown to be the
+    /// protected helper.
+    HelperUnverified,
     /// Anything with no more specific answer.
     ///
     /// Also where a code this build does not recognise lands, so an older CLI

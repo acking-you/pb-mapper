@@ -70,6 +70,49 @@ class _UnreadableApi extends FakePbMapperApi {
   _UnreadableTrust get desktop => _host;
 }
 
+/// A host whose start and rename fail with [failure], as the FFI reports
+/// it; with none they work.
+class _Refusing extends FakeDesktopApi {
+  DesktopCallException? failure;
+
+  @override
+  Future<String> startHost({
+    required String service,
+    required int displayId,
+    required bool allowControl,
+    bool relayOnly = false,
+    bool privileged = false,
+    bool remember = false,
+    bool autoStart = false,
+    bool background = false,
+  }) async {
+    if (failure case final failure?) throw failure;
+    return super.startHost(
+      service: service,
+      displayId: displayId,
+      allowControl: allowControl,
+      relayOnly: relayOnly,
+      privileged: privileged,
+      remember: remember,
+      autoStart: autoStart,
+      background: background,
+    );
+  }
+
+  @override
+  Future<String> renameHostService(String service) async {
+    if (failure case final failure?) throw failure;
+    return super.renameHostService(service);
+  }
+}
+
+class _RefusingApi extends FakePbMapperApi {
+  final _host = _Refusing();
+
+  @override
+  _Refusing get desktop => _host;
+}
+
 /// A host that can be re-keyed: its invitations name [fingerprint].
 class _RekeyedHost extends FakeDesktopApi {
   String fingerprint = 'AB12-CD34-EF56-7890';
@@ -426,6 +469,57 @@ void main() {
       expect(
         tester.widget<FilledButton>(_key('host-enable')).onPressed,
         isNotNull,
+      );
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
+    'a helper that serves another installed copy is explained in the app '
+    'language with the action that mends it on that card; other failures '
+    'keep their text',
+    (tester) async {
+      final api = _RefusingApi();
+      final l10n = lookupAppLocalizations(const Locale('en'));
+      await pumpApp(tester, api, page: AppPage.remote);
+      api.desktop.failure = const DesktopCallException(
+        'HELPER_FOREIGN_APP',
+        'open the installed application to check background sharing',
+      );
+      await _tapIn(tester, _key('host-enable-ordinary'));
+      await settle(tester);
+      expect(
+        find.text(l10n.hostErrorHelperForeignApp(l10n.hostEnable)),
+        findsOneWidget,
+      );
+      expect(find.textContaining('open the installed'), findsNothing);
+
+      api.desktop.failure = const DesktopCallException('NEW_CODE', 'a reason');
+      await _tapIn(tester, _key('host-enable-ordinary'));
+      await settle(tester);
+      expect(find.text('a reason'), findsOneWidget);
+
+      // While this app shares the desktop itself, the service cannot be set
+      // up again until sharing stops, so the card says so first.
+      api.desktop.failure = null;
+      await _tapIn(tester, _key('host-enable-ordinary'));
+      await settle(tester);
+      api.desktop.failure = const DesktopCallException('HELPER_FOREIGN_APP');
+      await _tapIn(tester, _key('host-more'));
+      await settle(tester);
+      await tester.tap(_key('host-rename'));
+      await settle(tester);
+      await tester.enterText(_key('host-rename-field'), 'den');
+      await tester.tap(_key('host-rename-save'));
+      await settle(tester);
+      expect(
+        find.text(
+          l10n.hostErrorStopFirst(
+            l10n.hostErrorHelperForeignApp(l10n.hostEnable),
+            l10n.hostStop,
+          ),
+        ),
+        findsOneWidget,
       );
       await finish(tester);
     },

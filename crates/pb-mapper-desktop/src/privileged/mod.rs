@@ -25,7 +25,8 @@ pub use crate::platform::windows::helper::run;
 #[cfg(windows)]
 #[cfg_attr(docsrs, doc(cfg(windows)))]
 pub use crate::platform::windows::helper::{
-    Action, HELPER_PROTOCOL, Status, prepare_application_restart, request_installation, status,
+    Action, HELPER_PROTOCOL, NotReady, Status, prepare_application_restart, request_installation,
+    status,
 };
 
 /// Hosting owned by the helper service, which keeps sharing while the app is

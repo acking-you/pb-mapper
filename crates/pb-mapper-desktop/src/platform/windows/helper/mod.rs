@@ -251,6 +251,11 @@ pub struct Status {
     /// Only true after SCM positively reports both Disabled and Stopped; an
     /// unavailable or restarting service must not permit a second host.
     pub startup_disabled: bool,
+    /// The installation names this Windows user as its owner: false when it
+    /// names another user, or cannot be read. Only its owner can install
+    /// over it.
+    pub owned_by_user: bool,
+    /// Owned by this user, and installed for this application's executable.
     pub authorized_application: bool,
     /// The live SCM process can be queried and matches the protected helper.
     pub identity_verified: bool,
@@ -265,37 +270,78 @@ pub struct Status {
     pub update_available: bool,
     pub message: String,
 }
+/// Why the helper cannot be used now, in the order [`Status::not_ready`]
+/// checks it. Its `Display` is the sentence a person reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotReady {
+    /// The installed helper is older than this build.
+    Outdated,
+    NotInstalled,
+    /// Installed but not running: stopped, Disabled, or restarting.
+    Stopped,
+    /// The helper serves another installed copy of the app for this user,
+    /// which installing from this one takes over.
+    ForeignApplication,
+    /// The helper belongs to another Windows user, or its installation cannot
+    /// be read: installing from this application is refused.
+    OtherOwner,
+    /// The running service cannot be shown to be the protected helper; the
+    /// text says why.
+    Unverified(String),
+}
+
+impl std::fmt::Display for NotReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Outdated => "Update the Windows desktop service to use remote desktop",
+            Self::NotInstalled => {
+                "Install the Windows desktop service on the host before sharing UAC or the lock screen"
+            }
+            Self::Stopped => {
+                "Enable the Windows desktop service on the host before sharing UAC or the lock screen"
+            }
+            Self::ForeignApplication => {
+                "Open the protected installed application on the host to use full desktop access"
+            }
+            Self::OtherOwner => {
+                "The Windows desktop service belongs to another user, or its installation cannot be read"
+            }
+            Self::Unverified(message) => {
+                return write!(
+                    f,
+                    "Windows desktop service identity could not be verified; install/update the helper: {message}"
+                );
+            }
+        })
+    }
+}
+
 impl Status {
+    /// Why the existing local authorization cannot be used, if it cannot.
+    pub fn not_ready(&self) -> Option<NotReady> {
+        if self.update_required {
+            Some(NotReady::Outdated)
+        } else if !self.installed {
+            Some(NotReady::NotInstalled)
+        } else if !self.running {
+            Some(NotReady::Stopped)
+        } else if !self.authorized_application {
+            Some(if self.owned_by_user {
+                NotReady::ForeignApplication
+            } else {
+                NotReady::OtherOwner
+            })
+        } else if !self.identity_verified {
+            Some(NotReady::Unverified(self.message.clone()))
+        } else {
+            None
+        }
+    }
+
     /// Validate the existing local authorization; this never installs, starts
     /// or elevates the helper on the caller's behalf.
     pub fn ensure_ready(&self) -> Result<()> {
-        if self.update_required {
-            return Err(error(
-                "Update the Windows desktop service to use remote desktop",
-            ));
-        }
-        if !self.installed {
-            return Err(error(
-                "Install the Windows desktop service on the host before sharing UAC or the lock screen",
-            ));
-        }
-        if !self.running {
-            return Err(error(
-                "Enable the Windows desktop service on the host before sharing UAC or the lock screen",
-            ));
-        }
-        if !self.authorized_application {
-            return Err(error(
-                "Open the protected installed application on the host to use full desktop access",
-            ));
-        }
-        if !self.identity_verified {
-            return Err(error(format!(
-                "Windows desktop service identity could not be verified; install/update the helper: {}",
-                self.message
-            )));
-        }
-        Ok(())
+        self.not_ready().map_or(Ok(()), |reason| Err(error(reason)))
     }
 }
 
@@ -315,11 +361,13 @@ pub fn status() -> Status {
                 Err(error("Windows desktop service is not running"))
             };
             let protocol = config.protocol();
+            let owned_by_user = os::current_sid().is_ok_and(|sid| sid == config.owner_sid);
             Status {
                 installed: true,
                 running,
                 startup_disabled,
-                authorized_application: os::current_sid().is_ok_and(|sid| sid == config.owner_sid)
+                owned_by_user,
+                authorized_application: owned_by_user
                     && std::env::current_exe()
                         .is_ok_and(|path| os::same_path(&path, &config.ui_executable)),
                 identity_verified: identity.is_ok(),
@@ -375,7 +423,7 @@ pub fn run() -> Result<()> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod readiness_tests {
-    use super::{Configuration, HELPER_PROTOCOL, Status, update_required};
+    use super::{Configuration, HELPER_PROTOCOL, NotReady, Status, update_required};
 
     #[test]
     fn readiness_requires_the_current_protocol() {
@@ -453,19 +501,27 @@ mod readiness_tests {
     #[test]
     fn capture_requires_installed_running_service_and_approved_caller() {
         let mut status = Status::default();
+        assert_eq!(status.not_ready(), Some(NotReady::NotInstalled));
         assert!(status.ensure_ready().is_err());
         status.installed = true;
-        assert!(status.ensure_ready().is_err());
+        assert_eq!(status.not_ready(), Some(NotReady::Stopped));
         status.running = true;
-        assert!(status.ensure_ready().is_err());
+        assert_eq!(status.not_ready(), Some(NotReady::OtherOwner));
+        status.owned_by_user = true;
+        assert_eq!(status.not_ready(), Some(NotReady::ForeignApplication));
         status.authorized_application = true;
-        assert!(status.ensure_ready().is_err());
+        assert!(matches!(status.not_ready(), Some(NotReady::Unverified(_))));
         status.identity_verified = true;
+        assert_eq!(status.not_ready(), None);
         assert!(status.ensure_ready().is_ok());
+        // An outdated helper comes first, whatever else holds.
+        status.update_required = true;
+        status.running = false;
+        assert_eq!(status.not_ready(), Some(NotReady::Outdated));
         // An installation retained after Disable does not retain capture
         // readiness, even though its approved caller remains the same.
-        status.running = false;
+        status.update_required = false;
         status.startup_disabled = true;
-        assert!(status.ensure_ready().is_err());
+        assert_eq!(status.not_ready(), Some(NotReady::Stopped));
     }
 }
