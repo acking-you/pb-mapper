@@ -12,6 +12,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// The protocol a direct connection speaks, by its carrier: a connection
+/// made for one is refused by the other.
+const QUIC_ALPN: &[u8] = b"pb-mapper/direct/1";
+const TCP_ALPN: &[u8] = b"pb-mapper/direct-tcp/1";
+
 pub(super) struct Identity {
     pub certificate: Vec<u8>,
     key: PrivateKeyDer<'static>,
@@ -28,7 +33,9 @@ impl Identity {
             permissions: Arc::new(Permissions::default()),
         })
     }
-    pub fn server(&self) -> io::Result<quinn::ServerConfig> {
+    /// TLS 1.3 only, with this identity, admitting only a client certificate
+    /// with a live grant, and no early data.
+    fn tls_server(&self, alpn: &[u8]) -> io::Result<rustls::ServerConfig> {
         let mut tls = rustls::ServerConfig::builder_with_provider(
             rustls::crypto::ring::default_provider().into(),
         )
@@ -40,15 +47,13 @@ impl Identity {
             self.key.clone_key(),
         )
         .map_err(io::Error::other)?;
-        tls.alpn_protocols = vec![b"pb-mapper/direct/1".to_vec()];
+        tls.alpn_protocols = vec![alpn.to_vec()];
         tls.max_early_data_size = 0;
-        let crypto =
-            quinn::crypto::rustls::QuicServerConfig::try_from(tls).map_err(io::Error::other)?;
-        let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-        config.transport_config(Arc::new(transport()?));
-        Ok(config)
+        Ok(tls)
     }
-    pub fn client(&self, peer: &[u8]) -> io::Result<quinn::ClientConfig> {
+    /// TLS 1.3 only, trusting `peer`'s exact certificate and nothing else,
+    /// presenting this identity, and no early data.
+    fn tls_client(&self, peer: &[u8], alpn: &[u8]) -> io::Result<rustls::ClientConfig> {
         let mut roots = rustls::RootCertStore::empty();
         roots
             .add(CertificateDer::from(peer.to_vec()))
@@ -64,13 +69,39 @@ impl Identity {
             self.key.clone_key(),
         )
         .map_err(io::Error::other)?;
-        tls.alpn_protocols = vec![b"pb-mapper/direct/1".to_vec()];
+        tls.alpn_protocols = vec![alpn.to_vec()];
         tls.enable_early_data = false;
+        Ok(tls)
+    }
+    pub fn server(&self) -> io::Result<quinn::ServerConfig> {
+        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(self.tls_server(QUIC_ALPN)?)
+            .map_err(io::Error::other)?;
+        let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+        config.transport_config(Arc::new(transport()?));
+        Ok(config)
+    }
+    pub fn client(&self, peer: &[u8]) -> io::Result<quinn::ClientConfig> {
         let mut config = quinn::ClientConfig::new(Arc::new(
-            quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(io::Error::other)?,
+            quinn::crypto::rustls::QuicClientConfig::try_from(self.tls_client(peer, QUIC_ALPN)?)
+                .map_err(io::Error::other)?,
         ));
         config.transport_config(Arc::new(transport()?));
         Ok(config)
+    }
+    /// The server's config over TCP. Neither tickets nor a session cache:
+    /// every connection presents, and has checked, a certificate with a
+    /// live grant, as a QUIC one does.
+    pub fn tcp_server(&self) -> io::Result<Arc<rustls::ServerConfig>> {
+        let mut tls = self.tls_server(TCP_ALPN)?;
+        tls.send_tls13_tickets = 0;
+        tls.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+        Ok(Arc::new(tls))
+    }
+    /// The client's config over TCP, to `peer`: no resumption either.
+    pub fn tcp_client(&self, peer: &[u8]) -> io::Result<Arc<rustls::ClientConfig>> {
+        let mut tls = self.tls_client(peer, TCP_ALPN)?;
+        tls.resumption = rustls::client::Resumption::disabled();
+        Ok(Arc::new(tls))
     }
 }
 /// Flow-control window of the single stream a direct connection carries.

@@ -1,8 +1,9 @@
 use super::{
-    QuicGuard,
+    DirectConn, QuicGuard,
     control::io_error,
-    endpoint::{self, Network},
+    endpoint::{Arrival, Network},
     lan::Assessment,
+    tcp,
 };
 use crate::{
     diagnostics::{
@@ -21,7 +22,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{io::AsyncReadExt, sync::mpsc, task::JoinSet, time::Instant};
+use tokio::{sync::mpsc, task::JoinSet, time::Instant};
 use tokio_util::sync::CancellationToken;
 use uni_stream::stream::StreamProvider;
 
@@ -37,10 +38,9 @@ pub(crate) struct Provider {
     done: CancellationToken,
     task: tokio_util::task::AbortOnDropHandle<()>,
 }
+/// A connection that claimed a session, with the binding it presented.
 struct Incoming {
-    connection: QuicGuard,
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
+    conn: DirectConn,
     tag: [u8; 32],
 }
 enum SessionEvent {
@@ -152,7 +152,7 @@ async fn run<L: StreamProvider + Send + 'static>(
                         sessions.insert(id, tx);
                         let session = session::<L>(
                             net, grant, stun_addr, reply, rx, local.clone(), idle,
-                            diagnostics.clone(), active.clone(), reports.clone(), policy.lan_first,
+                            diagnostics.clone(), active.clone(), reports.clone(), policy,
                         );
                         tasks.spawn(async move {
                             if let Err(error) = session.await {
@@ -171,19 +171,20 @@ async fn run<L: StreamProvider + Send + 'static>(
                     let _ = tx.try_send(event);
                 }
             }
-            connection = async {
+            arrival = async {
                 match &network {
                     Some(net) => net.accept().await,
                     None => std::future::pending().await,
                 }
             } => {
-                let Some(connection) = connection else { continue };
-                tracing::debug!(peer = %connection.remote_address(), "direct TLS accepted");
+                let Some(arrival) = arrival else { continue };
                 if arrivals.len() >= 64 {
-                    connection.close(0u32.into(), b"session capacity");
+                    if let Arrival::Quic(connection) = arrival {
+                        connection.close(0u32.into(), b"session capacity");
+                    }
                     continue;
                 }
-                let bind = session_bind(QuicGuard(connection));
+                let bind = session_bind(arrival);
                 arrivals.spawn(tokio::time::timeout(Duration::from_secs(2), bind));
             }
             Some(result) = arrivals.join_next(), if !arrivals.is_empty() => {
@@ -246,21 +247,28 @@ fn admit_offer(
 }
 /// The first bytes on an accepted connection name the grant they claim.
 /// Identity and binding are verified by the session that owns that grant.
-async fn session_bind(connection: QuicGuard) -> io::Result<(SessionId, Incoming)> {
-    let (send, mut recv) = connection.0.accept_bi().await.map_err(io_error)?;
+async fn session_bind(arrival: Arrival) -> io::Result<(SessionId, Incoming)> {
+    let mut conn = match arrival {
+        Arrival::Quic(connection) => {
+            tracing::debug!(peer = %connection.remote_address(), "direct TLS accepted");
+            let connection = QuicGuard(connection);
+            let (send, recv) = connection.0.accept_bi().await.map_err(io_error)?;
+            DirectConn::Quic {
+                connection,
+                send,
+                recv,
+            }
+        }
+        Arrival::Tcp { stream, rtt } => {
+            tracing::debug!(peer = ?tcp::addresses(&stream).0.ok(), "direct TLS accepted over TCP");
+            DirectConn::Tcp { stream, rtt }
+        }
+    };
     let mut id = [0; 16];
-    recv.read_exact(&mut id).await.map_err(io_error)?;
+    conn.read_exact(&mut id).await?;
     let mut tag = [0; 32];
-    recv.read_exact(&mut tag).await.map_err(io_error)?;
-    Ok((
-        id,
-        Incoming {
-            connection,
-            send,
-            recv,
-            tag,
-        },
-    ))
+    conn.read_exact(&mut tag).await?;
+    Ok((id, Incoming { conn, tag }))
 }
 /// Best effort: the consumer falls back without it once its wait expires.
 fn send(reply: &Reply, message: DirectProviderMessage) -> bool {
@@ -295,7 +303,7 @@ async fn session<L: StreamProvider>(
     diagnostics: Diagnostics,
     active: Arc<AtomicUsize>,
     reports: Arc<ProviderReports>,
-    lan_first: bool,
+    policy: crate::sdk::DirectPolicy,
 ) -> io::Result<()>
 where
     L::Item: StreamForward,
@@ -313,11 +321,12 @@ where
     let lan = Assessment::new(
         discovered.local.clone(),
         &grant.consumer.candidates,
-        lan_first,
+        policy.lan_first,
     );
     if let Some(evidence) = lan.evidence {
         diagnostics.lan_detected(evidence, lan.prefers());
     }
+    let tcp_offer = offer_tcp(&network, &mut grant, &lan, stun_addr, policy.lan_tcp);
     let missed = |took: Option<LinkKind>| {
         if let Some(evidence) = lan.evidence {
             diagnostics.lan_missed(evidence, took);
@@ -373,10 +382,10 @@ where
         return Err(io::Error::other("missing prepared connection"));
     };
     let committing = Instant::now();
-    incoming.send.write_all(&[1]).await.map_err(io_error)?;
+    incoming.conn.write_all(&[1]).await?;
     // Keep the read future alive while processing probe ticks or coordination.
     {
-        let start = async { incoming.recv.read_u8().await };
+        let start = async { incoming.conn.read_u8().await };
         tokio::pin!(start);
         loop {
             tokio::select! {
@@ -401,6 +410,8 @@ where
             }
         }
     }
+    // Committed: no other TCP connection is waited for.
+    drop(tcp_offer);
     // A committed session belongs to the endpoints even while its backend dial
     // is pending. A simultaneous credential rejection must not tear it down.
     let _active = ActiveSession::new(active);
@@ -408,12 +419,12 @@ where
     let local = match tokio::time::timeout_at(deadline, L::from_addr(local.as_slice())).await {
         Ok(Ok(local)) => local,
         _ => {
-            let _ = incoming.send.write_all(&[4]).await;
+            let _ = incoming.conn.write_all(&[4]).await;
             return Err(io::Error::other("local service connect failed"));
         }
     };
-    incoming.send.write_all(&[3]).await.map_err(io_error)?;
-    let framing = endpoint::framing_key(&incoming.connection.0, &grant)?;
+    incoming.conn.write_all(&[3]).await?;
+    let framing = incoming.conn.framing_key(&grant)?;
     let learned = network.learned(&grant.id);
     let first = |lan_only: bool| {
         learned
@@ -436,19 +447,19 @@ where
         ..super::counts(&discovered, &lan, &grant.consumer.candidates)
     };
     let link = super::direct_link(
-        &incoming.connection.0,
+        &incoming.conn,
         &lan,
         &grant.consumer.candidates,
         timings,
         candidates,
-    );
+    )?;
     if link.kind != LinkKind::Lan {
         missed(Some(link.kind));
     }
     super::log_path(&grant.service, &link);
     let summary = super::summary(&link);
-    let _link = diagnostics.link_opened(link, incoming.connection.0.clone());
-    let session = diagnostics.session_opened(SessionPath::Direct, Some(summary.kind));
+    let _link = diagnostics.link_opened(link, incoming.conn.probe());
+    let session = diagnostics.session_opened(SessionPath::Direct, Some(summary));
     let meter = Some(session.meter());
     let mut report = Report {
         reports,
@@ -460,7 +471,7 @@ where
         _link,
     };
     report.tick();
-    let forwarding = super::forward_quic(local, incoming.send, incoming.recv, framing, idle, meter);
+    let forwarding = super::forward_direct(local, incoming.conn, framing, idle, meter);
     tokio::pin!(forwarding);
     let mut tick = tokio::time::interval(Duration::from_secs(15));
     tick.tick().await;
@@ -471,21 +482,45 @@ where
         }
     }
 }
+/// The connection is the granted consumer's, by the one certificate it
+/// presented, and is bound to this grant.
 fn verify(incoming: &Incoming, grant: &SessionGrant) -> io::Result<()> {
-    let identity = incoming
-        .connection
-        .0
-        .peer_identity()
-        .ok_or_else(|| io::Error::other("missing client identity"))?;
-    let certs = identity
-        .downcast::<Vec<quinn::rustls::pki_types::CertificateDer<'static>>>()
-        .map_err(|_| io::Error::other("unexpected client identity"))?;
-    if certs.len() != 1 || certs[0].as_ref() != grant.consumer.certificate {
+    if incoming.conn.peer_certificate().as_deref() != Some(grant.consumer.certificate.as_slice()) {
         return Err(io::Error::other(
             "client identity does not match this session",
         ));
     }
-    endpoint::verify_binding(&incoming.connection.0, grant, &incoming.tag)
+    incoming.conn.verify_binding(grant, &incoming.tag)
+}
+/// Serve TCP within a LAN to a consumer that asked for it, when this end
+/// does and the two share a network, as the offer showed or, with the relay
+/// on loopback, as loopback: this end's LAN addresses go into its answer,
+/// and its listeners admit connections while the returned guard lives. A
+/// session across the internet is never offered TCP.
+fn offer_tcp(
+    network: &Network,
+    grant: &mut SessionGrant,
+    lan: &Assessment,
+    stun: std::net::SocketAddr,
+    serve: bool,
+) -> Option<tcp::Offered> {
+    let loopback = stun.ip().is_loopback();
+    let shared = lan.evidence.is_some()
+        || (loopback
+            && grant
+                .consumer
+                .candidates
+                .iter()
+                .any(|addr| addr.ip().is_loopback()));
+    if !serve || grant.consumer.lan_tcp.is_none() || !shared {
+        return None;
+    }
+    let (offered, addrs) = network.lan_tcp(loopback)?.offer(&lan.local.interfaces);
+    if addrs.is_empty() {
+        return None;
+    }
+    grant.provider.lan_tcp = Some(addrs);
+    Some(offered)
 }
 struct ProbeGuard {
     network: Arc<Network>,
@@ -630,7 +665,7 @@ impl Drop for Report {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use tokio::net::TcpListener;
+    use tokio::{io::AsyncReadExt, net::TcpListener};
     use tokio_util::task::AbortOnDropHandle;
     use uni_stream::stream::TcpStreamProvider;
 
@@ -709,6 +744,7 @@ mod tests {
             provider: PeerInfo {
                 certificate: vec![],
                 candidates: vec![],
+                lan_tcp: None,
             },
             secret: SessionSecret::random(),
             ttl_ms: SETUP_TTL_MS,
@@ -728,7 +764,12 @@ mod tests {
             Diagnostics::default(),
             active.clone(),
             Arc::new(ProviderReports::default()),
-            true,
+            crate::sdk::DirectPolicy {
+                port_mapping: crate::sdk::PortMapping::Off,
+                lan_first: true,
+                lan_transport: crate::sdk::LanTransport::Quic,
+                lan_tcp: true,
+            },
         )));
         let Some(LocalControlWrite::Direct(accepted)) = reply_rx.recv().await else {
             panic!("expected accepted offer");
@@ -762,7 +803,7 @@ mod tests {
                     tokio::select! {
                         connection = provider.accept() => {
                             let Some(connection) = connection else { break };
-                            arrivals.spawn(tokio::time::timeout_at(deadline, session_bind(QuicGuard(connection))));
+                            arrivals.spawn(tokio::time::timeout_at(deadline, session_bind(connection)));
                         }
                         Some(result) = arrivals.join_next(), if !arrivals.is_empty() => {
                             if let Ok(Ok(Ok((_, incoming)))) = result {
@@ -776,13 +817,25 @@ mod tests {
                 }
             }))
         };
-        let (connection, _) = consumer
-            .connect(&grant, deadline, &Assessment::default())
+        let (conn, _) = consumer
+            .connect(
+                &grant,
+                deadline,
+                &Assessment::default(),
+                &mut tcp::Race::idle(),
+            )
             .await
             .unwrap();
-        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        let DirectConn::Quic {
+            connection,
+            mut send,
+            mut recv,
+        } = conn
+        else {
+            panic!("a consumer that did not ask for TCP takes QUIC");
+        };
         send.write_all(&grant.id).await.unwrap();
-        send.write_all(&endpoint::binding(&connection, &grant).unwrap())
+        send.write_all(&super::super::endpoint::binding(&connection.0, &grant).unwrap())
             .await
             .unwrap();
         tokio::time::timeout_at(deadline, dispatch)
@@ -810,7 +863,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        connection.close(0u32.into(), b"test complete");
+        connection.0.close(0u32.into(), b"test complete");
         let _ = tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .unwrap();
@@ -822,5 +875,7 @@ mod tests {
             ));
         }
         assert_eq!(active.load(Ordering::Acquire), 0);
+        // Serving TCP costs nothing until a consumer asks for it.
+        assert!(!provider.lan_tcp_opened());
     }
 }

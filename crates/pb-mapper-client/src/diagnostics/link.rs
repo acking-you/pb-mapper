@@ -1,10 +1,10 @@
 //! How a direct session travels, as [`PathDiagnostics::link`] reports it:
 //! which network it crosses, by which interface, how it was found, how long
-//! each stage of its setup took, and QUIC's live view of the path.
+//! each stage of its setup took, and its carrier's live view of the path.
 //!
 //! [`PathDiagnostics::link`]: super::PathDiagnostics::link
 
-pub use pb_mapper_protocol::direct::{AddressFamily, LinkKind};
+pub use pb_mapper_protocol::direct::{AddressFamily, DirectTransport, LinkKind};
 use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
 
@@ -147,7 +147,7 @@ pub struct SetupTimings {
     /// to the first on a local network.
     pub first_pong_ms: Option<u64>,
     pub lan_first_pong_ms: Option<u64>,
-    /// The winning QUIC handshake.
+    /// The winning handshake: QUIC's, or TCP's and TLS's.
     pub handshake_ms: Option<u64>,
     /// From the handshake to the publisher's local service being open.
     pub commit_ms: Option<u64>,
@@ -167,14 +167,16 @@ pub struct CandidateCounts {
     /// The peer's candidates, and those on one of this end's networks.
     pub peer: u32,
     pub peer_lan: u32,
-    /// Peer addresses probed and those that answered; QUIC handshakes this
-    /// end started (none on the publishing end, which is dialed).
+    /// Peer addresses probed and those that answered; handshakes this end
+    /// started, TCP's among them (none on the publishing end, which is
+    /// dialed).
     pub probed: u32,
     pub answered: u32,
     pub handshakes: u32,
 }
 
-/// QUIC's view of the path, read when diagnostics or metrics are.
+/// QUIC's view of the path, read when diagnostics or metrics are. A TCP
+/// path has only its handshake's round trip, as both round trips.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct LinkStats {
@@ -204,6 +206,9 @@ pub struct DirectLink {
     pub kind: LinkKind,
     pub family: AddressFamily,
     pub via: LinkVia,
+    /// QUIC, or TCP within a local network. Over TCP, [`Self::stats`] has
+    /// the handshake's round trip and nothing else.
+    pub transport: DirectTransport,
     pub peer: SocketAddr,
     /// The local address the path leaves from, when the socket reports it.
     pub local_ip: Option<IpAddr>,

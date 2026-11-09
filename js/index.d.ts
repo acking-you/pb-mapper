@@ -307,6 +307,13 @@ export interface JsConnectRequest {
    * path as soon as it answers. Ignored on the relay-only path.
    */
   lanFirst?: boolean
+  /**
+   * What a path within a local network shared with the publisher runs
+   * over: "quic" (default), or "tcp", tried 300 ms ahead of QUIC and
+   * falling back to it. A path across the internet is always QUIC.
+   * Ignored on the relay-only path.
+   */
+  lanTransport?: string
   key: string
   localAddr: string
   transport: string
@@ -335,6 +342,11 @@ export interface JsDirectLink {
    * `peer_reflexive`.
    */
   via: string
+  /**
+   * `quic`, or `tcp` within a local network. Over TCP the round trips are
+   * the handshake's, and the rest is zero.
+   */
+  transport: string
   peer: string
   localIp?: string
   /**
@@ -403,6 +415,11 @@ export interface JsLinkSample {
   family: string
   /** `host`, `public`, `mapped` or `peer_reflexive`. */
   via: string
+  /**
+   * `quic`, or `tcp` within a local network. Over TCP the round trips are
+   * the handshake's, and the rest is zero.
+   */
+  transport: string
   peer: string
   localIp?: string
   /** `ipv6_prefix`, `public_ip_subnet` or `subnet`. */
@@ -431,6 +448,12 @@ export interface JsPathDiagnostics {
   /** Direct sessions within one local network, open now and in all. */
   activeLan: number
   lanSessions: number
+  /**
+   * Direct sessions over TCP, which only a local network carries, open
+   * now and in all.
+   */
+  activeLanTcp: number
+  lanTcpSessions: number
   /**
    * Setups that found the peer on a local network, and those of them that
    * ended on another path or on the relay.
@@ -531,6 +554,13 @@ export interface JsRegisterRequest {
    * allowed.
    */
   lanFirst?: boolean
+  /**
+   * Serve a consumer that asks for TCP within a local network shared with
+   * it (default `true`): a TCP listener opens the first time one asks,
+   * offered on LANs only. `false` leaves such a consumer on QUIC. Ignored
+   * when direct is not allowed.
+   */
+  lanTcp?: boolean
   key: string
   localAddr: string
   transport: string
@@ -625,6 +655,12 @@ export interface JsTunnelDiagnostics {
    * tunnel's lanFirst, and never without direct.
    */
   lanFirst: boolean
+  /**
+   * What direct setups ask a shared local network to carry, `quic` or
+   * `tcp`: a connection's lanTransport; `quic` without direct, and for a
+   * registration, which serves what each consumer asks for.
+   */
+  lanTransport: string
   direct?: JsPathDiagnostics
   /** Application bytes on each path, as `metrics().traffic`. */
   traffic: JsPathTraffic
@@ -667,8 +703,8 @@ export interface JsTunnelEvent {
    * `direct_fallback` and `stopped`, the last event of a stream. Steps,
    * from `subscribeEvents()` only: `phase_changed`, `direct_stage_changed`,
    * `direct_abandoned`, `session_opened`, `session_closed`,
-   * `port_mapping_changed`, `lan_detected`, `path_selected` and
-   * `lan_missed`. A kind added by a later SDK reads `unknown`.
+   * `port_mapping_changed`, `lan_detected`, `path_selected`, `lan_missed`
+   * and `lan_tcp_missed`. A kind added by a later SDK reads `unknown`.
    */
   kind: string
   /** `relay_ready`: setup latency of the answering relay. */
@@ -691,7 +727,9 @@ export interface JsTunnelEvent {
   /**
    * `direct_fallback`: why: `direct_not_offered`,
    * `direct_negotiation_failed`, `direct_negotiation_timeout` or
-   * `direct_timeout_or_unreachable`.
+   * `direct_timeout_or_unreachable`. `lan_tcp_missed`: why TCP was not
+   * the path: `not_offered`, `no_shared_lan`, `refused`, `timed_out` or
+   * `handshake`.
    */
   reason?: string
   /** `phase_changed`: the relay attempt's new phase. */
@@ -724,9 +762,11 @@ export interface JsTunnelEvent {
   link?: string
   family?: string
   via?: string
+  /** `path_selected`: `quic`, or `tcp` within a local network. */
+  transport?: string
   /**
    * `lan_missed`: where the session went instead, `internet` or
-   * `private`; absent when it took the relay.
+   * `private`; `lan_tcp_missed`: `quic`. Absent when it took the relay.
    */
   took?: string
   /**

@@ -1,8 +1,11 @@
 use super::{
+    DirectConn, QuicGuard,
     candidates::{Candidates, Host},
+    control::io_error,
     identity::Identity,
     lan::{Assessment, Interfaces, Local},
     socket::{self, Socket},
+    tcp::{self, TlsTcp},
 };
 use crate::diagnostics::{LanEvidence, StunOutcome, ms};
 use pb_mapper_protocol::direct::{PeerInfo, SessionGrant, SessionId};
@@ -70,17 +73,37 @@ pub(super) enum InterfaceSource {
     Fixed(Interfaces),
 }
 
+/// A connection a provider accepted, with its TLS handshake done, before the
+/// session it claims is known.
+pub(super) enum Arrival {
+    Quic(quinn::Connection),
+    Tcp {
+        stream: Box<TlsTcp>,
+        /// The handshake's round trip, which stands in for TCP's figures.
+        rtt: Duration,
+    },
+}
+
 pub(super) struct Network {
     pub identity: Identity,
     transports: Vec<(Socket, quinn::Endpoint)>,
-    incoming: Mutex<mpsc::Receiver<quinn::Connection>>,
+    /// Accepted connections on either carrier, in one queue.
+    incoming: Mutex<mpsc::Receiver<Arrival>>,
+    arrivals: mpsc::Sender<Arrival>,
     acceptors: Vec<tokio_util::task::AbortOnDropHandle<()>>,
+    /// A provider's TCP listeners, opened the first time a consumer on a
+    /// shared network asks for TCP: `None` if they could not be.
+    lan_tcp: std::sync::OnceLock<Option<tcp::Acceptor>>,
     cached: Mutex<Option<Discovery>>,
     generation: AtomicU64,
     network: Arc<crate::network::NetworkHints>,
     pub(super) interfaces: InterfaceSource,
     #[cfg(feature = "port-mapping")]
     mapper: Option<Mapper>,
+    /// Where a consumer's TCP attempts go instead of the provider's
+    /// addresses: a port nothing listens on refuses them.
+    #[cfg(test)]
+    pub(super) tcp_redirect: std::sync::OnceLock<SocketAddr>,
 }
 
 /// The router mapping this endpoint may ask for, and the one it asked for.
@@ -154,8 +177,10 @@ impl Network {
                                 handshakes.spawn(async move {
                                     match tokio::time::timeout(Duration::from_secs(3), incoming).await {
                                         Ok(Ok(connection)) => {
-                                            if let Err(error) = tx.try_send(connection) {
-                                                error.into_inner().close(0u32.into(), b"accept capacity");
+                                            if let Err(error) = tx.try_send(Arrival::Quic(connection))
+                                                && let Arrival::Quic(connection) = error.into_inner()
+                                            {
+                                                connection.close(0u32.into(), b"accept capacity");
                                             }
                                         }
                                         result => tracing::debug!(?result, "direct TLS accept failed"),
@@ -200,14 +225,40 @@ impl Network {
             identity,
             transports,
             incoming: Mutex::new(rx),
+            arrivals: tx,
             acceptors,
+            lan_tcp: std::sync::OnceLock::new(),
             cached: Mutex::new(None),
             generation: AtomicU64::new(0),
             network,
             interfaces: InterfaceSource::System,
             #[cfg(feature = "port-mapping")]
             mapper,
+            #[cfg(test)]
+            tcp_redirect: std::sync::OnceLock::new(),
         }))
+    }
+    /// This end's TCP acceptor, opened on first use: listening on loopback
+    /// alone when the relay is on it, else on every interface, admitting
+    /// only what [`tcp::Acceptor::offer`] lets in.
+    pub fn lan_tcp(&self, loopback: bool) -> Option<&tcp::Acceptor> {
+        self.lan_tcp
+            .get_or_init(|| {
+                let udp: Vec<_> = self
+                    .transports
+                    .iter()
+                    .filter_map(|(socket, _)| socket.local_addr().ok())
+                    .collect();
+                tcp::Acceptor::open(&udp, loopback, &self.identity, self.arrivals.clone())
+                    .inspect_err(|error| tracing::debug!(%error, "direct TCP unavailable"))
+                    .ok()
+            })
+            .as_ref()
+    }
+    /// Whether TCP listeners were ever opened.
+    #[cfg(test)]
+    pub fn lan_tcp_opened(&self) -> bool {
+        self.lan_tcp.get().is_some()
     }
     pub async fn peer(&self, stun: SocketAddr) -> Discovered {
         let mut cached = self.cached.lock().await;
@@ -311,6 +362,7 @@ impl Network {
             peer: PeerInfo {
                 certificate: self.identity.certificate.clone(),
                 candidates: selected.addrs,
+                lan_tcp: None,
             },
             local,
             stun,
@@ -448,7 +500,7 @@ impl Network {
             }
         }
     }
-    pub async fn accept(&self) -> Option<quinn::Connection> {
+    pub async fn accept(&self) -> Option<Arrival> {
         self.incoming.lock().await.recv().await
     }
     pub async fn shutdown(&self) {
@@ -473,13 +525,16 @@ impl Network {
     /// Dial the provider over each path as soon as it answers a probe, until
     /// one handshake completes. Only paths that answered are raced: blind
     /// QUIC flights to stale interface addresses can fill one shared UDP
-    /// socket's send queue and stall healthy sessions.
+    /// socket's send queue and stall healthy sessions. TCP needs no probe,
+    /// its connect being its own test: `tcp`'s attempts run from the start,
+    /// and with LAN-first on every QUIC path waits out their head start.
     pub async fn connect(
         &self,
         grant: &SessionGrant,
         deadline: Instant,
         lan: &Assessment,
-    ) -> io::Result<(quinn::Connection, Dialed)> {
+        tcp: &mut tcp::Race,
+    ) -> io::Result<(DirectConn, Dialed)> {
         let id = grant.id;
         let started = Instant::now();
         let config = self.identity.client(&grant.provider.certificate)?;
@@ -493,9 +548,29 @@ impl Network {
         // to send to a LAN address: either way the head start is over.
         let (mut lan_dialed, mut lan_failed, mut lan_refused) = (0, 0, false);
         let mut probe = tokio::time::interval(Duration::from_millis(120));
+        let dialed = |handshakes: u32, handshake| {
+            let learned = self.learned(&id);
+            let first = |lan_only: bool| {
+                learned
+                    .iter()
+                    .filter(|(addr, _)| !lan_only || lan.is_lan(*addr))
+                    .map(|(_, at)| at.saturating_duration_since(started))
+                    .min()
+            };
+            Dialed {
+                probed,
+                answered: learned.len() as u32,
+                handshakes,
+                first_pong: first(false),
+                lan_first_pong: first(true),
+                handshake,
+            }
+        };
         loop {
             let now = Instant::now();
-            let mut held: Option<Instant> = None;
+            // While TCP has its head start, no QUIC path is dialed.
+            let tcp_holds = tcp.holds(lan.prefers(), now);
+            let mut held: Option<Instant> = tcp_holds;
             let learned = self.learned(&id);
             // A LAN path that answered an authenticated probe is proof of
             // the LAN, where the offer was only evidence of it.
@@ -503,7 +578,7 @@ impl Network {
             for (addr, answered) in learned {
                 // At most 16 handshakes per setup: an attempt is bounded
                 // work, and the setup deadline ends the search anyway.
-                if tried.contains(&addr) || tried.len() >= 16 {
+                if tried.contains(&addr) || tried.len() >= 16 || tcp_holds.is_some() {
                     continue;
                 }
                 let on_lan = lan.is_lan(addr);
@@ -550,25 +625,23 @@ impl Network {
                     self.probe(id, &[]);
                 }
                 () = sleep_until_some(held) => {}
+                // A failed attempt is noted; the last one to fail ends the
+                // head start, which the next round sees.
+                result = tcp.next(), if tcp.pending() => match result {
+                    Ok(won) => {
+                        let dialed = dialed(tried.len() as u32 + tcp.dialed(), won.handshake);
+                        let conn = DirectConn::Tcp { stream: won.stream, rtt: won.rtt };
+                        return Ok((conn, dialed));
+                    }
+                    Err(miss) => tcp.record(miss),
+                },
                 Some(result) = attempts.join_next(), if !attempts.is_empty() => {
                     match result {
                         Ok((_, Ok(connection), handshake)) => {
-                            let learned = self.learned(&id);
-                            let first = |lan_only: bool| {
-                                learned
-                                    .iter()
-                                    .filter(|(addr, _)| !lan_only || lan.is_lan(*addr))
-                                    .map(|(_, at)| at.saturating_duration_since(started))
-                                    .min()
-                            };
-                            return Ok((connection, Dialed {
-                                probed,
-                                answered: learned.len() as u32,
-                                handshakes: tried.len() as u32,
-                                first_pong: first(false),
-                                lan_first_pong: first(true),
-                                handshake,
-                            }));
+                            let dialed = dialed(tried.len() as u32 + tcp.dialed(), handshake);
+                            let connection = QuicGuard(connection);
+                            let (send, recv) = connection.0.open_bi().await.map_err(io_error)?;
+                            return Ok((DirectConn::Quic { connection, send, recv }, dialed));
                         }
                         // A systematic identity or config mismatch must be
                         // distinguishable from an unreachable path.
@@ -619,23 +692,45 @@ impl Drop for Network {
     }
 }
 
-pub(super) fn binding(
-    connection: &quinn::Connection,
+/// A TLS session's keying-material exporter, and the label a session's
+/// binding is exported under on its carrier: one per carrier, so that a
+/// binding made on one is worthless on the other.
+pub(super) trait Exporter {
+    const BINDING: &'static [u8];
+    fn export(&self, out: &mut [u8], label: &[u8], context: &[u8]) -> io::Result<()>;
+}
+
+impl Exporter for quinn::Connection {
+    const BINDING: &'static [u8] = b"pb-mapper/direct/1";
+
+    fn export(&self, out: &mut [u8], label: &[u8], context: &[u8]) -> io::Result<()> {
+        self.export_keying_material(out, label, context)
+            .map_err(|_| io::Error::other("TLS exporter unavailable"))
+    }
+}
+
+pub(super) fn binding<E: Exporter>(connection: &E, grant: &SessionGrant) -> io::Result<[u8; 32]> {
+    tag(connection, E::BINDING, grant)
+}
+/// The binding of `grant` to `connection`'s TLS session under `label`.
+pub(super) fn tag(
+    connection: &impl Exporter,
+    label: &[u8],
     grant: &SessionGrant,
 ) -> io::Result<[u8; 32]> {
-    let exporter = binding_exporter(connection, grant)?;
+    let exporter = binding_exporter(connection, label, grant)?;
     let tag = ring::hmac::sign(
         &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &grant.secret.0),
         &exporter,
     );
     tag.as_ref().try_into().map_err(io::Error::other)
 }
-pub(super) fn verify_binding(
-    connection: &quinn::Connection,
+pub(super) fn verify_binding<E: Exporter>(
+    connection: &E,
     grant: &SessionGrant,
     tag: &[u8],
 ) -> io::Result<()> {
-    let exporter = binding_exporter(connection, grant)?;
+    let exporter = binding_exporter(connection, E::BINDING, grant)?;
     ring::hmac::verify(
         &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &grant.secret.0),
         &exporter,
@@ -643,7 +738,11 @@ pub(super) fn verify_binding(
     )
     .map_err(|_| io::Error::other("TLS session binding mismatch"))
 }
-fn binding_exporter(connection: &quinn::Connection, grant: &SessionGrant) -> io::Result<[u8; 32]> {
+fn binding_exporter(
+    connection: &impl Exporter,
+    label: &[u8],
+    grant: &SessionGrant,
+) -> io::Result<[u8; 32]> {
     use ring::digest;
     let context = serde_json::to_vec(&(
         grant.id,
@@ -659,19 +758,17 @@ fn binding_exporter(connection: &quinn::Connection, grant: &SessionGrant) -> io:
     ))
     .map_err(io::Error::other)?;
     let mut exporter = [0; 32];
-    connection
-        .export_keying_material(&mut exporter, b"pb-mapper/direct/1", &context)
-        .map_err(|_| io::Error::other("TLS exporter unavailable"))?;
+    connection.export(&mut exporter, label, &context)?;
     Ok(exporter)
 }
+/// The key UDP services frame their datagrams with: each TLS session
+/// exports its own, whatever the carrier.
 pub(super) fn framing_key(
-    connection: &quinn::Connection,
+    connection: &impl Exporter,
     grant: &SessionGrant,
 ) -> io::Result<[u8; 32]> {
     let mut key = [0; 32];
-    connection
-        .export_keying_material(&mut key, b"pb-mapper/framing/1", &grant.id)
-        .map_err(|_| io::Error::other("TLS framing exporter unavailable"))?;
+    connection.export(&mut key, b"pb-mapper/framing/1", &grant.id)?;
     Ok(key)
 }
 

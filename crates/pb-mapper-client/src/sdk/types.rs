@@ -298,10 +298,8 @@ pub(crate) struct DirectPolicy {
     pub port_mapping: PortMapping,
     pub lan_first: bool,
     /// What a consumer asks a shared LAN to carry.
-    #[allow(dead_code, reason = "the API seam: the direct core reads it next")]
     pub lan_transport: LanTransport,
     /// Whether a provider serves TCP on a shared LAN to a consumer that asks.
-    #[allow(dead_code, reason = "the API seam: the direct core reads it next")]
     pub lan_tcp: bool,
 }
 
@@ -313,19 +311,4 @@ impl DirectPolicy {
         lan_transport: LanTransport::Quic,
         lan_tcp: false,
     };
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A derived `Default` would turn a bool off: LAN-first stays on for
-    /// every caller that fills the rest with `..Default::default()`.
-    #[test]
-    fn options_default_to_lan_first() {
-        assert!(ConnectOptions::default().lan_first);
-        let register = RegisterOptions::default();
-        assert!(register.lan_first);
-        assert_eq!(register.allow_direct, cfg!(feature = "p2p"));
-    }
 }

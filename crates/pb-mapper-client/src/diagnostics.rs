@@ -10,7 +10,7 @@
 
 use crate::endpoint::RelayEndpoint;
 use crate::relay::RelayTransport;
-use pb_mapper_protocol::direct::SessionPath;
+use pb_mapper_protocol::direct::{DirectTransport, LinkSummary, SessionPath};
 use pb_mapper_protocol::forward::ByteMeter;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -152,6 +152,38 @@ impl FallbackReason {
     }
 }
 
+/// Why a direct setup that asked for TCP within a local network did not run
+/// over it, and took QUIC or the relay instead.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LanTcpMiss {
+    /// The publisher offered none: it, or the relay, predates TCP; it does
+    /// not serve it; or it shares no network with this end as it sees it.
+    NotOffered,
+    /// It offered addresses, none on a network of this end's.
+    NoSharedLan,
+    /// Its address refused the connection, or could not be reached.
+    Refused,
+    /// Nothing answered in time: a firewall dropping it, typically.
+    TimedOut,
+    /// TCP connected, and TLS failed.
+    Handshake,
+}
+
+impl LanTcpMiss {
+    /// Stable diagnostic label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotOffered => "not_offered",
+            Self::NoSharedLan => "no_shared_lan",
+            Self::Refused => "refused",
+            Self::TimedOut => "timed_out",
+            Self::Handshake => "handshake",
+        }
+    }
+}
+
 /// The direct attempt a tunnel is making right now.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 pub struct DirectAttempt {
@@ -234,11 +266,12 @@ pub enum TunnelEventKind {
         preferred: bool,
     },
     /// A direct session committed to a path: across `link`, over `family`,
-    /// to an address learned `via`.
+    /// to an address learned `via`, carried by `transport`.
     PathSelected {
         link: LinkKind,
         family: AddressFamily,
         via: LinkVia,
+        transport: DirectTransport,
     },
     /// A direct setup that found the peer on a local network, by
     /// `evidence`, did not end there: it took a path across `took`, or the
@@ -246,6 +279,12 @@ pub enum TunnelEventKind {
     LanMissed {
         evidence: LanEvidence,
         took: Option<LinkKind>,
+    },
+    /// A direct setup that asked for TCP within a local network did not get
+    /// it, for `reason`: it took `took`, or the relay when `None`.
+    LanTcpMissed {
+        reason: LanTcpMiss,
+        took: Option<DirectTransport>,
     },
 }
 
@@ -284,6 +323,7 @@ impl TunnelEventKind {
                 | Self::LanDetected { .. }
                 | Self::PathSelected { .. }
                 | Self::LanMissed { .. }
+                | Self::LanTcpMissed { .. }
         )
     }
 }
@@ -366,6 +406,10 @@ pub struct TunnelDiagnostics {
     /// Whether its direct setups try a shared local network first: its
     /// lan_first option, and never for a tunnel without direct.
     pub lan_first: bool,
+    /// What its direct setups ask a shared local network to carry: its
+    /// lan_transport option, and QUIC for a tunnel without direct and for
+    /// a publisher, which serves what each consumer asks for.
+    pub lan_transport: crate::sdk::LanTransport,
     /// How its sessions travel, on the relay and direct alike: present once
     /// one has opened or a direct attempt has begun.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -413,6 +457,10 @@ pub struct PathDiagnostics {
     /// Direct sessions within one local network, open now and in all.
     pub active_lan: u64,
     pub lan_sessions: u64,
+    /// Direct sessions over TCP, which only a local network carries, open
+    /// now and in all.
+    pub active_lan_tcp: u64,
+    pub lan_tcp_sessions: u64,
     /// Setups that found the peer on a local network of this end, and those
     /// of them that ended on another path or on the relay.
     pub lan_detected: u64,
@@ -427,7 +475,7 @@ pub struct PathDiagnostics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt: Option<DirectAttempt>,
     /// The newest direct session open now: its path, how it was set up, and
-    /// QUIC's view of it as of this read.
+    /// its carrier's view of it as of this read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link: Option<DirectLink>,
 }
@@ -464,7 +512,7 @@ enum Lifecycle {
 /// A session open now: its bytes are read from its meter until it closes.
 struct OpenSession {
     path: SessionPath,
-    link: Option<LinkKind>,
+    link: Option<LinkSummary>,
     opened: Instant,
     meter: Arc<ByteMeter>,
 }
@@ -495,6 +543,8 @@ struct State {
     cooldown_skips: u64,
     /// Whether direct setups try a shared local network first.
     lan_first: bool,
+    /// What they ask a shared local network to carry.
+    lan_transport: crate::sdk::LanTransport,
     port_mapping: Option<PortMappingDiagnostics>,
     phase: RecoveryPhase,
     /// The phase last announced to subscribers. A ready tunnel's routine
@@ -611,7 +661,7 @@ impl State {
     fn traffic(&self) -> PathTraffic {
         let mut buckets = self.closed;
         for session in self.sessions.values() {
-            let bucket = Bucket::of(session.path, session.link).index();
+            let bucket = Bucket::of(session.path, session.link.map(|link| link.kind)).index();
             buckets[bucket] = buckets[bucket].add(session.meter.totals());
         }
         Bucket::traffic(buckets)
@@ -688,6 +738,7 @@ impl Default for Diagnostics {
             cooldown: None,
             cooldown_skips: 0,
             lan_first: false,
+            lan_transport: crate::sdk::LanTransport::Quic,
             port_mapping: None,
             phase: RecoveryPhase::Starting,
             announced: RecoveryPhase::Starting,
@@ -766,9 +817,12 @@ impl Diagnostics {
         self.state().cleanups += 1;
         DeferClose(self.clone())
     }
-    /// Whether this tunnel's direct setups try a shared local network first.
-    pub(crate) fn prefer_lan(&self, prefer: bool) {
-        self.state().lan_first = prefer;
+    /// Whether this tunnel's direct setups try a shared local network first,
+    /// and what they ask it to carry.
+    pub(crate) fn prefer_lan(&self, prefer: bool, transport: crate::sdk::LanTransport) {
+        let mut state = self.state();
+        state.lan_first = prefer;
+        state.lan_transport = transport;
     }
     /// This tunnel may map its direct endpoint's port: once that opens, or
     /// (`Auto`) once punching through has failed.
@@ -828,12 +882,20 @@ impl Diagnostics {
     }
     /// A session opened on `path`, a direct one across `link`: counted
     /// until the guard drops, its bytes through the guard's meter.
-    pub(crate) fn session_opened(&self, path: SessionPath, link: Option<LinkKind>) -> SessionGuard {
+    pub(crate) fn session_opened(
+        &self,
+        path: SessionPath,
+        link: Option<LinkSummary>,
+    ) -> SessionGuard {
         let meter = Arc::new(ByteMeter::default());
         let mut state = self.state();
         state.next_session += 1;
         let id = state.next_session;
-        let lan = path == SessionPath::Direct && link == Some(LinkKind::Lan);
+        let direct = |kind: fn(&LinkSummary) -> bool| {
+            path == SessionPath::Direct && link.as_ref().is_some_and(kind)
+        };
+        let lan = direct(|link| link.kind == LinkKind::Lan);
+        let tcp = direct(|link| link.transport == DirectTransport::Tcp);
         let p = state.direct.get_or_insert_default();
         match path {
             SessionPath::Direct => {
@@ -849,6 +911,10 @@ impl Diagnostics {
             p.lan_sessions += 1;
             p.active_lan += 1;
         }
+        if tcp {
+            p.lan_tcp_sessions += 1;
+            p.active_lan_tcp += 1;
+        }
         state.sessions.insert(
             id,
             OpenSession {
@@ -861,7 +927,7 @@ impl Diagnostics {
         state.record(TunnelEventKind::SessionOpened {
             session: id,
             path,
-            link,
+            link: link.map(|link| link.kind),
         });
         SessionGuard {
             diagnostics: self.clone(),
@@ -875,7 +941,7 @@ impl Diagnostics {
             return;
         };
         let totals = session.meter.totals();
-        let bucket = Bucket::of(session.path, session.link).index();
+        let bucket = Bucket::of(session.path, session.link.map(|link| link.kind)).index();
         state.closed[bucket] = state.closed[bucket].add(totals);
         let p = state.direct.get_or_insert_default();
         match session.path {
@@ -885,10 +951,16 @@ impl Diagnostics {
         if bucket == Bucket::DirectLan.index() {
             p.active_lan = p.active_lan.saturating_sub(1);
         }
+        if session
+            .link
+            .is_some_and(|link| link.transport == DirectTransport::Tcp)
+        {
+            p.active_lan_tcp = p.active_lan_tcp.saturating_sub(1);
+        }
         state.record(TunnelEventKind::SessionClosed {
             session: id,
             path: session.path,
-            link: session.link,
+            link: session.link.map(|link| link.kind),
             duration_ms: ms(session.opened.elapsed()),
             sent_bytes: totals.sent,
             received_bytes: totals.received,
@@ -912,6 +984,13 @@ impl Diagnostics {
         state.direct.get_or_insert_default().lan_missed += 1;
         state.record(TunnelEventKind::LanMissed { evidence, took });
     }
+    /// A setup that asked for TCP within a local network did not get it,
+    /// for `reason`, and took `took` instead, or the relay.
+    #[cfg(feature = "p2p")]
+    pub(crate) fn lan_tcp_missed(&self, reason: LanTcpMiss, took: Option<DirectTransport>) {
+        self.state()
+            .record(TunnelEventKind::LanTcpMissed { reason, took });
+    }
     /// Direct is paused after a fallback until `until`, or no longer.
     #[cfg(feature = "p2p")]
     pub(crate) fn direct_cooldown(&self, until: Option<Instant>) {
@@ -929,10 +1008,10 @@ impl Diagnostics {
         let mut state = self.state();
         state.relay_rtt = Some(smooth(state.relay_rtt, rtt));
     }
-    /// A direct session is open on `link`: kept, with `connection` for its
-    /// live figures, until the guard drops.
+    /// A direct session is open on `link`: kept, with `probe` for its live
+    /// figures, until the guard drops.
     #[cfg(feature = "p2p")]
-    pub(crate) fn link_opened(&self, link: DirectLink, connection: quinn::Connection) -> LinkGuard {
+    pub(crate) fn link_opened(&self, link: DirectLink, probe: LinkProbe) -> LinkGuard {
         let mut state = self.state();
         state.next_link += 1;
         let id = state.next_link;
@@ -940,17 +1019,14 @@ impl Diagnostics {
             link: link.kind,
             family: link.family,
             via: link.via,
+            transport: link.transport,
         });
         // A provider holds at most 64 sessions; a consumer has no such cap,
         // and the newest is what is shown.
         if state.links.len() == 64 {
             state.links.remove(0);
         }
-        state.links.push(LiveLink {
-            id,
-            link,
-            connection,
-        });
+        state.links.push(LiveLink { id, link, probe });
         LinkGuard {
             diagnostics: self.clone(),
             id,
@@ -1065,6 +1141,7 @@ impl Diagnostics {
         TunnelDiagnostics {
             relay_transport: endpoint.transport(),
             lan_first: state.lan_first,
+            lan_transport: state.lan_transport,
             direct: state.direct.clone().map(|direct| PathDiagnostics {
                 attempt,
                 link,
@@ -1173,21 +1250,41 @@ impl Drop for DirectAttemptGuard {
     }
 }
 
-/// A direct session's path and the connection it runs on.
+/// Where a direct session's live figures come from.
+#[cfg(feature = "p2p")]
+pub(crate) enum LinkProbe {
+    /// QUIC's own, read from the connection as they are now.
+    Quic(quinn::Connection),
+    /// TCP keeps its figures in the kernel; the round trip of the
+    /// connection's handshake stands in for them.
+    Tcp { handshake_rtt: Duration },
+}
+
+/// A direct session's path and what its figures are read from.
 #[cfg(feature = "p2p")]
 struct LiveLink {
     id: u64,
     link: DirectLink,
-    connection: quinn::Connection,
+    probe: LinkProbe,
 }
 
 #[cfg(feature = "p2p")]
 impl LiveLink {
-    /// QUIC's figures as they are now.
+    /// The carrier's figures as they are now.
     fn stats(&self) -> LinkStats {
-        let stats = self.connection.stats();
+        let connection = match &self.probe {
+            LinkProbe::Quic(connection) => connection,
+            LinkProbe::Tcp { handshake_rtt } => {
+                return LinkStats {
+                    rtt_us: micros(*handshake_rtt),
+                    min_rtt_us: micros(*handshake_rtt),
+                    ..LinkStats::default()
+                };
+            }
+        };
+        let stats = connection.stats();
         LinkStats {
-            rtt_us: micros(self.connection.rtt()),
+            rtt_us: micros(connection.rtt()),
             min_rtt_us: micros(stats.path.min_rtt),
             congestion_window: stats.path.cwnd,
             mtu: stats.path.current_mtu,
@@ -1201,7 +1298,7 @@ impl LiveLink {
         }
     }
 
-    /// The link with QUIC's figures as they are now.
+    /// The link with its carrier's figures as they are now.
     fn sample(&self) -> DirectLink {
         DirectLink {
             stats: self.stats(),
@@ -1216,6 +1313,7 @@ impl LiveLink {
             kind: link.kind,
             family: link.family,
             via: link.via,
+            transport: link.transport,
             peer: link.peer,
             local_ip: link.local_ip,
             same_lan: link.same_lan,
