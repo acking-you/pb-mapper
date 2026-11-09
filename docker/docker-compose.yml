@@ -1,8 +1,9 @@
-version: '3.8'
 services:
   pb-mapper:
     container_name: pb-mapper
-    image: ackingliu/pb-mapper:x86_64_musl
+    # The release workflow moves this tag at every release. On an arm64 host
+    # use latest-aarch64_musl.
+    image: ackingliu/pb-mapper:latest-x86_64_musl
     environment:
       PB_MAPPER_PORT: 7666
       # Keep the machine-derived key on first boot of an empty auth volume so

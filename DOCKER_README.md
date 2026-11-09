@@ -1,102 +1,33 @@
-# pb-mapper Server - Network Tunneling Made Easy
+# pb-mapper relay
 
 ![Docker Pulls](https://img.shields.io/docker/pulls/ackingliu/pb-mapper)
 ![Docker Image Size](https://img.shields.io/docker/image-size/ackingliu/pb-mapper)
 
-The pb-mapper relay: one TCP port relays every service, and the same port number over UDP lets clients connect peer to peer, falling back to the relay when they cannot. Expose home services and reach private runtimes from anywhere.
+The [pb-mapper](https://github.com/acking-you/pb-mapper) relay as a container.
+One port carries everything: over TCP it relays every service, and over UDP, on
+the same number, it lets the two ends of a tunnel set up a direct path, so
+their traffic crosses the relay only when no direct path works.
 
-## 🚀 Quick Start
+## Run
 
-### Using Docker Run
 ```bash
-docker run -d \
-  --name pb-mapper \
-  -p 7666:7666/tcp \
-  -p 7666:7666/udp \
-  -e PB_MAPPER_PORT=7666 \
+docker run -d --name pb-mapper \
+  --restart unless-stopped \
+  -p 7666:7666/tcp -p 7666:7666/udp \
   -e RUST_LOG=error \
   -v pb-mapper-auth:/var/lib/pb-mapper/auth \
   ackingliu/pb-mapper:latest-x86_64_musl
 ```
 
-### Using Docker Compose
+On an arm64 host use `latest-aarch64_musl`. With Compose, save this as
+`compose.yaml` and run `docker compose up -d`:
+
 ```yaml
-version: '3.8'
 services:
   pb-mapper:
     container_name: pb-mapper
     image: ackingliu/pb-mapper:latest-x86_64_musl
     environment:
-      - PB_MAPPER_PORT=7666
-      - USE_IPV6=false
-      - USE_MACHINE_MSG_HEADER_KEY=false
-      - RUST_LOG=error
-    volumes:
-      - pb-mapper-auth:/var/lib/pb-mapper/auth
-    ports:
-      - "7666:7666/tcp"
-      - "7666:7666/udp"   # direct (peer-to-peer) coordination
-    restart: unless-stopped
-
-volumes:
-  pb-mapper-auth:
-```
-
-Save as `docker-compose.yml` and run:
-```bash
-docker-compose up -d
-```
-
-## 🔧 Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PB_MAPPER_PORT` | `7666` | **Required** - Port for the pb-mapper server to listen on |
-| `USE_IPV6` | `false` | Enable IPv6 support (`true`/`false`) |
-| `MSG_HEADER_KEY` | unset | Optional 32-character administrator key used only to initialize a new persistent auth volume |
-| `USE_MACHINE_MSG_HEADER_KEY` | `false` | Legacy compatibility: derive the administrator key from hostname + MAC |
-| `PB_MAPPER_AUTH_STATE_DIR` | `/var/lib/pb-mapper/auth` | Persistent encrypted authentication state |
-| `PB_MAPPER_RELAY_ONLY` | `false` | `true` serves the relay only: no UDP port, no direct connections |
-| `PB_MAPPER_DIRECT_ADVERTISE` | unset | Public `IP:PORT` for direct coordination when the UDP port is mapped differently from the TCP one; by default clients use the address they dialed |
-| `RUST_LOG` | `error` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) |
-
-⚠️ **Important**: `PB_MAPPER_PORT` must be set and `/var/lib/pb-mapper/auth` must be persistent. The first start creates a random administrator key at `admin.key`; losing the volume changes the root credential and loses temporary-key state.
-
-## 📋 Ubuntu Deployment Guide
-
-### Step 1: Install Docker
-```bash
-# Update package manager
-sudo apt update
-
-# Install Docker
-sudo apt install -y docker.io docker-compose
-
-# Add user to docker group (logout/login required)
-sudo usermod -aG docker $USER
-
-# Start and enable Docker service
-sudo systemctl start docker
-sudo systemctl enable docker
-```
-
-### Step 2: Create Docker Compose Configuration
-```bash
-# Create directory for pb-mapper
-mkdir -p ~/pb-mapper
-cd ~/pb-mapper
-
-# Create docker-compose.yml
-cat > docker-compose.yml << 'EOF'
-version: '3.8'
-services:
-  pb-mapper:
-    container_name: pb-mapper
-    image: ackingliu/pb-mapper:latest-x86_64_musl
-    environment:
-      PB_MAPPER_PORT: 7666
-      USE_IPV6: false
-      USE_MACHINE_MSG_HEADER_KEY: false
       RUST_LOG: error
     volumes:
       - pb-mapper-auth:/var/lib/pb-mapper/auth
@@ -107,185 +38,66 @@ services:
 
 volumes:
   pb-mapper-auth:
-EOF
 ```
 
-### Step 3: Configure Firewall (if enabled)
+The first start creates a random administrator key in the volume. Read it on
+the Docker host:
+
 ```bash
-# Allow the relay (TCP) and direct coordination (UDP) through the firewall
-sudo ufw allow 7666/tcp
-sudo ufw allow 7666/udp
-
-# Check firewall status
-sudo ufw status
-```
-
-### Step 4: Deploy and Start
-```bash
-# Start pb-mapper server
-docker-compose up -d
-
-# Check if it's running
-docker-compose ps
-
-# View logs
-docker-compose logs -f pb-mapper
-
-# Read the administrator key on the Docker host
 docker exec pb-mapper cat /var/lib/pb-mapper/auth/admin.key
 ```
 
-### Step 5: Verify Installation
-```bash
-# Check if server is listening
-netstat -tlnp | grep 7666
+Keep the volume: losing it changes the administrator key and loses every
+temporary credential. Open 7666/tcp and 7666/udp in the host's firewall and in
+the cloud security group.
 
-# Test connectivity (from another machine)
-telnet your-server-ip 7666
-```
+The other roles come from the same `pb-mapper` binary, on the computers at the
+two ends: `pb-mapper register` next to a service, `pb-mapper connect` where you
+need it. See the
+[quick start](https://github.com/acking-you/pb-mapper#get-started).
 
-## 🌐 How pb-mapper Works
+## Environment
 
-pb-mapper creates secure tunnels between your local services and remote clients through a public server:
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PB_MAPPER_PORT` | `7666` | The port the relay listens on, over TCP and UDP |
+| `USE_IPV6` | `false` | `true` listens on IPv6 (`::`) instead of IPv4 |
+| `MSG_HEADER_KEY` | unset | A 32-character administrator key, used only to initialize a new auth volume |
+| `USE_MACHINE_MSG_HEADER_KEY` | `false` | Legacy: derive the administrator key from the hostname and MAC address, while no `admin.key` exists |
+| `PB_MAPPER_AUTH_STATE_DIR` | `/var/lib/pb-mapper/auth` | Where the encrypted authentication state is kept |
+| `PB_MAPPER_RELAY_ONLY` | `false` | `true` serves the relay alone: no UDP port, no direct connections |
+| `PB_MAPPER_DIRECT_ADVERTISE` | unset | The public `IP:PORT` for direct coordination when the UDP port is mapped differently from the TCP one; by default clients use the address they dialed |
+| `RUST_LOG` | `info` | Log level: `error`, `warn`, `info`, `debug` or `trace` |
 
-```
-[Local Service] ↔ [pb-mapper register] ↔ [pb-mapper server] ↔ [pb-mapper connect] ↔ [Remote Client]
-     :8080              registers with           :7666            connects from          :9090
-                        service-key "my-app"                      service-key "my-app"
-```
+For another port, set `PB_MAPPER_PORT` and publish that port over both TCP and
+UDP. With `USE_IPV6: true`, publish on the IPv6 address:
+`"[::]:7666:7666/tcp"` and `"[::]:7666:7666/udp"`.
 
-### Example Usage Scenario
+## Tags
 
-1. **Setup**: You have a web service running on your home computer at `localhost:8080`
-2. **Register**: Use pb-mapper to register this service with key "my-web-app"
-3. **Access**: From anywhere, connect to "my-web-app" through your pb-mapper server
-4. **Result**: Access your home web service remotely on `localhost:9090`
+| Tag | Image |
+| --- | --- |
+| `latest-x86_64_musl`, `latest-aarch64_musl` | The newest release, for linux/amd64 and linux/arm64 |
+| `X.Y.Z-x86_64_musl`, `X.Y.Z-aarch64_musl` | One release, also as `vX.Y.Z-…`; `X.Y-…` and `X-…` follow the newest release of that line |
 
-## 🏗️ Architecture Support
+Releases after 0.11.0 also publish each tag without its suffix (`latest`,
+`X.Y.Z`, `X.Y`, `X`, `vX.Y.Z`) as one image for both architectures. For any
+other architecture, build the binary and then `docker/pb-mapper.dockerfile`,
+as `scripts/release/release-docker-image.sh` in the
+[repository](https://github.com/acking-you/pb-mapper) does.
 
-pb-mapper supports all architectures that Rust supports, but currently we provide pre-built Docker images for:
-- **linux/amd64** (x86_64) - `ackingliu/pb-mapper:*-x86_64_musl`
-- **linux/arm64** (aarch64) - `ackingliu/pb-mapper:*-aarch64_musl`
+## Security
 
-For other architectures, you can build the image yourself using the provided Dockerfile in the [GitHub repository](https://github.com/acking-you/pb-mapper).
+- Keep `admin.key` on the relay, and give each workload an expiring `pbmt1_`
+  credential issued with `pb-mapper admin`
+  ([credentials](https://github.com/acking-you/pb-mapper/blob/master/docs/user-guide.md#administrator-and-temporary-credentials)).
+- Publish 7666/tcp and 7666/udp only to the networks that need them.
+- Use `register --codec` when the application's own protocol is plaintext.
+- Update by pulling the tag again: `docker compose pull && docker compose up -d`.
 
-## 🔍 Available Tags
+## Links
 
-| Tag | Description |
-|-----|-------------|
-| `latest-x86_64_musl` | Latest stable x86_64 build (recommended) |
-| `latest-aarch64_musl` | Latest stable ARM64 build |
-| `v0.4.0-x86_64_musl` | Tagged-release x86_64 build |
-| `v0.4.0-aarch64_musl` | Tagged-release ARM64 build |
-| `0.4.0-x86_64_musl` | Semver x86_64 alias |
-| `0.4.0-aarch64_musl` | Semver ARM64 alias |
-
-**Recommendation**: Use `latest-x86_64_musl` for x86_64 systems or `latest-aarch64_musl` for ARM64 systems for best compatibility.
-
-## 🛡️ Security Considerations
-
-- **Firewall**: Expose 7666/tcp and 7666/udp only to the networks that need them
-- **Authentication**: Keep `admin.key` on the relay and distribute expiring `pbmt1_` temporary credentials to workloads
-- **Forwarded payload encryption**: Use `register --codec` when the inner application protocol is plaintext
-- **Updates**: Regularly update to the latest version for security patches
-
-## 📊 Monitoring and Logs
-
-### View Real-time Logs
-```bash
-docker-compose logs -f pb-mapper
-```
-
-### Check Container Status
-```bash
-docker-compose ps
-docker stats pb-mapper
-```
-
-### Debug Connection Issues
-```bash
-# Check if port is accessible
-nc -zv your-server-ip 7666
-
-# View detailed logs
-docker-compose logs pb-mapper
-```
-
-## 🔧 Advanced Configuration
-
-### Custom Port Configuration
-```yaml
-services:
-  pb-mapper:
-    image: ackingliu/pb-mapper:latest-x86_64_musl
-    environment:
-      PB_MAPPER_PORT: 8888  # Custom port
-    ports:
-      - "8888:8888/tcp"     # Update port mapping
-      - "8888:8888/udp"
-```
-
-### IPv6 Support
-```yaml
-services:
-  pb-mapper:
-    image: ackingliu/pb-mapper:latest-x86_64_musl
-    environment:
-      USE_IPV6: true
-      PB_MAPPER_PORT: 7666
-    ports:
-      - "[::]:7666:7666/tcp"    # IPv6 binding
-      - "[::]:7666:7666/udp"
-```
-
-### Production Deployment with Restart Policy
-```yaml
-services:
-  pb-mapper:
-    image: ackingliu/pb-mapper:latest-x86_64_musl
-    environment:
-      PB_MAPPER_PORT: 7666
-      RUST_LOG: warn
-    ports:
-      - "7666:7666/tcp"
-      - "7666:7666/udp"   # direct (peer-to-peer) coordination
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: '0.5'
-```
-
-## 🚨 Troubleshooting
-
-### Container Won't Start
-- **Error**: "PB_MAPPER_PORT is not set"
-  - **Solution**: Set the `PB_MAPPER_PORT` environment variable
-
-### Connection Refused
-- **Check**: Container is running: `docker ps`
-- **Check**: Port is exposed: `netstat -tlnp | grep 7666`
-- **Check**: Firewall allows the port: `sudo ufw status`
-
-### High Memory Usage
-- Add memory limits to your docker-compose.yml
-- Monitor with: `docker stats pb-mapper`
-
-## 📖 Related Tools
-
-The same released `pb-mapper` binary provides the other roles:
-- **`pb-mapper register`**: Register local services ([Download releases](https://github.com/acking-you/pb-mapper/releases))
-- **`pb-mapper connect`**: Connect to remote services ([Download releases](https://github.com/acking-you/pb-mapper/releases))
-- **pb-mapper UI**: Cross-platform GUI for all operations ([Download releases](https://github.com/acking-you/pb-mapper/releases))
-
-## 🔗 Links
-
-- **GitHub Repository**: [github.com/acking-you/pb-mapper](https://github.com/acking-you/pb-mapper)
-- **Documentation**: [Project README](https://github.com/acking-you/pb-mapper/blob/master/README.md)
-- **Issues & Support**: [GitHub Issues](https://github.com/acking-you/pb-mapper/issues)
-- **Releases**: [GitHub Releases](https://github.com/acking-you/pb-mapper/releases)
-
----
-
-**Made with ❤️ using Rust** - High performance, memory safe network tunneling solution.
+[User guide](https://github.com/acking-you/pb-mapper/blob/master/docs/user-guide.md) ·
+[README](https://github.com/acking-you/pb-mapper/blob/master/README.md) ·
+[Releases](https://github.com/acking-you/pb-mapper/releases) ·
+[Issues](https://github.com/acking-you/pb-mapper/issues)
