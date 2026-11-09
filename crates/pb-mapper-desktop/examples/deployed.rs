@@ -2,8 +2,9 @@
 //! The exported controller setup contains a dedicated expiring test credential,
 //! never the administrator credential, and is revoked when the host exits.
 //! `selftest` views the host from this machine through a simulated renderer
-//! that presents every unit at once; options `--max-width`, `--max-height`,
-//! `--fps` and `--quality quality|balanced|smooth` set what that viewer asks,
+//! that presents every unit at once. It asks for the display's own size, as
+//! a viewer does by default; options `--max-width`, `--max-height`, `--fps`
+//! and `--quality quality|balanced|smooth` set what it asks instead,
 //! `--fps-override` makes `--fps` its user's choice, every preset's ceiling,
 //! and `--codec h265` offers H.265 beside H.264, as the app does when it can
 //! decode it (the host picks; the line printed says what it picked).
@@ -13,8 +14,8 @@
 //! selftest viewer take it, and `controller.json` hands it to the phone tool.
 use pb_mapper_client::sdk::{Client, ClientConfig, ConnectOptions, PathPolicy, RelayTransport};
 use pb_mapper_desktop::{
-    DisplaySelection, Host, HostOptions, Pull, QualityPreset, VideoCodec, VideoLimits, Viewer,
-    ViewerConfig, ViewerState,
+    DisplaySelection, Host, HostOptions, Pull, QualityPreset, Resolution, VideoCodec, VideoLimits,
+    Viewer, ViewerConfig, ViewerState,
 };
 use serde::Deserialize;
 use std::{
@@ -70,9 +71,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .find(|pair| pair[0] == name)
             .map(|pair| pair[1].as_str())
     };
+    let (max_width, max_height) = Resolution::default().bounds();
     let mut limits = VideoLimits {
-        max_width: 1920,
-        max_height: 1080,
+        max_width,
+        max_height,
         max_fps: 60,
     };
     for (name, value) in [

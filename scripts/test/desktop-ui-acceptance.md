@@ -374,10 +374,15 @@ statements stay until the owner accepts fluidity.
      again once control is gained. A chosen fixed size is not remembered.
    - End the host app from Task Manager while fitted, then start it again:
      the display is back at its own mode once the app is open again.
-   - `display_mode_probe <config.json> --fullscreen-check` (built with
+   - `display_mode_probe <config.json>` (built with
      `cargo build --release -p pb-mapper-desktop --example display_mode_probe`,
-     against a local relay with a throwaway key) prints
-     `display_mode_probe passed`; record its `CDS_FULLSCREEN` line.
+     against a local relay with a throwaway key) records every display's
+     mode, runs Fit local with Original, disconnect, revoke and a killed host,
+     checks each display is back after each, and prints
+     `display_mode_probe passed` with the modes before and after. `--list`
+     only prints the modes, and `--restore` puts every display back. Add
+     `--owner-change --fullscreen-check` only in the VM, and record the
+     `CDS_FULLSCREEN` line.
 
 Secure-desktop and UAC acceptance of the helper is a separate matrix in
 [windows-helper-acceptance.md](windows-helper-acceptance.md).

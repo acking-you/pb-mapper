@@ -15,7 +15,7 @@ const REVOKED_MARKER: &str = "background-host.revoked";
 pub struct Settings {
     pub service: String,
     pub display_id: u32,
-    /// The display's device name (`\.DISPLAY1`), which finds it again
+    /// The display's device name (`\\.\DISPLAY1`), which finds it again
     /// when its id went stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_device: Option<String>,
