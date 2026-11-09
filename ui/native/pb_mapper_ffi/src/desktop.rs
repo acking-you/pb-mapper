@@ -440,6 +440,10 @@ struct DecoderOffer {
     h265: Option<[u32; 2]>,
 }
 impl DecoderOffer {
+    /// The decoders as offered. On Windows without Media Foundation (N and
+    /// KN editions without the Media Feature Pack) the runner decodes
+    /// nothing natively, whatever Dart passed (an unanswered probe
+    /// assumes H.264): the picture is JPEG, which Dart decodes.
     fn decoders(&self) -> Result<Decoders, CtlError> {
         let size = |largest: Option<[u32; 2]>| match largest {
             Some([width, height]) if width == 0 || height == 0 => Err(CtlError::invalid_argument(
@@ -447,10 +451,15 @@ impl DecoderOffer {
             )),
             largest => Ok(largest.map(|[width, height]| (width, height))),
         };
-        Ok(Decoders {
+        let decoders = Decoders {
             h264: size(self.h264)?,
             h265: size(self.h265)?,
-        })
+        };
+        #[cfg(windows)]
+        if !desktop::windows::media_foundation() {
+            return Ok(Decoders::default());
+        }
+        Ok(decoders)
     }
 }
 

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:ffi';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
@@ -831,10 +832,20 @@ class DesktopApi implements DesktopApiClient {
   }
 
   /// A runner without native video has no decoder to offer: its picture is
-  /// JPEG, which Dart decodes.
+  /// JPEG, which Dart decodes. Android requires an AVC decoder of every
+  /// device, so where the probe finds no hardware one, MediaCodec still
+  /// decodes H.264 in software, at 1080p, as before the probe.
   @override
-  Future<DesktopDecoders> decoders() async =>
-      nativeDesktopVideo ? probeDesktopDecoders() : const DesktopDecoders();
+  Future<DesktopDecoders> decoders() async {
+    if (!nativeDesktopVideo) return const DesktopDecoders();
+    final probed = await probeDesktopDecoders();
+    if (!Platform.isAndroid || probed.h264 != null) return probed;
+    return DesktopDecoders(
+      h264: DesktopDecoderLimit.p1080,
+      h265: probed.h265,
+      displayMaxHz: probed.displayMaxHz,
+    );
+  }
 
   // ---- the hot export, the view leaf and the video exports: synchronous
 

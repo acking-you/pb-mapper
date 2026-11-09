@@ -1405,16 +1405,19 @@ class DesktopStore {
   }
 
   /// R19: a computer that keeps Fit local gets it again each time this
-  /// viewer gains control, once the host's modes say what fits; a choice
-  /// made since stands until control ends.
+  /// viewer gains control, once the host's modes say what fits. Each gain
+  /// is answered once, whatever the computer keeps: a choice made since is
+  /// the user's ([setDisplayMode]), never sent again from here, even while
+  /// the host has not yet shown it.
   void _reapplyFitLocal(DesktopViewerStatus status) {
     if (!status.controlling) {
       _fitLocalDue = true;
       return;
     }
     final modes = status.modes;
-    if (!_fitLocalDue || _target?.fitLocal != true || modes == null) return;
+    if (!_fitLocalDue || modes == null) return;
     _fitLocalDue = false;
+    if (_target?.fitLocal != true) return;
     final local = _localDisplay();
     final fit = modes.fitLocal;
     if (local == null || fit == null || fit == modes.current) return;
@@ -2157,6 +2160,8 @@ class DesktopStore {
     final current = _target;
     if (_disposed || !_sessionActive || current == null) return null;
     _target = current.copyWith(fitLocal: target.fitsLocal);
+    // The user's choice answers this gain of control.
+    _fitLocalDue = false;
     _publishSession();
     try {
       return _api.setDisplayMode(target);
