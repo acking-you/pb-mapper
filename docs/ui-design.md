@@ -181,6 +181,23 @@ start, and a failure to start one says which in a toast. A remote-desktop
 host, local or in the background service, takes it at the next Start
 sharing.
 
+Under it, **LAN transport** (局域网传输, key `settings-lan-transport`) is a
+QUIC / TCP segmented control, QUIC by default: what a path within such a
+network runs over, for what this computer dials (`AppConfig.lan_transport`,
+saved at once the same way; the three config writes are serialised in
+`AppStore`, so one never undoes another). Its help says that TCP needs the
+other computer's firewall to let TCP in and falls back to QUIC within
+300 ms otherwise, and that as the shared end this computer serves whichever
+the other end asks for. A path across the internet is always QUIC, so the
+control says nothing about it. Changing it reuses LAN-first's dialog, for
+the connections Rust names in `lanTransport`; a remote-desktop viewer takes
+it at its next connect. A path chip on TCP reads **LAN · TCP** (局域网 ·
+TCP), in Tunnels, in the galaxy's panel, and in the remote viewer's chip,
+overlay and quality panel; QUIC, the usual carrier, is never named. TCP
+keeps its figures in the kernel, so a TCP link's only round trip is its
+handshake's: the viewer's quality panel leaves out the network round trip
+for it rather than show a stale number as QUIC's.
+
 ### How this computer reaches the relay
 
 What crosses the relay rides a carrier: TCP, a connection per stream, or
@@ -308,8 +325,9 @@ offers Reconnect where that can help.
   connection chip (path, round trip, frame rate and the speed received, each
   in a fixed cell so the centred bar never shifts; it shows or hides the
   quality panel), View and Control, Display (scaling, picture preference,
-  then Resolution, Maximum frame rate and Codec as submenus that name the
-  current choice, then the quality panel and the quality monitor),
+  then Resolution, **Remote resolution**, Maximum frame rate and Codec as
+  submenus that name the current choice, then the quality panel and the
+  quality monitor),
   Shortcuts, More, full screen and Disconnect. It is pinned at first;
   unpinned, it folds to a handle 2 s after the pointer leaves it, and never
   while one of its menus is open. In control, a hint says that keyboard and
@@ -336,14 +354,16 @@ offers Reconnect where that can help.
   a long press on the input mode opens it again.
 
 **What the picture is made of.** The picture preference changes live. The
-resolution (720p, 1080p by default, 1440p, or Native up to 4K) and the
-maximum frame rate (Auto, or 30, 60, 90 or 120 up to the display's highest
-refresh rate) belong to each remembered computer, as the preference does,
+resolution (Default: the remote display's own size, up to 4K and up to what
+this device's decoder takes; or 720p, 1080p, 1440p) and the maximum frame
+rate (Auto, or 30, 60, 90 or 120 up to the display's highest refresh rate)
+belong to each remembered computer, as the preference does,
 and are fixed for a session, so choosing one connects again at once, keeping
 the picture and the choice to view only; the menus say so. A frame rate
 chosen over Auto replaces every preset's own ceiling, Quality's 30 too. The
-codec is the device's: Auto offers H.265 where this device has a hardware
-decoder that takes the chosen resolution (asked of the platform at the first
+codec is the device's: Auto offers H.265 wherever this device has a hardware
+decoder for it, and the session's size is fitted inside the largest picture
+of the decoder offered first (asked of the platform at the first
 connect, never by creating a decoder, and waited for at most 2 s: until a
 probe that has not answered by then does, sessions are H.264), H.264 offers
 only that. A computer that answers an offer of H.265 with H.264 is not
@@ -356,6 +376,19 @@ codec the session would carry cannot take is shown disabled with the reason.
 When a picture fails to decode as H.265 the session connects again at once
 on H.264, and H.265 is not offered again until the app restarts; only a
 failure on H.264 too ends the session.
+
+**Remote resolution** (远程分辨率, desktop only) changes the remote
+computer's display mode, not the picture: Fit local (适配本机) asks for this
+display's size, or the nearest size the remote lists; Original (原始分辨率)
+puts its own back; the remote's own sizes follow. It shows only while this
+viewer controls a host that offers it, since a mode change is as intrusive
+as input, and the phone has none. The change lands within a few seconds
+without reconnecting; for 3 s after it the viewer waits as for any capture
+restart. A computer remembers Fit local, never a size, and applies it again
+on gaining control. On the host, the Remote desktop card says while its
+display is changed and offers Restore, which needs no viewer. The host puts
+the mode back by itself when the session ends or control is revoked, never
+on a pause, a release or a fresh grant.
 
 **Figures at a glance.** Speed is RustDesk's: everything the session moves
 each way, per second, as the tunnel counts it. The chip and the phone's

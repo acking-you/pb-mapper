@@ -8,6 +8,11 @@
   reference either way) → `pb-mapper-cli`, the `pb-mapper` SDK facade and
   `pb-mapper-node`. `ui/native/pb_mapper_ffi` is the Flutter C ABI.
   `pb-mapper-testkit` is test support only.
+- `pb-mapper-desktop` (the remote desktop) sits above `pb-mapper-client`; the
+  facade's `desktop` feature re-exports it, and only the FFI enables it. Its
+  host runs on a `Platform` chosen at compile time under `src/platform/`
+  (Windows today); nothing above that module names an operating system, and
+  one `Launch::prepare` per session is the only dynamic call on its path.
 - Binary, package and library file names are hardcoded by release workflows,
   Dockerfiles, install scripts and the Dart loader; do not rename them.
 
@@ -32,6 +37,19 @@
 - Established direct sessions belong to the endpoints. Coordinator loss and
   credential revocation must not close them; local stop cancels their tasks and
   closes the endpoint. Session reports are observations, never authorization.
+- Every entry point defaults to LAN first, then direct, then the relay
+  (`crates/pb-mapper/tests/default_path.rs` pins it). A path across the
+  internet, punched or not, is QUIC only. Within a LAN the dialing end may ask
+  for TCP (`lan_transport`, QUIC by default); the publisher serves it on
+  demand (`lan_tcp`, on by default) on LAN addresses only, and an older peer
+  or relay, or `lan_tcp = false`, leaves the session on QUIC, byte-identical.
+  `DIRECT_VERSION` stays 1.
+- Remote desktop: nothing new reaches a peer that did not list the matching
+  capability, and ALPN stays `pb-mapper/desktop/2`. The helper protocol and
+  its `.v<n>` pipe names change together. Display modes change only
+  dynamically, never with `CDS_UPDATEREGISTRY` or `CDS_GLOBAL`, journalled
+  before the change and put back by the host. Both ends of the helper pipe
+  validate input.
 - Keep TLS exporter binding, exact certificate pinning, namespace isolation,
   bounded control messages and bounded observation tables intact.
 - Never write the process environment after startup; the credential lives in

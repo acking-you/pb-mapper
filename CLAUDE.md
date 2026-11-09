@@ -52,8 +52,8 @@ pb-mapper/
 │   ├── pb-mapper-protocol/ # Message framing, v2 secure sessions, forwarding
 │   ├── pb-mapper-server/   # Central relay server, plus the task manager
 │   ├── pb-mapper-client/   # Both tunnel ends: `register` and `connect`
-│   ├── pb-mapper-desktop/  # Remote desktop: host, viewer, receipt credit, QoS,
-│   │                       # Windows capture and the UAC/Winlogon helper
+│   ├── pb-mapper-desktop/  # Remote desktop: host, viewer, credit, QoS, display
+│   │                       # modes; platforms behind platform/ (Windows today)
 │   ├── pb-mapper/          # The published SDK facade over pb-mapper-client;
 │   │                       # feature `desktop` re-exports pb-mapper-desktop
 │   ├── pb-mapper-node/     # Node-API bindings for the client SDK, built by js/
@@ -99,7 +99,8 @@ pb-mapper-ffi ─▶ pb-mapper (feature desktop) ─▶ pb-mapper-desktop ─▶
 `pb-mapper` is the published SDK facade over `pb-mapper-client`. Its optional
 `desktop` feature re-exports `pb-mapper-desktop` as `pb_mapper::desktop`, and
 only the FFI enables it, so no CLI, relay or plain SDK build links capture,
-codec or input code. On Windows, `pb-mapper-desktop` also uses `pb-mapper-core`.
+codec or input code. `pb-mapper-desktop` also uses `pb-mapper-core` on every
+target, for the display-mode journal's `durable_file`.
 
 Note that the binary is still named `pb-mapper`, discovered from
 `src/bin/pb-mapper.rs` inside `pb-mapper-cli`. The release workflows, both
@@ -165,7 +166,19 @@ Nothing in the SDK crates knows it exists.
     only orders probes and holds other paths back while a LAN is known to
     be there (`Assessment::holds`); off, the LAN is still detected and
     reported. A committed session's `DirectLink` lives in
-    `diagnostics/link.rs`
+    `diagnostics/link.rs`. `tcp.rs` is the TCP half of a LAN path, which the
+    dialing end chooses (`ConnectOptions::lan_transport`, QUIC by default)
+    and the publisher permits (`RegisterOptions::lan_tcp`, on by default):
+    the provider's lazily opened acceptors (on every interface for a
+    consumer with LAN evidence, wherever the relay is; on loopback alone for
+    one on this computer under a loopback relay; admitting only LAN or
+    loopback sources while a TCP-asking session is pending), the consumer's
+    dialer and the head-start race (`TCP_HEAD_START`, 300 ms, while LAN-first
+    is on), and `WriteThrough` (tokio-rustls leaves records buffered when the
+    socket is full; the forward loop never flushes). `DirectConn` in
+    `mod.rs` is the committed connection on either carrier; `endpoint.rs`'s
+    `Exporter` gives each carrier its own binding label. A path across the
+    internet, punched or not, is always QUIC
   - `diagnostics.rs`, `diagnostics/metrics.rs`: a tunnel's diagnostics, its
     event stream and its `TunnelMetrics` (sessions and bytes per path, the
     relay round trip, the live link), all read from one state; each session
@@ -178,33 +191,133 @@ Nothing in the SDK crates knows it exists.
   - `worker.rs`, `pacer.rs`, `scheduler.rs`, `lane.rs`: Thread C, the one
     desktop-bound thread (capture, encode, input), its pacing, its one wait,
     and the input lane from B-recv
-  - `timer.rs`: Fine Windows timers for the whole process (power-throttling
-    opt-out and `timeBeginPeriod`), held while a session captures
+  - `timer.rs`: Fine process timers, held while a session captures; on
+    Windows `platform/windows/timer.rs` (the power-throttling opt-out and
+    `timeBeginPeriod`)
   - `credit.rs`, `qos.rs`, `idr.rs`, `outgoing.rs`: Receipt credit, delay-based
     QoS, on-demand IDRs, and the hand-off from thread C to B-send
   - `protocol.rs`, `wire.rs`, `invite.rs`, `security.rs`, `auth.rs`: Protocol v2
     (ALPN `pb-mapper/desktop/2`), invitations, certificate pinning, and the
     input authorisation ledger
   - `viewer/`, `video_sink.rs`: The viewer, and its one hand-off to a native
-    consumer, which is also where a presentation is validated
-  - `platform.rs`, `windows.rs`: Capabilities, displays, and the Windows
-    backend (xcap displays, enigo input, the desktop binding)
-  - `video/windows.rs`: Desktop Duplication → D3D11 → Media Foundation H.265
-    or H.264. H.265 only for a viewer that lists the `h265` capability, on a
-    GPU whose hardware HEVC encoder passes a probe kept per adapter; one
-    encoder failure turns it off for the process
-  - `helper/` (Windows): The opt-in UAC/Winlogon service and the UI's client to
-    it; the service side and the `pb-mapper-desktop-helper` binary need
-    `--features windows-helper`. `HELPER_PROTOCOL` (`helper/mod.rs`) and the
-    `.v<n>` pipe names change together; an installed helper of another
-    protocol, or of another build (its executable differs from the one
-    bundled with the app), is offered Update
-  - `dpapi.rs` (Windows): The one DPAPI call every Windows store uses, current
-    user or machine scope; the FFI's vault and trust files go through it
+    consumer, which is also where a presentation is validated. A direct
+    path's `ViewerLink` carries its `transport`; over TCP its round trips are
+    only the handshake's
+  - `backend.rs`: The public seam between thread C and what captures and
+    injects for it: `Backend` (object-safe, not `Send`; `Box<B>` forwards
+    every method under `#[deny(clippy::missing_trait_methods)]`, as every
+    forwarding impl does), `Description`, `BackendCaps`, `HostOs`,
+    `CursorMode`, `Waker`, and typed failures — `BackendError` carries a
+    `FailureKind` inside the `io::Error`, and `failure_kind` reads it back;
+    match kinds, never text
+  - `launch.rs`: `Launch` and `Launcher<B, F>`. One `Launch::prepare` per
+    admitted session is the only dynamic call on a host's session path;
+    thread C is `Engine<B: Backend>` on a concrete backend
+  - `native.rs`: `PlatformBackend<P>`, the neutral glue that drives any
+    platform's parts with static calls (desktop checks, held-input release,
+    input validation, the video source's lifetime, the display-mode guard),
+    and the opaque public `NativeBackend` / `native_backend()` that benches
+    and decorators compose
+  - `platform/`: `Platform` and its parts (`pub(crate)`), chosen once at
+    compile time: `Current` is `windows::Windows` on Windows and the
+    uninhabited `unsupported::Unsupported` elsewhere. No platform `cfg`
+    above this module, except the viewer's Android 60 fps rule and the
+    `windows` re-export. `host_support()` replaces the old `capabilities()`;
+    `displays()` lists displays, chosen by `DisplaySelection` with the
+    device name (`\\.\DISPLAYn`) as the stable key. `synthetic.rs` is the
+    test platform (pulled or pushed encoder). How to add Linux, macOS or
+    Android is "Platforms" in `docs/remote-desktop.md`
+  - `platform/windows/`: the ordinary desktop, `video.rs` (Desktop
+    Duplication → D3D11 → Media Foundation H.265 or H.264, the fused
+    `VideoSource`; H.265 only for a viewer that lists `h265`, on a GPU whose
+    hardware HEVC encoder passes a probe kept per adapter, and one encoder
+    failure turns it off for the process), `input`, `cursor`, `still`,
+    `waiter`, `timer`, `mf`, `dpapi` (the one DPAPI call every Windows store
+    uses), `modes.rs` and `helper/`
+  - `platform/windows/helper/`: The opt-in UAC/Winlogon service; the service
+    side and the `pb-mapper-desktop-helper` binary need `--features
+    windows-helper`. `HELPER_PROTOCOL` (now 7) and the `.v<n>` pipe names
+    change together; an installed helper of another protocol, or of another
+    build (its executable differs from the one bundled with the app), is
+    offered Update. Protocol 7: `Start`/`Attach` carry `display_device`;
+    `DisplayModes`, `SetDisplayMode`, `RestoreDisplayMode`; responses carry
+    `failure` (a `FailureKind`), `caps`, `modes`, `restored`. A worker exits 3
+    with modes outstanding, and the service then runs `helper restore
+    <session>` (10 min), as it does at its start for any journal left; it
+    ends that run only once a new worker in the session has attached.
+    `Start` and the display-mode calls are bounded by 20 s
+    (`MODE_TIMEOUT`), every other call by 3 s
+  - `oop/`: the out-of-process backend over any byte transport: `proto`,
+    `ipc` framing, `RemoteBackend<T>` (client) and `serve<B>` (worker),
+    tested on every target over `tokio::io::duplex`. Both ends validate
+    input; neither check may go
+  - `privileged/`: the public helper facade on every target —
+    `support()`, and on Windows `status`, `request_installation`,
+    `background::{configure, adopt, Options::resume, …}` (the app's
+    hand-off to the service)
+  - `codec/annexb.rs`, `input/{held,cursor}.rs`: neutral Annex B scanning
+    and keyframe detection; held-input release and cursor confinement
+  - `modes.rs`: display modes, platform-neutral — `Mode`, `ModeList`
+    (`fit_local`: the local size if listed, else the largest inside it
+    within 2 % of its shape), `ModeTarget`, `DisplayModeError`; the journal
+    (`display-modes.json` in the host's state directory, written durably
+    before any change), the per-display claims of one process (the first
+    original and the latest mode set; the last holder restores), `recover`,
+    which replays an entry only in the scope it was made in
+    (`DisplayModes::scope`: the login and the monitor) and drops one for a
+    display that is gone, and `SETTLE` (3 s after a change,
+    `display_changing`)
+  - `platform/windows/modes.rs`: `WinModes` over `EnumDisplaySettingsExW` /
+    `ChangeDisplaySettingsExW` — `CDS_TEST`, then dynamic (`dwFlags` 0),
+    never `CDS_UPDATEREGISTRY` or `CDS_GLOBAL`; a NULL `DEVMODE` puts the
+    registry mode back. `filter_modes` is the pure filter (depth,
+    orientation, ≥ 800×600, 64 at most)
+  - A mode change (远程分辨率, Remote resolution) needs the `display_mode`
+    capability on both ends and control; the owner's
+    `Host::restore_display_mode` needs neither. The host restores at session
+    end, on revoke and on the owner's Restore — never on release, pause or a
+    fresh grant — and never fights a mode the owner set meanwhile.
+    `recover_display_modes(state_dir)` replays a journal a crashed host
+    left; every `Host` start does it too, and after each session, backing
+    off from 2 s to a minute
+  - `Resolution::default()` is `Native` (the display's own size, up to
+    3840×2160); `ViewerConfig::for_decoders(Decoders, …)` makes the offer —
+    H.265 wherever its decoder exists, then H.264, else JPEG — and
+    `VideoLimits::clamped` fits the limits inside the first decoder's largest
+    picture, long edge against long edge
+  - Hosts start with `Host::builder` / `Host::start(client, HostOptions::new
+    (service))`, whose defaults are the tunnel's: LAN first, then direct,
+    then the relay, and `lan_tcp` on. `Host::{identity, restart_on,
+    switch_display, rename}` and `privileged::background::adopt` hold what
+    the FFI used to
+  - `supervisor.rs`: `RetryPolicy`, the pure `Reconnect` (the app's Dart
+    policy: backoff 1, 2, 4, 8, 15 s within 120 s; `protocol` at most 3 in a
+    row; a 5 s stall; one H.265 → H.264 fallback) and `Supervisor`, which
+    connects, waits on each viewer and keeps the control choice and preset.
+    The app keeps its own Dart policy; this serves SDK integrators
+  - `trust.rs`: `Sealer`, `CurrentUser` (current-user DPAPI under the app's
+    constants), `RelayScope`, `Remembered<T>`, `TrustFile<S, T>` — the app's
+    `desktop-trust.dpapi` format plus `display_device` — and
+    `write_durably`; `F/desktop_trust.rs` is a thin wrapper over
+    `TrustFile<CurrentUser, Settings>`
+  - `watch.rs`: `Host::watch`, `Viewer::watch` — status as a
+    `tokio::sync::watch`, sent when its JSON less per-frame fields changes,
+    ending with the host or viewer
+  - `mapping.rs`: `DesktopView::display_point`, `Input::text_chunks`
   - `tests.rs`, `tests/session.rs`: Tests over a real relay and TLS, the second
     end to end; `slow_link.rs`: the ignored acceptance cases
-  - `examples/`: Capture, transport and viewer probes, and `video_bench`, the
-    Windows capture and encode benchmark
+  - `examples/`: Capture, transport and viewer probes, `video_bench` (the
+    Windows capture and encode benchmark), `deployed` (the selftest, native
+    size by default) and `display_mode_probe`, the hardware acceptance of
+    display modes, which changes the display it runs on
+
+- **`pb-mapper/`**: The published SDK facade; `desktop` re-exports the
+  remote desktop. `examples/desktop_{loopback,host,viewer,control,
+  supervised,display_mode}.rs` with `examples/desktop_support/` (in-process
+  relay, synthetic `Backend`, renderer thread); `desktop_loopback` runs on
+  any OS and in the Linux CI job. `tests/default_path.rs` pins LAN → direct
+  → relay as every entry point's default; `pb-mapper-client` alone is
+  relay-only, as its crate docs say
 
 - **`pb-mapper-testkit/`**: Test support only; nothing shipped depends on it
   - `relay.rs`: `Relay` — a live server that retains its `AuthRuntime`, so a case
@@ -247,7 +360,8 @@ The design and its rules are in `docs/ui-design.md`.
     the relay this computer can run itself
   - `logs_page.dart`: The log stream, filtered by level and word
   - `settings_page.dart`: Relay, credential, setup string, *Try the local
-    network first* (saved at once, outside the relay form), theme, language;
+    network first* and *LAN transport* QUIC / TCP (both saved at once,
+    outside the relay form, and serialised in `AppStore`), theme, language;
     Test says what the relay answered, or why it did not
   - `setup_flow.dart`: First run — relay, then what to do, then that tunnel
   - `tunnel_editor.dart`: The one share/connect form, and `followTunnel`
@@ -351,10 +465,16 @@ The design and its rules are in `docs/ui-design.md`.
     `inspect_invitation`, `connect`, `disconnect`) under `block_on`, so only
     a background isolate calls it. `pb_mapper_desktop_viewer_call_json`
     takes the viewer's closed set of hot ops (`viewer_status`, `control`,
-    `release`, `input`, `keyframe`, `quality`, `pause`, `resume`): it never
-    enters the runtime, awaits or takes a tokio lock, so the UI isolate
-    calls it, as it calls the view leaf. Errors are typed `ErrorCode`s
-    (`error.rs`), never text to match
+    `release`, `input`, `keyframe`, `quality`, `pause`, `resume`,
+    `display_mode`): it never enters the runtime, awaits or takes a tokio
+    lock, so the UI isolate calls it, as it calls the view leaf. Errors are
+    typed `ErrorCode`s (`error.rs`), never text to match. `connect` takes
+    `decoders` (`{h264, h265}`, each `[w, h]` or null) and an optional
+    `resolution` (absent: the display's own size), and dials with the app
+    config's `lan_first` and `lan_transport`; `viewer_status{local}`
+    answers `modes.fit_local`, the size Fit local would pick;
+    `display_mode` takes `{target}`; `host_restore_display_mode` is the
+    host card's Restore
   - `desktop_video.rs`: Video goes from the viewer's `VideoSink` straight to
     its consumer. On Android, and on Windows where Media Foundation is
     installed, that is the native decoder (the runner's decoder thread in
@@ -381,7 +501,9 @@ The design and its rules are in `docs/ui-design.md`.
     wraps, which Dart unwraps through the `pb_mapper/keystore` channel
     (`ComputerKeystore.kt`) to unlock the vault once per process.
     Invitations never return to Dart: a computer is remembered from the
-    live, pinned session, and `connect` takes its `computer_id`.
+    live, pinned session, and `connect` takes its `computer_id`. The vault
+    is version 2: a resolution only when chosen (a version-1 `1080p`
+    follows the native default), and `display_mode: "fit_local"`.
     `desktop_trust.rs` keeps the sharing side's remembered identity
   - `relay.rs`: `pb_mapper_relay_call_json`, one export for every question
     and administrator request to the relay, dispatched on the request's
@@ -400,12 +522,15 @@ The design and its rules are in `docs/ui-design.md`.
     readers of a running tunnel's events (`subscribe`/`next`/`close`), each
     event carrying the tunnel's diagnostics and metrics as they are by then;
     with `metrics_ms`, `next` also answers `{type:"metrics"}` samples alone
-  - The relay carrier (TCP or QUIC, `relay-quic`) and LAN-first are app
-    config, set by `pb_mapper_update_config` with the address and
-    credential; a tunnel keeps what it started with and reports its carrier
-    as `relayTransport`. A change of either answers with the tunnels it
-    reaches (`move`, `lanFirst`), only those on the saved relay under the
-    saved credential, and the window offers to restart exactly those. Only
+  - The relay carrier (TCP or QUIC, `relay-quic`), LAN-first and the LAN
+    transport (QUIC, or TCP for what this computer dials) are app config,
+    set by `pb_mapper_update_config` with the address and credential; a
+    tunnel keeps what it started with and reports its carrier as
+    `relayTransport`. A change of any answers with the tunnels it reaches
+    (`move`, `lanFirst`, `lanTransport`), only those on the saved relay
+    under the saved credential, and the window offers to restart exactly
+    those; a remote-desktop connection takes the new value when it next
+    connects. Only
     a change of the relay settings
     (`AppConfig::same_relay`) resets the relay caches or asks the relay again.
     `pb_mapper_start_server` takes a `quic_port` (0: none). The window's
@@ -506,9 +631,14 @@ the reasoning):
   vault and opened by id, added by pasting or scanning an invitation. The
   viewer replaces the whole window: on a desktop a dark title bar and a
   floating toolbar; on a phone landscape gutters, a modifier bar and a
-  minimap. Its Display menu chooses each computer's resolution and maximum
-  frame rate and the device's codec, and turns on the quality monitor
-  (speed, frame rate, delay, bitrate, codec, resolution). The remote cursor
+  minimap. Its Display menu chooses each computer's resolution (by default
+  the remote display's own size, up to 4K and up to this device's
+  decoder) and maximum frame rate and the device's codec, and turns on the
+  quality monitor (speed, frame rate, delay, bitrate, codec, resolution).
+  On a desktop, while controlling a host that offers it, **Remote
+  resolution** (远程分辨率) changes the remote display's mode: Fit local,
+  Original, or one of its modes; the host puts it back at the session's
+  end, on revoke, or from Restore on its card. The remote cursor
   is the viewer's own (`DesktopCursor`, kept by the store for the session).
   Back keeps the session paused for up to ten minutes
 - **Relay**: whether the relay answers and how fast, and who this computer is
@@ -528,7 +658,8 @@ the reasoning):
   on a phone it opens from Settings
 - **Settings**: relay address, credential, the carrier (TCP or QUIC) with
   what the relay offers, default keep-alive, a copyable setup string for
-  another computer, theme and language
+  another computer; under Direct connections, LAN first and the LAN
+  transport (QUIC by default, or TCP); theme and language
 - **First run**: relay, then share-or-connect, then that one form
 
 Sharing and connecting are one editor with a Share/Connect switch; its More
@@ -679,7 +810,9 @@ docker-compose -f docker/docker-compose.yml up
 - **Device acceptance**: `scripts/test/desktop-ui-acceptance.md` (the viewer and
   its native decoder on devices, against a test host) and
   `scripts/test/windows-helper-acceptance.md` (the helper, UAC and Winlogon on an
-  isolated Windows VM) — manual procedures
+  isolated Windows VM) — manual procedures. `cargo run -p pb-mapper-desktop
+  --example display_mode_probe` changes the display it runs on and puts it
+  back: run it only where that is allowed
 - **Examples**: `examples/` directory provides working usage examples
 
 ### Service Deployment

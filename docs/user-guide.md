@@ -142,7 +142,10 @@ adds a firewall rule, so on Windows the first TCP listener raises the firewall
 prompt on the publisher's desktop, and a background service gets none. Until
 TCP is allowed, a session that asked for it takes QUIC on the LAN within the
 300 ms, and later sessions stop asking for a while (10 s, doubling to 5 min),
-without the relay's pause.
+without the relay's pause. The listener is on every interface for a consumer
+on a shared LAN, whichever relay the two use; only a consumer on the same
+computer, under a relay on loopback, gets one on loopback alone, which raises
+no prompt.
 
 - CLI: `connect --lan-transport tcp` (default `quic`); `register --no-lan-tcp`
   refuses TCP.

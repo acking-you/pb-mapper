@@ -437,6 +437,19 @@ helper's QUIC handshake. Add the helper to the same permitted route as the UI,
 or explicitly select a working relay carrier before configuring background
 sharing. pb-mapper does not change another application's routing rules.
 
+A viewer that chose **Settings → Direct connections → LAN transport → TCP**
+reaches a host on its LAN over TCP only where the host's firewall lets TCP in:
+the host opens a TCP listener, on its direct port's number, the first time
+such a viewer asks, and offers it on its LAN addresses only. A viewer with
+evidence of a shared LAN gets that listener on every interface, whichever
+relay the two use; only a viewer on the same computer, under a relay on
+loopback, gets one bound to loopback alone, which raises no prompt. On
+Windows that first listener on every interface raises the firewall prompt on
+the host's desktop for `pb_mapper_ui.exe`; the background service gets no
+prompt, and nothing adds a rule for either. Until TCP is allowed, the session
+takes QUIC on the LAN within 300 ms, as it would have without the choice, and
+the viewer stops asking for a while (10 s, doubling to 5 min).
+
 Background startup errors retain the registration carrier, phase and failure
 in the UI status and in the bounded protected
 `%ProgramFiles%\pb-mapper-desktop\service.log`. `background_start_failed`
