@@ -1,6 +1,6 @@
 //! Explicitly authorized hosting owned by the installed Windows service.
 //! The UI is a management client; closing it does not own or stop this host.
-use super::{configuration, ipc, os};
+use super::{configuration, ipc, os, pipe};
 use crate::{HostStatus, Result, error};
 use pb_mapper_client::sdk::RelayTransport;
 use serde::{Deserialize, Serialize};
@@ -100,7 +100,7 @@ struct Response {
 async fn call(command: Command) -> Result<Snapshot> {
     super::status().ensure_ready()?;
     let config = configuration()?;
-    let mut pipe = ipc::connect(PIPE)?;
+    let mut pipe = pipe::connect(PIPE)?;
     os::verify_server(&pipe, &config.helper_executable, None)?;
     tokio::time::timeout(CALL_TIMEOUT, async {
         ipc::write_json(&mut pipe, &command).await?;

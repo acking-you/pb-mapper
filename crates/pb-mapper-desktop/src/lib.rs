@@ -4,6 +4,7 @@
 //! host certificate from that invitation before sending its bearer capability.
 //! The native Windows backend captures the ordinary desktop. An explicitly
 //! installed, authorized helper handles UAC/Winlogon on its bound desktop.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod auth;
 mod backend;
@@ -14,15 +15,19 @@ mod codec;
 mod credit;
 mod host;
 mod idr;
-#[cfg_attr(not(windows), allow(dead_code))]
 mod input;
 mod invite;
 mod lane;
 mod launch;
 mod modes;
+mod native;
+// Only the Windows helper speaks it until another platform has an agent.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod oop;
 mod outgoing;
 mod pacer;
 mod platform;
+pub mod privileged;
 mod protocol;
 mod qos;
 mod scheduler;
@@ -49,13 +54,8 @@ pub use backend::{
 pub use host::{Access, Custom, DisplaySelection, Host, HostBuilder, HostOptions, Native};
 pub use invite::{Invitation, InvitationError, InvitationFormat};
 pub use modes::{DisplayModeError, Mode, ModeList, ModeTarget};
-#[cfg(windows)]
-pub use platform::windows::{dpapi, helper};
-pub use platform::{capabilities, displays, media_foundation, native_backend};
-#[cfg(windows)]
-pub mod video {
-    pub use crate::platform::windows::video as windows;
-}
+pub use native::{NativeBackend, native_backend};
+pub use platform::{HostSupport, UnsupportedReason, displays, host_support};
 pub use protocol::{
     Adaptation, DesktopKind, NoticeCode, RateModel, RejectReason, Route, SessionState, StateReason,
     StopReason, VideoSize,
@@ -67,6 +67,16 @@ pub use viewer::{
     NoticeInfo, PresentedInfo, VideoInfo, Viewer, ViewerConfig, ViewerLink, ViewerReason,
     ViewerState, ViewerStats, ViewerStatus,
 };
+
+/// What only a Windows build has.
+#[cfg(windows)]
+#[cfg_attr(docsrs, doc(cfg(windows)))]
+pub mod windows {
+    /// The fused encoder itself, for benches.
+    #[doc(hidden)]
+    pub use crate::platform::windows::video;
+    pub use crate::platform::windows::{dpapi, mf::media_foundation};
+}
 
 /// Embedding applications coordinate their other input writers here. Merely
 /// viewing a desktop never acquires this lease. Drop releases write admission
@@ -109,14 +119,6 @@ pub struct CursorPosition {
     pub x: i32,
     pub y: i32,
     pub visible: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Capabilities {
-    pub host: bool,
-    pub viewer: bool,
-    pub secure_desktop: bool,
-    pub mode: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

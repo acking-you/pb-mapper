@@ -217,16 +217,19 @@ mod windows_test {
     /// is forwarded, because a default left in place would quietly change the
     /// session: no encoder drain, no cursor, no drag-start hold.
     struct Guarded {
-        inner: Box<dyn Backend>,
+        inner: pb_mapper_desktop::NativeBackend,
         state: Arc<State>,
     }
     impl Guarded {
         /// One capture-side call between two guard checks, timed for the
         /// diagnostics.
-        fn timed<T>(&mut self, call: impl FnOnce(&mut dyn Backend) -> Result<T>) -> Result<T> {
+        fn timed<T>(
+            &mut self,
+            call: impl FnOnce(&mut pb_mapper_desktop::NativeBackend) -> Result<T>,
+        ) -> Result<T> {
             self.state.check()?;
             let started = Instant::now();
-            let value = call(self.inner.as_mut())?;
+            let value = call(&mut self.inner)?;
             self.state
                 .capture_ms
                 .store(started.elapsed().as_millis() as u32, Ordering::Release);
@@ -756,7 +759,7 @@ mod windows_test {
                 let host = Host::builder(options)
                     .backend(move || {
                         Ok(Guarded {
-                            inner: pb_mapper_desktop::native_backend(id)?,
+                            inner: pb_mapper_desktop::native_backend(&DisplaySelection::Id(id))?,
                             state: backend_state.clone(),
                         })
                     })

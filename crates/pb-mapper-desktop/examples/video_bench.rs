@@ -30,8 +30,8 @@
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use pb_mapper_desktop::{
-        VideoCodec, VideoRate, displays,
-        video::windows::{Encoded, Encoder, Statistics},
+        Backend, DisplaySelection, VideoCodec, VideoRate, displays,
+        windows::video::{Encoded, Encoder, Statistics},
     };
     use std::{
         io::Write,
@@ -170,7 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // What a host asks before it offers H.265: probed once per adapter.
         for _ in 0..2 {
             let asked = Instant::now();
-            let usable = pb_mapper_desktop::video::windows::h265_available(display.id);
+            let usable = pb_mapper_desktop::windows::video::h265_available(display.id);
             println!(
                 "h265_available={usable} probe_ms={:.1}",
                 asked.elapsed().as_secs_f64() * 1000.0
@@ -191,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let build_ms = building.elapsed().as_secs_f64() * 1000.0;
     let mut backend = if backend_mode {
-        let mut backend = pb_mapper_desktop::native_backend(display.id)?;
+        let mut backend = pb_mapper_desktop::native_backend(&DisplaySelection::Id(display.id))?;
         backend.configure_video(
             pb_mapper_desktop::VideoLimits {
                 max_width,

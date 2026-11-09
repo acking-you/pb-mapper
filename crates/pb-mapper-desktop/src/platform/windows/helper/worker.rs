@@ -1,4 +1,12 @@
 use super::*;
+#[cfg(feature = "windows-helper")]
+use crate::{
+    Backend,
+    oop::{
+        proto::{Request, Response, TIMEOUT},
+        server::{ServeState, exchange, serve},
+    },
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "windows-helper")]
 use std::sync::mpsc;
@@ -324,7 +332,7 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let mut pipe = ipc::connect(name)?;
+        let mut pipe = pipe::connect(name)?;
         os::verify_server(&pipe, &config.helper_executable, Some(parent))?;
         let Request::Attach {
             display_id,
@@ -340,8 +348,7 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
         let cancel = tokio_util::sync::CancellationToken::new();
         let stopped = cancel.clone();
         let join = std::thread::spawn(move || {
-            let mut backend = match crate::platform::windows::create_privileged(display_id, session)
-            {
+            let mut backend = match super::super::open_bound(display_id, session) {
                 Ok(backend) => backend,
                 Err(e) => {
                     if let Ok((_, reply)) = incoming.recv_timeout(TIMEOUT) {
@@ -350,14 +357,13 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                     return;
                 }
             };
-            let mut sequence = 0;
-            let mut last_input = std::time::Instant::now();
+            let mut state = ServeState::new();
             // Fine process timers while the host asks for video; a paused
             // host asks for none.
             let mut timer = None;
             let mut last_video = std::time::Instant::now();
             while !stopped.is_cancelled() {
-                if last_input.elapsed() > std::time::Duration::from_secs(2) {
+                if state.last_input.elapsed() > std::time::Duration::from_secs(2) {
                     backend.release();
                 }
                 if last_video.elapsed() > VIDEO_IDLE {
@@ -377,7 +383,7 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                     timer.get_or_insert_with(crate::timer::TimerResolution::hold);
                 }
                 let close = matches!(request, Request::Close {});
-                let result = serve(&mut *backend, request, &mut sequence, &mut last_input);
+                let result = serve(&mut backend, request, &mut state);
                 let pending = u32::try_from(backend.pending_video()).unwrap_or(u32::MAX);
                 let response = match result {
                     Ok((mut response, image)) => {
@@ -410,208 +416,6 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
         let _ = join.join();
         exchange
     })
-}
-
-/// Hand the host's requests to the desktop-bound thread, one at a time, until
-/// `Close`. Each answer is bounded by `TIMEOUT`, but the wait for the next
-/// request is not: a host whose viewer is paused sends nothing for as long as
-/// the pause lasts. The pipe closing ends that wait, and the service closes
-/// it when its caller's pipe closes, or when the owner or its login ends.
-#[cfg(feature = "windows-helper")]
-async fn exchange<P, A>(
-    pipe: &mut P,
-    display_id: u32,
-    mut serve: impl FnMut(Request) -> A,
-) -> Result<()>
-where
-    P: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-    A: std::future::Future<Output = Result<(Response, Vec<u8>)>>,
-{
-    let mut request = Request::Start { display_id };
-    loop {
-        let close = matches!(request, Request::Close {});
-        let (response, image) = tokio::time::timeout(TIMEOUT, serve(request))
-            .await
-            .map_err(error)??;
-        tokio::time::timeout(TIMEOUT, async {
-            ipc::write_json(pipe, &response).await?;
-            ipc::write_bytes(pipe, &image, ipc::MAX_FRAME).await
-        })
-        .await
-        .map_err(error)??;
-        if close {
-            return Ok(());
-        }
-        request = ipc::read_json(pipe).await?;
-    }
-}
-
-#[cfg(feature = "windows-helper")]
-impl Response {
-    fn failed(error: String, pending: u32) -> Self {
-        Self {
-            context: None,
-            error: Some(error),
-            video: None,
-            cursor: None,
-            pending,
-            double_click: None,
-            h265: None,
-        }
-    }
-}
-
-/// One request on the worker's desktop-bound thread. The host's thread C
-/// paces and authorises; this checks the input sequence again, and the
-/// backend the whole desktop the host expects, at the injection boundary.
-#[cfg(feature = "windows-helper")]
-fn serve(
-    backend: &mut dyn Backend,
-    request: Request,
-    sequence: &mut u64,
-    last_input: &mut std::time::Instant,
-) -> Result<(Response, Vec<u8>)> {
-    let mut response = Response {
-        context: None,
-        error: None,
-        video: None,
-        cursor: None,
-        pending: 0,
-        double_click: None,
-        h265: None,
-    };
-    if matches!(request, Request::Release {} | Request::Close {}) {
-        backend.release();
-        return Ok((response, vec![]));
-    }
-    if let Request::Input {
-        expected,
-        sequence: next,
-        input,
-    } = request
-    {
-        if next <= *sequence {
-            backend.release();
-            return Err(error("repeated helper input"));
-        }
-        *sequence = next;
-        // Binds this thread to the input desktop, and fails unless it is
-        // still `expected`.
-        backend.input_in_context(&expected, &input)?;
-        *last_input = std::time::Instant::now();
-        // The pointer as the input left it, so that the host's thread C knows
-        // its own move when it comes back. The input stands without it.
-        response.cursor = backend.cursor(&expected).ok().flatten();
-        // The host keeps the desktop each answer reports: this is the one the
-        // input reached.
-        response.context = Some(expected);
-        return Ok((response, vec![]));
-    }
-    let context = backend.context()?;
-    // Context checks observe the pointer too, so it follows while capture is
-    // idle. The backend checks this desktop identity; observing it never
-    // renews last_input or acknowledges video.
-    let observe_cursor = matches!(
-        request,
-        Request::Context {} | Request::Capture {} | Request::Video { .. }
-    );
-    let image = match request {
-        Request::Start { .. } => {
-            // This worker runs in the interactive session: its settings are
-            // the user's, which the service in session 0 cannot read.
-            response.double_click = backend.double_click_guard();
-            vec![]
-        }
-        Request::Context {} | Request::Release {} | Request::Close {} | Request::Input { .. } => {
-            vec![]
-        }
-        Request::Attach { .. } => return Err(error("worker is already attached")),
-        Request::H265 {} => {
-            response.h265 = Some(
-                backend
-                    .describe(true)
-                    .is_ok_and(|described| described.caps.h265),
-            );
-            vec![]
-        }
-        Request::ConfigureVideo {
-            limits,
-            nominal_fps,
-        } => {
-            if !(1..=120).contains(&nominal_fps) {
-                return Err(error("invalid video configuration"));
-            }
-            backend.configure_video(limits, nominal_fps)?;
-            vec![]
-        }
-        Request::Capture {} => backend.capture_consistent(&context)?,
-        Request::Video {
-            expected,
-            codec,
-            submit,
-            keyframe,
-            rate,
-            wait_ms,
-        } => {
-            if expected != context
-                || wait_ms > DRAIN_WAIT_MAX_MS
-                || submit
-                    && (!(crate::qos::ENCODER_BITRATE_MIN..=crate::qos::ENCODER_BITRATE_MAX)
-                        .contains(&rate.bitrate)
-                        || !(1..=120).contains(&rate.pace_fps))
-            {
-                return Err(error("invalid or stale video request"));
-            }
-            let frame = if submit {
-                backend.capture_video(&expected, codec, keyframe, rate)?
-            } else {
-                drain(
-                    backend,
-                    &expected,
-                    std::time::Duration::from_millis(wait_ms.into()),
-                )?
-            };
-            match frame {
-                Some(frame) => {
-                    response.video = Some(frame.format);
-                    frame.bytes
-                }
-                None => vec![],
-            }
-        }
-        Request::Presented { generation } => {
-            if generation != context.generation {
-                return Err(error("stale helper presentation"));
-            }
-            *last_input = std::time::Instant::now();
-            vec![]
-        }
-    };
-    if observe_cursor {
-        response.cursor = backend.cursor(&context)?;
-    }
-    response.context = Some(context);
-    Ok((response, image))
-}
-
-/// Drain one unit, waiting up to `wait` while the encoder still holds units,
-/// so the host polls a busy encoder without a pipe round trip per poll.
-#[cfg(feature = "windows-helper")]
-fn drain(
-    backend: &mut dyn Backend,
-    expected: &DesktopContext,
-    wait: std::time::Duration,
-) -> Result<Option<crate::EncodedFrame>> {
-    let until = std::time::Instant::now() + wait;
-    loop {
-        if let Some(frame) = backend.drain_video(expected, std::time::Duration::ZERO)? {
-            return Ok(Some(frame));
-        }
-        if backend.pending_video() == 0 || std::time::Instant::now() >= until {
-            return Ok(None);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
 }
 
 #[cfg(all(test, feature = "windows-helper"))]
@@ -771,104 +575,6 @@ mod tests {
             Unlocked
         );
     }
-
-    #[test]
-    fn input_reaches_only_the_desktop_the_host_expected() {
-        /// The bound desktop, which the test changes under the host.
-        struct Bound {
-            context: DesktopContext,
-            injected: u32,
-        }
-        impl Backend for Bound {
-            fn display(&mut self) -> Result<crate::Display> {
-                Ok(self.context.display.clone())
-            }
-            fn context(&mut self) -> Result<DesktopContext> {
-                Ok(self.context.clone())
-            }
-            fn capture(&mut self) -> Result<Vec<u8>> {
-                Ok(vec![])
-            }
-            fn input(&mut self, _: &Input) -> Result<()> {
-                self.injected += 1;
-                Ok(())
-            }
-            fn release(&mut self) {}
-        }
-        let expected = DesktopContext {
-            display: crate::Display {
-                id: 1,
-                name: "bound".into(),
-                x: 0,
-                y: 0,
-                width: 64,
-                height: 64,
-            },
-            generation: 1,
-            desktop: crate::DesktopKind::Ordinary,
-        };
-        let mut backend = Bound {
-            context: expected.clone(),
-            injected: 0,
-        };
-        let (mut sequence, mut last_input) = (0, std::time::Instant::now());
-        let mut send = |backend: &mut Bound, next| {
-            let request = Request::Input {
-                expected: expected.clone(),
-                sequence: next,
-                input: Input::Move { x: 1, y: 1 },
-            };
-            serve(backend, request, &mut sequence, &mut last_input).map(|(response, _)| response)
-        };
-        // The host keeps the desktop an answer reports, for its pointer.
-        let response = send(&mut backend, 1).unwrap();
-        assert_eq!(response.context, Some(expected.clone()));
-        assert!(send(&mut backend, 1).is_err(), "a repeated sequence");
-        // The same generation on a resized display is another desktop.
-        backend.context.display.width = 32;
-        assert!(send(&mut backend, 2).is_err());
-        assert_eq!(backend.injected, 1);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn the_worker_waits_out_a_paused_host() {
-        async fn answer(host: &mut tokio::io::DuplexStream) -> Result<Response> {
-            let response = ipc::read_json(host).await?;
-            ipc::read_bytes(host, ipc::MAX_FRAME).await?;
-            Ok(response)
-        }
-        let (mut host, mut worker) = tokio::io::duplex(1 << 16);
-        let exchange = tokio::spawn(async move {
-            exchange(&mut worker, 1, |_| async {
-                Ok((
-                    Response {
-                        context: None,
-                        error: None,
-                        video: None,
-                        cursor: None,
-                        pending: 0,
-                        double_click: None,
-                        h265: None,
-                    },
-                    vec![],
-                ))
-            })
-            .await
-        });
-        answer(&mut host).await.unwrap();
-        // The viewer stays paused for a minute: its host sends nothing.
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        ipc::write_json(&mut host, &Request::Context {})
-            .await
-            .unwrap();
-        answer(&mut host).await.unwrap();
-        ipc::write_json(&mut host, &Request::Close {})
-            .await
-            .unwrap();
-        answer(&mut host).await.unwrap();
-        exchange.await.unwrap().unwrap();
-    }
-
     #[test]
     fn desktop_hook_exits_when_startup_is_abandoned_or_owner_drops() {
         // Registers a passive hook only; never changes desktops or sends input.

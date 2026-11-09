@@ -1,4 +1,5 @@
 use super::*;
+use crate::oop::proto::{Request, TIMEOUT};
 use std::{
     ffi::OsString,
     sync::{Arc, Mutex},
@@ -165,7 +166,7 @@ fn entry(_: Vec<OsString>) {
             .enable_all()
             .build()?;
         runtime.block_on(async {
-            let mut listener = ipc::bind(PIPE, Some(&config.owner_sid), true)?;
+            let mut listener = pipe::bind(PIPE, Some(&config.owner_sid), true)?;
             status.set_service_status(state(ServiceState::Running, 0)).map_err(error)?;
             let mut background = tokio::spawn(super::background::run(stop.clone()));
             let capture = async {
@@ -173,7 +174,7 @@ fn entry(_: Vec<OsString>) {
                     tokio::select! { () = stop.cancelled() => break, result = listener.connect() => result? }
                     // Keep one live server instance while replacing the listener,
                     // so another process can never claim the pipe name in between.
-                    let next = ipc::bind(PIPE, Some(&config.owner_sid), false)?;
+                    let next = pipe::bind(PIPE, Some(&config.owner_sid), false)?;
                     let connection = std::mem::replace(&mut listener, next);
                     let _ = session(connection, &config, stop.clone(), &sessions).await;
                 }
@@ -215,7 +216,7 @@ async fn session(
     let revoked = sessions.begin(session.session);
     session.check()?;
     let name = format!("{PIPE}.worker.{}", crate::security::secret()?);
-    let mut private = ipc::bind(&name, None, true)?;
+    let mut private = pipe::bind(&name, None, true)?;
     let child = spawn_worker(config, session.session, &name)?;
     tokio::time::timeout(TIMEOUT, private.connect())
         .await
@@ -223,7 +224,7 @@ async fn session(
     let mut worker_pid = 0;
     unsafe {
         windows::Win32::System::Pipes::GetNamedPipeClientProcessId(
-            ipc::raw(&private),
+            pipe::raw(&private),
             &mut worker_pid,
         )
     }

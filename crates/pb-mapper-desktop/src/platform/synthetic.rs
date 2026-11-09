@@ -1,0 +1,401 @@
+//! A platform for tests: in-memory parts that record what they are asked,
+//! behind the same `PlatformBackend` every real platform uses. `PUSH = false`
+//! is a pulled encoder that thread C polls, as Windows' MFT; `PUSH = true` is
+//! a pushing one that wakes thread C when a unit is ready, as a callback
+//! encoder does.
+
+use super::{
+    CursorSource, Desktop, HostSupport, Injector, NoModes, Parts, Platform, StillCapture,
+    VideoSource,
+};
+use crate::{
+    BackendError, Button, CursorMode, DRAIN_POLL, Display, DisplaySelection, EncodedFrame,
+    FailureKind, HostOs, Key, Result, VideoCodec, VideoFormat, VideoLimits, VideoRate, Waker,
+    input::held::Pressed,
+};
+use parking_lot::Mutex;
+use std::{
+    collections::VecDeque,
+    future::Future,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+pub(crate) enum Synthetic<const PUSH: bool> {}
+
+/// What every part of a session shares, and the test reads and steers.
+#[derive(Clone, Default)]
+pub(crate) struct Probe(Arc<Mutex<State>>);
+#[derive(Default)]
+struct State {
+    lost: bool,
+    pointer: Option<(i32, i32)>,
+    down: Vec<Key>,
+    released: Vec<Pressed>,
+    /// Submit to drain, per unit.
+    latencies: Vec<Duration>,
+}
+impl Probe {
+    pub(crate) fn display() -> Display {
+        Display {
+            id: 1,
+            name: "synthetic".into(),
+            x: -1920,
+            y: 0,
+            width: 64,
+            height: 48,
+        }
+    }
+    fn lose(&self, lost: bool) {
+        self.0.lock().lost = lost;
+    }
+}
+
+impl<const PUSH: bool> Platform for Synthetic<PUSH> {
+    const OS: HostOs = HostOs::Linux;
+    type Grant = Probe;
+    type Desktop = SynDesktop;
+    type Video = SynVideo<PUSH>;
+    type Input = SynInput;
+    type Cursor = SynCursor;
+    type Modes = NoModes;
+    type Still = SynStill;
+
+    fn support() -> HostSupport {
+        HostSupport {
+            host: true,
+            viewer: true,
+            secure_desktop: false,
+            os: Some(Self::OS),
+            reason: None,
+        }
+    }
+    fn displays() -> Result<Vec<Display>> {
+        Ok(vec![Probe::display()])
+    }
+    fn acquire(_: &DisplaySelection) -> impl Future<Output = Result<(Probe, Display)>> + Send {
+        std::future::ready(Ok((Probe::default(), Probe::display())))
+    }
+    fn open(probe: &Probe, _: &Display) -> Result<Parts<Self>> {
+        Ok(Parts {
+            input: SynInput(probe.clone()),
+            cursor: SynCursor(probe.clone()),
+            modes: NoModes,
+            still: SynStill,
+            desktop: SynDesktop(probe.clone()),
+        })
+    }
+    fn default_state_dir() -> Option<PathBuf> {
+        None
+    }
+    fn recover(_: &Path) -> Result<usize> {
+        Ok(0)
+    }
+}
+
+pub(crate) struct SynDesktop(Probe);
+impl Desktop for SynDesktop {
+    type Scope = ();
+    fn scope(&self) {}
+    fn prepare(&mut self, _: impl FnOnce()) -> Result<()> {
+        Ok(())
+    }
+    fn display(&mut self) -> Result<Display> {
+        if self.0.0.lock().lost {
+            return Err(BackendError::new(FailureKind::DisplayLost, "display unplugged").into());
+        }
+        Ok(Probe::display())
+    }
+}
+
+/// Units in flight, each with its submit time and when it is ready.
+type Flight = Arc<Mutex<VecDeque<(Instant, Option<EncodedFrame>)>>>;
+
+pub(crate) struct SynVideo<const PUSH: bool> {
+    probe: Probe,
+    codec: VideoCodec,
+    waker: Waker,
+    flight: Flight,
+    frames: u64,
+}
+impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
+    type Grant = Probe;
+    const DRAIN: Option<Duration> = if PUSH { None } else { Some(DRAIN_POLL) };
+    fn encodes(_: &Display, codec: VideoCodec) -> bool {
+        codec == VideoCodec::H264
+    }
+    fn open(
+        probe: &Probe,
+        _: &Display,
+        codec: VideoCodec,
+        _: VideoLimits,
+        _: VideoRate,
+        waker: &Waker,
+    ) -> Result<Self> {
+        Ok(Self {
+            probe: probe.clone(),
+            codec,
+            waker: waker.clone(),
+            flight: Flight::default(),
+            frames: 0,
+        })
+    }
+    fn codec(&self) -> VideoCodec {
+        self.codec
+    }
+    fn set_rate(&mut self, _: VideoRate) -> Result<()> {
+        Ok(())
+    }
+    /// Pulled, a unit is ready at the next poll; pushed, a millisecond later
+    /// on the encoder's own thread, which wakes thread C.
+    fn submit(&mut self, keyframe: bool) -> Result<()> {
+        self.frames += 1;
+        let display = Probe::display();
+        let frame = EncodedFrame {
+            format: VideoFormat {
+                codec: self.codec,
+                width: display.width,
+                height: display.height,
+                keyframe,
+                pts_us: self.frames * 16_667,
+                ..VideoFormat::default()
+            },
+            bytes: vec![1; 64],
+        };
+        let mut flight = self.flight.lock();
+        if !PUSH {
+            flight.push_back((Instant::now(), Some(frame)));
+            return Ok(());
+        }
+        flight.push_back((Instant::now(), None));
+        drop(flight);
+        let (flight, waker) = (self.flight.clone(), self.waker.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1));
+            if let Some(slot) = flight.lock().iter_mut().find(|(_, unit)| unit.is_none()) {
+                slot.1 = Some(frame);
+            }
+            waker.wake();
+        });
+        Ok(())
+    }
+    fn drain(&mut self) -> Result<Option<EncodedFrame>> {
+        let mut flight = self.flight.lock();
+        if flight.front().is_none_or(|(_, unit)| unit.is_none()) {
+            return Ok(None);
+        }
+        let Some((submitted, frame)) = flight.pop_front() else {
+            return Ok(None);
+        };
+        self.probe.0.lock().latencies.push(submitted.elapsed());
+        Ok(frame)
+    }
+    fn pending(&self) -> usize {
+        self.flight.lock().len()
+    }
+}
+
+pub(crate) struct SynInput(Probe);
+impl Injector for SynInput {
+    const LOCK: bool = false;
+    fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
+        self.0.0.lock().pointer = Some((x, y));
+        Ok(())
+    }
+    fn button(&mut self, _: Button, _: bool) -> Result<()> {
+        Ok(())
+    }
+    fn wheel(&mut self, _: i32, _: i32) -> Result<()> {
+        Ok(())
+    }
+    fn key(&mut self, key: Key, down: bool) -> Result<()> {
+        let mut state = self.0.0.lock();
+        if down {
+            state.down.push(key);
+        } else {
+            state.down.retain(|held| *held != key);
+        }
+        Ok(())
+    }
+    fn text(&mut self, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn lock(&mut self) -> Result<()> {
+        Err(BackendError::new(FailureKind::Unsupported, "lock").into())
+    }
+    fn release(&mut self, pressed: Pressed) -> Result<()> {
+        self.0.0.lock().released.push(pressed);
+        Ok(())
+    }
+}
+
+pub(crate) struct SynCursor(Probe);
+impl CursorSource for SynCursor {
+    const MODE: CursorMode = CursorMode::Separate;
+    fn read(&mut self) -> Result<Option<(i32, i32, bool)>> {
+        Ok(self.0.0.lock().pointer.map(|(x, y)| (x, y, true)))
+    }
+}
+
+pub(crate) struct SynStill;
+impl StillCapture for SynStill {
+    fn jpeg(&mut self, _: &Display) -> Result<Vec<u8>> {
+        Ok(vec![0xff, 0xd8, 0xff, 0xd9])
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::{
+        Backend, Host, HostOptions, Input, Pull, QualityPreset, StateReason, Viewer, ViewerConfig,
+        ViewerStatus, launch::Launcher, native::PlatformBackend, platform::fallback_caps,
+    };
+    use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
+    use pb_mapper_testkit::{Relay, admin_credential};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A viewer that presents every unit at once, on its own thread.
+    struct Watching {
+        viewer: Viewer,
+        stop: Arc<AtomicBool>,
+        renderer: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Watching {
+        async fn connect(client: &Client, host: &Host) -> Self {
+            let config = ViewerConfig {
+                codecs: vec![VideoCodec::H264],
+                limits: VideoLimits::for_viewer(60.0),
+                fps_override: false,
+                quality: QualityPreset::Balanced,
+                progress: None,
+            };
+            let options = ConnectOptions {
+                path: PathPolicy::RelayOnly,
+                ..Default::default()
+            };
+            let viewer = Viewer::connect(client, host.invitation(), options, config)
+                .await
+                .unwrap();
+            let consumer = viewer.video_sink().attach().unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let done = stop.clone();
+            let renderer = std::thread::spawn(move || {
+                while !done.load(Ordering::Acquire) {
+                    match consumer.next(Duration::from_millis(50), 4 << 20) {
+                        Pull::Unit(unit) => {
+                            consumer.presented(unit.generation, unit.frame_id);
+                        }
+                        Pull::Closed => break,
+                        _ => {}
+                    }
+                }
+            });
+            Self {
+                viewer,
+                stop,
+                renderer: Some(renderer),
+            }
+        }
+        async fn until(&self, condition: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
+            until(|| condition(&self.viewer.status())).await;
+            self.viewer.status()
+        }
+        async fn stop(mut self) {
+            self.viewer.stop().await.unwrap();
+            self.stop.store(true, Ordering::Release);
+            if let Some(renderer) = self.renderer.take() {
+                renderer.join().unwrap();
+            }
+        }
+    }
+
+    async fn until(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    /// One session streams, applies input at the display's own offset and
+    /// releases the key it holds when it ends; the next reports its display
+    /// lost as the viewer's reason. A pushing source is drained as it wakes
+    /// thread C, never polled.
+    async fn session<const PUSH: bool>(name: &str) {
+        let relay = Relay::start(name).await;
+        let client =
+            Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
+        let probe = Probe::default();
+        let grant = Arc::new(probe.clone());
+        let backend =
+            PlatformBackend::<Synthetic<PUSH>>::open(grant.clone(), &Probe::display()).unwrap();
+        assert_eq!(backend.drain_poll().is_none(), PUSH);
+        drop(backend);
+        let launch = Arc::new(Launcher::new(
+            move || PlatformBackend::<Synthetic<PUSH>>::open(grant.clone(), &Probe::display()),
+            fallback_caps::<Synthetic<PUSH>>(),
+        ));
+        let mut options = HostOptions::new(format!("desktop:{name}"));
+        options.allow_control = true;
+        options.allow_direct = false;
+        let host = Host::builder(options)
+            .launch(launch)
+            .start(&client)
+            .await
+            .unwrap();
+
+        let watching = Watching::connect(&client, &host).await;
+        watching.until(|status| status.fresh).await;
+        watching.viewer.request_control(true).unwrap();
+        let controlled = watching
+            .until(|status| status.controlling && status.fresh)
+            .await;
+        let shift = Input::Key {
+            key: Key::Shift,
+            down: true,
+        };
+        let point = Input::Move { x: 3, y: 4 };
+        watching
+            .viewer
+            .input(controlled.generation, &[shift, point])
+            .unwrap();
+        until(|| {
+            let state = probe.0.lock();
+            state.down == [Key::Shift] && state.pointer == Some((-1917, 4))
+        })
+        .await;
+        if PUSH {
+            // Drained when the source woke thread C, not at the next tick.
+            let latencies = probe.0.lock().latencies.clone();
+            let prompt = latencies
+                .iter()
+                .filter(|latency| **latency < Duration::from_millis(8))
+                .count();
+            assert!(prompt * 2 >= latencies.len(), "{latencies:?}");
+        }
+        watching.stop().await;
+        until(|| probe.0.lock().released.contains(&Pressed::Key(Key::Shift))).await;
+
+        let watching = Watching::connect(&client, &host).await;
+        watching.until(|status| status.fresh).await;
+        probe.lose(true);
+        until(|| host.status().reason == Some(StateReason::DisplayLost)).await;
+        watching.stop().await;
+        host.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pulled_platform_streams_injects_releases_and_loses_its_display() {
+        session::<false>("desktop-synthetic-pull").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pushed_platform_is_drained_when_it_wakes_thread_c() {
+        session::<true>("desktop-synthetic-push").await;
+    }
+}

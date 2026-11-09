@@ -2,15 +2,13 @@
 //! capture and optional persistent hosting through protected local IPC. Each
 //! capture worker is bound to the approved owner's current console login,
 //! including its locked desktop; another login never inherits that grant.
-//! There is no arbitrary command execution, file or clipboard API.
+//! There is no arbitrary command execution, file or clipboard API. The
+//! backend it serves crosses the pipe through the platform-neutral `oop`.
 pub mod background;
-#[path = "../../../oop/client.rs"]
-mod client;
 #[cfg(feature = "windows-helper")]
 mod install;
-#[path = "../../../oop/ipc.rs"]
-mod ipc;
 mod os;
+mod pipe;
 #[cfg(feature = "windows-helper")]
 mod process_acl;
 mod restart;
@@ -18,19 +16,85 @@ mod restart;
 mod service;
 pub(crate) mod worker;
 
-use crate::{Backend, DesktopContext, Input, Result, error};
+use crate::{
+    BackendCaps, DisplaySelection, HostOs, Result, error,
+    launch::{Launch, Launcher},
+    oop::{client::RemoteBackend, ipc},
+};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::net::windows::named_pipe::NamedPipeClient;
 
-pub use client::backend;
-#[cfg(feature = "windows-helper")]
-pub(crate) use os::SessionIdentity;
 pub use os::{Action, request_installation};
 pub use restart::prepare as prepare_application_restart;
 
 #[cfg(feature = "windows-helper")]
 pub(crate) fn record_input_failure(detail: &str) {
     os::record_service_event("input_failed", detail);
+}
+
+/// What a session through the helper can do when its worker does not
+/// describe itself in time: it locks the workstation, as the helper always
+/// can.
+fn fallback_caps() -> BackendCaps {
+    BackendCaps {
+        lock: true,
+        os: Some(HostOs::Windows),
+        ..BackendCaps::default()
+    }
+}
+
+/// Sessions captured by the helper, on the display `selection` names.
+/// Refused before the host registers unless the helper is ready.
+pub(crate) fn launch(selection: &DisplaySelection) -> Result<Arc<dyn Launch>> {
+    status().ensure_ready()?;
+    let display_id = super::desktop::resolve(selection)?.id;
+    Ok(Arc::new(Launcher::new(
+        move || backend(display_id),
+        fallback_caps(),
+    )))
+}
+
+/// Connect from the dedicated SDK capture worker. No automatic privilege
+/// escalation or fallback: failure is observable at the viewer and local UI.
+pub(crate) fn backend(display_id: u32) -> Result<RemoteBackend<NamedPipeClient>> {
+    status().ensure_ready()?;
+    let config = configuration()?;
+    connect_backend(display_id, &config)
+}
+
+/// The background supervisor uses the same bounded IPC as the UI. The server
+/// independently accepts only its own kernel-reported PID, never arbitrary
+/// SYSTEM callers, and binds the worker to the approved owner's current login.
+#[cfg(feature = "windows-helper")]
+fn service_backend(display_id: u32) -> Result<RemoteBackend<NamedPipeClient>> {
+    let config = configuration()?;
+    if os::current_sid()? != "S-1-5-18"
+        || os::session(std::process::id())? != 0
+        || !os::same_path(&std::env::current_exe()?, &config.helper_executable)
+    {
+        return Err(error("background capture requires the installed service"));
+    }
+    connect_backend(display_id, &config)
+}
+
+fn connect_backend(
+    display_id: u32,
+    config: &Configuration,
+) -> Result<RemoteBackend<NamedPipeClient>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let pipe = {
+        let _entered = runtime.enter();
+        let pipe = pipe::connect(PIPE)?;
+        os::verify_server(&pipe, &config.helper_executable, None)?;
+        pipe
+    };
+    RemoteBackend::start(runtime, pipe, display_id, fallback_caps())
 }
 
 /// The helper IPC this build speaks. A helper installed by an older build
@@ -45,9 +109,6 @@ pub const HELPER_PROTOCOL: u32 = 6;
 const SERVICE: &str = "PbMapperDesktop";
 const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v6";
 const EXECUTABLE: &str = "pb-mapper-desktop-helper.exe";
-const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-/// The longest a helper drain may wait for encoder output.
-const DRAIN_WAIT_MAX_MS: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -247,7 +308,7 @@ pub fn status() -> Status {
                 identity_verified: identity.is_ok(),
                 installed_application: Some(config.ui_executable),
                 protocol,
-                update_required: update_required(protocol, running, || ipc::exists(PIPE)),
+                update_required: update_required(protocol, running, || pipe::exists(PIPE)),
                 update_available: update_available(&config.helper_executable),
                 message: identity.err().map_or_else(
                     || {
@@ -266,75 +327,6 @@ pub fn status() -> Status {
             ..Default::default()
         },
     }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "op", deny_unknown_fields, rename_all = "snake_case")]
-enum Request {
-    Start {
-        display_id: u32,
-    },
-    Attach {
-        display_id: u32,
-        session: os::SessionIdentity,
-    },
-    // Struct variants throughout: serde ignores extra fields on an internally
-    // tagged unit variant, which would undo `deny_unknown_fields`.
-    Context {},
-    Capture {},
-    ConfigureVideo {
-        limits: crate::VideoLimits,
-        nominal_fps: u32,
-    },
-    /// Drain finished output, then submit one capture when `submit` is set.
-    /// A drain alone may wait up to `wait_ms` (at most 4) for encoder output
-    /// while units are pending. The helper never paces.
-    Video {
-        expected: DesktopContext,
-        codec: crate::VideoCodec,
-        submit: bool,
-        keyframe: bool,
-        rate: crate::VideoRate,
-        wait_ms: u32,
-    },
-    Presented {
-        generation: u64,
-    },
-    /// Includes `Input::Lock`. A `drag_start` press is held by the host's
-    /// thread C before it gets here; the helper ignores the flag. `expected`
-    /// is the desktop the host admitted it on: the worker injects only while
-    /// the bound desktop is still that one, display included. The answer
-    /// carries the pointer as the input left it, when the worker could read
-    /// it.
-    Input {
-        expected: DesktopContext,
-        sequence: u64,
-        input: Input,
-    },
-    /// Whether the worker encodes H.265 on its display, which it probes in
-    /// the interactive session.
-    H265 {},
-    Release {},
-    Close {},
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Response {
-    context: Option<DesktopContext>,
-    error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    video: Option<crate::VideoFormat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    cursor: Option<crate::CursorPosition>,
-    /// Units the worker's encoder holds, for the host's submit gate.
-    pending: u32,
-    /// In the `Start` response: the double-click time and box of the
-    /// interactive session, read by the worker, which runs in it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    double_click: Option<crate::DoubleClickGuard>,
-    /// In the `H265` response.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    h265: Option<bool>,
 }
 
 /// Entry point of the dedicated helper executable, never the Flutter process.

@@ -1,9 +1,22 @@
-use super::*;
-use tokio::net::windows::named_pipe::NamedPipeClient;
+//! The out-of-process backend's client: a [`Backend`] whose calls cross a
+//! transport to a worker that serves its own backend (`server::serve`).
+//! Windows connects it over the helper's named pipe; any platform with a
+//! privileged agent can connect it over its own transport.
+use super::{
+    Transport, ipc,
+    proto::{DRAIN_WAIT_MAX_MS, Request, Response, TIMEOUT},
+};
+use crate::{
+    Backend, BackendCaps, Description, DesktopContext, Input, Result, Waker, error,
+    modes::{Mode, ModeList},
+};
 
-struct RemoteBackend {
+pub(crate) struct RemoteBackend<T: Transport> {
     runtime: tokio::runtime::Runtime,
-    pipe: Option<NamedPipeClient>,
+    pipe: Option<T>,
+    /// What the worker's backend can do. Protocol 6 does not say; the
+    /// connector knows its worker.
+    caps: BackendCaps,
     context: Option<DesktopContext>,
     video: Option<crate::VideoFormat>,
     cursor: Option<crate::CursorPosition>,
@@ -20,49 +33,24 @@ struct RemoteBackend {
     sequence: u64,
     failed: bool,
 }
-
-/// Connect from the dedicated SDK capture worker. No automatic privilege
-/// escalation or fallback: failure is observable at the viewer and local UI.
-pub fn backend(display_id: u32) -> Result<Box<dyn Backend>> {
-    status().ensure_ready()?;
-    let config = configuration()?;
-    connect_backend(display_id, &config)
-}
-
-/// The background supervisor uses the same bounded IPC as the UI. The server
-/// independently accepts only its own kernel-reported PID, never arbitrary
-/// SYSTEM callers, and binds the worker to the approved owner's current login.
-#[cfg(feature = "windows-helper")]
-pub(super) fn service_backend(display_id: u32) -> Result<Box<dyn Backend>> {
-    let config = configuration()?;
-    if os::current_sid()? != "S-1-5-18"
-        || os::session(std::process::id())? != 0
-        || !os::same_path(&std::env::current_exe()?, &config.helper_executable)
-    {
-        return Err(error("background capture requires the installed service"));
+impl<T: Transport> RemoteBackend<T> {
+    /// Start the worker on `display_id`, over `pipe`, whose calls `runtime`
+    /// drives; `caps` is what its backend can do.
+    pub(crate) fn start(
+        runtime: tokio::runtime::Runtime,
+        pipe: T,
+        display_id: u32,
+        caps: BackendCaps,
+    ) -> Result<Self> {
+        let mut backend = Self::new(runtime, pipe, caps);
+        backend.call(Request::Start { display_id })?;
+        Ok(backend)
     }
-    connect_backend(display_id, &config)
-}
-
-fn connect_backend(display_id: u32, config: &Configuration) -> Result<Box<dyn Backend>> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let pipe = {
-        let _entered = runtime.enter();
-        let pipe = ipc::connect(PIPE)?;
-        os::verify_server(&pipe, &config.helper_executable, None)?;
-        pipe
-    };
-    let mut backend = RemoteBackend::new(runtime, pipe);
-    backend.call(Request::Start { display_id })?;
-    Ok(Box::new(backend))
-}
-impl RemoteBackend {
-    fn new(runtime: tokio::runtime::Runtime, pipe: NamedPipeClient) -> Self {
+    fn new(runtime: tokio::runtime::Runtime, pipe: T, caps: BackendCaps) -> Self {
         Self {
             runtime,
             pipe: Some(pipe),
+            caps,
             context: None,
             video: None,
             cursor: None,
@@ -188,7 +176,8 @@ fn legacy_kind(text: &str) -> Option<crate::FailureKind> {
 fn disconnected(failure: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::NotConnected, failure.to_string())
 }
-impl Backend for RemoteBackend {
+#[deny(clippy::missing_trait_methods)]
+impl<T: Transport> Backend for RemoteBackend<T> {
     fn configure_video(&mut self, limits: crate::VideoLimits, nominal_fps: u32) -> Result<()> {
         limits.validate()?;
         self.call(Request::ConfigureVideo {
@@ -242,18 +231,33 @@ impl Backend for RemoteBackend {
     /// The worker probes the GPU of the display it captures, in the
     /// interactive session, which the background host in session 0 cannot;
     /// it is asked only for a viewer that decodes H.265.
-    fn describe(&mut self, probe_h265: bool) -> Result<crate::Description> {
+    fn describe(&mut self, probe_h265: bool) -> Result<Description> {
         let display = self.display()?;
         let h265 = probe_h265 && self.call(Request::H265 {}).is_ok() && self.h265 == Some(true);
-        Ok(crate::Description {
+        Ok(Description {
             display,
-            caps: crate::BackendCaps {
+            caps: BackendCaps {
                 h265,
-                lock: true,
-                os: Some(crate::HostOs::Windows),
-                ..crate::BackendCaps::default()
+                ..self.caps.clone()
             },
         })
+    }
+    /// The worker wakes nothing here: its output is drained by polling.
+    fn bind(&mut self, _waker: Waker) {}
+    fn capture_consistent(&mut self, expected: &DesktopContext) -> Result<Vec<u8>> {
+        if &self.context()? != expected {
+            return Err(error("desktop changed before capture"));
+        }
+        let frame = self.capture()?;
+        if &self.context()? != expected {
+            return Err(error(
+                "desktop changed during capture; waiting for a current frame",
+            ));
+        }
+        Ok(frame)
+    }
+    fn drain_poll(&self) -> Option<std::time::Duration> {
+        Some(crate::DRAIN_POLL)
     }
     fn input(&mut self, input: &Input) -> Result<()> {
         let context = self
@@ -287,8 +291,17 @@ impl Backend for RemoteBackend {
     fn double_click_guard(&mut self) -> Option<crate::DoubleClickGuard> {
         self.double_click
     }
+    fn display_modes(&mut self, _expected: &DesktopContext) -> Result<Option<ModeList>> {
+        Ok(None)
+    }
+    fn set_display_mode(&mut self, _expected: &DesktopContext, _mode: Mode) -> Result<()> {
+        Err(crate::BackendError::new(crate::FailureKind::Unsupported, "display modes").into())
+    }
+    fn restore_display_mode(&mut self) -> Result<bool> {
+        Ok(false)
+    }
 }
-impl Drop for RemoteBackend {
+impl<T: Transport> Drop for RemoteBackend<T> {
     fn drop(&mut self) {
         if !self.failed {
             let _ = self.call(Request::Close {});
@@ -300,37 +313,26 @@ impl Drop for RemoteBackend {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use tokio::net::windows::named_pipe::ServerOptions;
+    use tokio::io::DuplexStream;
 
-    /// A `RemoteBackend` on a private pipe whose helper answers each request
-    /// with `answer` and an empty image, until `Close`.
+    /// A `RemoteBackend` over an in-memory pipe whose worker answers each
+    /// request with `answer` and an empty image, until `Close`.
     fn remote(
         answer: impl Fn(&Request) -> Response + Send + 'static,
-    ) -> (RemoteBackend, std::thread::JoinHandle<()>) {
-        let name = format!(
-            r"\\.\pipe\pb-mapper.desktop-helper-test.{}",
-            crate::security::secret().unwrap()
-        );
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let mut server = {
-            let _entered = runtime.enter();
-            ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(&name)
-                .unwrap()
-        };
+    ) -> (RemoteBackend<DuplexStream>, std::thread::JoinHandle<()>) {
+        let (pipe, mut worker) = tokio::io::duplex(1 << 16);
         let helper = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             runtime.block_on(async move {
-                server.connect().await.unwrap();
                 loop {
-                    let request: Request = ipc::read_json(&mut server).await.unwrap();
-                    ipc::write_json(&mut server, &answer(&request))
+                    let request: Request = ipc::read_json(&mut worker).await.unwrap();
+                    ipc::write_json(&mut worker, &answer(&request))
                         .await
                         .unwrap();
-                    ipc::write_bytes(&mut server, &[], ipc::MAX_FRAME)
+                    ipc::write_bytes(&mut worker, &[], ipc::MAX_FRAME)
                         .await
                         .unwrap();
                     if matches!(request, Request::Close {}) {
@@ -343,11 +345,10 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let pipe = {
-            let _entered = runtime.enter();
-            ipc::connect(&name).unwrap()
-        };
-        (RemoteBackend::new(runtime, pipe), helper)
+        (
+            RemoteBackend::new(runtime, pipe, BackendCaps::default()),
+            helper,
+        )
     }
 
     fn empty() -> Response {

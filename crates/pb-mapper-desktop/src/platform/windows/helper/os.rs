@@ -1,4 +1,5 @@
 use super::*;
+pub(crate) use crate::oop::proto::SessionIdentity;
 use std::{
     ffi::c_void,
     os::windows::{
@@ -347,16 +348,6 @@ impl Drop for ScopedPrivileges {
         }
     }
 }
-/// The service attests this login instance before starting a privileged worker.
-/// Session IDs alone are reusable after logoff; lock/unlock keeps this identity.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SessionIdentity {
-    pub session: u32,
-    logon_time: i64,
-    user: String,
-    domain: String,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ConsoleState {
@@ -428,7 +419,7 @@ fn verify_pipe_identity(
     capture: bool,
 ) -> Result<Handle> {
     let mut id = 0;
-    unsafe { GetNamedPipeClientProcessId(super::ipc::raw(pipe), &mut id) }.map_err(error)?;
+    unsafe { GetNamedPipeClientProcessId(super::pipe::raw(pipe), &mut id) }.map_err(error)?;
     let process = process(id)?;
     let caller_session = session(id)?;
     let caller_sid = sid(token_for_process(process.raw())?.raw())?;
@@ -452,7 +443,7 @@ fn verify_pipe_identity(
     protected_file(&config.ui_executable)?;
     // Bind to the pipe's actual security context too, rather than trusting a
     // PID sent in a message. Revert synchronously before any await point.
-    unsafe { ImpersonateNamedPipeClient(super::ipc::raw(pipe)) }.map_err(error)?;
+    unsafe { ImpersonateNamedPipeClient(super::pipe::raw(pipe)) }.map_err(error)?;
     let verified = (|| {
         let mut token = HANDLE::default();
         unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) }
@@ -538,7 +529,7 @@ pub fn verify_server(
     parent: Option<u32>,
 ) -> Result<()> {
     let mut id = 0;
-    unsafe { GetNamedPipeServerProcessId(super::ipc::raw(pipe), &mut id) }.map_err(error)?;
+    unsafe { GetNamedPipeServerProcessId(super::pipe::raw(pipe), &mut id) }.map_err(error)?;
     let expected_id = if let Some(id) = parent {
         id
     } else {

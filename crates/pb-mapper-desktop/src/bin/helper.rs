@@ -2,7 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 fn main() {
     #[cfg(windows)]
-    if let Err(error) = pb_mapper_desktop::helper::run() {
+    if let Err(error) = pb_mapper_desktop::privileged::run() {
         eprintln!("desktop helper: {error}");
         std::process::exit(1);
     }

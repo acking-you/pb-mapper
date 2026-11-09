@@ -189,7 +189,7 @@ impl HostBuilder<Native> {
     /// Refused before registering where this platform cannot host, or the
     /// privileged helper is not ready.
     pub async fn start(self, client: &Client) -> Result<Host> {
-        let launch = platform::native_launch(&self.options)?;
+        let launch = platform::native_launch(&self.options).await?;
         let mut native = self.launch(launch);
         native.source.native = true;
         native.start(client).await
@@ -394,7 +394,7 @@ impl Host {
             .invitation(options.service.clone())
             .map_err(invalid)?;
         let launch = if self.native {
-            platform::native_launch(&options)?
+            platform::native_launch(&options).await?
         } else {
             self.launch.clone()
         };

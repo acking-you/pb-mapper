@@ -138,7 +138,7 @@ mod tests {
             Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "helper::process_acl::tests::identity_query_does_not_grant_process_control",
+                    "platform::windows::helper::process_acl::tests::identity_query_does_not_grant_process_control",
                     "--nocapture",
                 ])
                 .env(CHILD, "1")

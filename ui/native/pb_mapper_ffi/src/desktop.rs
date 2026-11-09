@@ -586,11 +586,13 @@ fn failed_background(previous: Option<&Value>, error: CtlError) -> Value {
 async fn query_background() -> Result<Value, CtlError> {
     #[cfg(windows)]
     {
-        let helper = tokio::task::spawn_blocking(desktop::helper::status)
+        let helper = tokio::task::spawn_blocking(desktop::privileged::status)
             .await
             .map_err(err)?;
         query_background_for_helper(helper, async {
-            let snapshot = desktop::helper::background::status().await.map_err(err)?;
+            let snapshot = desktop::privileged::background::status()
+                .await
+                .map_err(err)?;
             serde_json::to_value(snapshot).map_err(err)
         })
         .await
@@ -603,7 +605,7 @@ async fn query_background() -> Result<Value, CtlError> {
 
 #[cfg(windows)]
 async fn query_background_for_helper(
-    helper: desktop::helper::Status,
+    helper: desktop::privileged::Status,
     query: impl std::future::Future<Output = Result<Value, CtlError>>,
 ) -> Result<Value, CtlError> {
     if !helper.installed {
@@ -718,7 +720,7 @@ async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<
     let credential = process_credential()?;
     let namespace = credential.key_id();
     let credential = credential_text(credential)?;
-    let helper = tokio::task::spawn_blocking(desktop::helper::status)
+    let helper = tokio::task::spawn_blocking(desktop::privileged::status)
         .await
         .map_err(err)?;
     // A helper that cannot be asked resumes the host the card showed.
@@ -735,7 +737,7 @@ async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<
     };
     let options = resume_options(&saved, config, namespace, credential, move_relay)?;
     if helper_setup(&helper, true).is_some() {
-        let desktop::helper::background::Settings {
+        let desktop::privileged::background::Settings {
             service,
             display_id,
             allow_control,
@@ -744,7 +746,7 @@ async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<
         return enable_host(handle, &mut slot, service, display_id, allow_control, true).await;
     }
     disable_legacy_startup(handle).await?;
-    let snapshot = desktop::helper::background::configure(options)
+    let snapshot = desktop::privileged::background::configure(options)
         .await
         .map_err(err)?;
     let snapshot = handle
@@ -765,8 +767,8 @@ fn resume_options(
     namespace: u64,
     credential: String,
     move_relay: bool,
-) -> Result<desktop::helper::background::Options, CtlError> {
-    let settings: desktop::helper::background::Settings =
+) -> Result<desktop::privileged::background::Options, CtlError> {
+    let settings: desktop::privileged::background::Settings =
         serde_json::from_value(saved["settings"].clone())
             .ok()
             .filter(|_| background_configured(saved))
@@ -785,11 +787,11 @@ fn resume_options(
             "this computer is shared on another relay or credential namespace; moving it changes its invitation",
         ));
     }
-    Ok(desktop::helper::background::Options {
+    Ok(desktop::privileged::background::Options {
         server: config.server_address,
         credential,
         relay_transport: config.relay_transport,
-        settings: desktop::helper::background::Settings {
+        settings: desktop::privileged::background::Settings {
             auto_start: true,
             ..settings
         },
@@ -801,7 +803,7 @@ async fn stop_background(state: &DesktopState) -> Result<(), CtlError> {
     let snapshot = query_background().await?;
     #[cfg(windows)]
     if background_configured(&snapshot) && snapshot["service_disabled"] != true {
-        let snapshot = desktop::helper::background::stop().await.map_err(err)?;
+        let snapshot = desktop::privileged::background::stop().await.map_err(err)?;
         state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
         return Ok(());
     }
@@ -822,7 +824,7 @@ async fn revoke_background(handle: &PbMapperHandle) -> Result<Value, CtlError> {
         let namespace = get_process_credential()
             .ok()
             .map(|credential| credential.key_id());
-        let snapshot = desktop::helper::background::revoke_scope(server, namespace)
+        let snapshot = desktop::privileged::background::revoke_scope(server, namespace)
             .await
             .map_err(err)?;
         serde_json::to_value(snapshot).map_err(err)
@@ -924,7 +926,7 @@ pub unsafe extern "C" fn pb_mapper_desktop_call_json(
 async fn helper_action(handle: &PbMapperHandle, verb: HelperVerb) -> Result<Value, CtlError> {
     #[cfg(windows)]
     {
-        use desktop::helper::Action;
+        use desktop::privileged::Action;
         // Installing may resume a saved service grant. Keep it serialized
         // with local starts until the helper process exits. An update from
         // here keeps a stopped or Disabled service as it is.
@@ -940,12 +942,12 @@ async fn helper_action(handle: &PbMapperHandle, verb: HelperVerb) -> Result<Valu
             HelperVerb::Uninstall => Action::Uninstall,
         };
         let restart = matches!(action, Action::Install { .. });
-        tokio::task::spawn_blocking(move || desktop::helper::request_installation(action))
+        tokio::task::spawn_blocking(move || desktop::privileged::request_installation(action))
             .await
             .map_err(err)?
             .map_err(err)?;
         if restart {
-            desktop::helper::prepare_application_restart()
+            desktop::privileged::prepare_application_restart()
                 .await
                 .map_err(err)?;
         }
@@ -965,6 +967,35 @@ async fn load_trust(directory: PathBuf) -> Result<Option<trust::Saved>, CtlError
         .map_err(err)?
 }
 
+/// The `capabilities` op's `capabilities`: the keys the app has always read,
+/// and why this computer cannot host, when it cannot.
+fn capabilities_json(support: desktop::HostSupport) -> Value {
+    json!({
+        "host": support.host,
+        "viewer": support.viewer,
+        "secure_desktop": support.secure_desktop,
+        "mode": if support.os == Some(desktop::HostOs::Windows) {
+            "windows_desktop"
+        } else {
+            "native_viewer"
+        },
+        "reason": support.reason,
+    })
+}
+
+/// Whether this runner decodes H.264 natively: Windows where Media
+/// Foundation is installed. Android's runner always does.
+fn native_h264_decoder() -> bool {
+    #[cfg(windows)]
+    {
+        desktop::windows::media_foundation()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlError> {
     let state = &handle.desktop;
     match request {
@@ -972,10 +1003,10 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             return tokio::task::spawn_blocking(|| {
                 let displays = desktop::displays();
                 #[cfg(windows)]
-                let helper = serde_json::to_value(desktop::helper::status()).ok();
+                let helper = serde_json::to_value(desktop::privileged::status()).ok();
                 #[cfg(not(windows))]
                 let helper: Option<Value> = None;
-                json!({"capabilities": desktop::capabilities(), "helper": helper, "displays": displays.as_ref().ok(), "message": displays.err().map(|e| e.to_string())})
+                json!({"capabilities": capabilities_json(desktop::host_support()), "helper": helper, "displays": displays.as_ref().ok(), "message": displays.err().map(|e| e.to_string())})
             }).await.map_err(err);
         }
         Request::HelperAction { action } => return helper_action(handle, action).await,
@@ -1117,7 +1148,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                     let snapshot = query_background().await?;
                     if background_enabled(&snapshot) {
                         let snapshot =
-                            desktop::helper::background::set_control_allowed(allow_control)
+                            desktop::privileged::background::set_control_allowed(allow_control)
                                 .await
                                 .map_err(err)?;
                         state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
@@ -1168,7 +1199,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                 .as_ref()
                 .is_some_and(background_enabled)
             {
-                let snapshot = desktop::helper::background::end_session()
+                let snapshot = desktop::privileged::background::end_session()
                     .await
                     .map_err(err)?;
                 state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
@@ -1226,7 +1257,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             // Android, and Windows where Media Foundation is installed,
             // decode H.264 natively, and H.265 where the app found a decoder;
             // elsewhere Dart decodes JPEG.
-            let codecs = if cfg!(target_os = "android") || desktop::media_foundation() {
+            let codecs = if cfg!(target_os = "android") || native_h264_decoder() {
                 if h265 {
                     vec![VideoCodec::H265, VideoCodec::H264]
                 } else {
@@ -1338,11 +1369,11 @@ async fn start_background(handle: &PbMapperHandle, start: HostStart) -> Result<V
         // later app launch to resurrect its independent automatic grant.
         disable_legacy_startup(handle).await?;
         let legacy = load_trust(directory.clone()).await?;
-        let options = desktop::helper::background::Options {
+        let options = desktop::privileged::background::Options {
             server: config.server_address,
             credential,
             relay_transport: config.relay_transport,
-            settings: desktop::helper::background::Settings {
+            settings: desktop::privileged::background::Settings {
                 service: start.service.clone(),
                 display_id: start.display_id,
                 allow_control: start.allow_control,
@@ -1359,9 +1390,10 @@ async fn start_background(handle: &PbMapperHandle, start: HostStart) -> Result<V
         let snapshot = if let Some(saved) =
             legacy.filter(|saved| saved.matches(&scope) && saved.settings.service == start.service)
         {
-            desktop::helper::background::configure_with_identity(options, saved.identity()?).await
+            desktop::privileged::background::configure_with_identity(options, saved.identity()?)
+                .await
         } else {
-            desktop::helper::background::configure(options).await
+            desktop::privileged::background::configure(options).await
         }
         .map_err(err)?;
         let snapshot = handle
@@ -1679,7 +1711,7 @@ async fn enable_host(
     })
     .await
     .map_err(err)??;
-    let helper = tokio::task::spawn_blocking(desktop::helper::status)
+    let helper = tokio::task::spawn_blocking(desktop::privileged::status)
         .await
         .map_err(err)?;
     let setup = helper_setup(&helper, allow_install);
@@ -1694,7 +1726,7 @@ async fn enable_host(
             ));
         }
         let installed =
-            tokio::task::spawn_blocking(move || desktop::helper::request_installation(action))
+            tokio::task::spawn_blocking(move || desktop::privileged::request_installation(action))
                 .await
                 .map_err(err)?
                 .map_err(err);
@@ -1714,19 +1746,19 @@ async fn enable_host(
             .map_err(err)??;
             return Err(failure);
         }
-        if matches!(action, desktop::helper::Action::Install { .. }) {
-            desktop::helper::prepare_application_restart()
+        if matches!(action, desktop::privileged::Action::Install { .. }) {
+            desktop::privileged::prepare_application_restart()
                 .await
                 .map_err(err)?;
             return Ok(json!({"restart": true}));
         }
     }
-    let snapshot = desktop::helper::background::configure_with_identity(
-        desktop::helper::background::Options {
+    let snapshot = desktop::privileged::background::configure_with_identity(
+        desktop::privileged::background::Options {
             server: config.server_address,
             credential,
             relay_transport: config.relay_transport,
-            settings: desktop::helper::background::Settings {
+            settings: desktop::privileged::background::Settings {
                 service,
                 display_id,
                 allow_control,
@@ -1756,9 +1788,9 @@ async fn enable_host(
 /// but holds the old host. Startup's restore never asks.
 #[cfg(windows)]
 fn helper_setup(
-    helper: &desktop::helper::Status,
+    helper: &desktop::privileged::Status,
     allow_install: bool,
-) -> Option<desktop::helper::Action> {
+) -> Option<desktop::privileged::Action> {
     (helper.ensure_ready().is_err() || (allow_install && helper.update_available))
         .then(|| helper_setup_action(helper))
 }
@@ -1768,16 +1800,16 @@ fn helper_setup(
 /// as it is. Setup's install also turns a stopped or Disabled service on,
 /// which an update alone would leave off.
 #[cfg(windows)]
-fn helper_setup_action(helper: &desktop::helper::Status) -> desktop::helper::Action {
+fn helper_setup_action(helper: &desktop::privileged::Status) -> desktop::privileged::Action {
     if !helper.installed
         || helper.update_required
         || helper.update_available
         || !helper.authorized_application
         || (helper.running && !helper.identity_verified)
     {
-        desktop::helper::Action::Install { enable: true }
+        desktop::privileged::Action::Install { enable: true }
     } else {
-        desktop::helper::Action::Enable
+        desktop::privileged::Action::Enable
     }
 }
 
@@ -2383,7 +2415,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn resume_configures_the_saved_host_from_the_current_settings() {
-        use desktop::helper::background::{Options, Settings};
+        use desktop::privileged::background::{Options, Settings};
         use pb_mapper_client::sdk::RelayTransport;
         let config = crate::state::AppConfig {
             server_address: "new-relay:7666".into(),
@@ -2525,7 +2557,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn handoff_lets_the_viewer_reconnect_only_to_the_same_invitation() {
-        use desktop::{ViewerReason, ViewerState, helper::Status};
+        use desktop::{ViewerReason, ViewerState, privileged::Status};
         // The tunnel's framing and codec read the process credential, which
         // other tests change.
         let _credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
@@ -2606,7 +2638,7 @@ mod tests {
         let disabled = tokio::time::timeout(
             Duration::from_secs(1),
             query_background_for_helper(
-                desktop::helper::Status {
+                desktop::privileged::Status {
                     installed: true,
                     startup_disabled: true,
                     ..Default::default()
@@ -2629,7 +2661,7 @@ mod tests {
             let result = tokio::time::timeout(
                 Duration::from_secs(1),
                 query_background_for_helper(
-                    desktop::helper::Status {
+                    desktop::privileged::Status {
                         installed: true,
                         running,
                         startup_disabled,
@@ -2653,7 +2685,7 @@ mod tests {
         // An installed/running service is not usable if its image cannot be
         // verified. Fail before management IPC and preserve the unknown grant.
         let unverified = query_background_for_helper(
-            desktop::helper::Status {
+            desktop::privileged::Status {
                 installed: true,
                 running: true,
                 authorized_application: true,
@@ -2667,7 +2699,7 @@ mod tests {
         assert!(background_configured(&observed));
         assert!(background_enabled(&observed));
         let disconnected = query_background_for_helper(
-            desktop::helper::Status {
+            desktop::privileged::Status {
                 installed: true,
                 running: true,
                 authorized_application: true,
@@ -2686,10 +2718,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn setup_installs_an_outdated_helper_again_and_turns_it_on() {
-        use desktop::helper::Action;
+        use desktop::privileged::Action;
         // Of an older protocol: enabling it again would still refuse to
         // capture, and updating it alone would leave a stopped one off.
-        let outdated = desktop::helper::Status {
+        let outdated = desktop::privileged::Status {
             installed: true,
             running: false,
             authorized_application: true,
@@ -2702,15 +2734,15 @@ mod tests {
             helper_setup_action(&outdated),
             Action::Install { enable: true }
         );
-        let current = desktop::helper::Status {
-            protocol: desktop::helper::HELPER_PROTOCOL,
+        let current = desktop::privileged::Status {
+            protocol: desktop::privileged::HELPER_PROTOCOL,
             update_required: false,
             ..outdated
         };
         assert_eq!(helper_setup_action(&current), Action::Enable);
         // Another build, ready: it hosts the old code, so an action the owner
         // started installs this one; startup's restore uses it as it is.
-        let other_build = desktop::helper::Status {
+        let other_build = desktop::privileged::Status {
             running: true,
             update_available: true,
             ..current
@@ -2720,7 +2752,7 @@ mod tests {
             Some(Action::Install { enable: true })
         );
         assert_eq!(helper_setup(&other_build, false), None);
-        let ready = desktop::helper::Status {
+        let ready = desktop::privileged::Status {
             update_available: false,
             ..other_build
         };

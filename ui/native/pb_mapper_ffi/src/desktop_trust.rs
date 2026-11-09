@@ -213,7 +213,7 @@ pub(crate) fn protect(
     entropy: &[u8],
     description: &str,
 ) -> Result<Vec<u8>, CtlError> {
-    use pb_mapper::desktop::dpapi;
+    use pb_mapper::desktop::windows::dpapi;
     dpapi::protect(
         bytes,
         encrypt,

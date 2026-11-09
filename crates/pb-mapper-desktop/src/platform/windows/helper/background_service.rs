@@ -405,15 +405,9 @@ impl Supervisor {
             options.allow_control = settings.allow_control;
             options.allow_direct = settings.allow_direct;
             options.lan_first = saved.options.lan_first;
-            // The worker locks the workstation, as the helper always can.
-            let fallback = crate::BackendCaps {
-                lock: true,
-                os: Some(crate::HostOs::Windows),
-                ..crate::BackendCaps::default()
-            };
             let launch = Arc::new(crate::launch::Launcher::new(
-                move || super::super::client::service_backend(display_id),
-                fallback,
+                move || super::super::service_backend(display_id),
+                super::super::fallback_caps(),
             ));
             Host::builder(options)
                 .identity(saved.identity)
@@ -429,7 +423,7 @@ async fn manage(
     sender: mpsc::Sender<Operation>,
     stop: CancellationToken,
 ) -> Result<()> {
-    let mut listener = ipc::bind(PIPE, Some(&config.owner_sid), true)?;
+    let mut listener = pipe::bind(PIPE, Some(&config.owner_sid), true)?;
     let mut requests = JoinSet::new();
     loop {
         tokio::select! {
@@ -437,13 +431,13 @@ async fn manage(
             Some(_) = requests.join_next(), if !requests.is_empty() => {},
             connected = listener.connect(), if requests.len() < 8 => {
                 connected?;
-                let next = ipc::bind(PIPE, Some(&config.owner_sid), false)?;
+                let next = pipe::bind(PIPE, Some(&config.owner_sid), false)?;
                 let mut caller = std::mem::replace(&mut listener, next);
                 let config = config.clone();
                 let sender = sender.clone();
                 requests.spawn(async move {
                     let _owner = os::verify_management_client(&caller, &config)?;
-                    let command = tokio::time::timeout(super::super::TIMEOUT, ipc::read_json(&mut caller)).await.map_err(error)??;
+                    let command = tokio::time::timeout(crate::oop::proto::TIMEOUT, ipc::read_json(&mut caller)).await.map_err(error)??;
                     let (reply, result) = oneshot::channel();
                     sender.try_send((command, reply)).map_err(|_| error("Background management is busy"))?;
                     let result = result.await.map_err(error)?;
@@ -451,7 +445,7 @@ async fn manage(
                         Ok(snapshot) => Response { snapshot: Some(snapshot), error: None },
                         Err(e) => Response { snapshot: None, error: Some(e.to_string()) },
                     };
-                    tokio::time::timeout(super::super::TIMEOUT, ipc::write_json(&mut caller, &response)).await.map_err(error)??;
+                    tokio::time::timeout(crate::oop::proto::TIMEOUT, ipc::write_json(&mut caller, &response)).await.map_err(error)??;
                     Ok::<_, std::io::Error>(())
                 });
             },
@@ -584,10 +578,10 @@ pub(crate) fn revoke_installation(root: &Path) -> Result<()> {
 }
 
 fn protect(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>> {
-    crate::dpapi::protect(
+    crate::platform::windows::dpapi::protect(
         bytes,
         encrypt,
-        crate::dpapi::Scope::Machine,
+        crate::platform::windows::dpapi::Scope::Machine,
         ENTROPY,
         DESCRIPTION,
         STORAGE_LIMIT,
