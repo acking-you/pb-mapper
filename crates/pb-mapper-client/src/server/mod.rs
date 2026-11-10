@@ -197,7 +197,10 @@ mod shutdown_tests {
             )
             .await;
         });
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        // Let the pool start its workers, so cancelling stops running ones.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
         shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(3), task)
             .await
