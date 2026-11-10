@@ -3,13 +3,15 @@ use super::host::*;
 use super::viewer::*;
 use super::*;
 use crate::error::ErrorCode;
+use crate::test_support::{TempRoot, take_reply, test_handle};
 use base64::Engine as _;
 use pb_mapper::desktop::{
     ConnectStage, DesktopView, QualityPreset, Resolution, VideoCodec, VideoLimits, Viewer,
     ViewerConfig,
 };
+use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
 use std::{
-    ffi::{CStr, CString},
+    ffi::CString,
     future::Future,
     sync::atomic::Ordering,
     task::{Context, Waker},
@@ -17,33 +19,18 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
-fn test_handle(name: &str) -> PbMapperHandle {
-    let root = std::env::temp_dir().join(format!("pb-desktop-{name}-{}", std::process::id()));
-    // A new state writes the process credential, which a live relay's
-    // framing reads, so it is made under the lock such tests hold.
-    let _credential_guard =
-        pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK.blocking_lock();
-    PbMapperHandle {
-        desktop: Default::default(),
-        tunnel_events: Default::default(),
-        state: Arc::new(tokio::sync::Mutex::new(crate::state::PbMapperState::new(
-            Some(root.display().to_string()),
-        ))),
-        control_shutdown: Default::default(),
-        runtime: tokio::runtime::Runtime::new().unwrap(),
-    }
-}
-
-fn reply(text: *mut c_char) -> Value {
-    let value = serde_json::from_slice(unsafe { CStr::from_ptr(text) }.to_bytes()).unwrap();
-    unsafe { crate::logging::pb_mapper_free_string(text) };
-    value
+/// A handle rooted in `root`. A new state writes the process credential,
+/// which a live relay's framing reads, so it is made under the lock such
+/// tests hold.
+fn new_handle(root: &TempRoot) -> PbMapperHandle {
+    let _credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.blocking_lock();
+    test_handle(root.path())
 }
 
 /// The lifecycle export, as a Dart worker calls it.
 fn call_json(handle: &PbMapperHandle, request: Value) -> Value {
     let request = CString::new(request.to_string()).unwrap();
-    reply(unsafe {
+    take_reply(unsafe {
         pb_mapper_desktop_call_json(std::ptr::from_ref(handle).cast_mut(), request.as_ptr())
     })
 }
@@ -51,7 +38,7 @@ fn call_json(handle: &PbMapperHandle, request: Value) -> Value {
 /// The hot export, as the UI isolate calls it.
 fn hot(handle: &PbMapperHandle, request: Value) -> Value {
     let request = CString::new(request.to_string()).unwrap();
-    reply(unsafe {
+    take_reply(unsafe {
         pb_mapper_desktop_viewer_call_json(std::ptr::from_ref(handle).cast_mut(), request.as_ptr())
     })
 }
@@ -135,7 +122,8 @@ fn eventually(mut condition: impl FnMut() -> bool) {
 
 #[test]
 fn hot_ops_never_wait_for_a_slow_disconnect() {
-    let handle = test_handle("hot-ops");
+    let root = TempRoot::new("desktop-hot-ops");
+    let handle = new_handle(&root);
     let handle = &handle;
     let _host = handle.runtime.block_on(async {
         let (viewer, host) = scripted_viewer().await;
@@ -305,7 +293,8 @@ fn lifecycle_requests_refuse_unknown_fields() {
 #[test]
 fn inspect_invitation_classifies_without_network() {
     // Nothing listens on the default relay, so any network use would fail.
-    let handle = test_handle("inspect");
+    let root = TempRoot::new("desktop-inspect");
+    let handle = new_handle(&root);
     let inspect = |text: &str| {
         call_json(
             &handle,
@@ -337,7 +326,8 @@ fn inspect_invitation_classifies_without_network() {
 
 #[test]
 fn background_consent_and_ui_ownership_boundaries() {
-    let handle = test_handle("background-boundaries");
+    let root = TempRoot::new("desktop-background-boundaries");
+    let handle = new_handle(&root);
     handle.runtime.block_on(async {
         let config = handle.state.lock().await;
         let lifecycle = handle.desktop.host.lock().await;
@@ -606,7 +596,8 @@ fn resume_configures_the_saved_host_from_the_current_settings() {
 #[cfg(windows)]
 #[test]
 fn revocation_waits_for_handoff_and_uses_the_actual_owner() {
-    let handle = test_handle("revoke-handoff");
+    let root = TempRoot::new("desktop-revoke-handoff");
+    let handle = new_handle(&root);
     handle.runtime.block_on(async {
         let directory = handle.state.lock().await.desktop_config_dir();
         let scope = trust::Scope {
@@ -822,7 +813,8 @@ fn setup_installs_an_outdated_helper_again_and_turns_it_on() {
 
 #[test]
 fn disconnect_cancels_configuration_wait_without_cancelling_reconnect() {
-    let handle = test_handle("config-cancel");
+    let root = TempRoot::new("desktop-config-cancel");
+    let handle = new_handle(&root);
     handle.runtime.block_on(async {
         // Contend on the real app-state lock used by the FFI call. Setup
         // must be cancelled while the lock is still held, before loading
@@ -897,9 +889,9 @@ fn disconnect_cancels_configuration_wait_without_cancelling_reconnect() {
 /// reason the person can act on, not an IO failure the viewer retries.
 #[test]
 fn connect_without_a_credential_ends_the_attempt() {
-    let handle = test_handle("no-credential");
-    let _credential_guard =
-        pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK.blocking_lock();
+    let root = TempRoot::new("desktop-no-credential");
+    let handle = new_handle(&root);
+    let _credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.blocking_lock();
     pb_mapper_core::checksum::set_process_msg_header_key(None).unwrap();
     let failure = handle
         .runtime
