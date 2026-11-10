@@ -92,7 +92,7 @@ fn a_renewed_key_ends_at_its_new_deadline() {
 /// stages: they name the key, so at the old deadline they would otherwise end
 /// the key the renewal just extended. The WAL says that key is active, so a row
 /// that said otherwise could not even be revoked. That the actor takes this path
-/// is `renew_replaces_a_lease_canceled_during_persistence`.
+/// is `a_renewal_that_replaced_a_cancelled_lease_outlives_the_old_deadline`.
 #[test]
 fn a_lease_adopted_by_a_renewal_outlives_the_old_deadline() {
     let (inner, mut leases) = schedule();

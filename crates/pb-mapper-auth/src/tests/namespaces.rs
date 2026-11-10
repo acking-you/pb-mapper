@@ -395,6 +395,48 @@ async fn a_shortening_below_the_minimum_is_refused_and_changes_nothing() {
     assert_eq!(shown.metadata.expires_at, issued.metadata.expires_at);
 }
 
+/// A key's old deadline passes after a renewal replaced its cancelled lease.
+/// The schedule of the lease it replaced must not end the key that was just
+/// extended: the WAL says it is active, so a row that said otherwise could not
+/// even be revoked.
+#[tokio::test]
+async fn a_renewal_that_replaced_a_cancelled_lease_outlives_the_old_deadline() {
+    let state_dir = TempPath::new("renew-replaced-lease");
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
+    let issued = runtime.issue(&admin, MIN_TEMP_KEY_TTL, None).await.unwrap();
+    let key_id = issued.metadata.key_id;
+    let context = authenticate_for_test(&runtime, key_id).unwrap();
+    context.ensure_active().unwrap().cancel_expired();
+
+    let renewed = runtime.renew(&admin, key_id, HOUR).await.unwrap();
+    assert!(renewed.metadata.expires_at > issued.metadata.expires_at);
+    let replacement = authenticate_for_test(&runtime, key_id)
+        .unwrap()
+        .cancellation_token()
+        .unwrap();
+
+    // A key issued now ends no earlier than the old deadline, so once it has
+    // ended, the schedule has passed that deadline too.
+    let marker = runtime.issue(&admin, MIN_TEMP_KEY_TTL, None).await.unwrap();
+    let marker = authenticate_for_test(&runtime, marker.metadata.key_id)
+        .unwrap()
+        .cancellation_token()
+        .unwrap();
+    tokio::time::timeout(
+        MIN_TEMP_KEY_TTL + Duration::from_secs(10),
+        marker.cancelled(),
+    )
+    .await
+    .expect("a key must end at its deadline");
+
+    assert!(!replacement.is_cancelled());
+    let shown = runtime.show(&admin, key_id, false).await.unwrap();
+    assert_eq!(shown.metadata.state, "active");
+    authenticate_for_test(&runtime, key_id).unwrap();
+    runtime.revoke(&admin, key_id).await.unwrap();
+    stop(runtime).await;
+}
+
 /// What the allocator's file alone cannot promise: losing it must not repeat a
 /// number, including one whose keys are all gone, which is every namespace of a
 /// tenant that has gone quiet.
