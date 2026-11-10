@@ -11,7 +11,7 @@ use tracing::instrument;
 use super::error::{
     ConnectLocalStreamSnafu, ConnectRemoteStreamSnafu, ControlIoTimeoutSnafu,
     DecodePbConnStreamRespSnafu, EncodePbConnStreamReqSnafu, PbConnStreamRespNotMatchSnafu, Result,
-    WritePbConnStreamReqSnafu,
+    StreamRemoteSnafu, WritePbConnStreamReqSnafu,
 };
 use crate::diagnostics::Diagnostics;
 use crate::endpoint::RelayEndpoint;
@@ -181,8 +181,10 @@ where
                     action: "data codec",
                 },
             )?,
-            PbConnResponse::Error(error) => PbConnStreamRespNotMatchSnafu {
-                resp: format!("{}: {}", error.code, error.message),
+            PbConnResponse::Error(error) => StreamRemoteSnafu {
+                code: error.code,
+                message: error.message,
+                retryable: error.retryable,
             }
             .fail()?,
             _ => PbConnStreamRespNotMatchSnafu {

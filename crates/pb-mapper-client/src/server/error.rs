@@ -35,6 +35,13 @@ pub enum Error {
         // Structured representation of response
         resp: String,
     },
+    /// The relay answered the data stream with a structured refusal.
+    #[snafu(display("relay refused the stream: {code}: {message}"))]
+    StreamRemoteError {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
     #[snafu(display("Failed to write ping message"))]
     WritePingMsg { source: CoreError },
     #[snafu(display("Failed to encode ping message"))]
