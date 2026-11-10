@@ -44,6 +44,10 @@ const _: () = assert!(
     crate::lane::LANE_CAPACITY >= INPUT_QUEUE,
     "the host's lane takes a whole viewer queue during one backend call"
 );
+const _: () = assert!(
+    PING_IDLE.as_nanos() < crate::session::HOST_READ_TIMEOUT.as_nanos(),
+    "an idle viewer writes before the host reads its silence as a dead transport"
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Barrier {

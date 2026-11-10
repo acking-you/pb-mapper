@@ -40,6 +40,10 @@ const _: () = assert!(
     crate::session::STATS_INTERVAL.as_millis() < VIEWER_HEADER_TIMEOUT.as_millis(),
     "the host's Stats keep a live link inside the read timeout"
 );
+const _: () = assert!(
+    crate::host::BACKEND_ANSWER_WAIT.as_nanos() < ACCEPT_TIMEOUT.as_nanos(),
+    "the host answers Authenticate before the viewer gives up on Accepted"
+);
 
 /// What `Accepted` settled for the session.
 pub(super) struct Accepted {
