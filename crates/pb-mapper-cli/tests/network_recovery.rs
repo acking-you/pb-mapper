@@ -475,6 +475,15 @@ async fn connection_burst_has_bounded_setup_and_probe_concurrency() {
     })
     .await
     .unwrap();
+    // Every setup slot reaches the relay, however slowly the machine runs;
+    // then nothing more than one probe may join them.
+    timeout(Duration::from_secs(5), async {
+        while proxy.state.accepted.load(Ordering::SeqCst) - before < 64 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fewer than 64 setups reached the relay");
     tokio::time::sleep(Duration::from_millis(300)).await;
     let setups = proxy.state.accepted.load(Ordering::SeqCst) - before;
     assert!(
