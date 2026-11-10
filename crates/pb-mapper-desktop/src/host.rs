@@ -26,6 +26,7 @@ use pb_mapper_client::sdk::{
     TunnelMetricsStream,
 };
 use std::{
+    io,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
@@ -142,7 +143,7 @@ impl Host {
                 },
             )
             .await
-            .map_err(error)?;
+            .map_err(io::Error::other)?;
         if let Err(failure) = registration
             .wait_ready_timeout(Duration::from_secs(15))
             .await
@@ -242,9 +243,7 @@ impl Host {
         let mut options = self.options.clone();
         options.allow_control = self.shared.policy.allowed();
         change(&mut options);
-        let invalid = |failure: std::io::Error| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, failure.to_string())
-        };
+        let invalid = |failure: io::Error| io::Error::new(io::ErrorKind::InvalidInput, failure);
         if !crate::valid_service(&options.service) {
             return Err(invalid(error("invalid desktop service")));
         }
@@ -361,7 +360,11 @@ impl Host {
             let _ = task.await;
         }
         join.take();
-        self.shared.registration.stop().await.map_err(error)?;
+        self.shared
+            .registration
+            .stop()
+            .await
+            .map_err(io::Error::other)?;
         self.shared.stopped.store(true, Ordering::Release);
         self.last.send_replace(Some(self.shared.status()));
         Ok(())
