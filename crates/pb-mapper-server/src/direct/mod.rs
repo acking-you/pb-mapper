@@ -28,14 +28,19 @@ pub struct DirectServerConfig {
     pub advertise: SocketAddr,
 }
 
+/// The STUN service direct coordination runs: what it announces to clients,
+/// and the task serving it.
+pub(crate) struct StunService {
+    pub(crate) capability: DirectCapability,
+    pub(crate) task: tokio_util::task::AbortOnDropHandle<()>,
+}
+
+/// Start the STUN service `config` asks for, if any.
 pub(crate) async fn bind(
     config: Option<DirectServerConfig>,
-) -> std::io::Result<(
-    Option<DirectCapability>,
-    Option<tokio_util::task::AbortOnDropHandle<()>>,
-)> {
+) -> std::io::Result<Option<StunService>> {
     let Some(config) = config else {
-        return Ok((None, None));
+        return Ok(None);
     };
     #[cfg(not(feature = "p2p"))]
     {
@@ -76,7 +81,7 @@ pub(crate) async fn bind(
                 tracing::error!(%error, "STUN service stopped");
             }
         }));
-        Ok((Some(capability), Some(task)))
+        Ok(Some(StunService { capability, task }))
     }
 }
 

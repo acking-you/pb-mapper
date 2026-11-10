@@ -131,7 +131,10 @@ pub async fn run_server_on_listener_with_options(
     auth: AuthRuntime,
     options: RelayServerOptions,
 ) -> std::io::Result<()> {
-    let (capability, stun_task) = direct::bind(options.direct).await?;
+    let (capability, stun_task) = direct::bind(options.direct)
+        .await?
+        .map(|stun| (stun.capability, stun.task))
+        .unzip();
     let direct_state = direct::DirectState::new(capability);
     let security = ServerSecurity::new(auth);
     let manager = TaskManager::new();
@@ -165,7 +168,9 @@ pub async fn run_server_on_listener_with_options(
         manager.get_task_sender(),
         quic_stop.clone(),
     )
-    .await?;
+    .await?
+    .map(|quic| (quic.task, quic.endpoint))
+    .unzip();
     #[cfg(not(feature = "relay-quic"))]
     let (quic_task, quic_capability): (
         Option<tokio_util::task::AbortOnDropHandle<()>>,

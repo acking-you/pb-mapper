@@ -31,6 +31,13 @@ impl Drop for ConnectionGuard {
     }
 }
 
+/// A running QUIC listener: the task serving it, and the endpoint it
+/// announces to clients.
+pub(super) struct QuicListener {
+    pub(super) task: AbortOnDropHandle<()>,
+    pub(super) endpoint: Arc<QuicEndpoint>,
+}
+
 /// Listen for QUIC as `config` says, until `stop`. The task this returns
 /// ends only once every connection task it started has: each holds the
 /// authentication runtime, which a restart in the same process reopens.
@@ -39,9 +46,9 @@ pub(super) async fn start(
     security: ServerSecurity,
     sender: ManagerTaskSender,
     stop: CancellationToken,
-) -> io::Result<(Option<AbortOnDropHandle<()>>, Option<Arc<QuicEndpoint>>)> {
+) -> io::Result<Option<QuicListener>> {
     let Some(config) = config else {
-        return Ok((None, None));
+        return Ok(None);
     };
     let (tls, certificate) = server_config()?;
     let endpoint = quinn::Endpoint::server(tls, config.listen)?;
@@ -92,7 +99,10 @@ pub(super) async fn start(
         owner.0.close(0u32.into(), b"relay shutdown");
         let _ = tokio::time::timeout(Duration::from_secs(1), owner.0.wait_idle()).await;
     }));
-    Ok((Some(task), Some(capability)))
+    Ok(Some(QuicListener {
+        task,
+        endpoint: capability,
+    }))
 }
 
 async fn handle_connection(
