@@ -405,78 +405,96 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Publishes CLI flags as environment variables, which is how the auth
-/// subsystem reads its configuration.
-///
-/// # Safety note
-///
-/// Mutating the environment is unsafe in edition 2024 because it races
-/// concurrent readers. Every call here happens during argument handling on the
-/// main thread, before any runtime task or thread is spawned, so there is no
-/// concurrent reader to race.
-fn apply_server_auth_overrides(args: &ServerArgs) -> Result<(), Box<dyn Error>> {
-    if let Some(auth_state_dir) = &args.auth_state_dir {
-        unsafe { std::env::set_var("PB_MAPPER_AUTH_STATE_DIR", auth_state_dir) };
-    }
-    if let Some(max_temporary_keys) = args.max_temporary_keys {
-        if !(1..=MAX_TEMP_KEY_CAPACITY).contains(&max_temporary_keys) {
-            return Err(format!(
+/// A server flag outside the range the relay accepts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServerFlagError {
+    MaxTemporaryKeys,
+    MaxTemporaryKeyTtl,
+}
+
+impl std::fmt::Display for ServerFlagError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MaxTemporaryKeys => write!(
+                f,
                 "`--max-temporary-keys` must be between 1 and {MAX_TEMP_KEY_CAPACITY}"
-            )
-            .into());
-        }
-        unsafe {
-            std::env::set_var(
-                "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
-                max_temporary_keys.to_string(),
-            )
-        };
-    }
-    if let Some(max_temporary_key_ttl) = args.max_temporary_key_ttl {
-        if max_temporary_key_ttl < MIN_TEMP_KEY_TTL || max_temporary_key_ttl > MAX_TEMP_KEY_TTL {
-            return Err(format!(
+            ),
+            Self::MaxTemporaryKeyTtl => write!(
+                f,
                 "`--max-temporary-key-ttl` must be between {}s and {}d",
                 MIN_TEMP_KEY_TTL.as_secs(),
                 MAX_TEMP_KEY_TTL.as_secs() / 86_400
-            )
-            .into());
+            ),
         }
-        unsafe {
+    }
+}
+
+impl Error for ServerFlagError {}
+
+/// The relay's authentication configuration: the environment's, with each
+/// explicit flag taking precedence.
+///
+/// The flags are checked first, so an out-of-range one fails before anything
+/// else happens. `AuthConfig` reads its settings only from the environment,
+/// so the flags that pass are written there before it is built.
+fn server_auth_config(args: &ServerArgs) -> Result<AuthConfig, ServerFlagError> {
+    if let Some(max_temporary_keys) = args.max_temporary_keys
+        && !(1..=MAX_TEMP_KEY_CAPACITY).contains(&max_temporary_keys)
+    {
+        return Err(ServerFlagError::MaxTemporaryKeys);
+    }
+    if let Some(max_temporary_key_ttl) = args.max_temporary_key_ttl
+        && !(MIN_TEMP_KEY_TTL..=MAX_TEMP_KEY_TTL).contains(&max_temporary_key_ttl)
+    {
+        return Err(ServerFlagError::MaxTemporaryKeyTtl);
+    }
+    // SAFETY: writing the environment races any thread that reads it. This
+    // runs first thing in `run_server`: the runtime's worker threads exist,
+    // but nothing has been spawned on them, and no other thread reads the
+    // environment.
+    unsafe {
+        if let Some(auth_state_dir) = &args.auth_state_dir {
+            std::env::set_var("PB_MAPPER_AUTH_STATE_DIR", auth_state_dir);
+        }
+        if let Some(max_temporary_keys) = args.max_temporary_keys {
+            std::env::set_var(
+                "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
+                max_temporary_keys.to_string(),
+            );
+        }
+        if let Some(max_temporary_key_ttl) = args.max_temporary_key_ttl {
             std::env::set_var(
                 "PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS",
                 max_temporary_key_ttl.as_secs().to_string(),
-            )
-        };
-    }
-    Ok(())
-}
-
-async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
-    apply_server_auth_overrides(&args)?;
-    if let Some(legacy_protocol) = args.legacy_protocol {
-        // SAFETY: as in `apply_server_auth_overrides` — this runs before the
-        // server spawns anything that reads the environment.
-        unsafe {
+            );
+        }
+        if let Some(legacy_protocol) = args.legacy_protocol {
             std::env::set_var(
                 "PB_MAPPER_LEGACY_PROTOCOL",
                 match legacy_protocol {
                     LegacyProtocolArg::Allow => "allow",
                     LegacyProtocolArg::Deny => "deny",
                 },
-            )
-        };
+            );
+        }
     }
-    let auth_config = AuthConfig::default();
+    Ok(AuthConfig::default())
+}
+
+async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
+    let auth_config = server_auth_config(&args)?;
+    let admin_key_path = auth_config.state_dir.join("admin.key");
     if args.init_admin_key {
         std::fs::create_dir_all(&auth_config.state_dir)?;
-        let _lock = acquire_state_dir_lock(&auth_config.state_dir)?;
-        let key_path = auth_config.state_dir.join("admin.key");
-        let key = initialize_admin_key(&key_path, args.force_init_admin_key)?;
-        drop(_lock);
+        let lock = acquire_state_dir_lock(&auth_config.state_dir)?;
+        let key = initialize_admin_key(&admin_key_path, args.force_init_admin_key)?;
+        drop(lock);
         set_process_msg_header_key(Some(&key))?;
-        eprintln!("administrator key initialized at {}", key_path.display());
+        eprintln!(
+            "administrator key initialized at {}",
+            admin_key_path.display()
+        );
     } else if args.use_machine_msg_header_key {
-        let admin_key_path = auth_config.state_dir.join("admin.key");
         if admin_key_path.exists() {
             return Err(format!(
                 "--use-machine-msg-header-key cannot replace `{}`; use `pb-mapper admin root-key rotate` to change the root key",
@@ -1050,20 +1068,15 @@ mod tests {
 
     #[test]
     fn explicit_out_of_range_server_auth_flags_are_rejected() {
-        let cli = Cli::try_parse_from(["pb-mapper", "server", "--max-temporary-keys", "0"])
-            .expect("clap should accept the token before bounds checking");
-        let Command::Server(args) = cli.command else {
-            panic!("expected server command");
-        };
-        let error = apply_server_auth_overrides(&args).unwrap_err();
-        assert!(error.to_string().contains("--max-temporary-keys"));
-
-        let cli = Cli::try_parse_from(["pb-mapper", "server", "--max-temporary-key-ttl", "5s"])
-            .expect("clap should accept the token before bounds checking");
-        let Command::Server(args) = cli.command else {
-            panic!("expected server command");
-        };
-        let error = apply_server_auth_overrides(&args).unwrap_err();
-        assert!(error.to_string().contains("--max-temporary-key-ttl"));
+        // clap accepts both tokens; the bounds are checked afterwards, before
+        // anything is written to the environment.
+        assert_eq!(
+            server_auth_config(&server_args(&["--max-temporary-keys", "0"])).unwrap_err(),
+            ServerFlagError::MaxTemporaryKeys
+        );
+        assert_eq!(
+            server_auth_config(&server_args(&["--max-temporary-key-ttl", "5s"])).unwrap_err(),
+            ServerFlagError::MaxTemporaryKeyTtl
+        );
     }
 }
