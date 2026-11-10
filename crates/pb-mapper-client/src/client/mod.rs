@@ -21,7 +21,7 @@ use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
 use self::status::{get_status_scoped, get_status_with_credential};
 use self::stream::{StreamSetup, handle_local_stream};
 use crate::addr::{resolve_all, resolve_tunnel_ends};
-use crate::recovery::{RecoveryTiming, jitter};
+use crate::recovery::{REVOKED_DIRECT_RECHECK, RecoveryTiming, jitter, transport_backoff};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::ResolvedAddrs;
 use pb_mapper_core::config::{
@@ -261,7 +261,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     });
     #[cfg(not(feature = "p2p"))]
     let _ = (path, is_datagram, policy);
-    let mut retry_backoff = RetryBackoff::new(Duration::from_millis(100), Duration::from_secs(2));
+    let mut retry_backoff = transport_backoff();
     let mut stream_tasks = JoinSet::new();
     let setup_slots = Arc::new(Semaphore::new(64));
     let timing = Arc::new(Mutex::new(RecoveryTiming::default()));
@@ -552,7 +552,7 @@ impl Health<'_> {
             Err(failure) if failure.permanent && self.diagnostics.has_active_direct() => {
                 self.diagnostics.failed(failure.kind, Duration::ZERO);
                 self.report("retrying");
-                self.next_probe = Instant::now() + Duration::from_secs(30);
+                self.next_probe = Instant::now() + REVOKED_DIRECT_RECHECK;
             }
             Err(failure) if failure.permanent => {
                 if failure.protocol_replied {

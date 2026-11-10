@@ -10,7 +10,7 @@ use super::stream::spawn_stream;
 use super::{ServerTunnelOptions, StatusCallback};
 use crate::diagnostics::{Diagnostics, RecoveryFailure};
 use crate::endpoint::RelayEndpoint;
-use crate::recovery::{RecoveryTiming, jitter};
+use crate::recovery::{RecoveryTiming, jitter, transport_backoff};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{ResolvedAddrs, control_conn_pool_size, registration_reject_backoff};
 use pb_mapper_core::timeout::RetryBackoff;
@@ -38,7 +38,7 @@ impl ControlBackoff {
     fn new() -> Self {
         let (reject_min, reject_max) = registration_reject_backoff();
         Self {
-            transport: RetryBackoff::new(Duration::from_millis(100), Duration::from_secs(2)),
+            transport: transport_backoff(),
             timing: RecoveryTiming::default(),
             reject: RetryBackoff::new(reject_min, reject_max),
         }
@@ -261,7 +261,7 @@ async fn run_server_side_cli_worker(
                     .is_some_and(|provider| provider.has_active()) =>
             {
                 // Revocation closes the control plane, not endpoint-owned direct sessions.
-                (Duration::from_secs(30), 0)
+                (crate::recovery::REVOKED_DIRECT_RECHECK, 0)
             }
             Status::Rejected(reason) => {
                 diagnostics.failed(RecoveryFailure::Rejected, Duration::ZERO);

@@ -29,13 +29,13 @@ use uni_stream::stream::{StreamProvider, StreamSplit};
 /// Each end is the full candidate list rather than one address, so a session
 /// opened long after registration still has every record to try.
 #[derive(Clone, Debug)]
-pub struct StreamConnect {
-    pub local_addr: ResolvedAddrs,
-    pub remote_addr: ResolvedAddrs,
-    pub keep_alive: bool,
-    pub namespace: Option<u64>,
-    pub credential: Credential,
-    pub idle_timeout: Option<std::time::Duration>,
+pub(super) struct StreamConnect {
+    pub(super) local_addr: ResolvedAddrs,
+    pub(super) remote_addr: ResolvedAddrs,
+    pub(super) keep_alive: bool,
+    pub(super) namespace: Option<u64>,
+    pub(super) credential: Credential,
+    pub(super) idle_timeout: Option<std::time::Duration>,
 }
 
 /// Starts one forwarded session in a worker's set of sessions.

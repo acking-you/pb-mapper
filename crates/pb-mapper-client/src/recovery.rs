@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use pb_mapper_core::config::control_io_timeout;
+use pb_mapper_core::timeout::RetryBackoff;
 
 const MIN_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_TIMEOUT: Duration = Duration::from_secs(5);
@@ -58,3 +59,14 @@ impl RecoveryTiming {
 pub(crate) fn jitter(delay: Duration) -> Duration {
     delay.mul_f64(rand::random_range(0.75..=1.0))
 }
+
+/// The ladder both tunnel directions climb when they cannot reach or hold the
+/// relay: quick, because retrying is how a tunnel comes back.
+pub(crate) fn transport_backoff() -> RetryBackoff {
+    RetryBackoff::new(Duration::from_millis(100), Duration::from_secs(2))
+}
+
+/// How often a tunnel whose credential the relay refused for good asks again
+/// while a direct session it holds is still up: revocation closes the control
+/// plane, not the endpoint-owned sessions.
+pub(crate) const REVOKED_DIRECT_RECHECK: Duration = Duration::from_secs(30);

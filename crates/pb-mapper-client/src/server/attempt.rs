@@ -22,7 +22,7 @@ use super::probe::{RegistrationProbeResult, probe_remote_registration};
 use super::status::WorkerStatus;
 use super::stream::{SpawnStream, StreamConnect};
 use super::worker::ControlBackoff;
-use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
+use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase, ms};
 use crate::endpoint::{RecoveryWake, RelayEndpoint};
 use crate::relay::CarrierId;
 use pb_mapper_core::checksum::Credential;
@@ -149,14 +149,10 @@ impl Debug for ServerCliRunConfig {
     }
 }
 
-fn duration_to_millis(duration: Duration) -> u64 {
-    duration.as_millis().min(u128::from(u64::MAX)) as u64
-}
-
 fn new_client_instance_id(worker_index: usize) -> String {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(duration_to_millis)
+        .map(ms)
         .unwrap_or_default();
     format!("{}-{worker_index}-{now_ms}", std::process::id())
 }
@@ -283,8 +279,8 @@ pub(super) async fn run_server_side_cli_inner(
             is_datagram,
             protocol_version: Some(CONTROL_PROTOCOL_V2),
             client_instance_id: Some(new_client_instance_id(worker_index)),
-            heartbeat_interval_ms: Some(duration_to_millis(heartbeat_interval)),
-            heartbeat_tolerance_ms: Some(duration_to_millis(heartbeat_tolerance)),
+            heartbeat_interval_ms: Some(ms(heartbeat_interval)),
+            heartbeat_tolerance_ms: Some(ms(heartbeat_tolerance)),
         },
         None => PbConnRequest::Register {
             direct: direct_version,
@@ -293,8 +289,8 @@ pub(super) async fn run_server_side_cli_inner(
             is_datagram,
             protocol_version: Some(CONTROL_PROTOCOL_V2),
             client_instance_id: Some(new_client_instance_id(worker_index)),
-            heartbeat_interval_ms: Some(duration_to_millis(heartbeat_interval)),
-            heartbeat_tolerance_ms: Some(duration_to_millis(heartbeat_tolerance)),
+            heartbeat_interval_ms: Some(ms(heartbeat_interval)),
+            heartbeat_tolerance_ms: Some(ms(heartbeat_tolerance)),
         },
     };
     let msg = ok_or_end!(request.encode().context(EncodeRegisterReqSnafu));
@@ -321,7 +317,7 @@ pub(super) async fn run_server_side_cli_inner(
         }
     };
     // read register resp to indicate that register has finished
-    let (key, registration) = {
+    let registration = {
         let msg = tokio::select! {
             () = shutdown.cancelled() => return Status::Cancelled,
             () = wake.network_changed() => return Status::NetworkChanged,
@@ -393,14 +389,14 @@ pub(super) async fn run_server_side_cli_inner(
         // This worker holds a registered control connection, which is on its own
         // enough to make the service reachable.
         report(WorkerStatus::Connected);
-        (key, registration)
+        registration
     };
 
     drop(control_permit);
     diagnostics.succeeded(started.elapsed());
     remote_addr.protocol_succeeded();
     backoff.timing.record(started.elapsed());
-    tracing::debug!(event = "local_server_setup_latency", elapsed_ms = duration_to_millis(started.elapsed()), next_timeout_ms = duration_to_millis(backoff.timing.timeout()), %key, worker_index);
+    tracing::debug!(event = "local_server_setup_latency", elapsed_ms = ms(started.elapsed()), next_timeout_ms = ms(backoff.timing.timeout()), %key, worker_index);
     backoff.reset();
     let (write_tx, write_rx) = mpsc::channel::<LocalControlWrite>(64);
     #[cfg(feature = "p2p")]
@@ -416,10 +412,9 @@ pub(super) async fn run_server_side_cli_inner(
             key.clone(),
             registration,
             lease_state.clone(),
+            heartbeat_interval,
         )));
 
-    let heartbeat_interval = control_heartbeat_interval();
-    let heartbeat_tolerance = control_heartbeat_tolerance();
     let suspect_grace = control_suspect_grace();
     let mut heartbeat = tokio::time::interval(heartbeat_interval);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -428,7 +423,7 @@ pub(super) async fn run_server_side_cli_inner(
     let mut ping_seq = 0_u64;
     let mut control_deadline = tokio::time::Instant::now() + heartbeat_tolerance + suspect_grace;
 
-    let result = loop {
+    loop {
         tokio::select! {
             msg = msg_reader.read_msg() => {
                 let msg = match msg.context(ReadStreamReqSnafu) {
@@ -513,8 +508,8 @@ pub(super) async fn run_server_side_cli_inner(
                         conn_id = %registration.conn_id,
                         generation = registration.generation,
                         worker_index,
-                        last_rx_age_ms = duration_to_millis(last_rx_age),
-                        heartbeat_tolerance_ms = duration_to_millis(heartbeat_tolerance),
+                        last_rx_age_ms = ms(last_rx_age),
+                        heartbeat_tolerance_ms = ms(heartbeat_tolerance),
                         "local server control lease is suspect; probing remote registration"
                     );
                     let probe_key = key.clone();
@@ -524,7 +519,7 @@ pub(super) async fn run_server_side_cli_inner(
                         let _permit = probe_endpoint.control_permit().await;
                         probe_remote_registration(
                             probe_remote,
-                            probe_endpoint.clone(),
+                            probe_endpoint,
                             probe_key,
                             registration,
                             namespace,
@@ -560,7 +555,7 @@ pub(super) async fn run_server_side_cli_inner(
                             conn_id = %registration.conn_id,
                             generation = registration.generation,
                             worker_index,
-                            last_rx_age_ms = duration_to_millis(last_rx_age),
+                            last_rx_age_ms = ms(last_rx_age),
                             "remote registration still contains this control connection"
                         );
                     }
@@ -571,7 +566,7 @@ pub(super) async fn run_server_side_cli_inner(
                             conn_id = %registration.conn_id,
                             generation = registration.generation,
                             worker_index,
-                            last_rx_age_ms = duration_to_millis(last_rx_age),
+                            last_rx_age_ms = ms(last_rx_age),
                             "remote registration no longer contains this control connection; reconnecting"
                         );
                         break Status::ReadMsg;
@@ -583,7 +578,7 @@ pub(super) async fn run_server_side_cli_inner(
                             conn_id = %registration.conn_id,
                             generation = registration.generation,
                             worker_index,
-                            last_rx_age_ms = duration_to_millis(last_rx_age),
+                            last_rx_age_ms = ms(last_rx_age),
                             "remote registration probe was stale after recent control activity"
                         );
                     }
@@ -596,7 +591,7 @@ pub(super) async fn run_server_side_cli_inner(
                             conn_id = %registration.conn_id,
                             generation = registration.generation,
                             worker_index,
-                            last_rx_age_ms = duration_to_millis(last_rx_age),
+                            last_rx_age_ms = ms(last_rx_age),
                             reason = %reason,
                             "registration probe failed past suspect grace; reconnecting"
                         );
@@ -609,7 +604,7 @@ pub(super) async fn run_server_side_cli_inner(
                             conn_id = %registration.conn_id,
                             generation = registration.generation,
                             worker_index,
-                            last_rx_age_ms = duration_to_millis(last_rx_age),
+                            last_rx_age_ms = ms(last_rx_age),
                             reason = %reason,
                             "registration probe failed; waiting inside suspect grace"
                         );
@@ -617,11 +612,7 @@ pub(super) async fn run_server_side_cli_inner(
                 }
             }
         }
-    };
-    if !writer_handle.is_finished() {
-        writer_handle.abort();
     }
-    result
 }
 
 /// Write what the control loop queues, in order, until the queue closes or a
@@ -633,6 +624,7 @@ async fn run_control_writer(
     key: Arc<str>,
     registration: ControlRegistration,
     lease: Arc<tokio::sync::Mutex<ControlLeaseState>>,
+    heartbeat_interval: Duration,
 ) -> Status {
     let mut msg_writer = match session.continuation_writer(&mut writer) {
         Ok(writer) => writer,
@@ -674,7 +666,7 @@ async fn run_control_writer(
                     generation = registration.generation,
                     protocol_version = registration.protocol_version,
                     seq,
-                    interval = ?control_heartbeat_interval(),
+                    interval = ?heartbeat_interval,
                     "local server heartbeat sent"
                 );
             }
