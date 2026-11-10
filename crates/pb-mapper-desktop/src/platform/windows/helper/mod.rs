@@ -5,7 +5,11 @@
 //! There is no arbitrary command execution, file or clipboard API. The
 //! backend it serves crosses the pipe through the platform-neutral `oop`.
 pub mod background;
+#[cfg(feature = "windows-helper")]
+mod child;
 mod config;
+#[cfg(feature = "windows-helper")]
+mod host_log;
 #[cfg(feature = "windows-helper")]
 mod install;
 mod os;
