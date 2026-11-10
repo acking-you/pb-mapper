@@ -69,7 +69,7 @@ impl Response {
             error: Some(failure.to_string()),
             failure: failure_kind(failure),
             pending,
-            ..Self::empty()
+            ..Self::default()
         }
     }
 }
@@ -82,7 +82,7 @@ pub(crate) fn serve<B: Backend>(
     request: Request,
     state: &mut ServeState,
 ) -> Result<(Response, Vec<u8>)> {
-    let mut response = Response::empty();
+    let mut response = Response::default();
     if matches!(request, Request::Release {} | Request::Close {}) {
         backend.release();
         return Ok((response, vec![]));
@@ -309,7 +309,7 @@ mod tests {
         let (mut host, mut worker) = tokio::io::duplex(1 << 16);
         let exchange = tokio::spawn(async move {
             exchange(&mut worker, 1, None, |_| async {
-                Ok((Response::empty(), vec![]))
+                Ok((Response::default(), vec![]))
             })
             .await
         });

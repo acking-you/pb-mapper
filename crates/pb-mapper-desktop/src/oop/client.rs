@@ -504,7 +504,7 @@ mod tests {
         // at the pointer, and the rest report both.
         let reported = desktop.clone();
         let (mut backend, helper) = remote(move |request| {
-            let mut response = Response::empty();
+            let mut response = Response::default();
             match request {
                 Request::Input { .. } => response.error = Some("lock failed".into()),
                 Request::Release {} | Request::Close {} => {}
@@ -543,7 +543,7 @@ mod tests {
                 gop: u32::MAX,
                 ..crate::VideoFormat::default()
             }),
-            ..Response::empty()
+            ..Response::default()
         });
         let rate = crate::VideoRate {
             bitrate: 4_000_000,

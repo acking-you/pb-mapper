@@ -151,7 +151,7 @@ impl Request {
         }
     }
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Response {
     pub context: Option<DesktopContext>,
@@ -183,24 +183,6 @@ pub(crate) struct Response {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored: Option<bool>,
 }
-impl Response {
-    pub(crate) fn empty() -> Self {
-        Self {
-            context: None,
-            error: None,
-            failure: None,
-            video: None,
-            cursor: None,
-            pending: 0,
-            double_click: None,
-            caps: None,
-            h265: None,
-            modes: None,
-            restored: None,
-        }
-    }
-}
-
 /// What a worker's backend can do, as its `Start` answer says: never H.265,
 /// which costs a probe and is asked only when a viewer decodes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,22 +195,35 @@ pub(crate) struct StartCaps {
 }
 impl From<&BackendCaps> for StartCaps {
     fn from(caps: &BackendCaps) -> Self {
+        let BackendCaps {
+            h265: _,
+            lock,
+            display_modes,
+            os,
+            cursor,
+        } = *caps;
         Self {
-            lock: caps.lock,
-            display_modes: caps.display_modes,
-            os: caps.os,
-            cursor: caps.cursor,
+            lock,
+            display_modes,
+            os,
+            cursor,
         }
     }
 }
 impl From<StartCaps> for BackendCaps {
     fn from(caps: StartCaps) -> Self {
+        let StartCaps {
+            lock,
+            display_modes,
+            os,
+            cursor,
+        } = caps;
         Self {
             h265: false,
-            lock: caps.lock,
-            display_modes: caps.display_modes,
-            os: caps.os,
-            cursor: caps.cursor,
+            lock,
+            display_modes,
+            os,
+            cursor,
         }
     }
 }
