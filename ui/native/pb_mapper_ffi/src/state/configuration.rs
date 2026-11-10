@@ -11,15 +11,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use parking_lot::Mutex as SyncMutex;
 use pb_mapper_core::checksum::set_process_msg_header_key;
-use pb_mapper_core::durable_file;
+use pb_mapper_core::durable_file::{self, NewFileMode, ReplaceStep};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -299,59 +298,33 @@ fn write_store<T: Serialize>(path: &Path, store: &T, noun: &str) -> Result<(), C
 }
 
 /// Replaces `path` with `bytes` all at once, so that a crash leaves the old
-/// file or the new one, never a torn one: a file beside it is written and
-/// synced, then renamed over it. Making the rename itself durable is best
-/// effort: by then the new contents are in place, and a file system that
-/// cannot sync a directory should not turn every save into a failure.
+/// file or the new one, never a torn one: core's `replace_contents`, keeping
+/// the mode a file written in place keeps, where there is one. Making the
+/// rename itself durable is best effort: by then the new contents are in
+/// place, and a file system that cannot sync a directory should not turn
+/// every save into a failure.
 fn replace_contents(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let Some(name) = path.file_name() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{} names no file", path.display()),
-        ));
-    };
-    // A bare file name is in the current directory, whose path is empty.
-    let directory = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    // Named for this process and save, so no other save writes it; one a
-    // crash left behind is never read, and is overwritten if ever named again.
-    let temporary = directory.join(format!(
-        "{}.{}-{}.tmp",
-        name.to_string_lossy(),
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let written = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&temporary)?;
-        // What a file written in place keeps: its mode, where there is one.
-        if cfg!(unix)
-            && let Ok(existing) = fs::metadata(path)
-        {
-            fs::set_permissions(&temporary, existing.permissions())?;
+    // A bare file name is in the current directory, whose path is empty and
+    // so names no directory to sync.
+    let in_current_directory;
+    let target = match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => {
+            in_current_directory = Path::new(".").join(path);
+            &in_current_directory
         }
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        durable_file::replace_file(&temporary, path)
-    })();
-    if written.is_err() {
-        let _ = fs::remove_file(&temporary);
+        _ => path,
+    };
+    match durable_file::replace_contents(target, bytes, NewFileMode::KeepExisting) {
+        Err(failure) if failure.step == ReplaceStep::SyncParent => {
+            tracing::debug!(
+                "Saved {} without syncing its directory: {}",
+                path.display(),
+                failure.io()
+            );
+            Ok(())
+        }
+        result => result.map_err(io::Error::from),
     }
-    written?;
-    if let Err(error) = durable_file::sync_parent_directory(&directory.join(name)) {
-        tracing::debug!(
-            "Saved {} without syncing its directory: {error}",
-            path.display()
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]
