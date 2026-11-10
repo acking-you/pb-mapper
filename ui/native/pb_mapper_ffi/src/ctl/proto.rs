@@ -14,8 +14,8 @@ use crate::ctl::Command;
 use crate::error::{CtlError, ErrorCode};
 
 /// Bumped only when a change would confuse an older peer. The UI and the CLI
-/// are usually the same binary, but `pb-mapper-ctl` can be installed
-/// separately and a UI updated in place keeps running the old code.
+/// are the same binary, but a UI updated in place keeps running the old code
+/// while the newer binary's CLI talks to it.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Larger than any real payload; the biggest is a server map dump.

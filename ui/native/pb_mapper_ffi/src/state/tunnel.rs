@@ -68,9 +68,9 @@ fn refuses_for_now(error: &SdkError) -> bool {
 /// Setting a tunnel up runs its slow parts — DNS, the preflight connect — with
 /// the state lock released. That reopens a window the old always-locked version
 /// closed by accident: two callers, say the window and a terminal, could both
-/// get through the preflight and both insert, and the second would overwrite
-/// the first's [`JoinHandle`], leaving a tunnel running that nothing could
-/// abort. Holding the key across the gap is what closes it again.
+/// get through the preflight and both insert, and the second would replace,
+/// and so stop, the tunnel the first caller was told had started. Holding the
+/// key across the gap is what closes it again.
 ///
 /// The set is behind a blocking mutex rather than tokio's so that `Drop` can
 /// release it; it is only ever held for a set insert or remove.
@@ -280,7 +280,7 @@ pub(super) struct TunnelRuntime {
 
 /// Stops the tunnel under `key`, if there is one: dropping its handle does,
 /// since the SDK's `LiveTunnel` cancels and aborts its worker on drop.
-pub(super) fn abort_runtime(map: &mut HashMap<String, TunnelRuntime>, key: &str) -> bool {
+pub(super) fn stop_tunnel(map: &mut HashMap<String, TunnelRuntime>, key: &str) -> bool {
     map.remove(key).is_some()
 }
 

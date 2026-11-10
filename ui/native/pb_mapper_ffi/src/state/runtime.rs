@@ -2,9 +2,9 @@
 //!
 //! ```text
 //! start relay: bind listener -> initialize app-local auth -> spawn -> mark running
-//! register:    resolved addresses -> spawn control pool -> retain JoinHandle
-//! connect:     preflight local bind -> spawn listener ----> retain JoinHandle
-//! stop:        cancel relay + abort owned tunnel tasks + clear runtime maps
+//! register:    claim key -> resolve -> preflight -> SDK registration -> commit
+//! connect:     claim key -> resolve -> bind check -> SDK connection -> commit
+//! stop:        cancel the relay; drop the tunnels' handles, which stops them
 //! ```
 //!
 //! Readiness is published only after both listener binding and authentication
@@ -30,7 +30,7 @@ use pb_mapper_server::{
 };
 
 use super::tunnel::{
-    ConnectCommit, KeyClaim, RegisterCommit, TunnelHandle, TunnelRuntime, abort_runtime, claim_key,
+    ConnectCommit, KeyClaim, RegisterCommit, TunnelHandle, TunnelRuntime, claim_key, stop_tunnel,
     watch_tunnel,
 };
 use super::{LocalServerStatus, PbMapperState, RelayTunnels};
@@ -391,7 +391,7 @@ impl PbMapperState {
     }
 
     pub fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
-        if abort_runtime(&mut self.service_runtime, &service_key) {
+        if stop_tunnel(&mut self.service_runtime, &service_key) {
             tracing::info!("Service '{}' unregistered successfully", service_key);
             Ok(())
         } else {
@@ -402,7 +402,7 @@ impl PbMapperState {
     }
 
     pub fn delete_service_config_and_stop(&mut self, service_key: String) -> Result<(), CtlError> {
-        abort_runtime(&mut self.service_runtime, &service_key);
+        stop_tunnel(&mut self.service_runtime, &service_key);
         self.delete_service_config(&service_key)
     }
 
@@ -456,7 +456,7 @@ impl PbMapperState {
     /// loop still dialling in the background; failing only when there was
     /// nothing to stop.
     pub fn disconnect_service(&mut self, service_key: String) -> Result<(), CtlError> {
-        if abort_runtime(&mut self.client_runtime, &service_key) {
+        if stop_tunnel(&mut self.client_runtime, &service_key) {
             tracing::info!("Disconnected from service '{}'", service_key);
             Ok(())
         } else {
@@ -467,7 +467,7 @@ impl PbMapperState {
     }
 
     pub fn delete_client_config_and_stop(&mut self, service_key: String) -> Result<(), CtlError> {
-        abort_runtime(&mut self.client_runtime, &service_key);
+        stop_tunnel(&mut self.client_runtime, &service_key);
         self.delete_client_config(&service_key)
     }
 }
