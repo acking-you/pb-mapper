@@ -4,9 +4,13 @@
 //!
 //! [`PathDiagnostics::link`]: super::PathDiagnostics::link
 
+#[cfg(feature = "p2p")]
+use super::LinkSample;
 pub use pb_mapper_protocol::direct::{AddressFamily, DirectTransport, LinkKind};
 use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(feature = "p2p")]
+use std::time::Duration;
 
 /// What a local interface is. Candidates are offered, and probed, in this
 /// order.
@@ -220,4 +224,84 @@ pub struct DirectLink {
     pub timings: SetupTimings,
     pub candidates: CandidateCounts,
     pub stats: LinkStats,
+}
+
+/// Where a direct session's live figures come from.
+#[cfg(feature = "p2p")]
+pub(crate) enum LinkProbe {
+    /// QUIC's own, read from the connection as they are now.
+    Quic(quinn::Connection),
+    /// TCP keeps its figures in the kernel; the round trip of the
+    /// connection's handshake stands in for them.
+    Tcp { handshake_rtt: Duration },
+}
+
+/// A direct session's path and what its figures are read from.
+#[cfg(feature = "p2p")]
+pub(super) struct LiveLink {
+    pub(super) id: u64,
+    pub(super) link: DirectLink,
+    pub(super) probe: LinkProbe,
+}
+
+#[cfg(feature = "p2p")]
+impl LiveLink {
+    /// The carrier's figures as they are now.
+    fn stats(&self) -> LinkStats {
+        let connection = match &self.probe {
+            LinkProbe::Quic(connection) => connection,
+            LinkProbe::Tcp { handshake_rtt } => {
+                return LinkStats {
+                    rtt_us: micros(*handshake_rtt),
+                    min_rtt_us: micros(*handshake_rtt),
+                    ..LinkStats::default()
+                };
+            }
+        };
+        let stats = connection.stats();
+        LinkStats {
+            rtt_us: micros(connection.rtt()),
+            min_rtt_us: micros(stats.path.min_rtt),
+            congestion_window: stats.path.cwnd,
+            mtu: stats.path.current_mtu,
+            sent_packets: stats.path.sent_packets,
+            lost_packets: stats.path.lost_packets,
+            congestion_events: stats.path.congestion_events,
+            sent_bytes: stats.udp_tx.bytes,
+            received_bytes: stats.udp_rx.bytes,
+            lost_bytes: stats.path.lost_bytes,
+            bandwidth_bps: stats.path.bandwidth_estimate,
+        }
+    }
+
+    /// The link with its carrier's figures as they are now.
+    pub(super) fn sample(&self) -> DirectLink {
+        DirectLink {
+            stats: self.stats(),
+            ..self.link.clone()
+        }
+    }
+
+    /// What [`TunnelMetrics::link`] reports of it, figures as they are now.
+    ///
+    /// [`TunnelMetrics::link`]: super::TunnelMetrics::link
+    pub(super) fn metrics(&self) -> LinkSample {
+        let link = &self.link;
+        LinkSample {
+            kind: link.kind,
+            family: link.family,
+            via: link.via,
+            transport: link.transport,
+            peer: link.peer,
+            local_ip: link.local_ip,
+            same_lan: link.same_lan,
+            setup_ms: link.timings.setup_ms,
+            stats: self.stats(),
+        }
+    }
+}
+
+#[cfg(feature = "p2p")]
+fn micros(time: Duration) -> u64 {
+    time.as_micros().min(u128::from(u64::MAX)) as u64
 }
