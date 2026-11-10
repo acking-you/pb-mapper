@@ -15,13 +15,21 @@
 
 use super::*;
 
+/// A handle on a running authentication state. Clones share one handle, so
+/// cloning is cheap, and the actor stops once the last clone is dropped.
 #[derive(Clone)]
 pub struct AuthRuntime {
+    shared: Arc<RuntimeShared>,
+}
+
+struct RuntimeShared {
     inner: Weak<AuthStateInner>,
+    /// The only sender: dropping the last handle closes the channel, which is
+    /// what stops an actor nobody shut down.
     command_tx: mpsc::Sender<AuthCommand>,
     config: AuthConfig,
     _state_lock: Arc<File>,
-    actor: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    actor: Mutex<Option<tokio::task::JoinHandle<()>>>,
     actor_abort: tokio::task::AbortHandle,
 }
 
@@ -126,12 +134,14 @@ impl AuthRuntime {
         );
         let actor_abort = actor.abort_handle();
         let runtime = Self {
-            inner: Arc::downgrade(&inner),
-            command_tx,
-            config: config.clone(),
-            _state_lock: state_lock.clone(),
-            actor: Arc::new(Mutex::new(Some(actor))),
-            actor_abort,
+            shared: Arc::new(RuntimeShared {
+                inner: Arc::downgrade(&inner),
+                command_tx,
+                config: config.clone(),
+                _state_lock: state_lock.clone(),
+                actor: Mutex::new(Some(actor)),
+                actor_abort,
+            }),
         };
         Ok(runtime)
     }
@@ -139,24 +149,25 @@ impl AuthRuntime {
     pub async fn shutdown_actor(&self) {
         let (response, receiver) = oneshot::channel();
         let _ = self
+            .shared
             .command_tx
             .send(AuthCommand::Shutdown { response })
             .await;
         let _ = receiver.await;
-        let handle = self.actor.lock().take();
+        let handle = self.shared.actor.lock().take();
         if let Some(handle) = handle {
             let _ = handle.await;
         }
     }
 
     pub async fn abort_actor(&self) -> Result<(), AuthFailure> {
-        self.actor_abort.abort();
-        let handle = self.actor.lock().take();
+        self.shared.actor_abort.abort();
+        let handle = self.shared.actor.lock().take();
         if let Some(handle) = handle {
             let _ = handle.await;
         }
         tokio::time::timeout(Duration::from_secs(5), async {
-            while self.inner.upgrade().is_some() {
+            while self.shared.inner.upgrade().is_some() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -171,11 +182,11 @@ impl AuthRuntime {
     }
 
     pub fn config(&self) -> &AuthConfig {
-        &self.config
+        &self.shared.config
     }
 
     fn inner(&self) -> Result<Arc<AuthStateInner>, AuthFailure> {
-        self.inner.upgrade().ok_or_else(|| {
+        self.shared.inner.upgrade().ok_or_else(|| {
             AuthFailure::new(
                 "auth_state_unavailable",
                 "authentication state manager is not running",
@@ -340,13 +351,17 @@ impl AuthRuntime {
         build: impl FnOnce(oneshot::Sender<Result<T, AuthFailure>>) -> AuthCommand,
     ) -> Result<T, AuthFailure> {
         let (response, receiver) = oneshot::channel();
-        self.command_tx.send(build(response)).await.map_err(|_| {
-            AuthFailure::new(
-                "auth_state_unavailable",
-                "authentication state manager is not running",
-                true,
-            )
-        })?;
+        self.shared
+            .command_tx
+            .send(build(response))
+            .await
+            .map_err(|_| {
+                AuthFailure::new(
+                    "auth_state_unavailable",
+                    "authentication state manager is not running",
+                    true,
+                )
+            })?;
         receiver.await.map_err(|_| {
             AuthFailure::new(
                 "auth_state_unavailable",
