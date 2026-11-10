@@ -526,10 +526,10 @@ impl Race {
     /// should not try again at once: a provider that refuses TCP, or whose
     /// firewall drops it, does so for every session.
     pub fn costly(miss: LanTcpMiss) -> bool {
-        matches!(
-            miss,
-            LanTcpMiss::Refused | LanTcpMiss::TimedOut | LanTcpMiss::Handshake
-        )
+        match miss {
+            LanTcpMiss::Refused | LanTcpMiss::TimedOut | LanTcpMiss::Handshake => true,
+            LanTcpMiss::NotOffered | LanTcpMiss::NoSharedLan => false,
+        }
     }
 }
 

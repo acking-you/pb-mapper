@@ -78,19 +78,24 @@ impl Candidates {
         // The rest by tier, alternating families so that a machine with many
         // virtual adapters cannot crowd out IPv6. Within a tier, globally
         // routed IPv6 before unique-local and loopback.
-        let mut v6: Vec<_> = hosts.iter().filter(|host| host.addr.is_ipv6()).collect();
+        let mut v6: Vec<_> = hosts
+            .iter()
+            .filter_map(|host| match host.addr {
+                SocketAddr::V6(addr) => Some((host, addr)),
+                SocketAddr::V4(_) => None,
+            })
+            .collect();
         let mut v4: Vec<_> = hosts.iter().filter(|host| host.addr.is_ipv4()).collect();
-        v6.sort_by_key(|host| match host.addr {
-            SocketAddr::V6(addr) => (
+        v6.sort_by_key(|(host, addr)| {
+            (
                 host.tier,
                 addr.ip().is_loopback(),
                 addr.ip().is_unique_local(),
                 host.addr,
-            ),
-            SocketAddr::V4(_) => unreachable!(),
+            )
         });
         v4.sort_by_key(|host| (host.tier, host.addr.ip().is_loopback(), host.addr));
-        let mut v6 = v6.into_iter();
+        let mut v6 = v6.into_iter().map(|(host, _)| host);
         let mut v4 = v4.into_iter();
         loop {
             match (v6.next(), v4.next()) {
