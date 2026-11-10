@@ -506,6 +506,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(journal);
     }
 
+    /// A lost pipe fails the call that met it and every later one with
+    /// `NotConnected`, which ends the session; nothing is sent again.
+    #[test]
+    fn a_lost_helper_fails_every_later_call_as_not_connected() {
+        let (pipe, worker) = tokio::io::duplex(1 << 16);
+        drop(worker);
+        let mut backend = RemoteBackend::new(runtime(), pipe, BackendCaps::default());
+        let lost = backend.context().unwrap_err();
+        assert_eq!(lost.kind(), std::io::ErrorKind::NotConnected);
+        assert_eq!(crate::failure_kind(&lost), None);
+        for later in [
+            backend.capture().unwrap_err(),
+            backend.cursor(&desktop()).unwrap_err(),
+        ] {
+            assert_eq!(later.kind(), std::io::ErrorKind::NotConnected);
+        }
+    }
+
     #[test]
     fn a_helper_error_keeps_the_desktop_and_its_pointer() {
         let desktop = desktop();
