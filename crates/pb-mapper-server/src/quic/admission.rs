@@ -126,7 +126,6 @@ type PerAddress = Arc<StdMutex<HashMap<IpAddr, usize>>>;
 
 /// Handshakes in flight: in all, from addresses not yet validated, and per
 /// validated address.
-#[derive(Clone)]
 pub(super) struct Handshakes {
     total: Arc<Semaphore>,
     unvalidated: Arc<Semaphore>,
