@@ -49,6 +49,10 @@ const BACKEND_ANSWER_WAIT: Duration = Duration::from_secs(3);
 /// `RESTORE_RETRY_MAX`.
 const RESTORE_RETRY: Duration = Duration::from_secs(2);
 const RESTORE_RETRY_MAX: Duration = Duration::from_secs(60);
+const _: () = assert!(
+    RESTORE_RETRY.as_nanos() <= RESTORE_RETRY_MAX.as_nanos(),
+    "the retry backs off from RESTORE_RETRY up to the cap"
+);
 
 /// What a host's status reads, shared with its acceptor.
 struct Shared {

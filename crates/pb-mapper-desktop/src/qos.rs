@@ -68,6 +68,20 @@ const PIXEL_SCALE_MAX: f64 = 3.0;
 /// The most one window may raise the expected bitrate, in bit/s.
 const BPF_RAISE_MAX_BPS: f64 = 150_000.0;
 
+const _: () = assert!(
+    ENCODER_BITRATE_MIN <= ENCODER_BITRATE_MAX,
+    "targets clamps the encoder bitrate between them"
+);
+const _: () = assert!(
+    PIXEL_SCALE_MIN <= PIXEL_SCALE_MAX,
+    "pixel_scale clamps between them"
+);
+const _: () = assert!(
+    FAST_PROBE_INTERVAL.as_nanos() < PROBE_INTERVAL.as_nanos(),
+    "a short path is probed more often"
+);
+const _: () = assert!(DELAY_HISTORY >= 1, "the delay is the median of the history");
+
 /// A preset's fps and bits per frame (at 1080p).
 struct Preset {
     min_fps: u32,
@@ -77,32 +91,46 @@ struct Preset {
     bpf_max: f64,
     bpf_floor: f64,
 }
-fn preset(quality: QualityPreset) -> Preset {
+const QUALITY: Preset = Preset {
+    min_fps: 8,
+    normal_fps: 24,
+    ceiling_fps: 30,
+    bpf_start: 200_000.0,
+    bpf_max: 400_000.0,
+    bpf_floor: 50_000.0,
+};
+const BALANCED: Preset = Preset {
+    min_fps: 10,
+    normal_fps: 45,
+    ceiling_fps: 60,
+    bpf_start: 66_667.0,
+    bpf_max: 133_333.0,
+    bpf_floor: 16_667.0,
+};
+const SMOOTH: Preset = Preset {
+    min_fps: 12,
+    normal_fps: 50,
+    ceiling_fps: 120,
+    bpf_start: 50_000.0,
+    bpf_max: 100_000.0,
+    bpf_floor: 12_500.0,
+};
+/// A preset's fps and bits per frame are each in order, floor to max.
+const fn ordered(p: &Preset) -> bool {
+    p.min_fps <= p.normal_fps
+        && p.normal_fps <= p.ceiling_fps
+        && p.bpf_floor <= p.bpf_start
+        && p.bpf_start <= p.bpf_max
+}
+const _: () = assert!(
+    ordered(&QUALITY) && ordered(&BALANCED) && ordered(&SMOOTH),
+    "clamp_bpf clamps between a preset's floor and max"
+);
+fn preset(quality: QualityPreset) -> &'static Preset {
     match quality {
-        QualityPreset::Quality => Preset {
-            min_fps: 8,
-            normal_fps: 24,
-            ceiling_fps: 30,
-            bpf_start: 200_000.0,
-            bpf_max: 400_000.0,
-            bpf_floor: 50_000.0,
-        },
-        QualityPreset::Balanced => Preset {
-            min_fps: 10,
-            normal_fps: 45,
-            ceiling_fps: 60,
-            bpf_start: 66_667.0,
-            bpf_max: 133_333.0,
-            bpf_floor: 16_667.0,
-        },
-        QualityPreset::Smooth => Preset {
-            min_fps: 12,
-            normal_fps: 50,
-            ceiling_fps: 120,
-            bpf_start: 50_000.0,
-            bpf_max: 100_000.0,
-            bpf_floor: 12_500.0,
-        },
+        QualityPreset::Quality => &QUALITY,
+        QualityPreset::Balanced => &BALANCED,
+        QualityPreset::Smooth => &SMOOTH,
     }
 }
 

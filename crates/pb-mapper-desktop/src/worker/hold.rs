@@ -13,6 +13,10 @@ use std::{
 const DRAG_GUARD_MARGIN: Duration = Duration::from_millis(20);
 /// ...but never longer than this.
 const DRAG_GUARD_MAX: Duration = Duration::from_millis(600);
+const _: () = assert!(
+    DRAG_GUARD_MARGIN.as_nanos() < DRAG_GUARD_MAX.as_nanos(),
+    "the margin past the double-click time stays below the cap"
+);
 
 /// A left press that starts a drag right after a click would merge with it
 /// into a double click on the host. It waits out the OS double-click time

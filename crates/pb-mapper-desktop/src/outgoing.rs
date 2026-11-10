@@ -13,6 +13,10 @@ use std::{
 
 pub(crate) const OUTGOING_CAPACITY: usize = TRANSPORT_GATE + ENCODER_DEPTH;
 pub(crate) const OUTGOING_BYTES: usize = 8 * 1024 * 1024;
+const _: () = assert!(
+    OUTGOING_BYTES >= crate::wire::MAX_PAYLOAD,
+    "the largest unit the wire carries must fit an empty hand-off"
+);
 /// A head older than this is cleared and replaced by a requested IDR. Time it
 /// waits behind an IDR in flight does not count (`CreditLedger::aging_since`).
 pub(crate) const OUTGOING_MAX_AGE: Duration = Duration::from_secs(1);

@@ -34,6 +34,23 @@ pub(crate) const DELIVERY_FACTOR: f64 = 1.25;
 pub(crate) const JPEG_WINDOW_FRAMES: usize = 4;
 pub(crate) const JPEG_WINDOW_BYTES: usize = 2 * 1024 * 1024;
 
+const _: () = assert!(
+    FRAME_WINDOW_MIN <= FRAME_WINDOW_MAX,
+    "window clamps the frame count between them"
+);
+const _: () = assert!(
+    BYTE_WINDOW_MIN <= BYTE_WINDOW_MAX,
+    "window clamps the normal byte window between them"
+);
+const _: () = assert!(
+    BYTE_WINDOW_CLAMP_MIN <= BYTE_WINDOW_MIN,
+    "the delivery clamp's upper bound is the normal window, which is at least BYTE_WINDOW_MIN"
+);
+const _: () = assert!(
+    ACK_SAMPLES_MIN >= 1,
+    "ack_queue takes the median of at least this many delays"
+);
+
 /// A receipt for a seq beyond the last one admitted: the viewer receipted
 /// video that was never sent, which breaks the protocol.
 #[derive(Debug)]
