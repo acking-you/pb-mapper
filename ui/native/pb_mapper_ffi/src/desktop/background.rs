@@ -1,6 +1,6 @@
 //! The Windows service's background host as this app sees it: the cached
 //! snapshot, its discovery, and setup, resume, stop and revoke.
-use super::host::HostStart;
+use super::host::{HostSlot, HostStart};
 #[cfg(windows)]
 use super::host::{disable_legacy_startup, load_trust};
 #[cfg(windows)]
@@ -11,7 +11,7 @@ use crate::{error::CtlError, handle::PbMapperHandle};
 use crate::{error::ErrorCode, state::process_credential};
 #[cfg(windows)]
 use pb_mapper::desktop;
-use pb_mapper::desktop::{Host, HostStatus};
+use pb_mapper::desktop::HostStatus;
 #[cfg(windows)]
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use serde::{Deserialize, Serialize};
@@ -349,7 +349,7 @@ pub(super) async fn background_action(
 async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<Enabled, CtlError> {
     // As `enable_host`: the host slot, then the settings.
     let mut slot = handle.desktop.host.lock().await;
-    if slot.is_some() {
+    if slot.host.is_some() {
         return Err(err(
             "stop local desktop sharing before starting the background host",
         ));
@@ -476,7 +476,7 @@ pub(super) async fn helper_action(
         // here keeps a stopped or Disabled service as it is.
         let local = handle.desktop.host.lock().await;
         let action = match verb {
-            HelperVerb::Install if local.is_some() => {
+            HelperVerb::Install if local.host.is_some() => {
                 return Err(err(
                     "stop local sharing before enabling the background service",
                 ));
@@ -518,8 +518,8 @@ pub(super) async fn start_background(
     {
         // Serialize both owners before loading configuration or talking to the
         // service. A concurrent Stop cannot finish and then be undone by this start.
-        let slot = handle.desktop.host.lock().await;
-        if slot.is_some() {
+        let mut slot = handle.desktop.host.lock().await;
+        if slot.host.is_some() {
             return Err(err("desktop is already shared"));
         }
         handle.desktop.cache_background(query_background().await?);
@@ -563,7 +563,7 @@ pub(super) async fn start_background(
         }
         .map_err(err)?;
         let snapshot = handle.desktop.cache_background(snapshot.into());
-        *handle.desktop.host_identity.lock().await = None;
+        slot.identity = None;
         tokio::task::spawn_blocking(move || trust::revoke(&directory))
             .await
             .map_err(err)??;
@@ -632,7 +632,7 @@ impl Enabled {
 #[cfg(windows)]
 pub(super) async fn enable_host(
     handle: &PbMapperHandle,
-    slot: &mut Option<Host>,
+    slot: &mut HostSlot,
     service: String,
     display_id: u32,
     allow_control: bool,
@@ -657,7 +657,7 @@ pub(super) async fn enable_host(
 #[cfg(windows)]
 async fn enable(
     handle: &PbMapperHandle,
-    slot: &mut Option<Host>,
+    slot: &mut HostSlot,
     service: String,
     display_id: u32,
     allow_control: bool,
@@ -685,11 +685,11 @@ async fn enable(
             "background setup was stopped or belongs to another relay",
         ));
     }
-    let local = handle.desktop.host_identity.lock().await.clone();
-    let local = local.filter(|local| {
+    let local = slot.identity.clone().filter(|local| {
         local.scope.relay == scope.relay
             && local.scope.namespace == scope.namespace
             && slot
+                .host
                 .as_ref()
                 .is_some_and(|host| host.invitation().service == service)
     });
@@ -719,7 +719,7 @@ async fn enable(
     // is adopted, and its viewer reconnects, only when the service resumes
     // its invitation at once: the same identity and service, and a helper
     // that needs no setup, which the owner may cancel.
-    let adopted = match slot.take() {
+    let adopted = match slot.host.take() {
         Some(host) if local.is_some() && setup.is_none() => Some(host),
         host => {
             if let Some(host) = host {
@@ -728,7 +728,7 @@ async fn enable(
             None
         }
     };
-    *handle.desktop.host_identity.lock().await = None;
+    slot.identity = None;
     if let Some(action) = setup {
         if !allow_install {
             return Err(err(
@@ -827,7 +827,7 @@ pub(super) fn helper_setup_action(
 #[cfg(not(windows))]
 pub(super) async fn enable_host(
     _: &PbMapperHandle,
-    _: &mut Option<Host>,
+    _: &mut HostSlot,
     _: String,
     _: u32,
     _: bool,

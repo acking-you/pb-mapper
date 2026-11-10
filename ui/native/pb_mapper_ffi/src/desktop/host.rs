@@ -14,6 +14,16 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
+/// What the host lifecycle lock guards: the host this app runs, and its
+/// identity beside it.
+#[derive(Default)]
+pub(super) struct HostSlot {
+    pub(super) host: Option<Host>,
+    /// Retained, even an ephemeral local key, while its host lives, so
+    /// ownership can move to the service unchanged.
+    pub(super) identity: Option<LocalIdentity>,
+}
+
 /// The running local host's identity and settings: what a restart on another
 /// display or under another service, and the background handoff, start from.
 #[derive(Clone)]
@@ -72,7 +82,7 @@ pub(super) async fn revoke_trust_with_background(
     // the UI's cached owner is not authoritative here.
     let state = &handle.desktop;
     let mut slot = state.host.lock().await;
-    if let Some(host) = slot.as_ref() {
+    if let Some(host) = slot.host.as_ref() {
         host.set_control_allowed(false);
     }
     let directory = handle.state.lock().await.desktop_config_dir();
@@ -89,12 +99,12 @@ pub(super) async fn revoke_trust_with_background(
         Err(failure) => Err(failure),
     };
     // Its viewer hears that access was withdrawn, and does not reconnect.
-    let stopped = if let Some(host) = slot.take() {
+    let stopped = if let Some(host) = slot.host.take() {
         host.stop_with(StopReason::Revoked).await.map_err(err)
     } else {
         Ok(())
     };
-    *state.host_identity.lock().await = None;
+    slot.identity = None;
     stopped?;
     revoked?;
     Ok(())
@@ -163,7 +173,7 @@ pub(super) async fn host_status(handle: &PbMapperHandle) -> Result<Value, CtlErr
     // serialises a status carries the secret.
     let (host, busy) = match state.host.try_lock() {
         Ok(slot) => (
-            slot.as_ref().map(|host| {
+            slot.host.as_ref().map(|host| {
                 let invitation = host.invitation();
                 let mut value = json!({
                     "status": host.status(),
@@ -171,9 +181,7 @@ pub(super) async fn host_status(handle: &PbMapperHandle) -> Result<Value, CtlErr
                     "invitation": invitation.encode(),
                 });
                 // Set beside the host, under the lock held here.
-                if let Ok(local) = state.host_identity.try_lock()
-                    && let Some(scope) = local.as_ref().map(|local| &local.scope)
-                {
+                if let Some(scope) = slot.identity.as_ref().map(|local| &local.scope) {
                     value["server"] = json!(scope.relay);
                     value["matches_relay"] = json!(
                         relay
@@ -217,12 +225,12 @@ pub(super) async fn host_restore(handle: &PbMapperHandle) -> Result<Value, CtlEr
 pub(super) async fn host_stop(handle: &PbMapperHandle, on_exit: bool) -> Result<Value, CtlError> {
     let state = &handle.desktop;
     let mut slot = state.host.lock().await;
-    let stopped = if let Some(host) = slot.take() {
+    let stopped = if let Some(host) = slot.host.take() {
         host.stop().await.map_err(err)
     } else {
         Ok(())
     };
-    *state.host_identity.lock().await = None;
+    slot.identity = None;
     if on_exit {
         // The system service owns its host. Closing this UI only
         // releases the temporary host owned by this FFI handle.
@@ -245,7 +253,7 @@ pub(super) async fn host_permission(
 ) -> Result<Value, CtlError> {
     let state = &handle.desktop;
     let slot = state.host.lock().await;
-    let Some(host) = slot.as_ref() else {
+    let Some(host) = slot.host.as_ref() else {
         #[cfg(windows)]
         {
             let snapshot = query_background().await?;
@@ -262,14 +270,12 @@ pub(super) async fn host_permission(
     if !allow_control {
         host.set_control_allowed(false);
     }
-    if let Some(local) = state
-        .host_identity
-        .lock()
-        .await
-        .clone()
+    if let Some(scope) = slot
+        .identity
+        .as_ref()
         .filter(|local| local.remembered)
+        .map(|local| local.scope.clone())
     {
-        let scope = local.scope;
         let service = host.invitation().service.clone();
         tokio::task::spawn_blocking(move || {
             let mut saved = trust::load(&scope.directory)?
@@ -292,7 +298,7 @@ pub(super) async fn host_permission(
 pub(super) async fn host_restore_display_mode(handle: &PbMapperHandle) -> Result<Value, CtlError> {
     let state = &handle.desktop;
     let slot = state.host.lock().await;
-    if let Some(host) = slot.as_ref() {
+    if let Some(host) = slot.host.as_ref() {
         return Ok(json!({"restored": host.restore_display_mode()}));
     }
     #[cfg(windows)]
@@ -317,7 +323,7 @@ pub(super) async fn host_restore_display_mode(handle: &PbMapperHandle) -> Result
 pub(super) async fn host_end_session(handle: &PbMapperHandle) -> Result<Value, CtlError> {
     let state = &handle.desktop;
     let slot = state.host.lock().await;
-    if let Some(host) = slot.as_ref() {
+    if let Some(host) = slot.host.as_ref() {
         host.end_session();
         return Ok(json!({}));
     }
@@ -345,7 +351,7 @@ pub(super) async fn start_local(handle: &PbMapperHandle, start: Start) -> Result
     // Serialize both owners before loading configuration or talking to the
     // service. A concurrent Stop cannot finish and then be undone by this start.
     let mut slot = handle.desktop.host.lock().await;
-    if slot.is_some() {
+    if slot.host.is_some() {
         return Err(err("desktop is already shared"));
     }
     let background = handle.desktop.cache_background(query_background().await?);
@@ -449,8 +455,8 @@ pub(super) async fn start_local(handle: &PbMapperHandle, start: Start) -> Result
         }
     }
     let invitation = host.invitation().encode();
-    *slot = Some(host);
-    *handle.desktop.host_identity.lock().await = Some(local_identity);
+    slot.host = Some(host);
+    slot.identity = Some(local_identity);
     Ok(json!({"invitation": invitation}))
 }
 
@@ -499,8 +505,7 @@ pub(super) async fn restart_host(
     if state.cache_background(query_background().await?).configured {
         return Err(CtlError::invalid_argument("stop the background host first"));
     }
-    let local = state.host_identity.lock().await.clone();
-    let (Some(host), Some(local)) = (slot.as_ref(), local) else {
+    let (Some(host), Some(local)) = (slot.host.as_ref(), slot.identity.clone()) else {
         return Err(err("desktop is not shared"));
     };
     let mut settings = local.settings.clone();
@@ -526,10 +531,10 @@ pub(super) async fn restart_host(
         .remembered
         .then(|| trust::Saved::new(&local.scope, settings.clone(), &local.identity))
         .transpose()?;
-    let Some(host) = slot.take() else {
+    let Some(host) = slot.host.take() else {
         return Err(err("desktop is not shared"));
     };
-    *state.host_identity.lock().await = None;
+    slot.identity = None;
     // The same identity, source and live policy, on the relay client the
     // settings name now (a rotated key, another carrier); the old
     // registration goes before the new one.
@@ -549,7 +554,7 @@ pub(super) async fn restart_host(
         }
     }
     let invitation = host.invitation().encode();
-    *slot = Some(host);
-    *state.host_identity.lock().await = Some(LocalIdentity { settings, ..local });
+    slot.host = Some(host);
+    slot.identity = Some(LocalIdentity { settings, ..local });
     Ok(json!({"invitation": invitation}))
 }

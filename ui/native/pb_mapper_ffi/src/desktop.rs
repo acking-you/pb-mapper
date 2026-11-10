@@ -12,7 +12,7 @@ use crate::{
     handle::PbMapperHandle,
     response::{err_ctl, err_null_handle, ok_data, parse_c_string},
 };
-use pb_mapper::desktop::{self, Host, Invitation, StopReason};
+use pb_mapper::desktop::{self, Invitation, StopReason};
 use pb_mapper_core::checksum::get_process_credential;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -30,7 +30,7 @@ use background::{
     revoke_background, start_background,
 };
 use host::{
-    HostStart, LocalIdentity, Start, host_end_session, host_permission, host_restore,
+    HostSlot, HostStart, Start, host_end_session, host_permission, host_restore,
     host_restore_display_mode, host_status, host_stop, restart_host, revoke_trust_with_background,
     start_local, trust_status,
 };
@@ -42,15 +42,12 @@ pub use viewer::{PbDesktopViewV1, pb_mapper_desktop_view_v1, pb_mapper_desktop_v
 pub(crate) struct DesktopState {
     // Outbound connection setup must never hold the local host's stop/revoke
     // lock. Each endpoint owns its lifecycle independently.
-    host: tokio::sync::Mutex<Option<Host>>,
+    host: tokio::sync::Mutex<HostSlot>,
     /// Hot ops read it on the UI isolate, so it is never held across an
     /// await. Where both are taken, `connecting` comes first.
     viewer: parking_lot::RwLock<Option<Live>>,
     connecting: parking_lot::Mutex<Option<PendingConnect>>,
     viewer_epoch: AtomicU64,
-    // Guarded by the host lifecycle lock. Retain even an ephemeral local key
-    // while its host lives so ownership can move to the service unchanged.
-    host_identity: tokio::sync::Mutex<Option<LocalIdentity>>,
     background: Arc<parking_lot::Mutex<BackgroundCache>>,
     /// The settings' relay scope as last read, for a status poll that finds
     /// the settings locked: it never waits for them.
