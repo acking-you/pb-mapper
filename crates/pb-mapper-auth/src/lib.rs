@@ -158,9 +158,9 @@ pub use ids::{ADMIN_KEY_ID, Generation, KeyId, MAX_ALLOCATED_NAMESPACE, SlotInde
 pub use keys::derive_temporary_key;
 pub use lease::{AuthContext, AuthLease};
 pub use persistence::{
-    acquire_state_dir_lock, discard_staged_admin_key, encrypted_auth_state_exists,
-    generate_admin_key, initialize_admin_key, stage_admin_key_candidate, staged_admin_key_path,
-    write_admin_key_file,
+    ADMIN_KEY_FILE, acquire_state_dir_lock, admin_key_path, discard_staged_admin_key,
+    encrypted_auth_state_exists, generate_admin_key, initialize_admin_key,
+    stage_admin_key_candidate, staged_admin_key_path, write_admin_key_file,
 };
 pub use runtime::{AuthRuntime, LegacyConnectionGuard};
 pub use types::{
@@ -174,8 +174,8 @@ use keys::{load_isolated_server_admin_credential, load_server_admin_credential};
 use leases::Leases;
 use persistence::{
     AdminReplayRecord, AuditRecord, PersistedEntry, PersistedSnapshot, StateMutation, WalRecord,
-    admin_key_path, append_audit, append_mutation, append_wal, atomic_write, audit_action,
-    build_snapshot, cancel_all_temporary_leases, empty_snapshot, fail_closed_on_uncertain_wal, hex,
+    append_audit, append_mutation, append_wal, atomic_write, audit_action, build_snapshot,
+    cancel_all_temporary_leases, empty_snapshot, fail_closed_on_uncertain_wal, hex,
     instance_id_path, load_or_create_instance_id, load_persisted_state, normalize_tombstone_times,
     persist_recovery_admin_key, prepare_state_dir_and_lock, push_audit_record,
     push_persisted_audit, random_instance_id, read_admin_key, read_namespace_high_water,

@@ -64,8 +64,8 @@ pub(crate) use wal::{
 const AUTH_SNAPSHOT_FILE: &str = "auth.snapshot";
 const AUTH_WAL_FILE: &str = "auth.wal";
 const LOCK_FILE: &str = "auth.lock";
-/// The live administrator key.
-const ADMIN_KEY_FILE: &str = "admin.key";
+/// The live administrator key's file name in a state directory.
+pub const ADMIN_KEY_FILE: &str = "admin.key";
 /// The new key a root rotation stages while it installs it. Not the candidate
 /// [`staged_admin_key_path`] names for the CLI and SDK (`.admin.key.next`):
 /// those are two different files.
@@ -86,7 +86,8 @@ fn lock_path(state_dir: &Path) -> PathBuf {
     state_dir.join(LOCK_FILE)
 }
 
-pub(crate) fn admin_key_path(state_dir: &Path) -> PathBuf {
+/// Where the live administrator key of `state_dir` is kept.
+pub fn admin_key_path(state_dir: &Path) -> PathBuf {
     state_dir.join(ADMIN_KEY_FILE)
 }
 
