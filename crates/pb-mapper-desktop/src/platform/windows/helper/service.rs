@@ -231,12 +231,7 @@ async fn session(
         _ = tokio::io::copy_bidirectional(&mut caller, &mut private) => {},
     }
     drop(private); // EOF wakes the worker and releases its held input.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while unsafe { WaitForSingleObject(child.process.raw(), 0) } == WAIT_TIMEOUT
-        && tokio::time::Instant::now() < deadline
-    {
-        tokio::time::sleep(Duration::from_millis(15)).await;
-    }
+    child.wait_exit(Duration::from_secs(2)).await;
     let exit = child.exit_code();
     drop(child); // Job close terminates a worker that failed to exit.
     // Killed, failed, or a display mode still journalled: put it back.

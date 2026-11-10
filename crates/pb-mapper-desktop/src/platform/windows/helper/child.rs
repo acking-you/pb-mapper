@@ -109,7 +109,7 @@ pub(super) async fn restore_left_modes(config: &Configuration, restores: &Restor
 
 pub(super) struct Child {
     job: os::Handle,
-    pub(super) process: os::Handle,
+    process: os::Handle,
     pub(super) pid: u32,
 }
 impl Child {
@@ -122,7 +122,11 @@ impl Child {
     /// End it now, and wait until it is gone: two seconds at most.
     async fn end(self) {
         let _ = unsafe { TerminateJobObject(self.job.raw(), 1) };
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        self.wait_exit(Duration::from_secs(2)).await;
+    }
+    /// Wait until it has exited, `within` at most.
+    pub(super) async fn wait_exit(&self, within: Duration) {
+        let deadline = tokio::time::Instant::now() + within;
         while unsafe { WaitForSingleObject(self.process.raw(), 0) } == WAIT_TIMEOUT
             && tokio::time::Instant::now() < deadline
         {
