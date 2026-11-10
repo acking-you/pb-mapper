@@ -95,8 +95,15 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
         credential,
         offered_v2: LocalStream::supports_data_v2(),
     };
-    let ((mut remote_stream, codec_key, client_id, server_id), setup_latency) =
-        subscription.with_retry(&setup, deadline, budget).await?;
+    let (
+        Subscribed {
+            stream: mut remote_stream,
+            codec: codec_key,
+            client_id,
+            server_id,
+        },
+        setup_latency,
+    ) = subscription.with_retry(&setup, deadline, budget).await?;
     drop(global_permit);
     remote_addr.protocol_succeeded();
     setup.diagnostics.succeeded(setup_latency);
@@ -127,9 +134,15 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
     Ok(())
 }
 
-/// A subscribed relay stream: the stream, its data codec, and the ids the relay
-/// gave this end and the serving one.
-type Subscribed = (RelayStream, Option<DataCodec>, u32, u32);
+/// A subscribed relay stream, with what the relay answered about it.
+pub(crate) struct Subscribed {
+    pub(crate) stream: RelayStream,
+    /// The data codec, when the subscription asked for one.
+    pub(crate) codec: Option<DataCodec>,
+    /// The ids the relay gave this end and the serving one.
+    pub(crate) client_id: u32,
+    pub(crate) server_id: u32,
+}
 
 /// What a local stream subscribes to over the relay, and how. Not generic:
 /// the local stream type contributes only whether it offers data protocol v2.
@@ -288,5 +301,10 @@ pub(crate) async fn subscribe_request(
             .fail()?,
         }
     };
-    Ok((remote_stream, codec_key, client_id, server_id))
+    Ok(Subscribed {
+        stream: remote_stream,
+        codec: codec_key,
+        client_id,
+        server_id,
+    })
 }

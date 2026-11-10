@@ -12,6 +12,7 @@ use super::{
     tcp,
 };
 use crate::{
+    client::stream::{Subscribed, subscribe_request},
     diagnostics::{
         CandidateCounts, Diagnostics, DirectAttemptGuard, DirectLink, DirectStage, FallbackReason,
         LanTcpMiss, LinkKind, SetupTimings, ms,
@@ -477,7 +478,11 @@ impl Consumer {
         pending: &mut PendingSession,
     ) -> io::Result<Prepared> {
         control.relay(grant.id).await?;
-        let (socket, codec, _, _) = crate::client::stream::subscribe_request(
+        let Subscribed {
+            stream: socket,
+            codec,
+            ..
+        } = subscribe_request(
             PbConnRequest::DirectRelay {
                 id: grant.id,
                 secret: grant.secret,
