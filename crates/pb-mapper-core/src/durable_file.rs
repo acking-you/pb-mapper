@@ -11,7 +11,8 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use rand::RngExt;
+use rand::TryRng;
+use rand::rngs::SysRng;
 use snafu::Snafu;
 
 /// The permissions [`replace_contents`] gives the new file on unix. Ignored
@@ -63,7 +64,8 @@ pub struct ReplaceError {
     pub step: ReplaceStep,
     /// The temporary file for [`ReplaceStep::Create`],
     /// [`ReplaceStep::SetPermissions`] and [`ReplaceStep::Write`]; the target
-    /// for [`ReplaceStep::Replace`] and [`ReplaceStep::SyncParent`].
+    /// for [`ReplaceStep::Replace`] and [`ReplaceStep::SyncParent`], and for a
+    /// [`ReplaceStep::Create`] that failed before the temporary had a name.
     pub path: PathBuf,
     source: std::io::Error,
 }
@@ -87,8 +89,10 @@ impl From<ReplaceError> for std::io::Error {
 ///
 /// The bytes go to a new file beside `path`, named
 /// `.{file name}.tmp-{pid}-{16 random hex digits}`, opened with `create_new`
-/// and given `mode` before its first byte. That file is synced, renamed over
-/// `path` with [`replace_file`], and the directory synced.
+/// and given `mode` before its first byte. The digits come from the operating
+/// system's random source; when that fails, so does the create step. That
+/// file is synced, renamed over `path` with [`replace_file`], and the
+/// directory synced.
 /// On failure the temporary file is removed and `path` is left as it was —
 /// unless only the final directory sync failed, by which time it is replaced.
 ///
@@ -104,7 +108,13 @@ pub fn replace_contents(path: &Path, bytes: &[u8], mode: NewFileMode) -> Result<
             source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"),
         });
     };
-    let suffix: u64 = rand::rng().random();
+    // Straight from the operating system, which can fail where the thread RNG
+    // would panic.
+    let suffix = SysRng.try_next_u64().map_err(|error| ReplaceError {
+        step: ReplaceStep::Create,
+        path: path.to_path_buf(),
+        source: std::io::Error::other(error),
+    })?;
     let temporary = path.with_file_name(format!(
         ".{}.tmp-{}-{suffix:016x}",
         file_name.to_string_lossy(),
