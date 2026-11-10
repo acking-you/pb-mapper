@@ -155,7 +155,7 @@ pub async fn run_client_side_cli_with_callback_scoped<
 ///
 /// Takes both ends already resolved, because its caller — the SDK — resolves them
 /// itself in order to report a bad address as an error rather than a log line.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "a published signature")]
 pub async fn run_client_side_cli_with_shutdown<LocalListener: ListenerProvider>(
     local_addr: ResolvedAddrs,
     remote_addr: ResolvedAddrs,
@@ -181,7 +181,10 @@ pub async fn run_client_side_cli_with_shutdown<LocalListener: ListenerProvider>(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "takes what both relay-only entry points pass through"
+)]
 async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
     local_addr: ResolvedAddrs,
     remote_addr: ResolvedAddrs,
@@ -211,7 +214,10 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
     .await;
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the SDK starts a connection with each of its settings"
+)]
 pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: ListenerProvider>(
     local_addr: ResolvedAddrs,
     remote_addr: RelayEndpoint,
@@ -794,7 +800,6 @@ pub async fn show_status_scoped<A: ToSocketAddrs>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod cancellation_audit {
     use std::{
         future::Future,

@@ -231,7 +231,10 @@ pub(super) async fn handle_ping_interval<T: MessageWriter>(
 }
 
 #[instrument(skip_all, fields(%key, conn_id))]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one control message is handled against the whole of its attempt's state"
+)]
 pub(super) async fn handle_request(
     msg: &[u8],
     target: StreamConnect,

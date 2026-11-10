@@ -136,14 +136,28 @@ pub(super) struct ServerCliRunConfig {
 
 impl Debug for ServerCliRunConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Recorded on every attempt's span: the credential only by its id,
+        // and none of the shared handles.
+        let Self {
+            local_addr,
+            remote_addr,
+            diagnostics: _,
+            key,
+            options,
+            worker_index,
+            credential,
+            idle_timeout: _,
+            direct: _,
+            spawn_stream: _,
+        } = self;
         formatter
             .debug_struct("ServerCliRunConfig")
-            .field("local_addr", &self.local_addr)
-            .field("remote_addr", &self.remote_addr)
-            .field("key", &self.key)
-            .field("options", &self.options)
-            .field("worker_index", &self.worker_index)
-            .field("credential_key_id", &self.credential.key_id())
+            .field("local_addr", local_addr)
+            .field("remote_addr", remote_addr)
+            .field("key", key)
+            .field("options", options)
+            .field("worker_index", worker_index)
+            .field("credential_key_id", &credential.key_id())
             .finish()
     }
 }
@@ -158,7 +172,10 @@ fn new_client_instance_id(worker_index: usize) -> String {
 
 // `backoff` is skipped: it is mutable retry state, and recording it would
 // print two ladders' internals on every span the worker enters.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "an attempt borrows the worker's state piece by piece, most of it mutably"
+)]
 #[instrument(skip(backoff, report, shutdown, stream_tasks, setup_slots, wake, carrier))]
 pub(super) async fn run_server_side_cli_inner(
     backoff: &mut ControlBackoff,

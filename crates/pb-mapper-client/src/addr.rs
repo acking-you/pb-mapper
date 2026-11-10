@@ -127,7 +127,6 @@ pub(crate) async fn resolve_tunnel_ends<A: ToSocketAddrs>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::sync::{

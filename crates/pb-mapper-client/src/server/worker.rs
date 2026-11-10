@@ -78,7 +78,10 @@ async fn resolve_registration_credential(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the SDK starts a registration with each of its settings"
+)]
 pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
     local_addr: ResolvedAddrs,
     remote_addr: RelayEndpoint,
