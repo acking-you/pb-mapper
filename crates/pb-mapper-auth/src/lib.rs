@@ -117,37 +117,43 @@ const ADMIN_REPLAY_RETENTION: Duration = Duration::from_secs(10 * 60);
 const ADMIN_REPLAY_CAPACITY: usize = 65_536;
 const AUDIT_RECORD_CAPACITY: usize = 4096;
 
+mod actor;
+mod clock;
+mod config;
+mod ids;
+mod keys;
+mod lease;
+mod leases;
+mod persistence;
+mod runtime;
+mod state;
+#[cfg(test)]
+mod tests;
+mod timing_wheel;
 mod types;
+
+// The published API. Each name is listed, so nothing becomes public by accident.
+pub use config::default_auth_state_dir;
+pub use ids::{ADMIN_KEY_ID, Generation, KeyId, MAX_ALLOCATED_NAMESPACE, SlotIndex};
+pub use keys::derive_temporary_key;
+pub use lease::{AuthContext, AuthLease};
+pub use persistence::{
+    acquire_state_dir_lock, discard_staged_admin_key, encrypted_auth_state_exists,
+    generate_admin_key, initialize_admin_key, stage_admin_key_candidate, staged_admin_key_path,
+    write_admin_key_file,
+};
+pub use runtime::{AuthRuntime, LegacyConnectionGuard};
 pub use types::{
     AuthConfig, AuthFailure, AuthStatus, IssuedTemporaryKey, KeyPage, LegacyProtocolPolicy,
     TemporaryKeyMetadata,
 };
-mod lease;
-pub use lease::{AuthContext, AuthLease};
-mod state;
-use state::{AdminState, AuthStateInner, ColdMetadata, PreviousRoot, SlotHot, SlotState};
-mod clock;
-use clock::unix_seconds;
-mod config;
-pub use config::default_auth_state_dir;
-#[cfg(all(test, not(any(windows, target_os = "macos"))))]
-pub(crate) use config::linux_default_auth_state_dir;
-#[cfg(test)]
-pub(crate) use config::parse_legacy_protocol_policy;
-#[cfg(test)]
-pub(crate) use config::platform_default_auth_state_dir;
-#[cfg(all(test, not(any(windows, target_os = "macos"))))]
-pub(crate) use config::{linux_system_auth_dir_usable, unix_effective_uid};
-mod keys;
-pub use keys::derive_temporary_key;
-pub(crate) use keys::{load_isolated_server_admin_credential, load_server_admin_credential};
-mod runtime;
-pub use runtime::{AuthRuntime, LegacyConnectionGuard};
-mod actor;
+
+// What the child modules share through their `use super::*`.
 use actor::{AuthActorState, AuthCommand, run_auth_actor};
-mod persistence;
-pub use persistence::*;
-pub(crate) use persistence::{
+use clock::unix_seconds;
+use keys::{load_isolated_server_admin_credential, load_server_admin_credential};
+use leases::Leases;
+use persistence::{
     AdminReplayRecord, AuditRecord, PersistedEntry, PersistedSnapshot, StateMutation, WalRecord,
     append_audit, append_mutation, append_wal, atomic_write, auth_snapshot_path, build_snapshot,
     cancel_all_temporary_leases, compaction_is_allowed, empty_snapshot,
@@ -159,13 +165,5 @@ pub(crate) use persistence::{
     split_high_slot_state, truncate_auth_wal, write_admin_key, write_namespace_high_water,
     write_snapshot_and_truncate_wal,
 };
-#[cfg(test)]
-pub(crate) use persistence::{prepare_state_dir, read_instance_id_file, try_load_persisted_state};
-mod ids;
-pub use ids::{ADMIN_KEY_ID, Generation, KeyId, MAX_ALLOCATED_NAMESPACE, SlotIndex};
-mod leases;
-use leases::Leases;
-mod timing_wheel;
+use state::{AdminState, AuthStateInner, ColdMetadata, PreviousRoot, SlotHot, SlotState};
 use timing_wheel::{Timer, TimingWheel};
-#[cfg(test)]
-mod tests;

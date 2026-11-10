@@ -13,6 +13,15 @@
 use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
 
 use super::*;
+#[cfg(not(any(windows, target_os = "macos")))]
+use crate::config::{
+    linux_default_auth_state_dir, linux_system_auth_dir_usable, unix_effective_uid,
+};
+use crate::config::{parse_legacy_protocol_policy, platform_default_auth_state_dir};
+use crate::persistence::{
+    prepare_state_dir, read_instance_id_file, seal_blob, sync_parent_directory,
+    try_load_persisted_state,
+};
 
 mod namespaces;
 
