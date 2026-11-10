@@ -1,7 +1,9 @@
 //! Mixed data formats on a real relay; old peers omit capability fields.
 
 use pb_mapper_core::checksum::Credential;
-use pb_mapper_protocol::command::{LocalServer, MessageSerializer, PbConnRequest, PbConnResponse};
+use pb_mapper_protocol::command::{
+    LocalServer, MessageSerializer, PbConnRequest, PbConnResponse, PbServerRequest,
+};
 use pb_mapper_protocol::data::DataCodec;
 use pb_mapper_protocol::secure::ClientHeaderSession;
 use pb_mapper_protocol::{CodecMessageReader, CodecMessageWriter, MessageReader, MessageWriter};
@@ -47,7 +49,8 @@ async fn check_pair(datagram: bool, subscriber_v2: bool, publisher_v2: bool) {
         )
         .await
         .unwrap();
-    let mut control_reader = control_session.response_reader(&mut control).unwrap();
+    let (mut control_read, mut control_write) = control.split();
+    let mut control_reader = control_session.response_reader(&mut control_read).unwrap();
     assert!(matches!(
         PbConnResponse::decode(control_reader.read_msg().await.unwrap()).unwrap(),
         PbConnResponse::RegisterV2 { .. }
@@ -71,6 +74,21 @@ async fn check_pair(datagram: bool, subscriber_v2: bool, publisher_v2: bool) {
     else {
         panic!("expected stream request");
     };
+    // Acknowledged first, as a publisher does: unacknowledged, the stream
+    // itself would have to arrive within the relay's ack timeout.
+    control_session
+        .continuation_writer(&mut control_write)
+        .unwrap()
+        .write_msg(
+            &PbServerRequest::StreamAck {
+                client_id,
+                server_generation,
+            }
+            .encode()
+            .unwrap(),
+        )
+        .await
+        .unwrap();
 
     let mut publisher = TcpStream::connect(relay.addr()).await.unwrap();
     let publisher_session = ClientHeaderSession::new_v2(&credential).unwrap();
