@@ -37,6 +37,17 @@ fn pick_gop(mut set: impl FnMut(u32) -> bool, mut read: impl FnMut() -> Option<u
     read().unwrap_or(0)
 }
 
+/// What the encoder is set up for: a codec, the encoded size, the nominal
+/// frame rate and the mean bitrate.
+#[derive(Clone, Copy)]
+pub(super) struct EncoderSettings {
+    pub(super) kind: VideoCodec,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) fps: u32,
+    pub(super) bitrate: u32,
+}
+
 pub(super) struct Codec {
     pub(super) kind: VideoCodec,
     pub(super) transform: IMFTransform,
@@ -51,17 +62,14 @@ pub(super) struct Codec {
     pub(super) gop: u32,
 }
 impl Codec {
-    /// The first hardware encoder of `kind` on `device`'s adapter that takes
-    /// this pipeline's settings. There is no software fallback.
+    /// The first hardware encoder of `settings.kind` on `device`'s adapter
+    /// that takes this pipeline's settings. There is no software fallback.
     pub(super) fn new(
         device: &ID3D11Device,
         manager: &IMFDXGIDeviceManager,
-        kind: VideoCodec,
-        width: u32,
-        height: u32,
-        fps: u32,
-        bitrate: u32,
+        settings: EncoderSettings,
     ) -> Result<Self> {
+        let kind = settings.kind;
         let input = MFT_REGISTER_TYPE_INFO {
             guidMajorType: MFMediaType_Video,
             guidSubtype: MFVideoFormat_NV12,
@@ -109,16 +117,7 @@ impl Codec {
         let mut failures = vec![];
         for activation in candidates {
             let name = activation_name(&activation);
-            match Self::activate(
-                &activation,
-                name.clone(),
-                manager,
-                kind,
-                width,
-                height,
-                fps,
-                bitrate,
-            ) {
+            match Self::activate(&activation, name.clone(), manager, settings) {
                 Ok(codec) => return Ok(codec),
                 Err(e) => {
                     unsafe {
@@ -139,17 +138,19 @@ impl Codec {
         )))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn activate(
         activation: &IMFActivate,
         name: String,
         manager: &IMFDXGIDeviceManager,
-        kind: VideoCodec,
-        width: u32,
-        height: u32,
-        fps: u32,
-        bitrate: u32,
+        settings: EncoderSettings,
     ) -> Result<Self> {
+        let EncoderSettings {
+            kind,
+            width,
+            height,
+            fps,
+            bitrate,
+        } = settings;
         let transform: IMFTransform = unsafe {
             activation
                 .ActivateObject()

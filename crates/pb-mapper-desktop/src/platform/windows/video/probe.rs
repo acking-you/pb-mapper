@@ -2,7 +2,7 @@
 //! use, probed once per adapter.
 use super::{
     Runtime,
-    codec::{Codec, luid_value},
+    codec::{Codec, EncoderSettings, luid_value},
     device_manager,
 };
 use crate::{Result, VideoCodec, error};
@@ -98,11 +98,13 @@ fn probe_h265(adapter: &IDXGIAdapter1) -> Result<()> {
     Codec::new(
         &device,
         &manager,
-        VideoCodec::H265,
-        1920,
-        1080,
-        60,
-        8_000_000,
+        EncoderSettings {
+            kind: VideoCodec::H265,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate: 8_000_000,
+        },
     )
     .map(drop)
 }

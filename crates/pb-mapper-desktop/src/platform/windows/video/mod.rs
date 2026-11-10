@@ -16,7 +16,7 @@ use crate::{
     BackendError, Display, FailureKind, Result, VideoCodec, error,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
 };
-use codec::{Codec, attributes, media_type, sample_bytes};
+use codec::{Codec, EncoderSettings, attributes, media_type, sample_bytes};
 use converter::Converter;
 use std::{
     collections::VecDeque,
@@ -171,7 +171,7 @@ pub struct Encoder {
     force_keyframe: bool,
     wait_independent_output: bool,
     stats: Statistics,
-    _runtime: Runtime,
+    runtime: Runtime,
 }
 
 /// The encoded size: the capture fitted inside these bounds, keeping its aspect
@@ -273,8 +273,15 @@ impl Encoder {
         };
         let device = capture.device();
         let manager = device_manager(device, capture.device_context())?;
-        let codec = Codec::new(device, &manager, kind, width, height, fps, bitrate)
-            .map_err(|failure| codec_error(kind, failure))?;
+        let settings = EncoderSettings {
+            kind,
+            width,
+            height,
+            fps,
+            bitrate,
+        };
+        let codec =
+            Codec::new(device, &manager, settings).map_err(|failure| codec_error(kind, failure))?;
         let converter = Converter::new(
             device,
             capture.device_context(),
@@ -330,7 +337,7 @@ impl Encoder {
             force_keyframe: true,
             wait_independent_output: true,
             stats,
-            _runtime: runtime,
+            runtime,
         })
     }
 
@@ -366,7 +373,7 @@ impl Encoder {
     }
 
     fn check_thread(&self) -> Result<()> {
-        if self._runtime.thread != std::thread::current().id() {
+        if self.runtime.thread != std::thread::current().id() {
             return Err(error("video encoder must remain on its capture thread"));
         }
         Ok(())
