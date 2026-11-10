@@ -1159,7 +1159,7 @@ mod tests {
         assert_eq!(parse_duration("18446744073709551615h"), None);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn half_close_idle_timeout_closes_stalled_peer() {
         let client_reader = ScriptedReader::new([ReadAction::Eof]);
         let client_writer = ScriptedWriter::default();
@@ -1187,7 +1187,7 @@ mod tests {
         assert_eq!(server_writer_state.shutdowns(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn expected_disconnect_stops_waiting_for_pending_peer() {
         let client_reader =
             ScriptedReader::new([ReadAction::Error(io::ErrorKind::ConnectionReset)]);
@@ -1213,7 +1213,7 @@ mod tests {
         .expect("expected disconnect did not stop the tunnel");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn half_closed_tunnel_drains_peer_before_timeout() {
         let client_reader = ScriptedReader::new([ReadAction::Eof]);
         let client_writer = ScriptedWriter::default();
@@ -1243,7 +1243,7 @@ mod tests {
         assert_eq!(client_writer_state.shutdowns(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn delayed_tail_write_survives_peer_half_close() {
         let write_started = Arc::new(Notify::new());
         let client_reader = EofAfterWriteStartsReader::new(write_started.clone());
@@ -1273,7 +1273,7 @@ mod tests {
         assert_eq!(client_writer_state.chunks(), vec![tail]);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn open_tunnel_idle_timeout_closes_inactive_tunnel() {
         let client_reader = ScriptedReader::new([ReadAction::Pending]);
         let client_writer = ScriptedWriter::default();
@@ -1325,7 +1325,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_metered_forward_counts_each_direction_into_its_totals_and_the_meter() {
         let meter = ByteMeter::default();
         let streamed = start_forward_with_config(
