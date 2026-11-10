@@ -4,8 +4,8 @@
 //!   issue      schedule(expires_at)  ── slots[i] Active, lease live
 //!                     |
 //!                     v  deadline arrives, or a revoke fires the timer early
-//!   retire     lease cancelled, slots[i] Expired, tombstoned_at recorded,
-//!              a reap timer scheduled for +TOMBSTONE_RETENTION
+//!   retire     lease cancelled, slots[i] Expired (or Revoked), tombstoned_at
+//!              recorded, the reap due TOMBSTONE_RETENTION after it
 //!                     |  <- a client presenting the dead credential is told
 //!                     |     "expired", not the "unknown key" it would get from
 //!                     v     an already-recycled row
@@ -173,12 +173,32 @@ impl Leases {
     }
 
     /// Retires a key now rather than at its expiry, leaving its reap on schedule.
-    /// This is what a revoke needs: the credential stops working immediately, but
-    /// the row is held long enough to report *why*.
     pub(super) fn retire_now(&mut self, key_id: KeyId) {
         if let Some(retire) = self.stage(key_id, |stages| &stages.retire) {
             retire.fire();
         }
+    }
+
+    /// Ends a key its revoke at second `at` has already marked: the credential
+    /// stops working now, and the row is held for a retention window from `at`,
+    /// long enough to report *why*, rather than until its old deadline.
+    pub(super) fn revoke(&mut self, key_id: KeyId, at: u64) {
+        self.retire_now(key_id);
+        if let Some(inner) = self.inner.upgrade() {
+            inner
+                .cold_mut()
+                .entry(key_id)
+                .and_modify(|cold| cold.tombstoned_at = at);
+        }
+        let Some(stages) = self.stages.get_mut(&key_id) else {
+            return;
+        };
+        let Some(reap) = stages.reap.upgrade() else {
+            return;
+        };
+        let reap = reap.supersede();
+        stages.reap = Arc::downgrade(&reap);
+        self.schedule_at(retention_ends(at), reap);
     }
 
     /// Ends a key outright, running both stages. Skips the retention wait, so it

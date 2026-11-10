@@ -387,10 +387,10 @@ pub(super) fn actor_revoke(
         let state = slot_state_name(slot.state).to_string();
         let expires_at = slot.expires_at;
         drop(slots);
-        // Retire only: the row stays until its retention elapses, because the
-        // slot table holds a `Weak` and a later request has to be able to read
-        // the revoked reason rather than find a recycled row.
-        leases.retire_now(key_id);
+        // The row stays until its retention elapses, because the slot table
+        // holds a `Weak` and a later request has to be able to read the revoked
+        // reason rather than find a recycled row.
+        leases.revoke(key_id, now);
         let cold = inner.cold();
         let metadata = cold.get(&key_id).ok_or_else(|| key_not_found(key_id))?;
         return Ok(TemporaryKeyMetadata {

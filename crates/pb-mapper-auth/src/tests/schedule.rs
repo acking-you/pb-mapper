@@ -154,6 +154,26 @@ fn a_restored_key_ends_at_its_persisted_deadline() {
     assert_eq!(state_of(&inner, key_id), SlotState::Expired);
 }
 
+/// A revoked key keeps its row for a retention window counted from the revoke,
+/// not from the deadline it no longer has, and records when that window began.
+#[test]
+fn a_revoked_key_is_recycled_a_retention_window_after_the_revoke() {
+    let (inner, mut leases) = schedule();
+    let (key_id, cancellation) = issue(&inner, &mut leases, 0, T + 3600);
+
+    // What `actor_revoke` does for a row in the table.
+    inner.slots_mut()[0].state = SlotState::Revoked;
+    leases.revoke(key_id, T);
+    assert!(cancellation.is_cancelled());
+    assert_eq!(inner.cold()[&key_id].tombstoned_at, T);
+
+    leases.tick(T + TOMBSTONE_RETENTION.as_secs() - 1);
+    assert_eq!(state_of(&inner, key_id), SlotState::Revoked);
+    leases.tick(T + TOMBSTONE_RETENTION.as_secs());
+    assert_eq!(state_of(&inner, key_id), SlotState::Free);
+    assert!(!inner.cold().contains_key(&key_id));
+}
+
 /// No callback can reach the schedule's map, so a key that ended on schedule
 /// is swept out of it rather than kept for as long as the relay runs. A key
 /// whose reap is still to come stays, so collecting it can still end it early.
