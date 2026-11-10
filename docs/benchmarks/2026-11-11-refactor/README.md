@@ -129,12 +129,14 @@ refactored tree, so no commit needed tracing.
 
 ### Stalls in relay_transport_bench
 
-Now and then one 64 MiB echo takes 6-7 s instead of about 1.2 s (it shows
-as 9-11 MiB/s), in any of the four cases; nothing is logged while it waits,
-and the run then finishes normally. Once, on the after side of the one-write
-comparison (round 18, `Tcp codec=false`, a path that change does not
-reach), the echo did not finish within the bench's 60 s timeout and the run
-panicked; that run has no figures.
+Now and then one 64 MiB echo takes 6-7 s instead of 1-1.5 s (it shows as
+9-11 MiB/s), in any of the four cases; nothing is logged while it waits, and
+the run then finishes normally. The cause is Windows' loopback TCP, not
+pb-mapper (below). Once, on the after side of the one-write comparison
+(round 18, `Tcp codec=false`, a path that change does not reach), the echo
+did not finish within the bench's 60 s timeout and the run panicked; that
+run has no figures. It did not recur in any run below; it may have been
+several stalls in a row, which is not verified.
 
 The first part-1 sessions showed stalls on the refactored side only (0 of 30
 base runs, 3 of 30 refactored), so a third session ran base against
@@ -153,8 +155,122 @@ base runs, 3 of 30 refactored), so a third session ran base against
 
 Base stalls too (2 of 80 runs, against 5 of 80 for 03d1dd0f: Fisher exact
 p = 0.44; 2 of 80 against 16 of 260 for every build after the refactor:
-p = 0.26). The refactor did not introduce them, and no change here made
-them measurably more frequent. Their cause was not found.
+p = 0.26). A final comparison ran base 3207797 against the refactored tree
+(5ab03df8) for 200 alternated rounds per side
+(`stall-final-relay_transport_bench.txt`): 10 runs of each stalled. The
+refactor did not introduce the stalls and does not change how often they
+come.
+
+#### What a stall is
+
+At every five-second stall examined but one (below), one loopback
+connection is stuck the same way, read with `SIO_TCP_INFO` and `FIONREAD`
+on every socket:
+
+- the sending end's TCP holds a send window under one loopback MSS (65495
+  bytes): `SndWnd` 256 to 1280 bytes, nothing in flight. The program writing
+  to it is blocked on a full send buffer, as it should be.
+- the receiving end's TCP advertises its whole buffer (`RcvWnd` 131070 or
+  262140) and holds nothing unread (`FIONREAD` 0). The program reading it
+  is waiting for data, as it should be.
+
+About five seconds later the sender's window jumps to the full window and
+the bytes flow at once. No program holds them: the two ends of one TCP
+connection disagree about its window. Whether the update that reopens it
+is never sent, dropped or not applied would take a packet capture, which
+needs administrator rights the account running these benches lacked.
+
+This is what Microsoft's KB2020447 describes: over loopback on a
+multiprocessor computer, a transfer of more than 64 KB can wait five seconds
+for the silly-window-syndrome avoidance timer, and a receiver that
+acknowledges within those five seconds does not end the wait. The article
+offers no fix, only fewer occurrences with more receive buffer or smaller
+transfers. Seen here on Windows 11 Enterprise 10.0.26300 (build
+26300.9711). Any loopback hop of a real tunnel on Windows can meet it: a
+local program to the `connect` end, or the `register` end to a backend on
+the same computer. It is not specific to an echo: a one-way upload through
+three pb-mapper forwarders stalled for 5.39 s.
+
+#### How it was shown not to be pb-mapper's
+
+A reproducer looped the bench's echo (`write_all` and `read_exact` of
+64 MiB on one socket) through a chain of forwarders and, after a second
+without progress, printed the state above for every socket. These runs went
+three to seven at a time, which raised the rate; a stall counted is a pause
+of 3 s or more:
+
+| program | rounds | stalls |
+|---|---|---|
+| std only: blocking sockets, a thread per direction, 3 forwarders | 206 | 7 (4.6-5.0 s) |
+| tokio only, 3 forwarders, tokio 1.49.0 / mio 1.1.1 | 181 | 15 (4.5-5.0 s) |
+| tokio only, 3 forwarders, tokio 1.54.1 / mio 1.2.4 | 182 | 14 (4.3-5.0 s) |
+| pb-mapper's forwarder, 3 hops, no relay | 283 | 14 |
+| `tokio::io::copy_bidirectional`, 3 hops | 208 | 0 |
+| relay, TCP carrier, codec on | 40 | 6 |
+| Linux (WSL2, kernel 6.6.87.2): pb-mapper's forwarder, 3 hops | 277 | 0 |
+| Linux (WSL2, kernel 6.6.87.2): relay, TCP carrier, codec off | 266 | 0 |
+
+- The std-only and tokio-only programs contain no pb-mapper code and stall
+  with the same TCP state. The std one has neither tokio nor mio, and at
+  every stall the receiver had nothing to read and the sender was not
+  writable, so no wakeup was lost either.
+- Linux never stalled, in 543 rounds.
+- The relay, QUIC and the codec play no part: chains without a relay stall,
+  and so do all four bench cases.
+- Forwarders that read and write in large chunks meet it more often than
+  8 KiB copies (above, and a plain copy loop: 4 stalls in 221 rounds with
+  an 8 MiB buffer, none in 170 with 8 KiB). They make a receive window
+  fall under one MSS more often; they do not hold the bytes.
+- Nothing on the data path waits five seconds: the forward loop's only
+  timers are the tunnel idle timeout (1 h) and the half-close idle timeout
+  (60 s), and QUIC's keep-alive is 15 s.
+
+Under that load the reproducers also showed pauses, mostly of 1-2 s, in
+which a runnable task or thread (pb-mapper's, `copy_bidirectional`'s and
+the std threads alike) had data to move and did not run: an overloaded
+CPU, not the stale window. The one five-second stall that did not show the
+stale window, a relay pause of 5.37 s taken while the most reproducers ran,
+was of this kind. The final comparison shows none: none of its echoes took
+between 2.5 and 5.5 s.
+
+#### Workarounds measured and not taken
+
+| change | measured with | result |
+|---|---|---|
+| Forward reads capped at 64 KiB (`MAX_BUF_SIZE` in `pb-mapper-protocol/src/buffer.rs`) | `relay_transport_bench`, 57 alternated rounds per side | runs with a stall: 3 of 57 before, 3 of 57 after. QUIC throughput -16.9% without the codec (p = 2.3e-8) and -7.7% with it (p = 0.007); TCP unchanged (p > 0.05) |
+| A 4 MiB `SO_RCVBUF` on every loopback data socket pb-mapper owns | `relay_transport_bench`, 33 alternated rounds per setting | runs with a stall: 2 of 33 without, 1 of 33 with; throughput not distinguishable |
+
+A larger receive buffer makes the state rarer, as the KB says, but only
+where pb-mapper owns the receiving socket, and in the bench the stuck
+receiver was usually the bench's own. Neither removed the stall; the first
+costs QUIC throughput, and the second is a Windows-only socket option that
+costs memory per socket. Neither is applied.
+
+#### Reading the tables
+
+Echo times are bimodal. Of the final comparison's 1600 echoes, 1580 took
+0.5-2.5 s, 19 took 5.5-7.0 s and one 11.49 s (two stalls in one echo); none
+took between 2.5 and 5.5 s. A stall adds about five seconds to one echo
+(4.2-5.4 s where the reproducers timed it) and nothing else. In this pass's
+raw files an echo with one stall shows as 9.0-10.8 MiB/s, the one with two
+as 5.6 MiB/s, and the slowest echo without a stall as 23.5 MiB/s.
+
+So count a run with an echo over 5 s as stalled, and leave stalled runs out
+of throughput medians or give the medians both ways. A stall barely moves a
+median but sets the minimum, and the [min..max] spreads above that reach
+down to 9-11 MiB/s are stalls. A stall count says nothing about the build.
+The final comparison both ways (MiB/s, median [min..max]):
+
+| case | side | stalled echoes | all 200 runs | the 190 runs without a stall |
+|---|---|---|---|---|
+| Tcp codec=false | base | 8 | 49.55 [5.6..77.2] | 50.00 [28.3..77.2] |
+| | refactored | 4 | 50.90 [9.6..80.2] | 50.90 [30.0..80.2] |
+| Tcp codec=true | base | 0 | 43.10 [27.3..66.5] | 43.40 [27.3..66.5] |
+| | refactored | 4 | 46.75 [9.3..66.5] | 46.85 [28.5..66.5] |
+| Quic codec=false | base | 2 | 63.50 [10.6..76.5] | 63.50 [44.4..76.5] |
+| | refactored | 1 | 63.70 [10.8..74.9] | 63.75 [46.3..74.9] |
+| Quic codec=true | base | 0 | 55.30 [38.5..73.3] | 55.30 [41.4..73.3] |
+| | refactored | 1 | 56.55 [10.6..68.9] | 57.25 [40.7..68.9] |
 
 ## Part 2: the deferred findings and report-only items
 
@@ -523,3 +639,6 @@ Pinned runs spread as widely as the unpinned sessions above (TCP throughput
   `u09-12-host_send_bench.txt`, `u09-11-host_send_bench.txt`,
   `u09-13-host_send_bench.txt`: part 2, one per comparison.
 - `aa-check-relay_transport_bench.txt`: the A/A check.
+- `stall-final-relay_transport_bench.txt`: the final stall comparison, base
+  3207797 against 5ab03df8, 200 rounds each (see "Stalls in
+  relay_transport_bench").
