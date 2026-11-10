@@ -7,21 +7,9 @@
 use crate::worker_status::WorkerStatus;
 use pb_mapper_auth::LegacyProtocolPolicy;
 use pb_mapper_protocol::command::{PbConnStatusResp, PbServiceConnStatus};
-use snafu::Snafu;
-
-/// A label that names no value of the option it was parsed as.
-#[derive(Clone, Debug, Eq, PartialEq, Snafu)]
-#[snafu(display("unknown value `{label}`"))]
-pub struct UnknownLabel {
-    label: String,
-}
-
-impl UnknownLabel {
-    /// The label as it was given.
-    pub fn label(&self) -> &str {
-        &self.label
-    }
-}
+// The type `RelayTransport::from_str` fails with too, so every option label the
+// SDK parses fails alike.
+pub use pb_mapper_protocol::transport::UnknownLabel;
 
 /// Give an option enum its one table of labels: `as_str`, and a `FromStr`
 /// that takes exactly those labels back, case and all.
@@ -42,7 +30,7 @@ macro_rules! labels {
             fn from_str(label: &str) -> Result<Self, UnknownLabel> {
                 match label {
                     $($label => Ok(Self::$variant),)+
-                    _ => UnknownLabelSnafu { label }.fail(),
+                    _ => Err(UnknownLabel::new(label)),
                 }
             }
         }
@@ -437,12 +425,7 @@ mod tests {
             LanTransport::Quic => "quic",
             LanTransport::Tcp => "tcp",
         );
-        assert_eq!(
-            "TCP".parse::<Transport>(),
-            Err(UnknownLabel {
-                label: "TCP".into()
-            })
-        );
+        assert_eq!("TCP".parse::<Transport>(), Err(UnknownLabel::new("TCP")));
         for mapping in [PortMapping::Off, PortMapping::Auto, PortMapping::Always] {
             assert_eq!(serde_json::to_value(mapping).unwrap(), mapping.as_str());
         }
