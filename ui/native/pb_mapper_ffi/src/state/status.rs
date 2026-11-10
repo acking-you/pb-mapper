@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use pb_mapper_client::sdk::{Client, RelayTransport, RemoteId};
+use pb_mapper_core::time::{saturating_millis, unix_millis};
 
 use super::runtime::EmbeddedRelay;
 use super::stored::normalize_msg_header_key;
@@ -110,6 +111,12 @@ async fn fetch_real_status(
             .ok()
     };
     tokio::join!(answer, quic)
+}
+
+/// `at` in whole milliseconds since the Unix epoch, as [`unix_millis`] reads
+/// the clock now.
+fn unix_millis_at(at: SystemTime) -> u64 {
+    saturating_millis(at.duration_since(UNIX_EPOCH).unwrap_or_default())
 }
 
 fn cache_is_stale(last_update: Option<Instant>, ttl: Duration) -> bool {
@@ -213,15 +220,8 @@ impl PbMapperState {
                 status_message: view.message,
                 path: view.path,
                 relay_transport: view.transport,
-                created_at_ms: config
-                    .created_at
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-                updated_at_ms: SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
+                created_at_ms: unix_millis_at(config.created_at),
+                updated_at_ms: unix_millis(),
             });
         }
 
@@ -260,16 +260,8 @@ impl PbMapperState {
                 status_message: view.message,
                 path: view.path,
                 relay_transport: view.transport,
-                created_at_ms: config
-                    .created_at
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-                updated_at_ms: config
-                    .created_at
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
+                created_at_ms: unix_millis_at(config.created_at),
+                updated_at_ms: unix_millis_at(config.created_at),
             });
         }
 
@@ -483,7 +475,7 @@ async fn refresh_server_status(
             active_connections: remote_id.active,
             idle_connections: remote_id.idle,
             error: None,
-            latency_ms: Some(latency.as_millis() as u64),
+            latency_ms: Some(saturating_millis(latency)),
             quic_port: quic.flatten(),
             quic_known: quic.is_some(),
         },

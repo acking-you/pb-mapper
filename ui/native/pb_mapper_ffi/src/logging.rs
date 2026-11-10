@@ -2,7 +2,6 @@
 
 use std::ffi::{CString, c_char, c_int};
 use std::fmt::Write as _;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::callback::CallbackSlot;
 
@@ -18,10 +17,7 @@ static LOG_CALLBACK: CallbackSlot<LogCallback> = CallbackSlot::empty();
 pub(crate) fn send_log(level: c_int, message: &str) {
     LOG_CALLBACK.with(|callback| {
         if let Ok(c_msg) = CString::new(message) {
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let timestamp = pb_mapper_core::time::unix_seconds();
             let leaked = c_msg.into_raw();
             callback(level, leaked, timestamp);
         }

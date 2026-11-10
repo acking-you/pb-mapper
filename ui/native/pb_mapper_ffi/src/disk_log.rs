@@ -9,9 +9,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, OnceLock, mpsc};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use parking_lot::Mutex;
+use pb_mapper_core::time::unix_seconds;
 use rolling_file::{BasicRollingFileAppender, RollingConditionBasic};
 use tracing_appender::non_blocking::{ErrorCounter, NonBlocking, NonBlockingBuilder, WorkerGuard};
 
@@ -311,13 +312,6 @@ impl Write for LogFile {
         }
         self.writer.as_mut().map_or(Ok(()), Write::flush)
     }
-}
-
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn non_blocking(writer: impl Write + Send + 'static) -> (NonBlocking, WorkerGuard) {
