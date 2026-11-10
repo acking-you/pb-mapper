@@ -535,36 +535,44 @@ mod tests {
     use super::*;
     use std::future::poll_fn;
 
+    /// Receive on `demux` until it fails, as Quinn's endpoint driver does: its
+    /// receive path handles each control segment of whatever arrives, which
+    /// Linux's UDP GRO may have coalesced into one read.
+    fn drive(mut demux: Demux) -> tokio_util::task::AbortOnDropHandle<()> {
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut buffer = vec![0; usize::from(u16::MAX)];
+            let mut meta = [RecvMeta::default()];
+            while poll_fn(|cx| demux.poll_recv(cx, &mut [IoSliceMut::new(&mut buffer)], &mut meta))
+                .await
+                .is_ok()
+            {}
+        }))
+    }
+
     #[tokio::test]
     async fn authenticated_source_requires_our_return_path_challenge() {
         tokio::time::timeout(Duration::from_secs(3), async {
-            let (consumer, _) = Socket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-            let (provider, _) = Socket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let (consumer, consumer_rx) = Socket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let (provider, provider_rx) = Socket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
             let id = [4; 16];
             let secret = SessionSecret([5; 32]);
             let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
             let wake = Arc::new(Notify::new());
             consumer.authorize(id, secret, deadline, wake.clone());
             provider.authorize(id, secret, deadline, Arc::new(Notify::new()));
+            let _consumer_rx = drive(consumer_rx);
+            let _provider_rx = drive(provider_rx);
             consumer.inner.writable().await.unwrap();
             provider.inner.writable().await.unwrap();
-            let mut buffer = [0; 1500];
             // Only the provider knows a working candidate. Its source address
             // was not advertised to the consumer (as with a changed NAT port).
             provider.probe(id, &[consumer.local_addr()]);
-            let (len, source) = consumer.inner.recv_from(&mut buffer).await.unwrap();
-            consumer.handle_control(&buffer[..len], source);
             // The session hears at once that a source is owed a challenge.
             wake.notified().await;
             consumer.probe(id, &[]);
             assert!(consumer.learned(&id).is_empty());
-            // The provider receives our Pong and then our own challenge.
-            for _ in 0..2 {
-                let (len, source) = provider.inner.recv_from(&mut buffer).await.unwrap();
-                provider.handle_control(&buffer[..len], source);
-            }
-            let (len, source) = consumer.inner.recv_from(&mut buffer).await.unwrap();
-            consumer.handle_control(&buffer[..len], source);
+            // The provider takes our Pong and answers our own challenge, and
+            // only that answer proves the path.
             wake.notified().await;
             let learned: Vec<_> = consumer.learned(&id).into_iter().map(|(a, _)| a).collect();
             assert_eq!(learned, [provider.local_addr()]);
