@@ -12,10 +12,10 @@
 //! meanwhile is never changed back.
 
 use crate::{FailureKind, Result, error, failure_kind, platform::DisplayModes};
+use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
-    sync::{Mutex, MutexGuard, PoisonError},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -290,7 +290,12 @@ impl Journal {
 
     /// Its entries with `device`'s replaced by `entry`, or removed.
     fn put(&self, device: &str, entry: Option<Entry>) -> Result<()> {
-        let mut entries = self.read();
+        self.put_into(self.read(), device, entry)
+    }
+
+    /// `entries`, just read from it, with `device`'s replaced by `entry`, or
+    /// removed.
+    fn put_into(&self, mut entries: Vec<Entry>, device: &str, entry: Option<Entry>) -> Result<()> {
         entries.retain(|kept| kept.device != device);
         entries.extend(entry);
         if entries.len() > MAX_ENTRIES {
@@ -323,7 +328,7 @@ struct Claim {
 static CLAIMS: Mutex<Vec<Claim>> = Mutex::new(Vec::new());
 
 fn claims() -> MutexGuard<'static, Vec<Claim>> {
-    CLAIMS.lock().unwrap_or_else(PoisonError::into_inner)
+    CLAIMS.lock()
 }
 
 fn unclaim(claims: &mut Vec<Claim>, device: &str) {
@@ -417,12 +422,10 @@ impl Guard {
             (None, Some(at)) => claims[at].original,
             (None, None) => modes.current(device)?,
         };
-        let before = self
-            .journal
-            .read()
-            .into_iter()
-            .find(|entry| entry.device == device);
-        self.journal.put(
+        let entries = self.journal.read();
+        let before = entries.iter().find(|entry| entry.device == device).cloned();
+        self.journal.put_into(
+            entries,
             device,
             Some(Entry {
                 device: device.to_owned(),
@@ -574,7 +577,7 @@ static WARNED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 fn not_restored(device: &str, failure: &std::io::Error) {
     let detail = failure.to_string();
-    let mut warned = WARNED.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut warned = WARNED.lock();
     let new = !warned
         .iter()
         .any(|(seen, said)| seen == device && *said == detail);
@@ -591,10 +594,7 @@ fn not_restored(device: &str, failure: &std::io::Error) {
 }
 
 fn settled(device: &str) {
-    WARNED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .retain(|(seen, _)| seen != device);
+    WARNED.lock().retain(|(seen, _)| seen != device);
 }
 
 #[cfg(test)]
