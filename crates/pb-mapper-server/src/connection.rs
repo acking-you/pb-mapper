@@ -81,7 +81,7 @@ pub(super) async fn handle_listener(
 pub(super) fn log_auth_failure(
     security: &ServerSecurity,
     peer_addr: SocketAddr,
-    conn: &dyn std::fmt::Display,
+    conn: impl std::fmt::Display,
     error: &pb_mapper_protocol::secure::ServerInitialError,
 ) {
     let key_id = error
@@ -129,7 +129,7 @@ pub(super) async fn handle_conn(
     let initial = match tokio::time::timeout(timeout, security.read_initial(&mut conn)).await {
         Err(_) => TaskCenterInitRequestTimeoutSnafu { conn_id, timeout }.fail()?,
         Ok(Err(error)) => {
-            log_auth_failure(&security, peer_addr, &conn_id, &error);
+            log_auth_failure(&security, peer_addr, conn_id, &error);
             if let Some(session) = error.response_session {
                 write_protocol_error(&mut conn, &session, &error.failure).await;
             }
