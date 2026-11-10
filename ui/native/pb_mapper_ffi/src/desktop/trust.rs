@@ -96,12 +96,7 @@ impl Saved {
     }
 
     pub fn new(scope: &Scope, settings: Settings, identity: &HostIdentity) -> Self {
-        let display_device = desktop::displays().ok().and_then(|displays| {
-            displays
-                .into_iter()
-                .find(|display| display.id == settings.display_id)
-                .map(|display| display.name)
-        });
+        let display_device = display_device(settings.display_id);
         Self {
             scope: scope.relay(),
             settings,
@@ -174,6 +169,17 @@ fn failure(failure: std::io::Error) -> CtlError {
     } else {
         err(failure)
     }
+}
+
+/// The device name of the display `display_id` names now, which the service
+/// and a remembered grant keep beside the id: a reboot or a mode change may
+/// give the display another id, never another name.
+pub(super) fn display_device(display_id: u32) -> Option<String> {
+    desktop::displays()
+        .ok()?
+        .into_iter()
+        .find(|display| display.id == display_id)
+        .map(|display| display.name)
 }
 
 /// `None` when nothing is remembered. The display is the remembered

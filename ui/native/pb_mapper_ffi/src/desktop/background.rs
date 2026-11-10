@@ -1,5 +1,7 @@
 //! The Windows service's background host as this app sees it: the cached
 //! snapshot, its discovery, and setup, resume, stop and revoke.
+#[cfg(windows)]
+use super::credential_namespace;
 use super::host::{HostSlot, HostStart};
 #[cfg(windows)]
 use super::host::{disable_legacy_startup, load_trust, revoke_trust, save_trust};
@@ -13,7 +15,7 @@ use crate::{error::ErrorCode, state::process_credential};
 use pb_mapper::desktop;
 use pb_mapper::desktop::HostStatus;
 #[cfg(windows)]
-use pb_mapper_core::checksum::{Credential, get_process_credential};
+use pb_mapper_core::checksum::Credential;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -471,12 +473,10 @@ pub(super) async fn revoke_background(handle: &PbMapperHandle) -> Result<Backgro
     #[cfg(windows)]
     {
         let server = handle.state.lock().await.get_config_status().server_address;
-        let namespace = get_process_credential()
-            .ok()
-            .map(|credential| credential.key_id());
-        let snapshot = desktop::privileged::background::revoke_scope(server, namespace)
-            .await
-            .map_err(err)?;
+        let snapshot =
+            desktop::privileged::background::revoke_scope(server, credential_namespace())
+                .await
+                .map_err(err)?;
         Ok(snapshot.into())
     }
     #[cfg(not(windows))]
@@ -566,7 +566,7 @@ pub(super) async fn start_background(
             settings: desktop::privileged::background::Settings {
                 service: start.service.clone(),
                 display_id: start.display_id,
-                display_device: display_device(start.display_id),
+                display_device: trust::display_device(start.display_id),
                 allow_control: start.allow_control,
                 allow_direct: !start.relay_only,
                 auto_start: start.auto_start,
@@ -600,18 +600,6 @@ pub(super) async fn start_background(
         let _ = handle;
         Err(err("background hosting requires Windows"))
     }
-}
-
-/// The device name of the display `display_id` names now, which the service
-/// keeps beside the id: a reboot or a mode change may give the display
-/// another id, never another name.
-#[cfg(windows)]
-fn display_device(display_id: u32) -> Option<String> {
-    desktop::displays()
-        .ok()?
-        .into_iter()
-        .find(|display| display.id == display_id)
-        .map(|display| display.name)
 }
 
 /// The process credential, as the service stores it.
@@ -789,7 +777,7 @@ async fn enable(
         settings: desktop::privileged::background::Settings {
             service,
             display_id,
-            display_device: display_device(display_id),
+            display_device: trust::display_device(display_id),
             allow_control,
             allow_direct: true,
             auto_start: true,

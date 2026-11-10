@@ -3,13 +3,12 @@
 use super::background::{
     Background, enable_host, query_background, stop_background, with_relay_match,
 };
-use super::{err, trust};
+use super::{credential_namespace, err, trust};
 use crate::{error::CtlError, handle::PbMapperHandle, state::process_credential};
 use pb_mapper::{
     Client,
     desktop::{self, Access, DisplaySelection, Host, HostOptions, StopReason},
 };
-use pb_mapper_core::checksum::get_process_credential;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -161,9 +160,7 @@ pub(super) async fn trust_status(handle: &PbMapperHandle) -> Result<Value, CtlEr
         )
     };
     let saved = load_trust(directory).await?;
-    let namespace = get_process_credential()
-        .ok()
-        .map(|credential| credential.key_id());
+    let namespace = credential_namespace();
     let matches = saved.as_ref().is_some_and(|saved| {
         namespace.is_some_and(|namespace| saved.matches_relay(&relay, namespace))
     });

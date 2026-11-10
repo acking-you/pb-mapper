@@ -90,9 +90,7 @@ impl DesktopState {
         };
         let scope = RelayScope {
             server: state.get_config_status().server_address,
-            namespace: get_process_credential()
-                .ok()
-                .map(|credential| credential.key_id()),
+            namespace: credential_namespace(),
         };
         *self.relay.lock() = Some(scope.clone());
         Some(scope)
@@ -145,6 +143,13 @@ enum Request {
     },
     Connect(ConnectRequest),
     Disconnect,
+}
+
+/// The namespace the process credential owns, if there is one.
+fn credential_namespace() -> Option<u64> {
+    get_process_credential()
+        .ok()
+        .map(|credential| credential.key_id())
 }
 
 fn err(e: impl std::fmt::Display) -> CtlError {
