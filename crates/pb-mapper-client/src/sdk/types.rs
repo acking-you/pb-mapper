@@ -4,6 +4,7 @@
 //! Keeping owned mirrors here is what lets a caller depend on the SDK alone: the
 //! protocol crate stays an implementation detail.
 
+use crate::worker_status::WorkerStatus;
 use pb_mapper_auth::LegacyProtocolPolicy;
 use pb_mapper_protocol::command::{PbConnStatusResp, PbServiceConnStatus};
 
@@ -76,19 +77,16 @@ pub enum TunnelStatus {
 }
 
 impl TunnelStatus {
-    pub(crate) fn from_callback(status: &str) -> Self {
+    /// What a worker's report means to a caller of the SDK.
+    pub(crate) fn from_worker(status: &WorkerStatus) -> Self {
         match status {
-            "connected" => return Self::Connected,
-            "retrying" => return Self::Retrying,
-            "failed" => return Self::Failed("failed".into()),
-            _ => {}
-        }
-        // A permanent rejection arrives as `failed: <reason>`; the reason is the
-        // only description of it the caller ever gets, so it has to survive here
-        // rather than collapsing into `Retrying` and hanging `wait_ready`.
-        match status.strip_prefix("failed:") {
-            Some(reason) => Self::Failed(reason.trim().to_string()),
-            None => Self::Retrying,
+            WorkerStatus::Connected => Self::Connected,
+            WorkerStatus::Retrying => Self::Retrying,
+            WorkerStatus::Failed(None) => Self::Failed("failed".into()),
+            // The reason is the only description of a permanent rejection
+            // the caller ever gets. Trimmed: one a `snafu::Report` rendered
+            // ends in a line break.
+            WorkerStatus::Failed(Some(reason)) => Self::Failed(reason.trim().to_owned()),
         }
     }
 }

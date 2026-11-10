@@ -27,6 +27,7 @@ mod recovery;
 mod direct;
 
 mod relay;
+mod worker_status;
 
 #[cfg(test)]
 mod status_text_tests;

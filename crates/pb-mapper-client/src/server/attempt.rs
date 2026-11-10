@@ -21,12 +21,12 @@ use super::error::{
     RegisterRespNotMatchSnafu, SendRegisterReqSnafu,
 };
 use super::probe::{RegistrationProbeResult, probe_remote_registration};
-use super::status::WorkerStatus;
 use super::stream::{SpawnStream, StreamConnect};
 use super::worker::ControlBackoff;
 use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase, ms};
 use crate::endpoint::{RecoveryWake, RelayEndpoint};
 use crate::relay::CarrierId;
+use crate::worker_status::WorkerStatus;
 use pb_mapper_core::checksum::Credential;
 #[cfg(feature = "p2p")]
 use pb_mapper_core::config::control_io_timeout;

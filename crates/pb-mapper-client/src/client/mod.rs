@@ -21,6 +21,7 @@ use self::status::get_status_scoped;
 use self::stream::{StreamSetup, handle_local_stream};
 use crate::addr::{resolve_all, resolve_tunnel_ends};
 use crate::recovery::{RecoveryTiming, jitter, transport_backoff};
+use crate::worker_status::{StatusSink, WorkerStatus, text_sink};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{ResolvedAddrs, StatusOp};
 use pb_mapper_protocol::command::PbConnStatusReq;
@@ -32,23 +33,21 @@ use uni_stream::stream::{ListenerProvider, StreamAccept};
 /// listener's backlog; a stream that starts forwarding gives its slot back.
 const LOCAL_SETUPS: usize = 64;
 
-/// Receives a tunnel's status as text: `connected`, `retrying`, `failed`, or
-/// `failed: <reason>` once it will not come up.
-pub type ClientStatusCallback = Box<dyn Fn(&str) + Send + Sync>;
+pub use crate::worker_status::StatusCallback as ClientStatusCallback;
 
-/// Resolve both ends, reporting a bad address through `status_callback`.
+/// Resolve both ends, reporting a bad address through `status`.
 ///
-/// The callback is the only channel a caller has here — these entry points return
+/// The status is the only channel a caller has here — these entry points return
 /// `()` — so an address that never resolves has to settle the tunnel as failed
 /// rather than just leaving a log line behind.
 async fn resolve_ends_or_fail<A: ToSocketAddrs>(
     local_addr: A,
     remote_addr: A,
-    status_callback: Option<&ClientStatusCallback>,
+    status: Option<&StatusSink>,
 ) -> Option<(ResolvedAddrs, ResolvedAddrs)> {
     let resolved = resolve_tunnel_ends(local_addr, remote_addr).await;
-    if let (None, Some(callback)) = (&resolved, status_callback) {
-        callback("failed");
+    if let (None, Some(sink)) = (&resolved, status) {
+        sink(&WorkerStatus::Failed(None));
     }
     resolved
 }
@@ -131,8 +130,9 @@ pub async fn run_client_side_cli_with_callback_scoped<
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
+    let status = status_callback.map(text_sink);
     let Some((local_addr, remote_addr)) =
-        resolve_ends_or_fail(local_addr, remote_addr, status_callback.as_ref()).await
+        resolve_ends_or_fail(local_addr, remote_addr, status.as_ref()).await
     else {
         return;
     };
@@ -142,7 +142,7 @@ pub async fn run_client_side_cli_with_callback_scoped<
         key,
         keep_alive,
         namespace,
-        status_callback,
+        status,
         pinned_credential,
         CancellationToken::new(),
     )
@@ -173,7 +173,7 @@ pub async fn run_client_side_cli_with_shutdown<LocalListener: ListenerProvider>(
         key,
         keep_alive,
         namespace,
-        status_callback,
+        status_callback.map(text_sink),
         pinned_credential,
         shutdown,
     )
@@ -190,7 +190,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
     key: Arc<str>,
     keep_alive: bool,
     namespace: Option<u64>,
-    status_callback: Option<ClientStatusCallback>,
+    status: Option<StatusSink>,
     pinned_credential: Option<pb_mapper_core::checksum::Credential>,
     shutdown: CancellationToken,
 ) where
@@ -202,7 +202,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
         key,
         keep_alive,
         namespace,
-        status_callback,
+        status,
         pinned_credential,
         shutdown,
         Diagnostics::default(),
@@ -223,7 +223,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     key: Arc<str>,
     keep_alive: bool,
     namespace: Option<u64>,
-    status_callback: Option<ClientStatusCallback>,
+    status: Option<StatusSink>,
     pinned_credential: Option<Credential>,
     shutdown: CancellationToken,
     diagnostics: Diagnostics,
@@ -248,8 +248,8 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
             Ok(credential) => credential,
             Err(e) => {
                 tracing::error!("load client credential failed: {e}");
-                if let Some(ref callback) = status_callback {
-                    callback("failed");
+                if let Some(sink) = &status {
+                    sink(&WorkerStatus::Failed(None));
                 }
                 return;
             }
@@ -284,7 +284,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                 Ok(listener) => listener,
                 Err(error) => {
                     tracing::warn!(event = "client_local_bind_failed", %key, %local_addr, %error);
-                    if let Some(callback) = &status_callback { callback("retrying"); }
+                    if let Some(sink) = &status { sink(&WorkerStatus::Retrying); }
                     tokio::select! {
                         () = shutdown.cancelled() => break,
                         () = tokio::time::sleep(jitter(retry_backoff.next_delay())) => {}
@@ -300,7 +300,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
             namespace,
             credential,
             diagnostics: &diagnostics,
-            status_callback: status_callback.as_ref(),
+            status: status.as_ref(),
             timing: &timing,
             retry_backoff: &mut retry_backoff,
             probes: JoinSet::new(),
@@ -365,8 +365,8 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
             }
         }
         drop(health);
-        if let Some(callback) = &status_callback {
-            callback("retrying");
+        if let Some(sink) = &status {
+            sink(&WorkerStatus::Retrying);
         }
         tokio::select! {
             () = shutdown.cancelled() => break,

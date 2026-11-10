@@ -6,14 +6,15 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use super::ServerTunnelOptions;
 use super::attempt::{ServerCliRunConfig, Status, run_server_side_cli_inner};
 use super::control::DirectProvider;
-use super::status::{PoolStatus, WorkerStatus};
+use super::status::PoolStatus;
 use super::stream::spawn_stream;
-use super::{ServerTunnelOptions, StatusCallback};
 use crate::diagnostics::{Diagnostics, RecoveryFailure};
 use crate::endpoint::RelayEndpoint;
 use crate::recovery::{REVOKED_DIRECT_RECHECK, RecoveryTiming, jitter, transport_backoff};
+use crate::worker_status::{StatusSink, WorkerStatus};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{ResolvedAddrs, control_conn_pool_size, registration_reject_backoff};
 use pb_mapper_core::timeout::RetryBackoff;
@@ -89,7 +90,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
     remote_addr: RelayEndpoint,
     key: Arc<str>,
     options: ServerTunnelOptions,
-    status_callback: Option<StatusCallback>,
+    status: Option<StatusSink>,
     pinned_credential: Option<Credential>,
     shutdown: CancellationToken,
     diagnostics: Diagnostics,
@@ -141,7 +142,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
         direct,
         spawn_stream: spawn_stream::<LocalStream>,
     };
-    run_control_pool(config, pool_size, status_callback, shutdown).await;
+    run_control_pool(config, pool_size, status, shutdown).await;
 }
 
 /// Run `pool_size` control workers for the registration `config` describes,
@@ -152,15 +153,14 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
 async fn run_control_pool(
     config: ServerCliRunConfig,
     pool_size: usize,
-    status_callback: Option<StatusCallback>,
+    status: Option<StatusSink>,
     shutdown: CancellationToken,
 ) {
     let mut workers = JoinSet::new();
     // Every worker reports here, and the pool's aggregate is what the caller is
     // told: one healthy control connection is a reachable service, whichever
     // worker holds it.
-    let pool_status =
-        status_callback.map(|callback| Arc::new(PoolStatus::new(callback, pool_size)));
+    let pool_status = status.map(|sink| Arc::new(PoolStatus::new(sink, pool_size)));
     for worker_index in 0..pool_size {
         let worker = ServerCliRunConfig {
             worker_index,
@@ -271,7 +271,7 @@ async fn run_server_side_cli_worker(
                     reason = %reason,
                     "pb server permanently rejected this registration; not reconnecting"
                 );
-                report(WorkerStatus::Failed(reason));
+                report(WorkerStatus::Failed(Some(reason)));
                 break 'outer;
             }
             Status::RejectedRetryable(ref reason) => {

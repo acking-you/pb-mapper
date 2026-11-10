@@ -17,7 +17,7 @@ use super::error::{AddressSnafu, Result};
 use super::handle::LiveTunnel;
 use super::types::TunnelStatus;
 use super::{DirectPolicy, LanTransport, PortMapping};
-use crate::server::StatusCallback;
+use crate::worker_status::StatusSink;
 
 /// Resolve one endpoint to every address it names.
 ///
@@ -48,23 +48,21 @@ fn settle_stopped(tx: &watch::Sender<TunnelStatus>) {
     });
 }
 
-/// Bridge the worker's string status callback onto the handle's watch channel.
-///
-/// `StatusCallback` and `ClientStatusCallback` are the same boxed closure type,
-/// so both tunnel directions share this.
-fn watch_callback(tx: watch::Sender<TunnelStatus>) -> StatusCallback {
-    Box::new(move |status: &str| {
-        let _ = tx.send(TunnelStatus::from_callback(status));
+/// Publish what a worker of either tunnel direction reports on the handle's
+/// watch channel.
+fn watch_sink(tx: watch::Sender<TunnelStatus>) -> StatusSink {
+    Box::new(move |status| {
+        let _ = tx.send(TunnelStatus::from_worker(status));
     })
 }
 
 /// What a spawned tunnel worker is given: its resolved endpoints, its key, the
-/// callback that publishes its status, and the token that stops it.
+/// sink that publishes its status, and the token that stops it.
 pub(super) struct WorkerContext {
     pub(super) local_addr: ResolvedAddrs,
     pub(super) remote_addr: RelayEndpoint,
     pub(super) key: Arc<str>,
-    pub(super) status_callback: StatusCallback,
+    pub(super) status: StatusSink,
     pub(super) shutdown: CancellationToken,
     pub(super) diagnostics: Diagnostics,
 }
@@ -176,7 +174,7 @@ impl TunnelWorker {
                 local_addr,
                 remote_addr,
                 key,
-                status_callback: watch_callback(status_tx.clone()),
+                status: watch_sink(status_tx.clone()),
                 shutdown: worker_shutdown,
                 diagnostics: worker_diagnostics.clone(),
             })

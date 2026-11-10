@@ -25,8 +25,9 @@ use uni_stream::stream::StreamProvider;
 
 #[cfg(feature = "p2p")]
 pub(crate) use self::control::LocalControlWrite;
-pub use self::status::StatusCallback;
 pub(crate) use self::worker::run_server_side_cli_recovering;
+pub use crate::worker_status::StatusCallback;
+use crate::worker_status::text_sink;
 
 /// How a local-server tunnel forwards and where it registers: the codec, the
 /// transport, whether its sockets keep alive, and its namespace.
@@ -156,7 +157,7 @@ async fn run_server_side_cli_pool<LocalStream>(
         RelayEndpoint::fixed(remote_addr),
         key,
         options,
-        status_callback,
+        status_callback.map(text_sink),
         pinned_credential,
         shutdown,
         Diagnostics::default(),

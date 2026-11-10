@@ -31,6 +31,7 @@ use super::{ConnectOptions, LanTransport, PathPolicy, RegisterOptions};
 use crate::client::run_client_side_cli_recovering_with_path;
 use crate::client::status::get_status_with_credential;
 use crate::server::{ServerTunnelOptions, run_server_side_cli_recovering};
+use crate::worker_status::WorkerStatus;
 
 pub(crate) struct ClientInner {
     pub(crate) server: String,
@@ -299,7 +300,7 @@ impl Client {
                     context.remote_addr,
                     context.key,
                     tunnel,
-                    Some(context.status_callback),
+                    Some(context.status),
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
@@ -314,7 +315,7 @@ impl Client {
                     context.remote_addr,
                     context.key,
                     tunnel,
-                    Some(context.status_callback),
+                    Some(context.status),
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
@@ -413,10 +414,10 @@ impl Client {
                 tokio::select! {
                     biased;
                     () = context.shutdown.cancelled() => break,
-                    Some(_) = ready.recv() => (context.status_callback)("connected"),
+                    Some(_) = ready.recv() => (context.status)(&WorkerStatus::Connected),
                     result = &mut forward => {
                         if let Err(error) = result {
-                            (context.status_callback)(&format!("failed: {error}"));
+                            (context.status)(&WorkerStatus::Failed(Some(error.to_string())));
                         }
                         break;
                     }
@@ -460,7 +461,7 @@ impl Client {
                     context.key,
                     keep_alive,
                     namespace,
-                    Some(context.status_callback),
+                    Some(context.status),
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
@@ -476,7 +477,7 @@ impl Client {
                     context.key,
                     keep_alive,
                     namespace,
-                    Some(context.status_callback),
+                    Some(context.status),
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,

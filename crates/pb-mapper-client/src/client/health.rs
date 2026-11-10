@@ -9,12 +9,12 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use super::ClientStatusCallback;
 use super::status::get_status_with_credential;
 use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
 use crate::endpoint::RelayEndpoint;
 use crate::recovery::{REVOKED_DIRECT_RECHECK, RecoveryTiming, jitter};
 use crate::relay::CarrierId;
+use crate::worker_status::{StatusSink, WorkerStatus};
 use pb_mapper_core::checksum::Credential;
 use pb_mapper_core::config::{
     ResolvedAddrs, client_health_check_interval, client_health_check_timeout,
@@ -110,7 +110,7 @@ pub(super) struct Health<'a> {
     pub(super) namespace: Option<u64>,
     pub(super) credential: Credential,
     pub(super) diagnostics: &'a Diagnostics,
-    pub(super) status_callback: Option<&'a ClientStatusCallback>,
+    pub(super) status: Option<&'a StatusSink>,
     pub(super) timing: &'a Mutex<RecoveryTiming>,
     /// Shared with the listener's own rebinds, which wait on it too.
     pub(super) retry_backoff: &'a mut RetryBackoff,
@@ -122,9 +122,9 @@ pub(super) struct Health<'a> {
 }
 
 impl Health<'_> {
-    fn report(&self, status: &str) {
-        if let Some(callback) = self.status_callback {
-            callback(status);
+    fn report(&self, status: WorkerStatus) {
+        if let Some(sink) = self.status {
+            sink(&status);
         }
     }
 
@@ -195,12 +195,12 @@ impl Health<'_> {
                 self.next_probe = Instant::now() + client_health_check_interval();
                 if !self.connected {
                     self.connected = true;
-                    self.report("connected");
+                    self.report(WorkerStatus::Connected);
                 }
             }
             Err(failure) if failure.permanent && self.diagnostics.has_active_direct() => {
                 self.diagnostics.failed(failure.kind, Duration::ZERO);
-                self.report("retrying");
+                self.report(WorkerStatus::Retrying);
                 self.next_probe = Instant::now() + REVOKED_DIRECT_RECHECK;
             }
             Err(failure) if failure.permanent => {
@@ -209,7 +209,7 @@ impl Health<'_> {
                     self.diagnostics.responded(elapsed);
                 }
                 self.diagnostics.failed(failure.kind, Duration::ZERO);
-                self.report(&format!("failed: {failure}"));
+                self.report(WorkerStatus::Failed(Some(failure.reason)));
                 return ControlFlow::Break(());
             }
             Err(_) if self.last_success.is_some_and(|success| success > started) => {
@@ -230,7 +230,7 @@ impl Health<'_> {
                     || self.consecutive_health_failures >= client_health_failure_threshold()
                 {
                     self.connected = false;
-                    self.report("retrying");
+                    self.report(WorkerStatus::Retrying);
                 }
                 let delay = jitter(self.retry_backoff.next_delay());
                 self.next_probe = Instant::now() + delay;
@@ -258,7 +258,7 @@ impl Health<'_> {
             self.retry_backoff.reset();
             if !self.connected {
                 self.connected = true;
-                self.report("connected");
+                self.report(WorkerStatus::Connected);
             }
         } else if self.probes.is_empty() {
             // Coalesce failures and rate limit probes independently
