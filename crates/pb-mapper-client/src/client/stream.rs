@@ -72,9 +72,7 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
                 action: "direct setup",
                 timeout: budget,
             })?
-            .map_err(|error| super::error::Error::DirectSetup {
-                detail: error.to_string(),
-            })?;
+            .map_err(direct_failed)?;
         if let Some(prepared) = prepared {
             drop(global_permit);
             setup.diagnostics.succeeded(started.elapsed());
@@ -84,9 +82,7 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
             return prepared
                 .forward(local_stream, credential)
                 .await
-                .map_err(|error| super::error::Error::DirectSetup {
-                    detail: error.to_string(),
-                });
+                .map_err(direct_failed);
         }
     }
     let subscription = Subscription {
@@ -134,6 +130,12 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
         );
     });
     Ok(())
+}
+
+/// The error a stream ends with when its direct path failed.
+#[cfg(feature = "p2p")]
+fn direct_failed(source: std::io::Error) -> super::error::Error {
+    super::error::Error::DirectSetup { source }
 }
 
 /// A subscribed relay stream, with what the relay answered about it.
@@ -309,4 +311,27 @@ pub(crate) async fn subscribe_request(
         client_id,
         server_id,
     })
+}
+
+#[cfg(all(test, feature = "p2p"))]
+mod tests {
+    use super::*;
+
+    /// A direct path that failed on a lost connection keeps why it was lost
+    /// in the chain its stream's failure is logged with, not only the io
+    /// error's own text, "connection lost".
+    #[test]
+    fn a_failed_direct_path_keeps_its_cause() {
+        let lost = std::io::Error::from(quinn::ReadError::ConnectionLost(
+            quinn::ConnectionError::TimedOut,
+        ));
+        let error = direct_failed(lost);
+        let mut causes =
+            std::iter::successors(std::error::Error::source(&error), |cause| cause.source());
+        assert!(
+            causes.any(|cause| cause.downcast_ref::<quinn::ConnectionError>().is_some()),
+            "{}",
+            snafu::Report::from_error(error)
+        );
+    }
 }

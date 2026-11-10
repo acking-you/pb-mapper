@@ -6,8 +6,10 @@ use snafu::Snafu;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(super)))]
 pub enum Error {
-    #[snafu(display("direct setup failed: {detail}"))]
-    DirectSetup { detail: String },
+    // The text names its source: a tunnel that fails on it reports this
+    // Display as its failure reason.
+    #[snafu(display("direct setup failed: {source}"))]
+    DirectSetup { source: std::io::Error },
     #[snafu(display("bind local listener error"))]
     BindLocalListener { source: std::io::Error },
     #[snafu(display("accept local listener error"))]
