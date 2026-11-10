@@ -3,7 +3,7 @@
 //! forwarding and reports.
 use super::{
     conn::{DirectConn, forward_direct},
-    control::{Control, io_error},
+    control::Control,
     endpoint::Network,
     lan::Assessment,
     link::{counts, direct_link, log_path, stun_timings, summary},
@@ -213,7 +213,7 @@ impl Consumer {
             &self.credential,
         )
         .await
-        .map_err(io_error)?;
+        .map_err(io::Error::other)?;
         let PbConnStatusResp::Service {
             direct: Some(capability),
             ..
@@ -448,7 +448,7 @@ impl Consumer {
                 &mut None,
             )
             .await
-            .map_err(io_error)?;
+            .map_err(io::Error::other)?;
             pending.completed = true;
             tracing::info!(event = "session_path_selected", path = "relay", service = %key, reason = FallbackReason::Unreachable.as_str());
             Ok(Some(Prepared {
@@ -549,7 +549,7 @@ impl Prepared {
                         )
                         .await
                         .map(|_| ())
-                        .map_err(io_error)
+                        .map_err(io::Error::other)
                     })
                 }
             }

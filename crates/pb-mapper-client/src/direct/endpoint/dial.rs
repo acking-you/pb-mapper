@@ -5,7 +5,6 @@ use crate::{
     diagnostics::LanEvidence,
     direct::{
         conn::{DirectConn, QuicGuard},
-        control::io_error,
         lan::Assessment,
         tcp,
     },
@@ -200,7 +199,7 @@ impl Network {
                         Ok((_, Ok(connection), handshake)) => {
                             let dialed = dialed(tried.len() as u32 + tcp.dialed(), handshake);
                             let connection = QuicGuard(connection);
-                            let (send, recv) = connection.0.open_bi().await.map_err(io_error)?;
+                            let (send, recv) = connection.0.open_bi().await.map_err(io::Error::other)?;
                             return Ok((DirectConn::Quic { connection, send, recv }, dialed));
                         }
                         // A systematic identity or config mismatch must be

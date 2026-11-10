@@ -2,7 +2,6 @@
 //! forwarding over it that both ends run.
 use super::{
     binding,
-    control::io_error,
     tcp::{self, TlsTcp},
 };
 use crate::diagnostics::LinkProbe;
@@ -112,7 +111,7 @@ impl DirectConn {
     /// its records.
     pub(super) async fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         match self {
-            Self::Quic { send, .. } => send.write_all(bytes).await.map_err(io_error),
+            Self::Quic { send, .. } => send.write_all(bytes).await.map_err(io::Error::other),
             Self::Tcp { stream, .. } => {
                 stream.write_all(bytes).await?;
                 stream.flush().await
@@ -127,7 +126,7 @@ impl DirectConn {
     }
     pub(super) async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         match self {
-            Self::Quic { recv, .. } => recv.read_exact(buf).await.map_err(io_error),
+            Self::Quic { recv, .. } => recv.read_exact(buf).await.map_err(io::Error::other),
             Self::Tcp { stream, .. } => stream.read_exact(buf).await.map(|_| ()),
         }
     }
@@ -193,7 +192,7 @@ async fn idle_bounded<T>(
         Some(idle) => pb_mapper_protocol::forward::with_tunnel_idle_timeout(idle, forward)
             .await
             .map(|_| ())
-            .map_err(io_error),
-        None => forward.await.map(|_| ()).map_err(io_error),
+            .map_err(io::Error::other),
+        None => forward.await.map(|_| ()).map_err(io::Error::other),
     }
 }

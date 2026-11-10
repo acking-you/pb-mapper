@@ -41,16 +41,16 @@ impl Control {
     ) -> io::Result<Arc<Self>> {
         let mut socket = remote.connect(credential, &mut None).await?;
         let relay_ip = socket.peer_addr()?.ip();
-        let session = ClientHeaderSession::new_v2(&credential).map_err(io_error)?;
+        let session = ClientHeaderSession::new_v2(&credential).map_err(io::Error::other)?;
         session
             .write_initial(
                 &mut socket,
                 &PbConnRequest::DirectControl { namespace }
                     .encode()
-                    .map_err(io_error)?,
+                    .map_err(io::Error::other)?,
             )
             .await
-            .map_err(io_error)?;
+            .map_err(io::Error::other)?;
         let (tx, mut rx) = mpsc::channel::<DirectClientMessage>(64);
         let pending = Arc::new(Mutex::new(Pending {
             opens: HashMap::new(),
@@ -67,15 +67,15 @@ impl Control {
             };
             let result: io::Result<()> = async {
                 let (mut read, mut write) = socket.into_split();
-                let mut reader = session.response_reader(&mut read).map_err(io_error)?;
-                let mut writer = session.continuation_writer(&mut write).map_err(io_error)?;
-                let first = PbConnResponse::decode(reader.read_msg().await.map_err(io_error)?).map_err(io_error)?;
+                let mut reader = session.response_reader(&mut read).map_err(io::Error::other)?;
+                let mut writer = session.continuation_writer(&mut write).map_err(io::Error::other)?;
+                let first = PbConnResponse::decode(reader.read_msg().await.map_err(io::Error::other)?).map_err(io::Error::other)?;
                 let PbConnResponse::Direct(DirectEvent::Ready(capability)) = first else { return Err(io::Error::other("relay declined direct control")); };
                 let _ = ready.send(capability);
                 let reading = async {
                     loop {
-                        let bytes = tokio::time::timeout(Duration::from_secs(45), reader.read_msg()).await.map_err(|_|io::Error::other("direct control idle"))?.map_err(io_error)?;
-                        let response = PbConnResponse::decode(bytes).map_err(io_error)?;
+                        let bytes = tokio::time::timeout(Duration::from_secs(45), reader.read_msg()).await.map_err(|_|io::Error::other("direct control idle"))?.map_err(io::Error::other)?;
+                        let response = PbConnResponse::decode(bytes).map_err(io::Error::other)?;
                         let PbConnResponse::Direct(event) = response else { return Err(io::Error::other("unexpected direct control response")); };
                         let mut pending = pending_task.lock().unwrap_or_else(|e| e.into_inner());
                         match event {
@@ -95,8 +95,8 @@ impl Control {
                             message = rx.recv() => { let Some(message) = message else { return Ok(()); }; message },
                             _ = ping.tick() => DirectClientMessage::Ping,
                         };
-                        let bytes = message.encode().map_err(io_error)?;
-                        tokio::time::timeout(Duration::from_secs(5), writer.write_msg(&bytes)).await.map_err(|_|io::Error::other("direct control write timeout"))?.map_err(io_error)?;
+                        let bytes = message.encode().map_err(io::Error::other)?;
+                        tokio::time::timeout(Duration::from_secs(5), writer.write_msg(&bytes)).await.map_err(|_|io::Error::other("direct control write timeout"))?.map_err(io::Error::other)?;
                     }
                 };
                 tokio::select! { result = reading => result, result = writing => result }
@@ -216,7 +216,4 @@ impl Drop for ControlCleanup {
         p.opens.clear();
         p.relays.clear();
     }
-}
-pub(super) fn io_error(error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(error.to_string())
 }

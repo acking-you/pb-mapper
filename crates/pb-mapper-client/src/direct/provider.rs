@@ -1,6 +1,5 @@
 use super::{
     conn::{DirectConn, QuicGuard, forward_direct},
-    control::io_error,
     endpoint::{Arrival, Network},
     lan::Assessment,
     link::{counts, direct_link, log_path, stun_timings, summary},
@@ -253,7 +252,7 @@ async fn session_bind(arrival: Arrival) -> io::Result<(SessionId, Incoming)> {
         Arrival::Quic(connection) => {
             tracing::debug!(peer = %connection.remote_address(), "direct TLS accepted");
             let connection = QuicGuard(connection);
-            let (send, recv) = connection.0.accept_bi().await.map_err(io_error)?;
+            let (send, recv) = connection.0.accept_bi().await.map_err(io::Error::other)?;
             DirectConn::Quic {
                 connection,
                 send,
@@ -478,7 +477,7 @@ where
     tick.tick().await;
     loop {
         tokio::select! {
-            result = &mut forwarding => return result.map_err(io_error),
+            result = &mut forwarding => return result,
             _ = tick.tick() => report.tick(),
         }
     }
