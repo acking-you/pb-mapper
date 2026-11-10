@@ -782,6 +782,51 @@ fn replay_rewrite_succeeds_when_a_pid_temporary_file_already_exists() {
     let _ = std::fs::remove_file(path);
 }
 
+/// What the replay log holds, which a relay reads back after an upgrade: per
+/// admission, the SHA-256 fingerprint of key id and salt, then the admission
+/// time big-endian.
+#[test]
+fn replay_log_records_keep_their_layout() {
+    let fingerprint = replay_fingerprint(KeyId::from_u64(7), &[3; CONNECTION_SALT_LEN]);
+    assert_eq!(
+        hex(&fingerprint),
+        "d771a0d52b7477ba0b9fa8e6d5319f353ba65029bdd6fffd5118ed0cebe80b1f"
+    );
+    let mut random = [0_u8; 8];
+    let mut rng = rand::rng();
+    for byte in &mut random {
+        *byte = rng.random();
+    }
+    let path = std::env::temp_dir().join(format!(
+        "pb-mapper-replay-layout-{}",
+        u64::from_be_bytes(random)
+    ));
+    let now = unix_seconds();
+    let mut written = fingerprint.to_vec();
+    written.extend_from_slice(&now.to_be_bytes());
+    {
+        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        assert_eq!(
+            guard.admit(KeyId::from_u64(7), &fingerprint, now),
+            FirstFlightAdmit::Fresh
+        );
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), written);
+
+    // A log written by hand, not by this code, reads back the same way.
+    let other = [0xcd_u8; 32];
+    let mut handmade = other.to_vec();
+    handmade.extend_from_slice(&now.to_be_bytes());
+    std::fs::write(&path, &handmade).unwrap();
+    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    assert_eq!(
+        restored.admit(KeyId::from_u64(8), &other, now),
+        FirstFlightAdmit::Replayed
+    );
+    drop(restored);
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn persisted_first_flights_survive_replay_guard_restart() {
     let mut random = [0_u8; 8];
