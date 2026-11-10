@@ -153,8 +153,15 @@ async fn main() -> Outcome {
         }
     };
     tokio::pin!(deadline);
+    // One Ctrl-C listener for the whole loop, so a Ctrl-C that arrives while
+    // a line prints is not missed.
+    let interrupt = tokio::signal::ctrl_c();
+    tokio::pin!(interrupt);
     loop {
         tokio::select! {
+            biased;
+            result = &mut interrupt => { result?; break; }
+            () = &mut deadline => break,
             changed = status.changed() => {
                 if changed.is_err() {
                     break;
@@ -188,8 +195,6 @@ async fn main() -> Outcome {
                     if direct == Some(true) { ", direct" } else { "" },
                 );
             }
-            result = tokio::signal::ctrl_c() => { result?; break; }
-            () = &mut deadline => break,
         }
     }
     viewer.stop().await?;

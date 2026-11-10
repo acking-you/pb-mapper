@@ -56,10 +56,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut metrics = connection.subscribe_metrics(std::time::Duration::from_secs(5));
     let mut status_open = true;
     let mut metrics_open = true;
+    // One Ctrl-C listener for the whole loop, so a Ctrl-C that arrives while
+    // a line prints is not missed. It is polled only until it fires.
+    let mut interrupt = std::pin::pin!(tokio::signal::ctrl_c());
     let mut stopping = false;
     loop {
         tokio::select! {
-            result = tokio::signal::ctrl_c(), if !stopping => {
+            biased;
+            result = interrupt.as_mut(), if !stopping => {
                 result?;
                 stopping = true;
                 connection.stop().await?;

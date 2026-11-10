@@ -111,8 +111,18 @@ async fn main() -> Outcome {
     println!("{}", host.invitation().encode());
     let mut status = host.watch(Duration::from_millis(500));
     status.mark_changed();
+    // One Ctrl-C listener for the whole loop, so a Ctrl-C that arrives while
+    // a status prints is not missed.
+    let interrupt = tokio::signal::ctrl_c();
+    tokio::pin!(interrupt);
     loop {
         tokio::select! {
+            biased;
+            result = &mut interrupt => {
+                result?;
+                host.stop().await?;
+                break;
+            }
             changed = status.changed() => {
                 if changed.is_err() {
                     break;
@@ -125,11 +135,6 @@ async fn main() -> Outcome {
                     ),
                     None => println!("{:?}", status.state),
                 }
-            }
-            result = tokio::signal::ctrl_c() => {
-                result?;
-                host.stop().await?;
-                break;
             }
         }
     }
