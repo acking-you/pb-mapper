@@ -265,6 +265,13 @@ pub(super) fn unavailable_reason(failure: &io::Error) -> StateReason {
     match failure_kind(failure) {
         Some(FailureKind::SecureDesktop) => StateReason::SecureDesktop,
         Some(FailureKind::DisplayLost) => StateReason::DisplayLost,
-        _ => StateReason::CaptureFailed,
+        Some(
+            FailureKind::CaptureFailed
+            | FailureKind::EncoderFailed { .. }
+            | FailureKind::Unsupported
+            | FailureKind::PermissionMissing
+            | FailureKind::ConsentRevoked,
+        )
+        | None => StateReason::CaptureFailed,
     }
 }

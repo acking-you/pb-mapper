@@ -91,7 +91,11 @@ impl DragHold {
                 down: true,
                 ..
             } => self.left_down = self.pointer.map(|pointer| (now, pointer)),
-            _ => {}
+            Input::Button { .. }
+            | Input::Wheel { .. }
+            | Input::Key { .. }
+            | Input::Text { .. }
+            | Input::Lock {} => {}
         }
     }
 }
