@@ -62,6 +62,10 @@ const _: () = assert!(
         <= MAX_PAGES as usize,
     "*_all must drain a relay filled to capacity within MAX_PAGES pages"
 );
+const _: () = assert!(
+    COLLECT_PAGE_SIZE == MAX_PAGE_SIZE,
+    "paging below the relay's maximum multiplies its per-page re-sort"
+);
 
 /// Administrator RPCs. Constructed via [`super::Client::admin`].
 #[derive(Clone)]
