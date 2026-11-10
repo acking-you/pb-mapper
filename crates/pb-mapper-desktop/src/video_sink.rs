@@ -59,6 +59,18 @@ const DECODER_NAME_MAX: usize = 64;
 const DECODER_ERROR_MAX: usize = 160;
 /// A detached sink has no session limits; this is the largest allowed.
 const DETACHED_MAX_FPS: u32 = 120;
+const _: () = assert!(
+    crate::wire::MAX_PAYLOAD <= SINK_MAX_BYTES,
+    "the largest unit fits an empty sink"
+);
+const _: () = assert!(
+    BACKLOG_MIN_UNITS <= SINK_MAX_UNITS,
+    "a backlog is reachable before overflow"
+);
+const _: () = assert!(
+    RECENT_FRAMES as u128 * 1000 >= PRESENTED_FRESH.as_millis() * DETACHED_MAX_FPS as u128,
+    "every unit handed out within PRESENTED_FRESH at the top frame rate is remembered"
+);
 
 /// One encoded access unit (or JPEG picture) as received.
 #[derive(Debug)]

@@ -36,6 +36,14 @@ pub(crate) const INPUT_QUEUE_BYTES: usize = 256 * 1024;
 pub(crate) const INPUT_BATCH_MAX: usize = 16;
 /// A ping is written only after this long without any other message.
 pub(crate) const PING_IDLE: Duration = Duration::from_secs(1);
+const _: () = assert!(
+    INPUT_BATCH_MAX <= INPUT_QUEUE,
+    "one full batch fits an empty queue"
+);
+const _: () = assert!(
+    crate::lane::LANE_CAPACITY >= INPUT_QUEUE,
+    "the host's lane takes a whole viewer queue during one backend call"
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Barrier {

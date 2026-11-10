@@ -71,6 +71,14 @@ const TICKS_PER_SECOND: u64 = 4;
 const MAX_DISPLAY: u32 = 32768;
 /// Why a session whose decoder failed for good ended.
 const DECODER_FAILED: &str = "the remote picture could not be decoded";
+const _: () = assert!(
+    VIEWER_TICK.as_millis() * TICKS_PER_SECOND as u128 == 1000,
+    "the path sample and the stats roll-up run once a second"
+);
+const _: () = assert!(
+    crate::session::STATS_INTERVAL.as_millis() < VIEWER_HEADER_TIMEOUT.as_millis(),
+    "the host's Stats keep a live link inside the read timeout"
+);
 
 /// How a viewer connects.
 #[derive(Clone)]

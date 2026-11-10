@@ -22,6 +22,10 @@ const CAP_CHANGE_MIN: Duration = Duration::from_secs(1);
 const BACKLOG_HIGH: usize = 2;
 /// Up to this many queued units count as keeping up.
 const BACKLOG_LOW: usize = 1;
+const _: () = assert!(
+    BACKLOG_LOW < BACKLOG_HIGH,
+    "keeping up is below falling behind"
+);
 
 /// Owned by the sink. `tick` runs every viewer tick while the session
 /// streams and is not paused, from `IDR_GRACE` after the consumer took its
