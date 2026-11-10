@@ -21,6 +21,7 @@ mod server;
 mod status;
 
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -269,13 +270,107 @@ pub struct ServerConnInfo {
 
 pub type ServerConnMap = hashbrown::HashMap<ImutableKey, Vec<ServerConnInfo>>;
 
-/// A subscriber's stream, from its own connection ID to the server connection it
-/// was routed to, that connection's generation, and the service key it asked for.
-pub(crate) type PendingStreamMap =
-    hashbrown::HashMap<RemoteConnId, (RemoteConnId, u64, ImutableKey, Instant)>;
+/// A subscriber's stream request: the server connection it was routed to, that
+/// connection's generation, the service key it asked for, and when.
+#[derive(Clone)]
+pub(crate) struct PendingStream {
+    pub(crate) server_conn_id: RemoteConnId,
+    pub(crate) server_generation: u64,
+    pub(crate) key: ImutableKey,
+    pub(crate) requested_at: Instant,
+}
+
+/// Subscribers' stream requests by their own connection ID, counted per
+/// namespace as they are added and removed.
+#[derive(Default)]
+pub(crate) struct PendingStreams {
+    by_client: hashbrown::HashMap<RemoteConnId, PendingStream>,
+    per_namespace: hashbrown::HashMap<u64, usize>,
+}
+
+impl PendingStreams {
+    pub(crate) fn get(&self, client_id: &RemoteConnId) -> Option<&PendingStream> {
+        self.by_client.get(client_id)
+    }
+
+    pub(crate) fn contains(&self, client_id: &RemoteConnId) -> bool {
+        self.by_client.contains_key(client_id)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&RemoteConnId, &PendingStream)> {
+        self.by_client.iter()
+    }
+
+    /// Record a client's stream request, replacing the one it made before.
+    pub(crate) fn insert(&mut self, client_id: RemoteConnId, stream: PendingStream) {
+        let namespace = split_scoped_service_key(&stream.key).0;
+        match self.by_client.insert(client_id, stream) {
+            Some(replaced) if split_scoped_service_key(&replaced.key).0 == namespace => return,
+            Some(replaced) => self.uncount(split_scoped_service_key(&replaced.key).0),
+            None => {}
+        }
+        *self.per_namespace.entry(namespace).or_default() += 1;
+    }
+
+    pub(crate) fn remove(&mut self, client_id: &RemoteConnId) -> Option<PendingStream> {
+        let removed = self.by_client.remove(client_id)?;
+        self.uncount(split_scoped_service_key(&removed.key).0);
+        Some(removed)
+    }
+
+    /// How many requests in `namespace` are pending.
+    pub(crate) fn count_in(&self, namespace: u64) -> usize {
+        self.per_namespace
+            .get(&namespace)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Whether `namespace` can take `extra` more streams than it has pending.
+    pub(crate) fn has_room(&self, namespace: u64, extra: usize, limit: NonZeroUsize) -> bool {
+        extra + self.count_in(namespace) < limit.get()
+    }
+
+    fn uncount(&mut self, namespace: u64) {
+        let Some(count) = self.per_namespace.get_mut(&namespace) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.per_namespace.remove(&namespace);
+        }
+    }
+}
 
 /// Per-namespace new-stream rate limiters, keyed by the namespace's key ID.
-pub(crate) type NamespaceRateLimitMap = hashbrown::HashMap<u64, NamespaceRateLimit>;
+pub(crate) struct NamespaceRateLimits {
+    buckets: hashbrown::HashMap<u64, NamespaceRateLimit>,
+    rate_per_second: NonZeroUsize,
+    burst: NonZeroUsize,
+}
+
+impl NamespaceRateLimits {
+    pub(crate) fn new(rate_per_second: NonZeroUsize, burst: NonZeroUsize) -> Self {
+        Self {
+            buckets: hashbrown::HashMap::new(),
+            rate_per_second,
+            burst,
+        }
+    }
+
+    /// Take a token for one new stream in `namespace`.
+    pub(crate) fn try_take(&mut self, namespace: u64) -> bool {
+        self.buckets
+            .entry(namespace)
+            .or_insert_with(|| NamespaceRateLimit::new(self.rate_per_second, self.burst))
+            .allow()
+    }
+
+    /// Forget `namespace`'s bucket, as nothing in it is registered or pending.
+    fn release(&mut self, namespace: u64) {
+        self.buckets.remove(&namespace);
+    }
+}
 
 struct NamespaceRateLimit {
     tokens: f64,
@@ -285,12 +380,12 @@ struct NamespaceRateLimit {
 }
 
 impl NamespaceRateLimit {
-    fn new(rate_per_second: usize, burst: usize) -> Self {
+    fn new(rate_per_second: NonZeroUsize, burst: NonZeroUsize) -> Self {
         Self {
-            tokens: burst as f64,
+            tokens: burst.get() as f64,
             last_refill: Instant::now(),
-            rate_per_second: rate_per_second as f64,
-            burst: burst as f64,
+            rate_per_second: rate_per_second.get() as f64,
+            burst: burst.get() as f64,
         }
     }
 
@@ -309,12 +404,84 @@ impl NamespaceRateLimit {
     }
 }
 
-fn env_limit(name: &str, default: usize) -> usize {
+/// Drop `namespace`'s rate limiter once it has no registered service and no
+/// pending stream.
+fn release_namespace_rate_limit_if_idle(
+    namespace: u64,
+    server_conn_map: &ServerConnMap,
+    pending_streams: &PendingStreams,
+    namespace_rate_limits: &mut NamespaceRateLimits,
+) {
+    if pending_streams.count_in(namespace) > 0
+        || server_conn_map
+            .keys()
+            .any(|key| split_scoped_service_key(key).0 == namespace)
+    {
+        return;
+    }
+    namespace_rate_limits.release(namespace);
+}
+
+/// Routing limits and timings, read from the environment once as the relay
+/// starts.
+pub(crate) struct RoutingConfig {
+    pub(crate) max_services_per_namespace: NonZeroUsize,
+    pub(crate) max_register_connections_per_service: NonZeroUsize,
+    pub(crate) max_streams_per_namespace: NonZeroUsize,
+    pub(crate) new_streams_per_second: NonZeroUsize,
+    pub(crate) new_streams_burst: NonZeroUsize,
+    /// The stream acknowledgement budget a registration starts with, and the
+    /// floor its learned budget never drops below.
+    pub(crate) stream_ack_timeout: Duration,
+    /// The lease a protocol-v2 registration is granted.
+    pub(crate) lease_timeout: Duration,
+}
+
+impl RoutingConfig {
+    pub(crate) fn from_env() -> Self {
+        Self {
+            max_services_per_namespace: env_limit(
+                "PB_MAPPER_MAX_SERVICES_PER_NAMESPACE",
+                const { limit(256) },
+            ),
+            max_register_connections_per_service: env_limit(
+                "PB_MAPPER_MAX_REGISTER_CONNECTIONS_PER_SERVICE",
+                const { limit(16) },
+            ),
+            max_streams_per_namespace: env_limit(
+                "PB_MAPPER_MAX_STREAMS_PER_NAMESPACE",
+                const { limit(1024) },
+            ),
+            new_streams_per_second: env_limit(
+                "PB_MAPPER_NEW_STREAMS_PER_SECOND",
+                const { limit(100) },
+            ),
+            new_streams_burst: env_limit("PB_MAPPER_NEW_STREAMS_BURST", const { limit(200) }),
+            stream_ack_timeout: pb_mapper_core::config::stream_ack_timeout(),
+            lease_timeout: server_lease_timeout(),
+        }
+    }
+
+    /// The ceiling a learned stream acknowledgement budget never exceeds.
+    pub(crate) fn max_stream_ack_budget(&self) -> Duration {
+        Duration::from_secs(5).max(self.stream_ack_timeout)
+    }
+}
+
+/// `name`'s value when it is a positive integer, otherwise `default`.
+fn env_limit(name: &str, default: NonZeroUsize) -> NonZeroUsize {
     std::env::var(name)
         .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
+        .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+/// A default limit; evaluated in a `const` block, so zero fails the build.
+const fn limit(value: usize) -> NonZeroUsize {
+    match NonZeroUsize::new(value) {
+        Some(limit) => limit,
+        None => panic!("a routing limit is never zero"),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -340,8 +507,14 @@ pub struct ServerStatusInfo {
 ///
 /// [`control_heartbeat_interval`]: pb_mapper_core::config::control_heartbeat_interval
 pub(crate) fn server_conn_idle_timeout(protocol_version: u16) -> Duration {
+    idle_timeout(protocol_version, server_lease_timeout)
+}
+
+/// [`server_conn_idle_timeout`], taking the lease from `lease_timeout` and only
+/// when the protocol has one.
+fn idle_timeout(protocol_version: u16, lease_timeout: impl FnOnce() -> Duration) -> Duration {
     if protocol_version >= CONTROL_PROTOCOL_V2 {
-        server_lease_timeout()
+        lease_timeout()
     } else {
         LEGACY_SERVER_IDLE_TIMEOUT
     }
@@ -446,13 +619,16 @@ struct StaleServerConn {
 /// The sweep exists for the case where it does not — a task wedged on a socket
 /// that will never return, which is how three services sat at a full 16/16
 /// connection quota for seventeen hours.
-fn sweep_server_conn_leases(server_conn_map: &mut ServerConnMap) -> Vec<StaleServerConn> {
+fn sweep_server_conn_leases(
+    server_conn_map: &mut ServerConnMap,
+    lease_timeout: Duration,
+) -> Vec<StaleServerConn> {
     let now = Instant::now();
     let mut stale = Vec::new();
     for (key, infos) in server_conn_map.iter_mut() {
         for info in infos.iter_mut() {
             let idle_for = now.duration_since(info.last_rx_at);
-            if idle_for <= server_conn_idle_timeout(info.protocol_version) {
+            if idle_for <= idle_timeout(info.protocol_version, || lease_timeout) {
                 continue;
             }
             match info.health {
@@ -501,14 +677,93 @@ fn record_server_conn_activity_by_conn_id(
     true
 }
 
-async fn send_subcribe_failed(
+/// Why a registration was refused.
+#[derive(Clone, Copy)]
+enum RegisterRefusal {
+    TransportMismatch,
+    ServiceConnectionLimit,
+    NamespaceServiceLimit,
+}
+
+impl RegisterRefusal {
+    fn task(self) -> ConnTask {
+        let (code, reason, retryable) = match self {
+            Self::TransportMismatch => (
+                "service_transport_mismatch",
+                "the service name is already registered with a different transport",
+                false,
+            ),
+            Self::ServiceConnectionLimit => (
+                "service_connection_limit_exceeded",
+                "the service has reached its register connection limit",
+                true,
+            ),
+            Self::NamespaceServiceLimit => (
+                "namespace_service_limit_exceeded",
+                "the namespace has reached its service name limit",
+                true,
+            ),
+        };
+        ConnTask::RegisterFailed {
+            code: code.to_string(),
+            reason: reason.to_string(),
+            retryable,
+        }
+    }
+}
+
+/// Why a new subscription was refused before any registration was tried.
+#[derive(Clone, Copy)]
+enum SubscribeRefusal {
+    NamespaceStreamLimit,
+    NamespaceStreamRate,
+}
+
+impl SubscribeRefusal {
+    fn task(self) -> ConnTask {
+        let (code, reason) = match self {
+            Self::NamespaceStreamLimit => (
+                "namespace_stream_limit_exceeded",
+                "the namespace has reached its active stream limit",
+            ),
+            Self::NamespaceStreamRate => (
+                "namespace_stream_rate_exceeded",
+                "the namespace new-stream rate limit was exceeded",
+            ),
+        };
+        ConnTask::SubcribeFailed {
+            code: code.to_string(),
+            reason: reason.to_string(),
+            retryable: true,
+        }
+    }
+}
+
+/// Tell a subscriber that no registration can serve it: a retry when it is
+/// recovering from registrations it already excluded, a failure otherwise.
+fn reject_subscribe(
     conn_sender: &ConnTaskSender,
     key: &ImutableKey,
     conn_id: RemoteConnId,
-    reason: impl Into<String>,
+    reason: String,
+    retry: bool,
 ) {
-    let reason = reason.into();
-    if conn_sender
+    if retry {
+        if conn_sender
+            .try_send(ConnTask::SubcribeRetry {
+                reason: reason.clone(),
+            })
+            .is_err()
+        {
+            tracing::debug!(
+                event = "subscribe_retry_receiver_dropped",
+                key = %key,
+                client_conn_id = %conn_id,
+                reason = %reason,
+                "subscribe retry receiver dropped"
+            );
+        }
+    } else if conn_sender
         .try_send(ConnTask::SubcribeFailed {
             code: "service_not_available".to_string(),
             reason: reason.clone(),
@@ -522,29 +777,6 @@ async fn send_subcribe_failed(
             client_conn_id = %conn_id,
             reason = %reason,
             "subscribe failure receiver dropped"
-        );
-    }
-}
-
-async fn send_subcribe_retry(
-    conn_sender: &ConnTaskSender,
-    key: &ImutableKey,
-    conn_id: RemoteConnId,
-    reason: impl Into<String>,
-) {
-    let reason = reason.into();
-    if conn_sender
-        .try_send(ConnTask::SubcribeRetry {
-            reason: reason.clone(),
-        })
-        .is_err()
-    {
-        tracing::debug!(
-            event = "subscribe_retry_receiver_dropped",
-            key = %key,
-            client_conn_id = %conn_id,
-            reason = %reason,
-            "subscribe retry receiver dropped"
         );
     }
 }
@@ -573,8 +805,8 @@ pub use runtime::{
 };
 mod connection;
 use connection::{
-    compose_service_key, decrement_namespace_stream_count, handle_conn, handle_listener,
-    release_namespace_rate_limit_if_idle, split_scoped_service_key, validate_service_name,
+    compose_service_key, handle_conn, handle_listener, split_scoped_service_key,
+    validate_service_name,
 };
 
 #[cfg(test)]
@@ -600,6 +832,8 @@ mod task_tests {
 #[cfg(test)]
 mod lease_tests {
     use super::*;
+
+    const LEASE: Duration = Duration::from_secs(15);
 
     fn conn(conn_id: u32, protocol_version: u16, idle_for: Duration) -> ServerConnInfo {
         ServerConnInfo {
@@ -632,22 +866,14 @@ mod lease_tests {
     }
 
     #[test]
-    fn sweep_leaves_a_registration_that_is_renewing_its_lease() {
-        let mut map = map(vec![conn(1, CONTROL_PROTOCOL_V2, Duration::from_secs(2))]);
-
-        assert!(sweep_server_conn_leases(&mut map).is_empty());
-        assert_eq!(health(&map, 1), ServerConnHealth::Healthy);
-    }
-
-    #[test]
     fn sweep_marks_before_it_retires() {
         let mut map = map(vec![conn(1, CONTROL_PROTOCOL_V2, Duration::from_secs(60))]);
 
         // First sweep only withdraws it from the subscribe candidates.
-        assert!(sweep_server_conn_leases(&mut map).is_empty());
+        assert!(sweep_server_conn_leases(&mut map, LEASE).is_empty());
         assert_eq!(health(&map, 1), ServerConnHealth::Suspect);
 
-        let stale = sweep_server_conn_leases(&mut map);
+        let stale = sweep_server_conn_leases(&mut map, LEASE);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].conn_id, RemoteConnId::from(1));
         assert_eq!(stale[0].protocol_version, CONTROL_PROTOCOL_V2);
@@ -658,14 +884,14 @@ mod lease_tests {
         let key = ImutableKey::from("sf-backend");
         let mut map = map(vec![conn(1, CONTROL_PROTOCOL_V2, Duration::from_secs(60))]);
 
-        assert!(sweep_server_conn_leases(&mut map).is_empty());
+        assert!(sweep_server_conn_leases(&mut map, LEASE).is_empty());
         assert!(record_server_conn_activity(
             &mut map,
             &key,
             RemoteConnId::from(1)
         ));
 
-        assert!(sweep_server_conn_leases(&mut map).is_empty());
+        assert!(sweep_server_conn_leases(&mut map, LEASE).is_empty());
         assert_eq!(health(&map, 1), ServerConnHealth::Healthy);
     }
 
@@ -678,7 +904,7 @@ mod lease_tests {
             conn(2, CONTROL_PROTOCOL_V2, idle_for),
         ]);
 
-        assert!(sweep_server_conn_leases(&mut map).is_empty());
+        assert!(sweep_server_conn_leases(&mut map, LEASE).is_empty());
         assert_eq!(health(&map, 1), ServerConnHealth::Healthy);
         assert_eq!(health(&map, 2), ServerConnHealth::Suspect);
     }
@@ -686,18 +912,68 @@ mod lease_tests {
     #[test]
     fn sweep_reports_every_stale_connection_of_a_service() {
         let idle_for = Duration::from_secs(60);
+        // The third is renewing its lease.
         let mut map = map(vec![
             conn(1, CONTROL_PROTOCOL_V2, idle_for),
             conn(2, CONTROL_PROTOCOL_V2, idle_for),
             conn(3, CONTROL_PROTOCOL_V2, Duration::from_secs(1)),
         ]);
 
-        assert!(sweep_server_conn_leases(&mut map).is_empty());
-        let mut stale: Vec<u32> = sweep_server_conn_leases(&mut map)
+        assert!(sweep_server_conn_leases(&mut map, LEASE).is_empty());
+        let mut stale: Vec<u32> = sweep_server_conn_leases(&mut map, LEASE)
             .into_iter()
             .map(|stale| stale.conn_id.into())
             .collect();
         stale.sort_unstable();
         assert_eq!(stale, vec![1, 2]);
+        assert_eq!(health(&map, 3), ServerConnHealth::Healthy);
+    }
+}
+
+#[cfg(test)]
+mod pending_stream_tests {
+    use super::*;
+
+    /// The per-namespace count is what admission and rate-limit release read in
+    /// place of scanning every pending stream, so it must always equal the scan.
+    #[test]
+    fn namespace_counts_match_a_scan_of_the_pending_streams() {
+        let keys = [
+            ImutableKey::from("plain"),
+            compose_service_key(1, "echo"),
+            compose_service_key(1, "other"),
+            compose_service_key(2, "echo"),
+        ];
+        let mut pending = PendingStreams::default();
+        // A fixed pseudo-random walk over inserts, replacements and removals.
+        let mut state = 0x2545_f491_u32;
+        for _ in 0..2000 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let client_id = RemoteConnId::from(state % 16);
+            if state & 0x100 == 0 {
+                pending.remove(&client_id);
+            } else {
+                let key = &keys[(state >> 9) as usize % keys.len()];
+                pending.insert(
+                    client_id,
+                    PendingStream {
+                        server_conn_id: RemoteConnId::from(0),
+                        server_generation: 1,
+                        key: key.clone(),
+                        requested_at: Instant::now(),
+                    },
+                );
+            }
+            for namespace in [0, 1, 2, 3] {
+                let scanned = pending
+                    .iter()
+                    .filter(|(_, stream)| split_scoped_service_key(&stream.key).0 == namespace)
+                    .count();
+                assert_eq!(pending.count_in(namespace), scanned);
+                assert_eq!(pending.per_namespace.contains_key(&namespace), scanned > 0);
+            }
+        }
     }
 }

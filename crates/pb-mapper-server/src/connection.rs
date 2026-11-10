@@ -711,33 +711,3 @@ pub(super) fn split_scoped_service_key(key: &str) -> (u64, &str) {
         Err(_) => (0, key),
     }
 }
-
-pub(super) fn decrement_namespace_stream_count(
-    namespace_stream_counts: &mut hashbrown::HashMap<u64, usize>,
-    namespace: u64,
-) {
-    let Some(count) = namespace_stream_counts.get_mut(&namespace) else {
-        return;
-    };
-    *count = count.saturating_sub(1);
-    if *count == 0 {
-        namespace_stream_counts.remove(&namespace);
-    }
-}
-
-pub(super) fn release_namespace_rate_limit_if_idle(
-    namespace: u64,
-    server_conn_map: &ServerConnMap,
-    pending_streams: &PendingStreamMap,
-    namespace_rate_limits: &mut NamespaceRateLimitMap,
-) {
-    let has_registered_service = server_conn_map
-        .keys()
-        .any(|key| split_scoped_service_key(key).0 == namespace);
-    let has_pending_stream = pending_streams
-        .values()
-        .any(|(_, _, key, _)| split_scoped_service_key(key).0 == namespace);
-    if !has_registered_service && !has_pending_stream {
-        namespace_rate_limits.remove(&namespace);
-    }
-}

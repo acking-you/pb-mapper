@@ -116,15 +116,10 @@ pub async fn run_server_on_listener_with_options(
     let mut manager = TaskManager::new();
     // represent the mapping of the `key` to the id of the server-side conn
     let mut server_conn_map = ServerConnMap::new();
-    let mut pending_streams = PendingStreamMap::new();
-    let mut namespace_stream_counts = hashbrown::HashMap::<u64, usize>::new();
-    let mut namespace_rate_limits = NamespaceRateLimitMap::new();
-    let max_services_per_namespace = env_limit("PB_MAPPER_MAX_SERVICES_PER_NAMESPACE", 256);
-    let max_register_connections_per_service =
-        env_limit("PB_MAPPER_MAX_REGISTER_CONNECTIONS_PER_SERVICE", 16);
-    let max_streams_per_namespace = env_limit("PB_MAPPER_MAX_STREAMS_PER_NAMESPACE", 1024);
-    let new_streams_per_second = env_limit("PB_MAPPER_NEW_STREAMS_PER_SECOND", 100);
-    let new_streams_burst = env_limit("PB_MAPPER_NEW_STREAMS_BURST", 200);
+    let mut pending_streams = PendingStreams::default();
+    let config = RoutingConfig::from_env();
+    let mut namespace_rate_limits =
+        NamespaceRateLimits::new(config.new_streams_per_second, config.new_streams_burst);
     let mut next_server_generation = 1_u64;
     let mut connection_tasks = tokio::task::JoinSet::new();
 
@@ -269,21 +264,11 @@ pub async fn run_server_on_listener_with_options(
                             },
                     } => {
                         let admit = |namespace, pending| {
-                            pending
-                                + namespace_stream_counts
-                                    .get(&namespace)
-                                    .copied()
-                                    .unwrap_or_default()
-                                < max_streams_per_namespace
-                                && namespace_rate_limits
-                                    .entry(namespace)
-                                    .or_insert_with(|| {
-                                        NamespaceRateLimit::new(
-                                            new_streams_per_second,
-                                            new_streams_burst,
-                                        )
-                                    })
-                                    .allow()
+                            pending_streams.has_room(
+                                namespace,
+                                pending,
+                                config.max_streams_per_namespace,
+                            ) && namespace_rate_limits.try_take(namespace)
                         };
                         direct_state.open(
                             connection,
@@ -488,8 +473,9 @@ pub async fn run_server_on_listener_with_options(
                             .collect::<Vec<_>>();
                         let client_ids = pending_streams
                             .iter()
-                            .filter_map(|(client_id, (_, _, key, _))| {
-                                (split_scoped_service_key(key).0 == namespace).then_some(*client_id)
+                            .filter_map(|(client_id, stream)| {
+                                (split_scoped_service_key(&stream.key).0 == namespace)
+                                    .then_some(*client_id)
                             })
                             .collect::<Vec<_>>();
                         PbConnResponse::Status(PbConnStatusResp::RemoteId {
@@ -511,15 +497,13 @@ pub async fn run_server_on_listener_with_options(
                             .collect(),
                     )),
                     PbConnStatusReq::Service { key, direct_query } => {
-                        let display_key = key.clone();
-                        let key: ImutableKey = if namespace == 0 {
-                            key.into()
-                        } else {
-                            Arc::from(format!("@{namespace:016x}\u{0}{key}"))
-                        };
+                        let connections = service_status_connections(
+                            &server_conn_map,
+                            &compose_service_key(namespace, &key),
+                        );
                         PbConnResponse::Status(PbConnStatusResp::Service {
-                            key: display_key,
-                            connections: service_status_connections(&server_conn_map, &key),
+                            key,
+                            connections,
                             direct: direct_query
                                 .filter(|q| *q)
                                 .and(direct_state.capability.clone()),
@@ -637,7 +621,7 @@ pub async fn run_server_on_listener_with_options(
                 info.stream_ack_budget = info
                     .stream_ack_budget
                     .saturating_mul(2)
-                    .min(Duration::from_secs(5).max(pb_mapper_core::config::stream_ack_timeout()));
+                    .min(config.max_stream_ack_budget());
                 // A timeout affects candidate selection immediately, but a late
                 // authenticated ACK/heartbeat can restore it without a reconnect.
                 info.health = ServerConnHealth::Suspect;
@@ -698,11 +682,9 @@ pub async fn run_server_on_listener_with_options(
                 server_id,
                 client_id,
             } => {
-                let removed_namespace = pending_streams.remove(&client_id).map(|(_, _, key, _)| {
-                    let namespace = split_scoped_service_key(&key).0;
-                    decrement_namespace_stream_count(&mut namespace_stream_counts, namespace);
-                    namespace
-                });
+                let removed_namespace = pending_streams
+                    .remove(&client_id)
+                    .map(|stream| split_scoped_service_key(&stream.key).0);
                 // Same rule as `DeRegisterServerConn`: the guard's arrival is what
                 // makes recycling safe, so both IDs come back here even if their
                 // senders were dropped earlier.
@@ -762,82 +744,53 @@ pub async fn run_server_on_listener_with_options(
                 let direct = direct.filter(|_| direct_state.capability.is_some());
                 let namespace = split_scoped_service_key(&key).0;
                 let existing = server_conn_map.get(&key);
-                let failure = if existing.is_some_and(|connections| {
+                let refusal = if existing.is_some_and(|connections| {
                     connections
                         .first()
                         .is_some_and(|connection| connection.is_datagram != is_datagram)
                 }) {
-                    Some((
-                        "service_transport_mismatch",
-                        "the service name is already registered with a different transport",
-                        false,
-                    ))
+                    Some(RegisterRefusal::TransportMismatch)
                 } else if existing.is_some_and(|connections| {
-                    connections.len() >= max_register_connections_per_service
+                    connections.len() >= config.max_register_connections_per_service.get()
                 }) {
-                    Some((
-                        "service_connection_limit_exceeded",
-                        "the service has reached its register connection limit",
-                        true,
-                    ))
+                    Some(RegisterRefusal::ServiceConnectionLimit)
                 } else if existing.is_none()
                     && server_conn_map
                         .keys()
                         .filter(|registered| split_scoped_service_key(registered).0 == namespace)
                         .count()
-                        >= max_services_per_namespace
+                        >= config.max_services_per_namespace.get()
                 {
-                    Some((
-                        "namespace_service_limit_exceeded",
-                        "the namespace has reached its service name limit",
-                        true,
-                    ))
+                    Some(RegisterRefusal::NamespaceServiceLimit)
                 } else {
                     None
                 };
-                if let Some((code, reason, retryable)) = failure {
-                    let _ = conn_sender.try_send(ConnTask::RegisterFailed {
-                        code: code.to_string(),
-                        reason: reason.to_string(),
-                        retryable,
-                    });
+                if let Some(refusal) = refusal {
+                    let _ = conn_sender.try_send(refusal.task());
                     continue;
                 }
                 let generation = next_server_generation;
                 next_server_generation = next_server_generation.saturating_add(1).max(1);
-                let now = Instant::now();
+                let direct_capability = direct.as_ref().and(direct_state.capability.clone());
+                let info = ServerConnInfo {
+                    conn_id,
+                    generation,
+                    health: ServerConnHealth::Healthy,
+                    need_codec,
+                    is_datagram,
+                    protocol_version,
+                    last_rx_at: Instant::now(),
+                    stream_ack_budget: config.stream_ack_timeout,
+                    suspect_check: None,
+                    retire_token,
+                    direct,
+                };
                 // sign up server connection
                 manager.sign_up_conn_sender(conn_id, conn_sender.clone());
                 match server_conn_map.entry(key.clone()) {
-                    hashbrown::hash_map::Entry::Occupied(mut o) => {
-                        o.get_mut().push(ServerConnInfo {
-                            conn_id,
-                            generation,
-                            health: ServerConnHealth::Healthy,
-                            need_codec,
-                            is_datagram,
-                            protocol_version,
-                            last_rx_at: now,
-                            stream_ack_budget: pb_mapper_core::config::stream_ack_timeout(),
-                            suspect_check: None,
-                            retire_token,
-                            direct: direct.clone(),
-                        });
-                    }
+                    hashbrown::hash_map::Entry::Occupied(mut o) => o.get_mut().push(info),
                     hashbrown::hash_map::Entry::Vacant(v) => {
-                        v.insert(vec![ServerConnInfo {
-                            conn_id,
-                            generation,
-                            health: ServerConnHealth::Healthy,
-                            need_codec,
-                            is_datagram,
-                            protocol_version,
-                            last_rx_at: now,
-                            stream_ack_budget: pb_mapper_core::config::stream_ack_timeout(),
-                            suspect_check: None,
-                            retire_token,
-                            direct: direct.clone(),
-                        }]);
+                        v.insert(vec![info]);
                     }
                 }
 
@@ -862,8 +815,8 @@ pub async fn run_server_on_listener_with_options(
                         .try_send(ConnTask::RegisterResp {
                             generation,
                             protocol_version,
-                            lease_ttl_ms: server_lease_timeout().as_millis() as u64,
-                            direct: direct.as_ref().and(direct_state.capability.clone()),
+                            lease_ttl_ms: config.lease_timeout.as_millis() as u64,
+                            direct: direct_capability,
                         })
                         .context(TaskCenterSendRegisterRespSnafu { key, conn_id })
                 );
@@ -877,8 +830,12 @@ pub async fn run_server_on_listener_with_options(
                 client_id,
                 server_generation,
             } => {
-                let Some((expected_control_conn_id, expected_generation, expected_key, _)) =
-                    pending_streams.get(&client_id).cloned()
+                let Some(PendingStream {
+                    server_conn_id: expected_control_conn_id,
+                    server_generation: expected_generation,
+                    key: expected_key,
+                    requested_at: _,
+                }) = pending_streams.get(&client_id).cloned()
                 else {
                     tracing::warn!(
                         event = "stale_stream_without_pending_client",
@@ -955,8 +912,12 @@ pub async fn run_server_on_listener_with_options(
             } => {
                 let recorded_activity =
                     record_server_conn_activity_by_conn_id(&mut server_conn_map, server_id);
-                let Some((expected_server_id, expected_generation, _, requested_at)) =
-                    pending_streams.get(&client_id).cloned()
+                let Some(&PendingStream {
+                    server_conn_id: expected_server_id,
+                    server_generation: expected_generation,
+                    key: _,
+                    requested_at,
+                }) = pending_streams.get(&client_id)
                 else {
                     tracing::warn!(
                         event = "stale_stream_ack_without_pending_client",
@@ -990,8 +951,8 @@ pub async fn run_server_on_listener_with_options(
                     let sample_budget = requested_at.elapsed().saturating_mul(3);
                     info.stream_ack_budget = (info.stream_ack_budget.mul_f64(0.75)
                         + sample_budget.mul_f64(0.25))
-                    .max(pb_mapper_core::config::stream_ack_timeout())
-                    .min(Duration::from_secs(5).max(pb_mapper_core::config::stream_ack_timeout()));
+                    .max(config.stream_ack_timeout)
+                    .min(config.max_stream_ack_budget());
                 }
                 let client_sender = snafu_error_get_or_continue!(
                     manager
@@ -1020,22 +981,14 @@ pub async fn run_server_on_listener_with_options(
                 // pinned DirectRelay is the same: its grant held a setup slot
                 // and a rate token until this subscription replaced it.
                 let is_new_subscription =
-                    !pending_streams.contains_key(&conn_id) && pinned_provider.is_none();
+                    !pending_streams.contains(&conn_id) && pinned_provider.is_none();
                 if is_new_subscription
-                    && namespace_stream_counts
-                        .get(&namespace)
-                        .copied()
-                        .unwrap_or_default()
-                        >= max_streams_per_namespace
+                    && !pending_streams.has_room(namespace, 0, config.max_streams_per_namespace)
                 {
-                    let _ = conn_sender.try_send(ConnTask::SubcribeFailed {
-                        code: "namespace_stream_limit_exceeded".to_string(),
-                        reason: "the namespace has reached its active stream limit".to_string(),
-                        retryable: true,
-                    });
+                    let _ = conn_sender.try_send(SubscribeRefusal::NamespaceStreamLimit.task());
                     continue;
                 }
-                let Some(server_conn_id_list) = server_conn_map.get(&key).cloned() else {
+                let Some(registrations) = server_conn_map.get(&key) else {
                     let reason = format!("server key `{key}` is not registered");
                     tracing::warn!(
                         event = "subscribe_key_missing",
@@ -1046,59 +999,46 @@ pub async fn run_server_on_listener_with_options(
                         server_connections = registered_server_conn_count(&server_conn_map),
                         "subscribe key is not registered"
                     );
-                    if excluded_server_conns.is_empty() {
-                        send_subcribe_failed(&conn_sender, &key, conn_id, reason).await;
-                    } else {
-                        send_subcribe_retry(&conn_sender, &key, conn_id, reason).await;
-                    }
+                    reject_subscribe(
+                        &conn_sender,
+                        &key,
+                        conn_id,
+                        reason,
+                        !excluded_server_conns.is_empty(),
+                    );
                     continue;
                 };
                 // A direct setup that ended before its grant already paid for
                 // the ordinary subscription its consumer falls back to.
                 if is_new_subscription
                     && !direct_state.take_fallback_credit(&key)
-                    && !namespace_rate_limits
-                        .entry(namespace)
-                        .or_insert_with(|| {
-                            NamespaceRateLimit::new(new_streams_per_second, new_streams_burst)
-                        })
-                        .allow()
+                    && !namespace_rate_limits.try_take(namespace)
                 {
-                    let _ = conn_sender.try_send(ConnTask::SubcribeFailed {
-                        code: "namespace_stream_rate_exceeded".to_string(),
-                        reason: "the namespace new-stream rate limit was exceeded".to_string(),
-                        retryable: true,
-                    });
+                    let _ = conn_sender.try_send(SubscribeRefusal::NamespaceStreamRate.task());
                     continue;
                 }
+                // Newest first. A snapshot, because an unusable candidate is
+                // removed from the map while the rest are still to be tried.
+                let candidates: Vec<Candidate> = registrations
+                    .iter()
+                    .rev()
+                    .filter(|info| {
+                        info.health == ServerConnHealth::Healthy
+                            && !excluded_server_conns.contains(&(info.conn_id, info.generation))
+                            && pinned_provider.is_none_or(|p| p == (info.conn_id, info.generation))
+                    })
+                    .map(Candidate::from)
+                    .collect();
                 let mut selected = false;
-                let mut candidates = Vec::new();
-                candidates.extend(
-                    server_conn_id_list
-                        .iter()
-                        .rev()
-                        .filter(|info| {
-                            info.health == ServerConnHealth::Healthy
-                                && !excluded_server_conns.contains(&(info.conn_id, info.generation))
-                                && pinned_provider
-                                    .is_none_or(|p| p == (info.conn_id, info.generation))
-                        })
-                        .cloned(),
-                );
-                for server_info in candidates {
-                    let ServerConnInfo {
+                for candidate in candidates {
+                    let Candidate {
                         conn_id: server_conn_id,
                         generation: server_generation,
                         health,
                         need_codec,
                         is_datagram,
-                        protocol_version: _,
-                        last_rx_at: _,
                         stream_ack_budget,
-                        suspect_check: _,
-                        retire_token: _,
-                        direct: _,
-                    } = server_info;
+                    } = candidate;
                     let Some(server_conn_sender) = manager.get_conn_sender_chan(&server_conn_id)
                     else {
                         tracing::warn!(
@@ -1144,20 +1084,15 @@ pub async fn run_server_on_listener_with_options(
                     if !manager.has_conn_sender(&conn_id) {
                         manager.sign_up_conn_sender(conn_id, conn_sender.clone());
                     }
-                    let is_new_stream = pending_streams
-                        .insert(
-                            conn_id,
-                            (
-                                server_conn_id,
-                                server_generation,
-                                key.clone(),
-                                Instant::now(),
-                            ),
-                        )
-                        .is_none();
-                    if is_new_stream {
-                        *namespace_stream_counts.entry(namespace).or_default() += 1;
-                    }
+                    pending_streams.insert(
+                        conn_id,
+                        PendingStream {
+                            server_conn_id,
+                            server_generation,
+                            key: key.clone(),
+                            requested_at: Instant::now(),
+                        },
+                    );
                     // 2. Response subcribe ok
                     if let Err(e) = conn_sender
                         .try_send(ConnTask::SubcribeResp {
@@ -1212,11 +1147,13 @@ pub async fn run_server_on_listener_with_options(
                         server_connections = registered_server_conn_count(&server_conn_map),
                         "no usable server connection for subscribe"
                     );
-                    if excluded_server_conns.is_empty() {
-                        send_subcribe_failed(&conn_sender, &key, conn_id, reason).await;
-                    } else {
-                        send_subcribe_retry(&conn_sender, &key, conn_id, reason).await;
-                    }
+                    reject_subscribe(
+                        &conn_sender,
+                        &key,
+                        conn_id,
+                        reason,
+                        !excluded_server_conns.is_empty(),
+                    );
                 }
             }
             ManagerTask::SweepServerLeases => {
@@ -1224,7 +1161,7 @@ pub async fn run_server_on_listener_with_options(
                 // Retire in place rather than queueing `RetireServerConn` back into
                 // the manager channel: this loop is that channel's only consumer, so
                 // a full queue would have it waiting on itself.
-                for stale in sweep_server_conn_leases(&mut server_conn_map) {
+                for stale in sweep_server_conn_leases(&mut server_conn_map, config.lease_timeout) {
                     let reason = format!(
                         "lease expired: no control traffic for {:?} (protocol v{})",
                         stale.idle_for, stale.protocol_version
@@ -1278,8 +1215,8 @@ pub async fn run_server_on_listener_with_options(
 struct RoutingState<'a> {
     manager: &'a mut TaskManager,
     server_conn_map: &'a mut ServerConnMap,
-    pending_streams: &'a PendingStreamMap,
-    namespace_rate_limits: &'a mut NamespaceRateLimitMap,
+    pending_streams: &'a PendingStreams,
+    namespace_rate_limits: &'a mut NamespaceRateLimits,
 }
 
 /// Drop one registered control connection from every map that tracks it, and tell
@@ -1359,6 +1296,30 @@ fn retire_server_conn(
     );
 }
 
+/// What a subscribe needs of a registration it may route to.
+#[derive(Clone, Copy)]
+struct Candidate {
+    conn_id: RemoteConnId,
+    generation: u64,
+    health: ServerConnHealth,
+    need_codec: bool,
+    is_datagram: bool,
+    stream_ack_budget: Duration,
+}
+
+impl From<&ServerConnInfo> for Candidate {
+    fn from(info: &ServerConnInfo) -> Self {
+        Self {
+            conn_id: info.conn_id,
+            generation: info.generation,
+            health: info.health,
+            need_codec: info.need_codec,
+            is_datagram: info.is_datagram,
+            stream_ack_budget: info.stream_ack_budget,
+        }
+    }
+}
+
 async fn abort_and_wait(
     handles: impl IntoIterator<Item = tokio_util::task::AbortOnDropHandle<()>>,
 ) {
@@ -1424,8 +1385,9 @@ mod tests {
     fn a_retired_conn_id_is_withheld_until_its_socket_task_deregisters() {
         let key: ImutableKey = Arc::from("echo");
         let mut manager = TaskManager::new();
-        let pending_streams = hashbrown::HashMap::new();
-        let mut namespace_rate_limits = hashbrown::HashMap::new();
+        let pending_streams = PendingStreams::default();
+        let mut namespace_rate_limits =
+            NamespaceRateLimits::new(NonZeroUsize::MIN, NonZeroUsize::MIN);
         let mut server_conn_map: ServerConnMap = ServerConnMap::new();
 
         // One registered control connection, holding the first ID the provider hands out.
