@@ -1,14 +1,14 @@
 //! The legacy machine-derived administrator key: derived from the hostname and
 //! MAC addresses, and persisted for operators to reuse.
 
-use std::io;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
 use ring::digest::{SHA256, digest};
 
 use super::set_process_msg_header_key;
-use crate::durable_file::{NewFileMode, ReplaceStep, replace_contents};
 
 /// Fixed file path used to persist a machine-derived key for operators to reuse.
 pub const MACHINE_MSG_HEADER_KEY_PATH: &str = "/var/lib/pb-mapper-server/msg_header_key";
@@ -269,8 +269,14 @@ fn write_machine_msg_header_key(key: &str) -> io::Result<()> {
     write_key_file(Path::new(MACHINE_MSG_HEADER_KEY_PATH), key)
 }
 
-/// Replaces `path` with `key` and a newline, readable by its owner alone on
-/// unix from the moment it exists, creating its directory first.
+/// Writes `key` and a newline over `path`, creating its directory first. On
+/// unix the file is readable by its owner alone, from the moment it exists if
+/// this creates it.
+///
+/// The file is written in place, not replaced, so a single-file bind mount, a
+/// hard link, a symlink and a file another user owns all keep working, and no
+/// directory sync can fail. The key is re-derived and rewritten on every
+/// start, so a torn write heals at the next one.
 fn write_key_file(path: &Path, key: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -280,26 +286,30 @@ fn write_key_file(path: &Path, key: &str) -> io::Result<()> {
             )
         })?;
     }
-    replace_contents(
-        path,
-        format!("{key}\n").as_bytes(),
-        NewFileMode::Exactly(0o600),
-    )
-    .map_err(|error| match error.step {
-        // Reported bare, as the `chmod` that used to follow the write was.
-        ReplaceStep::SetPermissions => io::Error::from(error),
-        ReplaceStep::Create
-        | ReplaceStep::Write
-        | ReplaceStep::Replace
-        | ReplaceStep::SyncParent => io::Error::new(
-            error.io().kind(),
-            format!(
-                "failed to write key file `{}`: {}",
-                path.display(),
-                error.io()
-            ),
-        ),
-    })
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .and_then(|mut file| file.write_all(format!("{key}\n").as_bytes()))
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to write key file `{}`: {error}", path.display()),
+            )
+        })?;
+    // The mode above applies only to a file this creates; an existing one
+    // keeps its own until this narrows it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -409,5 +419,21 @@ lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    /// The key file is rewritten in place, so a hard link (like a single-file
+    /// bind mount, or a file another user owns) still sees the new key.
+    #[test]
+    fn rewriting_the_machine_key_file_writes_through_its_hard_links() {
+        use super::*;
+        use crate::test_support::TempPath;
+
+        let scratch = TempPath::new("machine-key-link");
+        let path = scratch.join("msg_header_key");
+        write_key_file(&path, "first").unwrap();
+        let link = scratch.join("linked_key");
+        std::fs::hard_link(&path, &link).unwrap();
+        write_key_file(&path, "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "second\n");
     }
 }
