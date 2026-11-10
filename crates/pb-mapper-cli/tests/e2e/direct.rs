@@ -179,7 +179,19 @@ async fn udp_direct(lan_transport: LanTransport) {
     .await;
     let application = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     application.connect(addr).await.unwrap();
-    for size in [1, 1200, 8000] {
+    // One byte, a datagram under any path's MTU, and one only IP
+    // fragmentation carries, which both UDP hops here cross on loopback.
+    let mut sizes = vec![1, 1200];
+    if loopback_carries(8000).await {
+        sizes.push(8000);
+    } else {
+        eprintln!(
+            "loopback drops an 8000-byte UDP datagram on this host (WSL's mirrored \
+             networking routes 127.0.0.1 over a 1500-byte link that drops fragments); \
+             the case sends nothing it cannot carry"
+        );
+    }
+    for size in sizes {
         let payload = vec![size as u8; size];
         application.send(&payload).await.unwrap();
         let mut response = vec![0; 65536];
@@ -251,6 +263,24 @@ async fn udp_direct(lan_transport: LanTransport) {
     assert_eq!(&response[..len], b"still direct");
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
+}
+
+/// Whether this host's loopback delivers a UDP datagram of `size` bytes
+/// between two sockets on 127.0.0.1, as a datagram tunnel's application and
+/// backend need it to before pb-mapper sees anything.
+async fn loopback_carries(size: usize) -> bool {
+    let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let payload = vec![0x5a; size];
+    sender
+        .send_to(&payload, receiver.local_addr().unwrap())
+        .await
+        .unwrap();
+    let mut got = vec![0; size + 1];
+    matches!(
+        tokio::time::timeout(Duration::from_secs(1), receiver.recv(&mut got)).await,
+        Ok(Ok(len)) if got[..len] == payload[..]
+    )
 }
 
 #[tokio::test]
