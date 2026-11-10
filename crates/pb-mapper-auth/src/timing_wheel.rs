@@ -120,7 +120,7 @@ fn run(callback: Option<Box<dyn FnOnce() + Send>>) {
 enum Link {
     /// The end of a route. Never read: holding the reference *is* this leg's job,
     /// and releasing it is what fires the timer.
-    Deliver(#[allow(dead_code)] Arc<Timer>),
+    Deliver(Arc<Timer>),
     /// Files `next` into `level`'s `slot` when this leg comes off the front.
     ///
     /// `Box`, not `Arc`: exactly one bucket owns a route at a time, so a leg needs
@@ -238,8 +238,14 @@ impl TimingWheel {
         bucket
     }
 
+    /// Files `link` in `level`'s bucket `slot`. Out of range, the link is dropped,
+    /// which fires its timer: the safe direction for a credential deadline.
     fn file(&mut self, level: usize, slot: usize, link: Link) {
-        if let Some(bucket) = self.levels[level].get_mut(slot) {
+        if let Some(bucket) = self
+            .levels
+            .get_mut(level)
+            .and_then(|queue| queue.get_mut(slot))
+        {
             bucket.push(link);
         }
     }
