@@ -92,6 +92,9 @@ pub struct Host {
     /// dropped with the host, which ends them too.
     last: tokio::sync::watch::Sender<Option<HostStatus>>,
     join: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The display-mode restore retry, when the launcher journals; it ends
+    /// on `cancel`, and dropping the host aborts it.
+    restore: Option<tokio::task::JoinHandle<()>>,
 }
 impl Host {
     pub fn builder(options: HostOptions) -> HostBuilder {
@@ -175,9 +178,9 @@ impl Host {
             restore: tokio::sync::Notify::new(),
         });
         let cancel = CancellationToken::new();
-        if let Some(recovery) = launch.recovery() {
-            tokio::spawn(restore_retry(shared.clone(), recovery, cancel.clone()));
-        }
+        let restore = launch
+            .recovery()
+            .map(|recovery| tokio::spawn(restore_retry(shared.clone(), recovery, cancel.clone())));
         let acceptor = Arc::new(Acceptor {
             tls,
             token: invitation.token_text(),
@@ -200,6 +203,7 @@ impl Host {
             cancel,
             last: tokio::sync::watch::Sender::new(None),
             join: AsyncMutex::new(Some(join)),
+            restore,
         })
     }
     /// The `pbd1` invitation to this host.
@@ -374,6 +378,11 @@ impl Drop for Host {
     fn drop(&mut self) {
         self.shared.policy.set(false);
         self.cancel.cancel();
+        // A replay already running finishes on its own blocking thread; the
+        // task that waits for it lets go of the host now.
+        if let Some(restore) = &self.restore {
+            restore.abort();
+        }
     }
 }
 
@@ -492,6 +501,12 @@ async fn restore_retry(shared: Arc<Shared>, recovery: Recovery, cancel: Cancella
                         warned = Some(detail);
                     }
                 }
+                Err(failure) if failure.is_panic() => tracing::warn!(
+                    target: "pb_mapper_desktop::session",
+                    event = "display_mode_restore_panicked",
+                    detail = %failure,
+                ),
+                // Cancelled: the runtime is shutting down.
                 Err(_) => {}
             }
         }
