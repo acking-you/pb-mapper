@@ -25,7 +25,7 @@ mod service;
 mod worker;
 
 use crate::{
-    BackendCaps, DisplaySelection, HostOs, Result,
+    BackendCaps, DisplaySelection, Result,
     launch::{Launch, Launcher},
     oop::{client::RemoteBackend, ipc},
 };
@@ -47,11 +47,7 @@ pub(crate) fn record_input_failure(detail: &str) {
 /// What a session through the helper can do until its worker's `Start`
 /// answer says: it locks the workstation, as the helper always can.
 fn fallback_caps() -> BackendCaps {
-    BackendCaps {
-        lock: true,
-        os: Some(HostOs::Windows),
-        ..BackendCaps::default()
-    }
+    crate::platform::fallback_caps::<super::Windows>()
 }
 
 /// Sessions captured by the helper, on the display `selection` names.
