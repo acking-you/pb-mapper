@@ -43,6 +43,24 @@ pub(crate) struct ClientInner {
     pub(crate) namespace: Option<u64>,
 }
 
+impl ClientInner {
+    /// The credential this session authenticates with now.
+    pub(crate) fn credential(&self) -> Credential {
+        *self
+            .credential
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Authenticate this session's later requests with `credential`.
+    pub(crate) fn set_credential(&self, credential: Credential) {
+        *self
+            .credential
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = credential;
+    }
+}
+
 /// Session against one deployed relay.
 ///
 /// The credential is per-client, not process-global. Two clients in the same
@@ -138,7 +156,7 @@ impl Client {
     /// over TCP whatever this client's carrier, so a TCP client can learn
     /// whether QUIC would work before switching to it.
     pub async fn relay_quic_port(&self) -> Result<Option<u16>> {
-        let timeout = control_io_timeout().min(std::time::Duration::from_secs(5));
+        let timeout = status_io_timeout();
         tokio::time::timeout(timeout, self.inner.endpoint.quic_port(self.credential()))
             .await
             .unwrap_or(Err(
@@ -170,11 +188,7 @@ impl Client {
     }
 
     pub(crate) fn credential(&self) -> Credential {
-        *self
-            .inner
-            .credential
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner.credential()
     }
 
     /// Administrator RPCs. Fails locally when the session is not an admin key.
@@ -505,9 +519,7 @@ impl Client {
     pub async fn list_keys(&self) -> Result<Vec<String>> {
         match self.status_request(PbConnStatusReq::Keys).await? {
             PbConnStatusResp::Keys(keys) => Ok(keys),
-            other => Err(Error::protocol(format!(
-                "expected keys status, got {other:?}"
-            ))),
+            other => Err(Error::unexpected("keys status", &other)),
         }
     }
 
@@ -515,9 +527,7 @@ impl Client {
     pub async fn sessions(&self) -> Result<Vec<pb_mapper_protocol::direct::SessionObservation>> {
         match self.status_request(PbConnStatusReq::Sessions).await? {
             PbConnStatusResp::Sessions(sessions) => Ok(sessions),
-            other => Err(Error::protocol(format!(
-                "expected sessions status, got {other:?}"
-            ))),
+            other => Err(Error::unexpected("sessions status", &other)),
         }
     }
 
@@ -534,9 +544,7 @@ impl Client {
                 .into_iter()
                 .map(ServiceConnection::from)
                 .collect()),
-            other => Err(Error::protocol(format!(
-                "expected service status, got {other:?}"
-            ))),
+            other => Err(Error::unexpected("service status", &other)),
         }
     }
 
@@ -570,9 +578,7 @@ impl Client {
 
     async fn status_request(&self, request: PbConnStatusReq) -> Result<PbConnStatusResp> {
         let credential = self.credential();
-        // Queries share admission with recovery. A stalled status consumer must
-        // not occupy that budget for the legacy 30-second control I/O timeout.
-        let io_timeout = control_io_timeout().min(std::time::Duration::from_secs(5));
+        let io_timeout = status_io_timeout();
         let endpoint = &self.inner.endpoint;
         let ask = async |carrier: &mut Option<CarrierId>| {
             let mut stream = endpoint
@@ -599,7 +605,7 @@ impl Client {
                 // arrives on it. A status query is a read: asked once more on
                 // a fresh connection, it gets the relay's verdict.
                 Err(error)
-                    if is_carrier_failure(&error)
+                    if error.is_carrier_failure()
                         && endpoint.transport() == super::RelayTransport::Quic =>
                 {
                     endpoint.carrier_failed(carrier);
@@ -614,8 +620,8 @@ impl Client {
         }));
         match &result {
             Ok(_) => endpoint.protocol_succeeded(),
+            Err(error) if error.is_carrier_failure() => endpoint.carrier_failed(carrier),
             // The relay answered: the carrier works, whatever it said.
-            Err(error) if is_carrier_failure(error) => endpoint.carrier_failed(carrier),
             Err(_) => {}
         }
         result
@@ -648,14 +654,11 @@ impl RelayMetricsStream {
     }
 }
 
-/// Whether `error` says the carrier failed, rather than that the relay
-/// answered with a refusal.
-pub(crate) fn is_carrier_failure(error: &Error) -> bool {
-    match error {
-        Error::Remote { .. } => false,
-        Error::Status { source } => source.remote_retryable().is_none(),
-        _ => true,
-    }
+/// The I/O bound of a status query. Queries share admission with recovery: a
+/// stalled status consumer must not occupy that budget for the legacy
+/// 30-second control I/O timeout.
+fn status_io_timeout() -> std::time::Duration {
+    control_io_timeout().min(std::time::Duration::from_secs(5))
 }
 
 /// Refuse a mapping from the start that this build cannot make, rather than

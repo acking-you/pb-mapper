@@ -77,7 +77,7 @@ macro_rules! admin_rpc {
         pub async fn $name(&self, $($arg: $arg_ty),*) -> Result<$output> {
             match self.request($request).await? {
                 AdminResponse::$variant($binding) => Ok($value),
-                other => unexpected(stringify!($variant), &other),
+                other => Err(Error::unexpected(stringify!($variant), &other)),
             }
         }
     };
@@ -97,7 +97,7 @@ macro_rules! admin_rpc_struct {
         pub async fn $name(&self, $($arg: $arg_ty),*) -> Result<$output> {
             match self.request($request).await? {
                 AdminResponse::$variant { $($binding)* } => Ok($value),
-                other => unexpected(stringify!($variant), &other),
+                other => Err(Error::unexpected(stringify!($variant), &other)),
             }
         }
     };
@@ -117,7 +117,13 @@ impl Admin {
         request: AdminRequest,
         io_timeout: Duration,
     ) -> Result<AdminResponse> {
-        send_admin_request(&self.inner.endpoint, self.credential(), request, io_timeout).await
+        send_admin_request(
+            &self.inner.endpoint,
+            self.inner.credential(),
+            request,
+            io_timeout,
+        )
+        .await
     }
 
     admin_rpc!(
@@ -332,16 +338,12 @@ impl Admin {
             .map_err(preserve)?;
         match response {
             AdminResponse::Ok { .. } => {
-                *self
-                    .inner
-                    .credential
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = parsed;
+                self.inner.set_credential(parsed);
                 Ok(new_key)
             }
             // A response that is not `Ok` still came from the relay, but nothing
             // here proves the rotation did not take effect.
-            other => unexpected::<String>("Ok", &other).map_err(preserve),
+            other => Err(preserve(Error::unexpected("Ok", &other))),
         }
     }
 
@@ -393,14 +395,6 @@ impl Admin {
         discard_staged_admin_key(&staged_path);
         Ok(rotated)
     }
-
-    fn credential(&self) -> pb_mapper_core::checksum::Credential {
-        *self
-            .inner
-            .credential
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
 }
 
 /// Lift an administrator key-file failure into the SDK's error type.
@@ -421,12 +415,6 @@ fn validate_page_size(page_size: u16) -> Result<u16> {
         )));
     }
     Ok(page_size)
-}
-
-fn unexpected<T>(expected: &str, actual: &AdminResponse) -> Result<T> {
-    Err(Error::protocol(format!(
-        "expected {expected}, got {actual:?}"
-    )))
 }
 
 /// Drain a paginated listing into one vector.

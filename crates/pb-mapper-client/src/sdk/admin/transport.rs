@@ -65,19 +65,10 @@ pub(super) async fn send_admin_request(
             // Nothing reached the relay, so re-sending cannot duplicate an
             // effect. Anything past that point is reported as-is.
             Err(error) => {
-                if crate::sdk::client::is_carrier_failure(&error) {
+                if error.is_carrier_failure() {
                     endpoint.carrier_failed(exchange.carrier);
                 }
-                if exchange.sent
-                    || last_attempt
-                    || matches!(
-                        error,
-                        Error::Remote {
-                            retryable: false,
-                            ..
-                        }
-                    )
-                {
+                if exchange.sent || last_attempt || !error.may_resend_unsent() {
                     return Err(error);
                 }
                 continue;

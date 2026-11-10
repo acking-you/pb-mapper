@@ -110,9 +110,7 @@ impl RemoteId {
                 active,
                 idle,
             }),
-            other => Err(super::Error::protocol(format!(
-                "expected remote-id status, got {other:?}"
-            ))),
+            other => Err(super::Error::unexpected("remote-id status", &other)),
         }
     }
 }
