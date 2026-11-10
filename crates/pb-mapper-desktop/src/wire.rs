@@ -8,13 +8,13 @@ pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(3);
 /// Protocol v2 records are `u32 BE len | bytes`: a JSON header of at most
 /// `MAX_HEADER`, and after `HostMessage::Video` only, one payload record of
 /// 1..=`MAX_PAYLOAD` bytes.
-pub(crate) const MAX_HEADER: usize = 8192;
+const MAX_HEADER: usize = 8192;
 pub(crate) const MAX_PAYLOAD: usize = 4 * 1024 * 1024;
 /// Writes and payload reads get `IO_TIMEOUT` plus the time this rate needs, so
 /// a large IDR on a slow cellular link is not mistaken for a dead peer.
-pub(crate) const WRITE_FLOOR_BPS: u64 = 1_000_000;
+const WRITE_FLOOR_BPS: u64 = 1_000_000;
 
-pub(crate) fn write_timeout(bytes: usize) -> Duration {
+fn write_timeout(bytes: usize) -> Duration {
     IO_TIMEOUT + Duration::from_secs_f64(bytes as f64 * 8.0 / WRITE_FLOOR_BPS as f64)
 }
 
@@ -22,14 +22,24 @@ fn timed_out() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::TimedOut, "desktop transport timed out")
 }
 
-/// One message: the header record and, for video only, its payload record,
-/// buffered together and flushed once, all within `write_timeout`.
+/// One message: `header` serialized, then written with `payload` as
+/// `write_records` writes them.
 pub(crate) async fn write_message<W: AsyncWrite + Unpin, T: Serialize>(
     w: &mut W,
     header: &T,
     payload: Option<&[u8]>,
 ) -> Result<()> {
     let header = serde_json::to_vec(header).map_err(std::io::Error::other)?;
+    write_records(w, &header, payload).await
+}
+
+/// The header record and, for video only, its payload record, buffered
+/// together and flushed once, all within `write_timeout`.
+async fn write_records<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    header: &[u8],
+    payload: Option<&[u8]>,
+) -> Result<()> {
     if header.len() > MAX_HEADER {
         return Err(error("desktop message too large"));
     }
@@ -41,7 +51,7 @@ pub(crate) async fn write_message<W: AsyncWrite + Unpin, T: Serialize>(
     tokio::time::timeout(write_timeout(header.len() + payload_len), async {
         let mut out = tokio::io::BufWriter::with_capacity(records, &mut *w);
         out.write_u32(header.len() as u32).await?;
-        out.write_all(&header).await?;
+        out.write_all(header).await?;
         if let Some(payload) = payload {
             out.write_u32(payload.len() as u32).await?;
             out.write_all(payload).await?;
@@ -58,6 +68,19 @@ pub(crate) async fn read_header<R: AsyncRead + Unpin, T: DeserializeOwned>(
     r: &mut R,
     timeout: Duration,
 ) -> Result<Option<T>> {
+    let Some(bytes) = read_record(r, timeout).await? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| error("invalid desktop message"))
+}
+
+/// The next header record's bytes, as `read_header` waits for them.
+async fn read_record<R: AsyncRead + Unpin>(
+    r: &mut R,
+    timeout: Duration,
+) -> Result<Option<Vec<u8>>> {
     tokio::time::timeout(timeout, async {
         let mut length = [0; 4];
         if r.read(&mut length[..1]).await? == 0 {
@@ -70,9 +93,7 @@ pub(crate) async fn read_header<R: AsyncRead + Unpin, T: DeserializeOwned>(
         }
         let mut bytes = vec![0; len];
         r.read_exact(&mut bytes).await?;
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| error("invalid desktop message"))
+        Ok(Some(bytes))
     })
     .await
     .map_err(|_| timed_out())?
