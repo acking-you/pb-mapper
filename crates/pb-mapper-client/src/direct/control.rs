@@ -4,7 +4,8 @@ use pb_mapper_protocol::{
     MessageReader, MessageWriter,
     command::{MessageSerializer, PbConnRequest, PbConnResponse},
     direct::*,
-    secure::ClientHeaderSession,
+    secure::{ClientHeaderSession, HeaderMessageReader, HeaderMessageWriter},
+    transport::{RelayReadHalf, RelayStream, RelayWriteHalf},
 };
 use std::{
     collections::HashMap,
@@ -16,6 +17,21 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot};
+
+/// Messages queued for the relay.
+const CONTROL_QUEUE: usize = 64;
+/// Grants one control connection waits for at once.
+const MAX_PENDING_OPENS: usize = 64;
+/// How long the relay may stay silent before the connection is dropped.
+const CONTROL_IDLE: Duration = Duration::from_secs(45);
+/// How often the relay is pinged; it answers each ping.
+const CONTROL_PING: Duration = Duration::from_secs(15);
+/// How long writing one message may take.
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const _: () = assert!(
+    CONTROL_IDLE.as_secs() > CONTROL_PING.as_secs(),
+    "a live relay answers a ping before the read times out"
+);
 
 type GrantReply = oneshot::Sender<io::Result<Option<SessionGrant>>>;
 struct Pending {
@@ -51,7 +67,7 @@ impl Control {
             )
             .await
             .map_err(io::Error::other)?;
-        let (tx, mut rx) = mpsc::channel::<DirectClientMessage>(64);
+        let (tx, mut rx) = mpsc::channel::<DirectClientMessage>(CONTROL_QUEUE);
         let pending = Arc::new(Mutex::new(Pending {
             opens: HashMap::new(),
             relays: HashMap::new(),
@@ -65,42 +81,7 @@ impl Control {
                 pending: pending_task.clone(),
                 alive: alive_task,
             };
-            let result: io::Result<()> = async {
-                let (mut read, mut write) = socket.into_split();
-                let mut reader = session.response_reader(&mut read).map_err(io::Error::other)?;
-                let mut writer = session.continuation_writer(&mut write).map_err(io::Error::other)?;
-                let first = PbConnResponse::decode(reader.read_msg().await.map_err(io::Error::other)?).map_err(io::Error::other)?;
-                let PbConnResponse::Direct(DirectEvent::Ready(capability)) = first else { return Err(io::Error::other("relay declined direct control")); };
-                let _ = ready.send(capability);
-                let reading = async {
-                    loop {
-                        let bytes = tokio::time::timeout(Duration::from_secs(45), reader.read_msg()).await.map_err(|_|io::Error::other("direct control idle"))?.map_err(io::Error::other)?;
-                        let response = PbConnResponse::decode(bytes).map_err(io::Error::other)?;
-                        let PbConnResponse::Direct(event) = response else { return Err(io::Error::other("unexpected direct control response")); };
-                        let mut pending = pending_task.lock().unwrap_or_else(|e| e.into_inner());
-                        match event {
-                            DirectEvent::Granted { request, grant } => { if let Some(reply) = pending.opens.remove(&request) { let _ = reply.send(Ok(Some(grant))); } }
-                            DirectEvent::LegacyRelay { request } => { if let Some(reply) = pending.opens.remove(&request) { let _ = reply.send(Ok(None)); } }
-                            DirectEvent::Rejected { request, reason } => { if let Some(reply) = pending.opens.remove(&request) { let _ = reply.send(Err(io::Error::other(reason))); } }
-                            DirectEvent::RelaySelected { id } => { if let Some(reply) = pending.relays.remove(&id) { let _ = reply.send(Ok(())); } }
-                            DirectEvent::Pong => {}
-                            _ => return Err(io::Error::other("invalid consumer coordination event")),
-                        }
-                    }
-                };
-                let writing = async {
-                    let mut ping = tokio::time::interval(Duration::from_secs(15));
-                    loop {
-                        let message = tokio::select! {
-                            message = rx.recv() => { let Some(message) = message else { return Ok(()); }; message },
-                            _ = ping.tick() => DirectClientMessage::Ping,
-                        };
-                        let bytes = message.encode().map_err(io::Error::other)?;
-                        tokio::time::timeout(Duration::from_secs(5), writer.write_msg(&bytes)).await.map_err(|_|io::Error::other("direct control write timeout"))?.map_err(io::Error::other)?;
-                    }
-                };
-                tokio::select! { result = reading => result, result = writing => result }
-            }.await;
+            let result = drive(socket, &session, ready, &pending_task, &mut rx).await;
             if let Err(error) = result {
                 tracing::debug!(%error, "direct coordination disconnected; established data sessions stay alive");
             }
@@ -131,7 +112,7 @@ impl Control {
         {
             let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             pending.opens.retain(|_, reply| !reply.is_closed());
-            if pending.opens.len() >= 64 {
+            if pending.opens.len() >= MAX_PENDING_OPENS {
                 return Err(io::Error::other("direct setup capacity reached"));
             }
             pending.opens.insert(request, tx);
@@ -184,6 +165,116 @@ impl Control {
         let _ = self.tx.try_send(DirectClientMessage::Cancel { id });
     }
 }
+/// Run a control connection: wait for the relay's `Ready`, hand its
+/// capability to `ready`, then deliver what the relay sends to `pending` and
+/// write what `rx` queues, until either side ends.
+async fn drive(
+    socket: RelayStream,
+    session: &ClientHeaderSession,
+    ready: oneshot::Sender<DirectCapability>,
+    pending: &Mutex<Pending>,
+    rx: &mut mpsc::Receiver<DirectClientMessage>,
+) -> io::Result<()> {
+    let (mut read, mut write) = socket.into_split();
+    let mut reader = session
+        .response_reader(&mut read)
+        .map_err(io::Error::other)?;
+    let mut writer = session
+        .continuation_writer(&mut write)
+        .map_err(io::Error::other)?;
+    let first = reader.read_msg().await.map_err(io::Error::other)?;
+    let PbConnResponse::Direct(DirectEvent::Ready(capability)) =
+        PbConnResponse::decode(first).map_err(io::Error::other)?
+    else {
+        return Err(io::Error::other("relay declined direct control"));
+    };
+    let _ = ready.send(capability);
+    tokio::select! {
+        result = read_events(&mut reader, pending) => result,
+        result = write_messages(&mut writer, rx) => result,
+    }
+}
+
+/// Deliver each event the relay sends, until it fails or goes quiet.
+async fn read_events(
+    reader: &mut HeaderMessageReader<'_, RelayReadHalf>,
+    pending: &Mutex<Pending>,
+) -> io::Result<()> {
+    loop {
+        let bytes = tokio::time::timeout(CONTROL_IDLE, reader.read_msg())
+            .await
+            .map_err(|_| io::Error::other("direct control idle"))?
+            .map_err(io::Error::other)?;
+        let PbConnResponse::Direct(event) =
+            PbConnResponse::decode(bytes).map_err(io::Error::other)?
+        else {
+            return Err(io::Error::other("unexpected direct control response"));
+        };
+        deliver(
+            &mut pending.lock().unwrap_or_else(|e| e.into_inner()),
+            event,
+        )?;
+    }
+}
+
+/// Write each queued message, and a ping when none was queued for a while.
+/// Ends when every sender is gone.
+async fn write_messages(
+    writer: &mut HeaderMessageWriter<'_, RelayWriteHalf>,
+    rx: &mut mpsc::Receiver<DirectClientMessage>,
+) -> io::Result<()> {
+    let mut ping = tokio::time::interval(CONTROL_PING);
+    loop {
+        let message = tokio::select! {
+            message = rx.recv() => {
+                let Some(message) = message else { return Ok(()) };
+                message
+            }
+            _ = ping.tick() => DirectClientMessage::Ping,
+        };
+        let bytes = message.encode().map_err(io::Error::other)?;
+        tokio::time::timeout(CONTROL_WRITE_TIMEOUT, writer.write_msg(&bytes))
+            .await
+            .map_err(|_| io::Error::other("direct control write timeout"))?
+            .map_err(io::Error::other)?;
+    }
+}
+
+/// Answer the setup waiting on `event`. A consumer is sent only answers to
+/// what it asked, and pongs; anything else is a broken relay.
+fn deliver(pending: &mut Pending, event: DirectEvent) -> io::Result<()> {
+    match event {
+        DirectEvent::Granted { request, grant } => {
+            if let Some(reply) = pending.opens.remove(&request) {
+                let _ = reply.send(Ok(Some(grant)));
+            }
+        }
+        DirectEvent::LegacyRelay { request } => {
+            if let Some(reply) = pending.opens.remove(&request) {
+                let _ = reply.send(Ok(None));
+            }
+        }
+        DirectEvent::Rejected { request, reason } => {
+            if let Some(reply) = pending.opens.remove(&request) {
+                let _ = reply.send(Err(io::Error::other(reason)));
+            }
+        }
+        DirectEvent::RelaySelected { id } => {
+            if let Some(reply) = pending.relays.remove(&id) {
+                let _ = reply.send(Ok(()));
+            }
+        }
+        DirectEvent::Pong => {}
+        DirectEvent::Ready(_)
+        | DirectEvent::Offer { .. }
+        | DirectEvent::RelaySelect { .. }
+        | DirectEvent::Cancel { .. } => {
+            return Err(io::Error::other("invalid consumer coordination event"));
+        }
+    }
+    Ok(())
+}
+
 struct PendingGuard {
     tx: mpsc::Sender<DirectClientMessage>,
     pending: Arc<Mutex<Pending>>,
