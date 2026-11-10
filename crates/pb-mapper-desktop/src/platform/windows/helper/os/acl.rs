@@ -10,6 +10,11 @@ use windows::{
     },
     core::PCWSTR,
 };
+#[cfg(feature = "windows-helper")]
+use {
+    std::{fs::File, io::Write, os::windows::io::FromRawHandle},
+    windows::Win32::Foundation::GENERIC_WRITE,
+};
 
 #[cfg(feature = "windows-helper")]
 pub struct Descriptor {
@@ -42,6 +47,56 @@ impl Descriptor {
     pub fn attributes(&self) -> *mut SECURITY_ATTRIBUTES {
         (&self.attributes as *const SECURITY_ATTRIBUTES).cast_mut()
     }
+}
+
+/// `path`, created or opened as `disposition` says, for writing. A file it
+/// creates has `descriptor`'s owner and DACL from its first instant: set
+/// afterwards, they would leave an owner a WRITE_DAC window.
+#[cfg(feature = "windows-helper")]
+pub fn create_protected(
+    path: &Path,
+    descriptor: &Descriptor,
+    disposition: FILE_CREATION_DISPOSITION,
+    flags: FILE_FLAGS_AND_ATTRIBUTES,
+) -> Result<File> {
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide(path).as_ptr()),
+            GENERIC_WRITE.0,
+            FILE_SHARE_READ,
+            Some(descriptor.attributes()),
+            disposition,
+            flags,
+            None,
+        )
+    }
+    .map_err(error)?;
+    Ok(unsafe { File::from_raw_handle(handle.0) })
+}
+
+/// Writes `bytes` to the new file `temporary`, created as
+/// [`create_protected`] creates it, syncs it, and moves it over `target`
+/// write-through. On failure the caller removes `temporary`.
+#[cfg(feature = "windows-helper")]
+pub fn replace_protected(
+    temporary: &Path,
+    target: &Path,
+    descriptor: &Descriptor,
+    flags: FILE_FLAGS_AND_ATTRIBUTES,
+    bytes: &[u8],
+) -> Result<()> {
+    let mut file = create_protected(temporary, descriptor, CREATE_NEW, flags)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    unsafe {
+        MoveFileExW(
+            PCWSTR(wide(temporary).as_ptr()),
+            PCWSTR(wide(target).as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(error)
 }
 
 pub fn install_root() -> Result<PathBuf> {

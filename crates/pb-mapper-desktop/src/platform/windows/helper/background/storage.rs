@@ -4,9 +4,15 @@ use super::{FILE_NAME, Options, REVOKED_MARKER, os};
 use crate::{HostIdentity, Result, error};
 use pb_mapper_client::sdk::{Client, ClientConfig};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{io::Write, path::Path};
+use windows::Win32::Storage::FileSystem::{
+    CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
+};
 
 const STORAGE_LIMIT: u64 = 32 * 1024;
+/// The grant's files: SYSTEM and administrators own them, and nobody else
+/// may even read them.
+const PRIVATE_SDDL: &str = "O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)";
 /// Every stored grant was protected with these, for this machine; they
 /// never change.
 const ENTROPY: &[u8] = b"pb-mapper/background-host/v1";
@@ -106,11 +112,6 @@ pub(super) fn load(root: &Path, owner_sid: &str) -> Result<Option<Saved>> {
     Ok(Some(saved))
 }
 pub(super) fn save(root: &Path, saved: &Saved) -> Result<()> {
-    use std::{io::Write, os::windows::io::FromRawHandle};
-    use windows::{
-        Win32::{Foundation::GENERIC_WRITE, Storage::FileSystem::*},
-        core::PCWSTR,
-    };
     os::protected_path(root)?;
     let target = root.join(FILE_NAME);
     if target.exists() {
@@ -118,33 +119,14 @@ pub(super) fn save(root: &Path, saved: &Saved) -> Result<()> {
     }
     let cipher = protect(&serde_json::to_vec(saved).map_err(error)?, true)?;
     let temporary = root.join(format!("background-{}.tmp", crate::security::secret()?));
-    let descriptor = os::Descriptor::new("O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)")?;
-    let result = (|| {
-        let handle = unsafe {
-            CreateFileW(
-                PCWSTR(os::wide(&temporary).as_ptr()),
-                GENERIC_WRITE.0,
-                FILE_SHARE_READ,
-                Some(descriptor.attributes()),
-                CREATE_NEW,
-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-                None,
-            )
-        }
-        .map_err(error)?;
-        let mut file = unsafe { std::fs::File::from_raw_handle(handle.0) };
-        file.write_all(&cipher)?;
-        file.sync_all()?;
-        drop(file);
-        unsafe {
-            MoveFileExW(
-                PCWSTR(os::wide(&temporary).as_ptr()),
-                PCWSTR(os::wide(&target).as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        }
-        .map_err(error)
-    })();
+    let descriptor = os::Descriptor::new(PRIVATE_SDDL)?;
+    let result = os::replace_protected(
+        &temporary,
+        &target,
+        &descriptor,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        &cipher,
+    );
     if result.is_err() {
         let _ = std::fs::remove_file(temporary);
     }
@@ -160,31 +142,19 @@ pub(super) fn remove(root: &Path) -> Result<()> {
 }
 
 pub(super) fn mark_revoked(root: &Path) -> Result<()> {
-    use std::{io::Write, os::windows::io::FromRawHandle};
-    use windows::{
-        Win32::{Foundation::GENERIC_WRITE, Storage::FileSystem::*},
-        core::PCWSTR,
-    };
     os::protected_path(root)?;
     let path = root.join(REVOKED_MARKER);
     if path.exists() {
         private_file(&path)?;
         return Ok(());
     }
-    let descriptor = os::Descriptor::new("O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)")?;
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(os::wide(&path).as_ptr()),
-            GENERIC_WRITE.0,
-            FILE_SHARE_READ,
-            Some(descriptor.attributes()),
-            CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
-            None,
-        )
-    }
-    .map_err(error)?;
-    let mut file = unsafe { std::fs::File::from_raw_handle(handle.0) };
+    let descriptor = os::Descriptor::new(PRIVATE_SDDL)?;
+    let mut file = os::create_protected(
+        &path,
+        &descriptor,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+    )?;
     file.write_all(b"revoked")?;
     file.sync_all()?;
     Ok(())

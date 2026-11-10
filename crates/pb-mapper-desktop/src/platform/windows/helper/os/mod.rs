@@ -13,7 +13,7 @@ mod scm;
 pub(crate) use crate::oop::proto::SessionIdentity;
 pub(crate) use crate::platform::windows::win32::wide;
 #[cfg(feature = "windows-helper")]
-pub use acl::{Descriptor, check_acl, protected_path};
+pub use acl::{Descriptor, check_acl, create_protected, protected_path, replace_protected};
 pub use acl::{install_root, protected_file, same_path};
 pub use console::{ConsoleState, active_session};
 #[cfg(feature = "windows-helper")]

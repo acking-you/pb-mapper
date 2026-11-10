@@ -1,10 +1,8 @@
 //! The service's bounded diagnostics files in the protected installation.
-use super::{Descriptor, install_root, protected_file, protected_path, wide};
-use crate::{Result, error};
-use std::os::windows::io::FromRawHandle;
-use windows::{
-    Win32::{Foundation::GENERIC_WRITE, Storage::FileSystem::*},
-    core::PCWSTR,
+use super::{Descriptor, create_protected, install_root, protected_file, protected_path};
+use crate::Result;
+use windows::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT, OPEN_ALWAYS,
 };
 
 pub fn record_service_failure(failure: &std::io::Error) {
@@ -22,19 +20,12 @@ pub fn open_service_log(name: &str) -> Result<(std::fs::File, u64)> {
         protected_file(&path)?;
     }
     let descriptor = Descriptor::new("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;BU)")?;
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(wide(&path).as_ptr()),
-            GENERIC_WRITE.0,
-            FILE_SHARE_READ,
-            Some(descriptor.attributes()),
-            OPEN_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-            None,
-        )
-    }
-    .map_err(error)?;
-    let mut file = unsafe { std::fs::File::from_raw_handle(handle.0) };
+    let mut file = create_protected(
+        &path,
+        &descriptor,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+    )?;
     let len = file.seek(SeekFrom::End(0))?;
     Ok((file, len))
 }

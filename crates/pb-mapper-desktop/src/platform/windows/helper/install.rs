@@ -3,7 +3,6 @@ use crate::platform::windows::win32::LocalAllocation;
 use std::{
     ffi::OsString,
     fs::File,
-    io::Write,
     os::windows::io::{AsRawHandle, FromRawHandle},
     path::Path,
     time::{Duration, Instant},
@@ -139,22 +138,11 @@ fn configure_recovery(service: &Service) -> Result<()> {
     .apply(service)
 }
 
-// Apply owner and DACL at creation: changing them afterwards leaves an owner
-// WRITE_DAC race even when the inherited file permissions are read-only.
+/// A new file of the installation, with its owner and DACL from the start:
+/// set afterwards, they would leave an owner a WRITE_DAC race even where the
+/// inherited permissions are read-only.
 fn create_file(path: &Path, descriptor: &os::Descriptor) -> Result<File> {
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(os::wide(path).as_ptr()),
-            GENERIC_WRITE.0,
-            FILE_SHARE_READ,
-            Some(descriptor.attributes()),
-            CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )
-    }
-    .map_err(error)?;
-    Ok(unsafe { File::from_raw_handle(handle.0) })
+    os::create_protected(path, descriptor, CREATE_NEW, FILE_ATTRIBUTE_NORMAL)
 }
 fn create_dir(path: &Path, descriptor: &os::Descriptor) -> Result<()> {
     unsafe {
@@ -213,20 +201,13 @@ impl Installation {
         let temporary = self
             .root
             .join(format!("install-{}.tmp", crate::security::secret()?));
-        let result = (|| {
-            let mut file = create_file(&temporary, &self.descriptor)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            drop(file);
-            unsafe {
-                MoveFileExW(
-                    PCWSTR(os::wide(&temporary).as_ptr()),
-                    PCWSTR(os::wide(&destination).as_ptr()),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-                )
-            }
-            .map_err(error)
-        })();
+        let result = os::replace_protected(
+            &temporary,
+            &destination,
+            &self.descriptor,
+            FILE_ATTRIBUTE_NORMAL,
+            bytes,
+        );
         if result.is_err() && temporary.exists() {
             os::protected_file(&temporary)?;
             std::fs::remove_file(&temporary)?;
