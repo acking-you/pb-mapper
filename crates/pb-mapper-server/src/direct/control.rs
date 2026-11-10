@@ -97,7 +97,10 @@ pub(crate) async fn handle_control(
                 .await
                 .map_err(|_| std::io::Error::other("router closed"))?;
         }
-        #[allow(unreachable_code)]
+        #[expect(
+            unreachable_code,
+            reason = "fixes the block's error type; the loop only ends through `?`"
+        )]
         Ok::<(), std::io::Error>(())
     };
     let write = async {

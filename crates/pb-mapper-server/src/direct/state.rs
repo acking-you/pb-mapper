@@ -171,7 +171,10 @@ impl DirectState {
             );
         }
     }
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the fields of `DirectClientMessage::Open`, with the routing map and admission the manager supplies"
+    )]
     pub fn open(
         &mut self,
         connection: RemoteConnId,

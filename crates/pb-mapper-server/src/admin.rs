@@ -398,6 +398,9 @@ async fn audit_action(
 
 #[cfg(test)]
 mod tests {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
     use super::*;
     use pb_mapper_auth::ADMIN_KEY_ID;
     use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
@@ -633,16 +636,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let _ = std::fs::remove_dir_all(state_dir);
     }
-}
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod cancellation_audit {
-    use super::*;
-    use std::{
-        future::{Future, poll_fn},
-        task::Poll,
-    };
     #[tokio::test]
     async fn applied_mutation_must_not_be_reported_as_cancelled() {
         let config = pb_mapper_auth::AuthConfig {
