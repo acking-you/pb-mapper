@@ -46,7 +46,6 @@ mod tests;
 mod timer;
 pub mod trust;
 mod video;
-mod video_sink;
 mod viewer;
 mod watch;
 mod wire;
@@ -76,11 +75,11 @@ pub use video::{
     EncodedFrame, KeyframeReason, QualityPreset, Resolution, VideoCodec, VideoFormat, VideoLimits,
     VideoRate,
 };
-pub use video_sink::{AttachError, Pull, VideoConsumer, VideoSink, VideoUnit};
 pub use viewer::{
-    ConnectError, ConnectStage, DecoderInfo, DecoderState, Decoders, DesktopView, InputError,
-    IntervalStats, NoticeInfo, PresentedInfo, VideoInfo, Viewer, ViewerConfig, ViewerLink,
-    ViewerReason, ViewerState, ViewerStats, ViewerStatus,
+    AttachError, ConnectError, ConnectStage, DecoderInfo, DecoderState, Decoders, DesktopView,
+    InputError, IntervalStats, NoticeInfo, PresentedInfo, Pull, VideoConsumer, VideoInfo,
+    VideoSink, VideoUnit, Viewer, ViewerConfig, ViewerLink, ViewerReason, ViewerState, ViewerStats,
+    ViewerStatus,
 };
 
 /// What only a Windows build has.
