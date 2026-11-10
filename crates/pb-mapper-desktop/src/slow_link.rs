@@ -322,6 +322,9 @@ struct Rig {
     viewer: Viewer,
     probe: Arc<Probe>,
     _clients: [Client; 2],
+    /// The shaped hop the viewer reaches the relay through, if any, held
+    /// while the rig lives. The testkit does not name its type.
+    _link: Option<Box<dyn Send>>,
     _relay: Relay,
 }
 impl Rig {
@@ -358,10 +361,13 @@ impl Rig {
             .start(&local)
             .await
             .unwrap();
-        let remote = client(match shape {
-            Some(shape) => shaped_link(relay.addr(), shape).await,
-            None => relay.addr(),
-        });
+        let (remote, link): (_, Option<Box<dyn Send>>) = match shape {
+            Some(shape) => {
+                let link = shaped_link(relay.addr(), shape).await;
+                (client(link.addr()), Some(Box::new(link)))
+            }
+            None => (client(relay.addr()), None),
+        };
         let viewer = Viewer::connect(
             &remote,
             host.invitation(),
@@ -384,6 +390,7 @@ impl Rig {
             viewer,
             probe,
             _clients: [local, remote],
+            _link: link,
             _relay: relay,
         }
     }

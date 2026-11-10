@@ -536,7 +536,7 @@ async fn pause_stops_video_and_resume_starts_with_an_idr() {
     let host = encoded_host(&client, "desktop:pause", &observed, &cursor, 4096).await;
     let shape = Arc::new(Shape::default());
     let link = shaped_link(relay.addr(), shape.clone()).await;
-    let remote = Client::from_credential(link.to_string(), admin_credential(), true, None);
+    let remote = Client::from_credential(link.addr().to_string(), admin_credential(), true, None);
     let viewer = relay_viewer(&remote, &host, VideoCodec::H264).await;
     let renderer = Renderer::start(&viewer);
     viewer.request_control(true).unwrap();
@@ -587,7 +587,7 @@ async fn control_grant_with_queued_video_keeps_the_session() {
     let shape = Arc::new(Shape::default());
     shape.delay_ms.store(50, Ordering::Relaxed);
     let link = shaped_link(relay.addr(), shape).await;
-    let remote = Client::from_credential(link.to_string(), admin_credential(), true, None);
+    let remote = Client::from_credential(link.addr().to_string(), admin_credential(), true, None);
     let viewer = relay_viewer(&remote, &host, VideoCodec::H264).await;
     let renderer = Renderer::start(&viewer);
     let start = wait(&viewer, |status| status.fresh).await;

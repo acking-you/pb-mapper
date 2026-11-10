@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::task::JoinSet;
 
 /// How a [`shaped_link`] shapes its traffic, in both directions alike.
 #[derive(Default)]
@@ -18,15 +19,32 @@ pub struct Shape {
     pub rate: AtomicU64,
 }
 
+/// A running [`shaped_link`]. Dropping it stops the hop: its accept loop
+/// and every connection it carries.
+pub struct ShapedLink {
+    addr: SocketAddr,
+    /// The accept loop, which owns the connections' copy tasks.
+    _hop: JoinSet<()>,
+}
+impl ShapedLink {
+    /// Where to connect in place of the relay.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
 /// A TCP hop in front of `relay`, shaped by `shape` while connections run.
 /// Each direction queues at most 256 reads, so the sender's own flow control
 /// bounds what is in flight. Bytes stay in order. A connection the relay
 /// refuses is closed, and the hop goes on accepting, as a network would.
-pub async fn shaped_link(relay: SocketAddr, shape: Arc<Shape>) -> SocketAddr {
+pub async fn shaped_link(relay: SocketAddr, shape: Arc<Shape>) -> ShapedLink {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
+    let mut hop = JoinSet::new();
+    hop.spawn(async move {
+        let mut copies = JoinSet::new();
         while let Ok((near, _)) = listener.accept().await {
+            while copies.try_join_next().is_some() {}
             let Ok(far) = tokio::net::TcpStream::connect(relay).await else {
                 continue;
             };
@@ -34,11 +52,13 @@ pub async fn shaped_link(relay: SocketAddr, shape: Arc<Shape>) -> SocketAddr {
             far.set_nodelay(true).unwrap();
             let (near_read, near_write) = near.into_split();
             let (far_read, far_write) = far.into_split();
-            tokio::spawn(shaped_copy(near_read, far_write, shape.clone()));
-            tokio::spawn(shaped_copy(far_read, near_write, shape.clone()));
+            copies.spawn(shaped_copy(near_read, far_write, shape.clone()));
+            copies.spawn(shaped_copy(far_read, near_write, shape.clone()));
         }
+        // A listener that fails stops accepting; what it carries goes on.
+        while copies.join_next().await.is_some() {}
     });
-    addr
+    ShapedLink { addr, _hop: hop }
 }
 
 async fn shaped_copy(mut read: OwnedReadHalf, mut write: OwnedWriteHalf, shape: Arc<Shape>) {
