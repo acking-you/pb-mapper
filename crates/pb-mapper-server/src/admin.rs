@@ -24,7 +24,10 @@ use pb_mapper_auth::{AuthContext, AuthFailure, AuthRuntime, KeyId};
 use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::MessageWriter;
-use pb_mapper_protocol::command::{AdminRequest, AdminResponse, MessageSerializer, PbConnResponse};
+use pb_mapper_protocol::command::{
+    ACTION_ADMINISTRATOR_KEY_ROTATED, ACTION_AUTH_STATE_RESET, ACTION_LEGACY_PROTOCOL_UPDATED,
+    AdminRequest, AdminResponse, MessageSerializer, PbConnResponse,
+};
 use pb_mapper_protocol::secure::ServerHeaderSession;
 
 pub async fn handle_admin_request(
@@ -152,7 +155,7 @@ async fn execute(
             }
             auth.reset(authorization).await?;
             Ok(AdminResponse::Ok {
-                action: "auth_state_reset".to_string(),
+                action: ACTION_AUTH_STATE_RESET.to_string(),
             })
         }
         AdminRequest::RootKeyRotate { new_admin_key } => {
@@ -167,13 +170,13 @@ async fn execute(
             };
             auth.rotate_root(authorization, new_key).await?;
             Ok(AdminResponse::Ok {
-                action: "administrator_key_rotated".to_string(),
+                action: ACTION_ADMINISTRATOR_KEY_ROTATED.to_string(),
             })
         }
         AdminRequest::LegacyProtocolSet { policy } => {
             auth.set_legacy_protocol(authorization, policy).await?;
             Ok(AdminResponse::Ok {
-                action: "legacy_protocol_updated".to_string(),
+                action: ACTION_LEGACY_PROTOCOL_UPDATED.to_string(),
             })
         }
         AdminRequest::ServiceList {

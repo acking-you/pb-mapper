@@ -254,6 +254,11 @@ pub struct PbErrorResponse {
     pub server_time: u64,
 }
 
+/// The [`PbErrorResponse::code`] a relay answers an authenticated request it
+/// cannot decode with, which is also how a relay that predates a request kind
+/// answers that kind.
+pub const REQUEST_DECODE_FAILED: &str = "request_decode_failed";
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AdminServiceInfo {
     pub key_id: u64,
@@ -313,10 +318,19 @@ pub enum AdminResponse {
     ConnectionsRetired {
         retired: u32,
     },
+    /// A change acknowledged by name: `action` is one of the `ACTION_*`
+    /// constants.
     Ok {
         action: String,
     },
 }
+
+/// The [`AdminResponse::Ok`] action after the auth state was reset.
+pub const ACTION_AUTH_STATE_RESET: &str = "auth_state_reset";
+/// The [`AdminResponse::Ok`] action after the root key was rotated.
+pub const ACTION_ADMINISTRATOR_KEY_ROTATED: &str = "administrator_key_rotated";
+/// The [`AdminResponse::Ok`] action after the legacy-protocol policy was set.
+pub const ACTION_LEGACY_PROTOCOL_UPDATED: &str = "legacy_protocol_updated";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum PbConnResponse {

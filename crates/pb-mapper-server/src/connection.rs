@@ -25,7 +25,7 @@ use pb_mapper_core::snafu_error_handle;
 use pb_mapper_protocol::MessageWriter;
 use pb_mapper_protocol::command::{
     AdminRequest, CONTROL_PROTOCOL_V2, MessageSerializer, PbConnRequest, PbConnResponse,
-    PbConnStatusReq,
+    PbConnStatusReq, REQUEST_DECODE_FAILED,
 };
 use pb_mapper_protocol::direct::{SessionId, SessionSecret};
 use pb_mapper_protocol::secure::{HeaderProtocol, ServerHeaderSession, ServerSecurity};
@@ -153,7 +153,7 @@ pub(super) async fn handle_conn(
                 &mut conn,
                 &initial.session,
                 &pb_mapper_auth::AuthFailure::new(
-                    "request_decode_failed",
+                    REQUEST_DECODE_FAILED,
                     "authenticated request payload is malformed",
                     false,
                 ),
