@@ -23,6 +23,9 @@ use crate::{
     modes::ModeList,
     protocol::{Adaptation, DesktopKind, NoticeCode, RateModel, StateReason, StopReason},
 };
+use pb_mapper_client::sdk::{
+    AddressFamily, DirectTransport, LanEvidence, LinkKind, LinkSample, LinkVia,
+};
 use serde::Serialize;
 use std::{
     collections::VecDeque,
@@ -232,7 +235,7 @@ pub struct ViewerStats {
     pub degraded: bool,
     /// The direct link under `path`, sampled once a second; `None` on the
     /// relay.
-    pub link: Option<super::ViewerLink>,
+    pub link: Option<ViewerLink>,
 }
 impl Default for ViewerStats {
     fn default() -> Self {
@@ -339,6 +342,49 @@ impl DesktopView {
             ViewerState::CaptureUnavailable => Self::STATE_CAPTURE_UNAVAILABLE,
             ViewerState::Paused => Self::STATE_PAUSED,
             ViewerState::Stopped => Self::STATE_STOPPED,
+        }
+    }
+}
+
+/// The direct link a session runs on, as `ViewerStats::link` reports it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ViewerLink {
+    /// `lan`, `internet` or `private`.
+    pub kind: LinkKind,
+    pub family: AddressFamily,
+    /// How the peer address was learned.
+    pub via: LinkVia,
+    pub peer: String,
+    pub local_ip: Option<String>,
+    /// QUIC, or TCP on a LAN when this viewer's `ConnectOptions` asked for
+    /// it and the host let TCP in.
+    pub transport: DirectTransport,
+    /// QUIC's round trip and its lowest, rounded up to whole milliseconds:
+    /// the network alone, unlike `ViewerStats::rtt_ms`, which the host's
+    /// probe measures behind the video. TCP keeps its figures in the
+    /// kernel, so over TCP both are the handshake's round trip, measured
+    /// once at setup.
+    pub rtt_ms: u32,
+    pub min_rtt_ms: u32,
+    pub setup_ms: u32,
+    /// What suggested a shared network before the setup.
+    pub same_lan: Option<LanEvidence>,
+}
+
+impl From<&LinkSample> for ViewerLink {
+    fn from(link: &LinkSample) -> Self {
+        let ms = |us: u64| u32::try_from(us.div_ceil(1000)).unwrap_or(u32::MAX);
+        Self {
+            kind: link.kind,
+            family: link.family,
+            via: link.via,
+            peer: link.peer.to_string(),
+            local_ip: link.local_ip.map(|ip| ip.to_string()),
+            transport: link.transport,
+            rtt_ms: ms(link.stats.rtt_us),
+            min_rtt_ms: ms(link.stats.min_rtt_us),
+            setup_ms: u32::try_from(link.setup_ms).unwrap_or(u32::MAX),
+            same_lan: link.same_lan,
         }
     }
 }
