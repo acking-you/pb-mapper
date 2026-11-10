@@ -154,7 +154,7 @@ fn server_auth_config(args: &ServerArgs) -> Result<AuthConfig, ServerFlagError> 
 
 pub(super) async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
     let auth_config = server_auth_config(&args)?;
-    let admin_key_path = auth_config.state_dir.join("admin.key");
+    let admin_key_path = pb_mapper_auth::admin_key_path(&auth_config.state_dir);
     if args.init_admin_key {
         std::fs::create_dir_all(&auth_config.state_dir)?;
         let lock = acquire_state_dir_lock(&auth_config.state_dir)?;
