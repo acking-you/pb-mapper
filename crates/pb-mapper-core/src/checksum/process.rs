@@ -129,11 +129,11 @@ mod tests {
     #[tokio::test]
     async fn clearing_the_process_credential_fails_closed_for_checksums() {
         use super::*;
-        use crate::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
+        use crate::test_support::{PROCESS_CREDENTIAL_TEST_LOCK, TEST_ADMIN_KEY};
 
         let _guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
         let environment = std::env::var_os(ENV_MSG_HEADER_KEY);
-        set_process_msg_header_key(Some("0123456789abcdefghijklmnopqrstuv")).unwrap();
+        set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
         let checksum = get_checksum(32);
         assert!(valid_checksum(32, checksum));
         assert!(process_credential_configured());

@@ -221,33 +221,50 @@ fn open_directory_for_sync(path: &Path) -> std::io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::Scratch;
+    use crate::test_support::TempPath;
+
+    /// A directory of its own for one test, created.
+    fn scratch(label: &str) -> TempPath {
+        let directory = TempPath::new(label);
+        std::fs::create_dir(&directory).unwrap();
+        directory
+    }
+
+    /// The names directly inside `directory`, sorted.
+    fn entries(directory: &Path) -> Vec<std::ffi::OsString> {
+        let mut names = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
 
     #[test]
     fn replace_contents_creates_then_replaces_and_leaves_only_the_target() {
-        let scratch = Scratch::new("replace");
-        let path = scratch.0.join("state.json");
+        let scratch = scratch("replace");
+        let path = scratch.join("state.json");
 
         replace_contents(&path, b"first", NewFileMode::Default).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"first");
         replace_contents(&path, b"second", NewFileMode::KeepExisting).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"second");
-        assert_eq!(scratch.entries(), ["state.json"]);
+        assert_eq!(entries(&scratch), ["state.json"]);
     }
 
     /// A failed replace names its step, keeps the target and removes the
     /// temporary file it wrote.
     #[test]
     fn a_failed_replace_reports_its_step_and_removes_the_temporary() {
-        let scratch = Scratch::new("replace-fails");
-        let path = scratch.0.join("occupied");
+        let scratch = scratch("replace-fails");
+        let path = scratch.join("occupied");
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("kept"), b"kept").unwrap();
 
         let error = replace_contents(&path, b"new", NewFileMode::Default).unwrap_err();
         assert_eq!(error.step, ReplaceStep::Replace);
         assert_eq!(error.path, path);
-        assert_eq!(scratch.entries(), ["occupied"]);
+        assert_eq!(entries(&scratch), ["occupied"]);
         assert_eq!(std::fs::read(path.join("kept")).unwrap(), b"kept");
     }
 
@@ -255,8 +272,8 @@ mod tests {
     #[test]
     fn replace_contents_sets_the_requested_mode() {
         use std::os::unix::fs::PermissionsExt;
-        let scratch = Scratch::new("replace-mode");
-        let path = scratch.0.join("secret");
+        let scratch = scratch("replace-mode");
+        let path = scratch.join("secret");
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
 
         replace_contents(&path, b"key", NewFileMode::Exactly(0o600)).unwrap();

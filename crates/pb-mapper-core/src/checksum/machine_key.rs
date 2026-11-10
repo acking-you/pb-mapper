@@ -393,10 +393,10 @@ lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536
     #[test]
     fn machine_key_file_holds_the_key_line_for_its_owner_alone() {
         use super::*;
-        use crate::test_support::Scratch;
+        use crate::test_support::TempPath;
 
-        let scratch = Scratch::new("machine-key");
-        let path = scratch.0.join("pb-mapper-server").join("msg_header_key");
+        let scratch = TempPath::new("machine-key");
+        let path = scratch.join("pb-mapper-server").join("msg_header_key");
         write_key_file(&path, "first").unwrap();
         write_key_file(&path, "0123456789abcdefghijklmnopqrstuv").unwrap();
         assert_eq!(
