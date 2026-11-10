@@ -277,9 +277,17 @@ impl AuthStateInner {
     pub(crate) fn instance_id(&self) -> [u8; INSTANCE_ID_LEN] {
         *self.instance_id.read()
     }
+
+    /// The legacy-protocol policy in force.
+    pub(crate) fn legacy_policy(&self) -> LegacyProtocolPolicy {
+        if self.legacy_protocol_allowed.load(Ordering::Acquire) {
+            LegacyProtocolPolicy::Allow
+        } else {
+            LegacyProtocolPolicy::Deny
+        }
+    }
 }
 
-#[derive(Clone)]
 pub(crate) struct ColdMetadata {
     pub(crate) issued_at: u64,
     pub(crate) label: Option<String>,

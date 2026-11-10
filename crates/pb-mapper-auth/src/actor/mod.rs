@@ -271,30 +271,16 @@ impl Actor {
 fn actor_status(inner: &Arc<AuthStateInner>) -> AuthStatus {
     let slots = inner.slots();
     let high = inner.high();
-    let active_keys = slots
-        .iter()
-        .filter(|slot| slot.state == SlotState::Active)
-        .count()
-        + high
-            .iter()
-            .filter(|entry| entry.state == SlotState::Active)
-            .count();
-    let expired_keys = slots
-        .iter()
-        .filter(|slot| slot.state == SlotState::Expired)
-        .count()
-        + high
-            .iter()
-            .filter(|entry| entry.state == SlotState::Expired)
-            .count();
-    let revoked_keys = slots
-        .iter()
-        .filter(|slot| slot.state == SlotState::Revoked)
-        .count()
-        + high
-            .iter()
-            .filter(|entry| entry.state == SlotState::Revoked)
-            .count();
+    let (mut active_keys, mut expired_keys, mut revoked_keys) = (0, 0, 0);
+    let states = slots.iter().map(|slot| slot.state);
+    for state in states.chain(high.iter().map(|entry| entry.state)) {
+        match state {
+            SlotState::Free => {}
+            SlotState::Active => active_keys += 1,
+            SlotState::Expired => expired_keys += 1,
+            SlotState::Revoked => revoked_keys += 1,
+        }
+    }
     let last_legacy_connection_at = inner.last_legacy_connection_at.load(Ordering::Acquire);
     AuthStatus {
         schema_version: ADMIN_SCHEMA_VERSION,
@@ -303,11 +289,7 @@ fn actor_status(inner: &Arc<AuthStateInner>) -> AuthStatus {
         active_keys,
         expired_keys,
         revoked_keys,
-        legacy_protocol: if inner.legacy_protocol_allowed.load(Ordering::Acquire) {
-            LegacyProtocolPolicy::Allow
-        } else {
-            LegacyProtocolPolicy::Deny
-        },
+        legacy_protocol: inner.legacy_policy(),
         active_legacy_connections: inner.active_legacy_connections.load(Ordering::Acquire),
         last_legacy_connection_at: (last_legacy_connection_at != 0)
             .then_some(last_legacy_connection_at),
@@ -406,12 +388,14 @@ fn slot_state_name(state: SlotState) -> &'static str {
     }
 }
 
-fn audit(action: &str, key_id: Option<KeyId>, label: Option<String>) -> AuditRecord {
+/// An audit record of `action`, stamped now. See [`AuditRecord::label`] for what
+/// the last argument holds.
+fn audit(action: &str, key_id: Option<KeyId>, label_or_detail: Option<String>) -> AuditRecord {
     AuditRecord {
         at: unix_seconds(),
         action: action.to_string(),
         key_id,
-        label,
+        label: label_or_detail,
         namespace: None,
     }
 }

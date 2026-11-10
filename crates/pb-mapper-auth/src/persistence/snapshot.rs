@@ -3,11 +3,7 @@ use super::super::*;
 use super::{auth_snapshot_path, auth_wal_path, open_blob, read_wal};
 
 pub(crate) fn push_audit_record(inner: &AuthStateInner, record: AuditRecord) {
-    let mut records = inner.audit_records.write();
-    while records.len() >= AUDIT_RECORD_CAPACITY {
-        records.pop_front();
-    }
-    records.push_back(record);
+    push_persisted_audit(&mut inner.audit_records.write(), record);
 }
 
 pub(crate) fn cancel_all_temporary_leases(inner: &AuthStateInner) {
@@ -91,7 +87,8 @@ pub(crate) fn normalize_tombstone_times(snapshot: &mut PersistedSnapshot, now: u
                 .iter()
                 .rev()
                 .find(|record| {
-                    record.action == "temporary_key_revoke" && record.key_id == Some(entry.key_id)
+                    record.action == audit_action::TEMPORARY_KEY_REVOKE
+                        && record.key_id == Some(entry.key_id)
                 })
                 .map(|record| record.at)
                 .or(Some(now)),
@@ -126,11 +123,7 @@ fn snapshot_with(
         instance_id,
         generations,
         entries,
-        legacy_protocol: if inner.legacy_protocol_allowed.load(Ordering::Acquire) {
-            LegacyProtocolPolicy::Allow
-        } else {
-            LegacyProtocolPolicy::Deny
-        },
+        legacy_protocol: inner.legacy_policy(),
         admin_replays: admin_replays.iter().cloned().collect(),
         audit_records: inner.audit_records.read().clone(),
         root_epoch: inner.root_epoch.load(Ordering::Acquire),

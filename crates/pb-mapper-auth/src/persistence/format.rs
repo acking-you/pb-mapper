@@ -64,11 +64,29 @@ pub(crate) enum StateMutation {
     LegacyProtocol(LegacyProtocolPolicy),
 }
 
+/// The [`AuditRecord::action`] values this crate writes. The administrator API
+/// records actions of its own beside them, so the field stays a string.
+pub(crate) mod audit_action {
+    pub(crate) const TEMPORARY_KEY_ISSUE: &str = "temporary_key_issue";
+    pub(crate) const TEMPORARY_KEY_SHOW: &str = "temporary_key_show";
+    pub(crate) const TEMPORARY_KEY_REVEAL: &str = "temporary_key_reveal";
+    pub(crate) const TEMPORARY_KEY_RENEW: &str = "temporary_key_renew";
+    /// Also read back, to recover a revoked key's tombstone time.
+    pub(crate) const TEMPORARY_KEY_REVOKE: &str = "temporary_key_revoke";
+    pub(crate) const TEMPORARY_KEY_GC: &str = "temporary_key_gc";
+    pub(crate) const NAMESPACE_ALLOCATE: &str = "namespace_allocate";
+    pub(crate) const LEGACY_PROTOCOL_UPDATE: &str = "legacy_protocol_update";
+    pub(crate) const AUTH_STATE_RESET: &str = "auth_state_reset";
+    pub(crate) const ADMINISTRATOR_KEY_ROTATE: &str = "administrator_key_rotate";
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct AuditRecord {
     pub(crate) at: u64,
     pub(crate) action: String,
     pub(crate) key_id: Option<KeyId>,
+    /// The key's label, or for an action on no key a detail of it: a GC's
+    /// count, a legacy-protocol policy, or what the administrator API passed.
     pub(crate) label: Option<String>,
     /// The namespace an allocation handed out. Replaying this is how the encrypted
     /// state learns the allocator's mark, in a field an older relay ignores rather

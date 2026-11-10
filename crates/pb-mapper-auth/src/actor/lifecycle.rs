@@ -67,11 +67,8 @@ fn key_state(inner: &AuthStateInner, key_id: KeyId) -> Result<KeyState, AuthFail
     let slots = inner.slots();
     if let Some(slot) = slots.get(key_id.slot().as_index()) {
         validate_slot_identity(slot, key_id)?;
-        let metadata = inner
-            .cold()
-            .get(&key_id)
-            .cloned()
-            .ok_or_else(|| key_not_found(key_id))?;
+        let cold = inner.cold();
+        let metadata = cold.get(&key_id).ok_or_else(|| key_not_found(key_id))?;
         return Ok(KeyState {
             state: slot.state,
             expires_at: slot.expires_at,
@@ -125,7 +122,7 @@ pub(super) fn actor_allocate_namespace(
         inner,
         AuditRecord {
             namespace: Some(namespace),
-            ..audit("namespace_allocate", None, None)
+            ..audit(audit_action::NAMESPACE_ALLOCATE, None, None)
         },
     )?;
     Ok(namespace)
@@ -201,7 +198,11 @@ pub(super) fn actor_issue(
         config,
         inner,
         StateMutation::Issue(entry),
-        audit("temporary_key_issue", Some(key_id), label.clone()),
+        audit(
+            audit_action::TEMPORARY_KEY_ISSUE,
+            Some(key_id),
+            label.clone(),
+        ),
     )?;
     let mut slots = inner.slots_mut();
     let slot = slots
@@ -271,9 +272,9 @@ pub(super) fn actor_show(
         inner,
         audit(
             if reveal {
-                "temporary_key_reveal"
+                audit_action::TEMPORARY_KEY_REVEAL
             } else {
-                "temporary_key_show"
+                audit_action::TEMPORARY_KEY_SHOW
             },
             Some(key_id),
             result.metadata.label.clone(),
@@ -303,7 +304,11 @@ pub(super) fn actor_renew(
         config,
         inner,
         StateMutation::Renew { key_id, expires_at },
-        audit("temporary_key_renew", Some(key_id), label.clone()),
+        audit(
+            audit_action::TEMPORARY_KEY_RENEW,
+            Some(key_id),
+            label.clone(),
+        ),
     )?;
     let mut slots = inner.slots_mut();
     if let Some(slot) = slots.get_mut(index) {
@@ -366,7 +371,11 @@ pub(super) fn actor_revoke(
         config,
         inner,
         StateMutation::Revoke { key_id, at: now },
-        audit("temporary_key_revoke", Some(key_id), label.clone()),
+        audit(
+            audit_action::TEMPORARY_KEY_REVOKE,
+            Some(key_id),
+            label.clone(),
+        ),
     )?;
     let mut slots = inner.slots_mut();
     if let Some(slot) = slots.get_mut(index) {
@@ -382,11 +391,8 @@ pub(super) fn actor_revoke(
         // slot table holds a `Weak` and a later request has to be able to read
         // the revoked reason rather than find a recycled row.
         leases.retire_now(key_id);
-        let metadata = inner
-            .cold()
-            .get(&key_id)
-            .cloned()
-            .ok_or_else(|| key_not_found(key_id))?;
+        let cold = inner.cold();
+        let metadata = cold.get(&key_id).ok_or_else(|| key_not_found(key_id))?;
         return Ok(TemporaryKeyMetadata {
             key_id,
             state,
@@ -425,7 +431,11 @@ pub(super) fn actor_gc(
 ) -> Result<u64, AuthFailure> {
     ensure_store_available(inner)?;
     let removed = leases.collect_garbage(unix_seconds());
-    let gc_audit = audit("temporary_key_gc", None, Some(format!("removed={removed}")));
+    let gc_audit = audit(
+        audit_action::TEMPORARY_KEY_GC,
+        None,
+        Some(format!("removed={removed}")),
+    );
     let mut snapshot = build_snapshot(inner, admin_replays);
     push_persisted_audit(&mut snapshot.audit_records, gc_audit.clone());
     let admin_key = inner.admin_key();

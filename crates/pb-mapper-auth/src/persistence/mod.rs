@@ -32,6 +32,7 @@ pub(crate) use admin_key::{
 pub(crate) use blob::{open_blob, seal_blob};
 pub(crate) use format::{
     AdminReplayRecord, AuditRecord, PersistedEntry, PersistedSnapshot, StateMutation, WalRecord,
+    audit_action,
 };
 pub use fs::acquire_state_dir_lock;
 #[cfg(test)]

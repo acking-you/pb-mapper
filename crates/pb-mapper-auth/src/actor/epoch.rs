@@ -17,7 +17,7 @@ pub(super) fn actor_reset(
 ) -> Result<(), AuthFailure> {
     let new_instance_id = random_instance_id();
     inner.root_epoch.fetch_add(1, Ordering::AcqRel);
-    let reset_audit = audit("auth_state_reset", None, None);
+    let reset_audit = audit(audit_action::AUTH_STATE_RESET, None, None);
     let mut snapshot = empty_snapshot(inner, new_instance_id, admin_replays);
     push_persisted_audit(&mut snapshot.audit_records, reset_audit.clone());
     let admin_key = inner.admin_key();
@@ -84,7 +84,7 @@ pub(super) fn actor_rotate_root(
     })?;
 
     inner.root_epoch.fetch_add(1, Ordering::AcqRel);
-    let rotate_audit = audit("administrator_key_rotate", None, None);
+    let rotate_audit = audit(audit_action::ADMINISTRATOR_KEY_ROTATE, None, None);
     let mut snapshot = empty_snapshot(inner, inner.instance_id(), &VecDeque::new());
     push_persisted_audit(&mut snapshot.audit_records, rotate_audit.clone());
     let next_key_path = rotation_key_path(&config.state_dir);
@@ -138,10 +138,23 @@ pub(super) fn actor_set_legacy_protocol(
         config,
         inner,
         StateMutation::LegacyProtocol(policy),
-        audit("legacy_protocol_update", None, Some(format!("{policy:?}"))),
+        audit(
+            audit_action::LEGACY_PROTOCOL_UPDATE,
+            None,
+            Some(policy_detail(policy).to_string()),
+        ),
     )?;
     inner
         .legacy_protocol_allowed
         .store(policy.is_allowed(), Ordering::Release);
     Ok(())
+}
+
+/// How a policy change is written into its audit record. Spelled out rather
+/// than taken from `Debug`, because the record is persisted.
+fn policy_detail(policy: LegacyProtocolPolicy) -> &'static str {
+    match policy {
+        LegacyProtocolPolicy::Allow => "Allow",
+        LegacyProtocolPolicy::Deny => "Deny",
+    }
 }
