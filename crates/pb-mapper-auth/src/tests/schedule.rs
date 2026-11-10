@@ -122,8 +122,6 @@ fn a_lease_adopted_by_a_renewal_outlives_the_old_deadline() {
 fn a_restored_key_ends_at_its_persisted_deadline() {
     let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(2));
     let snapshot = PersistedSnapshot {
-        schema_version: SNAPSHOT_SCHEMA_VERSION,
-        instance_id: [0; INSTANCE_ID_LEN],
         generations: vec![
             Generation::FIRST,
             Generation::FIRST,
@@ -139,11 +137,7 @@ fn a_restored_key_ends_at_its_persisted_deadline() {
             tombstoned_at: None,
             namespace: None,
         }],
-        legacy_protocol: LegacyProtocolPolicy::Allow,
-        admin_replays: Vec::new(),
-        audit_records: VecDeque::new(),
-        root_epoch: 0,
-        namespace_high_water: 0,
+        ..snapshot_for_test([0; INSTANCE_ID_LEN], 0, 0)
     };
     let (inner, mut leases) = restore(Some(&snapshot));
     let cancellation = inner.slots()[2]

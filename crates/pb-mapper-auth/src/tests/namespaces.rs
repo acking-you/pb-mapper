@@ -2,37 +2,15 @@
 
 use super::*;
 
-const ADMIN_KEY: [u8; 32] = *b"0123456789abcdefghijklmnopqrstuv";
-const HOUR: Duration = Duration::from_secs(3600);
-
+/// The configuration these tests run with.
 fn config_for(state_dir: &Path) -> AuthConfig {
-    AuthConfig {
-        state_dir: state_dir.to_path_buf(),
-        max_temporary_keys: 8,
-        max_temporary_key_ttl: HOUR,
-        legacy_protocol: LegacyProtocolPolicy::Allow,
-    }
-}
-
-async fn start(state_dir: &Path) -> (AuthRuntime, AuthContext) {
-    let runtime = AuthRuntime::start(ADMIN_KEY, config_for(state_dir))
-        .await
-        .unwrap();
-    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
-    (runtime, admin)
-}
-
-/// Stop a runtime and bring the same state directory back up.
-async fn restart(runtime: AuthRuntime, state_dir: &Path) -> (AuthRuntime, AuthContext) {
-    runtime.shutdown_actor().await;
-    drop(runtime);
-    start(state_dir).await
+    config(state_dir, 8)
 }
 
 #[tokio::test]
 async fn keys_in_a_namespace_share_it_and_are_revoked_one_at_a_time() {
     let state_dir = temp_state_dir("namespace-shared");
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let namespace = runtime.allocate_namespace(&admin).await.unwrap();
     let first = runtime
         .issue_in_namespace(&admin, namespace, HOUR, Some("first".into()))
@@ -76,7 +54,7 @@ async fn keys_in_a_namespace_share_it_and_are_revoked_one_at_a_time() {
 #[tokio::test]
 async fn a_key_keeps_its_namespace_through_wal_replay_compaction_and_lease_replacement() {
     let state_dir = temp_state_dir("namespace-durable");
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let namespace = runtime.allocate_namespace(&admin).await.unwrap();
     let issued = runtime
         .issue_in_namespace(&admin, namespace, HOUR, None)
@@ -85,7 +63,7 @@ async fn a_key_keeps_its_namespace_through_wal_replay_compaction_and_lease_repla
     let key_id = issued.metadata.key_id;
 
     // Nothing compacted yet, so this reads the key back from the WAL.
-    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let (runtime, admin) = restart(runtime).await;
     assert_eq!(
         authenticate_for_test(&runtime, key_id).unwrap().namespace,
         namespace
@@ -108,7 +86,7 @@ async fn a_key_keeps_its_namespace_through_wal_replay_compaction_and_lease_repla
             .namespace,
         Some(namespace)
     );
-    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let (runtime, admin) = restart(runtime).await;
     let context = authenticate_for_test(&runtime, key_id).unwrap();
     assert_eq!(context.namespace, namespace);
 
@@ -130,10 +108,10 @@ async fn a_key_keeps_its_namespace_through_wal_replay_compaction_and_lease_repla
 async fn an_allocated_namespace_is_never_handed_out_again() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
     let state_dir = temp_state_dir("namespace-never-reused");
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let mut allocated = vec![runtime.allocate_namespace(&admin).await.unwrap()];
 
-    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let (runtime, admin) = restart(runtime).await;
     allocated.push(runtime.allocate_namespace(&admin).await.unwrap());
 
     runtime.gc(&admin).await.unwrap();
@@ -148,8 +126,7 @@ async fn an_allocated_namespace_is_never_handed_out_again() {
         .authenticate_presented(ADMIN_KEY_ID, &rotated_key)
         .unwrap();
     allocated.push(runtime.allocate_namespace(&rotated_admin).await.unwrap());
-    runtime.shutdown_actor().await;
-    drop(runtime);
+    stop(runtime).await;
 
     std::fs::write(state_dir.join("auth.snapshot"), b"damaged").unwrap();
     let runtime = AuthRuntime::start(rotated_key, config_for(&state_dir))
@@ -184,7 +161,7 @@ async fn an_allocated_namespace_is_never_handed_out_again() {
 #[tokio::test]
 async fn only_the_administrator_issues_and_only_into_an_allocated_namespace() {
     let state_dir = temp_state_dir("namespace-refusals");
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let own = runtime.issue(&admin, HOUR, None).await.unwrap();
     let allocated = runtime.allocate_namespace(&admin).await.unwrap();
 
@@ -221,7 +198,7 @@ async fn only_the_administrator_issues_and_only_into_an_allocated_namespace() {
 #[tokio::test]
 async fn an_unreadable_allocator_refuses_namespaces_and_leaves_keys_working() {
     let state_dir = temp_state_dir("namespace-allocator-damaged");
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let namespace = runtime.allocate_namespace(&admin).await.unwrap();
     let issued = runtime
         .issue_in_namespace(&admin, namespace, HOUR, None)
@@ -293,7 +270,7 @@ async fn keys_from_an_older_relay_stay_in_their_key_id_namespace() {
     )
     .unwrap();
 
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     assert!(!runtime.status(&admin).await.unwrap().safe_mode);
     for key_id in [in_snapshot, in_wal] {
         let context = authenticate_for_test(&runtime, key_id).unwrap();
@@ -326,7 +303,7 @@ async fn keys_from_an_older_relay_stay_in_their_key_id_namespace() {
 #[tokio::test]
 async fn the_capability_is_reported_and_an_older_relay_reports_none() {
     let state_dir = temp_state_dir("namespace-capability");
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let status = runtime.status(&admin).await.unwrap();
     assert!(
         status
@@ -353,7 +330,7 @@ async fn the_capability_is_reported_and_an_older_relay_reports_none() {
 #[tokio::test]
 async fn renewing_shorter_ends_the_key_at_the_new_deadline() {
     let state_dir = temp_state_dir("renew-shorter");
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let issued = runtime.issue(&admin, HOUR, None).await.unwrap();
     let key_id = issued.metadata.key_id;
     let context = authenticate_for_test(&runtime, key_id).unwrap();
@@ -388,7 +365,7 @@ async fn renewing_shorter_ends_the_key_at_the_new_deadline() {
 #[tokio::test]
 async fn a_shortened_deadline_holds_across_a_restart() {
     let state_dir = temp_state_dir("renew-shorter-restart");
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let issued = runtime.issue(&admin, HOUR, None).await.unwrap();
     let key_id = issued.metadata.key_id;
     let shortened = runtime
@@ -396,7 +373,7 @@ async fn a_shortened_deadline_holds_across_a_restart() {
         .await
         .unwrap();
 
-    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let (runtime, admin) = restart(runtime).await;
     let revealed = runtime.show(&admin, key_id, true).await.unwrap();
     assert_eq!(revealed.metadata.expires_at, shortened.metadata.expires_at);
     assert_eq!(revealed.credential, issued.credential);
@@ -412,7 +389,7 @@ async fn a_shortened_deadline_holds_across_a_restart() {
 #[tokio::test]
 async fn a_shortening_below_the_minimum_is_refused_and_changes_nothing() {
     let state_dir = temp_state_dir("renew-below-minimum");
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let issued = runtime.issue(&admin, HOUR, None).await.unwrap();
     let key_id = issued.metadata.key_id;
     assert_eq!(
@@ -435,12 +412,12 @@ async fn a_shortening_below_the_minimum_is_refused_and_changes_nothing() {
 async fn losing_the_allocator_file_does_not_repeat_a_namespace() {
     let state_dir = temp_state_dir("namespace-allocator-lost");
     let allocator = state_dir.join("namespace-allocator");
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
 
     // The mark as the WAL has it: nothing has compacted yet.
     let in_wal = runtime.allocate_namespace(&admin).await.unwrap();
     std::fs::remove_file(&allocator).unwrap();
-    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let (runtime, admin) = restart(runtime).await;
     let after_wal = runtime.allocate_namespace(&admin).await.unwrap();
     assert!(after_wal > in_wal);
 
@@ -455,7 +432,7 @@ async fn losing_the_allocator_file_does_not_repeat_a_namespace() {
         .unwrap();
     runtime.gc(&admin).await.unwrap();
     std::fs::remove_file(&allocator).unwrap();
-    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let (runtime, admin) = restart(runtime).await;
     assert_eq!(
         std::fs::read_to_string(&allocator).unwrap(),
         after_wal.to_string(),
@@ -545,7 +522,7 @@ async fn a_crash_during_compaction_replays_records_for_finished_keys_harmlessly(
         .unwrap();
     }
 
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     assert!(!runtime.status(&admin).await.unwrap().safe_mode);
     authenticate_for_test(&runtime, live).unwrap();
     // A dead key stays dead rather than coming back through its own old record.
@@ -583,7 +560,7 @@ async fn a_record_for_a_key_the_snapshot_never_issued_still_fails_closed() {
     )
     .unwrap();
 
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     assert!(runtime.status(&admin).await.unwrap().safe_mode);
     let _ = std::fs::remove_dir_all(state_dir);
 }
