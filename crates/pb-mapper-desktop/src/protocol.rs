@@ -325,7 +325,7 @@ pub enum StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Button, Input, Key, security};
+    use crate::{Button, Input, Key};
     use serde_json::{Value, json};
 
     /// Serialise, parse back and serialise again: the JSON must not change.
@@ -352,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_parsing_and_version_gate() {
+    fn strict_parsing() {
         let limits = VideoLimits::for_viewer(60.0);
         let viewer = [
             ViewerMessage::Authenticate {
@@ -557,22 +557,5 @@ mod tests {
         ]));
         assert!(!valid_capabilities(&["Lock".into()]));
         assert!(!valid_capabilities(&vec!["a".into(); MAX_CAPABILITIES + 1]));
-
-        // A v1 peer fails the TLS handshake with a typed version mismatch,
-        // whichever side is the old one.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            for old_host in [true, false] {
-                let failure = security::tests::alpn_handshake(old_host).await;
-                assert_eq!(
-                    security::handshake_failure(&failure),
-                    Some(security::HandshakeFailure::VersionMismatch),
-                    "{failure}"
-                );
-            }
-        });
     }
 }

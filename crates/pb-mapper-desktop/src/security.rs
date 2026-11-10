@@ -233,7 +233,7 @@ pub(crate) fn server() -> Result<(tokio_rustls::TlsAcceptor, [u8; 32])> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use tokio::io::DuplexStream;
 
@@ -258,23 +258,31 @@ pub(crate) mod tests {
         connected.err()
     }
 
-    /// A viewer and host of different desktop protocol versions: the old side
-    /// offers the PR #51 ALPN. Returns the viewer's handshake error.
-    pub(crate) async fn alpn_handshake(old_host: bool) -> io::Error {
-        let identity = HostIdentity::generate().unwrap();
-        let fingerprint = identity
-            .invitation("desktop:test".into())
-            .unwrap()
-            .fingerprint;
-        let mut client = client_config(fingerprint).unwrap();
-        let mut server = identity.server_config(vec![]).unwrap();
-        let old = b"pb-mapper/desktop/1".to_vec();
-        if old_host {
-            server.alpn_protocols = vec![old];
-        } else {
-            client.alpn_protocols = vec![old];
+    /// A v1 peer, which offers the PR #51 ALPN, fails the TLS handshake with
+    /// a typed version mismatch, whichever side is the old one.
+    #[tokio::test]
+    async fn another_protocol_version_fails_the_handshake_typed() {
+        for old_host in [true, false] {
+            let identity = HostIdentity::generate().unwrap();
+            let fingerprint = identity
+                .invitation("desktop:test".into())
+                .unwrap()
+                .fingerprint;
+            let mut client = client_config(fingerprint).unwrap();
+            let mut server = identity.server_config(vec![]).unwrap();
+            let old = b"pb-mapper/desktop/1".to_vec();
+            if old_host {
+                server.alpn_protocols = vec![old];
+            } else {
+                client.alpn_protocols = vec![old];
+            }
+            let failure = connect(client, server).await.unwrap();
+            assert_eq!(
+                handshake_failure(&failure),
+                Some(HandshakeFailure::VersionMismatch),
+                "{failure}"
+            );
         }
-        connect(client, server).await.unwrap()
     }
 
     #[tokio::test]
