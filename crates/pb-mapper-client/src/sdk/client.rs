@@ -1,9 +1,9 @@
-//! The session object: [`Client`], its request types, and the tunnel spawner.
+//! The session object: [`Client`].
 //!
 //! Everything a caller starts goes through here. `register` and `connect` are
 //! the same shape — resolve the local endpoint, open a status channel, spawn the
-//! transport's worker — so that lifecycle lives in one place (`TunnelWorker`)
-//! and each call site is left with only the worker it invokes.
+//! transport's worker — so that lifecycle lives in one place (`TunnelWorker`,
+//! in `worker`) and each call site is left with only the worker it invokes.
 
 use crate::diagnostics::Diagnostics;
 use crate::endpoint::RelayEndpoint;
@@ -11,7 +11,7 @@ use crate::relay::CarrierId;
 use std::sync::{Arc, RwLock};
 
 use pb_mapper_core::checksum::{Credential, parse_credential};
-use pb_mapper_core::config::{ResolvedAddrs, control_io_timeout, resolve_addrs_async};
+use pb_mapper_core::config::control_io_timeout;
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -23,55 +23,17 @@ use snafu::ResultExt;
 
 use super::Error;
 use super::admin::Admin;
-use super::error::{AddressSnafu, Result, StatusSnafu};
-use super::handle::{Connection, LiveTunnel, Registration};
-use super::types::{RemoteId, ServiceConnection, Transport, TunnelStatus};
-use super::{ConnectOptions, DirectPolicy, LanTransport, PathPolicy, PortMapping, RegisterOptions};
+use super::error::{Result, StatusSnafu};
+use super::handle::{Connection, Registration};
+use super::types::{
+    ClientConfig, ConnectRequest, RegisterRequest, RemoteId, ServiceConnection, Transport,
+    TunnelStatus,
+};
+use super::worker::{TunnelWorker, resolve};
+use super::{ConnectOptions, LanTransport, PathPolicy, PortMapping, RegisterOptions};
 use crate::client::run_client_side_cli_recovering_with_path;
 use crate::client::status::get_status_with_credential;
-use crate::server::{ServerTunnelOptions, StatusCallback, run_server_side_cli_recovering};
-
-/// Configuration for a [`Client`] session.
-#[derive(Clone)]
-pub struct ClientConfig {
-    /// Relay address (`host:port`).
-    pub server: String,
-    /// Administrator key (32 printable bytes) or a `pbmt1_` temporary credential.
-    pub credential: String,
-    pub keep_alive: bool,
-    /// Administrator-only target namespace. Temporary credentials always use
-    /// their own namespace when this is `None`.
-    pub namespace: Option<u64>,
-}
-
-impl std::fmt::Debug for ClientConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClientConfig")
-            .field("server", &self.server)
-            .field("credential", &"[redacted]")
-            .field("keep_alive", &self.keep_alive)
-            .field("namespace", &self.namespace)
-            .finish()
-    }
-}
-
-/// Register a local TCP/UDP service with the relay.
-#[derive(Clone, Debug)]
-pub struct RegisterRequest {
-    pub key: String,
-    pub local_addr: String,
-    pub transport: Transport,
-    pub codec: bool,
-    pub force_namespace: bool,
-}
-
-/// Subscribe to a registered service and listen locally.
-#[derive(Clone, Debug)]
-pub struct ConnectRequest {
-    pub key: String,
-    pub local_addr: String,
-    pub transport: Transport,
-}
+use crate::server::{ServerTunnelOptions, run_server_side_cli_recovering};
 
 pub(crate) struct ClientInner {
     pub(crate) server: String,
@@ -706,159 +668,9 @@ fn check_port_mapping(requested: PortMapping) -> Result<()> {
     Ok(())
 }
 
-/// Resolve one endpoint to every address it names.
-///
-/// The list, not just its first entry: a worker handed the whole list dials each
-/// candidate in turn, so a relay hostname with several records survives one of
-/// them being unreachable.
-async fn resolve(addr: &str) -> Result<ResolvedAddrs> {
-    resolve_addrs_async(addr)
-        .await
-        .context(AddressSnafu { addr })
-}
-
-/// Mark a finished worker as `Stopped`, unless it already reported why it will
-/// never come up. The status is a watch channel, so it keeps only the newest
-/// value: overwriting a `Failed(reason)` that the worker set on its way out
-/// would replace the only description of a permanent rejection the caller ever
-/// gets, leaving `wait_ready` to report a bare stop instead.
-fn settle_stopped(tx: &watch::Sender<TunnelStatus>) {
-    tx.send_if_modified(|status| match status {
-        TunnelStatus::Failed(_) => false,
-        _ => {
-            *status = TunnelStatus::Stopped;
-            true
-        }
-    });
-}
-
-/// Bridge the worker's string status callback onto the handle's watch channel.
-///
-/// `StatusCallback` and `ClientStatusCallback` are the same boxed closure type,
-/// so both tunnel directions share this.
-fn watch_callback(tx: watch::Sender<TunnelStatus>) -> StatusCallback {
-    Box::new(move |status: &str| {
-        let _ = tx.send(TunnelStatus::from_callback(status));
-    })
-}
-
-/// What a spawned tunnel worker is given: its resolved endpoints, its key, the
-/// callback that publishes its status, and the token that stops it.
-struct WorkerContext {
-    local_addr: ResolvedAddrs,
-    remote_addr: RelayEndpoint,
-    key: Arc<str>,
-    status_callback: StatusCallback,
-    shutdown: CancellationToken,
-    diagnostics: Diagnostics,
-}
-
-/// A tunnel resolved and wired up, waiting only for the transport-specific
-/// worker that will drive it.
-///
-/// Register and connect, over TCP and UDP, are four workers with four different
-/// signatures but one lifecycle: spawn, publish status, settle as `Stopped`.
-/// This owns that lifecycle so each call site is left with just its own call.
-struct TunnelWorker {
-    local_addr: ResolvedAddrs,
-    remote_addr: RelayEndpoint,
-    key: Arc<str>,
-    shutdown: CancellationToken,
-    status_tx: watch::Sender<TunnelStatus>,
-    status_rx: watch::Receiver<TunnelStatus>,
-    diagnostics: Diagnostics,
-}
-
-impl TunnelWorker {
-    /// How this tunnel's direct setups go, if it has any: how it maps its
-    /// direct endpoint's port and whether it tries a shared local network
-    /// first, both noted in its diagnostics from the start; and what that
-    /// network carries: what a consumer asks for, and whether a provider
-    /// serves TCP.
-    fn direct_policy(
-        &self,
-        direct: bool,
-        port_mapping: PortMapping,
-        lan_first: bool,
-        lan_transport: LanTransport,
-        lan_tcp: bool,
-    ) -> DirectPolicy {
-        let port_mapping = if direct && cfg!(feature = "port-mapping") {
-            port_mapping
-        } else {
-            PortMapping::Off
-        };
-        let lan_first = direct && lan_first;
-        if port_mapping != PortMapping::Off {
-            self.diagnostics.port_mapping_requested(
-                port_mapping,
-                crate::network::NetworkHints::shared().generation(),
-            );
-        }
-        let lan_transport = if direct {
-            lan_transport
-        } else {
-            LanTransport::Quic
-        };
-        self.diagnostics.prefer_lan(lan_first, lan_transport);
-        DirectPolicy {
-            port_mapping,
-            lan_first,
-            lan_transport,
-            lan_tcp: direct && lan_tcp,
-        }
-    }
-
-    fn spawn<F, Fut>(self, start: F) -> LiveTunnel
-    where
-        F: FnOnce(WorkerContext) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send,
-    {
-        let Self {
-            local_addr,
-            remote_addr,
-            key,
-            shutdown,
-            status_tx,
-            status_rx,
-            diagnostics,
-        } = self;
-        let worker_shutdown = shutdown.clone();
-        let worker_diagnostics = diagnostics.clone();
-        let endpoint = remote_addr.clone();
-        let join = tokio::spawn(async move {
-            start(WorkerContext {
-                local_addr,
-                remote_addr,
-                key,
-                status_callback: watch_callback(status_tx.clone()),
-                shutdown: worker_shutdown,
-                diagnostics: worker_diagnostics.clone(),
-            })
-            .await;
-            worker_diagnostics.stop();
-            settle_stopped(&status_tx);
-        });
-        LiveTunnel::new(shutdown, join, status_rx, endpoint, diagnostics)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn config_debug_redacts_credentials() {
-        let config = ClientConfig {
-            server: "localhost:7666".into(),
-            credential: "0123456789abcdefghijklmnopqrstuv".into(),
-            keep_alive: false,
-            namespace: None,
-        };
-        let debug = format!("{config:?}");
-        assert!(!debug.contains(&config.credential));
-        assert!(debug.contains("[redacted]"));
-    }
 
     #[test]
     fn admin_requires_administrator_credential() {

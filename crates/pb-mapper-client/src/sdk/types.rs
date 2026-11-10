@@ -20,6 +20,48 @@ impl Transport {
     }
 }
 
+/// Configuration for a [`Client`](super::Client) session.
+#[derive(Clone)]
+pub struct ClientConfig {
+    /// Relay address (`host:port`).
+    pub server: String,
+    /// Administrator key (32 printable bytes) or a `pbmt1_` temporary credential.
+    pub credential: String,
+    pub keep_alive: bool,
+    /// Administrator-only target namespace. Temporary credentials always use
+    /// their own namespace when this is `None`.
+    pub namespace: Option<u64>,
+}
+
+impl std::fmt::Debug for ClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientConfig")
+            .field("server", &self.server)
+            .field("credential", &"[redacted]")
+            .field("keep_alive", &self.keep_alive)
+            .field("namespace", &self.namespace)
+            .finish()
+    }
+}
+
+/// Register a local TCP/UDP service with the relay.
+#[derive(Clone, Debug)]
+pub struct RegisterRequest {
+    pub key: String,
+    pub local_addr: String,
+    pub transport: Transport,
+    pub codec: bool,
+    pub force_namespace: bool,
+}
+
+/// Subscribe to a registered service and listen locally.
+#[derive(Clone, Debug)]
+pub struct ConnectRequest {
+    pub key: String,
+    pub local_addr: String,
+    pub transport: Transport,
+}
+
 /// Observed lifecycle of a [`super::Registration`] or [`super::Connection`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TunnelStatus {
@@ -311,4 +353,22 @@ impl DirectPolicy {
         lan_transport: LanTransport::Quic,
         lan_tcp: false,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_debug_redacts_credentials() {
+        let config = ClientConfig {
+            server: "localhost:7666".into(),
+            credential: "0123456789abcdefghijklmnopqrstuv".into(),
+            keep_alive: false,
+            namespace: None,
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(&config.credential));
+        assert!(debug.contains("[redacted]"));
+    }
 }

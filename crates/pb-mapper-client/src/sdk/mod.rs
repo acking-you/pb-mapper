@@ -9,18 +9,20 @@ mod client;
 mod error;
 mod handle;
 mod types;
+mod worker;
 
 pub use admin::{
     Admin, AuthStatusInfo, ConnectionInfo, ConnectionPage, IssuedKey, KeyListPage, KeyMetadata,
     ServiceInfo, ServicePage,
 };
-pub use client::{Client, ClientConfig, ConnectRequest, RegisterRequest, RelayMetricsStream};
+pub use client::{Client, RelayMetricsStream};
 pub use error::{Error, Result};
 pub use handle::{Connection, Registration};
 pub(crate) use types::DirectPolicy;
 pub use types::{
-    ConnectOptions, LanTransport, LegacyProtocol, PathPolicy, PortMapping, RegisterOptions,
-    RemoteId, ServiceConnection, Transport, TunnelStatus,
+    ClientConfig, ConnectOptions, ConnectRequest, LanTransport, LegacyProtocol, PathPolicy,
+    PortMapping, RegisterOptions, RegisterRequest, RemoteId, ServiceConnection, Transport,
+    TunnelStatus,
 };
 
 /// The SDK version compiled into this process.
