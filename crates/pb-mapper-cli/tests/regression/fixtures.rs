@@ -143,9 +143,9 @@ pub(crate) async fn register_control_conn_parts(
     conn_id
 }
 
-/// Wait up to two seconds for a stream request on `who`'s control connection.
+/// Wait up to five seconds for a stream request on `who`'s control connection.
 pub(crate) async fn read_stream_request(reader: &mut impl MessageReader, who: &str) -> (u32, u64) {
-    let request = timeout(Duration::from_secs(2), reader.read_msg())
+    let request = timeout(Duration::from_secs(5), reader.read_msg())
         .await
         .unwrap_or_else(|_| panic!("{who} did not receive a stream request"))
         .unwrap();

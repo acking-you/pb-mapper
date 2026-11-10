@@ -473,6 +473,24 @@ struct ReadyStream {
     data_protocol: Option<u16>,
 }
 
+/// How long after a suspected connection is retired a subscribe still waits
+/// for the replacement to register.
+const REPLACEMENT_MARGIN: Duration = Duration::from_millis(200);
+
+/// Until when a subscribe that has just suspected a connection, whose
+/// acknowledgement it waited `ack_timeout` for, waits for its replacement.
+///
+/// The relay retires that connection one grace from now, the grace being the
+/// suspect grace or the connection's doubled acknowledgement budget (see
+/// `on_suspect`), and a replacement registers only after that. Counted from
+/// the subscribe's start instead, the wait ran out before the retirement for
+/// any provider the relay had learned to wait more than 300 ms for, and for
+/// any whose acknowledgement timer fired late.
+fn replacement_deadline(ack_timeout: Duration) -> Instant {
+    let grace = pb_mapper_core::config::control_suspect_grace().max(ack_timeout.saturating_mul(2));
+    Instant::now() + grace + REPLACEMENT_MARGIN
+}
+
 async fn get_server_stream(
     conn: &mut RelayStream,
     session: &ServerHeaderSession,
@@ -484,11 +502,9 @@ async fn get_server_stream(
     let (tx, rx) = kanal::bounded_async(DEFAULT_CLIENT_CHAN_CAP);
     let ready_timeout = stream_ready_timeout();
     let recovery_timeout = stream_recovery_timeout().max(
-        pb_mapper_core::config::control_suspect_grace()
-            + stream_ack_timeout()
-            + Duration::from_millis(200),
+        pb_mapper_core::config::control_suspect_grace() + stream_ack_timeout() + REPLACEMENT_MARGIN,
     );
-    let recovery_deadline = Instant::now() + recovery_timeout;
+    let mut recovery_deadline = Instant::now() + recovery_timeout;
     let mut excluded_server_conns = Vec::new();
 
     'attempt: loop {
@@ -638,6 +654,7 @@ async fn get_server_stream(
                 suspect_server_conn(&task_sender, key.clone(), server_conn_id, server_generation)
                     .await;
                 excluded_server_conns.push((server_conn_id, server_generation));
+                recovery_deadline = recovery_deadline.max(replacement_deadline(ack_timeout));
                 continue 'attempt;
             }
         };
@@ -705,6 +722,7 @@ async fn get_server_stream(
                 suspect_server_conn(&task_sender, key.clone(), server_conn_id, server_generation)
                     .await;
                 excluded_server_conns.push((server_conn_id, server_generation));
+                recovery_deadline = recovery_deadline.max(replacement_deadline(ack_timeout));
                 continue 'attempt;
             }
         };

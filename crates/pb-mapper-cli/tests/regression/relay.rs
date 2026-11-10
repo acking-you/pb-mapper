@@ -36,7 +36,15 @@ enum StaleEnd {
     IgnoreStreamUntilRetired(oneshot::Sender<()>),
     /// It acknowledges its first stream request and opens nothing.
     AckStream,
+    /// It acknowledges its first stream request [`LATE_ACK`] late and opens
+    /// nothing, then ends as `IgnoreStreamUntilRetired`.
+    AckLateThenIgnoreUntilRetired(oneshot::Sender<()>),
 }
+
+/// Late for the relay's first 300 ms acknowledgement timeout, and early in the
+/// two-second grace that follows it, so the relay readmits the connection and
+/// learns to wait 825 ms for its next acknowledgement.
+const LATE_ACK: Duration = Duration::from_millis(500);
 
 /// A stale provider: register `key` as a legacy control connection, report it
 /// `ready`, and end as `end` says.
@@ -49,36 +57,59 @@ async fn stale_control(addr: SocketAddr, key: String, ready: oneshot::Sender<()>
         register_control_conn_parts(&mut reader, &mut writer, &key).await;
     }
     ready.send(()).unwrap();
+    let ack = |client_id, server_generation| {
+        PbServerRequest::StreamAck {
+            client_id,
+            server_generation,
+        }
+        .encode()
+        .unwrap()
+    };
     match end {
         StaleEnd::IgnoreStream => {
             read_stream_request(&mut reader, "stale control").await;
         }
         StaleEnd::IgnoreStreamUntilRetired(retired) => {
             read_stream_request(&mut reader, "stale control").await;
-            // A missed stream ACK first receives a two-second confirmation grace.
-            let closed = timeout(Duration::from_secs(3), reader.read_msg())
-                .await
-                .expect("stale control was not retired by the server");
-            if let Ok(bytes) = closed {
-                assert!(bytes.is_empty());
-            }
-            retired.send(()).unwrap();
+            until_retired(&mut reader, retired).await;
             return;
         }
         StaleEnd::AckStream => {
             let (client_id, server_generation) =
                 read_stream_request(&mut reader, "stale control").await;
             let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-            let ack = PbServerRequest::StreamAck {
-                client_id,
-                server_generation,
-            }
-            .encode()
-            .unwrap();
-            writer.write_msg(&ack).await.unwrap();
+            writer
+                .write_msg(&ack(client_id, server_generation))
+                .await
+                .unwrap();
+        }
+        StaleEnd::AckLateThenIgnoreUntilRetired(retired) => {
+            let (client_id, server_generation) =
+                read_stream_request(&mut reader, "stale control").await;
+            tokio::time::sleep(LATE_ACK).await;
+            let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+            writer
+                .write_msg(&ack(client_id, server_generation))
+                .await
+                .unwrap();
+            read_stream_request(&mut reader, "stale control").await;
+            until_retired(&mut reader, retired).await;
+            return;
         }
     }
     std::future::pending::<()>().await;
+}
+
+/// Wait for the relay to close the control connection `reader` reads, which
+/// a missed acknowledgement earns after a two-second grace, and report it.
+async fn until_retired(reader: &mut impl MessageReader, retired: oneshot::Sender<()>) {
+    let closed = timeout(Duration::from_secs(5), reader.read_msg())
+        .await
+        .expect("stale control was not retired by the server");
+    if let Ok(bytes) = closed {
+        assert!(bytes.is_empty());
+    }
+    retired.send(()).unwrap();
 }
 
 async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
@@ -529,6 +560,78 @@ async fn subscribe_waits_for_replacement_after_retiring_stale_control_connection
     let response = timeout(Duration::from_secs(3), reader.read_msg())
         .await
         .expect("subscribe did not wait for replacement control connection")
+        .unwrap();
+    assert!(matches!(
+        PbConnResponse::decode(response).unwrap(),
+        PbConnResponse::Subcribe { .. }
+    ));
+
+    let stream = replacement_stream_rx.await.unwrap();
+    drop(stream);
+    stale_task.abort();
+    replacement_task.abort();
+    relay.stop().await;
+}
+
+/// As above, for a provider whose acknowledgements the relay has learned to
+/// wait longer for: the subscriber's wait for a replacement runs from when
+/// the relay gave up on the stale connection, which is later.
+#[tokio::test]
+async fn subscribe_waits_for_replacement_of_a_slow_provider() {
+    let relay = InProcessRelay::start(auth_config()).await;
+
+    let key = "slow-backend";
+    let (stale_ready_tx, stale_ready_rx) = oneshot::channel();
+    let (retired_tx, retired_rx) = oneshot::channel();
+    let stale_task = tokio::spawn(stale_control(
+        relay.addr,
+        key.to_string(),
+        stale_ready_tx,
+        StaleEnd::AckLateThenIgnoreUntilRetired(retired_tx),
+    ));
+    stale_ready_rx.await.unwrap();
+
+    // The first subscriber's acknowledgement comes late: the relay passes
+    // over the provider for it, and it fails with nothing else to try. The
+    // provider is readmitted, and acknowledgements from it are now awaited
+    // for 825 ms.
+    let mut first = subscribe(relay.addr, key).await;
+    let mut reader = get_header_msg_reader(&mut first).unwrap();
+    let refused = timeout(Duration::from_secs(5), reader.read_msg())
+        .await
+        .expect("the first subscriber was neither served nor refused");
+    assert!(
+        !refused.is_ok_and(|response| matches!(
+            PbConnResponse::decode(response),
+            Ok(PbConnResponse::Subcribe { .. })
+        )),
+        "a provider passed over for an acknowledgement served the stream anyway"
+    );
+
+    let (replacement_stream_tx, replacement_stream_rx) = oneshot::channel();
+    let replacement_task = tokio::spawn({
+        let addr = relay.addr;
+        let key = key.to_string();
+        async move {
+            retired_rx.await.unwrap();
+            serve_one_stream(
+                addr,
+                key,
+                "replacement control",
+                None,
+                replacement_stream_tx,
+            )
+            .await;
+        }
+    });
+
+    // The second is never acknowledged: 825 ms, then the two-second grace,
+    // and the provider is retired, after which the replacement registers.
+    let mut client = subscribe(relay.addr, key).await;
+    let mut reader = get_header_msg_reader(&mut client).unwrap();
+    let response = timeout(Duration::from_secs(6), reader.read_msg())
+        .await
+        .expect("subscribe did not wait for the slow provider's replacement")
         .unwrap();
     assert!(matches!(
         PbConnResponse::decode(response).unwrap(),
