@@ -85,7 +85,7 @@ pub unsafe extern "C" fn pb_mapper_get_local_server_status_json(
     let state = handle.state.clone();
     let status = handle.runtime.block_on(async move {
         let state = state.lock().await;
-        state.get_local_server_status().await
+        state.get_local_server_status()
     });
 
     ok_data(serde_json::to_value(status).unwrap_or_else(|_| json!({})))
@@ -249,7 +249,6 @@ mod tests {
                         lan_first: true,
                         ..Default::default()
                     })
-                    .await
             })
             .unwrap();
 

@@ -199,7 +199,7 @@ impl DesktopState {
             return self.relay.lock().clone();
         };
         let scope = RelayScope {
-            server: state.get_config_status().await.server_address,
+            server: state.get_config_status().server_address,
             namespace: get_process_credential()
                 .ok()
                 .map(|credential| credential.key_id()),
@@ -853,7 +853,7 @@ async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<
             "stop local desktop sharing before starting the background host",
         ));
     }
-    let config = handle.state.lock().await.get_config_status().await;
+    let config = handle.state.lock().await.get_config_status();
     let credential = process_credential()?;
     let namespace = credential.key_id();
     let credential = credential_text(credential)?;
@@ -945,13 +945,7 @@ async fn stop_background(state: &DesktopState) -> Result<(), CtlError> {
 async fn revoke_background(handle: &PbMapperHandle) -> Result<Value, CtlError> {
     #[cfg(windows)]
     {
-        let server = handle
-            .state
-            .lock()
-            .await
-            .get_config_status()
-            .await
-            .server_address;
+        let server = handle.state.lock().await.get_config_status().server_address;
         let namespace = get_process_credential()
             .ok()
             .map(|credential| credential.key_id());
@@ -1141,7 +1135,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                 let state = handle.state.lock().await;
                 (
                     state.desktop_config_dir(),
-                    state.get_config_status().await.server_address,
+                    state.get_config_status().server_address,
                 )
             };
             let saved = load_trust(directory).await?;
@@ -1455,7 +1449,7 @@ async fn connect(
             // wait inside the registered, cancellable attempt.
             let (client, app) = {
                 let state = handle.state.lock().await;
-                (state.relay_client()?, state.get_config_status().await)
+                (state.relay_client()?, state.get_config_status())
             };
             let options = ConnectOptions {
                 path: if relay_only {
@@ -1506,7 +1500,7 @@ async fn start_background(handle: &PbMapperHandle, start: HostStart) -> Result<V
         handle.desktop.cache_background(query_background().await?);
         let (directory, config) = {
             let state = handle.state.lock().await;
-            (state.desktop_config_dir(), state.get_config_status().await)
+            (state.desktop_config_dir(), state.get_config_status())
         };
         let credential = process_credential()?;
         let namespace = credential.key_id();
@@ -1608,7 +1602,7 @@ async fn start_local(handle: &PbMapperHandle, start: Start) -> Result<Value, Ctl
         let state = handle.state.lock().await;
         (
             state.desktop_config_dir(),
-            state.get_config_status().await,
+            state.get_config_status(),
             state.relay_client()?,
         )
     };
@@ -1757,7 +1751,7 @@ async fn restart_host(
         .map_err(|failure| CtlError::invalid_argument(failure.to_string()))?;
     let (config, client) = {
         let state = handle.state.lock().await;
-        (state.get_config_status().await, state.relay_client()?)
+        (state.get_config_status(), state.relay_client()?)
     };
     let credential = process_credential()?;
     if config.server_address != local.scope.relay || credential.key_id() != local.scope.namespace {
@@ -1812,7 +1806,7 @@ async fn enable_host(
 ) -> Result<Value, CtlError> {
     let (directory, config) = {
         let state = handle.state.lock().await;
-        (state.desktop_config_dir(), state.get_config_status().await)
+        (state.desktop_config_dir(), state.get_config_status())
     };
     let credential = process_credential()?;
     let scope = trust::Scope {

@@ -12,7 +12,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -143,19 +143,12 @@ impl PbMapperState {
         self.server_port = Some(port);
         self.server_quic_port = quic_port;
 
-        {
-            let mut cache = self.local_server_status_cache.write().await;
-            *cache = LocalServerStatus {
-                is_running: true,
-                port: Some(port),
-                quic_port,
-                ..LocalServerStatus::default()
-            };
-        }
-        {
-            let mut last_update = self.local_server_status_last_update.write().await;
-            *last_update = Some(Instant::now());
-        }
+        self.local_server_status.lock().record(LocalServerStatus {
+            is_running: true,
+            port: Some(port),
+            quic_port,
+            ..LocalServerStatus::default()
+        });
 
         tracing::info!("pb-mapper server started successfully");
         Ok(())
@@ -176,7 +169,7 @@ impl PbMapperState {
         self.server_start_time = None;
         self.server_port = None;
         self.server_quic_port = None;
-        *self.local_server_status_cache.write().await = LocalServerStatus::default();
+        self.local_server_status.lock().status = LocalServerStatus::default();
     }
 
     pub async fn stop_server(&mut self) -> Result<(), CtlError> {
@@ -215,14 +208,9 @@ impl PbMapperState {
             self.server_port = None;
             self.server_quic_port = None;
 
-            {
-                let mut cache = self.local_server_status_cache.write().await;
-                *cache = LocalServerStatus::default();
-            }
-            {
-                let mut last_update = self.local_server_status_last_update.write().await;
-                *last_update = Some(Instant::now());
-            }
+            self.local_server_status
+                .lock()
+                .record(LocalServerStatus::default());
 
             self.service_runtime.clear();
             self.client_runtime.clear();

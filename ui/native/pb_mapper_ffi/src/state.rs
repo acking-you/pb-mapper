@@ -21,11 +21,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use parking_lot::Mutex as SyncMutex;
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -43,6 +41,7 @@ mod stored;
 mod tunnel;
 mod views;
 
+use status::LocalStatusCache;
 pub use status::{force_refresh_server_status, get_server_status_detail, get_service_conns};
 pub use stored::{
     AppConfig, ClientConfigData, ClientConfigStore, DirectOptions, ServiceConfigData,
@@ -79,9 +78,8 @@ pub struct PbMapperState {
     config: AppConfig,
     config_dir: PathBuf,
     app_directory_path: Option<String>,
-    local_server_status_cache: Arc<RwLock<LocalServerStatus>>,
-    local_server_status_last_update: Arc<RwLock<Option<Instant>>>,
-    local_server_status_refreshing: Arc<AtomicBool>,
+    /// Shared with the background read that refreshes it.
+    local_server_status: Arc<SyncMutex<LocalStatusCache>>,
     /// Keys currently being set up. See [`KeyClaim`](tunnel::KeyClaim). Separate sets because a
     /// key can legitimately be registered and connected to at the same time.
     registering: Arc<SyncMutex<HashSet<String>>>,

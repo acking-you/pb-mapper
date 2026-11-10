@@ -135,7 +135,7 @@ async fn ui_server_uses_its_writable_config_directory_and_reports_readiness() {
             .await
             .expect("UI server should bind and initialize authentication");
         assert!(state.server_handle.is_some());
-        let status = state.get_local_server_status().await;
+        let status = state.get_local_server_status();
         assert!(status.is_running);
         assert_eq!(status.quic_port, Some(quic_port));
         auth_dir
@@ -308,7 +308,7 @@ async fn the_list_says_which_path_each_tunnel_takes() {
     }
     let running = || async {
         let state = state.lock().await;
-        let clients = state.get_client_configs().await;
+        let clients = state.get_client_configs();
         clients.len() == 2 && clients.iter().all(|client| client.status == "running")
     };
     tokio::time::timeout(pb_mapper_testkit::READY_TIMEOUT, async {
@@ -346,13 +346,11 @@ async fn the_list_says_which_path_each_tunnel_takes() {
     };
     let clients: Vec<_> = state
         .get_client_configs()
-        .await
         .into_iter()
         .map(|client| (client.service_key, client.path))
         .collect();
     let shares: Vec<_> = state
         .get_service_configs()
-        .await
         .into_iter()
         .map(|share| (share.service_key, share.path))
         .collect();
@@ -453,7 +451,7 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
     .unwrap();
     tokio::time::timeout(pb_mapper_testkit::READY_TIMEOUT, async {
         loop {
-            let clients = state.lock().await.get_client_configs().await;
+            let clients = state.lock().await.get_client_configs();
             if clients.iter().all(|client| client.status == "running") {
                 break;
             }
@@ -479,8 +477,8 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
     assert!(detail.quic_port.is_some());
     {
         let state = state.lock().await;
-        let share = &state.get_service_configs().await[0];
-        let client = &state.get_client_configs().await[0];
+        let share = &state.get_service_configs()[0];
+        let client = &state.get_client_configs()[0];
         assert_eq!(share.relay_transport, Some(RelayTransport::Quic));
         assert_eq!(client.relay_transport, Some(RelayTransport::Quic));
         // Saved with each tunnel, but one kept on the relay asks no router.

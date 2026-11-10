@@ -18,7 +18,6 @@
 //! waits.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Mutex;
@@ -36,6 +35,25 @@ use crate::error::{CtlError, ErrorCode, sdk_error};
 
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
 const FORCE_REFRESH_TIMEOUT: Duration = Duration::from_millis(5000);
+/// How long the embedded relay has to report its figures.
+const LOCAL_STATUS_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// The embedded relay's figures as last read, when, and whether a read is
+/// under way, kept together so that they change together.
+#[derive(Default)]
+pub(super) struct LocalStatusCache {
+    pub(super) status: LocalServerStatus,
+    pub(super) last_update: Option<Instant>,
+    pub(super) refreshing: bool,
+}
+
+impl LocalStatusCache {
+    /// Takes `status` as read now.
+    pub(super) fn record(&mut self, status: LocalServerStatus) {
+        self.status = status;
+        self.last_update = Some(Instant::now());
+    }
+}
 
 /// What the relay answered: its services, the routing table, and how long
 /// the services took to come back.
@@ -118,7 +136,7 @@ impl PbMapperState {
             .map(|runtime| &runtime.handle)
             .ok_or_else(|| CtlError::not_found(format!("'{key}' is not running")))
     }
-    pub async fn get_config_status(&self) -> AppConfig {
+    pub fn get_config_status(&self) -> AppConfig {
         self.config.clone()
     }
 
@@ -155,7 +173,7 @@ impl PbMapperState {
     /// Save `candidate` as this computer's config, its credential checked
     /// and in effect for the process. What is cached about the relay is
     /// dropped only when the relay settings changed.
-    pub async fn update_config(&mut self, candidate: AppConfig) -> Result<(), CtlError> {
+    pub fn update_config(&mut self, candidate: AppConfig) -> Result<(), CtlError> {
         let candidate = AppConfig {
             msg_header_key: normalize_msg_header_key(candidate.msg_header_key)?,
             ..candidate
@@ -170,12 +188,12 @@ impl PbMapperState {
             return Err(error);
         }
         if !previous.same_relay(&self.config) {
-            self.reset_status_caches().await;
+            self.reset_status_caches();
         }
         Ok(())
     }
 
-    pub async fn get_service_configs(&self) -> Vec<ServiceConfigInfo> {
+    pub fn get_service_configs(&self) -> Vec<ServiceConfigInfo> {
         let store = self.load_service_configs();
         let mut services = Vec::new();
 
@@ -212,7 +230,7 @@ impl PbMapperState {
         services
     }
 
-    pub async fn get_service_status(&self, service_key: String) -> ServiceStatusResponse {
+    pub fn get_service_status(&self, service_key: String) -> ServiceStatusResponse {
         let view = self.service_view(&service_key);
         ServiceStatusResponse {
             service_key,
@@ -221,7 +239,7 @@ impl PbMapperState {
         }
     }
 
-    pub async fn get_client_configs(&self) -> Vec<ClientConfigInfo> {
+    pub fn get_client_configs(&self) -> Vec<ClientConfigInfo> {
         let store = self.load_client_configs();
         let mut client_infos = Vec::new();
 
@@ -261,7 +279,7 @@ impl PbMapperState {
         client_infos
     }
 
-    pub async fn get_client_status(&self, service_key: String) -> ClientStatusResponse {
+    pub fn get_client_status(&self, service_key: String) -> ClientStatusResponse {
         let view = self.client_view(&service_key);
         ClientStatusResponse {
             service_key,
@@ -284,7 +302,10 @@ impl PbMapperState {
         }
     }
 
-    pub async fn get_local_server_status(&self) -> LocalServerStatus {
+    /// The embedded relay's figures as last read, starting a read in the
+    /// background when they are stale. Spawns onto the runtime it is called
+    /// in.
+    pub fn get_local_server_status(&self) -> LocalServerStatus {
         // One that ended on its own is not running, whatever is left of it.
         let is_running = self
             .server_handle
@@ -292,42 +313,27 @@ impl PbMapperState {
             .is_some_and(|handle| !handle.is_finished());
         if !is_running {
             let status = LocalServerStatus::default();
-            {
-                let mut cache = self.local_server_status_cache.write().await;
-                *cache = status.clone();
-            }
-            {
-                let mut last_update = self.local_server_status_last_update.write().await;
-                *last_update = Some(Instant::now());
-            }
+            self.local_server_status.lock().record(status.clone());
             return status;
         }
 
-        let should_refresh = {
-            let last_update = self.local_server_status_last_update.read().await;
-            cache_is_stale(*last_update, STATUS_CACHE_TTL)
+        let (status, refresh) = {
+            let mut cache = self.local_server_status.lock();
+            let refresh = cache_is_stale(cache.last_update, STATUS_CACHE_TTL)
+                && !std::mem::replace(&mut cache.refreshing, true);
+            (cache.status.clone(), refresh)
         };
-
-        if should_refresh {
-            self.schedule_local_server_status_refresh();
+        if refresh {
+            self.refresh_local_server_status();
         }
-
-        let cache = self.local_server_status_cache.read().await;
-        cache.clone()
+        status
     }
 
-    fn schedule_local_server_status_refresh(&self) {
-        if self
-            .local_server_status_refreshing
-            .swap(true, Ordering::AcqRel)
-        {
-            return;
-        }
-
+    /// Reads the embedded relay's figures into the cache, in the background;
+    /// the caller has marked the cache as refreshing.
+    fn refresh_local_server_status(&self) {
         let sender = self.server_status_sender.clone();
-        let cache = self.local_server_status_cache.clone();
-        let last_update = self.local_server_status_last_update.clone();
-        let refreshing = self.local_server_status_refreshing.clone();
+        let cache = self.local_server_status.clone();
         let start_time = self.server_start_time;
         let port = self.server_port;
         let quic_port = self.server_quic_port;
@@ -348,7 +354,7 @@ impl PbMapperState {
                 let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
                 if sender.send(response_sender).is_ok()
                     && let Ok(Ok(info)) =
-                        tokio::time::timeout(Duration::from_millis(200), response_receiver).await
+                        tokio::time::timeout(LOCAL_STATUS_TIMEOUT, response_receiver).await
                 {
                     status.active_connections = info.active_connections;
                     status.registered_services = info.registered_services;
@@ -356,15 +362,9 @@ impl PbMapperState {
                 }
             }
 
-            {
-                let mut cache = cache.write().await;
-                *cache = status;
-            }
-            {
-                let mut last_update = last_update.write().await;
-                *last_update = Some(Instant::now());
-            }
-            refreshing.store(false, Ordering::Release);
+            let mut cache = cache.lock();
+            cache.record(status);
+            cache.refreshing = false;
         });
     }
 

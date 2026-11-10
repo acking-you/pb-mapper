@@ -61,7 +61,7 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
     let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
-        let config = state.lock().await.get_config_status().await;
+        let config = state.lock().await.get_config_status();
         let credential = get_process_credential();
         // The key a rotation retires: the tunnels still holding it are the
         // ones to start again on the new key.
@@ -95,15 +95,12 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
             let mut save_error = None;
             // Only the relay settings matter: a preference of this
             // computer's changed meanwhile is kept as it is now.
-            let current = state.get_config_status().await;
+            let current = state.get_config_status();
             let saved = current.same_relay(&config)
-                && match state
-                    .update_config(AppConfig {
-                        msg_header_key: key,
-                        ..current
-                    })
-                    .await
-                {
+                && match state.update_config(AppConfig {
+                    msg_header_key: key,
+                    ..current
+                }) {
                     Ok(()) => true,
                     Err(error) => {
                         tracing::error!("Saving the rotated administrator key failed: {error}");

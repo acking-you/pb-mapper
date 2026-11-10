@@ -13,17 +13,16 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 use parking_lot::Mutex as SyncMutex;
 use pb_mapper_core::checksum::set_process_msg_header_key;
-use tokio::sync::RwLock;
 
+use super::status::LocalStatusCache;
 use super::stored::normalize_msg_header_key;
 use super::{
-    AppConfig, ClientConfigData, ClientConfigStore, DirectOptions, LocalServerStatus,
-    PbMapperState, ServiceConfigData, ServiceConfigStore,
+    AppConfig, ClientConfigData, ClientConfigStore, DirectOptions, PbMapperState,
+    ServiceConfigData, ServiceConfigStore,
 };
 use crate::error::CtlError;
 
@@ -31,17 +30,8 @@ impl PbMapperState {
     pub(crate) fn desktop_config_dir(&self) -> PathBuf {
         self.config_dir.clone()
     }
-    pub(super) async fn reset_status_caches(&self) {
-        {
-            let mut cache = self.local_server_status_cache.write().await;
-            *cache = LocalServerStatus::default();
-        }
-        {
-            let mut last_update = self.local_server_status_last_update.write().await;
-            *last_update = None;
-        }
-        self.local_server_status_refreshing
-            .store(false, Ordering::Release);
+    pub(super) fn reset_status_caches(&self) {
+        *self.local_server_status.lock() = LocalStatusCache::default();
     }
     /// A state that has read nothing: the default configuration and no
     /// credential, until `set_app_directory_path` names its directory. Every
@@ -49,7 +39,6 @@ impl PbMapperState {
     /// platform's own), so the FFI handle starts here rather than reading a
     /// directory it may never be pointed at.
     pub fn unloaded() -> Self {
-        let local_server_status_cache = Arc::new(RwLock::new(LocalServerStatus::default()));
         Self {
             server_handle: None,
             server_auth: None,
@@ -65,9 +54,7 @@ impl PbMapperState {
             config: AppConfig::default(),
             config_dir: Self::get_config_dir(&None),
             app_directory_path: None,
-            local_server_status_cache,
-            local_server_status_last_update: Arc::new(RwLock::new(None)),
-            local_server_status_refreshing: Arc::new(AtomicBool::new(false)),
+            local_server_status: Arc::default(),
             registering: Arc::new(SyncMutex::new(HashSet::new())),
             connecting: Arc::new(SyncMutex::new(HashSet::new())),
         }

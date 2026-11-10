@@ -152,7 +152,7 @@ pub unsafe extern "C" fn pb_mapper_get_service_configs_json(
     let state = handle.state.clone();
     let services: Vec<ServiceConfigInfo> = handle.runtime.block_on(async move {
         let state = state.lock().await;
-        state.get_service_configs().await
+        state.get_service_configs()
     });
 
     ok_data(json!({"services": services}))
@@ -177,7 +177,7 @@ pub unsafe extern "C" fn pb_mapper_get_service_status_json(
     let state = handle.state.clone();
     let status: ServiceStatusResponse = handle.runtime.block_on(async move {
         let state = state.lock().await;
-        state.get_service_status(service_key).await
+        state.get_service_status(service_key)
     });
 
     ok_data(serde_json::to_value(status).unwrap_or_else(|_| json!({})))

@@ -27,7 +27,7 @@ pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) 
     let (config, isolated_admin_key_set) = handle.runtime.block_on(async move {
         let state = state.lock().await;
         (
-            state.get_config_status().await,
+            state.get_config_status(),
             state.isolated_admin_key().is_some(),
         )
     });
@@ -126,7 +126,7 @@ pub unsafe extern "C" fn pb_mapper_update_config(
         // and only when the carrier, LAN-first or the LAN transport looks
         // about to change. `None` is not looked up; `Some(None)` did not
         // resolve.
-        let current = state.lock().await.get_config_status().await;
+        let current = state.lock().await.get_config_status();
         let looked_up = if current.relay_transport == relay_transport
             && current.lan_first == lan_first
             && current.lan_transport == lan_transport
@@ -144,20 +144,18 @@ pub unsafe extern "C" fn pb_mapper_update_config(
         // setting, or both miss the change, and the tunnels named are the
         // ones started otherwise than this save wrote.
         let mut state = state.lock().await;
-        let saved = state.get_config_status().await;
+        let saved = state.get_config_status();
         let carrier_changed = saved.relay_transport != relay_transport;
         let lan_first_changed = saved.lan_first != lan_first;
         let lan_transport_changed = saved.lan_transport != lan_transport;
-        state
-            .update_config(AppConfig {
-                server_address: server_address.clone(),
-                keep_alive_enabled: enable_keep_alive != 0,
-                msg_header_key,
-                relay_transport,
-                lan_first,
-                lan_transport,
-            })
-            .await?;
+        state.update_config(AppConfig {
+            server_address: server_address.clone(),
+            keep_alive_enabled: enable_keep_alive != 0,
+            msg_header_key,
+            relay_transport,
+            lan_first,
+            lan_transport,
+        })?;
         let credential = match get_process_credential() {
             Ok(credential) if carrier_changed || lan_first_changed || lan_transport_changed => {
                 credential

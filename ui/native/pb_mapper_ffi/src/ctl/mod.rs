@@ -232,7 +232,7 @@ async fn run(
         }
 
         Command::Services => {
-            let services = state.lock().await.get_service_configs().await;
+            let services = state.lock().await.get_service_configs();
             Ok(proto::Response::ok(
                 Some(json!({ "services": services })),
                 None,
@@ -240,7 +240,7 @@ async fn run(
         }
 
         Command::Clients => {
-            let clients = state.lock().await.get_client_configs().await;
+            let clients = state.lock().await.get_client_configs();
             Ok(proto::Response::ok(
                 Some(json!({ "clients": clients })),
                 None,
@@ -257,7 +257,7 @@ async fn run(
 
         Command::ConfigGet => {
             let guard = state.lock().await;
-            let config = guard.get_config_status().await;
+            let config = guard.get_config_status();
             let isolated_admin_key = guard.isolated_admin_key();
             Ok(proto::Response::ok(
                 Some(json!({
