@@ -144,27 +144,18 @@ pub unsafe extern "C" fn pb_mapper_force_refresh_server_status_json(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::ffi::CStr;
-    use std::sync::{Arc, mpsc};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     use pb_mapper_client::sdk::RelayTransport;
     use pb_mapper_core::checksum::set_process_msg_header_key;
     use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
-    use serde_json::Value;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::config::pb_mapper_get_config_json;
-    use crate::state::PbMapperState;
-
-    fn reply(text: *mut c_char) -> Value {
-        let value = serde_json::from_slice(unsafe { CStr::from_ptr(text) }.to_bytes()).unwrap();
-        unsafe { crate::logging::pb_mapper_free_string(text) };
-        value
-    }
+    use crate::test_support::{TempRoot, take_reply, test_handle};
 
     /// The window checks the relay every few seconds, each call on a worker
     /// of its own. A relay that takes the connection and never answers keeps
@@ -175,22 +166,8 @@ mod tests {
         // Building a state and saving a credential write the process
         // credential; see `state::tests::temp_state`.
         let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.blocking_lock();
-        let root = std::env::temp_dir().join(format!(
-            "pb-mapper-ffi-test-silent-relay-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or_default()
-        ));
-        let handle = PbMapperHandle {
-            desktop: Default::default(),
-            tunnel_events: Default::default(),
-            state: Arc::new(tokio::sync::Mutex::new(PbMapperState::new(Some(
-                root.display().to_string(),
-            )))),
-            control_shutdown: Default::default(),
-            runtime: tokio::runtime::Runtime::new().unwrap(),
-        };
+        let root = TempRoot::new("silent-relay");
+        let handle = test_handle(root.path());
         let ptr = || std::ptr::from_ref(&handle).cast_mut();
 
         // Takes every connection and answers none, until it hangs up.
@@ -235,13 +212,13 @@ mod tests {
             .unwrap();
 
         std::thread::scope(|scope| {
-            let checking =
-                scope.spawn(|| reply(unsafe { pb_mapper_get_server_status_detail_json(ptr()) }));
+            let checking = scope
+                .spawn(|| take_reply(unsafe { pb_mapper_get_server_status_detail_json(ptr()) }));
             dials
                 .recv_timeout(Duration::from_secs(5))
                 .expect("the check dials the relay");
             let (read, settings) = mpsc::channel();
-            scope.spawn(move || read.send(reply(unsafe { pb_mapper_get_config_json(ptr()) })));
+            scope.spawn(move || read.send(take_reply(unsafe { pb_mapper_get_config_json(ptr()) })));
             // Well inside the check's own timeout, which is seconds long.
             let config = settings.recv_timeout(Duration::from_secs(1));
             let overlapped = !checking.is_finished();
@@ -261,6 +238,5 @@ mod tests {
 
         let _ = set_process_msg_header_key(None);
         drop(handle);
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

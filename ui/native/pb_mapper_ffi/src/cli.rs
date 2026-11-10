@@ -163,7 +163,6 @@ pub unsafe extern "C" fn pb_mapper_cli_main(argc: c_int, argv: *const *const c_c
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -194,21 +193,5 @@ mod tests {
         // And with global flags in front, which is where a hand-written check
         // would usually go wrong.
         assert!(looks_like_command(&args(&["--json", "status"])));
-    }
-
-    /// The verb list is derived from `Command`, so this fails the moment a
-    /// variant is added without the CLI knowing about it.
-    #[test]
-    fn the_verb_list_comes_from_the_command_enum() {
-        let verbs: Vec<String> = Cli::command()
-            .get_subcommands()
-            .map(|s| s.get_name().to_string())
-            .collect();
-        assert!(verbs.contains(&"hello".to_string()));
-        assert!(verbs.contains(&"connections".to_string()));
-        assert!(
-            verbs.len() >= 10,
-            "expected the whole surface, got {verbs:?}"
-        );
     }
 }

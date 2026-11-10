@@ -559,6 +559,8 @@ mod tests {
     use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
     use pb_mapper_testkit::{Relay, TEST_ADMIN_KEY};
 
+    use crate::error::ErrorCode;
+
     async fn run_over(
         relay: &Relay,
         transport: RelayTransport,
@@ -623,10 +625,7 @@ mod tests {
         let temporary = run(&relay, &credential, json!({ "op": "keys" }))
             .await
             .unwrap_err();
-        assert!(
-            temporary.to_string().contains("administrator"),
-            "{temporary}"
-        );
+        assert_eq!(temporary.code(), ErrorCode::InvalidArgument, "{temporary}");
         let role = run(&relay, &credential, json!({ "op": "credential" }))
             .await
             .unwrap();
@@ -644,7 +643,7 @@ mod tests {
         }
 
         let unknown = admin(json!({ "op": "teleport" })).await.unwrap_err();
-        assert!(unknown.to_string().contains("teleport"), "{unknown}");
+        assert_eq!(unknown.code(), ErrorCode::InvalidArgument, "{unknown}");
 
         // Rotation hands back the key the relay now takes, to be saved; the
         // old one stops working.
@@ -682,7 +681,7 @@ mod tests {
         .await
         .err()
         .unwrap();
-        assert_eq!(error.code(), crate::error::ErrorCode::ServerUnreachable);
+        assert_eq!(error.code(), ErrorCode::ServerUnreachable);
     }
 
     /// Over QUIC the administrator's questions share one connection, which

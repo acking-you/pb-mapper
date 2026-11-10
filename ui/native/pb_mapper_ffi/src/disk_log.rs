@@ -478,44 +478,23 @@ pub(crate) fn shutdown() {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct Directory(PathBuf);
+    use crate::test_support::TempRoot;
 
-    impl Directory {
-        fn new() -> Self {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "pb-runtime-log-{}-{}-{}",
-                std::process::id(),
-                unix_seconds(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn records(&self) -> String {
-            (0..WRITER_SLOTS)
-                .filter_map(|slot| fs::read_dir(self.0.join(format!("runtime-{slot}"))).ok())
-                .flatten()
-                .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
-                .collect()
-        }
-    }
-
-    impl Drop for Directory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
+    /// Every record written into `directory`'s slots.
+    fn slot_records(directory: &Path) -> String {
+        (0..WRITER_SLOTS)
+            .filter_map(|slot| fs::read_dir(directory.join(format!("runtime-{slot}"))).ok())
+            .flatten()
+            .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect()
     }
 
     #[test]
     fn bootstrap_is_bounded_and_shutdown_persists_without_a_ui_callback() {
-        let directory = Directory::new();
+        let directory = TempRoot::new("runtime-log");
         let logger = DiskLog::default();
         let huge = "中文".repeat(RECORD_BYTES);
         for _ in 0..QUEUE_RECORDS + 2 {
@@ -541,31 +520,31 @@ mod tests {
         // intentionally overflowing the asynchronous channel at the same time.
         let logger = DiskLog::default();
         logger.write(b"startup before the app directory\n");
-        logger.configure(&directory.0).unwrap();
-        logger.configure(&directory.0).unwrap();
+        logger.configure(directory.path()).unwrap();
+        logger.configure(directory.path()).unwrap();
         for index in 0..100 {
             logger.write(format!("native event {index} 中文\n").as_bytes());
         }
         logger.shutdown();
         logger.shutdown();
-        let records = directory.records();
+        let records = slot_records(directory.path());
         assert!(records.contains("startup before the app directory"));
         assert_eq!(records.matches("native event").count(), 100);
         // Reinitialization appends and a failed reconfiguration preserves the
         // active sink instead of silently replacing it with no persistence.
-        logger.configure(&directory.0).unwrap();
-        let invalid = directory.0.join("not-a-directory");
+        logger.configure(directory.path()).unwrap();
+        let invalid = directory.path().join("not-a-directory");
         fs::write(&invalid, "file").unwrap();
         assert!(logger.configure(&invalid).is_err());
         logger.write(b"after restart\n");
         logger.shutdown();
-        assert!(directory.records().contains("after restart"));
+        assert!(slot_records(directory.path()).contains("after restart"));
     }
 
     #[test]
     fn retention_expires_idle_shards_and_rotates_with_finite_capacity() {
-        let directory = Directory::new();
-        let mut file = LogFile::open(&directory.0, 80).unwrap();
+        let directory = TempRoot::new("runtime-log");
+        let mut file = LogFile::open(directory.path(), 80).unwrap();
         let now = unix_seconds() / 60 * 60;
         for index in 0..30 {
             file.append_at(
@@ -585,11 +564,11 @@ mod tests {
                 .iter()
                 .all(|entry| entry.metadata().unwrap().len() <= 80)
         );
-        let kept = directory.records();
+        let kept = slot_records(directory.path());
         assert!(kept.contains("record 29"));
         assert!(!kept.contains("record 00"));
         // A different live writer claims a different slot.
-        let other = LogFile::open(&directory.0, 80).unwrap();
+        let other = LogFile::open(directory.path(), 80).unwrap();
         assert_ne!(file.directory, other.directory);
         // An idle maintenance tick closes the old file and removes it by time,
         // even when no replacement record (and no new file) is created.
@@ -603,7 +582,7 @@ mod tests {
         fs::write(&recent, b"recent").unwrap();
         let slot_directory = file.directory.clone();
         drop(file);
-        cleanup_inactive_slots(&directory.0, now + RETENTION_SECONDS + 1).unwrap();
+        cleanup_inactive_slots(directory.path(), now + RETENTION_SECONDS + 1).unwrap();
         assert!(!old.exists());
         assert!(recent.exists());
         // Capacity pressure can discard younger archives, while unrelated files
@@ -618,8 +597,8 @@ mod tests {
 
         // Exercise the real nonblocking worker command too: an empty write
         // would be swallowed by std::io::Write::write_all before reaching us.
-        let idle_directory = Directory::new();
-        let mut idle = LogFile::open(&idle_directory.0, 80).unwrap();
+        let idle_directory = TempRoot::new("runtime-log");
+        let mut idle = LogFile::open(idle_directory.path(), 80).unwrap();
         idle.append_at(b"expired idle record\n", now - RETENTION_SECONDS - 60)
             .unwrap();
         idle.flush().unwrap();

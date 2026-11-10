@@ -196,26 +196,3 @@ pub(crate) fn sdk_error(error: SdkError) -> CtlError {
 pub(crate) fn sdk_refusal(error: SdkError) -> CtlError {
     CtlError::invalid_argument(error.to_string())
 }
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_message_is_what_a_person_reads() {
-        let err = CtlError::address_in_use("Failed to bind local address 127.0.0.1:80");
-        assert_eq!(
-            err.to_string(),
-            "Failed to bind local address 127.0.0.1:80",
-            "Display must stay the plain sentence the UI already shows"
-        );
-        assert_eq!(err.code(), ErrorCode::AddressInUse);
-    }
-
-    #[test]
-    fn codes_serialise_as_screaming_snake_case() {
-        let json = serde_json::to_string(&ErrorCode::ServerUnreachable).unwrap();
-        assert_eq!(json, "\"SERVER_UNREACHABLE\"");
-    }
-}

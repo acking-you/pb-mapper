@@ -1,10 +1,9 @@
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pb_mapper_client::sdk::{
     AddressFamily, Client, DirectStage, DirectTransport, LanEvidence, LanTransport, LinkKind,
     LinkVia, PortMapping, RegisterOptions, RegisterRequest, RelayTransport, StunOutcome, Transport,
+    TunnelStatus,
 };
 use pb_mapper_core::checksum::{parse_credential, set_process_msg_header_key};
 use pb_mapper_core::config::ResolvedAddrs;
@@ -19,6 +18,7 @@ use super::{
     force_refresh_server_status, get_server_status_detail, register_service,
 };
 use crate::error::ErrorCode;
+use crate::test_support::TempRoot;
 
 type ProcessCredentialGuard = tokio::sync::MutexGuard<'static, ()>;
 
@@ -30,17 +30,32 @@ type ProcessCredentialGuard = tokio::sync::MutexGuard<'static, ()>;
 /// process credential. That is process-global, so the returned guard is what
 /// keeps one test's state from wiping the credential another test just set.
 /// Hold it for the whole test, not just the construction.
-async fn temp_state(name: &str) -> (ProcessCredentialGuard, Arc<Mutex<PbMapperState>>, PathBuf) {
+async fn temp_state(name: &str) -> (ProcessCredentialGuard, Arc<Mutex<PbMapperState>>, TempRoot) {
     let guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let root = std::env::temp_dir().join(format!(
-        "pb-mapper-ffi-test-{name}-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    ));
-    let state = PbMapperState::new(Some(root.to_string_lossy().into_owned()));
+    let root = TempRoot::new(name);
+    let state = PbMapperState::new(Some(root.path().to_string_lossy().into_owned()));
     (guard, Arc::new(Mutex::new(state)), root)
+}
+
+/// Waits until the connection under each of `keys` is connected, which the
+/// list shows as `running`.
+async fn until_connected(state: &Mutex<PbMapperState>, keys: &[&str]) {
+    let statuses: Vec<_> = {
+        let state = state.lock().await;
+        keys.iter()
+            .map(|key| state.running_tunnel(false, key).unwrap().subscribe())
+            .collect()
+    };
+    tokio::time::timeout(pb_mapper_testkit::READY_TIMEOUT, async {
+        for mut status in statuses {
+            status
+                .wait_for(|status| matches!(status, TunnelStatus::Connected))
+                .await
+                .expect("the connection is still running");
+        }
+    })
+    .await
+    .expect("the connections come up");
 }
 
 /// The window reads a LAN link's kind, address and figures, and hears
@@ -122,7 +137,7 @@ fn a_lan_link_reaches_the_window_and_changes_its_shape() {
 
 #[tokio::test]
 async fn ui_server_uses_its_writable_config_directory_and_reports_readiness() {
-    let (_process_credential_guard, state, root) = temp_state("server-auth-path").await;
+    let (_process_credential_guard, state, _root) = temp_state("server-auth-path").await;
     let quic_port = std::net::UdpSocket::bind("0.0.0.0:0")
         .and_then(|socket| socket.local_addr())
         .unwrap()
@@ -154,7 +169,6 @@ async fn ui_server_uses_its_writable_config_directory_and_reports_readiness() {
         .stop_server()
         .await
         .expect("UI server should stop cleanly");
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// After a rotation only the rotated relay's tunnels on the retired key
@@ -165,7 +179,7 @@ async fn ui_server_uses_its_writable_config_directory_and_reports_readiness() {
 /// restarts the same ones, and LAN-first only those that may go direct.
 #[tokio::test]
 async fn a_change_restarts_only_the_relays_tunnels_on_its_key() {
-    let (_process_credential_guard, state, root) = temp_state("rotation-tunnels").await;
+    let (_process_credential_guard, state, _root) = temp_state("rotation-tunnels").await;
     let retired = pb_mapper_core::checksum::parse_credential(&"a".repeat(32)).unwrap();
     let other = pb_mapper_core::checksum::parse_credential(&"b".repeat(32)).unwrap();
     let relay: std::net::SocketAddr = "127.0.0.1:7666".parse().unwrap();
@@ -241,7 +255,6 @@ async fn a_change_restarts_only_the_relays_tunnels_on_its_key() {
     let lan_off = state.on_other_lan_first("relay.example:7666", Some(&endpoint), retired, false);
     assert!(lan_off.shares.is_empty());
     drop(state);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Each session of a tunnel goes direct when both ends allow it, and the
@@ -251,7 +264,7 @@ async fn a_change_restarts_only_the_relays_tunnels_on_its_key() {
 async fn the_list_says_which_path_each_tunnel_takes() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let (_process_credential_guard, state, root) = temp_state("paths").await;
+    let (_process_credential_guard, state, _root) = temp_state("paths").await;
     let relay = pb_mapper_testkit::Relay::start_with_direct(
         "ffi-paths",
         Some(DirectServerConfig {
@@ -306,18 +319,7 @@ async fn the_list_says_which_path_each_tunnel_takes() {
         .unwrap();
         ports.push(port);
     }
-    let running = || async {
-        let state = state.lock().await;
-        let clients = state.get_client_configs();
-        clients.len() == 2 && clients.iter().all(|client| client.status == "running")
-    };
-    tokio::time::timeout(pb_mapper_testkit::READY_TIMEOUT, async {
-        while !running().await {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("both connections come up");
+    until_connected(&state, &["direct", "relayed"]).await;
 
     // One session through each, held open while the list is read.
     let mut sessions = Vec::new();
@@ -390,7 +392,6 @@ async fn the_list_says_which_path_each_tunnel_takes() {
     drop(state);
     drop(relay);
     let _ = set_process_msg_header_key(None);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// With QUIC chosen, tunnels and the window's relay check go over it and
@@ -400,7 +401,7 @@ async fn the_list_says_which_path_each_tunnel_takes() {
 async fn tunnels_and_checks_follow_the_chosen_carrier() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let (_process_credential_guard, state, root) = temp_state("carrier").await;
+    let (_process_credential_guard, state, _root) = temp_state("carrier").await;
     let relay = pb_mapper_testkit::Relay::start_with_quic("ffi-carrier").await;
     set_process_msg_header_key(Some(pb_mapper_testkit::TEST_ADMIN_KEY)).unwrap();
     {
@@ -449,17 +450,7 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
     )
     .await
     .unwrap();
-    tokio::time::timeout(pb_mapper_testkit::READY_TIMEOUT, async {
-        loop {
-            let clients = state.lock().await.get_client_configs();
-            if clients.iter().all(|client| client.status == "running") {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("the connection comes up over QUIC");
+    until_connected(&state, &["web"]).await;
     let mut socket = tokio::net::TcpStream::connect(port).await.unwrap();
     socket.write_all(b"quic").await.unwrap();
     let mut echoed = [0; 4];
@@ -533,7 +524,6 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
     drop(socket);
     drop((relay, tcp_only));
     let _ = set_process_msg_header_key(None);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A relay that offers QUIC on a UDP port nothing gets through to — one
@@ -541,7 +531,7 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
 /// is UDP, and which port, rather than that the relay is silent.
 #[tokio::test]
 async fn a_relay_whose_quic_port_is_blocked_is_named_as_such() {
-    let (_process_credential_guard, state, root) = temp_state("quic-blocked").await;
+    let (_process_credential_guard, state, _root) = temp_state("quic-blocked").await;
     // Holds the port and reads nothing: every QUIC packet is dropped.
     let blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let blocked = blackhole.local_addr().unwrap().port();
@@ -571,7 +561,6 @@ async fn a_relay_whose_quic_port_is_blocked_is_named_as_such() {
 
     drop((relay, blackhole));
     let _ = set_process_msg_header_key(None);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The claim is what stands in for the lock that registration no longer
@@ -581,7 +570,7 @@ async fn a_relay_whose_quic_port_is_blocked_is_named_as_such() {
 /// caller was told had started.
 #[tokio::test]
 async fn a_second_registration_of_the_same_key_is_refused() {
-    let (_process_credential_guard, state, root) = temp_state("claim").await;
+    let (_process_credential_guard, state, _root) = temp_state("claim").await;
 
     let held = {
         let guard = state.lock().await;
@@ -619,7 +608,6 @@ async fn a_second_registration_of_the_same_key_is_refused() {
     }
 
     drop(held);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The claim has to survive every way a setup can end, including the ones
@@ -627,7 +615,7 @@ async fn a_second_registration_of_the_same_key_is_refused() {
 /// path can forget it — this pins that.
 #[tokio::test]
 async fn a_failed_registration_releases_its_claim() {
-    let (_process_credential_guard, state, root) = temp_state("release").await;
+    let (_process_credential_guard, state, _root) = temp_state("release").await;
     struct RestoreProcessKey;
     impl Drop for RestoreProcessKey {
         fn drop(&mut self) {
@@ -679,8 +667,6 @@ async fn a_failed_registration_releases_its_claim() {
         ErrorCode::AlreadyInProgress,
         "the claim leaked after a failed registration: {second}"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Registering and connecting share a key space in the UI but not a claim:
@@ -688,7 +674,7 @@ async fn a_failed_registration_releases_its_claim() {
 /// must not block each other.
 #[tokio::test]
 async fn registering_and_connecting_claim_separately() {
-    let (_process_credential_guard, state, root) = temp_state("separate").await;
+    let (_process_credential_guard, state, _root) = temp_state("separate").await;
 
     let guard = state.lock().await;
     let _registering = guard
@@ -699,7 +685,6 @@ async fn registering_and_connecting_claim_separately() {
         .expect("connecting the same key must not be blocked by registering it");
 
     drop(guard);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A config.json saved before LAN-first could be switched off, or the
@@ -735,21 +720,15 @@ fn a_config_saved_before_the_switch_tries_the_lan_first() {
 async fn a_state_reads_nothing_until_its_directory_arrives() {
     let _guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
     set_process_msg_header_key(None).unwrap();
-    let root = std::env::temp_dir().join(format!(
-        "pb-mapper-ffi-test-unloaded-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    ));
-    std::fs::create_dir_all(root.join("pb-mapper-ui")).unwrap();
+    let root = TempRoot::new("unloaded");
+    std::fs::create_dir_all(root.path().join("pb-mapper-ui")).unwrap();
     let saved = AppConfig {
         server_address: "relay.example:7666".into(),
         msg_header_key: pb_mapper_testkit::TEST_ADMIN_KEY.into(),
         ..AppConfig::default()
     };
     std::fs::write(
-        root.join("pb-mapper-ui").join("config.json"),
+        root.path().join("pb-mapper-ui").join("config.json"),
         serde_json::to_vec(&saved).unwrap(),
     )
     .unwrap();
@@ -759,11 +738,10 @@ async fn a_state_reads_nothing_until_its_directory_arrives() {
     assert!(!pb_mapper_core::checksum::process_credential_configured());
 
     state
-        .set_app_directory_path(Some(root.to_string_lossy().into_owned()))
+        .set_app_directory_path(Some(root.path().to_string_lossy().into_owned()))
         .unwrap();
     assert!(state.config == saved);
     assert!(pb_mapper_core::checksum::process_credential_configured());
 
     set_process_msg_header_key(None).unwrap();
-    let _ = std::fs::remove_dir_all(&root);
 }

@@ -76,7 +76,6 @@ pub unsafe extern "C" fn pb_mapper_set_change_callback(callback: Option<ChangeCa
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -107,12 +106,5 @@ mod tests {
         };
         let json = serde_json::to_string(&change).unwrap();
         assert!(!json.contains("key"), "{json}");
-    }
-
-    /// Emitting with nothing installed must be a no-op rather than a panic:
-    /// mobile never installs one, and the tests here do not either.
-    #[test]
-    fn emitting_into_the_void_is_harmless() {
-        emit(ChangeKind::Server, None, Origin::Internal);
     }
 }

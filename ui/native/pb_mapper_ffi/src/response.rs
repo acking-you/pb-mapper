@@ -118,29 +118,22 @@ pub fn port_mapping_from_c(raw: std::ffi::c_int) -> Result<PortMapping, CtlError
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::ffi::CString;
-
-    fn read_and_free(ptr: *mut c_char) -> serde_json::Value {
-        assert!(!ptr.is_null(), "a response must serialise");
-        let owned = unsafe { CString::from_raw(ptr) };
-        serde_json::from_slice(owned.as_bytes()).expect("responses are JSON")
-    }
+    use crate::test_support::take_reply;
 
     /// The contract the CLI will read: a failure always says what kind it is,
     /// so a script never has to match on the sentence.
     #[test]
     fn every_failure_carries_a_code() {
-        let failed = read_and_free(err_ctl(&CtlError::not_found("no such service")));
+        let failed = take_reply(err_ctl(&CtlError::not_found("no such service")));
         assert_eq!(failed["success"], false);
         assert_eq!(failed["message"], "no such service");
         assert_eq!(failed["code"], "NOT_FOUND");
 
         // Including the ones raised at the boundary, before any state is
         // touched: a call without a handle never runs.
-        let null_handle = read_and_free(respond(None, |_| panic!("ran without a handle")));
+        let null_handle = take_reply(respond(None, |_| panic!("ran without a handle")));
         assert_eq!(null_handle["code"], "INVALID_ARGUMENT");
 
         // SAFETY: null is allowed.
@@ -152,7 +145,7 @@ mod tests {
     /// Success responses have no code to report, and must not grow one.
     #[test]
     fn success_responses_stay_as_they_were() {
-        let ok = read_and_free(ok_message("service registration started"));
+        let ok = take_reply(ok_message("service registration started"));
         assert_eq!(ok["success"], true);
         assert_eq!(ok["message"], "service registration started");
         assert!(ok.get("code").is_none(), "success carries no error code");

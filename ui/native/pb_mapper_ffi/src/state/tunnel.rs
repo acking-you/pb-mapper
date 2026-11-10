@@ -181,7 +181,7 @@ impl TunnelHandle {
         }
     }
 
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<TunnelStatus> {
+    pub(super) fn subscribe(&self) -> tokio::sync::watch::Receiver<TunnelStatus> {
         match self {
             Self::Share(handle) => handle.subscribe(),
             Self::Connect(handle) => handle.subscribe(),

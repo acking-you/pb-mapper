@@ -21,6 +21,8 @@ mod response;
 mod server;
 mod service;
 mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod tunnel_events;
 mod update;
 
