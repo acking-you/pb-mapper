@@ -328,7 +328,7 @@ fn validate_admin_authority(
             false,
         )
     })?;
-    if presented.cancellation.is_cancelled() {
+    if presented.is_cancelled() {
         return Err(AuthFailure::new(
             "administrator_key_rotated",
             "administrator credential lease has been cancelled",

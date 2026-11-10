@@ -993,7 +993,7 @@ async fn ensure_active_keeps_expiry_after_the_lease_is_cancelled() {
         .unwrap();
     let context = authenticate_for_test(&runtime, issued.metadata.key_id).unwrap();
     let lease = context.ensure_active().unwrap();
-    lease.expire_now();
+    lease.set_expires_at(0);
     assert_eq!(
         context.ensure_active().unwrap_err().code,
         "temporary_key_expired"

@@ -311,8 +311,8 @@ pub(super) fn actor_renew(
         }
         slot.expires_at = expires_at;
         match slot.lease.upgrade() {
-            Some(lease) if !lease.cancellation_token().is_cancelled() => {
-                lease.expires_at.store(expires_at, Ordering::Release);
+            Some(lease) if !lease.is_cancelled() => {
+                lease.set_expires_at(expires_at);
                 drop(slots);
                 leases.renew(key_id, expires_at);
             }

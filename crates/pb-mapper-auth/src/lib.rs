@@ -167,10 +167,28 @@ impl fmt::Display for AuthFailure {
 
 impl std::error::Error for AuthFailure {}
 
-const LEASE_CANCEL_NONE: u8 = 0;
-const LEASE_CANCEL_EXPIRED: u8 = 1;
-const LEASE_CANCEL_REVOKED: u8 = 2;
-const LEASE_CANCEL_ROTATED: u8 = 3;
+/// Why a lease was cancelled, so a dead credential can say why. Stored in an
+/// `AtomicU8`; the first reason recorded wins.
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum CancelReason {
+    /// Not cancelled, or cancelled without a recorded reason.
+    None = 0,
+    Expired = 1,
+    Revoked = 2,
+    Rotated = 3,
+}
+
+impl CancelReason {
+    fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::Expired,
+            2 => Self::Revoked,
+            3 => Self::Rotated,
+            _ => Self::None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct AuthLease {
@@ -178,6 +196,7 @@ pub struct AuthLease {
     namespace: u64,
     expires_at: AtomicU64,
     cancellation: CancellationToken,
+    /// A [`CancelReason`].
     cancel_reason: AtomicU8,
 }
 
@@ -188,7 +207,7 @@ impl AuthLease {
             namespace: key_id.namespace(issued_into),
             expires_at: AtomicU64::new(expires_at),
             cancellation: CancellationToken::new(),
-            cancel_reason: AtomicU8::new(LEASE_CANCEL_NONE),
+            cancel_reason: AtomicU8::new(CancelReason::None as u8),
         }
     }
 
@@ -204,31 +223,39 @@ impl AuthLease {
         self.cancellation.clone()
     }
 
-    fn record_cancel(&self, reason: u8) {
+    fn record_cancel(&self, reason: CancelReason) {
         let _ = self.cancel_reason.compare_exchange(
-            LEASE_CANCEL_NONE,
-            reason,
+            CancelReason::None as u8,
+            reason as u8,
             Ordering::AcqRel,
             Ordering::Acquire,
         );
         self.cancellation.cancel();
     }
 
+    fn cancel_reason(&self) -> CancelReason {
+        CancelReason::from_u8(self.cancel_reason.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    /// Moves the deadline `ensure_active` checks, for a renewal.
+    pub(crate) fn set_expires_at(&self, expires_at: u64) {
+        self.expires_at.store(expires_at, Ordering::Release);
+    }
+
     pub(crate) fn cancel_expired(&self) {
-        self.record_cancel(LEASE_CANCEL_EXPIRED);
+        self.record_cancel(CancelReason::Expired);
     }
 
     pub(crate) fn cancel_revoked(&self) {
-        self.record_cancel(LEASE_CANCEL_REVOKED);
+        self.record_cancel(CancelReason::Revoked);
     }
 
     pub(crate) fn cancel_rotated(&self) {
-        self.record_cancel(LEASE_CANCEL_ROTATED);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn expire_now(&self) {
-        self.expires_at.store(0, Ordering::Release);
+        self.record_cancel(CancelReason::Rotated);
     }
 }
 
@@ -262,7 +289,7 @@ impl AuthContext {
                 false,
             )
         })?;
-        if lease.cancellation.is_cancelled() {
+        if lease.is_cancelled() {
             return Err(cancelled_lease_failure(self.is_admin, &lease));
         }
         if !self.is_admin && lease.expires_at() <= unix_seconds() {
@@ -312,19 +339,19 @@ fn cancelled_lease_failure(is_admin: bool, lease: &AuthLease) -> AuthFailure {
             false,
         );
     }
-    match lease.cancel_reason.load(Ordering::Acquire) {
-        LEASE_CANCEL_EXPIRED => {
+    match lease.cancel_reason() {
+        CancelReason::Expired => {
             AuthFailure::new("temporary_key_expired", "temporary key has expired", false)
         }
-        LEASE_CANCEL_ROTATED => AuthFailure::new(
+        CancelReason::Rotated => AuthFailure::new(
             "temporary_key_rotated",
             "temporary credential was invalidated by administrator root rotation or auth-state reset",
             false,
         ),
-        LEASE_CANCEL_REVOKED => {
+        CancelReason::Revoked => {
             AuthFailure::new("temporary_key_revoked", "temporary key was revoked", false)
         }
-        _ => AuthFailure::new(
+        CancelReason::None => AuthFailure::new(
             "temporary_key_inactive",
             "credential lease has been cancelled",
             false,
