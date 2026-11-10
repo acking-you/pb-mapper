@@ -667,144 +667,15 @@ mod tests {
                 .is_err()
         );
     }
+}
 
-    #[cfg(feature = "p2p")]
-    #[tokio::test]
-    async fn relay_recovery_preserves_direct_cooldown_until_network_changes() {
-        use crate::sdk::{Client, ConnectRequest, RegisterOptions, RegisterRequest, Transport};
-        use pb_mapper_auth::{AuthConfig, AuthRuntime};
-        use pb_mapper_core::checksum::Credential;
-        use tokio::{
-            io::{AsyncReadExt, AsyncWriteExt},
-            net::{TcpListener, TcpStream},
-        };
-        use tokio_util::sync::CancellationToken;
-
-        tokio::time::timeout(Duration::from_secs(8), async {
-            let credential = Credential::Admin(pb_mapper_core::checksum::gen_random_key());
-            let state_dir = std::env::temp_dir().join(format!(
-                "pb-cooldown-{}-{}",
-                std::process::id(),
-                rand::random::<u64>()
-            ));
-            let auth = AuthRuntime::start(
-                *credential.key(),
-                AuthConfig {
-                    state_dir: state_dir.clone(),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let relay_addr = listener.local_addr().unwrap();
-            let relay = AbortOnDropHandle::new(tokio::spawn(
-                pb_mapper_server::run_server_on_listener_with_direct(
-                    listener,
-                    CancellationToken::new(),
-                    None,
-                    false,
-                    auth,
-                    None,
-                ),
-            ));
-            let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let backend_addr = backend.local_addr().unwrap();
-            let echo = AbortOnDropHandle::new(tokio::spawn(async move {
-                loop {
-                    let (mut stream, _) = backend.accept().await.unwrap();
-                    let mut byte = [0; 1];
-                    stream.read_exact(&mut byte).await.unwrap();
-                    stream.write_all(&byte).await.unwrap();
-                }
-            }));
-            let mut client =
-                Client::from_credential(relay_addr.to_string(), credential, false, None);
-            let mut endpoint = RelayEndpoint::fixed(relay_addr.into());
-            Arc::get_mut(&mut endpoint.0).unwrap().network = NetworkHints::isolated();
-            Arc::get_mut(&mut client.inner).unwrap().endpoint = endpoint;
-            let registration = client
-                .register_with_options(
-                    RegisterRequest {
-                        key: "cooldown".into(),
-                        local_addr: backend_addr.to_string(),
-                        transport: Transport::Tcp,
-                        codec: true,
-                        force_namespace: false,
-                    },
-                    RegisterOptions {
-                        allow_direct: false,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            registration
-                .wait_ready_timeout(Duration::from_secs(3))
-                .await
-                .unwrap();
-            // The SDK owns its listener and cannot accept a bound socket.
-            let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let local = reservation.local_addr().unwrap();
-            drop(reservation);
-            let tunnel = client
-                .connect(ConnectRequest {
-                    key: "cooldown".into(),
-                    local_addr: local.to_string(),
-                    transport: Transport::Tcp,
-                })
-                .await
-                .unwrap();
-            tunnel
-                .wait_ready_timeout(Duration::from_secs(3))
-                .await
-                .unwrap();
-            let exchange = async || {
-                let mut stream = TcpStream::connect(local).await.unwrap();
-                stream.write_all(b"x").await.unwrap();
-                let mut response = [0; 1];
-                stream.read_exact(&mut response).await.unwrap();
-                assert_eq!(&response, b"x");
-            };
-            exchange().await;
-            assert_eq!(tunnel.diagnostics().direct.unwrap().fallbacks, 1);
-            exchange().await;
-            let before = tunnel.diagnostics();
-            assert_eq!(before.direct.unwrap().fallbacks, 1);
-
-            // A shared endpoint's recovery must wake the worker's health probe,
-            // without claiming that this tunnel's direct path became reachable.
-            let endpoint = &client.inner.endpoint;
-            endpoint.transport_failed(None);
-            endpoint.protocol_succeeded();
-            while tunnel.diagnostics().attempts == before.attempts {
-                tokio::task::yield_now().await;
-            }
-            exchange().await;
-            let recovered = tunnel.diagnostics();
-            assert_eq!(recovered.network_generation, before.network_generation);
-            assert_eq!(recovered.direct.unwrap().fallbacks, 1);
-
-            endpoint.notify_network_change();
-            while !tunnel.diagnostics().events.iter().any(|event| {
-                matches!(
-                    event.kind,
-                    crate::diagnostics::TunnelEventKind::NetworkChanged
-                )
-            }) {
-                tokio::task::yield_now().await;
-            }
-            exchange().await;
-            let changed = tunnel.diagnostics();
-            assert_ne!(changed.network_generation, before.network_generation);
-            assert_eq!(changed.direct.unwrap().fallbacks, 2);
-            tunnel.stop().await.unwrap();
-            registration.stop().await.unwrap();
-            drop(echo);
-            drop(relay);
-            let _ = std::fs::remove_dir_all(state_dir);
-        })
-        .await
-        .unwrap();
+#[cfg(all(test, feature = "p2p"))]
+impl RelayEndpoint {
+    /// [`Self::fixed`], with network hints of its own rather than the
+    /// process's, so that the network changes a test makes reach no other.
+    pub(crate) fn isolated(addresses: ResolvedAddrs) -> Self {
+        let mut endpoint = Self::fixed(addresses);
+        Arc::get_mut(&mut endpoint.0).unwrap().network = NetworkHints::isolated();
+        endpoint
     }
 }
