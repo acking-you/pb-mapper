@@ -177,7 +177,7 @@ pub enum DecoderState {
     Failed,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ViewerStats {
     /// `direct`, `relay`, or empty before the first sample.
     pub path: String,
@@ -233,49 +233,6 @@ pub struct ViewerStats {
     /// The direct link under `path`, sampled once a second; `None` on the
     /// relay.
     pub link: Option<ViewerLink>,
-}
-impl Default for ViewerStats {
-    fn default() -> Self {
-        Self {
-            path: String::new(),
-            relay_transport: None,
-            rtt_ms: None,
-            base_rtt_ms: None,
-            queue_delay_ms: None,
-            picture_latency_ms: None,
-            host_ms: None,
-            viewer_ms: None,
-            presented_fps: 0.0,
-            received_fps: 0.0,
-            capture_fps: 0.0,
-            pace_fps: 0,
-            target_fps: 0,
-            fps_cap: 0,
-            preset: QualityPreset::default(),
-            max_fps: 0,
-            skipped_per_s: 0.0,
-            encoder_dwell_ms: None,
-            sent_bitrate: 0,
-            ack_queue_ms: None,
-            bitrate: 0,
-            encoder_bitrate: 0,
-            received_bitrate: 0,
-            speed_rx_bps: 0,
-            speed_tx_bps: 0,
-            width: 0,
-            height: 0,
-            codec: VideoCodec::default(),
-            adaptation: Adaptation::Startup,
-            rate_model: RateModel::Nominal,
-            keyframes: 0,
-            keyframes_requested: 0,
-            backlog_drops: 0,
-            dropped_frames: 0,
-            present_interval: IntervalStats::default(),
-            degraded: false,
-            link: None,
-        }
-    }
 }
 
 /// Intervals between accepted presentations. The percentiles and the maximum

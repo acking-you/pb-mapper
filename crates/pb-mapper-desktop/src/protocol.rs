@@ -285,9 +285,10 @@ pub struct VideoSize {
     pub width: u32,
     pub height: u32,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Adaptation {
+    #[default]
     Startup,
     Steady,
     Raising,
@@ -296,9 +297,10 @@ pub enum Adaptation {
     Unresponsive,
     Paused,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RateModel {
+    #[default]
     Nominal,
     Timestamp,
 }
