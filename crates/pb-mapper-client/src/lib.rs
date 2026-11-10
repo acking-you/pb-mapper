@@ -28,5 +28,7 @@ mod direct;
 
 mod relay;
 
-#[cfg(all(test, feature = "p2p"))]
+#[cfg(test)]
+mod status_text_tests;
+#[cfg(test)]
 mod test_relay;
