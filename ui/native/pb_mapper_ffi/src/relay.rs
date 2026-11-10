@@ -376,13 +376,7 @@ async fn rotate(relay: &Target<'_>, old: Credential, admin: &Admin) -> Result<Ou
             .await
         {
             Ok(Ok(key)) => return Ok(rotated(key)),
-            // Refused before the request left this computer: nothing changed.
-            Ok(Err(
-                error @ (SdkError::NotAdministrator
-                | SdkError::InvalidConfig { .. }
-                | SdkError::Address { .. }
-                | SdkError::Connect { .. }),
-            )) => return Err(sdk_error(error)),
+            Ok(Err(error)) if never_sent(&error) => return Err(sdk_error(error)),
             Ok(Err(error)) => error.to_string(),
             Err(_) => format!(
                 "{server} did not answer within {} seconds",
@@ -399,6 +393,27 @@ async fn rotate(relay: &Target<'_>, old: Credential, admin: &Admin) -> Result<Ou
         )));
     }
     Ok(json!({ "adminKey": candidate, "confirmed": false, "reason": reason }).into())
+}
+
+/// Whether `error` refused a rotation before the request left this computer,
+/// so the relay cannot have changed its key.
+fn never_sent(error: &SdkError) -> bool {
+    match error {
+        SdkError::NotAdministrator
+        | SdkError::InvalidConfig { .. }
+        | SdkError::Address { .. }
+        | SdkError::Connect { .. } => true,
+        SdkError::Remote { .. }
+        | SdkError::Protocol { .. }
+        | SdkError::ReadyTimeout { .. }
+        | SdkError::TimedOut { .. }
+        | SdkError::TunnelFailed { .. }
+        | SdkError::Stopped
+        | SdkError::Status { .. }
+        | SdkError::Io { .. }
+        | SdkError::AuthFile { .. }
+        | SdkError::RootRotationUncertain { .. } => false,
+    }
 }
 
 fn rotated(key: String) -> Outcome {

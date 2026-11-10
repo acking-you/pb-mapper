@@ -181,12 +181,19 @@ pub(crate) fn sdk_error(error: SdkError) -> CtlError {
         SdkError::Remote { code, message, .. } => {
             CtlError::protocol(format!("The relay refused: {message} ({code})"))
         }
-        other => CtlError::protocol(other.to_string()),
+        SdkError::Protocol { .. }
+        | SdkError::ReadyTimeout { .. }
+        | SdkError::TunnelFailed { .. }
+        | SdkError::Stopped
+        | SdkError::Status { .. }
+        | SdkError::Io { .. }
+        | SdkError::AuthFile { .. }
+        | SdkError::RootRotationUncertain { .. } => CtlError::protocol(error.to_string()),
     }
 }
 
 /// What the SDK said when it refused a tunnel before starting it.
-pub(crate) fn sdk_refusal(error: pb_mapper_client::sdk::Error) -> CtlError {
+pub(crate) fn sdk_refusal(error: SdkError) -> CtlError {
     CtlError::invalid_argument(error.to_string())
 }
 

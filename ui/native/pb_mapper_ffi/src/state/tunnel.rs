@@ -9,9 +9,9 @@ use tokio::sync::Mutex;
 use uni_stream::stream::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
 
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, Connection, PathPolicy, PortMapping, RecoveryFailure,
-    RegisterOptions, RegisterRequest, Registration, RelayTransport, Transport, TunnelDiagnostics,
-    TunnelStatus,
+    Client, ConnectOptions, ConnectRequest, Connection, Error as SdkError, PathPolicy, PortMapping,
+    RecoveryFailure, RegisterOptions, RegisterRequest, Registration, RelayTransport, Transport,
+    TunnelDiagnostics, TunnelStatus,
 };
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{ResolvedAddrs, resolve_addrs_async, resolve_pb_mapper_server_async};
@@ -30,24 +30,35 @@ use crate::events;
 /// One authenticated question over TCP, the one QUIC discovery asks. A bare
 /// connect would prove less, and the relay logs each as a failed login.
 async fn preflight(client: &Client) -> Result<(), CtlError> {
-    use pb_mapper_client::sdk::Error as SdkError;
     match (client.relay_transport(), client.relay_quic_port().await) {
-        (
-            _,
-            Err(
-                error @ (SdkError::Connect { .. }
-                | SdkError::Address { .. }
-                | SdkError::Remote {
-                    retryable: false, ..
-                }),
-            ),
-        ) => Err(sdk_error(error)),
+        (_, Err(error)) if refuses_for_now(&error) => Err(sdk_error(error)),
         (_, Err(error)) => {
             tracing::debug!("Starting a tunnel the relay could not be asked about: {error}");
             Ok(())
         }
         (RelayTransport::Quic, Ok(None)) => Err(no_quic()),
-        _ => Ok(()),
+        (RelayTransport::Tcp, Ok(_)) | (RelayTransport::Quic, Ok(Some(_))) => Ok(()),
+    }
+}
+
+/// Whether `error`, the relay's answer to [`preflight`], refuses a tunnel
+/// now: the relay cannot be reached, its address does not resolve, or it
+/// refuses this credential for good. Everything else may clear by itself.
+fn refuses_for_now(error: &SdkError) -> bool {
+    match error {
+        SdkError::Connect { .. } | SdkError::Address { .. } => true,
+        SdkError::Remote { retryable, .. } => !retryable,
+        SdkError::InvalidConfig { .. }
+        | SdkError::NotAdministrator
+        | SdkError::Protocol { .. }
+        | SdkError::ReadyTimeout { .. }
+        | SdkError::TimedOut { .. }
+        | SdkError::TunnelFailed { .. }
+        | SdkError::Stopped
+        | SdkError::Status { .. }
+        | SdkError::Io { .. }
+        | SdkError::AuthFile { .. }
+        | SdkError::RootRotationUncertain { .. } => false,
     }
 }
 
