@@ -5,7 +5,7 @@ use crate::{
     VideoCodec,
     idr::IdrReason,
     outgoing::OUTGOING_MAX_AGE,
-    protocol::{HostMessage, NoticeCode, StateReason, StateRecord, StopReason},
+    protocol::{HostMessage, NoticeCode, StateReason, StateRecord, StatsRecord, StopReason},
     qos::QOS_TICK,
     shared::{CursorReport, EngineState},
     wire::{self, MAX_PAYLOAD},
@@ -411,7 +411,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         self.stats_since = now;
         self.counters.interval_bytes = 0;
         let ms = |duration: Duration| u32::try_from(duration.as_millis()).unwrap_or(u32::MAX);
-        let stats = HostMessage::Stats {
+        let stats = HostMessage::Stats(StatsRecord {
             capture_fps: engine.capture_fps,
             pace_fps: qos.pace_fps,
             target_fps: qos.fps,
@@ -435,7 +435,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             adaptation: qos.adaptation,
             rate_model: qos.rate_model,
             gop: engine.gop,
-        };
+        });
         tracing::debug!(
             target: "pb_mapper_desktop::feedback",
             event = "desktop_feedback_interval",

@@ -1,10 +1,10 @@
 //! Desktop protocol v2 (ALPN `pb-mapper/desktop/2`): one JSON record per
 //! message; only `HostMessage::Video` is followed by one payload record
 //! (`wire.rs`). Every message and struct rejects unknown fields, and every enum
-//! variant is a struct variant or wraps one strict struct (`State`), because
-//! serde ignores extra fields on an internally tagged unit variant. A v2.x
-//! peer sends a new message, field or value only after the other side listed
-//! the matching capability.
+//! variant is a struct variant or wraps one strict struct (`State`, `Stats`),
+//! because serde ignores extra fields on an internally tagged unit variant. A
+//! v2.x peer sends a new message, field or value only after the other side
+//! listed the matching capability.
 use crate::{
     Display, InputEvent, KeyframeReason, QualityPreset, VideoCodec, VideoLimits, modes::ModeList,
 };
@@ -175,38 +175,7 @@ pub(crate) enum HostMessage {
         nonce: u64,
     },
     /// Every `STATS_INTERVAL`; also the host-to-viewer liveness.
-    Stats {
-        capture_fps: f32,
-        pace_fps: u32,
-        target_fps: u32,
-        /// 0 = no viewer cap.
-        fps_cap: u32,
-        /// Expected: bits per frame × pace.
-        bitrate: u32,
-        encoder_bitrate: u32,
-        sent_bitrate: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rtt_ms: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        base_rtt_ms: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        queue_delay_ms: Option<u32>,
-        ack_queue_ms: u32,
-        /// The median time a unit stayed in the encoder, from submit to
-        /// output, over the last second. Only to a viewer that listed
-        /// `encoder_dwell`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        encoder_dwell_ms: Option<u32>,
-        dropped_frames: u64,
-        /// Ticks skipped for transport backpressure or a full encoder.
-        skipped_ticks: u64,
-        keyframes: u64,
-        frames: u64,
-        bytes: u64,
-        adaptation: Adaptation,
-        rate_model: RateModel,
-        gop: u32,
-    },
+    Stats(StatsRecord),
     Notice {
         code: NoticeCode,
         message: String,
@@ -216,6 +185,41 @@ pub(crate) enum HostMessage {
         reason: StopReason,
         message: String,
     },
+}
+
+/// What a `Stats` message carries.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StatsRecord {
+    pub capture_fps: f32,
+    pub pace_fps: u32,
+    pub target_fps: u32,
+    /// 0 = no viewer cap.
+    pub fps_cap: u32,
+    /// Expected: bits per frame × pace.
+    pub bitrate: u32,
+    pub encoder_bitrate: u32,
+    pub sent_bitrate: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_rtt_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_delay_ms: Option<u32>,
+    pub ack_queue_ms: u32,
+    /// The median time a unit stayed in the encoder, from submit to output,
+    /// over the last second. Only to a viewer that listed `encoder_dwell`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_dwell_ms: Option<u32>,
+    pub dropped_frames: u64,
+    /// Ticks skipped for transport backpressure or a full encoder.
+    pub skipped_ticks: u64,
+    pub keyframes: u64,
+    pub frames: u64,
+    pub bytes: u64,
+    pub adaptation: Adaptation,
+    pub rate_model: RateModel,
+    pub gop: u32,
 }
 
 /// What a `State` message carries.
@@ -475,7 +479,7 @@ mod tests {
                 input_sequence: Some(12),
             },
             HostMessage::Probe { nonce: 2 },
-            HostMessage::Stats {
+            HostMessage::Stats(StatsRecord {
                 capture_fps: 59.5,
                 pace_fps: 60,
                 target_fps: 60,
@@ -496,7 +500,7 @@ mod tests {
                 adaptation: Adaptation::Steady,
                 rate_model: RateModel::Nominal,
                 gop: u32::MAX,
-            },
+            }),
             HostMessage::Notice {
                 code: NoticeCode::LockFailed,
                 message: "access denied".into(),
@@ -565,7 +569,7 @@ mod tests {
     /// fields in their order, and an absent optional figure left out.
     #[test]
     fn stats_keep_their_wire_bytes() {
-        let full = HostMessage::Stats {
+        let full = HostMessage::Stats(StatsRecord {
             capture_fps: 59.5,
             pace_fps: 60,
             target_fps: 50,
@@ -586,8 +590,8 @@ mod tests {
             adaptation: Adaptation::LoweringFps,
             rate_model: RateModel::Timestamp,
             gop: u32::MAX,
-        };
-        let sparse = HostMessage::Stats {
+        });
+        let sparse = HostMessage::Stats(StatsRecord {
             capture_fps: 0.0,
             pace_fps: 1,
             target_fps: 2,
@@ -608,7 +612,7 @@ mod tests {
             adaptation: Adaptation::Startup,
             rate_model: RateModel::Nominal,
             gop: 0,
-        };
+        });
         for (message, golden) in [
             (
                 full,

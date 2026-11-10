@@ -2,7 +2,7 @@
 //! reader records video and the host's `Stats`, the writer's tick rolls the
 //! rates up once a second, and status polls read them.
 use super::{IntervalStats, ViewerStats};
-use crate::protocol::{Adaptation, RateModel};
+use crate::protocol::StatsRecord;
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -158,28 +158,6 @@ impl PresentStats {
     }
 }
 
-/// The last host `Stats` message, as the viewer reports it.
-#[derive(Clone, Copy)]
-pub(crate) struct HostStats {
-    pub capture_fps: f32,
-    pub pace_fps: u32,
-    pub target_fps: u32,
-    pub fps_cap: u32,
-    pub bitrate: u32,
-    pub encoder_bitrate: u32,
-    pub sent_bitrate: u32,
-    pub rtt_ms: Option<u32>,
-    pub base_rtt_ms: Option<u32>,
-    pub queue_delay_ms: Option<u32>,
-    pub ack_queue_ms: u32,
-    pub encoder_dwell_ms: Option<u32>,
-    pub dropped_frames: u64,
-    pub skipped_ticks: u64,
-    pub keyframes: u64,
-    pub adaptation: Adaptation,
-    pub rate_model: RateModel,
-}
-
 /// Bytes a session's tunnel carried so far, each way.
 #[derive(Clone, Copy)]
 pub(crate) struct Traffic {
@@ -190,7 +168,8 @@ pub(crate) struct Traffic {
 /// Received video and the host's last `Stats`. The read task records; the
 /// write task's tick rolls the rates up once a second.
 pub(crate) struct ViewerStatsAcc {
-    pub host: Option<HostStats>,
+    /// The host's last `Stats`.
+    pub host: Option<StatsRecord>,
     /// When the last `Stats` came, or the session started.
     host_at: Instant,
     /// Host ticks skipped per second between the last two `Stats`.
@@ -265,7 +244,7 @@ impl ViewerStatsAcc {
     /// the host sends them at least `STATS_INTERVAL` apart: the rate is over
     /// no less, and never above `max_fps`, since a tick skipped is one the
     /// pace had.
-    pub fn on_host(&mut self, now: Instant, host: HostStats) {
+    pub fn on_host(&mut self, now: Instant, host: StatsRecord) {
         let skipped = self.host.map_or(0, |last| last.skipped_ticks);
         let elapsed = now
             .saturating_duration_since(self.host_at)

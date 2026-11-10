@@ -184,18 +184,12 @@ async fn stale_generation_units_are_dropped_before_admission() {
     shared.outgoing.push(unit(2, 5, false));
     assert!(cursor(&viewer.next().await.0));
     assert_eq!(video(&viewer.next().await.0), (3, 2, 5));
-    let HostMessage::Stats {
-        dropped_frames,
-        frames,
-        encoder_dwell_ms,
-        ..
-    } = viewer.stats().await
-    else {
+    let HostMessage::Stats(stats) = viewer.stats().await else {
         unreachable!()
     };
-    assert_eq!((dropped_frames, frames), (2, 3));
+    assert_eq!((stats.dropped_frames, stats.frames), (2, 3));
     // A viewer that did not list `encoder_dwell` would reject the field.
-    assert_eq!(encoder_dwell_ms, None);
+    assert_eq!(stats.encoder_dwell_ms, None);
 
     // A receipt for video never sent is a protocol error, and the viewer
     // hears so before the close.

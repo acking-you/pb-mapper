@@ -529,27 +529,29 @@ async fn time_without_video_counts_only_while_streaming() {
 async fn host_stats_reach_the_viewer_status() {
     let (viewer, mut host, _) = connect(accepted()).await;
     let viewer = viewer.unwrap();
-    let stats = |skipped_ticks, keyframes| HostMessage::Stats {
-        capture_fps: 59.5,
-        pace_fps: 60,
-        target_fps: 60,
-        fps_cap: 0,
-        bitrate: 4_000_000,
-        encoder_bitrate: 4_000_000,
-        sent_bitrate: 3_900_000,
-        rtt_ms: Some(40),
-        base_rtt_ms: Some(38),
-        queue_delay_ms: Some(2),
-        ack_queue_ms: 12,
-        encoder_dwell_ms: Some(3),
-        dropped_frames: 0,
-        skipped_ticks,
-        keyframes,
-        frames: 60,
-        bytes: 500_000,
-        adaptation: crate::Adaptation::Steady,
-        rate_model: crate::RateModel::Nominal,
-        gop: u32::MAX,
+    let stats = |skipped_ticks, keyframes| {
+        HostMessage::Stats(crate::protocol::StatsRecord {
+            capture_fps: 59.5,
+            pace_fps: 60,
+            target_fps: 60,
+            fps_cap: 0,
+            bitrate: 4_000_000,
+            encoder_bitrate: 4_000_000,
+            sent_bitrate: 3_900_000,
+            rtt_ms: Some(40),
+            base_rtt_ms: Some(38),
+            queue_delay_ms: Some(2),
+            ack_queue_ms: 12,
+            encoder_dwell_ms: Some(3),
+            dropped_frames: 0,
+            skipped_ticks,
+            keyframes,
+            frames: 60,
+            bytes: 500_000,
+            adaptation: crate::Adaptation::Steady,
+            rate_model: crate::RateModel::Nominal,
+            gop: u32::MAX,
+        })
     };
     let keyframes = || viewer.status().stats.keyframes;
     send(&mut host, stats(10, 1), None).await;

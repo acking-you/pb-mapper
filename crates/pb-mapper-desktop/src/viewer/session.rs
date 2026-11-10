@@ -2,9 +2,7 @@
 //! races the reader against the writer until one of them ends.
 use super::{
     ConnectError, CursorSlot, Notice, Stopped, VideoSink, VideoUnit, ViewerConfig, ViewerLink,
-    ViewerReason, ViewerShared,
-    outbound::Next,
-    stats::{HostStats, Traffic},
+    ViewerReason, ViewerShared, outbound::Next, stats::Traffic,
 };
 use crate::{
     Input, QualityPreset, VideoCodec, VideoLimits,
@@ -380,47 +378,7 @@ impl Reader<'_> {
                     }
                 }
             }
-            HostMessage::Stats {
-                capture_fps,
-                pace_fps,
-                target_fps,
-                fps_cap,
-                bitrate,
-                encoder_bitrate,
-                sent_bitrate,
-                rtt_ms,
-                base_rtt_ms,
-                queue_delay_ms,
-                ack_queue_ms,
-                encoder_dwell_ms,
-                dropped_frames,
-                skipped_ticks,
-                keyframes,
-                adaptation,
-                rate_model,
-                ..
-            } => {
-                let host = HostStats {
-                    capture_fps,
-                    pace_fps,
-                    target_fps,
-                    fps_cap,
-                    bitrate,
-                    encoder_bitrate,
-                    sent_bitrate,
-                    rtt_ms,
-                    base_rtt_ms,
-                    queue_delay_ms,
-                    ack_queue_ms,
-                    encoder_dwell_ms,
-                    dropped_frames,
-                    skipped_ticks,
-                    keyframes,
-                    adaptation,
-                    rate_model,
-                };
-                self.shared.stats.lock().on_host(Instant::now(), host);
-            }
+            HostMessage::Stats(host) => self.shared.stats.lock().on_host(Instant::now(), host),
             HostMessage::Notice { code, message } => {
                 let mut state = self.shared.state.lock();
                 let seq = state.notice.as_ref().map_or(1, |notice| notice.seq + 1);
