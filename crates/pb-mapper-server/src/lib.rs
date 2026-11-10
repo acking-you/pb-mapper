@@ -53,7 +53,7 @@ use pb_mapper_core::config::{
 };
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_core::paging::paginate;
-use pb_mapper_core::{snafu_error_get_or_continue, snafu_error_handle};
+use pb_mapper_core::{snafu_error_get_or_return, snafu_error_handle};
 use pb_mapper_protocol::MessageWriter;
 use pb_mapper_protocol::command::{
     AdminConnectionInfo, AdminConnectionPage, AdminServiceInfo, AdminServicePage,
@@ -402,24 +402,6 @@ impl NamespaceRateLimit {
             true
         }
     }
-}
-
-/// Drop `namespace`'s rate limiter once it has no registered service and no
-/// pending stream.
-fn release_namespace_rate_limit_if_idle(
-    namespace: u64,
-    server_conn_map: &ServerConnMap,
-    pending_streams: &PendingStreams,
-    namespace_rate_limits: &mut NamespaceRateLimits,
-) {
-    if pending_streams.count_in(namespace) > 0
-        || server_conn_map
-            .keys()
-            .any(|key| split_scoped_service_key(key).0 == namespace)
-    {
-        return;
-    }
-    namespace_rate_limits.release(namespace);
 }
 
 /// Routing limits and timings, read from the environment once as the relay
