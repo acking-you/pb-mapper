@@ -456,10 +456,11 @@ where
 mod tests {
     use super::*;
     use crate::sdk::admin::types::KeyListPage;
+    use pb_mapper_core::test_support::TEST_ADMIN_KEY_BYTES;
 
     fn page(next_page: Option<u32>, ids: &[u64]) -> KeyListPage {
         KeyListPage {
-            schema_version: 1,
+            schema_version: pb_mapper_auth::ADMIN_SCHEMA_VERSION,
             items: ids
                 .iter()
                 .map(|&key_id| KeyMetadata {
@@ -547,7 +548,7 @@ mod tests {
 
         let error = crate::sdk::Client::from_credential(
             remote_addr.to_string(),
-            pb_mapper_core::checksum::Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv"),
+            pb_mapper_core::checksum::Credential::Admin(TEST_ADMIN_KEY_BYTES),
             false,
             None,
         )

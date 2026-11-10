@@ -2,10 +2,10 @@
 //! `pb-mapper-testkit`: the testkit depends on this crate.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 
 use pb_mapper_auth::{AuthConfig, AuthRuntime};
 use pb_mapper_core::checksum::{Credential, gen_random_key};
+use pb_mapper_core::test_support::TempPath;
 use pb_mapper_server::DirectServerConfig;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -19,7 +19,7 @@ pub(crate) struct TestRelay {
     pub(crate) addr: SocketAddr,
     // Before `_state`: fields drop in order, and the relay goes first.
     _task: AbortOnDropHandle<()>,
-    _state: StateDir,
+    _state: TempPath,
 }
 
 impl TestRelay {
@@ -27,15 +27,11 @@ impl TestRelay {
     /// names its state directory.
     pub(crate) async fn start(label: &str, direct: Option<DirectServerConfig>) -> Self {
         let credential = Credential::Admin(gen_random_key());
-        let state = StateDir(std::env::temp_dir().join(format!(
-            "pb-{label}-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        )));
+        let state = TempPath::new(label);
         let auth = AuthRuntime::start(
             *credential.key(),
             AuthConfig {
-                state_dir: state.0.clone(),
+                state_dir: state.to_path_buf(),
                 ..AuthConfig::default()
             },
         )
@@ -60,14 +56,5 @@ impl TestRelay {
             _task: task,
             _state: state,
         }
-    }
-}
-
-/// A relay's state directory, removed when dropped.
-struct StateDir(PathBuf);
-
-impl Drop for StateDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }

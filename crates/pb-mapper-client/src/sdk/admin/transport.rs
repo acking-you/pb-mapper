@@ -155,6 +155,7 @@ fn protocol(error: impl std::fmt::Display) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pb_mapper_core::test_support::TEST_ADMIN_KEY_BYTES;
     use tokio::io::AsyncReadExt;
 
     #[tokio::test]
@@ -162,7 +163,7 @@ mod tests {
         let endpoint = RelayEndpoint::shared("localhost:invalid-port");
         let result = send_admin_request(
             &endpoint,
-            Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv"),
+            Credential::Admin(TEST_ADMIN_KEY_BYTES),
             AdminRequest::AuthStatus,
             Duration::from_secs(1),
         )
@@ -172,7 +173,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn cancelled_partial_admin_write_must_not_be_retried() {
-        let credential = Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv");
+        let credential = Credential::Admin(TEST_ADMIN_KEY_BYTES);
         let session = ClientHeaderSession::new_v2(&credential).unwrap();
         let (mut writer, mut reader) = tokio::io::duplex(1);
         let mut exchange = Exchange::new();

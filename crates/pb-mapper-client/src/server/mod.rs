@@ -172,6 +172,7 @@ mod shutdown_tests {
     use std::time::Duration;
 
     use super::*;
+    use pb_mapper_core::test_support::TEST_ADMIN_KEY_BYTES;
     use uni_stream::stream::TcpStreamProvider;
 
     #[tokio::test]
@@ -192,7 +193,7 @@ mod shutdown_tests {
                     force_namespace: false,
                 },
                 None,
-                Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv"),
+                Credential::Admin(TEST_ADMIN_KEY_BYTES),
                 token,
             )
             .await;

@@ -588,12 +588,13 @@ fn status_io_timeout() -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pb_mapper_core::test_support::TEST_ADMIN_KEY_BYTES;
 
     #[test]
     fn admin_requires_administrator_credential() {
         let admin = Client::from_credential(
             "127.0.0.1:7666",
-            Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv"),
+            Credential::Admin(TEST_ADMIN_KEY_BYTES),
             false,
             None,
         );

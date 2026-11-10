@@ -392,7 +392,7 @@ mod tests {
     fn config_debug_redacts_credentials() {
         let config = ClientConfig {
             server: "localhost:7666".into(),
-            credential: "0123456789abcdefghijklmnopqrstuv".into(),
+            credential: pb_mapper_core::test_support::TEST_ADMIN_KEY.into(),
             keep_alive: false,
             namespace: None,
         };
