@@ -358,8 +358,11 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DecoderInfo, DesktopKind, ViewerStats};
-    use std::io;
+    use crate::{
+        DecoderInfo, DesktopKind, ViewerStats,
+        test_util::{present, status_until},
+    };
+    use std::{io, sync::Arc};
 
     /// What happened, at a time in seconds.
     enum Event {
@@ -614,7 +617,7 @@ mod tests {
             // Thread C takes its time over a grant, so the host's report of
             // the failure stays the viewer's for several polls after a
             // request: the window a supervisor must not act in.
-            builder = builder.admission(std::sync::Arc::new(Unhurried));
+            builder = builder.admission(Arc::new(Unhurried));
         }
         let host = builder
             .backend(move || Ok(Screen { failing }))
@@ -635,36 +638,6 @@ mod tests {
         (relay, host, supervisor, viewer)
     }
 
-    /// A renderer that shows every picture, until the session ends.
-    fn present(viewer: &Viewer) -> std::thread::JoinHandle<()> {
-        let consumer = viewer.video_sink().attach().unwrap();
-        std::thread::spawn(move || {
-            loop {
-                match consumer.next(Duration::from_millis(50), 1 << 20) {
-                    crate::Pull::Unit(unit) => {
-                        consumer.presented(unit.generation, unit.frame_id);
-                    }
-                    crate::Pull::Closed => break,
-                    _ => {}
-                }
-            }
-        })
-    }
-
-    async fn until(viewer: &Viewer, done: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let status = viewer.status();
-                if done(&status) {
-                    return status;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap()
-    }
-
     /// Longer than a poll and the pause between two requests together.
     const SETTLED: Duration = Duration::from_millis(250 + 2 * 1000);
 
@@ -674,9 +647,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn control_follows_what_the_viewer_last_asked() {
         let (_relay, host, mut supervisor, viewer) = supervised("desktop-supervisor", false).await;
-        let renderer = present(&viewer);
+        let renderer = present(&viewer, Arc::default());
         let script = async {
-            until(&viewer, |status| status.controlling).await;
+            status_until(&viewer, |status| status.controlling).await;
             viewer.request_control(false).unwrap();
             tokio::time::sleep(SETTLED).await;
             assert!(!viewer.status().controlling, "control was taken back");
@@ -696,9 +669,9 @@ mod tests {
         let (_relay, host, mut supervisor, viewer) =
             supervised("desktop-supervisor-early", false).await;
         viewer.request_control(false).unwrap();
-        let renderer = present(&viewer);
+        let renderer = present(&viewer, Arc::default());
         let script = async {
-            until(&viewer, |status| status.fresh).await;
+            status_until(&viewer, |status| status.fresh).await;
             tokio::time::sleep(SETTLED).await;
             let status = viewer.status();
             assert!(!status.controlling && status.control_wanted == Some(false));
@@ -716,22 +689,22 @@ mod tests {
     async fn an_input_failure_stops_automatic_requests_not_the_users() {
         let (_relay, host, mut supervisor, viewer) =
             supervised("desktop-supervisor-input", true).await;
-        let renderer = present(&viewer);
+        let renderer = present(&viewer, Arc::default());
         let script = async {
-            let status = until(&viewer, |status| status.controlling && status.fresh).await;
+            let status = status_until(&viewer, |status| status.controlling && status.fresh).await;
             let scroll = crate::Input::Wheel {
                 horizontal: 0,
                 vertical: 1,
             };
             viewer.input(status.generation, &[scroll]).unwrap();
-            until(&viewer, |status| {
+            status_until(&viewer, |status| {
                 !status.controlling && status.reason == Some(ViewerReason::InputFailed)
             })
             .await;
             tokio::time::sleep(SETTLED).await;
             assert!(!viewer.status().controlling, "asked again by itself");
             viewer.request_control(true).unwrap();
-            until(&viewer, |status| status.controlling).await;
+            status_until(&viewer, |status| status.controlling).await;
             tokio::time::sleep(SETTLED).await;
             let status = viewer.status();
             assert!(status.controlling && status.control_wanted == Some(true));

@@ -75,30 +75,10 @@ pub async fn adopt(host: Host, options: Options, resumes_at_once: bool) -> Resul
 mod tests {
     use super::*;
     use crate::{
-        HostOptions, VideoCodec, Viewer, ViewerConfig, ViewerReason, ViewerState, test_util::until,
+        HostOptions, VideoCodec, Viewer, ViewerConfig, ViewerReason, ViewerState,
+        test_util::{Pixel, until},
     };
     use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
-
-    struct Pixel;
-    impl crate::Backend for Pixel {
-        fn display(&mut self) -> Result<crate::Display> {
-            Ok(crate::Display {
-                id: 1,
-                name: "adopted".into(),
-                x: 0,
-                y: 0,
-                width: 10,
-                height: 10,
-            })
-        }
-        fn capture(&mut self) -> Result<Vec<u8>> {
-            Ok(vec![1])
-        }
-        fn input(&mut self, _: &crate::Input) -> Result<()> {
-            Ok(())
-        }
-        fn release(&mut self) {}
-    }
 
     /// The viewer of an adopted host reconnects by itself only when the
     /// service resumes its invitation at once; otherwise it ends, rather than

@@ -3,33 +3,15 @@ use crate::{
     BackendCaps, QualityPreset, VideoCodec, VideoLimits,
     launch::Launcher,
     protocol::{CAPABILITY_H265, HostMessage, RejectReason, ViewerMessage},
-    security, wire,
+    security,
+    test_util::{Pixel, until_within},
+    wire,
 };
 use pb_mapper_client::sdk::{ConnectOptions, Connection, PathPolicy};
 use std::sync::atomic::AtomicU32;
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream as ClientStream;
 
-struct Screen;
-impl crate::Backend for Screen {
-    fn display(&mut self) -> Result<crate::Display> {
-        Ok(crate::Display {
-            id: 1,
-            name: "trusted".into(),
-            x: 0,
-            y: 0,
-            width: 10,
-            height: 10,
-        })
-    }
-    fn capture(&mut self) -> Result<Vec<u8>> {
-        Ok(vec![1])
-    }
-    fn input(&mut self, _: &crate::Input) -> Result<()> {
-        Err(error("read-only test backend"))
-    }
-    fn release(&mut self) {}
-}
 fn options() -> HostOptions {
     let mut options = HostOptions::new("desktop:remembered");
     options.allow_direct = false;
@@ -141,7 +123,7 @@ async fn handshake_reports_denied_and_busy_before_close() {
     let host = Host::builder(options())
         .backend(move || {
             created.fetch_add(1, Ordering::Relaxed);
-            Ok(Screen)
+            Ok(Pixel)
         })
         .start(&client)
         .await
@@ -191,14 +173,8 @@ async fn handshake_reports_denied_and_busy_before_close() {
 }
 
 /// Poll `condition` for up to 5 s.
-async fn until(mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !condition() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+async fn until(condition: impl FnMut() -> bool) {
+    until_within(Duration::from_secs(5), condition).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -213,7 +189,7 @@ async fn status_reports_the_viewer_and_end_session_keeps_hosting() {
     let mut options = options();
     options.allow_control = true;
     let host = Host::builder(options)
-        .backend(|| Ok(Screen))
+        .backend(|| Ok(Pixel))
         .start(&client)
         .await
         .unwrap();
@@ -293,7 +269,7 @@ struct Hevc {
 }
 impl crate::Backend for Hevc {
     fn display(&mut self) -> Result<crate::Display> {
-        crate::Backend::display(&mut Screen)
+        crate::Backend::display(&mut Pixel)
     }
     fn capture(&mut self) -> Result<Vec<u8>> {
         Ok(vec![1])
@@ -351,7 +327,7 @@ async fn a_late_description_falls_back_to_the_launcher() {
     struct Late;
     impl crate::Backend for Late {
         fn display(&mut self) -> Result<crate::Display> {
-            crate::Backend::display(&mut Screen)
+            crate::Backend::display(&mut Pixel)
         }
         fn input(&mut self, _: &crate::Input) -> Result<()> {
             Err(error("read-only test backend"))
@@ -509,7 +485,7 @@ async fn remembered_invitation_survives_restart_but_not_revocation() {
     let start = |identity| {
         Host::builder(options())
             .identity(identity)
-            .backend(|| Ok(Screen))
+            .backend(|| Ok(Pixel))
             .start(&client)
     };
     let host = start(identity).await.unwrap();

@@ -409,7 +409,11 @@ async fn manage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{HostIdentity, platform::windows::helper::background::storage::protect};
+    use crate::{
+        HostIdentity,
+        platform::windows::helper::background::storage::protect,
+        test_util::{Pixel, until_within},
+    };
     fn options() -> Options {
         Options {
             server: "127.0.0.1:7666".into(),
@@ -525,36 +529,8 @@ mod tests {
     }
 
     /// Poll `condition` for up to 5 s.
-    async fn until(mut condition: impl FnMut() -> bool) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !condition() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    /// A one-pixel desktop, enough to hold a viewer's session open.
-    struct Pixel;
-    impl crate::Backend for Pixel {
-        fn display(&mut self) -> Result<crate::Display> {
-            Ok(crate::Display {
-                id: 1,
-                name: "background".into(),
-                x: 0,
-                y: 0,
-                width: 10,
-                height: 10,
-            })
-        }
-        fn capture(&mut self) -> Result<Vec<u8>> {
-            Ok(vec![1])
-        }
-        fn input(&mut self, _: &crate::Input) -> Result<()> {
-            Ok(())
-        }
-        fn release(&mut self) {}
+    async fn until(condition: impl FnMut() -> bool) {
+        until_within(Duration::from_secs(5), condition).await;
     }
 
     /// Revoking the grant tells the background host's viewer `revoked`, as an

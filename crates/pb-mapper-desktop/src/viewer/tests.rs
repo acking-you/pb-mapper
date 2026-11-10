@@ -105,14 +105,9 @@ async fn pull(consumer: &crate::VideoConsumer) -> VideoUnit {
     .unwrap()
 }
 
-async fn eventually(mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !condition() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+/// Poll `condition` for up to 5 s.
+async fn eventually(condition: impl FnMut() -> bool) {
+    crate::test_util::until_within(Duration::from_secs(5), condition).await;
 }
 
 fn accepted() -> HostMessage {
