@@ -229,7 +229,7 @@ impl PathInfo {
     pub(super) fn shape(&self) -> PathShape {
         let last_kind = match self.last {
             Some(PathOutcome::Direct { kind, .. }) => kind,
-            _ => None,
+            Some(PathOutcome::Relay { .. }) | None => None,
         };
         PathShape {
             direct: self.active_direct > 0,
