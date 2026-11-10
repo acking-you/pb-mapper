@@ -207,10 +207,12 @@ async fn run(
     command: Command,
 ) -> Result<proto::Response, CtlError> {
     match command {
+        // The workspace's version, which the app is released as; this
+        // library's own package version never changes.
         Command::Hello => Ok(proto::Response::ok(
             Some(json!({
                 "protocolVersion": proto::PROTOCOL_VERSION,
-                "appVersion": env!("CARGO_PKG_VERSION"),
+                "appVersion": pb_mapper_client::sdk::SDK_VERSION,
                 "pid": std::process::id(),
             })),
             None,
@@ -318,5 +320,26 @@ async fn run(
                 Some(format!("disconnected '{key}'")),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `hello` names the version the app is released as, which a client
+    /// checks against its own.
+    #[tokio::test]
+    async fn hello_names_the_version_the_app_is_released_as() {
+        let pubspec = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pubspec.yaml");
+        let pubspec = std::fs::read_to_string(pubspec).unwrap();
+        let released = pubspec
+            .lines()
+            .find_map(|line| line.strip_prefix("version: "))
+            .and_then(|version| version.split('+').next())
+            .unwrap();
+        let state = Arc::new(Mutex::new(PbMapperState::unloaded()));
+        let hello = dispatch(&state, Command::Hello, Origin::Cli).await;
+        assert_eq!(hello.data.unwrap()["appVersion"], released);
     }
 }
