@@ -12,9 +12,7 @@ use crate::{
     handle::PbMapperHandle,
     response::{err_ctl, err_null_handle, ok_data, parse_c_string},
 };
-use pb_mapper::desktop::{
-    self, Host, Invitation, QualityPreset, Resolution, StopReason, ViewerConfig,
-};
+use pb_mapper::desktop::{self, Host, Invitation, StopReason};
 use pb_mapper_core::checksum::get_process_credential;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -29,16 +27,15 @@ mod viewer;
 
 use background::{
     BackgroundCache, BackgroundVerb, HelperVerb, background_action, enable_host, helper_action,
-    revoke_background, start_background, stop_background, with_relay_match,
+    revoke_background, start_background,
 };
-#[cfg(windows)]
-use background::{background_enabled, query_background};
 use host::{
-    HostStart, LocalIdentity, Start, disable_legacy_startup, load_trust, restart_host,
-    revoke_trust_with_background, start_local,
+    HostStart, LocalIdentity, Start, host_end_session, host_permission, host_restore,
+    host_restore_display_mode, host_status, host_stop, restart_host, revoke_trust_with_background,
+    start_local, trust_status,
 };
 pub(crate) use viewer::Connected;
-use viewer::{DecoderOffer, Live, PendingConnect, Target, connect, inspection, invitation_error};
+use viewer::{ConnectRequest, Live, PendingConnect, connect_request, inspection, invitation_error};
 pub use viewer::{PbDesktopViewV1, pb_mapper_desktop_view_v1, pb_mapper_desktop_viewer_call_json};
 
 #[derive(Default)]
@@ -149,28 +146,7 @@ enum Request {
     InspectInvitation {
         invitation: String,
     },
-    /// Exactly one of `invitation` and `computer_id`, a remembered computer.
-    Connect {
-        #[serde(default)]
-        invitation: Option<String>,
-        #[serde(default)]
-        computer_id: Option<String>,
-        #[serde(default)]
-        relay_only: bool,
-        #[serde(default)]
-        quality: QualityPreset,
-        refresh_hz: f64,
-        /// What the runner decodes in hardware, as its probe found it, H.265
-        /// left out once it failed this run: the offer, and the largest
-        /// picture of each decoder, which bounds the limits.
-        decoders: DecoderOffer,
-        /// Absent: the SDK's default, the display's own size.
-        #[serde(default)]
-        resolution: Option<Resolution>,
-        /// 0 is Auto; otherwise the user's own rate, see `valid_max_fps`.
-        #[serde(default)]
-        max_fps: u32,
-    },
+    Connect(ConnectRequest),
     Disconnect,
 }
 
@@ -248,315 +224,81 @@ fn capabilities_json(support: desktop::HostSupport) -> Value {
     })
 }
 
+/// The `capabilities` op: what this computer can do, its displays and the
+/// helper's state.
+async fn capabilities() -> Result<Value, CtlError> {
+    tokio::task::spawn_blocking(|| {
+        // The app's first question: once per process, put back a
+        // display mode a host of this app left changed when it died.
+        static RECOVERED: std::sync::Once = std::sync::Once::new();
+        RECOVERED.call_once(|| {
+            if let Err(failure) = desktop::recover_display_modes(None) {
+                tracing::warn!(event = "display_modes_not_recovered", %failure);
+            }
+        });
+        let displays = desktop::displays();
+        #[cfg(windows)]
+        let helper = serde_json::to_value(desktop::privileged::status()).ok();
+        #[cfg(not(windows))]
+        let helper: Option<Value> = None;
+        json!({
+            "capabilities": capabilities_json(desktop::host_support()),
+            "helper": helper,
+            "displays": displays.as_ref().ok(),
+            "message": displays.err().map(|e| e.to_string()),
+        })
+    })
+    .await
+    .map_err(err)
+}
+
 async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlError> {
-    let state = &handle.desktop;
     match request {
-        Request::Capabilities => {
-            return tokio::task::spawn_blocking(|| {
-                // The app's first question: once per process, put back a
-                // display mode a host of this app left changed when it died.
-                static RECOVERED: std::sync::Once = std::sync::Once::new();
-                RECOVERED.call_once(|| {
-                    if let Err(failure) = desktop::recover_display_modes(None) {
-                        tracing::warn!(event = "display_modes_not_recovered", %failure);
-                    }
-                });
-                let displays = desktop::displays();
-                #[cfg(windows)]
-                let helper = serde_json::to_value(desktop::privileged::status()).ok();
-                #[cfg(not(windows))]
-                let helper: Option<Value> = None;
-                json!({"capabilities": capabilities_json(desktop::host_support()), "helper": helper, "displays": displays.as_ref().ok(), "message": displays.err().map(|e| e.to_string())})
-            }).await.map_err(err);
-        }
-        Request::HelperAction { action } => return helper_action(handle, action).await,
-        Request::TrustStatus => {
-            let (directory, relay) = {
-                let state = handle.state.lock().await;
-                (
-                    state.desktop_config_dir(),
-                    state.get_config_status().server_address,
-                )
-            };
-            let saved = load_trust(directory).await?;
-            let namespace = get_process_credential()
-                .ok()
-                .map(|credential| credential.key_id());
-            let matches = saved.as_ref().is_some_and(|saved| {
-                namespace.is_some_and(|namespace| {
-                    saved.matches(&trust::Scope {
-                        directory: Default::default(),
-                        relay: relay.clone(),
-                        namespace,
-                    })
-                })
-            });
-            // The invitation resumes sharing without setup, so only a grant
-            // for this relay and namespace offers one.
-            let saved = match saved {
-                Some(saved) => {
-                    let invitation = if matches {
-                        let service = saved.settings.service.clone();
-                        Some(saved.identity()?.invitation(service).map_err(err)?.encode())
-                    } else {
-                        None
-                    };
-                    Some(saved.metadata(invitation))
-                }
-                None => None,
-            };
-            return Ok(
-                json!({"supported": trust::supported(), "saved": saved, "matches_relay": matches}),
-            );
-        }
-        Request::TrustRevoke => {
-            revoke_trust_with_background(handle, revoke_background(handle)).await?;
-        }
-        Request::HostStatus => {
-            // Each host says whether it is published where the settings
-            // name (`matches_relay`), and where it is (`server`).
-            let relay = state.relay_scope(&handle.state).await;
-            let background = state
-                .background_status(handle.runtime.handle())
-                .map(|snapshot| with_relay_match(snapshot, relay.as_ref()));
-            // A lifecycle call (a display switch, a rename, a helper action
-            // waiting on UAC) holds the host lock, but must never delay a
-            // status poll. `busy` says the host is then unknown, not absent.
-            // The invitation stays beside the status, so nothing that
-            // serialises a status carries the secret.
-            let (host, busy) = match state.host.try_lock() {
-                Ok(slot) => (
-                    slot.as_ref().map(|host| {
-                        let invitation = host.invitation();
-                        let mut value = json!({"status": host.status(), "service": invitation.service, "invitation": invitation.encode()});
-                        // Set beside the host, under the lock held here.
-                        if let Ok(local) = state.host_identity.try_lock()
-                            && let Some(scope) = local.as_ref().map(|local| &local.scope)
-                        {
-                            value["server"] = json!(scope.relay);
-                            value["matches_relay"] = json!(relay.as_ref().map(|current| {
-                                current.holds(&scope.relay, Some(scope.namespace))
-                            }));
-                        }
-                        value
-                    }),
-                    false,
-                ),
-                Err(_) => (None, true),
-            };
-            return Ok(json!({"host": host, "busy": busy, "background": background}));
-        }
+        Request::Capabilities => capabilities().await,
+        Request::HelperAction { action } => helper_action(handle, action).await,
+        Request::TrustStatus => trust_status(handle).await,
+        Request::TrustRevoke => revoke_trust_with_background(handle, revoke_background(handle))
+            .await
+            .map(|()| json!({})),
+        Request::HostStatus => host_status(handle).await,
         Request::BackgroundAction { action, move_relay } => {
-            return background_action(handle, action, move_relay).await;
+            background_action(handle, action, move_relay).await
         }
         Request::HostEnable {
             service,
             display_id,
             allow_control,
         } => {
-            let mut slot = state.host.lock().await;
-            return enable_host(handle, &mut slot, service, display_id, allow_control, true).await;
+            let mut slot = handle.desktop.host.lock().await;
+            enable_host(handle, &mut slot, service, display_id, allow_control, true).await
         }
-        Request::HostRestore => {
-            let directory = handle.state.lock().await.desktop_config_dir();
-            if let Some(saved) = load_trust(directory)
-                .await?
-                .filter(|saved| saved.settings.background)
-            {
-                let mut slot = state.host.lock().await;
-                return enable_host(
-                    handle,
-                    &mut slot,
-                    saved.settings.service,
-                    saved.settings.display_id,
-                    saved.settings.allow_control,
-                    false,
-                )
-                .await;
-            }
-            return start_local(handle, Start::Restore).await;
-        }
-        Request::HostStart(start) if start.background => {
-            return start_background(handle, start).await;
-        }
-        Request::HostStart(start) => return start_local(handle, Start::Fresh(start)).await,
-        Request::HostStop { on_exit } => {
-            let mut slot = state.host.lock().await;
-            let stopped = if let Some(host) = slot.take() {
-                host.stop().await.map_err(err)
-            } else {
-                Ok(())
-            };
-            *state.host_identity.lock().await = None;
-            if on_exit {
-                // The system service owns its host. Closing this UI only
-                // releases the temporary host owned by this FFI handle.
-                stopped?;
-                return Ok(json!({}));
-            }
-            let disabled_startup = disable_legacy_startup(handle).await;
-            let background_stopped = stop_background(state).await;
-            stopped?;
-            disabled_startup?;
-            background_stopped?;
-        }
-        Request::HostPermission { allow_control } => {
-            let slot = state.host.lock().await;
-            let Some(host) = slot.as_ref() else {
-                #[cfg(windows)]
-                {
-                    let snapshot = query_background().await?;
-                    if background_enabled(&snapshot) {
-                        let snapshot =
-                            desktop::privileged::background::set_control_allowed(allow_control)
-                                .await
-                                .map_err(err)?;
-                        state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
-                        return Ok(json!({}));
-                    }
-                }
-                return Err(err("desktop is not shared"));
-            };
-            if !allow_control {
-                host.set_control_allowed(false);
-            }
-            if let Some(local) = state
-                .host_identity
-                .lock()
-                .await
-                .clone()
-                .filter(|local| local.remembered)
-            {
-                let scope = local.scope;
-                let service = host.invitation().service.clone();
-                tokio::task::spawn_blocking(move || {
-                    let mut saved = trust::load(&scope.directory)?
-                        .ok_or_else(|| err("remembered trust was revoked"))?;
-                    if !saved.matches(&scope) || saved.settings.service != service {
-                        return Err(err("remembered trust changed; restart sharing"));
-                    }
-                    saved.settings.allow_control = allow_control;
-                    trust::save(&scope.directory, &saved)
-                })
-                .await
-                .map_err(err)??;
-            }
-            host.set_control_allowed(allow_control);
-        }
-        Request::HostRestoreDisplayMode => {
-            let slot = state.host.lock().await;
-            if let Some(host) = slot.as_ref() {
-                return Ok(json!({"restored": host.restore_display_mode()}));
-            }
-            #[cfg(windows)]
-            if state
-                .background
-                .lock()
-                .snapshot
-                .as_ref()
-                .is_some_and(background_enabled)
-            {
-                let snapshot = desktop::privileged::background::restore_display_mode()
-                    .await
-                    .map_err(err)?;
-                state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
-                return Ok(json!({"restored": true}));
-            }
-            return Err(err("desktop is not shared"));
-        }
-        Request::HostEndSession => {
-            let slot = state.host.lock().await;
-            if let Some(host) = slot.as_ref() {
-                host.end_session();
-                return Ok(json!({}));
-            }
-            // The background host the UI shows: the service ends its session
-            // and keeps sharing.
-            #[cfg(windows)]
-            if state
-                .background
-                .lock()
-                .snapshot
-                .as_ref()
-                .is_some_and(background_enabled)
-            {
-                let snapshot = desktop::privileged::background::end_session()
-                    .await
-                    .map_err(err)?;
-                state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
-                return Ok(json!({}));
-            }
-            return Err(err("desktop is not shared"));
-        }
+        Request::HostRestore => host_restore(handle).await,
+        Request::HostStart(start) if start.background => start_background(handle, start).await,
+        Request::HostStart(start) => start_local(handle, Start::Fresh(start)).await,
+        Request::HostStop { on_exit } => host_stop(handle, on_exit).await,
+        Request::HostPermission { allow_control } => host_permission(handle, allow_control).await,
+        Request::HostRestoreDisplayMode => host_restore_display_mode(handle).await,
+        Request::HostEndSession => host_end_session(handle).await,
         // A display switch resumes at once with the same invitation, so the
         // viewer reconnects; a renamed service is no longer what it reaches.
         Request::HostSetDisplay { display_id } => {
-            return restart_host(handle, StopReason::Restarting, |settings| {
+            restart_host(handle, StopReason::Restarting, |settings| {
                 settings.display_id = display_id;
             })
-            .await;
+            .await
         }
         Request::HostRename { service } => {
-            return restart_host(handle, StopReason::HostStopped, |settings| {
+            restart_host(handle, StopReason::HostStopped, |settings| {
                 settings.service = service;
             })
-            .await;
+            .await
         }
-        Request::InspectInvitation { invitation } => {
-            return Ok(inspection(
-                &Invitation::decode(&invitation).map_err(invitation_error)?,
-            ));
-        }
-        Request::Connect {
-            invitation,
-            computer_id,
-            relay_only,
-            quality,
-            refresh_hz,
-            decoders,
-            resolution,
-            max_fps,
-        } => {
-            if !valid_max_fps(max_fps) {
-                return Err(CtlError::invalid_argument(
-                    "max_fps must be 0 (Auto) or 30..=120",
-                ));
-            }
-            let decoders = decoders.decoders()?;
-            // A pasted invitation is checked before anything waits; a
-            // remembered one is read inside the cancellable attempt.
-            let target = match (invitation, computer_id) {
-                (Some(text), None) => {
-                    Target::Invitation(Invitation::decode(&text).map_err(invitation_error)?)
-                }
-                (None, Some(id)) => Target::Remembered(id),
-                _ => {
-                    return Err(CtlError::invalid_argument(
-                        "connect takes exactly one of an invitation and a computer id",
-                    ));
-                }
-            };
-            // The runner's own decoders, which Dart probed: none where it
-            // has no native video, and Dart decodes JPEG.
-            let chosen_fps = (max_fps != 0).then_some(max_fps);
-            let (viewer, source) = connect(handle, target, relay_only, |progress| ViewerConfig {
-                quality,
-                progress: Some(progress),
-                ..ViewerConfig::for_decoders(
-                    decoders,
-                    resolution.unwrap_or_default(),
-                    refresh_hz,
-                    chosen_fps,
-                )
-            })
-            .await?;
-            return Ok(json!({"video_source": source, "codec": viewer.status().stats.codec}));
-        }
-        Request::Disconnect => {
-            state.disconnect_viewer().await?;
-        }
+        Request::InspectInvitation { invitation } => Ok(inspection(
+            &Invitation::decode(&invitation).map_err(invitation_error)?,
+        )),
+        Request::Connect(request) => connect_request(handle, request).await,
+        Request::Disconnect => handle.desktop.disconnect_viewer().await.map(|()| json!({})),
     }
-    Ok(json!({}))
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 //! The viewer: its connect, its state machine and the two hot exports.
-use super::{DesktopState, err};
+use super::{DesktopState, err, valid_max_fps};
 use crate::{
     desktop_video,
     error::{CtlError, ErrorCode},
@@ -11,7 +11,7 @@ use pb_mapper::{
     desktop::{
         self, ConnectError, ConnectStage, Decoders, DesktopView, DisplayModeError, InputError,
         Invitation, InvitationError, InvitationFormat, KeyframeReason, Mode, ModeTarget,
-        QualityPreset, Viewer, ViewerConfig,
+        QualityPreset, Resolution, Viewer, ViewerConfig,
     },
 };
 use serde::Deserialize;
@@ -229,6 +229,32 @@ fn stage_of(code: u8) -> Option<ConnectStage> {
     }
 }
 
+/// The `connect` op: exactly one of `invitation` and `computer_id`, a
+/// remembered computer.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ConnectRequest {
+    #[serde(default)]
+    pub(super) invitation: Option<String>,
+    #[serde(default)]
+    pub(super) computer_id: Option<String>,
+    #[serde(default)]
+    pub(super) relay_only: bool,
+    #[serde(default)]
+    pub(super) quality: QualityPreset,
+    pub(super) refresh_hz: f64,
+    /// What the runner decodes in hardware, as its probe found it, H.265
+    /// left out once it failed this run: the offer, and the largest
+    /// picture of each decoder, which bounds the limits.
+    pub(super) decoders: DecoderOffer,
+    /// Absent: the SDK's default, the display's own size.
+    #[serde(default)]
+    pub(super) resolution: Option<Resolution>,
+    /// 0 is Auto; otherwise the user's own rate, see `valid_max_fps`.
+    #[serde(default)]
+    pub(super) max_fps: u32,
+}
+
 /// Each decoder's largest picture as `[width, height]`; `null` for none.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -241,7 +267,7 @@ impl DecoderOffer {
     /// KN editions without the Media Feature Pack) the runner decodes
     /// nothing natively, whatever Dart passed (an unanswered probe
     /// assumes H.264): the picture is JPEG, which Dart decodes.
-    pub(super) fn decoders(&self) -> Result<Decoders, CtlError> {
+    fn decoders(&self) -> Result<Decoders, CtlError> {
         let size = |largest: Option<[u32; 2]>| match largest {
             Some([width, height]) if width == 0 || height == 0 => Err(CtlError::invalid_argument(
                 "a decoder's largest picture must not be empty",
@@ -382,8 +408,60 @@ pub(super) fn inspection(invitation: &Invitation) -> Value {
     })
 }
 
+/// The `connect` op: the viewer and its video source, published once its
+/// host accepted.
+pub(super) async fn connect_request(
+    handle: &PbMapperHandle,
+    request: ConnectRequest,
+) -> Result<Value, CtlError> {
+    let ConnectRequest {
+        invitation,
+        computer_id,
+        relay_only,
+        quality,
+        refresh_hz,
+        decoders,
+        resolution,
+        max_fps,
+    } = request;
+    if !valid_max_fps(max_fps) {
+        return Err(CtlError::invalid_argument(
+            "max_fps must be 0 (Auto) or 30..=120",
+        ));
+    }
+    let decoders = decoders.decoders()?;
+    // A pasted invitation is checked before anything waits; a
+    // remembered one is read inside the cancellable attempt.
+    let target = match (invitation, computer_id) {
+        (Some(text), None) => {
+            Target::Invitation(Invitation::decode(&text).map_err(invitation_error)?)
+        }
+        (None, Some(id)) => Target::Remembered(id),
+        _ => {
+            return Err(CtlError::invalid_argument(
+                "connect takes exactly one of an invitation and a computer id",
+            ));
+        }
+    };
+    // The runner's own decoders, which Dart probed: none where it
+    // has no native video, and Dart decodes JPEG.
+    let chosen_fps = (max_fps != 0).then_some(max_fps);
+    let (viewer, source) = connect(handle, target, relay_only, |progress| ViewerConfig {
+        quality,
+        progress: Some(progress),
+        ..ViewerConfig::for_decoders(
+            decoders,
+            resolution.unwrap_or_default(),
+            refresh_hz,
+            chosen_fps,
+        )
+    })
+    .await?;
+    Ok(json!({"video_source": source, "codec": viewer.status().stats.codec}))
+}
+
 /// Whom `connect` reaches.
-pub(super) enum Target {
+enum Target {
     Invitation(Invitation),
     /// A remembered computer's id, resolved in Rust: its token never
     /// reaches Dart.
@@ -393,7 +471,7 @@ pub(super) enum Target {
 /// Resolves the target and the relay inside the registered, cancellable
 /// attempt, then connects with `config`, whose progress callback reports the
 /// stage to `viewer_status`.
-pub(super) async fn connect(
+async fn connect(
     handle: &PbMapperHandle,
     target: Target,
     relay_only: bool,

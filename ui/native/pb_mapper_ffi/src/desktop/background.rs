@@ -9,9 +9,9 @@ use super::{DesktopState, RelayScope, err};
 use crate::{error::CtlError, handle::PbMapperHandle};
 #[cfg(windows)]
 use crate::{error::ErrorCode, state::process_credential};
-use pb_mapper::desktop::Host;
 #[cfg(windows)]
 use pb_mapper::desktop;
+use pb_mapper::desktop::Host;
 #[cfg(windows)]
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use serde::Deserialize;

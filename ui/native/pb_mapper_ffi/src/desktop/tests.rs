@@ -4,7 +4,10 @@ use super::viewer::*;
 use super::*;
 use crate::error::ErrorCode;
 use base64::Engine as _;
-use pb_mapper::desktop::{ConnectStage, DesktopView, VideoCodec, VideoLimits, Viewer};
+use pb_mapper::desktop::{
+    ConnectStage, DesktopView, QualityPreset, Resolution, VideoCodec, VideoLimits, Viewer,
+    ViewerConfig,
+};
 use std::{
     ffi::{CStr, CString},
     future::Future,
@@ -283,6 +286,20 @@ fn hot_ops_never_wait_for_a_slow_disconnect() {
         );
         assert_eq!(disconnecting.join().unwrap()["success"], true);
     });
+}
+
+/// A lifecycle request names its op beside its fields, and nothing else.
+#[test]
+fn lifecycle_requests_refuse_unknown_fields() {
+    let connect = json!({"op": "connect", "invitation": "pbd1", "refresh_hz": 60,
+        "decoders": {"h264": [1920, 1080], "h265": null}});
+    assert!(matches!(
+        serde_json::from_value(connect.clone()),
+        Ok(Request::Connect(ConnectRequest { max_fps: 0, .. }))
+    ));
+    let mut unknown = connect;
+    unknown["relay"] = json!("relay:7666");
+    assert!(serde_json::from_value::<Request>(unknown).is_err());
 }
 
 #[test]
@@ -689,7 +706,7 @@ fn disconnect_cancels_configuration_wait_without_cancelling_reconnect() {
         let connect_at = |invitation: String, max_fps| {
             call(
                 &handle,
-                Request::Connect {
+                Request::Connect(ConnectRequest {
                     invitation: Some(invitation),
                     computer_id: None,
                     relay_only: false,
@@ -701,7 +718,7 @@ fn disconnect_cancels_configuration_wait_without_cancelling_reconnect() {
                     },
                     resolution: Some(Resolution::P1440),
                     max_fps,
-                },
+                }),
             )
         };
         let connect = |invitation| connect_at(invitation, 0);
@@ -763,7 +780,7 @@ fn connect_without_a_credential_ends_the_attempt() {
         .runtime
         .block_on(call(
             &handle,
-            Request::Connect {
+            Request::Connect(ConnectRequest {
                 invitation: Some(invitation().encode()),
                 computer_id: None,
                 relay_only: false,
@@ -775,7 +792,7 @@ fn connect_without_a_credential_ends_the_attempt() {
                 },
                 resolution: None,
                 max_fps: 0,
-            },
+            }),
         ))
         .unwrap_err();
     assert_eq!(failure.code(), ErrorCode::InvalidArgument);

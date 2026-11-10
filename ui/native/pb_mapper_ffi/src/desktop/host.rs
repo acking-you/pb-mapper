@@ -1,12 +1,17 @@
 //! The local host this app owns: start, restore, restart and its remembered
 //! trust.
-use super::background::{background_configured, query_background};
+#[cfg(windows)]
+use super::background::background_enabled;
+use super::background::{
+    background_configured, enable_host, query_background, stop_background, with_relay_match,
+};
 use super::{err, trust};
 use crate::{error::CtlError, handle::PbMapperHandle, state::process_credential};
 use pb_mapper::{
     Client,
     desktop::{self, Access, DisplaySelection, Host, HostOptions, StopReason},
 };
+use pb_mapper_core::checksum::get_process_credential;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -102,6 +107,239 @@ pub(super) async fn load_trust(directory: PathBuf) -> Result<Option<trust::Saved
     tokio::task::spawn_blocking(move || trust::load(&directory))
         .await
         .map_err(err)?
+}
+
+/// `trust_status`: the remembered grant, and whether it is for the relay and
+/// namespace the settings name.
+pub(super) async fn trust_status(handle: &PbMapperHandle) -> Result<Value, CtlError> {
+    let (directory, relay) = {
+        let state = handle.state.lock().await;
+        (
+            state.desktop_config_dir(),
+            state.get_config_status().server_address,
+        )
+    };
+    let saved = load_trust(directory).await?;
+    let namespace = get_process_credential()
+        .ok()
+        .map(|credential| credential.key_id());
+    let matches = saved.as_ref().is_some_and(|saved| {
+        namespace.is_some_and(|namespace| {
+            saved.matches(&trust::Scope {
+                directory: Default::default(),
+                relay: relay.clone(),
+                namespace,
+            })
+        })
+    });
+    // The invitation resumes sharing without setup, so only a grant
+    // for this relay and namespace offers one.
+    let saved = match saved {
+        Some(saved) => {
+            let invitation = if matches {
+                let service = saved.settings.service.clone();
+                Some(saved.identity()?.invitation(service).map_err(err)?.encode())
+            } else {
+                None
+            };
+            Some(saved.metadata(invitation))
+        }
+        None => None,
+    };
+    Ok(json!({"supported": trust::supported(), "saved": saved, "matches_relay": matches}))
+}
+
+/// `host_status`: this app's host and the background service's.
+pub(super) async fn host_status(handle: &PbMapperHandle) -> Result<Value, CtlError> {
+    let state = &handle.desktop;
+    // Each host says whether it is published where the settings
+    // name (`matches_relay`), and where it is (`server`).
+    let relay = state.relay_scope(&handle.state).await;
+    let background = state
+        .background_status(handle.runtime.handle())
+        .map(|snapshot| with_relay_match(snapshot, relay.as_ref()));
+    // A lifecycle call (a display switch, a rename, a helper action
+    // waiting on UAC) holds the host lock, but must never delay a
+    // status poll. `busy` says the host is then unknown, not absent.
+    // The invitation stays beside the status, so nothing that
+    // serialises a status carries the secret.
+    let (host, busy) = match state.host.try_lock() {
+        Ok(slot) => (
+            slot.as_ref().map(|host| {
+                let invitation = host.invitation();
+                let mut value = json!({
+                    "status": host.status(),
+                    "service": invitation.service,
+                    "invitation": invitation.encode(),
+                });
+                // Set beside the host, under the lock held here.
+                if let Ok(local) = state.host_identity.try_lock()
+                    && let Some(scope) = local.as_ref().map(|local| &local.scope)
+                {
+                    value["server"] = json!(scope.relay);
+                    value["matches_relay"] = json!(
+                        relay
+                            .as_ref()
+                            .map(|current| { current.holds(&scope.relay, Some(scope.namespace)) })
+                    );
+                }
+                value
+            }),
+            false,
+        ),
+        Err(_) => (None, true),
+    };
+    Ok(json!({"host": host, "busy": busy, "background": background}))
+}
+
+/// `host_restore`: the remembered grant again, through the service when it
+/// is the service's.
+pub(super) async fn host_restore(handle: &PbMapperHandle) -> Result<Value, CtlError> {
+    let directory = handle.state.lock().await.desktop_config_dir();
+    if let Some(saved) = load_trust(directory)
+        .await?
+        .filter(|saved| saved.settings.background)
+    {
+        let mut slot = handle.desktop.host.lock().await;
+        return enable_host(
+            handle,
+            &mut slot,
+            saved.settings.service,
+            saved.settings.display_id,
+            saved.settings.allow_control,
+            false,
+        )
+        .await;
+    }
+    start_local(handle, Start::Restore).await
+}
+
+/// `host_stop`: this app's host, and unless the app is exiting, the
+/// background service's too.
+pub(super) async fn host_stop(handle: &PbMapperHandle, on_exit: bool) -> Result<Value, CtlError> {
+    let state = &handle.desktop;
+    let mut slot = state.host.lock().await;
+    let stopped = if let Some(host) = slot.take() {
+        host.stop().await.map_err(err)
+    } else {
+        Ok(())
+    };
+    *state.host_identity.lock().await = None;
+    if on_exit {
+        // The system service owns its host. Closing this UI only
+        // releases the temporary host owned by this FFI handle.
+        stopped?;
+        return Ok(json!({}));
+    }
+    let disabled_startup = disable_legacy_startup(handle).await;
+    let background_stopped = stop_background(state).await;
+    stopped?;
+    disabled_startup?;
+    background_stopped?;
+    Ok(json!({}))
+}
+
+/// `host_permission`: whether a viewer may take control, of this app's host
+/// or else the background service's.
+pub(super) async fn host_permission(
+    handle: &PbMapperHandle,
+    allow_control: bool,
+) -> Result<Value, CtlError> {
+    let state = &handle.desktop;
+    let slot = state.host.lock().await;
+    let Some(host) = slot.as_ref() else {
+        #[cfg(windows)]
+        {
+            let snapshot = query_background().await?;
+            if background_enabled(&snapshot) {
+                let snapshot = desktop::privileged::background::set_control_allowed(allow_control)
+                    .await
+                    .map_err(err)?;
+                state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
+                return Ok(json!({}));
+            }
+        }
+        return Err(err("desktop is not shared"));
+    };
+    if !allow_control {
+        host.set_control_allowed(false);
+    }
+    if let Some(local) = state
+        .host_identity
+        .lock()
+        .await
+        .clone()
+        .filter(|local| local.remembered)
+    {
+        let scope = local.scope;
+        let service = host.invitation().service.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut saved = trust::load(&scope.directory)?
+                .ok_or_else(|| err("remembered trust was revoked"))?;
+            if !saved.matches(&scope) || saved.settings.service != service {
+                return Err(err("remembered trust changed; restart sharing"));
+            }
+            saved.settings.allow_control = allow_control;
+            trust::save(&scope.directory, &saved)
+        })
+        .await
+        .map_err(err)??;
+    }
+    host.set_control_allowed(allow_control);
+    Ok(json!({}))
+}
+
+/// `host_restore_display_mode`: put back the display mode a viewer changed,
+/// of this app's host or else the background service's.
+pub(super) async fn host_restore_display_mode(handle: &PbMapperHandle) -> Result<Value, CtlError> {
+    let state = &handle.desktop;
+    let slot = state.host.lock().await;
+    if let Some(host) = slot.as_ref() {
+        return Ok(json!({"restored": host.restore_display_mode()}));
+    }
+    #[cfg(windows)]
+    if state
+        .background
+        .lock()
+        .snapshot
+        .as_ref()
+        .is_some_and(background_enabled)
+    {
+        let snapshot = desktop::privileged::background::restore_display_mode()
+            .await
+            .map_err(err)?;
+        state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
+        return Ok(json!({"restored": true}));
+    }
+    Err(err("desktop is not shared"))
+}
+
+/// `host_end_session`: end the viewer's session and keep sharing, on this
+/// app's host or else the background service's.
+pub(super) async fn host_end_session(handle: &PbMapperHandle) -> Result<Value, CtlError> {
+    let state = &handle.desktop;
+    let slot = state.host.lock().await;
+    if let Some(host) = slot.as_ref() {
+        host.end_session();
+        return Ok(json!({}));
+    }
+    // The background host the UI shows: the service ends its session
+    // and keeps sharing.
+    #[cfg(windows)]
+    if state
+        .background
+        .lock()
+        .snapshot
+        .as_ref()
+        .is_some_and(background_enabled)
+    {
+        let snapshot = desktop::privileged::background::end_session()
+            .await
+            .map_err(err)?;
+        state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
+        return Ok(json!({}));
+    }
+    Err(err("desktop is not shared"))
 }
 
 /// A host this UI owns, unless the service already owns this desktop.
