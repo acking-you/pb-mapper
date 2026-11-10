@@ -55,6 +55,61 @@ async fn interrupted_v2_writer_cannot_reuse_a_nonce_or_restart_a_partial_frame()
     assert_eq!(wire.len(), 1);
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The bytes released peers write and read: the clear-text prefix, then for
+/// each direction its key, nonce and authenticated data, over two counters.
+#[tokio::test]
+async fn v2_control_frames_keep_their_wire_bytes() {
+    let material = derive_material(KeyId::from_u64(7), &[7; 32], [3; CONNECTION_SALT_LEN]).unwrap();
+    assert_eq!(
+        hex(&first_prefix(&material)),
+        concat!(
+            "50424d32",                         // magic
+            "02",                               // version
+            "00",                               // flags
+            "0000",                             // reserved
+            "0000000000000007",                 // key id
+            "03030303030303030303030303030303", // salt
+        )
+    );
+    for (direction, counter, expected) in [
+        (
+            DIRECTION_CLIENT_TO_SERVER,
+            1,
+            concat!(
+                "0000000000000001",
+                "00000016",
+                "81a928bec6e5537e35d6497bd3328d7a1538af1b0770",
+                "0000000000000002",
+                "00000010",
+                "38ce0080082c479293c605c62d245d2a",
+            ),
+        ),
+        (
+            DIRECTION_SERVER_TO_CLIENT,
+            0,
+            concat!(
+                "0000000000000000",
+                "00000016",
+                "f63a46e9c35c0b779a0dbab36b91e6a318fec749497f",
+                "0000000000000001",
+                "00000010",
+                "52b8a5d2df47834020e0d08728b0e894",
+            ),
+        ),
+    ] {
+        let mut wire = Vec::new();
+        let mut writer =
+            V2MessageWriter::new(&mut wire, material.clone(), direction, counter).unwrap();
+        writer.write_msg(b"golden").await.unwrap();
+        writer.write_msg(b"").await.unwrap();
+        assert_eq!(hex(&wire), expected, "direction {direction}");
+    }
+}
+
 #[tokio::test]
 async fn exhausted_v2_writer_fails_before_emitting_any_ciphertext() {
     let material = derive_material(ADMIN_KEY_ID, &[7; 32], [3; CONNECTION_SALT_LEN]).unwrap();
