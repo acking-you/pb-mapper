@@ -233,11 +233,19 @@ impl<S: Sealer, T: Serialize + DeserializeOwned> TrustFile<S, T> {
         }
         write_durably(&self.path(), &self.sealer.seal(&plain)?)
     }
-    /// Forget the grant; nothing remembered is no failure.
+    /// Forget the grant, durably: a crash after this returns cannot bring it
+    /// back. Nothing remembered is no failure.
     pub fn revoke(&self) -> Result<()> {
-        match std::fs::remove_file(self.path()) {
-            Err(failure) if failure.kind() != io::ErrorKind::NotFound => Err(failure),
-            _ => Ok(()),
+        let path = self.path();
+        match std::fs::remove_file(&path) {
+            Err(failure) if failure.kind() != io::ErrorKind::NotFound => return Err(failure),
+            _ => {}
+        }
+        // Synced even when already gone, which an earlier revoke that failed
+        // here leaves; no directory at all means nothing was ever saved.
+        match pb_mapper_core::durable_file::sync_parent_directory(&path) {
+            Err(failure) if failure.kind() == io::ErrorKind::NotFound => Ok(()),
+            synced => synced,
         }
     }
 }
@@ -303,6 +311,8 @@ mod tests {
         let directory = TempPath::new("trust");
         let file = TrustFile::<_, Settings>::new(directory.to_path_buf(), Xor(0x5a));
         assert!(file.load().unwrap().is_none());
+        // Nothing was ever saved, not even its directory: nothing to revoke.
+        file.revoke().unwrap();
         let scope = RelayScope {
             relay: "relay:7666".into(),
             namespace: 7,
