@@ -29,6 +29,18 @@ const MAINTENANCE: &[u8] = b"\0";
 // another's open files, while keeping retention bounded across process restarts.
 const WRITER_SLOTS: usize = 4;
 const TRUNCATED: &[u8] = b" ... [record truncated]\n";
+const _: () = assert!(
+    TRUNCATED.len() < RECORD_BYTES,
+    "a truncated record keeps some of its text"
+);
+const _: () = assert!(
+    RECORD_BYTES as u64 <= FILE_BYTES,
+    "one record fits in one file"
+);
+const _: () = assert!(
+    RECORD_BYTES as u64 <= SLOT_BYTES,
+    "SLOT_BYTES less a record cannot underflow"
+);
 
 static LOG: LazyLock<DiskLog> = LazyLock::new(DiskLog::default);
 
