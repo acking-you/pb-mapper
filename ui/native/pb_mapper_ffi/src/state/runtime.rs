@@ -33,7 +33,7 @@ use super::tunnel::{
     ConnectCommit, KeyClaim, RegisterCommit, TunnelHandle, TunnelRuntime, abort_runtime, claim_key,
     watch_tunnel,
 };
-use super::{DirectOptions, LocalServerStatus, PbMapperState, RelayTunnels};
+use super::{LocalServerStatus, PbMapperState, RelayTunnels};
 use crate::error::CtlError;
 use crate::events;
 
@@ -248,38 +248,20 @@ impl PbMapperState {
     }
 
     pub(super) fn finish_register(&mut self, commit: RegisterCommit) -> Result<(), CtlError> {
-        let RegisterCommit {
-            service_key,
-            local_address,
-            protocol,
-            enable_encryption,
-            enable_keep_alive,
-            port_mapping,
-            handle,
-            pin,
-        } = commit;
+        let RegisterCommit { spec, handle, pin } = commit;
 
         tracing::info!(
             "Registering service '{}' with protocol {}, local address {}, server address {}",
-            service_key,
-            protocol,
-            local_address,
+            spec.service_key,
+            spec.protocol,
+            spec.local_address,
             pin.relay
         );
 
-        self.save_service_config(
-            &service_key,
-            &local_address,
-            &protocol,
-            enable_encryption,
-            enable_keep_alive,
-            DirectOptions {
-                allow_direct: pin.allow_direct,
-                port_mapping,
-            },
-        )
-        .map_err(|e| CtlError::io(format!("Failed to save service configuration: {e}")))?;
+        self.save_service_config(&spec)
+            .map_err(|e| CtlError::io(format!("Failed to save service configuration: {e}")))?;
 
+        let service_key = spec.service_key;
         let handle = Arc::new(TunnelHandle::Share(handle));
         watch_tunnel(&handle, events::ChangeKind::Services, &service_key);
         if self
@@ -425,28 +407,19 @@ impl PbMapperState {
     }
 
     pub(super) fn finish_connect(&mut self, commit: ConnectCommit) -> Result<(), CtlError> {
-        let ConnectCommit {
-            service_key,
-            local_address,
-            protocol,
-            enable_keep_alive,
-            port_mapping,
-            handle,
-            pin,
-        } = commit;
+        let ConnectCommit { spec, handle, pin } = commit;
 
         tracing::info!(
             "Connecting to service '{}' with protocol {}, local address {}, server address {}",
-            service_key,
-            protocol,
-            local_address,
+            spec.service_key,
+            spec.protocol,
+            spec.local_address,
             pin.relay
         );
 
-        let namespace = pin.namespace;
-        let allow_direct = pin.allow_direct;
+        let service_key = &spec.service_key;
         let handle = Arc::new(TunnelHandle::Connect(handle));
-        watch_tunnel(&handle, events::ChangeKind::Clients, &service_key);
+        watch_tunnel(&handle, events::ChangeKind::Clients, service_key);
         if self
             .client_runtime
             .insert(service_key.clone(), TunnelRuntime { handle, pin })
@@ -459,17 +432,7 @@ impl PbMapperState {
         // from a terminal is remembered exactly like one made from the window.
         // `finish_register` has always done this; leaving it out here meant a
         // CLI `connect` started a client that never appeared in the list.
-        if let Err(e) = self.save_client_config(
-            &service_key,
-            &local_address,
-            &protocol,
-            enable_keep_alive,
-            namespace,
-            DirectOptions {
-                allow_direct,
-                port_mapping,
-            },
-        ) {
+        if let Err(e) = self.save_client_config(&spec) {
             // The client is up either way, so this is a warning and not a
             // failure: losing the config costs the entry after a restart.
             tracing::warn!("Failed to save client config for '{service_key}': {e}");

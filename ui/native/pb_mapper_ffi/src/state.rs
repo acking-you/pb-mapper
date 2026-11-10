@@ -45,7 +45,7 @@ pub use stored::{
 };
 pub(crate) use tunnel::TunnelHandle;
 use tunnel::TunnelRuntime;
-pub use tunnel::{connect_service, register_service};
+pub use tunnel::{ConnectSpec, ShareSpec, connect_service, register_service};
 pub use views::{
     ClientConfigInfo, ClientStatusResponse, LocalServerStatus, PathInfo, RelayTunnels,
     ServerStatusDetail, ServiceConfigInfo, ServiceConnInfo, ServiceStatusResponse,

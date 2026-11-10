@@ -8,7 +8,7 @@ use crate::ctl::Origin;
 use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{Reply, json_or, parse_c_string, port_mapping_from_c, respond};
-use crate::state::DirectOptions;
+use crate::state::{DirectOptions, ShareSpec};
 
 /// Register a service. A nonzero `allow_direct` lets connections reach it
 /// directly rather than through the relay; `port_mapping` then says when to
@@ -42,14 +42,16 @@ pub unsafe extern "C" fn pb_mapper_register_service(
         // caller does not hold it. See `state::register_service`.
         handle.runtime.block_on(crate::state::register_service(
             &handle.state,
-            service_key,
-            local_address,
-            protocol,
-            enable_encryption != 0,
-            enable_keep_alive != 0,
-            DirectOptions {
-                allow_direct: allow_direct != 0,
-                port_mapping,
+            ShareSpec {
+                service_key,
+                local_address,
+                protocol,
+                enable_encryption: enable_encryption != 0,
+                enable_keep_alive: enable_keep_alive != 0,
+                direct: DirectOptions {
+                    allow_direct: allow_direct != 0,
+                    port_mapping,
+                },
             },
         ))?;
         events::emit(events::ChangeKind::Services, None, Origin::Ui);

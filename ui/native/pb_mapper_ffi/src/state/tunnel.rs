@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use uni_stream::stream::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
 
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, Connection, Error as SdkError, PathPolicy, PortMapping,
+    Client, ConnectOptions, ConnectRequest, Connection, Error as SdkError, PathPolicy,
     RecoveryFailure, RegisterOptions, RegisterRequest, Registration, RelayTransport, Transport,
     TunnelDiagnostics, TunnelStatus,
 };
@@ -281,16 +281,37 @@ pub(super) fn abort_runtime(map: &mut HashMap<String, TunnelRuntime>, key: &str)
     map.remove(key).is_some()
 }
 
+/// A share as its caller asks for it, and as it is saved.
+pub struct ShareSpec {
+    pub service_key: String,
+    /// The local service it exposes, as `ip:port`.
+    pub local_address: String,
+    /// `TCP`, or anything else for UDP.
+    pub protocol: String,
+    pub enable_encryption: bool,
+    pub enable_keep_alive: bool,
+    pub direct: DirectOptions,
+}
+
+/// A connection as its caller asks for it, and as it is saved.
+pub struct ConnectSpec {
+    pub service_key: String,
+    /// Where it listens locally, as `ip:port`.
+    pub local_address: String,
+    /// `TCP`, or anything else for UDP.
+    pub protocol: String,
+    pub enable_keep_alive: bool,
+    /// Whose service it is when that is not this credential's own, which
+    /// only the administrator key may ask for.
+    pub namespace: Option<u64>,
+    pub direct: DirectOptions,
+}
+
 /// Everything [`PbMapperState::finish_register`] needs once the slow work is
 /// done, the tunnel itself included: it starts before the commit, and stops
 /// again if the commit fails.
 pub(super) struct RegisterCommit {
-    pub(super) service_key: String,
-    pub(super) local_address: String,
-    pub(super) protocol: String,
-    pub(super) enable_encryption: bool,
-    pub(super) enable_keep_alive: bool,
-    pub(super) port_mapping: PortMapping,
+    pub(super) spec: ShareSpec,
     pub(super) handle: Registration,
     pub(super) pin: PinnedTunnel,
 }
@@ -298,11 +319,7 @@ pub(super) struct RegisterCommit {
 /// Everything [`PbMapperState::finish_connect`] needs once the slow work is
 /// done. See [`RegisterCommit`].
 pub(super) struct ConnectCommit {
-    pub(super) service_key: String,
-    pub(super) local_address: String,
-    pub(super) protocol: String,
-    pub(super) enable_keep_alive: bool,
-    pub(super) port_mapping: PortMapping,
+    pub(super) spec: ConnectSpec,
     pub(super) handle: Connection,
     pub(super) pin: PinnedTunnel,
 }
@@ -324,17 +341,8 @@ fn transport_of(protocol: &str) -> Transport {
 /// them out, including a status read that wanted nothing from this key at all.
 pub async fn register_service(
     state: &Arc<Mutex<PbMapperState>>,
-    service_key: String,
-    local_address: String,
-    protocol: String,
-    enable_encryption: bool,
-    enable_keep_alive: bool,
-    direct: DirectOptions,
+    spec: ShareSpec,
 ) -> Result<(), CtlError> {
-    let DirectOptions {
-        allow_direct,
-        port_mapping,
-    } = direct;
     // 1. Claim the key and take what the slow work needs. Microseconds.
     //    `_claim` is held to the end of the function on purpose: dropping it
     //    early would release the key while the setup is still running.
@@ -343,7 +351,7 @@ pub async fn register_service(
     //    socket; LAN-first with them, as this computer's config says now.
     let (_claim, server_address, credential, relay_transport, lan_first) = {
         let state = state.lock().await;
-        let claim = state.claim_registering(&service_key)?;
+        let claim = state.claim_registering(&spec.service_key)?;
         let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
         (
             claim,
@@ -356,13 +364,13 @@ pub async fn register_service(
 
     // 2. The slow parts, with the lock released, ending with the tunnel
     //    started.
-    resolve_addrs_async(&local_address)
+    resolve_addrs_async(&spec.local_address)
         .await
         .map_err(|e| CtlError::invalid_address(format!("Invalid local address: {e}")))?;
     let remote_addrs = resolve_pb_mapper_server_async(Some(&server_address))
         .await
         .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
-    let client = Client::from_credential(&server_address, credential, enable_keep_alive, None)
+    let client = Client::from_credential(&server_address, credential, spec.enable_keep_alive, None)
         .with_relay_transport(relay_transport)
         .map_err(sdk_refusal)?;
     // Surface a relay this tunnel cannot use now, rather than retrying it.
@@ -370,16 +378,16 @@ pub async fn register_service(
     let handle = client
         .register_with_options(
             RegisterRequest {
-                key: service_key.clone(),
-                local_addr: local_address.clone(),
-                transport: transport_of(&protocol),
-                codec: enable_encryption,
+                key: spec.service_key.clone(),
+                local_addr: spec.local_address.clone(),
+                transport: transport_of(&spec.protocol),
+                codec: spec.enable_encryption,
                 force_namespace: false,
             },
             RegisterOptions {
-                allow_direct,
+                allow_direct: spec.direct.allow_direct,
                 idle_timeout: None,
-                port_mapping,
+                port_mapping: spec.direct.port_mapping,
                 lan_first,
                 ..Default::default()
             },
@@ -388,45 +396,30 @@ pub async fn register_service(
         .map_err(sdk_refusal)?;
 
     // 3. Commit. Microseconds again.
-    state.lock().await.finish_register(RegisterCommit {
-        service_key,
-        local_address,
-        protocol,
-        enable_encryption,
-        enable_keep_alive,
-        port_mapping,
-        handle,
-        pin: PinnedTunnel {
-            credential,
-            endpoint: remote_addrs,
-            relay: server_address,
-            namespace: None,
-            allow_direct,
-        },
-    })
+    let pin = PinnedTunnel {
+        credential,
+        endpoint: remote_addrs,
+        relay: server_address,
+        namespace: None,
+        allow_direct: spec.direct.allow_direct,
+    };
+    state
+        .lock()
+        .await
+        .finish_register(RegisterCommit { spec, handle, pin })
 }
 
 /// Connects to a registered service. Phased exactly like [`register_service`];
-/// the slow step here is the local bind that proves the port is free.
-/// `namespace` names whose service it is when that is not this credential's
-/// own, which only the administrator key may ask for. With `allow_direct`
-/// each session tries a direct path first, and the relay when that fails.
+/// the slow step here is the local bind that proves the port is free. With
+/// `allow_direct` each session tries a direct path first, and the relay when
+/// that fails.
 pub async fn connect_service(
     state: &Arc<Mutex<PbMapperState>>,
-    service_key: String,
-    local_address: String,
-    protocol: String,
-    enable_keep_alive: bool,
-    namespace: Option<u64>,
-    direct: DirectOptions,
+    spec: ConnectSpec,
 ) -> Result<(), CtlError> {
-    let DirectOptions {
-        allow_direct,
-        port_mapping,
-    } = direct;
     let (_claim, server_address, credential, relay_transport, lan_first, lan_transport) = {
         let state = state.lock().await;
-        let claim = state.claim_connecting(&service_key)?;
+        let claim = state.claim_connecting(&spec.service_key)?;
         let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
         (
             claim,
@@ -438,7 +431,7 @@ pub async fn connect_service(
         )
     };
 
-    let local_addrs = resolve_addrs_async(&local_address)
+    let local_addrs = resolve_addrs_async(&spec.local_address)
         .await
         .map_err(|e| CtlError::invalid_address(format!("Invalid local address: {e}")))?;
     let remote_addrs = resolve_pb_mapper_server_async(Some(&server_address))
@@ -446,7 +439,7 @@ pub async fn connect_service(
         .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
 
     // Preflight local bind to detect "port already in use" before starting client.
-    let transport = transport_of(&protocol);
+    let transport = transport_of(&spec.protocol);
     let bound = match transport {
         Transport::Tcp => TcpListenerProvider::bind(local_addrs.as_slice())
             .await
@@ -456,11 +449,19 @@ pub async fn connect_service(
             .map(drop),
     };
     bound.map_err(|e| {
-        CtlError::address_in_use(format!("Failed to bind local address {local_address}: {e}"))
+        CtlError::address_in_use(format!(
+            "Failed to bind local address {}: {e}",
+            spec.local_address
+        ))
     })?;
-    let client = Client::from_credential(&server_address, credential, enable_keep_alive, namespace)
-        .with_relay_transport(relay_transport)
-        .map_err(sdk_refusal)?;
+    let client = Client::from_credential(
+        &server_address,
+        credential,
+        spec.enable_keep_alive,
+        spec.namespace,
+    )
+    .with_relay_transport(relay_transport)
+    .map_err(sdk_refusal)?;
     // A relay that is down is retried, as it always was: the connection
     // listens locally meanwhile. One that offers no QUIC never will.
     if relay_transport == RelayTransport::Quic {
@@ -469,17 +470,17 @@ pub async fn connect_service(
     let handle = client
         .connect_with_options(
             ConnectRequest {
-                key: service_key.clone(),
-                local_addr: local_address.clone(),
+                key: spec.service_key.clone(),
+                local_addr: spec.local_address.clone(),
                 transport,
             },
             ConnectOptions {
-                path: if allow_direct {
+                path: if spec.direct.allow_direct {
                     PathPolicy::Auto
                 } else {
                     PathPolicy::RelayOnly
                 },
-                port_mapping,
+                port_mapping: spec.direct.port_mapping,
                 lan_first,
                 lan_transport,
             },
@@ -487,21 +488,17 @@ pub async fn connect_service(
         .await
         .map_err(sdk_refusal)?;
 
-    state.lock().await.finish_connect(ConnectCommit {
-        service_key,
-        local_address,
-        protocol,
-        enable_keep_alive,
-        port_mapping,
-        handle,
-        pin: PinnedTunnel {
-            credential,
-            endpoint: remote_addrs,
-            relay: server_address,
-            namespace,
-            allow_direct,
-        },
-    })
+    let pin = PinnedTunnel {
+        credential,
+        endpoint: remote_addrs,
+        relay: server_address,
+        namespace: spec.namespace,
+        allow_direct: spec.direct.allow_direct,
+    };
+    state
+        .lock()
+        .await
+        .finish_connect(ConnectCommit { spec, handle, pin })
 }
 
 /// Tell the window when `handle`'s state or path changes, until the tunnel

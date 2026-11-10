@@ -8,7 +8,7 @@ use crate::ctl::Origin;
 use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{Reply, json_or, parse_c_string, port_mapping_from_c, respond};
-use crate::state::DirectOptions;
+use crate::state::{ConnectSpec, DirectOptions};
 
 /// Connect client to service. `namespace` is the temporary credential whose
 /// service it is, for the administrator key; negative for this credential's
@@ -46,14 +46,16 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
         // from a terminal end up in the same state.
         handle.runtime.block_on(crate::state::connect_service(
             &handle.state,
-            service_key,
-            local_address,
-            protocol,
-            enable_keep_alive != 0,
-            u64::try_from(namespace).ok(),
-            DirectOptions {
-                allow_direct: allow_direct != 0,
-                port_mapping,
+            ConnectSpec {
+                service_key,
+                local_address,
+                protocol,
+                enable_keep_alive: enable_keep_alive != 0,
+                namespace: u64::try_from(namespace).ok(),
+                direct: DirectOptions {
+                    allow_direct: allow_direct != 0,
+                    port_mapping,
+                },
             },
         ))?;
         events::emit(events::ChangeKind::Clients, None, Origin::Ui);

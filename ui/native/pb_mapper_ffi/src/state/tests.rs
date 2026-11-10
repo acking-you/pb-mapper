@@ -14,8 +14,8 @@ use tokio::sync::Mutex;
 use super::tunnel::{PinnedTunnel, TunnelHandle, TunnelRuntime};
 use super::views::{PathLink, PathOutcome};
 use super::{
-    AppConfig, DirectOptions, PathInfo, PbMapperState, ServiceConfigData, connect_service,
-    force_refresh_server_status, get_server_status_detail, register_service,
+    AppConfig, ConnectSpec, DirectOptions, PathInfo, PbMapperState, ServiceConfigData, ShareSpec,
+    connect_service, force_refresh_server_status, get_server_status_detail, register_service,
 };
 use crate::error::ErrorCode;
 use crate::test_support::TempRoot;
@@ -290,14 +290,16 @@ async fn the_list_says_which_path_each_tunnel_takes() {
     for (key, direct) in [("direct", true), ("relayed", false)] {
         register_service(
             &state,
-            key.into(),
-            backend.clone(),
-            "TCP".into(),
-            true,
-            false,
-            DirectOptions {
-                allow_direct: direct,
-                port_mapping: PortMapping::Off,
+            ShareSpec {
+                service_key: key.into(),
+                local_address: backend.clone(),
+                protocol: "TCP".into(),
+                enable_encryption: true,
+                enable_keep_alive: false,
+                direct: DirectOptions {
+                    allow_direct: direct,
+                    port_mapping: PortMapping::Off,
+                },
             },
         )
         .await
@@ -305,14 +307,16 @@ async fn the_list_says_which_path_each_tunnel_takes() {
         let port = pb_mapper_testkit::reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
         connect_service(
             &state,
-            key.into(),
-            port.to_string(),
-            "TCP".into(),
-            false,
-            None,
-            DirectOptions {
-                allow_direct: true,
-                port_mapping: PortMapping::Off,
+            ConnectSpec {
+                service_key: key.into(),
+                local_address: port.to_string(),
+                protocol: "TCP".into(),
+                enable_keep_alive: false,
+                namespace: None,
+                direct: DirectOptions {
+                    allow_direct: true,
+                    port_mapping: PortMapping::Off,
+                },
             },
         )
         .await
@@ -423,14 +427,16 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
     // Kept on the relay, so the bytes cross the QUIC carrier.
     register_service(
         &state,
-        "web".into(),
-        backend.clone(),
-        "TCP".into(),
-        true,
-        false,
-        DirectOptions {
-            allow_direct: false,
-            port_mapping: PortMapping::Always,
+        ShareSpec {
+            service_key: "web".into(),
+            local_address: backend.clone(),
+            protocol: "TCP".into(),
+            enable_encryption: true,
+            enable_keep_alive: false,
+            direct: DirectOptions {
+                allow_direct: false,
+                port_mapping: PortMapping::Always,
+            },
         },
     )
     .await
@@ -438,14 +444,16 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
     let port = pb_mapper_testkit::reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
     connect_service(
         &state,
-        "web".into(),
-        port.to_string(),
-        "TCP".into(),
-        false,
-        None,
-        DirectOptions {
-            allow_direct: false,
-            port_mapping: PortMapping::Always,
+        ConnectSpec {
+            service_key: "web".into(),
+            local_address: port.to_string(),
+            protocol: "TCP".into(),
+            enable_keep_alive: false,
+            namespace: None,
+            direct: DirectOptions {
+                allow_direct: false,
+                port_mapping: PortMapping::Always,
+            },
         },
     )
     .await
@@ -506,14 +514,16 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
     state.lock().await.config.server_address = tcp_only.addr().to_string();
     let refused = register_service(
         &state,
-        "cam".into(),
-        backend,
-        "TCP".into(),
-        false,
-        false,
-        DirectOptions {
-            allow_direct: true,
-            port_mapping: PortMapping::Off,
+        ShareSpec {
+            service_key: "cam".into(),
+            local_address: backend,
+            protocol: "TCP".into(),
+            enable_encryption: false,
+            enable_keep_alive: false,
+            direct: DirectOptions {
+                allow_direct: true,
+                port_mapping: PortMapping::Off,
+            },
         },
     )
     .await
@@ -581,14 +591,16 @@ async fn a_second_registration_of_the_same_key_is_refused() {
 
     let err = register_service(
         &state,
-        "home".to_string(),
-        "127.0.0.1:8080".to_string(),
-        "TCP".to_string(),
-        false,
-        false,
-        DirectOptions {
-            allow_direct: true,
-            port_mapping: PortMapping::Off,
+        ShareSpec {
+            service_key: "home".to_string(),
+            local_address: "127.0.0.1:8080".to_string(),
+            protocol: "TCP".to_string(),
+            enable_encryption: false,
+            enable_keep_alive: false,
+            direct: DirectOptions {
+                allow_direct: true,
+                port_mapping: PortMapping::Off,
+            },
         },
     )
     .await
@@ -628,14 +640,16 @@ async fn a_failed_registration_releases_its_claim() {
     // Fails in phase 2, while the claim is held.
     let first = register_service(
         &state,
-        "home".to_string(),
-        "not a socket address".to_string(),
-        "TCP".to_string(),
-        false,
-        false,
-        DirectOptions {
-            allow_direct: true,
-            port_mapping: PortMapping::Off,
+        ShareSpec {
+            service_key: "home".to_string(),
+            local_address: "not a socket address".to_string(),
+            protocol: "TCP".to_string(),
+            enable_encryption: false,
+            enable_keep_alive: false,
+            direct: DirectOptions {
+                allow_direct: true,
+                port_mapping: PortMapping::Off,
+            },
         },
     )
     .await
@@ -650,14 +664,16 @@ async fn a_failed_registration_releases_its_claim() {
     // the same address parsing it failed on before.
     let second = register_service(
         &state,
-        "home".to_string(),
-        "not a socket address".to_string(),
-        "TCP".to_string(),
-        false,
-        false,
-        DirectOptions {
-            allow_direct: true,
-            port_mapping: PortMapping::Off,
+        ShareSpec {
+            service_key: "home".to_string(),
+            local_address: "not a socket address".to_string(),
+            protocol: "TCP".to_string(),
+            enable_encryption: false,
+            enable_keep_alive: false,
+            direct: DirectOptions {
+                allow_direct: true,
+                port_mapping: PortMapping::Off,
+            },
         },
     )
     .await

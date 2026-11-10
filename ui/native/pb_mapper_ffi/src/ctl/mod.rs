@@ -273,14 +273,16 @@ async fn run(
         Command::Register(args) => {
             state::register_service(
                 state,
-                args.key.clone(),
-                args.addr,
-                protocol(args.udp),
-                !args.no_encrypt,
-                args.keep_alive,
-                state::DirectOptions {
-                    allow_direct: !args.relay_only,
-                    port_mapping: args.port_mapping,
+                state::ShareSpec {
+                    service_key: args.key.clone(),
+                    local_address: args.addr,
+                    protocol: protocol(args.udp),
+                    enable_encryption: !args.no_encrypt,
+                    enable_keep_alive: args.keep_alive,
+                    direct: state::DirectOptions {
+                        allow_direct: !args.relay_only,
+                        port_mapping: args.port_mapping,
+                    },
                 },
             )
             .await?;
@@ -298,14 +300,16 @@ async fn run(
         Command::Connect(args) => {
             state::connect_service(
                 state,
-                args.key.clone(),
-                args.addr,
-                protocol(args.udp),
-                args.keep_alive,
-                args.namespace,
-                state::DirectOptions {
-                    allow_direct: !args.relay_only,
-                    port_mapping: args.port_mapping,
+                state::ConnectSpec {
+                    service_key: args.key.clone(),
+                    local_address: args.addr,
+                    protocol: protocol(args.udp),
+                    enable_keep_alive: args.keep_alive,
+                    namespace: args.namespace,
+                    direct: state::DirectOptions {
+                        allow_direct: !args.relay_only,
+                        port_mapping: args.port_mapping,
+                    },
                 },
             )
             .await?;

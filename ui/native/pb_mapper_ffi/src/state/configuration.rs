@@ -21,8 +21,8 @@ use pb_mapper_core::checksum::set_process_msg_header_key;
 use super::status::LocalStatusCache;
 use super::stored::normalize_msg_header_key;
 use super::{
-    AppConfig, ClientConfigData, ClientConfigStore, DirectOptions, PbMapperState,
-    ServiceConfigData, ServiceConfigStore,
+    AppConfig, ClientConfigData, ClientConfigStore, ConnectSpec, DirectOptions, PbMapperState,
+    ServiceConfigData, ServiceConfigStore, ShareSpec,
 };
 use crate::error::CtlError;
 
@@ -198,19 +198,19 @@ impl PbMapperState {
         Ok(())
     }
 
-    pub fn save_service_config(
-        &self,
-        service_key: &str,
-        local_address: &str,
-        protocol: &str,
-        enable_encryption: bool,
-        enable_keep_alive: bool,
-        direct: DirectOptions,
-    ) -> Result<(), CtlError> {
-        let DirectOptions {
-            allow_direct,
-            port_mapping,
-        } = direct;
+    pub fn save_service_config(&self, spec: &ShareSpec) -> Result<(), CtlError> {
+        let ShareSpec {
+            service_key,
+            local_address,
+            protocol,
+            enable_encryption,
+            enable_keep_alive,
+            direct:
+                DirectOptions {
+                    allow_direct,
+                    port_mapping,
+                },
+        } = spec;
         let mut store = self.load_service_configs();
         let now = SystemTime::now();
 
@@ -218,15 +218,15 @@ impl PbMapperState {
             service_key: service_key.to_string(),
             local_address: local_address.to_string(),
             protocol: protocol.to_string(),
-            enable_encryption,
-            enable_keep_alive,
+            enable_encryption: *enable_encryption,
+            enable_keep_alive: *enable_keep_alive,
             created_at: if store.services.contains_key(service_key) {
                 store.services[service_key].created_at
             } else {
                 now
             },
-            allow_direct,
-            port_mapping,
+            allow_direct: *allow_direct,
+            port_mapping: *port_mapping,
         };
 
         store.services.insert(service_key.to_string(), config);
@@ -266,19 +266,19 @@ impl PbMapperState {
         Ok(())
     }
 
-    pub fn save_client_config(
-        &self,
-        service_key: &str,
-        local_address: &str,
-        protocol: &str,
-        enable_keep_alive: bool,
-        namespace: Option<u64>,
-        direct: DirectOptions,
-    ) -> Result<(), CtlError> {
-        let DirectOptions {
-            allow_direct,
-            port_mapping,
-        } = direct;
+    pub fn save_client_config(&self, spec: &ConnectSpec) -> Result<(), CtlError> {
+        let ConnectSpec {
+            service_key,
+            local_address,
+            protocol,
+            enable_keep_alive,
+            namespace,
+            direct:
+                DirectOptions {
+                    allow_direct,
+                    port_mapping,
+                },
+        } = spec;
         let mut store = self.load_client_configs();
         let now = SystemTime::now();
 
@@ -286,15 +286,15 @@ impl PbMapperState {
             service_key: service_key.to_string(),
             local_address: local_address.to_string(),
             protocol: protocol.to_string(),
-            enable_keep_alive,
+            enable_keep_alive: *enable_keep_alive,
             created_at: if store.clients.contains_key(service_key) {
                 store.clients[service_key].created_at
             } else {
                 now
             },
-            namespace,
-            allow_direct,
-            port_mapping,
+            namespace: *namespace,
+            allow_direct: *allow_direct,
+            port_mapping: *port_mapping,
         };
 
         store.clients.insert(service_key.to_string(), config);
