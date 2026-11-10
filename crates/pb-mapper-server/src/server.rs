@@ -18,6 +18,7 @@ use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::command::{
     CONTROL_PROTOCOL_V2, LocalServer, MessageSerializer, PbConnResponse, PbServerRequest,
 };
+use pb_mapper_protocol::direct::DirectCapability;
 use pb_mapper_protocol::secure::ServerHeaderSession;
 use pb_mapper_protocol::{MessageReader, MessageWriter};
 
@@ -108,8 +109,9 @@ pub struct ServerRegistration {
     pub direct: Option<pb_mapper_auth::AuthContext>,
 }
 
-/// Maintaining a connection to the server.
-/// This connection is used to send channel request
+/// Serve one registered service's control connection: register it with the
+/// manager, answer with what the manager granted, then carry control frames
+/// both ways until the connection ends or is retired.
 #[instrument(skip(registration, task_sender, conn, session))]
 pub async fn handle_server_conn(
     registration: ServerRegistration,
@@ -132,7 +134,7 @@ pub async fn handle_server_conn(
     // reading leaves it blocked inside one.
     let retire_token = CancellationToken::new();
 
-    // register metadate
+    // Tell the manager what this connection serves.
     task_sender
         .send(ManagerTask::Register {
             key: key.clone(),
@@ -173,162 +175,39 @@ pub async fn handle_server_conn(
                 key: key.clone(),
                 conn_id,
             })?;
-
-        let ConnTask::RegisterResp {
-            generation,
-            protocol_version,
-            lease_ttl_ms,
-            direct,
-        } = response
-        else {
-            if let ConnTask::RegisterFailed {
+        let registered = match response {
+            ConnTask::RegisterResp {
+                generation,
+                protocol_version,
+                lease_ttl_ms,
+                direct,
+            } => Registered {
+                key: key.clone(),
+                conn_id,
+                need_codec,
+                is_datagram,
+                generation,
+                protocol_version,
+                lease_ttl_ms,
+                direct,
+            },
+            ConnTask::RegisterFailed {
                 code,
                 reason,
                 retryable,
-            } = response
-            {
-                let response = PbConnResponse::error(code, reason, retryable)
-                    .encode()
-                    .context(ServerConnEncodeRegisterRespSnafu {
-                        key: key.clone(),
-                        conn_id,
-                    })?;
-                let mut writer = session
-                    .response_writer(&mut conn)
-                    .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
-                writer
-                    .write_msg(&response)
-                    .await
-                    .context(ServerConnWriteRegisterRespSnafu {
-                        key: key.clone(),
-                        conn_id,
-                    })?;
-                return Ok(());
+            } => {
+                let refusal = PbConnResponse::error(code, reason, retryable);
+                return write_register_refusal(&mut conn, &session, refusal, &key, conn_id).await;
             }
-            ServerConnRegisteredRespNotMatchSnafu {
-                key: key.clone(),
-                conn_id,
-            }
-            .fail()?
-        };
-        tracing::debug!(
-            event = "server_register_ack_received",
-            key = %key,
-            conn_id = %conn_id,
-            generation,
-            protocol_version,
-            "server register ack received from manager"
-        );
-
-        let (mut reader, mut writer) = conn.into_split();
-        let mut msg_reader = session
-            .continuation_reader(&mut reader)
-            .context(ServerConnCreateHeaderToolSnafu { tool: "reader" })?;
-        // Keep one header writer for the register response and all later control frames. The
-        // encrypted header codec is stateful; recreating it between frames breaks peer decoding.
-        let register_response = if protocol_version >= CONTROL_PROTOCOL_V2 {
-            PbConnResponse::RegisterV2 {
-                conn_id: conn_id.into(),
-                generation,
-                lease_ttl_ms,
-                direct,
-            }
-        } else {
-            PbConnResponse::Register(conn_id.into())
-        }
-        .encode()
-        .context(ServerConnEncodeRegisterRespSnafu {
-            key: key.clone(),
-            conn_id,
-        })?;
-        let (write_tx, mut write_rx) = tokio::sync::mpsc::channel(CONTROL_WRITE_QUEUE);
-        let writer_key = key.clone();
-        let writer_retire_token = retire_token.clone();
-        let mut writer_handle =
-            tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-                let mut msg_writer = session
-                    .response_writer(&mut writer)
-                    .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
-                msg_writer.write_msg(&register_response).await.context(
-                    ServerConnWriteRegisterRespSnafu {
-                        key: writer_key.clone(),
-                        conn_id,
-                    },
-                )?;
-                tracing::info!(
-                    event = "server_register_response_written",
-                    key = %writer_key,
-                    conn_id = %conn_id,
-                    need_codec,
-                    is_datagram,
-                    generation,
-                    protocol_version,
-                    lease_ttl_ms,
-                    "server register response written to local server"
-                );
-                run_control_writer(
-                    &mut msg_writer,
-                    &rx,
-                    &mut write_rx,
-                    &writer_retire_token,
-                    writer_key,
+            _ => {
+                return ServerConnRegisteredRespNotMatchSnafu {
+                    key: key.clone(),
                     conn_id,
-                )
-                .await
-            }));
-
-        // Read once: the environment it comes from is not written after startup.
-        let idle_timeout = crate::server_conn_idle_timeout(protocol_version);
-        let reader_result = async {
-            loop {
-                let msg = match tokio::time::timeout(idle_timeout, msg_reader.read_msg()).await {
-                    Ok(Ok(msg)) => msg,
-                    Ok(Err(e)) => {
-                        tracing::error!(
-                            event = "server_conn_control_read_failed",
-                            key = %key,
-                            conn_id = %conn_id,
-                            error = %snafu::Report::from_error(e),
-                            "server connection control read failed"
-                        );
-                        break Ok(());
-                    }
-                    Err(_) => {
-                        tracing::error!(
-                            event = "server_conn_idle_timeout",
-                            key = %key,
-                            conn_id = %conn_id,
-                            timeout = ?idle_timeout,
-                            protocol_version,
-                            "server connection idle timeout triggered"
-                        );
-                        break Ok(());
-                    }
-                };
-                handle_control_message(msg, &write_tx, &task_sender, &key, conn_id).await?;
+                }
+                .fail();
             }
         };
-
-        let result = tokio::select! {
-            result = reader_result => result,
-            result = &mut writer_handle => match result {
-                Ok(result) => result,
-                Err(e) => {
-                    tracing::warn!(
-                        event = "server_conn_writer_join_failed",
-                        key = %key,
-                        conn_id = %conn_id,
-                        error = %e,
-                        "server connection writer task failed"
-                    );
-                    Ok(())
-                }
-            },
-        };
-        if !writer_handle.is_finished() {
-            writer_handle.abort();
-        }
-        result
+        serve_registered(registered, conn, session, rx, retire_token, &task_sender).await
     }
     .await;
     match &result {
@@ -348,6 +227,180 @@ pub async fn handle_server_conn(
     }
     guard.deregister().await;
     result
+}
+
+/// Tell the local server why the manager refused its registration.
+async fn write_register_refusal(
+    conn: &mut RelayStream,
+    session: &ServerHeaderSession,
+    refusal: PbConnResponse,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+) -> Result<()> {
+    let refusal = refusal
+        .encode()
+        .context(ServerConnEncodeRegisterRespSnafu {
+            key: key.clone(),
+            conn_id,
+        })?;
+    let mut writer = session
+        .response_writer(conn)
+        .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
+    writer
+        .write_msg(&refusal)
+        .await
+        .context(ServerConnWriteRegisterRespSnafu {
+            key: key.clone(),
+            conn_id,
+        })
+}
+
+/// A registration as the manager accepted it: what the local server asked
+/// for, and what the manager granted.
+struct Registered {
+    key: ImutableKey,
+    conn_id: RemoteConnId,
+    need_codec: bool,
+    is_datagram: bool,
+    generation: u64,
+    protocol_version: u16,
+    lease_ttl_ms: u64,
+    direct: Option<DirectCapability>,
+}
+
+/// Answer an accepted registration, then read its control frames here while a
+/// task of its own writes to it, until either side ends.
+async fn serve_registered(
+    registered: Registered,
+    conn: RelayStream,
+    session: ServerHeaderSession,
+    rx: ConnTaskReceiver,
+    retire_token: CancellationToken,
+    task_sender: &ManagerTaskSender,
+) -> Result<()> {
+    let Registered {
+        key,
+        conn_id,
+        need_codec,
+        is_datagram,
+        generation,
+        protocol_version,
+        lease_ttl_ms,
+        direct,
+    } = registered;
+    tracing::debug!(
+        event = "server_register_ack_received",
+        key = %key,
+        conn_id = %conn_id,
+        generation,
+        protocol_version,
+        "server register ack received from manager"
+    );
+
+    let (mut reader, mut writer) = conn.into_split();
+    let mut msg_reader = session
+        .continuation_reader(&mut reader)
+        .context(ServerConnCreateHeaderToolSnafu { tool: "reader" })?;
+    // Keep one header writer for the register response and all later control frames. The
+    // encrypted header codec is stateful; recreating it between frames breaks peer decoding.
+    let register_response = if protocol_version >= CONTROL_PROTOCOL_V2 {
+        PbConnResponse::RegisterV2 {
+            conn_id: conn_id.into(),
+            generation,
+            lease_ttl_ms,
+            direct,
+        }
+    } else {
+        PbConnResponse::Register(conn_id.into())
+    }
+    .encode()
+    .context(ServerConnEncodeRegisterRespSnafu {
+        key: key.clone(),
+        conn_id,
+    })?;
+    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel(CONTROL_WRITE_QUEUE);
+    let writer_key = key.clone();
+    // Aborted when dropped, so the writer never outlives this function.
+    let mut writer_handle = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut msg_writer = session
+            .response_writer(&mut writer)
+            .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
+        msg_writer.write_msg(&register_response).await.context(
+            ServerConnWriteRegisterRespSnafu {
+                key: writer_key.clone(),
+                conn_id,
+            },
+        )?;
+        tracing::info!(
+            event = "server_register_response_written",
+            key = %writer_key,
+            conn_id = %conn_id,
+            need_codec,
+            is_datagram,
+            generation,
+            protocol_version,
+            lease_ttl_ms,
+            "server register response written to local server"
+        );
+        run_control_writer(
+            &mut msg_writer,
+            &rx,
+            &mut write_rx,
+            &retire_token,
+            writer_key,
+            conn_id,
+        )
+        .await
+    }));
+
+    // Read once: the environment it comes from is not written after startup.
+    let idle_timeout = crate::server_conn_idle_timeout(protocol_version);
+    let reader_result = async {
+        loop {
+            let msg = match tokio::time::timeout(idle_timeout, msg_reader.read_msg()).await {
+                Ok(Ok(msg)) => msg,
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        event = "server_conn_control_read_failed",
+                        key = %key,
+                        conn_id = %conn_id,
+                        error = %snafu::Report::from_error(e),
+                        "server connection control read failed"
+                    );
+                    break Ok(());
+                }
+                Err(_) => {
+                    tracing::error!(
+                        event = "server_conn_idle_timeout",
+                        key = %key,
+                        conn_id = %conn_id,
+                        timeout = ?idle_timeout,
+                        protocol_version,
+                        "server connection idle timeout triggered"
+                    );
+                    break Ok(());
+                }
+            };
+            handle_control_message(msg, &write_tx, task_sender, &key, conn_id).await?;
+        }
+    };
+
+    tokio::select! {
+        result = reader_result => result,
+        result = &mut writer_handle => match result {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::warn!(
+                    event = "server_conn_writer_join_failed",
+                    key = %key,
+                    conn_id = %conn_id,
+                    error = %e,
+                    "server connection writer task failed"
+                );
+                Ok(())
+            }
+        },
+    }
 }
 
 #[instrument(skip(msg, write_tx))]
@@ -592,55 +645,54 @@ async fn handle_stream_req<T: MessageWriter>(
     key: ImutableKey,
     conn_id: RemoteConnId,
 ) -> Result<()> {
-    if let ConnTask::Direct(event) = req {
-        let msg =
-            LocalServer::Direct(event)
-                .encode()
-                .context(ServerConnEncodeStreamRequestSnafu {
+    match req {
+        ConnTask::Direct(event) => {
+            let msg = LocalServer::Direct(event).encode().context(
+                ServerConnEncodeStreamRequestSnafu {
                     key: key.clone(),
                     conn_id,
-                })?;
-        writer
-            .write_msg(&msg)
-            .await
-            .context(ServerConnWriteStreamRequestSnafu { key, conn_id })?;
-    } else if let ConnTask::StreamReq {
-        client_id: client_conn_id,
-        server_generation,
-    } = req
-    {
-        let msg = LocalServer::Stream {
-            client_id: client_conn_id.into(),
-            server_generation,
+                },
+            )?;
+            writer
+                .write_msg(&msg)
+                .await
+                .context(ServerConnWriteStreamRequestSnafu { key, conn_id })?;
         }
-        .encode()
-        .context(ServerConnEncodeStreamRequestSnafu {
-            key: key.clone(),
-            conn_id,
-        })?;
-        tracing::debug!(
-            event = "stream_request_written_to_local_server",
-            key = %key,
-            server_conn_id = %conn_id,
-            client_conn_id = %client_conn_id,
+        ConnTask::StreamReq {
+            client_id: client_conn_id,
             server_generation,
-            "writing stream request to local server"
-        );
-        writer
-            .write_msg(&msg)
-            .await
-            .context(ServerConnWriteStreamRequestSnafu {
+        } => {
+            let msg = LocalServer::Stream {
+                client_id: client_conn_id.into(),
+                server_generation,
+            }
+            .encode()
+            .context(ServerConnEncodeStreamRequestSnafu {
                 key: key.clone(),
                 conn_id,
-            })?
-    } else {
-        tracing::error!(
-            event = "unexpected_server_conn_task",
-            key = %key,
-            server_conn_id = %conn_id,
-            task = ?req,
-            "expected stream request task"
-        );
+            })?;
+            tracing::debug!(
+                event = "stream_request_written_to_local_server",
+                key = %key,
+                server_conn_id = %conn_id,
+                client_conn_id = %client_conn_id,
+                server_generation,
+                "writing stream request to local server"
+            );
+            writer
+                .write_msg(&msg)
+                .await
+                .context(ServerConnWriteStreamRequestSnafu { key, conn_id })?;
+        }
+        req => {
+            tracing::error!(
+                event = "unexpected_server_conn_task",
+                key = %key,
+                server_conn_id = %conn_id,
+                task = ?req,
+                "expected stream request task"
+            );
+        }
     }
     Ok(())
 }
