@@ -7,81 +7,43 @@ use super::error::{
     StatusSendManagerTaskSnafu, StatusWriteRespSnafu,
 };
 use super::{ManagerTask, ManagerTaskSender};
-use crate::manager::TrySendError;
+use crate::guard::{DeregisterGuard, Deregistration};
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::MessageWriter;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnStatusReq};
 use pb_mapper_protocol::secure::ServerHeaderSession;
 
-struct StatusConnGuard {
+/// A status connection's ID, returned to the manager when the request ends.
+struct StatusDeregistration {
     conn_id: RemoteConnId,
-    sender: ManagerTaskSender,
-    active: bool,
 }
 
-impl StatusConnGuard {
-    fn new(conn_id: RemoteConnId, sender: ManagerTaskSender) -> Self {
-        Self {
-            conn_id,
-            sender,
-            active: true,
-        }
-    }
-
-    fn deregister_task(&self) -> ManagerTask {
+impl Deregistration for StatusDeregistration {
+    fn task(&self) -> ManagerTask {
         ManagerTask::DeRegisterClientConn {
             server_id: None,
             client_id: self.conn_id,
         }
     }
 
-    async fn deregister(&mut self) {
-        if !self.active {
-            return;
-        }
-        let task = self.deregister_task();
-        if self.sender.send(task).await.is_err() {
-            tracing::debug!("skip async status deregister because manager channel is closed");
-        }
-        self.active = false;
+    fn manager_closed(&self) {
+        tracing::debug!("skip async status deregister because manager channel is closed");
     }
 
-    fn spawn_deregister(sender: ManagerTaskSender, task: ManagerTask) {
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    if sender.send(task).await.is_err() {
-                        tracing::debug!(
-                            "skip deferred status deregister because manager channel is closed"
-                        );
-                    }
-                });
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "cannot defer status deregister because no Tokio runtime is available"
-                );
-            }
-        }
+    fn dropped_manager_closed(&self) {
+        tracing::debug!("skip status deregister because manager channel is closed");
     }
-}
 
-impl Drop for StatusConnGuard {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        let task = self.deregister_task();
-        match self.sender.try_send(task) {
-            Ok(()) => {}
-            Err(TrySendError::Closed(_)) => {
-                tracing::debug!("skip status deregister because manager channel is closed");
-            }
-            Err(TrySendError::Full(task)) => {
-                tracing::warn!("manager queue is full; defer status deregister");
-                Self::spawn_deregister(self.sender.clone(), task);
-            }
-        }
+    fn dropped_queue_full(&self) {
+        tracing::warn!("manager queue is full; defer status deregister");
+    }
+
+    fn deferred_manager_closed() {
+        tracing::debug!("skip deferred status deregister because manager channel is closed");
+    }
+
+    fn no_runtime() {
+        tracing::warn!("cannot defer status deregister because no Tokio runtime is available");
     }
 }
 
@@ -94,7 +56,7 @@ pub async fn handle_show_status(
     session: ServerHeaderSession,
 ) -> Result<()> {
     let info_span = info_span!("show status", "{status:?},{conn_id:?}");
-    let mut guard = StatusConnGuard::new(conn_id, manager_sender.clone());
+    let mut guard = DeregisterGuard::new(StatusDeregistration { conn_id }, manager_sender.clone());
     let result = async {
         let (response_sender, response) = tokio::sync::oneshot::channel();
         let req = ManagerTask::Status {
@@ -122,46 +84,4 @@ pub async fn handle_show_status(
     .await;
     guard.deregister().await;
     result
-}
-
-#[cfg(test)]
-mod cancellation_audit {
-    use super::*;
-    use std::{
-        future::{Future, poll_fn},
-        task::Poll,
-    };
-    #[tokio::test]
-    async fn cancelled_pending_deregister_delivers_exactly_one_cleanup() {
-        let (sender, mut receiver) = crate::manager::task_channel(1);
-        sender.send(ManagerTask::SweepServerLeases).await.unwrap();
-        let mut guard = StatusConnGuard::new(7_u32.into(), sender.clone());
-        let mut deregister = Box::pin(guard.deregister());
-        poll_fn(|cx| {
-            assert!(deregister.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        assert!(matches!(
-            receiver.recv().await.unwrap(),
-            ManagerTask::SweepServerLeases
-        ));
-        assert!(
-            receiver.is_empty(),
-            "a pending send must not deliver before it is polled"
-        );
-        drop(deregister);
-        drop(guard);
-        let delivered = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        drop(delivered);
-        let duplicate =
-            tokio::time::timeout(std::time::Duration::from_millis(20), receiver.recv()).await;
-        assert!(
-            duplicate.is_err(),
-            "cancelling cleanup after channel delivery emitted a second deregistration"
-        );
-    }
 }

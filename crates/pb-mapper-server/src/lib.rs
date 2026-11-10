@@ -17,6 +17,7 @@ mod client;
 mod connection;
 pub mod direct;
 mod error;
+mod guard;
 // Moved here from `common`: the routing runtime is its only caller.
 pub mod manager;
 #[cfg(feature = "relay-quic")]
