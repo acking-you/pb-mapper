@@ -532,13 +532,15 @@ mod probe {
             .map_err(|failure| failure.to_string())?;
             let consumer = viewer.video_sink().attach()?;
             let presenting = std::thread::spawn(move || {
+                let mut capacity = 8 << 20;
                 loop {
-                    match consumer.next(Duration::from_millis(50), 8 << 20) {
+                    match consumer.next(Duration::from_millis(50), capacity) {
                         Pull::Unit(unit) => {
                             consumer.presented(unit.generation, unit.frame_id);
                         }
+                        Pull::NeedCapacity(needed) => capacity = needed,
+                        Pull::Timeout | Pull::Paused => {}
                         Pull::Closed => return,
-                        _ => {}
                     }
                 }
             });

@@ -126,11 +126,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let decoder = std::thread::spawn(move || -> std::io::Result<Decoded> {
         let mut decoded = Decoded::default();
         let mut previous = None;
+        let mut capacity = 4 << 20;
         while !done.load(Ordering::Acquire) {
-            let unit = match consumer.next(Duration::from_millis(100), 4 << 20) {
+            let unit = match consumer.next(Duration::from_millis(100), capacity) {
                 Pull::Unit(unit) => unit,
+                Pull::NeedCapacity(needed) => {
+                    capacity = needed;
+                    continue;
+                }
+                Pull::Timeout | Pull::Paused => continue,
                 Pull::Closed => break,
-                _ => continue,
             };
             decoded.units += 1;
             decoded.keyframes += u64::from(unit.keyframe);

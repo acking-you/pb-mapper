@@ -217,8 +217,9 @@ impl Renderer {
         let stop = Arc::new(AtomicBool::new(false));
         let (present, log, done) = (presenting.clone(), pulled.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
+            let mut capacity = 4 << 20;
             while !done.load(Ordering::Acquire) {
-                match consumer.next(Duration::from_millis(50), 4 << 20) {
+                match consumer.next(Duration::from_millis(50), capacity) {
                     Pull::Unit(unit) => {
                         log.lock().unwrap().push(Pulled {
                             keyframe: unit.keyframe,
@@ -228,8 +229,9 @@ impl Renderer {
                             consumer.presented(unit.generation, unit.frame_id);
                         }
                     }
+                    Pull::NeedCapacity(needed) => capacity = needed,
+                    Pull::Timeout | Pull::Paused => {}
                     Pull::Closed => break,
-                    _ => {}
                 }
             }
         });

@@ -141,15 +141,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // The renderer blocks on the sink, so it gets its own thread.
                 let renderer = tokio::task::spawn_blocking(move || {
                     let start = Instant::now(); let (mut received, mut bytes) = (0u64, 0u64);
+                    let mut capacity = 4 << 20;
                     while start.elapsed() < Duration::from_secs(seconds) {
-                        match consumer.next(Duration::from_millis(100), 4 << 20) {
+                        match consumer.next(Duration::from_millis(100), capacity) {
                             Pull::Unit(unit) => {
                                 received += u64::from(!unit.duplicate);
                                 bytes += unit.bytes.len() as u64;
                                 consumer.presented(unit.generation, unit.frame_id);
                             }
+                            Pull::NeedCapacity(needed) => capacity = needed,
+                            Pull::Timeout | Pull::Paused => {}
                             Pull::Closed => break,
-                            _ => {}
                         }
                     }
                     (received, bytes, start.elapsed().as_secs_f64())
