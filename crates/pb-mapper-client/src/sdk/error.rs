@@ -143,6 +143,24 @@ impl Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// `error`'s text, then each of its causes', as `error: cause: …`, leaving
+/// out a cause whose text the one before already ends with: for an error
+/// that reaches its caller only as text, which would otherwise name the step
+/// that failed and not why.
+pub(crate) fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(current) = cause {
+        let more = current.to_string();
+        if !text.ends_with(&more) {
+            text.push_str(": ");
+            text.push_str(&more);
+        }
+        cause = current.source();
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

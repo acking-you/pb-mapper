@@ -147,9 +147,10 @@ impl Exchange {
     }
 }
 
-/// Flatten a framing or session failure into the SDK's protocol error.
-fn protocol(error: impl std::fmt::Display) -> Error {
-    Error::protocol(error.to_string())
+/// A framing or session failure as the SDK's protocol error, its causes
+/// written into its text.
+fn protocol(error: impl std::error::Error) -> Error {
+    Error::protocol(super::super::error::with_causes(&error))
 }
 
 #[cfg(test)]
@@ -169,6 +170,18 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(Error::Address { .. })));
+    }
+
+    /// A framing failure keeps what caused it in the text an administrator
+    /// request fails with, which is all a Node or app caller gets of it.
+    #[test]
+    fn a_framing_failure_keeps_its_cause() {
+        let cause = || std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset mid-reply");
+        let failure = pb_mapper_core::error::Error::MsgNetworkReadBody { source: cause() };
+        let Error::Protocol { message } = protocol(failure) else {
+            panic!("a framing failure is a protocol error");
+        };
+        assert!(message.contains(&cause().to_string()), "{message}");
     }
 
     #[tokio::test(start_paused = true)]
