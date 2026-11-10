@@ -4,15 +4,19 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use pb_mapper_auth::{
-    ADMIN_KEY_ID, AuthConfig, AuthRuntime, LegacyProtocolPolicy, write_admin_key_file,
+    ADMIN_KEY_ID, AuthConfig, AuthRuntime, IssuedTemporaryKey, write_admin_key_file,
 };
 use pb_mapper_client::client::run_client_side_cli_with_callback;
-use pb_mapper_client::server::{ServerTunnelOptions, run_server_side_cli_with_callback};
+use pb_mapper_client::server::{
+    ServerTunnelOptions, StatusCallback, run_server_side_cli_with_callback,
+};
 use pb_mapper_core::checksum::{Credential, parse_credential, set_process_msg_header_key};
 use pb_mapper_protocol::command::{
     AdminRequest, AdminResponse, LocalServer, MessageSerializer, PbConnRequest, PbConnResponse,
@@ -22,16 +26,22 @@ use pb_mapper_protocol::secure::{ClientHeaderSession, ServerHeaderSession, Serve
 use pb_mapper_protocol::{
     MessageReader, MessageWriter, get_header_msg_reader, get_header_msg_writer,
 };
-use pb_mapper_server::run_server_with_auth_config;
-// Only the hand-rolled v2 registration helper: this file sets the process
-// credential itself, so it must not touch anything in the testkit that runs
-// `init_test_env` — `Relay` and `Tunnel` — which would write it a second time.
-use pb_mapper_testkit::{V2ControlSpec, register_v2_control};
+use pb_mapper_server::run_server_on_listener;
+// Nothing that runs `init_test_env` (`Relay`, `Tunnel`): that would also
+// install the testkit's tracing here. This binary writes the process
+// credential itself; see `init_process_credential`.
+use pb_mapper_testkit::{
+    TEST_ADMIN_KEY, Transport, V2ControlSpec, admin_credential, admin_key_bytes,
+    register_v2_control, reserve_addr,
+};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 use uni_stream::stream::{TcpListenerProvider, TcpStreamProvider};
 
 /// Serialises tests that override or require default process-global configuration.
@@ -107,6 +117,8 @@ impl Drop for EnvVarGuard {
     }
 }
 
+/// Connect once something listens on `server_addr`: a relay in a child process
+/// binds its port some time after it is spawned.
 async fn wait_for_server(server_addr: SocketAddr) -> TcpStream {
     timeout(Duration::from_secs(2), async {
         loop {
@@ -118,6 +130,116 @@ async fn wait_for_server(server_addr: SocketAddr) -> TcpStream {
     })
     .await
     .expect("server did not start")
+}
+
+/// The process credential, written once per binary before any relay or client
+/// here reads it: the hand-written frames in these cases checksum with it.
+///
+/// `AuthRuntime::from_process` and `AuthRuntime::start` write it again at every
+/// relay start, which this binary cannot avoid; every write is the same key.
+fn init_process_credential() {
+    static CREDENTIAL: LazyLock<()> =
+        LazyLock::new(|| set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap());
+    *CREDENTIAL
+}
+
+/// A fresh authentication state directory, with the process credential in place.
+fn auth_config() -> AuthConfig {
+    init_process_credential();
+    pb_mapper_testkit::auth_config("regression")
+}
+
+/// An authentication state directory, removed when the case ends, passed or not.
+struct StateDir(PathBuf);
+
+impl Drop for StateDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A relay in this process, on a socket it bound before it started, so nothing
+/// else can take the port in between.
+///
+/// The server under test is `run_server_with_auth_config`'s: the same
+/// `AuthRuntime::from_process` and `run_server_on_listener`, with the bind
+/// moved ahead of them.
+struct InProcessRelay {
+    addr: SocketAddr,
+    auth: AuthRuntime,
+    shutdown: CancellationToken,
+    task: JoinHandle<()>,
+    // Last, so the directory goes only after the relay is told to stop.
+    _state: StateDir,
+}
+
+impl InProcessRelay {
+    async fn start(config: AuthConfig) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state = StateDir(config.state_dir.clone());
+        let auth = AuthRuntime::from_process(config).await.unwrap();
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn({
+            let shutdown = shutdown.clone();
+            let auth = auth.clone();
+            async move {
+                run_server_on_listener(listener, shutdown, None, false, auth)
+                    .await
+                    .unwrap();
+            }
+        });
+        Self {
+            addr,
+            auth,
+            shutdown,
+            task,
+            _state: state,
+        }
+    }
+
+    /// Stop the server, which must not have failed, then the auth actor that
+    /// holds the state directory's lock, so the directory can go.
+    async fn stop(mut self) {
+        self.shutdown.cancel();
+        (&mut self.task).await.unwrap();
+        self.auth.shutdown_actor().await;
+    }
+}
+
+impl Drop for InProcessRelay {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        self.task.abort();
+    }
+}
+
+/// Issue temporary keys into `config`'s state before a relay starts on it, one
+/// per label, so the relay has to load them from disk.
+async fn issue_before_start<const N: usize>(
+    config: &AuthConfig,
+    labels: [&str; N],
+) -> [IssuedTemporaryKey; N] {
+    let _ = std::fs::remove_dir_all(&config.state_dir);
+    write_admin_key_file(&config.state_dir.join("admin.key"), TEST_ADMIN_KEY, true).unwrap();
+    let runtime = AuthRuntime::start(admin_key_bytes(), config.clone())
+        .await
+        .unwrap();
+    let admin = runtime
+        .authenticate_presented(ADMIN_KEY_ID, &admin_key_bytes())
+        .unwrap();
+    let mut issued = Vec::with_capacity(N);
+    for label in labels {
+        issued.push(
+            runtime
+                .issue(&admin, Duration::from_secs(120), Some(label.to_string()))
+                .await
+                .unwrap(),
+        );
+    }
+    // The actor holds `auth.lock` until it ends; the relay takes it next.
+    runtime.shutdown_actor().await;
+    issued.try_into().unwrap()
 }
 
 #[tokio::test]
@@ -158,50 +280,15 @@ async fn explicit_invalid_msg_header_key_fails_server_startup() {
 
 #[tokio::test]
 async fn admin_all_preserves_json_output_mode() {
-    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server_addr = probe_listener.local_addr().unwrap();
-    drop(probe_listener);
-    let config = auth_config(server_addr);
-    let _ = std::fs::remove_dir_all(&config.state_dir);
-    write_admin_key_file(&config.state_dir.join("admin.key"), TEST_ADMIN_KEY, true).unwrap();
-    let runtime = AuthRuntime::start(
-        *TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap(),
-        config.clone(),
-    )
-    .await
-    .unwrap();
-    let admin = runtime
-        .authenticate_presented(
-            ADMIN_KEY_ID,
-            TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap(),
-        )
-        .unwrap();
-    runtime
-        .issue(
-            &admin,
-            Duration::from_secs(120),
-            Some("json-output".to_string()),
-        )
-        .await
-        .unwrap();
-    drop(runtime);
-    tokio::time::sleep(Duration::from_millis(20)).await;
-
-    let shutdown = CancellationToken::new();
-    let server_shutdown = shutdown.clone();
-    let server_config = config.clone();
-    let server = tokio::spawn(async move {
-        run_server_with_auth_config(server_addr, server_shutdown, None, false, server_config)
-            .await
-            .unwrap();
-    });
-    drop(wait_for_server(server_addr).await);
+    let config = auth_config();
+    issue_before_start(&config, ["json-output"]).await;
+    let relay = InProcessRelay::start(config).await;
 
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_pb-mapper"));
     command
         .arg("admin")
         .arg("--server")
-        .arg(server_addr.to_string())
+        .arg(relay.addr.to_string())
         .arg("--output")
         .arg("json")
         .arg("key")
@@ -225,9 +312,7 @@ async fn admin_all_preserves_json_output_mode() {
         1
     );
 
-    shutdown.cancel();
-    server.await.unwrap();
-    let _ = std::fs::remove_dir_all(config.state_dir);
+    relay.stop().await;
 }
 
 async fn read_secure_request(
@@ -240,25 +325,6 @@ async fn read_secure_request(
         initial.session,
     )
 }
-
-fn auth_config(server_addr: SocketAddr) -> AuthConfig {
-    static CONFIG_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-
-    set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
-    let sequence = CONFIG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    AuthConfig {
-        state_dir: std::env::temp_dir().join(format!(
-            "pb-mapper-regression-{}-{}-{sequence}",
-            std::process::id(),
-            server_addr.port()
-        )),
-        max_temporary_keys: 64,
-        max_temporary_key_ttl: Duration::from_secs(3600),
-        legacy_protocol: LegacyProtocolPolicy::Allow,
-    }
-}
-
-const TEST_ADMIN_KEY: &str = "0123456789abcdefghijklmnopqrstuv";
 
 async fn register_control_conn_parts(
     reader: &mut impl MessageReader,
@@ -289,8 +355,140 @@ async fn register_control_conn_parts(
     conn_id
 }
 
+/// Wait up to two seconds for a stream request on `who`'s control connection.
+async fn read_stream_request(reader: &mut impl MessageReader, who: &str) -> (u32, u64) {
+    let request = timeout(Duration::from_secs(2), reader.read_msg())
+        .await
+        .unwrap_or_else(|_| panic!("{who} did not receive a stream request"))
+        .unwrap();
+    let LocalServer::Stream {
+        client_id,
+        server_generation,
+    } = LocalServer::decode(request).unwrap()
+    else {
+        panic!("{who} received another local server control message");
+    };
+    (client_id, server_generation)
+}
+
+/// A healthy provider: register `key` as a legacy control connection, report it
+/// `ready`, then serve one stream request — acknowledge it and open its data
+/// connection, which goes to `stream` — and park.
+async fn serve_one_stream(
+    addr: SocketAddr,
+    key: String,
+    who: &'static str,
+    ready: Option<oneshot::Sender<()>>,
+    stream: oneshot::Sender<TcpStream>,
+) {
+    let control = wait_for_server(addr).await;
+    let (mut reader_stream, mut writer_stream) = control.into_split();
+    let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+        register_control_conn_parts(&mut reader, &mut writer, &key).await;
+    }
+    // Frames after the registration go through a writer of their own.
+    let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+    if let Some(ready) = ready {
+        ready.send(()).unwrap();
+    }
+    let (client_id, server_generation) = read_stream_request(&mut reader, who).await;
+    let ack = PbServerRequest::StreamAck {
+        client_id,
+        server_generation,
+    }
+    .encode()
+    .unwrap();
+    writer.write_msg(&ack).await.unwrap();
+
+    let mut data = TcpStream::connect(addr).await.unwrap();
+    let request = PbConnRequest::Stream {
+        data_protocol: None,
+        key,
+        dst_id: client_id,
+        server_generation,
+    }
+    .encode()
+    .unwrap();
+    let mut data_writer = get_header_msg_writer(&mut data).unwrap();
+    data_writer.write_msg(&request).await.unwrap();
+    stream.send(data).unwrap();
+    std::future::pending::<()>().await;
+}
+
+/// How a control connection that never opens a data stream ends.
+enum StaleEnd {
+    /// It reads nothing more.
+    Park,
+    /// It receives a stream request and leaves it unacknowledged.
+    IgnoreStream,
+    /// As `IgnoreStream`, then waits for the relay to retire it and reports that.
+    IgnoreStreamUntilRetired(oneshot::Sender<()>),
+    /// It acknowledges its first stream request and opens nothing.
+    AckStream,
+}
+
+/// A stale provider: register `key` as a legacy control connection, report it
+/// `ready`, and end as `end` says.
+async fn stale_control(addr: SocketAddr, key: String, ready: oneshot::Sender<()>, end: StaleEnd) {
+    let control = wait_for_server(addr).await;
+    let (mut reader_stream, mut writer_stream) = control.into_split();
+    let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+        register_control_conn_parts(&mut reader, &mut writer, &key).await;
+    }
+    ready.send(()).unwrap();
+    match end {
+        StaleEnd::Park => {}
+        StaleEnd::IgnoreStream => {
+            read_stream_request(&mut reader, "stale control").await;
+        }
+        StaleEnd::IgnoreStreamUntilRetired(retired) => {
+            read_stream_request(&mut reader, "stale control").await;
+            // A missed stream ACK first receives a two-second confirmation grace.
+            let closed = timeout(Duration::from_secs(3), reader.read_msg())
+                .await
+                .expect("stale control was not retired by the server");
+            if let Ok(bytes) = closed {
+                assert!(bytes.is_empty());
+            }
+            retired.send(()).unwrap();
+            return;
+        }
+        StaleEnd::AckStream => {
+            let (client_id, server_generation) =
+                read_stream_request(&mut reader, "stale control").await;
+            let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+            let ack = PbServerRequest::StreamAck {
+                client_id,
+                server_generation,
+            }
+            .encode()
+            .unwrap();
+            writer.write_msg(&ack).await.unwrap();
+        }
+    }
+    std::future::pending::<()>().await;
+}
+
+/// Subscribe to `key` on the relay at `addr` with plain frames.
+async fn subscribe(addr: SocketAddr, key: &str) -> TcpStream {
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let request = PbConnRequest::Subcribe {
+        data_protocol: None,
+        key: key.to_string(),
+    }
+    .encode()
+    .unwrap();
+    let mut writer = get_header_msg_writer(&mut client).unwrap();
+    writer.write_msg(&request).await.unwrap();
+    client
+}
+
 async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
-    let mut stream = wait_for_server(server_addr).await;
+    let mut stream = TcpStream::connect(server_addr).await.unwrap();
     let request = PbConnRequest::Status(PbConnStatusReq::Keys)
         .encode()
         .unwrap();
@@ -317,7 +515,7 @@ async fn send_v2_request(
     credential: &Credential,
     request: PbConnRequest,
 ) -> (TcpStream, ClientHeaderSession, PbConnResponse) {
-    let mut stream = wait_for_server(server_addr).await;
+    let mut stream = TcpStream::connect(server_addr).await.unwrap();
     let session = ClientHeaderSession::new_v2(credential).unwrap();
     session
         .write_initial(&mut stream, &request.encode().unwrap())
@@ -334,46 +532,103 @@ async fn send_v2_request(
     (stream, session, response)
 }
 
+/// What a [`FakeRelay`] does with one authenticated request.
+enum Reply {
+    /// Answer, then close the connection.
+    Respond(PbConnResponse),
+    /// Answer, then hold the connection open.
+    RespondAndHold(PbConnResponse),
+    /// Hold the connection open without answering.
+    Hold,
+    /// Close the connection without answering.
+    Close,
+}
+
+/// The authentication a relay over a fresh state directory runs, and that directory.
+async fn relay_security() -> (ServerSecurity, StateDir) {
+    let config = auth_config();
+    let state = StateDir(config.state_dir.clone());
+    let auth = AuthRuntime::from_process(config).await.unwrap();
+    (ServerSecurity::new(auth), state)
+}
+
+/// A relay that authenticates the first request on each connection as the real
+/// one does, and answers it as `reply` says. Dropping it stops it.
+struct FakeRelay {
+    _task: AbortOnDropHandle<()>,
+    // Last, so the directory goes only after the relay is told to stop.
+    _state: StateDir,
+}
+
+impl FakeRelay {
+    async fn start<F>(listener: TcpListener, reply: F) -> Self
+    where
+        F: Fn(PbConnRequest) -> Reply + Send + Sync + 'static,
+    {
+        let (security, state) = relay_security().await;
+        let reply = Arc::new(reply);
+        let task = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            loop {
+                tokio::select! {
+                    Some(_) = connections.join_next(), if !connections.is_empty() => {}
+                    accepted = listener.accept() => {
+                        let (mut stream, _) = accepted.unwrap();
+                        let security = security.clone();
+                        let reply = reply.clone();
+                        connections.spawn(async move {
+                            let (request, session) = read_secure_request(&security, &mut stream).await;
+                            let (response, hold) = match reply(request) {
+                                Reply::Respond(response) => (Some(response), false),
+                                Reply::RespondAndHold(response) => (Some(response), true),
+                                Reply::Hold => (None, true),
+                                Reply::Close => (None, false),
+                            };
+                            if let Some(response) = response {
+                                let mut writer = session.response_writer(&mut stream).unwrap();
+                                writer.write_msg(&response.encode().unwrap()).await.unwrap();
+                            }
+                            if hold {
+                                std::future::pending::<()>().await;
+                            }
+                        });
+                    }
+                }
+            }
+        });
+        Self {
+            _task: AbortOnDropHandle::new(task),
+            _state: state,
+        }
+    }
+}
+
+/// `register`'s options for a plain TCP service in the credential's own namespace.
+fn plain_tcp_options() -> ServerTunnelOptions {
+    ServerTunnelOptions {
+        need_codec: false,
+        is_datagram: false,
+        keep_alive: false,
+        namespace: None,
+        force_namespace: false,
+    }
+}
+
+/// Every status a tunnel reports, in order, and the callback that records them,
+/// for `register` and `connect` alike: both take this callback type.
+fn status_recorder() -> (Arc<Mutex<Vec<String>>>, StatusCallback) {
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let recorder = statuses.clone();
+    let callback = Box::new(move |status: &str| recorder.lock().unwrap().push(status.to_string()));
+    (statuses, callback)
+}
+
 #[tokio::test]
 async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
-    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server_addr = probe_listener.local_addr().unwrap();
-    drop(probe_listener);
-
-    let config = auth_config(server_addr);
-    let _ = std::fs::remove_dir_all(&config.state_dir);
-    write_admin_key_file(&config.state_dir.join("admin.key"), TEST_ADMIN_KEY, true).unwrap();
-    let runtime = AuthRuntime::start(
-        *TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap(),
-        config.clone(),
-    )
-    .await
-    .unwrap();
-    let admin = runtime
-        .authenticate_presented(
-            ADMIN_KEY_ID,
-            TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap(),
-        )
-        .unwrap();
-    let first = runtime
-        .issue(&admin, Duration::from_secs(120), Some("first".to_string()))
-        .await
-        .unwrap();
-    let second = runtime
-        .issue(&admin, Duration::from_secs(120), Some("second".to_string()))
-        .await
-        .unwrap();
-    drop(runtime);
-    tokio::time::sleep(Duration::from_millis(20)).await;
-
-    let shutdown_token = CancellationToken::new();
-    let server_shutdown = shutdown_token.clone();
-    let server_config = config.clone();
-    let server = tokio::spawn(async move {
-        run_server_with_auth_config(server_addr, server_shutdown, None, false, server_config)
-            .await
-            .unwrap();
-    });
+    let config = auth_config();
+    let [first, second] = issue_before_start(&config, ["first", "second"]).await;
+    let relay = InProcessRelay::start(config).await;
+    let server_addr = relay.addr;
 
     let first_credential = parse_credential(&first.credential).unwrap();
     let second_credential = parse_credential(&second.credential).unwrap();
@@ -457,11 +712,9 @@ async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
         assert_eq!(denied.code, "admin_permission_required");
     }
 
-    let admin_credential =
-        Credential::Admin(*TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap());
     let (_, _, revoked) = send_v2_request(
         server_addr,
-        &admin_credential,
+        &admin_credential(),
         PbConnRequest::Admin(AdminRequest::KeyRevoke {
             key_id: first.metadata.key_id.as_u64(),
         }),
@@ -485,58 +738,21 @@ async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
         PbConnResponse::Status(PbConnStatusResp::Service { .. })
     ));
 
-    shutdown_token.cancel();
-    server.await.unwrap();
-    let _ = std::fs::remove_dir_all(config.state_dir);
+    relay.stop().await;
 }
 
 #[tokio::test]
 async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
-    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server_addr = probe_listener.local_addr().unwrap();
-    drop(probe_listener);
-
-    let config = auth_config(server_addr);
-    let _ = std::fs::remove_dir_all(&config.state_dir);
-    write_admin_key_file(&config.state_dir.join("admin.key"), TEST_ADMIN_KEY, true).unwrap();
-    let runtime = AuthRuntime::start(
-        *TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap(),
-        config.clone(),
-    )
-    .await
-    .unwrap();
-    let admin = runtime
-        .authenticate_presented(
-            ADMIN_KEY_ID,
-            TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap(),
-        )
-        .unwrap();
-    let issued = runtime
-        .issue(
-            &admin,
-            Duration::from_secs(120),
-            Some("active-stream".to_string()),
-        )
-        .await
-        .unwrap();
-    drop(runtime);
-    tokio::time::sleep(Duration::from_millis(20)).await;
-
-    let shutdown_token = CancellationToken::new();
-    let server_shutdown = shutdown_token.clone();
-    let server_config = config.clone();
-    let server = tokio::spawn(async move {
-        run_server_with_auth_config(server_addr, server_shutdown, None, false, server_config)
-            .await
-            .unwrap();
-    });
+    let config = auth_config();
+    let [issued] = issue_before_start(&config, ["active-stream"]).await;
+    let relay = InProcessRelay::start(config).await;
+    let server_addr = relay.addr;
 
     let credential = parse_credential(&issued.credential).unwrap();
-    let admin_credential =
-        Credential::Admin(*TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap());
+    let admin = admin_credential();
     let service = "revoked-stream";
-    let mut control = wait_for_server(server_addr).await;
-    let control_session = ClientHeaderSession::new_v2(&admin_credential).unwrap();
+    let mut control = TcpStream::connect(server_addr).await.unwrap();
+    let control_session = ClientHeaderSession::new_v2(&admin).unwrap();
     let register = PbConnRequest::RegisterScoped {
         direct: None,
         need_codec: false,
@@ -564,7 +780,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
         PbConnResponse::RegisterV2 { .. }
     ));
 
-    let mut subscriber = wait_for_server(server_addr).await;
+    let mut subscriber = TcpStream::connect(server_addr).await.unwrap();
     let subscriber_session = ClientHeaderSession::new_v2(&credential).unwrap();
     subscriber_session
         .write_initial(
@@ -605,8 +821,8 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
         .await
         .unwrap();
 
-    let mut provider = wait_for_server(server_addr).await;
-    let provider_session = ClientHeaderSession::new_v2(&admin_credential).unwrap();
+    let mut provider = TcpStream::connect(server_addr).await.unwrap();
+    let provider_session = ClientHeaderSession::new_v2(&admin).unwrap();
     provider_session
         .write_initial(
             &mut provider,
@@ -655,7 +871,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
 
     let (_, _, revoked) = send_v2_request(
         server_addr,
-        &admin_credential,
+        &admin,
         PbConnRequest::Admin(AdminRequest::KeyRevoke {
             key_id: issued.metadata.key_id.as_u64(),
         }),
@@ -678,33 +894,15 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
         Ok(Err(error)) => panic!("administrator registration was cancelled too: {error}"),
     }
 
-    shutdown_token.cancel();
-    server.await.unwrap();
-    let _ = std::fs::remove_dir_all(config.state_dir);
+    relay.stop().await;
 }
 
 #[tokio::test]
 async fn status_service_reports_registered_v2_control_connection() {
-    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server_addr = probe_listener.local_addr().unwrap();
-    drop(probe_listener);
-
-    let shutdown_token = CancellationToken::new();
-    let server_shutdown = shutdown_token.clone();
-    let server = tokio::spawn(async move {
-        run_server_with_auth_config(
-            server_addr,
-            server_shutdown,
-            None,
-            false,
-            auth_config(server_addr),
-        )
-        .await
-        .unwrap();
-    });
+    let relay = InProcessRelay::start(auth_config()).await;
 
     let key = "sf-backend";
-    let control = wait_for_server(server_addr).await;
+    let control = TcpStream::connect(relay.addr).await.unwrap();
     let (mut reader_stream, mut writer_stream) = control.into_split();
     let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
     let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
@@ -718,7 +916,7 @@ async fn status_service_reports_registered_v2_control_connection() {
     )
     .await;
 
-    let mut status = wait_for_server(server_addr).await;
+    let mut status = TcpStream::connect(relay.addr).await.unwrap();
     let request = PbConnRequest::Status(PbConnStatusReq::Service {
         direct_query: None,
         key: key.to_string(),
@@ -750,8 +948,7 @@ async fn status_service_reports_registered_v2_control_connection() {
     assert_eq!(connections[0].generation, generation);
     assert!(connections[0].healthy);
 
-    shutdown_token.cancel();
-    server.await.unwrap();
+    relay.stop().await;
 }
 
 #[tokio::test]
@@ -767,85 +964,50 @@ async fn local_server_reconnects_when_registered_conn_is_missing_from_remote_sta
 
     let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = remote_listener.local_addr().unwrap();
-    let register_count = Arc::new(AtomicUsize::new(0));
-    let (second_register_tx, second_register_rx) = tokio::sync::oneshot::channel();
-    let second_register_tx = Arc::new(tokio::sync::Mutex::new(Some(second_register_tx)));
-
-    let fake_register_count = register_count.clone();
-    let fake_second_register_tx = second_register_tx.clone();
-    let fake_security = ServerSecurity::new(
-        AuthRuntime::from_process(auth_config(remote_addr))
-            .await
-            .unwrap(),
-    );
-    let fake_server = tokio::spawn(async move {
-        loop {
-            let (mut stream, _) = remote_listener.accept().await.unwrap();
-            let register_count = fake_register_count.clone();
-            let second_register_tx = fake_second_register_tx.clone();
-            let security = fake_security.clone();
-            tokio::spawn(async move {
-                let (request, session) = read_secure_request(&security, &mut stream).await;
-                match request {
-                    PbConnRequest::Register { key, .. } => {
-                        let count = register_count.fetch_add(1, Ordering::SeqCst) + 1;
-                        let response = PbConnResponse::RegisterV2 {
-                            direct: None,
-                            conn_id: count as u32,
-                            generation: count as u64,
-                            lease_ttl_ms: 150,
-                        }
-                        .encode()
-                        .unwrap();
-                        let mut writer = session.response_writer(&mut stream).unwrap();
-                        writer.write_msg(&response).await.unwrap();
-                        if count == 2
-                            && let Some(tx) = second_register_tx.lock().await.take()
-                        {
-                            tx.send(()).unwrap();
-                        }
-                        tracing::debug!(key, count, "fake server accepted register");
-                        std::future::pending::<()>().await;
-                    }
-                    PbConnRequest::Status(PbConnStatusReq::Service {
-                        direct_query: _,
-                        key,
-                    }) => {
-                        let response = PbConnResponse::Status(PbConnStatusResp::Service {
-                            direct: None,
-                            key,
-                            connections: Vec::new(),
-                        })
-                        .encode()
-                        .unwrap();
-                        let mut writer = session.response_writer(&mut stream).unwrap();
-                        writer.write_msg(&response).await.unwrap();
-                    }
-                    PbConnRequest::Status(PbConnStatusReq::Keys) => {
-                        let response = PbConnResponse::Status(PbConnStatusResp::Keys(Vec::new()))
-                            .encode()
-                            .unwrap();
-                        let mut writer = session.response_writer(&mut stream).unwrap();
-                        writer.write_msg(&response).await.unwrap();
-                    }
-                    _ => {}
-                }
-            });
+    let register_count = AtomicUsize::new(0);
+    let (second_register_tx, second_register_rx) = oneshot::channel();
+    let second_register_tx = Mutex::new(Some(second_register_tx));
+    // Registers are accepted and held; every status says the service has no
+    // connection, which is what has to make the local server register again.
+    let _relay = FakeRelay::start(remote_listener, move |request| match request {
+        PbConnRequest::Register { key, .. } => {
+            let count = register_count.fetch_add(1, Ordering::SeqCst) + 1;
+            // Reported as the second register arrives, ahead of its answer:
+            // its arrival is all this case waits for.
+            if count == 2
+                && let Some(tx) = second_register_tx.lock().unwrap().take()
+            {
+                tx.send(()).unwrap();
+            }
+            tracing::debug!(key, count, "fake server accepted register");
+            Reply::RespondAndHold(PbConnResponse::RegisterV2 {
+                direct: None,
+                conn_id: count as u32,
+                generation: count as u64,
+                lease_ttl_ms: 150,
+            })
         }
-    });
+        PbConnRequest::Status(PbConnStatusReq::Service {
+            direct_query: _,
+            key,
+        }) => Reply::Respond(PbConnResponse::Status(PbConnStatusResp::Service {
+            direct: None,
+            key,
+            connections: Vec::new(),
+        })),
+        PbConnRequest::Status(PbConnStatusReq::Keys) => {
+            Reply::Respond(PbConnResponse::Status(PbConnStatusResp::Keys(Vec::new())))
+        }
+        _ => Reply::Close,
+    })
+    .await;
 
     let local_addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
     let local_server = tokio::spawn(run_server_side_cli_with_callback::<TcpStreamProvider, _>(
         local_addr,
         remote_addr,
         Arc::from("sf-backend"),
-        ServerTunnelOptions {
-            need_codec: false,
-            is_datagram: false,
-            keep_alive: false,
-            namespace: None,
-            force_namespace: false,
-        },
+        plain_tcp_options(),
         None,
     ));
 
@@ -855,18 +1017,13 @@ async fn local_server_reconnects_when_registered_conn_is_missing_from_remote_sta
         .unwrap();
 
     local_server.abort();
-    fake_server.abort();
 }
 
 #[tokio::test]
 async fn client_closes_initial_status_probe_after_key_check() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = listener.local_addr().unwrap();
-    let security = ServerSecurity::new(
-        AuthRuntime::from_process(auth_config(remote_addr))
-            .await
-            .unwrap(),
-    );
+    let (security, _state) = relay_security().await;
 
     let fake_server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -926,100 +1083,69 @@ async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
     ])
     .await;
 
-    let local_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let local_addr = local_probe.local_addr().unwrap();
-    drop(local_probe);
+    let local_addr = reserve_addr(Transport::Tcp).await;
 
     let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = remote_listener.local_addr().unwrap();
     let failed_status_responses = Arc::new(AtomicUsize::new(0));
     let status_count = Arc::new(AtomicUsize::new(0));
-    let status_changes = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let fake_failed_status_responses = failed_status_responses.clone();
-    let fake_status_count = status_count.clone();
-    let fake_security = ServerSecurity::new(
-        AuthRuntime::from_process(auth_config(remote_addr))
-            .await
-            .unwrap(),
-    );
-    let fake_server = tokio::spawn(async move {
-        loop {
-            let (mut stream, _) = remote_listener.accept().await.unwrap();
-            let failed_status_responses = fake_failed_status_responses.clone();
-            let status_count = fake_status_count.clone();
-            let security = fake_security.clone();
-            tokio::spawn(async move {
-                let (request, session) = read_secure_request(&security, &mut stream).await;
-                match request {
-                    PbConnRequest::Status(PbConnStatusReq::Service {
-                        direct_query: _,
-                        key,
-                    }) => {
-                        status_count.fetch_add(1, Ordering::SeqCst);
-                        let should_fail = failed_status_responses
-                            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                                remaining.checked_sub(1)
-                            })
-                            .is_ok();
-                        let connections = if should_fail {
-                            Vec::new()
-                        } else {
-                            vec![PbServiceConnStatus {
-                                conn_id: 1,
-                                generation: 1,
-                                protocol_version: 2,
-                                healthy: true,
-                                last_rx_age_ms: 0,
-                            }]
-                        };
-                        let response = PbConnResponse::Status(PbConnStatusResp::Service {
-                            direct: None,
-                            key,
-                            connections,
-                        })
-                        .encode()
-                        .unwrap();
-                        let mut writer = session.response_writer(&mut stream).unwrap();
-                        writer.write_msg(&response).await.unwrap();
-                    }
-                    PbConnRequest::Status(PbConnStatusReq::Keys) => {
-                        status_count.fetch_add(1, Ordering::SeqCst);
-                        let should_fail = failed_status_responses
-                            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                                remaining.checked_sub(1)
-                            })
-                            .is_ok();
-                        let keys = if should_fail {
-                            Vec::new()
-                        } else {
-                            vec!["sf-backend".to_string()]
-                        };
-                        let response = PbConnResponse::Status(PbConnStatusResp::Keys(keys))
-                            .encode()
-                            .unwrap();
-                        let mut writer = session.response_writer(&mut stream).unwrap();
-                        writer.write_msg(&response).await.unwrap();
-                    }
-                    PbConnRequest::Subcribe { .. } => std::future::pending().await,
-                    _ => {}
-                }
-            });
+    // Every status succeeds unless the case has asked for failures; the
+    // subscription itself is held open, unanswered.
+    let relay_failures = failed_status_responses.clone();
+    let relay_status_count = status_count.clone();
+    let _relay = FakeRelay::start(remote_listener, move |request| {
+        let should_fail = || {
+            relay_status_count.fetch_add(1, Ordering::SeqCst);
+            relay_failures
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+        };
+        match request {
+            PbConnRequest::Status(PbConnStatusReq::Service {
+                direct_query: _,
+                key,
+            }) => {
+                let connections = if should_fail() {
+                    Vec::new()
+                } else {
+                    vec![PbServiceConnStatus {
+                        conn_id: 1,
+                        generation: 1,
+                        protocol_version: 2,
+                        healthy: true,
+                        last_rx_age_ms: 0,
+                    }]
+                };
+                Reply::Respond(PbConnResponse::Status(PbConnStatusResp::Service {
+                    direct: None,
+                    key,
+                    connections,
+                }))
+            }
+            PbConnRequest::Status(PbConnStatusReq::Keys) => {
+                let keys = if should_fail() {
+                    Vec::new()
+                } else {
+                    vec!["sf-backend".to_string()]
+                };
+                Reply::Respond(PbConnResponse::Status(PbConnStatusResp::Keys(keys)))
+            }
+            PbConnRequest::Subcribe { .. } => Reply::Hold,
+            _ => Reply::Close,
         }
-    });
+    })
+    .await;
 
-    let callback_status_changes = status_changes.clone();
+    let (status_changes, record_status) = status_recorder();
     let client = tokio::spawn(run_client_side_cli_with_callback::<TcpListenerProvider, _>(
         local_addr,
         remote_addr,
         Arc::from("sf-backend"),
         false,
-        Some(Box::new(move |status| {
-            callback_status_changes
-                .lock()
-                .unwrap()
-                .push(status.to_string());
-        })),
+        Some(record_status),
     ));
 
     timeout(Duration::from_secs(1), async {
@@ -1069,64 +1195,24 @@ async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
     );
 
     client.abort();
-    fake_server.abort();
 }
 
 #[tokio::test]
 async fn subscribe_retires_unacked_control_connection() {
     let _config_guard = ENV_OVERRIDE_LOCK.lock().await;
-    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server_addr = probe_listener.local_addr().unwrap();
-    drop(probe_listener);
-
-    let shutdown_token = CancellationToken::new();
-    let server_shutdown = shutdown_token.clone();
-    let server = tokio::spawn(async move {
-        run_server_with_auth_config(
-            server_addr,
-            server_shutdown,
-            None,
-            false,
-            auth_config(server_addr),
-        )
-        .await
-        .unwrap();
-    });
+    let relay = InProcessRelay::start(auth_config()).await;
 
     let key = "sf-backend";
-    let (stale_ready_tx, stale_ready_rx) = tokio::sync::oneshot::channel();
-    let stale_key = key.to_string();
-    let stale_task = tokio::spawn(async move {
-        let stale_control = wait_for_server(server_addr).await;
-        let (mut reader_stream, mut writer_stream) = stale_control.into_split();
-        let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
-        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-        register_control_conn_parts(&mut reader, &mut writer, &stale_key).await;
-        stale_ready_tx.send(()).unwrap();
-        let request = timeout(Duration::from_secs(2), reader.read_msg())
-            .await
-            .expect("stale control did not receive stream request")
-            .unwrap();
-        assert!(matches!(
-            LocalServer::decode(request).unwrap(),
-            LocalServer::Stream { .. }
-        ));
-        std::future::pending::<()>().await;
-    });
+    let (stale_ready_tx, stale_ready_rx) = oneshot::channel();
+    let stale_task = tokio::spawn(stale_control(
+        relay.addr,
+        key.to_string(),
+        stale_ready_tx,
+        StaleEnd::IgnoreStream,
+    ));
     stale_ready_rx.await.unwrap();
 
-    let mut client = wait_for_server(server_addr).await;
-    let request = PbConnRequest::Subcribe {
-        data_protocol: None,
-        key: key.to_string(),
-    }
-    .encode()
-    .unwrap();
-    {
-        let mut writer = get_header_msg_writer(&mut client).unwrap();
-        writer.write_msg(&request).await.unwrap();
-    }
-
+    let mut client = subscribe(relay.addr, key).await;
     let mut reader = get_header_msg_reader(&mut client).unwrap();
     let result = timeout(Duration::from_secs(4), reader.read_msg())
         .await
@@ -1136,7 +1222,7 @@ async fn subscribe_retires_unacked_control_connection() {
     // Subscribe failure and the manager's suspect sweep complete independently.
     timeout(Duration::from_secs(3), async {
         loop {
-            let keys = read_status_keys(server_addr).await;
+            let keys = read_status_keys(relay.addr).await;
             if !keys.iter().any(|candidate| candidate == key) {
                 break;
             }
@@ -1147,121 +1233,43 @@ async fn subscribe_retires_unacked_control_connection() {
     .expect("unacked stale control connection kept key registered");
 
     stale_task.abort();
-    shutdown_token.cancel();
-    server.await.unwrap();
+    relay.stop().await;
 }
 
 #[tokio::test]
 async fn subscribe_waits_for_replacement_after_retiring_stale_control_connection() {
     let _config_guard = ENV_OVERRIDE_LOCK.lock().await;
-    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server_addr = probe_listener.local_addr().unwrap();
-    drop(probe_listener);
-
-    let shutdown_token = CancellationToken::new();
-    let server_shutdown = shutdown_token.clone();
-    let server = tokio::spawn(async move {
-        run_server_with_auth_config(
-            server_addr,
-            server_shutdown,
-            None,
-            false,
-            auth_config(server_addr),
-        )
-        .await
-        .unwrap();
-    });
+    let relay = InProcessRelay::start(auth_config()).await;
 
     let key = "sf-backend";
-    let (stale_ready_tx, stale_ready_rx) = tokio::sync::oneshot::channel();
-    let (retired_tx, retired_rx) = tokio::sync::oneshot::channel();
-    let stale_key = key.to_string();
-    let stale_task = tokio::spawn(async move {
-        let stale_control = wait_for_server(server_addr).await;
-        let (mut reader_stream, mut writer_stream) = stale_control.into_split();
-        let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
-        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-        register_control_conn_parts(&mut reader, &mut writer, &stale_key).await;
-        stale_ready_tx.send(()).unwrap();
-        let request = timeout(Duration::from_secs(2), reader.read_msg())
-            .await
-            .expect("stale control did not receive stream request")
-            .unwrap();
-        assert!(matches!(
-            LocalServer::decode(request).unwrap(),
-            LocalServer::Stream { .. }
-        ));
-
-        // A missed stream ACK first receives a two-second confirmation grace.
-        let retired = timeout(Duration::from_secs(3), reader.read_msg())
-            .await
-            .expect("stale control was not retired by the server");
-        if let Ok(bytes) = retired {
-            assert!(bytes.is_empty());
-        }
-        retired_tx.send(()).unwrap();
-    });
+    let (stale_ready_tx, stale_ready_rx) = oneshot::channel();
+    let (retired_tx, retired_rx) = oneshot::channel();
+    let stale_task = tokio::spawn(stale_control(
+        relay.addr,
+        key.to_string(),
+        stale_ready_tx,
+        StaleEnd::IgnoreStreamUntilRetired(retired_tx),
+    ));
     stale_ready_rx.await.unwrap();
 
-    let (replacement_stream_tx, replacement_stream_rx) = tokio::sync::oneshot::channel();
-    let replacement_key = key.to_string();
-    let replacement_task = tokio::spawn(async move {
-        retired_rx.await.unwrap();
-        let replacement_control = wait_for_server(server_addr).await;
-        let (mut reader_stream, mut writer_stream) = replacement_control.into_split();
-        let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
-        {
-            let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-            register_control_conn_parts(&mut reader, &mut writer, &replacement_key).await;
+    let (replacement_stream_tx, replacement_stream_rx) = oneshot::channel();
+    let replacement_task = tokio::spawn({
+        let addr = relay.addr;
+        let key = key.to_string();
+        async move {
+            retired_rx.await.unwrap();
+            serve_one_stream(
+                addr,
+                key,
+                "replacement control",
+                None,
+                replacement_stream_tx,
+            )
+            .await;
         }
-        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-        let request = timeout(Duration::from_secs(2), reader.read_msg())
-            .await
-            .expect("replacement control did not receive stream request")
-            .unwrap();
-        let LocalServer::Stream {
-            client_id,
-            server_generation,
-        } = LocalServer::decode(request).unwrap()
-        else {
-            panic!("unexpected local server control message");
-        };
-
-        let ack = PbServerRequest::StreamAck {
-            client_id,
-            server_generation,
-        }
-        .encode()
-        .unwrap();
-        writer.write_msg(&ack).await.unwrap();
-
-        let mut stream = TcpStream::connect(server_addr).await.unwrap();
-        let request = PbConnRequest::Stream {
-            data_protocol: None,
-            key: replacement_key,
-            dst_id: client_id,
-            server_generation,
-        }
-        .encode()
-        .unwrap();
-        let mut stream_writer = get_header_msg_writer(&mut stream).unwrap();
-        stream_writer.write_msg(&request).await.unwrap();
-        replacement_stream_tx.send(stream).unwrap();
-        std::future::pending::<()>().await;
     });
 
-    let mut client = wait_for_server(server_addr).await;
-    let request = PbConnRequest::Subcribe {
-        data_protocol: None,
-        key: key.to_string(),
-    }
-    .encode()
-    .unwrap();
-    {
-        let mut writer = get_header_msg_writer(&mut client).unwrap();
-        writer.write_msg(&request).await.unwrap();
-    }
-
+    let mut client = subscribe(relay.addr, key).await;
     let mut reader = get_header_msg_reader(&mut client).unwrap();
     let response = timeout(Duration::from_secs(3), reader.read_msg())
         .await
@@ -1276,52 +1284,14 @@ async fn subscribe_waits_for_replacement_after_retiring_stale_control_connection
     drop(stream);
     stale_task.abort();
     replacement_task.abort();
-    shutdown_token.cancel();
-    server.await.unwrap();
+    relay.stop().await;
 }
 
 #[tokio::test]
 async fn subscribe_missing_key_closes_without_hanging() {
-    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server_addr = probe_listener.local_addr().unwrap();
-    drop(probe_listener);
+    let relay = InProcessRelay::start(auth_config()).await;
 
-    let shutdown_token = CancellationToken::new();
-    let server_shutdown = shutdown_token.clone();
-    let server = tokio::spawn(async move {
-        run_server_with_auth_config(
-            server_addr,
-            server_shutdown,
-            None,
-            false,
-            auth_config(server_addr),
-        )
-        .await
-        .unwrap();
-    });
-
-    let mut stream = timeout(Duration::from_secs(2), async {
-        loop {
-            match TcpStream::connect(server_addr).await {
-                Ok(stream) => break stream,
-                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
-            }
-        }
-    })
-    .await
-    .expect("server did not start");
-
-    let request = PbConnRequest::Subcribe {
-        data_protocol: None,
-        key: "missing-key".to_string(),
-    }
-    .encode()
-    .unwrap();
-    {
-        let mut writer = get_header_msg_writer(&mut stream).unwrap();
-        writer.write_msg(&request).await.unwrap();
-    }
-
+    let mut stream = subscribe(relay.addr, "missing-key").await;
     let mut reader = get_header_msg_reader(&mut stream).unwrap();
     let result = timeout(Duration::from_millis(200), reader.read_msg())
         .await
@@ -1332,8 +1302,7 @@ async fn subscribe_missing_key_closes_without_hanging() {
     };
     assert_eq!(error.code, "service_not_available");
 
-    shutdown_token.cancel();
-    server.await.unwrap();
+    relay.stop().await;
 }
 
 #[tokio::test]
@@ -1347,11 +1316,10 @@ async fn subscribe_failover_reuses_its_namespace_slot_and_rate_token() {
 }
 
 async fn bypass_unacked_control(at_capacity: bool) {
-    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server_addr = probe_listener.local_addr().unwrap();
-    drop(probe_listener);
-
-    let config = auth_config(server_addr);
+    // Bound by the child relay, so only an address no `:0` bind can be handed.
+    let server_addr = reserve_addr(Transport::Tcp).await;
+    let config = auth_config();
+    let _state = StateDir(config.state_dir.clone());
     // Limits belong only to this relay process, not the parallel test runner.
     let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_pb-mapper"))
         .args([
@@ -1374,87 +1342,35 @@ async fn bypass_unacked_control(at_capacity: bool) {
         )
         .env("PB_MAPPER_NEW_STREAMS_PER_SECOND", "1")
         .env("RUST_LOG", "error")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
 
     let key = "sf-backend";
-    let (healthy_ready_tx, healthy_ready_rx) = tokio::sync::oneshot::channel();
-    let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
-    let healthy_key = key.to_string();
-    let healthy_task = tokio::spawn(async move {
-        let healthy_control = wait_for_server(server_addr).await;
-        let (mut reader_stream, mut writer_stream) = healthy_control.into_split();
-        let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
-        {
-            let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-            register_control_conn_parts(&mut reader, &mut writer, &healthy_key).await;
-        }
-        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-        healthy_ready_tx.send(()).unwrap();
-        let request = timeout(Duration::from_secs(2), reader.read_msg())
-            .await
-            .expect("healthy control did not receive stream request")
-            .unwrap();
-        let LocalServer::Stream {
-            client_id,
-            server_generation,
-        } = LocalServer::decode(request).unwrap()
-        else {
-            panic!("unexpected local server control message");
-        };
-
-        let ack = PbServerRequest::StreamAck {
-            client_id,
-            server_generation,
-        }
-        .encode()
-        .unwrap();
-        writer.write_msg(&ack).await.unwrap();
-
-        let mut stream = TcpStream::connect(server_addr).await.unwrap();
-        let request = PbConnRequest::Stream {
-            data_protocol: None,
-            key: healthy_key,
-            dst_id: client_id,
-            server_generation,
-        }
-        .encode()
-        .unwrap();
-        let mut stream_writer = get_header_msg_writer(&mut stream).unwrap();
-        stream_writer.write_msg(&request).await.unwrap();
-        stream_tx.send(stream).unwrap();
-        std::future::pending::<()>().await;
-    });
+    let (healthy_ready_tx, healthy_ready_rx) = oneshot::channel();
+    let (stream_tx, stream_rx) = oneshot::channel();
+    let healthy_task = tokio::spawn(serve_one_stream(
+        server_addr,
+        key.to_string(),
+        "healthy control",
+        Some(healthy_ready_tx),
+        stream_tx,
+    ));
     healthy_ready_rx.await.unwrap();
 
-    let (stale_ready_tx, stale_ready_rx) = tokio::sync::oneshot::channel();
-    let stale_key = key.to_string();
-    let stale_task = tokio::spawn(async move {
-        let stale_control = wait_for_server(server_addr).await;
-        let (mut reader_stream, mut writer_stream) = stale_control.into_split();
-        let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
-        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-        register_control_conn_parts(&mut reader, &mut writer, &stale_key).await;
-        stale_ready_tx.send(()).unwrap();
-        std::future::pending::<()>().await;
-    });
+    let (stale_ready_tx, stale_ready_rx) = oneshot::channel();
+    let stale_task = tokio::spawn(stale_control(
+        server_addr,
+        key.to_string(),
+        stale_ready_tx,
+        StaleEnd::Park,
+    ));
     stale_ready_rx.await.unwrap();
 
-    let mut client = wait_for_server(server_addr).await;
-    let request = PbConnRequest::Subcribe {
-        data_protocol: None,
-        key: key.to_string(),
-    }
-    .encode()
-    .unwrap();
-    {
-        let mut writer = get_header_msg_writer(&mut client).unwrap();
-        writer.write_msg(&request).await.unwrap();
-    }
-
+    let mut client = subscribe(server_addr, key).await;
     let mut reader = get_header_msg_reader(&mut client).unwrap();
     let response = timeout(Duration::from_millis(1_000), reader.read_msg())
         .await
@@ -1471,125 +1387,34 @@ async fn bypass_unacked_control(at_capacity: bool) {
     stale_task.abort();
     server.kill().await.unwrap();
     server.wait().await.unwrap();
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[tokio::test]
 async fn subscribe_bypasses_acked_control_connection_without_stream() {
-    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server_addr = probe_listener.local_addr().unwrap();
-    drop(probe_listener);
-
-    let shutdown_token = CancellationToken::new();
-    let server_shutdown = shutdown_token.clone();
-    let server = tokio::spawn(async move {
-        run_server_with_auth_config(
-            server_addr,
-            server_shutdown,
-            None,
-            false,
-            auth_config(server_addr),
-        )
-        .await
-        .unwrap();
-    });
+    let relay = InProcessRelay::start(auth_config()).await;
 
     let key = "sf-backend";
-    let (healthy_ready_tx, healthy_ready_rx) = tokio::sync::oneshot::channel();
-    let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
-    let healthy_key = key.to_string();
-    let healthy_task = tokio::spawn(async move {
-        let healthy_control = wait_for_server(server_addr).await;
-        let (mut reader_stream, mut writer_stream) = healthy_control.into_split();
-        let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
-        {
-            let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-            register_control_conn_parts(&mut reader, &mut writer, &healthy_key).await;
-        }
-        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-        healthy_ready_tx.send(()).unwrap();
-        let request = timeout(Duration::from_secs(2), reader.read_msg())
-            .await
-            .expect("healthy control did not receive fallback stream request")
-            .unwrap();
-        let LocalServer::Stream {
-            client_id,
-            server_generation,
-        } = LocalServer::decode(request).unwrap()
-        else {
-            panic!("unexpected local server control message");
-        };
-
-        let ack = PbServerRequest::StreamAck {
-            client_id,
-            server_generation,
-        }
-        .encode()
-        .unwrap();
-        writer.write_msg(&ack).await.unwrap();
-
-        let mut stream = TcpStream::connect(server_addr).await.unwrap();
-        let request = PbConnRequest::Stream {
-            data_protocol: None,
-            key: healthy_key,
-            dst_id: client_id,
-            server_generation,
-        }
-        .encode()
-        .unwrap();
-        let mut stream_writer = get_header_msg_writer(&mut stream).unwrap();
-        stream_writer.write_msg(&request).await.unwrap();
-        stream_tx.send(stream).unwrap();
-        std::future::pending::<()>().await;
-    });
+    let (healthy_ready_tx, healthy_ready_rx) = oneshot::channel();
+    let (stream_tx, stream_rx) = oneshot::channel();
+    let healthy_task = tokio::spawn(serve_one_stream(
+        relay.addr,
+        key.to_string(),
+        "healthy control",
+        Some(healthy_ready_tx),
+        stream_tx,
+    ));
     healthy_ready_rx.await.unwrap();
 
-    let (stale_ready_tx, stale_ready_rx) = tokio::sync::oneshot::channel();
-    let stale_key = key.to_string();
-    let stale_task = tokio::spawn(async move {
-        let stale_control = wait_for_server(server_addr).await;
-        let (mut reader_stream, mut writer_stream) = stale_control.into_split();
-        let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
-        {
-            let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-            register_control_conn_parts(&mut reader, &mut writer, &stale_key).await;
-        }
-        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-        stale_ready_tx.send(()).unwrap();
-        let request = timeout(Duration::from_secs(2), reader.read_msg())
-            .await
-            .expect("stale control did not receive first stream request")
-            .unwrap();
-        let LocalServer::Stream {
-            client_id,
-            server_generation,
-        } = LocalServer::decode(request).unwrap()
-        else {
-            panic!("unexpected local server control message");
-        };
-        let ack = PbServerRequest::StreamAck {
-            client_id,
-            server_generation,
-        }
-        .encode()
-        .unwrap();
-        writer.write_msg(&ack).await.unwrap();
-        std::future::pending::<()>().await;
-    });
+    let (stale_ready_tx, stale_ready_rx) = oneshot::channel();
+    let stale_task = tokio::spawn(stale_control(
+        relay.addr,
+        key.to_string(),
+        stale_ready_tx,
+        StaleEnd::AckStream,
+    ));
     stale_ready_rx.await.unwrap();
 
-    let mut client = wait_for_server(server_addr).await;
-    let request = PbConnRequest::Subcribe {
-        data_protocol: None,
-        key: key.to_string(),
-    }
-    .encode()
-    .unwrap();
-    {
-        let mut writer = get_header_msg_writer(&mut client).unwrap();
-        writer.write_msg(&request).await.unwrap();
-    }
-
+    let mut client = subscribe(relay.addr, key).await;
     let mut reader = get_header_msg_reader(&mut client).unwrap();
     let response = timeout(Duration::from_millis(2_000), reader.read_msg())
         .await
@@ -1604,8 +1429,7 @@ async fn subscribe_bypasses_acked_control_connection_without_stream() {
     drop(stream);
     healthy_task.abort();
     stale_task.abort();
-    shutdown_token.cancel();
-    server.await.unwrap();
+    relay.stop().await;
 }
 
 /// A fake relay that refuses every registration with one error.
@@ -1613,55 +1437,41 @@ async fn subscribe_bypasses_acked_control_connection_without_stream() {
 /// Returns the timestamps of the register attempts it saw, which is what the two
 /// cases below actually assert on: how long the client waited before trying
 /// again, and whether it tried again at all.
-fn spawn_rejecting_relay(
+async fn rejecting_relay(
     listener: TcpListener,
-    remote_addr: SocketAddr,
     code: &'static str,
     retryable: bool,
-) -> (
-    tokio::task::JoinHandle<()>,
-    Arc<Mutex<Vec<tokio::time::Instant>>>,
-) {
+) -> (FakeRelay, Arc<Mutex<Vec<tokio::time::Instant>>>) {
     let attempts = Arc::new(Mutex::new(Vec::new()));
     let relay_attempts = attempts.clone();
-    let relay = tokio::spawn(async move {
-        let security = ServerSecurity::new(
-            AuthRuntime::from_process(auth_config(remote_addr))
-                .await
-                .unwrap(),
-        );
-        loop {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let attempts = relay_attempts.clone();
-            let security = security.clone();
-            tokio::spawn(async move {
-                let (request, session) = read_secure_request(&security, &mut stream).await;
-                let response = match request {
-                    PbConnRequest::Register { .. } | PbConnRequest::RegisterScoped { .. } => {
-                        attempts.lock().unwrap().push(tokio::time::Instant::now());
-                        PbConnResponse::error(code, "refused by the test relay", retryable)
-                    }
-                    // The registration probe, which the client runs against a
-                    // relay it has not registered with yet.
-                    PbConnRequest::Status(PbConnStatusReq::Service {
-                        direct_query: _,
-                        key,
-                    }) => PbConnResponse::Status(PbConnStatusResp::Service {
-                        direct: None,
-                        key,
-                        connections: Vec::new(),
-                    }),
-                    PbConnRequest::Status(PbConnStatusReq::Keys) => {
-                        PbConnResponse::Status(PbConnStatusResp::Keys(Vec::new()))
-                    }
-                    _ => return,
-                };
-                let mut writer = session.response_writer(&mut stream).unwrap();
-                writer.write_msg(&response.encode().unwrap()).await.unwrap();
-                std::future::pending::<()>().await;
-            });
+    let relay = FakeRelay::start(listener, move |request| match request {
+        PbConnRequest::Register { .. } | PbConnRequest::RegisterScoped { .. } => {
+            relay_attempts
+                .lock()
+                .unwrap()
+                .push(tokio::time::Instant::now());
+            Reply::RespondAndHold(PbConnResponse::error(
+                code,
+                "refused by the test relay",
+                retryable,
+            ))
         }
-    });
+        // The registration probe, which the client runs against a
+        // relay it has not registered with yet.
+        PbConnRequest::Status(PbConnStatusReq::Service {
+            direct_query: _,
+            key,
+        }) => Reply::RespondAndHold(PbConnResponse::Status(PbConnStatusResp::Service {
+            direct: None,
+            key,
+            connections: Vec::new(),
+        })),
+        PbConnRequest::Status(PbConnStatusReq::Keys) => {
+            Reply::RespondAndHold(PbConnResponse::Status(PbConnStatusResp::Keys(Vec::new())))
+        }
+        _ => Reply::Close,
+    })
+    .await;
     (relay, attempts)
 }
 
@@ -1695,33 +1505,17 @@ async fn retryable_registration_rejection_waits_on_the_slow_ladder() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = listener.local_addr().unwrap();
-    let (relay, attempts) = spawn_rejecting_relay(
-        listener,
-        remote_addr,
-        "service_connection_limit_exceeded",
-        true,
-    );
+    let (_relay, attempts) =
+        rejecting_relay(listener, "service_connection_limit_exceeded", true).await;
 
-    let status_changes = Arc::new(Mutex::new(Vec::<String>::new()));
-    let callback_status_changes = status_changes.clone();
+    let (status_changes, record_status) = status_recorder();
     let local_addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
     let local_server = tokio::spawn(run_server_side_cli_with_callback::<TcpStreamProvider, _>(
         local_addr,
         remote_addr,
         Arc::from("sf-backend"),
-        ServerTunnelOptions {
-            need_codec: false,
-            is_datagram: false,
-            keep_alive: false,
-            namespace: None,
-            force_namespace: false,
-        },
-        Some(Box::new(move |status| {
-            callback_status_changes
-                .lock()
-                .unwrap()
-                .push(status.to_string());
-        })),
+        plain_tcp_options(),
+        Some(record_status),
     ));
 
     let seen = wait_for_register_attempts(&attempts, 2, Duration::from_secs(5)).await;
@@ -1744,7 +1538,6 @@ async fn retryable_registration_rejection_waits_on_the_slow_ladder() {
     );
 
     local_server.abort();
-    relay.abort();
 }
 
 #[tokio::test]
@@ -1753,29 +1546,16 @@ async fn terminal_registration_rejection_stops_the_worker() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = listener.local_addr().unwrap();
-    let (relay, attempts) =
-        spawn_rejecting_relay(listener, remote_addr, "service_transport_mismatch", false);
+    let (_relay, attempts) = rejecting_relay(listener, "service_transport_mismatch", false).await;
 
-    let status_changes = Arc::new(Mutex::new(Vec::<String>::new()));
-    let callback_status_changes = status_changes.clone();
+    let (status_changes, record_status) = status_recorder();
     let local_addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
     let local_server = tokio::spawn(run_server_side_cli_with_callback::<TcpStreamProvider, _>(
         local_addr,
         remote_addr,
         Arc::from("sf-backend"),
-        ServerTunnelOptions {
-            need_codec: false,
-            is_datagram: false,
-            keep_alive: false,
-            namespace: None,
-            force_namespace: false,
-        },
-        Some(Box::new(move |status| {
-            callback_status_changes
-                .lock()
-                .unwrap()
-                .push(status.to_string());
-        })),
+        plain_tcp_options(),
+        Some(record_status),
     ));
 
     // The pool returns once its only worker gives up, which is the whole point:
@@ -1792,6 +1572,4 @@ async fn terminal_registration_rejection_stops_the_worker() {
             .is_some_and(|status| status.starts_with("failed: service_transport_mismatch")),
         "a permanent rejection was not reported to the caller: {statuses:?}"
     );
-
-    relay.abort();
 }
