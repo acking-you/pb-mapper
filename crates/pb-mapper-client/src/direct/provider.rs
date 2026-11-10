@@ -805,7 +805,6 @@ impl Drop for ActiveSession {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use tokio::{io::AsyncReadExt, net::TcpListener};
     use tokio_util::task::AbortOnDropHandle;

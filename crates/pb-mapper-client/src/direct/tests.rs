@@ -1,4 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::{
     binding,
     conn::DirectConn,
@@ -265,21 +264,14 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
     let diagnostics = Diagnostics::default();
     let mut events = diagnostics.subscribe();
     let consumer = share.consumer(network, diagnostics.clone(), LanTransport::Quic);
-    let prepared = tokio::time::timeout(
-        Duration::from_secs(8),
-        consumer.prepare("fallback", Instant::now() + Duration::from_secs(8)),
-    )
-    .await
-    .unwrap()
-    .unwrap()
-    .unwrap();
+    let prepared = prepare(&consumer, "fallback").await;
     assert!(matches!(prepared.path, DataPath::Relay { .. }));
     // The fallback pauses direct: the next session goes to the relay at once.
-    let next = consumer
+    let paused = consumer
         .prepare("fallback", Instant::now() + Duration::from_secs(8))
         .await
         .unwrap();
-    assert!(next.is_none());
+    assert!(paused.is_none());
     let paused = diagnostics.metrics(RelayTransport::Tcp);
     assert!(paused.direct_cooldown_ms.is_some());
     assert_eq!(paused.cooldown_skips, 1);
@@ -318,16 +310,11 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
     .await
     .expect("snapshot must drain beyond the control channel capacity");
     let _forward = share.forward(prepared).await;
-    let missed = loop {
-        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        if let TunnelEventKind::LanMissed { evidence, took } = event.kind {
-            break (evidence, took);
-        }
-    };
+    let missed = next(&mut events, |kind| match kind {
+        TunnelEventKind::LanMissed { evidence, took } => Some((evidence, took)),
+        _ => None,
+    })
+    .await;
     assert_eq!(missed, (LanEvidence::PublicIpSubnet, None));
     let metrics = diagnostics.metrics(RelayTransport::Tcp);
     assert_eq!((metrics.lan.detected, metrics.lan.missed), (1, 1));
@@ -411,15 +398,16 @@ async fn a_lan_is_dialed_on_its_first_answer_and_reported_while_open() {
     };
     assert_eq!((traffic.lan, traffic.direct), (echoed, echoed));
     assert_eq!(traffic.relay, ByteCount::default());
-    // The session's end lets its connection go.
+    // The session's end lets its connection go: closing it in diagnostics
+    // and letting its link go are one step.
+    let mut events = diagnostics.subscribe();
     drop(forward);
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while read().link.is_some() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    next(&mut events, |kind| match kind {
+        TunnelEventKind::SessionClosed { .. } => Some(()),
+        _ => None,
     })
-    .await
-    .unwrap();
+    .await;
+    assert!(read().link.is_none());
     assert_eq!(read().active_lan, 0);
     share.stop().await;
 }

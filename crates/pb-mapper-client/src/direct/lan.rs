@@ -632,7 +632,6 @@ fn rank(interface: &netdev::Interface, addrs: &[(IpAddr, u8)], android: bool) ->
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use super::*;
 
     fn ip(text: &str) -> IpAddr {

@@ -142,7 +142,6 @@ impl Candidates {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use super::*;
 
     /// This PC as measured: a WLAN with a stable IPv6 address and a Windows

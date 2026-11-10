@@ -532,7 +532,6 @@ fn packet(id: SessionId, nonce: [u8; 16], pong: bool, secret: SessionSecret) -> 
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use super::*;
     use std::future::poll_fn;
 

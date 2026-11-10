@@ -248,7 +248,6 @@ async fn sleep_until_some(at: Option<Instant>) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use super::*;
     use std::sync::Arc;
 

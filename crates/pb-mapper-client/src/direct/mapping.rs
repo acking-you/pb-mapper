@@ -289,7 +289,6 @@ impl From<portmapper::MappingProtocol> for PortMappingProtocol {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -355,7 +355,6 @@ impl Drop for Network {
 
 #[cfg(all(test, feature = "port-mapping"))]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::{diagnostics::Diagnostics, sdk::PortMapping};
 

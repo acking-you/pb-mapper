@@ -169,7 +169,6 @@ impl Network {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::{diagnostics::Diagnostics, sdk::PortMapping};
     use stun_proto::types::{
