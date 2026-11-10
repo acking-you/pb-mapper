@@ -23,7 +23,7 @@ use crate::config::{
 };
 use crate::config::{parse_legacy_protocol_policy, platform_default_auth_state_dir};
 use crate::persistence::{
-    auth_snapshot_path, prepare_state_dir, read_instance_id_file, seal_blob, sync_parent_directory,
+    auth_snapshot_path, prepare_state_dir, read_instance_id_file, seal_blob,
     try_load_persisted_state,
 };
 
@@ -616,15 +616,6 @@ fn platform_default_auth_state_dir_is_writable_outside_linux_system_paths() {
             );
         }
     }
-}
-
-#[test]
-fn sync_parent_directory_succeeds_for_a_local_file() {
-    let state_dir = TempPath::new("dirsync");
-    prepare_state_dir(&state_dir).unwrap();
-    let path = state_dir.join("probe");
-    std::fs::write(&path, b"x").unwrap();
-    sync_parent_directory(&path).unwrap();
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]

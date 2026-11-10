@@ -268,6 +268,16 @@ mod tests {
         assert_eq!(std::fs::read(path.join("kept")).unwrap(), b"kept");
     }
 
+    /// Syncing a directory opens it, which Windows allows only with backup
+    /// semantics.
+    #[test]
+    fn sync_parent_directory_succeeds_for_a_local_file() {
+        let scratch = scratch("dirsync");
+        let path = scratch.join("probe");
+        std::fs::write(&path, b"x").unwrap();
+        sync_parent_directory(&path).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn replace_contents_sets_the_requested_mode() {
