@@ -21,11 +21,13 @@ pub(crate) fn cancel_all_temporary_leases(inner: &AuthStateInner) {
     }
 }
 
-fn snapshot_generations(inner: &AuthStateInner) -> Vec<Generation> {
-    let slots = inner.slots();
-    let extra = inner.high_slot_generations.read();
-    let mut generations = slots.iter().map(|slot| slot.generation).collect::<Vec<_>>();
-    generations.extend_from_slice(&extra);
+/// Every row's generation, the indexable rows first. Takes the slot table the
+/// caller already holds: a second read lock taken on the same thread can
+/// deadlock behind a queued writer.
+fn snapshot_generations(slots: &[SlotHot], high: &[Generation]) -> Vec<Generation> {
+    let mut generations = Vec::with_capacity(slots.len() + high.len());
+    generations.extend(slots.iter().map(|slot| slot.generation));
+    generations.extend_from_slice(high);
     generations
 }
 
@@ -49,7 +51,7 @@ pub(crate) fn build_snapshot(
 ) -> PersistedSnapshot {
     let slots = inner.slots();
     let cold = inner.cold();
-    let generations = snapshot_generations(inner);
+    let generations = snapshot_generations(&slots, &inner.high_slot_generations);
     let mut entries = slots
         .iter()
         .enumerate()
@@ -112,13 +114,8 @@ pub(crate) fn empty_snapshot(
     instance_id: [u8; INSTANCE_ID_LEN],
     admin_replays: &VecDeque<AdminReplayRecord>,
 ) -> PersistedSnapshot {
-    snapshot_with(
-        inner,
-        instance_id,
-        snapshot_generations(inner),
-        Vec::new(),
-        admin_replays,
-    )
+    let generations = snapshot_generations(&inner.slots(), &inner.high_slot_generations);
+    snapshot_with(inner, instance_id, generations, Vec::new(), admin_replays)
 }
 
 fn snapshot_with(

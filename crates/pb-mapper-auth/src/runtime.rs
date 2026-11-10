@@ -180,7 +180,7 @@ impl AuthRuntime {
             sync_process_credential,
             instance_id: RwLock::new(instance_id),
             slots: RwLock::new(slots),
-            high_slot_generations: RwLock::new(high_slot_generations),
+            high_slot_generations: high_slot_generations.into_boxed_slice(),
             high_slot_entries: RwLock::new(high_slot_entries),
             safe_mode: AtomicBool::new(safe_mode),
             legacy_protocol_allowed: AtomicBool::new(legacy_protocol.is_allowed()),
@@ -656,12 +656,9 @@ fn temporary_key_material_mismatch(inner: &AuthStateInner, key_id: KeyId) -> Aut
     let slots = inner.slots();
     let current_generation = match slots.get(index) {
         Some(slot) => Some(slot.generation),
-        None => {
-            let high = inner.high_slot_generations.read();
-            index
-                .checked_sub(slots.len())
-                .and_then(|offset| high.get(offset).copied())
-        }
+        None => index
+            .checked_sub(slots.len())
+            .and_then(|offset| inner.high_slot_generations.get(offset).copied()),
     };
     let slot_is_active = slots
         .get(index)

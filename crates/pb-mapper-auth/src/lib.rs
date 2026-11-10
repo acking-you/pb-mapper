@@ -497,7 +497,10 @@ struct AuthStateInner {
     /// a key id that was already handed out, and their entries so a still-live
     /// credential in that range keeps working. This is the fallback path that
     /// operations take after missing in `slots`.
-    high_slot_generations: RwLock<Vec<Generation>>,
+    ///
+    /// Fixed at startup: nothing issues into these rows, so the generations
+    /// never change and need no lock.
+    high_slot_generations: Box<[Generation]>,
     high_slot_entries: RwLock<Vec<PersistedEntry>>,
     /// Per-key description that no authentication check needs, kept out of the
     /// hot slot row. Lives here rather than inside the actor so a key's handle
