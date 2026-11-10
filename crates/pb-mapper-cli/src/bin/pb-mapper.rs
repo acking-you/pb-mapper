@@ -849,6 +849,27 @@ mod tests {
         .expect("administrator namespace registration flags should parse");
     }
 
+    #[test]
+    fn rejects_invalid_admin_paging_and_duration() {
+        assert!(
+            Cli::try_parse_from(["pb-mapper", "admin", "key", "list", "--page-size", "1001",])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["pb-mapper", "admin", "key", "issue", "--ttl", "1fortnight",])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "pb-mapper",
+                "server",
+                "--init-admin-key",
+                "--use-machine-msg-header-key",
+            ])
+            .is_err()
+        );
+    }
+
     fn server_args(args: &[&str]) -> ServerArgs {
         let cli = Cli::try_parse_from(["pb-mapper", "server"].iter().chain(args))
             .expect("server flags should parse");
@@ -874,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_flags_from_0_7_still_parse_and_override_the_defaults() {
+    fn server_direct_flags_from_0_7_still_parse_and_override_the_defaults() {
         let args = server_args(&[
             "--enable-direct",
             "--direct-listen",
@@ -890,157 +911,18 @@ mod tests {
             Cli::try_parse_from(["pb-mapper", "server", "--relay-only", "--enable-direct"])
                 .is_err()
         );
-
-        let register = [
-            "pb-mapper",
-            "register",
-            "tcp",
-            "--key",
-            "web",
-            "--addr",
-            "127.0.0.1:8080",
-        ];
-        let Command::Register(defaults) = Cli::try_parse_from(register).unwrap().command else {
-            panic!("expected register command");
-        };
-        assert!(!defaults.relay_only);
-        assert!(defaults.lan_first && defaults.lan_tcp);
-        assert_eq!(defaults.relay.relay_transport, RelayTransportArg::Tcp);
-        assert!(
-            Cli::try_parse_from(register.iter().chain(&["--allow-direct"])).is_ok(),
-            "0.7 opt-in flag is accepted"
-        );
-        let Command::Register(no_tcp) =
-            Cli::try_parse_from(register.iter().chain(&["--no-lan-tcp"]))
-                .unwrap()
-                .command
-        else {
-            panic!("expected register command");
-        };
-        assert!(!no_tcp.lan_tcp && no_tcp.lan_first);
-        assert!(
-            Cli::try_parse_from(register.iter().chain(&["--relay-only", "--no-lan-tcp"])).is_err()
-        );
-        let Command::Register(lan_first_off) =
-            Cli::try_parse_from(register.iter().chain(&["--no-lan-first"]))
-                .unwrap()
-                .command
-        else {
-            panic!("expected register command");
-        };
-        assert!(!lan_first_off.lan_first);
-        assert!(
-            Cli::try_parse_from(register.iter().chain(&["--relay-only", "--no-lan-first"]))
-                .is_err()
-        );
-        let Command::Register(opted_out) =
-            Cli::try_parse_from(register.iter().chain(&["--relay-only"]))
-                .unwrap()
-                .command
-        else {
-            panic!("expected register command");
-        };
-        assert!(opted_out.relay_only);
-
-        let connect = [
-            "pb-mapper",
-            "connect",
-            "tcp",
-            "--key",
-            "web",
-            "--addr",
-            "127.0.0.1:9090",
-        ];
-        let Command::Connect(defaults) = Cli::try_parse_from(connect).unwrap().command else {
-            panic!("expected connect command");
-        };
-        assert_eq!(defaults.path, PathArg::Auto);
-        assert_eq!(defaults.relay.relay_transport, RelayTransportArg::Tcp);
-        assert!(!defaults.relay_only);
-        assert!(Cli::try_parse_from(connect.iter().chain(&["--path", "auto"])).is_ok());
-        assert!(Cli::try_parse_from(connect.iter().chain(&["--relay-only"])).is_ok());
-        assert!(
-            Cli::try_parse_from(connect.iter().chain(&["--relay-only", "--path", "auto"])).is_err()
-        );
-        let mapping = |extra: &[&str]| match Cli::try_parse_from(connect.iter().chain(extra))
-            .unwrap()
-            .command
-        {
-            Command::Connect(args) => args.port_mapping,
-            _ => panic!("expected connect command"),
-        };
-        assert_eq!(defaults.port_mapping, PortMappingArg::Auto);
-        assert_eq!(mapping(&["--port-mapping", "off"]), PortMappingArg::Off);
-        assert_eq!(mapping(&["--port-mapping"]), PortMappingArg::Always);
-        assert_eq!(mapping(&["--port-mapping", "auto"]), PortMappingArg::Auto);
-        assert!(defaults.lan_first);
-        let Command::Connect(lan_first_off) =
-            Cli::try_parse_from(connect.iter().chain(&["--no-lan-first"]))
-                .unwrap()
-                .command
-        else {
-            panic!("expected connect command");
-        };
-        assert!(!lan_first_off.lan_first);
-        assert!(
-            Cli::try_parse_from(connect.iter().chain(&["--relay-only", "--no-lan-first"])).is_err()
-        );
-        assert_eq!(defaults.lan_transport, LanTransportArg::Quic);
-        let Command::Connect(tcp) =
-            Cli::try_parse_from(connect.iter().chain(&["--lan-transport", "tcp"]))
-                .unwrap()
-                .command
-        else {
-            panic!("expected connect command");
-        };
-        assert_eq!(LanTransport::from(tcp.lan_transport), LanTransport::Tcp);
-        assert!(
-            Cli::try_parse_from(
-                connect
-                    .iter()
-                    .chain(&["--relay-only", "--lan-transport", "tcp"])
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_admin_paging_and_duration() {
-        assert!(
-            Cli::try_parse_from(["pb-mapper", "admin", "key", "list", "--page-size", "1001",])
-                .is_err()
-        );
-        assert!(
-            Cli::try_parse_from(["pb-mapper", "admin", "key", "issue", "--ttl", "1fortnight",])
-                .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "pb-mapper",
-                "server",
-                "--init-admin-key",
-                "--use-machine-msg-header-key",
-            ])
-            .is_err()
-        );
     }
 
     #[test]
     fn server_auth_options_only_override_environment_when_explicit() {
-        let cli =
-            Cli::try_parse_from(["pb-mapper", "server"]).expect("server defaults should parse");
-        let Command::Server(defaults) = cli.command else {
-            panic!("expected server command");
-        };
+        let defaults = server_args(&[]);
         assert_eq!(defaults.auth_state_dir, None);
         assert_eq!(defaults.quic_listen, None);
         assert_eq!(defaults.max_temporary_keys, None);
         assert_eq!(defaults.max_temporary_key_ttl, None);
         assert_eq!(defaults.legacy_protocol, None);
 
-        let cli = Cli::try_parse_from([
-            "pb-mapper",
-            "server",
+        let explicit = server_args(&[
             "--auth-state-dir",
             "/tmp/pb-mapper-auth",
             "--max-temporary-keys",
@@ -1049,11 +931,7 @@ mod tests {
             "2h",
             "--legacy-protocol",
             "deny",
-        ])
-        .expect("explicit server authentication options should parse");
-        let Command::Server(explicit) = cli.command else {
-            panic!("expected server command");
-        };
+        ]);
         assert_eq!(
             explicit.auth_state_dir,
             Some(PathBuf::from("/tmp/pb-mapper-auth"))
@@ -1078,5 +956,87 @@ mod tests {
             server_auth_config(&server_args(&["--max-temporary-key-ttl", "5s"])).unwrap_err(),
             ServerFlagError::MaxTemporaryKeyTtl
         );
+    }
+
+    const REGISTER: [&str; 7] = [
+        "pb-mapper",
+        "register",
+        "tcp",
+        "--key",
+        "web",
+        "--addr",
+        "127.0.0.1:8080",
+    ];
+
+    const CONNECT: [&str; 7] = [
+        "pb-mapper",
+        "connect",
+        "tcp",
+        "--key",
+        "web",
+        "--addr",
+        "127.0.0.1:9090",
+    ];
+
+    /// `base`, a whole command line, with `extra` appended.
+    fn parse_with(base: &[&str], extra: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(base.iter().chain(extra))
+    }
+
+    fn register_args(extra: &[&str]) -> RegisterArgs {
+        let cli = parse_with(&REGISTER, extra).expect("register flags should parse");
+        let Command::Register(args) = cli.command else {
+            panic!("expected register command");
+        };
+        args
+    }
+
+    fn connect_args(extra: &[&str]) -> ConnectArgs {
+        let cli = parse_with(&CONNECT, extra).expect("connect flags should parse");
+        let Command::Connect(args) = cli.command else {
+            panic!("expected connect command");
+        };
+        args
+    }
+
+    #[test]
+    fn register_flags_from_0_7_still_parse_and_direct_is_the_default() {
+        let defaults = register_args(&[]);
+        assert!(!defaults.relay_only);
+        assert!(defaults.lan_first && defaults.lan_tcp);
+        assert_eq!(defaults.relay.relay_transport, RelayTransportArg::Tcp);
+        assert!(
+            parse_with(&REGISTER, &["--allow-direct"]).is_ok(),
+            "0.7 opt-in flag is accepted"
+        );
+        let no_tcp = register_args(&["--no-lan-tcp"]);
+        assert!(!no_tcp.lan_tcp && no_tcp.lan_first);
+        assert!(parse_with(&REGISTER, &["--relay-only", "--no-lan-tcp"]).is_err());
+        assert!(!register_args(&["--no-lan-first"]).lan_first);
+        assert!(parse_with(&REGISTER, &["--relay-only", "--no-lan-first"]).is_err());
+        assert!(register_args(&["--relay-only"]).relay_only);
+    }
+
+    #[test]
+    fn connect_flags_from_0_7_still_parse_and_direct_is_the_default() {
+        let defaults = connect_args(&[]);
+        assert_eq!(defaults.path, PathArg::Auto);
+        assert_eq!(defaults.relay.relay_transport, RelayTransportArg::Tcp);
+        assert!(!defaults.relay_only);
+        assert!(parse_with(&CONNECT, &["--path", "auto"]).is_ok());
+        assert!(parse_with(&CONNECT, &["--relay-only"]).is_ok());
+        assert!(parse_with(&CONNECT, &["--relay-only", "--path", "auto"]).is_err());
+        let mapping = |extra: &[&str]| connect_args(extra).port_mapping;
+        assert_eq!(defaults.port_mapping, PortMappingArg::Auto);
+        assert_eq!(mapping(&["--port-mapping", "off"]), PortMappingArg::Off);
+        assert_eq!(mapping(&["--port-mapping"]), PortMappingArg::Always);
+        assert_eq!(mapping(&["--port-mapping", "auto"]), PortMappingArg::Auto);
+        assert!(defaults.lan_first);
+        assert!(!connect_args(&["--no-lan-first"]).lan_first);
+        assert!(parse_with(&CONNECT, &["--relay-only", "--no-lan-first"]).is_err());
+        assert_eq!(defaults.lan_transport, LanTransportArg::Quic);
+        let tcp = connect_args(&["--lan-transport", "tcp"]);
+        assert_eq!(LanTransport::from(tcp.lan_transport), LanTransport::Tcp);
+        assert!(parse_with(&CONNECT, &["--relay-only", "--lan-transport", "tcp"]).is_err());
     }
 }
