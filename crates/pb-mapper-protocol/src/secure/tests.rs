@@ -573,7 +573,9 @@ async fn mistyped_temporary_first_flight_does_not_send_an_unreadable_error() {
 async fn oversized_initial_frame_is_rejected_before_reading_its_body() {
     let credential = Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv");
     let session = ClientHeaderSession::new_v2(&credential).unwrap();
-    let material = session.v2.as_ref().unwrap();
+    let SessionKeys::V2(material) = &session.keys else {
+        panic!("new clients speak protocol v2");
+    };
     let mut bytes = first_prefix(material);
     bytes.extend_from_slice(&0_u64.to_be_bytes());
     bytes.extend_from_slice(&(MAX_INITIAL_PLAINTEXT_LEN + 17).to_be_bytes());

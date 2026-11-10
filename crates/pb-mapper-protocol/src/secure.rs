@@ -77,23 +77,80 @@ pub enum HeaderProtocol {
     V2,
 }
 
+/// How a session protects its control messages: a legacy session frames them
+/// with its framing key alone; a v2 one with directional keys derived for the
+/// connection.
+enum SessionKeys {
+    Legacy,
+    V2(V2Material),
+}
+
+impl SessionKeys {
+    fn protocol(&self) -> HeaderProtocol {
+        match self {
+            Self::Legacy => HeaderProtocol::Legacy,
+            Self::V2(_) => HeaderProtocol::V2,
+        }
+    }
+
+    /// Reads what the peer sends in `direction`, from frame `counter` on.
+    fn reader<'a, T: AsyncReadExt + Unpin>(
+        &self,
+        framing_key: &AesKeyType,
+        reader: &'a mut T,
+        direction: u8,
+        counter: u64,
+    ) -> Result<HeaderMessageReader<'a, T>> {
+        Ok(match self {
+            Self::Legacy => HeaderMessageReader::Legacy(CodecMessageReader::for_session_key(
+                reader,
+                Aes256GcmDeCodec::try_new(framing_key)
+                    .map_err(|_| protocol_error("failed to initialize legacy reader"))?,
+                *framing_key,
+            )),
+            Self::V2(material) => HeaderMessageReader::V2(V2MessageReader::new(
+                reader,
+                material.clone(),
+                direction,
+                counter,
+            )?),
+        })
+    }
+
+    /// Writes what this end sends in `direction`, from frame `counter` on.
+    /// `legacy_label` names a legacy writer in its setup error.
+    fn writer<'a, T: AsyncWriteExt + Unpin>(
+        &self,
+        framing_key: &AesKeyType,
+        writer: &'a mut T,
+        direction: u8,
+        counter: u64,
+        legacy_label: &str,
+    ) -> Result<HeaderMessageWriter<'a, T>> {
+        Ok(match self {
+            Self::Legacy => HeaderMessageWriter::Legacy(CodecMessageWriter::for_session_key(
+                writer,
+                Aes256GcmEnCodec::try_new(framing_key)
+                    .map_err(|_| protocol_error(format!("failed to initialize {legacy_label}")))?,
+                *framing_key,
+            )),
+            Self::V2(material) => HeaderMessageWriter::V2(V2MessageWriter::new(
+                writer,
+                material.clone(),
+                direction,
+                counter,
+            )?),
+        })
+    }
+}
+
 pub struct ClientHeaderSession {
-    protocol: HeaderProtocol,
-    legacy_key: AesKeyType,
-    v2: Option<V2Material>,
+    /// The credential's key, which a legacy session frames with.
+    framing_key: AesKeyType,
+    keys: SessionKeys,
 }
 
 impl ClientHeaderSession {
-    /// The v2 material, which is `Some` exactly when `protocol` is `V2`.
-    ///
-    /// The type does not tie the two together, so this reports instead of
-    /// panicking on a state that construction never produces.
-    fn v2_material(&self) -> Result<&V2Material> {
-        self.v2
-            .as_ref()
-            .ok_or_else(|| protocol_error("v2 session is missing its key material"))
-    }
-
     /// New clients always use protocol v2, for both administrator and temporary credentials.
     pub fn from_process() -> Result<Self> {
         let credential = get_process_credential().map_err(protocol_error)?;
@@ -110,23 +167,21 @@ impl ClientHeaderSession {
         let material =
             derive_material(KeyId::from_u64(credential.key_id()), credential.key(), salt)?;
         Ok(Self {
-            protocol: HeaderProtocol::V2,
-            legacy_key: *credential.key(),
-            v2: Some(material),
+            framing_key: *credential.key(),
+            keys: SessionKeys::V2(material),
         })
     }
 
     #[cfg(test)]
     pub fn new_legacy(key: AesKeyType) -> Self {
         Self {
-            protocol: HeaderProtocol::Legacy,
-            legacy_key: key,
-            v2: None,
+            framing_key: key,
+            keys: SessionKeys::Legacy,
         }
     }
 
     pub fn protocol(&self) -> HeaderProtocol {
-        self.protocol
+        self.keys.protocol()
     }
 
     pub async fn write_initial<T: AsyncWriteExt + Unpin>(
@@ -134,44 +189,35 @@ impl ClientHeaderSession {
         writer: &mut T,
         message: &[u8],
     ) -> Result<()> {
-        match self.protocol {
-            HeaderProtocol::Legacy => {
-                legacy_message_writer(writer, &self.legacy_key, "legacy writer")?
-                    .write_msg(message)
-                    .await
-            }
-            HeaderProtocol::V2 => {
-                let material = self.v2_material()?;
+        match &self.keys {
+            SessionKeys::Legacy => {}
+            SessionKeys::V2(material) => {
                 writer
                     .write_all(&first_prefix(material))
                     .await
                     .map_err(|error| {
                         protocol_error(format!("failed to write v2 prefix: {error}"))
                     })?;
-                V2MessageWriter::new(writer, material.clone(), DIRECTION_CLIENT_TO_SERVER, 0)?
-                    .write_msg(message)
-                    .await
             }
         }
+        self.keys
+            .writer(
+                &self.framing_key,
+                writer,
+                DIRECTION_CLIENT_TO_SERVER,
+                0,
+                "legacy writer",
+            )?
+            .write_msg(message)
+            .await
     }
 
     pub fn response_reader<'a, T: AsyncReadExt + Unpin>(
         &self,
         reader: &'a mut T,
     ) -> Result<HeaderMessageReader<'a, T>> {
-        match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageReader::Legacy(legacy_message_reader(
-                reader,
-                &self.legacy_key,
-                "legacy reader",
-            )?)),
-            HeaderProtocol::V2 => Ok(HeaderMessageReader::V2(V2MessageReader::new(
-                reader,
-                self.v2_material()?.clone(),
-                DIRECTION_SERVER_TO_CLIENT,
-                0,
-            )?)),
-        }
+        self.keys
+            .reader(&self.framing_key, reader, DIRECTION_SERVER_TO_CLIENT, 0)
     }
 
     pub async fn exchange<T: AsyncReadExt + AsyncWriteExt + Unpin>(
@@ -204,26 +250,21 @@ impl ClientHeaderSession {
         &self,
         writer: &'a mut T,
     ) -> Result<HeaderMessageWriter<'a, T>> {
-        match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageWriter::Legacy(legacy_message_writer(
-                writer,
-                &self.legacy_key,
-                "legacy writer",
-            )?)),
-            HeaderProtocol::V2 => Ok(HeaderMessageWriter::V2(V2MessageWriter::new(
-                writer,
-                self.v2_material()?.clone(),
-                DIRECTION_CLIENT_TO_SERVER,
-                1,
-            )?)),
-        }
+        self.keys.writer(
+            &self.framing_key,
+            writer,
+            DIRECTION_CLIENT_TO_SERVER,
+            1,
+            "legacy writer",
+        )
     }
 }
 
 pub struct ServerHeaderSession {
-    protocol: HeaderProtocol,
-    legacy_key: AesKeyType,
-    v2: Option<V2Material>,
+    /// The administrator key for a legacy session, the presented credential's
+    /// key for a v2 one. Data frames on this connection are checksummed with it.
+    framing_key: AesKeyType,
+    keys: SessionKeys,
     context: Option<AuthContext>,
     _legacy_guard: Option<LegacyConnectionGuard>,
 }
@@ -232,7 +273,7 @@ impl fmt::Debug for ServerHeaderSession {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ServerHeaderSession")
-            .field("protocol", &self.protocol)
+            .field("protocol", &self.protocol())
             .field("key_id", &self.key_id())
             .field("authenticated", &self.context.is_some())
             .finish()
@@ -240,31 +281,21 @@ impl fmt::Debug for ServerHeaderSession {
 }
 
 impl ServerHeaderSession {
-    /// The v2 material, `Some` exactly when `protocol` is `V2` — see
-    /// [`ClientHeaderSession::v2_material`].
-    fn v2_material(&self) -> Result<&V2Material> {
-        self.v2
-            .as_ref()
-            .ok_or_else(|| protocol_error("v2 session is missing its key material"))
-    }
-
     pub fn protocol(&self) -> HeaderProtocol {
-        self.protocol
+        self.keys.protocol()
     }
 
     pub fn framing_key(&self) -> AesKeyType {
-        self.legacy_key
+        self.framing_key
     }
 
     pub fn key_id(&self) -> KeyId {
         self.context
             .as_ref()
             .map(|context| context.key_id)
-            .unwrap_or_else(|| {
-                self.v2
-                    .as_ref()
-                    .map(|material| material.key_id)
-                    .unwrap_or(ADMIN_KEY_ID)
+            .unwrap_or_else(|| match &self.keys {
+                SessionKeys::Legacy => ADMIN_KEY_ID,
+                SessionKeys::V2(material) => material.key_id,
             })
     }
 
@@ -278,38 +309,21 @@ impl ServerHeaderSession {
         &self,
         writer: &'a mut T,
     ) -> Result<HeaderMessageWriter<'a, T>> {
-        match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageWriter::Legacy(legacy_message_writer(
-                writer,
-                &self.legacy_key,
-                "legacy response writer",
-            )?)),
-            HeaderProtocol::V2 => Ok(HeaderMessageWriter::V2(V2MessageWriter::new(
-                writer,
-                self.v2_material()?.clone(),
-                DIRECTION_SERVER_TO_CLIENT,
-                0,
-            )?)),
-        }
+        self.keys.writer(
+            &self.framing_key,
+            writer,
+            DIRECTION_SERVER_TO_CLIENT,
+            0,
+            "legacy response writer",
+        )
     }
 
     pub fn continuation_reader<'a, T: AsyncReadExt + Unpin>(
         &self,
         reader: &'a mut T,
     ) -> Result<HeaderMessageReader<'a, T>> {
-        match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageReader::Legacy(legacy_message_reader(
-                reader,
-                &self.legacy_key,
-                "legacy reader",
-            )?)),
-            HeaderProtocol::V2 => Ok(HeaderMessageReader::V2(V2MessageReader::new(
-                reader,
-                self.v2_material()?.clone(),
-                DIRECTION_CLIENT_TO_SERVER,
-                1,
-            )?)),
-        }
+        self.keys
+            .reader(&self.framing_key, reader, DIRECTION_CLIENT_TO_SERVER, 1)
     }
 }
 
@@ -503,9 +517,8 @@ impl ServerSecurity {
         Ok(ServerInitialMessage {
             payload: plain.to_vec(),
             session: ServerHeaderSession {
-                protocol: HeaderProtocol::Legacy,
-                legacy_key: key,
-                v2: None,
+                framing_key: key,
+                keys: SessionKeys::Legacy,
                 context: Some(context),
                 _legacy_guard: Some(legacy_guard),
             },
@@ -574,7 +587,6 @@ impl ServerSecurity {
                 key_id,
             )
         })?;
-        let mut session = v2_session(key, material.clone());
         let (counter, ciphertext) = read_v2_frame(reader, 0, MAX_INITIAL_PLAINTEXT_LEN)
             .await
             .map_err(|error| {
@@ -596,7 +608,7 @@ impl ServerSecurity {
             Ok(payload) => FirstFlightWork::Live {
                 key,
                 payload,
-                error_session: session_without_context(&session),
+                error_session: v2_session(key, material.clone()),
             },
             Err(error) => {
                 match stale_root_first_flight(&self.auth, key_id, salt, counter, &ciphertext) {
@@ -626,10 +638,12 @@ impl ServerSecurity {
                 key_id,
             ))
         })?;
-        session.context = Some(context);
         Ok(ServerInitialMessage {
             payload,
-            session,
+            session: ServerHeaderSession {
+                context: Some(context),
+                ..v2_session(key, material)
+            },
             replay_fingerprint: Some(fingerprint),
             client_timestamp: Some(client_timestamp),
         })
@@ -679,31 +693,6 @@ use replay::{
 };
 mod first_flight;
 use first_flight::*;
-fn legacy_message_reader<'a, T: AsyncReadExt + Unpin>(
-    reader: &'a mut T,
-    key: &AesKeyType,
-    action: &str,
-) -> Result<CodecMessageReader<'a, T, Aes256GcmDeCodec>> {
-    Ok(CodecMessageReader::for_session_key(
-        reader,
-        Aes256GcmDeCodec::try_new(key)
-            .map_err(|_| protocol_error(format!("failed to initialize {action}")))?,
-        *key,
-    ))
-}
-
-fn legacy_message_writer<'a, T: AsyncWriteExt + Unpin>(
-    writer: &'a mut T,
-    key: &AesKeyType,
-    action: &str,
-) -> Result<CodecMessageWriter<'a, T, Aes256GcmEnCodec>> {
-    Ok(CodecMessageWriter::for_session_key(
-        writer,
-        Aes256GcmEnCodec::try_new(key)
-            .map_err(|_| protocol_error(format!("failed to initialize {action}")))?,
-        *key,
-    ))
-}
 
 pub(crate) fn protocol_error(detail: impl Into<String>) -> Error {
     Error::MsgProtocol {

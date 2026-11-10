@@ -123,21 +123,11 @@ pub(super) fn stale_root_first_flight(
     })
 }
 
+/// An unauthenticated v2 session: enough to answer the presenter.
 pub(super) fn v2_session(key: AesKeyType, material: V2Material) -> ServerHeaderSession {
     ServerHeaderSession {
-        protocol: HeaderProtocol::V2,
-        legacy_key: key,
-        v2: Some(material),
-        context: None,
-        _legacy_guard: None,
-    }
-}
-
-pub(super) fn session_without_context(session: &ServerHeaderSession) -> ServerHeaderSession {
-    ServerHeaderSession {
-        protocol: session.protocol,
-        legacy_key: session.legacy_key,
-        v2: session.v2.clone(),
+        framing_key: key,
+        keys: SessionKeys::V2(material),
         context: None,
         _legacy_guard: None,
     }
