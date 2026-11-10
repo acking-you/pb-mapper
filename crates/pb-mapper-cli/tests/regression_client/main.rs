@@ -13,6 +13,8 @@
 // modules but not a `tests/` target, whose whole body is test code.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "../e2e/bound_listener.rs"]
+mod bound_listener;
 #[path = "../regression/credential.rs"]
 mod credential;
 mod fake;
@@ -36,13 +38,13 @@ use pb_mapper_protocol::command::{
     MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
     PbServiceConnStatus,
 };
-use pb_mapper_testkit::{Transport, reserve_addr};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use uni_stream::stream::{TcpListenerProvider, TcpStreamProvider};
 
+use bound_listener::{BoundListener, with_bound_listener};
 use fake::{
     FakeRelay, Reply, plain_tcp_options, read_secure_request, relay_security, status_recorder,
 };
@@ -205,7 +207,8 @@ async fn client_closes_initial_status_probe_after_key_check() {
 #[tokio::test]
 async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
     client_env();
-    let local_addr = reserve_addr(Transport::Tcp).await;
+    let local = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = local.local_addr().unwrap();
 
     let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = remote_listener.local_addr().unwrap();
@@ -262,25 +265,26 @@ async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
     .await;
 
     let (status_changes, record_status) = status_recorder();
-    let client = tokio::spawn(run_client_side_cli_with_callback::<TcpListenerProvider, _>(
-        local_addr,
-        remote_addr,
-        Arc::from("sf-backend"),
-        false,
-        Some(record_status),
+    let client = tokio::spawn(with_bound_listener(
+        local,
+        run_client_side_cli_with_callback::<BoundListener, _>(
+            local_addr,
+            remote_addr,
+            Arc::from("sf-backend"),
+            false,
+            Some(record_status),
+        ),
     ));
 
-    wait_until("client did not run initial key probe", || {
-        status_count.load(Ordering::SeqCst) >= 1
+    wait_until("client did not report the initial key probe", || {
+        !status_changes.lock().unwrap().is_empty()
     })
     .await;
-    timeout(READY, async {
-        while TcpStream::connect(local_addr).await.is_err() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("client listener did not bind after key probe");
+    assert_eq!(
+        status_changes.lock().unwrap().as_slice(),
+        ["connected"],
+        "the initial key probe did not connect"
+    );
 
     let baseline = status_count.load(Ordering::SeqCst);
     failed_status_responses.store(2, Ordering::SeqCst);

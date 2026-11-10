@@ -20,6 +20,7 @@
 // modules but not a `tests/` target, whose whole body is test code.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod bound_listener;
 mod data_compatibility;
 #[cfg(feature = "p2p")]
 mod direct;

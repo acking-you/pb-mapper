@@ -14,6 +14,8 @@ use pb_mapper_testkit::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use crate::bound_listener::{BoundListener, with_bound_listener};
+
 const LONG_TTL: Duration = Duration::from_secs(600);
 
 /// Wait until every worker in a registration's control-connection pool is
@@ -741,24 +743,17 @@ async fn publisher_idle_policy_reclaims_abandoned_encrypted_probes() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let relay_addr = relay.addr();
-        subscribers.spawn(async move {
-            BOUND_SUBSCRIBER
-                .scope(std::cell::RefCell::new(Some(listener)), async move {
-                    pb_mapper_client::client::run_client_side_cli_with_pinned_credential::<
-                        BoundSubscriber,
-                        _,
-                    >(
-                        addr,
-                        relay_addr,
-                        key.into(),
-                        false,
-                        None,
-                        admin_credential(),
-                    )
-                    .await;
-                })
-                .await;
-        });
+        subscribers.spawn(with_bound_listener(
+            listener,
+            pb_mapper_client::client::run_client_side_cli_with_pinned_credential::<BoundListener, _>(
+                addr,
+                relay_addr,
+                key.into(),
+                false,
+                None,
+                admin_credential(),
+            ),
+        ));
         addresses.push(addr);
     }
     async fn ping(stream: &mut tokio::net::TcpStream) {
@@ -805,39 +800,4 @@ async fn publisher_idle_policy_reclaims_abandoned_encrypted_probes() {
     registration.stop().await.unwrap();
     unbounded.stop().await.unwrap();
     disabled.stop().await.unwrap();
-}
-
-// Hand the already bound socket to the production subscriber loop through its
-// listener-provider seam. Each task owns its socket throughout setup, with no
-// process-global port reservation and no drop/rebind window.
-tokio::task_local! {
-    static BOUND_SUBSCRIBER: std::cell::RefCell<Option<TcpListener>>;
-}
-
-struct BoundSubscriber;
-struct BoundSubscriberListener(TcpListener);
-
-impl uni_stream::stream::ListenerProvider for BoundSubscriber {
-    type Listener = BoundSubscriberListener;
-
-    async fn bind<A: uni_stream::addr::ToSocketAddrs + Send>(
-        _addr: A,
-    ) -> std::io::Result<Self::Listener> {
-        BOUND_SUBSCRIBER.with(|listener| {
-            listener
-                .borrow_mut()
-                .take()
-                .map(BoundSubscriberListener)
-                .ok_or_else(|| std::io::Error::other("subscriber listener already taken"))
-        })
-    }
-}
-
-impl uni_stream::stream::StreamAccept for BoundSubscriberListener {
-    type Item = uni_stream::stream::TcpStreamImpl;
-
-    async fn accept(&self) -> std::io::Result<(Self::Item, std::net::SocketAddr)> {
-        let (stream, addr) = self.0.accept().await?;
-        Ok((uni_stream::stream::TcpStreamImpl::new(stream), addr))
-    }
 }

@@ -4,7 +4,9 @@
 //! inherits every socket open in its parent when it starts (Tokio's sockets
 //! come from mio 1.1, which marks none non-inheritable) and keeps it until it
 //! exits, so a connection another case dropped stays open, then resets, and
-//! a listener it dropped keeps its port. No case here waits for a close.
+//! a listener it dropped keeps its port. No case here waits for a close, and
+//! no case here reserves a port: a child relay binds port 0 and says which
+//! port it took.
 
 // An integration test: a failed `unwrap` is a failed test, which is the report
 // this target exists to produce. `allow-unwrap-in-tests` covers `#[cfg(test)]`
@@ -16,21 +18,24 @@ mod credential;
 #[path = "../regression/fixtures.rs"]
 mod fixtures;
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::process::Stdio;
 use std::time::Duration;
 
 use pb_mapper_core::test_support::TempPath;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnResponse};
 use pb_mapper_protocol::{MessageReader, get_header_msg_reader, get_header_msg_writer};
-use pb_mapper_testkit::{TEST_ADMIN_KEY, Transport, reserve_addr};
+use pb_mapper_testkit::TEST_ADMIN_KEY;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::net::TcpStream;
+use tokio::process::Child;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
+use tokio_util::task::AbortOnDropHandle;
 
 use credential::{StateDir, auth_config};
 use fixtures::{
     InProcessRelay, issue_before_start, register_control_conn_parts, serve_one_stream, subscribe,
-    wait_for_server,
 };
 
 #[tokio::test]
@@ -113,10 +118,53 @@ async fn subscribe_failover_reuses_its_namespace_slot_and_rate_token() {
     bypass_unacked_control(true).await;
 }
 
+/// Start `command`, a `pb-mapper server` on port 0, and return the loopback
+/// address of the port it took: it says so in its `pb_server_listening`
+/// event, which it writes to stdout once it listens. The rest of its stdout
+/// is drained for as long as the returned task lives, so the child never
+/// blocks on a full pipe.
+async fn spawn_relay(
+    command: &mut tokio::process::Command,
+) -> (Child, SocketAddr, AbortOnDropHandle<()>) {
+    let mut child = command
+        .env("PB_MAPPER_LOG_FORMAT", "json")
+        .env("RUST_LOG", "error,pb_mapper_server::runtime=info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let port = timeout(Duration::from_secs(10), async {
+        loop {
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("the relay exited before it listened");
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if event["event"] == "pb_server_listening" {
+                let listen_addr: SocketAddr =
+                    event["listen_addr"].as_str().unwrap().parse().unwrap();
+                break listen_addr.port();
+            }
+        }
+    })
+    .await
+    .expect("the relay did not start listening");
+    let drain = AbortOnDropHandle::new(tokio::spawn(async move {
+        while let Ok(Some(_)) = lines.next_line().await {}
+    }));
+    (child, SocketAddr::from((Ipv4Addr::LOCALHOST, port)), drain)
+}
+
 /// A provider that registers `key` as a legacy control connection, reports
 /// it `ready`, and reads nothing more.
 async fn parked_control(addr: SocketAddr, key: String, ready: oneshot::Sender<()>) {
-    let control = wait_for_server(addr).await;
+    let control = TcpStream::connect(addr).await.unwrap();
     let (mut reader_stream, mut writer_stream) = control.into_split();
     let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
     let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
@@ -126,38 +174,26 @@ async fn parked_control(addr: SocketAddr, key: String, ready: oneshot::Sender<()
 }
 
 async fn bypass_unacked_control(at_capacity: bool) {
-    // Bound by the child relay, so only an address no `:0` bind can be handed.
-    let server_addr = reserve_addr(Transport::Tcp).await;
     let config = auth_config();
     let _state = StateDir(config.state_dir.clone());
     // Limits belong only to this relay process, not the parallel test runner.
-    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_pb-mapper"))
-        .args([
-            "server",
-            "--port",
-            &server_addr.port().to_string(),
-            "--legacy-protocol",
-            "allow",
-        ])
-        .arg("--auth-state-dir")
-        .arg(&config.state_dir)
-        .env("MSG_HEADER_KEY", TEST_ADMIN_KEY)
-        .env(
-            "PB_MAPPER_MAX_STREAMS_PER_NAMESPACE",
-            if at_capacity { "1" } else { "1024" },
-        )
-        .env(
-            "PB_MAPPER_NEW_STREAMS_BURST",
-            if at_capacity { "1" } else { "200" },
-        )
-        .env("PB_MAPPER_NEW_STREAMS_PER_SECOND", "1")
-        .env("RUST_LOG", "error")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
+    let (mut server, server_addr, _drain) = spawn_relay(
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_pb-mapper"))
+            .args(["server", "--port", "0", "--legacy-protocol", "allow"])
+            .arg("--auth-state-dir")
+            .arg(&config.state_dir)
+            .env("MSG_HEADER_KEY", TEST_ADMIN_KEY)
+            .env(
+                "PB_MAPPER_MAX_STREAMS_PER_NAMESPACE",
+                if at_capacity { "1" } else { "1024" },
+            )
+            .env(
+                "PB_MAPPER_NEW_STREAMS_BURST",
+                if at_capacity { "1" } else { "200" },
+            )
+            .env("PB_MAPPER_NEW_STREAMS_PER_SECOND", "1"),
+    )
+    .await;
 
     let key = "sf-backend";
     let (healthy_ready_tx, healthy_ready_rx) = oneshot::channel();

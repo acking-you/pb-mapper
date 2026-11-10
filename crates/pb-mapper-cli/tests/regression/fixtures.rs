@@ -2,6 +2,9 @@
 //! a relay in this process, and control connections and subscribers that
 //! speak the legacy framing by hand. `regression_cli` includes this file by
 //! path.
+//!
+//! Every relay here is listening by the time a case knows its address, so
+//! peers connect without waiting for one to start.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -24,21 +27,6 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::credential::StateDir;
-
-/// Connect once something listens on `server_addr`: a relay that binds its own
-/// port, in a child process or a task, does so some time after it is spawned.
-pub(crate) async fn wait_for_server(server_addr: SocketAddr) -> TcpStream {
-    timeout(Duration::from_secs(2), async {
-        loop {
-            match TcpStream::connect(server_addr).await {
-                Ok(stream) => break stream,
-                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
-            }
-        }
-    })
-    .await
-    .expect("server did not start")
-}
 
 /// A relay in this process, on a socket it bound before it started, so nothing
 /// else can take the port in between.
@@ -181,7 +169,7 @@ pub(crate) async fn serve_one_stream(
     ready: Option<oneshot::Sender<()>>,
     stream: oneshot::Sender<TcpStream>,
 ) {
-    let control = wait_for_server(addr).await;
+    let control = TcpStream::connect(addr).await.unwrap();
     let (mut reader_stream, mut writer_stream) = control.into_split();
     let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
     {

@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 use crate::credential::{StateDir, auth_config};
 use crate::fixtures::{
     InProcessRelay, issue_before_start, read_stream_request, register_control_conn_parts,
-    serve_one_stream, subscribe, wait_for_server,
+    serve_one_stream, subscribe,
 };
 
 /// How a control connection that never opens a data stream ends.
@@ -41,7 +41,7 @@ enum StaleEnd {
 /// A stale provider: register `key` as a legacy control connection, report it
 /// `ready`, and end as `end` says.
 async fn stale_control(addr: SocketAddr, key: String, ready: oneshot::Sender<()>, end: StaleEnd) {
-    let control = wait_for_server(addr).await;
+    let control = TcpStream::connect(addr).await.unwrap();
     let (mut reader_stream, mut writer_stream) = control.into_split();
     let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
     {
@@ -610,7 +610,9 @@ async fn subscribe_bypasses_acked_control_connection_without_stream() {
 async fn run_server_with_auth_config_serves_until_cancelled() {
     let config = auth_config();
     let _state = StateDir(config.state_dir.clone());
-    // It binds the address itself, so it cannot be handed a bound socket.
+    // It binds the address itself and says where only in its log, so it is
+    // handed a reserved port; this binary starts no process that could hold
+    // the reservation's socket.
     let addr = reserve_addr(Transport::Tcp).await;
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(run_server_with_auth_config(
@@ -621,7 +623,14 @@ async fn run_server_with_auth_config_serves_until_cancelled() {
         config,
     ));
 
-    wait_for_server(addr).await;
+    // Connect once it listens, some time after it is spawned.
+    timeout(Duration::from_secs(5), async {
+        while TcpStream::connect(addr).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the relay did not start listening");
     assert!(read_status_keys(addr).await.is_empty());
 
     shutdown.cancel();
