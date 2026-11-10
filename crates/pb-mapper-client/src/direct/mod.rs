@@ -17,7 +17,7 @@ mod tcp;
 
 pub(crate) use consumer::Consumer;
 use pb_mapper_protocol::direct::{SETUP_TTL_MS, SessionGrant};
-pub(crate) use provider::Provider;
+pub(crate) use provider::{MAX_SESSIONS as MAX_PROVIDER_SESSIONS, Provider};
 
 /// Whether a grant is for `key`'s service and of its kind, with a setup TTL
 /// the protocol allows: what both ends check of every grant.

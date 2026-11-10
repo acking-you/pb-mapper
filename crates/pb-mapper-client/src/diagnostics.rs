@@ -65,10 +65,15 @@ pub(crate) fn smooth(smoothed: Option<Duration>, sample: Duration) -> Duration {
 }
 
 /// How many open direct sessions a tunnel keeps the link of. A provider holds
-/// at most 64 sessions; a consumer has no such cap, and the newest is what is
-/// shown.
+/// no more sessions than that; a consumer has no such cap, and the newest is
+/// what is shown.
 #[cfg(feature = "p2p")]
 const MAX_LIVE_LINKS: usize = 64;
+#[cfg(feature = "p2p")]
+const _: () = assert!(
+    MAX_LIVE_LINKS >= crate::direct::MAX_PROVIDER_SESSIONS,
+    "a provider's open sessions all keep their link"
+);
 
 #[derive(Clone)]
 pub(crate) struct Diagnostics(Arc<Mutex<State>>);

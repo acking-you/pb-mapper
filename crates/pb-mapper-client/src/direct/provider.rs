@@ -39,7 +39,7 @@ const ENVELOPE_QUEUE: usize = 128;
 /// Coordination events queued for one session; a full queue drops them.
 const SESSION_EVENTS: usize = 8;
 /// Setups and committed sessions one registration runs at once.
-const MAX_SESSIONS: usize = 64;
+pub(crate) const MAX_SESSIONS: usize = 64;
 /// Accepted connections still reading the grant they claim.
 const MAX_ARRIVALS: usize = 64;
 /// How long an accepted connection has to name its grant.
