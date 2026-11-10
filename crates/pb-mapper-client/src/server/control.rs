@@ -1,3 +1,6 @@
+//! One registered control connection: what it writes, the lease it keeps,
+//! and how it answers the relay.
+
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};

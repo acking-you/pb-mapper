@@ -1,5 +1,7 @@
-use crate::diagnostics::Diagnostics;
-use crate::endpoint::RelayEndpoint;
+//! The register side of a tunnel: a pool of control connections that keep a
+//! local service registered with the relay, and a forwarded session for each
+//! stream the relay asks for.
+
 mod attempt;
 mod control;
 pub mod error;
@@ -13,6 +15,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::addr::resolve_tunnel_ends;
+use crate::diagnostics::Diagnostics;
+use crate::endpoint::RelayEndpoint;
 use pb_mapper_core::checksum::Credential;
 use pb_mapper_core::config::ResolvedAddrs;
 use pb_mapper_protocol::forward::StreamForward;
@@ -24,12 +28,12 @@ pub(crate) use self::control::LocalControlWrite;
 pub use self::status::StatusCallback;
 pub(crate) use self::worker::run_server_side_cli_recovering;
 
-/// How a local-server tunnel forwards: the codec, the transport, and whether
-/// its sockets keep alive.
+/// How a local-server tunnel forwards and where it registers: the codec, the
+/// transport, whether its sockets keep alive, and its namespace.
 ///
-/// Grouped rather than passed as three adjacent `bool`s, which is a
-/// transposition waiting to happen at a call site — and named fields make the
-/// call sites say which is which.
+/// Grouped rather than passed as adjacent `bool`s, which is a transposition
+/// waiting to happen at a call site — and named fields make the call sites say
+/// which is which.
 #[derive(Clone, Copy, Debug)]
 pub struct ServerTunnelOptions {
     pub need_codec: bool,

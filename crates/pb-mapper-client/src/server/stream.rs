@@ -1,3 +1,5 @@
+//! One forwarded session: from the relay's stream request to the local service.
+
 use std::sync::Arc;
 
 use snafu::ResultExt;

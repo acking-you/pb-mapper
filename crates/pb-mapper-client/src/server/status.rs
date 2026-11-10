@@ -1,6 +1,9 @@
+//! The pool's one status, from its workers' own.
+
 use std::sync::Mutex;
 
-// Callback for notifying status changes to external systems
+/// Receives a tunnel's status as text: `connected`, `retrying`, `failed`, or
+/// `failed: <reason>` once it will not come up.
 pub type StatusCallback = Box<dyn Fn(&str) + Send + Sync>;
 
 /// Turns the control pool's per-worker statuses into the one status a caller sees.

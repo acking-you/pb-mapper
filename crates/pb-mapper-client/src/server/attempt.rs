@@ -1,3 +1,5 @@
+//! One attempt at registering a control connection, and holding it.
+
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

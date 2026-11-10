@@ -1,3 +1,5 @@
+//! The control pool and each worker's reconnect loop.
+
 use std::sync::Arc;
 use std::time::Duration;
 

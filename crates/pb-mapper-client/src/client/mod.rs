@@ -34,7 +34,8 @@ use pb_mapper_protocol::forward::StreamForward;
 use uni_stream::addr::ToSocketAddrs;
 use uni_stream::stream::{ListenerProvider, StreamAccept};
 
-// Callback for notifying status changes to external systems
+/// Receives a tunnel's status as text: `connected`, `retrying`, `failed`, or
+/// `failed: <reason>` once it will not come up.
 pub type ClientStatusCallback = Box<dyn Fn(&str) + Send + Sync>;
 
 /// Resolve both ends, reporting a bad address through `status_callback`.
