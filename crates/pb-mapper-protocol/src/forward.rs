@@ -310,8 +310,7 @@ impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> CodecDatagramWriter<'a, T, E> {
 
 impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> DatagramWriter for CodecDatagramWriter<'a, T, E> {
     async fn send(&mut self, src: &[u8]) -> Result<()> {
-        let buf = src.to_vec();
-        self.0.write_msg(&buf).await
+        self.0.write_msg(src).await
     }
 }
 
