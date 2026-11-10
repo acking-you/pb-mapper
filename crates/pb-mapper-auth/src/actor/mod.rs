@@ -324,28 +324,28 @@ fn validate_admin_authority(
 ) -> Result<(), AuthFailure> {
     let presented = authority.upgrade().ok_or_else(|| {
         AuthFailure::new(
-            "administrator_key_rotated",
+            codes::ADMINISTRATOR_KEY_ROTATED,
             "administrator credential lease is no longer active",
             false,
         )
     })?;
     if presented.is_cancelled() {
         return Err(AuthFailure::new(
-            "administrator_key_rotated",
+            codes::ADMINISTRATOR_KEY_ROTATED,
             "administrator credential lease has been cancelled",
             false,
         ));
     }
     let current = inner.admin.read().lease.upgrade().ok_or_else(|| {
         AuthFailure::new(
-            "administrator_key_rotated",
+            codes::ADMINISTRATOR_KEY_ROTATED,
             "active administrator credential lease is unavailable",
             false,
         )
     })?;
     if !Arc::ptr_eq(&presented, &current) {
         return Err(AuthFailure::new(
-            "administrator_key_rotated",
+            codes::ADMINISTRATOR_KEY_ROTATED,
             "administrator request was authenticated before the latest root-key rotation",
             false,
         ));
@@ -356,7 +356,7 @@ fn validate_admin_authority(
 fn ensure_store_available(inner: &AuthStateInner) -> Result<(), AuthFailure> {
     if inner.safe_mode.load(Ordering::Acquire) {
         Err(AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             "temporary key store is in administrator safe mode",
             false,
         ))
@@ -375,7 +375,7 @@ fn validate_slot_identity(slot: &SlotHot, key_id: KeyId) -> Result<(), AuthFailu
 
 fn key_not_found(key_id: KeyId) -> AuthFailure {
     AuthFailure::new(
-        "temporary_key_not_found",
+        codes::TEMPORARY_KEY_NOT_FOUND,
         format!("temporary key {key_id} does not exist"),
         false,
     )
@@ -383,7 +383,7 @@ fn key_not_found(key_id: KeyId) -> AuthFailure {
 
 fn key_not_renewable() -> AuthFailure {
     AuthFailure::new(
-        "temporary_key_not_renewable",
+        codes::TEMPORARY_KEY_NOT_RENEWABLE,
         "only an active, unexpired temporary key can be renewed",
         false,
     )
@@ -391,7 +391,7 @@ fn key_not_renewable() -> AuthFailure {
 
 fn key_not_active() -> AuthFailure {
     AuthFailure::new(
-        "temporary_key_not_active",
+        codes::TEMPORARY_KEY_NOT_ACTIVE,
         "temporary key is not active",
         false,
     )

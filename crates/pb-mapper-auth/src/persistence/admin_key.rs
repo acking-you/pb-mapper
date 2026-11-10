@@ -13,7 +13,7 @@ pub(crate) fn read_admin_key(path: &Path) -> Result<Option<String>, AuthFailure>
     {
         let metadata = std::fs::metadata(path).map_err(|error| {
             AuthFailure::new(
-                "administrator_key_required",
+                codes::ADMINISTRATOR_KEY_REQUIRED,
                 format!(
                     "administrator key file `{}` metadata could not be read: {error}",
                     path.display()
@@ -25,7 +25,7 @@ pub(crate) fn read_admin_key(path: &Path) -> Result<Option<String>, AuthFailure>
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
                 |error| {
                     AuthFailure::new(
-                        "administrator_key_required",
+                        codes::ADMINISTRATOR_KEY_REQUIRED,
                         format!(
                             "administrator key file `{}` permissions could not be secured: {error}",
                             path.display()
@@ -43,7 +43,7 @@ pub(crate) fn read_admin_key(path: &Path) -> Result<Option<String>, AuthFailure>
     }
     std::fs::read_to_string(path).map(Some).map_err(|error| {
         AuthFailure::new(
-            "administrator_key_required",
+            codes::ADMINISTRATOR_KEY_REQUIRED,
             format!(
                 "administrator key file `{}` could not be read: {error}",
                 path.display()
@@ -60,7 +60,7 @@ pub(crate) fn persist_recovery_admin_key(
 ) -> Result<(), AuthFailure> {
     if encrypted_auth_state_exists(state_dir) && !key_matches_existing_state(Some(state_dir), key) {
         return Err(AuthFailure::new(
-            "administrator_key_invalid",
+            codes::ADMINISTRATOR_KEY_INVALID,
             mismatch_message,
             false,
         ));
@@ -78,7 +78,7 @@ pub(crate) fn recover_admin_key_after_rotation(
     }
     let bytes = std::fs::read(&snapshot_path).map_err(|error| {
         AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             format!("failed to read `{}`: {error}", snapshot_path.display()),
             false,
         )
@@ -124,7 +124,7 @@ pub fn generate_admin_key() -> String {
 pub fn initialize_admin_key(path: &Path, force: bool) -> Result<String, AuthFailure> {
     if path.exists() && !force {
         return Err(AuthFailure::new(
-            "administrator_key_exists",
+            codes::ADMINISTRATOR_KEY_EXISTS,
             format!("administrator key file `{}` already exists", path.display()),
             false,
         ));
@@ -138,10 +138,10 @@ pub fn initialize_admin_key(path: &Path, force: bool) -> Result<String, AuthFail
 /// Reject anything that is not a 32-byte administrator key before it reaches disk.
 fn validate_admin_key(key: &str) -> Result<(), AuthFailure> {
     let Credential::Admin(_) = parse_credential(key)
-        .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?
+        .map_err(|error| AuthFailure::new(codes::ADMINISTRATOR_KEY_INVALID, error, false))?
     else {
         return Err(AuthFailure::new(
-            "administrator_key_invalid",
+            codes::ADMINISTRATOR_KEY_INVALID,
             "administrator key file requires a 32-byte administrator key",
             false,
         ));
@@ -153,7 +153,7 @@ pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), A
     validate_admin_key(key)?;
     if path.exists() && !force {
         return Err(AuthFailure::new(
-            "administrator_key_exists",
+            codes::ADMINISTRATOR_KEY_EXISTS,
             format!(
                 "administrator key file `{}` already exists; pass --force to replace it",
                 path.display()
@@ -225,7 +225,7 @@ fn accept_staged_candidate(
         return Ok(staged_path);
     }
     Err(AuthFailure::new(
-        "administrator_key_staged",
+        codes::ADMINISTRATOR_KEY_STAGED,
         format!(
             "a previous root rotation left an unresolved candidate at `{}`, so the relay's active \
              administrator key is either `{}` or that candidate; determine which key the relay \
@@ -259,7 +259,7 @@ fn read_admin_key_file(path: &Path) -> Result<Option<String>, AuthFailure> {
         Ok(contents) => Ok(Some(contents)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(AuthFailure::new(
-            "auth_state_unavailable",
+            codes::AUTH_STATE_UNAVAILABLE,
             format!("failed to read `{}`: {error}", path.display()),
             false,
         )),
@@ -354,7 +354,7 @@ fn refuse_write_if_encrypted_state(path: &Path, force: bool) -> Result<(), AuthF
         return Ok(());
     }
     Err(AuthFailure::new(
-        "administrator_key_state_exists",
+        codes::ADMINISTRATOR_KEY_STATE_EXISTS,
         format!(
             "refusing to {} `{}` while encrypted auth state exists; use `pb-mapper admin root-key rotate` or `pb-mapper admin auth-state reset --confirm`",
             if force { "replace" } else { "create" },

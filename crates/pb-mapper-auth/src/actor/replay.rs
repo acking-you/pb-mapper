@@ -58,21 +58,21 @@ impl AdminReplays {
         self.prune(now);
         if self.admitted(&fingerprint) {
             return Err(AuthFailure::new(
-                "admin_request_replayed",
+                codes::ADMIN_REQUEST_REPLAYED,
                 "administrator mutation was already admitted",
                 false,
             ));
         }
         if self.seen.len() >= ADMIN_REPLAY_CAPACITY {
             return Err(AuthFailure::new(
-                "admin_replay_capacity_exhausted",
+                codes::ADMIN_REPLAY_CAPACITY_EXHAUSTED,
                 "administrator mutation replay window is full; retry after older claims expire",
                 true,
             ));
         }
         if now.abs_diff(client_timestamp) > ADMIN_REPLAY_RETENTION.as_secs() / 2 {
             return Err(AuthFailure::new(
-                "admin_request_timestamp_invalid",
+                codes::ADMIN_REQUEST_TIMESTAMP_INVALID,
                 "administrator mutation timestamp is outside the accepted window",
                 false,
             ));

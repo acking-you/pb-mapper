@@ -19,14 +19,14 @@ pub fn acquire_state_dir_lock(state_dir: &Path) -> Result<File, AuthFailure> {
         .open(&path)
         .map_err(|error| {
             AuthFailure::new(
-                "auth_state_unavailable",
+                codes::AUTH_STATE_UNAVAILABLE,
                 format!("failed to open `{}`: {error}", path.display()),
                 false,
             )
         })?;
     lock_exclusive_nonblock(&file).map_err(|error| {
         AuthFailure::new(
-            "auth_state_locked",
+            codes::AUTH_STATE_LOCKED,
             format!(
                 "authentication state directory `{}` is already in use: {error}",
                 state_dir.display()
@@ -108,7 +108,7 @@ fn lock_exclusive_nonblock(file: &File) -> std::io::Result<()> {
 pub(crate) fn sync_parent_directory(path: &Path) -> Result<(), AuthFailure> {
     pb_mapper_core::durable_file::sync_parent_directory(path).map_err(|error| {
         AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             format!("failed to sync `{}`: {error}", path.display()),
             false,
         )
@@ -118,7 +118,7 @@ pub(crate) fn sync_parent_directory(path: &Path) -> Result<(), AuthFailure> {
 pub(crate) fn prepare_state_dir(path: &Path) -> Result<(), AuthFailure> {
     std::fs::create_dir_all(path).map_err(|error| {
         AuthFailure::new(
-            "auth_state_unavailable",
+            codes::AUTH_STATE_UNAVAILABLE,
             format!(
                 "failed to create auth state directory `{}`: {error}",
                 path.display()
@@ -129,7 +129,7 @@ pub(crate) fn prepare_state_dir(path: &Path) -> Result<(), AuthFailure> {
     #[cfg(unix)]
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
         AuthFailure::new(
-            "auth_state_unavailable",
+            codes::AUTH_STATE_UNAVAILABLE,
             format!(
                 "failed to secure auth state directory `{}`: {error}",
                 path.display()
@@ -158,7 +158,7 @@ pub(crate) fn create_new_write(path: &Path, data: &[u8], mode: u32) -> Result<bo
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             AuthFailure::new(
-                "auth_state_unavailable",
+                codes::AUTH_STATE_UNAVAILABLE,
                 format!("failed to create `{}`: {error}", parent.display()),
                 false,
             )
@@ -179,7 +179,7 @@ pub(crate) fn create_new_write(path: &Path, data: &[u8], mode: u32) -> Result<bo
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
         Err(error) => {
             return Err(AuthFailure::new(
-                "auth_state_unavailable",
+                codes::AUTH_STATE_UNAVAILABLE,
                 format!("failed to create `{}`: {error}", path.display()),
                 false,
             ));
@@ -193,7 +193,7 @@ pub(crate) fn create_new_write(path: &Path, data: &[u8], mode: u32) -> Result<bo
             .and_then(|()| file.sync_all())
             .map_err(|error| {
                 AuthFailure::new(
-                    "auth_state_unavailable",
+                    codes::AUTH_STATE_UNAVAILABLE,
                     format!("failed to write `{}`: {error}", path.display()),
                     false,
                 )
@@ -214,7 +214,7 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), Au
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             AuthFailure::new(
-                "auth_state_unavailable",
+                codes::AUTH_STATE_UNAVAILABLE,
                 format!("failed to create `{}`: {error}", parent.display()),
                 false,
             )
@@ -240,7 +240,7 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), Au
         .open(&temporary)
         .map_err(|error| {
             AuthFailure::new(
-                "auth_state_unavailable",
+                codes::AUTH_STATE_UNAVAILABLE,
                 format!("failed to open `{}`: {error}", temporary.display()),
                 false,
             )
@@ -257,7 +257,7 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), Au
             .and_then(|()| file.sync_all())
             .map_err(|error| {
                 AuthFailure::new(
-                    "auth_state_unavailable",
+                    codes::AUTH_STATE_UNAVAILABLE,
                     format!("failed to write `{}`: {error}", temporary.display()),
                     false,
                 )
@@ -265,7 +265,7 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), Au
         drop(file);
         pb_mapper_core::durable_file::replace_file(&temporary, path).map_err(|error| {
             AuthFailure::new(
-                "auth_state_unavailable",
+                codes::AUTH_STATE_UNAVAILABLE,
                 format!("failed to replace `{}`: {error}", path.display()),
                 false,
             )

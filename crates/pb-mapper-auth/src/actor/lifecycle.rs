@@ -9,7 +9,7 @@ use pb_mapper_core::paging::paginate;
 fn validate_ttl(config: &AuthConfig, ttl: Duration) -> Result<u64, AuthFailure> {
     if ttl < MIN_TEMP_KEY_TTL {
         return Err(AuthFailure::new(
-            "temporary_key_ttl_too_short",
+            codes::TEMPORARY_KEY_TTL_TOO_SHORT,
             format!(
                 "temporary key TTL must be at least {} seconds",
                 MIN_TEMP_KEY_TTL.as_secs()
@@ -19,7 +19,7 @@ fn validate_ttl(config: &AuthConfig, ttl: Duration) -> Result<u64, AuthFailure> 
     }
     if ttl > config.max_temporary_key_ttl {
         return Err(AuthFailure::new(
-            "temporary_key_ttl_too_long",
+            codes::TEMPORARY_KEY_TTL_TOO_LONG,
             format!(
                 "temporary key TTL exceeds the configured maximum of {} seconds",
                 config.max_temporary_key_ttl.as_secs()
@@ -36,7 +36,7 @@ fn validate_label(label: Option<String>) -> Result<Option<String>, AuthFailure> 
         .filter(|label| !label.is_empty());
     if label.as_ref().is_some_and(|label| label.len() > 64) {
         return Err(AuthFailure::new(
-            "temporary_key_label_too_long",
+            codes::TEMPORARY_KEY_LABEL_TOO_LONG,
             "temporary key label must not exceed 64 UTF-8 bytes",
             false,
         ));
@@ -105,7 +105,7 @@ pub(super) fn actor_allocate_namespace(
     let namespace = namespace_high_water(inner, config)?.saturating_add(1);
     if namespace > MAX_ALLOCATED_NAMESPACE {
         return Err(AuthFailure::new(
-            "namespace_space_exhausted",
+            codes::NAMESPACE_SPACE_EXHAUSTED,
             "every allocatable namespace has been handed out",
             false,
         ));
@@ -134,7 +134,7 @@ fn ensure_namespace_allocated(
 ) -> Result<(), AuthFailure> {
     if namespace == 0 || namespace > namespace_high_water(inner, config)? {
         return Err(AuthFailure::new(
-            "namespace_not_allocated",
+            codes::NAMESPACE_NOT_ALLOCATED,
             format!("namespace {namespace} was not allocated by this relay"),
             false,
         ));
@@ -168,7 +168,7 @@ pub(super) fn actor_issue(
                 .map(|generation| (SlotIndex::from_index(index), generation))
         }) else {
             return Err(AuthFailure::new(
-                "temporary_key_capacity_exhausted",
+                codes::TEMPORARY_KEY_CAPACITY_EXHAUSTED,
                 "temporary key slot table is full",
                 true,
             ));
@@ -304,7 +304,7 @@ pub(super) fn actor_renew(
         validate_slot_identity(slot, key_id)?;
         if slot.state != SlotState::Active {
             return Err(AuthFailure::new(
-                "temporary_key_inactive",
+                codes::TEMPORARY_KEY_INACTIVE,
                 "temporary key lease is no longer active",
                 true,
             ));
@@ -333,7 +333,7 @@ pub(super) fn actor_renew(
         let entry = high_slot_entry_mut(&mut high, key_id)?;
         if entry.state != SlotState::Active {
             return Err(AuthFailure::new(
-                "temporary_key_inactive",
+                codes::TEMPORARY_KEY_INACTIVE,
                 "temporary key lease is no longer active",
                 true,
             ));

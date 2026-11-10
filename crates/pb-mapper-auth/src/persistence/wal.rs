@@ -71,7 +71,7 @@ pub(crate) fn append_wal(
         .open(&path)
         .map_err(|error| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to open `{}`: {error}", path.display()),
                 true,
             )
@@ -80,7 +80,7 @@ pub(crate) fn append_wal(
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .map_err(|error| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to secure `{}`: {error}", path.display()),
                 false,
             )
@@ -90,7 +90,7 @@ pub(crate) fn append_wal(
         .map(|metadata| metadata.len())
         .map_err(|error| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to inspect `{}`: {error}", path.display()),
                 true,
             )
@@ -107,7 +107,7 @@ pub(crate) fn append_wal(
             .and_then(|()| file.sync_data())
             .is_ok();
         return Err(AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             if rolled_back {
                 format!("failed to durably append `{}`: {error}", path.display())
             } else {
@@ -128,7 +128,7 @@ pub(crate) fn append_wal(
 pub(crate) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRecord>, AuthFailure> {
     let mut file = File::open(path).map_err(|error| {
         AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             format!("failed to open `{}`: {error}", path.display()),
             false,
         )
@@ -142,7 +142,7 @@ pub(crate) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRec
             Ok(_) => unreachable!("single-byte WAL prefix read"),
             Err(error) => {
                 return Err(AuthFailure::new(
-                    "temporary_key_store_unavailable",
+                    codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                     format!("failed to read auth WAL length: {error}"),
                     false,
                 ));
@@ -150,7 +150,7 @@ pub(crate) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRec
         }
         file.read_exact(&mut length[1..]).map_err(|error| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("truncated auth WAL length: {error}"),
                 false,
             )
@@ -158,7 +158,7 @@ pub(crate) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRec
         let length = u32::from_be_bytes(length) as usize;
         if length > 1024 * 1024 {
             return Err(AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 "auth WAL record exceeds 1 MiB",
                 false,
             ));
@@ -166,7 +166,7 @@ pub(crate) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRec
         let mut sealed = vec![0_u8; length];
         file.read_exact(&mut sealed).map_err(|error| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("truncated auth WAL record: {error}"),
                 false,
             )
@@ -174,7 +174,7 @@ pub(crate) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRec
         let plain = open_blob(admin_key, &sealed)?;
         records.push(serde_json::from_slice(&plain).map_err(|error| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to decode auth WAL record: {error}"),
                 false,
             )
@@ -207,14 +207,14 @@ pub(crate) fn truncate_auth_wal(state_dir: &Path) -> Result<(), AuthFailure> {
         .open(&wal_path)
         .map_err(|error| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to truncate `{}`: {error}", wal_path.display()),
                 true,
             )
         })?;
     wal.sync_all().map_err(|error| {
         AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             format!("failed to sync `{}`: {error}", wal_path.display()),
             true,
         )

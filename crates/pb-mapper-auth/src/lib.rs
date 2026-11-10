@@ -119,6 +119,7 @@ const AUDIT_RECORD_CAPACITY: usize = 4096;
 
 mod actor;
 mod clock;
+pub mod codes;
 mod config;
 mod ids;
 mod keys;

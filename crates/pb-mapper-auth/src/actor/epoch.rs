@@ -61,14 +61,14 @@ pub(super) fn actor_rotate_root(
 ) -> Result<(), AuthFailure> {
     if new_key == inner.admin_key() {
         return Err(AuthFailure::new(
-            "administrator_key_unchanged",
+            codes::ADMINISTRATOR_KEY_UNCHANGED,
             "new administrator key must differ from the current key",
             false,
         ));
     }
     if !is_env_safe_admin_key(&new_key) {
         return Err(AuthFailure::new(
-            "administrator_key_invalid",
+            codes::ADMINISTRATOR_KEY_INVALID,
             env_safe_admin_key_error(),
             false,
         ));
@@ -77,7 +77,7 @@ pub(super) fn actor_rotate_root(
     // Reported rather than panicked, since this already returns `Result`.
     let new_key_string = String::from_utf8(new_key.to_vec()).map_err(|_| {
         AuthFailure::new(
-            "administrator_key_invalid",
+            codes::ADMINISTRATOR_KEY_INVALID,
             env_safe_admin_key_error(),
             false,
         )

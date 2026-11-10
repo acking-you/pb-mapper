@@ -21,14 +21,14 @@ pub(crate) fn read_instance_id_file(
     }
     let bytes = std::fs::read(path).map_err(|error| {
         AuthFailure::new(
-            "auth_state_unavailable",
+            codes::AUTH_STATE_UNAVAILABLE,
             format!("failed to read `{}`: {error}", path.display()),
             false,
         )
     })?;
     bytes.try_into().map(Some).map_err(|_| {
         AuthFailure::new(
-            "auth_state_unavailable",
+            codes::AUTH_STATE_UNAVAILABLE,
             "server instance id must be exactly 16 bytes",
             false,
         )
@@ -56,7 +56,7 @@ pub(crate) fn recover_instance_id_after_reset(
     }
     let bytes = std::fs::read(&snapshot_path).map_err(|error| {
         AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             format!("failed to read `{}`: {error}", snapshot_path.display()),
             false,
         )

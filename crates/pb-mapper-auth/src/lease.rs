@@ -115,9 +115,9 @@ impl AuthContext {
         let lease = self.lease.upgrade().ok_or_else(|| {
             AuthFailure::new(
                 if self.is_admin {
-                    "administrator_key_rotated"
+                    codes::ADMINISTRATOR_KEY_ROTATED
                 } else {
-                    "temporary_key_inactive"
+                    codes::TEMPORARY_KEY_INACTIVE
                 },
                 "credential lease is no longer active",
                 false,
@@ -129,7 +129,7 @@ impl AuthContext {
         if !self.is_admin && lease.expires_at() <= unix_seconds() {
             lease.cancel_expired();
             return Err(AuthFailure::new(
-                "temporary_key_expired",
+                codes::TEMPORARY_KEY_EXPIRED,
                 "temporary key has expired",
                 false,
             ));
@@ -157,7 +157,7 @@ impl AuthContext {
             Ok(())
         } else {
             Err(AuthFailure::new(
-                "admin_permission_required",
+                codes::ADMIN_PERMISSION_REQUIRED,
                 "administrator credential is required for this operation",
                 false,
             ))
@@ -168,25 +168,29 @@ impl AuthContext {
 fn cancelled_lease_failure(is_admin: bool, lease: &AuthLease) -> AuthFailure {
     if is_admin {
         return AuthFailure::new(
-            "administrator_key_rotated",
+            codes::ADMINISTRATOR_KEY_ROTATED,
             "credential lease has been cancelled",
             false,
         );
     }
     match lease.cancel_reason() {
-        CancelReason::Expired => {
-            AuthFailure::new("temporary_key_expired", "temporary key has expired", false)
-        }
+        CancelReason::Expired => AuthFailure::new(
+            codes::TEMPORARY_KEY_EXPIRED,
+            "temporary key has expired",
+            false,
+        ),
         CancelReason::Rotated => AuthFailure::new(
-            "temporary_key_rotated",
+            codes::TEMPORARY_KEY_ROTATED,
             "temporary credential was invalidated by administrator root rotation or auth-state reset",
             false,
         ),
-        CancelReason::Revoked => {
-            AuthFailure::new("temporary_key_revoked", "temporary key was revoked", false)
-        }
+        CancelReason::Revoked => AuthFailure::new(
+            codes::TEMPORARY_KEY_REVOKED,
+            "temporary key was revoked",
+            false,
+        ),
         CancelReason::None => AuthFailure::new(
-            "temporary_key_inactive",
+            codes::TEMPORARY_KEY_INACTIVE,
             "credential lease has been cancelled",
             false,
         ),

@@ -30,7 +30,7 @@ pub(crate) fn open_blob(admin_key: &AesKeyType, sealed: &[u8]) -> Result<Vec<u8>
         || &sealed[..STATE_BLOB_MAGIC.len()] != STATE_BLOB_MAGIC
     {
         return Err(AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             "authentication state blob has an invalid header",
             false,
         ));
@@ -42,7 +42,7 @@ pub(crate) fn open_blob(admin_key: &AesKeyType, sealed: &[u8]) -> Result<Vec<u8>
     // rather than panics.
     let nonce_bytes: [u8; 12] = sealed[nonce_start..nonce_end].try_into().map_err(|_| {
         AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             "authentication state blob has an invalid nonce",
             false,
         )
@@ -50,7 +50,7 @@ pub(crate) fn open_blob(admin_key: &AesKeyType, sealed: &[u8]) -> Result<Vec<u8>
     let mut plain = sealed[nonce_end..].to_vec();
     let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, admin_key).map_err(|_| {
         AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             "failed to initialize state decryption key",
             false,
         )
@@ -63,7 +63,7 @@ pub(crate) fn open_blob(admin_key: &AesKeyType, sealed: &[u8]) -> Result<Vec<u8>
         )
         .map_err(|_| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 "authentication state integrity check failed",
                 false,
             )

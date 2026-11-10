@@ -39,7 +39,7 @@ impl AuthFailure {
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::new("auth_internal_error", message, false)
+        Self::new(codes::AUTH_INTERNAL_ERROR, message, false)
     }
 }
 

@@ -3,10 +3,10 @@ use super::*;
 
 fn validate_admin_credential(raw: &str) -> Result<Credential, AuthFailure> {
     let credential = parse_credential(raw.trim())
-        .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?;
+        .map_err(|error| AuthFailure::new(codes::ADMINISTRATOR_KEY_INVALID, error, false))?;
     if !credential.is_admin() {
         return Err(AuthFailure::new(
-            "administrator_key_required",
+            codes::ADMINISTRATOR_KEY_REQUIRED,
             "the server key file contains a temporary credential",
             false,
         ));
@@ -20,17 +20,17 @@ pub(super) fn load_server_admin_credential(state_dir: &Path) -> Result<Credentia
         raw
     } else if process_credential_configured() {
         let credential = get_process_credential()
-            .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?;
+            .map_err(|error| AuthFailure::new(codes::ADMINISTRATOR_KEY_INVALID, error, false))?;
         let Credential::Admin(key) = credential else {
             return Err(AuthFailure::new(
-                "administrator_key_required",
+                codes::ADMINISTRATOR_KEY_REQUIRED,
                 "the relay server cannot start with a temporary credential",
                 false,
             ));
         };
         let key = String::from_utf8(key.to_vec()).map_err(|_| {
             AuthFailure::new(
-                "administrator_key_invalid",
+                codes::ADMINISTRATOR_KEY_INVALID,
                 "the relay administrator key must be printable UTF-8 so it can be persisted",
                 false,
             )
@@ -44,7 +44,7 @@ pub(super) fn load_server_admin_credential(state_dir: &Path) -> Result<Credentia
     } else if Path::new(MACHINE_MSG_HEADER_KEY_PATH).is_file() {
         let key = std::fs::read_to_string(MACHINE_MSG_HEADER_KEY_PATH).map_err(|error| {
             AuthFailure::new(
-                "administrator_key_required",
+                codes::ADMINISTRATOR_KEY_REQUIRED,
                 format!(
                     "legacy administrator key file `{MACHINE_MSG_HEADER_KEY_PATH}` could not be read: {error}"
                 ),

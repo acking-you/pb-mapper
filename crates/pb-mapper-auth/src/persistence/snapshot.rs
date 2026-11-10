@@ -167,7 +167,7 @@ pub(crate) fn try_load_persisted_state(
     let mut snapshot = if snapshot_path.exists() {
         let bytes = std::fs::read(&snapshot_path).map_err(|error| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to read `{}`: {error}", snapshot_path.display()),
                 false,
             )
@@ -175,7 +175,7 @@ pub(crate) fn try_load_persisted_state(
         let plain = open_blob(admin_key, &bytes)?;
         serde_json::from_slice::<PersistedSnapshot>(&plain).map_err(|error| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to decode auth snapshot: {error}"),
                 false,
             )
@@ -195,7 +195,7 @@ pub(crate) fn try_load_persisted_state(
     };
     if snapshot.schema_version != SNAPSHOT_SCHEMA_VERSION || snapshot.instance_id != instance_id {
         return Err(AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             "auth snapshot schema or server instance id does not match",
             false,
         ));
@@ -287,7 +287,7 @@ fn replayed_entry_mut<'a>(
         Some(entry) => Ok(Some(entry)),
         None if issued => Ok(None),
         None => Err(AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             format!("WAL {operation} record references an unknown key"),
             false,
         )),
