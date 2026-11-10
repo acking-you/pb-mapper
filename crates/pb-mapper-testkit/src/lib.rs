@@ -52,10 +52,14 @@ use std::time::Duration;
 
 use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
 use pb_mapper_core::checksum::{ADMIN_KEY_LEN, Credential, set_process_msg_header_key};
-use pb_mapper_core::config::init_tracing;
 
 mod control;
 mod echo;
+/// The `pb-mapper` binary's own log setup, so tests log as it does. Included
+/// rather than depended on: the binary is a shipped crate, this is test
+/// support, and the file names nothing of the binary's.
+#[path = "../../pb-mapper-cli/src/bin/pb-mapper/logging.rs"]
+mod logging;
 mod poll;
 mod relay;
 mod sdk;
@@ -115,7 +119,7 @@ pub const RAW_TCP_PAYLOAD_MAX: usize = 20_000;
 /// framing in every concurrent case reads it.
 pub fn init_test_env() {
     static TEST_ENV: LazyLock<()> = LazyLock::new(|| {
-        init_tracing();
+        logging::init_tracing();
         set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
     });
     *TEST_ENV

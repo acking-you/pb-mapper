@@ -1,12 +1,10 @@
 use std::net::{AddrParseError, SocketAddr};
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::ValueEnum;
 use snafu::ResultExt;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 use crate::error::{CfgPbServerEnvNotExistSnafu, Result};
 
@@ -274,19 +272,6 @@ pub fn parse_log_format(value: &str) -> LogFormat {
         "json" => LogFormat::Json,
         _ => LogFormat::Pretty,
     }
-}
-
-fn log_format_from_env() -> LogFormat {
-    std::env::var(PB_MAPPER_LOG_FORMAT)
-        .ok()
-        .map(|value| parse_log_format(&value))
-        .unwrap_or(LogFormat::Pretty)
-}
-
-fn default_env_filter() -> EnvFilter {
-    EnvFilter::builder()
-        .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-        .from_env_lossy()
 }
 
 pub fn parse_duration(value: &str) -> Option<Duration> {
@@ -584,46 +569,6 @@ pub async fn resolve_pb_mapper_server_async(addr: Option<&str>) -> Result<Resolv
             resolve_addrs_async(&addr).await
         }
     }
-}
-
-pub fn init_tracing() {
-    static INIT_TRACING: Once = Once::new();
-    INIT_TRACING.call_once(|| {
-        let result = match log_format_from_env() {
-            LogFormat::Pretty => {
-                let subscriber = tracing_subscriber::registry().with(
-                    fmt::layer()
-                        .pretty()
-                        .with_writer(std::io::stdout)
-                        .with_filter(default_env_filter()),
-                );
-                tracing::subscriber::set_global_default(subscriber)
-            }
-            LogFormat::Compact => {
-                let subscriber = tracing_subscriber::registry().with(
-                    fmt::layer()
-                        .compact()
-                        .with_writer(std::io::stdout)
-                        .with_filter(default_env_filter()),
-                );
-                tracing::subscriber::set_global_default(subscriber)
-            }
-            LogFormat::Json => {
-                let subscriber = tracing_subscriber::registry().with(
-                    fmt::layer()
-                        .json()
-                        .flatten_event(true)
-                        .with_writer(std::io::stdout)
-                        .with_filter(default_env_filter()),
-                );
-                tracing::subscriber::set_global_default(subscriber)
-            }
-        };
-
-        if let Err(e) = result {
-            eprintln!("failed to initialize tracing subscriber: {e}");
-        }
-    });
 }
 
 #[cfg(test)]

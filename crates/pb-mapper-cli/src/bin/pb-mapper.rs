@@ -12,7 +12,8 @@
 //! `server` (the relay, its authentication settings and direct coordination),
 //! `tunnel` (`register` and `connect`, and the log kept of a running tunnel)
 //! and `admin` (parsing, pagination, wire requests and output rendering).
-//! `status` is one request and stays here.
+//! `status` is one request and stays here; `logging` sets up the log output
+//! every role shares.
 
 use std::error::Error;
 use std::time::Duration;
@@ -20,11 +21,13 @@ use std::time::Duration;
 use better_mimalloc_rs::MiMalloc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use pb_mapper_client::client::show_status_scoped;
-use pb_mapper_core::config::{init_tracing, resolve_pb_mapper_server_async};
+use pb_mapper_core::config::resolve_pb_mapper_server_async;
 use pb_mapper_protocol::command::PbConnStatusReq;
 
 #[path = "pb-mapper/admin.rs"]
 mod admin;
+#[path = "pb-mapper/logging.rs"]
+mod logging;
 #[path = "pb-mapper/server.rs"]
 mod server;
 #[path = "pb-mapper/tunnel.rs"]
@@ -101,7 +104,7 @@ impl From<StatusOpArg> for PbConnStatusReq {
 async fn main() {
     MiMalloc::init();
     let cli = Cli::parse();
-    init_tracing();
+    logging::init_tracing();
 
     if let Err(error) = run(cli).await {
         tracing::error!(%error, "pb-mapper command failed");
