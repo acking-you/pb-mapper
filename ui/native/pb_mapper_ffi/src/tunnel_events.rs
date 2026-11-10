@@ -41,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     error::CtlError,
     handle::PbMapperHandle,
-    response::{err_ctl, err_null_handle, ok_data, parse_c_string},
+    response::{Reply, parse_c_string, respond},
     state::TunnelHandle,
 };
 
@@ -172,20 +172,14 @@ pub unsafe extern "C" fn pb_mapper_tunnel_events_call_json(
     handle: *mut PbMapperHandle,
     request: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-    let request = match parse_c_string(request, "request").and_then(|raw| {
-        serde_json::from_str::<Request>(&raw).map_err(|e| CtlError::invalid_argument(e.to_string()))
-    }) {
-        Ok(request) => request,
-        Err(error) => return err_ctl(&error),
-    };
-    let handle = unsafe { &*handle };
-    match handle.runtime.block_on(call(handle, request)) {
-        Ok(value) => ok_data(value),
-        Err(error) => err_ctl(&error),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        let request = parse_c_string(request, "request").and_then(|raw| {
+            serde_json::from_str::<Request>(&raw)
+                .map_err(|e| CtlError::invalid_argument(e.to_string()))
+        })?;
+        Ok(Reply::Data(handle.runtime.block_on(call(handle, request))?))
+    })
 }
 
 async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlError> {

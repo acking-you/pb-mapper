@@ -26,7 +26,7 @@ use crate::ctl::Origin;
 use crate::error::{CtlError, sdk_error};
 use crate::events;
 use crate::handle::PbMapperHandle;
-use crate::response::{err_ctl, err_null_handle, ok_data, parse_c_string};
+use crate::response::{Reply, parse_c_string, respond};
 use crate::state::AppConfig;
 
 /// Long enough for an inventory paged across a large relay, short enough
@@ -48,96 +48,87 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
     handle: *mut PbMapperHandle,
     request: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-    let request = match parse_c_string(request, "request")
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).map_err(bad_request))
-    {
-        Ok(request) => request,
-        Err(error) => return err_ctl(&error),
-    };
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let result = handle.runtime.block_on(async move {
-        let config = state.lock().await.get_config_status();
-        let credential = get_process_credential();
-        // The key a rotation retires: the tunnels still holding it are the
-        // ones to start again on the new key.
-        let retired = credential.as_ref().ok().copied();
-        let relay = Target {
-            server: &config.server_address,
-            keep_alive: config.keep_alive_enabled,
-            transport: config.relay_transport,
-        };
-        let outcome = call(&relay, credential, &request).await?;
-        let mut data = outcome.data;
-        // A rotated administrator key is the only one that relay accepts
-        // now: this computer switches to it, or every later call would fail.
-        // Unless Settings moved it to another relay or credential while the
-        // rotation ran — then the key is not this computer's to save, and
-        // saving it would undo that change — or saving it fails. Either way
-        // the rotation happened, so it is answered as one: `"saved"` tells
-        // the page whether to keep the key for the person, and
-        // `"saveError"` why it could not be saved. Once saved, `"restart"`
-        // names this computer's tunnels on that relay: those still holding
-        // the retired key, for the page to start again on the new one, and
-        // those on a temporary credential the rotation erased, which only
-        // a newly issued one can bring back.
-        if let Some(key) = outcome.rotated_key {
-            // Where that relay is, to know its tunnels by address as well as
-            // by name. Resolved before the state is locked: it can be slow.
-            let endpoint = resolve_pb_mapper_server_async(Some(&config.server_address))
-                .await
-                .ok();
-            let mut state = state.lock().await;
-            let mut save_error = None;
-            // Only the relay settings matter: a preference of this
-            // computer's changed meanwhile is kept as it is now.
-            let current = state.get_config_status();
-            let saved = current.same_relay(&config)
-                && match state.update_config(AppConfig {
-                    msg_header_key: key,
-                    ..current
-                }) {
-                    Ok(()) => true,
-                    Err(error) => {
-                        tracing::error!("Saving the rotated administrator key failed: {error}");
-                        save_error = Some(error.to_string());
-                        false
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        let request = parse_c_string(request, "request")
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).map_err(bad_request))?;
+        let state = &handle.state;
+        let data = handle.runtime.block_on(async move {
+            let config = state.lock().await.get_config_status();
+            let credential = get_process_credential();
+            // The key a rotation retires: the tunnels still holding it are the
+            // ones to start again on the new key.
+            let retired = credential.as_ref().ok().copied();
+            let relay = Target {
+                server: &config.server_address,
+                keep_alive: config.keep_alive_enabled,
+                transport: config.relay_transport,
+            };
+            let outcome = call(&relay, credential, &request).await?;
+            let mut data = outcome.data;
+            // A rotated administrator key is the only one that relay accepts
+            // now: this computer switches to it, or every later call would fail.
+            // Unless Settings moved it to another relay or credential while the
+            // rotation ran — then the key is not this computer's to save, and
+            // saving it would undo that change — or saving it fails. Either way
+            // the rotation happened, so it is answered as one: `"saved"` tells
+            // the page whether to keep the key for the person, and
+            // `"saveError"` why it could not be saved. Once saved, `"restart"`
+            // names this computer's tunnels on that relay: those still holding
+            // the retired key, for the page to start again on the new one, and
+            // those on a temporary credential the rotation erased, which only
+            // a newly issued one can bring back.
+            if let Some(key) = outcome.rotated_key {
+                // Where that relay is, to know its tunnels by address as well as
+                // by name. Resolved before the state is locked: it can be slow.
+                let endpoint = resolve_pb_mapper_server_async(Some(&config.server_address))
+                    .await
+                    .ok();
+                let mut state = state.lock().await;
+                let mut save_error = None;
+                // Only the relay settings matter: a preference of this
+                // computer's changed meanwhile is kept as it is now.
+                let current = state.get_config_status();
+                let saved = current.same_relay(&config)
+                    && match state.update_config(AppConfig {
+                        msg_header_key: key,
+                        ..current
+                    }) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            tracing::error!("Saving the rotated administrator key failed: {error}");
+                            save_error = Some(error.to_string());
+                            false
+                        }
+                    };
+                let restart = retired.filter(|_| saved).map(|retired| {
+                    state.tunnels_on(&config.server_address, endpoint.as_ref(), retired)
+                });
+                drop(state);
+                if saved {
+                    events::emit(events::ChangeKind::Config, None, Origin::Ui);
+                }
+                if let Some(fields) = data.as_object_mut() {
+                    fields.insert("saved".to_owned(), saved.into());
+                    if let Some(error) = save_error {
+                        fields.insert("saveError".to_owned(), error.into());
                     }
-                };
-            let restart = retired.filter(|_| saved).map(|retired| {
-                state.tunnels_on(&config.server_address, endpoint.as_ref(), retired)
-            });
-            drop(state);
-            if saved {
-                events::emit(events::ChangeKind::Config, None, Origin::Ui);
-            }
-            if let Some(fields) = data.as_object_mut() {
-                fields.insert("saved".to_owned(), saved.into());
-                if let Some(error) = save_error {
-                    fields.insert("saveError".to_owned(), error.into());
-                }
-                if let Some(tunnels) = restart {
-                    fields.insert(
-                        "restart".to_owned(),
-                        json!({
-                            "shares": tunnels.shares,
-                            "connections": tunnels.connections,
-                            "stranded": tunnels.stranded,
-                        }),
-                    );
+                    if let Some(tunnels) = restart {
+                        fields.insert(
+                            "restart".to_owned(),
+                            json!({
+                                "shares": tunnels.shares,
+                                "connections": tunnels.connections,
+                                "stranded": tunnels.stranded,
+                            }),
+                        );
+                    }
                 }
             }
-        }
-        Ok::<_, CtlError>(data)
-    });
-    match result {
-        Ok(data) => ok_data(data),
-        Err(error) => err_ctl(&error),
-    }
+            Ok::<_, CtlError>(data)
+        })?;
+        Ok(Reply::Data(data))
+    })
 }
 
 /// What an operation answered, and the administrator key it rotated to, if

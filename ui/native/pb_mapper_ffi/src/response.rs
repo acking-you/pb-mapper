@@ -1,12 +1,49 @@
 //! Shared helpers for FFI response formatting and argument parsing.
+//!
+//! Every JSON-envelope export has one shape, which [`respond`] holds: the
+//! null-handle check, then the call with the borrowed handle (its arguments
+//! parsed, its work run, its change announced), then the envelope.
 
+use std::borrow::Cow;
 use std::ffi::{CStr, CString, c_char};
 use std::ptr;
 
 use pb_mapper_client::sdk::PortMapping;
-use serde_json::json;
+use serde::Serialize;
+use serde_json::{Value, json};
 
 use crate::error::CtlError;
+use crate::handle::PbMapperHandle;
+
+/// What a JSON-envelope export answers with when it succeeds.
+pub(crate) enum Reply {
+    /// `{"success": true, "message": …}`
+    Message(Cow<'static, str>),
+    /// `{"success": true, "data": …}`
+    Data(Value),
+}
+
+/// Runs `call` with the handle, or answers that there is none, and turns
+/// what it returns into the envelope. `handle` is what `as_ref` on the
+/// export's raw pointer gives.
+pub(crate) fn respond(
+    handle: Option<&PbMapperHandle>,
+    call: impl FnOnce(&PbMapperHandle) -> Result<Reply, CtlError>,
+) -> *mut c_char {
+    let Some(handle) = handle else {
+        return err_null_handle();
+    };
+    match call(handle) {
+        Ok(Reply::Message(message)) => ok_message(&message),
+        Ok(Reply::Data(data)) => ok_data(data),
+        Err(error) => err_ctl(&error),
+    }
+}
+
+/// `value` as JSON, or `fallback` if it does not serialize.
+pub(crate) fn json_or(value: impl Serialize, fallback: Value) -> Value {
+    serde_json::to_value(value).unwrap_or(fallback)
+}
 
 /// Convert a JSON value into an owned C string pointer.
 ///
@@ -41,8 +78,8 @@ pub(crate) fn err_ctl(error: &CtlError) -> *mut c_char {
 /// The response for a call made with a handle that was never created, or was
 /// already destroyed.
 ///
-/// Its own function because nineteen entry points open with the same check and
-/// all of them mean the same thing.
+/// Its own function because every entry point taking a handle opens with the
+/// same check, and all of them mean the same thing.
 pub(crate) fn err_null_handle() -> *mut c_char {
     err_ctl(&CtlError::invalid_argument("handle is null"))
 }
@@ -98,8 +135,9 @@ mod tests {
         assert_eq!(failed["message"], "no such service");
         assert_eq!(failed["code"], "NOT_FOUND");
 
-        // Including the ones raised at the boundary, before any state is touched.
-        let null_handle = read_and_free(err_null_handle());
+        // Including the ones raised at the boundary, before any state is
+        // touched: a call without a handle never runs.
+        let null_handle = read_and_free(respond(None, |_| panic!("ran without a handle")));
         assert_eq!(null_handle["code"], "INVALID_ARGUMENT");
 
         let bad_arg = parse_c_string(std::ptr::null(), "service_key")

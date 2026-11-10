@@ -11,7 +11,7 @@ use serde_json::json;
 use crate::ctl::Origin;
 use crate::events;
 use crate::handle::PbMapperHandle;
-use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
+use crate::response::{Reply, json_or, parse_c_string, respond};
 
 /// Start pb-mapper server. A nonzero `quic_port` also takes QUIC on that
 /// UDP port; zero offers none.
@@ -26,30 +26,23 @@ pub unsafe extern "C" fn pb_mapper_start_server(
     enable_keep_alive: c_int,
     quic_port: u16,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let result = handle.runtime.block_on(async move {
-        let mut state = state.lock().await;
-        state
-            .start_server(
-                port,
-                enable_keep_alive != 0,
-                (quic_port != 0).then_some(quic_port),
-            )
-            .await
-    });
-
-    match result {
-        Ok(_) => {
-            events::emit(events::ChangeKind::Server, None, Origin::Ui);
-            ok_message("server started")
-        }
-        Err(e) => err_ctl(&e),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        handle.runtime.block_on(async {
+            handle
+                .state
+                .lock()
+                .await
+                .start_server(
+                    port,
+                    enable_keep_alive != 0,
+                    (quic_port != 0).then_some(quic_port),
+                )
+                .await
+        })?;
+        events::emit(events::ChangeKind::Server, None, Origin::Ui);
+        Ok(Reply::Message("server started".into()))
+    })
 }
 
 /// Stop pb-mapper server.
@@ -59,24 +52,14 @@ pub unsafe extern "C" fn pb_mapper_start_server(
 /// destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_stop_server(handle: *mut PbMapperHandle) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let result = handle.runtime.block_on(async move {
-        let mut state = state.lock().await;
-        state.stop_server().await
-    });
-
-    match result {
-        Ok(_) => {
-            events::emit(events::ChangeKind::Server, None, Origin::Ui);
-            ok_message("server stopped")
-        }
-        Err(e) => err_ctl(&e),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        handle
+            .runtime
+            .block_on(async { handle.state.lock().await.stop_server().await })?;
+        events::emit(events::ChangeKind::Server, None, Origin::Ui);
+        Ok(Reply::Message("server stopped".into()))
+    })
 }
 
 /// Get local server status (running/uptime).
@@ -88,18 +71,14 @@ pub unsafe extern "C" fn pb_mapper_stop_server(handle: *mut PbMapperHandle) -> *
 pub unsafe extern "C" fn pb_mapper_get_local_server_status_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let status = handle.runtime.block_on(async move {
-        let state = state.lock().await;
-        state.get_local_server_status()
-    });
-
-    ok_data(serde_json::to_value(status).unwrap_or_else(|_| json!({})))
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        // Inside the runtime: a stale figure starts a read on it.
+        let status = handle
+            .runtime
+            .block_on(async { handle.state.lock().await.get_local_server_status() });
+        Ok(Reply::Data(json_or(status, json!({}))))
+    })
 }
 
 /// The connections the remote server holds for one service key.
@@ -117,24 +96,14 @@ pub unsafe extern "C" fn pb_mapper_get_service_conns_json(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let service_key = match parse_c_string(service_key, "service_key") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-
-    let handle = unsafe { &*handle };
-    let result = handle
-        .runtime
-        .block_on(crate::state::get_service_conns(&handle.state, service_key));
-
-    match result {
-        Ok(conns) => ok_data(serde_json::to_value(conns).unwrap_or_else(|_| json!([]))),
-        Err(e) => err_ctl(&e),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        let service_key = parse_c_string(service_key, "service_key")?;
+        let conns = handle
+            .runtime
+            .block_on(crate::state::get_service_conns(&handle.state, service_key))?;
+        Ok(Reply::Data(json_or(conns, json!([]))))
+    })
 }
 
 /// Get server status detail (remote server).
@@ -146,19 +115,13 @@ pub unsafe extern "C" fn pb_mapper_get_service_conns_json(
 pub unsafe extern "C" fn pb_mapper_get_server_status_detail_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let handle = unsafe { &*handle };
-    let result = handle
-        .runtime
-        .block_on(crate::state::get_server_status_detail(&handle.state));
-
-    match result {
-        Ok(detail) => ok_data(serde_json::to_value(detail).unwrap_or_else(|_| json!({}))),
-        Err(e) => err_ctl(&e),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        let detail = handle
+            .runtime
+            .block_on(crate::state::get_server_status_detail(&handle.state))?;
+        Ok(Reply::Data(json_or(detail, json!({}))))
+    })
 }
 
 /// Force-refresh server status (blocks until network result is available).
@@ -170,19 +133,13 @@ pub unsafe extern "C" fn pb_mapper_get_server_status_detail_json(
 pub unsafe extern "C" fn pb_mapper_force_refresh_server_status_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let handle = unsafe { &*handle };
-    let result = handle
-        .runtime
-        .block_on(crate::state::force_refresh_server_status(&handle.state));
-
-    match result {
-        Ok(detail) => ok_data(serde_json::to_value(detail).unwrap_or_else(|_| json!({}))),
-        Err(e) => err_ctl(&e),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        let detail = handle
+            .runtime
+            .block_on(crate::state::force_refresh_server_status(&handle.state))?;
+        Ok(Reply::Data(json_or(detail, json!({}))))
+    })
 }
 
 #[cfg(test)]

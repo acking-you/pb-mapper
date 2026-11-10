@@ -20,6 +20,7 @@ use pb_mapper_client::sdk::PortMapping;
 
 use crate::error::CtlError;
 use crate::events::ChangeKind;
+use crate::response::json_or;
 use crate::state::{self, PbMapperState};
 
 /// Who asked. Not part of the wire format: the control server stamps `Cli` on
@@ -225,10 +226,7 @@ async fn run(
 
         Command::Status => {
             let detail = state::get_server_status_detail(state).await?;
-            Ok(proto::Response::ok(
-                Some(serde_json::to_value(detail).unwrap_or_else(|_| json!({}))),
-                None,
-            ))
+            Ok(proto::Response::ok(Some(json_or(detail, json!({}))), None))
         }
 
         Command::Services => {

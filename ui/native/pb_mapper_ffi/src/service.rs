@@ -7,8 +7,8 @@ use serde_json::json;
 use crate::ctl::Origin;
 use crate::events;
 use crate::handle::PbMapperHandle;
-use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
-use crate::state::{ServiceConfigInfo, ServiceStatusResponse};
+use crate::response::{Reply, json_or, parse_c_string, port_mapping_from_c, respond};
+use crate::state::DirectOptions;
 
 /// Register a service. A nonzero `allow_direct` lets connections reach it
 /// directly rather than through the relay; `port_mapping` then says when to
@@ -30,55 +30,30 @@ pub unsafe extern "C" fn pb_mapper_register_service(
     allow_direct: c_int,
     port_mapping: c_int,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let service_key = match parse_c_string(service_key, "service_key") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-    let local_address = match parse_c_string(local_address, "local_address") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-    let protocol = match parse_c_string(protocol, "protocol") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-    let port_mapping = match crate::response::port_mapping_from_c(port_mapping) {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    // Not `state.lock().await` around the call: registration releases the lock
-    // for its slow middle phase, which it can only do if the caller does not
-    // hold it. See `state::register_service`.
-    let result = handle.runtime.block_on(async move {
-        crate::state::register_service(
-            &state,
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        let service_key = parse_c_string(service_key, "service_key")?;
+        let local_address = parse_c_string(local_address, "local_address")?;
+        let protocol = parse_c_string(protocol, "protocol")?;
+        let port_mapping = port_mapping_from_c(port_mapping)?;
+        // Not `state.lock().await` around the call: registration releases
+        // the lock for its slow middle phase, which it can only do if the
+        // caller does not hold it. See `state::register_service`.
+        handle.runtime.block_on(crate::state::register_service(
+            &handle.state,
             service_key,
             local_address,
             protocol,
             enable_encryption != 0,
             enable_keep_alive != 0,
-            crate::state::DirectOptions {
+            DirectOptions {
                 allow_direct: allow_direct != 0,
                 port_mapping,
             },
-        )
-        .await
-    });
-
-    match result {
-        Ok(_) => {
-            events::emit(events::ChangeKind::Services, None, Origin::Ui);
-            ok_message("service registration started")
-        }
-        Err(e) => err_ctl(&e),
-    }
+        ))?;
+        events::emit(events::ChangeKind::Services, None, Origin::Ui);
+        Ok(Reply::Message("service registration started".into()))
+    })
 }
 
 /// Unregister a service (stop running but keep config).
@@ -92,29 +67,15 @@ pub unsafe extern "C" fn pb_mapper_unregister_service(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let service_key = match parse_c_string(service_key, "service_key") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let result = handle.runtime.block_on(async move {
-        let mut state = state.lock().await;
-        state.unregister_service(service_key)
-    });
-
-    match result {
-        Ok(_) => {
-            events::emit(events::ChangeKind::Services, None, Origin::Ui);
-            ok_message("service unregistered")
-        }
-        Err(e) => err_ctl(&e),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        let service_key = parse_c_string(service_key, "service_key")?;
+        handle
+            .runtime
+            .block_on(async { handle.state.lock().await.unregister_service(service_key) })?;
+        events::emit(events::ChangeKind::Services, None, Origin::Ui);
+        Ok(Reply::Message("service unregistered".into()))
+    })
 }
 
 /// Delete service config (also stops service if running).
@@ -128,29 +89,19 @@ pub unsafe extern "C" fn pb_mapper_delete_service_config(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let service_key = match parse_c_string(service_key, "service_key") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let result = handle.runtime.block_on(async move {
-        let mut state = state.lock().await;
-        state.delete_service_config_and_stop(service_key)
-    });
-
-    match result {
-        Ok(_) => {
-            events::emit(events::ChangeKind::Services, None, Origin::Ui);
-            ok_message("service config deleted")
-        }
-        Err(e) => err_ctl(&e),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        let service_key = parse_c_string(service_key, "service_key")?;
+        handle.runtime.block_on(async {
+            handle
+                .state
+                .lock()
+                .await
+                .delete_service_config_and_stop(service_key)
+        })?;
+        events::emit(events::ChangeKind::Services, None, Origin::Ui);
+        Ok(Reply::Message("service config deleted".into()))
+    })
 }
 
 /// Get service configs list.
@@ -162,18 +113,13 @@ pub unsafe extern "C" fn pb_mapper_delete_service_config(
 pub unsafe extern "C" fn pb_mapper_get_service_configs_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let services: Vec<ServiceConfigInfo> = handle.runtime.block_on(async move {
-        let state = state.lock().await;
-        state.get_service_configs()
-    });
-
-    ok_data(json!({"services": services}))
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        let services = handle
+            .runtime
+            .block_on(async { handle.state.lock().await.get_service_configs() });
+        Ok(Reply::Data(json!({"services": services})))
+    })
 }
 
 /// Get service status for a specific key.
@@ -187,21 +133,12 @@ pub unsafe extern "C" fn pb_mapper_get_service_status_json(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let service_key = match parse_c_string(service_key, "service_key") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let status: ServiceStatusResponse = handle.runtime.block_on(async move {
-        let state = state.lock().await;
-        state.get_service_status(service_key)
-    });
-
-    ok_data(serde_json::to_value(status).unwrap_or_else(|_| json!({})))
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        let service_key = parse_c_string(service_key, "service_key")?;
+        let status = handle
+            .runtime
+            .block_on(async { handle.state.lock().await.get_service_status(service_key) });
+        Ok(Reply::Data(json_or(status, json!({}))))
+    })
 }
