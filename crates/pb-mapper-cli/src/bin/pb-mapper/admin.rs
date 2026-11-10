@@ -412,7 +412,7 @@ async fn send_admin_request(
 /// The item type stays out of the trait: the per-page methods below are all the
 /// loop needs, and keeping them concrete means this crate never has to name the
 /// three item types or carry a `serde` dependency for the bound.
-trait AdminPage: Clone {
+trait AdminPage {
     /// Names this listing in the error raised when the relay answers with some
     /// other response variant.
     const LABEL: &'static str;
@@ -439,6 +439,9 @@ trait AdminPage: Clone {
 }
 
 /// Declares [`AdminPage`] for one wire page type.
+///
+/// `empty_clone` and `absorb` name every field of the page, so a field it
+/// gains needs a decision here before `--all` compiles.
 macro_rules! impl_admin_page {
     ($page:ty, variant = $variant:ident, label = $label:literal) => {
         impl AdminPage for $page {
@@ -467,15 +470,25 @@ macro_rules! impl_admin_page {
             }
 
             fn empty_clone(&self) -> Self {
+                let Self {
+                    schema_version,
+                    items: _,
+                    next_page: _,
+                } = self;
                 Self {
+                    schema_version: *schema_version,
                     items: Vec::new(),
                     next_page: None,
-                    ..self.clone()
                 }
             }
 
             fn absorb(&mut self, page: &Self) {
-                self.items.extend_from_slice(&page.items);
+                let Self {
+                    schema_version: _,
+                    items,
+                    next_page: _,
+                } = page;
+                self.items.extend_from_slice(items);
             }
         }
     };
