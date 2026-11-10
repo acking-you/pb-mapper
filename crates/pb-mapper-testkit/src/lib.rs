@@ -57,8 +57,8 @@ use pb_mapper_core::test_support::TEST_ADMIN_KEY_BYTES;
 mod control;
 mod echo;
 /// The `pb-mapper` binary's own log setup, so tests log as it does. Included
-/// rather than depended on: the binary is a shipped crate, this is test
-/// support, and the file names nothing of the binary's.
+/// by path rather than depended on, since the binary's crate ships and this
+/// one is test support; the file uses only `pb-mapper-core` and `tracing`.
 #[path = "../../pb-mapper-cli/src/bin/pb-mapper/logging.rs"]
 mod logging;
 mod poll;
