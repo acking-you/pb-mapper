@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use pb_mapper_auth::{
-    AuthConfig, LegacyProtocolPolicy, MAX_TEMP_KEY_CAPACITY, MAX_TEMP_KEY_TTL, MIN_TEMP_KEY_TTL,
-    acquire_state_dir_lock, initialize_admin_key,
+    AuthConfig, AuthConfigOverrides, LegacyProtocolPolicy, MAX_TEMP_KEY_CAPACITY, MAX_TEMP_KEY_TTL,
+    MIN_TEMP_KEY_TTL, acquire_state_dir_lock, initialize_admin_key,
 };
 use pb_mapper_core::checksum::{
     MACHINE_MSG_HEADER_KEY_PATH, set_process_msg_header_key, setup_machine_msg_header_key,
@@ -131,8 +131,8 @@ impl Error for ServerFlagError {}
 /// explicit flag taking precedence.
 ///
 /// The flags are checked first, so an out-of-range one fails before anything
-/// else happens. `AuthConfig` reads its settings only from the environment,
-/// so the flags that pass are written there before it is built.
+/// else happens. A flag that is given replaces its environment variable,
+/// which is then not read at all.
 fn server_auth_config(args: &ServerArgs) -> Result<AuthConfig, ServerFlagError> {
     if let Some(max_temporary_keys) = args.max_temporary_keys
         && !(1..=MAX_TEMP_KEY_CAPACITY).contains(&max_temporary_keys)
@@ -144,37 +144,12 @@ fn server_auth_config(args: &ServerArgs) -> Result<AuthConfig, ServerFlagError> 
     {
         return Err(ServerFlagError::MaxTemporaryKeyTtl);
     }
-    // SAFETY: writing the environment races any thread that reads it. This
-    // runs first thing in `run_server`: the runtime's worker threads exist,
-    // but nothing has been spawned on them, and no other thread reads the
-    // environment.
-    unsafe {
-        if let Some(auth_state_dir) = &args.auth_state_dir {
-            std::env::set_var("PB_MAPPER_AUTH_STATE_DIR", auth_state_dir);
-        }
-        if let Some(max_temporary_keys) = args.max_temporary_keys {
-            std::env::set_var(
-                "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
-                max_temporary_keys.to_string(),
-            );
-        }
-        if let Some(max_temporary_key_ttl) = args.max_temporary_key_ttl {
-            std::env::set_var(
-                "PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS",
-                max_temporary_key_ttl.as_secs().to_string(),
-            );
-        }
-        if let Some(legacy_protocol) = args.legacy_protocol {
-            std::env::set_var(
-                "PB_MAPPER_LEGACY_PROTOCOL",
-                match legacy_protocol {
-                    LegacyProtocolArg::Allow => "allow",
-                    LegacyProtocolArg::Deny => "deny",
-                },
-            );
-        }
-    }
-    Ok(AuthConfig::default())
+    Ok(AuthConfig::from_env_with(AuthConfigOverrides {
+        state_dir: args.auth_state_dir.clone(),
+        max_temporary_keys: args.max_temporary_keys,
+        max_temporary_key_ttl: args.max_temporary_key_ttl,
+        legacy_protocol: args.legacy_protocol.map(Into::into),
+    }))
 }
 
 pub(super) async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
@@ -328,7 +303,9 @@ mod tests {
         assert_eq!(defaults.max_temporary_key_ttl, None);
         assert_eq!(defaults.legacy_protocol, None);
 
-        let explicit = server_args(&[
+        // Each value differs from its default, so each one shows its flag
+        // reached the relay's configuration.
+        let explicit = server_auth_config(&server_args(&[
             "--auth-state-dir",
             "/tmp/pb-mapper-auth",
             "--max-temporary-keys",
@@ -337,23 +314,21 @@ mod tests {
             "2h",
             "--legacy-protocol",
             "deny",
-        ]);
-        assert_eq!(
-            explicit.auth_state_dir,
-            Some(PathBuf::from("/tmp/pb-mapper-auth"))
-        );
-        assert_eq!(explicit.max_temporary_keys, Some(1024));
+        ]))
+        .unwrap();
+        assert_eq!(explicit.state_dir, PathBuf::from("/tmp/pb-mapper-auth"));
+        assert_eq!(explicit.max_temporary_keys, 1024);
         assert_eq!(
             explicit.max_temporary_key_ttl,
-            Some(Duration::from_secs(2 * 60 * 60))
+            Duration::from_secs(2 * 60 * 60)
         );
-        assert_eq!(explicit.legacy_protocol, Some(LegacyProtocolArg::Deny));
+        assert_eq!(explicit.legacy_protocol, LegacyProtocolPolicy::Deny);
     }
 
     #[test]
     fn explicit_out_of_range_server_auth_flags_are_rejected() {
         // clap accepts both tokens; the bounds are checked afterwards, before
-        // anything is written to the environment.
+        // the configuration is built.
         assert_eq!(
             server_auth_config(&server_args(&["--max-temporary-keys", "0"])).unwrap_err(),
             ServerFlagError::MaxTemporaryKeys
