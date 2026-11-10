@@ -1634,14 +1634,19 @@ mod tests {
 
     #[tokio::test]
     async fn scripted_host_session_acknowledges_first_and_authorises_input_by_presentation() {
-        for (reason, rejected) in [
-            (RejectReason::Busy, "Busy"),
-            (RejectReason::Denied, "Denied"),
-            (RejectReason::InvalidRequest, "InvalidRequest"),
-        ] {
-            let (result, _, _) = connect(HostMessage::Rejected { reason }).await;
-            assert_eq!(format!("{:?}", result.err().unwrap()), rejected);
-        }
+        let rejected = async |reason| connect(HostMessage::Rejected { reason }).await.0.err();
+        assert!(matches!(
+            rejected(RejectReason::Busy).await,
+            Some(ConnectError::Busy)
+        ));
+        assert!(matches!(
+            rejected(RejectReason::Denied).await,
+            Some(ConnectError::Denied)
+        ));
+        assert!(matches!(
+            rejected(RejectReason::InvalidRequest).await,
+            Some(ConnectError::InvalidRequest)
+        ));
 
         let (viewer, mut host, authenticate) = connect(accepted()).await;
         let viewer = viewer.unwrap();

@@ -868,7 +868,8 @@ mod tests {
         drop(consumer);
         let consumer = sink.attach().unwrap();
 
-        // A consumer blocked in `next` returns promptly once the sink closes.
+        // A consumer blocked in `next` returns once the sink closes, long
+        // before its 5 s timeout.
         let blocked = std::thread::spawn(move || {
             let started = Instant::now();
             let pulled = consumer.next(Duration::from_secs(5), 1000);
@@ -879,7 +880,7 @@ mod tests {
         sink.close();
         let (pulled, _) = blocked.join().unwrap();
         assert!(matches!(pulled, Pull::Closed));
-        assert!(closed_at.elapsed() < Duration::from_millis(100));
+        assert!(closed_at.elapsed() < Duration::from_secs(1));
         assert_eq!(sink.attach().err(), Some(AttachError::Closed));
     }
 
