@@ -9,7 +9,7 @@ use super::LinkSample;
 pub use pb_mapper_protocol::direct::{AddressFamily, DirectTransport, LinkKind};
 use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
-#[cfg(feature = "p2p")]
+#[cfg(any(feature = "p2p", feature = "relay-quic"))]
 use std::time::Duration;
 
 /// What a local interface is. Candidates are offered, and probed, in this
@@ -247,9 +247,10 @@ pub(super) struct LiveLink {
     pub(super) probe: LinkProbe,
 }
 
-#[cfg(feature = "p2p")]
+#[cfg(any(feature = "p2p", feature = "relay-quic"))]
 impl LinkStats {
-    /// QUIC's view of `connection`'s path, as it is now.
+    /// QUIC's view of `connection`'s path, as it is now: a direct session's,
+    /// or a relay carrier's.
     pub(crate) fn of_quic(connection: &quinn::Connection) -> Self {
         let stats = connection.stats();
         Self {
@@ -309,7 +310,7 @@ impl LiveLink {
     }
 }
 
-#[cfg(feature = "p2p")]
+#[cfg(any(feature = "p2p", feature = "relay-quic"))]
 fn micros(time: Duration) -> u64 {
     time.as_micros().min(u128::from(u64::MAX)) as u64
 }

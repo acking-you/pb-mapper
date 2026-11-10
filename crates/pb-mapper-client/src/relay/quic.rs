@@ -12,6 +12,7 @@
 use super::{
     ConnectError, QUIC_UNAVAILABLE, QuicConnectionDiagnostics, RelayDiagnostics, RelayTransport,
 };
+use crate::diagnostics::LinkStats;
 use pb_mapper_core::{checksum::Credential, config::ResolvedAddrs};
 use pb_mapper_protocol::{command::PbErrorResponse, quic::*, secure::ClientHeaderSession};
 use std::{
@@ -377,23 +378,34 @@ impl Pool {
 
 fn describe(shared: &QuicConnection, pooled: bool) -> QuicConnectionDiagnostics {
     let connection = &shared.connection;
-    let stats = connection.stats();
-    let micros = |time: std::time::Duration| time.as_micros().min(u64::MAX.into()) as u64;
+    let LinkStats {
+        rtt_us,
+        min_rtt_us,
+        congestion_window,
+        mtu,
+        sent_packets,
+        lost_packets,
+        congestion_events,
+        sent_bytes,
+        received_bytes,
+        lost_bytes,
+        bandwidth_bps,
+    } = LinkStats::of_quic(connection);
     QuicConnectionDiagnostics {
         connection_id: connection.stable_id() as u64,
         peer_addr: connection.remote_address(),
         pooled,
-        rtt_us: micros(connection.rtt()),
-        min_rtt_us: micros(stats.path.min_rtt),
-        congestion_window: stats.path.cwnd,
-        mtu: stats.path.current_mtu,
-        sent_packets: stats.path.sent_packets,
-        lost_packets: stats.path.lost_packets,
-        congestion_events: stats.path.congestion_events,
-        sent_bytes: stats.udp_tx.bytes,
-        received_bytes: stats.udp_rx.bytes,
-        lost_bytes: stats.path.lost_bytes,
-        bandwidth_bps: stats.path.bandwidth_estimate,
+        rtt_us,
+        min_rtt_us,
+        congestion_window,
+        mtu,
+        sent_packets,
+        lost_packets,
+        congestion_events,
+        sent_bytes,
+        received_bytes,
+        lost_bytes,
+        bandwidth_bps,
     }
 }
 
