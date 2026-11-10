@@ -23,7 +23,7 @@ use pb_mapper_auth::{
     MIN_TEMP_KEY_TTL, acquire_state_dir_lock, discard_staged_admin_key, generate_admin_key,
     initialize_admin_key, stage_admin_key_candidate, write_admin_key_file,
 };
-use pb_mapper_client::client::handle_status_cli_scoped;
+use pb_mapper_client::client::show_status_scoped;
 use pb_mapper_client::sdk::{
     Client, ConnectOptions, ConnectRequest, LanTransport, PathPolicy, PortMapping, RegisterOptions,
     RegisterRequest, TunnelDiagnostics, TunnelEventKind, TunnelEvents, TunnelMetrics, TunnelStatus,
@@ -31,11 +31,10 @@ use pb_mapper_client::sdk::{
 use pb_mapper_core::checksum::set_process_msg_header_key;
 use pb_mapper_core::checksum::{MACHINE_MSG_HEADER_KEY_PATH, setup_machine_msg_header_key};
 use pb_mapper_core::config::{
-    StatusOp, init_tracing, keep_alive_from_env, pb_mapper_server_addr,
-    resolve_pb_mapper_server_async,
+    init_tracing, keep_alive_from_env, pb_mapper_server_addr, resolve_pb_mapper_server_async,
 };
 use pb_mapper_protocol::command::{
-    AdminConnectionPage, AdminRequest, AdminResponse, AdminServicePage,
+    AdminConnectionPage, AdminRequest, AdminResponse, AdminServicePage, PbConnStatusReq,
 };
 
 use tokio_util::sync::CancellationToken;
@@ -257,13 +256,33 @@ struct ConnectArgs {
 struct StatusArgs {
     /// Status query to execute.
     #[arg(value_enum)]
-    op: StatusOp,
+    op: StatusOpArg,
     /// Relay address. Falls back to PB_MAPPER_SERVER.
     #[arg(short, long, visible_alias = "pb-mapper-server", value_name = "ADDR")]
     server: Option<String>,
     /// Administrator-only namespace to inspect.
     #[arg(long)]
     namespace: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum StatusOpArg {
+    /// Get active remote connection IDs.
+    RemoteId,
+    /// Get registered service keys.
+    Keys,
+    /// Get direct-session observations reported by endpoints in this namespace.
+    Sessions,
+}
+
+impl From<StatusOpArg> for PbConnStatusReq {
+    fn from(value: StatusOpArg) -> Self {
+        match value {
+            StatusOpArg::RemoteId => Self::RemoteId,
+            StatusOpArg::Keys => Self::Keys,
+            StatusOpArg::Sessions => Self::Sessions,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -656,7 +675,7 @@ async fn monitor_tunnel(
 
 async fn run_status(args: StatusArgs) -> Result<(), Box<dyn Error>> {
     let remote_addr = resolve_pb_mapper_server_async(args.server.as_deref()).await?;
-    handle_status_cli_scoped(args.op, remote_addr.as_slice(), args.namespace).await
+    show_status_scoped(remote_addr.as_slice(), args.op.into(), args.namespace).await
 }
 
 fn parse_duration(raw: &str) -> Result<Duration, String> {
