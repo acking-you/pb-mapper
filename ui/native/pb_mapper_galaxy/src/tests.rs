@@ -1,6 +1,6 @@
 use super::{
-    Camera, DecodedScene, Frame, Link, Out, Planet, Scene, System, V3, VERSION, compute, links,
-    runs,
+    Camera, DecodedScene, Frame, Link, Out, Planet, SCRATCH_LIMIT_BYTES, Scene, System, V3,
+    VERSION, compute, links, runs,
 };
 
 /// This computer with two tunnels on one ring, the relay with one registered
@@ -202,7 +202,7 @@ fn decoding_reuses_buffers_and_recovers_after_a_malformed_scene() {
     // An exceptional scene must not retain more than the normal scratch cap.
     storage
         .systems
-        .reserve((1 << 20) / std::mem::size_of::<System>() + 1);
+        .reserve(SCRATCH_LIMIT_BYTES / std::mem::size_of::<System>() + 1);
     storage.trim();
     assert_eq!(storage.systems.capacity(), 0);
 }

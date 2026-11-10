@@ -1,6 +1,6 @@
 //! The frame's temporaries, reused from frame to frame; the coordinates
 //! themselves are written straight into the caller's buffer.
-use super::{Hit, Out, Projected, Rect};
+use super::{Hit, Out, Projected, Rect, SCRATCH_LIMIT_BYTES};
 
 type Point = (f64, f64);
 type Placed = (usize, Projected, f64, bool);
@@ -64,7 +64,7 @@ pub(super) struct Scratch {
 
 impl Scratch {
     /// Starts afresh once an unusually large scene has grown the temporaries
-    /// past 1 MiB, so they do not stay that large.
+    /// past [`SCRATCH_LIMIT_BYTES`], so they do not stay that large.
     pub(super) fn trim(&mut self) {
         let bytes = self.back.bytes()
             + self.front.bytes()
@@ -74,7 +74,7 @@ impl Scratch {
             + self.label_order.capacity() * std::mem::size_of::<usize>()
             + (self.label_stars.capacity() + self.label_rects.capacity())
                 * std::mem::size_of::<Rect>();
-        if bytes > 1 << 20 {
+        if bytes > SCRATCH_LIMIT_BYTES {
             *self = Self::default();
         }
     }
