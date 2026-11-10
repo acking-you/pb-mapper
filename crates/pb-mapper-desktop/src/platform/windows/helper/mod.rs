@@ -36,7 +36,7 @@ use tokio::net::windows::named_pipe::NamedPipeClient;
 use {crate::error, std::path::PathBuf};
 
 pub use os::{Action, request_installation};
-use readiness::ensure_ready;
+pub(crate) use readiness::ensure_ready;
 pub use readiness::{NotReady, Status, status};
 pub use restart::prepare as prepare_application_restart;
 

@@ -182,7 +182,7 @@ pub fn status() -> Status {
 
 /// [`status`]'s [`Status::ensure_ready`], without the update check, which
 /// readiness never reads.
-pub(super) fn ensure_ready() -> Result<()> {
+pub(crate) fn ensure_ready() -> Result<()> {
     status_with(false).ensure_ready()
 }
 
