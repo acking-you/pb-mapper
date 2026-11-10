@@ -14,15 +14,17 @@
 //! Rust and preceded on the wire by that presentation. Receipts, probes,
 //! cursor and input traffic never grant or renew anything.
 //!
-//! The sink keeps only the newest decodable frames (`video_sink`), recovery
+//! The sink keeps only the newest decodable frames (`sink`), recovery
 //! asks for IDRs on a limited backoff (`recovery`), and when the consumer
 //! falls behind the host is capped to what it presents (`fps_cap`). A decoder
 //! that cannot recover ends the session with `decoder_failed`.
 pub(crate) mod fps_cap;
 mod outbound;
 pub(crate) mod recovery;
+mod sink;
 pub(crate) mod status;
 
+pub use sink::{AttachError, Pull, VideoConsumer, VideoSink, VideoUnit};
 pub use status::{
     DecoderInfo, DecoderState, DesktopView, IntervalStats, NoticeInfo, PresentedInfo, VideoInfo,
     ViewerReason, ViewerState, ViewerStats, ViewerStatus,
@@ -38,9 +40,7 @@ use crate::{
         RejectReason, Route, SessionState, StateRecord, VideoSize, ViewerMessage,
         valid_capabilities,
     },
-    security, valid_service,
-    video_sink::{VideoSink, VideoUnit},
-    wire,
+    security, valid_service, wire,
 };
 use outbound::{Barrier, Lifecycle, ModeRequest, Next, Outbound};
 use parking_lot::Mutex;
@@ -1483,7 +1483,7 @@ impl From<&LinkSample> for ViewerLink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Display, Key, protocol::StopReason, video_sink::Pull};
+    use crate::{Display, Key, protocol::StopReason};
     use tokio::io::DuplexStream;
 
     const TOKEN: &str = "0123456789012345678901234567890123456789012";
