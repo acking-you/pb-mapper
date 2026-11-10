@@ -12,9 +12,12 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use tokio::net::TcpListener;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use pb_mapper_auth::{AuthConfig, AuthRuntime};
@@ -22,7 +25,8 @@ use pb_mapper_client::sdk::{LanTransport, RelayTransport};
 use pb_mapper_core::checksum::Credential;
 use pb_mapper_core::config::ResolvedAddrs;
 use pb_mapper_server::{
-    DirectServerConfig, QuicServerConfig, RelayServerOptions, run_server_on_listener_with_options,
+    DirectServerConfig, QuicServerConfig, RelayServerOptions, ServerStatusInfo,
+    run_server_on_listener_with_options,
 };
 
 use super::tunnel::{
@@ -32,6 +36,22 @@ use super::tunnel::{
 use super::{DirectOptions, LocalServerStatus, PbMapperState, RelayTunnels};
 use crate::error::CtlError;
 use crate::events;
+
+/// How long a stopping relay has to wind down before its task is aborted.
+const SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The relay this computer runs itself, while it runs: each part exists
+/// exactly as long as the others.
+pub(super) struct EmbeddedRelay {
+    pub(super) task: JoinHandle<()>,
+    auth: AuthRuntime,
+    shutdown: CancellationToken,
+    /// Where the status read asks the relay for its figures.
+    pub(super) status_requests: UnboundedSender<oneshot::Sender<ServerStatusInfo>>,
+    pub(super) started_at: SystemTime,
+    pub(super) port: u16,
+    pub(super) quic_port: Option<u16>,
+}
 
 impl PbMapperState {
     /// Run a relay on `port`. With `quic_port` it also takes QUIC there, on
@@ -43,9 +63,9 @@ impl PbMapperState {
         quic_port: Option<u16>,
     ) -> Result<(), CtlError> {
         if self
-            .server_handle
+            .embedded_relay
             .as_ref()
-            .is_some_and(|h| !h.is_finished())
+            .is_some_and(|relay| !relay.task.is_finished())
         {
             return Err(CtlError::already_exists("Server is already running"));
         }
@@ -120,28 +140,33 @@ impl PbMapperState {
             }
         };
 
-        self.server_auth = Some(auth.clone());
-        let handle = tokio::spawn(async move {
-            if let Err(e) = run_server_on_listener_with_options(
-                listener,
-                shutdown_token_clone,
-                Some(status_receiver),
-                enable_keep_alive,
-                auth,
-                RelayServerOptions { direct, quic },
-            )
-            .await
-            {
-                tracing::error!("pb-mapper server stopped with error: {e}");
+        let task = tokio::spawn({
+            let auth = auth.clone();
+            async move {
+                if let Err(e) = run_server_on_listener_with_options(
+                    listener,
+                    shutdown_token_clone,
+                    Some(status_receiver),
+                    enable_keep_alive,
+                    auth,
+                    RelayServerOptions { direct, quic },
+                )
+                .await
+                {
+                    tracing::error!("pb-mapper server stopped with error: {e}");
+                }
             }
         });
 
-        self.server_handle = Some(handle);
-        self.server_shutdown_token = Some(shutdown_token);
-        self.server_status_sender = Some(status_sender);
-        self.server_start_time = Some(SystemTime::now());
-        self.server_port = Some(port);
-        self.server_quic_port = quic_port;
+        self.embedded_relay = Some(EmbeddedRelay {
+            task,
+            auth,
+            shutdown: shutdown_token,
+            status_requests: status_sender,
+            started_at: SystemTime::now(),
+            port,
+            quic_port,
+        });
 
         self.local_server_status.lock().record(LocalServerStatus {
             is_running: true,
@@ -157,69 +182,69 @@ impl PbMapperState {
     /// Clear what a relay that ended on its own left behind — a listener
     /// lost to another process, say — so that it can be started again.
     async fn reap_finished_server(&mut self) {
-        if !self.server_handle.as_ref().is_some_and(|h| h.is_finished()) {
+        let Some(relay) = self
+            .embedded_relay
+            .take_if(|relay| relay.task.is_finished())
+        else {
             return;
-        }
-        self.server_handle = None;
-        self.server_shutdown_token = None;
-        self.server_status_sender = None;
-        if let Some(auth) = self.server_auth.take() {
-            auth.shutdown_actor().await;
-        }
-        self.server_start_time = None;
-        self.server_port = None;
-        self.server_quic_port = None;
+        };
+        let EmbeddedRelay {
+            task,
+            auth,
+            shutdown,
+            status_requests,
+            started_at: _,
+            port: _,
+            quic_port: _,
+        } = relay;
+        drop((task, shutdown, status_requests));
+        auth.shutdown_actor().await;
         self.local_server_status.lock().status = LocalServerStatus::default();
     }
 
     pub async fn stop_server(&mut self) -> Result<(), CtlError> {
-        if let (Some(handle), Some(shutdown_token)) =
-            (self.server_handle.take(), self.server_shutdown_token.take())
-        {
-            self.server_status_sender = None;
+        let Some(EmbeddedRelay {
+            mut task,
+            auth,
+            shutdown,
+            status_requests,
+            started_at: _,
+            port: _,
+            quic_port: _,
+        }) = self.embedded_relay.take()
+        else {
+            return Err(CtlError::not_found("Server is not running"));
+        };
+        drop(status_requests);
 
-            shutdown_token.cancel();
+        shutdown.cancel();
 
-            let shutdown_timeout = tokio::time::Duration::from_secs(5);
-
-            let mut handle = handle;
-            match tokio::time::timeout(shutdown_timeout, &mut handle).await {
-                Ok(_) => {
-                    tracing::info!("Server shutdown gracefully");
-                }
-                Err(_) => {
-                    if let Some(auth) = self.server_auth.as_ref()
-                        && let Err(error) = auth.abort_actor().await
-                    {
-                        tracing::warn!(
-                            "timed out waiting for the authentication actor to drop: {error}"
-                        );
-                    }
-                    handle.abort();
-                    let _ = handle.await;
-                    tracing::warn!("Server shutdown timed out; aborted the relay task");
-                }
+        match tokio::time::timeout(SERVER_STOP_TIMEOUT, &mut task).await {
+            Ok(_) => {
+                tracing::info!("Server shutdown gracefully");
             }
-            if let Some(auth) = self.server_auth.take() {
-                auth.shutdown_actor().await;
+            Err(_) => {
+                if let Err(error) = auth.abort_actor().await {
+                    tracing::warn!(
+                        "timed out waiting for the authentication actor to drop: {error}"
+                    );
+                }
+                task.abort();
+                let _ = task.await;
+                tracing::warn!("Server shutdown timed out; aborted the relay task");
             }
-
-            self.server_start_time = None;
-            self.server_port = None;
-            self.server_quic_port = None;
-
-            self.local_server_status
-                .lock()
-                .record(LocalServerStatus::default());
-
-            self.service_runtime.clear();
-            self.client_runtime.clear();
-
-            tracing::info!("pb-mapper server stopped, all services and connections terminated");
-            Ok(())
-        } else {
-            Err(CtlError::not_found("Server is not running"))
         }
+        auth.shutdown_actor().await;
+
+        self.local_server_status
+            .lock()
+            .record(LocalServerStatus::default());
+
+        self.service_runtime.clear();
+        self.client_runtime.clear();
+
+        tracing::info!("pb-mapper server stopped, all services and connections terminated");
+        Ok(())
     }
 
     pub(super) fn finish_register(&mut self, commit: RegisterCommit) -> Result<(), CtlError> {

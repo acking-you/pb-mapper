@@ -21,16 +21,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use parking_lot::Mutex as SyncMutex;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
-use pb_mapper_auth::AuthRuntime;
 use pb_mapper_client::sdk::Client;
 use pb_mapper_core::checksum::{Credential, get_process_credential};
-use pb_mapper_server::ServerStatusInfo;
 
 use crate::error::CtlError;
 
@@ -41,6 +36,7 @@ mod stored;
 mod tunnel;
 mod views;
 
+use runtime::EmbeddedRelay;
 use status::LocalStatusCache;
 pub use status::{force_refresh_server_status, get_server_status_detail, get_service_conns};
 pub use stored::{
@@ -56,14 +52,7 @@ pub use views::{
 };
 
 pub struct PbMapperState {
-    server_handle: Option<JoinHandle<()>>,
-    server_auth: Option<AuthRuntime>,
-    server_shutdown_token: Option<CancellationToken>,
-    server_status_sender:
-        Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<ServerStatusInfo>>>,
-    server_start_time: Option<SystemTime>,
-    server_port: Option<u16>,
-    server_quic_port: Option<u16>,
+    embedded_relay: Option<EmbeddedRelay>,
     /// The client this window's own questions to the relay go through, kept
     /// for as long as the relay settings it was made from stay as they are:
     /// a QUIC connection, and the relay's resolved address, then outlive

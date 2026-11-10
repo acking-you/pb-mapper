@@ -24,6 +24,7 @@ use tokio::sync::Mutex;
 
 use pb_mapper_client::sdk::{Client, RelayTransport, RemoteId};
 
+use super::runtime::EmbeddedRelay;
 use super::stored::normalize_msg_header_key;
 use super::tunnel::{TunnelHandle, TunnelView};
 use super::{
@@ -307,15 +308,15 @@ impl PbMapperState {
     /// in.
     pub fn get_local_server_status(&self) -> LocalServerStatus {
         // One that ended on its own is not running, whatever is left of it.
-        let is_running = self
-            .server_handle
+        let Some(relay) = self
+            .embedded_relay
             .as_ref()
-            .is_some_and(|handle| !handle.is_finished());
-        if !is_running {
+            .filter(|relay| !relay.task.is_finished())
+        else {
             let status = LocalServerStatus::default();
             self.local_server_status.lock().record(status.clone());
             return status;
-        }
+        };
 
         let (status, refresh) = {
             let mut cache = self.local_server_status.lock();
@@ -324,42 +325,39 @@ impl PbMapperState {
             (cache.status.clone(), refresh)
         };
         if refresh {
-            self.refresh_local_server_status();
+            self.refresh_local_server_status(relay);
         }
         status
     }
 
-    /// Reads the embedded relay's figures into the cache, in the background;
-    /// the caller has marked the cache as refreshing.
-    fn refresh_local_server_status(&self) {
-        let sender = self.server_status_sender.clone();
+    /// Reads `relay`'s figures into the cache, in the background; the caller
+    /// has marked the cache as refreshing.
+    fn refresh_local_server_status(&self, relay: &EmbeddedRelay) {
+        let sender = relay.status_requests.clone();
         let cache = self.local_server_status.clone();
-        let start_time = self.server_start_time;
-        let port = self.server_port;
-        let quic_port = self.server_quic_port;
+        let started_at = relay.started_at;
+        let port = relay.port;
+        let quic_port = relay.quic_port;
 
         tokio::spawn(async move {
             let mut status = LocalServerStatus {
                 is_running: true,
-                port,
+                port: Some(port),
                 quic_port,
-                uptime_seconds: start_time
-                    .and_then(|ts| SystemTime::now().duration_since(ts).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
+                uptime_seconds: SystemTime::now()
+                    .duration_since(started_at)
+                    .map_or(0, |d| d.as_secs()),
                 ..LocalServerStatus::default()
             };
 
-            if let Some(sender) = sender {
-                let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
-                if sender.send(response_sender).is_ok()
-                    && let Ok(Ok(info)) =
-                        tokio::time::timeout(LOCAL_STATUS_TIMEOUT, response_receiver).await
-                {
-                    status.active_connections = info.active_connections;
-                    status.registered_services = info.registered_services;
-                    status.uptime_seconds = info.uptime_seconds;
-                }
+            let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
+            if sender.send(response_sender).is_ok()
+                && let Ok(Ok(info)) =
+                    tokio::time::timeout(LOCAL_STATUS_TIMEOUT, response_receiver).await
+            {
+                status.active_connections = info.active_connections;
+                status.registered_services = info.registered_services;
+                status.uptime_seconds = info.uptime_seconds;
             }
 
             let mut cache = cache.lock();

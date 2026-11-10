@@ -134,7 +134,7 @@ async fn ui_server_uses_its_writable_config_directory_and_reports_readiness() {
             .start_server(0, false, Some(quic_port))
             .await
             .expect("UI server should bind and initialize authentication");
-        assert!(state.server_handle.is_some());
+        assert!(state.embedded_relay.is_some());
         let status = state.get_local_server_status();
         assert!(status.is_running);
         assert_eq!(status.quic_port, Some(quic_port));

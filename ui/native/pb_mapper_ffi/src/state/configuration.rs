@@ -40,13 +40,7 @@ impl PbMapperState {
     /// directory it may never be pointed at.
     pub fn unloaded() -> Self {
         Self {
-            server_handle: None,
-            server_auth: None,
-            server_shutdown_token: None,
-            server_status_sender: None,
-            server_start_time: None,
-            server_port: None,
-            server_quic_port: None,
+            embedded_relay: None,
             relay_client: SyncMutex::new(None),
             quic_offer: None,
             service_runtime: HashMap::new(),
