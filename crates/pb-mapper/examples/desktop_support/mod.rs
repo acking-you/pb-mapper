@@ -1,7 +1,6 @@
 //! What the in-process desktop examples share: a relay in this process, a
 //! synthetic desktop an embedder could have written, and a renderer thread.
 //! Each example uses part of it.
-#![allow(dead_code)]
 
 use std::error::Error;
 use std::net::SocketAddr;
@@ -111,6 +110,7 @@ impl Default for Panel {
     }
 }
 impl Panel {
+    #[allow(dead_code, reason = "desktop_supervised never reads the inputs")]
     pub fn inputs(&self) -> Vec<Input> {
         self.inputs
             .lock()
