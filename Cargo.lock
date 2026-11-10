@@ -3109,7 +3109,6 @@ name = "pb-mapper-core"
 version = "0.11.0"
 dependencies = [
  "base64 0.23.1",
- "clap",
  "hickory-resolver",
  "parking_lot",
  "rand 0.10.2",

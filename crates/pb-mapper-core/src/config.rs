@@ -3,12 +3,11 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::ValueEnum;
 use snafu::ResultExt;
 
 use crate::error::{CfgPbServerEnvNotExistSnafu, Result};
 
-#[derive(ValueEnum, Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum StatusOp {
     /// Get active remote connection IDs.
     RemoteId,

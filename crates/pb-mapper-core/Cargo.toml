@@ -16,7 +16,6 @@ harness = false
 
 [dependencies]
 base64.workspace = true
-clap.workspace = true
 hickory-resolver.workspace = true
 parking_lot.workspace = true
 rand.workspace = true
