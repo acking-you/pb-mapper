@@ -671,4 +671,20 @@ mod tests {
             &[0x40, 0x40, 0x40, 0x40, 0x41, 0x41, 0x41, 0x41, 0x42, 0x42]
         );
     }
+
+    /// Older peers read probes by these offsets: the magic, the session id,
+    /// the nonce, whether it answers a probe, and the tag over all of that.
+    #[test]
+    fn a_probe_keeps_its_wire_layout() {
+        let secret = SessionSecret([3; 32]);
+        let bytes = packet([1; 16], [2; 16], true, secret);
+        let mut expected = b"\x10PBD\0\0\0\x01".to_vec();
+        expected.extend([1; 16]);
+        expected.extend([2; 16]);
+        expected.push(1);
+        let key = hmac::Key::new(hmac::HMAC_SHA256, &[3; 32]);
+        let tag = hmac::sign(&key, &expected);
+        expected.extend_from_slice(tag.as_ref());
+        assert_eq!(bytes.as_slice(), expected.as_slice());
+    }
 }
