@@ -84,6 +84,29 @@ fn expected_video(display: Option<&Display>, limits: VideoLimits) -> VideoSize {
     VideoSize { width, height }
 }
 
+/// Frees the viewer slot however `serve` ends, a panic or a dropped task
+/// included: the host's status forgets this session, and the display-mode
+/// retry looks, since thread C put the display back as the session ended
+/// unless it could not.
+struct SlotRelease<'a> {
+    shared: &'a Shared,
+    session: Arc<Session>,
+}
+impl Drop for SlotRelease<'_> {
+    fn drop(&mut self) {
+        let mut slot = self.shared.session.lock();
+        if slot
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(&held.session, &self.session))
+        {
+            slot.take();
+        }
+        drop(slot);
+        self.shared.restore_pending.store(true, Ordering::Release);
+        self.shared.restore.notify_one();
+    }
+}
+
 /// The listener's side of the host: every connection's handshake and session.
 pub(super) struct Acceptor {
     pub(super) tls: TlsAcceptor,
@@ -156,6 +179,10 @@ impl Acceptor {
             session: session.clone(),
             capabilities,
         });
+        let slot = SlotRelease {
+            shared: &self.shared,
+            session: session.clone(),
+        };
         let mut worker = prepared.start(
             session.shared.clone(),
             WorkerConfig {
@@ -171,18 +198,9 @@ impl Acceptor {
             async move { worker.exited().await },
         )
         .await;
-        let mut slot = self.shared.session.lock();
-        if slot
-            .as_ref()
-            .is_some_and(|held| Arc::ptr_eq(&held.session, &session))
-        {
-            slot.take();
-        }
+        // The slot frees before the permit, which a panic keeps too: `permit`
+        // was bound first, so it is dropped last.
         drop(slot);
-        // Thread C put the display back as the session ended, unless it
-        // could not: the retry looks.
-        self.shared.restore_pending.store(true, Ordering::Release);
-        self.shared.restore.notify_one();
         drop(permit);
     }
 
