@@ -399,35 +399,23 @@ async fn audit_action(
 #[cfg(test)]
 mod tests {
     use std::future::{Future, poll_fn};
+    use std::path::PathBuf;
     use std::task::Poll;
 
     use super::*;
     use pb_mapper_auth::ADMIN_KEY_ID;
     use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
 
-    fn temp_state_dir(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "pb-mapper-admin-{name}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default()
-        ))
-    }
+    const ADMIN_KEY: [u8; 32] = *b"0123456789abcdefghijklmnopqrstuv";
 
-    async fn inventory_query_rejects_rotation(connection_query: bool) {
-        let _process_credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
-            .lock()
-            .await;
-        let state_dir = temp_state_dir(if connection_query {
-            "connections"
-        } else {
-            "services"
-        });
-        let old_key = *b"0123456789abcdefghijklmnopqrstuv";
-        let new_key = *b"abcdefghijklmnopqrstuvwxyz012345";
+    /// A runtime started on a fresh state directory with [`ADMIN_KEY`], and its
+    /// administrator. Starting it this way syncs the process credential, so the
+    /// caller holds `PROCESS_CREDENTIAL_TEST_LOCK`.
+    async fn admin_runtime(name: &str) -> (AuthRuntime, AuthContext, PathBuf) {
+        let state_dir =
+            std::env::temp_dir().join(format!("pb-mapper-admin-{name}-{}", rand::random::<u64>()));
         let runtime = AuthRuntime::start(
-            old_key,
+            ADMIN_KEY,
             AuthConfig {
                 state_dir: state_dir.clone(),
                 max_temporary_keys: 4,
@@ -438,8 +426,30 @@ mod tests {
         .await
         .expect("authentication runtime should start");
         let admin = runtime
-            .authenticate_presented(ADMIN_KEY_ID, &old_key)
-            .expect("old administrator key should authenticate");
+            .authenticate_presented(ADMIN_KEY_ID, &ADMIN_KEY)
+            .expect("administrator key should authenticate");
+        (runtime, admin, state_dir)
+    }
+
+    /// Stop the runtime's actor, which releases the state directory, and
+    /// remove the directory.
+    async fn shut_down(runtime: AuthRuntime, state_dir: PathBuf) {
+        runtime.shutdown_actor().await;
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    async fn inventory_query_rejects_rotation(connection_query: bool) {
+        let _process_credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
+            .lock()
+            .await;
+        let (runtime, admin, state_dir) = admin_runtime(if connection_query {
+            "connections"
+        } else {
+            "services"
+        })
+        .await;
+        let new_key = *b"abcdefghijklmnopqrstuvwxyz012345";
         let request = if connection_query {
             AdminRequest::ConnectionList {
                 key_id: None,
@@ -496,9 +506,7 @@ mod tests {
             .expect_err("rotated administrator must not receive inventory");
         assert_eq!(failure.code, "administrator_key_rotated");
 
-        drop(runtime);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let _ = std::fs::remove_dir_all(state_dir);
+        shut_down(runtime, state_dir).await;
     }
 
     #[tokio::test]
@@ -522,23 +530,8 @@ mod tests {
         let _process_credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
             .lock()
             .await;
-        let state_dir = temp_state_dir("retire-rotation");
-        let old_key = *b"0123456789abcdefghijklmnopqrstuv";
+        let (runtime, admin, state_dir) = admin_runtime("retire-rotation").await;
         let new_key = *b"abcdefghijklmnopqrstuvwxyz012345";
-        let runtime = AuthRuntime::start(
-            old_key,
-            AuthConfig {
-                state_dir: state_dir.clone(),
-                max_temporary_keys: 4,
-                max_temporary_key_ttl: Duration::from_secs(3600),
-                legacy_protocol: LegacyProtocolPolicy::Allow,
-            },
-        )
-        .await
-        .expect("authentication runtime should start");
-        let admin = runtime
-            .authenticate_presented(ADMIN_KEY_ID, &old_key)
-            .expect("old administrator key should authenticate");
         let (manager, mut receiver) = crate::manager::task_channel(1024);
         let request_admin = admin.clone();
         let request_runtime = runtime.clone();
@@ -581,9 +574,7 @@ mod tests {
             AdminResponse::ConnectionsRetired { retired: 3 }
         ));
 
-        drop(runtime);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let _ = std::fs::remove_dir_all(state_dir);
+        shut_down(runtime, state_dir).await;
     }
 
     /// A retire name carrying the scoped-key separator never reaches the manager.
@@ -596,22 +587,7 @@ mod tests {
         let _process_credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
             .lock()
             .await;
-        let state_dir = temp_state_dir("retire-nul");
-        let key = *b"0123456789abcdefghijklmnopqrstuv";
-        let runtime = AuthRuntime::start(
-            key,
-            AuthConfig {
-                state_dir: state_dir.clone(),
-                max_temporary_keys: 4,
-                max_temporary_key_ttl: Duration::from_secs(3600),
-                legacy_protocol: LegacyProtocolPolicy::Allow,
-            },
-        )
-        .await
-        .expect("authentication runtime should start");
-        let admin = runtime
-            .authenticate_presented(ADMIN_KEY_ID, &key)
-            .expect("administrator key should authenticate");
+        let (runtime, admin, state_dir) = admin_runtime("retire-nul").await;
         let (manager, receiver) = crate::manager::task_channel(1024);
 
         let failure = execute(
@@ -632,21 +608,20 @@ mod tests {
             "a refused retirement must not reach the manager"
         );
 
-        drop(runtime);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let _ = std::fs::remove_dir_all(state_dir);
+        shut_down(runtime, state_dir).await;
     }
 
     #[tokio::test]
     async fn applied_mutation_must_not_be_reported_as_cancelled() {
-        let config = pb_mapper_auth::AuthConfig {
-            state_dir: std::env::temp_dir()
-                .join(format!("pb-audit-admin-{}", rand::random::<u64>())),
-            ..pb_mapper_auth::AuthConfig::default()
+        let state_dir =
+            std::env::temp_dir().join(format!("pb-audit-admin-{}", rand::random::<u64>()));
+        let config = AuthConfig {
+            state_dir: state_dir.clone(),
+            ..AuthConfig::default()
         };
         let auth = AuthRuntime::from_isolated_state(config).await.unwrap();
         let admin = auth
-            .authenticate_presented(pb_mapper_auth::ADMIN_KEY_ID, &auth.admin_key().unwrap())
+            .authenticate_presented(ADMIN_KEY_ID, &auth.admin_key().unwrap())
             .unwrap();
         let cancellation = admin.admin_cancellation_token().unwrap();
         let (sender, mut receiver) = crate::manager::task_channel(1);
@@ -684,7 +659,7 @@ mod tests {
         }
         cancellation.cancel();
         let result = mutation.await;
-        auth.shutdown_actor().await;
+        shut_down(auth, state_dir).await;
         assert!(
             matches!(result, Ok(1)),
             "already-applied mutation reported {result:?}"

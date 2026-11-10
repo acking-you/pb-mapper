@@ -45,6 +45,32 @@ pub struct ServerConnInfo {
     pub direct: Option<AuthContext>,
 }
 
+#[cfg(test)]
+impl ServerConnInfo {
+    /// A healthy registration last heard from now, on the stream budget it
+    /// starts with.
+    pub(crate) fn for_test(
+        conn_id: u32,
+        generation: u64,
+        protocol_version: u16,
+        direct: Option<AuthContext>,
+    ) -> Self {
+        Self {
+            conn_id: RemoteConnId::from(conn_id),
+            generation,
+            health: ServerConnHealth::Healthy,
+            need_codec: false,
+            is_datagram: false,
+            protocol_version,
+            last_rx_at: Instant::now(),
+            stream_ack_budget: pb_mapper_core::config::stream_ack_timeout(),
+            suspect_check: None,
+            retire_token: CancellationToken::new(),
+            direct,
+        }
+    }
+}
+
 pub type ServerConnMap = hashbrown::HashMap<ImutableKey, Vec<ServerConnInfo>>;
 
 /// A subscriber's stream request: the server connection it was routed to, that
@@ -437,17 +463,8 @@ mod lease_tests {
 
     fn conn(conn_id: u32, protocol_version: u16, idle_for: Duration) -> ServerConnInfo {
         ServerConnInfo {
-            direct: None,
-            conn_id: RemoteConnId::from(conn_id),
-            generation: 1,
-            health: ServerConnHealth::Healthy,
-            need_codec: false,
-            is_datagram: false,
-            protocol_version,
             last_rx_at: Instant::now() - idle_for,
-            stream_ack_budget: pb_mapper_core::config::stream_ack_timeout(),
-            suspect_check: None,
-            retire_token: CancellationToken::new(),
+            ..ServerConnInfo::for_test(conn_id, 1, protocol_version, None)
         }
     }
 

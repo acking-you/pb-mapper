@@ -327,9 +327,8 @@ async fn abort_and_wait(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routing::{ImutableKey, ServerConnHealth, ServerConnInfo, service_conn_count};
+    use crate::routing::{ImutableKey, ServerConnInfo, service_conn_count};
     use pb_mapper_auth::{AuthConfig, AuthRuntime, LegacyProtocolPolicy};
-    use pb_mapper_core::conn_id::RemoteConnId;
     use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
     use pb_mapper_protocol::command::CONTROL_PROTOCOL_V2;
     use rand::RngExt;
@@ -349,22 +348,6 @@ mod tests {
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         ))
-    }
-
-    fn server_conn_info(conn_id: u32, generation: u64) -> ServerConnInfo {
-        ServerConnInfo {
-            direct: None,
-            conn_id: RemoteConnId::from(conn_id),
-            generation,
-            health: ServerConnHealth::Healthy,
-            need_codec: false,
-            is_datagram: false,
-            protocol_version: CONTROL_PROTOCOL_V2,
-            last_rx_at: Instant::now(),
-            stream_ack_budget: pb_mapper_core::config::stream_ack_timeout(),
-            suspect_check: None,
-            retire_token: CancellationToken::new(),
-        }
     }
 
     /// A retired connection's ID must not be handed out again until its own socket
@@ -399,9 +382,15 @@ mod tests {
         let retired = router.manager.get_conn_id(std::iter::empty());
         let (conn_sender, _conn_receiver) = kanal::bounded_async(MAILBOX_CAPACITY);
         router.manager.sign_up_conn_sender(retired, conn_sender);
-        router
-            .server_conn_map
-            .insert(key.clone(), vec![server_conn_info(retired.into(), 1)]);
+        router.server_conn_map.insert(
+            key.clone(),
+            vec![ServerConnInfo::for_test(
+                retired.into(),
+                1,
+                CONTROL_PROTOCOL_V2,
+                None,
+            )],
+        );
 
         assert!(
             router
@@ -439,9 +428,15 @@ mod tests {
         router
             .manager
             .sign_up_conn_sender(replacement, replacement_sender);
-        router
-            .server_conn_map
-            .insert(key.clone(), vec![server_conn_info(replacement.into(), 2)]);
+        router.server_conn_map.insert(
+            key.clone(),
+            vec![ServerConnInfo::for_test(
+                replacement.into(),
+                2,
+                CONTROL_PROTOCOL_V2,
+                None,
+            )],
+        );
 
         assert!(
             router

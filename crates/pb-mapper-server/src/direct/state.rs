@@ -564,19 +564,12 @@ mod tests {
         let scoped = crate::compose_service_key(namespace, "echo");
         registrations.insert(
             scoped.clone(),
-            vec![crate::ServerConnInfo {
-                direct: Some(provider.clone()),
-                conn_id: 3.into(),
-                generation: 3,
-                health: ServerConnHealth::Healthy,
-                need_codec: false,
-                is_datagram: false,
-                protocol_version: 2,
-                last_rx_at: Instant::now(),
-                stream_ack_budget: Duration::from_secs(1),
-                suspect_check: None,
-                retire_token: tokio_util::sync::CancellationToken::new(),
-            }],
+            vec![crate::ServerConnInfo::for_test(
+                3,
+                3,
+                2,
+                Some(provider.clone()),
+            )],
         );
         let (provider_sender, offers) = kanal::bounded_async(8);
         let route = |id: RemoteConnId| (id == 3.into()).then(|| provider_sender.clone());
@@ -765,18 +758,8 @@ mod tests {
             Some(DirectEvent::LegacyRelay { request: 1 })
         ));
         // A newer relay-only registration must not hide an older direct one.
-        let registration = |conn_id: u32, direct: Option<AuthContext>| crate::ServerConnInfo {
-            direct,
-            conn_id: conn_id.into(),
-            generation: u64::from(conn_id),
-            health: ServerConnHealth::Healthy,
-            need_codec: false,
-            is_datagram: false,
-            protocol_version: 2,
-            last_rx_at: Instant::now(),
-            stream_ack_budget: Duration::from_secs(1),
-            suspect_check: None,
-            retire_token: tokio_util::sync::CancellationToken::new(),
+        let registration = |conn_id: u32, direct: Option<AuthContext>| {
+            crate::ServerConnInfo::for_test(conn_id, u64::from(conn_id), 2, direct)
         };
         let mut registrations = ServerConnMap::default();
         registrations.insert(

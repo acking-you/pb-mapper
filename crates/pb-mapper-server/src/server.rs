@@ -700,8 +700,10 @@ async fn handle_stream_req<T: MessageWriter>(
 
 #[cfg(test)]
 mod tests {
+    use std::future::{Future, poll_fn};
+    use std::pin::Pin;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::task::Poll;
 
     use pb_mapper_core::conn_id::RemoteConnId;
     use pb_mapper_protocol::MessageWriter;
@@ -732,7 +734,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_the_retire_token_unwinds_a_writer_blocked_mid_write() {
         let (task_tx, task_rx) = kanal::bounded_async(4);
-        let (write_tx, mut write_rx) = tokio::sync::mpsc::channel(64);
+        let (write_tx, mut write_rx) = tokio::sync::mpsc::channel(super::CONTROL_WRITE_QUEUE);
         let retire_token = CancellationToken::new();
         let key: Arc<str> = Arc::from("wedged-service");
         let conn_id = RemoteConnId::from(3);
@@ -749,12 +751,11 @@ mod tests {
 
         // Wedge the writer first. Queuing the retirement alongside it would race:
         // `select!` polls its arms in a random order, and could take the retirement
-        // before the write ever started.
+        // before the write ever started. One poll takes the pong and parks the
+        // writer inside its write.
         write_tx.try_send(b"pong".to_vec()).unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut control)
-                .await
-                .is_err(),
+            poll_once(&mut control).await.is_pending(),
             "the writer should still be inside its write"
         );
 
@@ -766,16 +767,23 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut control)
-                .await
-                .is_err(),
+            poll_once(&mut control).await.is_pending(),
             "a queued retirement was somehow observed during a blocked write"
         );
 
         retire_token.cancel();
-        tokio::time::timeout(Duration::from_millis(200), control)
-            .await
-            .expect("cancelling the retire token did not unwind the blocked writer")
-            .expect("an interrupted write should not surface as an error");
+        match poll_once(&mut control).await {
+            Poll::Ready(result) => {
+                result.expect("an interrupted write should not surface as an error")
+            }
+            Poll::Pending => {
+                panic!("cancelling the retire token did not unwind the blocked writer")
+            }
+        }
+    }
+
+    /// Poll `future` once, without waiting for it to be woken.
+    async fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+        poll_fn(|cx| Poll::Ready(Pin::new(&mut *future).poll(cx))).await
     }
 }
