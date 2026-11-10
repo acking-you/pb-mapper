@@ -11,6 +11,7 @@ use std::{
     collections::HashMap,
     io::{self, IoSliceMut},
     net::SocketAddr,
+    ops::Range,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll, ready},
@@ -29,10 +30,32 @@ use tokio::sync::{Notify, mpsc};
 
 const PROBE: &[u8; 8] = b"\x10PBD\0\0\0\x01";
 const PROBE_LEN: usize = 8 + 16 + 16 + 1 + 32;
+/// A probe after its magic: the session's id, the sender's nonce, whether it
+/// answers a probe, then the HMAC-SHA256 tag over everything before it.
+const ID: Range<usize> = 8..24;
+const NONCE: Range<usize> = 24..40;
+const KIND: usize = 40;
+const MAC: usize = 41;
+const _: () = assert!(
+    ID.start == PROBE.len()
+        && ID.end - ID.start == size_of::<SessionId>()
+        && NONCE.start == ID.end
+        && NONCE.end - NONCE.start == 16
+        && KIND == NONCE.end
+        && MAC == KIND + 1
+        && PROBE_LEN == MAC + 32,
+    "a probe's fields follow each other, and its tag ends it"
+);
 const STUN_COOKIE: [u8; 4] = [0x21, 0x12, 0xa4, 0x42];
 /// Probe replies are answered inline by the receive path; bound the work an
 /// unauthenticated sender can cause per second.
 const MAX_PROBE_REPLIES_PER_SECOND: u32 = 128;
+/// Sessions a socket keeps probe state for at once.
+const MAX_PROBE_STATES: usize = 1024;
+/// How long a STUN binding may take, retransmissions included.
+const STUN_TIMEOUT: Duration = Duration::from_millis(700);
+/// How often a STUN binding checks whether a request is due again.
+const STUN_RETRANSMIT_CHECK: Duration = Duration::from_millis(25);
 
 /// Endpoint configuration for every direct endpoint. Both ends are
 /// pb-mapper, so not advertising QUIC-bit greasing (RFC 9287) keeps the fixed
@@ -187,7 +210,15 @@ impl Socket {
         if !valid_candidate(&source) {
             return;
         }
-        let Ok(id) = <[u8; 16]>::try_from(&data[8..24]) else {
+        let Some((signed, mac)) = data.split_at_checked(MAC) else {
+            return;
+        };
+        let (Some(id), Some(nonce), Some(&kind)) =
+            (signed.get(ID), signed.get(NONCE), signed.get(KIND))
+        else {
+            return;
+        };
+        let Ok(id) = <[u8; 16]>::try_from(id) else {
             return;
         };
         let reply = {
@@ -203,10 +234,10 @@ impl Socket {
                 return;
             };
             let key = hmac::Key::new(hmac::HMAC_SHA256, &probe.key.0);
-            if hmac::verify(&key, &data[..41], &data[41..]).is_err() {
+            if hmac::verify(&key, signed, mac).is_err() {
                 return;
             }
-            match data[40] {
+            match kind {
                 0 if self.reply_allowed() => {
                     // A destination-dependent NAT may send from a different
                     // mapping than STUN found. Replying alone only validates
@@ -219,10 +250,10 @@ impl Socket {
                         probe.triggered.push(source);
                         probe.wake.notify_one();
                     }
-                    let nonce = data[24..40].try_into().unwrap_or([0; 16]);
+                    let nonce = nonce.try_into().unwrap_or([0; 16]);
                     packet(id, nonce, true, probe.key)
                 }
-                1 if data[24..40] == probe.nonce
+                1 if nonce == probe.nonce
                     && !probe.learned.iter().any(|(addr, _)| *addr == source)
                     && probe.learned.len() < MAX_CANDIDATES =>
                 {
@@ -308,7 +339,7 @@ impl Socket {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         probes.retain(|_, p| p.expires > tokio::time::Instant::now());
-        if probes.len() >= 1024 {
+        if probes.len() >= MAX_PROBE_STATES {
             return;
         }
         let nonce = pb_mapper_protocol::direct::random_session_id();
@@ -412,7 +443,7 @@ impl Socket {
             control: self.control.clone(),
             id: txid,
         };
-        let result = tokio::time::timeout(Duration::from_millis(700), async {
+        let result = tokio::time::timeout(STUN_TIMEOUT, async {
             let transmit = agent
                 .send_request(bytes, server, Instant::from_std(std::time::Instant::now()))
                 .map_err(io::Error::other)?;
@@ -439,7 +470,7 @@ impl Socket {
                             return Ok(mapped);
                         }
                     }
-                    () = tokio::time::sleep(Duration::from_millis(25)) => {
+                    () = tokio::time::sleep(STUN_RETRANSMIT_CHECK) => {
                         let now = Instant::from_std(std::time::Instant::now());
                         if let Some(transmit) = agent.poll_transmit(now) {
                             self.inner.send_to(transmit.data, transmit.to).await?;
@@ -490,12 +521,12 @@ impl UdpSender for TestSender {
 }
 fn packet(id: SessionId, nonce: [u8; 16], pong: bool, secret: SessionSecret) -> [u8; PROBE_LEN] {
     let mut bytes = [0; PROBE_LEN];
-    bytes[..8].copy_from_slice(PROBE);
-    bytes[8..24].copy_from_slice(&id);
-    bytes[24..40].copy_from_slice(&nonce);
-    bytes[40] = u8::from(pong);
-    let mac = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, &secret.0), &bytes[..41]);
-    bytes[41..].copy_from_slice(mac.as_ref());
+    bytes[..ID.start].copy_from_slice(PROBE);
+    bytes[ID].copy_from_slice(&id);
+    bytes[NONCE].copy_from_slice(&nonce);
+    bytes[KIND] = u8::from(pong);
+    let mac = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, &secret.0), &bytes[..MAC]);
+    bytes[MAC..].copy_from_slice(mac.as_ref());
     bytes
 }
 
