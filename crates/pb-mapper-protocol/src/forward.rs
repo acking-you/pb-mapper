@@ -17,7 +17,7 @@ use crate::buffer::BufferReader;
 use crate::data::DataCodec;
 use pb_mapper_core::checksum::AesKeyType;
 use pb_mapper_core::codec::{Decryptor, Encryptor};
-use pb_mapper_core::config::duration_from_env;
+use pb_mapper_core::config;
 use pb_mapper_core::error::{FwdNetworkWriteWithNormalSnafu, Result};
 use uni_stream::stream::{StreamSplit, TcpStreamImpl, UdpStreamImpl};
 use uni_stream::udp::{UdpStreamReadHalf, UdpStreamWriteHalf};
@@ -113,11 +113,6 @@ impl Tally<'_> {
     }
 }
 
-const DEFAULT_TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
-const DEFAULT_HALF_CLOSE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const PB_MAPPER_TUNNEL_IDLE_TIMEOUT: &str = "PB_MAPPER_TUNNEL_IDLE_TIMEOUT";
-const PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT: &str = "PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT";
-
 tokio::task_local! {
     static TUNNEL_IDLE_OVERRIDE: Duration;
 }
@@ -142,13 +137,8 @@ impl ForwardTimeoutConfig {
         Self {
             tunnel_idle_timeout: TUNNEL_IDLE_OVERRIDE
                 .try_with(|timeout| *timeout)
-                .unwrap_or_else(|_| {
-                    duration_from_env(PB_MAPPER_TUNNEL_IDLE_TIMEOUT, DEFAULT_TUNNEL_IDLE_TIMEOUT)
-                }),
-            half_close_idle_timeout: duration_from_env(
-                PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT,
-                DEFAULT_HALF_CLOSE_IDLE_TIMEOUT,
-            ),
+                .unwrap_or_else(|_| config::tunnel_idle_timeout()),
+            half_close_idle_timeout: config::half_close_idle_timeout(),
         }
     }
 }

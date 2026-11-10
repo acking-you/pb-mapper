@@ -202,6 +202,8 @@ pub const PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT: &str = "PB_MAPPER_CLIENT_HEALTH
 pub const PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD: &str =
     "PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD";
 pub const PB_MAPPER_LOG_FORMAT: &str = "PB_MAPPER_LOG_FORMAT";
+pub const PB_MAPPER_TUNNEL_IDLE_TIMEOUT: &str = "PB_MAPPER_TUNNEL_IDLE_TIMEOUT";
+pub const PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT: &str = "PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT";
 const DEFAULT_CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_STREAM_ACK_TIMEOUT: Duration = Duration::from_millis(300);
 const DEFAULT_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -218,6 +220,8 @@ const DEFAULT_SERVER_LEASE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_CLIENT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_CLIENT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD: usize = 3;
+const DEFAULT_TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const DEFAULT_HALF_CLOSE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_CONTROL_CONN_POOL_SIZE: usize = 16;
 const MAX_CLIENT_HEALTH_FAILURE_THRESHOLD: usize = 100;
 
@@ -491,6 +495,20 @@ pub fn client_health_failure_threshold() -> usize {
     )
 }
 
+/// How long a TCP tunnel may carry nothing in either direction before it is
+/// closed. Zero never closes it for idling.
+pub fn tunnel_idle_timeout() -> Duration {
+    duration_from_env(PB_MAPPER_TUNNEL_IDLE_TIMEOUT, DEFAULT_TUNNEL_IDLE_TIMEOUT)
+}
+
+/// How long a TCP tunnel one side has finished sending on may carry nothing
+/// more before it is closed. Zero never closes it for idling.
+pub fn half_close_idle_timeout() -> Duration {
+    duration_from_env(
+        PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT,
+        DEFAULT_HALF_CLOSE_IDLE_TIMEOUT,
+    )
+}
 /// Whether the environment asks for TCP keep-alive, from `PB_MAPPER_KEEP_ALIVE`.
 ///
 /// A default for a process to read once at startup — not something the tunnels
