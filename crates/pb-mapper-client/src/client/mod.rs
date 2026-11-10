@@ -9,7 +9,7 @@ use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use snafu::ResultExt;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -20,7 +20,7 @@ use self::health::Health;
 use self::status::get_status_scoped;
 use self::stream::{StreamSetup, handle_local_stream};
 use crate::addr::{resolve_all, resolve_tunnel_ends};
-use crate::recovery::{RecoveryTiming, jitter, transport_backoff};
+use crate::recovery::{SharedTiming, jitter, transport_backoff};
 use crate::worker_status::{StatusSink, WorkerStatus, text_sink};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{ResolvedAddrs, StatusOp};
@@ -273,7 +273,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     let mut retry_backoff = transport_backoff();
     let mut stream_tasks = JoinSet::new();
     let setup_slots = Arc::new(Semaphore::new(LOCAL_SETUPS));
-    let timing = Arc::new(Mutex::new(RecoveryTiming::default()));
+    let timing = Arc::new(SharedTiming::default());
 
     'outer: loop {
         // Listener lifetime follows the local endpoint, not a remote health
@@ -353,10 +353,10 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                     });
                 }
                 () = tokio::time::sleep_until(health.next_probe), if health.probes.is_empty() => {
-                    health.spawn_probe().await;
+                    health.spawn_probe();
                 }
                 Some(result) = health.probes.join_next() => {
-                    if health.on_probe_result(result).await.is_break() {
+                    if health.on_probe_result(result).is_break() {
                         break 'outer;
                     }
                 }

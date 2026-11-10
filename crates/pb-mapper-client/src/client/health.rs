@@ -5,14 +5,13 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use super::status::get_status_with_credential;
 use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
 use crate::endpoint::RelayEndpoint;
-use crate::recovery::{REVOKED_DIRECT_RECHECK, RecoveryTiming, jitter};
+use crate::recovery::{REVOKED_DIRECT_RECHECK, SharedTiming, jitter};
 use crate::relay::CarrierId;
 use crate::worker_status::{StatusSink, WorkerStatus};
 use pb_mapper_core::checksum::Credential;
@@ -38,7 +37,7 @@ pub(super) struct ProbeFailure {
 }
 
 impl ProbeFailure {
-    fn update_timing(&self, timing: &mut RecoveryTiming, elapsed: Duration) {
+    fn update_timing(&self, timing: &SharedTiming, elapsed: Duration) {
         if self.kind == RecoveryFailure::Timeout {
             timing.timed_out();
         } else if self.protocol_replied {
@@ -111,7 +110,7 @@ pub(super) struct Health<'a> {
     pub(super) credential: Credential,
     pub(super) diagnostics: &'a Diagnostics,
     pub(super) status: Option<&'a StatusSink>,
-    pub(super) timing: &'a Mutex<RecoveryTiming>,
+    pub(super) timing: &'a SharedTiming,
     /// Shared with the listener's own rebinds, which wait on it too.
     pub(super) retry_backoff: &'a mut RetryBackoff,
     pub(super) probes: JoinSet<ProbeOutcome>,
@@ -136,18 +135,13 @@ impl Health<'_> {
         self.retry_backoff.reset();
     }
 
-    pub(super) async fn spawn_probe(&mut self) {
+    pub(super) fn spawn_probe(&mut self) {
         self.diagnostics.attempt();
         self.diagnostics.phase(RecoveryPhase::Handshake);
         let probe_remote = self.remote_addr.clone();
         let probe_key = self.key.clone();
         let (namespace, credential) = (self.namespace, self.credential);
-        let budget = self
-            .timing
-            .lock()
-            .await
-            .timeout()
-            .min(client_health_check_timeout());
+        let budget = self.timing.timeout().min(client_health_check_timeout());
         self.probes.spawn(async move {
             let _permit = probe_remote.control_permit().await;
             let started = Instant::now();
@@ -167,7 +161,7 @@ impl Health<'_> {
 
     /// Act on a finished probe. Breaks when the relay refused for good, which
     /// ends the tunnel.
-    pub(super) async fn on_probe_result(
+    pub(super) fn on_probe_result(
         &mut self,
         result: std::result::Result<ProbeOutcome, tokio::task::JoinError>,
     ) -> ControlFlow<()> {
@@ -186,7 +180,7 @@ impl Health<'_> {
         }
         match result {
             Ok(()) => {
-                self.timing.lock().await.record(elapsed);
+                self.timing.record(elapsed);
                 self.remote_addr.protocol_succeeded();
                 self.diagnostics.succeeded(elapsed);
                 self.last_success = Some(Instant::now());
@@ -217,7 +211,7 @@ impl Health<'_> {
                 self.next_probe = Instant::now() + client_health_check_interval();
             }
             Err(failure) => {
-                failure.update_timing(&mut *self.timing.lock().await, elapsed);
+                failure.update_timing(self.timing, elapsed);
                 if failure.protocol_replied {
                     self.remote_addr.protocol_succeeded();
                     self.diagnostics.responded(elapsed);
@@ -420,7 +414,7 @@ mod recovery_tests {
     use super::*;
     #[test]
     fn absent_service_learns_response_latency_without_inflating_timeout() {
-        let mut timing = RecoveryTiming::default();
+        let timing = SharedTiming::default();
         let missing = ProbeFailure {
             reason: String::new(),
             permanent: false,
@@ -428,17 +422,17 @@ mod recovery_tests {
             protocol_replied: true,
         };
         for _ in 0..20 {
-            missing.update_timing(&mut timing, Duration::from_millis(40));
+            missing.update_timing(&timing, Duration::from_millis(40));
         }
         assert_eq!(timing.timeout(), Duration::from_secs(1));
         let refusal = ProbeFailure::transient("connection refused");
-        refusal.update_timing(&mut timing, Duration::from_millis(1));
+        refusal.update_timing(&timing, Duration::from_millis(1));
         assert_eq!(timing.timeout(), Duration::from_secs(1));
         let timeout = ProbeFailure {
             kind: RecoveryFailure::Timeout,
             ..refusal
         };
-        timeout.update_timing(&mut timing, Duration::from_secs(1));
+        timeout.update_timing(&timing, Duration::from_secs(1));
         assert_eq!(timing.timeout(), Duration::from_secs(2));
     }
 }

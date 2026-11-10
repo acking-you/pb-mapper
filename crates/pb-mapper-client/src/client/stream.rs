@@ -2,11 +2,11 @@ use crate::diagnostics::{Diagnostics, RecoveryFailure};
 use crate::endpoint::RelayEndpoint;
 use std::sync::Arc;
 
-use crate::recovery::{MIN_SUBSCRIBE_ATTEMPT, RecoveryTiming};
+use crate::recovery::{MIN_SUBSCRIBE_ATTEMPT, SharedTiming};
 use crate::relay::CarrierId;
 use pb_mapper_protocol::transport::RelayStream;
 use snafu::ResultExt;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::time::Instant;
 use tracing::{Instrument, info_span, instrument};
 
@@ -26,7 +26,7 @@ use uni_stream::stream::NetworkStream;
 
 pub(crate) struct StreamSetup {
     pub permit: OwnedSemaphorePermit,
-    pub timing: Arc<Mutex<RecoveryTiming>>,
+    pub timing: Arc<SharedTiming>,
     pub events: mpsc::Sender<bool>,
     pub diagnostics: Diagnostics,
     #[cfg(feature = "p2p")]
@@ -76,7 +76,7 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
         if let Some(prepared) = prepared {
             drop(global_permit);
             setup.diagnostics.succeeded(started.elapsed());
-            setup.timing.lock().await.record(started.elapsed());
+            setup.timing.record(started.elapsed());
             let _ = setup.events.try_send(true);
             drop(setup.permit);
             return prepared
@@ -100,7 +100,7 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
     drop(global_permit);
     remote_addr.protocol_succeeded();
     setup.diagnostics.succeeded(setup_latency);
-    setup.timing.lock().await.record(setup_latency);
+    setup.timing.record(setup_latency);
     let _ = setup.events.try_send(true);
     drop(setup.permit);
     let session = setup
@@ -156,12 +156,7 @@ impl Subscription<'_> {
         let mut retry = pb_mapper_core::timeout::RetryBackoff::default();
         loop {
             let attempt_started = Instant::now();
-            let attempt_budget = setup
-                .timing
-                .lock()
-                .await
-                .timeout()
-                .max(MIN_SUBSCRIBE_ATTEMPT);
+            let attempt_budget = setup.timing.timeout().max(MIN_SUBSCRIBE_ATTEMPT);
             let attempt_deadline = (Instant::now() + attempt_budget).min(deadline);
             wake.acknowledge();
             let mut carrier = None;
@@ -186,7 +181,7 @@ impl Subscription<'_> {
                     setup
                         .diagnostics
                         .failed(RecoveryFailure::Timeout, std::time::Duration::ZERO);
-                    setup.timing.lock().await.timed_out();
+                    setup.timing.timed_out();
                     if Instant::now() >= deadline {
                         return super::error::ControlIoTimeoutSnafu {
                             action: "subscribe",

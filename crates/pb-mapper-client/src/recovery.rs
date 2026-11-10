@@ -1,5 +1,6 @@
 //! Short, bounded setup attempts; established streams have separate lifetimes.
 
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use pb_mapper_core::config::control_io_timeout;
@@ -64,6 +65,30 @@ impl RecoveryTiming {
 
     pub(crate) fn timed_out(&mut self) {
         self.budget = (self.timeout() * 2).min(MAX_TIMEOUT);
+    }
+}
+
+/// The one [`RecoveryTiming`] a connect tunnel's probes and stream setups all
+/// learn from. Each call holds the lock for itself alone, never across an
+/// await.
+#[derive(Debug, Default)]
+pub(crate) struct SharedTiming(Mutex<RecoveryTiming>);
+
+impl SharedTiming {
+    fn timing(&self) -> MutexGuard<'_, RecoveryTiming> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timing().timeout()
+    }
+
+    pub(crate) fn record(&self, elapsed: Duration) {
+        self.timing().record(elapsed);
+    }
+
+    pub(crate) fn timed_out(&self) {
+        self.timing().timed_out();
     }
 }
 

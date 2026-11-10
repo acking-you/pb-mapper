@@ -350,7 +350,7 @@ impl Client {
         options: ConnectOptions,
     ) -> Result<(TcpStream, Connection)> {
         use crate::client::stream::{StreamSetup, handle_local_stream};
-        use tokio::sync::{Mutex, Semaphore, mpsc};
+        use tokio::sync::{Semaphore, mpsc};
         use uni_stream::stream::TcpStreamImpl;
 
         let key = key.into();
@@ -395,7 +395,7 @@ impl Client {
             let setup = StreamSetup {
                 permit,
                 events,
-                timing: Arc::new(Mutex::new(Default::default())),
+                timing: Arc::default(),
                 diagnostics: context.diagnostics,
                 #[cfg(feature = "p2p")]
                 direct,
