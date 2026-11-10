@@ -430,12 +430,17 @@ async fn display_modes_reach_only_a_viewer_that_listed_them() {
             .unwrap();
         if listed {
             tokio::time::timeout(Duration::from_secs(5), async {
-                while !shared.lane.drain().iter().any(|(command, _)| {
-                    matches!(
-                        command,
-                        LaneCommand::DisplayMode(ModeCommand::Set(set)) if *set == mode(1920, 1080)
-                    )
-                }) {
+                let mut drained = std::collections::VecDeque::new();
+                loop {
+                    shared.lane.drain_into(&mut drained);
+                    if drained.iter().any(|(command, _)| {
+                        matches!(
+                            command,
+                            LaneCommand::DisplayMode(ModeCommand::Set(set)) if *set == mode(1920, 1080)
+                        )
+                    }) {
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             })

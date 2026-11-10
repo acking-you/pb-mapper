@@ -68,6 +68,18 @@ impl Window {
             p99_us: at(99),
             max_us: self.max_wait,
         };
-        *self = Self::new(now);
+        // A new window, as `new` makes one, keeping the samples' buffers.
+        let Self {
+            started,
+            unique,
+            waits,
+            max_wait,
+            dwells,
+        } = self;
+        *started = now;
+        *unique = 0;
+        waits.clear();
+        *max_wait = 0;
+        dwells.clear();
     }
 }

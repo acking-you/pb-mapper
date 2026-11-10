@@ -28,6 +28,7 @@ use crate::{
     timer::TimerResolution,
 };
 use std::{
+    collections::VecDeque,
     io,
     sync::{
         Arc,
@@ -284,6 +285,8 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     /// A sticky backend link failure: the session ends.
     fatal: Option<String>,
     window: Window,
+    /// The lane's commands while they run, reused by every drain.
+    drained: VecDeque<(LaneCommand, Instant)>,
     hold: DragHold,
     notice_serial: u64,
     notice_until: Option<Instant>,
@@ -334,6 +337,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             stale_released: false,
             fatal: None,
             window: Window::new(now),
+            drained: VecDeque::new(),
             hold: DragHold::default(),
             notice_serial: 0,
             notice_until: None,
@@ -359,11 +363,14 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
         self.state.record.control_allowed = shared.policy.allowed();
         if shared.lane.take_overflow() {
-            for (command, _) in shared.lane.drain() {
+            let mut drained = std::mem::take(&mut self.drained);
+            shared.lane.drain_into(&mut drained);
+            for (command, _) in drained.drain(..) {
                 if let LaneCommand::Input(event) = command {
                     self.taken(&event);
                 }
             }
+            self.drained = drained;
             self.congested();
         }
         if shared.auth.lock().take_stale() {

@@ -58,8 +58,12 @@ impl InputLane {
         queued
     }
 
-    pub fn drain(&self) -> VecDeque<(LaneCommand, Instant)> {
-        std::mem::take(&mut *self.q.lock())
+    /// Replace `out`'s contents with every queued command, and give the lane
+    /// `out`'s emptied allocation: two buffers trade places, so neither side
+    /// allocates again for a lane no fuller than before.
+    pub fn drain_into(&self, out: &mut VecDeque<(LaneCommand, Instant)>) {
+        out.clear();
+        std::mem::swap(&mut *self.q.lock(), out);
     }
 
     pub fn take_overflow(&self) -> bool {
@@ -81,7 +85,8 @@ mod tests {
         assert!(!lane.push(LaneCommand::Control { enabled: true }));
         assert!(lane.take_overflow());
         assert!(!lane.take_overflow());
-        let drained = lane.drain();
+        let mut drained = VecDeque::new();
+        lane.drain_into(&mut drained);
         assert_eq!(drained.len(), LANE_CAPACITY);
         assert!(
             drained
@@ -89,9 +94,14 @@ mod tests {
                 .all(|(command, _)| matches!(command, LaneCommand::Release))
         );
         assert!(lane.push(LaneCommand::EndControl));
+        lane.drain_into(&mut drained);
         assert!(matches!(
-            lane.drain().pop_front(),
+            drained.pop_front(),
             Some((LaneCommand::EndControl, _))
         ));
+        assert!(
+            drained.is_empty(),
+            "the earlier commands were not drained again"
+        );
     }
 }

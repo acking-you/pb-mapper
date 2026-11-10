@@ -26,15 +26,21 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     /// Execute every queued command in order. False when cancelled: the rest
     /// of the lane is dropped, never executed.
     pub(super) fn drain_lane(&mut self) -> bool {
-        for (command, received) in self.shared.lane.drain() {
+        let mut drained = std::mem::take(&mut self.drained);
+        self.shared.lane.drain_into(&mut drained);
+        let mut finished = true;
+        for (command, received) in drained.drain(..) {
             if self.shared.cancel.is_cancelled() {
-                return false;
+                // The rest drop with the drain, never run.
+                finished = false;
+                break;
             }
             let now = self.clock.now();
             self.window.wait(now.saturating_duration_since(received));
             self.execute(command, now);
         }
-        true
+        self.drained = drained;
+        finished
     }
 
     fn execute(&mut self, command: LaneCommand, now: Instant) {
