@@ -145,7 +145,7 @@ fn by_name(name: &str) -> Option<(u32, HMONITOR)> {
 
 pub(crate) struct WinDesktop {
     id: u32,
-    /// The device name (`\.\DISPLAY1`), which finds the display again when
+    /// The device name (`\\.\DISPLAY1`), which finds the display again when
     /// its handle goes stale.
     name: String,
     monitor: HMONITOR,
