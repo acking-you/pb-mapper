@@ -6,6 +6,7 @@ use super::{
     *,
 };
 use crate::{Host, HostOptions, HostState, StopReason};
+use pb_mapper_core::timeout::RetryBackoff;
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{
     sync::{mpsc, oneshot},
@@ -15,6 +16,13 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 type Operation = (Command, oneshot::Sender<Result<Snapshot>>);
+
+/// How long the host waits before it starts again after a failed start or a
+/// lost capture: 1 s, doubling up to 60 s, and 1 s again once it streams or
+/// is configured anew.
+fn retry() -> RetryBackoff {
+    RetryBackoff::new(Duration::from_secs(1), Duration::from_secs(60))
+}
 
 /// A single actor owns the host and its pending start. Management requests and
 /// SCM stop can cancel network startup without waiting for relay readiness.
@@ -39,7 +47,7 @@ pub(crate) async fn run(stop: CancellationToken) -> Result<()> {
         session: None,
         message,
         retry_at: Instant::now(),
-        retry_delay: Duration::from_secs(1),
+        retry: retry(),
         capture_failure_since: None,
         persistence_failed: false,
     };
@@ -67,10 +75,10 @@ pub(crate) async fn run(stop: CancellationToken) -> Result<()> {
                         os::record_service_event("background_registered", &state.message);
                     },
                     Err(failure) => {
-                        state.message = format!("Background hosting will retry in {} s: {failure}", state.retry_delay.as_secs());
+                        let delay = state.retry.next_delay();
+                        state.message = format!("Background hosting will retry in {} s: {failure}", delay.as_secs());
                         os::record_service_event("background_start_failed", &state.message);
-                        state.retry_at = Instant::now() + state.retry_delay;
-                        state.retry_delay = (state.retry_delay * 2).min(Duration::from_secs(60));
+                        state.retry_at = Instant::now() + delay;
                     },
                 }
             },
@@ -94,7 +102,7 @@ struct Supervisor {
     session: Option<u32>,
     message: String,
     retry_at: Instant,
-    retry_delay: Duration,
+    retry: RetryBackoff,
     capture_failure_since: Option<Instant>,
     persistence_failed: bool,
 }
@@ -175,7 +183,7 @@ impl Supervisor {
                 self.saved = Some(saved);
                 self.enabled = true;
                 self.retry_at = Instant::now();
-                self.retry_delay = Duration::from_secs(1);
+                self.retry.reset();
                 if self.host.is_none() {
                     self.message = "Connecting background host".into();
                 }
@@ -311,13 +319,12 @@ impl Supervisor {
                         self.deactivate().await;
                         self.message =
                             "Desktop capture stopped; background hosting will reconnect".into();
-                        self.retry_at = Instant::now() + self.retry_delay;
-                        self.retry_delay = (self.retry_delay * 2).min(Duration::from_secs(60));
+                        self.retry_at = Instant::now() + self.retry.next_delay();
                     }
                 }
                 HostState::Streaming => {
                     self.capture_failure_since = None;
-                    self.retry_delay = Duration::from_secs(1);
+                    self.retry.reset();
                 }
                 _ => self.capture_failure_since = None,
             }
@@ -424,7 +431,7 @@ mod tests {
             session: None,
             message: String::new(),
             retry_at: Instant::now(),
-            retry_delay: Duration::from_secs(1),
+            retry: retry(),
             capture_failure_since: None,
             persistence_failed: false,
         }
