@@ -489,6 +489,10 @@ mod tests {
         std::fs::create_dir(&directory).unwrap();
         std::fs::write(directory.join(REVOKED_MARKER), b"revoked").unwrap();
         assert!(load(&directory, "owner-one").is_err());
+        // The refusal keeps the marker, so every later load refuses too, and
+        // leaves nothing else behind.
+        assert!(directory.join(REVOKED_MARKER).exists());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
     }
 
     #[tokio::test]
