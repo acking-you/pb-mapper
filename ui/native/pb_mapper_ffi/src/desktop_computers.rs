@@ -492,7 +492,7 @@ fn open<'a>(
         {
             *slot = Some(Vault::new(directory, Protection::Dpapi));
         }
-        _ => {}
+        Platform::Dpapi | Platform::Keystore => {}
     }
     slot.as_mut()
         .filter(|vault| vault.directory == directory)

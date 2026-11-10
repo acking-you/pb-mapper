@@ -411,6 +411,8 @@ fn display_mode_error(failure: DisplayModeError) -> CtlError {
             "the remote display does not offer that resolution",
         ),
         // As every hot op of a closed session.
+        DisplayModeError::Closed => (ErrorCode::Io, "desktop is disconnected"),
+        // The SDK may add a failure; until this maps it, it reads as closed.
         _ => (ErrorCode::Io, "desktop is disconnected"),
     };
     CtlError::new(code, message)
@@ -419,7 +421,12 @@ fn display_mode_error(failure: DisplayModeError) -> CtlError {
 pub(super) fn invitation_error(failure: InvitationError) -> CtlError {
     let code = match failure {
         InvitationError::SetupString => ErrorCode::SetupString,
-        _ => ErrorCode::InvalidInvitation,
+        InvitationError::Empty
+        | InvitationError::TooLarge
+        | InvitationError::Malformed
+        | InvitationError::Checksum
+        | InvitationError::UnsupportedVersion
+        | InvitationError::InvalidService => ErrorCode::InvalidInvitation,
     };
     CtlError::new(code, failure.to_string())
 }
