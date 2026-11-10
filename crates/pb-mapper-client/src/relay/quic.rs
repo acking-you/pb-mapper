@@ -579,7 +579,11 @@ async fn dial_inner(
 mod tests {
     use super::*;
 
-    #[tokio::test(start_paused = true)]
+    /// Real sockets on the real clock: a paused one jumps ahead whenever every
+    /// task waits, which is whenever a loopback packet is in flight, and fires
+    /// QUIC's handshake timers before it lands. Nothing here waits on time;
+    /// the silence is written into the entries.
+    #[tokio::test]
     async fn a_failure_retires_only_its_own_silent_carrier() {
         let (mut config, certificate) = server_config().unwrap();
         let mut transport = quinn::TransportConfig::default();
@@ -613,15 +617,17 @@ mod tests {
         }
         let addresses = ResolvedAddrs::from_candidates(vec![address]).unwrap();
         let mut selected = None;
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(1),
-                pool.connect(&addresses, Credential::Admin([1; 32]), 0, &mut selected),
-            )
-            .await
-            .is_err(),
-            "the peer offered no stream credit"
-        );
+        {
+            // Polled once and dropped: the caller's deadline, cancelling the
+            // wait for stream credit the peer never offers.
+            let connect = pool.connect(&addresses, Credential::Admin([1; 32]), 0, &mut selected);
+            let mut connect = std::pin::pin!(connect);
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(
+                connect.as_mut().poll(&mut cx).is_pending(),
+                "the peer offered no stream credit"
+            );
+        }
         let selected = selected.expect("cancellation must retain the selected carrier");
         let pooled = || {
             lock(&pool.state)
