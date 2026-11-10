@@ -4,6 +4,7 @@ use super::super::*;
 use super::{
     ADMIN_KEY_FILE, admin_key_path, atomic_write, auth_snapshot_path, auth_wal_path,
     create_new_write, encrypted_auth_state_exists, open_blob, rotation_key_path, truncate_auth_wal,
+    wal::read_wal_record,
 };
 
 pub(crate) fn read_admin_key(path: &Path) -> Result<Option<String>, AuthFailure> {
@@ -319,6 +320,8 @@ fn key_matches_existing_state(state_dir: Option<&Path>, key: &str) -> bool {
     wal_decrypts_with_key(&wal_path, &admin_key)
 }
 
+/// Whether `admin_key` opens the first record of the WAL at `path`. An empty WAL
+/// fits any key, and a zero-length record none: sealing always adds a header.
 fn wal_decrypts_with_key(path: &Path, admin_key: &AesKeyType) -> bool {
     let Ok(mut file) = File::open(path) else {
         return false;
@@ -329,16 +332,12 @@ fn wal_decrypts_with_key(path: &Path, admin_key: &AesKeyType) -> bool {
     if metadata.len() == 0 {
         return true;
     }
-    let mut length = [0_u8; 4];
-    if file.read_exact(&mut length).is_err() {
+    let mut prefix = [0_u8; 4];
+    if file.read_exact(&mut prefix).is_err() || prefix == [0; 4] {
         return false;
     }
-    let length = u32::from_be_bytes(length) as usize;
-    if length == 0 || length > 1024 * 1024 {
-        return false;
-    }
-    let mut sealed = vec![0_u8; length];
-    if file.read_exact(&mut sealed).is_err() {
+    let mut sealed = Vec::new();
+    if read_wal_record(&mut file, prefix, &mut sealed).is_err() {
         return false;
     }
     open_blob(admin_key, &sealed).is_ok()

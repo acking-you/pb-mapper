@@ -125,6 +125,32 @@ pub(crate) fn append_wal(
     Ok(())
 }
 
+/// The largest sealed record a WAL frame may announce.
+const MAX_WAL_RECORD_LEN: usize = 1024 * 1024;
+
+/// Why the record a WAL frame announces could not be read.
+pub(super) enum WalRecordError {
+    /// The length prefix announces more than `MAX_WAL_RECORD_LEN`.
+    TooLarge,
+    /// The file failed or ended before the record did.
+    Truncated(std::io::Error),
+}
+
+/// Reads the sealed record a frame's big-endian length `prefix` announces into
+/// `sealed`, replacing what it held.
+pub(super) fn read_wal_record(
+    file: &mut File,
+    prefix: [u8; 4],
+    sealed: &mut Vec<u8>,
+) -> Result<(), WalRecordError> {
+    let length = u32::from_be_bytes(prefix) as usize;
+    if length > MAX_WAL_RECORD_LEN {
+        return Err(WalRecordError::TooLarge);
+    }
+    sealed.resize(length, 0);
+    file.read_exact(sealed).map_err(WalRecordError::Truncated)
+}
+
 pub(crate) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRecord>, AuthFailure> {
     let mut file = File::open(path).map_err(|error| {
         AuthFailure::new(
@@ -134,12 +160,14 @@ pub(crate) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRec
         )
     })?;
     let mut records = Vec::new();
+    let mut sealed = Vec::new();
     loop {
+        // The first byte alone, so a clean end of file between frames is told
+        // apart from one inside a length prefix.
         let mut length = [0_u8; 4];
         match file.read(&mut length[..1]) {
             Ok(0) => break,
-            Ok(1) => {}
-            Ok(_) => unreachable!("single-byte WAL prefix read"),
+            Ok(_) => {}
             Err(error) => {
                 return Err(AuthFailure::new(
                     codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
@@ -155,21 +183,17 @@ pub(crate) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRec
                 false,
             )
         })?;
-        let length = u32::from_be_bytes(length) as usize;
-        if length > 1024 * 1024 {
-            return Err(AuthFailure::new(
+        read_wal_record(&mut file, length, &mut sealed).map_err(|error| match error {
+            WalRecordError::TooLarge => AuthFailure::new(
                 codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 "auth WAL record exceeds 1 MiB",
                 false,
-            ));
-        }
-        let mut sealed = vec![0_u8; length];
-        file.read_exact(&mut sealed).map_err(|error| {
-            AuthFailure::new(
+            ),
+            WalRecordError::Truncated(error) => AuthFailure::new(
                 codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("truncated auth WAL record: {error}"),
                 false,
-            )
+            ),
         })?;
         let plain = open_blob(admin_key, &sealed)?;
         records.push(serde_json::from_slice(&plain).map_err(|error| {
