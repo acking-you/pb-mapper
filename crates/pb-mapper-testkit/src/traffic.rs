@@ -8,8 +8,7 @@ use rand::RngExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::{Instant, timeout};
-use uni_stream::addr::ToSocketAddrs;
-use uni_stream::stream::{StreamProvider, StreamSplit};
+use uni_stream::stream::{StreamProvider, StreamSplit, TcpStreamProvider};
 use uni_stream::udp::tune_udp_socket;
 
 use crate::poll::poll_until;
@@ -26,29 +25,6 @@ pub fn tagged_echo(tag: Option<u8>, payload: &[u8]) -> Vec<u8> {
     expected.extend(tag);
     expected.extend_from_slice(payload);
     expected
-}
-
-/// Accumulates the time spent inside its scope and prints that slice.
-pub struct TimerTickGuard<'a> {
-    ins: Instant,
-    mut_duration: &'a mut Duration,
-}
-
-impl<'a> TimerTickGuard<'a> {
-    pub fn new(mut_duration: &'a mut Duration) -> Self {
-        Self {
-            ins: Instant::now(),
-            mut_duration,
-        }
-    }
-}
-
-impl Drop for TimerTickGuard<'_> {
-    fn drop(&mut self) {
-        let duration = Instant::now() - self.ins;
-        *self.mut_duration += duration;
-        println!("duration:{duration:?}");
-    }
 }
 
 pub async fn connected_udp_socket(addr: SocketAddr) -> UdpSocket {
@@ -141,30 +117,25 @@ pub async fn run_udp_datagram_echo(addr: SocketAddr, rounds: usize, burst: usize
     }
 }
 
-/// Round-trip `times` × 10 random payloads over one stream and assert each echo.
+/// Round-trip `rounds` × 10 random payloads as frames over one stream and
+/// assert each echo.
 ///
 /// This frames its payloads, so the echo server must be byte-transparent — an
 /// echo tag would shift every frame header by a byte. Use [`run_raw_tcp_echo`]
 /// for a tagged tunnel.
-pub async fn run_echo_delay<P: StreamProvider, A: ToSocketAddrs + Send>(addr: A, times: usize) {
-    let mut stream = P::from_addr(addr).await.unwrap();
+pub async fn run_framed_tcp_echo(addr: SocketAddr, rounds: usize) {
+    let mut stream = TcpStreamProvider::from_addr(addr).await.unwrap();
     let (mut reader, mut writer) = stream.split();
     let mut reader = NormalMessageReader::new(&mut reader);
     let mut writer = NormalMessageWriter::new(&mut writer);
-    let mut duration = Duration::default();
-    for _ in 0..times {
+    for _ in 0..rounds {
         let expected = gen_random_msg(2000);
         for _ in 0..10 {
-            let msg = {
-                let _guard = TimerTickGuard::new(&mut duration);
-                writer.write_msg(&expected).await.unwrap();
-                reader.read_msg().await.unwrap()
-            };
-
+            writer.write_msg(&expected).await.unwrap();
+            let msg = reader.read_msg().await.unwrap();
             assert_eq!(expected, msg);
         }
     }
-    println!("{times} rounds of 10 random data echo delay tests each took a total of {duration:?}");
 }
 
 /// Round-trip `rounds` random payloads over one raw TCP stream, tag included.

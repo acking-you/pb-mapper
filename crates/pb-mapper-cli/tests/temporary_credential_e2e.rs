@@ -16,10 +16,9 @@ use std::time::Duration;
 
 use pb_mapper_auth::MIN_TEMP_KEY_TTL;
 use pb_mapper_testkit::{
-    Relay, Transport, TunnelSpec, admin_credential, run_echo_delay, run_raw_tcp_echo,
+    Relay, Transport, TunnelSpec, admin_credential, run_framed_tcp_echo, run_raw_tcp_echo,
     run_udp_datagram_echo,
 };
-use uni_stream::stream::TcpStreamProvider;
 
 /// A TTL long enough that nothing expires mid-test.
 const LONG_TTL: Duration = Duration::from_secs(600);
@@ -45,7 +44,7 @@ async fn assert_temporary_credential_echoes(transport: Transport, need_codec: bo
         .await;
 
     match transport {
-        Transport::Tcp => run_echo_delay::<TcpStreamProvider, _>(tunnel.addr(), 10).await,
+        Transport::Tcp => run_framed_tcp_echo(tunnel.addr(), 10).await,
         Transport::Udp => run_udp_datagram_echo(tunnel.addr(), 10, 8, None).await,
     }
 }
@@ -136,7 +135,7 @@ async fn renew_keeps_a_live_tunnel_forwarding() {
     // Past the original TTL, the renewed tunnel still carries traffic.
     tokio::time::sleep(MIN_TEMP_KEY_TTL + Duration::from_secs(2)).await;
     tunnel.wait_until_forwarding().await;
-    run_echo_delay::<TcpStreamProvider, _>(tunnel.addr(), 3).await;
+    run_framed_tcp_echo(tunnel.addr(), 3).await;
 }
 
 /// Expiry — not revocation — tears a live tunnel down.
@@ -209,5 +208,5 @@ async fn admin_registers_into_a_temporary_namespace() {
         "namespace 0 should not hold the service, saw {admin_keys:?}"
     );
 
-    run_echo_delay::<TcpStreamProvider, _>(tunnel.addr(), 3).await;
+    run_framed_tcp_echo(tunnel.addr(), 3).await;
 }

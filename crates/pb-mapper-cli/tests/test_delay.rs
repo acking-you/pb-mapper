@@ -9,8 +9,7 @@
 //! lives in `pb-mapper-testkit`, so any other test file can stand up the same
 //! flow — see `temporary_credential_e2e.rs`.
 
-use pb_mapper_testkit::{Transport, TunnelHarness, run_echo_delay, run_udp_datagram_echo};
-use uni_stream::stream::TcpStreamProvider;
+use pb_mapper_testkit::{Transport, TunnelHarness, run_framed_tcp_echo, run_udp_datagram_echo};
 
 /// Push traffic through the tunnel and assert every payload comes back byte for byte.
 ///
@@ -18,7 +17,7 @@ use uni_stream::stream::TcpStreamProvider;
 async fn assert_tunnel_echoes(transport: Transport, need_codec: bool) {
     let harness = TunnelHarness::start(transport, need_codec).await;
     match transport {
-        Transport::Tcp => run_echo_delay::<TcpStreamProvider, _>(harness.tunnel_addr(), 10).await,
+        Transport::Tcp => run_framed_tcp_echo(harness.tunnel_addr(), 10).await,
         Transport::Udp => run_udp_datagram_echo(harness.tunnel_addr(), 10, 8, None).await,
     }
 }

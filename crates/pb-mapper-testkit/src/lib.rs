@@ -9,7 +9,7 @@
 //!
 //! ```ignore
 //! let harness = TunnelHarness::start(Transport::Tcp, false).await;
-//! run_echo_delay::<TcpStreamProvider, _>(harness.tunnel_addr(), 10).await;
+//! run_framed_tcp_echo(harness.tunnel_addr(), 10).await;
 //! ```
 //!
 //! For anything the one-liner cannot express — a temporary credential, two
@@ -26,6 +26,10 @@
 //!
 //! A case that needs a slower network puts a [`shaped_link`] hop, with its
 //! delay and rate, in front of a [`Relay`] and connects through the hop.
+//!
+//! A case about the SDK rather than the CLI entry points builds its own
+//! backend with [`tcp_echo`] or [`udp_echo`], and its tunnel with
+//! [`admin_client`], [`publish`] and [`subscribe`].
 //!
 //! Everything here is a readiness probe rather than a sleep: [`Relay`] polls the
 //! `Keys` status to see a registration, and [`Tunnel::start`] returns only once a
@@ -54,18 +58,19 @@ mod control;
 mod echo;
 mod poll;
 mod relay;
+mod sdk;
 mod shaped;
 mod traffic;
 mod tunnel;
 
 pub use control::{V2ControlSpec, register_v2_control};
 pub use echo::{Echo, tcp_echo, udp_echo};
-pub use relay::Relay;
+pub use relay::{Relay, loopback_direct, loopback_quic};
+pub use sdk::{admin_client, publish, subscribe};
 pub use shaped::{Shape, shaped_link};
 pub use traffic::{
-    TimerTickGuard, connected_udp_socket, gen_random_msg, probe_udp_socket, raw_tcp_probe,
-    run_echo_delay, run_raw_tcp_echo, run_udp_datagram_echo, tagged_echo,
-    wait_until_udp_socket_forwards,
+    connected_udp_socket, gen_random_msg, probe_udp_socket, raw_tcp_probe, run_framed_tcp_echo,
+    run_raw_tcp_echo, run_udp_datagram_echo, tagged_echo, wait_until_udp_socket_forwards,
 };
 pub use tunnel::{Tunnel, TunnelHarness, TunnelSpec};
 
@@ -93,9 +98,9 @@ pub const RAW_TCP_PAYLOAD_MAX: usize = 20_000;
 
 /// Tracing plus the process credential, set up once per test process.
 ///
-/// The framing helpers in this crate ([`run_echo_delay`] and the TCP probe) write
-/// their own checksummed frames, and `checksum_for` fails closed without a
-/// process credential — so one has to exist before any case runs. It is
+/// The framing helper in this crate, [`run_framed_tcp_echo`], writes its own
+/// checksummed frames, and `checksum_for` fails closed without a process
+/// credential — so one has to exist before any case runs. It is
 /// unrelated to which credential a tunnel authenticates with: `pb-mapper`'s local
 /// side is byte-transparent, so these frames are only ever read back by the same
 /// process that wrote them.

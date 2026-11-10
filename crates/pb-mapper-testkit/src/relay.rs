@@ -1,6 +1,6 @@
 //! A `pb-mapper server` on a reserved loopback port, with its own auth state.
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use pb_mapper_auth::{
@@ -54,10 +54,7 @@ impl Relay {
             label,
             RelayServerOptions {
                 direct: None,
-                quic: Some(QuicServerConfig {
-                    listen: "127.0.0.1:0".parse().unwrap(),
-                    advertise_port: 0,
-                }),
+                quic: Some(loopback_quic()),
             },
         )
         .await
@@ -268,6 +265,25 @@ impl Drop for Relay {
         let _ = std::fs::remove_dir_all(&self.config.state_dir);
     }
 }
+
+/// Direct coordination on an ephemeral loopback port, announcing the port it bound.
+pub fn loopback_direct() -> DirectServerConfig {
+    DirectServerConfig {
+        listen: LOOPBACK_ANY_PORT,
+        advertise: LOOPBACK_ANY_PORT,
+    }
+}
+
+/// The QUIC carrier on an ephemeral loopback port, announcing the port it bound.
+pub fn loopback_quic() -> QuicServerConfig {
+    QuicServerConfig {
+        listen: LOOPBACK_ANY_PORT,
+        advertise_port: 0,
+    }
+}
+
+const LOOPBACK_ANY_PORT: SocketAddr =
+    SocketAddr::V4(std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
 
 /// The server loop over `listener`, logging the error it stops on, if any.
 fn spawn_server(
