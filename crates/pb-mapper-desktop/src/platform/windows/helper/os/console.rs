@@ -116,17 +116,20 @@ impl SessionIdentity {
     fn matches(&self, info: &WTSINFOEX_LEVEL1_W) -> bool {
         // Called on the capture/input path: compare existing UTF-16 slices,
         // allocating user/domain strings only when a login is first attested.
-        self.session == info.SessionId
-            && self.logon_time == info.LogonTime
-            && self
-                .user
+        let Self {
+            session,
+            logon_time,
+            user,
+            domain,
+        } = self;
+        *session == info.SessionId
+            && *logon_time == info.LogonTime
+            && user
                 .encode_utf16()
                 .eq(info.UserName.iter().copied().take_while(|c| *c != 0))
-            && self.domain.encode_utf16().eq(info
-                .DomainName
-                .iter()
-                .copied()
-                .take_while(|c| *c != 0))
+            && domain
+                .encode_utf16()
+                .eq(info.DomainName.iter().copied().take_while(|c| *c != 0))
     }
 }
 

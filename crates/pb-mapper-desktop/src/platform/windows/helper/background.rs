@@ -55,12 +55,19 @@ fn is_true(value: &bool) -> bool {
 }
 impl std::fmt::Debug for Options {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            server,
+            credential: _,
+            relay_transport,
+            settings,
+            lan_first,
+        } = self;
         f.debug_struct("Options")
-            .field("server", &self.server)
+            .field("server", server)
             .field("credential", &"[redacted]")
-            .field("relay_transport", &self.relay_transport)
-            .field("settings", &self.settings)
-            .field("lan_first", &self.lan_first)
+            .field("relay_transport", relay_transport)
+            .field("settings", settings)
+            .field("lan_first", lan_first)
             .finish()
     }
 }
