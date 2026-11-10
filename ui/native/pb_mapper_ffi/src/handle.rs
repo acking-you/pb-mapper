@@ -1,5 +1,4 @@
 //! FFI handle lifecycle and app directory configuration.
-#![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{CStr, c_char};
 use std::ptr;
@@ -30,10 +29,8 @@ impl Drop for PbMapperHandle {
     }
 }
 
-/// Create a new pb-mapper handle.
-///
-/// # Safety
-/// Returns a pointer that must be freed with `pb_mapper_destroy`.
+/// Create a new pb-mapper handle, to be freed with `pb_mapper_destroy`; null
+/// when no runtime could be started.
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_create() -> *mut PbMapperHandle {
     let runtime = match Runtime::new() {

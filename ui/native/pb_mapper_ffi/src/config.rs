@@ -1,5 +1,4 @@
 //! App-level configuration FFI entrypoints.
-#![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{c_char, c_int};
 
@@ -16,6 +15,10 @@ use crate::response::{err_ctl, err_null_handle, ok_data, parse_c_string};
 use crate::state::{AppConfig, RelayTunnels};
 
 /// Get current app config.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) -> *mut c_char {
     if handle.is_null() {
@@ -45,6 +48,10 @@ pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) 
 
 /// Reveal the embedded relay administrator key. This is a separate call so
 /// routine config fetches cannot leak the root secret.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_reveal_isolated_admin_key(
     handle: *mut PbMapperHandle,
@@ -82,6 +89,11 @@ pub unsafe extern "C" fn pb_mapper_reveal_isolated_admin_key(
 /// started with the other one. A tunnel on another relay or credential is
 /// in none: a start would move it onto these. Each is empty when its setting
 /// did not change.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed, and each string argument null or a NUL-terminated string
+/// that stays valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_update_config(
     handle: *mut PbMapperHandle,

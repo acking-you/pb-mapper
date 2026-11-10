@@ -72,7 +72,7 @@ pub fn emit(kind: ChangeKind, key: Option<&str>, origin: Origin) {
 /// # Safety
 /// `callback` must stay valid until it is replaced or cleared with null.
 #[unsafe(no_mangle)]
-pub extern "C" fn pb_mapper_set_change_callback(callback: Option<ChangeCallback>) {
+pub unsafe extern "C" fn pb_mapper_set_change_callback(callback: Option<ChangeCallback>) {
     CHANGE_CALLBACK.store(callback);
 }
 

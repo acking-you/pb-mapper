@@ -1,5 +1,4 @@
 //! Client connection and status FFI entrypoints.
-#![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{c_char, c_int};
 
@@ -17,6 +16,11 @@ use crate::state::{ClientConfigInfo, ClientStatusResponse};
 /// path before the relay; zero keeps them all on the relay. `port_mapping`
 /// says when to ask the router to map the direct UDP port, while direct is
 /// allowed: 0 never, 1 once punching through fails, 2 from the start.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed, and each string argument null or a NUL-terminated string
+/// that stays valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_connect_service(
     handle: *mut PbMapperHandle,
@@ -82,6 +86,11 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
 }
 
 /// Disconnect client from service.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed, and each string argument null or a NUL-terminated string
+/// that stays valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_disconnect_service(
     handle: *mut PbMapperHandle,
@@ -113,6 +122,11 @@ pub unsafe extern "C" fn pb_mapper_disconnect_service(
 }
 
 /// Delete client config (also stops client if running).
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed, and each string argument null or a NUL-terminated string
+/// that stays valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_delete_client_config(
     handle: *mut PbMapperHandle,
@@ -144,6 +158,10 @@ pub unsafe extern "C" fn pb_mapper_delete_client_config(
 }
 
 /// Get client configs list.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_client_configs_json(
     handle: *mut PbMapperHandle,
@@ -163,6 +181,11 @@ pub unsafe extern "C" fn pb_mapper_get_client_configs_json(
 }
 
 /// Get client status for a specific key.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed, and each string argument null or a NUL-terminated string
+/// that stays valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_client_status_json(
     handle: *mut PbMapperHandle,

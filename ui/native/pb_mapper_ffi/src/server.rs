@@ -3,7 +3,6 @@
 //! The remote relay's questions are not asked under the state lock: each
 //! takes it only for the settings and client it asks with, so a relay that
 //! is slow or silent holds up no other call. See `state::status`.
-#![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{c_char, c_int};
 
@@ -16,6 +15,10 @@ use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_str
 
 /// Start pb-mapper server. A nonzero `quic_port` also takes QUIC on that
 /// UDP port; zero offers none.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_start_server(
     handle: *mut PbMapperHandle,
@@ -50,6 +53,10 @@ pub unsafe extern "C" fn pb_mapper_start_server(
 }
 
 /// Stop pb-mapper server.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_stop_server(handle: *mut PbMapperHandle) -> *mut c_char {
     if handle.is_null() {
@@ -73,6 +80,10 @@ pub unsafe extern "C" fn pb_mapper_stop_server(handle: *mut PbMapperHandle) -> *
 }
 
 /// Get local server status (running/uptime).
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_local_server_status_json(
     handle: *mut PbMapperHandle,
@@ -96,6 +107,11 @@ pub unsafe extern "C" fn pb_mapper_get_local_server_status_json(
 /// The status detail's `serverMap` is a Debug dump of the whole map and is not
 /// something a UI should be parsing. This answers the same question with the
 /// protocol's own structured query, one key at a time.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed, and each string argument null or a NUL-terminated string
+/// that stays valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_service_conns_json(
     handle: *mut PbMapperHandle,
@@ -122,6 +138,10 @@ pub unsafe extern "C" fn pb_mapper_get_service_conns_json(
 }
 
 /// Get server status detail (remote server).
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_server_status_detail_json(
     handle: *mut PbMapperHandle,
@@ -142,6 +162,10 @@ pub unsafe extern "C" fn pb_mapper_get_server_status_detail_json(
 }
 
 /// Force-refresh server status (blocks until network result is available).
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_force_refresh_server_status_json(
     handle: *mut PbMapperHandle,

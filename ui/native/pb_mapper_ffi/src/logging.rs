@@ -36,9 +36,10 @@ pub(crate) fn send_log(level: c_int, message: &str) {
 /// Set log callback function.
 ///
 /// # Safety
-/// `callback` must be a valid function pointer or null to disable logging.
+/// `callback` must be null to disable logging, or a function that stays
+/// callable until it is replaced or cleared.
 #[unsafe(no_mangle)]
-pub extern "C" fn pb_mapper_set_log_callback(callback: Option<LogCallback>) {
+pub unsafe extern "C" fn pb_mapper_set_log_callback(callback: Option<LogCallback>) {
     *LOG_CALLBACK.write() = callback;
 }
 
@@ -111,10 +112,8 @@ impl tracing::field::Visit for MessageVisitor {
     }
 }
 
-/// Initialize logging with FFI callback support.
-///
-/// # Safety
-/// Can be called multiple times safely.
+/// Initialize logging with FFI callback support. Can be called more than
+/// once: only the first call installs anything.
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_init_logging() {
     use tracing_subscriber::layer::SubscriberExt;

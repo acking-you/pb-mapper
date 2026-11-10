@@ -1,5 +1,4 @@
 //! FFI interface for pb-mapper UI.
-#![allow(clippy::missing_safety_doc)]
 
 mod callback;
 mod cli;
