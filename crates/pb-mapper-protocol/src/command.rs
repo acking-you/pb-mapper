@@ -217,20 +217,28 @@ pub enum AdminRequest {
 }
 
 impl AdminRequest {
+    /// Whether the request changes relay state, and so must pass the durable
+    /// administrator-mutation replay check. Every variant is named: a new one
+    /// does not compile until someone decides.
     pub fn is_mutating(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::KeyIssue { .. }
-                | Self::NamespaceAllocate
-                | Self::KeyIssueScoped { .. }
-                | Self::KeyRenew { .. }
-                | Self::KeyRevoke { .. }
-                | Self::KeyGc
-                | Self::AuthStateReset { .. }
-                | Self::RootKeyRotate { .. }
-                | Self::LegacyProtocolSet { .. }
-                | Self::ConnectionRetire { .. }
-        )
+            | Self::NamespaceAllocate
+            | Self::KeyIssueScoped { .. }
+            | Self::KeyRenew { .. }
+            | Self::KeyRevoke { .. }
+            | Self::KeyGc
+            | Self::AuthStateReset { .. }
+            | Self::RootKeyRotate { .. }
+            | Self::LegacyProtocolSet { .. }
+            | Self::ConnectionRetire { .. } => true,
+            Self::KeyList { .. }
+            | Self::KeyShow { .. }
+            | Self::KeyReveal { .. }
+            | Self::AuthStatus
+            | Self::ConnectionList { .. }
+            | Self::ServiceList { .. } => false,
+        }
     }
 }
 
