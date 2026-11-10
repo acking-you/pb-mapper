@@ -6,7 +6,8 @@ use pb_mapper_core::checksum::AesKeyType;
 use super::frame::{Direction, V2Material, derive_material, open_v2_payload};
 use super::replay::{FirstFlightAdmit, ReplayGuard};
 use super::{
-    CONNECTION_SALT_LEN, ServerHeaderSession, ServerInitialError, SessionKeys, unix_seconds,
+    CONNECTION_SALT_LEN, CONNECTION_SALT_REPLAYED, ServerHeaderSession, ServerInitialError,
+    SessionKeys, unix_seconds,
 };
 
 pub(super) enum FirstFlightWork {
@@ -62,7 +63,7 @@ pub(super) fn evaluate_first_flight(
             match replay.admit(key_id, &fingerprint, unix_seconds()) {
                 FirstFlightAdmit::Fresh => Ok((payload, context)),
                 FirstFlightAdmit::Replayed => Err(ServerInitialError::fail_key(
-                    "connection_salt_replayed",
+                    CONNECTION_SALT_REPLAYED,
                     "protocol-v2 connection salt was already accepted",
                     true,
                     key_id,

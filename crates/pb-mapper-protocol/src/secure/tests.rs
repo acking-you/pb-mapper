@@ -254,7 +254,7 @@ async fn identical_initial_frames_are_admitted_only_once() {
             .unwrap()
             .failure
             .code,
-        "connection_salt_replayed"
+        CONNECTION_SALT_REPLAYED
     );
     assert!(
         results

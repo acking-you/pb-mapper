@@ -53,6 +53,9 @@ use replay::{ReplayGuard, replay_fingerprint};
 
 pub const PROTOCOL_V2_MAGIC: [u8; 4] = *b"PBM2";
 pub const PROTOCOL_V2_VERSION: u8 = 2;
+/// The failure code the relay answers a first flight with when it has already
+/// accepted that connection salt. Retryable: a fresh session draws a fresh salt.
+pub const CONNECTION_SALT_REPLAYED: &str = "connection_salt_replayed";
 const CONNECTION_SALT_LEN: usize = 16;
 /// What follows the magic in a first flight: version, flags, reserved, key id
 /// and connection salt.
