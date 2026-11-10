@@ -15,8 +15,6 @@
 //! Beyond that this crate holds no logic: anything worth testing belongs in the
 //! SDK, which is exercised by `crates/pb-mapper-cli/tests/sdk_e2e.rs`.
 
-#![allow(clippy::needless_pass_by_value)]
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -630,6 +628,7 @@ impl From<sdk::DirectLink> for JsDirectLink {
 /// One event of a tunnel. In `diagnostics().events` consecutive repeats fold
 /// into one entry, counted by `repeats`.
 #[napi(object)]
+#[derive(Default)]
 pub struct JsTunnelEvent {
     /// Increases with every event, a fold included: remember the highest one
     /// handled to tell which entries are new.
@@ -697,32 +696,18 @@ pub struct JsTunnelEvent {
 }
 
 impl From<sdk::TunnelEvent> for JsTunnelEvent {
+    // `TunnelEventKind` is non-exhaustive, so the `_` arm has to stay; the
+    // lint fails the build as soon as it would catch a kind this SDK has.
+    #[deny(
+        clippy::wildcard_enum_match_arm,
+        reason = "every event kind of the SDK this is built with needs its JS name"
+    )]
     fn from(event: sdk::TunnelEvent) -> Self {
         let mut js = Self {
             seq: number(event.seq),
             age_ms: number(event.age_ms),
             repeats: event.repeats,
-            kind: String::new(),
-            latency_ms: None,
-            failure: None,
-            retry_in_ms: None,
-            setup_ms: None,
-            stage: None,
-            reason: None,
-            phase: None,
-            session: None,
-            path: None,
-            duration_ms: None,
-            sent_bytes: None,
-            received_bytes: None,
-            mapping: None,
-            evidence: None,
-            link: None,
-            family: None,
-            via: None,
-            transport: None,
-            took: None,
-            preferred: None,
+            ..Self::default()
         };
         js.kind = match event.kind {
             sdk::TunnelEventKind::RelayReady { latency_ms } => {
@@ -742,7 +727,7 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 js.setup_ms = Some(number(setup_ms));
                 "direct_established"
             }
-            sdk::TunnelEventKind::DirectFallback { stage, reason, .. } => {
+            sdk::TunnelEventKind::DirectFallback { stage, reason } => {
                 js.stage = Some(stage.as_str().to_string());
                 js.reason = Some(reason.as_str().into());
                 "direct_fallback"
@@ -764,7 +749,6 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 session,
                 path,
                 link,
-                ..
             } => {
                 js.session = Some(number(session));
                 js.path = Some(path_name(path).into());
@@ -778,7 +762,6 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 duration_ms,
                 sent_bytes,
                 received_bytes,
-                ..
             } => {
                 js.session = Some(number(session));
                 js.path = Some(path_name(path).into());
@@ -795,7 +778,6 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
             sdk::TunnelEventKind::LanDetected {
                 evidence,
                 preferred,
-                ..
             } => {
                 js.evidence = Some(evidence.as_str().into());
                 js.preferred = Some(preferred);
@@ -806,7 +788,6 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 family,
                 via,
                 transport,
-                ..
             } => {
                 js.link = Some(link.as_str().into());
                 js.family = Some(family.as_str().into());
@@ -814,12 +795,12 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 js.transport = Some(transport.as_str().into());
                 "path_selected"
             }
-            sdk::TunnelEventKind::LanMissed { evidence, took, .. } => {
+            sdk::TunnelEventKind::LanMissed { evidence, took } => {
                 js.evidence = Some(evidence.as_str().into());
                 js.took = took.map(|link| link.as_str().into());
                 "lan_missed"
             }
-            sdk::TunnelEventKind::LanTcpMissed { reason, took, .. } => {
+            sdk::TunnelEventKind::LanTcpMissed { reason, took } => {
                 js.reason = Some(reason.as_str().into());
                 js.took = took.map(|transport| transport.as_str().into());
                 "lan_tcp_missed"
@@ -955,6 +936,32 @@ fn parse_transport(raw: &str) -> Result<Transport> {
         _ => Err(invalid_argument(format!(
             "transport must be \"tcp\" or \"udp\", got {raw}"
         ))),
+    }
+}
+
+fn parse_relay_transport(raw: Option<&str>) -> Result<sdk::RelayTransport> {
+    match raw.unwrap_or("tcp") {
+        "tcp" => Ok(sdk::RelayTransport::Tcp),
+        "quic" => Ok(sdk::RelayTransport::Quic),
+        _ => Err(invalid_argument("relayTransport must be tcp or quic")),
+    }
+}
+
+fn parse_path(raw: Option<&str>) -> Result<sdk::PathPolicy> {
+    match raw.unwrap_or("auto") {
+        "relay-only" => Ok(sdk::PathPolicy::RelayOnly),
+        "auto" => Ok(sdk::PathPolicy::Auto),
+        _ => Err(invalid_argument("path must be relay-only or auto")),
+    }
+}
+
+fn parse_legacy_protocol(raw: &str) -> Result<sdk::LegacyProtocol> {
+    match raw.to_ascii_lowercase().as_str() {
+        "allow" => Ok(sdk::LegacyProtocol::Allow),
+        "deny" => Ok(sdk::LegacyProtocol::Deny),
+        _ => Err(invalid_argument(
+            "legacy protocol must be \"allow\" or \"deny\"",
+        )),
     }
 }
 
@@ -1242,11 +1249,7 @@ pub struct Client {
 impl Client {
     #[napi(constructor)]
     pub fn new(config: JsClientConfig) -> Result<Self> {
-        let relay_transport = match config.relay_transport.as_deref().unwrap_or("tcp") {
-            "tcp" => sdk::RelayTransport::Tcp,
-            "quic" => sdk::RelayTransport::Quic,
-            _ => return Err(invalid_argument("relayTransport must be tcp or quic")),
-        };
+        let relay_transport = parse_relay_transport(config.relay_transport.as_deref())?;
         let inner = sdk::Client::new(ClientConfig {
             server: config.server,
             credential: config.credential,
@@ -1305,19 +1308,7 @@ impl Client {
 
     #[napi]
     pub async fn register(&self, request: JsRegisterRequest) -> Result<Registration> {
-        let options = sdk::RegisterOptions {
-            allow_direct: request.allow_direct.unwrap_or(true),
-            port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
-            lan_first: request.lan_first.unwrap_or(true),
-            lan_tcp: request.lan_tcp.unwrap_or(true),
-            ..Default::default()
-        };
-        let registration = self
-            .inner
-            .register_with_options(request.try_into()?, options)
-            .await
-            .map_err(to_napi)?;
-        Ok(Registration::new(registration))
+        register_tunnel(&self.inner, request, None).await
     }
 
     /// Publish TCP with an idle deadline in milliseconds; zero disables it.
@@ -1335,28 +1326,13 @@ impl Client {
                 "idleTimeoutMs must be a non-negative safe integer",
             ));
         }
-        let options = sdk::RegisterOptions {
-            allow_direct: request.allow_direct.unwrap_or(true),
-            idle_timeout: Some(Duration::from_millis(idle_timeout_ms as u64)),
-            port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
-            lan_first: request.lan_first.unwrap_or(true),
-            lan_tcp: request.lan_tcp.unwrap_or(true),
-        };
-        let registration = self
-            .inner
-            .register_with_options(request.try_into()?, options)
-            .await
-            .map_err(to_napi)?;
-        Ok(Registration::new(registration))
+        let idle_timeout = Duration::from_millis(idle_timeout_ms as u64);
+        register_tunnel(&self.inner, request, Some(idle_timeout)).await
     }
 
     #[napi]
     pub async fn connect(&self, request: JsConnectRequest) -> Result<Connection> {
-        let path = match request.path.as_deref().unwrap_or("auto") {
-            "relay-only" => sdk::PathPolicy::RelayOnly,
-            "auto" => sdk::PathPolicy::Auto,
-            _ => return Err(invalid_argument("path must be relay-only or auto")),
-        };
+        let path = parse_path(request.path.as_deref())?;
         let connection = self
             .inner
             .connect_with_options(
@@ -1417,6 +1393,28 @@ impl Client {
             inner: self.inner.admin().map_err(to_napi)?,
         })
     }
+}
+
+/// `register` and `registerWithIdleTimeout`, which differ only in
+/// `idle_timeout`. Every option is spelled out, so one the SDK adds needs a
+/// JS default here before this compiles.
+async fn register_tunnel(
+    client: &sdk::Client,
+    request: JsRegisterRequest,
+    idle_timeout: Option<Duration>,
+) -> Result<Registration> {
+    let options = sdk::RegisterOptions {
+        allow_direct: request.allow_direct.unwrap_or(true),
+        idle_timeout,
+        port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
+        lan_first: request.lan_first.unwrap_or(true),
+        lan_tcp: request.lan_tcp.unwrap_or(true),
+    };
+    let registration = client
+        .register_with_options(request.try_into()?, options)
+        .await
+        .map_err(to_napi)?;
+    Ok(Registration::new(registration))
 }
 
 /// The status stream behind `nextStatus`. Held per handle, so a change that
@@ -1687,15 +1685,7 @@ impl Admin {
 
     #[napi]
     pub async fn set_legacy_protocol(&self, policy: String) -> Result<()> {
-        let policy = match policy.to_ascii_lowercase().as_str() {
-            "allow" => sdk::LegacyProtocol::Allow,
-            "deny" => sdk::LegacyProtocol::Deny,
-            _ => {
-                return Err(Error::from_reason(
-                    "legacy protocol must be \"allow\" or \"deny\"",
-                ));
-            }
-        };
+        let policy = parse_legacy_protocol(&policy)?;
         self.inner
             .set_legacy_protocol(policy)
             .await
