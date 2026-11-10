@@ -679,7 +679,7 @@ fn offer_tcp(
     network: &Network,
     grant: &mut SessionGrant,
     lan: &Assessment,
-    stun: std::net::SocketAddr,
+    stun: SocketAddr,
     serve: bool,
 ) -> Option<tcp::Offered> {
     let local = lan.evidence.is_none()

@@ -20,6 +20,11 @@ use tokio_util::sync::CancellationToken;
 /// multicasts to the whole LAN).
 const RETRY_FIRST: Duration = Duration::from_secs(30);
 const RETRY_MAX: Duration = Duration::from_secs(600);
+/// How long the gateway may take to say which protocols it maps with.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long the gateway may take to release a lease, when the tunnel stops
+/// or its network changes.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(super) struct Mapping {
     address: watch::Receiver<(u64, Option<SocketAddr>)>,
@@ -61,7 +66,7 @@ impl Mapping {
             .flatten()
     }
 
-    /// Release the lease, waiting (at most 2 s) for the gateway.
+    /// Release the lease, waiting at most [`RELEASE_TIMEOUT`] for the gateway.
     pub async fn shutdown(&self) {
         self.stop.cancel();
         self.done.cancelled().await;
@@ -103,7 +108,7 @@ async fn run(
                 reporter.stage(PortMappingStage::NetworkChanged, None);
                 continue;
             },
-            result = tokio::time::timeout(Duration::from_secs(2), client.probe()) => {
+            result = tokio::time::timeout(PROBE_TIMEOUT, client.probe()) => {
                 if result.is_err() {
                     reporter.stage(PortMappingStage::Failed, Some("gateway discovery timed out".into()));
                 }
@@ -140,7 +145,7 @@ async fn run(
         if !stop.is_cancelled() {
             reporter.stage(PortMappingStage::NetworkChanged, None);
         }
-        if tokio::time::timeout(Duration::from_secs(2), client.deactivate_and_wait())
+        if tokio::time::timeout(RELEASE_TIMEOUT, client.deactivate_and_wait())
             .await
             .is_err()
         {
