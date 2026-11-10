@@ -50,21 +50,20 @@ pub struct StateChange {
 
 /// Announce a change. Cheap and non-blocking when nothing is listening.
 pub fn emit(kind: ChangeKind, key: Option<&str>, origin: Origin) {
-    let Some(callback) = CHANGE_CALLBACK.load() else {
-        return;
-    };
-    let change = StateChange {
-        kind,
-        key: key.map(|k| k.to_string()),
-        origin,
-        seq: SEQ.fetch_add(1, Ordering::SeqCst),
-    };
-    let Ok(json) = serde_json::to_string(&change) else {
-        return;
-    };
-    if let Ok(payload) = CString::new(json) {
-        callback(payload.into_raw());
-    }
+    CHANGE_CALLBACK.with(|callback| {
+        let change = StateChange {
+            kind,
+            key: key.map(|k| k.to_string()),
+            origin,
+            seq: SEQ.fetch_add(1, Ordering::SeqCst),
+        };
+        let Ok(json) = serde_json::to_string(&change) else {
+            return;
+        };
+        if let Ok(payload) = CString::new(json) {
+            callback(payload.into_raw());
+        }
+    });
 }
 
 /// Install the listener. Mirrors `pb_mapper_set_log_callback`.

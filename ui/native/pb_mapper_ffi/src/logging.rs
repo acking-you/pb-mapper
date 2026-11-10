@@ -3,7 +3,7 @@
 use std::ffi::{CString, c_char, c_int};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use parking_lot::RwLock;
+use crate::callback::CallbackSlot;
 
 /// Log callback function type.
 /// level: 0=trace, 1=debug, 2=info, 3=warn, 4=error
@@ -11,26 +11,20 @@ use parking_lot::RwLock;
 /// timestamp: unix timestamp (seconds)
 pub type LogCallback = extern "C" fn(level: c_int, message: *const c_char, timestamp: u64);
 
-/// Hold the read guard through the nonblocking NativeCallable.listener call.
-/// Clearing the callback then waits for in-flight native invocations before
-/// Dart closes the callable, including invocations from the log worker.
-static LOG_CALLBACK: RwLock<Option<LogCallback>> = RwLock::new(None);
+static LOG_CALLBACK: CallbackSlot<LogCallback> = CallbackSlot::empty();
 
 /// Internal function to send log to callback
 pub(crate) fn send_log(level: c_int, message: &str) {
-    let registered = LOG_CALLBACK.read();
-    let Some(callback) = *registered else {
-        return;
-    };
-
-    if let Ok(c_msg) = CString::new(message) {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let leaked = c_msg.into_raw();
-        callback(level, leaked, timestamp);
-    }
+    LOG_CALLBACK.with(|callback| {
+        if let Ok(c_msg) = CString::new(message) {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let leaked = c_msg.into_raw();
+            callback(level, leaked, timestamp);
+        }
+    });
 }
 
 /// Set log callback function.
@@ -40,7 +34,7 @@ pub(crate) fn send_log(level: c_int, message: &str) {
 /// callable until it is replaced or cleared.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_set_log_callback(callback: Option<LogCallback>) {
-    *LOG_CALLBACK.write() = callback;
+    LOG_CALLBACK.store(callback);
 }
 
 /// Free a string allocated by the library (e.g., from log callback or JSON result).
@@ -138,6 +132,6 @@ pub extern "C" fn pb_mapper_init_logging() {
 /// Idempotent; safe even if the application directory was never configured.
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_shutdown_logging() {
-    *LOG_CALLBACK.write() = None;
+    LOG_CALLBACK.store(None);
     crate::disk_log::shutdown();
 }
