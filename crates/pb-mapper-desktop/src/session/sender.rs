@@ -71,6 +71,9 @@ pub(super) struct Sender<'a, W> {
     session: &'a Session,
     writer: W,
     state: watch::Receiver<EngineState>,
+    /// What `state` held when B-send last looked: copied again only when it
+    /// differs.
+    engine: EngineState,
     cursor: watch::Receiver<Option<CursorReport>>,
     /// The engine state last written as `State`.
     written: Option<StateRecord>,
@@ -86,10 +89,13 @@ pub(super) struct Sender<'a, W> {
 impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     pub(super) fn new(session: &'a Session, writer: W) -> Self {
         let now = Instant::now();
+        let state = session.shared.state.subscribe();
+        let engine = state.borrow().clone();
         Self {
             session,
             writer,
-            state: session.shared.state.subscribe(),
+            state,
+            engine,
             cursor: session.shared.cursor.subscribe(),
             written: None,
             notice_serial: 0,
@@ -154,14 +160,14 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     /// One pass. Returns when to look again if nothing wakes B-send first.
     async fn pass(&mut self) -> Result<Instant, Abandoned> {
         let now = Instant::now();
-        let engine = self.write_engine().await?;
+        self.write_engine().await?;
         if now >= self.next_tick {
             self.next_tick = now + QOS_TICK;
             self.session.tick(now);
         }
         if now >= self.next_stats {
             self.next_stats = now + STATS_INTERVAL;
-            self.stats(&engine, now).await?;
+            self.stats(now).await?;
         }
         self.probe(now).await?;
         let probe_due = self.session.qos.lock().probe_due_at(now);
@@ -192,34 +198,44 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         }
     }
 
-    /// What the engine published last, after writing its `State` and its
-    /// notice, each only if new.
-    async fn write_engine(&mut self) -> Result<EngineState, Abandoned> {
-        let engine = self.state.borrow_and_update().clone();
-        self.write_state(&engine).await?;
-        if let Some((code, message, serial)) = &engine.notice
-            && *serial > self.notice_serial
+    /// Take what the engine published last into `engine`, then write its
+    /// `State` and its notice, each only if new.
+    async fn write_engine(&mut self) -> Result<(), Abandoned> {
         {
-            self.notice_serial = *serial;
-            // A display mode notice only to a viewer that reads them.
-            if *code != NoticeCode::DisplayModeFailed || self.session.display_mode {
-                let notice = HostMessage::Notice {
-                    code: *code,
-                    message: message.clone(),
-                };
-                self.send(&notice, None).await?;
+            // Compared, not `has_changed`: `wait` may already have marked a
+            // new value seen through `changed`.
+            let latest = self.state.borrow_and_update();
+            if *latest != self.engine {
+                self.engine.clone_from(&latest);
             }
         }
-        Ok(engine)
+        self.write_state().await?;
+        let notice = match &self.engine.notice {
+            Some((code, message, serial)) if *serial > self.notice_serial => {
+                self.notice_serial = *serial;
+                // A display mode notice only to a viewer that reads them.
+                (*code != NoticeCode::DisplayModeFailed || self.session.display_mode).then(|| {
+                    HostMessage::Notice {
+                        code: *code,
+                        message: message.clone(),
+                    }
+                })
+            }
+            _ => None,
+        };
+        if let Some(notice) = notice {
+            self.send(&notice, None).await?;
+        }
+        Ok(())
     }
 
     /// Write `State` when the engine's record changed, or to report a refused
     /// control request: that shows as its reason until the engine state
     /// changes.
-    async fn write_state(&mut self, engine: &EngineState) -> Result<(), Abandoned> {
-        let record = &self.session.for_viewer(&engine.record);
+    async fn write_state(&mut self) -> Result<(), Abandoned> {
+        let record = self.session.for_viewer(&self.engine.record);
         let denied = self.session.control_denied.swap(false, Ordering::AcqRel);
-        if !denied && self.written.as_ref() == Some(record) {
+        if !denied && self.written.as_ref() == Some(&*record) {
             return Ok(());
         }
         if let Some(video) = record.video
@@ -229,8 +245,8 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
                 qos.set_video_size(video.width, video.height);
             });
         }
-        self.written = Some(record.clone());
-        let mut sent = record.clone();
+        let mut sent = record.into_owned();
+        self.written = Some(sent.clone());
         if denied {
             sent.reason = Some(StateReason::ControlDenied);
             sent.message = CONTROL_DENIED.into();
@@ -382,8 +398,9 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     }
 
     /// `Stats`, which is also the host's liveness, and the 1 Hz trace.
-    async fn stats(&mut self, engine: &EngineState, now: Instant) -> Result<(), Abandoned> {
+    async fn stats(&mut self, now: Instant) -> Result<(), Abandoned> {
         let session = self.session;
+        let engine = &self.engine;
         let qos = session.qos.lock().view(now);
         let (credit, ack_queue, window) = {
             let mut credit = session.credit.lock();

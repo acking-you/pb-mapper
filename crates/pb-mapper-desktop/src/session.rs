@@ -28,6 +28,7 @@ use crate::{
 };
 use parking_lot::Mutex;
 use std::{
+    borrow::Cow,
     fmt,
     future::Future,
     sync::{
@@ -342,15 +343,19 @@ impl Session {
 
     /// What a viewer that does not read display modes is told instead: no
     /// modes, and a display still changing as the capture failure it is.
-    fn for_viewer(&self, record: &StateRecord) -> StateRecord {
-        let mut record = record.clone();
-        if !self.display_mode {
-            record.modes = None;
-            if record.reason == Some(StateReason::DisplayChanging) {
-                record.reason = Some(StateReason::CaptureFailed);
-            }
+    /// Borrowed when that changes nothing.
+    fn for_viewer<'a>(&self, record: &'a StateRecord) -> Cow<'a, StateRecord> {
+        if self.display_mode
+            || (record.modes.is_none() && record.reason != Some(StateReason::DisplayChanging))
+        {
+            return Cow::Borrowed(record);
         }
-        record
+        let mut record = record.clone();
+        record.modes = None;
+        if record.reason == Some(StateReason::DisplayChanging) {
+            record.reason = Some(StateReason::CaptureFailed);
+        }
+        Cow::Owned(record)
     }
 }
 
