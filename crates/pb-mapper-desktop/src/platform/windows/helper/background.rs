@@ -186,10 +186,11 @@ pub async fn restore_display_mode() -> Result<Snapshot> {
 }
 
 #[cfg(feature = "windows-helper")]
-#[path = "background_service.rs"]
 mod service;
 #[cfg(feature = "windows-helper")]
-pub(super) use service::{revoke_installation, run};
+mod storage;
+#[cfg(feature = "windows-helper")]
+pub(super) use {service::run, storage::revoke_installation};
 
 #[cfg(test)]
 mod tests {
