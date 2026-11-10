@@ -283,10 +283,13 @@ pub async fn run_server_on_listener_with_options(
     if let Some(task) = quic_task {
         let _ = task.await;
     }
+    // The STUN task too: its UDP port must be free again by the time this
+    // returns, for a relay restarted in the same process.
     abort_and_wait(
         [listener_handle, shutdown_handle, sweep_handle]
             .into_iter()
-            .chain(status_forward_handle),
+            .chain(status_forward_handle)
+            .chain(stun_task),
     )
     .await;
     router.security.auth().shutdown_actor().await;
@@ -491,6 +494,42 @@ mod tests {
         let restarted = AuthRuntime::start(admin_key, config).await.unwrap();
         restarted.shutdown_actor().await;
         drop(restarted);
+    }
+
+    /// A relay restarted in the same process, as the app does, must find its
+    /// direct UDP port free once the old one has returned.
+    #[cfg(feature = "p2p")]
+    #[tokio::test]
+    async fn shutdown_releases_the_direct_udp_port() {
+        let state_dir = TempPath::new("shutdown-udp");
+        let auth = AuthRuntime::from_isolated_state(AuthConfig {
+            state_dir: state_dir.to_path_buf(),
+            ..AuthConfig::default()
+        })
+        .await
+        .unwrap();
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let direct = DirectServerConfig::on_relay_port(
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            udp.local_addr().unwrap().port(),
+        );
+        drop(udp);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let shutdown = CancellationToken::new();
+        // Stops as soon as it has started.
+        shutdown.cancel();
+        run_server_on_listener_with_direct(
+            listener,
+            shutdown,
+            None,
+            false,
+            auth,
+            Some(direct.clone()),
+        )
+        .await
+        .unwrap();
+        std::net::UdpSocket::bind(direct.listen)
+            .expect("the stopped relay still holds its UDP port");
     }
 }
 
