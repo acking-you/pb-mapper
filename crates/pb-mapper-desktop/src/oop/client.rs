@@ -18,7 +18,6 @@ pub(crate) struct RemoteBackend<T: Transport> {
     /// the connector expects of its worker until then.
     caps: BackendCaps,
     context: Option<DesktopContext>,
-    video: Option<crate::VideoFormat>,
     cursor: Option<crate::CursorPosition>,
     /// The worker encoder's pending units, from the last response.
     pending: usize,
@@ -27,9 +26,6 @@ pub(crate) struct RemoteBackend<T: Transport> {
     double_click: Option<crate::DoubleClickGuard>,
     /// From the `H265` response.
     h265: Option<bool>,
-    /// From the last `DisplayModes` or `RestoreDisplayMode` response.
-    modes: Option<ModeList>,
-    restored: Option<bool>,
     /// This client changed the worker's display mode and has not asked it
     /// back since: a session's end asks only then.
     changed_mode: bool,
@@ -64,13 +60,10 @@ impl<T: Transport> RemoteBackend<T> {
             pipe: Some(pipe),
             caps,
             context: None,
-            video: None,
             cursor: None,
             pending: 0,
             double_click: None,
             h265: None,
-            modes: None,
-            restored: None,
             changed_mode: false,
             codec: crate::VideoCodec::H264,
             rate: crate::VideoRate {
@@ -92,15 +85,12 @@ impl<T: Transport> RemoteBackend<T> {
     /// input; and an error, of the kind the worker said, answers the
     /// request, not the desktop. The engine's own context checks notice a
     /// desktop change.
-    fn call(&mut self, request: Request) -> Result<Vec<u8>> {
+    fn call(&mut self, request: Request) -> Result<Answer> {
         if self.failed {
             return Err(disconnected("helper disconnected; restart desktop sharing"));
         }
-        let reports = request.reports_context();
-        let observes = request.observes_cursor();
-        let applies = matches!(request, Request::Input { .. });
         let bound = request.timeout();
-        let result = self.runtime.block_on(async {
+        let exchanged = self.runtime.block_on(async {
             tokio::time::timeout(bound, async {
                 let pipe = self
                     .pipe
@@ -109,37 +99,58 @@ impl<T: Transport> RemoteBackend<T> {
                 ipc::write_json(pipe, &request).await?;
                 let response: Response = ipc::read_json(pipe).await?;
                 let image = ipc::read_bytes(pipe, ipc::MAX_FRAME).await?;
-                self.pending = response.pending as usize;
-                if let Some(reason) = response.error {
-                    self.video = None;
-                    return Ok(Err(match response.failure {
-                        Some(kind) => BackendError::new(kind, reason).into(),
-                        None => error(reason),
-                    }));
-                }
-                if reports {
-                    self.context = response.context;
-                }
-                if observes || (applies && response.cursor.is_some()) {
-                    self.cursor = response.cursor;
-                }
-                self.video = response.video;
-                self.double_click = response.double_click.or(self.double_click);
-                if let Some(caps) = response.caps {
-                    self.caps = caps.into();
-                }
-                self.h265 = response.h265.or(self.h265);
-                self.modes = response.modes;
-                self.restored = response.restored;
-                Ok::<_, std::io::Error>(Ok(image))
+                Ok::<_, std::io::Error>((response, image))
             })
             .await
         });
-        match result {
-            Ok(Ok(result)) => result,
+        match exchanged {
+            Ok(Ok((response, image))) => self.absorb(&request, response, image),
             Ok(Err(failure)) => Err(self.fail(failure)),
             Err(elapsed) => Err(self.fail(elapsed)),
         }
+    }
+
+    /// Keep what `response` to `request` says of the worker, and hand the
+    /// caller the rest.
+    fn absorb(&mut self, request: &Request, response: Response, image: Vec<u8>) -> Result<Answer> {
+        let Response {
+            context,
+            error: reason,
+            failure,
+            video,
+            cursor,
+            pending,
+            double_click,
+            caps,
+            h265,
+            modes,
+            restored,
+        } = response;
+        self.pending = pending as usize;
+        if let Some(reason) = reason {
+            return Err(match failure {
+                Some(kind) => BackendError::new(kind, reason).into(),
+                None => error(reason),
+            });
+        }
+        if request.reports_context() {
+            self.context = context;
+        }
+        let applied = matches!(request, Request::Input { .. }) && cursor.is_some();
+        if request.observes_cursor() || applied {
+            self.cursor = cursor;
+        }
+        self.double_click = double_click.or(self.double_click);
+        if let Some(caps) = caps {
+            self.caps = caps.into();
+        }
+        self.h265 = h265.or(self.h265);
+        Ok(Answer {
+            image,
+            video,
+            modes,
+            restored,
+        })
     }
 
     fn fail(&mut self, failure: impl std::fmt::Display) -> std::io::Error {
@@ -157,7 +168,7 @@ impl<T: Transport> RemoteBackend<T> {
         keyframe: bool,
         wait: std::time::Duration,
     ) -> Result<Option<crate::EncodedFrame>> {
-        let bytes = self.call(Request::Video {
+        let answer = self.call(Request::Video {
             expected: expected.clone(),
             codec: self.codec,
             submit,
@@ -167,11 +178,24 @@ impl<T: Transport> RemoteBackend<T> {
                 .unwrap_or(u32::MAX)
                 .min(DRAIN_WAIT_MAX_MS),
         })?;
-        Ok(self
-            .video
-            .take()
-            .map(|format| crate::EncodedFrame { format, bytes }))
+        Ok(answer.video.map(|format| crate::EncodedFrame {
+            format,
+            bytes: answer.image,
+        }))
     }
+}
+
+/// What one response carried for its caller alone; what the worker holds
+/// across calls, the backend keeps.
+struct Answer {
+    /// The unit or still after the response; empty when it has none.
+    image: Vec<u8>,
+    /// In a `Video` response that drained a unit: `image`'s format.
+    video: Option<crate::VideoFormat>,
+    /// In the `DisplayModes` response.
+    modes: Option<ModeList>,
+    /// In the `RestoreDisplayMode` response.
+    restored: Option<bool>,
 }
 fn disconnected(failure: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::NotConnected, failure.to_string())
@@ -196,7 +220,7 @@ impl<T: Transport> Backend for RemoteBackend<T> {
             .ok_or_else(|| error("helper did not report desktop identity"))
     }
     fn capture(&mut self) -> Result<Vec<u8>> {
-        self.call(Request::Capture {})
+        Ok(self.call(Request::Capture {})?.image)
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         if self.failed {
@@ -287,10 +311,10 @@ impl<T: Transport> Backend for RemoteBackend<T> {
         if !self.caps.display_modes {
             return Ok(None);
         }
-        self.call(Request::DisplayModes {
+        let answer = self.call(Request::DisplayModes {
             expected: expected.clone(),
         })?;
-        Ok(self.modes.take())
+        Ok(answer.modes)
     }
     fn set_display_mode(&mut self, expected: &DesktopContext, mode: Mode) -> Result<()> {
         self.call(Request::SetDisplayMode {
@@ -306,9 +330,9 @@ impl<T: Transport> Backend for RemoteBackend<T> {
         if !self.changed_mode {
             return Ok(false);
         }
-        self.call(Request::RestoreDisplayMode {})?;
+        let answer = self.call(Request::RestoreDisplayMode {})?;
         self.changed_mode = false;
-        Ok(self.restored.take().unwrap_or(false))
+        Ok(answer.restored.unwrap_or(false))
     }
 }
 impl<T: Transport> Drop for RemoteBackend<T> {
