@@ -167,13 +167,10 @@ impl Command {
     }
 }
 
+/// The SDK's own labels, exact and case-sensitive.
 fn parse_port_mapping(raw: &str) -> Result<PortMapping, String> {
-    match raw {
-        "off" => Ok(PortMapping::Off),
-        "auto" => Ok(PortMapping::Auto),
-        "always" => Ok(PortMapping::Always),
-        _ => Err(format!("expected off, auto or always, got {raw}")),
-    }
+    raw.parse()
+        .map_err(|_| format!("expected off, auto or always, got {raw}"))
 }
 
 fn protocol(udp: bool) -> String {

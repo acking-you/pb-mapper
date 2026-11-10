@@ -193,24 +193,22 @@ fn named(tunnels: RelayTunnels) -> serde_json::Value {
     })
 }
 
-/// The LAN transport `raw` names: QUIC unless it says TCP.
+/// The LAN transport `raw` names, in any case and spacing: QUIC when empty.
 fn parse_lan_transport(raw: &str) -> Result<LanTransport, CtlError> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "quic" => Ok(LanTransport::Quic),
-        "tcp" => Ok(LanTransport::Tcp),
-        other => Err(CtlError::invalid_argument(format!(
-            "`{other}` is not a LAN transport; use quic or tcp"
-        ))),
+        "" => Ok(LanTransport::Quic),
+        other => other.parse().map_err(|_| {
+            CtlError::invalid_argument(format!("`{other}` is not a LAN transport; use quic or tcp"))
+        }),
     }
 }
 
-/// The carrier `raw` names.
+/// The carrier `raw` names, in any case and spacing: TCP when empty.
 fn parse_transport(raw: &str) -> Result<RelayTransport, CtlError> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "tcp" => Ok(RelayTransport::Tcp),
-        "quic" => Ok(RelayTransport::Quic),
-        other => Err(CtlError::invalid_argument(format!(
-            "`{other}` is not a relay carrier; use tcp or quic"
-        ))),
+        "" => Ok(RelayTransport::Tcp),
+        other => other.parse().map_err(|_| {
+            CtlError::invalid_argument(format!("`{other}` is not a relay carrier; use tcp or quic"))
+        }),
     }
 }
