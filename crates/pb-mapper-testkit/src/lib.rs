@@ -72,7 +72,7 @@ pub use control::{V2ControlSpec, register_v2_control};
 pub use echo::{Echo, tcp_echo, udp_echo};
 pub use relay::{Relay, loopback_direct, loopback_quic};
 pub use sdk::{admin_client, publish, subscribe};
-pub use shaped::{Shape, shaped_link};
+pub use shaped::{Shape, ShapedLink, shaped_link};
 pub use traffic::{
     connected_udp_socket, gen_random_msg, probe_udp_socket, raw_tcp_probe, run_framed_tcp_echo,
     run_raw_tcp_echo, run_udp_datagram_echo, tagged_echo, wait_until_udp_socket_forwards,
