@@ -250,16 +250,10 @@ impl Renderer {
     }
     /// The `index`th unit pulled, waiting for it.
     async fn unit(&self, index: usize) -> Pulled {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if let Some(unit) = self.pulled.lock().unwrap().get(index) {
-                    return *unit;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+        poll(Duration::from_secs(10), || {
+            self.pulled.lock().unwrap().get(index).copied()
         })
         .await
-        .unwrap()
     }
 }
 impl Drop for Renderer {
@@ -271,12 +265,12 @@ impl Drop for Renderer {
     }
 }
 
-async fn wait(viewer: &Viewer, condition: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
-    tokio::time::timeout(Duration::from_secs(10), async {
+/// What `probe` first returns, checking every 10 ms for up to `limit`.
+async fn poll<T>(limit: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
+    tokio::time::timeout(limit, async {
         loop {
-            let status = viewer.status();
-            if condition(&status) {
-                return status;
+            if let Some(value) = probe() {
+                return value;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -285,15 +279,18 @@ async fn wait(viewer: &Viewer, condition: impl Fn(&ViewerStatus) -> bool) -> Vie
     .unwrap()
 }
 
-/// Poll `condition` for up to `limit`.
-async fn until(limit: Duration, mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(limit, async {
-        while !condition() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+/// The viewer's status once `condition` holds, within 10 s.
+async fn wait(viewer: &Viewer, condition: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
+    poll(Duration::from_secs(10), || {
+        let status = viewer.status();
+        condition(&status).then_some(status)
     })
     .await
-    .unwrap();
+}
+
+/// Poll `condition` for up to `limit`.
+async fn until(limit: Duration, mut condition: impl FnMut() -> bool) {
+    poll(limit, || condition().then_some(())).await;
 }
 
 const SHIFT: [Input; 1] = [Input::Key {
