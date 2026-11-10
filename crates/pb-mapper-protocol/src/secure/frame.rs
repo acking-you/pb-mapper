@@ -120,8 +120,8 @@ fn validate_frame_header(
         )));
     }
     let datalen = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
-    let max_encrypted_len = max_plaintext_len.saturating_add(AES_256_GCM.tag_len() as u32);
-    if datalen < AES_256_GCM.tag_len() as u32 || datalen > max_encrypted_len {
+    let max_encrypted_len = max_plaintext_len.saturating_add(crate::CODEC_TAG_LEN);
+    if datalen < crate::CODEC_TAG_LEN || datalen > max_encrypted_len {
         return Err(protocol_error(format!(
             "protocol-v2 payload length {datalen} exceeds the {max_plaintext_len}-byte limit"
         )));
@@ -131,8 +131,7 @@ fn validate_frame_header(
 
 impl<T: AsyncReadExt + Unpin> MessageReader for V2MessageReader<'_, T> {
     async fn read_msg(&mut self) -> Result<&'_ [u8]> {
-        self.read_msg_with_limit(MAX_MSG_LEN - AES_256_GCM.tag_len() as u32)
-            .await
+        self.read_msg_with_limit(crate::MAX_PLAINTEXT_LEN).await
     }
 }
 
@@ -177,7 +176,7 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for V2MessageWriter<'_, T> {
         }
         let encrypted_len = message
             .len()
-            .checked_add(AES_256_GCM.tag_len())
+            .checked_add(crate::CODEC_TAG_LEN as usize)
             .and_then(|len| DataLenType::try_from(len).ok())
             .ok_or_else(|| protocol_error("protocol-v2 message is too large"))?;
         if encrypted_len > MAX_MSG_LEN {

@@ -33,7 +33,10 @@ use rand::RngExt;
 use super::*;
 
 const DEFAULT_NEW_STREAMS_PER_SECOND: u32 = 100;
-pub(super) const REPLAY_RECORD_LEN: usize = 40;
+/// A first-flight fingerprint: SHA-256 of the key id and connection salt.
+const FINGERPRINT_LEN: usize = ring::digest::SHA256_OUTPUT_LEN;
+/// One admission in the log: its fingerprint, then the admission time.
+pub(super) const REPLAY_RECORD_LEN: usize = FINGERPRINT_LEN + size_of::<u64>();
 pub(super) const REPLAY_COMPACT_INTERVAL_SECONDS: u64 = 60;
 
 fn first_flight_budget(window_seconds: u64) -> u32 {
@@ -64,7 +67,10 @@ pub(super) enum FirstFlightAdmit {
     Unavailable,
 }
 
-pub(super) fn replay_fingerprint(key_id: KeyId, salt: &[u8; CONNECTION_SALT_LEN]) -> [u8; 32] {
+pub(super) fn replay_fingerprint(
+    key_id: KeyId,
+    salt: &[u8; CONNECTION_SALT_LEN],
+) -> [u8; FINGERPRINT_LEN] {
     let mut input = [0_u8; 8 + CONNECTION_SALT_LEN];
     input[..8].copy_from_slice(&key_id.to_be_bytes());
     input[8..].copy_from_slice(salt);

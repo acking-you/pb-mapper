@@ -43,8 +43,12 @@ use pb_mapper_core::error::{Error, Result};
 pub const PROTOCOL_V2_MAGIC: [u8; 4] = *b"PBM2";
 pub const PROTOCOL_V2_VERSION: u8 = 2;
 const CONNECTION_SALT_LEN: usize = 16;
-const FIRST_PREFIX_REMAINDER_LEN: usize = 28;
-const FRAME_HEADER_LEN: usize = 12;
+/// What follows the magic in a first flight: version, flags, reserved, key id
+/// and connection salt.
+const FIRST_PREFIX_REMAINDER_LEN: usize =
+    size_of::<u8>() + size_of::<u8>() + size_of::<u16>() + size_of::<u64>() + CONNECTION_SALT_LEN;
+/// Counter, then ciphertext length.
+const FRAME_HEADER_LEN: usize = size_of::<u64>() + size_of::<DataLenType>();
 const DIRECTION_CLIENT_TO_SERVER: u8 = 0;
 const DIRECTION_SERVER_TO_CLIENT: u8 = 1;
 const MAX_CONNECTION_CLOCK_SKEW_SECONDS: u64 = 5 * 60;
@@ -53,8 +57,19 @@ const MAX_CONNECTION_CLOCK_SKEW_SECONDS: u64 = 5 * 60;
 /// until `insert + 2*skew`, so one generation is `2 * skew`.
 const DEFAULT_REPLAY_WINDOW_SECONDS: u64 = MAX_CONNECTION_CLOCK_SKEW_SECONDS.saturating_mul(2);
 const DEFAULT_REPLAY_FILTER_BYTES: usize = 1024 * 1024;
+const _: () = assert!(
+    DEFAULT_REPLAY_FILTER_BYTES > 0,
+    "Bloom positions are taken modulo the filter's bit count"
+);
 const MAX_INITIAL_PLAINTEXT_LEN: u32 = 64 * 1024;
-const MAX_INITIAL_CIPHERTEXT_LEN: u32 = MAX_INITIAL_PLAINTEXT_LEN + 16;
+const MAX_INITIAL_CIPHERTEXT_LEN: u32 = MAX_INITIAL_PLAINTEXT_LEN + crate::CODEC_TAG_LEN;
+/// The most bytes a first flight takes on the wire: its prefix, one frame
+/// header and the largest initial ciphertext.
+#[cfg(feature = "relay-quic")]
+pub(crate) const MAX_FIRST_FLIGHT_LEN: usize = PROTOCOL_V2_MAGIC.len()
+    + FIRST_PREFIX_REMAINDER_LEN
+    + FRAME_HEADER_LEN
+    + MAX_INITIAL_CIPHERTEXT_LEN as usize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeaderProtocol {

@@ -71,8 +71,12 @@ pub trait MessageWriter {
 
 /// Maximum plaintext payload size read from local services.
 const MAX_PLAINTEXT_LEN: DataLenType = 8 * 1024 * 1024;
-/// AES-GCM tag length (bytes). Keep in sync with ring's tag length.
+/// AES-GCM tag length (bytes).
 const CODEC_TAG_LEN: DataLenType = 16;
+const _: () = assert!(
+    CODEC_TAG_LEN as usize == ring::aead::MAX_TAG_LEN,
+    "every encrypted frame carries one ring AES-GCM tag"
+);
 /// Maximum value of `datalen` to prevent Out of Memory.
 /// For encrypted frames, the tag is appended to the payload.
 const MAX_MSG_LEN: DataLenType = MAX_PLAINTEXT_LEN + CODEC_TAG_LEN;

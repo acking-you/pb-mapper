@@ -6,7 +6,10 @@ use tokio::io::AsyncReadExt;
 use pb_mapper_core::error::MsgNetworkReadBufferdRawDataSnafu;
 
 const INIT_BUF_SIZE: usize = 8 * 1024;
-const MAX_BUF_SIZE: usize = 8 * 1024 * 1024;
+/// The largest read handed on in one piece. An encrypting forwarder sends each
+/// read as one frame, so a read holds at most what one frame the peer accepts
+/// carries.
+const MAX_BUF_SIZE: usize = crate::MAX_PLAINTEXT_LEN as usize;
 /// Buffer for situations where the length of the data to be read is not known
 pub trait DynamicSizeBuffer {
     fn need_resize(&self) -> bool;

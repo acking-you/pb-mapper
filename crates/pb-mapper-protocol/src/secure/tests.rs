@@ -955,6 +955,6 @@ fn failure_log_limiter_has_a_hard_cardinality_bound() {
     for key_id in 0..10_000 {
         limiter.record(peer, KeyId::from_u64(key_id), "invalid", 1_000);
     }
-    assert_eq!(limiter.entries.len(), 4096);
+    assert_eq!(limiter.entries.len(), limiter::MAX_TRACKED);
     assert!(limiter.overflow.is_some());
 }

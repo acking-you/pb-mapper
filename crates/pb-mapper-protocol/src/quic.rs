@@ -35,6 +35,10 @@ pub const RECEIVE_WINDOW: u32 = 16 * STREAM_RECEIVE_WINDOW;
 /// and some slack. Raised to [`RECEIVE_WINDOW`] on admission, so a flood of
 /// handshakes that never authenticate cannot pin a stream window each.
 const PRE_ADMISSION_WINDOW: u32 = 256 << 10;
+const _: () = assert!(
+    PRE_ADMISSION_WINDOW as usize >= crate::secure::MAX_FIRST_FLIGHT_LEN,
+    "an unauthenticated peer must be able to send one whole first flight"
+);
 
 fn transport(streams: u32, client: bool) -> Arc<quinn::TransportConfig> {
     let mut config = quinn::TransportConfig::default();
