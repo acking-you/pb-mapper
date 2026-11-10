@@ -68,7 +68,7 @@ impl V2Material {
     }
 }
 
-pub struct V2MessageReader<'a, T: AsyncReadExt + Unpin> {
+pub struct V2MessageReader<'a, T> {
     reader: &'a mut T,
     material: V2Material,
     key: LessSafeKey,
@@ -173,7 +173,7 @@ impl<T: AsyncReadExt + Unpin> MessageReader for V2MessageReader<'_, T> {
     }
 }
 
-pub struct V2MessageWriter<'a, T: AsyncWriteExt + Unpin> {
+pub struct V2MessageWriter<'a, T> {
     writer: &'a mut T,
     material: V2Material,
     key: LessSafeKey,

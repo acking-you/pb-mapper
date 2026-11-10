@@ -157,7 +157,7 @@ pub struct NormalForwardReader<'a, T> {
     buffered_reader: BufferReader<'a, T>,
 }
 
-impl<'a, T: AsyncReadExt + Unpin + Send> NormalForwardReader<'a, T> {
+impl<'a, T: AsyncReadExt + Unpin> NormalForwardReader<'a, T> {
     pub fn new(reader: &'a mut T) -> Self {
         Self {
             buffered_reader: BufferReader::new(reader),
@@ -165,17 +165,17 @@ impl<'a, T: AsyncReadExt + Unpin + Send> NormalForwardReader<'a, T> {
     }
 }
 
-impl<'a, T: AsyncReadExt + Unpin + Send> ForwardReader for NormalForwardReader<'a, T> {
+impl<'a, T: AsyncReadExt + Unpin> ForwardReader for NormalForwardReader<'a, T> {
     async fn read(&mut self) -> Result<&'_ [u8]> {
         self.buffered_reader.read().await
     }
 }
 
-pub struct NormalDatagramReader<'a, T: AsyncReadExt + Unpin> {
+pub struct NormalDatagramReader<'a, T> {
     reader: NormalMessageReader<'a, T>,
 }
 
-impl<'a, T: AsyncReadExt + Unpin + Send> NormalDatagramReader<'a, T> {
+impl<'a, T: AsyncReadExt + Unpin> NormalDatagramReader<'a, T> {
     pub fn new(reader: &'a mut T) -> Self {
         Self {
             reader: NormalMessageReader::new(reader),
@@ -189,7 +189,7 @@ impl<'a, T: AsyncReadExt + Unpin + Send> NormalDatagramReader<'a, T> {
     }
 }
 
-impl<'a, T: AsyncReadExt + Unpin + Send> DatagramReader for NormalDatagramReader<'a, T> {
+impl<'a, T: AsyncReadExt + Unpin> DatagramReader for NormalDatagramReader<'a, T> {
     async fn recv(&mut self) -> Result<Bytes> {
         let msg = self.reader.read_msg().await?;
         Ok(Bytes::copy_from_slice(msg))
@@ -200,7 +200,7 @@ pub struct NormalForwardWriter<'a, T> {
     writer: &'a mut T,
 }
 
-impl<'a, T: AsyncWriteExt + Unpin + Send> NormalForwardWriter<'a, T> {
+impl<'a, T: AsyncWriteExt + Unpin> NormalForwardWriter<'a, T> {
     pub fn new(writer: &'a mut T) -> Self {
         Self { writer }
     }
@@ -213,7 +213,7 @@ impl<'a, T: AsyncWriteExt + Unpin + Send> NormalForwardWriter<'a, T> {
     }
 }
 
-impl<'a, T: AsyncWriteExt + Unpin + Send> ForwardWriter for NormalForwardWriter<'a, T> {
+impl<'a, T: AsyncWriteExt + Unpin> ForwardWriter for NormalForwardWriter<'a, T> {
     async fn write(&mut self, src: &[u8]) -> Result<()> {
         self.write_inner(src).await
     }
@@ -223,11 +223,11 @@ impl<'a, T: AsyncWriteExt + Unpin + Send> ForwardWriter for NormalForwardWriter<
     }
 }
 
-pub struct NormalDatagramWriter<'a, T: AsyncWriteExt + Unpin> {
+pub struct NormalDatagramWriter<'a, T> {
     writer: NormalMessageWriter<'a, T>,
 }
 
-impl<'a, T: AsyncWriteExt + Unpin + Send> NormalDatagramWriter<'a, T> {
+impl<'a, T: AsyncWriteExt + Unpin> NormalDatagramWriter<'a, T> {
     pub fn new(writer: &'a mut T) -> Self {
         Self {
             writer: NormalMessageWriter::new(writer),
@@ -241,17 +241,15 @@ impl<'a, T: AsyncWriteExt + Unpin + Send> NormalDatagramWriter<'a, T> {
     }
 }
 
-impl<'a, T: AsyncWriteExt + Unpin + Send> DatagramWriter for NormalDatagramWriter<'a, T> {
+impl<'a, T: AsyncWriteExt + Unpin> DatagramWriter for NormalDatagramWriter<'a, T> {
     async fn send(&mut self, src: &[u8]) -> Result<()> {
         self.writer.write_msg(src).await
     }
 }
 
-pub struct CodecForwardReader<'a, T: AsyncReadExt + Unpin + Send, D: Decryptor>(
-    CodecMessageReader<'a, T, D>,
-);
+pub struct CodecForwardReader<'a, T, D>(CodecMessageReader<'a, T, D>);
 
-impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> CodecForwardReader<'a, T, D> {
+impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> CodecForwardReader<'a, T, D> {
     pub fn new(reader: &'a mut T, decryptor: D) -> Self {
         Self(CodecMessageReader::new(reader, decryptor))
     }
@@ -261,19 +259,15 @@ impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> CodecForwardReader<'a, T,
     }
 }
 
-impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> ForwardReader
-    for CodecForwardReader<'a, T, D>
-{
+impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> ForwardReader for CodecForwardReader<'a, T, D> {
     async fn read(&mut self) -> Result<&'_ [u8]> {
         self.0.read_stream().await
     }
 }
 
-pub struct CodecDatagramReader<'a, T: AsyncReadExt + Unpin + Send, D: Decryptor>(
-    CodecMessageReader<'a, T, D>,
-);
+pub struct CodecDatagramReader<'a, T, D>(CodecMessageReader<'a, T, D>);
 
-impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> CodecDatagramReader<'a, T, D> {
+impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> CodecDatagramReader<'a, T, D> {
     pub fn new(reader: &'a mut T, decryptor: D) -> Self {
         Self(CodecMessageReader::new(reader, decryptor))
     }
@@ -283,20 +277,16 @@ impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> CodecDatagramReader<'a, T
     }
 }
 
-impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> DatagramReader
-    for CodecDatagramReader<'a, T, D>
-{
+impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> DatagramReader for CodecDatagramReader<'a, T, D> {
     async fn recv(&mut self) -> Result<Bytes> {
         let msg = self.0.read_msg().await?;
         Ok(Bytes::copy_from_slice(msg))
     }
 }
 
-pub struct CodecForwardWriter<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor>(
-    CodecMessageWriter<'a, T, E>,
-);
+pub struct CodecForwardWriter<'a, T, E>(CodecMessageWriter<'a, T, E>);
 
-impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> CodecForwardWriter<'a, T, E> {
+impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> CodecForwardWriter<'a, T, E> {
     pub fn new(writer: &'a mut T, encryptor: E) -> Self {
         Self(CodecMessageWriter::new(writer, encryptor))
     }
@@ -306,9 +296,7 @@ impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> CodecForwardWriter<'a, T
     }
 }
 
-impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> ForwardWriter
-    for CodecForwardWriter<'a, T, E>
-{
+impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> ForwardWriter for CodecForwardWriter<'a, T, E> {
     async fn write(&mut self, src: &[u8]) -> Result<()> {
         self.0.write_msg(src).await
     }
@@ -318,11 +306,9 @@ impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> ForwardWriter
     }
 }
 
-pub struct CodecDatagramWriter<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor>(
-    CodecMessageWriter<'a, T, E>,
-);
+pub struct CodecDatagramWriter<'a, T, E>(CodecMessageWriter<'a, T, E>);
 
-impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> CodecDatagramWriter<'a, T, E> {
+impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> CodecDatagramWriter<'a, T, E> {
     pub fn new(writer: &'a mut T, encryptor: E) -> Self {
         Self(CodecMessageWriter::new(writer, encryptor))
     }
@@ -332,9 +318,7 @@ impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> CodecDatagramWriter<'a, 
     }
 }
 
-impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> DatagramWriter
-    for CodecDatagramWriter<'a, T, E>
-{
+impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> DatagramWriter for CodecDatagramWriter<'a, T, E> {
     async fn send(&mut self, src: &[u8]) -> Result<()> {
         let buf = src.to_vec();
         self.0.write_msg(&buf).await
@@ -694,56 +678,66 @@ pub trait StreamForward: StreamSplit + Sized {
     }
 }
 
+/// The legacy and negotiated entry points of a transport that implements
+/// [`StreamForward::forward_local_to_remote_metered`] itself: both forward
+/// through it and count nothing. The trait's defaults run the other way, for
+/// transports that implement only the legacy entry point.
+macro_rules! forward_through_metered {
+    () => {
+        fn forward_local_to_remote<'a, R, W>(
+            codec_key: Option<AesKeyType>,
+            framing_key: AesKeyType,
+            local_reader: Self::ReaderRef<'a>,
+            local_writer: Self::WriterRef<'a>,
+            remote_reader: R,
+            remote_writer: W,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
+        where
+            R: AsyncReadExt + Unpin + Send + 'a,
+            W: AsyncWriteExt + Unpin + Send + 'a,
+        {
+            Self::forward_local_to_remote_with_codec(
+                codec_key.map(DataCodec::legacy),
+                framing_key,
+                local_reader,
+                local_writer,
+                remote_reader,
+                remote_writer,
+            )
+        }
+
+        fn forward_local_to_remote_with_codec<'a, R, W>(
+            codec_key: Option<DataCodec>,
+            framing_key: AesKeyType,
+            local_reader: Self::ReaderRef<'a>,
+            local_writer: Self::WriterRef<'a>,
+            remote_reader: R,
+            remote_writer: W,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
+        where
+            R: AsyncReadExt + Unpin + Send + 'a,
+            W: AsyncWriteExt + Unpin + Send + 'a,
+        {
+            let forward = Self::forward_local_to_remote_metered(
+                codec_key,
+                framing_key,
+                local_reader,
+                local_writer,
+                remote_reader,
+                remote_writer,
+                None,
+            );
+            Box::pin(async move { forward.await.map(|_| ()) })
+        }
+    };
+}
+
 impl StreamForward for TcpStreamImpl {
     fn supports_data_v2() -> bool {
         true
     }
 
-    fn forward_local_to_remote<'a, R, W>(
-        codec_key: Option<AesKeyType>,
-        framing_key: AesKeyType,
-        local_reader: Self::ReaderRef<'a>,
-        local_writer: Self::WriterRef<'a>,
-        remote_reader: R,
-        remote_writer: W,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
-    where
-        R: AsyncReadExt + Unpin + Send + 'a,
-        W: AsyncWriteExt + Unpin + Send + 'a,
-    {
-        Self::forward_local_to_remote_with_codec(
-            codec_key.map(DataCodec::legacy),
-            framing_key,
-            local_reader,
-            local_writer,
-            remote_reader,
-            remote_writer,
-        )
-    }
-
-    fn forward_local_to_remote_with_codec<'a, R, W>(
-        codec_key: Option<DataCodec>,
-        framing_key: AesKeyType,
-        local_reader: Self::ReaderRef<'a>,
-        local_writer: Self::WriterRef<'a>,
-        remote_reader: R,
-        remote_writer: W,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
-    where
-        R: AsyncReadExt + Unpin + Send + 'a,
-        W: AsyncWriteExt + Unpin + Send + 'a,
-    {
-        let forward = Self::forward_local_to_remote_metered(
-            codec_key,
-            framing_key,
-            local_reader,
-            local_writer,
-            remote_reader,
-            remote_writer,
-            None,
-        );
-        Box::pin(async move { forward.await.map(|_| ()) })
-    }
+    forward_through_metered!();
 
     fn forward_local_to_remote_metered<'a, R, W>(
         codec_key: Option<DataCodec>,
@@ -808,51 +802,7 @@ impl StreamForward for UdpStreamImpl {
         true
     }
 
-    fn forward_local_to_remote<'a, R, W>(
-        codec_key: Option<AesKeyType>,
-        framing_key: AesKeyType,
-        local_reader: Self::ReaderRef<'a>,
-        local_writer: Self::WriterRef<'a>,
-        remote_reader: R,
-        remote_writer: W,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
-    where
-        R: AsyncReadExt + Unpin + Send + 'a,
-        W: AsyncWriteExt + Unpin + Send + 'a,
-    {
-        Self::forward_local_to_remote_with_codec(
-            codec_key.map(DataCodec::legacy),
-            framing_key,
-            local_reader,
-            local_writer,
-            remote_reader,
-            remote_writer,
-        )
-    }
-
-    fn forward_local_to_remote_with_codec<'a, R, W>(
-        codec_key: Option<DataCodec>,
-        framing_key: AesKeyType,
-        local_reader: Self::ReaderRef<'a>,
-        local_writer: Self::WriterRef<'a>,
-        remote_reader: R,
-        remote_writer: W,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
-    where
-        R: AsyncReadExt + Unpin + Send + 'a,
-        W: AsyncWriteExt + Unpin + Send + 'a,
-    {
-        let forward = Self::forward_local_to_remote_metered(
-            codec_key,
-            framing_key,
-            local_reader,
-            local_writer,
-            remote_reader,
-            remote_writer,
-            None,
-        );
-        Box::pin(async move { forward.await.map(|_| ()) })
-    }
+    forward_through_metered!();
 
     fn forward_local_to_remote_metered<'a, R, W>(
         codec_key: Option<DataCodec>,

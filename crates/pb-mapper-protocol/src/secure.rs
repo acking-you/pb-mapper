@@ -653,7 +653,7 @@ impl ServerSecurity {
     }
 }
 
-pub enum HeaderMessageReader<'a, T: AsyncReadExt + Unpin> {
+pub enum HeaderMessageReader<'a, T> {
     Legacy(CodecMessageReader<'a, T, Aes256GcmDeCodec>),
     V2(V2MessageReader<'a, T>),
 }
@@ -667,7 +667,7 @@ impl<T: AsyncReadExt + Unpin> MessageReader for HeaderMessageReader<'_, T> {
     }
 }
 
-pub enum HeaderMessageWriter<'a, T: AsyncWriteExt + Unpin> {
+pub enum HeaderMessageWriter<'a, T> {
     Legacy(CodecMessageWriter<'a, T, Aes256GcmEnCodec>),
     V2(V2MessageWriter<'a, T>),
 }

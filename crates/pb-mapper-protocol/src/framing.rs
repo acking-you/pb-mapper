@@ -98,7 +98,7 @@ async fn set_msg_len<T: AsyncWriteExt + Unpin>(
         .context(MsgNetworkWriteDatalenSnafu)
 }
 
-pub struct NormalMessageReader<'a, T: AsyncReadExt + Unpin> {
+pub struct NormalMessageReader<'a, T> {
     reader: &'a mut T,
     buffer: CommonBuffer,
     frame: frame_read::FrameRead<8>,
@@ -168,7 +168,7 @@ impl<'a, T: AsyncReadExt + Unpin> MessageReader for NormalMessageReader<'a, T> {
     }
 }
 
-pub struct NormalMessageWriter<'a, T: AsyncWriteExt> {
+pub struct NormalMessageWriter<'a, T> {
     writer: &'a mut T,
     checksum_key: Option<AesKeyType>,
 }
@@ -202,7 +202,7 @@ impl<'a, T: AsyncWriteExt + Unpin> MessageWriter for NormalMessageWriter<'a, T> 
     }
 }
 
-pub struct CodecMessageReader<'a, T: AsyncReadExt + Unpin, D: Decryptor> {
+pub struct CodecMessageReader<'a, T, D> {
     reader: NormalMessageReader<'a, T>,
     decryptor: D,
 }
@@ -256,7 +256,7 @@ impl<T: AsyncReadExt + Unpin, D: Decryptor> MessageReader for CodecMessageReader
 }
 
 /// Encrypts a copy of each message, leaving the caller's buffer untouched.
-pub struct CodecMessageWriter<'a, T: AsyncWriteExt + Unpin, E: Encryptor> {
+pub struct CodecMessageWriter<'a, T, E> {
     writer: &'a mut T,
     encryptor: E,
     /// `None` uses the process `MSG_HEADER_KEY` hash. Isolated relays must set
