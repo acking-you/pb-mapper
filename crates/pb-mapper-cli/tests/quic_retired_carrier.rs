@@ -86,7 +86,10 @@ async fn a_retired_connection_delivers_its_last_streams_tail() {
     .expect("the registration moves to a new connection");
 
     let mut rest = Vec::new();
-    tokio::time::timeout(READY_TIMEOUT, socket.read_to_end(&mut rest))
+    // What is asserted is that the tail arrives, not how fast: a debug build
+    // moves the 64 MiB in about seven seconds alone and took eleven on a
+    // loaded machine, so the bound only stops a hang.
+    tokio::time::timeout(Duration::from_secs(60), socket.read_to_end(&mut rest))
         .await
         .unwrap()
         .unwrap();
