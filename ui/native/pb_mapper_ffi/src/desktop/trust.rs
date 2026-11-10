@@ -62,13 +62,7 @@ impl Saved {
         previous: Option<&Self>,
         live_identity: Option<&HostIdentity>,
     ) -> Result<Self, CtlError> {
-        if !service.starts_with("desktop:")
-            || service.len() <= 8
-            || service.len() > 128
-            || !service
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"._-:".contains(&b))
-        {
+        if !desktop::valid_service(&service) {
             return Err(CtlError::invalid_argument("invalid desktop service"));
         }
         let identity = if let Some(identity) = live_identity {
