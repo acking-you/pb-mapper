@@ -261,6 +261,7 @@ pub fn write_durably(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pb_mapper_core::test_support::TempPath;
 
     /// XOR with a key byte and a tag: another key fails to open, as another
     /// user's DPAPI does.
@@ -299,8 +300,8 @@ mod tests {
 
     #[test]
     fn a_grant_round_trips_sealed_in_its_scope() {
-        let directory = std::env::temp_dir().join(format!("pb-trust-{}", std::process::id()));
-        let file = TrustFile::<_, Settings>::new(directory.clone(), Xor(0x5a));
+        let directory = TempPath::new("trust");
+        let file = TrustFile::<_, Settings>::new(directory.to_path_buf(), Xor(0x5a));
         assert!(file.load().unwrap().is_none());
         let scope = RelayScope {
             relay: "relay:7666".into(),
@@ -341,7 +342,7 @@ mod tests {
         assert_eq!(loaded.display_id(&now[..1]), None);
 
         // Another key cannot open it: unreadable, not a passing failure.
-        let stranger = TrustFile::<_, Settings>::new(directory.clone(), Xor(0x33));
+        let stranger = TrustFile::<_, Settings>::new(directory.to_path_buf(), Xor(0x33));
         assert_eq!(
             stranger.load().err().map(|failure| failure.kind()),
             Some(io::ErrorKind::InvalidData)
@@ -349,13 +350,14 @@ mod tests {
         file.revoke().unwrap();
         file.revoke().unwrap();
         assert!(file.load().unwrap().is_none());
-        std::fs::remove_dir(directory).unwrap();
+        // Revoking leaves nothing behind.
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
     }
 
     /// The app has written trust files since before `display_device`.
     #[test]
     fn a_file_the_app_wrote_still_loads() {
-        let directory = std::env::temp_dir().join(format!("pb-trust-app-{}", std::process::id()));
+        let directory = TempPath::new("trust-app");
         // The app's record as it serialises it, field for field.
         #[derive(Serialize)]
         struct Saved {
@@ -377,7 +379,7 @@ mod tests {
         })
         .unwrap();
         write_durably(&directory.join(FILE), &Xor(1).seal(&written).unwrap()).unwrap();
-        let file = TrustFile::<_, Settings>::new(directory.clone(), Xor(1));
+        let file = TrustFile::<_, Settings>::new(directory.to_path_buf(), Xor(1));
         let loaded = file.load().unwrap().unwrap();
         assert_eq!(loaded.settings.service, "desktop:app");
         assert_eq!(loaded.display_device, None);
@@ -386,13 +388,13 @@ mod tests {
         let sealed = std::fs::read(directory.join(FILE)).unwrap();
         assert_eq!(Xor(1).open(&sealed).unwrap(), written);
         file.revoke().unwrap();
-        std::fs::remove_dir(directory).unwrap();
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
     }
 
     /// A write that cannot replace its file fails and leaves nothing beside it.
     #[test]
     fn a_failed_durable_write_leaves_no_temporary() {
-        let directory = pb_mapper_core::test_support::TempPath::new("trust-fails");
+        let directory = TempPath::new("trust-fails");
         let path = directory.join(FILE);
         std::fs::create_dir_all(path.join("kept")).unwrap();
         assert!(write_durably(&path, b"new").is_err());

@@ -442,12 +442,11 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         };
         let (probe, modes) = Probe::with_modes();
-        let journal = std::env::temp_dir().join(format!("pb-desktop-oop-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&journal);
+        let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop");
         let asked_h265 = Arc::new(AtomicUsize::new(0));
         let (pipe, mut worker) = tokio::io::duplex(1 << 16);
         let (worker_probe, worker_journal, asked) =
-            (probe.clone(), journal.clone(), asked_h265.clone());
+            (probe.clone(), journal.to_path_buf(), asked_h265.clone());
         let helper = std::thread::spawn(move || {
             runtime().block_on(async move {
                 // The service reads the host's `Start`; the worker answers.
@@ -506,7 +505,6 @@ mod tests {
         );
         drop(backend);
         helper.join().unwrap();
-        let _ = std::fs::remove_dir_all(journal);
     }
 
     /// A lost pipe fails the call that met it and every later one with

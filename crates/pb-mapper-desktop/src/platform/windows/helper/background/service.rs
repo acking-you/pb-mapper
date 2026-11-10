@@ -485,15 +485,10 @@ mod tests {
         assert!(!format!("{:?}", original.options).contains(&original.options.credential));
         // An interrupted revocation must not fall through to loading an older
         // grant (or silently look like an empty installation).
-        let directory = std::env::temp_dir().join(format!(
-            "pb-background-marker-{}",
-            crate::security::secret().unwrap()
-        ));
+        let directory = pb_mapper_core::test_support::TempPath::new("background-marker");
         std::fs::create_dir(&directory).unwrap();
         std::fs::write(directory.join(REVOKED_MARKER), b"revoked").unwrap();
         assert!(load(&directory, "owner-one").is_err());
-        std::fs::remove_file(directory.join(REVOKED_MARKER)).unwrap();
-        std::fs::remove_dir(directory).unwrap();
     }
 
     #[tokio::test]

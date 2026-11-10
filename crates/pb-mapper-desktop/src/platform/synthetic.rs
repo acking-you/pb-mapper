@@ -461,9 +461,8 @@ mod tests {
             Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
         let (probe, modes) = Probe::with_modes();
         let (own, small) = (modes[0], modes[1]);
-        let dir = std::env::temp_dir().join(format!("pb-desktop-modes-e2e-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let journal = Journal::in_dir(Some(dir.clone()));
+        let dir = pb_mapper_core::test_support::TempPath::new("desktop-modes-e2e");
+        let journal = Journal::in_dir(Some(dir.to_path_buf()));
         let (grant, opened) = (Arc::new(probe.clone()), journal.clone());
         let (replayed, replaying) = (probe.clone(), journal.clone());
         let launch = Launcher::new(
@@ -593,6 +592,5 @@ mod tests {
         assert_eq!(resets(), 3);
         assert!(!journal.pending());
         host.stop().await.unwrap();
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

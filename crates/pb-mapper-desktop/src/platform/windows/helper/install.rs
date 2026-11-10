@@ -780,10 +780,7 @@ mod tests {
 
     #[test]
     fn installation_source_rejects_hard_linked_files() {
-        let directory = std::env::temp_dir().join(format!(
-            "pb-mapper-source-{}",
-            crate::security::secret().unwrap()
-        ));
+        let directory = pb_mapper_core::test_support::TempPath::new("source");
         std::fs::create_dir(&directory).unwrap();
         let source = directory.join("source");
         let alias = directory.join("alias");
@@ -795,8 +792,6 @@ mod tests {
         assert!(read_source(&alias, false).is_err());
         std::fs::remove_file(&alias).unwrap();
         assert!(read_source(&source, false).is_ok());
-        std::fs::remove_file(&source).unwrap();
-        std::fs::remove_dir(&directory).unwrap();
     }
 
     #[test]

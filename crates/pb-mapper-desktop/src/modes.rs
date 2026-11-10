@@ -590,6 +590,7 @@ fn settled(device: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pb_mapper_core::test_support::TempPath;
 
     fn mode(width: u32, height: u32) -> Mode {
         Mode { width, height }
@@ -694,11 +695,11 @@ mod tests {
         }
     }
 
-    fn journal(name: &str) -> Journal {
-        let dir =
-            std::env::temp_dir().join(format!("pb-desktop-modes-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        Journal::in_dir(Some(dir))
+    /// A journal in a directory of its own, which goes with the `TempPath`.
+    fn journal(name: &str) -> (TempPath, Journal) {
+        let dir = TempPath::new(&format!("desktop-modes-{name}"));
+        let journal = Journal::in_dir(Some(dir.to_path_buf()));
+        (dir, journal)
     }
 
     /// A crashed host's journal is replayed once: its display is reset and
@@ -707,7 +708,7 @@ mod tests {
     /// that fails validation is discarded unread.
     #[test]
     fn a_crashed_hosts_journal_resets_once_and_never_fights_the_owner() {
-        let journal = journal("recover");
+        let (_dir, journal) = journal("recover");
         let device = r"\\.\DISPLAY911";
         let mut display = steered();
         let mut crashed = Guard::new(journal.clone());
@@ -754,7 +755,6 @@ mod tests {
         assert_eq!(recover(&mut display, &journal).unwrap(), 0);
         assert!(!path.exists());
         assert_eq!(display.resets.len(), 1);
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// Two hosts of one process on one display: the first to end leaves it
@@ -762,7 +762,7 @@ mod tests {
     /// mode it shows.
     #[test]
     fn the_last_of_two_hosts_on_a_display_puts_its_original_back() {
-        let journal = journal("shared");
+        let (_dir, journal) = journal("shared");
         let device = r"\\.\DISPLAY912";
         let mut display = steered();
         let (mut first, mut second) = (Guard::new(journal.clone()), Guard::new(journal.clone()));
@@ -774,6 +774,5 @@ mod tests {
         assert!(first.restore(&mut display, || {}).unwrap());
         assert_eq!(display.resets, [setting(2560, 1440)]);
         assert!(!journal.pending());
-        let _ = std::fs::remove_dir_all(journal.path.unwrap().parent().unwrap());
     }
 }
