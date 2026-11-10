@@ -25,7 +25,8 @@
 //! header is read, so neither an IDR slower to cross than the next request
 //! nor a renderer that takes frames but shows nothing brings another IDR
 //! every half second.
-use crate::{KeyframeReason, viewer::DecoderState};
+use super::DecoderState;
+use crate::KeyframeReason;
 use pb_mapper_core::timeout::RetryBackoff;
 use std::{
     collections::VecDeque,

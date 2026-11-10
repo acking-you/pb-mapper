@@ -18,11 +18,11 @@
 //! asks for IDRs on a limited backoff (`recovery`), and when the consumer
 //! falls behind the host is capped to what it presents (`fps_cap`). A decoder
 //! that cannot recover ends the session with `decoder_failed`.
-pub(crate) mod fps_cap;
+mod fps_cap;
 mod outbound;
-pub(crate) mod recovery;
+mod recovery;
 mod sink;
-pub(crate) mod status;
+mod status;
 
 pub use sink::{AttachError, Pull, VideoConsumer, VideoSink, VideoUnit};
 pub use status::{
@@ -277,7 +277,7 @@ impl std::fmt::Display for InputError {
 impl std::error::Error for InputError {}
 
 /// The session as the reader, the writer and the API see it.
-pub(crate) struct ViewerStateSlot {
+struct ViewerStateSlot {
     codec: VideoCodec,
     capabilities: Vec<String>,
     quality: QualityPreset,
@@ -341,10 +341,10 @@ impl ViewerStateSlot {
         }
     }
     /// Presentations of the current generation can authorise input.
-    pub(crate) fn streaming(&self) -> bool {
+    fn streaming(&self) -> bool {
         self.viewer_state() == ViewerState::Streaming
     }
-    pub(crate) fn generation(&self) -> u64 {
+    fn generation(&self) -> u64 {
         self.host.as_ref().map_or(0, |host| host.generation)
     }
     fn controlling(&self) -> bool {
@@ -382,11 +382,11 @@ impl ViewerStateSlot {
 /// state slot, the sink, the control barriers or the outbound slots, and the
 /// sink while taking the outbound slots; no other lock is held while taking
 /// another, and none across an `.await`.
-pub(crate) struct ViewerShared {
-    pub state: Mutex<ViewerStateSlot>,
-    pub stats: Mutex<ViewerStatsAcc>,
-    pub cursor: Mutex<CursorSlot>,
-    pub outbound: Outbound,
+struct ViewerShared {
+    state: Mutex<ViewerStateSlot>,
+    stats: Mutex<ViewerStatsAcc>,
+    cursor: Mutex<CursorSlot>,
+    outbound: Outbound,
 }
 impl ViewerShared {
     /// The first end wins: a later transport error never replaces the host's

@@ -44,15 +44,15 @@ use std::{
 };
 
 /// Units queued at most; more means the consumer fell far behind.
-pub(crate) const SINK_MAX_UNITS: usize = 32;
+const SINK_MAX_UNITS: usize = 32;
 /// Bytes queued at most.
-pub(crate) const SINK_MAX_BYTES: usize = 8 * 1024 * 1024;
+const SINK_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// A head older than this, with `BACKLOG_MIN_UNITS` queued, is a backlog.
-pub(crate) const BACKLOG_AGE: Duration = Duration::from_millis(250);
-pub(crate) const BACKLOG_MIN_UNITS: usize = 3;
+const BACKLOG_AGE: Duration = Duration::from_millis(250);
+const BACKLOG_MIN_UNITS: usize = 3;
 /// No backlog drop this soon after an IDR was handed out, and no fps cap
 /// judgment this soon after the first.
-pub(crate) const IDR_GRACE: Duration = Duration::from_millis(500);
+const IDR_GRACE: Duration = Duration::from_millis(500);
 /// Longest decoder name kept for the overlay.
 const DECODER_NAME_MAX: usize = 64;
 /// Longest decoder failure text kept for the end message.
@@ -133,7 +133,7 @@ struct Handed {
 
 /// The newest accepted presentation.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Presented {
+pub(super) struct Presented {
     pub generation: u64,
     pub frame_id: u64,
     pub presented_at: Instant,
@@ -152,7 +152,7 @@ impl Presented {
 }
 
 /// What the viewer's status reads from the sink.
-pub(crate) struct SinkStats {
+pub(super) struct SinkStats {
     pub presented: Option<Presented>,
     pub presented_fps: f32,
     pub present_interval: IntervalStats,
@@ -320,7 +320,7 @@ impl VideoSink {
 
     /// `max_fps` is the session's `limits.max_fps`, which bounds the fps cap;
     /// with `fps_override` it is the cap's ceiling for every preset.
-    pub(crate) fn for_session(
+    pub(super) fn for_session(
         shared: Weak<ViewerShared>,
         max_fps: u32,
         fps_override: bool,
@@ -345,7 +345,7 @@ impl VideoSink {
 
     /// The read task. Never blocks. Units that cannot be decoded and shown in
     /// time are dropped here, and the sink asks for an IDR.
-    pub(crate) fn push(&self, unit: VideoUnit) {
+    pub(super) fn push(&self, unit: VideoUnit) {
         self.push_at(unit, Instant::now());
     }
 
@@ -407,7 +407,7 @@ impl VideoSink {
     /// awaited IDR is answered now, not once its last byte lands. The timer
     /// then follows an IDR that takes longer than the hold or a backoff step
     /// to cross instead of asking for another.
-    pub(crate) fn idr_arriving(&self) {
+    pub(super) fn idr_arriving(&self) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
@@ -434,7 +434,7 @@ impl VideoSink {
     /// Every host `State`. A new generation makes everything queued
     /// unshowable; recovery follows whether the host is `available`: not
     /// connecting, and its capture not unavailable.
-    pub(crate) fn on_state(&self, generation: u64, available: bool) {
+    pub(super) fn on_state(&self, generation: u64, available: bool) {
         self.on_state_at(generation, available, Instant::now());
     }
 
@@ -451,7 +451,7 @@ impl VideoSink {
     /// The viewer is hidden: drop the queue and wait for the IDR the host
     /// sends on resume. `next` returns `Paused`, so native stall checks stop;
     /// no keyframe is asked for, and the fps cap and the watchdog hold still.
-    pub(crate) fn pause(&self) {
+    pub(super) fn pause(&self) {
         let mut state = self.state.lock();
         self.paused.store(true, Ordering::Release);
         state.restart();
@@ -460,7 +460,7 @@ impl VideoSink {
         self.ready.notify_all();
     }
 
-    pub(crate) fn resume(&self) {
+    pub(super) fn resume(&self) {
         let mut state = self.state.lock();
         self.paused.store(false, Ordering::Release);
         state.recovery.resume(Instant::now());
@@ -484,7 +484,7 @@ impl VideoSink {
     /// streams and is not paused, from `IDR_GRACE` after the consumer took its
     /// first IDR. Also re-requests an awaited IDR on its backoff, and runs the
     /// stall watchdog.
-    pub(crate) fn tick(
+    pub(super) fn tick(
         &self,
         now: Instant,
         streaming: bool,
@@ -516,13 +516,13 @@ impl VideoSink {
     /// The decoder failed `DECODER_FAILURE_LIMIT` times without showing a
     /// picture, so the session's video cannot recover: why it last failed,
     /// empty when the consumer did not say.
-    pub(crate) fn decoder_failure(&self) -> Option<String> {
+    pub(super) fn decoder_failure(&self) -> Option<String> {
         let state = self.state.lock();
         state.recovery.failed().then(|| state.decoder_error.clone())
     }
 
     /// The presentation that stamps new input, only while it is fresh.
-    pub(crate) fn presented_for_input(&self) -> Result<(u64, u64), InputError> {
+    pub(super) fn presented_for_input(&self) -> Result<(u64, u64), InputError> {
         let shared = self.shared.upgrade().ok_or(InputError::Closed)?;
         let (streaming, generation) = {
             let state = shared.state.lock();
@@ -539,12 +539,12 @@ impl VideoSink {
         }
     }
 
-    pub(crate) fn presented(&self) -> Option<Presented> {
+    pub(super) fn presented(&self) -> Option<Presented> {
         self.state.lock().presented
     }
 
     /// Ask the host for an IDR, through recovery and its limiter.
-    pub(crate) fn request_keyframe(&self, reason: KeyframeReason) -> bool {
+    pub(super) fn request_keyframe(&self, reason: KeyframeReason) -> bool {
         if self.closed.load(Ordering::Acquire) {
             return false;
         }
@@ -566,7 +566,7 @@ impl VideoSink {
         }
     }
 
-    pub(crate) fn snapshot(&self, now: Instant) -> SinkStats {
+    pub(super) fn snapshot(&self, now: Instant) -> SinkStats {
         let mut state = self.state.lock();
         let decoder = DecoderInfo {
             state: state.recovery.decoder_state(state.presented.is_some()),
