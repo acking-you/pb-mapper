@@ -807,6 +807,27 @@ async fn a_tunnel_list_that_does_not_parse_is_kept() {
     );
 }
 
+/// Settings whose directory cannot be made are not saved at all, rather
+/// than saved, credential and all, in whatever directory the app runs in.
+#[tokio::test]
+async fn settings_whose_directory_cannot_be_made_are_refused() {
+    let _guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+    let root = TempRoot::new("no-config-dir");
+    std::fs::write(
+        root.path().join("pb-mapper-ui"),
+        b"where the directory goes",
+    )
+    .unwrap();
+    let mut state = PbMapperState::new(Some(root.path().to_string_lossy().into_owned()));
+    let saved = state.update_config(AppConfig {
+        msg_header_key: TEST_ADMIN_KEY.into(),
+        ..AppConfig::default()
+    });
+    set_process_msg_header_key(None).unwrap();
+    assert_eq!(saved.err().map(|e| e.code()), Some(ErrorCode::Io));
+    assert!(!std::path::Path::new("pb_mapper_config.json").exists());
+}
+
 /// The states the window matches on, as it reads them.
 #[test]
 fn tunnel_states_keep_their_names_on_the_wire() {

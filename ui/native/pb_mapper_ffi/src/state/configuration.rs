@@ -124,25 +124,24 @@ impl PbMapperState {
         }
     }
 
-    fn get_config_file_path(&self) -> PathBuf {
+    /// `config.json` in the config directory, which is made if need be. One
+    /// that cannot be made is an error: the file holds the credential, and
+    /// belongs nowhere else, the directory the app runs in least of all.
+    fn get_config_file_path(&self) -> Result<PathBuf, CtlError> {
         let config_dir = Self::get_config_dir(&self.app_directory_path);
-
-        if let Err(e) = std::fs::create_dir_all(&config_dir) {
-            tracing::warn!(
-                "Failed to create config directory {:?}: {}, using current directory",
-                config_dir,
-                e
-            );
-            return PathBuf::from("pb_mapper_config.json");
-        }
-
+        std::fs::create_dir_all(&config_dir).map_err(|e| {
+            CtlError::io(format!(
+                "Failed to create config directory {}: {e}",
+                config_dir.display()
+            ))
+        })?;
         let config_file = config_dir.join("config.json");
         tracing::info!("Using config file path: {:?}", config_file);
-        config_file
+        Ok(config_file)
     }
 
     pub fn load_config(&self) -> Result<AppConfig, CtlError> {
-        let config_path = self.get_config_file_path();
+        let config_path = self.get_config_file_path()?;
         if config_path.exists() {
             let contents =
                 fs::read_to_string(config_path).map_err(|e| CtlError::io(e.to_string()))?;
@@ -156,7 +155,7 @@ impl PbMapperState {
     }
 
     pub(super) fn write_config_file(&self, config: &AppConfig) -> Result<(), CtlError> {
-        let config_path = self.get_config_file_path();
+        let config_path = self.get_config_file_path()?;
         let contents =
             serde_json::to_string_pretty(config).map_err(|e| CtlError::io(e.to_string()))?;
         replace_contents(&config_path, contents.as_bytes())
