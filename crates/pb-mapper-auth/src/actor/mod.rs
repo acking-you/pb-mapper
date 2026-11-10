@@ -30,8 +30,13 @@ use lifecycle::*;
 pub(super) use replay::AdminReplays;
 
 /// Everything the actor owns. The runtime builds it and spawns [`Actor::run`].
+///
+/// Fields drop in declaration order, and `inner` must come last: dropping the
+/// schedule runs each live key's retire callback, which upgrades the state to
+/// cancel the key's lease. So an actor that ends without `stop()` (aborted,
+/// or unwinding from a panic) still cancels every live
+/// temporary-key session and logs `temporary_key_expired` for it.
 pub(super) struct Actor {
-    inner: Arc<AuthStateInner>,
     config: AuthConfig,
     leases: Leases,
     /// The current administrator lease. The actor holds its only strong
@@ -40,6 +45,8 @@ pub(super) struct Actor {
     replays: AdminReplays,
     /// Keeps the state directory locked for as long as the actor runs.
     _state_lock: Arc<File>,
+    /// The only strong reference to the state; see above for why it is last.
+    inner: Arc<AuthStateInner>,
 }
 
 impl Actor {

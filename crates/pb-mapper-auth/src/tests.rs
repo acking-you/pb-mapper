@@ -438,17 +438,22 @@ async fn safe_mode_denies_legacy_protocol_instead_of_restoring_the_default() {
 }
 
 /// The app's stop path aborts a wedged actor and relies on the state being gone
-/// once this returns.
+/// once this returns. An actor that ends without stopping still ends the
+/// sessions of every live temporary key: its schedule drops, and retires each
+/// key, before the state does.
 #[tokio::test]
-async fn abort_actor_returns_once_the_state_has_dropped() {
+async fn abort_actor_ends_live_keys_and_returns_once_the_state_has_dropped() {
     let state_dir = TempPath::new("abort-actor");
     let config = config(&state_dir, 4);
-    let runtime = AuthRuntime::start(TEST_ADMIN_KEY_BYTES, config)
-        .await
+    let (runtime, admin) = start(&config).await;
+    let issued = runtime.issue(&admin, HOUR, None).await.unwrap();
+    let session = authenticate_for_test(&runtime, issued.metadata.key_id)
+        .unwrap()
+        .cancellation_token()
         .unwrap();
-    authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
 
     runtime.abort_actor().await.unwrap();
+    assert!(session.is_cancelled());
     assert_eq!(
         authenticate_for_test(&runtime, ADMIN_KEY_ID)
             .unwrap_err()
