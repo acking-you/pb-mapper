@@ -493,6 +493,18 @@ mod tests {
         endpoint
     }
 
+    #[cfg(feature = "p2p")]
+    impl RelayEndpoint {
+        /// [`Self::fixed`], with network hints of its own rather than the
+        /// process's, so that the network changes a test makes reach no
+        /// other.
+        pub(crate) fn isolated(addresses: ResolvedAddrs) -> Self {
+            let mut endpoint = Self::fixed(addresses);
+            Arc::get_mut(&mut endpoint.0).unwrap().network = NetworkHints::isolated();
+            endpoint
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn initial_dns_failure_retries_and_changed_records_replace_candidates() {
         let port = Arc::new(AtomicUsize::new(0));
@@ -666,16 +678,5 @@ mod tests {
                 .await
                 .is_err()
         );
-    }
-}
-
-#[cfg(all(test, feature = "p2p"))]
-impl RelayEndpoint {
-    /// [`Self::fixed`], with network hints of its own rather than the
-    /// process's, so that the network changes a test makes reach no other.
-    pub(crate) fn isolated(addresses: ResolvedAddrs) -> Self {
-        let mut endpoint = Self::fixed(addresses);
-        Arc::get_mut(&mut endpoint.0).unwrap().network = NetworkHints::isolated();
-        endpoint
     }
 }

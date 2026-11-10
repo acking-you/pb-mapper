@@ -27,3 +27,6 @@ mod recovery;
 mod direct;
 
 mod relay;
+
+#[cfg(all(test, feature = "p2p"))]
+mod test_relay;

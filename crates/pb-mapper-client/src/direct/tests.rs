@@ -17,9 +17,9 @@ use crate::{
         Client, LanTransport, PortMapping, RegisterOptions, RegisterRequest, Registration,
         Transport,
     },
+    test_relay::TestRelay,
 };
-use pb_mapper_auth::{AuthConfig, AuthRuntime};
-use pb_mapper_core::{checksum::Credential, config::ResolvedAddrs};
+use pb_mapper_core::config::ResolvedAddrs;
 use pb_mapper_protocol::direct::*;
 use pb_mapper_server::DirectServerConfig;
 use std::{io, sync::Arc, time::Duration};
@@ -28,7 +28,7 @@ use tokio::{
     net::TcpListener,
     time::Instant,
 };
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use tokio_util::task::AbortOnDropHandle;
 use uni_stream::stream::{StreamProvider, TcpStreamProvider};
 
 #[test]
@@ -67,50 +67,24 @@ fn fallback_cooldown_doubles_to_its_cap_and_clears() {
 /// A loopback relay that offers direct, with a share of a local TCP backend
 /// on it.
 struct Share {
-    credential: Credential,
-    relay: std::net::SocketAddr,
     client: Client,
     registration: Registration,
     backend: TcpListener,
-    state_dir: std::path::PathBuf,
-    _relay: AbortOnDropHandle<()>,
+    relay: TestRelay,
 }
 
 impl Share {
     async fn start(key: &str, lan_tcp: bool) -> Self {
-        let credential = Credential::Admin(pb_mapper_core::checksum::gen_random_key());
-        let state_dir = std::env::temp_dir().join(format!(
-            "pb-direct-{key}-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let auth = AuthRuntime::start(
-            *credential.key(),
-            AuthConfig {
-                state_dir: state_dir.clone(),
-                ..AuthConfig::default()
-            },
-        )
-        .await
-        .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let relay = listener.local_addr().unwrap();
-        let server = pb_mapper_server::run_server_on_listener_with_direct(
-            listener,
-            CancellationToken::new(),
-            None,
-            false,
-            auth,
+        let relay = TestRelay::start(
+            &format!("direct-{key}"),
             Some(DirectServerConfig {
                 listen: "127.0.0.1:0".parse().unwrap(),
                 advertise: "127.0.0.1:0".parse().unwrap(),
             }),
-        );
-        let _relay = AbortOnDropHandle::new(tokio::spawn(async move {
-            let _ = server.await;
-        }));
+        )
+        .await;
         let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = Client::from_credential(relay.to_string(), credential, false, None);
+        let client = Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
         let registration = client
             .register_with_options(
                 RegisterRequest {
@@ -133,13 +107,10 @@ impl Share {
             .await
             .unwrap();
         Self {
-            credential,
-            relay,
             client,
             registration,
             backend,
-            state_dir,
-            _relay,
+            relay,
         }
     }
 
@@ -151,8 +122,8 @@ impl Share {
         lan_transport: LanTransport,
     ) -> Arc<Consumer> {
         let consumer = Consumer::new(
-            RelayEndpoint::fixed(ResolvedAddrs::from(self.relay)),
-            self.credential,
+            RelayEndpoint::fixed(ResolvedAddrs::from(self.relay.addr)),
+            self.relay.credential,
             None,
             false,
             true,
@@ -183,7 +154,7 @@ impl Share {
             .await
             .unwrap();
         let forward =
-            AbortOnDropHandle::new(tokio::spawn(prepared.forward(local, self.credential)));
+            AbortOnDropHandle::new(tokio::spawn(prepared.forward(local, self.relay.credential)));
         let (mut application, _) = downstream.accept().await.unwrap();
         application.write_all(b"exactly once").await.unwrap();
         let mut bytes = [0; 12];
@@ -205,8 +176,6 @@ impl Share {
 
     async fn stop(self) {
         self.registration.stop().await.unwrap();
-        drop(self._relay);
-        let _ = std::fs::remove_dir_all(self.state_dir);
     }
 }
 
@@ -533,33 +502,8 @@ async fn relay_recovery_preserves_direct_cooldown_until_network_changes() {
     use tokio::net::TcpStream;
 
     tokio::time::timeout(Duration::from_secs(8), async {
-        let credential = Credential::Admin(pb_mapper_core::checksum::gen_random_key());
-        let state_dir = std::env::temp_dir().join(format!(
-            "pb-cooldown-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let auth = AuthRuntime::start(
-            *credential.key(),
-            AuthConfig {
-                state_dir: state_dir.clone(),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let relay_addr = listener.local_addr().unwrap();
-        let relay = AbortOnDropHandle::new(tokio::spawn(
-            pb_mapper_server::run_server_on_listener_with_direct(
-                listener,
-                CancellationToken::new(),
-                None,
-                false,
-                auth,
-                None,
-            ),
-        ));
+        let relay = TestRelay::start("cooldown", None).await;
+        let relay_addr = relay.addr;
         let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let backend_addr = backend.local_addr().unwrap();
         let echo = AbortOnDropHandle::new(tokio::spawn(async move {
@@ -570,7 +514,8 @@ async fn relay_recovery_preserves_direct_cooldown_until_network_changes() {
                 stream.write_all(&byte).await.unwrap();
             }
         }));
-        let mut client = Client::from_credential(relay_addr.to_string(), credential, false, None);
+        let mut client =
+            Client::from_credential(relay_addr.to_string(), relay.credential, false, None);
         Arc::get_mut(&mut client.inner).unwrap().endpoint =
             RelayEndpoint::isolated(relay_addr.into());
         let registration = client
@@ -652,7 +597,6 @@ async fn relay_recovery_preserves_direct_cooldown_until_network_changes() {
         registration.stop().await.unwrap();
         drop(echo);
         drop(relay);
-        let _ = std::fs::remove_dir_all(state_dir);
     })
     .await
     .unwrap();
