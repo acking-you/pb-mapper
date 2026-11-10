@@ -1,9 +1,6 @@
 //! Mapping the picture to input: a point in the video to a pointer on the
 //! host's display, and text to input chunks the host accepts.
-use crate::{DesktopView, Input};
-
-/// The most UTF-8 bytes one `Input::Text` carries.
-const TEXT_MAX: usize = 1024;
+use crate::{DesktopView, Input, input::TEXT_INPUT_MAX};
 
 impl DesktopView {
     /// The pointer move to the display pixel under `(nx, ny)`, a point in
@@ -33,7 +30,7 @@ impl Input {
         let mut chars = text.chars().filter(|c| *c != '\0').peekable();
         std::iter::from_fn(move || {
             let mut chunk = String::new();
-            while let Some(c) = chars.next_if(|c| chunk.len() + c.len_utf8() <= TEXT_MAX) {
+            while let Some(c) = chars.next_if(|c| chunk.len() + c.len_utf8() <= TEXT_INPUT_MAX) {
                 chunk.push(c);
             }
             (!chunk.is_empty()).then_some(Input::Text { text: chunk })

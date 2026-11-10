@@ -21,8 +21,9 @@ use std::{
 
 /// The most modes a list carries.
 const MAX_MODES: usize = 64;
-/// The largest width or height of a mode.
-const MAX_SIDE: u32 = 32_768;
+/// The largest width or height of a mode, and so of a display or a picture
+/// the viewer accepts.
+pub(crate) const MAX_SIDE: u32 = 32_768;
 /// The most displays one journal names.
 const MAX_ENTRIES: usize = 16;
 /// The longest scope an entry keeps.

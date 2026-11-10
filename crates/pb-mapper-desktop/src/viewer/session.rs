@@ -8,6 +8,7 @@ use super::{
 };
 use crate::{
     Input, QualityPreset, VideoCodec, VideoLimits,
+    modes::MAX_SIDE,
     protocol::{HostMessage, RejectReason, Route, SessionState, ViewerMessage, valid_capabilities},
     wire::{self, WireError},
 };
@@ -28,8 +29,6 @@ const VIEWER_HEADER_TIMEOUT: Duration = Duration::from_secs(4);
 pub(super) const VIEWER_TICK: Duration = Duration::from_millis(250);
 /// Ticks per path re-sample and stats roll-up.
 const TICKS_PER_SECOND: u64 = 4;
-/// Display and JPEG geometry stays within this many pixels.
-const MAX_DISPLAY: u32 = 32768;
 /// Why a session whose decoder failed for good ended.
 const DECODER_FAILED: &str = "the remote picture could not be decoded";
 const _: () = assert!(
@@ -306,9 +305,7 @@ impl Reader<'_> {
                 // encoded size.
                 let bounded = self.codec == VideoCodec::Jpeg
                     || (width <= self.limits.max_width && height <= self.limits.max_height);
-                if !bounded
-                    || !(1..=MAX_DISPLAY).contains(&width)
-                    || !(1..=MAX_DISPLAY).contains(&height)
+                if !bounded || !(1..=MAX_SIDE).contains(&width) || !(1..=MAX_SIDE).contains(&height)
                 {
                     return Err(Ended::protocol("video geometry outside the session limits"));
                 }
@@ -341,8 +338,8 @@ impl Reader<'_> {
             HostMessage::Probe { nonce } => self.shared.outbound.probe(nonce),
             HostMessage::State(host) => {
                 if host.display.as_ref().is_some_and(|display| {
-                    !(1..=MAX_DISPLAY).contains(&display.width)
-                        || !(1..=MAX_DISPLAY).contains(&display.height)
+                    !(1..=MAX_SIDE).contains(&display.width)
+                        || !(1..=MAX_SIDE).contains(&display.height)
                 }) {
                     return Err(Ended::protocol("invalid display geometry"));
                 }

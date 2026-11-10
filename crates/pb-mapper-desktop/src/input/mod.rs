@@ -6,6 +6,9 @@ pub(crate) mod held;
 use crate::{Display, Result, error};
 use serde::{Deserialize, Serialize};
 
+/// The most UTF-8 bytes one `Input::Text` carries.
+pub(crate) const TEXT_INPUT_MAX: usize = 1024;
+
 /// The OS double-click time and half the double-click box, read in the
 /// interactive session. A press that starts a drag waits this long after a
 /// click so the two never merge into a double click.
@@ -148,7 +151,7 @@ impl Input {
             Self::Move { x, y } => {
                 (*x >= display.width || *y >= display.height).then_some("pointer outside display")
             }
-            Self::Text { text } => (text.len() > 1024 || text.contains('\0'))
+            Self::Text { text } => (text.len() > TEXT_INPUT_MAX || text.contains('\0'))
                 .then_some("text input too large or invalid"),
             Self::Wheel {
                 horizontal,

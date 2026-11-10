@@ -58,7 +58,7 @@ const DECODER_NAME_MAX: usize = 64;
 /// Longest decoder failure text kept for the end message.
 const DECODER_ERROR_MAX: usize = 160;
 /// A detached sink has no session limits; this is the largest allowed.
-const DETACHED_MAX_FPS: u32 = 120;
+const DETACHED_MAX_FPS: u32 = crate::video::MAX_FPS;
 const _: () = assert!(
     crate::wire::MAX_PAYLOAD <= SINK_MAX_BYTES,
     "the largest unit fits an empty sink"
