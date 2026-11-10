@@ -24,7 +24,7 @@ fn restore(snapshot: Option<&PersistedSnapshot>) -> (Arc<AuthStateInner>, Leases
     let (restored, live) = RestoredState::from_snapshot(snapshot, false, &config, T);
     let admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, None, u64::MAX));
     let inner = Arc::new(AuthStateInner::new(
-        *b"0123456789abcdefghijklmnopqrstuv",
+        TEST_ADMIN_KEY_BYTES,
         &admin_lease,
         false,
         [0; INSTANCE_ID_LEN],

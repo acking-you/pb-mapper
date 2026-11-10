@@ -12,7 +12,9 @@
 //! and replay. `schedule.rs` drives the lease schedule with explicit seconds, and
 //! the timing wheel's own tests sit beside it in `timing_wheel/tests.rs`.
 
-use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
+use pb_mapper_core::test_support::{
+    PROCESS_CREDENTIAL_TEST_LOCK, TEST_ADMIN_KEY, TEST_ADMIN_KEY_BYTES, TempPath,
+};
 
 use super::*;
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -21,20 +23,14 @@ use crate::config::{
 };
 use crate::config::{parse_legacy_protocol_policy, platform_default_auth_state_dir};
 use crate::persistence::{
-    auth_snapshot_path, prepare_state_dir, random_bytes, read_instance_id_file, seal_blob,
-    sync_parent_directory, try_load_persisted_state,
+    auth_snapshot_path, prepare_state_dir, read_instance_id_file, seal_blob, sync_parent_directory,
+    try_load_persisted_state,
 };
 
 mod namespaces;
 mod schedule;
 
-const ADMIN_KEY: [u8; 32] = *b"0123456789abcdefghijklmnopqrstuv";
 const HOUR: Duration = Duration::from_secs(3600);
-
-fn temp_state_dir(name: &str) -> PathBuf {
-    let suffix: [u8; 8] = random_bytes();
-    std::env::temp_dir().join(format!("pb-mapper-{name}-{}", hex(&suffix)))
-}
 
 /// A configuration for `state_dir` with room for `capacity` keys.
 fn config(state_dir: &Path, capacity: usize) -> AuthConfig {
@@ -46,9 +42,11 @@ fn config(state_dir: &Path, capacity: usize) -> AuthConfig {
     }
 }
 
-/// Starts a runtime under [`ADMIN_KEY`] and authenticates its administrator.
+/// Starts a runtime under [`TEST_ADMIN_KEY_BYTES`] and authenticates its administrator.
 async fn start(config: &AuthConfig) -> (AuthRuntime, AuthContext) {
-    let runtime = AuthRuntime::start(ADMIN_KEY, config.clone()).await.unwrap();
+    let runtime = AuthRuntime::start(TEST_ADMIN_KEY_BYTES, config.clone())
+        .await
+        .unwrap();
     let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     (runtime, admin)
 }
@@ -92,10 +90,10 @@ fn snapshot_for_test(
 
 #[test]
 fn initialize_admin_key_refuses_to_replace_a_key_when_encrypted_state_exists() {
-    let state_dir = temp_state_dir("force-init-state");
+    let state_dir = TempPath::new("force-init-state");
     std::fs::create_dir_all(&state_dir).unwrap();
     let key_path = state_dir.join("admin.key");
-    std::fs::write(&key_path, b"0123456789abcdefghijklmnopqrstuv\n").unwrap();
+    std::fs::write(&key_path, format!("{TEST_ADMIN_KEY}\n")).unwrap();
     std::fs::write(state_dir.join("auth.snapshot"), b"encrypted").unwrap();
     let error = initialize_admin_key(&key_path, true).unwrap_err();
     assert_eq!(error.code, "administrator_key_state_exists");
@@ -111,7 +109,6 @@ fn initialize_admin_key_refuses_to_replace_a_key_when_encrypted_state_exists() {
         true,
     )
     .unwrap();
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// A staged candidate is the only copy of a key the relay may already have
@@ -119,7 +116,7 @@ fn initialize_admin_key_refuses_to_replace_a_key_when_encrypted_state_exists() {
 /// key: that would leave no way back into the relay.
 #[test]
 fn staging_a_second_rotation_candidate_refuses_to_replace_the_first() {
-    let state_dir = temp_state_dir("stage-candidate");
+    let state_dir = TempPath::new("stage-candidate");
     std::fs::create_dir_all(&state_dir).unwrap();
     let key_path = state_dir.join("admin.key");
     let first = "abcdefghijklmnopqrstuvwxyz012345";
@@ -146,8 +143,6 @@ fn staging_a_second_rotation_candidate_refuses_to_replace_the_first() {
     discard_staged_admin_key(&staged);
     stage_admin_key_candidate(&key_path, second).unwrap();
     assert_eq!(std::fs::read_to_string(&staged).unwrap().trim(), second);
-
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// Two rotations racing to stage a candidate: exactly one may win, and the
@@ -158,7 +153,7 @@ fn staging_a_second_rotation_candidate_refuses_to_replace_the_first() {
 /// be the only copy of the key the relay had already installed.
 #[test]
 fn racing_rotations_stage_exactly_one_candidate() {
-    let state_dir = temp_state_dir("stage-candidate-race");
+    let state_dir = TempPath::new("stage-candidate-race");
     std::fs::create_dir_all(&state_dir).unwrap();
     let key_path = state_dir.join("admin.key");
     let staged_path = staged_admin_key_path(&key_path);
@@ -207,8 +202,6 @@ fn racing_rotations_stage_exactly_one_candidate() {
             assert!(!error.retryable);
         }
     }
-
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// A staged candidate is a live administrator key, so it must never be readable
@@ -218,7 +211,7 @@ fn racing_rotations_stage_exactly_one_candidate() {
 fn a_staged_candidate_is_owner_only_from_the_moment_it_exists() {
     use std::os::unix::fs::PermissionsExt;
 
-    let state_dir = temp_state_dir("stage-candidate-mode");
+    let state_dir = TempPath::new("stage-candidate-mode");
     std::fs::create_dir_all(&state_dir).unwrap();
     let key_path = state_dir.join("admin.key");
 
@@ -234,8 +227,6 @@ fn a_staged_candidate_is_owner_only_from_the_moment_it_exists() {
         "staged key mode was {:o}",
         mode & 0o777
     );
-
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// `create_new_write` gives up atomic contents in exchange for claiming the
@@ -244,7 +235,7 @@ fn a_staged_candidate_is_owner_only_from_the_moment_it_exists() {
 /// destroy it — even though it does not parse as a key.
 #[test]
 fn a_truncated_staged_candidate_still_blocks_rotation() {
-    let state_dir = temp_state_dir("stage-candidate-truncated");
+    let state_dir = TempPath::new("stage-candidate-truncated");
     std::fs::create_dir_all(&state_dir).unwrap();
     let key_path = state_dir.join("admin.key");
     let staged_path = staged_admin_key_path(&key_path);
@@ -258,13 +249,11 @@ fn a_truncated_staged_candidate_still_blocks_rotation() {
         "abcdef",
         "a short candidate is still evidence of an unresolved rotation"
     );
-
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn shrinking_then_expanding_capacity_does_not_reuse_old_key_ids() {
-    let state_dir = temp_state_dir("capacity-shrink");
+    let state_dir = TempPath::new("capacity-shrink");
     let config_two = config(&state_dir, 2);
     let (runtime, admin) = start(&config_two).await;
     let first = runtime
@@ -300,12 +289,11 @@ async fn shrinking_then_expanding_capacity_does_not_reuse_old_key_ids() {
     let fourth_id = fourth.metadata.key_id;
     assert_ne!(fourth_id, second_id);
     stop(runtime).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn gc_removes_inactive_high_slot_entries_and_keeps_their_generations() {
-    let state_dir = temp_state_dir("gc-high-slots");
+    let state_dir = TempPath::new("gc-high-slots");
     let config_two = config(&state_dir, 2);
     let (runtime, admin) = start(&config_two).await;
     let first = runtime
@@ -342,12 +330,11 @@ async fn gc_removes_inactive_high_slot_entries_and_keeps_their_generations() {
     let reused_id = high.metadata.key_id;
     assert_ne!(reused_id, second_id);
     stop(runtime).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn admin_lifecycle_covers_high_slot_keys_after_capacity_shrink() {
-    let state_dir = temp_state_dir("high-slot-admin");
+    let state_dir = TempPath::new("high-slot-admin");
     let config_two = config(&state_dir, 2);
     let (runtime, admin) = start(&config_two).await;
     let first = runtime
@@ -393,12 +380,11 @@ async fn admin_lifecycle_covers_high_slot_keys_after_capacity_shrink() {
     let restored = runtime.show(&admin, high_id, false).await.unwrap();
     assert_eq!(restored.metadata.state, "revoked");
     stop(runtime).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn safe_mode_denies_legacy_protocol_instead_of_restoring_the_default() {
-    let state_dir = temp_state_dir("safe-mode-legacy");
+    let state_dir = TempPath::new("safe-mode-legacy");
     let config = config(&state_dir, 4);
     let (runtime, admin) = start(&config).await;
     runtime
@@ -413,16 +399,17 @@ async fn safe_mode_denies_legacy_protocol_instead_of_restoring_the_default() {
     assert!(status.safe_mode);
     assert_eq!(status.legacy_protocol, LegacyProtocolPolicy::Deny);
     stop(runtime).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// The app's stop path aborts a wedged actor and relies on the state being gone
 /// once this returns.
 #[tokio::test]
 async fn abort_actor_returns_once_the_state_has_dropped() {
-    let state_dir = temp_state_dir("abort-actor");
+    let state_dir = TempPath::new("abort-actor");
     let config = config(&state_dir, 4);
-    let runtime = AuthRuntime::start(ADMIN_KEY, config).await.unwrap();
+    let runtime = AuthRuntime::start(TEST_ADMIN_KEY_BYTES, config)
+        .await
+        .unwrap();
     authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
 
     runtime.abort_actor().await.unwrap();
@@ -433,31 +420,33 @@ async fn abort_actor_returns_once_the_state_has_dropped() {
         "auth_state_unavailable"
     );
     drop(runtime);
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn overlapping_runtimes_cannot_share_an_auth_state_directory() {
-    let state_dir = temp_state_dir("auth-dir-lock");
+    let state_dir = TempPath::new("auth-dir-lock");
     let config = config(&state_dir, 4);
-    let first = AuthRuntime::start(ADMIN_KEY, config.clone()).await.unwrap();
-    let error = match AuthRuntime::start(ADMIN_KEY, config.clone()).await {
+    let first = AuthRuntime::start(TEST_ADMIN_KEY_BYTES, config.clone())
+        .await
+        .unwrap();
+    let error = match AuthRuntime::start(TEST_ADMIN_KEY_BYTES, config.clone()).await {
         Ok(_) => panic!("second runtime should not share the auth directory"),
         Err(error) => error,
     };
     assert_eq!(error.code, "auth_state_locked");
     stop(first).await;
-    let recovered = AuthRuntime::start(ADMIN_KEY, config).await.unwrap();
+    let recovered = AuthRuntime::start(TEST_ADMIN_KEY_BYTES, config)
+        .await
+        .unwrap();
     stop(recovered).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn env_recovery_key_is_not_written_when_it_cannot_decrypt_existing_state() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let state_dir = temp_state_dir("env-key-must-match-snapshot");
+    let state_dir = TempPath::new("env-key-must-match-snapshot");
     prepare_state_dir(&state_dir).unwrap();
-    let good = *b"0123456789abcdefghijklmnopqrstuv";
+    let good = TEST_ADMIN_KEY_BYTES;
     let bad = *b"abcdefghijklmnopqrstuvwxyz012345";
     let config = config(&state_dir, 1);
     let snapshot = snapshot_for_test([4_u8; INSTANCE_ID_LEN], 1, 0);
@@ -473,15 +462,14 @@ async fn env_recovery_key_is_not_written_when_it_cannot_decrypt_existing_state()
         !state_dir.join("admin.key").exists(),
         "a mismatched MSG_HEADER_KEY must not become the live administrator key"
     );
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn env_recovery_key_is_accepted_for_wal_only_state() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let state_dir = temp_state_dir("env-key-matches-wal");
+    let state_dir = TempPath::new("env-key-matches-wal");
     prepare_state_dir(&state_dir).unwrap();
-    let good = *b"0123456789abcdefghijklmnopqrstuv";
+    let good = TEST_ADMIN_KEY_BYTES;
     let config = config(&state_dir, 1);
     append_wal(
         &config,
@@ -503,15 +491,14 @@ async fn env_recovery_key_is_accepted_for_wal_only_state() {
         state_dir.join("admin.key").exists(),
         "a matching MSG_HEADER_KEY should become the live administrator key"
     );
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn env_recovery_key_is_not_written_when_wal_only_state_does_not_match() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let state_dir = temp_state_dir("env-key-must-match-wal");
+    let state_dir = TempPath::new("env-key-must-match-wal");
     prepare_state_dir(&state_dir).unwrap();
-    let good = *b"0123456789abcdefghijklmnopqrstuv";
+    let good = TEST_ADMIN_KEY_BYTES;
     let bad = *b"abcdefghijklmnopqrstuvwxyz012345";
     let config = config(&state_dir, 1);
     append_wal(
@@ -537,12 +524,11 @@ async fn env_recovery_key_is_not_written_when_wal_only_state_does_not_match() {
         !state_dir.join("admin.key").exists(),
         "a mismatched MSG_HEADER_KEY must not become the live administrator key"
     );
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn from_isolated_state_takes_the_state_lock_before_creating_admin_key() {
-    let state_dir = temp_state_dir("lock-before-key");
+    let state_dir = TempPath::new("lock-before-key");
     prepare_state_dir(&state_dir).unwrap();
     let _lock = acquire_state_dir_lock(&state_dir).unwrap();
     let config = config(&state_dir, 4);
@@ -556,12 +542,11 @@ async fn from_isolated_state_takes_the_state_lock_before_creating_admin_key() {
         "a locked start must not create a competing administrator key"
     );
     drop(_lock);
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn reset_clears_retained_high_slot_entries() {
-    let state_dir = temp_state_dir("reset-high-slots");
+    let state_dir = TempPath::new("reset-high-slots");
     let config_two = config(&state_dir, 2);
     let (runtime, admin) = start(&config_two).await;
     let first = runtime
@@ -585,20 +570,18 @@ async fn reset_clears_retained_high_slot_entries() {
     assert!(authenticate_for_test(&runtime, first.metadata.key_id).is_err());
     assert!(authenticate_for_test(&runtime, second.metadata.key_id).is_err());
     stop(runtime).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn rotate_root_rejects_a_nul_containing_key() {
-    let state_dir = temp_state_dir("rotate-nul");
+    let state_dir = TempPath::new("rotate-nul");
     let config = config(&state_dir, 4);
     let (runtime, admin) = start(&config).await;
-    let mut bad = *b"0123456789abcdefghijklmnopqrstuv";
+    let mut bad = TEST_ADMIN_KEY_BYTES;
     bad[4] = 0;
     let error = runtime.rotate_root(&admin, bad).await.unwrap_err();
     assert_eq!(error.code, "administrator_key_invalid");
     stop(runtime).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[test]
@@ -637,12 +620,11 @@ fn platform_default_auth_state_dir_is_writable_outside_linux_system_paths() {
 
 #[test]
 fn sync_parent_directory_succeeds_for_a_local_file() {
-    let state_dir = temp_state_dir("dirsync");
+    let state_dir = TempPath::new("dirsync");
     prepare_state_dir(&state_dir).unwrap();
     let path = state_dir.join("probe");
     std::fs::write(&path, b"x").unwrap();
     sync_parent_directory(&path).unwrap();
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -710,7 +692,7 @@ fn derived_key_is_bound_to_instance_and_key_id() {
     let instance_a = [1_u8; INSTANCE_ID_LEN];
     let instance_b = [2_u8; INSTANCE_ID_LEN];
     let key = derive_temporary_key(
-        &ADMIN_KEY,
+        &TEST_ADMIN_KEY_BYTES,
         &instance_a,
         KeyId::new(Generation::from_u32(1), SlotIndex::from_index(7)),
     )
@@ -718,7 +700,7 @@ fn derived_key_is_bound_to_instance_and_key_id() {
     assert_eq!(
         key,
         derive_temporary_key(
-            &ADMIN_KEY,
+            &TEST_ADMIN_KEY_BYTES,
             &instance_a,
             KeyId::new(Generation::from_u32(1), SlotIndex::from_index(7))
         )
@@ -727,7 +709,7 @@ fn derived_key_is_bound_to_instance_and_key_id() {
     assert_ne!(
         key,
         derive_temporary_key(
-            &ADMIN_KEY,
+            &TEST_ADMIN_KEY_BYTES,
             &instance_b,
             KeyId::new(Generation::from_u32(1), SlotIndex::from_index(7))
         )
@@ -736,7 +718,7 @@ fn derived_key_is_bound_to_instance_and_key_id() {
     assert_ne!(
         key,
         derive_temporary_key(
-            &ADMIN_KEY,
+            &TEST_ADMIN_KEY_BYTES,
             &instance_a,
             KeyId::new(Generation::from_u32(2), SlotIndex::from_index(7))
         )
@@ -747,7 +729,7 @@ fn derived_key_is_bound_to_instance_and_key_id() {
 #[tokio::test]
 async fn isolated_runtime_preserves_remote_temporary_process_credential() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let state_dir = temp_state_dir("isolated-relay");
+    let state_dir = TempPath::new("isolated-relay");
     let temporary_key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
     let temporary_key = *b"temporary-remote-key-0123456789a";
     let temporary_credential =
@@ -786,12 +768,11 @@ async fn isolated_runtime_preserves_remote_temporary_process_credential() {
 
     set_process_msg_header_key(None).unwrap();
     stop(runtime).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn issue_renew_revoke_and_persist() {
-    let state_dir = temp_state_dir("auth-lifecycle");
+    let state_dir = TempPath::new("auth-lifecycle");
     let config = config(&state_dir, 8);
     let (runtime, admin) = start(&config).await;
     let issued = runtime
@@ -835,7 +816,7 @@ async fn issue_renew_revoke_and_persist() {
         "temporary_key_revoked"
     );
     let instance_id = load_or_create_instance_id(&state_dir).unwrap();
-    let persisted = try_load_persisted_state(&config, &ADMIN_KEY, instance_id).unwrap();
+    let persisted = try_load_persisted_state(&config, &TEST_ADMIN_KEY_BYTES, instance_id).unwrap();
     let revoked = persisted
         .entries
         .iter()
@@ -844,19 +825,20 @@ async fn issue_renew_revoke_and_persist() {
     assert_eq!(revoked.state, SlotState::Revoked);
     assert!(revoked.tombstoned_at.is_some());
     stop(runtime).await;
-    let restored = AuthRuntime::start(ADMIN_KEY, config).await.unwrap();
+    let restored = AuthRuntime::start(TEST_ADMIN_KEY_BYTES, config)
+        .await
+        .unwrap();
     assert_eq!(
         authenticate_for_test(&restored, issued.metadata.key_id)
             .unwrap_err()
             .code,
         "temporary_key_revoked"
     );
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn ensure_active_keeps_expiry_after_the_lease_is_cancelled() {
-    let state_dir = temp_state_dir("lease-expiry-reason");
+    let state_dir = TempPath::new("lease-expiry-reason");
     let config = config(&state_dir, 4);
     let (runtime, admin) = start(&config).await;
     let issued = runtime
@@ -875,12 +857,11 @@ async fn ensure_active_keeps_expiry_after_the_lease_is_cancelled() {
         "temporary_key_expired"
     );
     stop(runtime).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn renew_replaces_a_lease_canceled_during_persistence() {
-    let state_dir = temp_state_dir("renew-canceled-lease");
+    let state_dir = TempPath::new("renew-canceled-lease");
     let config = config(&state_dir, 4);
     let (runtime, admin) = start(&config).await;
     let issued = runtime
@@ -902,12 +883,11 @@ async fn renew_replaces_a_lease_canceled_during_persistence() {
     assert!(canceled.is_cancelled());
 
     stop(runtime).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn reset_rotates_instance_and_prevents_old_key_id_reuse() {
-    let state_dir = temp_state_dir("auth-reset");
+    let state_dir = TempPath::new("auth-reset");
     let config = config(&state_dir, 1);
     let (runtime, admin) = start(&config).await;
     let before = runtime.status(&admin).await.unwrap().server_instance_id;
@@ -947,12 +927,11 @@ async fn reset_rotates_instance_and_prevents_old_key_id_reuse() {
     assert_ne!(replacement.credential, old.credential);
 
     stop(runtime).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[test]
 fn recover_instance_id_promotes_next_when_snapshot_matches() {
-    let state_dir = temp_state_dir("instance-next-promote");
+    let state_dir = TempPath::new("instance-next-promote");
     prepare_state_dir(&state_dir).unwrap();
     let current = [1_u8; INSTANCE_ID_LEN];
     let next = [2_u8; INSTANCE_ID_LEN];
@@ -960,10 +939,11 @@ fn recover_instance_id_promotes_next_when_snapshot_matches() {
     atomic_write(&state_dir.join("server-instance-id.next"), &next, 0o600).unwrap();
     let config = config(&state_dir, 1);
     let snapshot = snapshot_for_test(next, 1, 0);
-    write_snapshot_and_truncate_wal(&config, &ADMIN_KEY, &snapshot).unwrap();
+    write_snapshot_and_truncate_wal(&config, &TEST_ADMIN_KEY_BYTES, &snapshot).unwrap();
     std::fs::write(state_dir.join("auth.wal"), b"old-instance-wal").unwrap();
 
-    let recovered = recover_instance_id_after_reset(&state_dir, &ADMIN_KEY, current).unwrap();
+    let recovered =
+        recover_instance_id_after_reset(&state_dir, &TEST_ADMIN_KEY_BYTES, current).unwrap();
     assert_eq!(recovered, next);
     assert_eq!(
         read_instance_id_file(&state_dir.join("server-instance-id")).unwrap(),
@@ -971,30 +951,32 @@ fn recover_instance_id_promotes_next_when_snapshot_matches() {
     );
     assert!(!state_dir.join("server-instance-id.next").exists());
     assert_eq!(std::fs::read(state_dir.join("auth.wal")).unwrap(), b"");
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[test]
 fn reset_already_installed_accepts_matching_live_id_and_snapshot() {
-    let state_dir = temp_state_dir("reset-already-installed");
+    let state_dir = TempPath::new("reset-already-installed");
     prepare_state_dir(&state_dir).unwrap();
     let new_id = [9_u8; INSTANCE_ID_LEN];
     atomic_write(&state_dir.join("server-instance-id"), &new_id, 0o600).unwrap();
     let config = config(&state_dir, 1);
     let snapshot = snapshot_for_test(new_id, 1, 1);
-    write_snapshot_and_truncate_wal(&config, &ADMIN_KEY, &snapshot).unwrap();
-    assert!(reset_already_installed(&state_dir, &ADMIN_KEY, &new_id));
+    write_snapshot_and_truncate_wal(&config, &TEST_ADMIN_KEY_BYTES, &snapshot).unwrap();
+    assert!(reset_already_installed(
+        &state_dir,
+        &TEST_ADMIN_KEY_BYTES,
+        &new_id
+    ));
     assert!(!reset_already_installed(
         &state_dir,
-        &ADMIN_KEY,
+        &TEST_ADMIN_KEY_BYTES,
         &[8_u8; INSTANCE_ID_LEN]
     ));
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[test]
 fn recover_instance_id_discards_stale_next_when_snapshot_still_matches_current() {
-    let state_dir = temp_state_dir("instance-next-stale");
+    let state_dir = TempPath::new("instance-next-stale");
     prepare_state_dir(&state_dir).unwrap();
     let current = [3_u8; INSTANCE_ID_LEN];
     let next = [4_u8; INSTANCE_ID_LEN];
@@ -1002,19 +984,19 @@ fn recover_instance_id_discards_stale_next_when_snapshot_still_matches_current()
     atomic_write(&state_dir.join("server-instance-id.next"), &next, 0o600).unwrap();
     let config = config(&state_dir, 1);
     let snapshot = snapshot_for_test(current, 1, 0);
-    write_snapshot_and_truncate_wal(&config, &ADMIN_KEY, &snapshot).unwrap();
+    write_snapshot_and_truncate_wal(&config, &TEST_ADMIN_KEY_BYTES, &snapshot).unwrap();
 
-    let recovered = recover_instance_id_after_reset(&state_dir, &ADMIN_KEY, current).unwrap();
+    let recovered =
+        recover_instance_id_after_reset(&state_dir, &TEST_ADMIN_KEY_BYTES, current).unwrap();
     assert_eq!(recovered, current);
     assert!(!state_dir.join("server-instance-id.next").exists());
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[test]
 fn recover_admin_key_discards_leftover_wal_from_the_old_key() {
-    let state_dir = temp_state_dir("admin-next-wal");
+    let state_dir = TempPath::new("admin-next-wal");
     prepare_state_dir(&state_dir).unwrap();
-    let old_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let old_key = TEST_ADMIN_KEY_BYTES;
     let new_key = *b"abcdefghijklmnopqrstuvwxyz012345";
     let old_key_str = std::str::from_utf8(&old_key).unwrap();
     let new_key_str = std::str::from_utf8(&new_key).unwrap();
@@ -1029,14 +1011,13 @@ fn recover_admin_key_discards_leftover_wal_from_the_old_key() {
     assert_eq!(recovered.trim(), new_key_str);
     assert_eq!(std::fs::read(state_dir.join("auth.wal")).unwrap(), b"");
     assert!(!state_dir.join("admin.key.next").exists());
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[test]
 fn rotation_finalize_requires_the_live_admin_key() {
-    let state_dir = temp_state_dir("rotate-requires-live-key");
+    let state_dir = TempPath::new("rotate-requires-live-key");
     prepare_state_dir(&state_dir).unwrap();
-    let old_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let old_key = TEST_ADMIN_KEY_BYTES;
     let new_key = *b"abcdefghijklmnopqrstuvwxyz012345";
     let old_key_str = std::str::from_utf8(&old_key).unwrap();
     let new_key_str = std::str::from_utf8(&new_key).unwrap();
@@ -1047,12 +1028,11 @@ fn rotation_finalize_requires_the_live_admin_key() {
     assert!(!rotation_already_installed(&state_dir, new_key_str));
     write_admin_key(&state_dir, new_key_str).unwrap();
     assert!(rotation_already_installed(&state_dir, new_key_str));
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn interrupted_reset_recovers_the_staged_instance_id_on_restart() {
-    let state_dir = temp_state_dir("reset-recover");
+    let state_dir = TempPath::new("reset-recover");
     let config = config(&state_dir, 4);
     let (runtime, admin) = start(&config).await;
     let issued = runtime
@@ -1069,7 +1049,7 @@ async fn interrupted_reset_recovers_the_staged_instance_id_on_restart() {
     let next = random_instance_id();
     atomic_write(&state_dir.join("server-instance-id.next"), &next, 0o600).unwrap();
     let snapshot = snapshot_for_test(next, 4, 0);
-    write_snapshot_and_truncate_wal(&config, &ADMIN_KEY, &snapshot).unwrap();
+    write_snapshot_and_truncate_wal(&config, &TEST_ADMIN_KEY_BYTES, &snapshot).unwrap();
     std::fs::write(state_dir.join("auth.wal"), b"old-instance-wal").unwrap();
     atomic_write(
         &state_dir.join("server-instance-id"),
@@ -1085,12 +1065,11 @@ async fn interrupted_reset_recovers_the_staged_instance_id_on_restart() {
     assert!(authenticate_for_test(&restored, issued.metadata.key_id).is_err());
     assert!(!state_dir.join("server-instance-id.next").exists());
     stop(restored).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn corrupt_wal_fails_temporary_keys_closed_until_admin_reset() {
-    let state_dir = temp_state_dir("auth-safe-mode");
+    let state_dir = TempPath::new("auth-safe-mode");
     let config = config(&state_dir, 4);
     let (runtime, admin) = start(&config).await;
     let issued = runtime
@@ -1116,14 +1095,13 @@ async fn corrupt_wal_fails_temporary_keys_closed_until_admin_reset() {
     assert!(!recovered.status(&recovered_admin).await.unwrap().safe_mode);
 
     stop(recovered).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let state_dir = temp_state_dir("auth-root-rotation");
-    let old_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let state_dir = TempPath::new("auth-root-rotation");
+    let old_key = TEST_ADMIN_KEY_BYTES;
     let new_key = *b"abcdefghijklmnopqrstuvwxyz012345";
     let config = config(&state_dir, 4);
     let runtime = AuthRuntime::start(old_key, config).await.unwrap();
@@ -1207,12 +1185,11 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
     stop(runtime).await;
     // The rotation synced the process credential; leave it as it was found.
     set_process_msg_header_key(None).unwrap();
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn admitted_admin_mutation_replay_survives_restart() {
-    let state_dir = temp_state_dir("admin-replay-restart");
+    let state_dir = TempPath::new("admin-replay-restart");
     let config = config(&state_dir, 4);
     let fingerprint = [0x5a; 32];
     let timestamp = unix_seconds();
@@ -1234,12 +1211,11 @@ async fn admitted_admin_mutation_replay_survives_restart() {
     );
 
     stop(restored).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn snapshot_compaction_preserves_audit_records() {
-    let state_dir = temp_state_dir("audit-compaction");
+    let state_dir = TempPath::new("audit-compaction");
     let config = config(&state_dir, 4);
     let (runtime, admin) = start(&config).await;
     runtime
@@ -1249,7 +1225,7 @@ async fn snapshot_compaction_preserves_audit_records() {
     runtime.gc(&admin).await.unwrap();
 
     let instance_id = load_or_create_instance_id(&state_dir).unwrap();
-    let persisted = try_load_persisted_state(&config, &ADMIN_KEY, instance_id).unwrap();
+    let persisted = try_load_persisted_state(&config, &TEST_ADMIN_KEY_BYTES, instance_id).unwrap();
     let actions = persisted
         .audit_records
         .iter()
@@ -1259,12 +1235,11 @@ async fn snapshot_compaction_preserves_audit_records() {
     assert!(actions.contains(&"temporary_key_gc"));
 
     stop(runtime).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn revoking_keeps_the_row_until_its_retention_elapses() {
-    let state_dir = temp_state_dir("revoke-retention");
+    let state_dir = TempPath::new("revoke-retention");
     let config = config(&state_dir, 4);
     let (runtime, admin) = start(&config).await;
     let issued = runtime
@@ -1296,7 +1271,6 @@ async fn revoking_keeps_the_row_until_its_retention_elapses() {
     );
 
     stop(runtime).await;
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// Retention counts from the relay's own acceptance time, falling back to the
