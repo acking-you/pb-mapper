@@ -3,6 +3,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use pb_mapper_auth::codes::AUTH_STATE_LOCKED;
 use pb_mapper_auth::{
     ADMIN_KEY_ID, AuthConfig, AuthContext, AuthRuntime, IssuedTemporaryKey, KeyId,
     TemporaryKeyMetadata,
@@ -117,9 +118,7 @@ impl Relay {
         let deadline = Instant::now() + Duration::from_secs(5);
         let auth = loop {
             match AuthRuntime::start(admin_key_bytes(), self.config.clone()).await {
-                Err(failure)
-                    if failure.code == "auth_state_locked" && Instant::now() < deadline =>
-                {
+                Err(failure) if failure.code == AUTH_STATE_LOCKED && Instant::now() < deadline => {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
                 result => break result.unwrap(),
