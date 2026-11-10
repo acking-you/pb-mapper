@@ -122,7 +122,8 @@ jobs:
             Review this pull request using the complete diff and repository.
             Start with git diff BASE_SHA...HEAD_SHA using the SHAs above, then
             inspect related source, tests, and callers as needed to verify
-            behavior. Read the repository guidance in AGENTS.md and CLAUDE.md.
+            behavior. Read the repository guidance in AGENTS.md and
+            docs/architecture.md.
             You may use tools and run relevant checks throughout the review;
             there is no turn, tool-call, file-count, diff-size, or finding-count
             budget. The job's 30-minute timeout is the only execution budget.

@@ -1,6 +1,7 @@
 # Repository Guidelines
 
-Rules for changing this repository. [CLAUDE.md](CLAUDE.md) maps the code;
+Rules for changing this repository. `CLAUDE.md` is a symlink to this file.
+[docs/architecture.md](docs/architecture.md) maps the code;
 [docs/README.md](docs/README.md) indexes the design docs.
 
 ## Subagents
