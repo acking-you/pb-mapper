@@ -374,18 +374,3 @@ const _: () = assert!(
     NONCE_LEN == 4 + size_of::<u64>(),
     "a nonce is a zero prefix, then the counter"
 );
-
-/// `fields` back to back. Every caller's field widths add up to `N`; the
-/// golden test pins the bytes this lays out.
-fn pack<const N: usize>(fields: &[&[u8]]) -> [u8; N] {
-    debug_assert_eq!(
-        fields.iter().map(|field| field.len()).sum::<usize>(),
-        N,
-        "the field widths add up to the packed length"
-    );
-    let mut packed = [0; N];
-    for (slot, byte) in packed.iter_mut().zip(fields.iter().copied().flatten()) {
-        *slot = *byte;
-    }
-    packed
-}

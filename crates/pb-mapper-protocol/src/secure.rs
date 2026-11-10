@@ -697,5 +697,20 @@ fn unix_seconds() -> u64 {
         .as_secs()
 }
 
+/// `fields` back to back, for the fixed layouts on the wire and on disk. Every
+/// caller's field widths add up to `N`, and a test pins each layout's bytes.
+fn pack<const N: usize>(fields: &[&[u8]]) -> [u8; N] {
+    debug_assert_eq!(
+        fields.iter().map(|field| field.len()).sum::<usize>(),
+        N,
+        "the field widths add up to the packed length"
+    );
+    let mut packed = [0; N];
+    for (slot, byte) in packed.iter_mut().zip(fields.iter().copied().flatten()) {
+        *slot = *byte;
+    }
+    packed
+}
+
 #[cfg(test)]
 mod tests;

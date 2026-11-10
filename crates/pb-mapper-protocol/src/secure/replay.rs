@@ -14,12 +14,6 @@
 //! end of a window with a max-future timestamp cannot be replayed after rotation.
 //! Per-credential counts stop one tenant from filling the shared filter with
 //! unique salts before the request payload is decoded.
-//!
-//! The `expect`s here are all slices of a `[u8; REPLAY_RECORD_LEN]` at constant
-//! offsets, or SHA-256's 32-byte output — widths the array types already fix, so
-//! the conversions cannot fail. Unlike the parsing paths, these sit in functions
-//! that return `()`, so there is nothing to report a width error to.
-#![allow(clippy::expect_used)]
 
 use pb_mapper_auth::KeyId;
 
@@ -67,17 +61,40 @@ pub(super) enum FirstFlightAdmit {
     Unavailable,
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "a SHA-256 digest is always SHA256_OUTPUT_LEN bytes"
+)]
 pub(super) fn replay_fingerprint(
     key_id: KeyId,
     salt: &[u8; CONNECTION_SALT_LEN],
 ) -> [u8; FINGERPRINT_LEN] {
-    let mut input = [0_u8; 8 + CONNECTION_SALT_LEN];
-    input[..8].copy_from_slice(&key_id.to_be_bytes());
-    input[8..].copy_from_slice(salt);
+    let input: [u8; size_of::<u64>() + CONNECTION_SALT_LEN] = pack(&[&key_id.to_be_bytes(), salt]);
     digest(&SHA256, &input)
         .as_ref()
         .try_into()
         .expect("SHA-256 width")
+}
+
+/// One admission in the log.
+struct ReplayRecord {
+    fingerprint: [u8; FINGERPRINT_LEN],
+    timestamp: u64,
+}
+
+impl ReplayRecord {
+    /// The record on disk: the fingerprint, then the admission time.
+    fn to_bytes(&self) -> [u8; REPLAY_RECORD_LEN] {
+        pack(&[&self.fingerprint, &self.timestamp.to_be_bytes()])
+    }
+
+    fn from_bytes(bytes: [u8; REPLAY_RECORD_LEN]) -> Self {
+        let [fingerprint @ .., t0, t1, t2, t3, t4, t5, t6, t7] = bytes;
+        Self {
+            fingerprint,
+            timestamp: u64::from_be_bytes([t0, t1, t2, t3, t4, t5, t6, t7]),
+        }
+    }
 }
 
 pub(super) struct RotatingBloom {
@@ -97,12 +114,12 @@ impl RotatingBloom {
         }
     }
 
-    pub(super) fn contains(&mut self, fingerprint: &[u8; 32], now: u64) -> bool {
+    pub(super) fn contains(&mut self, fingerprint: &[u8; FINGERPRINT_LEN], now: u64) -> bool {
         self.rotate(now);
         bloom_contains(&self.current, fingerprint) || bloom_contains(&self.previous, fingerprint)
     }
 
-    pub(super) fn insert(&mut self, fingerprint: &[u8; 32], now: u64) {
+    pub(super) fn insert(&mut self, fingerprint: &[u8; FINGERPRINT_LEN], now: u64) {
         self.rotate(now);
         bloom_insert(&mut self.current, fingerprint);
     }
@@ -173,7 +190,7 @@ impl ReplayGuard {
     pub(super) fn admit(
         &mut self,
         key_id: KeyId,
-        fingerprint: &[u8; 32],
+        fingerprint: &[u8; FINGERPRINT_LEN],
         now: u64,
     ) -> FirstFlightAdmit {
         self.rotate_counts(now);
@@ -196,7 +213,11 @@ impl ReplayGuard {
         result
     }
 
-    pub(super) fn claim(&mut self, fingerprint: &[u8; 32], now: u64) -> FirstFlightAdmit {
+    pub(super) fn claim(
+        &mut self,
+        fingerprint: &[u8; FINGERPRINT_LEN],
+        now: u64,
+    ) -> FirstFlightAdmit {
         if self.bloom.contains(fingerprint, now) {
             return FirstFlightAdmit::Replayed;
         }
@@ -214,7 +235,7 @@ impl ReplayGuard {
         }
     }
 
-    fn reserve(&mut self, fingerprint: &[u8; 32], now: u64) -> FirstFlightAdmit {
+    fn reserve(&mut self, fingerprint: &[u8; FINGERPRINT_LEN], now: u64) -> FirstFlightAdmit {
         if self.persist(fingerprint, now).is_err() {
             return FirstFlightAdmit::Unavailable;
         }
@@ -231,7 +252,7 @@ impl ReplayGuard {
         self.counts_started_at = now;
     }
 
-    fn persist(&mut self, fingerprint: &[u8; 32], now: u64) -> std::io::Result<()> {
+    fn persist(&mut self, fingerprint: &[u8; FINGERPRINT_LEN], now: u64) -> std::io::Result<()> {
         if self.log_failed {
             return Err(std::io::Error::other(
                 "durable first-flight replay log is unavailable after a failed rollback",
@@ -246,9 +267,11 @@ impl ReplayGuard {
         let created = !path.exists();
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         let start_len = file.metadata()?.len();
-        let mut record = [0_u8; REPLAY_RECORD_LEN];
-        record[..32].copy_from_slice(fingerprint);
-        record[32..].copy_from_slice(&now.to_be_bytes());
+        let record = ReplayRecord {
+            fingerprint: *fingerprint,
+            timestamp: now,
+        }
+        .to_bytes();
         if let Err(error) = file.write_all(&record).and_then(|()| file.sync_data()) {
             drop(file);
             if truncate_replay_log(path, start_len).is_err() {
@@ -280,19 +303,13 @@ impl ReplayGuard {
         };
         let mut live = Vec::new();
         for record in records {
-            let timestamp = u64::from_be_bytes(record[32..].try_into().expect("timestamp width"));
-            if now.saturating_sub(timestamp) > self.window_seconds {
+            if now.saturating_sub(record.timestamp) > self.window_seconds {
                 continue;
             }
-            let fingerprint: [u8; 32] = record[..32].try_into().expect("fingerprint width");
-            self.bloom.insert(&fingerprint, timestamp);
+            self.bloom.insert(&record.fingerprint, record.timestamp);
             live.push(record);
         }
-        if let Some(oldest) = live
-            .iter()
-            .map(|record| u64::from_be_bytes(record[32..].try_into().expect("timestamp width")))
-            .min()
-        {
+        if let Some(oldest) = live.iter().map(|record| record.timestamp).min() {
             self.bloom.current_started_at = oldest;
         }
         self.total = u32::try_from(live.len())
@@ -320,11 +337,7 @@ impl ReplayGuard {
         };
         let live = records
             .into_iter()
-            .filter(|record| {
-                let timestamp =
-                    u64::from_be_bytes(record[32..].try_into().expect("timestamp width"));
-                now.saturating_sub(timestamp) <= self.window_seconds
-            })
+            .filter(|record| now.saturating_sub(record.timestamp) <= self.window_seconds)
             .collect::<Vec<_>>();
         if self.rewrite_live(&live).is_err() {
             self.log_failed = true;
@@ -333,29 +346,25 @@ impl ReplayGuard {
         self.last_compact_at = now;
     }
 
-    fn rewrite_live(&self, live: &[[u8; REPLAY_RECORD_LEN]]) -> std::io::Result<()> {
+    fn rewrite_live(&self, live: &[ReplayRecord]) -> std::io::Result<()> {
         let Some(path) = &self.log_path else {
             return Ok(());
         };
-        let mut random_suffix = [0_u8; 8];
-        let mut rng = rand::rng();
-        for byte in &mut random_suffix {
-            *byte = rng.random();
-        }
+        let random_suffix = u64::from_be_bytes(rand::rng().random::<[u8; 8]>());
         let temporary = path.with_file_name(format!(
-            ".{}.tmp-{}-{:016x}",
+            ".{}.tmp-{}-{random_suffix:016x}",
             path.file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("connection.replay"),
             std::process::id(),
-            u64::from_be_bytes(random_suffix)
         ));
+        let records = live.iter().map(ReplayRecord::to_bytes).collect::<Vec<_>>();
         let result = (|| {
             let mut file = OpenOptions::new()
                 .create_new(true)
                 .write(true)
                 .open(&temporary)?;
-            file.write_all(&live.concat())?;
+            file.write_all(records.as_flattened())?;
             file.sync_all()?;
             drop(file);
             pb_mapper_core::durable_file::replace_file(&temporary, path)?;
@@ -374,7 +383,7 @@ impl ReplayGuard {
 /// it makes `MoveFileExW` refuse that replace, leaving it to std's POSIX-rename
 /// retry, which older releases and some file systems lack; a failed rewrite
 /// latches `log_failed` for the life of the process.
-fn read_complete_replay_records(path: &Path) -> std::io::Result<Vec<[u8; REPLAY_RECORD_LEN]>> {
+fn read_complete_replay_records(path: &Path) -> std::io::Result<Vec<ReplayRecord>> {
     let mut file = File::open(path)?;
     let mut records = Vec::new();
     loop {
@@ -389,7 +398,7 @@ fn read_complete_replay_records(path: &Path) -> std::io::Result<Vec<[u8; REPLAY_
                 "truncated first-flight replay record",
             ));
         }
-        records.push(record);
+        records.push(ReplayRecord::from_bytes(record));
     }
 }
 
@@ -404,26 +413,25 @@ pub(super) fn truncate_replay_log(path: &Path, len: u64) -> std::io::Result<()> 
     file.sync_data()
 }
 
-fn bloom_positions(filter_len: usize, fingerprint: &[u8; 32]) -> [usize; 4] {
+/// The filter bits a fingerprint sets: each of its four big-endian `u64`s,
+/// modulo the filter's bit count.
+fn bloom_positions(
+    filter_len: usize,
+    fingerprint: &[u8; FINGERPRINT_LEN],
+) -> impl Iterator<Item = usize> {
     let bits = filter_len * 8;
-    std::array::from_fn(|index| {
-        let offset = index * 8;
-        let hash = u64::from_be_bytes(
-            fingerprint[offset..offset + 8]
-                .try_into()
-                .expect("fingerprint chunk"),
-        );
-        hash as usize % bits
-    })
+    let (hashes, _) = fingerprint.as_chunks::<8>();
+    hashes
+        .iter()
+        .map(move |hash| u64::from_be_bytes(*hash) as usize % bits)
 }
 
-fn bloom_contains(filter: &[u8], fingerprint: &[u8; 32]) -> bool {
+fn bloom_contains(filter: &[u8], fingerprint: &[u8; FINGERPRINT_LEN]) -> bool {
     bloom_positions(filter.len(), fingerprint)
-        .into_iter()
         .all(|position| filter[position / 8] & (1 << (position % 8)) != 0)
 }
 
-fn bloom_insert(filter: &mut [u8], fingerprint: &[u8; 32]) {
+fn bloom_insert(filter: &mut [u8], fingerprint: &[u8; FINGERPRINT_LEN]) {
     for position in bloom_positions(filter.len(), fingerprint) {
         filter[position / 8] |= 1 << (position % 8);
     }
