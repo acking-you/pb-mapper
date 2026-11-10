@@ -167,9 +167,10 @@ impl ViewerStateSlot {
 /// State shared by the API, the reader, the writer and the sink.
 ///
 /// Lock discipline: `Outbound`'s input queue may be held while taking the
-/// state slot, the sink, the control barriers or the outbound slots, and the
-/// sink while taking the outbound slots; no other lock is held while taking
-/// another, and none across an `.await`.
+/// state slot, the sink, the control barriers or the outbound slots, the
+/// state slot while taking the control barriers, and the sink while taking
+/// the outbound slots; no other lock is held while taking another, and none
+/// across an `.await`.
 struct ViewerShared {
     state: Mutex<ViewerStateSlot>,
     stats: Mutex<ViewerStatsAcc>,
@@ -547,23 +548,24 @@ impl Viewer {
     /// Ask for control, or give it up. A revoke always reaches the host
     /// before a later grant, and either discards queued input.
     pub fn request_control(&self, enabled: bool) -> Result<()> {
-        {
-            let mut state = self.shared.state.lock();
-            if self.cancel.is_cancelled() || state.stopped.is_some() {
-                // Teardown already ends control; an idempotent revoke must not
-                // replace the original failure.
-                return if enabled {
-                    Err(error("desktop session is disconnected"))
-                } else {
-                    Ok(())
-                };
-            }
-            state.control_requested = enabled;
-            state.control_wanted = Some(enabled);
-            if enabled {
-                state.local_reason = None;
-            }
+        let mut state = self.shared.state.lock();
+        if self.cancel.is_cancelled() || state.stopped.is_some() {
+            // Teardown already ends control; an idempotent revoke must not
+            // replace the original failure.
+            return if enabled {
+                Err(error("desktop session is disconnected"))
+            } else {
+                Ok(())
+            };
         }
+        state.control_requested = enabled;
+        state.control_wanted = Some(enabled);
+        if enabled {
+            state.local_reason = None;
+        }
+        // Under the state lock, as everything that ends control pushes its
+        // revoke: of two racing changes, the one whose state stays is the
+        // one whose barrier the host hears last.
         self.shared.outbound.barrier(if enabled {
             Barrier::Grant
         } else {
@@ -615,6 +617,9 @@ impl Viewer {
                 let mut state = self.shared.state.lock();
                 state.control_requested = false;
                 state.local_reason = Some(ViewerReason::InputCongestion);
+                // Again under the state lock, so that a racing request lands
+                // wholly before or after this end of control.
+                self.shared.outbound.barrier(Barrier::Revoke);
             },
         )
     }
@@ -678,8 +683,8 @@ impl Viewer {
             }
             state.paused = true;
             state.control_requested = false;
+            self.shared.outbound.barrier(Barrier::Revoke);
         }
-        self.shared.outbound.barrier(Barrier::Revoke);
         self.shared.outbound.lifecycle(Lifecycle::Pause);
         self.sink.pause();
     }
