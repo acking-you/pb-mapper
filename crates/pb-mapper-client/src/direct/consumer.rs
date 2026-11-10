@@ -7,12 +7,13 @@ use super::{
     endpoint::Network,
     lan::Assessment,
     link::{counts, direct_link, log_path, stun_timings, summary},
-    reports, tcp,
+    reports::{self, SessionReporter, Sink},
+    tcp,
 };
 use crate::{
     diagnostics::{
         CandidateCounts, Diagnostics, DirectLink, DirectStage, FallbackReason, LanTcpMiss,
-        LinkGuard, LinkKind, SessionGuard, SetupTimings, ms,
+        LinkKind, SetupTimings, ms,
     },
     endpoint::RelayEndpoint,
     sdk::LanTransport,
@@ -515,17 +516,14 @@ impl Prepared {
         };
         let session = self.diagnostics.session_opened(path, summary);
         let meter = Some(session.meter());
-        let mut report = ConsumerReport {
-            owner: self.owner,
-            session: (&self.grant).into(),
-            secret: self.grant.secret,
+        let mut report = SessionReporter::start(
+            Sink::Consumer(self.owner),
+            &self.grant,
             path,
-            link: summary,
-            seq: 0,
-            _session: session,
-            _link: link,
-        };
-        report.active();
+            summary,
+            session,
+            link,
+        );
         let forwarding = async {
             match self.path {
                 DataPath::Direct {
@@ -554,52 +552,10 @@ impl Prepared {
                 }
             }
         };
-        tokio::pin!(forwarding);
-        let mut ticker = tokio::time::interval(Duration::from_secs(15));
-        ticker.tick().await;
-        loop {
-            tokio::select! { result = &mut forwarding => return result, _ = ticker.tick() => report.active() }
-        }
+        report.during(forwarding).await
     }
 }
 
-struct ConsumerReport {
-    owner: Arc<Consumer>,
-    session: SessionSummary,
-    secret: SessionSecret,
-    path: SessionPath,
-    link: Option<LinkSummary>,
-    seq: u64,
-    /// Closes the session in diagnostics after the final report.
-    _session: SessionGuard,
-    _link: Option<LinkGuard>,
-}
-impl ConsumerReport {
-    fn update(&mut self, state: SessionState) {
-        self.seq += 1;
-        self.owner.reports.put(SessionUpdate {
-            session: self.session.clone(),
-            secret: self.secret,
-            report: SessionReport {
-                id: self.session.id,
-                seq: self.seq,
-                path: self.path,
-                state,
-                reason: None,
-                link: self.link,
-            },
-        });
-        self.owner.report_wake.notify_one();
-    }
-    fn active(&mut self) {
-        self.update(SessionState::Active);
-    }
-}
-impl Drop for ConsumerReport {
-    fn drop(&mut self) {
-        self.update(SessionState::Closed);
-    }
-}
 async fn report_loop(
     remote: RelayEndpoint,
     credential: Credential,

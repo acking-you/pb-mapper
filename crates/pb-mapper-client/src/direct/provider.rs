@@ -3,12 +3,11 @@ use super::{
     endpoint::{Arrival, Network},
     lan::Assessment,
     link::{counts, direct_link, log_path, stun_timings, summary},
+    reports::{Latest, SessionReporter, Sink},
     tcp,
 };
 use crate::{
-    diagnostics::{
-        CandidateCounts, Diagnostics, LinkGuard, LinkKind, SessionGuard, SetupTimings, ms,
-    },
+    diagnostics::{CandidateCounts, Diagnostics, LinkKind, SetupTimings, ms},
     server::LocalControlWrite,
 };
 use pb_mapper_core::config::ResolvedAddrs;
@@ -458,29 +457,20 @@ where
     }
     log_path(&grant.service, &link);
     let summary = summary(&link);
-    let _link = diagnostics.link_opened(link, incoming.conn.probe());
+    let link_guard = diagnostics.link_opened(link, incoming.conn.probe());
     let session = diagnostics.session_opened(SessionPath::Direct, Some(summary));
     let meter = Some(session.meter());
-    let mut report = Report {
-        reports,
-        session: (&grant).into(),
-        secret: grant.secret,
-        link: summary,
-        seq: 0,
-        _session: session,
-        _link,
-    };
-    report.tick();
-    let forwarding = forward_direct(local, incoming.conn, framing, idle, meter);
-    tokio::pin!(forwarding);
-    let mut tick = tokio::time::interval(Duration::from_secs(15));
-    tick.tick().await;
-    loop {
-        tokio::select! {
-            result = &mut forwarding => return result,
-            _ = tick.tick() => report.tick(),
-        }
-    }
+    let mut report = SessionReporter::start(
+        Sink::Provider(reports),
+        &grant,
+        SessionPath::Direct,
+        Some(summary),
+        session,
+        Some(link_guard),
+    );
+    report
+        .during(forward_direct(local, incoming.conn, framing, idle, meter))
+        .await
 }
 /// The connection is the granted consumer's, by the one certificate it
 /// presented, and is bound to this grant.
@@ -532,8 +522,8 @@ impl Drop for ProbeGuard {
     }
 }
 #[derive(Default)]
-struct ProviderReports {
-    latest: super::reports::Latest,
+pub(super) struct ProviderReports {
+    latest: Latest,
     // Alternative pooled control connections to ONE coordinator. A report
     // needs one live route, not broadcast copies on every worker connection.
     routes: std::sync::Mutex<Vec<Reply>>,
@@ -558,7 +548,7 @@ impl ProviderReports {
             }
         }
     }
-    fn put(&self, update: SessionUpdate) {
+    pub(super) fn put(&self, update: SessionUpdate) {
         self.latest.put(update.clone());
         let id = update.report.id;
         let delivered = self.deliver(update);
@@ -623,41 +613,6 @@ impl ActiveSession {
 impl Drop for ActiveSession {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-struct Report {
-    reports: Arc<ProviderReports>,
-    session: SessionSummary,
-    secret: SessionSecret,
-    link: LinkSummary,
-    seq: u64,
-    /// Closes the session in diagnostics after the final report.
-    _session: SessionGuard,
-    _link: LinkGuard,
-}
-impl Report {
-    fn update(&mut self, state: SessionState) {
-        self.seq += 1;
-        self.reports.put(SessionUpdate {
-            session: self.session.clone(),
-            secret: self.secret,
-            report: SessionReport {
-                id: self.session.id,
-                seq: self.seq,
-                path: SessionPath::Direct,
-                state,
-                reason: None,
-                link: Some(self.link),
-            },
-        });
-    }
-    fn tick(&mut self) {
-        self.update(SessionState::Active);
-    }
-}
-impl Drop for Report {
-    fn drop(&mut self) {
-        self.update(SessionState::Closed);
     }
 }
 
