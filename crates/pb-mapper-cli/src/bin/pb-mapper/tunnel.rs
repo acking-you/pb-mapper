@@ -310,8 +310,9 @@ async fn monitor_tunnel(
             TunnelStatus::Stopped => return Ok(()),
             TunnelStatus::Starting | TunnelStatus::Connected | TunnelStatus::Retrying => {}
         }
+        // Unbiased: a backlog of events, ready on every pass, must not keep
+        // the metrics tick from its turn.
         tokio::select! {
-            biased;
             result = &mut ctrl_c => { result?; return Ok(()); },
             result = status.changed() => { if result.is_err() { return Ok(()); } },
             event = events.recv(), if events_open => match event {
