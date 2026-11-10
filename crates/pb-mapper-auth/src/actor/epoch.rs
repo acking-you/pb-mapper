@@ -114,13 +114,19 @@ pub(super) fn actor_rotate_root(
         key: new_key,
         lease: Arc::downgrade(&new_admin_lease),
     };
-    if inner.sync_process_credential {
-        set_process_msg_header_key(Some(&new_key_string)).map_err(AuthFailure::internal)?;
-    }
+    // The key is installed on disk and in memory by now, so a failure here must
+    // not skip the rest: dropping `new_admin_lease` early would leave the relay
+    // with no administrator at all. (It cannot fail today: both ways past the
+    // writes above parsed the key as an administrator credential already.)
+    let synced = if inner.sync_process_credential {
+        set_process_msg_header_key(Some(&new_key_string)).map_err(AuthFailure::internal)
+    } else {
+        Ok(())
+    };
     inner.safe_mode.store(false, Ordering::Release);
     old_admin_lease.cancel_rotated();
     *admin_lease = new_admin_lease;
-    Ok(())
+    synced
 }
 
 pub(super) fn actor_set_legacy_protocol(
