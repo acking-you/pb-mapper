@@ -412,6 +412,7 @@ impl Bits<'_> {
 #[cfg(test)]
 mod tests {
     use crate::desktop_video::*;
+    use crate::test_support::TempRoot;
 
     #[test]
     fn test_source_loops_a_dumped_clip() {
@@ -426,8 +427,8 @@ mod tests {
         };
         let keyframe = record(&[&SPS, &[0x68, 0xce, 0x3c, 0x80], &[0x65, 0x88, 0x84]]);
         let predicted = record(&[&[0x41, 0x9a, 0x02]]);
-        let directory = std::env::temp_dir().join(format!("pb-video-clip-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
+        let temp = TempRoot::new("video-clip");
+        let directory = temp.path();
         let start = |name: &str, clip: &[u8], fps: u32| {
             let path = directory.join(name);
             std::fs::write(&path, clip).unwrap();
@@ -495,7 +496,6 @@ mod tests {
             test_source::sps_size(VideoCodec::H265, H265_SPS_766),
             Some((1366, 766))
         );
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     fn pull_unit(consumer: u64, timeout_ms: u32) -> (i32, PbDesktopVideoMetaV1) {

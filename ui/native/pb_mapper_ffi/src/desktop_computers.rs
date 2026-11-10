@@ -672,6 +672,7 @@ fn lookup(
 mod tests {
     use super::*;
     use crate::error::ErrorCode;
+    use crate::test_support::TempRoot;
     use pb_mapper::desktop::HostIdentity;
 
     const KEY: [u8; 32] = [7; 32];
@@ -690,9 +691,8 @@ mod tests {
 
     #[test]
     fn vault_round_trip_hides_secrets_and_rejects_tampering() {
-        let directory =
-            std::env::temp_dir().join(format!("pb-desktop-computers-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
+        let temp = TempRoot::new("desktop-computers");
+        let directory = temp.path().join("profile");
         let unlock = || {
             request(
                 json!({"op": "computers_unlock", "key": STANDARD.encode(KEY),
@@ -867,16 +867,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(listed, json!([]));
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     /// DPAPI that can no longer open the file, as after a restored profile
     /// or a password reset, is a vault no op can read; only a reset leaves.
     #[test]
     fn an_unreadable_dpapi_vault_can_be_reset() {
-        let directory =
-            std::env::temp_dir().join(format!("pb-desktop-computers-reset-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
+        let temp = TempRoot::new("desktop-computers-reset");
+        let directory = temp.path().join("profile");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join(DPAPI_FILE), b"sealed for someone else").unwrap();
         let mut slot = None;
@@ -897,6 +895,5 @@ mod tests {
         run("computers_reset").unwrap();
         assert_eq!(run("computers_list").unwrap(), json!([]));
         assert!(!directory.join(DPAPI_FILE).exists());
-        std::fs::remove_dir_all(directory).unwrap();
     }
 }

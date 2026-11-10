@@ -262,6 +262,7 @@ fn dpapi(_: &'static [u8], _: &'static str) -> Dpapi {
 mod tests {
     use super::*;
     use crate::error::ErrorCode;
+    use crate::test_support::TempRoot;
 
     fn path(directory: &Path) -> PathBuf {
         directory.join("desktop-trust.dpapi")
@@ -269,7 +270,8 @@ mod tests {
 
     #[test]
     fn dpapi_round_trip_tampering_and_revocation() {
-        let root = std::env::temp_dir().join(format!("pb-desktop-trust-{}", std::process::id()));
+        let temp = TempRoot::new("desktop-trust");
+        let root = temp.path().join("profile");
         let identity = HostIdentity::generate().unwrap();
         let scope = Scope {
             directory: root.clone(),
@@ -337,21 +339,21 @@ mod tests {
     /// one: the app retries it rather than offering to revoke it.
     #[test]
     fn a_file_that_cannot_be_opened_is_io_not_unreadable() {
-        let root = std::env::temp_dir().join(format!("pb-desktop-trust-io-{}", std::process::id()));
+        let temp = TempRoot::new("desktop-trust-io");
+        let root = temp.path().join("profile");
         std::fs::create_dir_all(path(&root)).unwrap();
         assert_eq!(
             load(&root).err().map(|failure| failure.code()),
             Some(ErrorCode::Io)
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// A display that is not attached when a grant is saved again keeps the
     /// device name it had, so it is found again when it comes back.
     #[test]
     fn a_display_away_at_a_save_keeps_its_device() {
-        let root =
-            std::env::temp_dir().join(format!("pb-desktop-trust-device-{}", std::process::id()));
+        let temp = TempRoot::new("desktop-trust-device");
+        let root = temp.path().join("profile");
         let scope = Scope {
             directory: root.clone(),
             relay: "relay:7666".into(),
@@ -401,8 +403,8 @@ mod tests {
 
     #[test]
     fn background_handoff_keeps_the_live_link_through_restart() {
-        let root =
-            std::env::temp_dir().join(format!("pb-desktop-trust-handoff-{}", std::process::id()));
+        let temp = TempRoot::new("desktop-trust-handoff");
+        let root = temp.path().join("profile");
         let scope = Scope {
             directory: root.clone(),
             relay: "relay:7666".into(),
