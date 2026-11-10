@@ -119,6 +119,7 @@ pub enum NotReady {
     Unverified(String),
 }
 
+impl std::error::Error for NotReady {}
 impl std::fmt::Display for NotReady {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -170,7 +171,8 @@ impl Status {
     /// Validate the existing local authorization; this never installs, starts
     /// or elevates the helper on the caller's behalf.
     pub fn ensure_ready(&self) -> Result<()> {
-        self.not_ready().map_or(Ok(()), |reason| Err(error(reason)))
+        self.not_ready()
+            .map_or(Ok(()), |reason| Err(std::io::Error::other(reason)))
     }
 }
 
@@ -318,7 +320,13 @@ mod readiness_tests {
     fn capture_requires_installed_running_service_and_approved_caller() {
         let mut status = Status::default();
         assert_eq!(status.not_ready(), Some(NotReady::NotInstalled));
-        assert!(status.ensure_ready().is_err());
+        // The reason travels typed, and reads as it always has.
+        let refused = status.ensure_ready().unwrap_err();
+        assert_eq!(refused.to_string(), NotReady::NotInstalled.to_string());
+        assert_eq!(
+            refused.get_ref().and_then(|reason| reason.downcast_ref()),
+            Some(&NotReady::NotInstalled)
+        );
         status.installed = true;
         assert_eq!(status.not_ready(), Some(NotReady::Stopped));
         status.running = true;
