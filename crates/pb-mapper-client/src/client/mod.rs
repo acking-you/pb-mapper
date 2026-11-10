@@ -193,7 +193,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
-    run_client_side_cli_recovering::<LocalListener>(
+    run_client_side_cli_recovering_with_path::<LocalListener>(
         local_addr,
         RelayEndpoint::fixed(remote_addr),
         key,
@@ -203,34 +203,6 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
         pinned_credential,
         shutdown,
         Diagnostics::default(),
-    )
-    .await;
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_client_side_cli_recovering<LocalListener: ListenerProvider>(
-    local_addr: ResolvedAddrs,
-    remote_addr: RelayEndpoint,
-    key: Arc<str>,
-    keep_alive: bool,
-    namespace: Option<u64>,
-    status_callback: Option<ClientStatusCallback>,
-    pinned_credential: Option<pb_mapper_core::checksum::Credential>,
-    shutdown: CancellationToken,
-    diagnostics: Diagnostics,
-) where
-    <LocalListener::Listener as StreamAccept>::Item: StreamForward,
-{
-    run_client_side_cli_recovering_with_path::<LocalListener>(
-        local_addr,
-        remote_addr,
-        key,
-        keep_alive,
-        namespace,
-        status_callback,
-        pinned_credential,
-        shutdown,
-        diagnostics,
         crate::sdk::PathPolicy::RelayOnly,
         false,
         crate::sdk::DirectPolicy::RELAY,
