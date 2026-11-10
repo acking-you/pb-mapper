@@ -246,16 +246,7 @@ impl<T: Transport> Backend for RemoteBackend<T> {
     /// The worker wakes nothing here: its output is drained by polling.
     fn bind(&mut self, _waker: Waker) {}
     fn capture_consistent(&mut self, expected: &DesktopContext) -> Result<Vec<u8>> {
-        if &self.context()? != expected {
-            return Err(error("desktop changed before capture"));
-        }
-        let frame = self.capture()?;
-        if &self.context()? != expected {
-            return Err(error(
-                "desktop changed during capture; waiting for a current frame",
-            ));
-        }
-        Ok(frame)
+        crate::backend::capture_checked(self, expected, Self::capture)
     }
     fn drain_poll(&self) -> Option<std::time::Duration> {
         Some(crate::DRAIN_POLL)

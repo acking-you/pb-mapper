@@ -8,7 +8,9 @@
 use crate::{
     Backend, BackendCaps, BackendError, Description, DesktopContext, DesktopKind, Display,
     DisplaySelection, DoubleClickGuard, EncodedFrame, FailureKind, Input, Result, VideoCodec,
-    VideoFormat, VideoLimits, VideoRate, Waker, error,
+    VideoFormat, VideoLimits, VideoRate, Waker,
+    backend::capture_checked,
+    error,
     input::{cursor::confine, held::Held},
     modes::{self, Guard, Journal, Mode, ModeList},
     platform::{
@@ -80,6 +82,14 @@ impl<P: Platform> PlatformBackend<P> {
             *video = None;
         })
     }
+    /// One JPEG of `display`, bound to the input desktop before and after.
+    fn still(&mut self, display: &Display) -> Result<Vec<u8>> {
+        let _scope = self.parts.desktop.scope();
+        self.prepare()?;
+        let jpeg = self.parts.still.jpeg(display)?;
+        self.prepare()?;
+        Ok(jpeg)
+    }
 }
 fn release<I: Injector>(held: &mut Held, input: &mut I) {
     held.release(|pressed| input.release(pressed));
@@ -128,29 +138,10 @@ impl<P: Platform> Backend for PlatformBackend<P> {
     }
     fn capture(&mut self) -> Result<Vec<u8>> {
         let display = self.display()?;
-        let _scope = self.parts.desktop.scope();
-        self.prepare()?;
-        let jpeg = self.parts.still.jpeg(&display)?;
-        self.prepare()?;
-        Ok(jpeg)
+        self.still(&display)
     }
     fn capture_consistent(&mut self, expected: &DesktopContext) -> Result<Vec<u8>> {
-        if &self.context()? != expected {
-            return Err(error("desktop changed before capture"));
-        }
-        let frame = {
-            let _scope = self.parts.desktop.scope();
-            self.prepare()?;
-            let jpeg = self.parts.still.jpeg(&expected.display)?;
-            self.prepare()?;
-            jpeg
-        };
-        if &self.context()? != expected {
-            return Err(error(
-                "desktop changed during capture; waiting for a current frame",
-            ));
-        }
-        Ok(frame)
+        capture_checked(self, expected, |this| this.still(&expected.display))
     }
     fn capture_video(
         &mut self,
