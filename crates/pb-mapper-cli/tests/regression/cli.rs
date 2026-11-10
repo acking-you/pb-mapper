@@ -3,6 +3,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
+use pb_mapper_core::test_support::TempPath;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnResponse};
 use pb_mapper_protocol::{MessageReader, get_header_msg_reader};
 use pb_mapper_testkit::{TEST_ADMIN_KEY, Transport, reserve_addr};
@@ -16,16 +17,14 @@ use crate::support::{
 
 #[tokio::test]
 async fn explicit_invalid_msg_header_key_fails_server_startup() {
-    let state_dir =
-        std::env::temp_dir().join(format!("pb-mapper-invalid-env-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&state_dir);
+    let state_dir = TempPath::new("invalid-env");
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_pb-mapper"));
     command
         .arg("server")
         .arg("--port")
         .arg("0")
         .arg("--auth-state-dir")
-        .arg(&state_dir)
+        .arg(state_dir.path())
         .env("MSG_HEADER_KEY", "invalid")
         // The assertion reads the error log; an inherited filter must not hide it.
         .env("RUST_LOG", "error")
@@ -47,7 +46,6 @@ async fn explicit_invalid_msg_header_key_fails_server_startup() {
         output.status
     );
     assert!(!state_dir.join("admin.key").exists());
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
