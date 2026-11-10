@@ -100,7 +100,7 @@ pub unsafe extern "C" fn pb_mapper_disconnect_service(
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;
-        state.disconnect_service(service_key).await
+        state.disconnect_service(service_key)
     });
 
     match result {
@@ -131,7 +131,7 @@ pub unsafe extern "C" fn pb_mapper_delete_client_config(
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;
-        state.delete_client_config_and_stop(service_key).await
+        state.delete_client_config_and_stop(service_key)
     });
 
     match result {

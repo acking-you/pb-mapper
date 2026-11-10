@@ -388,26 +388,22 @@ pub async fn register_service(
         .map_err(sdk_refusal)?;
 
     // 3. Commit. Microseconds again.
-    state
-        .lock()
-        .await
-        .finish_register(RegisterCommit {
-            service_key,
-            local_address,
-            protocol,
-            enable_encryption,
-            enable_keep_alive,
-            port_mapping,
-            handle,
-            pin: PinnedTunnel {
-                credential,
-                endpoint: remote_addrs,
-                relay: server_address,
-                namespace: None,
-                allow_direct,
-            },
-        })
-        .await
+    state.lock().await.finish_register(RegisterCommit {
+        service_key,
+        local_address,
+        protocol,
+        enable_encryption,
+        enable_keep_alive,
+        port_mapping,
+        handle,
+        pin: PinnedTunnel {
+            credential,
+            endpoint: remote_addrs,
+            relay: server_address,
+            namespace: None,
+            allow_direct,
+        },
+    })
 }
 
 /// Connects to a registered service. Phased exactly like [`register_service`];
@@ -491,25 +487,21 @@ pub async fn connect_service(
         .await
         .map_err(sdk_refusal)?;
 
-    state
-        .lock()
-        .await
-        .finish_connect(ConnectCommit {
-            service_key,
-            local_address,
-            protocol,
-            enable_keep_alive,
-            port_mapping,
-            handle,
-            pin: PinnedTunnel {
-                credential,
-                endpoint: remote_addrs,
-                relay: server_address,
-                namespace,
-                allow_direct,
-            },
-        })
-        .await
+    state.lock().await.finish_connect(ConnectCommit {
+        service_key,
+        local_address,
+        protocol,
+        enable_keep_alive,
+        port_mapping,
+        handle,
+        pin: PinnedTunnel {
+            credential,
+            endpoint: remote_addrs,
+            relay: server_address,
+            namespace,
+            allow_direct,
+        },
+    })
 }
 
 /// Tell the window when `handle`'s state or path changes, until the tunnel

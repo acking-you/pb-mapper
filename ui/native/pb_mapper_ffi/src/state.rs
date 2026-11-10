@@ -56,23 +56,6 @@ pub use views::{
     ServerStatusDetail, ServiceConfigInfo, ServiceConnInfo, ServiceStatusResponse,
 };
 
-#[derive(Clone)]
-#[allow(dead_code)]
-struct ServiceInfo {
-    service_key: String,
-    protocol: String,
-    local_address: String,
-    status: String,
-}
-
-#[derive(Clone)]
-#[allow(dead_code)]
-struct ConnectionInfo {
-    service_key: String,
-    client_id: String,
-    status: String,
-}
-
 pub struct PbMapperState {
     server_handle: Option<JoinHandle<()>>,
     server_auth: Option<AuthRuntime>,
@@ -91,8 +74,6 @@ pub struct PbMapperState {
     /// a forced check (Settings' Test) or a change of settings, not every
     /// periodic one, since a relay from before QUIC logs the question.
     quic_offer: Option<(AppConfig, Option<u16>)>,
-    registered_services: Arc<RwLock<HashMap<String, ServiceInfo>>>,
-    active_connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
     service_runtime: HashMap<String, TunnelRuntime>,
     client_runtime: HashMap<String, TunnelRuntime>,
     config: AppConfig,

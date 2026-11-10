@@ -29,9 +29,7 @@ use super::tunnel::{
     ConnectCommit, KeyClaim, RegisterCommit, TunnelHandle, TunnelRuntime, abort_runtime, claim_key,
     watch_tunnel,
 };
-use super::{
-    ConnectionInfo, DirectOptions, LocalServerStatus, PbMapperState, RelayTunnels, ServiceInfo,
-};
+use super::{DirectOptions, LocalServerStatus, PbMapperState, RelayTunnels};
 use crate::error::CtlError;
 use crate::events;
 
@@ -229,9 +227,6 @@ impl PbMapperState {
             self.service_runtime.clear();
             self.client_runtime.clear();
 
-            self.registered_services.write().await.clear();
-            self.active_connections.write().await.clear();
-
             tracing::info!("pb-mapper server stopped, all services and connections terminated");
             Ok(())
         } else {
@@ -239,7 +234,7 @@ impl PbMapperState {
         }
     }
 
-    pub(super) async fn finish_register(&mut self, commit: RegisterCommit) -> Result<(), CtlError> {
+    pub(super) fn finish_register(&mut self, commit: RegisterCommit) -> Result<(), CtlError> {
         let RegisterCommit {
             service_key,
             local_address,
@@ -281,18 +276,6 @@ impl PbMapperState {
         {
             tracing::warn!("Service '{service_key}' was already registered; replaced it");
         }
-
-        let service_info = ServiceInfo {
-            service_key: service_key.clone(),
-            protocol,
-            local_address,
-            status: "Registering".to_string(),
-        };
-
-        self.registered_services
-            .write()
-            .await
-            .insert(service_key.clone(), service_info);
 
         tracing::info!("Service '{}' registration initiated", service_key);
         Ok(())
@@ -412,16 +395,8 @@ impl PbMapperState {
         found
     }
 
-    pub async fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
-        abort_runtime(&mut self.service_runtime, &service_key);
-
-        if self
-            .registered_services
-            .write()
-            .await
-            .remove(&service_key)
-            .is_some()
-        {
+    pub fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
+        if abort_runtime(&mut self.service_runtime, &service_key) {
             tracing::info!("Service '{}' unregistered successfully", service_key);
             Ok(())
         } else {
@@ -431,18 +406,12 @@ impl PbMapperState {
         }
     }
 
-    pub async fn delete_service_config_and_stop(
-        &mut self,
-        service_key: String,
-    ) -> Result<(), CtlError> {
+    pub fn delete_service_config_and_stop(&mut self, service_key: String) -> Result<(), CtlError> {
         abort_runtime(&mut self.service_runtime, &service_key);
-
-        self.registered_services.write().await.remove(&service_key);
-
         self.delete_service_config(&service_key)
     }
 
-    pub(super) async fn finish_connect(&mut self, commit: ConnectCommit) -> Result<(), CtlError> {
+    pub(super) fn finish_connect(&mut self, commit: ConnectCommit) -> Result<(), CtlError> {
         let ConnectCommit {
             service_key,
             local_address,
@@ -472,17 +441,6 @@ impl PbMapperState {
         {
             tracing::warn!("Client for service '{service_key}' was already running; replaced it");
         }
-
-        let connection_info = ConnectionInfo {
-            service_key: service_key.clone(),
-            client_id: format!("client-{service_key}"),
-            status: "Connected".to_string(),
-        };
-
-        self.active_connections
-            .write()
-            .await
-            .insert(service_key.clone(), connection_info);
 
         // Persist here rather than at the FFI boundary, so a connection made
         // from a terminal is remembered exactly like one made from the window.
@@ -518,23 +476,11 @@ impl PbMapperState {
         claim_key(&self.connecting, service_key, "being connected")
     }
 
-    pub async fn disconnect_service(&mut self, service_key: String) -> Result<(), CtlError> {
-        // Aborting the task is the part that matters: it is what stops the
-        // retry loop still dialling in the background.
-        let aborted = abort_runtime(&mut self.client_runtime, &service_key);
-
-        let was_listed = self
-            .active_connections
-            .write()
-            .await
-            .remove(&service_key)
-            .is_some();
-
-        // Reported failure only when there was nothing to stop. It used to key
-        // off the bookkeeping map alone, so a client whose task had been
-        // aborted could still be reported as "not connected" — an error for an
-        // operation that had in fact just done its job.
-        if aborted || was_listed {
+    /// Stops the connection under `service_key`, which also stops its retry
+    /// loop still dialling in the background; failing only when there was
+    /// nothing to stop.
+    pub fn disconnect_service(&mut self, service_key: String) -> Result<(), CtlError> {
+        if abort_runtime(&mut self.client_runtime, &service_key) {
             tracing::info!("Disconnected from service '{}'", service_key);
             Ok(())
         } else {
@@ -544,14 +490,8 @@ impl PbMapperState {
         }
     }
 
-    pub async fn delete_client_config_and_stop(
-        &mut self,
-        service_key: String,
-    ) -> Result<(), CtlError> {
+    pub fn delete_client_config_and_stop(&mut self, service_key: String) -> Result<(), CtlError> {
         abort_runtime(&mut self.client_runtime, &service_key);
-
-        self.active_connections.write().await.remove(&service_key);
-
         self.delete_client_config(&service_key)
     }
 }

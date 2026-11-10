@@ -293,7 +293,7 @@ async fn run(
         }
 
         Command::Unregister { key } => {
-            state.lock().await.unregister_service(key.clone()).await?;
+            state.lock().await.unregister_service(key.clone())?;
             Ok(proto::Response::ok(None, Some(format!("stopped '{key}'"))))
         }
 
@@ -318,7 +318,7 @@ async fn run(
         }
 
         Command::Disconnect { key } => {
-            state.lock().await.disconnect_service(key.clone()).await?;
+            state.lock().await.disconnect_service(key.clone())?;
             Ok(proto::Response::ok(
                 None,
                 Some(format!("disconnected '{key}'")),
