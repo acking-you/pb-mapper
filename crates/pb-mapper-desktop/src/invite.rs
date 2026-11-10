@@ -272,9 +272,10 @@ impl Invitation {
     /// The first 8 bytes of the fingerprint, as `AB12-CD34-EF56-7890`, for a
     /// person to compare.
     pub fn short_fingerprint(&self) -> String {
-        self.fingerprint[..8]
-            .chunks(2)
-            .map(|pair| format!("{:02X}{:02X}", pair[0], pair[1]))
+        let (pairs, _) = self.fingerprint[..8].as_chunks::<2>();
+        pairs
+            .iter()
+            .map(|[high, low]| format!("{high:02X}{low:02X}"))
             .collect::<Vec<_>>()
             .join("-")
     }
