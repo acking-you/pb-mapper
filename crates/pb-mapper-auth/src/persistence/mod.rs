@@ -14,28 +14,36 @@ use super::*;
 
 mod admin_key;
 mod blob;
+mod format;
 mod fs;
+mod instance_id;
 mod namespaces;
 mod snapshot;
 mod wal;
 
-#[cfg(test)]
-pub(crate) use admin_key::read_instance_id_file;
 pub use admin_key::{
     discard_staged_admin_key, generate_admin_key, initialize_admin_key, stage_admin_key_candidate,
     staged_admin_key_path, write_admin_key_file,
 };
 pub(crate) use admin_key::{
-    key_matches_existing_state, load_or_create_instance_id, random_instance_id,
-    recover_instance_id_after_reset, reset_already_installed, rotation_already_installed,
-    write_admin_key,
+    persist_recovery_admin_key, read_admin_key, recover_admin_key_after_rotation,
+    rotation_already_installed, write_admin_key,
 };
 pub(crate) use blob::{open_blob, seal_blob};
+pub(crate) use format::{
+    AdminReplayRecord, AuditRecord, PersistedEntry, PersistedSnapshot, StateMutation, WalRecord,
+};
 pub use fs::acquire_state_dir_lock;
 #[cfg(test)]
 pub(crate) use fs::prepare_state_dir;
 pub(crate) use fs::sync_parent_directory;
 pub(crate) use fs::{atomic_write, create_new_write, prepare_state_dir_and_lock};
+#[cfg(test)]
+pub(crate) use instance_id::read_instance_id_file;
+pub(crate) use instance_id::{
+    load_or_create_instance_id, random_instance_id, recover_instance_id_after_reset,
+    reset_already_installed,
+};
 pub(crate) use namespaces::{
     read_namespace_high_water, restore_namespace_high_water, write_namespace_high_water,
 };
@@ -64,13 +72,6 @@ pub(crate) fn auth_wal_path(state_dir: &Path) -> PathBuf {
 
 pub fn encrypted_auth_state_exists(state_dir: &Path) -> bool {
     auth_snapshot_path(state_dir).exists() || auth_wal_path(state_dir).exists()
-}
-
-pub(crate) fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {

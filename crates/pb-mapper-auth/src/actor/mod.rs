@@ -18,8 +18,10 @@
 
 use super::*;
 
+mod command;
 mod epoch;
 mod lifecycle;
+pub(super) use command::AuthCommand;
 use epoch::*;
 use lifecycle::*;
 

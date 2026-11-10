@@ -15,6 +15,30 @@
 
 use super::*;
 
+#[derive(Clone)]
+pub struct AuthRuntime {
+    inner: Weak<AuthStateInner>,
+    command_tx: mpsc::Sender<AuthCommand>,
+    config: AuthConfig,
+    _state_lock: Arc<File>,
+    actor: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    actor_abort: tokio::task::AbortHandle,
+}
+
+pub struct LegacyConnectionGuard {
+    inner: Weak<AuthStateInner>,
+}
+
+impl Drop for LegacyConnectionGuard {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner
+                .active_legacy_connections
+                .fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
 impl AuthRuntime {
     pub async fn from_process(config: AuthConfig) -> Result<Self, AuthFailure> {
         let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
