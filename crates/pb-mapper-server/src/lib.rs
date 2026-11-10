@@ -49,7 +49,7 @@ use pb_mapper_auth::{ADMIN_KEY_ID, AuthConfig, AuthContext, AuthRuntime};
 use pb_mapper_core::config::{
     control_io_timeout, keep_alive_from_env, server_lease_sweep_interval, server_lease_timeout,
 };
-use pb_mapper_core::conn_id::{ConnIdProvider, RemoteConnId};
+use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_core::paging::paginate;
 use pb_mapper_core::{snafu_error_get_or_continue, snafu_error_handle};
 use pb_mapper_protocol::MessageWriter;
@@ -222,8 +222,9 @@ pub enum ConnTask {
     StatusResp(PbConnResponse),
 }
 
-impl manager::ManagedTask for ManagerTask {
-    fn ends_connection(&self) -> bool {
+impl ManagerTask {
+    /// Whether this task ends a connection, releasing its reusable routing ID.
+    pub(crate) fn ends_connection(&self) -> bool {
         matches!(
             self,
             Self::DeRegisterServerConn { .. } | Self::DeRegisterClientConn { .. }
@@ -231,7 +232,7 @@ impl manager::ManagedTask for ManagerTask {
     }
 }
 
-pub(crate) type ManagerTaskSender = manager::TaskSender<ManagerTask>;
+pub(crate) type ManagerTaskSender = manager::TaskSender;
 pub(crate) type ConnTaskSender = SenderChan<ConnTask>;
 pub(crate) type ConnTaskReceiver = ReceiverChan<ConnTask>;
 

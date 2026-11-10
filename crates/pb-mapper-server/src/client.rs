@@ -17,6 +17,7 @@ use crate::error::{
     ClientConnCreateHeaderToolSnafu, ClientConnEncodeStreamRespSnafu,
     ClientConnWriteStreamRespSnafu,
 };
+use crate::manager::TrySendError;
 use pb_mapper_core::checksum::{AesKeyType, gen_random_key};
 use pb_mapper_core::config::{stream_ack_timeout, stream_ready_timeout, stream_recovery_timeout};
 use pb_mapper_core::conn_id::RemoteConnId;
@@ -115,14 +116,14 @@ impl Drop for ClientConnGuard {
         let task = self.deregister_task();
         match self.sender.try_send(task) {
             Ok(()) => {}
-            Err(kanal::SendTimeoutError::Closed(_)) => {
+            Err(TrySendError::Closed(_)) => {
                 tracing::debug!(
                     "skip client deregister on drop because manager channel is closed: key:{} client:{}",
                     self.key,
                     self.client_id
                 );
             }
-            Err(kanal::SendTimeoutError::Timeout(task)) => {
+            Err(TrySendError::Full(task)) => {
                 tracing::warn!(
                     "manager queue is full; defer client deregister: key:{} client:{}",
                     self.key,
@@ -538,7 +539,6 @@ async fn get_server_stream(
                 selected,
             })
             .await
-            .map_err(|_| kanal::SendError(()))
             .context(ClientConnSendSubcribeSnafu {
                 key: key.clone(),
                 conn_id,

@@ -7,6 +7,7 @@ use super::error::{
     StatusRecvConnTaskSnafu, StatusSendManagerTaskSnafu, StatusWriteRespSnafu,
 };
 use super::{ConnTask, ManagerTask, ManagerTaskSender};
+use crate::manager::TrySendError;
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::MessageWriter;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnStatusReq};
@@ -73,10 +74,10 @@ impl Drop for StatusConnGuard {
         let task = self.deregister_task();
         match self.sender.try_send(task) {
             Ok(()) => {}
-            Err(kanal::SendTimeoutError::Closed(_)) => {
+            Err(TrySendError::Closed(_)) => {
                 tracing::debug!("skip status deregister because manager channel is closed");
             }
-            Err(kanal::SendTimeoutError::Timeout(task)) => {
+            Err(TrySendError::Full(task)) => {
                 tracing::warn!("manager queue is full; defer status deregister");
                 Self::spawn_deregister(self.sender.clone(), task);
             }
@@ -105,7 +106,6 @@ pub async fn handle_show_status(
         manager_sender
             .send(req)
             .await
-            .map_err(|_| kanal::SendError(()))
             .context(StatusSendManagerTaskSnafu)?;
 
         let resp = rx.recv().await.context(StatusRecvConnTaskSnafu)?;

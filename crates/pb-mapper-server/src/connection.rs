@@ -39,7 +39,6 @@ pub(super) async fn handle_listener(
                 peer_addr: addr,
             })
             .await
-            .map_err(|_| kanal::SendError(()))
             .context(TaskCenterSendListenerSnafu)?
     }
 }
@@ -458,7 +457,6 @@ pub(super) async fn handle_conn(
                     server_generation,
                 })
                 .await
-                .map_err(|_| kanal::SendError(()))
                 .context(TaskCenterSendStreamRespToManagerSnafu { key, conn_id })?;
         }
         PbConnRequest::Status(status) => {

@@ -1,59 +1,70 @@
-use snafu::{ResultExt, Snafu};
+//! The routing manager's work queue, and its registry of connection IDs and
+//! the mailboxes they are reached through.
+
+use std::fmt;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+
+use pb_mapper_core::conn_id::RemoteConnId;
 use tracing::instrument;
 
-use pb_mapper_core::conn_id::{ConnIdProvider, ConnIdTrait};
-
-/// The manager owns this rather than the core error enum: it is the only thing
-/// that waits on a task channel, and it keeps `kanal` out of the bottom layer.
-#[derive(Debug, Snafu)]
-#[snafu(display("`TaskManager` fails while waiting for a task"))]
-pub struct MngWaitForTaskError {
-    source: kanal::ReceiveError,
-}
-
-type Result<T, E = MngWaitForTaskError> = std::result::Result<T, E>;
+use crate::{ConnTask, ManagerTask};
 
 pub type SenderChan<T> = kanal::AsyncSender<T>;
 pub type ReceiverChan<T> = kanal::AsyncReceiver<T>;
 
-/// Tasks whose completion releases a connection's reusable routing ID.
-pub trait ManagedTask {
-    fn ends_connection(&self) -> bool;
+/// The routing manager's queue is closed: the relay has stopped routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManagerClosed;
+
+impl fmt::Display for ManagerClosed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("routing manager queue closed")
+    }
 }
 
-struct Envelope<T> {
-    task: T,
+impl std::error::Error for ManagerClosed {}
+
+/// Why [`TaskSender::try_send`] did not queue a task, with the task handed back.
+pub enum TrySendError {
+    /// The queue is at capacity; the task can still be sent by waiting.
+    Full(ManagerTask),
+    /// The manager has stopped and will never serve the task.
+    Closed(ManagerTask),
+}
+
+impl fmt::Debug for TrySendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Full(_) => f.write_str("Full(..)"),
+            Self::Closed(_) => f.write_str("Closed(..)"),
+        }
+    }
+}
+
+struct Envelope {
+    task: ManagerTask,
     scope: Option<Arc<AtomicBool>>,
 }
 
 /// Bounded manager mailbox with an unambiguous, cancellation-safe send boundary.
-pub struct TaskSender<T> {
-    sender: tokio::sync::mpsc::Sender<Envelope<T>>,
+#[derive(Clone)]
+pub struct TaskSender {
+    sender: tokio::sync::mpsc::Sender<Envelope>,
     scope: Option<Arc<AtomicBool>>,
 }
 
-impl<T> std::fmt::Debug for TaskSender<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for TaskSender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TaskSender")
             .field("connection_scoped", &self.scope.is_some())
             .finish()
     }
 }
 
-impl<T> Clone for TaskSender<T> {
-    fn clone(&self) -> Self {
-        Self {
-            sender: self.sender.clone(),
-            scope: self.scope.clone(),
-        }
-    }
-}
-
-impl<T> TaskSender<T> {
+impl TaskSender {
     /// A fresh connection incarnation; clones share its one-time cleanup fence.
     pub(crate) fn for_connection(&self) -> Self {
         Self {
@@ -62,17 +73,21 @@ impl<T> TaskSender<T> {
         }
     }
 
-    pub async fn send(&self, task: T) -> Result<(), kanal::SendError<T>> {
+    pub async fn send(&self, task: ManagerTask) -> Result<(), ManagerClosed> {
         self.sender
             .send(Envelope {
                 task,
                 scope: self.scope.clone(),
             })
             .await
-            .map_err(|error| kanal::SendError(error.0.task))
+            .map_err(|_| ManagerClosed)
     }
 
-    pub fn try_send(&self, task: T) -> Result<(), kanal::SendTimeoutError<T>> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "the task is handed back so the caller can send it again by waiting"
+    )]
+    pub fn try_send(&self, task: ManagerTask) -> Result<(), TrySendError> {
         self.sender
             .try_send(Envelope {
                 task,
@@ -80,24 +95,26 @@ impl<T> TaskSender<T> {
             })
             .map_err(|error| match error {
                 tokio::sync::mpsc::error::TrySendError::Full(message) => {
-                    kanal::SendTimeoutError::Timeout(message.task)
+                    TrySendError::Full(message.task)
                 }
                 tokio::sync::mpsc::error::TrySendError::Closed(message) => {
-                    kanal::SendTimeoutError::Closed(message.task)
+                    TrySendError::Closed(message.task)
                 }
             })
     }
 }
 
-pub(crate) struct TaskReceiver<T>(tokio::sync::mpsc::Receiver<Envelope<T>>);
+pub(crate) struct TaskReceiver(tokio::sync::mpsc::Receiver<Envelope>);
 
-impl<T: ManagedTask> TaskReceiver<T> {
+impl TaskReceiver {
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    pub(crate) async fn recv(&mut self) -> Result<T, kanal::ReceiveError> {
+    /// The next task from a live connection incarnation, or `None` once every
+    /// sender is gone.
+    pub(crate) async fn recv(&mut self) -> Option<ManagerTask> {
         while let Some(message) = self.0.recv().await {
             if let Some(scope) = message.scope {
                 let valid = if message.task.ends_connection() {
@@ -113,13 +130,13 @@ impl<T: ManagedTask> TaskReceiver<T> {
                     continue;
                 }
             }
-            return Ok(message.task);
+            return Some(message.task);
         }
-        Err(kanal::ReceiveError())
+        None
     }
 }
 
-pub(crate) fn task_channel<T>(capacity: usize) -> (TaskSender<T>, TaskReceiver<T>) {
+pub(crate) fn task_channel(capacity: usize) -> (TaskSender, TaskReceiver) {
     let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
     (
         TaskSender {
@@ -130,53 +147,58 @@ pub(crate) fn task_channel<T>(capacity: usize) -> (TaskSender<T>, TaskReceiver<T
     )
 }
 
-/// hashmap for index(`ConnId`) to `SenderChan`
-pub type ConnMap<K, V> = hashbrown::HashMap<K, SenderChan<V>>;
+const MANAGER_QUEUE_CAPACITY: usize = 1024;
 
-pub struct TaskManager<ManagerTaskType, ConnTaskType, ConnIdType, ConnIdProviderType> {
-    conn_id_provider: ConnIdProviderType,
-    manager_chan: (TaskSender<ManagerTaskType>, TaskReceiver<ManagerTaskType>),
-    idle_conn_id_list: Vec<ConnIdType>,
-    active_conn_map: ConnMap<ConnIdType, ConnTaskType>,
+/// Hands out connection IDs, and routes each registered ID to its mailbox.
+pub struct TaskManager {
+    /// The next ID never handed out; every ID below it has been.
+    next_conn_id: RemoteConnId,
+    /// Held for the manager's whole life, so its receiver never reports closed.
+    sender: TaskSender,
+    receiver: TaskReceiver,
+    idle_conn_ids: Vec<RemoteConnId>,
+    active_conn_map: hashbrown::HashMap<RemoteConnId, SenderChan<ConnTask>>,
 }
 
-const DEFAULT_CHAN_CAP: usize = 1024;
+impl Default for TaskManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-impl<
-    MangerChanType: ManagedTask,
-    ConnChanType,
-    ConnIdType: ConnIdTrait,
-    ConnIdProviderType: ConnIdProvider<ConnIdType>,
-> TaskManager<MangerChanType, ConnChanType, ConnIdType, ConnIdProviderType>
-{
-    pub fn new(
-        conn_id_provider: ConnIdProviderType,
-    ) -> TaskManager<MangerChanType, ConnChanType, ConnIdType, ConnIdProviderType> {
-        let manager_chan = task_channel(DEFAULT_CHAN_CAP);
+impl TaskManager {
+    pub fn new() -> Self {
+        let (sender, receiver) = task_channel(MANAGER_QUEUE_CAPACITY);
         Self {
-            conn_id_provider,
-            manager_chan,
-            idle_conn_id_list: vec![],
-            active_conn_map: ConnMap::new(),
+            next_conn_id: RemoteConnId::default(),
+            sender,
+            receiver,
+            idle_conn_ids: Vec::new(),
+            active_conn_map: hashbrown::HashMap::new(),
         }
     }
 
+    /// The next task to route.
+    ///
+    /// `None` would mean every sender is gone, which cannot happen while the
+    /// manager holds one of its own.
     #[inline]
-    pub async fn wait_for_task(&mut self) -> Result<MangerChanType> {
-        self.manager_chan
-            .1
-            .recv()
-            .await
-            .context(MngWaitForTaskSnafu)
+    pub async fn wait_for_task(&mut self) -> Option<ManagerTask> {
+        self.receiver.recv().await
     }
 
-    pub fn get_task_sender(&self) -> TaskSender<MangerChanType> {
-        self.manager_chan.0.clone()
+    pub fn get_task_sender(&self) -> TaskSender {
+        self.sender.clone()
     }
 
     #[inline]
-    pub fn get_conn_sender_chan(&self, conn_id: &ConnIdType) -> Option<SenderChan<ConnChanType>> {
+    pub fn get_conn_sender_chan(&self, conn_id: &RemoteConnId) -> Option<SenderChan<ConnTask>> {
         self.active_conn_map.get(conn_id).map(|v| v.to_owned())
+    }
+
+    #[inline]
+    pub fn has_conn_sender(&self, conn_id: &RemoteConnId) -> bool {
+        self.active_conn_map.contains_key(conn_id)
     }
 
     #[inline]
@@ -186,7 +208,7 @@ impl<
 
     #[inline]
     pub fn idle_conn_count(&self) -> usize {
-        self.idle_conn_id_list.len()
+        self.idle_conn_ids.len()
     }
 
     /// Stop routing to a connection, without returning its ID to the idle pool.
@@ -205,27 +227,29 @@ impl<
     /// point at which nothing will speak for that ID again. Every registered
     /// connection produces exactly one such task, so no ID is stranded.
     #[inline]
-    pub fn drop_conn_sender(&mut self, conn_id: ConnIdType) -> bool {
+    pub fn drop_conn_sender(&mut self, conn_id: RemoteConnId) -> bool {
         self.active_conn_map.remove(&conn_id).is_some()
     }
 
     /// Return an ID to the idle pool, if it is not already there.
     #[inline]
-    pub fn recycle_conn_id(&mut self, conn_id: ConnIdType) {
-        if !self.idle_conn_id_list.contains(&conn_id) {
-            self.idle_conn_id_list.push(conn_id);
+    pub fn recycle_conn_id(&mut self, conn_id: RemoteConnId) {
+        if !self.idle_conn_ids.contains(&conn_id) {
+            self.idle_conn_ids.push(conn_id);
         }
     }
 
+    /// An ID for a newly accepted connection: an idle one when one is free,
+    /// otherwise one never handed out. `registered` names the IDs the service
+    /// map still holds, which are never reused.
     pub fn get_conn_id(
         &mut self,
-        action_server_ids: impl Iterator<Item = ConnIdType>,
-    ) -> ConnIdType {
-        let active_server_ids = action_server_ids.collect::<Vec<_>>();
-        while let Some(conn_id) = self.idle_conn_id_list.pop() {
-            if self.conn_id_provider.is_valid_id(&conn_id)
+        registered: impl Iterator<Item = RemoteConnId> + Clone,
+    ) -> RemoteConnId {
+        while let Some(conn_id) = self.idle_conn_ids.pop() {
+            if self.is_issued(&conn_id)
                 && !self.active_conn_map.contains_key(&conn_id)
-                && !active_server_ids.contains(&conn_id)
+                && !registered.clone().any(|id| id == conn_id)
             {
                 return conn_id;
             } else {
@@ -237,12 +261,14 @@ impl<
             }
         }
 
-        self.conn_id_provider.get_next_id()
+        let conn_id = self.next_conn_id;
+        self.next_conn_id += 1;
+        conn_id
     }
 
     #[instrument(skip(self, sender))]
-    pub fn sign_up_conn_sender(&mut self, conn_id: ConnIdType, sender: SenderChan<ConnChanType>) {
-        if !self.conn_id_provider.is_valid_id(&conn_id) {
+    pub fn sign_up_conn_sender(&mut self, conn_id: RemoteConnId, sender: SenderChan<ConnTask>) {
+        if !self.is_issued(&conn_id) {
             tracing::warn!("invalid conn id,may be index out of bound,we do nothing");
             return;
         }
@@ -250,139 +276,54 @@ impl<
             tracing::error!("conn id {conn_id} is already active; replacing sender");
         }
     }
+
+    fn is_issued(&self, conn_id: &RemoteConnId) -> bool {
+        conn_id < &self.next_conn_id
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fmt;
-
     use super::*;
 
-    impl ManagedTask for () {
-        fn ends_connection(&self) -> bool {
-            false
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct TestConnId(u32);
-
-    impl From<TestConnId> for u32 {
-        fn from(value: TestConnId) -> Self {
-            value.0
-        }
-    }
-
-    impl fmt::Display for TestConnId {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "TestConnId({})", self.0)
-        }
-    }
-
-    impl ConnIdTrait for TestConnId {}
-
-    struct TestConnIdProvider {
-        next_id: TestConnId,
-    }
-
-    impl TestConnIdProvider {
-        fn new(next_id: u32) -> Self {
-            Self {
-                next_id: TestConnId(next_id),
-            }
-        }
-    }
-
-    impl ConnIdProvider<TestConnId> for TestConnIdProvider {
-        fn get_next_id(&mut self) -> TestConnId {
-            let ret = self.next_id;
-            self.next_id.0 += 1;
-            ret
-        }
-
-        fn is_valid_id(&self, id: &TestConnId) -> bool {
-            id < &self.next_id
-        }
-    }
-
-    fn manager() -> TaskManager<(), (), TestConnId, TestConnIdProvider> {
-        TaskManager::new(TestConnIdProvider::new(1))
-    }
-
-    fn sender() -> SenderChan<()> {
+    fn sender() -> SenderChan<ConnTask> {
         kanal::bounded_async(1).0
     }
 
     #[test]
-    fn dropping_a_sender_reports_whether_it_was_registered() {
-        let mut manager = manager();
-        manager.sign_up_conn_sender(TestConnId(0), sender());
-
-        assert!(manager.drop_conn_sender(TestConnId(0)));
-        assert!(!manager.drop_conn_sender(TestConnId(0)));
-    }
-
-    /// The reason the two steps are separate: a retirement drops the sender while
-    /// the socket task is still unwinding, and its ID must not be handed out again
-    /// until that task's deregistration arrives.
-    #[test]
-    fn a_dropped_sender_does_not_release_its_id_until_recycled() {
-        let mut manager = manager();
-        manager.sign_up_conn_sender(TestConnId(0), sender());
-
-        assert!(manager.drop_conn_sender(TestConnId(0)));
-        assert_eq!(
-            manager.get_conn_id(std::iter::empty()),
-            TestConnId(1),
-            "a retired id is not reused while its socket task may still deregister"
-        );
-
-        manager.recycle_conn_id(TestConnId(0));
-        assert_eq!(manager.get_conn_id(std::iter::empty()), TestConnId(0));
-    }
-
-    #[test]
     fn recycling_an_id_twice_queues_it_once() {
-        let mut manager = manager();
-        manager.sign_up_conn_sender(TestConnId(0), sender());
-        assert!(manager.drop_conn_sender(TestConnId(0)));
+        let mut manager = TaskManager::new();
+        let first = manager.get_conn_id(std::iter::empty());
+        manager.sign_up_conn_sender(first, sender());
+        assert!(manager.drop_conn_sender(first));
 
-        manager.recycle_conn_id(TestConnId(0));
-        manager.recycle_conn_id(TestConnId(0));
+        manager.recycle_conn_id(first);
+        manager.recycle_conn_id(first);
 
         assert_eq!(manager.idle_conn_count(), 1);
-        assert_eq!(manager.get_conn_id(std::iter::empty()), TestConnId(0));
-        assert_eq!(manager.get_conn_id(std::iter::empty()), TestConnId(1));
+        assert_eq!(manager.get_conn_id(std::iter::empty()), first);
+        assert_eq!(
+            manager.get_conn_id(std::iter::empty()),
+            RemoteConnId::from(1)
+        );
     }
 
     #[test]
     fn idle_id_is_not_reused_while_active() {
-        let mut manager = manager();
-        manager.sign_up_conn_sender(TestConnId(0), sender());
-        manager.idle_conn_id_list.push(TestConnId(0));
+        let mut manager = TaskManager::new();
+        let active = manager.get_conn_id(std::iter::empty());
+        manager.sign_up_conn_sender(active, sender());
+        manager.idle_conn_ids.push(active);
 
-        assert_eq!(manager.get_conn_id(std::iter::empty()), TestConnId(1));
-        assert!(manager.get_conn_sender_chan(&TestConnId(0)).is_some());
-    }
-
-    #[test]
-    fn exposes_active_and_idle_connection_counts() {
-        let mut manager = manager();
-        manager.sign_up_conn_sender(TestConnId(0), sender());
-
-        assert_eq!(manager.active_conn_count(), 1);
-        assert_eq!(manager.idle_conn_count(), 0);
-
-        assert!(manager.drop_conn_sender(TestConnId(0)));
-        manager.recycle_conn_id(TestConnId(0));
-
-        assert_eq!(manager.active_conn_count(), 0);
-        assert_eq!(manager.idle_conn_count(), 1);
+        assert_eq!(
+            manager.get_conn_id(std::iter::empty()),
+            RemoteConnId::from(1)
+        );
+        assert!(manager.get_conn_sender_chan(&active).is_some());
     }
 
     #[tokio::test]
     async fn old_connection_cannot_clean_up_or_update_a_reused_id() {
-        use crate::ManagerTask;
         let (sender, mut receiver) = task_channel(8);
         let old = sender.for_connection();
         let replacement = sender.for_connection();

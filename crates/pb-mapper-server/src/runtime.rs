@@ -12,31 +12,7 @@
 //! tasks and communicates with this state only through typed tasks.
 
 use super::*;
-
-struct RemoteIdProvider {
-    next_id: RemoteConnId,
-}
-
-impl RemoteIdProvider {
-    fn new() -> Self {
-        Self {
-            next_id: RemoteConnId::default(),
-        }
-    }
-}
-
-impl ConnIdProvider<RemoteConnId> for RemoteIdProvider {
-    fn get_next_id(&mut self) -> RemoteConnId {
-        let ret = self.next_id;
-        self.next_id += 1;
-        ret
-    }
-
-    fn is_valid_id(&self, id: &RemoteConnId) -> bool {
-        id < &self.next_id
-    }
-}
-type ServerMananger = TaskManager<ManagerTask, ConnTask, RemoteConnId, RemoteIdProvider>;
+use crate::manager::TrySendError;
 
 /// Run a server that takes its keep-alive setting from the environment.
 ///
@@ -137,7 +113,7 @@ pub async fn run_server_on_listener_with_options(
     let (capability, stun_task) = direct::bind(options.direct).await?;
     let mut direct_state = direct::DirectState::new(capability);
     let security = ServerSecurity::new(auth);
-    let mut manager = ServerMananger::new(RemoteIdProvider::new());
+    let mut manager = TaskManager::new();
     // represent the mapping of the `key` to the id of the server-side conn
     let mut server_conn_map = ServerConnMap::new();
     let mut pending_streams = PendingStreamMap::new();
@@ -205,7 +181,7 @@ pub async fn run_server_on_listener_with_options(
             }
             result = handle_listener(task_sender, listener, keep_alive) => {
                 if let Err(e) = result {
-                    tracing::error!("Listener error: {}", e);
+                    tracing::error!("Listener error: {}", snafu::Report::from_error(e));
                 }
             }
         }
@@ -251,7 +227,7 @@ pub async fn run_server_on_listener_with_options(
                 // A tick that finds the queue full is dropped, not retried: the
                 // next tick asks for the same sweep, and a backlog of them would
                 // only grow while the manager was already behind.
-                if let Err(kanal::SendTimeoutError::Closed(_)) =
+                if let Err(TrySendError::Closed(_)) =
                     sweep_sender.try_send(ManagerTask::SweepServerLeases)
                 {
                     break;
@@ -261,12 +237,9 @@ pub async fn run_server_on_listener_with_options(
     };
 
     loop {
-        let task = match manager.wait_for_task().await {
-            Ok(task) => task,
-            Err(e) => {
-                tracing::error!("Manager task error: {}", e);
-                break;
-            }
+        // `None` cannot happen while the manager holds its own sender.
+        let Some(task) = manager.wait_for_task().await else {
+            break;
         };
 
         while connection_tasks.try_join_next().is_some() {}
@@ -556,7 +529,6 @@ pub async fn run_server_on_listener_with_options(
                 snafu_error_get_or_continue!(
                     conn_sender
                         .try_send(ConnTask::StatusResp(resp))
-                        .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterSendStatusRespSnafu { conn_id })
                 );
             }
@@ -892,7 +864,6 @@ pub async fn run_server_on_listener_with_options(
                             lease_ttl_ms: server_lease_timeout().as_millis() as u64,
                             direct: direct.as_ref().and(direct_state.capability.clone()),
                         })
-                        .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterSendRegisterRespSnafu { key, conn_id })
                 );
             }
@@ -973,7 +944,6 @@ pub async fn run_server_on_listener_with_options(
                             stream,
                             session,
                         })
-                        .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterSendStreamRespToClientSnafu { conn_id: client_id })
                 );
             }
@@ -1033,7 +1003,6 @@ pub async fn run_server_on_listener_with_options(
                             server_id,
                             server_generation,
                         })
-                        .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterSendStreamRespToClientSnafu { conn_id: client_id })
                 );
             }
@@ -1152,7 +1121,6 @@ pub async fn run_server_on_listener_with_options(
                             client_id: conn_id,
                             server_generation,
                         })
-                        .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterClientSendStreamSnafu {
                             key: key.clone(),
                             conn_id,
@@ -1172,7 +1140,7 @@ pub async fn run_server_on_listener_with_options(
                         continue;
                     }
                     // sign up client connection after a server accepted the stream request
-                    if manager.get_conn_sender_chan(&conn_id).is_none() {
+                    if !manager.has_conn_sender(&conn_id) {
                         manager.sign_up_conn_sender(conn_id, conn_sender.clone());
                     }
                     let is_new_stream = pending_streams
@@ -1198,7 +1166,6 @@ pub async fn run_server_on_listener_with_options(
                             need_codec,
                             is_datagram,
                         })
-                        .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterSendSubcribeRespSnafu {
                             key: key.clone(),
                             conn_id,
@@ -1308,7 +1275,7 @@ pub async fn run_server_on_listener_with_options(
 /// combination, so passing them individually meant four borrows repeated at
 /// every call site with nothing naming what they mean as a group.
 struct RoutingState<'a> {
-    manager: &'a mut ServerMananger,
+    manager: &'a mut TaskManager,
     server_conn_map: &'a mut ServerConnMap,
     pending_streams: &'a PendingStreamMap,
     namespace_rate_limits: &'a mut NamespaceRateLimitMap,
@@ -1455,7 +1422,7 @@ mod tests {
     #[test]
     fn a_retired_conn_id_is_withheld_until_its_socket_task_deregisters() {
         let key: ImutableKey = Arc::from("echo");
-        let mut manager: ServerMananger = TaskManager::new(RemoteIdProvider::new());
+        let mut manager = TaskManager::new();
         let pending_streams = hashbrown::HashMap::new();
         let mut namespace_rate_limits = hashbrown::HashMap::new();
         let mut server_conn_map: ServerConnMap = ServerConnMap::new();

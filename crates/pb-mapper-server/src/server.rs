@@ -13,6 +13,7 @@ use super::error::{
     ServerConnWriteRegisteredOkSnafu, ServerConnWriteStreamRequestSnafu,
 };
 use super::{ConnTask, ConnTaskReceiver, ImutableKey, ManagerTask, ManagerTaskSender, Result};
+use crate::manager::TrySendError;
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::command::{
     CONTROL_PROTOCOL_V2, LocalServer, MessageSerializer, PbConnResponse, PbServerRequest,
@@ -103,14 +104,14 @@ impl Drop for ServerConnGuard {
                     self.conn_id
                 );
             }
-            Err(kanal::SendTimeoutError::Closed(_)) => {
+            Err(TrySendError::Closed(_)) => {
                 tracing::debug!(
                     "skip deregister on drop because manager channel is closed: key:{} conn_id:{}",
                     self.key,
                     self.conn_id
                 );
             }
-            Err(kanal::SendTimeoutError::Timeout(task)) => {
+            Err(TrySendError::Full(task)) => {
                 tracing::warn!(
                     "manager queue is full; defer server deregister: key:{} conn_id:{}",
                     self.key,
@@ -179,7 +180,6 @@ pub async fn handle_server_conn(
             direct,
         })
         .await
-        .map_err(|_| kanal::SendError(()))
         .context(ServerConnSendRegisterSnafu {
             key: key.clone(),
             conn_id,
@@ -411,7 +411,6 @@ async fn handle_control_message(
                 },
             ))
             .await
-            .map_err(|_| kanal::SendError(()))
             .context(ServerConnSendStreamAckSnafu { key, conn_id }),
         PbServerRequest::Ping => {
             task_sender
@@ -420,7 +419,6 @@ async fn handle_control_message(
                     conn_id,
                 })
                 .await
-                .map_err(|_| kanal::SendError(()))
                 .context(ServerConnSendStreamAckSnafu {
                     key: key.clone(),
                     conn_id,
@@ -456,7 +454,6 @@ async fn handle_control_message(
                     conn_id,
                 })
                 .await
-                .map_err(|_| kanal::SendError(()))
                 .context(ServerConnSendStreamAckSnafu {
                     key: key.clone(),
                     conn_id,
@@ -506,7 +503,6 @@ async fn handle_control_message(
                     server_generation,
                 })
                 .await
-                .map_err(|_| kanal::SendError(()))
                 .context(ServerConnSendStreamAckSnafu { key, conn_id })
         }
     }

@@ -1,7 +1,9 @@
-use std::{sync::Arc, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 use snafu::Snafu;
 
+use crate::ConnTask;
+use crate::manager::ManagerClosed;
 use pb_mapper_core::conn_id::RemoteConnId;
 // The `common::error::Error` spellings below are the source type on nearly every
 // variant; aliasing keeps them as they were.
@@ -25,62 +27,51 @@ pub enum Error {
         conn_id: RemoteConnId,
         timeout: Duration,
     },
-    #[snafu(display("send listener task error, type:{source:?} detail:{source}"))]
-    TaskCenterSendListener { source: kanal::SendError<()> },
+    #[snafu(display("send listener task error"))]
+    TaskCenterSendListener { source: ManagerClosed },
 
     #[snafu(display(
-        "client send server stream request error with `key:{key}` `client_id:{conn_id}`, \
-         type:{source:?} detail:{source}"
+        "client send server stream request error with `key:{key}` `client_id:{conn_id}`"
     ))]
     TaskCenterClientSendStream {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: kanal::SendError<()>,
+        #[snafu(source(from(kanal::SendTimeoutError<ConnTask>, MailboxError::from)))]
+        source: MailboxError,
     },
-    #[snafu(display(
-        "send server stream response to task manager error, `dst_id:{conn_id}`, \
-         type:{source:?} detail:{source}"
-    ))]
+    #[snafu(display("send server stream response to task manager error, `dst_id:{conn_id}`"))]
     TaskCenterSendStreamRespToManager {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: kanal::SendError<()>,
+        source: ManagerClosed,
     },
-    #[snafu(display(
-        "send server stream response to client error, `client_id:{conn_id}`, \
-         type:{source:?} detail:{source}"
-    ))]
+    #[snafu(display("send server stream response to client error, `client_id:{conn_id}`"))]
     TaskCenterSendStreamRespToClient {
         conn_id: RemoteConnId,
-        source: kanal::SendError<()>,
+        #[snafu(source(from(kanal::SendTimeoutError<ConnTask>, MailboxError::from)))]
+        source: MailboxError,
     },
-    #[snafu(display(
-        "send server status response error with `conn_id:{conn_id}`, type:{source:?} \
-         detail:{source}"
-    ))]
+    #[snafu(display("send server status response error with `conn_id:{conn_id}`"))]
     TaskCenterSendStatusResp {
         conn_id: RemoteConnId,
-        source: kanal::SendError<()>,
+        #[snafu(source(from(kanal::SendTimeoutError<ConnTask>, MailboxError::from)))]
+        source: MailboxError,
     },
-    #[snafu(display(
-        "send server register response error with `key:{key}` `conn_id:{conn_id}`, \
-         type:{source:?} detail:{source}"
-    ))]
+    #[snafu(display("send server register response error with `key:{key}` `conn_id:{conn_id}`"))]
     TaskCenterSendRegisterResp {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: kanal::SendError<()>,
+        #[snafu(source(from(kanal::SendTimeoutError<ConnTask>, MailboxError::from)))]
+        source: MailboxError,
     },
     #[snafu(display("failed to process stream task, `dst_id:{conn_id}` does not exist"))]
     TaskCenterStreamConnIdNotExist { conn_id: RemoteConnId },
-    #[snafu(display(
-        "send client subcriber response error with `key:{key}` `conn_id:{conn_id}`, \
-         type:{source:?} detail:{source}"
-    ))]
+    #[snafu(display("send client subcriber response error with `key:{key}` `conn_id:{conn_id}`"))]
     TaskCenterSendSubcribeResp {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: kanal::SendError<()>,
+        #[snafu(source(from(kanal::SendTimeoutError<ConnTask>, MailboxError::from)))]
+        source: MailboxError,
     },
     #[snafu(display("remote stream to set keepalive error,when handle_listener"))]
     TaskCenterSetKeepAlive { source: std::io::Error },
@@ -151,7 +142,7 @@ pub enum Error {
     ServerConnSendStreamAck {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: kanal::SendError<()>,
+        source: ManagerClosed,
     },
     #[snafu(display(
         "server conn decode stream request error with `key:{key}` `server_id:{conn_id}`"
@@ -161,14 +152,11 @@ pub enum Error {
         conn_id: RemoteConnId,
         source: common::error::Error,
     },
-    #[snafu(display(
-        "send register task error with `key:{key}` `conn_id:{conn_id}`, \
-         type:{source:?} detail:{source}"
-    ))]
+    #[snafu(display("send register task error with `key:{key}` `conn_id:{conn_id}`"))]
     ServerConnSendRegister {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: kanal::SendError<()>,
+        source: ManagerClosed,
     },
     /// client handler error
     #[snafu(display("Client connection create header tool:`{tool}` fails!"))]
@@ -179,14 +167,11 @@ pub enum Error {
     },
     #[snafu(display("client data stream credential is inactive: {detail}"))]
     ClientConnAuthInactive { detail: String },
-    #[snafu(display(
-        "send subcribe task error with `key:{key}` `conn_id:{conn_id}`, type:{source:?} \
-         detail:{source}"
-    ))]
+    #[snafu(display("send subcribe task error with `key:{key}` `conn_id:{conn_id}`"))]
     ClientConnSendSubcribe {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: kanal::SendError<()>,
+        source: ManagerClosed,
     },
     #[snafu(display("receive subcribe response error with `key:{key}` `client_id:{conn_id}`"))]
     ClientConnRecvSubcribeResp {
@@ -268,8 +253,8 @@ pub enum Error {
         tool: &'static str,
         source: common::error::Error,
     },
-    #[snafu(display("send status manager task error, type:{source:?} detail:{source}"))]
-    StatusSendManagerTask { source: kanal::SendError<()> },
+    #[snafu(display("send status manager task error"))]
+    StatusSendManagerTask { source: ManagerClosed },
     #[snafu(display("receive `ConnTask::StatusResp` error"))]
     StatusRecvConnTask { source: kanal::ReceiveError },
     #[snafu(display("we expected `ConnTask::StatusResp`"))]
@@ -283,3 +268,35 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// Why the routing loop could not queue a reply on a connection's mailbox.
+///
+/// The loop never waits on a mailbox, so a full one fails the reply just as a
+/// closed one does; the two point an operator at different problems.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailboxError {
+    /// The connection is not draining its mailbox.
+    Full,
+    /// The connection's task has ended.
+    Closed,
+}
+
+impl fmt::Display for MailboxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Full => "connection mailbox full",
+            Self::Closed => "connection mailbox closed",
+        })
+    }
+}
+
+impl std::error::Error for MailboxError {}
+
+impl<T> From<kanal::SendTimeoutError<T>> for MailboxError {
+    fn from(error: kanal::SendTimeoutError<T>) -> Self {
+        match error {
+            kanal::SendTimeoutError::Timeout(_) => Self::Full,
+            kanal::SendTimeoutError::Closed(_) => Self::Closed,
+        }
+    }
+}
