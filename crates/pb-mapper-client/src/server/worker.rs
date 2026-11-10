@@ -12,6 +12,7 @@ use super::control::DirectProvider;
 use super::status::PoolStatus;
 use super::stream::spawn_stream;
 use crate::diagnostics::{Diagnostics, RecoveryFailure};
+use crate::direct_policy::DirectPolicy;
 use crate::endpoint::RelayEndpoint;
 use crate::recovery::{REVOKED_DIRECT_RECHECK, RecoveryTiming, jitter, transport_backoff};
 use crate::worker_status::{StatusSink, WorkerStatus};
@@ -95,8 +96,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
     shutdown: CancellationToken,
     diagnostics: Diagnostics,
     idle_timeout: Option<Duration>,
-    allow_direct: bool,
-    policy: crate::sdk::DirectPolicy,
+    direct: Option<DirectPolicy>,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
@@ -114,7 +114,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
         "starting local server control connection pool"
     );
     #[cfg(feature = "p2p")]
-    let direct = DirectProvider(allow_direct.then(|| {
+    let direct = DirectProvider(direct.map(|policy| {
         crate::direct::Provider::spawn::<LocalStream>(
             local_addr.clone(),
             key.clone(),
@@ -127,7 +127,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
     }));
     #[cfg(not(feature = "p2p"))]
     let direct = {
-        let _ = (allow_direct, policy);
+        let _ = direct;
         DirectProvider::default()
     };
     let config = ServerCliRunConfig {

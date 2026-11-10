@@ -123,7 +123,7 @@ pub(crate) struct Consumer {
     /// every session, and each would pay the head start. Never the relay's
     /// pause: QUIC is still tried.
     tcp_cooldown: std::sync::Mutex<Cooldown>,
-    policy: crate::sdk::DirectPolicy,
+    policy: crate::direct_policy::DirectPolicy,
 }
 impl Consumer {
     pub fn new(
@@ -133,7 +133,7 @@ impl Consumer {
         is_datagram: bool,
         keep_alive: bool,
         diagnostics: Diagnostics,
-        policy: crate::sdk::DirectPolicy,
+        policy: crate::direct_policy::DirectPolicy,
     ) -> Arc<Self> {
         let control = Arc::new(Mutex::new(None::<Arc<Control>>));
         let reports = Arc::new(reports::Latest::default());

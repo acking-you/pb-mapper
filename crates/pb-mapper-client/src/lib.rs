@@ -19,6 +19,7 @@ pub mod server;
 
 mod addr;
 mod diagnostics;
+mod direct_policy;
 mod endpoint;
 mod network;
 mod recovery;

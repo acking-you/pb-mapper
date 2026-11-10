@@ -162,8 +162,7 @@ async fn run_server_side_cli_pool<LocalStream>(
         shutdown,
         Diagnostics::default(),
         None,
-        false,
-        crate::sdk::DirectPolicy::RELAY,
+        None,
     )
     .await;
 }

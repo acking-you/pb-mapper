@@ -128,7 +128,7 @@ impl Share {
             false,
             true,
             diagnostics,
-            crate::sdk::DirectPolicy {
+            crate::direct_policy::DirectPolicy {
                 port_mapping: PortMapping::Off,
                 lan_first: true,
                 lan_transport,

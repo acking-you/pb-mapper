@@ -20,6 +20,7 @@ use self::health::Health;
 use self::status::get_status_scoped;
 use self::stream::{StreamSetup, handle_local_stream};
 use crate::addr::{resolve_all, resolve_tunnel_ends};
+use crate::direct_policy::DirectPolicy;
 use crate::recovery::{SharedTiming, jitter, transport_backoff};
 use crate::worker_status::{StatusSink, WorkerStatus, text_sink};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
@@ -206,9 +207,8 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
         pinned_credential,
         shutdown,
         Diagnostics::default(),
-        crate::sdk::PathPolicy::RelayOnly,
         false,
-        crate::sdk::DirectPolicy::RELAY,
+        None,
     )
     .await;
 }
@@ -227,9 +227,8 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     pinned_credential: Option<Credential>,
     shutdown: CancellationToken,
     diagnostics: Diagnostics,
-    path: crate::sdk::PathPolicy,
     is_datagram: bool,
-    policy: crate::sdk::DirectPolicy,
+    direct: Option<DirectPolicy>,
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
@@ -257,7 +256,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     };
 
     #[cfg(feature = "p2p")]
-    let direct = (path == crate::sdk::PathPolicy::Auto).then(|| {
+    let direct = direct.map(|policy| {
         crate::direct::Consumer::new(
             remote_addr.clone(),
             credential,
@@ -269,7 +268,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
         )
     });
     #[cfg(not(feature = "p2p"))]
-    let _ = (path, is_datagram, policy);
+    let _ = (is_datagram, direct);
     let mut retry_backoff = transport_backoff();
     let mut stream_tasks = JoinSet::new();
     let setup_slots = Arc::new(Semaphore::new(LOCAL_SETUPS));

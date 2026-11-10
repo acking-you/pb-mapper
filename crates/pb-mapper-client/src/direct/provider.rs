@@ -82,7 +82,7 @@ impl Provider {
         shutdown: CancellationToken,
         idle: Option<Duration>,
         diagnostics: Diagnostics,
-        policy: crate::sdk::DirectPolicy,
+        policy: crate::direct_policy::DirectPolicy,
     ) -> Arc<Self>
     where
         L::Item: StreamForward,
@@ -150,7 +150,7 @@ struct SessionContext {
     /// Committed sessions, for [`Provider::has_active`].
     active: Arc<AtomicUsize>,
     reports: Arc<ProviderReports>,
-    policy: crate::sdk::DirectPolicy,
+    policy: crate::direct_policy::DirectPolicy,
 }
 
 /// An admitted offer: what its session starts from.
@@ -900,7 +900,7 @@ mod tests {
             diagnostics: Diagnostics::default(),
             active: active.clone(),
             reports: Arc::new(ProviderReports::default()),
-            policy: crate::sdk::DirectPolicy {
+            policy: crate::direct_policy::DirectPolicy {
                 port_mapping: crate::sdk::PortMapping::Off,
                 lan_first: true,
                 lan_transport: crate::sdk::LanTransport::Quic,

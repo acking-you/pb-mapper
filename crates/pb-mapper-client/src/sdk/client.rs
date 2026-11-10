@@ -305,7 +305,6 @@ impl Client {
                     context.shutdown,
                     context.diagnostics,
                     idle_timeout,
-                    allow_direct,
                     direct,
                 )
             }),
@@ -320,7 +319,6 @@ impl Client {
                     context.shutdown,
                     context.diagnostics,
                     idle_timeout,
-                    allow_direct,
                     direct,
                 )
             }),
@@ -375,7 +373,7 @@ impl Client {
         let handle = worker.spawn(move |context| async move {
             context.remote_addr.start();
             #[cfg(feature = "p2p")]
-            let direct = (options.path == PathPolicy::Auto).then(|| {
+            let direct = policy.map(|policy| {
                 crate::direct::Consumer::new(
                     context.remote_addr.clone(),
                     credential,
@@ -465,7 +463,6 @@ impl Client {
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
-                    options.path,
                     is_datagram,
                     direct,
                 )
@@ -481,7 +478,6 @@ impl Client {
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
-                    options.path,
                     is_datagram,
                     direct,
                 )

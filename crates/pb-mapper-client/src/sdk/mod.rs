@@ -18,7 +18,6 @@ pub use admin::{
 pub use client::{Client, RelayMetricsStream};
 pub use error::{Error, Result};
 pub use handle::{Connection, Registration};
-pub(crate) use types::DirectPolicy;
 pub use types::{
     ClientConfig, ConnectOptions, ConnectRequest, LanTransport, LegacyProtocol, PathPolicy,
     PortMapping, RegisterOptions, RegisterRequest, RemoteId, ServiceConnection, Transport,

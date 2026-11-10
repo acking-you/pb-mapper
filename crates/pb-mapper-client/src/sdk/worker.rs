@@ -16,7 +16,8 @@ use super::Error;
 use super::error::{AddressSnafu, Result};
 use super::handle::LiveTunnel;
 use super::types::TunnelStatus;
-use super::{DirectPolicy, LanTransport, PortMapping};
+use super::{LanTransport, PortMapping};
+use crate::direct_policy::DirectPolicy;
 use crate::worker_status::StatusSink;
 
 /// Resolve one endpoint to every address it names.
@@ -113,11 +114,11 @@ impl TunnelWorker {
         })
     }
 
-    /// How this tunnel's direct setups go, if it has any: how it maps its
-    /// direct endpoint's port and whether it tries a shared local network
-    /// first, both noted in its diagnostics from the start; and what that
-    /// network carries: what a consumer asks for, and whether a provider
-    /// serves TCP.
+    /// How this tunnel's direct setups go, or `None` when it keeps to the
+    /// relay: how it maps its direct endpoint's port and whether it tries a
+    /// shared local network first, both noted in its diagnostics from the
+    /// start either way; and what that network carries: what a consumer asks
+    /// for, and whether a provider serves TCP.
     pub(super) fn direct_policy(
         &self,
         direct: bool,
@@ -125,7 +126,7 @@ impl TunnelWorker {
         lan_first: bool,
         lan_transport: LanTransport,
         lan_tcp: bool,
-    ) -> DirectPolicy {
+    ) -> Option<DirectPolicy> {
         let port_mapping = if direct && cfg!(feature = "port-mapping") {
             port_mapping
         } else {
@@ -144,12 +145,12 @@ impl TunnelWorker {
             LanTransport::Quic
         };
         self.diagnostics.prefer_lan(lan_first, lan_transport);
-        DirectPolicy {
+        direct.then_some(DirectPolicy {
             port_mapping,
             lan_first,
             lan_transport,
-            lan_tcp: direct && lan_tcp,
-        }
+            lan_tcp,
+        })
     }
 
     pub(super) fn spawn<F, Fut>(self, start: F) -> LiveTunnel
