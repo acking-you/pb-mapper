@@ -39,8 +39,6 @@ uni-stream.workspace = true
 quinn.workspace = true
 pb-mapper-testkit.workspace = true
 
-rand.workspace = true
-
 [features]
 port-mapping = ["p2p", "pb-mapper-client/port-mapping"]
 relay-quic = ["pb-mapper-client/relay-quic", "pb-mapper-server/relay-quic", "pb-mapper-protocol/relay-quic"]

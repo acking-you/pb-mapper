@@ -38,7 +38,6 @@ pb-mapper = { workspace = true, features = ["desktop"] }
 pb-mapper-client = { workspace = true, features = ["p2p", "relay-quic", "port-mapping"] }
 pb-mapper-core.workspace = true
 pb-mapper-galaxy.workspace = true
-pb-mapper-protocol.workspace = true
 pb-mapper-server = { workspace = true, features = ["p2p", "relay-quic"] }
 uni-stream.workspace = true
 parking_lot.workspace = true
