@@ -52,10 +52,7 @@ pub fn record_service_event(event: &str, detail: &str) {
             .take(2000)
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = pb_mapper_core::time::unix_seconds();
         writeln!(file, "{now} {event}: {text}")?;
         Ok(())
     };

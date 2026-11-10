@@ -27,7 +27,6 @@ use pb_mapper_client::sdk::{
     AddressFamily, DirectTransport, LanEvidence, LinkKind, LinkSample, LinkVia,
 };
 use serde::Serialize;
-use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -341,8 +340,4 @@ impl From<&LinkSample> for ViewerLink {
             same_lan: link.same_lan,
         }
     }
-}
-
-pub(crate) fn millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }

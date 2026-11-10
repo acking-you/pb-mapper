@@ -10,6 +10,7 @@ use crate::{
     shared::{CursorReport, EngineState},
     wire::{self, MAX_PAYLOAD},
 };
+use pb_mapper_core::time::saturating_micros;
 use std::{
     sync::atomic::Ordering,
     time::{Duration, Instant},
@@ -374,8 +375,8 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
                 frame_id = unit.frame_id,
                 keyframe = unit.keyframe,
                 bytes = len,
-                ready_us = micros(unit.ready_at.saturating_duration_since(epoch)),
-                written_us = micros(Instant::now().saturating_duration_since(epoch)),
+                ready_us = saturating_micros(unit.ready_at.saturating_duration_since(epoch)),
+                written_us = saturating_micros(Instant::now().saturating_duration_since(epoch)),
             );
         }
     }
@@ -471,8 +472,4 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         );
         self.send(&stats, None).await
     }
-}
-
-fn micros(duration: Duration) -> u64 {
-    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }

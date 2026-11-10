@@ -34,7 +34,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -147,11 +147,7 @@ impl Session {
             encoder_dwell: listed(CAPABILITY_ENCODER_DWELL),
             cursor_sequence: listed(CAPABILITY_CURSOR_SEQUENCE),
             display_mode: display_modes && listed(CAPABILITY_DISPLAY_MODE),
-            started_unix_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |since| {
-                    u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-                }),
+            started_unix_ms: pb_mapper_core::time::unix_millis(),
             credit: Mutex::new(CreditLedger::new(now)),
             qos: Mutex::new(qos),
             credit_changed: Notify::new(),

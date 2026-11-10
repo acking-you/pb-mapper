@@ -14,10 +14,7 @@
 use crate::{FailureKind, Result, error, failure_kind, platform::DisplayModes};
 use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
-use std::{
-    path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{path::PathBuf, time::Duration};
 
 /// The most modes a list carries.
 const MAX_MODES: usize = 64;
@@ -341,14 +338,6 @@ fn unclaim(claims: &mut Vec<Claim>, device: &str) {
     }
 }
 
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
-}
-
 /// What one backend changed of its display's mode, and the way back.
 pub(crate) struct Guard {
     journal: Journal,
@@ -434,7 +423,7 @@ impl Guard {
                 original,
                 applied: target,
                 pid: std::process::id(),
-                at_unix_ms: now_unix_ms(),
+                at_unix_ms: pb_mapper_core::time::unix_millis(),
             }),
         )?;
         if let Err(failure) = modes.apply(device, &target) {

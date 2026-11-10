@@ -50,9 +50,9 @@ use parking_lot::Mutex;
 use pb_mapper_client::sdk::{
     Client, ConnectOptions, Connection, TunnelMetrics, TunnelMetricsStream,
 };
+use pb_mapper_core::time::saturating_millis;
 use session::{Session, handshake, run};
 use stats::ViewerStatsAcc;
-use status::millis;
 use std::{
     io,
     sync::Arc,
@@ -471,11 +471,11 @@ fn current_status(shared: &ViewerShared, sink: &VideoSink) -> ViewerStatus {
         presented: sink.presented.map(|presented| PresentedInfo {
             generation: presented.generation,
             frame_id: presented.frame_id,
-            age_ms: millis(now.saturating_duration_since(presented.presented_at)),
+            age_ms: saturating_millis(now.saturating_duration_since(presented.presented_at)),
         }),
-        last_video_age_ms: last_video
-            .0
-            .map(|at| millis(now.saturating_duration_since(at.max(state.entered_streaming)))),
+        last_video_age_ms: last_video.0.map(|at| {
+            saturating_millis(now.saturating_duration_since(at.max(state.entered_streaming)))
+        }),
         quality: state.quality,
         modes: state.modes().cloned(),
         host_os: state
@@ -487,7 +487,7 @@ fn current_status(shared: &ViewerShared, sink: &VideoSink) -> ViewerStatus {
             code: notice.code,
             message: notice.message.clone(),
             seq: notice.seq,
-            age_ms: millis(now.saturating_duration_since(notice.at)),
+            age_ms: saturating_millis(now.saturating_duration_since(notice.at)),
         }),
         decoder: sink.decoder,
         stats,
@@ -515,7 +515,7 @@ impl Viewer {
             presented_frame_id: current.map_or(0, |presented| presented.frame_id),
             cursor_seq: cursor.seq,
             presented_age_ms: current.map_or(u32::MAX, |presented| {
-                u32::try_from(millis(
+                u32::try_from(saturating_millis(
                     now.saturating_duration_since(presented.presented_at),
                 ))
                 .unwrap_or(u32::MAX - 1)

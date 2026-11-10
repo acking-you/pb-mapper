@@ -301,7 +301,7 @@ pub struct VideoSink {
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 fn micros(epoch: Instant, at: Instant) -> u64 {
-    u64::try_from(at.saturating_duration_since(epoch).as_micros()).unwrap_or(u64::MAX)
+    pb_mapper_core::time::saturating_micros(at.saturating_duration_since(epoch))
 }
 
 impl VideoSink {

@@ -445,8 +445,7 @@ impl Shared {
             message: record.message,
             control_allowed,
             viewer: Some(HostViewer {
-                since_ms: u64::try_from(session.shared.epoch.elapsed().as_millis())
-                    .unwrap_or(u64::MAX),
+                since_ms: pb_mapper_core::time::saturating_millis(session.shared.epoch.elapsed()),
                 started_unix_ms: session.started_unix_ms,
                 path: self.path(),
                 controlling: control_allowed && record.controlling,

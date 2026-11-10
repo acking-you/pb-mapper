@@ -490,7 +490,7 @@ async fn time_without_video_counts_only_while_streaming() {
     let age_within = |due: Instant| {
         let status = viewer.status();
         assert_eq!(status.state, ViewerState::Streaming);
-        assert!(status.last_video_age_ms.unwrap() <= millis(due.elapsed()));
+        assert!(status.last_video_age_ms.unwrap() <= saturating_millis(due.elapsed()));
     };
 
     let HostMessage::State(streaming) = state(1, false) else {
