@@ -386,7 +386,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         let session = self.session;
         let qos = session.qos.lock().view(now);
         let (credit, ack_queue, window) = {
-            let credit = session.credit.lock();
+            let mut credit = session.credit.lock();
             (
                 credit.view(),
                 qos.base_rtt

@@ -106,6 +106,8 @@ pub(crate) struct CreditLedger {
     /// When the delivery rate began to be measured.
     delivery_since: Option<Instant>,
     last_receipt: Instant,
+    /// Reused by `ack_queue` for the delays it takes the median of.
+    delays: Vec<Duration>,
 }
 impl CreditLedger {
     pub fn new(now: Instant) -> Self {
@@ -120,6 +122,7 @@ impl CreditLedger {
             delivered: VecDeque::new(),
             delivery_since: None,
             last_receipt: now,
+            delays: Vec::new(),
         }
     }
 
@@ -129,7 +132,7 @@ impl CreditLedger {
     /// the measured delivery rate instead: that bounds the queue between
     /// probes, while fps and bitrate decisions stay on the probe.
     pub fn window(
-        &self,
+        &mut self,
         codec: VideoCodec,
         pace_fps: u32,
         expected_bps: u64,
@@ -277,7 +280,7 @@ impl CreditLedger {
     /// `ACK_SAMPLE_WINDOW`, or over the newest three receipts when fewer came
     /// in it: a slow link receipts seldom, and its queue must not vanish
     /// between two receipts. Zero before three receipts.
-    pub fn ack_queue(&self, base_rtt: Duration, now: Instant) -> Duration {
+    pub fn ack_queue(&mut self, base_rtt: Duration, now: Instant) -> Duration {
         if self.ack_samples.len() < ACK_SAMPLES_MIN {
             return Duration::ZERO;
         }
@@ -287,17 +290,21 @@ impl CreditLedger {
             .filter(|(at, _)| now.saturating_duration_since(*at) <= ACK_SAMPLE_WINDOW)
             .count()
             .max(ACK_SAMPLES_MIN);
-        let mut delays: Vec<Duration> = self
-            .ack_samples
-            .iter()
-            .rev()
-            .take(recent)
-            .map(|(_, delay)| *delay)
-            .collect();
-        delays.sort_unstable();
-        delays
-            .get(delays.len() / 2)
-            .map_or(Duration::ZERO, |median| median.saturating_sub(base_rtt))
+        self.delays.clear();
+        self.delays.extend(
+            self.ack_samples
+                .iter()
+                .rev()
+                .take(recent)
+                .map(|(_, delay)| *delay),
+        );
+        if self.delays.is_empty() {
+            return Duration::ZERO;
+        }
+        // The middle of a non-empty list; the value a sort would put there.
+        let middle = self.delays.len() / 2;
+        let (_, median, _) = self.delays.select_nth_unstable(middle);
+        median.saturating_sub(base_rtt)
     }
 
     /// Bits per second receipted over the last `DELIVERY_WINDOW`.

@@ -244,7 +244,7 @@ impl Session {
                 qos.base_rtt(),
             )
         };
-        let credit = self.credit.lock();
+        let mut credit = self.credit.lock();
         let window = credit.window(self.codec, pace, expected, base, now);
         credit.fits(len, idr, &window)
     }
