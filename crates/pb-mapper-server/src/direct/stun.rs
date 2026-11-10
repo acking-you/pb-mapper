@@ -37,6 +37,23 @@ const _: () = assert!(
     "a buffer holds at least a header"
 );
 
+/// Windows' `WSAEMSGSIZE`: a datagram larger than the receive buffer.
+const WSAEMSGSIZE: i32 = 10040;
+/// Windows' `WSAENETRESET`: on a datagram socket, an ICMP time-exceeded for
+/// an earlier send.
+const WSAENETRESET: i32 = 10052;
+
+/// Whether a receive failed over one datagram, or over an ICMP error for an
+/// earlier reply, leaving the socket fine for everyone else. Windows reports
+/// both from `recv_from`: a port unreachable as a connection reset, and an
+/// oversized datagram as an error instead of a truncation.
+fn failed_one_datagram(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionRefused
+    ) || (cfg!(windows) && matches!(error.raw_os_error(), Some(WSAEMSGSIZE | WSAENETRESET)))
+}
+
 /// Binding only: bounded datagrams, no allocation until the per-source rate gate.
 pub(super) async fn serve(socket: UdpSocket) -> std::io::Result<()> {
     let mut bytes = [0; RECV_BUFFER];
@@ -44,7 +61,14 @@ pub(super) async fn serve(socket: UdpSocket) -> std::io::Result<()> {
     let mut window = Instant::now();
     let mut total = 0;
     loop {
-        let (len, from) = socket.recv_from(&mut bytes).await?;
+        let (len, from) = match socket.recv_from(&mut bytes).await {
+            Ok(received) => received,
+            Err(error) if failed_one_datagram(&error) => {
+                tracing::debug!(%error, "STUN receive failed for one datagram");
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if window.elapsed() >= WINDOW {
             window = Instant::now();
             total = 0;
@@ -87,5 +111,50 @@ pub(super) async fn serve(socket: UdpSocket) -> std::io::Result<()> {
         if let Err(error) = socket.send_to(&response.finish(), from).await {
             tracing::debug!(%error, "STUN reply failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    fn binding_request() -> Vec<u8> {
+        Message::builder_request(BINDING, MessageWriteVec::new()).finish()
+    }
+
+    /// Asks `service` for this socket's address until it answers.
+    async fn answers(client: &UdpSocket, service: SocketAddr) -> bool {
+        let mut reply = [0; RECV_BUFFER];
+        for _ in 0..20 {
+            client.send_to(&binding_request(), service).await.unwrap();
+            if let Ok(Ok(len)) =
+                tokio::time::timeout(Duration::from_millis(100), client.recv(&mut reply)).await
+            {
+                return Message::from_bytes(&reply[..len]).is_ok();
+            }
+        }
+        false
+    }
+
+    /// One peer cannot stop discovery for the others: neither a client that
+    /// left before its reply (Windows hands the ICMP error to the next
+    /// receive) nor a datagram larger than the buffer (which Windows fails
+    /// rather than truncates). Each alone used to end the service.
+    #[tokio::test]
+    async fn one_peer_cannot_stop_the_service() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let service = tokio::spawn(serve(socket));
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let gone = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        gone.send_to(&binding_request(), addr).unwrap();
+        drop(gone);
+        client.send_to(&[0; RECV_BUFFER * 2], addr).await.unwrap();
+
+        assert!(answers(&client, addr).await, "the service stopped");
+        assert!(!service.is_finished());
+        service.abort();
     }
 }
