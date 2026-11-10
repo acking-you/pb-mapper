@@ -308,7 +308,7 @@ async fn monitor_tunnel(
         match state {
             TunnelStatus::Failed(reason) => return Err(std::io::Error::other(reason).into()),
             TunnelStatus::Stopped => return Ok(()),
-            _ => {}
+            TunnelStatus::Starting | TunnelStatus::Connected | TunnelStatus::Retrying => {}
         }
         tokio::select! {
             biased;
