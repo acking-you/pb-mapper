@@ -36,6 +36,7 @@ use tokio::net::windows::named_pipe::NamedPipeClient;
 use {crate::error, std::path::PathBuf};
 
 pub use os::{Action, request_installation};
+use readiness::ensure_ready;
 pub use readiness::{NotReady, Status, status};
 pub use restart::prepare as prepare_application_restart;
 
@@ -53,7 +54,7 @@ fn fallback_caps() -> BackendCaps {
 /// Sessions captured by the helper, on the display `selection` names.
 /// Refused before the host registers unless the helper is ready.
 pub(crate) fn launch(selection: &DisplaySelection) -> Result<Arc<dyn Launch>> {
-    status().ensure_ready()?;
+    ensure_ready()?;
     let display = super::desktop::resolve(selection)?;
     let device = (!display.name.is_empty()).then_some(display.name);
     Ok(Arc::new(Launcher::new(
@@ -68,7 +69,7 @@ pub(crate) fn backend(
     display_id: u32,
     display_device: Option<String>,
 ) -> Result<RemoteBackend<NamedPipeClient>> {
-    status().ensure_ready()?;
+    ensure_ready()?;
     let config = configuration()?;
     connect_backend(display_id, display_device, &config)
 }

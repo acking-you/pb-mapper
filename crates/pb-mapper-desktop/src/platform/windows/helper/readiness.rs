@@ -55,12 +55,11 @@ fn sha256(mut reader: impl std::io::Read) -> std::io::Result<Sha256> {
 /// changes: a status poll costs a metadata read.
 fn digest(path: &Path) -> Option<Sha256> {
     type Entry = (PathBuf, u64, std::time::SystemTime, Sha256);
-    static DIGESTS: std::sync::Mutex<Vec<Entry>> = std::sync::Mutex::new(Vec::new());
+    static DIGESTS: parking_lot::Mutex<Vec<Entry>> = parking_lot::Mutex::new(Vec::new());
     let metadata = std::fs::metadata(path).ok()?;
     let (length, modified) = (metadata.len(), metadata.modified().ok()?);
     let cached = DIGESTS
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .find(|(cached, l, m, _)| cached == path && *l == length && *m == modified)
         .map(|entry| entry.3);
@@ -68,9 +67,7 @@ fn digest(path: &Path) -> Option<Sha256> {
         return cached;
     }
     let digest = sha256(std::fs::File::open(path).ok()?).ok()?;
-    let mut digests = DIGESTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut digests = DIGESTS.lock();
     digests.retain(|(cached, ..)| cached != path);
     digests.push((path.to_path_buf(), length, modified, digest));
     Some(digest)
@@ -178,6 +175,19 @@ impl Status {
 }
 
 pub fn status() -> Status {
+    status_with(true)
+}
+
+/// [`status`]'s [`Status::ensure_ready`], without the update check, which
+/// readiness never reads.
+pub(super) fn ensure_ready() -> Result<()> {
+    status_with(false).ensure_ready()
+}
+
+/// [`status`], with `update_available` false unless `update_check` asks for
+/// it: the check reads both helper executables, and hashes them after a
+/// change.
+pub(super) fn status_with(update_check: bool) -> Status {
     // A loaded service may outlive a damaged/unreadable installation.json.
     // Only an affirmative SCM "does not exist" permits treating it as absent.
     let (exists, running, startup_disabled) = match os::service_state() {
@@ -206,7 +216,7 @@ pub fn status() -> Status {
                 installed_application: Some(config.ui_executable),
                 protocol,
                 update_required: update_required(protocol, running, || pipe::exists(PIPE)),
-                update_available: update_available(&config.helper_executable),
+                update_available: update_check && update_available(&config.helper_executable),
                 message: identity.err().map_or_else(
                     || {
                         "Helper requires the installed application; the UI stays unprivileged"

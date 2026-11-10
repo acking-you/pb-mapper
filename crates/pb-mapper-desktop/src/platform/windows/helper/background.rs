@@ -121,7 +121,7 @@ struct Response {
 }
 
 async fn call(command: Command) -> Result<Snapshot> {
-    super::status().ensure_ready()?;
+    super::ensure_ready()?;
     let config = configuration()?;
     let mut pipe = pipe::connect(PIPE)?;
     os::verify_server(&pipe, &config.helper_executable, None)?;
@@ -176,7 +176,7 @@ pub async fn stop() -> Result<Snapshot> {
 /// handoff that its UI has not observed. The service checks the scope atomically.
 /// Older helpers reject this operation; never fall back to unscoped revocation.
 pub async fn revoke_scope(server: String, namespace: Option<u64>) -> Result<Snapshot> {
-    let helper = super::status();
+    let helper = super::readiness::status_with(false);
     if !helper.installed || helper.startup_disabled {
         let root = os::install_root()?;
         // An absent/stopped helper with no durable grant has nothing to revoke.
