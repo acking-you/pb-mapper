@@ -28,10 +28,9 @@ use super::types::{
 };
 use super::worker::TunnelWorker;
 use super::{ConnectOptions, LanTransport, PathPolicy, RegisterOptions};
-use crate::client::run_client_side_cli_recovering_with_path;
 use crate::client::status::get_status_with_credential;
+use crate::client::{run_client_side_cli_recovering_with_path, run_owned_stream};
 use crate::server::{ServerTunnelOptions, run_server_side_cli_recovering};
-use crate::worker_status::WorkerStatus;
 
 pub(crate) struct ClientInner {
     pub(crate) server: String,
@@ -347,10 +346,6 @@ impl Client {
         key: impl Into<String>,
         options: ConnectOptions,
     ) -> Result<(TcpStream, Connection)> {
-        use crate::client::stream::{StreamSetup, handle_local_stream};
-        use tokio::sync::{Semaphore, mpsc};
-        use uni_stream::stream::TcpStreamImpl;
-
         let key = key.into();
         if key.trim().is_empty() || (options.path == PathPolicy::Auto && !cfg!(feature = "p2p")) {
             return Err(Error::invalid_config(
@@ -363,64 +358,26 @@ impl Client {
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
-        let policy = worker.direct_policy(
+        let direct = worker.direct_policy(
             options.path == PathPolicy::Auto,
             options.port_mapping,
             options.lan_first,
             options.lan_transport,
             false,
         );
-        let handle = worker.spawn(move |context| async move {
-            context.remote_addr.start();
-            #[cfg(feature = "p2p")]
-            let direct = policy.map(|policy| {
-                crate::direct::Consumer::new(
-                    context.remote_addr.clone(),
-                    credential,
-                    namespace,
-                    false,
-                    keep_alive,
-                    context.diagnostics.clone(),
-                    policy,
-                )
-            });
-            #[cfg(not(feature = "p2p"))]
-            let _ = policy;
-            let (events, mut ready) = mpsc::channel(1);
-            let Ok(permit) = Arc::new(Semaphore::new(1)).acquire_owned().await else {
-                return;
-            };
-            let setup = StreamSetup {
-                permit,
-                events,
-                timing: Arc::default(),
-                diagnostics: context.diagnostics,
-                #[cfg(feature = "p2p")]
-                direct,
-            };
-            let forward = handle_local_stream(
-                TcpStreamImpl::new(accepted),
-                context.key,
+        let handle = worker.spawn(move |context| {
+            run_owned_stream(
+                accepted,
                 context.remote_addr,
+                context.key,
                 keep_alive,
                 namespace,
+                context.status,
                 credential,
-                setup,
-            );
-            tokio::pin!(forward);
-            loop {
-                tokio::select! {
-                    biased;
-                    () = context.shutdown.cancelled() => break,
-                    Some(_) = ready.recv() => (context.status)(&WorkerStatus::Connected),
-                    result = &mut forward => {
-                        if let Err(error) = result {
-                            (context.status)(&WorkerStatus::Failed(Some(error.to_string())));
-                        }
-                        break;
-                    }
-                }
-            }
+                context.shutdown,
+                context.diagnostics,
+                direct,
+            )
         });
         Ok((stream, Connection::new(handle, key)))
     }

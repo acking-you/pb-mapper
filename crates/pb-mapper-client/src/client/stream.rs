@@ -25,7 +25,9 @@ use pb_mapper_protocol::secure::ClientHeaderSession;
 use uni_stream::stream::NetworkStream;
 
 pub(crate) struct StreamSetup {
-    pub permit: OwnedSemaphorePermit,
+    /// The listener's setup slot, given back once the stream forwards. A
+    /// stream the caller handed in has none.
+    pub permit: Option<OwnedSemaphorePermit>,
     pub timing: Arc<SharedTiming>,
     pub events: mpsc::Sender<bool>,
     pub diagnostics: Diagnostics,

@@ -9,10 +9,12 @@ use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use snafu::ResultExt;
-use tokio::sync::Semaphore;
+use tokio::net::TcpStream;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use uni_stream::stream::TcpStreamImpl;
 use uni_stream::udp::set_custom_timeout;
 
 use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
@@ -339,7 +341,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                     let stream_remote = remote_addr.clone();
                     let stream_shutdown = shutdown.clone();
                     let event_tx = stream_event_tx.clone();
-                    let setup = StreamSetup { permit, timing: timing.clone(), events: event_tx.clone(), diagnostics: diagnostics.clone(), #[cfg(feature = "p2p")] direct: direct.clone() };
+                    let setup = StreamSetup { permit: Some(permit), timing: timing.clone(), events: event_tx.clone(), diagnostics: diagnostics.clone(), #[cfg(feature = "p2p")] direct: direct.clone() };
                     stream_tasks.spawn(async move {
                         let result = tokio::select! {
                             () = stream_shutdown.cancelled() => return,
@@ -379,6 +381,75 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     #[cfg(feature = "p2p")]
     if let Some(direct) = direct {
         direct.stop().await;
+    }
+}
+
+/// The connect worker for one TCP stream its caller already holds, the SDK's
+/// `connect_tcp`: set it up as a listener's stream would be, report it
+/// connected once it is or failed if its setup fails, and forward it. Nothing
+/// is set up again after that.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the SDK starts a stream with each of its settings"
+)]
+pub(crate) async fn run_owned_stream(
+    stream: TcpStream,
+    remote_addr: RelayEndpoint,
+    key: Arc<str>,
+    keep_alive: bool,
+    namespace: Option<u64>,
+    status: StatusSink,
+    credential: Credential,
+    shutdown: CancellationToken,
+    diagnostics: Diagnostics,
+    direct: Option<DirectPolicy>,
+) {
+    remote_addr.start();
+    #[cfg(feature = "p2p")]
+    let direct = direct.map(|policy| {
+        crate::direct::Consumer::new(
+            remote_addr.clone(),
+            credential,
+            namespace,
+            false,
+            keep_alive,
+            diagnostics.clone(),
+            policy,
+        )
+    });
+    #[cfg(not(feature = "p2p"))]
+    let _ = direct;
+    let (events, mut ready) = mpsc::channel(1);
+    let setup = StreamSetup {
+        permit: None,
+        events,
+        timing: Arc::default(),
+        diagnostics,
+        #[cfg(feature = "p2p")]
+        direct,
+    };
+    let forward = handle_local_stream(
+        TcpStreamImpl::new(stream),
+        key,
+        remote_addr,
+        keep_alive,
+        namespace,
+        credential,
+        setup,
+    );
+    tokio::pin!(forward);
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            Some(_) = ready.recv() => status(&WorkerStatus::Connected),
+            result = &mut forward => {
+                if let Err(error) = result {
+                    status(&WorkerStatus::Failed(Some(error.to_string())));
+                }
+                break;
+            }
+        }
     }
 }
 
