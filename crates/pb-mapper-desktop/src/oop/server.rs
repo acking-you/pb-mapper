@@ -160,7 +160,7 @@ pub(crate) fn serve<B: Backend>(
             limits,
             nominal_fps,
         } => {
-            if !(1..=crate::MAX_FPS).contains(&nominal_fps) {
+            if !(1..=crate::video::MAX_FPS).contains(&nominal_fps) {
                 return Err(error("invalid video configuration"));
             }
             backend.configure_video(limits, nominal_fps)?;
@@ -180,7 +180,7 @@ pub(crate) fn serve<B: Backend>(
                 || submit
                     && (!(crate::qos::ENCODER_BITRATE_MIN..=crate::qos::ENCODER_BITRATE_MAX)
                         .contains(&rate.bitrate)
-                        || !(1..=crate::MAX_FPS).contains(&rate.pace_fps))
+                        || !(1..=crate::video::MAX_FPS).contains(&rate.pace_fps))
             {
                 return Err(error("invalid or stale video request"));
             }

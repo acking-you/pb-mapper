@@ -12,7 +12,6 @@
 //!
 //! Decoding also accepts the v1 JSON invitation and pins the same certificate,
 //! and recognises a pb-mapper setup string pasted in the wrong place.
-use crate::{MAX_SERVICE_LEN, SERVICE_PREFIX, valid_service};
 use base64::{
     Engine, alphabet,
     engine::{
@@ -22,6 +21,19 @@ use base64::{
 use ring::digest::{SHA256, digest};
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
+
+/// What every desktop service name starts with.
+pub(crate) const SERVICE_PREFIX: &str = "desktop:";
+/// The longest service name, its prefix included.
+pub(crate) const MAX_SERVICE_LEN: usize = 128;
+pub(crate) fn valid_service(service: &str) -> bool {
+    service.starts_with(SERVICE_PREFIX)
+        && service.len() > SERVICE_PREFIX.len()
+        && service.len() <= MAX_SERVICE_LEN
+        && service
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c))
+}
 
 const PREFIX: &str = "pbd1.";
 const VERSION: u8 = 0x02;

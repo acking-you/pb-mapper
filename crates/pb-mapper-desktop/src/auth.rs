@@ -12,7 +12,7 @@ pub(crate) const PRESENTED_FRESH: Duration = Duration::from_secs(2);
 /// Produced frames remembered for validation; 2 s at 120 fps.
 pub(crate) const RECENT_FRAMES: usize = 256;
 const _: () = assert!(
-    RECENT_FRAMES as u64 >= PRESENTED_FRESH.as_secs() * crate::MAX_FPS as u64,
+    RECENT_FRAMES as u64 >= PRESENTED_FRESH.as_secs() * crate::video::MAX_FPS as u64,
     "the ledger remembers every frame that can still be fresh"
 );
 
