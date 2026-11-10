@@ -6,11 +6,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use super::error::{
-    ServerConnCreateHeaderToolSnafu, ServerConnDecodeStreamRequestSnafu,
-    ServerConnEncodeRegisterRespSnafu, ServerConnRecvConnTaskSnafu,
+    ServerConnCreateHeaderToolSnafu, ServerConnEncodeRegisterRespSnafu,
+    ServerConnEncodeStreamRequestSnafu, ServerConnRecvConnTaskSnafu,
     ServerConnRecvServerRegisteredRespSnafu, ServerConnRegisteredRespNotMatchSnafu,
-    ServerConnSendRegisterSnafu, ServerConnSendStreamAckSnafu, ServerConnWritePongRespSnafu,
-    ServerConnWriteRegisteredOkSnafu, ServerConnWriteStreamRequestSnafu,
+    ServerConnSendControlTaskSnafu, ServerConnSendRegisterSnafu, ServerConnWritePongRespSnafu,
+    ServerConnWriteRegisterRespSnafu, ServerConnWriteStreamRequestSnafu,
 };
 use super::{ConnTask, ConnTaskReceiver, ImutableKey, ManagerTask, ManagerTaskSender, Result};
 use crate::manager::TrySendError;
@@ -228,7 +228,7 @@ pub async fn handle_server_conn(
                 writer
                     .write_msg(&response)
                     .await
-                    .context(ServerConnWriteRegisteredOkSnafu {
+                    .context(ServerConnWriteRegisterRespSnafu {
                         key: key.clone(),
                         conn_id,
                     })?;
@@ -279,7 +279,7 @@ pub async fn handle_server_conn(
                     .response_writer(&mut writer)
                     .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
                 msg_writer.write_msg(&register_response).await.context(
-                    ServerConnWriteRegisteredOkSnafu {
+                    ServerConnWriteRegisterRespSnafu {
                         key: writer_key.clone(),
                         conn_id,
                     },
@@ -411,7 +411,7 @@ async fn handle_control_message(
                 },
             ))
             .await
-            .context(ServerConnSendStreamAckSnafu { key, conn_id }),
+            .context(ServerConnSendControlTaskSnafu { key, conn_id }),
         PbServerRequest::Ping => {
             task_sender
                 .send(ManagerTask::ServerConnActivity {
@@ -419,7 +419,7 @@ async fn handle_control_message(
                     conn_id,
                 })
                 .await
-                .context(ServerConnSendStreamAckSnafu {
+                .context(ServerConnSendControlTaskSnafu {
                     key: key.clone(),
                     conn_id,
                 })?;
@@ -454,7 +454,7 @@ async fn handle_control_message(
                     conn_id,
                 })
                 .await
-                .context(ServerConnSendStreamAckSnafu {
+                .context(ServerConnSendControlTaskSnafu {
                     key: key.clone(),
                     conn_id,
                 })?;
@@ -503,7 +503,7 @@ async fn handle_control_message(
                     server_generation,
                 })
                 .await
-                .context(ServerConnSendStreamAckSnafu { key, conn_id })
+                .context(ServerConnSendControlTaskSnafu { key, conn_id })
         }
     }
 }
@@ -600,7 +600,7 @@ async fn handle_stream_req<T: MessageWriter>(
         let msg =
             LocalServer::Direct(event)
                 .encode()
-                .context(ServerConnDecodeStreamRequestSnafu {
+                .context(ServerConnEncodeStreamRequestSnafu {
                     key: key.clone(),
                     conn_id,
                 })?;
@@ -618,7 +618,7 @@ async fn handle_stream_req<T: MessageWriter>(
             server_generation,
         }
         .encode()
-        .context(ServerConnDecodeStreamRequestSnafu {
+        .context(ServerConnEncodeStreamRequestSnafu {
             key: key.clone(),
             conn_id,
         })?;

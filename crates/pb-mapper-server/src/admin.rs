@@ -15,9 +15,10 @@
 use std::time::Duration;
 
 use pb_mapper_protocol::transport::RelayStream;
+use snafu::ResultExt;
 use tokio_util::sync::CancellationToken;
 
-use super::error::Error;
+use super::error::AdminOperationSnafu;
 use super::{ManagerTask, ManagerTaskSender, Result, compose_service_key, validate_service_name};
 use pb_mapper_auth::{AuthContext, AuthFailure, AuthRuntime, KeyId};
 use pb_mapper_core::checksum::{Credential, parse_credential};
@@ -51,19 +52,19 @@ pub async fn handle_admin_request(
             PbConnResponse::error(failure.code, failure.message, failure.retryable)
         }
     };
-    let message = response.encode().map_err(|error| Error::AdminOperation {
-        detail: format!("failed to encode response: {error}"),
+    let message = response.encode().context(AdminOperationSnafu {
+        what: "failed to encode response",
     })?;
     let mut writer = session
         .response_writer(&mut conn)
-        .map_err(|error| Error::AdminOperation {
-            detail: format!("failed to create response writer: {error}"),
+        .context(AdminOperationSnafu {
+            what: "failed to create response writer",
         })?;
     writer
         .write_msg(&message)
         .await
-        .map_err(|error| Error::AdminOperation {
-            detail: format!("failed to write response: {error}"),
+        .context(AdminOperationSnafu {
+            what: "failed to write response",
         })
 }
 

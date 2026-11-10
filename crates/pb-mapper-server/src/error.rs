@@ -18,8 +18,11 @@ pub enum Error {
         conn_id: RemoteConnId,
         timeout: Duration,
     },
-    #[snafu(display("administrator operation failed: {detail}"))]
-    AdminOperation { detail: String },
+    #[snafu(display("administrator operation failed: {what}"))]
+    AdminOperation {
+        what: &'static str,
+        source: common::error::Error,
+    },
     #[snafu(display(
         "timed out reading pb conn init request with `conn_id:{conn_id}` after {timeout:?}"
     ))]
@@ -106,7 +109,7 @@ pub enum Error {
         source: common::error::Error,
     },
     #[snafu(display("server conn write register resp error with `key:{key}` `conn_id:{conn_id}`"))]
-    ServerConnWriteRegisteredOk {
+    ServerConnWriteRegisterResp {
         key: Arc<str>,
         conn_id: RemoteConnId,
         source: common::error::Error,
@@ -136,17 +139,17 @@ pub enum Error {
         conn_id: RemoteConnId,
     },
     #[snafu(display(
-        "server conn send stream ack to manager error with `key:{key}` `server_id:{conn_id}`"
+        "server conn send control task to manager error with `key:{key}` `server_id:{conn_id}`"
     ))]
-    ServerConnSendStreamAck {
+    ServerConnSendControlTask {
         key: Arc<str>,
         conn_id: RemoteConnId,
         source: ManagerClosed,
     },
     #[snafu(display(
-        "server conn decode stream request error with `key:{key}` `server_id:{conn_id}`"
+        "server conn encode stream request error with `key:{key}` `server_id:{conn_id}`"
     ))]
-    ServerConnDecodeStreamRequest {
+    ServerConnEncodeStreamRequest {
         key: Arc<str>,
         conn_id: RemoteConnId,
         source: common::error::Error,
@@ -160,12 +163,15 @@ pub enum Error {
     /// client handler error
     #[snafu(display("Client connection create header tool:`{tool}` fails!"))]
     ClientConnCreateHeaderTool {
-        /// Must be `reader` or `writer`
+        /// What was being set up: a header reader or writer, a data protocol
+        /// check or a data codec.
         tool: &'static str,
         source: common::error::Error,
     },
-    #[snafu(display("client data stream credential is inactive: {detail}"))]
-    ClientConnAuthInactive { detail: String },
+    #[snafu(display("client data stream credential is inactive"))]
+    ClientConnAuthContext { source: common::error::Error },
+    #[snafu(display("client data stream credential is inactive"))]
+    ClientConnAuthInactive { source: pb_mapper_auth::AuthFailure },
     #[snafu(display("send subcribe task error with `key:{key}` `conn_id:{conn_id}`"))]
     ClientConnSendSubcribe {
         key: Arc<str>,

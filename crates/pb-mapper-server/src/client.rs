@@ -7,7 +7,8 @@ use tokio::time::{Instant, timeout};
 use tracing::instrument;
 
 use super::error::{
-    ClientConnEncodeSubcribeRespSnafu, ClientConnRecvStreamSnafu, ClientConnRecvSubcribeRespSnafu,
+    ClientConnAuthContextSnafu, ClientConnAuthInactiveSnafu, ClientConnEncodeSubcribeRespSnafu,
+    ClientConnRecvStreamSnafu, ClientConnRecvSubcribeRespSnafu,
     ClientConnRecvSubcribeRespTimeoutSnafu, ClientConnSendSubcribeSnafu,
     ClientConnStreamRespNotMatchSnafu, ClientConnSubcribeFailedSnafu,
     ClientConnSubcribeRespNotMatchSnafu, ClientConnWriteSubcribeRespSnafu,
@@ -246,13 +247,9 @@ pub(super) async fn handle_client_conn_selected(
         })?;
     let server_cancellation = server_session
         .context()
-        .map_err(|error| super::error::Error::ClientConnAuthInactive {
-            detail: error.to_string(),
-        })?
+        .context(ClientConnAuthContextSnafu)?
         .cancellation_token()
-        .map_err(|error| super::error::Error::ClientConnAuthInactive {
-            detail: error.to_string(),
-        })?;
+        .context(ClientConnAuthInactiveSnafu)?;
 
     let forwarding = async {
         let duration = Instant::now() - prev_time;
