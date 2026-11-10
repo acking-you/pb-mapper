@@ -358,7 +358,10 @@ async fn rotate_root_key(
     new_key: Option<String>,
     key_file: Option<PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
-    let key_file = key_file.unwrap_or_else(default_admin_recovery_key_file);
+    let key_file = match key_file {
+        Some(key_file) => key_file,
+        None => default_admin_recovery_key_file()?,
+    };
     let new_key = new_key.unwrap_or_else(generate_admin_key);
     // Staged before the relay is contacted, and never over an unresolved
     // candidate from an earlier attempt: that file may hold the only copy
@@ -690,11 +693,88 @@ fn print_human_admin_response(response: &AdminResponse) {
     }
 }
 
-fn default_admin_recovery_key_file() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("pb-mapper")
-        .join("admin.key")
+/// Where `root-key rotate` keeps the new key when `--key-file` does not say.
+fn default_admin_recovery_key_file() -> std::io::Result<PathBuf> {
+    recovery_key_file_in(|name| std::env::var_os(name))
+}
+
+/// `pb-mapper/admin.key` in `$XDG_CONFIG_HOME`, or else in `.config` in the
+/// home: `$HOME`, or on Windows `%USERPROFILE%`. Each must be a whole path,
+/// as XDG asks. With none, the caller names the file: the directory the
+/// command runs in may be anything, a shared checkout included, and is no
+/// place for the relay's administrator key.
+fn recovery_key_file_in(
+    var: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> std::io::Result<PathBuf> {
+    let whole = |name| {
+        var(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let home = || {
+        whole("HOME")
+            .or_else(|| cfg!(windows).then(|| whole("USERPROFILE")).flatten())
+            .map(|home| home.join(".config"))
+    };
+    let config = whole("XDG_CONFIG_HOME").or_else(home).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no home directory to keep the new administrator key in; pass --key-file",
+        )
+    })?;
+    Ok(config.join("pb-mapper").join("admin.key"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    /// The environment `vars` names, and nothing else.
+    fn only(vars: Vec<(&'static str, OsString)>) -> impl Fn(&str) -> Option<OsString> {
+        move |name| {
+            vars.iter()
+                .find(|(var, _)| *var == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    /// The recovery copy of a new administrator key goes to the user's
+    /// configuration directory, and never into whatever directory the
+    /// command happened to run in.
+    #[test]
+    fn the_recovery_key_lands_in_the_users_config_or_nowhere() {
+        let home = std::env::temp_dir();
+        let config = home.join("config");
+        assert_eq!(
+            recovery_key_file_in(only(vec![
+                ("XDG_CONFIG_HOME", config.clone().into()),
+                ("HOME", home.clone().into()),
+            ]))
+            .unwrap(),
+            config.join("pb-mapper").join("admin.key")
+        );
+        let in_home = home.join(".config").join("pb-mapper").join("admin.key");
+        assert_eq!(
+            recovery_key_file_in(only(vec![("HOME", home.clone().into())])).unwrap(),
+            in_home
+        );
+        // Windows keeps the home in USERPROFILE.
+        let from_profile = recovery_key_file_in(only(vec![("USERPROFILE", home.into())]));
+        if cfg!(windows) {
+            assert_eq!(from_profile.unwrap(), in_home);
+        } else {
+            assert!(from_profile.is_err());
+        }
+        // No home, or one that is not a whole path, leaves nowhere to put it.
+        assert!(recovery_key_file_in(only(Vec::new())).is_err());
+        assert!(
+            recovery_key_file_in(only(vec![
+                ("XDG_CONFIG_HOME", "".into()),
+                ("HOME", "home".into()),
+            ]))
+            .is_err()
+        );
+    }
 }
