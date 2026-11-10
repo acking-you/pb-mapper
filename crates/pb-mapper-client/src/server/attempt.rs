@@ -22,7 +22,7 @@ use super::probe::{RegistrationProbeResult, probe_remote_registration};
 use super::status::WorkerStatus;
 use super::stream::{SpawnStream, StreamConnect};
 use super::worker::ControlBackoff;
-use crate::diagnostics::{Diagnostics, RecoveryPhase};
+use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
 use crate::endpoint::{RecoveryWake, RelayEndpoint};
 use crate::relay::CarrierId;
 use pb_mapper_core::checksum::Credential;
@@ -95,6 +95,21 @@ macro_rules! ok_or_end {
 }
 
 impl Status {
+    /// How the attempt failed, for recovery's diagnostics and for whether its
+    /// carrier is to blame; `None` when it was cancelled rather than failed.
+    pub(super) fn failure(&self) -> Option<RecoveryFailure> {
+        match self {
+            Self::Cancelled => None,
+            Self::ReadMsg | Self::SendPing | Self::ConnectRemote | Self::Ended => {
+                Some(RecoveryFailure::Transport)
+            }
+            Self::Resolve => Some(RecoveryFailure::Dns),
+            Self::Timeout => Some(RecoveryFailure::Timeout),
+            Self::Rejected(_) | Self::RejectedRetryable(_) => Some(RecoveryFailure::Rejected),
+            Self::NetworkChanged => Some(RecoveryFailure::NetworkChanged),
+        }
+    }
+
     fn rejected(error: pb_mapper_protocol::command::PbErrorResponse) -> Self {
         let reason = format!("{}: {}", error.code, error.message);
         if error.retryable {

@@ -80,7 +80,44 @@ impl Error {
         match self {
             Self::StatusRemoteError { retryable, .. }
             | Self::SubscribeRemoteError { retryable, .. } => Some(*retryable),
-            _ => None,
+            Self::DirectSetup { .. }
+            | Self::BindLocalListener { .. }
+            | Self::AcceptLocalStream { .. }
+            | Self::ConnectRemoteStream { .. }
+            | Self::EncodeSubcribeReq { .. }
+            | Self::EncodeStatusReq { .. }
+            | Self::WriteStatusReq { .. }
+            | Self::DecodeStatusResp { .. }
+            | Self::StatusRespNotMatch { .. }
+            | Self::WriteSubcribeReq { .. }
+            | Self::DecodeSubcribeResp { .. }
+            | Self::SubcribeRespNotMatch { .. }
+            | Self::CreateHeaderTool { .. }
+            | Self::ControlIoTimeout { .. } => None,
+        }
+    }
+
+    /// Whether a failed subscription attempt is worth another before the
+    /// stream's setup deadline: the relay could not be reached or the request
+    /// not delivered, or the relay itself called its refusal retryable.
+    /// Anything else would fail the same way again.
+    pub(crate) fn subscribe_retryable(&self) -> bool {
+        match self {
+            Self::ConnectRemoteStream { .. } | Self::WriteSubcribeReq { .. } => true,
+            Self::SubscribeRemoteError { retryable, .. } => *retryable,
+            Self::DirectSetup { .. }
+            | Self::BindLocalListener { .. }
+            | Self::AcceptLocalStream { .. }
+            | Self::EncodeSubcribeReq { .. }
+            | Self::EncodeStatusReq { .. }
+            | Self::WriteStatusReq { .. }
+            | Self::DecodeStatusResp { .. }
+            | Self::StatusRespNotMatch { .. }
+            | Self::StatusRemoteError { .. }
+            | Self::DecodeSubcribeResp { .. }
+            | Self::SubcribeRespNotMatch { .. }
+            | Self::CreateHeaderTool { .. }
+            | Self::ControlIoTimeout { .. } => false,
         }
     }
 }

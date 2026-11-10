@@ -172,21 +172,12 @@ impl Subscription<'_> {
             match result {
                 Ok(Ok(ready)) => return Ok((ready, attempt_started.elapsed())),
                 Ok(Err(error)) => {
-                    let retryable = matches!(
-                        &error,
-                        super::error::Error::ConnectRemoteStream { .. }
-                            | super::error::Error::WriteSubcribeReq { .. }
-                            | super::error::Error::SubscribeRemoteError {
-                                retryable: true,
-                                ..
-                            }
-                    );
                     if error.remote_retryable().is_some() {
                         self.remote_addr.protocol_succeeded();
                     } else {
                         self.remote_addr.transport_failed(carrier);
                     }
-                    if !retryable || Instant::now() >= deadline {
+                    if !error.subscribe_retryable() || Instant::now() >= deadline {
                         return Err(error);
                     }
                 }

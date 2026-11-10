@@ -241,16 +241,9 @@ async fn run_server_side_cli_worker(
             }
             status => status,
         };
-        if matches!(status, Status::Cancelled) {
-            break 'outer;
-        }
         // Every non-terminal outcome retries; only the ladder differs.
-        let failure = match &status {
-            Status::Resolve => RecoveryFailure::Dns,
-            Status::Timeout => RecoveryFailure::Timeout,
-            Status::Rejected(_) | Status::RejectedRetryable(_) => RecoveryFailure::Rejected,
-            Status::NetworkChanged => RecoveryFailure::NetworkChanged,
-            _ => RecoveryFailure::Transport,
+        let Some(failure) = status.failure() else {
+            break 'outer;
         };
         if matches!(
             failure,
