@@ -11,9 +11,24 @@
 //! streams, per-namespace counts, and rate limits. Socket I/O runs in spawned connection
 //! tasks and communicates with this state only through typed tasks.
 
-use super::*;
+use std::sync::Arc;
+use std::time::Instant;
 
-use crate::manager::TrySendError;
+use pb_mapper_auth::{AuthConfig, AuthRuntime};
+use pb_mapper_core::config::{
+    control_io_timeout, keep_alive_from_env, server_lease_sweep_interval,
+};
+use pb_mapper_protocol::secure::ServerSecurity;
+use tokio::net::{TcpListener, ToSocketAddrs};
+use tokio_util::sync::CancellationToken;
+
+use crate::connection::handle_listener;
+use crate::manager::{TaskManager, TrySendError};
+#[cfg(feature = "relay-quic")]
+use crate::quic;
+use crate::routing::{NamespaceRateLimits, PendingStreams, RoutingConfig, ServerConnMap};
+use crate::task::ManagerTask;
+use crate::{DirectServerConfig, RelayServerOptions, ServerStatusInfo, direct};
 
 mod inventory;
 mod lease;
@@ -312,8 +327,11 @@ async fn abort_and_wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routing::{ImutableKey, ServerConnHealth, ServerConnInfo, service_conn_count};
     use pb_mapper_auth::{AuthConfig, AuthRuntime, LegacyProtocolPolicy};
+    use pb_mapper_core::conn_id::RemoteConnId;
     use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
+    use pb_mapper_protocol::command::CONTROL_PROTOCOL_V2;
     use rand::RngExt;
     use std::path::PathBuf;
     use std::time::Duration;

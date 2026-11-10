@@ -279,9 +279,7 @@ impl DirectState {
             );
             return;
         }
-        let Ok(key) =
-            super::connection::scoped_service_key(&consumer.auth, consumer.namespace, &key)
-        else {
+        let Ok(key) = super::scoped_service_key(&consumer.auth, consumer.namespace, &key) else {
             self.send(
                 connection,
                 DirectEvent::Rejected {
@@ -593,7 +591,7 @@ impl DirectState {
                     session.provider_key
                 }
             || session.service.len() > 1024
-            || super::connection::scoped_service_key(auth, namespace, &session.service).is_err()
+            || super::scoped_service_key(auth, namespace, &session.service).is_err()
         {
             return;
         }

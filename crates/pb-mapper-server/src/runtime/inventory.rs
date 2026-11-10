@@ -14,10 +14,8 @@ use snafu::ResultExt;
 
 use super::Router;
 use crate::error::{MailboxError, TaskCenterSendStatusRespSnafu};
-use crate::{
-    ImutableKey, ServerConnHealth, compose_service_key, service_status_connections,
-    split_scoped_service_key,
-};
+use crate::routing::{ImutableKey, ServerConnHealth, service_status_connections};
+use crate::service_key::{compose_service_key, split_scoped_service_key};
 
 impl Router {
     pub(super) fn on_status(

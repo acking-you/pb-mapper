@@ -12,12 +12,15 @@ use pb_mapper_protocol::secure::ServerSecurity;
 use pb_mapper_protocol::transport::RelayStream;
 
 use super::Router;
+use crate::connection::handle_conn;
 use crate::manager::TaskManager;
-use crate::{
-    ConnTask, ImutableKey, ManagerTask, NamespaceRateLimits, PendingStreams, RoutingConfig,
-    ServerConnMap, ServerStatusInfo, direct, handle_conn, registered_server_conn_count,
-    remove_server_conn, split_scoped_service_key,
+use crate::routing::{
+    ImutableKey, NamespaceRateLimits, PendingStreams, RoutingConfig, ServerConnMap,
+    registered_server_conn_count, remove_server_conn,
 };
+use crate::service_key::split_scoped_service_key;
+use crate::task::{ConnTask, ManagerTask};
+use crate::{ServerStatusInfo, direct};
 
 impl Router {
     pub(super) fn new(

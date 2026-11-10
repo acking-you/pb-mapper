@@ -10,11 +10,12 @@ use tokio_util::sync::CancellationToken;
 
 use super::Router;
 use crate::error::TaskCenterSendRegisterRespSnafu;
-use crate::{
-    ConnTask, ConnTaskSender, ImutableKey, ManagerTask, ServerConnHealth, ServerConnInfo,
-    record_server_conn_activity, registered_server_conn_count, remove_server_conn,
-    service_conn_count, split_scoped_service_key, sweep_server_conn_leases,
+use crate::routing::{
+    ImutableKey, ServerConnHealth, ServerConnInfo, record_server_conn_activity,
+    registered_server_conn_count, remove_server_conn, service_conn_count, sweep_server_conn_leases,
 };
+use crate::service_key::split_scoped_service_key;
+use crate::task::{ConnTask, ConnTaskSender, ManagerTask};
 
 impl Router {
     #[expect(

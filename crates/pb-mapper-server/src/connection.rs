@@ -14,7 +14,36 @@
 //! credential's cancellation token here. This outer guard closes a subscriber even
 //! when the paired service stream belongs to a different credential.
 
-use super::*;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use pb_mapper_auth::{ADMIN_KEY_ID, AuthContext};
+use pb_mapper_core::config::control_io_timeout;
+use pb_mapper_core::conn_id::RemoteConnId;
+use pb_mapper_core::snafu_error_handle;
+use pb_mapper_protocol::MessageWriter;
+use pb_mapper_protocol::command::{
+    CONTROL_PROTOCOL_V2, MessageSerializer, PbConnRequest, PbConnResponse,
+};
+use pb_mapper_protocol::secure::{HeaderProtocol, ServerHeaderSession, ServerSecurity};
+use pb_mapper_protocol::transport::RelayStream;
+use snafu::ResultExt;
+use tokio::net::TcpListener;
+use tracing::instrument;
+use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay};
+
+use crate::admin::handle_admin_request;
+use crate::client::{self, handle_client_conn};
+use crate::direct;
+use crate::error::{
+    Result, ServerListenSnafu, TaskCenterInitRequestTimeoutSnafu, TaskCenterSendListenerSnafu,
+    TaskCenterSendStreamRespToManagerSnafu, TaskCenterSetKeepAliveSnafu,
+};
+use crate::routing::ImutableKey;
+use crate::server::{ServerRegistration, handle_server_conn};
+use crate::service_key::scoped_service_key;
+use crate::status::handle_show_status;
+use crate::task::{ManagerTask, ManagerTaskSender};
 
 pub(super) async fn handle_listener(
     task_sender: ManagerTaskSender,
@@ -642,72 +671,4 @@ fn resolve_namespace(
         ));
     }
     Ok(namespace)
-}
-
-pub(super) fn scoped_service_key(
-    context: &AuthContext,
-    namespace: u64,
-    service_name: &str,
-) -> std::result::Result<ImutableKey, pb_mapper_auth::AuthFailure> {
-    validate_service_name(service_name)?;
-    if !context.is_admin
-        && (service_name.len() > 128
-            || !service_name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte)))
-    {
-        return Err(pb_mapper_auth::AuthFailure::new(
-            "service_name_invalid",
-            "temporary-key service names must be 1-128 ASCII bytes from [A-Za-z0-9._:-]",
-            false,
-        ));
-    }
-    Ok(compose_service_key(namespace, service_name))
-}
-
-/// Reject a service name that cannot become an unambiguous routing key.
-///
-/// NUL is the separator [`compose_service_key`] writes between the namespace
-/// prefix and the name, so a name containing one could spell out another
-/// namespace's key. Every path that takes a name from the wire checks this,
-/// including an administrator naming a service to retire: the name would
-/// otherwise reach a different service than the one the audit record names.
-pub(super) fn validate_service_name(
-    service_name: &str,
-) -> std::result::Result<(), pb_mapper_auth::AuthFailure> {
-    if service_name.is_empty() || service_name.len() > 1024 || service_name.contains('\0') {
-        return Err(pb_mapper_auth::AuthFailure::new(
-            "service_name_invalid",
-            "service names must be 1-1024 bytes and must not contain NUL",
-            false,
-        ));
-    }
-    Ok(())
-}
-
-/// Build the routing-map key for a service without validating the name.
-///
-/// The inverse of [`split_scoped_service_key`], and the one place the scoped-key
-/// format is written. Callers that accept a service name from the wire go through
-/// [`scoped_service_key`] instead, which validates it first; this is for callers
-/// naming a service that is already registered — an administrator retiring one.
-pub(super) fn compose_service_key(namespace: u64, service_name: &str) -> ImutableKey {
-    if namespace == 0 {
-        Arc::from(service_name)
-    } else {
-        Arc::from(format!("@{namespace:016x}\u{0}{service_name}"))
-    }
-}
-
-pub(super) fn split_scoped_service_key(key: &str) -> (u64, &str) {
-    let Some((prefix, name)) = key.split_once('\0') else {
-        return (0, key);
-    };
-    let Some(hex) = prefix.strip_prefix('@') else {
-        return (0, key);
-    };
-    match u64::from_str_radix(hex, 16) {
-        Ok(namespace) => (namespace, name),
-        Err(_) => (0, key),
-    }
 }
