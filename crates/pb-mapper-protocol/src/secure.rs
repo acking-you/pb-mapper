@@ -337,8 +337,19 @@ impl ServerHeaderSession {
 pub struct ServerInitialMessage {
     pub payload: Vec<u8>,
     pub session: ServerHeaderSession,
-    pub replay_fingerprint: Option<[u8; 32]>,
-    pub client_timestamp: Option<u64>,
+    /// `Some` exactly when `session` speaks protocol v2: a legacy first
+    /// message proves nothing a replay record could hold.
+    pub first_flight: Option<FirstFlightProof>,
+}
+
+/// What an accepted protocol-v2 first flight carried, for an administrator
+/// mutation to claim against auth's replay record.
+#[derive(Clone, Copy, Debug)]
+pub struct FirstFlightProof {
+    /// The replay fingerprint of the first flight's key id and connection salt.
+    pub fingerprint: [u8; 32],
+    /// The client's Unix time in seconds, as its connection salt states it.
+    pub client_timestamp: u64,
 }
 
 pub struct ServerInitialError {
@@ -531,8 +542,7 @@ impl ServerSecurity {
                 context: Some(context),
                 _legacy_guard: Some(legacy_guard),
             },
-            replay_fingerprint: None,
-            client_timestamp: None,
+            first_flight: None,
         })
     }
 
@@ -651,8 +661,10 @@ impl ServerSecurity {
                 context: Some(context),
                 ..v2_session(key, material)
             },
-            replay_fingerprint: Some(fingerprint),
-            client_timestamp: Some(client_timestamp),
+            first_flight: Some(FirstFlightProof {
+                fingerprint,
+                client_timestamp,
+            }),
         })
     }
 }

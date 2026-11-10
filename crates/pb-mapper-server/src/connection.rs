@@ -28,7 +28,9 @@ use pb_mapper_protocol::command::{
     PbConnStatusReq, REQUEST_DECODE_FAILED,
 };
 use pb_mapper_protocol::direct::{SessionId, SessionSecret};
-use pb_mapper_protocol::secure::{HeaderProtocol, ServerHeaderSession, ServerSecurity};
+use pb_mapper_protocol::secure::{
+    FirstFlightProof, HeaderProtocol, ServerHeaderSession, ServerSecurity,
+};
 use pb_mapper_protocol::transport::RelayStream;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
@@ -137,7 +139,7 @@ pub(super) async fn handle_conn(
         }
         Ok(Ok(initial)) => initial,
     };
-    let replay_claim = (initial.replay_fingerprint, initial.client_timestamp);
+    let first_flight = initial.first_flight;
     let init_request = match PbConnRequest::decode(&initial.payload) {
         Ok(request) => request,
         Err(error) => {
@@ -229,7 +231,7 @@ pub(super) async fn handle_conn(
         } => serve_stream(admitted, key, data_protocol, dst_id, server_generation).await,
         InitRequest::Status(status) => serve_status(admitted, status).await,
         InitRequest::Admin(request) => {
-            serve_admin(admitted, request, &security, replay_claim).await
+            serve_admin(admitted, request, &security, first_flight).await
         }
     }
 }
@@ -701,7 +703,7 @@ async fn serve_admin(
     admitted: Admitted,
     request: AdminRequest,
     security: &ServerSecurity,
-    (replay_fingerprint, client_timestamp): (Option<[u8; 32]>, Option<u64>),
+    first_flight: Option<FirstFlightProof>,
 ) -> Result<()> {
     let Admitted {
         conn_id,
@@ -724,7 +726,8 @@ async fn serve_admin(
         .await;
         return Ok(());
     }
-    if session.protocol() != HeaderProtocol::V2 {
+    // Only a protocol-v2 session carries a first-flight proof.
+    let Some(first_flight) = first_flight else {
         write_protocol_error(
             &mut conn,
             &session,
@@ -736,14 +739,12 @@ async fn serve_admin(
         )
         .await;
         return Ok(());
-    }
+    };
     if request.is_mutating() {
-        let (Some(fingerprint), Some(client_timestamp)) = (replay_fingerprint, client_timestamp)
-        else {
-            unreachable!(
-                "protocol-v2 sessions always carry a replay fingerprint and a client timestamp"
-            );
-        };
+        let FirstFlightProof {
+            fingerprint,
+            client_timestamp,
+        } = first_flight;
         if let Err(failure) = security
             .auth()
             .claim_admin_mutation(&auth, fingerprint, client_timestamp)

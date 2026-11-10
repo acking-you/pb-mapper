@@ -178,6 +178,7 @@ async fn v2_round_trip_uses_directional_counters() {
     let server_task = async {
         let initial = security.read_initial(&mut server_io).await.unwrap();
         assert_eq!(initial.payload, b"request");
+        assert!(initial.first_flight.is_some());
         let mut writer = initial.session.response_writer(&mut server_io).unwrap();
         writer.write_msg(b"response").await.unwrap();
     };
@@ -918,6 +919,7 @@ async fn legacy_initial_frame_validates_against_isolated_relay_key() {
         let initial = security.read_initial(&mut server_io).await.unwrap();
         assert_eq!(initial.payload, b"legacy-isolated");
         assert_eq!(initial.session.protocol(), HeaderProtocol::Legacy);
+        assert!(initial.first_flight.is_none());
         let mut writer = initial.session.response_writer(&mut server_io).unwrap();
         writer.write_msg(b"legacy-response").await.unwrap();
     };
