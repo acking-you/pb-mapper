@@ -34,7 +34,8 @@ pub struct ServerConnInfo {
     pub last_rx_at: Instant,
     /// Stream acknowledgement budget learned from completed requests and timeouts.
     pub stream_ack_budget: Duration,
-    /// At most one outstanding confirmation timer per control connection.
+    /// The suspicion the one confirmation scheduled for this connection will
+    /// settle, when one is: the latest, if activity answered an earlier one.
     pub suspect_check: Option<Instant>,
     /// Cancelled to tear this connection's socket down; see
     /// [`ManagerTask::Register::retire_token`](crate::ManagerTask::Register::retire_token).
@@ -44,6 +45,98 @@ pub struct ServerConnInfo {
     /// also why the struct is `Clone` and no longer `Copy`.
     pub retire_token: CancellationToken,
     pub direct: Option<AuthContext>,
+}
+
+/// A confirmation to schedule: once `due`, look for authenticated control
+/// activity since the suspicion at `observed_at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SuspectCheck {
+    pub(crate) observed_at: Instant,
+    pub(crate) due: Instant,
+}
+
+/// What a confirmation found when it came due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Confirmation {
+    /// Not the confirmation this registration waits on.
+    Stale,
+    /// Authenticated control activity answered the suspicion.
+    Cleared,
+    /// Silent since the suspicion: retire the registration.
+    Retire,
+    /// Activity answered the suspicion this confirmation was for, and a later
+    /// one renewed it while it waited: schedule this in its place.
+    Rearm(SuspectCheck),
+}
+
+impl ServerConnInfo {
+    /// Count authenticated control activity at `now`, which answers any
+    /// suspicion.
+    pub(crate) fn record_activity(&mut self, now: Instant) {
+        self.last_rx_at = now;
+        self.health = ServerConnHealth::Healthy;
+    }
+
+    /// Suspect this registration at `now`, after a stream it was asked for
+    /// timed out, doubling its acknowledgement budget up to `max_ack_budget`.
+    ///
+    /// The confirmation to schedule, or `None` when the one already scheduled
+    /// will settle this suspicion.
+    pub(crate) fn suspect(
+        &mut self,
+        now: Instant,
+        max_ack_budget: Duration,
+    ) -> Option<SuspectCheck> {
+        self.stream_ack_budget = self.stream_ack_budget.saturating_mul(2).min(max_ack_budget);
+        // A timeout affects candidate selection immediately, but a late
+        // authenticated ACK/heartbeat can restore it without a reconnect.
+        self.health = ServerConnHealth::Suspect;
+        match self.suspect_check {
+            // Nothing has answered the pending suspicion, so whatever answers
+            // this one answers that one too, and its confirmation settles both.
+            Some(pending) if self.last_rx_at <= pending => None,
+            // Activity answered the pending suspicion, and this one renews it.
+            // Its confirmation, already scheduled and too soon for this one,
+            // goes on to this one when it comes due (see `confirm`).
+            Some(_) => {
+                self.suspect_check = Some(now);
+                None
+            }
+            None => {
+                self.suspect_check = Some(now);
+                Some(self.check(now))
+            }
+        }
+    }
+
+    /// Settle the confirmation scheduled for the suspicion at `observed_at`.
+    pub(crate) fn confirm(&mut self, observed_at: Instant) -> Confirmation {
+        match self.suspect_check {
+            Some(pending) if pending == observed_at => {}
+            Some(pending) if pending > observed_at => {
+                return Confirmation::Rearm(self.check(pending));
+            }
+            _ => return Confirmation::Stale,
+        }
+        self.suspect_check = None;
+        if self.last_rx_at > observed_at {
+            Confirmation::Cleared
+        } else {
+            Confirmation::Retire
+        }
+    }
+
+    /// How long a suspicion waits for authenticated control activity.
+    pub(crate) fn suspect_grace(&self) -> Duration {
+        pb_mapper_core::config::control_suspect_grace().max(self.stream_ack_budget)
+    }
+
+    fn check(&self, observed_at: Instant) -> SuspectCheck {
+        SuspectCheck {
+            observed_at,
+            due: observed_at + self.suspect_grace(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -432,8 +525,7 @@ pub(crate) fn record_server_conn_activity(
     let Some(info) = infos.iter_mut().find(|info| info.conn_id == conn_id) else {
         return false;
     };
-    info.last_rx_at = Instant::now();
-    info.health = ServerConnHealth::Healthy;
+    info.record_activity(Instant::now());
     true
 }
 
@@ -448,8 +540,7 @@ pub(crate) fn record_server_conn_activity_by_conn_id(
     else {
         return false;
     };
-    info.last_rx_at = Instant::now();
-    info.health = ServerConnHealth::Healthy;
+    info.record_activity(Instant::now());
     true
 }
 
@@ -522,6 +613,56 @@ mod lease_tests {
         assert!(sweep_server_conn_leases(&mut map, LEASE).is_empty());
         assert_eq!(health(&map, 1), ServerConnHealth::Healthy);
         assert_eq!(health(&map, 2), ServerConnHealth::Suspect);
+    }
+
+    /// A provider suspected, answered by a heartbeat and suspected again, a
+    /// few times within one grace, then silent for good, is retired one grace
+    /// after its last suspicion, with one confirmation scheduled at a time.
+    ///
+    /// The clock is the instants passed in, and the router's timers are played
+    /// by delivering each scheduled confirmation once it is due.
+    #[test]
+    fn a_renewed_suspicion_is_confirmed_a_grace_after_it() {
+        let max_ack_budget = Duration::from_secs(5);
+        let mut info = ServerConnInfo::for_test(1, 1, CONTROL_PROTOCOL_V2, None);
+        let start = info.last_rx_at;
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut scheduled = Vec::new();
+
+        scheduled.extend(info.suspect(at(1_000), max_ack_budget));
+        let mut last_suspicion = at(1_000);
+        for flap in 1..=3 {
+            info.record_activity(at(1_000 + flap * 100));
+            last_suspicion = at(1_050 + flap * 100);
+            scheduled.extend(info.suspect(last_suspicion, max_ack_budget));
+            assert!(
+                scheduled.len() <= 1,
+                "a flapping provider is confirmed once at a time"
+            );
+        }
+        let grace = info.suspect_grace();
+
+        let mut retired_at = None;
+        while let Some(next) = (0..scheduled.len()).min_by_key(|&i| scheduled[i].due) {
+            let SuspectCheck { observed_at, due } = scheduled.swap_remove(next);
+            match info.confirm(observed_at) {
+                Confirmation::Retire => {
+                    retired_at = Some(due);
+                    break;
+                }
+                Confirmation::Rearm(check) => scheduled.push(check),
+                Confirmation::Cleared | Confirmation::Stale => {}
+            }
+            assert!(
+                scheduled.len() <= 1,
+                "a flapping provider is confirmed once at a time"
+            );
+        }
+        assert_eq!(
+            retired_at,
+            Some(last_suspicion + grace),
+            "the last suspicion was never confirmed; the provider stays suspect until its lease runs out"
+        );
     }
 
     #[test]

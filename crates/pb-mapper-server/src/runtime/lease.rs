@@ -11,8 +11,9 @@ use tokio_util::sync::CancellationToken;
 use super::Router;
 use crate::error::TaskCenterSendRegisterRespSnafu;
 use crate::routing::{
-    ImutableKey, ServerConnHealth, ServerConnInfo, record_server_conn_activity,
-    registered_server_conn_count, remove_server_conn, service_conn_count, sweep_server_conn_leases,
+    Confirmation, ImutableKey, ServerConnHealth, ServerConnInfo, SuspectCheck,
+    record_server_conn_activity, registered_server_conn_count, remove_server_conn,
+    service_conn_count, sweep_server_conn_leases,
 };
 use crate::service_key::split_scoped_service_key;
 use crate::task::{ConnTask, ConnTaskSender, ManagerTask};
@@ -153,39 +154,15 @@ impl Router {
     }
 
     pub(super) fn on_suspect(&mut self, key: ImutableKey, conn_id: RemoteConnId, generation: u64) {
-        let Some(info) = self.server_conn_map.get_mut(&key).and_then(|infos| {
-            infos
-                .iter_mut()
-                .find(|info| info.conn_id == conn_id && info.generation == generation)
-        }) else {
+        let max_ack_budget = self.config.max_stream_ack_budget();
+        let Some(info) = self.registration(&key, conn_id, generation) else {
             return;
         };
-        info.stream_ack_budget = info
-            .stream_ack_budget
-            .saturating_mul(2)
-            .min(self.config.max_stream_ack_budget());
-        // A timeout affects candidate selection immediately, but a late
-        // authenticated ACK/heartbeat can restore it without a reconnect.
-        info.health = ServerConnHealth::Suspect;
-        if info.suspect_check.is_some() {
+        let Some(check) = info.suspect(Instant::now(), max_ack_budget) else {
             return;
-        }
-        let observed_at = Instant::now();
-        info.suspect_check = Some(observed_at);
-        let grace = pb_mapper_core::config::control_suspect_grace().max(info.stream_ack_budget);
-        tracing::warn!(event = "server_conn_suspected", %key, %conn_id, generation, ?grace, ack_budget = ?info.stream_ack_budget, "stream was slow; waiting for authenticated control activity before retirement");
-        let sender = self.manager.get_task_sender();
-        self.connection_tasks.spawn(async move {
-            tokio::time::sleep(grace).await;
-            let _ = sender
-                .send(ManagerTask::ConfirmServerConn {
-                    key,
-                    conn_id,
-                    generation,
-                    observed_at,
-                })
-                .await;
-        });
+        };
+        tracing::warn!(event = "server_conn_suspected", %key, %conn_id, generation, grace = ?info.suspect_grace(), ack_budget = ?info.stream_ack_budget, "stream was slow; waiting for authenticated control activity before retirement");
+        self.schedule_confirm(key, conn_id, generation, check);
     }
 
     pub(super) fn on_confirm(
@@ -195,25 +172,61 @@ impl Router {
         generation: u64,
         observed_at: Instant,
     ) {
-        let Some(info) = self.server_conn_map.get_mut(&key).and_then(|infos| {
-            infos.iter_mut().find(|info| {
-                info.conn_id == conn_id
-                    && info.generation == generation
-                    && info.suspect_check == Some(observed_at)
-            })
-        }) else {
+        let Some(info) = self.registration(&key, conn_id, generation) else {
             return;
         };
-        info.suspect_check = None;
-        if info.last_rx_at > observed_at {
-            tracing::debug!(event = "server_conn_suspect_cleared", %key, %conn_id, generation, "control activity cancelled retirement");
-            return;
+        match info.confirm(observed_at) {
+            Confirmation::Stale => {}
+            Confirmation::Cleared => {
+                tracing::debug!(event = "server_conn_suspect_cleared", %key, %conn_id, generation, "control activity cancelled retirement");
+            }
+            Confirmation::Retire => self.retire_server_conn(
+                &key,
+                conn_id,
+                "stream timeout followed by silent control connection",
+            ),
+            Confirmation::Rearm(check) => {
+                tracing::warn!(event = "server_conn_suspect_renewed", %key, %conn_id, generation, grace = ?info.suspect_grace(), "control activity answered a slow stream, but another was slow since; waiting for activity after that one");
+                self.schedule_confirm(key, conn_id, generation, check);
+            }
         }
-        self.retire_server_conn(
-            &key,
-            conn_id,
-            "stream timeout followed by silent control connection",
-        );
+    }
+
+    /// The registration `conn_id` holds under `key`, if it is still `generation`.
+    fn registration(
+        &mut self,
+        key: &ImutableKey,
+        conn_id: RemoteConnId,
+        generation: u64,
+    ) -> Option<&mut ServerConnInfo> {
+        self.server_conn_map.get_mut(key).and_then(|infos| {
+            infos
+                .iter_mut()
+                .find(|info| info.conn_id == conn_id && info.generation == generation)
+        })
+    }
+
+    /// Send `ConfirmServerConn` for `check` once it is due.
+    fn schedule_confirm(
+        &mut self,
+        key: ImutableKey,
+        conn_id: RemoteConnId,
+        generation: u64,
+        check: SuspectCheck,
+    ) {
+        let sender = self.manager.get_task_sender();
+        let delay = check.due.saturating_duration_since(Instant::now());
+        self.connection_tasks.spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = sender
+                .send(ManagerTask::ConfirmServerConn {
+                    key,
+                    conn_id,
+                    generation,
+                    observed_at: check.observed_at,
+                })
+                .await;
+        });
     }
 
     pub(super) fn on_sweep(&mut self) {
