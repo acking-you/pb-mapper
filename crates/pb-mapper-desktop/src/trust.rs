@@ -246,36 +246,16 @@ impl<S: Sealer, T: Serialize + DeserializeOwned> TrustFile<S, T> {
 /// by its owner alone where the platform has modes, synced, renamed over it
 /// and its directory synced, so a crash leaves the old file or the new one,
 /// never a torn one. The directory is created first.
+///
+/// The sequence is core's `durable_file::replace_contents`; its failures
+/// arrive as the I/O error of the step that failed.
 pub fn write_durably(path: &Path, bytes: &[u8]) -> Result<()> {
-    use pb_mapper_core::durable_file::{replace_file, sync_parent_directory};
-    use ring::rand::SecureRandom;
-    use std::io::Write;
-    let (Some(directory), Some(stem)) = (path.parent(), path.file_stem()) else {
+    use pb_mapper_core::durable_file::{NewFileMode, replace_contents};
+    let (Some(directory), Some(_)) = (path.parent(), path.file_stem()) else {
         return Err(error("invalid private file path"));
     };
     std::fs::create_dir_all(directory)?;
-    let mut nonce = [0u8; 16];
-    ring::rand::SystemRandom::new()
-        .fill(&mut nonce)
-        .map_err(error)?;
-    let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
-    let temporary = directory.join(format!("{}-{nonce}.tmp", stem.to_string_lossy()));
-    let written = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut file = options.open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        replace_file(&temporary, path)?;
-        sync_parent_directory(path)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    written
+    replace_contents(path, bytes, NewFileMode::Exactly(0o600)).map_err(io::Error::from)
 }
 
 #[cfg(test)]
