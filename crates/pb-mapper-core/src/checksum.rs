@@ -40,16 +40,16 @@ pub fn valid_checksum_for_key(datalen: DataLenType, checksum: ChecksumType, key:
     checksum == get_checksum_for_key(datalen, key)
 }
 
-// This was missing its `#[cfg(test)]`, so it compiled into release builds.
 #[cfg(test)]
 mod tests {
+    /// Every legacy frame header carries `datalen ^ hash(key)`, so the hash is
+    /// part of the wire format.
     #[test]
-    fn test_random_checksum() {
+    fn the_key_hash_in_frame_checksums_is_fixed() {
         use super::*;
-        println!(
-            "{}",
-            gen_checksum_by_key(b"0123456789abcdefghijklmnopqrstuv")
-        );
+        let key = b"0123456789abcdefghijklmnopqrstuv";
+        assert_eq!(gen_checksum_by_key(key), 0xE4D1_EDB0);
+        assert_eq!(get_checksum_for_key(32, key), 32 ^ 0xE4D1_EDB0);
     }
 
     #[test]

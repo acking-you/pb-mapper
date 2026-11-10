@@ -183,21 +183,16 @@ mod tests {
         );
     }
 
+    /// An administrator key is 32 printable ASCII bytes: no NUL, no
+    /// whitespace, whether checked directly or parsed as a credential.
     #[test]
-    fn env_safe_admin_key_rejects_nul_and_accepts_printable_ascii() {
+    fn administrator_keys_are_printable_ascii_without_nul_or_whitespace() {
         use super::*;
         assert!(is_env_safe_admin_key(b"0123456789abcdefghijklmnopqrstuv"));
         let mut with_nul = *b"0123456789abcdefghijklmnopqrstuv";
         with_nul[8] = 0;
         assert!(!is_env_safe_admin_key(&with_nul));
         assert!(!is_env_safe_admin_key(b"short"));
-    }
-
-    #[test]
-    fn administrator_credentials_reject_nul_and_whitespace() {
-        use super::*;
-        let mut with_nul = *b"0123456789abcdefghijklmnopqrstuv";
-        with_nul[8] = 0;
         assert!(parse_credential(std::str::from_utf8(&with_nul).unwrap()).is_err());
         assert!(parse_credential("0123456789abcdefghijklmnopq rstuv").is_err());
     }

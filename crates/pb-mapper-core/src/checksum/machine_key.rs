@@ -316,6 +316,8 @@ mod tests {
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 32);
         assert!(key1.chars().all(|ch| ch.is_ascii_alphanumeric()));
+        // Operators have distributed keys derived this way.
+        assert_eq!(key1, "1sQAOc3e6Zhob33ZdgvQU0LWVLUfD3uW");
     }
 
     /// Discovery feeds the derivation, so what each listing yields is the key:
