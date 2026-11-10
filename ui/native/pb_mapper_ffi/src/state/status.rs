@@ -387,17 +387,13 @@ impl PbMapperState {
 
 /// The periodic check: the relay's holdings, and what it said about QUIC for
 /// these settings, asking only if it has not said yet.
-pub async fn get_server_status_detail(
-    state: &Arc<Mutex<PbMapperState>>,
-) -> Result<ServerStatusDetail, CtlError> {
+pub async fn get_server_status_detail(state: &Arc<Mutex<PbMapperState>>) -> ServerStatusDetail {
     refresh_server_status(state, false).await
 }
 
 /// Perform a blocking status refresh — waits for the actual network result
 /// instead of returning stale cache — and asks the relay about QUIC again.
-pub async fn force_refresh_server_status(
-    state: &Arc<Mutex<PbMapperState>>,
-) -> Result<ServerStatusDetail, CtlError> {
+pub async fn force_refresh_server_status(state: &Arc<Mutex<PbMapperState>>) -> ServerStatusDetail {
     refresh_server_status(state, true).await
 }
 
@@ -437,7 +433,7 @@ pub async fn get_service_conns(
 async fn refresh_server_status(
     state: &Arc<Mutex<PbMapperState>>,
     force: bool,
-) -> Result<ServerStatusDetail, CtlError> {
+) -> ServerStatusDetail {
     let unavailable = |error: String| ServerStatusDetail {
         server_available: false,
         registered_services: Vec::new(),
@@ -461,7 +457,7 @@ async fn refresh_server_status(
     };
     let client = match client {
         Ok(client) => client,
-        Err(error) => return Ok(unavailable(error.to_string())),
+        Err(error) => return unavailable(error.to_string()),
     };
 
     let (answer, mut asked) = fetch_real_status(&client, force || known.is_none()).await;
@@ -481,7 +477,7 @@ async fn refresh_server_status(
         state.lock().await.remember_quic_offer(config, port);
     }
     let quic = asked.or(known);
-    let detail = match answer {
+    match answer {
         Ok((services, remote_id, latency)) => ServerStatusDetail {
             server_available: true,
             registered_services: services,
@@ -511,7 +507,5 @@ async fn refresh_server_status(
                 ..unavailable(error)
             }
         }
-    };
-
-    Ok(detail)
+    }
 }

@@ -472,7 +472,7 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
     .unwrap();
     assert_eq!(&echoed, b"quic");
 
-    let detail = force_refresh_server_status(&state).await.unwrap();
+    let detail = force_refresh_server_status(&state).await;
     assert!(detail.server_available, "{:?}", detail.error);
     assert!(detail.quic_port.is_some());
     {
@@ -564,7 +564,7 @@ async fn a_relay_whose_quic_port_is_blocked_is_named_as_such() {
         state.config.relay_transport = RelayTransport::Quic;
     }
 
-    let detail = get_server_status_detail(&state).await.unwrap();
+    let detail = get_server_status_detail(&state).await;
     assert!(!detail.server_available);
     assert_eq!(detail.quic_port, Some(blocked));
     let error = detail.error.unwrap();

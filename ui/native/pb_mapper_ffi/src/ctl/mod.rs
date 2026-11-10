@@ -225,7 +225,7 @@ async fn run(
         )),
 
         Command::Status => {
-            let detail = state::get_server_status_detail(state).await?;
+            let detail = state::get_server_status_detail(state).await;
             Ok(proto::Response::ok(Some(json_or(detail, json!({}))), None))
         }
 

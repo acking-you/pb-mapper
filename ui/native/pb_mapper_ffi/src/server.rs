@@ -120,7 +120,7 @@ pub unsafe extern "C" fn pb_mapper_get_server_status_detail_json(
     respond(unsafe { handle.as_ref() }, |handle| {
         let detail = handle
             .runtime
-            .block_on(crate::state::get_server_status_detail(&handle.state))?;
+            .block_on(crate::state::get_server_status_detail(&handle.state));
         Ok(Reply::Data(json_or(detail, json!({}))))
     })
 }
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn pb_mapper_force_refresh_server_status_json(
     respond(unsafe { handle.as_ref() }, |handle| {
         let detail = handle
             .runtime
-            .block_on(crate::state::force_refresh_server_status(&handle.state))?;
+            .block_on(crate::state::force_refresh_server_status(&handle.state));
         Ok(Reply::Data(json_or(detail, json!({}))))
     })
 }
