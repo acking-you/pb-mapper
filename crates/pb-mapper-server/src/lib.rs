@@ -48,6 +48,7 @@ pub(crate) use task::{ConnTaskReceiver, ConnTaskSender, ManagerTaskSender};
 
 #[derive(Debug, Clone)]
 pub struct ServerStatusInfo {
+    /// Registered control connections, across every service.
     pub active_connections: u32,
     pub registered_services: u32,
     pub uptime_seconds: u64,

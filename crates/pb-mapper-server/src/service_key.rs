@@ -52,7 +52,8 @@ pub(crate) fn validate_service_name(
 /// The inverse of [`split_scoped_service_key`], and the one place the scoped-key
 /// format is written. Callers that accept a service name from the wire go through
 /// [`scoped_service_key`] instead, which validates it first; this is for callers
-/// naming a service that is already registered — an administrator retiring one.
+/// naming a service that is already registered — an administrator retiring one,
+/// or a status query for one.
 pub(crate) fn compose_service_key(namespace: u64, service_name: &str) -> ImutableKey {
     if namespace == 0 {
         Arc::from(service_name)

@@ -120,6 +120,9 @@ pub enum ManagerTask {
     /// in `tokio::select!` would drop a task the receive had already taken.
     SweepServerLeases,
     DeRegisterClientConn {
+        /// The provider stream socket that served this subscriber, once one has:
+        /// the connection that sent `Stream`, not the registered control
+        /// connection the subscribe was routed to.
         server_id: Option<RemoteConnId>,
         client_id: RemoteConnId,
     },
@@ -169,6 +172,7 @@ pub enum ConnTask {
     },
     StreamResp {
         data_protocol: Option<u16>,
+        /// The provider stream socket handed over, not its control connection.
         server_id: RemoteConnId,
         server_generation: u64,
         stream: RelayStream,

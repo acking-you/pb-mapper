@@ -5,8 +5,8 @@ use snafu::Snafu;
 use crate::ConnTask;
 use crate::manager::ManagerClosed;
 use pb_mapper_core::conn_id::RemoteConnId;
-// The `common::error::Error` spellings below are the source type on nearly every
-// variant; aliasing keeps them as they were.
+// Encode, decode and write failures below wrap `common::error::Error`; the alias
+// keeps those spellings short.
 use pb_mapper_core as common;
 
 #[derive(Debug, Snafu)]

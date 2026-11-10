@@ -467,6 +467,7 @@ mod tests {
 
         drop(router);
         auth.shutdown_actor().await;
+        drop(auth);
         let _ = std::fs::remove_dir_all(state_dir);
     }
 
@@ -494,6 +495,8 @@ mod tests {
             async move { run_server_on_listener(listener, shutdown_token, None, false, auth).await }
         });
         let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // Nothing signals that the relay has accepted an unauthenticated socket and
+        // spawned its connection task, the state this test shuts down from.
         tokio::time::sleep(Duration::from_millis(80)).await;
         shutdown_token.cancel();
         tokio::time::timeout(Duration::from_secs(2), server)
@@ -502,8 +505,8 @@ mod tests {
             .unwrap()
             .unwrap();
         let restarted = AuthRuntime::start(admin_key, config).await.unwrap();
+        restarted.shutdown_actor().await;
         drop(restarted);
-        tokio::time::sleep(Duration::from_millis(20)).await;
         let _ = std::fs::remove_dir_all(state_dir);
     }
 }
@@ -517,9 +520,10 @@ mod cancellation_audit {
     };
     #[tokio::test]
     async fn dropping_relay_future_must_release_its_listener() {
+        let state_dir =
+            std::env::temp_dir().join(format!("pb-audit-abort-{}", rand::random::<u64>()));
         let config = AuthConfig {
-            state_dir: std::env::temp_dir()
-                .join(format!("pb-audit-abort-{}", rand::random::<u64>())),
+            state_dir: state_dir.clone(),
             ..AuthConfig::default()
         };
         let auth = AuthRuntime::from_isolated_state(config).await.unwrap();
@@ -549,6 +553,8 @@ mod cancellation_audit {
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
+        drop(auth);
+        let _ = std::fs::remove_dir_all(state_dir);
         assert!(
             !leaked,
             "relay future dropped, but detached listener task still owns {addr}"
