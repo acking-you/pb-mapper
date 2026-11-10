@@ -15,7 +15,8 @@ use super::tunnel::{PinnedTunnel, TunnelHandle, TunnelRuntime};
 use super::views::{PathLink, PathOutcome};
 use super::{
     AppConfig, ConnectSpec, DirectOptions, PathInfo, PbMapperState, ServiceConfigData, ShareSpec,
-    connect_service, force_refresh_server_status, get_server_status_detail, register_service,
+    TunnelState, connect_service, force_refresh_server_status, get_server_status_detail,
+    register_service,
 };
 use crate::error::ErrorCode;
 use crate::test_support::TempRoot;
@@ -760,4 +761,17 @@ async fn a_state_reads_nothing_until_its_directory_arrives() {
     assert!(pb_mapper_core::checksum::process_credential_configured());
 
     set_process_msg_header_key(None).unwrap();
+}
+
+/// The states the window matches on, as it reads them.
+#[test]
+fn tunnel_states_keep_their_names_on_the_wire() {
+    let names = [
+        TunnelState::Running,
+        TunnelState::Retrying,
+        TunnelState::Failed,
+        TunnelState::Stopped,
+    ]
+    .map(|state| serde_json::to_value(state).unwrap());
+    assert_eq!(names, ["running", "retrying", "failed", "stopped"]);
 }

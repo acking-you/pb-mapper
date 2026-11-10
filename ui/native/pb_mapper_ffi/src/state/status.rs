@@ -28,9 +28,8 @@ use super::runtime::EmbeddedRelay;
 use super::stored::normalize_msg_header_key;
 use super::tunnel::{TunnelHandle, TunnelView};
 use super::{
-    AppConfig, ClientConfigInfo, ClientStatusResponse, LocalServerStatus, PbMapperState,
-    ServerStatusDetail, ServiceConfigInfo, ServiceConnInfo, ServiceStatusResponse,
-    process_credential,
+    AppConfig, ClientConfigInfo, LocalServerStatus, PbMapperState, ServerStatusDetail,
+    ServiceConfigInfo, ServiceConnInfo, TunnelStatusResponse, process_credential,
 };
 use crate::error::{CtlError, ErrorCode, sdk_error};
 
@@ -212,7 +211,7 @@ impl PbMapperState {
                 enable_keep_alive: config.enable_keep_alive,
                 allow_direct: config.allow_direct,
                 port_mapping: config.port_mapping,
-                status: view.status.to_string(),
+                status: view.status,
                 status_message: view.message,
                 path: view.path,
                 relay_transport: view.transport,
@@ -231,11 +230,11 @@ impl PbMapperState {
         services
     }
 
-    pub fn get_service_status(&self, service_key: String) -> ServiceStatusResponse {
+    pub fn get_service_status(&self, service_key: String) -> TunnelStatusResponse {
         let view = self.service_view(&service_key);
-        ServiceStatusResponse {
+        TunnelStatusResponse {
             service_key,
-            status: view.status.to_string(),
+            status: view.status,
             message: view.message,
         }
     }
@@ -259,7 +258,7 @@ impl PbMapperState {
                     .map(|runtime| runtime.pin.routed_namespace()),
                 allow_direct: config.allow_direct,
                 port_mapping: config.port_mapping,
-                status: view.status.to_string(),
+                status: view.status,
                 status_message: view.message,
                 path: view.path,
                 relay_transport: view.transport,
@@ -280,11 +279,11 @@ impl PbMapperState {
         client_infos
     }
 
-    pub fn get_client_status(&self, service_key: String) -> ClientStatusResponse {
+    pub fn get_client_status(&self, service_key: String) -> TunnelStatusResponse {
         let view = self.client_view(&service_key);
-        ClientStatusResponse {
+        TunnelStatusResponse {
             service_key,
-            status: view.status.to_string(),
+            status: view.status,
             message: view.message,
         }
     }

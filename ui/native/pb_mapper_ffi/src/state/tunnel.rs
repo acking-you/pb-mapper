@@ -16,7 +16,7 @@ use pb_mapper_client::sdk::{
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{ResolvedAddrs, resolve_addrs_async, resolve_pb_mapper_server_async};
 
-use super::{DirectOptions, PathInfo, PbMapperState};
+use super::{DirectOptions, PathInfo, PbMapperState, TunnelState};
 use crate::ctl::Origin;
 use crate::error::{CtlError, no_quic, sdk_error, sdk_refusal};
 use crate::events;
@@ -193,7 +193,7 @@ impl TunnelHandle {
         let diagnostics = self.diagnostics();
         let transport = diagnostics.relay_transport;
         let (status, message) = match self.status() {
-            TunnelStatus::Connected => ("running", String::new()),
+            TunnelStatus::Connected => (TunnelState::Running, String::new()),
             // Still dialling, or failed and trying again: "failed" is what a
             // tunnel whose last attempt failed has always reported, while its
             // retry loop runs on.
@@ -202,14 +202,17 @@ impl TunnelHandle {
                     .last_failure
                     .filter(|_| diagnostics.consecutive_failures > 0)
                 {
-                    Some(failure) => ("failed", failure_message(failure, self, transport)),
-                    None => ("retrying", "Connecting to the relay".to_string()),
+                    Some(failure) => (
+                        TunnelState::Failed,
+                        failure_message(failure, self, transport),
+                    ),
+                    None => (TunnelState::Retrying, "Connecting to the relay".to_string()),
                 }
             }
-            TunnelStatus::Failed(reason) => ("failed", reason),
+            TunnelStatus::Failed(reason) => (TunnelState::Failed, reason),
             // Nothing here stops a tunnel but removing it, so a stopped one
             // that is still held ended on its own.
-            TunnelStatus::Stopped => ("failed", "The tunnel stopped".to_string()),
+            TunnelStatus::Stopped => (TunnelState::Failed, "The tunnel stopped".to_string()),
         };
         TunnelView {
             status,
@@ -250,7 +253,7 @@ fn failure_message(
 /// A tunnel's state as the list shows it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) struct TunnelView {
-    pub(super) status: &'static str,
+    pub(super) status: TunnelState,
     pub(super) message: String,
     pub(super) path: Option<PathInfo>,
     pub(super) transport: Option<RelayTransport>,
@@ -260,7 +263,7 @@ impl TunnelView {
     /// The view of a tunnel this computer has configured but is not running.
     pub(super) fn stopped(message: &str) -> Self {
         Self {
-            status: "stopped",
+            status: TunnelState::Stopped,
             message: message.to_string(),
             path: None,
             transport: None,

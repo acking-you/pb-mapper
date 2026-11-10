@@ -16,7 +16,7 @@ pub struct ServiceConfigInfo {
     pub enable_keep_alive: bool,
     pub allow_direct: bool,
     pub port_mapping: PortMapping,
-    pub status: String,
+    pub status: TunnelState,
     pub status_message: String,
     /// How its sessions travel, while it runs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -44,7 +44,7 @@ pub struct ClientConfigInfo {
     pub routed_namespace: Option<u64>,
     pub allow_direct: bool,
     pub port_mapping: PortMapping,
-    pub status: String,
+    pub status: TunnelState,
     pub status_message: String,
     /// How its sessions travel, while it runs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -298,19 +298,25 @@ pub struct ServiceConnInfo {
     pub last_rx_age_ms: u64,
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct ServiceStatusResponse {
-    pub service_key: String,
-    pub status: String,
-    pub message: String,
+/// A tunnel's state as the list shows it.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TunnelState {
+    Running,
+    /// Still dialling, with no failure to report.
+    Retrying,
+    /// Failed, whether or not it is trying again.
+    Failed,
+    /// Configured, but not running.
+    Stopped,
 }
 
+/// One tunnel's state, for a share or a connection alike.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct ClientStatusResponse {
+pub struct TunnelStatusResponse {
     pub service_key: String,
-    pub status: String,
+    pub status: TunnelState,
     pub message: String,
 }
 
