@@ -97,12 +97,14 @@ pub unsafe extern "C" fn pb_mapper_update_config(
 ) -> *mut c_char {
     // SAFETY: null or live, as the caller guarantees.
     respond(unsafe { handle.as_ref() }, |handle| {
-        let server_address = parse_c_string(server_address, "server_address")?;
-        let msg_header_key = parse_c_string(msg_header_key, "msg_header_key")?;
-        let relay_transport = parse_c_string(relay_transport, "relay_transport")
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let server_address = unsafe { parse_c_string(server_address, "server_address") }?;
+        let msg_header_key = unsafe { parse_c_string(msg_header_key, "msg_header_key") }?;
+        let relay_transport = unsafe { parse_c_string(relay_transport, "relay_transport") }
             .and_then(|raw| parse_transport(&raw))?;
         let lan_first = lan_first != 0;
-        let lan_transport = parse_c_string(lan_transport, "lan_transport")
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let lan_transport = unsafe { parse_c_string(lan_transport, "lan_transport") }
             .and_then(|raw| parse_lan_transport(&raw))?;
         let state = &handle.state;
         let (moving, reached, carried) = handle.runtime.block_on(async move {

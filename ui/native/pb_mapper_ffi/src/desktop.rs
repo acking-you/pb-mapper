@@ -1016,7 +1016,8 @@ pub unsafe extern "C" fn pb_mapper_desktop_call_json(
     if handle.is_null() {
         return err_null_handle();
     }
-    let request = match parse_c_string(request, "request").and_then(|text| {
+    // SAFETY: null or NUL-terminated, as the caller guarantees.
+    let request = match unsafe { parse_c_string(request, "request") }.and_then(|text| {
         if text.len() > 16384 {
             return Err(CtlError::invalid_argument("desktop request too large"));
         }
@@ -1995,7 +1996,8 @@ pub unsafe extern "C" fn pb_mapper_desktop_viewer_call_json(
     let handle = unsafe { &*handle };
     let failed = || CtlError::internal("desktop viewer call failed");
     let result = desktop_video::guard(Err(failed()), || {
-        let text = parse_c_string(request, "request")?;
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let text = unsafe { parse_c_string(request, "request") }?;
         if text.len() > MAX_VIEWER_REQUEST {
             return Err(CtlError::invalid_argument(
                 "desktop viewer request too large",

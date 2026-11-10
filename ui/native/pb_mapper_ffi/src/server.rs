@@ -98,7 +98,8 @@ pub unsafe extern "C" fn pb_mapper_get_service_conns_json(
 ) -> *mut c_char {
     // SAFETY: null or live, as the caller guarantees.
     respond(unsafe { handle.as_ref() }, |handle| {
-        let service_key = parse_c_string(service_key, "service_key")?;
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let service_key = unsafe { parse_c_string(service_key, "service_key") }?;
         let conns = handle
             .runtime
             .block_on(crate::state::get_service_conns(&handle.state, service_key))?;

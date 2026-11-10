@@ -90,16 +90,19 @@ pub(crate) fn ok_data(data: serde_json::Value) -> *mut c_char {
 }
 
 /// Parse a required C string argument.
-pub(crate) fn parse_c_string(ptr: *const c_char, field: &str) -> Result<String, CtlError> {
+///
+/// # Safety
+/// `ptr` must be null or point to a NUL-terminated string that stays valid
+/// for the call.
+pub(crate) unsafe fn parse_c_string(ptr: *const c_char, field: &str) -> Result<String, CtlError> {
     if ptr.is_null() {
         return Err(CtlError::invalid_argument(format!("{field} is null")));
     }
-    unsafe {
-        CStr::from_ptr(ptr)
-            .to_str()
-            .map(|s| s.to_string())
-            .map_err(|_| CtlError::invalid_argument(format!("{field} is not valid UTF-8")))
-    }
+    // SAFETY: non-null, and NUL-terminated as the caller guarantees.
+    unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .map(|s| s.to_string())
+        .map_err(|_| CtlError::invalid_argument(format!("{field} is not valid UTF-8")))
 }
 
 /// The port mapping a C caller names: 0 off, 1 when needed, 2 always.
@@ -140,7 +143,8 @@ mod tests {
         let null_handle = read_and_free(respond(None, |_| panic!("ran without a handle")));
         assert_eq!(null_handle["code"], "INVALID_ARGUMENT");
 
-        let bad_arg = parse_c_string(std::ptr::null(), "service_key")
+        // SAFETY: null is allowed.
+        let bad_arg = unsafe { parse_c_string(std::ptr::null(), "service_key") }
             .expect_err("a null pointer is not a string");
         assert_eq!(bad_arg.code(), crate::error::ErrorCode::InvalidArgument);
     }

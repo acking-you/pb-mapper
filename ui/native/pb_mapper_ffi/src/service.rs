@@ -32,9 +32,10 @@ pub unsafe extern "C" fn pb_mapper_register_service(
 ) -> *mut c_char {
     // SAFETY: null or live, as the caller guarantees.
     respond(unsafe { handle.as_ref() }, |handle| {
-        let service_key = parse_c_string(service_key, "service_key")?;
-        let local_address = parse_c_string(local_address, "local_address")?;
-        let protocol = parse_c_string(protocol, "protocol")?;
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let service_key = unsafe { parse_c_string(service_key, "service_key") }?;
+        let local_address = unsafe { parse_c_string(local_address, "local_address") }?;
+        let protocol = unsafe { parse_c_string(protocol, "protocol") }?;
         let port_mapping = port_mapping_from_c(port_mapping)?;
         // Not `state.lock().await` around the call: registration releases
         // the lock for its slow middle phase, which it can only do if the
@@ -69,7 +70,8 @@ pub unsafe extern "C" fn pb_mapper_unregister_service(
 ) -> *mut c_char {
     // SAFETY: null or live, as the caller guarantees.
     respond(unsafe { handle.as_ref() }, |handle| {
-        let service_key = parse_c_string(service_key, "service_key")?;
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let service_key = unsafe { parse_c_string(service_key, "service_key") }?;
         handle
             .runtime
             .block_on(async { handle.state.lock().await.unregister_service(service_key) })?;
@@ -91,7 +93,8 @@ pub unsafe extern "C" fn pb_mapper_delete_service_config(
 ) -> *mut c_char {
     // SAFETY: null or live, as the caller guarantees.
     respond(unsafe { handle.as_ref() }, |handle| {
-        let service_key = parse_c_string(service_key, "service_key")?;
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let service_key = unsafe { parse_c_string(service_key, "service_key") }?;
         handle.runtime.block_on(async {
             handle
                 .state
@@ -135,7 +138,8 @@ pub unsafe extern "C" fn pb_mapper_get_service_status_json(
 ) -> *mut c_char {
     // SAFETY: null or live, as the caller guarantees.
     respond(unsafe { handle.as_ref() }, |handle| {
-        let service_key = parse_c_string(service_key, "service_key")?;
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let service_key = unsafe { parse_c_string(service_key, "service_key") }?;
         let status = handle
             .runtime
             .block_on(async { handle.state.lock().await.get_service_status(service_key) });

@@ -50,7 +50,8 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
 ) -> *mut c_char {
     // SAFETY: null or live, as the caller guarantees.
     respond(unsafe { handle.as_ref() }, |handle| {
-        let request = parse_c_string(request, "request")
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let request = unsafe { parse_c_string(request, "request") }
             .and_then(|raw| serde_json::from_str::<Value>(&raw).map_err(bad_request))?;
         let state = &handle.state;
         let data = handle.runtime.block_on(async move {
