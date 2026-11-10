@@ -59,6 +59,7 @@ pub(super) async fn start(
         let mut tasks = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
+                biased;
                 () = stop.cancelled() => break,
                 Some(_) = tasks.join_next(), if !tasks.is_empty() => {},
                 incoming = owner.0.accept() => {
@@ -190,6 +191,7 @@ async fn handle_connection(
     tracing::info!(event = "relay_quic_authenticated", peer = %shared.connection.remote_address(), connection_id = shared.connection.stable_id());
     loop {
         let pair = tokio::select! {
+            biased;
             () = cancellation.cancelled() => break,
             pair = shared.connection.accept_bi() => match pair { Ok(pair) => pair, Err(_) => break },
         };
@@ -198,6 +200,7 @@ async fn handle_connection(
             stream: RelayStream::Quic(Box::new(QuicStream::new(shared.clone(), pair))),
         };
         tokio::select! {
+            biased;
             () = cancellation.cancelled() => break,
             result = sender.send(task) => if result.is_err() { break; },
         }

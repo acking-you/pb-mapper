@@ -625,6 +625,7 @@ async fn run_control_writer<T: MessageWriter>(
         }
     };
     tokio::select! {
+        biased;
         () = retire_token.cancelled() => {
             tracing::warn!(
                 event = "server_conn_writer_cancelled",

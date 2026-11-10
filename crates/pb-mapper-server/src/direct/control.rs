@@ -110,5 +110,10 @@ pub(crate) async fn handle_control(
         }
         Ok::<(), std::io::Error>(())
     };
-    tokio::select! { result = read => result, result = write => result, () = cancellation.cancelled() => Ok(()) }
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Ok(()),
+        result = read => result,
+        result = write => result,
+    }
 }
