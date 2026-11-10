@@ -1,6 +1,4 @@
 use std::io;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::LazyLock;
@@ -14,6 +12,7 @@ use rand::RngExt;
 use ring::digest::{SHA256, digest};
 
 use crate::DataLenType;
+use crate::durable_file::{NewFileMode, ReplaceStep, replace_contents};
 
 pub type ChecksumType = u32;
 
@@ -249,9 +248,9 @@ pub fn encode_temporary_credential(key_id: u64, key: &AesKeyType) -> String {
 /// - it is deterministic for the same input;
 /// - it returns exactly 32 bytes, which naturally matches the required key length.
 ///
-/// The final key is represented with alphanumeric ASCII characters and written to
-/// [`MACHINE_MSG_HEADER_KEY_PATH`], and also injected into `MSG_HEADER_KEY` env
-/// for the current process.
+/// The final key is represented with alphanumeric ASCII characters, installed as
+/// this process's credential through [`set_process_msg_header_key`], and written
+/// to [`MACHINE_MSG_HEADER_KEY_PATH`].
 pub fn setup_machine_msg_header_key() -> io::Result<String> {
     let hostname = get_machine_hostname()?;
     let mac_addresses = get_machine_mac_addresses()?;
@@ -481,7 +480,12 @@ fn derive_msg_header_key(hostname: &str, mac_addresses: &[String]) -> String {
 }
 
 fn write_machine_msg_header_key(key: &str) -> io::Result<()> {
-    let path = Path::new(MACHINE_MSG_HEADER_KEY_PATH);
+    write_key_file(Path::new(MACHINE_MSG_HEADER_KEY_PATH), key)
+}
+
+/// Replaces `path` with `key` and a newline, readable by its owner alone on
+/// unix from the moment it exists, creating its directory first.
+fn write_key_file(path: &Path, key: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             io::Error::new(
@@ -490,15 +494,26 @@ fn write_machine_msg_header_key(key: &str) -> io::Result<()> {
             )
         })?;
     }
-    std::fs::write(path, format!("{key}\n")).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to write key file `{}`: {error}", path.display()),
-        )
-    })?;
-    #[cfg(unix)]
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
+    replace_contents(
+        path,
+        format!("{key}\n").as_bytes(),
+        NewFileMode::Exactly(0o600),
+    )
+    .map_err(|error| match error.step {
+        // Reported bare, as the `chmod` that used to follow the write was.
+        ReplaceStep::SetPermissions => io::Error::from(error),
+        ReplaceStep::Create
+        | ReplaceStep::Write
+        | ReplaceStep::Replace
+        | ReplaceStep::SyncParent => io::Error::new(
+            error.io().kind(),
+            format!(
+                "failed to write key file `{}`: {}",
+                path.display(),
+                error.io()
+            ),
+        ),
+    })
 }
 
 fn gen_checksum_by_key(key: &[u8]) -> ChecksumType {
@@ -652,6 +667,29 @@ mod tests {
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 32);
         assert!(key1.chars().all(|ch| ch.is_ascii_alphanumeric()));
+    }
+
+    /// The key file is the key and a newline (the relay's legacy migration
+    /// reads it back), in a directory created for it, owner-only on unix.
+    #[test]
+    fn machine_key_file_holds_the_key_line_for_its_owner_alone() {
+        use super::*;
+        use crate::test_support::Scratch;
+
+        let scratch = Scratch::new("machine-key");
+        let path = scratch.0.join("pb-mapper-server").join("msg_header_key");
+        write_key_file(&path, "first").unwrap();
+        write_key_file(&path, "0123456789abcdefghijklmnopqrstuv").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "0123456789abcdefghijklmnopqrstuv\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 
     #[test]
