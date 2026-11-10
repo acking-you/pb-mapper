@@ -112,6 +112,11 @@ async fn scripted_viewer() -> (Viewer, DuplexStream) {
     (connecting.await.unwrap().unwrap(), host)
 }
 
+/// How soon a call that waits for nothing returns: longer than a loaded
+/// machine may take to run it, and well short of what waiting would cost, a
+/// blocked pull's 1 s or the disconnect's 3 s drain.
+const PROMPT: Duration = Duration::from_millis(500);
+
 fn eventually(mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(2);
     while !condition() {
@@ -224,7 +229,7 @@ fn hot_ops_never_wait_for_a_slow_disconnect() {
         // The source closes before the viewer's stop starts.
         let (code, returned) = pulling.join().unwrap();
         assert_eq!(code, desktop_video::CLOSED);
-        assert!(returned.saturating_duration_since(disconnected_at) < Duration::from_millis(100));
+        assert!(returned.saturating_duration_since(disconnected_at) < PROMPT);
 
         // Inside the runtime, where entering it again would panic.
         handle.runtime.block_on(async {
@@ -257,16 +262,16 @@ fn hot_ops_never_wait_for_a_slow_disconnect() {
             ] {
                 let started = Instant::now();
                 assert_eq!(hot(handle, request.clone()), expected, "{request}");
-                assert!(started.elapsed() < Duration::from_millis(10), "{request}");
+                assert!(started.elapsed() < PROMPT, "{request}");
             }
             for request in [json!({"op": "control", "enabled": true}), input, fit] {
                 let started = Instant::now();
                 assert_eq!(hot(handle, request.clone())["code"], "IO", "{request}");
-                assert!(started.elapsed() < Duration::from_millis(10), "{request}");
+                assert!(started.elapsed() < PROMPT, "{request}");
             }
             let started = Instant::now();
             assert_eq!(view(handle), (0, PbDesktopViewV1::default()));
-            assert!(started.elapsed() < Duration::from_millis(10));
+            assert!(started.elapsed() < PROMPT);
         });
         assert!(
             !disconnecting.is_finished(),

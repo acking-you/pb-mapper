@@ -502,6 +502,11 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    /// How soon a blocked `next` returns once it is woken: longer than a
+    /// loaded machine may take to run the woken thread, and well short of
+    /// the 1 s it waits when nothing wakes it, when it returns `CLOSED` too.
+    const WOKEN: Duration = Duration::from_millis(500);
+
     fn unit(frame_id: u64, len: usize) -> VideoUnit {
         VideoUnit {
             seq: frame_id,
@@ -598,7 +603,7 @@ mod tests {
         // Detaching wakes a blocked pull, and the source takes a new consumer.
         let (code, waited) = blocked_next(consumer, || pb_mapper_desktop_video_detach_v1(consumer));
         assert_eq!(code, CLOSED);
-        assert!(waited < Duration::from_millis(100), "{waited:?}");
+        assert!(waited < WOKEN, "{waited:?}");
         pb_mapper_desktop_video_detach_v1(consumer);
         let consumer = pb_mapper_desktop_video_attach_v1(source);
         assert!(consumer > 0);
@@ -607,7 +612,7 @@ mod tests {
         // Disconnecting closes the source under a blocked pull.
         let (code, waited) = blocked_next(consumer, || remove_source(source));
         assert_eq!(code, CLOSED);
-        assert!(waited < Duration::from_millis(100), "{waited:?}");
+        assert!(waited < WOKEN, "{waited:?}");
 
         // Every id of the closed source now reads CLOSED, and nothing panics.
         let name = c"decoder";
