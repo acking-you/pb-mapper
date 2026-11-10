@@ -12,11 +12,14 @@
 //! low-latency hint (case F). The configuration's `lan_first`, the app's
 //! *Try the local network first*, is read once at start: the host and the
 //! selftest viewer take it, and `controller.json` hands it to the phone tool.
-use pb_mapper_client::sdk::{Client, ClientConfig, ConnectOptions, PathPolicy, RelayTransport};
+mod probe_support;
+
+use pb_mapper_client::sdk::{ConnectOptions, PathPolicy, RelayTransport};
 use pb_mapper_desktop::{
     DisplaySelection, Host, HostOptions, Pull, QualityPreset, Resolution, VideoCodec, VideoLimits,
     Viewer, ViewerConfig, ViewerState,
 };
+use probe_support::{option, relay_client};
 use serde::Deserialize;
 use std::{
     path::PathBuf,
@@ -31,12 +34,8 @@ struct Configuration {
     relay_transport: RelayTransport,
     /// As the app's `AppConfig::lan_first`, so on for a file saved before
     /// the switch existed.
-    #[serde(default = "lan_first_by_default")]
+    #[serde(default = "probe_support::lan_first_by_default")]
     lan_first: bool,
-}
-
-fn lan_first_by_default() -> bool {
-    true
 }
 
 #[tokio::main]
@@ -66,11 +65,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !(5..=1800).contains(&seconds) {
         return Err("duration outside 5..1800 seconds".into());
     }
-    let option = |name| {
-        args.windows(2)
-            .find(|pair| pair[0] == name)
-            .map(|pair| pair[1].as_str())
-    };
     let (max_width, max_height) = Resolution::default().bounds();
     let mut limits = VideoLimits {
         max_width,
@@ -82,31 +76,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("--max-height", &mut limits.max_height),
         ("--fps", &mut limits.max_fps),
     ] {
-        if let Some(text) = option(name) {
+        if let Some(text) = option(&args, name) {
             *value = text.parse()?;
         }
     }
     limits.validate()?;
-    let quality = match option("--quality") {
+    let quality = match option(&args, "--quality") {
         None | Some("balanced") => QualityPreset::Balanced,
         Some("quality") => QualityPreset::Quality,
         Some("smooth") => QualityPreset::Smooth,
         Some(_) => return Err("--quality must be quality, balanced or smooth".into()),
     };
-    let codecs = match option("--codec") {
+    let codecs = match option(&args, "--codec") {
         None | Some("h264") => vec![VideoCodec::H264],
         Some("h265") => vec![VideoCodec::H265, VideoCodec::H264],
         Some(_) => return Err("--codec must be h264 or h265".into()),
     };
     let fps_override = args.iter().any(|arg| arg == "--fps-override");
     std::fs::create_dir_all(&output)?;
-    let admin_client = Client::new(ClientConfig {
-        server: config.server_address.clone(),
-        credential: config.msg_header_key,
-        keep_alive: true,
-        namespace: None,
-    })?
-    .with_relay_transport(config.relay_transport)?;
+    let admin_client = relay_client(
+        config.server_address.clone(),
+        config.msg_header_key,
+        config.relay_transport,
+    )?;
     let admin = admin_client.admin()?;
     let key = admin
         .issue_key(
@@ -115,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     let result = async {
-        let client = Client::new(ClientConfig { server: config.server_address.clone(), credential: key.credential.clone(), keep_alive: true, namespace: None })?.with_relay_transport(config.relay_transport)?;
+        let client = relay_client(config.server_address.clone(), key.credential.clone(), config.relay_transport)?;
         let display = pb_mapper_desktop::displays()?.into_iter().next().ok_or("no display")?;
         let mut options = HostOptions::new(format!("desktop:acceptance-{}", std::process::id()));
         options.display = DisplaySelection::Id(display.id);

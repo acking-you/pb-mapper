@@ -1,11 +1,11 @@
 //! The cases, the host and viewer they drive, and the put-back.
 use crate::modes::{Shown, change, every_display, print, read, shown};
-use pb_mapper_client::sdk::{Client, ClientConfig, ConnectOptions, PathPolicy, RelayTransport};
+use crate::probe_support::{RelayConfig, option, relay_client};
+use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
 use pb_mapper_desktop::{
     Host, HostOptions, Invitation, Mode, ModeList, ModeTarget, Pull, VideoCodec, Viewer,
     ViewerConfig, ViewerStatus, recover_display_modes,
 };
-use serde::Deserialize;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -26,26 +26,13 @@ const JOURNAL: &str = "display-modes.json";
 /// How long the end waits for the ordinary desktop to put a display back.
 const PUT_BACK_FOR: Duration = Duration::from_secs(600);
 
-#[derive(Deserialize)]
-struct Configuration {
-    server_address: String,
-    msg_header_key: String,
-    #[serde(default)]
-    relay_transport: RelayTransport,
-}
-
 pub async fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let flag = |name: &str| args.iter().any(|arg| arg == name);
-    let option = |name: &str| {
-        args.windows(2)
-            .find(|pair| pair[0] == name)
-            .map(|pair| pair[1].clone())
-    };
     if flag("--list") {
         return print("now", &every_display()?);
     }
-    let state_dir = option("--state-dir")
+    let state_dir = option(&args, "--state-dir")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("pb-mapper-display-mode-probe"));
     if flag("--restore") {
@@ -62,25 +49,23 @@ pub async fn run() -> Result<()> {
         }
         return print("now", &every_display()?);
     }
-    if let Some(size) = option("--fullscreen-child") {
-        let device = option("--device").ok_or("device required")?;
-        change(&device, Some((parse(&size)?, 0)), CDS_FULLSCREEN)?;
+    if let Some(size) = option(&args, "--fullscreen-child") {
+        let device = option(&args, "--device").ok_or("device required")?;
+        change(device, Some((parse(size)?, 0)), CDS_FULLSCREEN)?;
         std::thread::sleep(Duration::from_secs(2));
         return Ok(());
     }
     let config_path = args.get(1).ok_or("configuration path required")?;
-    let config: Configuration = serde_json::from_slice(&std::fs::read(config_path)?)?;
-    let client = Client::new(ClientConfig {
-        server: config.server_address,
-        credential: config.msg_header_key,
-        keep_alive: true,
-        namespace: None,
-    })?
-    .with_relay_transport(config.relay_transport)?;
+    let config: RelayConfig = serde_json::from_slice(&std::fs::read(config_path)?)?;
+    let client = relay_client(
+        config.server_address,
+        config.msg_header_key,
+        config.relay_transport,
+    )?;
     if flag("--child-host") {
         return child_host(&client, &state_dir).await;
     }
-    let fit = option("--fit").map(|size| parse(&size)).transpose()?;
+    let fit = option(&args, "--fit").map(parse).transpose()?;
 
     // An interrupted run's journal first, so the modes recorded are the
     // displays' own.

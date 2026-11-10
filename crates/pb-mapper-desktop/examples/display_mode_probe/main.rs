@@ -55,6 +55,9 @@
 mod modes;
 #[cfg(windows)]
 mod probe;
+#[cfg(windows)]
+#[path = "../probe_support/mod.rs"]
+mod probe_support;
 
 #[cfg(not(windows))]
 fn main() {

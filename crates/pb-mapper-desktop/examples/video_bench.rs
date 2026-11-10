@@ -28,11 +28,15 @@
 //! It prints the largest keyframe and access unit, which `wire::MAX_PAYLOAD`
 //! must hold.
 #[cfg(windows)]
+mod probe_support;
+
+#[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use pb_mapper_desktop::{
         Backend, DisplaySelection, VideoCodec, VideoRate, displays,
         windows::video::{Encoded, Encoder, Statistics},
     };
+    use probe_support::option;
     use std::{
         io::Write,
         time::{Duration, Instant},
@@ -52,11 +56,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| args.iter().any(|arg| arg == name);
-    let value = |name: &str| {
-        args.windows(2)
-            .find(|pair| pair[0] == name)
-            .map(|pair| pair[1].as_str())
-    };
     let mut positional = Vec::new();
     let mut operand = false;
     for arg in &args {
@@ -72,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !(1..=300).contains(&seconds) {
         return Err("benchmark duration must be 1..300 seconds".into());
     }
-    let paces: Option<Vec<u32>> = value("--pace")
+    let paces: Option<Vec<u32>> = option(&args, "--pace")
         .map(|list| list.split(',').map(str::parse).collect())
         .transpose()?;
     let fps: u32 = positional
@@ -88,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("--pace needs 3 s or more per step, and paces of 1..fps".into());
     }
-    let codec = match value("--codec").unwrap_or("h264") {
+    let codec = match option(&args, "--codec").unwrap_or("h264") {
         "h264" => VideoCodec::H264,
         "h265" => VideoCodec::H265,
         other => return Err(format!("unknown codec {other}: h264 or h265").into()),
@@ -96,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let display = displays()?.into_iter().next().ok_or("no display")?;
     let pattern_only = flag("--pattern-only");
     let noise = flag("--noise");
-    let _animation = if value("--dump").is_some() || noise {
+    let _animation = if option(&args, "--dump").is_some() || noise {
         Some(pattern::Pattern::new(
             display.x,
             display.y,
@@ -123,26 +122,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let backend_mode = flag("--backend");
-    let max_width = value("--max-width")
+    let max_width = option(&args, "--max-width")
         .map(str::parse)
         .transpose()?
         .unwrap_or(display.width);
-    let max_height = value("--max-height")
+    let max_height = option(&args, "--max-height")
         .map(str::parse)
         .transpose()?
         .unwrap_or(display.height);
-    let bitrate: u32 =
-        value("--bitrate")
-            .map(str::parse)
-            .transpose()?
-            .unwrap_or(if paces.is_some() {
-                4_000_000
-            } else {
-                24_000_000
-            });
-    let frames: Option<u64> = value("--frames").map(str::parse).transpose()?;
+    let bitrate: u32 = option(&args, "--bitrate")
+        .map(str::parse)
+        .transpose()?
+        .unwrap_or(if paces.is_some() {
+            4_000_000
+        } else {
+            24_000_000
+        });
+    let frames: Option<u64> = option(&args, "--frames").map(str::parse).transpose()?;
     let poll = Duration::from_micros(
-        value("--poll-us")
+        option(&args, "--poll-us")
             .map(str::parse)
             .transpose()?
             .unwrap_or(8_333),
@@ -150,15 +148,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !(Duration::from_micros(500)..=Duration::from_millis(100)).contains(&poll) {
         return Err("poll interval must be 500..100000 microseconds".into());
     }
-    let pause_ms: u64 = value("--pause-ms")
+    let pause_ms: u64 = option(&args, "--pause-ms")
         .map(str::parse)
         .transpose()?
         .unwrap_or(0);
     if pause_ms != 0 && (!(300..=1000).contains(&pause_ms) || backend_mode) {
         return Err("pause probe requires the encoder mode and 300..1000 ms".into());
     }
-    let mut output = value("--output").map(std::fs::File::create).transpose()?;
-    let mut dump = value("--dump")
+    let mut output = option(&args, "--output")
+        .map(std::fs::File::create)
+        .transpose()?;
+    let mut dump = option(&args, "--dump")
         .map(std::fs::File::create)
         .transpose()?
         .map(std::io::BufWriter::new);

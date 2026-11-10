@@ -2,7 +2,8 @@
 //! what it receives, and the input it sends.
 use crate::fixture::{Fixture, State, TEXT, failure};
 use crate::guarded::Guarded;
-use pb_mapper_client::sdk::{Client, ClientConfig, ConnectOptions, PathPolicy, RelayTransport};
+use crate::probe_support::{RelayConfig, option, relay_client};
+use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy, RelayTransport};
 use pb_mapper_desktop::{
     Button, DesktopView, Display, DisplaySelection, Host, HostOptions, Input, Pull, QualityPreset,
     Result, VideoCodec, VideoLimits, Viewer, ViewerConfig,
@@ -18,13 +19,6 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 /// the last click plus 20 ms, but never 600 ms past its arrival
 /// (`DRAG_GUARD_*` in the worker): it always waits out up to this much.
 const DRAG_HOLD_COVERS_MS: u32 = 580;
-#[derive(serde::Deserialize)]
-struct Configuration {
-    server_address: String,
-    msg_header_key: String,
-    #[serde(default)]
-    relay_transport: RelayTransport,
-}
 async fn wait_for(state: &State, what: &str, predicate: impl Fn() -> bool) -> Result<()> {
     let start = Instant::now();
     while !predicate() {
@@ -190,17 +184,12 @@ pub fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .build()?;
     runtime.block_on(async {
         let args: Vec<_> = std::env::args().collect();
-        let value = |name| {
-            args.windows(2)
-                .find(|pair| pair[0] == name)
-                .map(|pair| pair[1].as_str())
-        };
-        for option in ["--relay-config", "--consumer-server"] {
-            if args.iter().any(|arg| arg == option) && value(option).is_none() {
-                return Err(failure(format!("{option} requires a value")));
+        for name in ["--relay-config", "--consumer-server"] {
+            if args.iter().any(|arg| arg == name) && option(&args, name).is_none() {
+                return Err(failure(format!("{name} requires a value")));
             }
         }
-        let local_relay = if value("--relay-config").is_none() {
+        let local_relay = if option(&args, "--relay-config").is_none() {
             Some(Relay::start("desktop-owned-native-input").await)
         } else {
             None
@@ -215,8 +204,8 @@ pub fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
             );
             (server, RelayTransport::Tcp, client)
         } else {
-            let config = serde_json::from_slice::<Configuration>(&std::fs::read(
-                value("--relay-config").ok_or_else(|| failure("relay config required"))?,
+            let config = serde_json::from_slice::<RelayConfig>(&std::fs::read(
+                option(&args, "--relay-config").ok_or_else(|| failure("relay config required"))?,
             )?)
             .map_err(failure)?;
             let transport = if args.iter().any(|arg| arg == "--tcp") {
@@ -224,14 +213,11 @@ pub fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
             } else {
                 config.relay_transport
             };
-            let client = Client::new(ClientConfig {
-                server: config.server_address.clone(),
-                credential: config.msg_header_key,
-                keep_alive: true,
-                namespace: None,
-            })
-            .map_err(failure)?
-            .with_relay_transport(transport)
+            let client = relay_client(
+                config.server_address.clone(),
+                config.msg_header_key,
+                transport,
+            )
             .map_err(failure)?;
             (config.server_address, transport, client)
         };
@@ -241,25 +227,17 @@ pub fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
             .await
             .map_err(failure)?;
         let result = async {
-            let client = Client::new(ClientConfig {
-                server: server.clone(),
-                credential: issued.credential.clone(),
-                keep_alive: true,
-                namespace: None,
-            })
-            .map_err(failure)?
-            .with_relay_transport(transport)
+            let client = relay_client(server.clone(), issued.credential.clone(), transport)
+                .map_err(failure)?;
+            let consumer = relay_client(
+                option(&args, "--consumer-server")
+                    .unwrap_or(&server)
+                    .to_string(),
+                issued.credential.clone(),
+                transport,
+            )
             .map_err(failure)?;
-            let consumer = Client::new(ClientConfig {
-                server: value("--consumer-server").unwrap_or(&server).to_string(),
-                credential: issued.credential.clone(),
-                keep_alive: true,
-                namespace: None,
-            })
-            .map_err(failure)?
-            .with_relay_transport(transport)
-            .map_err(failure)?;
-            let topology = if value("--consumer-server").is_some() {
+            let topology = if option(&args, "--consumer-server").is_some() {
                 "configured_separate_relay_entries"
             } else if local_relay.is_some() {
                 "local_tcp_relay"

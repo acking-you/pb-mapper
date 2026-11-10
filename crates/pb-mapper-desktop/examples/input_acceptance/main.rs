@@ -15,6 +15,9 @@ mod acceptance;
 mod fixture;
 #[cfg(windows)]
 mod guarded;
+#[cfg(windows)]
+#[path = "../probe_support/mod.rs"]
+mod probe_support;
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
