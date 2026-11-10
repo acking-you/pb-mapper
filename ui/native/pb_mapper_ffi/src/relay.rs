@@ -11,6 +11,7 @@
 //! holds up nothing else.
 
 use std::ffi::c_char;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use pb_mapper_auth::generate_admin_key;
@@ -464,7 +465,11 @@ fn session_json(session: &SessionObservation) -> Value {
         .iter()
         .filter_map(|report| report.as_ref())
         .min_by_key(|report| report.age_ms);
-    let id: String = session.id[..6].iter().map(|b| format!("{b:02x}")).collect();
+    let mut id = String::with_capacity(12);
+    for byte in session.id.iter().take(6) {
+        // Writing to a String cannot fail.
+        let _ = write!(id, "{byte:02x}");
+    }
     // What the ends said of a direct path, the latest first: absent where
     // both ends, or the relay, predate it.
     let link = latest.and_then(|report| report.report.link).or_else(|| {
@@ -476,10 +481,10 @@ fn session_json(session: &SessionObservation) -> Value {
         "id": id,
         "service": session.service,
         "transport": if session.is_datagram { "UDP" } else { "TCP" },
-        "path": latest.map(|report| format!("{:?}", report.report.path).to_lowercase()),
+        "path": latest.map(|report| report.report.path),
         "pathKind": link.map(|link| link.kind.as_str()),
         "family": link.map(|link| link.family.as_str()),
-        "state": latest.map(|report| format!("{:?}", report.report.state).to_lowercase()),
+        "state": latest.map(|report| report.report.state),
         "reason": latest.and_then(|report| report.report.reason.clone()),
         "ageMs": latest.map(|report| report.age_ms),
         "consumerSeen": session.consumer.is_some(),
@@ -664,6 +669,45 @@ mod tests {
         run(&relay, TEST_ADMIN_KEY, json!({ "op": "auth_status" }))
             .await
             .unwrap_err();
+    }
+
+    /// A session as the Relay page reads it: the first six bytes of its id
+    /// in hex, and the path and state of the newest report.
+    #[test]
+    fn a_session_reads_as_the_relay_page_expects() {
+        let id: Vec<u8> = (0..16).collect();
+        let report = |path: &str, state: &str, age_ms: u64| {
+            json!({
+                "report": { "id": id, "seq": 1, "path": path, "state": state, "reason": null },
+                "age_ms": age_ms,
+            })
+        };
+        let session: SessionObservation = serde_json::from_value(json!({
+            "server_instance": vec![0u8; 16],
+            "restored": false,
+            "id": id,
+            "service": "web",
+            "is_datagram": false,
+            "consumer": report("direct", "active", 5),
+            "provider": report("relay", "closed", 50),
+            "stale": false,
+            "conflicting": false,
+        }))
+        .unwrap();
+        let read = session_json(&session);
+        assert_eq!(read["id"], "000102030405");
+        assert_eq!(
+            (&read["path"], &read["state"]),
+            (&json!("direct"), &json!("active"))
+        );
+        let older = session_json(&SessionObservation {
+            consumer: None,
+            ..session
+        });
+        assert_eq!(
+            (&older["path"], &older["state"]),
+            (&json!("relay"), &json!("closed"))
+        );
     }
 
     #[tokio::test]
