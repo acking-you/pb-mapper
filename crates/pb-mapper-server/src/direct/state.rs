@@ -45,10 +45,10 @@ struct Entry {
 }
 impl Entry {
     fn pending(&self) -> bool {
-        matches!(
-            self.phase,
-            Phase::Offered | Phase::Granted | Phase::SelectingRelay | Phase::RelaySelected
-        )
+        match self.phase {
+            Phase::Offered | Phase::Granted | Phase::SelectingRelay | Phase::RelaySelected => true,
+            Phase::Attached | Phase::Closed => false,
+        }
     }
 }
 
@@ -289,63 +289,64 @@ impl DirectState {
         if consumer.auth.ensure_active().is_err() {
             return;
         }
-        if matches!(message, DirectClientMessage::Ping) {
-            self.send(connection, DirectEvent::Pong);
-            return;
-        }
-        if let DirectClientMessage::CancelOpen { request } = message {
-            for entry in self
-                .entries
-                .values_mut()
-                .filter(|e| e.consumer == connection && e.request == request && e.pending())
-            {
-                if entry.phase == Phase::Offered {
-                    self.fallback_credits.add(entry.key.clone(), entry.deadline);
-                }
-                entry.phase = Phase::Closed;
-                if let Some(sender) = route(entry.provider) {
-                    let _ = sender.try_send(conn_task(DirectEvent::Cancel { id: entry.grant.id }));
+        match message {
+            DirectClientMessage::Ping => {
+                self.send(connection, DirectEvent::Pong);
+            }
+            DirectClientMessage::CancelOpen { request } => {
+                for entry in self
+                    .entries
+                    .values_mut()
+                    .filter(|e| e.consumer == connection && e.request == request && e.pending())
+                {
+                    if entry.phase == Phase::Offered {
+                        self.fallback_credits.add(entry.key.clone(), entry.deadline);
+                    }
+                    entry.phase = Phase::Closed;
+                    if let Some(sender) = route(entry.provider) {
+                        let _ =
+                            sender.try_send(conn_task(DirectEvent::Cancel { id: entry.grant.id }));
+                    }
                 }
             }
-            return;
+            DirectClientMessage::Report(update) => {
+                let auth = consumer.auth.clone();
+                let namespace = consumer.namespace;
+                self.observe(&auth, namespace, update, true);
+            }
+            DirectClientMessage::RelaySelect { id } => {
+                let Some(entry) = self.consumer_entry(connection, id) else {
+                    return;
+                };
+                if entry.phase == Phase::Granted && Instant::now() < entry.deadline {
+                    entry.phase = Phase::SelectingRelay;
+                    if let Some(sender) = route(entry.provider) {
+                        let _ = sender.try_send(conn_task(DirectEvent::RelaySelect { id }));
+                    }
+                } else if entry.phase == Phase::RelaySelected {
+                    self.send(connection, DirectEvent::RelaySelected { id });
+                }
+            }
+            DirectClientMessage::Cancel { id } => {
+                let Some(entry) = self.consumer_entry(connection, id) else {
+                    return;
+                };
+                if entry.pending() {
+                    entry.phase = Phase::Closed;
+                    if let Some(sender) = route(entry.provider) {
+                        let _ = sender.try_send(conn_task(DirectEvent::Cancel { id }));
+                    }
+                }
+            }
+            // The manager hands `Open` to `open`, with the routing map it needs.
+            DirectClientMessage::Open { .. } => {}
         }
-        if let DirectClientMessage::Report(update) = message {
-            let auth = consumer.auth.clone();
-            let namespace = consumer.namespace;
-            self.observe(&auth, namespace, update, true);
-            return;
-        }
-        let id = match &message {
-            DirectClientMessage::RelaySelect { id } | DirectClientMessage::Cancel { id } => *id,
-            _ => return,
-        };
-        let Some(entry) = self
-            .entries
+    }
+    /// Setup `id`, if `connection` is the consumer that opened it.
+    fn consumer_entry(&mut self, connection: RemoteConnId, id: SessionId) -> Option<&mut Entry> {
+        self.entries
             .get_mut(&id)
             .filter(|e| e.consumer == connection)
-        else {
-            return;
-        };
-        match message {
-            DirectClientMessage::RelaySelect { .. }
-                if entry.phase == Phase::Granted && Instant::now() < entry.deadline =>
-            {
-                entry.phase = Phase::SelectingRelay;
-                if let Some(sender) = route(entry.provider) {
-                    let _ = sender.try_send(conn_task(DirectEvent::RelaySelect { id }));
-                }
-            }
-            DirectClientMessage::RelaySelect { .. } if entry.phase == Phase::RelaySelected => {
-                self.send(connection, DirectEvent::RelaySelected { id });
-            }
-            DirectClientMessage::Cancel { .. } if entry.pending() => {
-                entry.phase = Phase::Closed;
-                if let Some(sender) = route(entry.provider) {
-                    let _ = sender.try_send(conn_task(DirectEvent::Cancel { id }));
-                }
-            }
-            _ => {}
-        }
     }
     pub fn provider(
         &mut self,
@@ -417,7 +418,12 @@ impl DirectState {
                 entry.phase = Phase::RelaySelected;
                 self.send(consumer, DirectEvent::RelaySelected { id });
             }
-            _ => {}
+            // Out of phase, past the deadline or carrying an invalid peer.
+            DirectProviderMessage::Accept { .. }
+            | DirectProviderMessage::Reject { .. }
+            | DirectProviderMessage::RelaySelected { .. } => {}
+            // Recorded above, before any setup was looked up.
+            DirectProviderMessage::Report(_) => {}
         }
     }
     pub fn relay(
