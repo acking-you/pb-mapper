@@ -12,7 +12,7 @@ use pb_mapper::{
 use pb_mapper_core::checksum::get_process_credential;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// What the host lifecycle lock guards: the host this app runs, and its
 /// identity beside it.
@@ -86,10 +86,7 @@ pub(super) async fn revoke_trust_with_background(
         host.set_control_allowed(false);
     }
     let directory = handle.state.lock().await.desktop_config_dir();
-    let retired = tokio::task::spawn_blocking(move || trust::revoke(&directory))
-        .await
-        .map_err(err)
-        .and_then(|result| result);
+    let retired = revoke_trust(directory).await;
     // Retire pending automatic setup before deleting the service grant, so a
     // later startup cannot recreate access from a leftover local identity.
     let revoked = match retired {
@@ -115,6 +112,42 @@ pub(super) async fn load_trust(directory: PathBuf) -> Result<Option<trust::Saved
     tokio::task::spawn_blocking(move || trust::load(&directory))
         .await
         .map_err(err)?
+}
+
+/// `saved` remembered, written off the runtime.
+#[cfg(windows)]
+pub(super) async fn save_trust(directory: PathBuf, saved: trust::Saved) -> Result<(), CtlError> {
+    tokio::task::spawn_blocking(move || trust::save(&directory, &saved))
+        .await
+        .map_err(err)?
+}
+
+/// The remembered grant forgotten, off the runtime.
+pub(super) async fn revoke_trust(directory: PathBuf) -> Result<(), CtlError> {
+    tokio::task::spawn_blocking(move || trust::revoke(&directory))
+        .await
+        .map_err(err)?
+}
+
+/// `host` once `persisted`, its remembered grant if it has one, is saved.
+/// A grant the file system refuses stops the host, which is not to run
+/// unremembered; a save that panicked returns at once.
+async fn persist_or_stop(
+    host: Host,
+    persisted: Option<trust::Saved>,
+    directory: &Path,
+) -> Result<Host, CtlError> {
+    if let Some(saved) = persisted {
+        let directory = directory.to_owned();
+        let stored = tokio::task::spawn_blocking(move || trust::save(&directory, &saved))
+            .await
+            .map_err(err)?;
+        if let Err(failure) = stored {
+            let _ = host.stop().await;
+            return Err(failure);
+        }
+    }
+    Ok(host)
 }
 
 /// `trust_status`: the remembered grant, and whether it is for the relay and
@@ -436,16 +469,7 @@ pub(super) async fn start_local(handle: &PbMapperHandle, start: Start) -> Result
         identity,
     )
     .await?;
-    if let Some(saved) = persisted {
-        let directory = local_identity.scope.directory.clone();
-        let stored = tokio::task::spawn_blocking(move || trust::save(&directory, &saved))
-            .await
-            .map_err(err)?;
-        if let Err(failure) = stored {
-            let _ = host.stop().await;
-            return Err(failure);
-        }
-    }
+    let host = persist_or_stop(host, persisted, &local_identity.scope.directory).await?;
     let invitation = host.invitation().encode();
     slot.host = Some(host);
     slot.identity = Some(local_identity);
@@ -559,16 +583,7 @@ pub(super) async fn restart_host(
         .restart_on(&client, reason, |restarted| *restarted = options)
         .await
         .map_err(err)?;
-    if let Some(saved) = persisted {
-        let directory = local.scope.directory.clone();
-        let stored = tokio::task::spawn_blocking(move || trust::save(&directory, &saved))
-            .await
-            .map_err(err)?;
-        if let Err(failure) = stored {
-            let _ = host.stop().await;
-            return Err(failure);
-        }
-    }
+    let host = persist_or_stop(host, persisted, &local.scope.directory).await?;
     let invitation = host.invitation().encode();
     slot.host = Some(host);
     slot.identity = Some(LocalIdentity { settings, ..local });

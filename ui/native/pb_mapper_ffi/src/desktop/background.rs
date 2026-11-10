@@ -2,7 +2,7 @@
 //! snapshot, its discovery, and setup, resume, stop and revoke.
 use super::host::{HostSlot, HostStart};
 #[cfg(windows)]
-use super::host::{disable_legacy_startup, load_trust};
+use super::host::{disable_legacy_startup, load_trust, revoke_trust, save_trust};
 #[cfg(windows)]
 use super::trust;
 use super::{DesktopState, RelayScope, err};
@@ -592,9 +592,7 @@ pub(super) async fn start_background(
         .map_err(err)?;
         let snapshot = handle.desktop.cache_background(snapshot.into());
         slot.identity = None;
-        tokio::task::spawn_blocking(move || trust::revoke(&directory))
-            .await
-            .map_err(err)??;
+        revoke_trust(directory).await?;
         Ok(json!({"invitation": snapshot.invitation, "background": snapshot}))
     }
     #[cfg(not(windows))]
@@ -732,12 +730,7 @@ async fn enable(
     let identity = pending.identity().clone();
     // Fails before anything changes, never after the running host has gone.
     let credential = credential_text(credential)?;
-    tokio::task::spawn_blocking({
-        let directory = directory.clone();
-        move || trust::save(&directory, &pending)
-    })
-    .await
-    .map_err(err)??;
+    save_trust(directory.clone(), pending).await?;
     let helper = tokio::task::spawn_blocking(desktop::privileged::status)
         .await
         .map_err(err)?;
@@ -771,17 +764,15 @@ async fn enable(
         if let Err(failure) = installed {
             // A cancelled/failed first installation must not silently resume
             // the pending action on a later application launch.
-            tokio::task::spawn_blocking(move || match previous {
+            match previous {
                 Some(mut saved) => {
                     if saved.settings.background {
                         saved.settings.auto_start = false;
                     }
-                    trust::save(&directory, &saved)
+                    save_trust(directory, saved).await?;
                 }
-                None => trust::revoke(&directory),
-            })
-            .await
-            .map_err(err)??;
+                None => revoke_trust(directory).await?,
+            }
             return Err(failure);
         }
         if matches!(action, desktop::privileged::Action::Install { .. }) {
@@ -813,9 +804,7 @@ async fn enable(
     let snapshot = handle.desktop.cache_background(snapshot.into());
     // The service now durably owns the key. Retiring the legacy copy also
     // prevents an explicit legacy restore after service revocation.
-    tokio::task::spawn_blocking(move || trust::revoke(&directory))
-        .await
-        .map_err(err)??;
+    revoke_trust(directory).await?;
     Ok(Enabled::Hosting(snapshot))
 }
 
