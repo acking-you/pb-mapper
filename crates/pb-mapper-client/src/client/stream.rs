@@ -2,7 +2,7 @@ use crate::diagnostics::{Diagnostics, RecoveryFailure};
 use crate::endpoint::RelayEndpoint;
 use std::sync::Arc;
 
-use crate::recovery::RecoveryTiming;
+use crate::recovery::{MIN_SUBSCRIBE_ATTEMPT, RecoveryTiming};
 use crate::relay::CarrierId;
 use pb_mapper_protocol::transport::RelayStream;
 use snafu::ResultExt;
@@ -161,7 +161,7 @@ impl Subscription<'_> {
                 .lock()
                 .await
                 .timeout()
-                .max(std::time::Duration::from_secs(3));
+                .max(MIN_SUBSCRIBE_ATTEMPT);
             let attempt_deadline = (Instant::now() + attempt_budget).min(deadline);
             wake.acknowledge();
             let mut carrier = None;

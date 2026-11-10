@@ -56,6 +56,10 @@ pub const QUIC_UNAVAILABLE: &str = "quic_unavailable";
 /// answers [`PbConnRequest::QuicEndpoint`].
 const REQUEST_DECODE_FAILED: &str = "request_decode_failed";
 
+/// The largest QUIC certificate discovery accepts from a relay: a bound on
+/// what it takes from the wire.
+const MAX_QUIC_CERTIFICATE: usize = 4096;
+
 fn quic_unavailable() -> ConnectError {
     ConnectError::Rejected {
         response: PbErrorResponse {
@@ -95,7 +99,7 @@ pub(crate) async fn discover(
         PbConnResponse::QuicEndpoint(Some(endpoint))
             if endpoint.port != 0
                 && !endpoint.certificate.is_empty()
-                && endpoint.certificate.len() <= 4096 =>
+                && endpoint.certificate.len() <= MAX_QUIC_CERTIFICATE =>
         {
             Ok((relay_addr, endpoint))
         }

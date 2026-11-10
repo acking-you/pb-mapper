@@ -32,6 +32,10 @@ const MAX_ENTRIES: usize = 16;
 /// retired one waits as long, so that its last streams finish delivering.
 const IDLE_CLOSE: Duration = Duration::from_secs(30);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+const _: () = assert!(
+    SWEEP_INTERVAL.as_millis() < IDLE_CLOSE.as_millis(),
+    "sweeps come round more often than a connection may sit idle"
+);
 
 /// References past which a connection is not handed out again, and another
 /// is dialled rather than waiting for stream credit. Each stream holds one,
@@ -40,9 +44,15 @@ const REFERENCES_PER_CONNECTION: usize = MAX_STREAMS as usize;
 
 /// How long the relay may be silent on a connection before a transport
 /// failure retires it: well past a round trip and an acknowledgement's
-/// delay on a slow path, and short of every setup budget (3 s or more), so
-/// a path that stopped delivering is caught by the failure it caused.
+/// delay on a slow path, and shorter than a data stream's subscribe
+/// attempt, so a path that stopped delivering is caught by the failure it
+/// caused. A registration attempt's own budget can be shorter, so its
+/// failure alone may not retire the connection.
 const SILENCE: Duration = Duration::from_secs(2);
+const _: () = assert!(
+    SILENCE.as_millis() < crate::recovery::MIN_SUBSCRIBE_ATTEMPT.as_millis(),
+    "a subscribe attempt that times out has outlasted the silence that retires its carrier"
+);
 
 /// Which of a pool's connections a relay stream went over: its place in
 /// the order the pool dialled them. Never reused, so a failure reported

@@ -7,6 +7,18 @@ use pb_mapper_core::timeout::RetryBackoff;
 
 const MIN_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_TIMEOUT: Duration = Duration::from_secs(5);
+/// Where a setup estimate starts, before any attempt has been timed.
+const INITIAL_BUDGET: Duration = Duration::from_secs(2);
+const _: () = assert!(
+    MIN_TIMEOUT.as_millis() <= INITIAL_BUDGET.as_millis()
+        && INITIAL_BUDGET.as_millis() <= MAX_TIMEOUT.as_millis(),
+    "the first estimate lies within the clamp every later one goes through"
+);
+
+/// The least a data stream's subscribe attempt is given, whatever the setup
+/// estimate: its answer waits on the serving side opening a stream of its own
+/// to the relay.
+pub(crate) const MIN_SUBSCRIBE_ATTEMPT: Duration = Duration::from_secs(3);
 
 /// Estimate the whole setup latency, including dial and authenticated response.
 /// A variance margin tolerates jitter; expired attempts increase the budget.
@@ -23,7 +35,7 @@ impl Default for RecoveryTiming {
         Self {
             smoothed: None,
             variation: Duration::ZERO,
-            budget: Duration::from_secs(2),
+            budget: INITIAL_BUDGET,
         }
     }
 }

@@ -14,18 +14,27 @@ use crate::relay::ConnectError;
 use pb_mapper_core::config::ResolvedAddrs;
 use uni_stream::addr::ToSocketAddrs;
 
+/// How long one TCP candidate may take to connect before the next is tried in
+/// its place.
+const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a candidate has to itself before a second joins the race.
+const CANDIDATE_STAGGER: Duration = Duration::from_millis(250);
+/// Candidates dialled at once: enough to get past one blackholed address
+/// without flooding a relay with every record it publishes.
+const MAX_RACING: usize = 2;
+const _: () = assert!(
+    CANDIDATE_STAGGER.as_millis() < CANDIDATE_TIMEOUT.as_millis(),
+    "a stalled candidate is joined by the next before it times out"
+);
+
 /// Race a small number of TCP candidates so a blackholed first address cannot
 /// hide a working IPv4/IPv6 alternative. Callers retain their overall deadline.
 pub(crate) async fn connect_tcp(addrs: &ResolvedAddrs) -> std::io::Result<tokio::net::TcpStream> {
-    race_candidates(
-        addrs.as_slice(),
-        Duration::from_secs(2),
-        |addr| async move {
-            tokio::net::TcpStream::connect(addr)
-                .await
-                .map_err(Into::into)
-        },
-    )
+    race_candidates(addrs.as_slice(), CANDIDATE_TIMEOUT, |addr| async move {
+        tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(Into::into)
+    })
     .await
     .map_err(Into::into)
 }
@@ -53,7 +62,7 @@ where
     ));
     loop {
         if attempts.is_empty()
-            || (attempts.len() < 2 && tokio::time::Instant::now() >= next_attempt)
+            || (attempts.len() < MAX_RACING && tokio::time::Instant::now() >= next_attempt)
         {
             if let Some(addr) = remaining.next() {
                 let future = dial(*addr);
@@ -64,7 +73,7 @@ where
                             Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
                         })
                 });
-                next_attempt = tokio::time::Instant::now() + Duration::from_millis(250);
+                next_attempt = tokio::time::Instant::now() + CANDIDATE_STAGGER;
             } else if attempts.is_empty() {
                 return Err(last_error);
             }
@@ -79,7 +88,7 @@ where
                 Ok(Err(error)) => last_error = error,
                 Err(error) => last_error = std::io::Error::other(error).into(),
             },
-            () = tokio::time::sleep_until(next_attempt), if attempts.len() < 2 && remaining.len() > 0 => {}
+            () = tokio::time::sleep_until(next_attempt), if attempts.len() < MAX_RACING && remaining.len() > 0 => {}
         }
     }
 }

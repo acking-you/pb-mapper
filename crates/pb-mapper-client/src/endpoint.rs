@@ -20,6 +20,10 @@ use tokio_util::task::AbortOnDropHandle;
 
 const DNS_TTL: Duration = Duration::from_secs(60);
 const DNS_RETRY: Duration = Duration::from_secs(2);
+const _: () = assert!(
+    DNS_RETRY.as_millis() <= DNS_TTL.as_millis(),
+    "the cooldown between lookups never outlasts a result's freshness"
+);
 const DNS_WAIT: Duration = Duration::from_secs(2);
 pub(crate) const CONTROL_SETUPS: usize = 8;
 pub(crate) const DATA_SETUPS: usize = 64;

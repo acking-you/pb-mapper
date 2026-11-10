@@ -34,6 +34,10 @@ use pb_mapper_protocol::forward::StreamForward;
 use uni_stream::addr::ToSocketAddrs;
 use uni_stream::stream::{ListenerProvider, StreamAccept};
 
+/// Local streams of one connect tunnel in setup at once. More wait in the
+/// listener's backlog; a stream that starts forwarding gives its slot back.
+const LOCAL_SETUPS: usize = 64;
+
 /// Receives a tunnel's status as text: `connected`, `retrying`, `failed`, or
 /// `failed: <reason>` once it will not come up.
 pub type ClientStatusCallback = Box<dyn Fn(&str) + Send + Sync>;
@@ -274,7 +278,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     let _ = (path, is_datagram, policy);
     let mut retry_backoff = transport_backoff();
     let mut stream_tasks = JoinSet::new();
-    let setup_slots = Arc::new(Semaphore::new(64));
+    let setup_slots = Arc::new(Semaphore::new(LOCAL_SETUPS));
     let timing = Arc::new(Mutex::new(RecoveryTiming::default()));
 
     'outer: loop {
