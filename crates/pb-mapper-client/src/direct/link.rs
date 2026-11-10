@@ -44,11 +44,10 @@ pub(super) fn counts(
     lan: &Assessment,
     peer: &[SocketAddr],
 ) -> CandidateCounts {
-    let (local, local_lan, truncated) = discovered.counts;
     CandidateCounts {
-        local,
-        local_lan,
-        truncated,
+        local: discovered.peer.candidates.len() as u32,
+        local_lan: discovered.offered_lan,
+        truncated: discovered.truncated,
         peer: peer.len() as u32,
         peer_lan: peer.iter().filter(|addr| lan.is_lan(**addr)).count() as u32,
         ..CandidateCounts::default()

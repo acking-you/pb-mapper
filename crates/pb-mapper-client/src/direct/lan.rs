@@ -15,7 +15,7 @@
 
 use crate::diagnostics::{InterfaceTier, LanEvidence, LinkKind};
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex},
 };
 
@@ -314,7 +314,7 @@ impl Assessment {
 pub(crate) fn is_global(ip: IpAddr) -> bool {
     match ip.to_canonical() {
         IpAddr::V4(v4) => {
-            let [a, b, ..] = v4.octets();
+            let [a, ..] = v4.octets();
             !(v4.is_private()
                 || v4.is_loopback()
                 || v4.is_link_local()
@@ -324,11 +324,19 @@ pub(crate) fn is_global(ip: IpAddr) -> bool {
                 || v4.is_multicast()
                 || a == 0
                 || a >= 240
-                || (a == 100 && b & 0xc0 == 64)
-                || (a == 198 && b & 0xfe == 18))
+                || shared_or_benchmarking(v4))
         }
         IpAddr::V6(v6) => v6.segments()[0] & 0xe000 == 0x2000,
     }
+}
+
+/// Whether `v4` is in the shared address space (100.64/10) or the
+/// benchmarking block (198.18/15): neither is routed on the internet, and
+/// VPNs number their tunnels from them, Tailscale from the first and
+/// fake-IP proxies from the second.
+fn shared_or_benchmarking(v4: Ipv4Addr) -> bool {
+    let [a, b, ..] = v4.octets();
+    (a == 100 && b & 0xc0 == 64) || (a == 198 && b & 0xfe == 18)
 }
 
 /// The prefix an address shares with its link. Windows lists temporary IPv6
@@ -399,14 +407,10 @@ fn tier(
     {
         return InterfaceTier::Cellular;
     }
-    // Ranges VPNs number their tunnels from: Tailscale's CGNAT, and the
-    // benchmarking block fake-IP proxies use.
+    // Ranges VPNs number their tunnels from.
     let vpn_range = || {
         addrs.iter().any(|(ip, _)| match ip {
-            IpAddr::V4(v4) => {
-                let [a, b, ..] = v4.octets();
-                (a == 100 && b & 0xc0 == 64) || (a == 198 && b & 0xfe == 18)
-            }
+            IpAddr::V4(v4) => shared_or_benchmarking(*v4),
             IpAddr::V6(_) => false,
         })
     };
@@ -476,8 +480,18 @@ struct Known {
     tier: InterfaceTier,
 }
 
-/// The latest reading, and whether a new one is being taken.
-static KINDS: Mutex<(Option<Arc<Kinds>>, bool)> = Mutex::new((None, false));
+/// What netdev said, as far as discovery is concerned.
+struct KindsState {
+    /// The latest reading.
+    latest: Option<Arc<Kinds>>,
+    /// Whether a new one is being taken.
+    reading: bool,
+}
+
+static KINDS: Mutex<KindsState> = Mutex::new(KindsState {
+    latest: None,
+    reading: false,
+});
 
 impl Kinds {
     /// The latest reading. Starts a new one, unless one is under way, when
@@ -485,11 +499,11 @@ impl Kinds {
     fn current(generation: u64) -> Option<Arc<Self>> {
         let mut state = KINDS.lock().unwrap_or_else(|e| e.into_inner());
         let stale = state
-            .0
+            .latest
             .as_ref()
             .is_none_or(|kinds| kinds.generation != generation);
-        if stale && !state.1 {
-            state.1 = true;
+        if stale && !state.reading {
+            state.reading = true;
             let reading = std::thread::Builder::new()
                 .name("pb-mapper-interfaces".into())
                 .spawn(move || {
@@ -500,19 +514,19 @@ impl Kinds {
                         fn drop(&mut self) {
                             let mut state = KINDS.lock().unwrap_or_else(|e| e.into_inner());
                             if let Some(kinds) = self.0.take() {
-                                state.0 = Some(Arc::new(kinds));
+                                state.latest = Some(Arc::new(kinds));
                             }
-                            state.1 = false;
+                            state.reading = false;
                         }
                     }
                     let mut reading = Reading(None);
                     reading.0 = Some(Self::read(generation));
                 });
             if reading.is_err() {
-                state.1 = false;
+                state.reading = false;
             }
         }
-        state.0.clone()
+        state.latest.clone()
     }
 
     /// The tier netdev gave the interface with this index, or this name.

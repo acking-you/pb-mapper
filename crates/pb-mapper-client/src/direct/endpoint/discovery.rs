@@ -32,8 +32,10 @@ pub(super) struct Discovery {
 pub(in crate::direct) struct Discovered {
     pub peer: PeerInfo,
     pub local: Arc<Local>,
-    /// Candidates offered, on a LAN interface, and left out past the limit.
-    pub counts: (u32, u32, u32),
+    /// Of the candidates offered, those on a LAN interface.
+    pub offered_lan: u32,
+    /// Candidates left out past the limit.
+    pub truncated: u32,
     pub stun: StunOutcome,
     pub stun_ms: Option<u64>,
 }
@@ -124,11 +126,8 @@ impl Network {
             Arc::make_mut(&mut local).public.push(mapped);
         }
         Discovered {
-            counts: (
-                selected.addrs.len() as u32,
-                selected.lan,
-                selected.truncated,
-            ),
+            offered_lan: selected.lan,
+            truncated: selected.truncated,
             peer: PeerInfo {
                 certificate: self.identity.certificate.clone(),
                 candidates: selected.addrs,
