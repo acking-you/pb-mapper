@@ -7,7 +7,7 @@ use super::{
     endpoint::Network,
     lan::Assessment,
     link::{counts, direct_link, log_path, stun_timings, summary},
-    reports::{self, SessionReporter, Sink},
+    reports::{self, REPORT_INTERVAL, SessionReporter, Sink},
     tcp,
 };
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
     sdk::LanTransport,
 };
 use pb_mapper_auth::ADMIN_NAMESPACE;
-use pb_mapper_core::checksum::Credential;
+use pb_mapper_core::{checksum::Credential, timeout::RetryBackoff};
 use pb_mapper_protocol::{
     command::{PbConnRequest, PbConnStatusReq, PbConnStatusResp},
     data::DataCodec,
@@ -37,6 +37,19 @@ use uni_stream::stream::NetworkStream;
 pub(super) const COOLDOWN_INITIAL: Duration = Duration::from_secs(10);
 /// Longest pause between direct attempts on a network that keeps refusing them.
 pub(super) const COOLDOWN_MAX: Duration = Duration::from_secs(300);
+const _: () = assert!(
+    !COOLDOWN_INITIAL.is_zero() && COOLDOWN_MAX.as_nanos() >= COOLDOWN_INITIAL.as_nanos(),
+    "RetryBackoff needs a first pause, and a cap no shorter"
+);
+
+/// How long one delivery of reports may take, reconnecting included.
+const REPORT_ATTEMPT: Duration = Duration::from_secs(3);
+/// The first wait after a delivery failed, doubling up to the interval.
+const REPORT_RETRY: Duration = Duration::from_secs(1);
+const _: () = assert!(
+    !REPORT_RETRY.is_zero() && REPORT_INTERVAL.as_nanos() >= REPORT_RETRY.as_nanos(),
+    "RetryBackoff needs a first wait, and a cap no shorter"
+);
 
 /// When a tunnel may try direct again after falling back.
 ///
@@ -47,10 +60,20 @@ pub(super) const COOLDOWN_MAX: Duration = Duration::from_secs(300);
 /// straight to the relay instead. The pause doubles while fallbacks repeat; a
 /// direct success or a network change, which can make a path punchable,
 /// clears it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct Cooldown {
     until: Option<Instant>,
-    next: Duration,
+    /// The pauses, from [`COOLDOWN_INITIAL`] doubling to [`COOLDOWN_MAX`].
+    pauses: RetryBackoff,
+}
+
+impl Default for Cooldown {
+    fn default() -> Self {
+        Self {
+            until: None,
+            pauses: RetryBackoff::new(COOLDOWN_INITIAL, COOLDOWN_MAX),
+        }
+    }
 }
 
 impl Cooldown {
@@ -65,13 +88,7 @@ impl Cooldown {
         if self.active(now) {
             return;
         }
-        let pause = if self.next.is_zero() {
-            COOLDOWN_INITIAL
-        } else {
-            self.next
-        };
-        self.until = Some(now + pause);
-        self.next = (pause * 2).min(COOLDOWN_MAX);
+        self.until = Some(now + self.pauses.next_delay());
     }
 
     pub(super) fn clear(&mut self) {
@@ -564,8 +581,8 @@ async fn report_loop(
     reports: Arc<reports::Latest>,
     wake: Arc<tokio::sync::Notify>,
 ) {
-    let mut delay = Duration::from_secs(15);
-    let mut retry = Duration::from_secs(1);
+    let mut delay = REPORT_INTERVAL;
+    let mut retry = RetryBackoff::new(REPORT_RETRY, REPORT_INTERVAL);
     loop {
         tokio::select! { () = wake.notified() => {}, () = tokio::time::sleep(delay) => {} }
         let snapshot = reports.snapshot();
@@ -591,16 +608,15 @@ async fn report_loop(
             }
             Ok::<_, io::Error>(())
         };
-        match tokio::time::timeout(Duration::from_secs(3), attempt).await {
+        match tokio::time::timeout(REPORT_ATTEMPT, attempt).await {
             Ok(Ok(())) => {
-                delay = Duration::from_secs(15);
-                retry = Duration::from_secs(1);
+                delay = REPORT_INTERVAL;
+                retry.reset();
             }
             _ => {
                 // A failed reconnect must not cost another full reporting
                 // interval. Retry independently of data with bounded backoff.
-                delay = retry;
-                retry = (retry * 2).min(Duration::from_secs(15));
+                delay = retry.next_delay();
             }
         }
     }
