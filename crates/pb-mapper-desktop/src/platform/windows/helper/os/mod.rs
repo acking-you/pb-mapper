@@ -32,8 +32,11 @@ pub use scm::service_state;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use windows::Win32::Foundation::HANDLE;
 
+/// A kernel handle, closed when it drops.
 pub struct Handle(pub OwnedHandle);
 impl Handle {
+    /// # Safety
+    /// `handle` is open and nothing else closes it.
     pub unsafe fn own(handle: HANDLE) -> Self {
         Self(unsafe { OwnedHandle::from_raw_handle(handle.0) })
     }
