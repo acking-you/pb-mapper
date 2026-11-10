@@ -26,7 +26,7 @@ mod tests;
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use pb_mapper_auth::{
@@ -37,6 +37,7 @@ use pb_mapper_core::checksum::{
 };
 use pb_mapper_core::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec, Decryptor};
 use pb_mapper_core::error::{Error, Result};
+use pb_mapper_core::time::unix_seconds;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{CodecMessageReader, CodecMessageWriter, DataLenType, MessageReader, MessageWriter};
@@ -685,13 +686,6 @@ pub(crate) fn protocol_error(detail: impl Into<String>) -> Error {
     Error::MsgProtocol {
         detail: detail.into(),
     }
-}
-
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 /// `fields` back to back, for the fixed layouts on the wire and on disk. Every

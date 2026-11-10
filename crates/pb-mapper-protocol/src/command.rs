@@ -353,10 +353,7 @@ impl PbConnResponse {
             code: code.into(),
             message: message.into(),
             retryable,
-            server_time: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            server_time: pb_mapper_core::time::unix_seconds(),
         })
     }
 }
