@@ -23,45 +23,65 @@ pub(crate) fn codec_name(kind: VideoCodec) -> &'static str {
     }
 }
 
-/// Each NAL unit's range in an Annex B access unit, from its header to the
-/// next start code. The scan is the same for H.264 and H.265.
-pub(crate) fn nal_ranges(bytes: &[u8]) -> Result<Vec<(usize, usize)>> {
-    if !bytes.starts_with(&[0, 0, 0, 1]) && !bytes.starts_with(&[0, 0, 1]) {
-        return Err(error("hardware encoder did not produce Annex B"));
-    }
-    let mut units = Vec::new();
-    let mut position = 0;
-    while position + 3 < bytes.len() {
-        let prefix = if bytes[position..].starts_with(&[0, 0, 0, 1]) {
-            4
-        } else if bytes[position..].starts_with(&[0, 0, 1]) {
-            3
-        } else {
-            position += 1;
-            continue;
-        };
-        if let Some((_, end)) = units.last_mut() {
-            *end = position;
+/// An Annex B access unit, with each NAL unit's range in it: from its
+/// header to the next start code. The ranges are built from these bytes,
+/// so every one is in bounds.
+pub(crate) struct AccessUnit<'a> {
+    bytes: &'a [u8],
+    units: Vec<(usize, usize)>,
+}
+impl<'a> AccessUnit<'a> {
+    /// Find the NAL units. The scan is the same for H.264 and H.265.
+    pub(crate) fn parse(bytes: &'a [u8]) -> Result<Self> {
+        if !bytes.starts_with(&[0, 0, 0, 1]) && !bytes.starts_with(&[0, 0, 1]) {
+            return Err(error("hardware encoder did not produce Annex B"));
         }
-        let start = position + prefix;
-        if start >= bytes.len() {
-            return Err(error("truncated NAL unit"));
+        let mut units = Vec::new();
+        let mut position = 0;
+        while position + 3 < bytes.len() {
+            let prefix = if bytes[position..].starts_with(&[0, 0, 0, 1]) {
+                4
+            } else if bytes[position..].starts_with(&[0, 0, 1]) {
+                3
+            } else {
+                position += 1;
+                continue;
+            };
+            if let Some((_, end)) = units.last_mut() {
+                *end = position;
+            }
+            let start = position + prefix;
+            if start >= bytes.len() {
+                return Err(error("truncated NAL unit"));
+            }
+            units.push((start, bytes.len()));
+            if units.len() > 4096 {
+                return Err(error("too many NAL units"));
+            }
+            position = start;
         }
-        units.push((start, bytes.len()));
-        if units.len() > 4096 {
-            return Err(error("too many NAL units"));
+        if units.is_empty() {
+            return Err(error("hardware encoder did not produce Annex B"));
         }
-        position = start;
+        Ok(Self { bytes, units })
     }
-    if units.is_empty() {
-        return Err(error("hardware encoder did not produce Annex B"));
+
+    /// Each NAL unit's kind, in order.
+    fn kinds(&self, kind: VideoCodec) -> impl Iterator<Item = Nal> + '_ {
+        self.units
+            .iter()
+            .map(move |&(start, _)| nal(kind, self.bytes[start]))
     }
-    Ok(units)
+
+    /// Whether it holds a picture a decoder can start from.
+    pub(crate) fn keyframe(&self, kind: VideoCodec) -> bool {
+        self.kinds(kind).any(|nal| nal == Nal::Irap)
+    }
 }
 
 /// What a NAL unit is, as far as sending it goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Nal {
+enum Nal {
     /// A picture a decoder can start from: H.264's IDR (5); H.265's IRAP
     /// pictures (16 to 21), which hold its IDRs (19 and 20) and CRA (21).
     Irap,
@@ -80,7 +100,7 @@ pub(crate) enum Nal {
 /// A NAL unit's kind from its first header byte: H.264's type is the low five
 /// bits; H.265's two-byte header holds its type in the six bits below the
 /// forbidden bit, `(b0 >> 1) & 0x3f`.
-pub(crate) fn nal(kind: VideoCodec, header: u8) -> Nal {
+fn nal(kind: VideoCodec, header: u8) -> Nal {
     match kind {
         VideoCodec::H265 => match (header >> 1) & 0x3f {
             16..=21 => Nal::Irap,
@@ -158,17 +178,17 @@ impl ParameterSets {
     pub(crate) fn complete(&self) -> bool {
         self.needed().all(|set| !self.set(set).is_empty())
     }
-    /// Whether the units carry every set this codec needs.
-    pub(crate) fn carried(&self, bytes: &[u8], units: &[(usize, usize)]) -> bool {
+    /// Whether the unit carries every set this codec needs.
+    pub(crate) fn carried(&self, unit: &AccessUnit) -> bool {
         self.needed().all(|needed| {
-            units
-                .iter()
-                .any(|&(start, _)| ParamSet::of(nal(self.kind, bytes[start])) == Some(needed))
+            unit.kinds(self.kind)
+                .any(|nal| ParamSet::of(nal) == Some(needed))
         })
     }
-    pub(crate) fn observe(&mut self, bytes: &[u8], units: &[(usize, usize)]) -> Result<()> {
-        for &(start, end) in units {
-            let Some(set) = ParamSet::of(nal(self.kind, bytes[start])) else {
+    /// Keep the sets the unit carries.
+    pub(crate) fn observe(&mut self, unit: &AccessUnit) -> Result<()> {
+        for &(start, end) in &unit.units {
+            let Some(set) = ParamSet::of(nal(self.kind, unit.bytes[start])) else {
                 continue;
             };
             if end - start > 64 * 1024 {
@@ -176,19 +196,23 @@ impl ParameterSets {
             }
             let target = self.set_mut(set);
             target.clear();
-            target.extend_from_slice(&bytes[start..end]);
+            target.extend_from_slice(&unit.bytes[start..end]);
         }
         Ok(())
     }
-    /// `keyframe`, whose NAL units are `units`, with every kept set in front
-    /// of its pictures: after its delimiter, which stays first.
-    pub(crate) fn prepend(&self, keyframe: &[u8], units: &[(usize, usize)]) -> Result<Vec<u8>> {
+    /// The bytes of `keyframe` with every kept set in front of its
+    /// pictures: after its delimiter, which stays first.
+    pub(crate) fn prepend(&self, keyframe: &AccessUnit) -> Result<Vec<u8>> {
         if !self.complete() {
             return Err(error(format!(
                 "{} keyframe has no decoder configuration",
                 codec_name(self.kind)
             )));
         }
+        let AccessUnit {
+            bytes: keyframe,
+            units,
+        } = keyframe;
         let at = match units.first() {
             Some(&(start, end)) if nal(self.kind, keyframe[start]) == Nal::Delimiter => end,
             _ => 0,
@@ -216,15 +240,15 @@ mod tests {
     fn parameter_sets_survive_partial_updates_and_emulation_prevention() -> Result<()> {
         let mut sets = ParameterSets::new(VideoCodec::H264);
         let initial = [0, 0, 0, 1, 0x67, 1, 0, 0, 3, 1, 0, 0, 1, 0x68, 2];
-        sets.observe(&initial, &nal_ranges(&initial)?)?;
+        sets.observe(&AccessUnit::parse(&initial)?)?;
         assert!(sets.complete());
         assert_eq!(sets.sps, &[0x67, 1, 0, 0, 3, 1]);
         let partial = [0, 0, 1, 0x68, 3];
-        sets.observe(&partial, &nal_ranges(&partial)?)?;
+        sets.observe(&AccessUnit::parse(&partial)?)?;
         assert!(sets.complete());
         assert_eq!(sets.pps, &[0x68, 3]);
-        assert!(nal_ranges(&[0, 0, 0, 1]).is_err());
-        assert!(nal_ranges(&[0, 0, 0, 8, 0x65]).is_err());
+        assert!(AccessUnit::parse(&[0, 0, 0, 1]).is_err());
+        assert!(AccessUnit::parse(&[0, 0, 0, 8, 0x65]).is_err());
         Ok(())
     }
     #[test]
@@ -249,15 +273,17 @@ mod tests {
             0, 0, 0, 1, 0x40, 1, 0xa, 0, 0, 0, 1, 0x42, 1, 0xb, 0, 0, 1, 0x44, 1, 0xc,
         ];
         let mut sets = ParameterSets::new(VideoCodec::H265);
-        sets.observe(&sets_only, &nal_ranges(&sets_only)?)?;
+        sets.observe(&AccessUnit::parse(&sets_only)?)?;
         assert!(sets.complete());
         // An IDR without them gets the VPS, SPS and PPS in front, in order,
         // after its delimiter ...
         let idr = [0, 0, 0, 1, 0x46, 1, 0x50, 0, 0, 0, 1, 0x28, 1, 0xd];
-        let units = nal_ranges(&idr)?;
-        assert!(!sets.carried(&idr, &units));
+        let idr_unit = AccessUnit::parse(&idr)?;
+        assert!(idr_unit.keyframe(VideoCodec::H265));
+        assert!(!AccessUnit::parse(&sets_only)?.keyframe(VideoCodec::H265));
+        assert!(!sets.carried(&idr_unit));
         assert_eq!(
-            sets.prepend(&idr, &units)?,
+            sets.prepend(&idr_unit)?,
             [
                 0, 0, 0, 1, 0x46, 1, 0x50, 0, 0, 0, 1, 0x40, 1, 0xa, 0, 0, 0, 1, 0x42, 1, 0xb, 0,
                 0, 0, 1, 0x44, 1, 0xc, 0, 0, 0, 1, 0x28, 1, 0xd
@@ -265,11 +291,11 @@ mod tests {
         );
         // ... one that carries them goes as it is ...
         let whole = [&sets_only[..], &idr].concat();
-        assert!(sets.carried(&whole, &nal_ranges(&whole)?));
+        assert!(sets.carried(&AccessUnit::parse(&whole)?));
         // ... and without a VPS there is no decoder configuration.
         let mut partial = ParameterSets::new(VideoCodec::H265);
-        partial.observe(&sets_only[7..], &nal_ranges(&sets_only[7..])?)?;
-        assert!(!partial.complete() && partial.prepend(&idr, &units).is_err());
+        partial.observe(&AccessUnit::parse(&sets_only[7..])?)?;
+        assert!(!partial.complete() && partial.prepend(&idr_unit).is_err());
         Ok(())
     }
 }

@@ -3,7 +3,7 @@
 use super::MAX_IN_FLIGHT;
 use crate::{
     Result, VideoCodec,
-    codec::annexb::{MAX_ACCESS_UNIT, Nal, ParameterSets, codec_name, nal, nal_ranges},
+    codec::annexb::{AccessUnit, MAX_ACCESS_UNIT, ParameterSets, codec_name},
     error,
 };
 use std::mem::ManuallyDrop;
@@ -390,7 +390,7 @@ impl Codec {
                     .map_err(error)?;
             }
             if bytes.starts_with(&[0, 0, 0, 1]) || bytes.starts_with(&[0, 0, 1]) {
-                self.parameter_sets.observe(&bytes, &nal_ranges(&bytes)?)?;
+                self.parameter_sets.observe(&AccessUnit::parse(&bytes)?)?;
             }
         }
         Ok(())
@@ -401,18 +401,16 @@ impl Codec {
     /// keyframe that comes without its parameter sets gets the last ones,
     /// in-band or from the media type, in front.
     pub(super) fn annex_b(&mut self, bytes: Vec<u8>) -> Result<(Vec<u8>, bool)> {
-        let units = nal_ranges(&bytes)?;
-        self.parameter_sets.observe(&bytes, &units)?;
-        let keyframe = units
-            .iter()
-            .any(|&(start, _)| nal(self.kind, bytes[start]) == Nal::Irap);
-        if !keyframe || self.parameter_sets.carried(&bytes, &units) {
+        let unit = AccessUnit::parse(&bytes)?;
+        self.parameter_sets.observe(&unit)?;
+        let keyframe = unit.keyframe(self.kind);
+        if !keyframe || self.parameter_sets.carried(&unit) {
             return Ok((bytes, keyframe));
         }
         if !self.parameter_sets.complete() {
             self.update_header()?;
         }
-        Ok((self.parameter_sets.prepend(&bytes, &units)?, true))
+        Ok((self.parameter_sets.prepend(&unit)?, true))
     }
 }
 impl Drop for Codec {
