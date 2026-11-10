@@ -14,7 +14,7 @@ mod tests;
 use self::sender::Sender;
 use crate::{
     QualityPreset, VideoCodec, VideoLimits, VideoSize,
-    credit::CreditLedger,
+    credit::{CreditLedger, ReceiptAhead},
     idr::IdrReason,
     lane::LaneCommand,
     modes::{Mode, ModeCommand},
@@ -29,6 +29,7 @@ use crate::{
 };
 use parking_lot::Mutex;
 use std::{
+    fmt,
     future::Future,
     io,
     sync::{
@@ -60,6 +61,33 @@ pub(crate) fn stop_message(reason: StopReason) -> &'static str {
         StopReason::Revoked => "The host withdrew this viewer's access",
         StopReason::CaptureFailed => "The host could not capture its screen",
         StopReason::ProtocolError => "The desktop protocol was broken",
+    }
+}
+
+/// Why B-recv ended a session as a protocol error. Its text is the message
+/// of the viewer's `Stopped{protocol_error}`.
+#[derive(Debug)]
+enum Violation {
+    AuthenticatedTwice,
+    Receipt(ReceiptAhead),
+    /// An fps cap outside 1..=120.
+    FpsCap(u32),
+    /// A display mode request from a viewer this host offered none.
+    DisplayModeNotOffered,
+    /// A malformed or oversized message, as the framing reported it.
+    Framing(io::Error),
+}
+impl fmt::Display for Violation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AuthenticatedTwice => f.write_str("authenticated twice"),
+            Self::Receipt(ahead) => ahead.fmt(f),
+            Self::FpsCap(fps) => write!(f, "fps cap {fps} out of bounds"),
+            Self::DisplayModeNotOffered => {
+                f.write_str("a display mode request without the capability")
+            }
+            Self::Framing(failure) => failure.fmt(f),
+        }
     }
 }
 
@@ -229,15 +257,15 @@ impl Session {
 
     /// B-recv's handling of one message: inline, never waiting for thread C.
     /// An error is a protocol violation.
-    fn handle(&self, message: ViewerMessage, now: Instant) -> Result<(), String> {
+    fn handle(&self, message: ViewerMessage, now: Instant) -> Result<(), Violation> {
         let shared = &self.shared;
         match message {
-            ViewerMessage::Authenticate { .. } => return Err("authenticated twice".into()),
+            ViewerMessage::Authenticate { .. } => return Err(Violation::AuthenticatedTwice),
             ViewerMessage::Received { seq } => {
                 self.credit
                     .lock()
                     .on_receipt(seq, now)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(Violation::Receipt)?;
                 self.update_qos(now, Qos::on_receipt);
                 self.credit_changed.notify_one();
             }
@@ -263,7 +291,7 @@ impl Session {
             }
             ViewerMessage::FpsCap { fps } => {
                 if !(1..=120).contains(&fps) {
-                    return Err(format!("fps cap {fps} out of bounds"));
+                    return Err(Violation::FpsCap(fps));
                 }
                 self.update_qos(now, |qos| qos.set_viewer_cap(fps));
             }
@@ -310,9 +338,9 @@ impl Session {
     }
 
     /// Only from a viewer this host offered display modes.
-    fn display_mode(&self, command: ModeCommand) -> Result<(), String> {
+    fn display_mode(&self, command: ModeCommand) -> Result<(), Violation> {
         if !self.display_mode {
-            return Err("a display mode request without the capability".into());
+            return Err(Violation::DisplayModeNotOffered);
         }
         self.shared.lane.push(LaneCommand::DisplayMode(command));
         Ok(())
@@ -353,7 +381,7 @@ pub(crate) async fn run<S>(
         tokio::pin!(receive);
         tokio::select! {
             violation = &mut receive => match violation {
-                Some(violation) => session.end(StopReason::ProtocolError, violation),
+                Some(violation) => session.end(StopReason::ProtocolError, violation.to_string()),
                 None => session.close(),
             },
             stopped = &mut send => sent = Some(stopped),
@@ -402,7 +430,7 @@ pub(crate) async fn run<S>(
 
 /// B-recv. Returns the protocol violation that ended it, or `None` when the
 /// transport closed, failed or went silent.
-async fn receive<R: AsyncRead + Unpin>(session: &Session, mut reader: R) -> Option<String> {
+async fn receive<R: AsyncRead + Unpin>(session: &Session, mut reader: R) -> Option<Violation> {
     loop {
         match wire::read_header::<_, ViewerMessage>(&mut reader, HOST_READ_TIMEOUT).await {
             Ok(Some(message)) => {
@@ -414,7 +442,7 @@ async fn receive<R: AsyncRead + Unpin>(session: &Session, mut reader: R) -> Opti
             // The framing reports a malformed or oversized message as `Other`;
             // every other kind is the transport failing or timing out.
             Err(failure) if failure.kind() == io::ErrorKind::Other => {
-                return Some(failure.to_string());
+                return Some(Violation::Framing(failure));
             }
             Err(_) => return None,
         }

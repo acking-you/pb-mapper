@@ -4,9 +4,10 @@
 //! decoder or a display. Receipts are consumed here and by the QoS controller
 //! only: they grant, renew or prove nothing about input, and no authorisation
 //! method takes a seq.
-use crate::{Result, VideoCodec, error};
+use crate::VideoCodec;
 use std::{
     collections::VecDeque,
+    fmt,
     time::{Duration, Instant},
 };
 
@@ -32,6 +33,17 @@ pub(crate) const DELIVERY_FACTOR: f64 = 1.25;
 /// A JPEG session's fixed window: pictures are independent and few.
 pub(crate) const JPEG_WINDOW_FRAMES: usize = 4;
 pub(crate) const JPEG_WINDOW_BYTES: usize = 2 * 1024 * 1024;
+
+/// A receipt for a seq beyond the last one admitted: the viewer receipted
+/// video that was never sent, which breaks the protocol.
+#[derive(Debug)]
+pub(crate) struct ReceiptAhead;
+impl fmt::Display for ReceiptAhead {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("receipt for video that was never sent")
+    }
+}
+impl std::error::Error for ReceiptAhead {}
 
 /// A video message admitted and written, not yet receipted.
 struct Sent {
@@ -168,9 +180,9 @@ impl CreditLedger {
     }
 
     /// A cumulative receipt: every unit up to `seq` was read off the network.
-    pub fn on_receipt(&mut self, seq: u64, now: Instant) -> Result<()> {
+    pub fn on_receipt(&mut self, seq: u64, now: Instant) -> Result<(), ReceiptAhead> {
         if seq > self.last_admitted {
-            return Err(error("receipt for video that was never sent"));
+            return Err(ReceiptAhead);
         }
         if seq <= self.acked {
             return Ok(());
