@@ -219,6 +219,18 @@ impl PortMapping {
             Self::Always => "always",
         }
     }
+
+    /// Refuse a mapping from the start that this build cannot make, rather
+    /// than ignore it. One when needed is best effort, and the default:
+    /// without the feature it never starts.
+    pub(crate) fn check_supported(self) -> super::Result<()> {
+        if self == Self::Always && !cfg!(feature = "port-mapping") {
+            return Err(super::Error::invalid_config(
+                "built without port-mapping support",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// What a direct path within a local network runs over. A path across the

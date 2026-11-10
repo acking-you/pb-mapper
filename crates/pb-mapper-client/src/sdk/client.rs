@@ -5,7 +5,6 @@
 //! transport's worker — so that lifecycle lives in one place (`TunnelWorker`,
 //! in `worker`) and each call site is left with only the worker it invokes.
 
-use crate::diagnostics::Diagnostics;
 use crate::endpoint::RelayEndpoint;
 use crate::relay::CarrierId;
 use std::sync::{Arc, RwLock};
@@ -13,8 +12,6 @@ use std::sync::{Arc, RwLock};
 use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_core::config::control_io_timeout;
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
-use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
 use uni_stream::stream::{
     TcpListenerProvider, TcpStreamProvider, UdpListenerProvider, UdpStreamProvider,
 };
@@ -27,10 +24,9 @@ use super::error::{Result, StatusSnafu};
 use super::handle::{Connection, Registration};
 use super::types::{
     ClientConfig, ConnectRequest, RegisterRequest, RemoteId, ServiceConnection, Transport,
-    TunnelStatus,
 };
-use super::worker::{TunnelWorker, resolve};
-use super::{ConnectOptions, LanTransport, PathPolicy, PortMapping, RegisterOptions};
+use super::worker::TunnelWorker;
+use super::{ConnectOptions, LanTransport, PathPolicy, RegisterOptions};
 use crate::client::run_client_side_cli_recovering_with_path;
 use crate::client::status::get_status_with_credential;
 use crate::server::{ServerTunnelOptions, run_server_side_cli_recovering};
@@ -254,7 +250,7 @@ impl Client {
         if options.allow_direct && !cfg!(feature = "p2p") {
             return Err(Error::invalid_config("built without p2p support"));
         }
-        check_port_mapping(options.port_mapping)?;
+        options.port_mapping.check_supported()?;
         if let Some(timeout) = options.idle_timeout
             && (request.transport.is_datagram()
                 || tokio::time::Instant::now().checked_add(timeout).is_none())
@@ -288,9 +284,8 @@ impl Client {
             namespace: self.inner.namespace,
             force_namespace: request.force_namespace,
         };
-        let worker = self
-            .prepare_worker(&request.key, &request.local_addr)
-            .await?;
+        let worker =
+            TunnelWorker::prepare(&self.inner.endpoint, &request.key, &request.local_addr).await?;
         let credential = self.credential();
         let direct = worker.direct_policy(
             allow_direct,
@@ -368,7 +363,7 @@ impl Client {
                 "invalid service key or unavailable direct support",
             ));
         }
-        check_port_mapping(options.port_mapping)?;
+        options.port_mapping.check_supported()?;
         let io_error = |error: std::io::Error| Error::protocol(error.to_string());
         // Retain the bound socket until our own connection has been accepted;
         // there is no reserve/drop/rebind race or reusable external listener.
@@ -386,7 +381,7 @@ impl Client {
         drop(listener);
         stream.set_nodelay(true).map_err(io_error)?;
         accepted.set_nodelay(true).map_err(io_error)?;
-        let worker = self.prepare_worker(&key, "127.0.0.1:0").await?;
+        let worker = TunnelWorker::prepare(&self.inner.endpoint, &key, "127.0.0.1:0").await?;
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
@@ -460,14 +455,13 @@ impl Client {
         if options.path == PathPolicy::Auto && !cfg!(feature = "p2p") {
             return Err(Error::invalid_config("built without p2p support"));
         }
-        check_port_mapping(options.port_mapping)?;
+        options.port_mapping.check_supported()?;
         let is_datagram = request.transport.is_datagram();
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
         }
-        let worker = self
-            .prepare_worker(&request.key, &request.local_addr)
-            .await?;
+        let worker =
+            TunnelWorker::prepare(&self.inner.endpoint, &request.key, &request.local_addr).await?;
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
@@ -550,30 +544,6 @@ impl Client {
 
     pub async fn remote_id(&self) -> Result<RemoteId> {
         RemoteId::from_status(self.status_request(PbConnStatusReq::RemoteId).await?)
-    }
-
-    /// Resolve the local endpoint and set up a recovering relay worker.
-    ///
-    /// Shared by `register` and `connect`: the two differ only in which worker
-    /// they hand the context to. Relay DNS remains retryable inside that worker.
-    async fn prepare_worker(&self, key: &str, local_addr: &str) -> Result<TunnelWorker> {
-        if !self.inner.endpoint.validate() {
-            return Err(Error::invalid_config(
-                "relay must be host:port or an IP socket address",
-            ));
-        }
-        let local_addr = resolve(local_addr).await?;
-        let remote_addr = self.inner.endpoint.clone();
-        let (status_tx, status_rx) = watch::channel(TunnelStatus::Starting);
-        Ok(TunnelWorker {
-            local_addr,
-            remote_addr,
-            key: Arc::from(key),
-            shutdown: CancellationToken::new(),
-            status_tx,
-            status_rx,
-            diagnostics: Diagnostics::default(),
-        })
     }
 
     async fn status_request(&self, request: PbConnStatusReq) -> Result<PbConnStatusResp> {
@@ -659,16 +629,6 @@ impl RelayMetricsStream {
 /// 30-second control I/O timeout.
 fn status_io_timeout() -> std::time::Duration {
     control_io_timeout().min(std::time::Duration::from_secs(5))
-}
-
-/// Refuse a mapping from the start that this build cannot make, rather than
-/// ignore it. One when needed is best effort, and the default: without the
-/// feature it never starts.
-fn check_port_mapping(requested: PortMapping) -> Result<()> {
-    if requested == PortMapping::Always && !cfg!(feature = "port-mapping") {
-        return Err(Error::invalid_config("built without port-mapping support"));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

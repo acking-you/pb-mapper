@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use snafu::ResultExt;
 
+use super::Error;
 use super::error::{AddressSnafu, Result};
 use super::handle::LiveTunnel;
 use super::types::TunnelStatus;
@@ -23,7 +24,7 @@ use crate::server::StatusCallback;
 /// The list, not just its first entry: a worker handed the whole list dials each
 /// candidate in turn, so a relay hostname with several records survives one of
 /// them being unreachable.
-pub(super) async fn resolve(addr: &str) -> Result<ResolvedAddrs> {
+async fn resolve(addr: &str) -> Result<ResolvedAddrs> {
     resolve_addrs_async(addr)
         .await
         .context(AddressSnafu { addr })
@@ -37,7 +38,10 @@ pub(super) async fn resolve(addr: &str) -> Result<ResolvedAddrs> {
 fn settle_stopped(tx: &watch::Sender<TunnelStatus>) {
     tx.send_if_modified(|status| match status {
         TunnelStatus::Failed(_) => false,
-        _ => {
+        TunnelStatus::Starting
+        | TunnelStatus::Connected
+        | TunnelStatus::Retrying
+        | TunnelStatus::Stopped => {
             *status = TunnelStatus::Stopped;
             true
         }
@@ -72,16 +76,45 @@ pub(super) struct WorkerContext {
 /// signatures but one lifecycle: spawn, publish status, settle as `Stopped`.
 /// This owns that lifecycle so each call site is left with just its own call.
 pub(super) struct TunnelWorker {
-    pub(super) local_addr: ResolvedAddrs,
-    pub(super) remote_addr: RelayEndpoint,
-    pub(super) key: Arc<str>,
-    pub(super) shutdown: CancellationToken,
-    pub(super) status_tx: watch::Sender<TunnelStatus>,
-    pub(super) status_rx: watch::Receiver<TunnelStatus>,
-    pub(super) diagnostics: Diagnostics,
+    local_addr: ResolvedAddrs,
+    remote_addr: RelayEndpoint,
+    key: Arc<str>,
+    shutdown: CancellationToken,
+    status_tx: watch::Sender<TunnelStatus>,
+    status_rx: watch::Receiver<TunnelStatus>,
+    diagnostics: Diagnostics,
 }
 
 impl TunnelWorker {
+    /// Resolve the local endpoint and set up a recovering worker for the
+    /// relay at `endpoint`.
+    ///
+    /// Shared by `register` and `connect`: the two differ only in which worker
+    /// they hand the context to. Relay DNS remains retryable inside that worker.
+    pub(super) async fn prepare(
+        endpoint: &RelayEndpoint,
+        key: &str,
+        local_addr: &str,
+    ) -> Result<Self> {
+        if !endpoint.validate() {
+            return Err(Error::invalid_config(
+                "relay must be host:port or an IP socket address",
+            ));
+        }
+        let local_addr = resolve(local_addr).await?;
+        let remote_addr = endpoint.clone();
+        let (status_tx, status_rx) = watch::channel(TunnelStatus::Starting);
+        Ok(Self {
+            local_addr,
+            remote_addr,
+            key: Arc::from(key),
+            shutdown: CancellationToken::new(),
+            status_tx,
+            status_rx,
+            diagnostics: Diagnostics::default(),
+        })
+    }
+
     /// How this tunnel's direct setups go, if it has any: how it maps its
     /// direct endpoint's port and whether it tries a shared local network
     /// first, both noted in its diagnostics from the start; and what that
