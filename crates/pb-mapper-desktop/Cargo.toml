@@ -29,7 +29,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-ring.workspace = true
+# `std`: its errors are `std::error::Error`, kept as the cause of ours.
+ring = { workspace = true, features = ["std"] }
 base64.workspace = true
 parking_lot.workspace = true
 bytes.workspace = true

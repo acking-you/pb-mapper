@@ -277,7 +277,7 @@ impl Supervisor {
             self.enabled = false;
             self.deactivate().await;
             self.message = "Background hosting stopped, but the authorization change could not be saved; configure it again before starting".into();
-            return Err(error(&self.message));
+            return Err(error(self.message.clone()));
         }
         self.persistence_failed = false;
         Ok(())

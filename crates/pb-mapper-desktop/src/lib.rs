@@ -102,10 +102,10 @@ pub trait ControlLease: 'static {}
 impl<T: 'static> ControlLease for T {}
 
 pub type Result<T> = io::Result<T>;
-/// A failure this crate describes, as `ErrorKind::Other`. An error value
-/// goes through `io::Error::other` instead, which keeps it as the cause.
-pub(crate) fn error(e: impl std::fmt::Display) -> io::Error {
-    io::Error::other(e.to_string())
+/// A failure as `ErrorKind::Other`: a message this crate writes, or an
+/// error value, which stays the cause; either way its text is the failure's.
+pub(crate) fn error(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    io::Error::other(e)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
