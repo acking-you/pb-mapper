@@ -396,7 +396,9 @@ fn tier(
                 || words.iter().any(|word| label.contains(word))
         })
     };
-    if kind == Kind::Loopback || addrs.iter().all(|(ip, _)| ip.is_loopback()) {
+    // Only the loopback interface holds a loopback address, whatever else it
+    // holds: WSL's mirrored networking and service addresses put more on it.
+    if kind == Kind::Loopback || addrs.iter().any(|(ip, _)| ip.is_loopback()) {
         return InterfaceTier::Loopback;
     }
     if kind == Kind::Cellular
@@ -755,6 +757,18 @@ mod tests {
         assert_eq!(
             android(T::PeerToPeerWireless, "p2p0"),
             InterfaceTier::Virtual
+        );
+    }
+
+    /// Linux's `lo` as WSL's mirrored networking sets it up, and as hosts
+    /// that put a service address on it do: loopback, which no peer shares,
+    /// even before netdev has said so.
+    #[test]
+    fn a_loopback_interface_stays_loopback_with_another_address_on_it() {
+        let lo = [(ip("127.0.0.1"), 8), (ip("10.255.255.254"), 32)];
+        assert_eq!(
+            tier(Kind::Unknown, &["lo"], None, None, &lo),
+            InterfaceTier::Loopback
         );
     }
 
