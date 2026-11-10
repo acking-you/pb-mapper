@@ -14,10 +14,15 @@ keywords = ["proxy", "tunnel", "relay", "tcp", "udp"]
 categories = ["command-line-utilities", "network-programming"]
 publish = ["crates-io"]
 
-# The binary keeps the name `pb-mapper`, discovered from
-# `src/bin/pb-mapper.rs`. Release workflows, both Dockerfiles, and the install
-# scripts all hardcode it, and `cargo build --bin pb-mapper` resolves it from
-# the workspace root regardless of which crate holds it.
+# The binary keeps the name `pb-mapper`. Release workflows, both Dockerfiles,
+# and the install scripts all hardcode it, and `cargo build --bin pb-mapper`
+# resolves it from the workspace root regardless of which crate holds it.
+# It is not documented: rustdoc would write it to `pb_mapper/`, where the
+# `pb-mapper` SDK's library documentation goes.
+[[bin]]
+name = "pb-mapper"
+path = "src/bin/pb-mapper.rs"
+doc = false
 
 [dependencies]
 pb-mapper-auth.workspace = true
