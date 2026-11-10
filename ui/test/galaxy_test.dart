@@ -201,6 +201,14 @@ void main() {
       expect(computeFrameInDart(truncated, _frame(), out), -1);
     });
 
+    test('a system however far away draws a bounded frame', () {
+      for (final x in [1e6, double.infinity]) {
+        final far = _encode(_scene())..[5] = x;
+        final needed = computeFrameInDart(far, _frame(), Float32List(0));
+        expect(needed, inInclusiveRange(-(1 << 20), -2), reason: '$x');
+      }
+    });
+
     test('the frame buffer computes in Dart without the library', () {
       GalaxyNative.reset();
       final buffer = GalaxyFrameBuffer();
@@ -221,11 +229,13 @@ void main() {
       GalaxyNative.use(DynamicLibrary.open(library!));
       addTearDown(GalaxyNative.reset);
       final random = math.Random(7);
-      for (var i = 0; i < 32; i++) {
+      for (var i = 0; i < 33; i++) {
         final scene = _encode(
           _scene(shares: random.nextInt(14), remote: random.nextInt(20)),
           appeared: {'share:share-0': 2.5},
         );
+        // The last puts a star so far out that the guides reach their bound.
+        if (i == 32) scene[5] = 1e6;
         final frame = _frame(
           yaw: random.nextDouble() * math.pi * 2,
           tilt: 0.2 + random.nextDouble(),
@@ -245,7 +255,7 @@ void main() {
         native.frame.setAll(0, frame);
         final fromRust = Float32List.fromList(native.compute(scene)!);
         native.dispose();
-        final dart = Float32List(1 << 18);
+        final dart = Float32List(1 << 20);
         final written = computeFrameInDart(scene, frame, dart);
         expect(fromRust.length, written, reason: 'frame $i length');
         for (var v = 0; v < written; v++) {

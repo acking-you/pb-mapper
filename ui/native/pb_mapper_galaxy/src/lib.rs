@@ -709,6 +709,11 @@ fn orbit_point(
     }
 }
 
+/// The most guide circles the plane draws. A scene the app lays out reaches a
+/// few hundred units at most, well inside it; past it, a scene with an
+/// enormous or infinite coordinate still costs a bounded frame.
+const MAX_GUIDES: usize = 1024;
+
 fn plane(scene: &Scene, camera: &Camera, out: &mut Out, circle: &[(f64, f64); 97]) {
     if scene.systems.is_empty() {
         for _ in 0..6 {
@@ -761,7 +766,7 @@ fn plane(scene: &Scene, camera: &Camera, out: &mut Out, circle: &[(f64, f64); 97
     let guides = out.hole();
     let mut n = 0;
     let mut r = 2.6;
-    while r < reach {
+    while r < reach && n < MAX_GUIDES {
         out.push(1.0 - r / (reach * 1.15));
         runs(
             camera,
