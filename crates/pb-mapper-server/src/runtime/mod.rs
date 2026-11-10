@@ -337,6 +337,7 @@ mod tests {
     use super::*;
     use crate::routing::{ImutableKey, ServerConnInfo, service_conn_count};
     use pb_mapper_auth::{AuthConfig, AuthRuntime, LegacyProtocolPolicy};
+    use pb_mapper_core::conn_id::RemoteConnId;
     use pb_mapper_core::test_support::{
         PROCESS_CREDENTIAL_TEST_LOCK, TEST_ADMIN_KEY_BYTES, TempPath,
     };
@@ -372,7 +373,7 @@ mod tests {
         let key: ImutableKey = Arc::from("echo");
 
         // One registered control connection, holding the first ID the manager hands out.
-        let retired = router.manager.get_conn_id(std::iter::empty());
+        let retired = router.manager.get_conn_id(std::iter::empty()).unwrap();
         let (conn_sender, _conn_receiver) = kanal::bounded_async(MAILBOX_CAPACITY);
         router.manager.sign_up_conn_sender(retired, conn_sender);
         router.server_conn_map.insert(
@@ -404,12 +405,15 @@ mod tests {
         );
 
         // The retired socket task has not unwound yet, so its ID is still spoken for.
-        let replacement = router.manager.get_conn_id(
-            router
-                .server_conn_map
-                .iter()
-                .flat_map(|(_, ids)| ids.iter().map(|info| info.conn_id)),
-        );
+        let replacement = router
+            .manager
+            .get_conn_id(
+                router
+                    .server_conn_map
+                    .iter()
+                    .flat_map(|(_, ids)| ids.iter().map(|info| info.conn_id)),
+            )
+            .unwrap();
         assert_ne!(
             replacement, retired,
             "the retired id was handed to a new connection while its guard was still live"
@@ -451,7 +455,63 @@ mod tests {
         );
 
         // And the ID is available again now that its task is gone.
-        assert_eq!(router.manager.get_conn_id(std::iter::empty()), retired);
+        assert_eq!(
+            router.manager.get_conn_id(std::iter::empty()),
+            Some(retired)
+        );
+
+        drop(router);
+        auth.shutdown_actor().await;
+        drop(auth);
+    }
+
+    /// A connection that ends before it authenticates, as a port scan's does,
+    /// still returns the ID its accept took. Each one that did not was an ID
+    /// gone for good, and the counter behind fresh ones only climbed.
+    #[tokio::test]
+    async fn a_connection_that_never_authenticates_returns_its_id() {
+        let state_dir = TempPath::new("probe-id");
+        let auth = AuthRuntime::from_isolated_state(AuthConfig {
+            state_dir: state_dir.to_path_buf(),
+            ..AuthConfig::default()
+        })
+        .await
+        .unwrap();
+        let mut router = Router::new(
+            TaskManager::new(),
+            direct::DirectState::new(None),
+            ServerSecurity::new(auth.clone()),
+            None,
+            RoutingConfig::from_env(),
+            Instant::now(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let probe = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (accepted, peer_addr) = listener.accept().await.unwrap();
+        drop(probe);
+
+        assert!(
+            router
+                .handle(ManagerTask::Accept {
+                    stream: accepted.into(),
+                    peer_addr,
+                })
+                .is_continue()
+        );
+        // Bounds a hang, not a speed: the probe's socket is already closed.
+        let returned =
+            tokio::time::timeout(Duration::from_secs(10), router.manager.wait_for_task())
+                .await
+                .expect("the probe's connection ended without returning its id")
+                .unwrap();
+        assert!(router.handle(returned).is_continue());
+        assert_eq!(
+            router.manager.get_conn_id(std::iter::empty()),
+            Some(RemoteConnId::from(0)),
+            "the probe's id serves the next connection"
+        );
 
         drop(router);
         auth.shutdown_actor().await;

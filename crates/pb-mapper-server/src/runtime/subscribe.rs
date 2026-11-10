@@ -14,6 +14,7 @@ use crate::error::{
     TaskCenterClientSendStreamSnafu, TaskCenterSendStreamRespToClientSnafu,
     TaskCenterSendSubcribeRespSnafu, TaskCenterStreamConnIdNotExistSnafu,
 };
+use crate::guard::ConnLease;
 use crate::routing::{
     ImutableKey, PendingStream, ServerConnHealth, ServerConnInfo, cancel_and_remove_server_conn,
     record_server_conn_activity_by_conn_id, registered_server_conn_count, service_conn_count,
@@ -225,10 +226,12 @@ impl Router {
         key: ImutableKey,
         stream: RelayStream,
         session: ServerHeaderSession,
-        server_id: RemoteConnId,
+        server: ConnLease,
         client_id: RemoteConnId,
         server_generation: u64,
     ) {
+        // A stream dropped here returns its ID as `server` drops with it.
+        let server_id = server.conn_id();
         let Some(PendingStream {
             server_conn_id: expected_control_conn_id,
             server_generation: expected_generation,
@@ -296,7 +299,7 @@ impl Router {
             client_sender
                 .try_send(ConnTask::StreamResp {
                     data_protocol,
-                    server_id,
+                    server,
                     server_generation: expected_generation,
                     stream,
                     session,

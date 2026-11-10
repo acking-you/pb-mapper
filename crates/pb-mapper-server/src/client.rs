@@ -17,7 +17,7 @@ use crate::error::{
     ClientConnCreateHeaderToolSnafu, ClientConnEncodeStreamRespSnafu,
     ClientConnWriteStreamRespSnafu,
 };
-use crate::guard::{DeregisterGuard, Deregistration};
+use crate::guard::{ConnLease, Deregistration};
 use pb_mapper_core::checksum::{AesKeyType, gen_random_key};
 use pb_mapper_core::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec};
 use pb_mapper_core::config::{stream_ack_timeout, stream_ready_timeout, stream_recovery_timeout};
@@ -90,30 +90,28 @@ const DEFAULT_CLIENT_CHAN_CAP: usize = 32;
 /// `selected` pins the registration and generation a direct setup's relay
 /// fallback was granted; a plain subscription leaves the choice to the manager.
 /// The function's name is its span's name in the logs.
-#[instrument(skip(task_sender, conn, session))]
+#[instrument(skip(lease, task_sender, conn, session), fields(conn_id = %lease.conn_id()))]
 pub(super) async fn handle_client_conn_selected(
     key: ImutableKey,
-    conn_id: RemoteConnId,
+    lease: ConnLease,
     task_sender: ManagerTaskSender,
     mut conn: RelayStream,
     session: ServerHeaderSession,
     data_protocol: Option<u16>,
     selected: Option<(RemoteConnId, u64)>,
 ) -> Result<()> {
+    let conn_id = lease.conn_id();
+    let mut guard = lease.hand_to(ClientDeregistration {
+        key: key.clone(),
+        client_id: conn_id,
+        server_id: None,
+    });
     DataCodec::validate_offer(data_protocol, session.protocol()).context(
         ClientConnCreateHeaderToolSnafu {
             tool: "data protocol",
         },
     )?;
     let prev_time = Instant::now();
-    let mut guard = DeregisterGuard::new(
-        ClientDeregistration {
-            key: key.clone(),
-            client_id: conn_id,
-            server_id: None,
-        },
-        task_sender.clone(),
-    );
     // Bounds the whole subscribe exchange, every wait for the manager included.
     let setup_timeout = pb_mapper_core::config::control_io_timeout().min(Duration::from_secs(5));
     let setup_result = timeout(
@@ -138,7 +136,7 @@ pub(super) async fn handle_client_conn_selected(
     let ReadyStream {
         mut server_stream,
         server_session,
-        server_id,
+        server,
         codec_key,
         is_datagram,
         data_protocol: server_data_protocol,
@@ -156,6 +154,8 @@ pub(super) async fn handle_client_conn_selected(
             return Err(e);
         }
     };
+    // This connection's deregistration returns the stream's ID from here on.
+    let server_id = server.transfer();
     guard.what_mut().server_id = Some(server_id);
     DataCodec::validate_offer(server_data_protocol, server_session.protocol()).context(
         ClientConnCreateHeaderToolSnafu {
@@ -467,7 +467,7 @@ async fn write_subscribe_response(
 struct ReadyStream {
     server_stream: RelayStream,
     server_session: ServerHeaderSession,
-    server_id: RemoteConnId,
+    server: ConnLease,
     codec_key: Option<AesKeyType>,
     is_datagram: bool,
     data_protocol: Option<u16>,
@@ -662,7 +662,7 @@ async fn get_server_stream(
         match resp {
             ConnTask::StreamResp {
                 data_protocol,
-                server_id,
+                server,
                 server_generation: response_generation,
                 stream,
                 session: stream_session,
@@ -670,7 +670,7 @@ async fn get_server_stream(
                 return Ok(ReadyStream {
                     server_stream: stream,
                     server_session: stream_session,
-                    server_id,
+                    server,
                     codec_key,
                     is_datagram,
                     data_protocol,
@@ -729,7 +729,7 @@ async fn get_server_stream(
 
         if let ConnTask::StreamResp {
             data_protocol,
-            server_id,
+            server,
             server_generation: response_generation,
             stream,
             session: stream_session,
@@ -739,7 +739,7 @@ async fn get_server_stream(
                 return Ok(ReadyStream {
                     server_stream: stream,
                     server_session: stream_session,
-                    server_id,
+                    server,
                     codec_key,
                     is_datagram,
                     data_protocol,
@@ -751,7 +751,7 @@ async fn get_server_stream(
                 client_conn_id = %conn_id,
                 expected_server_conn_id = %server_conn_id,
                 expected_generation = server_generation,
-                server_conn_id = %server_id,
+                server_conn_id = %server.conn_id(),
                 response_generation,
                 "ignoring stale server stream response"
             );

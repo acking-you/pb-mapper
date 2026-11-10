@@ -12,6 +12,7 @@ use pb_mapper_protocol::secure::ServerHeaderSession;
 use pb_mapper_protocol::transport::RelayStream;
 use tokio_util::sync::CancellationToken;
 
+use crate::guard::ConnLease;
 use crate::manager::{self, ReceiverChan, SenderChan};
 use crate::routing::ImutableKey;
 use crate::{ServerStatusInfo, direct};
@@ -55,7 +56,8 @@ pub enum ManagerTask {
         key: ImutableKey,
         stream: RelayStream,
         session: ServerHeaderSession,
-        server_id: RemoteConnId,
+        /// The provider stream socket's ID, which goes where the stream goes.
+        server: ConnLease,
         client_id: RemoteConnId,
         server_generation: u64,
     },
@@ -119,6 +121,8 @@ pub enum ManagerTask {
     /// that loop's single await is a channel receive, and racing it against a tick
     /// in `tokio::select!` would drop a task the receive had already taken.
     SweepServerLeases,
+    /// A connection that registered no service ended: a subscriber, a direct
+    /// control connection, or one that registered nothing under its ID.
     DeRegisterClientConn {
         /// The provider stream socket that served this subscriber, once one has:
         /// the connection that sent `Stream`, not the registered control
@@ -172,8 +176,9 @@ pub enum ConnTask {
     },
     StreamResp {
         data_protocol: Option<u16>,
-        /// The provider stream socket handed over, not its control connection.
-        server_id: RemoteConnId,
+        /// The ID of the provider stream socket handed over, not of its
+        /// control connection; returned if the stream is dropped on the way.
+        server: ConnLease,
         server_generation: u64,
         stream: RelayStream,
         session: ServerHeaderSession,
@@ -205,7 +210,7 @@ mod task_tests {
     fn no_conn_task_is_wider_than_a_stream_hand_off() {
         let stream_hand_off = size_of::<RelayStream>()
             + size_of::<ServerHeaderSession>()
-            + size_of::<(Option<u16>, RemoteConnId, u64)>();
+            + size_of::<(Option<u16>, ConnLease, u64)>();
         assert!(
             size_of::<ConnTask>() <= stream_hand_off,
             "ConnTask is {} bytes, a stream hand-off {stream_hand_off}",

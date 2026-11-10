@@ -45,6 +45,7 @@ use crate::error::{
     Result, ServerListenSnafu, TaskCenterInitRequestTimeoutSnafu, TaskCenterSendListenerSnafu,
     TaskCenterSendStreamRespToManagerSnafu, TaskCenterSetKeepAliveSnafu,
 };
+use crate::guard::ConnLease;
 use crate::routing::ImutableKey;
 use crate::server::{ServerRegistration, handle_server_conn};
 use crate::service_key::scoped_service_key;
@@ -169,15 +170,18 @@ pub(super) fn log_auth_failure(
     }
 }
 
-#[instrument(skip(manager_task_sender, conn, security, quic_capability), fields(conn_id = %conn_id, peer_addr = %peer_addr))]
+/// Serve one accepted connection. `lease` returns its ID whichever way this
+/// ends, through the guard of the role it takes on if it gets that far.
+#[instrument(skip(lease, manager_task_sender, conn, security, quic_capability), fields(conn_id = %lease.conn_id(), peer_addr = %peer_addr))]
 pub(super) async fn handle_conn(
-    conn_id: RemoteConnId,
+    lease: ConnLease,
     peer_addr: SocketAddr,
     manager_task_sender: ManagerTaskSender,
     mut conn: RelayStream,
     security: ServerSecurity,
     quic_capability: Option<Arc<pb_mapper_protocol::command::QuicEndpoint>>,
 ) -> Result<()> {
+    let conn_id = lease.conn_id();
     let timeout = control_io_timeout();
     let initial = match tokio::time::timeout(timeout, security.read_initial(&mut conn)).await {
         Err(_) => TaskCenterInitRequestTimeoutSnafu { conn_id, timeout }.fail()?,
@@ -249,6 +253,7 @@ pub(super) async fn handle_conn(
     };
     let admitted = Admitted {
         conn_id,
+        lease,
         peer_addr,
         conn,
         session,
@@ -454,6 +459,9 @@ impl InitRequest {
 /// request named.
 struct Admitted {
     conn_id: RemoteConnId,
+    /// Taken over by a role that registers something under the ID; a role
+    /// that does not drops it, with the rest, when it is done.
+    lease: ConnLease,
     peer_addr: SocketAddr,
     conn: RelayStream,
     session: ServerHeaderSession,
@@ -481,7 +489,7 @@ async fn serve_quic_endpoint(
 
 async fn serve_direct_control(admitted: Admitted) {
     let Admitted {
-        conn_id,
+        lease,
         conn,
         session,
         namespace,
@@ -491,7 +499,7 @@ async fn serve_direct_control(admitted: Admitted) {
     if session.protocol() != HeaderProtocol::V2 {
         return;
     }
-    if let Err(error) = direct::handle_control(conn_id, namespace, conn, session, manager).await {
+    if let Err(error) = direct::handle_control(lease, namespace, conn, session, manager).await {
         tracing::debug!(%error, "direct control closed");
     }
 }
@@ -505,6 +513,7 @@ async fn serve_direct_relay(
 ) -> Result<()> {
     let Admitted {
         conn_id,
+        lease,
         mut conn,
         session,
         auth,
@@ -556,7 +565,7 @@ async fn serve_direct_relay(
         |conn, session| {
             handle_client_conn_selected(
                 key,
-                conn_id,
+                lease,
                 manager,
                 conn,
                 session,
@@ -571,6 +580,7 @@ async fn serve_direct_relay(
 async fn serve_register(admitted: Admitted, request: RegisterRequest) -> Result<()> {
     let Admitted {
         conn_id,
+        lease,
         peer_addr,
         mut conn,
         session,
@@ -620,7 +630,7 @@ async fn serve_register(admitted: Admitted, request: RegisterRequest) -> Result<
                     need_codec,
                     is_datagram,
                     protocol_version,
-                    conn_id,
+                    lease,
                     direct: direct
                         .filter(|v| {
                             *v == pb_mapper_protocol::direct::DIRECT_VERSION
@@ -645,6 +655,7 @@ async fn serve_subscribe(
 ) -> Result<()> {
     let Admitted {
         conn_id,
+        lease,
         peer_addr,
         mut conn,
         session,
@@ -671,7 +682,7 @@ async fn serve_subscribe(
         conn_id,
         "subscribed data connection",
         |conn, session| {
-            handle_client_conn_selected(key, conn_id, manager, conn, session, data_protocol, None)
+            handle_client_conn_selected(key, lease, manager, conn, session, data_protocol, None)
         },
     )
     .await
@@ -686,6 +697,7 @@ async fn serve_stream(
 ) -> Result<()> {
     let Admitted {
         conn_id,
+        lease,
         peer_addr,
         mut conn,
         session,
@@ -707,13 +719,14 @@ async fn serve_stream(
     else {
         return Ok(());
     };
+    // The stream goes to a subscriber, and its ID with it.
     manager
         .send(ManagerTask::Stream {
             data_protocol,
             key: key.clone(),
             stream: conn,
             session,
-            server_id: conn_id,
+            server: lease,
             client_id: dst_id.into(),
             server_generation,
         })
@@ -724,6 +737,7 @@ async fn serve_stream(
 async fn serve_status(admitted: Admitted, status: PbConnStatusReq) -> Result<()> {
     let Admitted {
         conn_id,
+        lease,
         peer_addr,
         conn,
         session,
@@ -745,7 +759,7 @@ async fn serve_status(admitted: Admitted, status: PbConnStatusReq) -> Result<()>
         &auth,
         conn_id,
         "status request",
-        |conn, session| handle_show_status(status, namespace, manager, conn_id, conn, session),
+        |conn, session| handle_show_status(status, namespace, manager, lease, conn, session),
     )
     .await
 }

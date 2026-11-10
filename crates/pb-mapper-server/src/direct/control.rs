@@ -1,7 +1,7 @@
 //! One direct coordination connection's socket loop.
 use super::DirectTask;
 use crate::ManagerTask;
-use crate::guard::{DeregisterGuard, Deregistration};
+use crate::guard::{ConnLease, Deregistration};
 use pb_mapper_core::conn_id::RemoteConnId;
 // Also brings `CONTROL_IDLE` and `CONTROL_WRITE_TIMEOUT`, the timings both
 // ends of a control connection share.
@@ -49,7 +49,7 @@ impl Deregistration for ControlDeregistration {
 }
 
 pub(crate) async fn handle_control(
-    connection: RemoteConnId,
+    lease: ConnLease,
     namespace: u64,
     socket: pb_mapper_protocol::transport::RelayStream,
     session: pb_mapper_protocol::secure::ServerHeaderSession,
@@ -59,14 +59,15 @@ pub(crate) async fn handle_control(
         MessageReader, MessageWriter,
         command::{MessageSerializer, PbConnResponse},
     };
+    let connection = lease.conn_id();
+    // Dropped, never awaited: whichever way this returns, the drop queues the
+    // cleanup without waiting on the manager.
+    let _guard = lease.hand_to(ControlDeregistration { connection });
     // Causes stay typed inside the `io::Error`; their text is what it displays.
     let io = std::io::Error::other::<pb_mapper_core::error::Error>;
     let auth = session.context().map_err(io)?.clone();
     let cancellation = auth.cancellation_token().map_err(std::io::Error::other)?;
     let (events, mut rx) = mpsc::channel(CONTROL_EVENT_QUEUE);
-    // Dropped, never awaited: whichever way this returns, the drop queues the
-    // cleanup without waiting on the manager.
-    let _guard = DeregisterGuard::new(ControlDeregistration { connection }, sender.clone());
     sender
         .send(ManagerTask::Direct(DirectTask::Connect {
             connection,

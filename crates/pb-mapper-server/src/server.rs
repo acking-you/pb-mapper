@@ -13,7 +13,7 @@ use super::error::{
     ServerConnWriteRegisterRespSnafu, ServerConnWriteStreamRequestSnafu,
 };
 use super::{ConnTask, ConnTaskReceiver, ImutableKey, ManagerTask, ManagerTaskSender, Result};
-use crate::guard::{DeregisterGuard, Deregistration};
+use crate::guard::{ConnLease, Deregistration};
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::command::{
     CONTROL_PROTOCOL_V2, LocalServer, MessageSerializer, PbConnResponse, PbServerRequest,
@@ -105,7 +105,7 @@ pub struct ServerRegistration {
     pub need_codec: bool,
     pub is_datagram: bool,
     pub protocol_version: u16,
-    pub conn_id: RemoteConnId,
+    pub lease: ConnLease,
     pub direct: Option<pb_mapper_auth::AuthContext>,
 }
 
@@ -124,9 +124,16 @@ pub async fn handle_server_conn(
         need_codec,
         is_datagram,
         protocol_version,
-        conn_id,
+        lease,
         direct,
     } = registration;
+    let conn_id = lease.conn_id();
+    // Taken over before the registration is sent, so that whichever way this
+    // ends, what it registered goes with its ID.
+    let mut guard = lease.hand_to(ServerDeregistration {
+        key: key.clone(),
+        conn_id,
+    });
     let (tx, rx) = kanal::bounded_async(DEFAULT_SERVER_CHAN_CAP);
     // Handed to the manager so a retirement can cancel this connection's socket
     // directly. Queuing `ConnTask::Retire` is not enough on its own: the writer
@@ -160,13 +167,6 @@ pub async fn handle_server_conn(
         "server register task sent to manager"
     );
 
-    let mut guard = DeregisterGuard::new(
-        ServerDeregistration {
-            key: key.clone(),
-            conn_id,
-        },
-        task_sender.clone(),
-    );
     let result = async {
         let response = rx
             .recv()

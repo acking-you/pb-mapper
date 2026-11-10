@@ -151,7 +151,9 @@ const MANAGER_QUEUE_CAPACITY: usize = 1024;
 
 /// Hands out connection IDs, and routes each registered ID to its mailbox.
 pub struct TaskManager {
-    /// The next ID never handed out; every ID below it has been.
+    /// The next ID never handed out; every ID below it has been. It stops at
+    /// `u32::MAX`, which is never handed out, rather than wrap onto IDs that
+    /// live connections may hold.
     next_conn_id: RemoteConnId,
     /// Held for the manager's whole life, so its receiver never reports closed.
     sender: TaskSender,
@@ -224,8 +226,9 @@ impl TaskManager {
     ///
     /// So the ID stays out of circulation until [`Self::recycle_conn_id`], which
     /// the manager calls when the guard's deregistration finally arrives — the one
-    /// point at which nothing will speak for that ID again. Every registered
-    /// connection produces exactly one such task, so no ID is stranded.
+    /// point at which nothing will speak for that ID again. Every accepted
+    /// connection produces exactly one such task, however it ends, so no ID is
+    /// stranded.
     #[inline]
     pub fn drop_conn_sender(&mut self, conn_id: RemoteConnId) -> bool {
         self.active_conn_map.remove(&conn_id).is_some()
@@ -242,16 +245,20 @@ impl TaskManager {
     /// An ID for a newly accepted connection: an idle one when one is free,
     /// otherwise one never handed out. `registered` names the IDs the service
     /// map still holds, which are never reused.
+    ///
+    /// `None` once every ID is held, which takes four billion connections
+    /// open at once: the caller refuses the connection, and an ID that comes
+    /// back is handed out again.
     pub fn get_conn_id(
         &mut self,
         registered: impl Iterator<Item = RemoteConnId> + Clone,
-    ) -> RemoteConnId {
+    ) -> Option<RemoteConnId> {
         while let Some(conn_id) = self.idle_conn_ids.pop() {
             if self.is_issued(&conn_id)
                 && !self.active_conn_map.contains_key(&conn_id)
                 && !registered.clone().any(|id| id == conn_id)
             {
-                return conn_id;
+                return Some(conn_id);
             } else {
                 tracing::warn!(
                     "You got invalid or active `conn_id` from `idle_list`!
@@ -262,8 +269,8 @@ impl TaskManager {
         }
 
         let conn_id = self.next_conn_id;
-        self.next_conn_id += 1;
-        conn_id
+        self.next_conn_id = u32::from(conn_id).checked_add(1)?.into();
+        Some(conn_id)
     }
 
     #[instrument(skip(self, sender))]
@@ -293,7 +300,7 @@ mod tests {
     #[test]
     fn recycling_an_id_twice_queues_it_once() {
         let mut manager = TaskManager::new();
-        let first = manager.get_conn_id(std::iter::empty());
+        let first = manager.get_conn_id(std::iter::empty()).unwrap();
         manager.sign_up_conn_sender(first, sender());
         assert!(manager.drop_conn_sender(first));
 
@@ -301,23 +308,43 @@ mod tests {
         manager.recycle_conn_id(first);
 
         assert_eq!(manager.idle_conn_count(), 1);
-        assert_eq!(manager.get_conn_id(std::iter::empty()), first);
+        assert_eq!(manager.get_conn_id(std::iter::empty()), Some(first));
         assert_eq!(
             manager.get_conn_id(std::iter::empty()),
-            RemoteConnId::from(1)
+            Some(RemoteConnId::from(1))
         );
+    }
+
+    /// Past the last fresh ID a new connection is refused, not handed an ID
+    /// that wrapped round to one a live connection holds.
+    #[test]
+    fn the_end_of_the_id_space_refuses_rather_than_wraps() {
+        let mut manager = TaskManager::new();
+        let live = manager.get_conn_id(std::iter::empty()).unwrap();
+        manager.sign_up_conn_sender(live, sender());
+        manager.next_conn_id = RemoteConnId::from(u32::MAX - 1);
+
+        let last = manager.get_conn_id(std::iter::empty()).unwrap();
+        assert_eq!(last, RemoteConnId::from(u32::MAX - 1));
+        assert_eq!(manager.get_conn_id(std::iter::empty()), None);
+        assert_eq!(manager.get_conn_id(std::iter::empty()), None);
+
+        // An ID that comes back serves the next connection.
+        manager.recycle_conn_id(last);
+        assert_eq!(manager.get_conn_id(std::iter::empty()), Some(last));
+        assert!(manager.get_conn_sender_chan(&live).is_some());
     }
 
     #[test]
     fn idle_id_is_not_reused_while_active() {
         let mut manager = TaskManager::new();
-        let active = manager.get_conn_id(std::iter::empty());
+        let active = manager.get_conn_id(std::iter::empty()).unwrap();
         manager.sign_up_conn_sender(active, sender());
         manager.idle_conn_ids.push(active);
 
         assert_eq!(
             manager.get_conn_id(std::iter::empty()),
-            RemoteConnId::from(1)
+            Some(RemoteConnId::from(1))
         );
         assert!(manager.get_conn_sender_chan(&active).is_some());
     }

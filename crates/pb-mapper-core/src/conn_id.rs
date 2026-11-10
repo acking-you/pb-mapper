@@ -1,6 +1,5 @@
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
-use std::ops::AddAssign;
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RemoteConnId(u32);
@@ -44,27 +43,13 @@ macro_rules! impl_primitive_from_tupe {
     };
 }
 
-macro_rules! impl_tuple_add_assign_primitive {
-    ($primitive_ty:ident, $tuple_ty:ident) => {
-        impl AddAssign<$primitive_ty> for $tuple_ty {
-            fn add_assign(&mut self, rhs: $primitive_ty) {
-                self.0 += rhs
-            }
-        }
-    };
-}
-
 impl_tuple_from_primitive!(u32, RemoteConnId);
 
 impl_primitive_from_tupe!(u32, RemoteConnId);
 
-impl_tuple_add_assign_primitive!(u32, RemoteConnId);
-
 impl_tuple_from_primitive!(u32, LocalConnId);
 
 impl_primitive_from_tupe!(u32, LocalConnId);
-
-impl_tuple_add_assign_primitive!(u32, LocalConnId);
 
 impl Display for RemoteConnId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

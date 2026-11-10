@@ -13,6 +13,7 @@ use pb_mapper_protocol::transport::RelayStream;
 
 use super::Router;
 use crate::connection::handle_conn;
+use crate::guard::ConnLease;
 use crate::manager::TaskManager;
 use crate::routing::{
     ImutableKey, NamespaceRateLimits, PendingStreams, RoutingConfig, ServerConnMap,
@@ -132,7 +133,7 @@ impl Router {
                 key,
                 stream,
                 session,
-                server_id,
+                server,
                 client_id,
                 server_generation,
             } => self.on_stream(
@@ -140,7 +141,7 @@ impl Router {
                 key,
                 stream,
                 session,
-                server_id,
+                server,
                 client_id,
                 server_generation,
             ),
@@ -166,11 +167,20 @@ impl Router {
     }
 
     pub(super) fn on_accept(&mut self, stream: RelayStream, peer_addr: SocketAddr) {
-        let conn_id = self.manager.get_conn_id(
+        let Some(conn_id) = self.manager.get_conn_id(
             self.server_conn_map
                 .iter()
                 .flat_map(|(_, ids)| ids.iter().map(|v| v.conn_id)),
-        );
+        ) else {
+            // Dropping the stream closes it.
+            tracing::error!(
+                event = "conn_refused",
+                peer_addr = %peer_addr,
+                active_connections = self.manager.active_conn_count(),
+                "refused a connection: every connection id is in use"
+            );
+            return;
+        };
         tracing::info!(
             event = "conn_accepted",
             conn_id = %conn_id,
@@ -182,12 +192,15 @@ impl Router {
             "accepted pb connection"
         );
         let manager_task_sender = self.manager.get_task_sender().for_connection();
+        // Made where the ID is taken, so that it comes back however the
+        // connection ends, even as a task aborted before it first ran.
+        let lease = ConnLease::new(conn_id, manager_task_sender.clone());
         let security = self.security.clone();
         let quic_capability = self.quic_capability.clone();
         self.connection_tasks.spawn(async move {
             snafu_error_handle!(
                 handle_conn(
-                    conn_id,
+                    lease,
                     peer_addr,
                     manager_task_sender,
                     stream,

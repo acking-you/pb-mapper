@@ -1,13 +1,98 @@
 //! The one deregistration a connection task owes the routing manager.
 //!
-//! A socket task that told the manager about itself must tell it when it ends,
-//! whether it finishes, fails or is cancelled; the manager recycles the
-//! connection's ID only then. [`DeregisterGuard`] sends that task exactly once:
-//! awaited on the normal path, and from `Drop` otherwise, without blocking and
-//! without needing a runtime.
+//! Every accepted connection must tell the manager when it ends, whether it
+//! finishes, fails or is cancelled; the manager recycles the connection's ID
+//! only then. [`DeregisterGuard`] sends that task exactly once: awaited on the
+//! normal path, and from `Drop` otherwise, without blocking and without
+//! needing a runtime. The debt starts as a [`ConnLease`], made by the accept
+//! that takes the ID, and passes to the guard for the connection's role once
+//! the connection has one.
+
+use std::fmt;
+
+use pb_mapper_core::conn_id::RemoteConnId;
 
 use crate::manager::{ManagerClosed, TrySendError};
 use crate::task::{ManagerTask, ManagerTaskSender};
+
+/// An accepted connection's ID, owed back to the manager from the accept that
+/// took it until the connection ends, however it ends.
+///
+/// A connection that registers nothing under its ID, such as one that never
+/// authenticates or an administrator request, returns it bare when the lease
+/// drops. One that does hands the debt to the guard for its role
+/// ([`hand_to`](Self::hand_to)), which returns the ID along with what it
+/// registered. A provider's stream socket travels to its subscriber with its
+/// lease, and is returned by the subscriber's deregistration once the
+/// subscriber takes it ([`transfer`](Self::transfer)), or by the lease if it
+/// is dropped on the way.
+pub struct ConnLease(DeregisterGuard<IdRelease>);
+
+impl ConnLease {
+    pub(crate) fn new(conn_id: RemoteConnId, sender: ManagerTaskSender) -> Self {
+        Self(DeregisterGuard::new(IdRelease { conn_id }, sender))
+    }
+
+    pub(crate) fn conn_id(&self) -> RemoteConnId {
+        self.0.what.conn_id
+    }
+
+    /// The connection now registers `what` under its ID: its guard owes the
+    /// deregistration from here on, and this lease nothing.
+    pub(crate) fn hand_to<D: Deregistration>(mut self, what: D) -> DeregisterGuard<D> {
+        self.0.owed = Owed::Nothing;
+        DeregisterGuard::new(what, self.0.sender.clone())
+    }
+
+    /// Another connection's deregistration returns this ID from here on, so
+    /// this lease owes nothing. The ID is for that deregistration to name.
+    pub(crate) fn transfer(mut self) -> RemoteConnId {
+        self.0.owed = Owed::Nothing;
+        self.conn_id()
+    }
+
+    /// Return the ID and wait until the manager has it.
+    pub(crate) async fn release(mut self) {
+        self.0.deregister().await;
+    }
+}
+
+impl fmt::Debug for ConnLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ConnLease").field(&self.conn_id()).finish()
+    }
+}
+
+/// A connection that registered nothing under its ID: only the ID goes back.
+pub(crate) struct IdRelease {
+    conn_id: RemoteConnId,
+}
+
+impl Deregistration for IdRelease {
+    fn task(&self) -> ManagerTask {
+        ManagerTask::DeRegisterClientConn {
+            server_id: None,
+            client_id: self.conn_id,
+        }
+    }
+
+    fn manager_closed(&self) {}
+
+    fn dropped_manager_closed(&self) {}
+
+    fn dropped_queue_full(&self) {
+        tracing::warn!(
+            "manager queue is full; defer returning connection id {}",
+            self.conn_id
+        );
+    }
+
+    fn deferred_manager_closed() {}
+
+    fn no_runtime() {
+        tracing::warn!("cannot defer returning a connection id: no Tokio runtime is available");
+    }
+}
 
 /// What one kind of connection deregisters, and what it logs at each step.
 ///
@@ -58,7 +143,7 @@ enum Owed {
 }
 
 impl<D: Deregistration> DeregisterGuard<D> {
-    pub(crate) fn new(what: D, sender: ManagerTaskSender) -> Self {
+    fn new(what: D, sender: ManagerTaskSender) -> Self {
         Self {
             what,
             sender,
