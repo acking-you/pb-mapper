@@ -121,7 +121,7 @@ fn get_machine_mac_addresses_from_sysfs() -> io::Result<Vec<String>> {
         };
         mac_addresses.push(format!("{interface}:{mac}"));
     }
-    normalize_and_validate_mac_entries(&mut mac_addresses);
+    sort_and_dedup(&mut mac_addresses);
     Ok(mac_addresses)
 }
 
@@ -134,30 +134,12 @@ fn get_machine_mac_addresses_from_ip_link() -> io::Result<Vec<String>> {
 }
 
 fn macs_from_ip_link(stdout: &str) -> Vec<String> {
-    let mut mac_addresses = Vec::new();
-    let mut current_interface: Option<String> = None;
-    for line in stdout.lines() {
-        if !line.starts_with(' ') {
-            current_interface = parse_interface_name_from_ip_link(line);
-            continue;
-        }
-        let line = line.trim_start();
-        if !line.starts_with("link/ether ") {
-            continue;
-        }
-        let Some(interface) = current_interface.as_ref() else {
-            continue;
-        };
-        let Some(raw_mac) = line.split_whitespace().nth(1) else {
-            continue;
-        };
-        let Some(mac) = normalize_mac_address(raw_mac) else {
-            continue;
-        };
-        mac_addresses.push(format!("{interface}:{mac}"));
-    }
-    normalize_and_validate_mac_entries(&mut mac_addresses);
-    mac_addresses
+    macs_from_listing(
+        stdout,
+        |line| !line.starts_with(' '),
+        parse_interface_name_from_ip_link,
+        "link/ether ",
+    )
 }
 
 fn get_machine_mac_addresses_from_ifconfig() -> io::Result<Vec<String>> {
@@ -169,15 +151,33 @@ fn get_machine_mac_addresses_from_ifconfig() -> io::Result<Vec<String>> {
 }
 
 fn macs_from_ifconfig(stdout: &str) -> Vec<String> {
+    macs_from_listing(
+        stdout,
+        |line| !line.starts_with('\t') && !line.starts_with(' '),
+        parse_interface_name_from_ifconfig,
+        "ether ",
+    )
+}
+
+/// The `interface:mac` entries of an interface listing, sorted and
+/// deduplicated. Each header line names the interface the indented lines below
+/// it describe (`None` skips it); an indented line that starts with `marker`
+/// carries its MAC address as the next word.
+fn macs_from_listing(
+    stdout: &str,
+    is_header: fn(&str) -> bool,
+    interface_name: fn(&str) -> Option<String>,
+    marker: &str,
+) -> Vec<String> {
     let mut mac_addresses = Vec::new();
     let mut current_interface: Option<String> = None;
     for line in stdout.lines() {
-        if !line.starts_with('\t') && !line.starts_with(' ') {
-            current_interface = parse_interface_name_from_ifconfig(line);
+        if is_header(line) {
+            current_interface = interface_name(line);
             continue;
         }
         let line = line.trim_start();
-        if !line.starts_with("ether ") {
+        if !line.starts_with(marker) {
             continue;
         }
         let Some(interface) = current_interface.as_ref() else {
@@ -191,11 +191,11 @@ fn macs_from_ifconfig(stdout: &str) -> Vec<String> {
         };
         mac_addresses.push(format!("{interface}:{mac}"));
     }
-    normalize_and_validate_mac_entries(&mut mac_addresses);
+    sort_and_dedup(&mut mac_addresses);
     mac_addresses
 }
 
-fn normalize_and_validate_mac_entries(mac_addresses: &mut Vec<String>) {
+fn sort_and_dedup(mac_addresses: &mut Vec<String>) {
     mac_addresses.sort();
     mac_addresses.dedup();
 }
