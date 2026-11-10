@@ -861,3 +861,70 @@ fn resolve_namespace(
     }
     Ok(namespace)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pb_mapper_auth::{AuthConfig, AuthRuntime, LegacyProtocolPolicy};
+    use pb_mapper_core::test_support::{
+        PROCESS_CREDENTIAL_TEST_LOCK, TEST_ADMIN_KEY_BYTES, TempPath,
+    };
+    use pb_mapper_protocol::{
+        CodecMessageReader, CodecMessageWriter, MessageReader, get_decodec, get_encodec,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    /// An administrator change needs protocol v2's first-flight proof to claim
+    /// against replay. Sent with the administrator key over legacy framing, it
+    /// is refused before it reaches auth.
+    #[tokio::test]
+    async fn a_legacy_administrator_change_is_refused() {
+        let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+        let state_dir = TempPath::new("legacy-admin");
+        let auth = AuthRuntime::start(
+            TEST_ADMIN_KEY_BYTES,
+            AuthConfig {
+                state_dir: state_dir.to_path_buf(),
+                max_temporary_keys: 4,
+                max_temporary_key_ttl: Duration::from_secs(3600),
+                legacy_protocol: LegacyProtocolPolicy::Allow,
+            },
+        )
+        .await
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let relay = tokio::spawn(crate::run_server_on_listener(
+            listener,
+            shutdown.clone(),
+            None,
+            false,
+            auth.clone(),
+        ));
+
+        let key = TEST_ADMIN_KEY_BYTES;
+        let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let request = PbConnRequest::Admin(AdminRequest::LegacyProtocolSet {
+            policy: LegacyProtocolPolicy::Deny,
+        });
+        CodecMessageWriter::for_session_key(&mut socket, get_encodec(&key).unwrap(), key)
+            .write_msg(&request.encode().unwrap())
+            .await
+            .unwrap();
+        let mut reader =
+            CodecMessageReader::for_session_key(&mut socket, get_decodec(&key).unwrap(), key);
+        let response = tokio::time::timeout(Duration::from_secs(10), reader.read_msg())
+            .await
+            .unwrap()
+            .unwrap();
+        match PbConnResponse::decode(response).unwrap() {
+            PbConnResponse::Error(error) => assert_eq!(error.code, "admin_protocol_v2_required"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(auth.legacy_protocol_allowed().unwrap(), "the change was not made");
+
+        shutdown.cancel();
+        relay.await.unwrap().unwrap();
+    }
+}
