@@ -904,6 +904,18 @@ impl StreamForward for UdpStreamImpl {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::io;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use parking_lot::Mutex;
+    use pb_mapper_core::config::parse_duration;
+    use pb_mapper_core::error::Error;
+    use tokio::sync::Notify;
+
+    use super::*;
+
     #[tokio::test]
     async fn encrypted_stream_fin_requires_complete_authenticated_frames() {
         use crate::{data::DATA_PROTOCOL_V2, secure::HeaderProtocol};
@@ -1000,18 +1012,6 @@ mod tests {
         assert!(observer.nodelay().unwrap());
         forwarding.abort();
     }
-
-    use std::collections::VecDeque;
-    use std::io;
-    use std::sync::Arc;
-
-    use parking_lot::Mutex;
-    use std::time::Duration;
-
-    use super::*;
-    use pb_mapper_core::config::parse_duration;
-    use pb_mapper_core::error::Error;
-    use tokio::sync::Notify;
 
     enum ReadAction {
         Data(Vec<u8>),

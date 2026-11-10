@@ -424,18 +424,25 @@ gen_impl_msg_serializer!(PbConnResponse);
 gen_impl_msg_serializer!(PbServerRequest);
 gen_impl_msg_serializer!(LocalServer);
 
+/// Only a UDP port is advertised; use the IP of the authenticated TCP peer.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct QuicEndpoint {
+    pub port: u16,
+    pub certificate: Vec<u8>,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::PbConnRequest;
+    use super::*;
 
-    /// The wire form of `Register` is load-bearing: a running peer on the other
-    /// side of an upgrade has to keep parsing it. The `None` fields must stay
-    /// absent from the JSON rather than serialise as null.
+    /// The wire form a running peer on the other side of an upgrade has to
+    /// keep parsing: optional fields left `None` stay absent from the JSON
+    /// rather than serialise as null.
     #[test]
-    fn test_serde_mapper_header() {
-        let mapper = PbConnRequest::Register {
+    fn unset_optional_fields_are_absent_from_the_wire() {
+        let register = PbConnRequest::Register {
             direct: None,
-            key: "test".into(),
+            key: "legacy".into(),
             need_codec: false,
             is_datagram: false,
             protocol_version: None,
@@ -443,19 +450,35 @@ mod tests {
             heartbeat_interval_ms: None,
             heartbeat_tolerance_ms: None,
         };
-        let json_value = serde_json::to_string(&mapper).unwrap();
-        let raw_json_str =
-            r##"{"Register":{"need_codec":false,"is_datagram":false,"key":"test"}}"##;
-        assert_eq!(raw_json_str, json_value);
-
-        let value: PbConnRequest = serde_json::from_str(raw_json_str).unwrap();
-        assert_eq!(mapper, value)
+        let wire = br#"{"Register":{"need_codec":false,"is_datagram":false,"key":"legacy"}}"#;
+        assert_eq!(register.encode().unwrap(), wire);
+        assert_eq!(PbConnRequest::decode(wire).unwrap(), register);
+        assert_eq!(
+            serde_json::to_vec(&PbConnStatusReq::Service {
+                key: "legacy".into(),
+                direct_query: None
+            })
+            .unwrap(),
+            br#"{"Service":{"key":"legacy"}}"#
+        );
+        let response = PbConnResponse::RegisterV2 {
+            conn_id: 1,
+            generation: 2,
+            lease_ttl_ms: 3000,
+            direct: None,
+        };
+        assert_eq!(
+            response.encode().unwrap(),
+            br#"{"RegisterV2":{"conn_id":1,"generation":2,"lease_ttl_ms":3000}}"#
+        );
+        let response = PbConnStatusResp::Service {
+            key: "legacy".into(),
+            connections: vec![],
+            direct: None,
+        };
+        assert_eq!(
+            serde_json::to_vec(&response).unwrap(),
+            br#"{"Service":{"key":"legacy","connections":[]}}"#
+        );
     }
-}
-
-/// Only a UDP port is advertised; use the IP of the authenticated TCP peer.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct QuicEndpoint {
-    pub port: u16,
-    pub certificate: Vec<u8>,
 }

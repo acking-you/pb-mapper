@@ -365,53 +365,12 @@ wire_message!(
 
 #[cfg(test)]
 mod tests {
-    use crate::command::{
-        MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
-    };
+    /// LAN TCP: a peer that neither asks nor serves writes what it always
+    /// has, and what it always wrote reads as neither. The command messages'
+    /// unset direct fields are pinned with the rest of their wire form in
+    /// `command.rs`.
     #[test]
-    fn disabled_direct_fields_are_absent_from_existing_wire_messages() {
-        let request = PbConnRequest::Register {
-            direct: None,
-            key: "legacy".into(),
-            need_codec: false,
-            is_datagram: false,
-            protocol_version: None,
-            client_instance_id: None,
-            heartbeat_interval_ms: None,
-            heartbeat_tolerance_ms: None,
-        };
-        let expected = br#"{"Register":{"need_codec":false,"is_datagram":false,"key":"legacy"}}"#;
-        assert_eq!(request.encode().unwrap(), expected);
-        assert_eq!(
-            serde_json::to_vec(&PbConnStatusReq::Service {
-                key: "legacy".into(),
-                direct_query: None
-            })
-            .unwrap(),
-            br#"{"Service":{"key":"legacy"}}"#
-        );
-        let response = PbConnResponse::RegisterV2 {
-            conn_id: 1,
-            generation: 2,
-            lease_ttl_ms: 3000,
-            direct: None,
-        };
-        assert_eq!(
-            response.encode().unwrap(),
-            br#"{"RegisterV2":{"conn_id":1,"generation":2,"lease_ttl_ms":3000}}"#
-        );
-        let response = PbConnStatusResp::Service {
-            key: "legacy".into(),
-            connections: vec![],
-            direct: None,
-        };
-        assert_eq!(
-            serde_json::to_vec(&response).unwrap(),
-            br#"{"Service":{"key":"legacy","connections":[]}}"#
-        );
-
-        // LAN TCP: a peer that neither asks nor serves writes what it always
-        // has, and what it always wrote reads as neither.
+    fn a_peer_without_lan_tcp_keeps_its_wire_form() {
         let quic = br#"{"certificate":[1],"candidates":["192.168.1.5:41234"]}"#;
         let mut peer = super::PeerInfo {
             certificate: vec![1],
