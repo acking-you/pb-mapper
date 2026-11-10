@@ -396,10 +396,6 @@ pub struct ServerSecurity {
     failure_logs: Arc<Mutex<FailureLogLimiter>>,
 }
 
-// `ServerInitialError` is 256 bytes, but the success type it is paired with,
-// `ServerInitialMessage`, is 264 — so the `Result` is already sized by its `Ok`
-// variant and boxing the error would buy an allocation for no size reduction.
-#[allow(clippy::result_large_err)]
 impl ServerSecurity {
     pub fn new(auth: AuthRuntime) -> Self {
         let replay_path = auth.config().state_dir.join("connection.replay");
@@ -429,6 +425,10 @@ impl ServerSecurity {
             .record(peer_ip, key_id, reason, unix_seconds())
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "the Ok variant is as large, so boxing the error saves nothing"
+    )]
     pub async fn read_initial<T: AsyncReadExt + Unpin>(
         &self,
         reader: &mut T,
@@ -448,6 +448,10 @@ impl ServerSecurity {
         }
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "the Ok variant is as large, so boxing the error saves nothing"
+    )]
     async fn read_legacy_initial<T: AsyncReadExt + Unpin>(
         &self,
         reader: &mut T,
@@ -520,6 +524,10 @@ impl ServerSecurity {
         })
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "the Ok variant is as large, so boxing the error saves nothing"
+    )]
     async fn read_v2_initial<T: AsyncReadExt + Unpin>(
         &self,
         reader: &mut T,

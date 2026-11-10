@@ -22,10 +22,18 @@ use pb_mapper_core::error::{FwdNetworkWriteWithNormalSnafu, Result};
 use uni_stream::stream::{StreamSplit, TcpStreamImpl, UdpStreamImpl};
 use uni_stream::udp::{UdpStreamReadHalf, UdpStreamWriteHalf};
 
+#[expect(
+    async_fn_in_trait,
+    reason = "awaited only on the connection task that owns the stream, never sent to another"
+)]
 pub trait ForwardReader {
     async fn read(&mut self) -> Result<&'_ [u8]>;
 }
 
+#[expect(
+    async_fn_in_trait,
+    reason = "awaited only on the connection task that owns the stream, never sent to another"
+)]
 pub trait ForwardWriter {
     async fn write(&mut self, src: &[u8]) -> Result<()>;
 
@@ -33,10 +41,18 @@ pub trait ForwardWriter {
     async fn shutdown(&mut self);
 }
 
+#[expect(
+    async_fn_in_trait,
+    reason = "awaited only on the connection task that owns the stream, never sent to another"
+)]
 pub trait DatagramReader {
     async fn recv(&mut self) -> Result<Bytes>;
 }
 
+#[expect(
+    async_fn_in_trait,
+    reason = "awaited only on the connection task that owns the stream, never sent to another"
+)]
 pub trait DatagramWriter {
     async fn send(&mut self, src: &[u8]) -> Result<()>;
 }
@@ -652,7 +668,6 @@ pub trait StreamForward: StreamSplit + Sized {
     /// totals it returns once both directions are done. Sent is local to
     /// remote. A transport that does not implement it forwards as before and
     /// counts nothing.
-    #[allow(clippy::too_many_arguments)]
     fn forward_local_to_remote_metered<'a, R, W>(
         codec: Option<DataCodec>,
         framing_key: AesKeyType,

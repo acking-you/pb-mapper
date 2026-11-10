@@ -4,7 +4,6 @@
 //! The reader and writer traits are `async fn` in a public trait, which cannot
 //! state its auto-trait bounds. That is deliberate: these are only ever awaited
 //! on the connection task that owns the stream, never sent across one.
-#![allow(async_fn_in_trait)]
 
 pub mod buffer;
 pub mod command;
@@ -46,10 +45,18 @@ use pb_mapper_core::error::{
 /// │(Actual Data)│
 /// └─────────────┘
 /// ```
+#[expect(
+    async_fn_in_trait,
+    reason = "awaited only on the connection task that owns the stream, never sent to another"
+)]
 pub trait MessageReader {
     async fn read_msg(&mut self) -> Result<&'_ [u8]>;
 }
 
+#[expect(
+    async_fn_in_trait,
+    reason = "awaited only on the connection task that owns the stream, never sent to another"
+)]
 pub trait MessageWriter {
     async fn write_msg(&mut self, msg: &[u8]) -> Result<()>;
 }

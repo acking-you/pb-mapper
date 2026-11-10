@@ -31,7 +31,10 @@ fn reserved_error_session(
     .then_some(session)
 }
 
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the Ok variant is as large, so boxing the error saves nothing"
+)]
 pub(super) fn evaluate_first_flight(
     auth: &AuthRuntime,
     replay: &parking_lot::Mutex<ReplayGuard>,
