@@ -5,6 +5,7 @@ use crate::diagnostics::{
     Diagnostics, PortMappingProtocol, PortMappingStage, PortMappingStatus, ms,
 };
 use crate::network::NetworkHints;
+use pb_mapper_core::timeout::RetryBackoff;
 use std::{
     net::SocketAddr,
     num::NonZeroU16,
@@ -20,6 +21,10 @@ use tokio_util::sync::CancellationToken;
 /// multicasts to the whole LAN).
 const RETRY_FIRST: Duration = Duration::from_secs(30);
 const RETRY_MAX: Duration = Duration::from_secs(600);
+const _: () = assert!(
+    !RETRY_FIRST.is_zero() && RETRY_MAX.as_nanos() >= RETRY_FIRST.as_nanos(),
+    "RetryBackoff needs a first wait, and a cap no shorter"
+);
 /// How long the gateway may take to say which protocols it maps with.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long the gateway may take to release a lease, when the tunnel stops
@@ -115,7 +120,11 @@ async fn run(
             }
         }
         client.update_local_port(port);
-        let mut wait = RETRY_FIRST;
+        // `wait` is the timer's interval; the ladder only gives it new values.
+        // A lease starts the ladder over, and the next retry without one is
+        // then the second rung, as a lease's tick re-arms with `wait` as is.
+        let mut backoff = RetryBackoff::new(RETRY_FIRST, RETRY_MAX);
+        let mut wait = backoff.next_delay();
         let retry = tokio::time::sleep(wait);
         tokio::pin!(retry);
         loop {
@@ -127,7 +136,8 @@ async fn run(
                     if result.is_err() { break; }
                     let mapped = external.borrow_and_update().map(SocketAddr::V4);
                     if mapped.is_some() {
-                        wait = RETRY_FIRST;
+                        backoff.reset();
+                        wait = backoff.next_delay();
                     }
                     address.send_replace((generation, mapped));
                 }
@@ -135,7 +145,7 @@ async fn run(
                     if external.borrow().is_none() {
                         reporter.stage(PortMappingStage::Retrying, None);
                         client.procure_mapping();
-                        wait = (wait * 2).min(RETRY_MAX);
+                        wait = backoff.next_delay();
                     }
                     retry.as_mut().reset(tokio::time::Instant::now() + wait);
                 }
