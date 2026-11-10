@@ -17,20 +17,18 @@
 //! This root module coordinates client/server sessions. Frame mechanics, replay admission,
 //! log suppression, and protocol tests are isolated in focused child modules.
 
-use std::sync::Arc;
+mod first_flight;
+mod frame;
+mod limiter;
+mod replay;
+#[cfg(test)]
+mod tests;
 
-use parking_lot::Mutex;
+use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rand::RngExt;
-use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
-use ring::digest::{SHA256, digest};
-use ring::hkdf::{HKDF_SHA256, Salt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-use super::{
-    CodecMessageReader, CodecMessageWriter, DataLenType, MAX_MSG_LEN, MessageReader, MessageWriter,
-};
+use parking_lot::Mutex;
 use pb_mapper_auth::{
     ADMIN_KEY_ID, AuthContext, AuthFailure, AuthRuntime, KeyId, LegacyConnectionGuard,
 };
@@ -39,6 +37,18 @@ use pb_mapper_core::checksum::{
 };
 use pb_mapper_core::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec, Decryptor};
 use pb_mapper_core::error::{Error, Result};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::{CodecMessageReader, CodecMessageWriter, DataLenType, MessageReader, MessageWriter};
+use first_flight::{FirstFlightWork, evaluate_first_flight, stale_root_first_flight, v2_session};
+use frame::{
+    Direction, PREFIX_FLAGS, PREFIX_RESERVED, PrefixFields, V2Material, connection_salt,
+    derive_material, first_prefix, open_v2_payload, read_v2_frame, salt_timestamp,
+};
+pub use frame::{V2MessageReader, V2MessageWriter};
+pub use limiter::FailureLogDecision;
+use limiter::FailureLogLimiter;
+use replay::{ReplayGuard, replay_fingerprint};
 
 pub const PROTOCOL_V2_MAGIC: [u8; 4] = *b"PBM2";
 pub const PROTOCOL_V2_VERSION: u8 = 2;
@@ -387,8 +397,6 @@ impl fmt::Display for ServerInitialError {
 
 impl std::error::Error for ServerInitialError {}
 
-use std::fmt;
-
 #[derive(Clone)]
 pub struct ServerSecurity {
     auth: AuthRuntime,
@@ -435,11 +443,11 @@ impl ServerSecurity {
     ) -> std::result::Result<ServerInitialMessage, ServerInitialError> {
         let mut first = [0_u8; 4];
         reader.read_exact(&mut first).await.map_err(|error| {
-            ServerInitialError::new(AuthFailure::new(
+            ServerInitialError::fail(
                 "protocol_header_read_failed",
                 format!("failed to read initial protocol header: {error}"),
                 true,
-            ))
+            )
         })?;
         if first == PROTOCOL_V2_MAGIC {
             self.read_v2_initial(reader).await
@@ -609,7 +617,7 @@ impl ServerSecurity {
                 match stale_root_first_flight(&self.auth, key_id, salt, counter, &ciphertext) {
                     Some(stale) => FirstFlightWork::Stale(stale),
                     None => {
-                        return Err(first_flight_error(
+                        return Err(ServerInitialError::fail_key(
                             "protocol_v2_decrypt_failed",
                             error.to_string(),
                             false,
@@ -626,7 +634,7 @@ impl ServerSecurity {
         })
         .await
         .unwrap_or_else(|_| {
-            Err(first_flight_error(
+            Err(ServerInitialError::fail_key(
                 "connection_replay_store_unavailable",
                 "failed to evaluate first-flight admission",
                 true,
@@ -644,10 +652,6 @@ impl ServerSecurity {
         })
     }
 }
-
-mod limiter;
-pub use limiter::FailureLogDecision;
-use limiter::FailureLogLimiter;
 
 pub enum HeaderMessageReader<'a, T: AsyncReadExt + Unpin> {
     Legacy(CodecMessageReader<'a, T, Aes256GcmDeCodec>),
@@ -677,21 +681,6 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for HeaderMessageWriter<'_, T> {
     }
 }
 
-mod frame;
-use frame::{
-    Direction, PREFIX_FLAGS, PREFIX_RESERVED, PrefixFields, V2Material, connection_salt,
-    derive_material, first_prefix, open_v2_payload, read_v2_frame, salt_timestamp,
-};
-pub use frame::{V2MessageReader, V2MessageWriter};
-mod replay;
-use replay::{FirstFlightAdmit, ReplayGuard, replay_fingerprint};
-#[cfg(test)]
-use replay::{
-    REPLAY_COMPACT_INTERVAL_SECONDS, REPLAY_RECORD_LEN, RotatingBloom, truncate_replay_log,
-};
-mod first_flight;
-use first_flight::*;
-
 pub(crate) fn protocol_error(detail: impl Into<String>) -> Error {
     Error::MsgProtocol {
         detail: detail.into(),
@@ -719,6 +708,3 @@ fn pack<const N: usize>(fields: &[&[u8]]) -> [u8; N] {
     }
     packed
 }
-
-#[cfg(test)]
-mod tests;

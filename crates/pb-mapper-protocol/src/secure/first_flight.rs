@@ -1,5 +1,13 @@
 //! First-flight authentication, replay admission, and stale-root classification.
-use super::*;
+
+use pb_mapper_auth::{AuthContext, AuthFailure, AuthRuntime, KeyId};
+use pb_mapper_core::checksum::AesKeyType;
+
+use super::frame::{Direction, V2Material, derive_material, open_v2_payload};
+use super::replay::{FirstFlightAdmit, ReplayGuard};
+use super::{
+    CONNECTION_SALT_LEN, ServerHeaderSession, ServerInitialError, SessionKeys, unix_seconds,
+};
 
 pub(super) enum FirstFlightWork {
     Live {
@@ -8,15 +16,6 @@ pub(super) enum FirstFlightWork {
         error_session: ServerHeaderSession,
     },
     Stale(ServerInitialError),
-}
-
-pub(super) fn first_flight_error(
-    code: &'static str,
-    message: impl Into<String>,
-    retryable: bool,
-    key_id: KeyId,
-) -> ServerInitialError {
-    ServerInitialError::fail_key(code, message, retryable, key_id)
 }
 
 fn reserved_error_session(
@@ -62,19 +61,19 @@ pub(super) fn evaluate_first_flight(
                 })?;
             match replay.admit(key_id, &fingerprint, unix_seconds()) {
                 FirstFlightAdmit::Fresh => Ok((payload, context)),
-                FirstFlightAdmit::Replayed => Err(first_flight_error(
+                FirstFlightAdmit::Replayed => Err(ServerInitialError::fail_key(
                     "connection_salt_replayed",
                     "protocol-v2 connection salt was already accepted",
                     true,
                     key_id,
                 )),
-                FirstFlightAdmit::Limited => Err(first_flight_error(
+                FirstFlightAdmit::Limited => Err(ServerInitialError::fail_key(
                     "connection_admission_limited",
                     "this credential has opened too many new connections in the current window",
                     true,
                     key_id,
                 )),
-                FirstFlightAdmit::Unavailable => Err(first_flight_error(
+                FirstFlightAdmit::Unavailable => Err(ServerInitialError::fail_key(
                     "connection_replay_store_unavailable",
                     "failed to persist first-flight replay admission",
                     true,

@@ -15,20 +15,21 @@
 //! Per-credential counts stop one tenant from filling the shared filter with
 //! unique salts before the request payload is decoded.
 
-use pb_mapper_auth::KeyId;
-
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
+use pb_mapper_auth::KeyId;
+use pb_mapper_core::durable_file;
 use rand::RngExt;
+use ring::digest::{SHA256, SHA256_OUTPUT_LEN, digest};
 
-use super::*;
+use super::{CONNECTION_SALT_LEN, pack, unix_seconds};
 
 const DEFAULT_NEW_STREAMS_PER_SECOND: u32 = 100;
 /// A first-flight fingerprint: SHA-256 of the key id and connection salt.
-const FINGERPRINT_LEN: usize = ring::digest::SHA256_OUTPUT_LEN;
+const FINGERPRINT_LEN: usize = SHA256_OUTPUT_LEN;
 /// One admission in the log: its fingerprint, then the admission time.
 pub(super) const REPLAY_RECORD_LEN: usize = FINGERPRINT_LEN + size_of::<u64>();
 pub(super) const REPLAY_COMPACT_INTERVAL_SECONDS: u64 = 60;
@@ -279,7 +280,7 @@ impl ReplayGuard {
             }
             return Err(error);
         }
-        if created && let Err(error) = pb_mapper_core::durable_file::sync_parent_directory(path) {
+        if created && let Err(error) = durable_file::sync_parent_directory(path) {
             self.log_failed = true;
             return Err(error);
         }
@@ -367,8 +368,8 @@ impl ReplayGuard {
             file.write_all(records.as_flattened())?;
             file.sync_all()?;
             drop(file);
-            pb_mapper_core::durable_file::replace_file(&temporary, path)?;
-            pb_mapper_core::durable_file::sync_parent_directory(path)
+            durable_file::replace_file(&temporary, path)?;
+            durable_file::sync_parent_directory(path)
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temporary);

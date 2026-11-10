@@ -11,9 +11,21 @@
 //! a body; continuation frames retain the normal protocol maximum.
 
 use pb_mapper_auth::KeyId;
-use ring::aead::NONCE_LEN;
+use pb_mapper_core::checksum::AesKeyType;
+use pb_mapper_core::error::Result;
+use rand::RngExt;
+use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
+use ring::hkdf::{HKDF_SHA256, Prk, Salt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::*;
+use super::{
+    CONNECTION_SALT_LEN, FIRST_PREFIX_REMAINDER_LEN, FRAME_HEADER_LEN, PROTOCOL_V2_MAGIC,
+    PROTOCOL_V2_VERSION, pack, protocol_error,
+};
+use crate::frame_read::FrameRead;
+use crate::{
+    CODEC_TAG_LEN, DataLenType, MAX_MSG_LEN, MAX_PLAINTEXT_LEN, MessageReader, MessageWriter,
+};
 
 /// Which way a frame travels. Each direction has its own key and its own
 /// counter, and the authenticated data names it.
@@ -63,7 +75,7 @@ pub struct V2MessageReader<'a, T: AsyncReadExt + Unpin> {
     direction: Direction,
     expected_counter: u64,
     buffer: Vec<u8>,
-    frame: crate::frame_read::FrameRead<FRAME_HEADER_LEN>,
+    frame: FrameRead<FRAME_HEADER_LEN>,
 }
 
 impl<'a, T: AsyncReadExt + Unpin> V2MessageReader<'a, T> {
@@ -81,7 +93,7 @@ impl<'a, T: AsyncReadExt + Unpin> V2MessageReader<'a, T> {
             direction,
             expected_counter,
             buffer: Vec::new(),
-            frame: crate::frame_read::FrameRead::new(),
+            frame: FrameRead::new(),
         })
     }
 
@@ -118,7 +130,7 @@ pub(super) async fn read_v2_frame<T: AsyncReadExt + Unpin>(
     expected_counter: u64,
     max_plaintext_len: u32,
 ) -> Result<(u64, Vec<u8>)> {
-    let mut frame = crate::frame_read::FrameRead::<FRAME_HEADER_LEN>::new();
+    let mut frame = FrameRead::<FRAME_HEADER_LEN>::new();
     frame
         .header(reader)
         .await
@@ -146,8 +158,8 @@ fn validate_frame_header(
         )));
     }
     let datalen = u32::from_be_bytes([l0, l1, l2, l3]);
-    let max_encrypted_len = max_plaintext_len.saturating_add(crate::CODEC_TAG_LEN);
-    if datalen < crate::CODEC_TAG_LEN || datalen > max_encrypted_len {
+    let max_encrypted_len = max_plaintext_len.saturating_add(CODEC_TAG_LEN);
+    if datalen < CODEC_TAG_LEN || datalen > max_encrypted_len {
         return Err(protocol_error(format!(
             "protocol-v2 payload length {datalen} exceeds the {max_plaintext_len}-byte limit"
         )));
@@ -157,7 +169,7 @@ fn validate_frame_header(
 
 impl<T: AsyncReadExt + Unpin> MessageReader for V2MessageReader<'_, T> {
     async fn read_msg(&mut self) -> Result<&'_ [u8]> {
-        self.read_msg_with_limit(crate::MAX_PLAINTEXT_LEN).await
+        self.read_msg_with_limit(MAX_PLAINTEXT_LEN).await
     }
 }
 
@@ -198,7 +210,7 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for V2MessageWriter<'_, T> {
         }
         let encrypted_len = message
             .len()
-            .checked_add(crate::CODEC_TAG_LEN as usize)
+            .checked_add(CODEC_TAG_LEN as usize)
             .and_then(|len| DataLenType::try_from(len).ok())
             .ok_or_else(|| protocol_error("protocol-v2 message is too large"))?;
         if encrypted_len > MAX_MSG_LEN {
@@ -269,10 +281,7 @@ pub(super) fn derive_material(
     })
 }
 
-fn expand_direction(
-    pseudo_random_key: &ring::hkdf::Prk,
-    label: &'static [u8],
-) -> Result<AesKeyType> {
+fn expand_direction(pseudo_random_key: &Prk, label: &'static [u8]) -> Result<AesKeyType> {
     let info = [label];
     let output = pseudo_random_key
         .expand(&info, HkdfLen(32))

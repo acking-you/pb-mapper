@@ -9,12 +9,19 @@
 //! These tests intentionally exercise both administrator and derived temporary
 //! credentials, while lifecycle persistence remains covered by `common::auth::tests`.
 
-use super::*;
 use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
 use pb_mapper_core::checksum::{
     encode_temporary_credential, parse_credential, set_process_msg_header_key,
 };
 use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
+use rand::RngExt;
+use ring::aead::AES_256_GCM;
+
+use super::replay::{
+    FirstFlightAdmit, REPLAY_COMPACT_INTERVAL_SECONDS, REPLAY_RECORD_LEN, RotatingBloom,
+    truncate_replay_log,
+};
+use super::*;
 
 // A heartbeat/select branch may cancel a read at any byte boundary. The next
 // read must resume that frame, including its authenticated counter.
