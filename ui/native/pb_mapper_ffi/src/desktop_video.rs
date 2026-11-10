@@ -187,21 +187,51 @@ pub(crate) fn attach(source: u64) -> i64 {
 
 /// Waits up to `timeout_ms` (at most a second) for the next unit no longer
 /// than `capacity`. A longer head stays queued behind `NeedCapacity`.
-pub(crate) fn next(consumer: u64, timeout_ms: u32, capacity: usize) -> Result<Pull, i32> {
+fn next(consumer: u64, timeout_ms: u32, capacity: usize) -> Result<Pull, i32> {
     // The lock is released before the wait: only the consumer's Arc is held.
     let consumer = REGISTRY.lock().consumer(consumer)?;
     let timeout = Duration::from_millis(timeout_ms.into()).min(MAX_WAIT);
     Ok(consumer.next(timeout, capacity))
 }
 
-/// The return code of a pull that carries no unit.
-pub(crate) fn code(pull: &Pull) -> i32 {
-    match pull {
-        Pull::Unit(_) => UNIT,
-        Pull::NeedCapacity(_) => NEED_CAPACITY,
-        Pull::Timeout => TIMEOUT,
-        Pull::Paused => PAUSED,
-        Pull::Closed => CLOSED,
+/// What a pull left the caller, for the C and the JNI `next` alike.
+pub(crate) enum Pulled {
+    /// A unit was copied into the buffer: its metadata, its age measured at
+    /// the pop.
+    Unit(PbDesktopVideoMetaV1),
+    /// The head unit needs this many bytes; it stays queued.
+    NeedCapacity(usize),
+    /// No unit: the return code.
+    Code(i32),
+}
+
+/// `next`, with the unit it pulls copied to `dst`.
+///
+/// # Safety
+/// `dst` must be valid for `capacity` bytes of writes; it may be null only
+/// when `capacity` is 0.
+pub(crate) unsafe fn pull_into(
+    consumer: u64,
+    timeout_ms: u32,
+    dst: *mut u8,
+    capacity: usize,
+) -> Pulled {
+    match next(consumer, timeout_ms, capacity) {
+        Ok(Pull::Unit(unit)) => {
+            if !unit.bytes.is_empty() {
+                // SAFETY: `next` only returns a unit of at most `capacity`
+                // bytes, and the caller provides that many at `dst`.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(unit.bytes.as_ptr(), dst, unit.bytes.len());
+                }
+            }
+            Pulled::Unit(PbDesktopVideoMetaV1::of(&unit))
+        }
+        Ok(Pull::NeedCapacity(len)) => Pulled::NeedCapacity(len),
+        Ok(Pull::Timeout) => Pulled::Code(TIMEOUT),
+        Ok(Pull::Paused) => Pulled::Code(PAUSED),
+        Ok(Pull::Closed) => Pulled::Code(CLOSED),
+        Err(code) => Pulled::Code(code),
     }
 }
 
@@ -286,20 +316,13 @@ pub unsafe extern "C" fn pb_mapper_desktop_video_next_v1(
         if meta.is_null() || (dst.is_null() && capacity != 0) {
             return INVALID;
         }
-        let (code, value) = match next(consumer, timeout_ms, capacity as usize) {
-            Ok(Pull::Unit(unit)) => {
-                if !unit.bytes.is_empty() {
-                    // SAFETY: `next` only returns a unit of at most `capacity`
-                    // bytes, and the caller provides that many at `dst`.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(unit.bytes.as_ptr(), dst, unit.bytes.len());
-                    }
-                }
-                (UNIT, PbDesktopVideoMetaV1::of(&unit))
-            }
-            Ok(Pull::NeedCapacity(len)) => (NEED_CAPACITY, PbDesktopVideoMetaV1::needing(len)),
-            Ok(pull) => return code(&pull),
-            Err(code) => return code,
+        // SAFETY: the caller provides `capacity` bytes at `dst`, which is
+        // null only when `capacity` is 0, as just checked.
+        let pulled = unsafe { pull_into(consumer, timeout_ms, dst, capacity as usize) };
+        let (code, value) = match pulled {
+            Pulled::Unit(value) => (UNIT, value),
+            Pulled::NeedCapacity(len) => (NEED_CAPACITY, PbDesktopVideoMetaV1::needing(len)),
+            Pulled::Code(code) => return code,
         };
         // SAFETY: checked non-null; the caller provides a writable struct.
         unsafe { meta.write(value) };

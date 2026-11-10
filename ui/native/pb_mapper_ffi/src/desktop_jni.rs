@@ -5,13 +5,12 @@
 //! so Kotlin always sees a code, never a throw.
 #![allow(non_snake_case)]
 
-use crate::desktop_video::{self as video, INVALID, NEED_CAPACITY, PbDesktopVideoMetaV1, UNIT};
+use crate::desktop_video::{self as video, INVALID, NEED_CAPACITY, Pulled, UNIT};
 use jni::{
     JNIEnv,
     objects::{JByteBuffer, JClass, JLongArray, JString},
     sys::{jboolean, jint, jlong},
 };
-use pb_mapper::desktop::Pull;
 
 /// `next` fills `meta[0..10]`: generation, frame id, seq, pts, age, width,
 /// height, len, flags, 0.
@@ -72,14 +71,11 @@ pub extern "system" fn Java_com_pb_1mapper_ui_DesktopVideoNative_next(
         // Both fail for a buffer that is not direct.
         let capacity = env.get_direct_buffer_capacity(&buffer)?;
         let address = env.get_direct_buffer_address(&buffer)?;
-        Ok(match video::next(consumer, timeout_ms, capacity) {
-            Ok(Pull::Unit(unit)) => {
-                // SAFETY: the unit is at most `capacity` bytes, and the direct
-                // buffer owns `capacity` bytes at `address` while Kotlin holds it.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(unit.bytes.as_ptr(), address, unit.bytes.len());
-                }
-                let meta_of = PbDesktopVideoMetaV1::of(&unit);
+        // SAFETY: the direct buffer owns `capacity` bytes at `address` while
+        // Kotlin holds it.
+        let pulled = unsafe { video::pull_into(consumer, timeout_ms, address, capacity) };
+        Ok(match pulled {
+            Pulled::Unit(meta_of) => {
                 let values = [
                     meta_of.generation,
                     meta_of.frame_id,
@@ -96,13 +92,12 @@ pub extern "system" fn Java_com_pb_1mapper_ui_DesktopVideoNative_next(
                 env.set_long_array_region(&meta, 0, &values)?;
                 UNIT
             }
-            Ok(Pull::NeedCapacity(len)) => {
+            Pulled::NeedCapacity(len) => {
                 let len = i64::try_from(len).unwrap_or(i64::MAX);
                 env.set_long_array_region(&meta, META_INDEX_LEN, &[len])?;
                 NEED_CAPACITY
             }
-            Ok(pull) => video::code(&pull),
-            Err(code) => code,
+            Pulled::Code(code) => code,
         })
     })
 }
