@@ -938,7 +938,15 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
             RejectReason::Busy => ConnectError::Busy,
             RejectReason::InvalidRequest => ConnectError::InvalidRequest,
         }),
-        Ok(Some(_)) => Err(ConnectError::Protocol(
+        Ok(Some(
+            HostMessage::State { .. }
+            | HostMessage::Video { .. }
+            | HostMessage::Cursor { .. }
+            | HostMessage::Probe { .. }
+            | HostMessage::Stats { .. }
+            | HostMessage::Notice { .. }
+            | HostMessage::Stopped { .. },
+        )) => Err(ConnectError::Protocol(
             "the host did not answer the authentication".into(),
         )),
         Ok(None) => Err(ConnectError::Transport(io::Error::new(

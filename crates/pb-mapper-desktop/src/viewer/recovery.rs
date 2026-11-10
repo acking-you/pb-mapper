@@ -150,7 +150,11 @@ impl Recovery {
             Phase::AwaitingIdr(awaiting) if !awaiting.answered => {
                 self.retry(now).then_some(awaiting.reason)
             }
-            _ => None,
+            Phase::Live
+            | Phase::AwaitingIdr(_)
+            | Phase::Paused
+            | Phase::HostUnavailable
+            | Phase::Failed => None,
         }
     }
 
@@ -208,7 +212,7 @@ impl Recovery {
             Phase::Live | Phase::AwaitingIdr(_) if new_generation => {
                 Phase::AwaitingIdr(Awaiting::held(now))
             }
-            phase => phase,
+            phase @ (Phase::Live | Phase::AwaitingIdr(_)) => phase,
         };
     }
 
@@ -244,7 +248,9 @@ impl Recovery {
         match self.phase {
             Phase::Failed => DecoderState::Failed,
             Phase::AwaitingIdr(_) if presented_before => DecoderState::Recovering,
-            _ => DecoderState::Ok,
+            Phase::Live | Phase::AwaitingIdr(_) | Phase::Paused | Phase::HostUnavailable => {
+                DecoderState::Ok
+            }
         }
     }
 
