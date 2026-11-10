@@ -29,6 +29,8 @@ pub(super) const VIEWER_TICK: Duration = Duration::from_millis(250);
 const TICKS_PER_SECOND: u64 = 4;
 /// Why a session whose decoder failed for good ended.
 const DECODER_FAILED: &str = "the remote picture could not be decoded";
+/// Why a session whose task panicked ended.
+const SESSION_PANICKED: &str = "the desktop session ended unexpectedly";
 const _: () = assert!(
     VIEWER_TICK.as_millis() * TICKS_PER_SECOND as u128 == 1000,
     "the path sample and the stats roll-up run once a second"
@@ -143,7 +145,7 @@ impl Ended {
 
 /// What `run` owns besides the stream. Dropping it ends the session however
 /// `run` ends: returned, dropped with its runtime (polled or not) or
-/// unwinding.
+/// unwinding from a panic.
 pub(super) struct Session {
     pub(super) shared: Arc<ViewerShared>,
     pub(super) sink: Arc<VideoSink>,
@@ -156,10 +158,17 @@ impl Drop for Session {
     fn drop(&mut self) {
         // Each step is idempotent and the first stop wins, so after `run`'s
         // own end this changes nothing; otherwise the consumer exits and the
-        // status says stopped, with no reason, as after a local stop.
+        // status says stopped. A drop with the runtime reads as a local stop,
+        // with no reason; a panic as a transport failure, which a supervisor
+        // retries as it did the stall the panic used to leave.
         self.cancel.cancel();
         self.sink.close();
-        self.shared.mark_stopped(None, String::new());
+        if std::thread::panicking() {
+            self.shared
+                .mark_stopped(Some(ViewerReason::Transport), SESSION_PANICKED.into());
+        } else {
+            self.shared.mark_stopped(None, String::new());
+        }
     }
 }
 

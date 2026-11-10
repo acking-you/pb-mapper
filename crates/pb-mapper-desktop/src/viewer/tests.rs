@@ -7,7 +7,12 @@ use crate::{
     },
     wire,
 };
-use tokio::io::{AsyncWriteExt, DuplexStream};
+use std::{
+    pin::Pin,
+    sync::atomic::{AtomicBool, Ordering},
+    task::{Context, Poll},
+};
+use tokio::io::{AsyncWriteExt, DuplexStream, ReadBuf};
 
 const TOKEN: &str = "0123456789012345678901234567890123456789012";
 
@@ -616,6 +621,75 @@ fn a_session_dropped_with_its_runtime_ends_stopped() {
     let status = viewer.status();
     assert_eq!((status.state, status.reason), (ViewerState::Stopped, None));
     drop(host);
+}
+
+/// A stream whose reads panic once `armed`, as a bug in the session's code
+/// would.
+struct Faulty {
+    inner: DuplexStream,
+    armed: Arc<AtomicBool>,
+}
+impl AsyncRead for Faulty {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        assert!(!self.armed.load(Ordering::SeqCst), "a bug in the session");
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for Faulty {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// A session task that panics ends as a failure the supervisor's policy
+/// retries, as it retried the stall such a panic used to leave behind; only
+/// a drop that is not a panic reads as a local stop.
+#[tokio::test]
+async fn a_session_that_panics_ends_as_a_failure_the_supervisor_retries() {
+    let (stream, mut host) = tokio::io::duplex(1 << 20);
+    let armed = Arc::new(AtomicBool::new(false));
+    let stream = Faulty {
+        inner: stream,
+        armed: armed.clone(),
+    };
+    let connecting = tokio::spawn(Viewer::start(stream, TOKEN.into(), config(), None));
+    receive(&mut host).await;
+    send(&mut host, accepted(), None).await;
+    let viewer = connecting.await.unwrap().unwrap();
+    let consumer = viewer.video_sink().attach().unwrap();
+    send(&mut host, state(1, false), None).await;
+    eventually(|| viewer.status().state == ViewerState::Streaming).await;
+
+    armed.store(true, Ordering::SeqCst);
+    send(&mut host, HostMessage::Probe { nonce: 1 }, None).await;
+    eventually(|| viewer.status().state == ViewerState::Stopped).await;
+    let status = viewer.status();
+    assert_eq!(status.reason, Some(ViewerReason::Transport));
+    assert!(matches!(
+        consumer.next(Duration::ZERO, 1 << 20),
+        Pull::Closed
+    ));
+    let mut policy = crate::supervisor::Reconnect::new(crate::supervisor::RetryPolicy::default());
+    assert!(
+        policy.after(&status, Instant::now()).is_some(),
+        "a supervisor gives up on a panicked session"
+    );
+    drop(host);
+    viewer.stop().await.unwrap();
 }
 
 #[tokio::test]
