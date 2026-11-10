@@ -463,6 +463,8 @@ async fn abort_actor_ends_live_keys_and_returns_once_the_state_has_dropped() {
     drop(runtime);
 }
 
+/// One runtime at a time owns a state directory, and dropping its last handle,
+/// with no shutdown, is enough to stop its actor and free the directory.
 #[tokio::test]
 async fn overlapping_runtimes_cannot_share_an_auth_state_directory() {
     let state_dir = TempPath::new("auth-dir-lock");
@@ -470,15 +472,33 @@ async fn overlapping_runtimes_cannot_share_an_auth_state_directory() {
     let first = AuthRuntime::start(TEST_ADMIN_KEY_BYTES, config.clone())
         .await
         .unwrap();
+    let clone = first.clone();
     let error = match AuthRuntime::start(TEST_ADMIN_KEY_BYTES, config.clone()).await {
         Ok(_) => panic!("second runtime should not share the auth directory"),
         Err(error) => error,
     };
     assert_eq!(error.code, "auth_state_locked");
-    stop(first).await;
-    let recovered = AuthRuntime::start(TEST_ADMIN_KEY_BYTES, config)
-        .await
-        .unwrap();
+    drop(first);
+    drop(clone);
+
+    // The actor lets go of the directory once it runs again and sees the
+    // channel closed.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let recovered = loop {
+        match AuthRuntime::start(TEST_ADMIN_KEY_BYTES, config.clone()).await {
+            Ok(runtime) => break runtime,
+            Err(error)
+                if error.code == codes::AUTH_STATE_LOCKED
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(error) => panic!(
+                "dropping every handle did not free the directory: {}",
+                error.code
+            ),
+        }
+    };
     stop(recovered).await;
 }
 
