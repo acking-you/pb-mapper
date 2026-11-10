@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use pb_mapper_protocol::transport::RelayStream;
@@ -562,7 +561,8 @@ async fn get_server_stream(
                     reason = %reason,
                     "subscribe failed before stream forwarding"
                 );
-                write_subscribe_error(conn, session, &code, &reason, retryable).await?;
+                let refusal = PbConnResponse::error(code, &reason, retryable);
+                write_subscribe_error(conn, session, refusal, &key, conn_id).await?;
                 ClientConnSubcribeFailedSnafu {
                     key: key.clone(),
                     conn_id,
@@ -738,15 +738,15 @@ async fn get_server_stream(
 async fn write_subscribe_error(
     conn: &mut RelayStream,
     session: &ServerHeaderSession,
-    code: &str,
-    reason: &str,
-    retryable: bool,
+    refusal: PbConnResponse,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
 ) -> Result<()> {
-    let message = PbConnResponse::error(code, reason, retryable)
+    let message = refusal
         .encode()
         .context(ClientConnEncodeSubcribeRespSnafu {
-            key: Arc::from("<rejected>"),
-            conn_id: RemoteConnId::default(),
+            key: key.clone(),
+            conn_id,
         })?;
     let mut writer = session
         .response_writer(conn)
@@ -755,7 +755,7 @@ async fn write_subscribe_error(
         .write_msg(&message)
         .await
         .context(ClientConnWriteSubcribeRespSnafu {
-            key: Arc::from("<rejected>"),
-            conn_id: RemoteConnId::default(),
+            key: key.clone(),
+            conn_id,
         })
 }
