@@ -74,7 +74,7 @@ pub(super) fn replay_fingerprint(
     digest(&SHA256, &input)
         .as_ref()
         .try_into()
-        .expect("SHA-256 width")
+        .expect("a SHA-256 digest is SHA256_OUTPUT_LEN bytes")
 }
 
 /// One admission in the log.
