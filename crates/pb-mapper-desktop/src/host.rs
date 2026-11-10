@@ -24,6 +24,7 @@ use pb_mapper_client::sdk::{
     Client, RegisterOptions, RegisterRequest, Registration, Transport, TunnelMetrics,
     TunnelMetricsStream,
 };
+use pb_mapper_core::timeout::RetryBackoff;
 use std::{
     io,
     sync::{
@@ -50,8 +51,8 @@ pub(crate) const BACKEND_ANSWER_WAIT: Duration = Duration::from_secs(3);
 const RESTORE_RETRY: Duration = Duration::from_secs(2);
 const RESTORE_RETRY_MAX: Duration = Duration::from_secs(60);
 const _: () = assert!(
-    RESTORE_RETRY.as_nanos() <= RESTORE_RETRY_MAX.as_nanos(),
-    "the retry backs off from RESTORE_RETRY up to the cap"
+    !RESTORE_RETRY.is_zero() && RESTORE_RETRY.as_nanos() <= RESTORE_RETRY_MAX.as_nanos(),
+    "RetryBackoff::new's preconditions: the retry backs off from RESTORE_RETRY up to the cap"
 );
 
 /// What a host's status reads, shared with its acceptor.
@@ -479,7 +480,8 @@ impl Shared {
 /// failure is warned of when it changes, never at every try. A live
 /// session's backend replays it itself. Ends with the host.
 async fn restore_retry(shared: Arc<Shared>, recovery: Recovery, cancel: CancellationToken) {
-    let mut wait = RESTORE_RETRY;
+    let mut backoff = RetryBackoff::new(RESTORE_RETRY, RESTORE_RETRY_MAX);
+    let mut wait = backoff.next_delay();
     let mut warned = None;
     loop {
         if shared.restore_pending.load(Ordering::Acquire) && shared.session.lock().is_none() {
@@ -520,8 +522,11 @@ async fn restore_retry(shared: Arc<Shared>, recovery: Recovery, cancel: Cancella
         tokio::select! {
             biased;
             () = cancel.cancelled() => return,
-            () = shared.restore.notified() => wait = RESTORE_RETRY,
-            () = retry => wait = (wait * 2).min(RESTORE_RETRY_MAX),
+            () = shared.restore.notified() => {
+                backoff.reset();
+                wait = backoff.next_delay();
+            }
+            () = retry => wait = backoff.next_delay(),
         }
     }
 }
