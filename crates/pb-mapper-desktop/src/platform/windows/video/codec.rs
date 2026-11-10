@@ -229,7 +229,7 @@ impl Codec {
         let input = media_type(&MFVideoFormat_NV12, width, height, fps)?;
         let profile = match kind {
             VideoCodec::H265 => eAVEncH265VProfile_Main_420_8.0,
-            _ => eAVEncH264VProfile_Base.0,
+            VideoCodec::H264 | VideoCodec::Jpeg => eAVEncH264VProfile_Base.0,
         };
         unsafe {
             output
@@ -474,7 +474,7 @@ pub(super) fn media_type(
 fn subtype(kind: VideoCodec) -> GUID {
     match kind {
         VideoCodec::H265 => MFVideoFormat_HEVC,
-        _ => MFVideoFormat_H264,
+        VideoCodec::H264 | VideoCodec::Jpeg => MFVideoFormat_H264,
     }
 }
 fn activation_name(activation: &IMFActivate) -> String {

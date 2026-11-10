@@ -326,7 +326,10 @@ impl Supervisor {
                     self.capture_failure_since = None;
                     self.retry.reset();
                 }
-                _ => self.capture_failure_since = None,
+                HostState::Waiting
+                | HostState::Connecting
+                | HostState::Paused
+                | HostState::Stopped => self.capture_failure_since = None,
             }
         }
         if self.host.is_some() || self.pending.is_some() || Instant::now() < self.retry_at {
