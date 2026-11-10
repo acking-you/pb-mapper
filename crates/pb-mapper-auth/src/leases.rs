@@ -365,8 +365,8 @@ fn retire(inner: &Arc<AuthStateInner>, key_id: KeyId, lease: &Arc<AuthLease>) {
     let Some(slot) = slots.get_mut(key_id.slot().as_index()) else {
         return;
     };
-    // Already dead, or the row moved on: a revoke marked it and recorded its
-    // tombstone time, and the reap is already scheduled either way.
+    // Already dead, or the row moved on: a revoke marks the row before it
+    // retires the key, and the reap is already scheduled either way.
     if !slot.holds(key_id) || slot.state != SlotState::Active {
         return;
     }

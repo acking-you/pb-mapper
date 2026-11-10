@@ -1,4 +1,5 @@
-//! Administrator credential load, recovery, and temporary-key derivation.
+//! Which administrator credential a relay starts with, and temporary-key
+//! derivation.
 use super::*;
 
 fn validate_admin_credential(raw: &str) -> Result<Credential, AuthFailure> {

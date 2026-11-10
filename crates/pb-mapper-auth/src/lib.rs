@@ -31,7 +31,7 @@
 //!
 //! The slot table is a preallocated array indexed straight off the key id, so
 //! verification costs an array index and churn does not grow memory. The
-//! `SlotState` docs below cover the table's layout, why generations exist, and
+//! `SlotState` docs (`state.rs`) cover the table's layout, why generations exist, and
 //! why dead rows linger. `Leases` (`leases.rs`) owns the three structures a
 //! key's lifetime spans; `timing_wheel.rs` schedules the expiries.
 //!
@@ -62,8 +62,9 @@
 //! Every mutation is serialized through a single actor, so a request authorized
 //! before a root rotation cannot execute against the state that replaced it.
 //!
-//! The facade and model types stay in this root module; runtime checks, actor
-//! mutations, persistence, expiry scheduling, and tests live in the children.
+//! This root module holds the constants and the module map. The facade is in
+//! `runtime.rs`, the shared state in `state.rs`, the actor in `actor/`, the
+//! files in `persistence/`, and the expiry schedule in `leases.rs`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
