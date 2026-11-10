@@ -84,7 +84,4 @@ pub(crate) fn process_credential() -> Result<Credential, CtlError> {
 }
 
 #[cfg(test)]
-// The crate denies these so a panic never reaches a Flutter caller through the
-// FFI boundary. In a test a panic *is* the failure report.
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests;

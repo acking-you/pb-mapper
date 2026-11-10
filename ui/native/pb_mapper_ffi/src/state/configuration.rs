@@ -94,7 +94,6 @@ impl PbMapperState {
         set_process_msg_header_key(key).map_err(CtlError::invalid_argument)
     }
 
-    #[allow(unused_variables)]
     pub(crate) fn get_config_dir(app_directory_path: &Option<String>) -> PathBuf {
         // An explicit path wins everywhere. Mobile is where it normally comes
         // from — Flutter hands it over, because there is no OS config dir to

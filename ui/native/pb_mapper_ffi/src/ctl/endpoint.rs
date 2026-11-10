@@ -265,12 +265,3 @@ mod imp {
 #[cfg(windows)]
 pub use imp::bind_next;
 pub use imp::{bind_first, connect, endpoint};
-
-/// Whether a UI is listening right now.
-///
-/// A connect attempt, not a pid file: it is the only check that cannot report
-/// "no UI" while one is running, or block waiting for one that died.
-#[allow(dead_code)] // used by the headless fallback in phase 3
-pub async fn probe() -> bool {
-    connect(&endpoint()).await.is_ok()
-}
