@@ -45,69 +45,12 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
         // Only ever the protected one of this console session: no caller
         // names where it is.
         let journal = journal(session.session)?;
-        let (requests, incoming) =
-            mpsc::sync_channel::<(Request, tokio::sync::oneshot::Sender<(Response, Vec<u8>)>)>(4);
+        let (requests, incoming) = mpsc::sync_channel::<Call>(4);
         let cancel = tokio_util::sync::CancellationToken::new();
         let stopped = cancel.clone();
         let (device, replayed) = (display_device.clone(), journal.clone());
         let join = std::thread::spawn(move || {
-            // Opening replays the journal: what a killed worker left changed.
-            let mut backend = match super::super::open_bound(display_id, device, session, replayed)
-            {
-                Ok(backend) => backend,
-                Err(e) => {
-                    if let Ok((_, reply)) = incoming.recv_timeout(TIMEOUT) {
-                        let _ = reply.send((Response::failed(&e, 0), vec![]));
-                    }
-                    return;
-                }
-            };
-            let mut state = ServeState::new();
-            // Fine process timers while the host asks for video; a paused
-            // host asks for none.
-            let mut timer = None;
-            let mut last_video = std::time::Instant::now();
-            while !stopped.is_cancelled() {
-                if state.last_input.elapsed() > std::time::Duration::from_secs(2) {
-                    backend.release();
-                }
-                if last_video.elapsed() > VIDEO_IDLE {
-                    timer = None;
-                }
-                let (request, reply) =
-                    match incoming.recv_timeout(std::time::Duration::from_millis(15)) {
-                        Ok(request) => request,
-                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(_) => break,
-                    };
-                if stopped.is_cancelled() {
-                    break;
-                }
-                if matches!(request, Request::Video { .. }) {
-                    last_video = std::time::Instant::now();
-                    timer.get_or_insert_with(crate::timer::TimerResolution::hold);
-                }
-                let close = matches!(request, Request::Close {});
-                let result = serve(&mut backend, request, &mut state);
-                let pending = u32::try_from(backend.pending_video()).unwrap_or(u32::MAX);
-                let response = match result {
-                    Ok((mut response, image)) => {
-                        response.pending = pending;
-                        (response, image)
-                    }
-                    Err(e) => {
-                        backend.release();
-                        (Response::failed(&e, pending), vec![])
-                    }
-                };
-                let _ = reply.send(response);
-                if close {
-                    break;
-                }
-            }
-            backend.release();
-            // The backend drops here, on its desktop: it puts back what it
-            // changed, or leaves it journalled.
+            serve_bound(display_id, device, session, replayed, incoming, stopped)
         });
         let exchange = exchange(&mut pipe, display_id, display_device, |request| {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -129,6 +72,78 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
         std::process::exit(RESTORE_PENDING as i32);
     }
     Ok(())
+}
+
+/// One request to the capture thread, with where its answer goes.
+type Call = (Request, tokio::sync::oneshot::Sender<(Response, Vec<u8>)>);
+
+/// The capture thread: opens the backend bound to `session`'s input desktop
+/// on display `display_id` (or its `device`), which replays `journal`, and
+/// serves `incoming` until it closes, `stopped` is cancelled or the host
+/// asks to close.
+fn serve_bound(
+    display_id: u32,
+    device: Option<String>,
+    session: os::SessionIdentity,
+    journal: Journal,
+    incoming: mpsc::Receiver<Call>,
+    stopped: tokio_util::sync::CancellationToken,
+) {
+    // Opening replays the journal: what a killed worker left changed.
+    let mut backend = match super::super::open_bound(display_id, device, session, journal) {
+        Ok(backend) => backend,
+        Err(e) => {
+            if let Ok((_, reply)) = incoming.recv_timeout(TIMEOUT) {
+                let _ = reply.send((Response::failed(&e, 0), vec![]));
+            }
+            return;
+        }
+    };
+    let mut state = ServeState::new();
+    // Fine process timers while the host asks for video; a paused
+    // host asks for none.
+    let mut timer = None;
+    let mut last_video = std::time::Instant::now();
+    while !stopped.is_cancelled() {
+        if state.last_input.elapsed() > std::time::Duration::from_secs(2) {
+            backend.release();
+        }
+        if last_video.elapsed() > VIDEO_IDLE {
+            timer = None;
+        }
+        let (request, reply) = match incoming.recv_timeout(std::time::Duration::from_millis(15)) {
+            Ok(request) => request,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(_) => break,
+        };
+        if stopped.is_cancelled() {
+            break;
+        }
+        if matches!(request, Request::Video { .. }) {
+            last_video = std::time::Instant::now();
+            timer.get_or_insert_with(crate::timer::TimerResolution::hold);
+        }
+        let close = matches!(request, Request::Close {});
+        let result = serve(&mut backend, request, &mut state);
+        let pending = u32::try_from(backend.pending_video()).unwrap_or(u32::MAX);
+        let response = match result {
+            Ok((mut response, image)) => {
+                response.pending = pending;
+                (response, image)
+            }
+            Err(e) => {
+                backend.release();
+                (Response::failed(&e, pending), vec![])
+            }
+        };
+        let _ = reply.send(response);
+        if close {
+            break;
+        }
+    }
+    backend.release();
+    // The backend drops here, on its desktop: it puts back what it
+    // changed, or leaves it journalled.
 }
 
 /// This console session's display-mode journal, in the helper's protected
