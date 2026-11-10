@@ -850,7 +850,6 @@ mod tests {
     use std::time::Duration;
 
     use parking_lot::Mutex;
-    use pb_mapper_core::config::parse_duration;
     use pb_mapper_core::error::Error;
     use tokio::sync::Notify;
 
@@ -1085,18 +1084,6 @@ mod tests {
         async fn shutdown(&mut self) {
             self.state.lock().shutdowns += 1;
         }
-    }
-
-    #[test]
-    fn parse_duration_accepts_suffixes_and_plain_seconds() {
-        assert_eq!(parse_duration("42"), Some(Duration::from_secs(42)));
-        assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
-        assert_eq!(parse_duration("2s"), Some(Duration::from_secs(2)));
-        assert_eq!(parse_duration("3m"), Some(Duration::from_secs(180)));
-        assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
-        assert_eq!(parse_duration(""), None);
-        assert_eq!(parse_duration("bad"), None);
-        assert_eq!(parse_duration("18446744073709551615h"), None);
     }
 
     #[tokio::test(start_paused = true)]

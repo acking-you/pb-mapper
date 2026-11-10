@@ -618,6 +618,18 @@ mod tests {
         assert_eq!(parse_log_format("unknown"), LogFormat::Pretty);
     }
 
+    #[test]
+    fn parse_duration_accepts_suffixes_and_plain_seconds() {
+        assert_eq!(parse_duration("42"), Some(Duration::from_secs(42)));
+        assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_duration("2s"), Some(Duration::from_secs(2)));
+        assert_eq!(parse_duration("3m"), Some(Duration::from_secs(180)));
+        assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_duration(""), None);
+        assert_eq!(parse_duration("bad"), None);
+        assert_eq!(parse_duration("18446744073709551615h"), None);
+    }
+
     /// The point of [`ResolvedAddrs`]: a name with several records keeps them
     /// all, so the dial loops can try each one. Collapsing to the first is what
     /// made a multi-record relay unreachable whenever its first address was.
