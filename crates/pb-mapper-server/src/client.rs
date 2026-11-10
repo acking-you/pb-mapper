@@ -84,26 +84,10 @@ const DEFAULT_CLIENT_CHAN_CAP: usize = 32;
 
 /// 1. Request server stream
 /// 2. Forward the traffic between client stream and server stream
-pub async fn handle_client_conn(
-    key: ImutableKey,
-    conn_id: RemoteConnId,
-    task_sender: ManagerTaskSender,
-    conn: RelayStream,
-    session: ServerHeaderSession,
-    data_protocol: Option<u16>,
-) -> Result<()> {
-    handle_client_conn_selected(
-        key,
-        conn_id,
-        task_sender,
-        conn,
-        session,
-        data_protocol,
-        None,
-    )
-    .await
-}
-
+///
+/// `selected` pins the registration and generation a direct setup's relay
+/// fallback was granted; a plain subscription leaves the choice to the manager.
+/// The function's name is its span's name in the logs.
 #[instrument(skip(task_sender, conn, session))]
 pub(super) async fn handle_client_conn_selected(
     key: ImutableKey,

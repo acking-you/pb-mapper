@@ -36,7 +36,7 @@ use tracing::instrument;
 use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay};
 
 use crate::admin::handle_admin_request;
-use crate::client::{self, handle_client_conn};
+use crate::client::handle_client_conn_selected;
 use crate::direct;
 use crate::error::{
     Result, ServerListenSnafu, TaskCenterInitRequestTimeoutSnafu, TaskCenterSendListenerSnafu,
@@ -501,7 +501,7 @@ async fn serve_direct_relay(
         conn_id,
         "direct fallback relay",
         |conn, session| {
-            client::handle_client_conn_selected(
+            handle_client_conn_selected(
                 key,
                 conn_id,
                 manager,
@@ -617,7 +617,9 @@ async fn serve_subscribe(
         &auth,
         conn_id,
         "subscribed data connection",
-        |conn, session| handle_client_conn(key, conn_id, manager, conn, session, data_protocol),
+        |conn, session| {
+            handle_client_conn_selected(key, conn_id, manager, conn, session, data_protocol, None)
+        },
     )
     .await
 }
