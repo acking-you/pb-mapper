@@ -297,15 +297,27 @@ fn write_store<T: Serialize>(path: &Path, store: &T, noun: &str) -> Result<(), C
     Ok(())
 }
 
-/// Replaces `path` with `bytes` all at once, so that a crash leaves the old
-/// file or the new one, never a torn one: core's `replace_contents`, keeping
-/// the mode a file written in place keeps, where there is one. Where an
-/// in-place write worked, so does this: a symbolic link at `path` keeps
-/// naming the file it points to, which is the one replaced (or created, for
-/// a dangling link), and a directory that takes no new file has its existing
-/// file written in place. Making the rename itself durable is best effort: by
-/// then the new contents are in place, and a file system that cannot sync a
-/// directory should not turn every save into a failure.
+/// Saves `bytes` at `path`, where the in-place write of 0.11.0 (`fs::write`)
+/// saved them, and refuses what it refused. A symbolic link at `path` keeps
+/// naming the file it points to, which is the one saved (or created, for a
+/// dangling link).
+///
+/// - **Atomic**, so a crash leaves the old file or the new one, never a torn
+///   one: core's `replace_contents`, a new file renamed over the old, which
+///   keeps the old one's mode. That is a new file, and an existing one with a
+///   single name that this user may write, in a directory that takes a new
+///   file and lets it replace the old.
+/// - **In place**, as 0.11.0 wrote, so a crash can cut the file short: a file
+///   with more than one name (a hard link, which unix can tell; on Windows it
+///   is replaced, and its other names keep the old contents), a directory
+///   that takes no new file, and a file the rename may not replace (refused,
+///   a mount point, or on another device).
+/// - **Refused**: an existing file this user may not open for writing, such
+///   as a read-only one or another user's.
+///
+/// Making the rename itself durable is best effort: by then the new contents
+/// are in place, and a file system that cannot sync a directory should not
+/// turn every save into a failure.
 fn replace_contents(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let target = linked_file(path)?;
     // A bare file name is in the current directory, whose path is empty and
@@ -314,6 +326,18 @@ fn replace_contents(path: &Path, bytes: &[u8]) -> io::Result<()> {
         Some(parent) if parent.as_os_str().is_empty() => Path::new(".").join(target),
         _ => target,
     };
+    // Opened for writing first, so a file `fs::write` refuses is refused
+    // here too rather than replaced by one this user owns.
+    match fs::OpenOptions::new().write(true).open(&target) {
+        Ok(file) if has_other_names(&file)? => {
+            drop(file);
+            tracing::debug!("Saving {} in place, it has other names", path.display());
+            return fs::write(&target, bytes);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     match durable_file::replace_contents(&target, bytes, NewFileMode::KeepExisting) {
         Err(failure) if failure.step == ReplaceStep::SyncParent => {
             tracing::debug!(
@@ -323,12 +347,9 @@ fn replace_contents(path: &Path, bytes: &[u8]) -> io::Result<()> {
             );
             Ok(())
         }
-        Err(failure)
-            if failure.step == ReplaceStep::Create
-                && failure.io().kind() == io::ErrorKind::PermissionDenied =>
-        {
+        Err(failure) if writes_in_place(&failure) => {
             tracing::debug!(
-                "Saving {} in place, its directory takes no new file: {}",
+                "Saving {} in place, it cannot be replaced: {}",
                 path.display(),
                 failure.io()
             );
@@ -336,6 +357,35 @@ fn replace_contents(path: &Path, bytes: &[u8]) -> io::Result<()> {
         }
         result => result.map_err(io::Error::from),
     }
+}
+
+/// Whether a failed atomic save is one an in-place write gets past: the
+/// directory takes no new file, or the old file may not be replaced, being
+/// protected, a mount point or on another device.
+fn writes_in_place(failure: &durable_file::ReplaceError) -> bool {
+    use io::ErrorKind::{CrossesDevices, PermissionDenied, ResourceBusy};
+    match failure.step {
+        ReplaceStep::Create => failure.io().kind() == PermissionDenied,
+        ReplaceStep::Replace => matches!(
+            failure.io().kind(),
+            PermissionDenied | ResourceBusy | CrossesDevices
+        ),
+        ReplaceStep::SetPermissions | ReplaceStep::Write | ReplaceStep::SyncParent => false,
+    }
+}
+
+/// Whether `file` has a name besides the one it was opened by: a hard link.
+#[cfg(unix)]
+fn has_other_names(file: &fs::File) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(file.metadata()?.nlink() > 1)
+}
+
+/// Whether `file` has a name besides the one it was opened by: on Windows,
+/// where stable Rust cannot read the link count, never.
+#[cfg(not(unix))]
+fn has_other_names(_: &fs::File) -> io::Result<bool> {
+    Ok(false)
 }
 
 /// The file a write to `path` reaches: `path` itself, or the end of the
@@ -430,6 +480,80 @@ mod tests {
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
     }
 
+    /// A file with a second name, a hard link, is written in place, so both
+    /// names read what was saved.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_reaches_every_hard_link_to_the_file() {
+        let root = TempRoot::new("replace-hard-link");
+        let path = root.path().join("services.json");
+        let other = root.path().join("dotfiles-services.json");
+        fs::write(&path, b"old").unwrap();
+        fs::hard_link(&path, &other).unwrap();
+        replace_contents(&path, b"first").unwrap();
+        replace_contents(&path, b"second").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        assert_eq!(fs::read(&other).unwrap(), b"second");
+    }
+
+    /// A file this user may not write is refused, as an in-place write
+    /// refuses it, rather than replaced by one the user owns.
+    #[test]
+    fn a_file_this_user_may_not_write_is_left_alone() {
+        let root = TempRoot::new("replace-read-only");
+        let path = root.path().join("services.json");
+        fs::write(&path, b"old").unwrap();
+        read_only(&path, true);
+        if fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            // Root writes it anyway, in place as atomically.
+            read_only(&path, false);
+            return;
+        }
+        let saved = replace_contents(&path, b"new");
+        let contents = fs::read(&path).unwrap();
+        read_only(&path, false);
+        assert_eq!(saved.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(contents, b"old");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    /// A file its directory will not let be replaced, though it may be
+    /// written, is saved in place.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_that_may_not_be_replaced_is_written_in_place() {
+        let root = TempRoot::new("replace-kept");
+        let directory = root.path().join("kept");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("services.json");
+        fs::write(&path, b"old").unwrap();
+        // Neither the file's own delete right nor its directory's.
+        deny(&path, Some("DE"));
+        deny(&directory, Some("DC"));
+        let saved = replace_contents(&path, b"new");
+        deny(&directory, None);
+        deny(&path, None);
+        saved.unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+    }
+
+    /// Makes `path` read-only, or writable again.
+    #[cfg(unix)]
+    fn read_only(path: &Path, on: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if on { 0o444 } else { 0o644 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Makes `path` read-only, or writable again.
+    #[cfg(windows)]
+    fn read_only(path: &Path, on: bool) {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(on);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
     /// Makes `directory` take no new file, or take them again; its files stay
     /// writable.
     #[cfg(unix)]
@@ -440,17 +564,23 @@ mod tests {
     }
 
     /// Makes `directory` take no new file, or take them again; its files stay
-    /// writable: a deny entry for this user that its files do not inherit.
+    /// writable.
     #[cfg(windows)]
     fn lock(directory: &Path, locked: bool) {
+        deny(directory, locked.then_some("WD,AD"));
+    }
+
+    /// Denies this user `rights` on `path` alone, in an entry nothing inside
+    /// it inherits; or, given none, removes what was denied.
+    #[cfg(windows)]
+    fn deny(path: &Path, rights: Option<&str>) {
         let user = std::env::var("USERNAME").unwrap();
         let mut icacls = std::process::Command::new("icacls");
-        icacls.arg(directory);
-        if locked {
-            icacls.args(["/deny", &format!("{user}:(WD,AD)")]);
-        } else {
-            icacls.args(["/remove:d", &user]);
-        }
+        icacls.arg(path);
+        match rights {
+            Some(rights) => icacls.args(["/deny", &format!("{user}:({rights})")]),
+            None => icacls.args(["/remove:d", &user]),
+        };
         let output = icacls.output().unwrap();
         assert!(output.status.success(), "{output:?}");
     }
