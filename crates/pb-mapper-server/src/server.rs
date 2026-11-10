@@ -605,7 +605,7 @@ async fn run_control_writer<T: MessageWriter>(
                             break Ok(());
                         }
                         req => {
-                            handle_stream_req(req, msg_writer, key.clone(), conn_id).await?;
+                            handle_stream_req(req, msg_writer, &key, conn_id).await?;
                         }
                     }
                 }
@@ -616,7 +616,7 @@ async fn run_control_writer<T: MessageWriter>(
                     msg_writer
                         .write_msg(&pong)
                         .await
-                        .context(ServerConnWritePongRespSnafu {
+                        .with_context(|_| ServerConnWritePongRespSnafu {
                             key: key.clone(),
                             conn_id,
                         })?;
@@ -643,21 +643,24 @@ async fn run_control_writer<T: MessageWriter>(
 async fn handle_stream_req<T: MessageWriter>(
     req: ConnTask,
     writer: &mut T,
-    key: ImutableKey,
+    key: &ImutableKey,
     conn_id: RemoteConnId,
 ) -> Result<()> {
     match req {
         ConnTask::Direct(event) => {
-            let msg = LocalServer::Direct(event).encode().context(
+            let msg = LocalServer::Direct(event).encode().with_context(|_| {
                 ServerConnEncodeStreamRequestSnafu {
                     key: key.clone(),
                     conn_id,
-                },
-            )?;
+                }
+            })?;
             writer
                 .write_msg(&msg)
                 .await
-                .context(ServerConnWriteStreamRequestSnafu { key, conn_id })?;
+                .with_context(|_| ServerConnWriteStreamRequestSnafu {
+                    key: key.clone(),
+                    conn_id,
+                })?;
         }
         ConnTask::StreamReq {
             client_id: client_conn_id,
@@ -668,7 +671,7 @@ async fn handle_stream_req<T: MessageWriter>(
                 server_generation,
             }
             .encode()
-            .context(ServerConnEncodeStreamRequestSnafu {
+            .with_context(|_| ServerConnEncodeStreamRequestSnafu {
                 key: key.clone(),
                 conn_id,
             })?;
@@ -683,7 +686,10 @@ async fn handle_stream_req<T: MessageWriter>(
             writer
                 .write_msg(&msg)
                 .await
-                .context(ServerConnWriteStreamRequestSnafu { key, conn_id })?;
+                .with_context(|_| ServerConnWriteStreamRequestSnafu {
+                    key: key.clone(),
+                    conn_id,
+                })?;
         }
         req => {
             tracing::error!(
