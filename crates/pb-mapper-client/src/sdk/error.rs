@@ -43,7 +43,9 @@ pub enum Error {
     TunnelFailed { reason: String },
     #[snafu(display("tunnel stopped before becoming ready"))]
     Stopped,
-    #[snafu(display("{source}"))]
+    /// Its text carries the source's causes: a status error names the step
+    /// that failed, and a Node or app caller gets only the text.
+    #[snafu(display("{}", with_causes(source)))]
     Status { source: crate::client::error::Error },
     #[snafu(display("{source}"))]
     Io { source: std::io::Error },
@@ -183,5 +185,19 @@ mod tests {
         };
         assert!(unreachable.is_carrier_failure());
         assert!(unreachable.may_resend_unsent());
+    }
+
+    /// A status query that failed in transport says why in its text, which
+    /// is all a Node or app caller gets of it, and keeps its source.
+    #[test]
+    fn a_failed_status_query_names_its_cause() {
+        let cause = || std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset mid-reply");
+        let error = Error::Status {
+            source: crate::client::error::Error::WriteStatusReq {
+                source: pb_mapper_core::error::Error::MsgNetworkReadBody { source: cause() },
+            },
+        };
+        assert!(error.to_string().contains(&cause().to_string()), "{error}");
+        assert!(std::error::Error::source(&error).is_some());
     }
 }
