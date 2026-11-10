@@ -215,7 +215,7 @@ async fn run_server_side_cli_worker(
         wake.acknowledge();
         diagnostics.attempt();
         let mut carrier = None;
-        let status = if let Err(status) = run_server_side_cli_inner(
+        let status = match run_server_side_cli_inner(
             &mut backoff,
             config.clone(),
             &report,
@@ -227,18 +227,19 @@ async fn run_server_side_cli_worker(
         )
         .await
         {
-            status
-        } else {
-            if shutdown.is_cancelled() {
-                break 'outer;
+            Status::Ended => {
+                if shutdown.is_cancelled() {
+                    break 'outer;
+                }
+                tracing::warn!(
+                    event = "local_server_control_worker_finished",
+                    key = %key,
+                    worker_index,
+                    "local server control worker finished without an error; reconnecting"
+                );
+                Status::ReadMsg
             }
-            tracing::warn!(
-                event = "local_server_control_worker_finished",
-                key = %key,
-                worker_index,
-                "local server control worker finished without an error; reconnecting"
-            );
-            Status::ReadMsg
+            status => status,
         };
         if matches!(status, Status::Cancelled) {
             break 'outer;
@@ -300,6 +301,7 @@ async fn run_server_side_cli_worker(
                 (Duration::ZERO, 0)
             }
             Status::ReadMsg
+            | Status::Ended
             | Status::SendPing
             | Status::ConnectRemote
             | Status::Resolve

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use snafu::ResultExt;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -30,10 +31,7 @@ use pb_mapper_core::config::control_io_timeout;
 use pb_mapper_core::config::{
     ResolvedAddrs, control_heartbeat_interval, control_heartbeat_tolerance, control_suspect_grace,
 };
-use pb_mapper_core::{
-    snafu_error_get_or_continue, snafu_error_get_or_return, snafu_error_get_or_return_ok,
-    snafu_error_handle,
-};
+use pb_mapper_core::{snafu_error_get_or_continue, snafu_error_get_or_return, snafu_error_handle};
 use pb_mapper_protocol::MessageReader;
 #[cfg(feature = "p2p")]
 use pb_mapper_protocol::MessageWriter;
@@ -43,6 +41,7 @@ use pb_mapper_protocol::command::{
     CONTROL_PROTOCOL_V2, MessageSerializer, PbConnRequest, PbConnResponse,
 };
 use pb_mapper_protocol::secure::ClientHeaderSession;
+use pb_mapper_protocol::transport::RelayWriteHalf;
 
 /// Why one attempt at holding a control connection ended, and therefore how the
 /// worker should treat it.
@@ -74,6 +73,25 @@ pub(super) enum Status {
     /// limit. Worth retrying, but slowly: the relay is reachable and answering,
     /// and reconnecting hard only adds load to what has to drain.
     RejectedRetryable(String),
+    /// The attempt failed in a way it has already logged — encoding, writing,
+    /// reading or decoding the registration — or its writer stopped because
+    /// nothing is left to queue writes. The worker reconnects as after
+    /// [`Status::ReadMsg`], unless it is shutting down.
+    Ended,
+}
+
+/// Unwrap `result`, or log its error and end the attempt with
+/// [`Status::Ended`].
+macro_rules! ok_or_end {
+    ($result:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!("{}", snafu::Report::from_error(error));
+                return Status::Ended;
+            }
+        }
+    };
 }
 
 impl Status {
@@ -141,7 +159,7 @@ pub(super) async fn run_server_side_cli_inner(
     setup_slots: &Arc<tokio::sync::Semaphore>,
     wake: &mut RecoveryWake,
     carrier: &mut Option<CarrierId>,
-) -> std::result::Result<(), Status> {
+) -> Status {
     let ServerCliRunConfig {
         local_addr,
         remote_addr,
@@ -163,8 +181,8 @@ pub(super) async fn run_server_side_cli_inner(
         spawn_stream,
     } = config;
     let control_permit = tokio::select! {
-        () = shutdown.cancelled() => return Err(Status::Cancelled),
-        () = wake.network_changed() => return Err(Status::NetworkChanged),
+        () = shutdown.cancelled() => return Status::Cancelled,
+        () = wake.network_changed() => return Status::NetworkChanged,
         permit = remote_addr.control_permit() => permit,
     };
     let started = tokio::time::Instant::now();
@@ -172,17 +190,17 @@ pub(super) async fn run_server_side_cli_inner(
     let deadline = started + timeout;
     diagnostics.phase(RecoveryPhase::Resolving);
     let addresses = tokio::select! {
-        () = shutdown.cancelled() => return Err(Status::Cancelled),
-        () = wake.network_changed() => return Err(Status::NetworkChanged),
+        () = shutdown.cancelled() => return Status::Cancelled,
+        () = wake.network_changed() => return Status::NetworkChanged,
         result = tokio::time::timeout_at(deadline, remote_addr.addresses()) => match result {
             Ok(Ok(addresses)) => addresses,
-            _ => return Err(Status::Resolve),
+            _ => return Status::Resolve,
         },
     };
     diagnostics.phase(RecoveryPhase::Connecting);
     let mut manager_stream = tokio::select! {
-        () = shutdown.cancelled() => return Err(Status::Cancelled),
-        () = wake.network_changed() => return Err(Status::NetworkChanged),
+        () = shutdown.cancelled() => return Status::Cancelled,
+        () = wake.network_changed() => return Status::NetworkChanged,
         result = tokio::time::timeout_at(deadline, remote_addr.connect_addresses(&addresses, credential, carrier)) => {
             match result {
                 Ok(Ok(stream)) => stream,
@@ -192,14 +210,14 @@ pub(super) async fn run_server_side_cli_inner(
                         remote_addr.protocol_succeeded();
                         diagnostics.responded(started.elapsed());
                         backoff.timing.record(started.elapsed());
-                        return Err(Status::rejected(response));
+                        return Status::rejected(response);
                     }
-                    return Err(Status::ConnectRemote);
+                    return Status::ConnectRemote;
                 }
                 Err(_) => {
                     backoff.timing.timed_out();
                     tracing::debug!(event = "local_server_setup_timeout", %key, worker_index, ?timeout, phase = "dial");
-                    return Err(Status::Timeout);
+                    return Status::Timeout;
                 }
             }
         }
@@ -229,7 +247,7 @@ pub(super) async fn run_server_side_cli_inner(
         Ok(session) => session,
         Err(error) => {
             tracing::error!("create manager protocol-v2 session failed: {error}");
-            return Err(Status::ConnectRemote);
+            return Status::ConnectRemote;
         }
     };
     let heartbeat_interval = control_heartbeat_interval();
@@ -264,48 +282,46 @@ pub(super) async fn run_server_side_cli_inner(
             heartbeat_tolerance_ms: Some(duration_to_millis(heartbeat_tolerance)),
         },
     };
-    let msg = snafu_error_get_or_return_ok!(request.encode().context(EncodeRegisterReqSnafu));
+    let msg = ok_or_end!(request.encode().context(EncodeRegisterReqSnafu));
     tokio::select! {
-        () = shutdown.cancelled() => return Err(Status::Cancelled),
-        () = wake.network_changed() => return Err(Status::NetworkChanged),
+        () = shutdown.cancelled() => return Status::Cancelled,
+        () = wake.network_changed() => return Status::NetworkChanged,
         result = tokio::time::timeout_at(deadline, session.write_initial(&mut manager_stream, &msg)) => {
             match result {
-                Ok(result) => snafu_error_get_or_return_ok!(result.context(SendRegisterReqSnafu)),
+                Ok(result) => ok_or_end!(result.context(SendRegisterReqSnafu)),
                 Err(_) => {
                     backoff.timing.timed_out();
                     tracing::debug!(event = "local_server_setup_timeout", %key, worker_index, ?timeout, phase = "write");
-                    return Err(Status::Timeout);
+                    return Status::Timeout;
                 }
             }
         }
     }
-    let (mut reader, mut writer) = manager_stream.into_split();
+    let (mut reader, writer) = manager_stream.into_split();
     let mut msg_reader = match session.response_reader(&mut reader) {
         Ok(reader) => reader,
         Err(e) => {
             tracing::error!("create manager header reader failed: {e}");
-            return Err(Status::ReadMsg);
+            return Status::ReadMsg;
         }
     };
     // read register resp to indicate that register has finished
     let (key, registration) = {
         let msg = tokio::select! {
-            () = shutdown.cancelled() => return Err(Status::Cancelled),
-            () = wake.network_changed() => return Err(Status::NetworkChanged),
+            () = shutdown.cancelled() => return Status::Cancelled,
+            () = wake.network_changed() => return Status::NetworkChanged,
             result = tokio::time::timeout_at(deadline, msg_reader.read_msg()) => {
                 match result {
-                    Ok(result) => snafu_error_get_or_return_ok!(result.context(ReadRegisterRespSnafu)),
+                    Ok(result) => ok_or_end!(result.context(ReadRegisterRespSnafu)),
                     Err(_) => {
                         backoff.timing.timed_out();
                         tracing::debug!(event = "local_server_setup_timeout", %key, worker_index, ?timeout, phase = "response");
-                        return Err(Status::Timeout);
+                        return Status::Timeout;
                     }
                 }
             }
         };
-        let resp = snafu_error_get_or_return_ok!(
-            PbConnResponse::decode(msg).context(DecodeRegisterRespSnafu)
-        );
+        let resp = ok_or_end!(PbConnResponse::decode(msg).context(DecodeRegisterRespSnafu));
         remote_addr.protocol_succeeded();
         diagnostics.responded(started.elapsed());
         backoff.timing.record(started.elapsed());
@@ -328,7 +344,7 @@ pub(super) async fn run_server_side_cli_inner(
                 lease_ttl_ms: 0,
             },
             // A rejection is an answer, not a failure to get one, so it never
-            // goes through `snafu_error_get_or_return_ok!`: that would report the
+            // goes through `ok_or_end!`: that would report the
             // attempt as having "finished without an error" and retry it on the
             // transport ladder, which is how a refused registration turned into
             // thousands of reject lines a minute.
@@ -342,9 +358,9 @@ pub(super) async fn run_server_side_cli_inner(
                     message = %error.message,
                     "pb server rejected service registration"
                 );
-                return Err(Status::rejected(error));
+                return Status::rejected(error);
             }
-            _ => snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail()),
+            _ => ok_or_end!(RegisterRespNotMatchSnafu {}.fail()),
         };
         tracing::info!(
             event = "local_server_registered",
@@ -371,77 +387,21 @@ pub(super) async fn run_server_side_cli_inner(
     backoff.timing.record(started.elapsed());
     tracing::debug!(event = "local_server_setup_latency", elapsed_ms = duration_to_millis(started.elapsed()), next_timeout_ms = duration_to_millis(backoff.timing.timeout()), %key, worker_index);
     backoff.reset();
-    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<LocalControlWrite>(64);
+    let (write_tx, write_rx) = mpsc::channel::<LocalControlWrite>(64);
     #[cfg(feature = "p2p")]
     if let Some(direct) = &direct {
         direct.connected(write_tx.clone());
     }
     let lease_state = Arc::new(tokio::sync::Mutex::new(ControlLeaseState::new()));
-    let writer_key = key.clone();
-    let writer_registration = registration;
-    let writer_lease = lease_state.clone();
-    let mut writer_handle = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut msg_writer = match session.continuation_writer(&mut writer) {
-            Ok(writer) => writer,
-            Err(e) => {
-                tracing::error!("create manager header writer failed: {e}");
-                return Err(Status::SendPing);
-            }
-        };
-        loop {
-            let Some(cmd) = write_rx.recv().await else {
-                return Ok(());
-            };
-            match cmd {
-                #[cfg(feature = "p2p")]
-                LocalControlWrite::Direct(message) => {
-                    let payload = PbServerRequest::Direct(*message)
-                        .encode()
-                        .map_err(|_| Status::SendPing)?;
-                    tokio::time::timeout(control_io_timeout(), msg_writer.write_msg(&payload))
-                        .await
-                        .map_err(|_| Status::SendPing)?
-                        .map_err(|_| Status::SendPing)?;
-                }
-                LocalControlWrite::Ping { seq } => {
-                    // Timed from the write, not the tick: the round trip
-                    // leaves out this queue.
-                    writer_lease.lock().await.ping_sent(seq);
-                    snafu_error_get_or_return!(
-                        handle_ping_interval(
-                            &mut msg_writer,
-                            writer_key.clone(),
-                            writer_registration,
-                            seq
-                        )
-                        .await,
-                        "[send ping]",
-                        Err(Status::SendPing)
-                    );
-                    tracing::debug!(
-                        event = "local_server_heartbeat_sent",
-                        key = %writer_key,
-                        conn_id = %writer_registration.conn_id,
-                        generation = writer_registration.generation,
-                        protocol_version = writer_registration.protocol_version,
-                        seq,
-                        interval = ?control_heartbeat_interval(),
-                        "local server heartbeat sent"
-                    );
-                }
-                LocalControlWrite::StreamAck {
-                    client_id,
-                    server_generation,
-                } => {
-                    snafu_error_get_or_return!(
-                        write_stream_ack(&mut msg_writer, client_id, server_generation).await,
-                        "[send stream ack]",
-                        Err(Status::SendPing)
-                    );
-                }
-            }
-        }
-    }));
+    let mut writer_handle =
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(run_control_writer(
+            session,
+            writer,
+            write_rx,
+            key.clone(),
+            registration,
+            lease_state.clone(),
+        )));
 
     let heartbeat_interval = control_heartbeat_interval();
     let heartbeat_tolerance = control_heartbeat_tolerance();
@@ -467,7 +427,7 @@ pub(super) async fn run_server_side_cli_inner(
                             error = %snafu::Report::from_error(e),
                             "local server control read failed"
                         );
-                        break Err(Status::ReadMsg);
+                        break Status::ReadMsg;
                     }
                 };
                 remote_addr.protocol_succeeded();
@@ -503,11 +463,11 @@ pub(super) async fn run_server_side_cli_inner(
             }
             Some(_) = stream_tasks.join_next() => {
                 // Reap finished sessions so the set does not grow for the lifetime
-                // of the registration. `handle_stream` logs its own failures.
+                // of the registration. Each session logs its own failure.
             }
             result = &mut writer_handle => {
                 break match result {
-                    Ok(result) => result,
+                    Ok(status) => status,
                     Err(e) => {
                         tracing::error!(
                             event = "local_server_control_writer_join_failed",
@@ -517,14 +477,14 @@ pub(super) async fn run_server_side_cli_inner(
                             error = %e,
                             "local server control writer task failed"
                         );
-                        Err(Status::SendPing)
+                        Status::SendPing
                     }
                 };
             }
             _ = heartbeat.tick() => {
                 ping_seq = ping_seq.wrapping_add(1);
                 if write_tx.try_send(LocalControlWrite::Ping { seq: ping_seq }).is_err() {
-                    break Err(Status::SendPing);
+                    break Status::SendPing;
                 }
 
                 let last_rx_age = lease_state.lock().await.last_rx_age();
@@ -568,11 +528,11 @@ pub(super) async fn run_server_side_cli_inner(
                     worker_index,
                     "local server control loop cancelled"
                 );
-                break Err(Status::Cancelled);
+                break Status::Cancelled;
             }
             () = tokio::time::sleep_until(control_deadline) => {
                 tracing::warn!(event = "local_server_control_unresponsive", %key, worker_index, "control socket received no reply past grace; reconnecting");
-                break Err(Status::ReadMsg);
+                break Status::ReadMsg;
             }
             Some(probe_result) = probes.join_next() => {
                 let probe_result = probe_result.unwrap_or_else(|error| RegistrationProbeResult::Failed(error.to_string()));
@@ -599,7 +559,7 @@ pub(super) async fn run_server_side_cli_inner(
                             last_rx_age_ms = duration_to_millis(last_rx_age),
                             "remote registration no longer contains this control connection; reconnecting"
                         );
-                        break Err(Status::ReadMsg);
+                        break Status::ReadMsg;
                     }
                     RegistrationProbeResult::Missing => {
                         tracing::debug!(
@@ -625,7 +585,7 @@ pub(super) async fn run_server_side_cli_inner(
                             reason = %reason,
                             "registration probe failed past suspect grace; reconnecting"
                         );
-                        break Err(Status::ReadMsg);
+                        break Status::ReadMsg;
                     }
                     RegistrationProbeResult::Failed(reason) => {
                         tracing::warn!(
@@ -647,4 +607,72 @@ pub(super) async fn run_server_side_cli_inner(
         writer_handle.abort();
     }
     result
+}
+
+/// Write what the control loop queues, in order, until the queue closes or a
+/// write fails. Either ends the attempt, with what the writer returns.
+async fn run_control_writer(
+    session: ClientHeaderSession,
+    mut writer: RelayWriteHalf,
+    mut write_rx: mpsc::Receiver<LocalControlWrite>,
+    key: Arc<str>,
+    registration: ControlRegistration,
+    lease: Arc<tokio::sync::Mutex<ControlLeaseState>>,
+) -> Status {
+    let mut msg_writer = match session.continuation_writer(&mut writer) {
+        Ok(writer) => writer,
+        Err(e) => {
+            tracing::error!("create manager header writer failed: {e}");
+            return Status::SendPing;
+        }
+    };
+    loop {
+        let Some(cmd) = write_rx.recv().await else {
+            return Status::Ended;
+        };
+        match cmd {
+            #[cfg(feature = "p2p")]
+            LocalControlWrite::Direct(message) => {
+                let Ok(payload) = PbServerRequest::Direct(*message).encode() else {
+                    return Status::SendPing;
+                };
+                let written =
+                    tokio::time::timeout(control_io_timeout(), msg_writer.write_msg(&payload))
+                        .await;
+                if !matches!(written, Ok(Ok(()))) {
+                    return Status::SendPing;
+                }
+            }
+            LocalControlWrite::Ping { seq } => {
+                // Timed from the write, not the tick: the round trip
+                // leaves out this queue.
+                lease.lock().await.ping_sent(seq);
+                snafu_error_get_or_return!(
+                    handle_ping_interval(&mut msg_writer, key.clone(), registration, seq).await,
+                    "[send ping]",
+                    Status::SendPing
+                );
+                tracing::debug!(
+                    event = "local_server_heartbeat_sent",
+                    key = %key,
+                    conn_id = %registration.conn_id,
+                    generation = registration.generation,
+                    protocol_version = registration.protocol_version,
+                    seq,
+                    interval = ?control_heartbeat_interval(),
+                    "local server heartbeat sent"
+                );
+            }
+            LocalControlWrite::StreamAck {
+                client_id,
+                server_generation,
+            } => {
+                snafu_error_get_or_return!(
+                    write_stream_ack(&mut msg_writer, client_id, server_generation).await,
+                    "[send stream ack]",
+                    Status::SendPing
+                );
+            }
+        }
+    }
 }
