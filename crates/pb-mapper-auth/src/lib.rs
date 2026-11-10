@@ -80,7 +80,7 @@ use std::time::Duration;
 use parking_lot::{Mutex, RwLock};
 use rand::RngExt;
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
-use ring::hkdf::{HKDF_SHA256, Salt};
+use ring::hkdf::{HKDF_SHA256, Prk, Salt};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -170,7 +170,10 @@ pub use types::{
 
 // What the child modules share through their `use super::*`.
 use actor::{Actor, AdminReplays, AuthCommand};
-use keys::{load_isolated_server_admin_credential, load_server_admin_credential};
+use keys::{
+    expand_temporary_key, load_isolated_server_admin_credential, load_server_admin_credential,
+    temporary_root,
+};
 use leases::Leases;
 use persistence::{
     AdminReplayRecord, AuditRecord, PersistedEntry, PersistedSnapshot, StateMutation, WalRecord,

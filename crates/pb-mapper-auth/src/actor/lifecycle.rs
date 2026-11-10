@@ -481,7 +481,7 @@ fn metadata_with_credential(
 ) -> Result<IssuedTemporaryKey, AuthFailure> {
     let slots = inner.slots();
     let credential = if reveal {
-        let key = derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)?;
+        let key = inner.derive_temporary_key(key_id)?;
         encode_temporary_credential(key_id.as_u64(), &key)
     } else {
         String::new()

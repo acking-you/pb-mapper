@@ -206,7 +206,7 @@ impl AuthRuntime {
         if key_id.is_admin() {
             return Ok(inner.admin_key());
         }
-        derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)
+        inner.derive_temporary_key(key_id)
     }
 
     #[cfg(test)]
@@ -264,7 +264,7 @@ impl AuthRuntime {
             )));
         }
 
-        let expected_key = derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)?;
+        let expected_key = inner.derive_temporary_key(key_id)?;
         if !bool::from(presented_key.ct_eq(&expected_key)) {
             return Err(counted(temporary_key_material_mismatch(&inner, key_id)));
         }

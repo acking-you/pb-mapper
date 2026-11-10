@@ -109,11 +109,20 @@ pub fn derive_temporary_key(
     instance_id: &[u8; INSTANCE_ID_LEN],
     key_id: KeyId,
 ) -> Result<AesKeyType, AuthFailure> {
-    let salt = Salt::new(HKDF_SHA256, instance_id);
-    let pseudo_random_key = salt.extract(admin_key);
+    expand_temporary_key(&temporary_root(admin_key, instance_id), key_id)
+}
+
+/// What every temporary key of one root key and instance id is expanded
+/// from: the HKDF extraction, which depends on nothing else.
+pub(crate) fn temporary_root(admin_key: &AesKeyType, instance_id: &[u8; INSTANCE_ID_LEN]) -> Prk {
+    Salt::new(HKDF_SHA256, instance_id).extract(admin_key)
+}
+
+/// The temporary key `key_id` under `root`, a [`temporary_root`].
+pub(crate) fn expand_temporary_key(root: &Prk, key_id: KeyId) -> Result<AesKeyType, AuthFailure> {
     let key_id_bytes = key_id.to_be_bytes();
     let info = [b"pb-mapper-temp-key-v1".as_slice(), key_id_bytes.as_slice()];
-    let output = pseudo_random_key
+    let output = root
         .expand(&info, HkdfLen(32))
         .map_err(|_| AuthFailure::internal("failed to expand temporary key"))?;
     let mut key = [0_u8; 32];

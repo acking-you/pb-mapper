@@ -150,6 +150,10 @@ pub(crate) struct AuthStateInner {
     pub(crate) admin: RwLock<AdminState>,
     pub(crate) sync_process_credential: bool,
     pub(crate) instance_id: RwLock<[u8; INSTANCE_ID_LEN]>,
+    /// The [`temporary_root`] of the administrator key and the instance id. A
+    /// change to either takes this lock first and replaces it before letting
+    /// go, so no derivation pairs a new key or id with the old root.
+    pub(crate) temporary_root: RwLock<Prk>,
     /// Preallocated, indexed directly by `key_id.slot()`. Documented on
     /// [`SlotState`].
     pub(crate) slots: RwLock<Box<[SlotHot]>>,
@@ -218,6 +222,7 @@ impl AuthStateInner {
                 lease: Arc::downgrade(admin_lease),
             }),
             sync_process_credential,
+            temporary_root: RwLock::new(temporary_root(&admin_key, &instance_id)),
             instance_id: RwLock::new(instance_id),
             slots: RwLock::new(slots),
             high_slot_generations,
@@ -276,6 +281,11 @@ impl AuthStateInner {
 
     pub(crate) fn instance_id(&self) -> [u8; INSTANCE_ID_LEN] {
         *self.instance_id.read()
+    }
+
+    /// The temporary key `key_id` names under the current root.
+    pub(crate) fn derive_temporary_key(&self, key_id: KeyId) -> Result<AesKeyType, AuthFailure> {
+        expand_temporary_key(&self.temporary_root.read(), key_id)
     }
 
     /// The legacy-protocol policy in force.

@@ -977,6 +977,16 @@ async fn reset_rotates_instance_and_prevents_old_key_id_reuse() {
         .unwrap();
     assert_ne!(replacement.metadata.key_id, old.metadata.key_id);
     assert_ne!(replacement.credential, old.credential);
+    // Derivations run from the kept extraction, which the reset replaced
+    // with the new instance id's: the full derivation agrees.
+    let instance_id = read_instance_id_file(&instance_id_path(&state_dir))
+        .unwrap()
+        .unwrap();
+    let key_id = replacement.metadata.key_id;
+    assert_eq!(
+        runtime.derive_key(key_id).unwrap(),
+        derive_temporary_key(&TEST_ADMIN_KEY_BYTES, &instance_id, key_id).unwrap()
+    );
 
     stop(runtime).await;
 }
@@ -1201,7 +1211,7 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
     let new_admin = runtime
         .authenticate_presented(ADMIN_KEY_ID, &new_key)
         .unwrap();
-    let _replacement = runtime
+    let replacement = runtime
         .issue(
             &new_admin,
             Duration::from_secs(60),
@@ -1209,6 +1219,16 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
         )
         .await
         .unwrap();
+    // Derivations run from the kept extraction, which the rotation replaced
+    // with the new key's: the full derivation agrees.
+    let instance_id = read_instance_id_file(&instance_id_path(&state_dir))
+        .unwrap()
+        .unwrap();
+    let key_id = replacement.metadata.key_id;
+    assert_eq!(
+        runtime.derive_key(key_id).unwrap(),
+        derive_temporary_key(&new_key, &instance_id, key_id).unwrap()
+    );
     assert_eq!(
         runtime
             .authenticate_presented(issued.metadata.key_id, &old_temporary)
