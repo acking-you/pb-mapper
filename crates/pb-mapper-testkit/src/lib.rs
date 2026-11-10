@@ -51,7 +51,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
-use pb_mapper_core::checksum::{ADMIN_KEY_LEN, Credential, set_process_msg_header_key};
+use pb_mapper_core::checksum::{Credential, set_process_msg_header_key};
+use pb_mapper_core::test_support::TEST_ADMIN_KEY_BYTES;
 
 mod control;
 mod echo;
@@ -82,7 +83,8 @@ pub use tunnel::{Tunnel, TunnelHarness, TunnelSpec};
 ///
 /// A fixed key rather than a random one: it is also the process credential (see
 /// [`init_test_env`]), and one value keeps that a single write per process.
-pub const TEST_ADMIN_KEY: &str = "0123456789abcdefghijklmnopqrstuv";
+/// The crates below this one test with the same key.
+pub use pb_mapper_core::test_support::TEST_ADMIN_KEY;
 
 /// How long any readiness probe polls before failing the test.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -125,20 +127,14 @@ pub fn init_test_env() {
     *TEST_ENV
 }
 
-/// [`TEST_ADMIN_KEY`]'s bytes. A key of any other length fails to compile.
-const ADMIN_KEY: [u8; ADMIN_KEY_LEN] = match TEST_ADMIN_KEY.as_bytes().first_chunk() {
-    Some(key) if TEST_ADMIN_KEY.len() == ADMIN_KEY_LEN => *key,
-    _ => panic!("TEST_ADMIN_KEY must be exactly one administrator key"),
-};
-
 /// The administrator credential matching [`TEST_ADMIN_KEY`].
 pub fn admin_credential() -> Credential {
-    Credential::Admin(ADMIN_KEY)
+    Credential::Admin(TEST_ADMIN_KEY_BYTES)
 }
 
 /// The 32 raw bytes of [`TEST_ADMIN_KEY`], as [`pb_mapper_auth::AuthRuntime`] wants them.
 pub fn admin_key_bytes() -> [u8; 32] {
-    ADMIN_KEY
+    TEST_ADMIN_KEY_BYTES
 }
 
 /// A private authentication state directory, unique per relay.
