@@ -1,12 +1,13 @@
 //! The desktop viewer (protocol v2). `Viewer::connect` returns once the host
-//! accepted; two tasks then run the session under one supervisor:
+//! accepted; one spawned task then runs the session, racing its two halves
+//! (`run`):
 //!
-//! - The read task decodes host messages. For every video record it queues
+//! - The reader decodes host messages. For every video record it queues
 //!   the transport receipt before anything else, so the host's send credit
 //!   covers units the sink later drops; then it hands the unit to the
 //!   `VideoSink` and updates the state, cursor and stats slots. No FFI, Dart
 //!   or decoder work happens on it.
-//! - The write task writes `Outbound`'s messages, one per pick in priority
+//! - The writer writes `Outbound`'s messages, one per pick in priority
 //!   order, and runs the 250 ms viewer tick.
 //!
 //! Input is authorised only by a presentation the sink validated, stamped by
@@ -275,7 +276,7 @@ impl std::fmt::Display for InputError {
 }
 impl std::error::Error for InputError {}
 
-/// The session as both tasks and the API see it.
+/// The session as the reader, the writer and the API see it.
 pub(crate) struct ViewerStateSlot {
     codec: VideoCodec,
     capabilities: Vec<String>,
@@ -361,7 +362,7 @@ impl ViewerStateSlot {
     }
 }
 
-/// State shared by the API, both session tasks and the sink.
+/// State shared by the API, the reader, the writer and the sink.
 ///
 /// Lock discipline: `Outbound`'s input queue may be held while taking the
 /// state slot, the sink, the control barriers or the outbound slots, and the
@@ -944,11 +945,17 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
             io::ErrorKind::UnexpectedEof,
             "the remote computer closed the connection during authentication",
         ))),
-        Err(failure) if failure.kind() == io::ErrorKind::Other => {
+        Err(failure) if wire_violation(&failure) => {
             Err(ConnectError::Protocol(failure.to_string()))
         }
         Err(failure) => Err(ConnectError::Transport(failure)),
     }
+}
+
+/// `wire` reports malformed and oversized records as `Other`; the transport
+/// reports its own kinds.
+fn wire_violation(failure: &io::Error) -> bool {
+    failure.kind() == io::ErrorKind::Other
 }
 
 /// How a session ended.
@@ -960,11 +967,9 @@ enum Ended {
 }
 impl Ended {
     fn failed(failure: io::Error) -> Self {
-        // `wire` reports malformed and oversized records as `Other`; the
-        // transport reports its own kinds.
         let reason = match failure.kind() {
             io::ErrorKind::TimedOut => ViewerReason::Timeout,
-            io::ErrorKind::Other => ViewerReason::Protocol,
+            _ if wire_violation(&failure) => ViewerReason::Protocol,
             _ => ViewerReason::Transport,
         };
         Self::Stopped(reason, failure.to_string())
@@ -999,7 +1004,7 @@ impl Drop for Session {
     }
 }
 
-/// The supervisor: the first task to end ends the session.
+/// Races the reader against the writer; the first to end ends the session.
 async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, session: Session) {
     let started = Instant::now();
     let Session {
