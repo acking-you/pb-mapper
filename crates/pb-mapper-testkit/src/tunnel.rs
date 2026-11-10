@@ -14,8 +14,9 @@ use uni_stream::stream::{
 };
 
 use crate::echo::{tcp_echo_server, udp_echo_server};
+use crate::poll::poll_until;
 use crate::relay::Relay;
-use crate::traffic::{connected_udp_socket, probe_udp_socket, raw_tcp_probe};
+use crate::traffic::{connected_udp_socket, probe_udp_socket, raw_tcp_probe, tagged_echo};
 use crate::{PROBE, READY_TIMEOUT, Transport, admin_credential, reserve_addr};
 
 /// What kind of tunnel to build. Everything but the transport has a default that
@@ -286,10 +287,7 @@ impl Tunnel {
     /// and only exchange on a fresh connection — which is exactly where a TCP
     /// tag sits.
     fn expected_echo(&self, payload: &[u8]) -> Vec<u8> {
-        let mut expected = Vec::with_capacity(payload.len() + 1);
-        expected.extend(self.echo_tag);
-        expected.extend_from_slice(payload);
-        expected
+        tagged_echo(self.echo_tag, payload)
     }
 
     /// Poll until a payload round-trips, or fail the test.
@@ -298,20 +296,17 @@ impl Tunnel {
     /// connection, `connect`'s local listener, and the echo server at once — which
     /// is why no case here needs a sleep.
     pub async fn wait_until_forwarding(&self) {
-        let deadline = Instant::now() + READY_TIMEOUT;
-        let mut last_error = String::from("no attempt completed");
-        while Instant::now() < deadline {
-            match self.probe_once().await {
-                Ok(()) => return,
-                Err(error) => last_error = error,
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        let forwarding = poll_until(READY_TIMEOUT, Duration::from_millis(50), move || {
+            self.probe_once()
+        })
+        .await;
+        if let Err(last_error) = forwarding {
+            panic!(
+                "{} tunnel at {} never forwarded traffic: {last_error}",
+                self.transport.name(),
+                self.tunnel_addr
+            );
         }
-        panic!(
-            "{} tunnel at {} never forwarded traffic: {last_error}",
-            self.transport.name(),
-            self.tunnel_addr
-        );
     }
 
     /// Poll until a probe stops round-tripping, or fail the test.

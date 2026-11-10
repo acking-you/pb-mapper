@@ -47,11 +47,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
-use pb_mapper_core::checksum::{Credential, set_process_msg_header_key};
+use pb_mapper_core::checksum::{ADMIN_KEY_LEN, Credential, set_process_msg_header_key};
 use pb_mapper_core::config::init_tracing;
 
 mod control;
 mod echo;
+mod poll;
 mod relay;
 mod shaped;
 mod traffic;
@@ -98,15 +99,14 @@ pub const RAW_TCP_PAYLOAD_MAX: usize = 20_000;
 /// side is byte-transparent, so these frames are only ever read back by the same
 /// process that wrote them.
 ///
-/// This establishes the baseline for the whole test binary rather than taking
-/// `PROCESS_CREDENTIAL_TEST_LOCK` around a write, which is why the `LazyLock` is
-/// the whole synchronisation: it runs once, before any case can observe the
-/// credential, and never writes again. **The consequence is a rule for test
-/// files: a target that uses this crate must not also set the process credential
-/// itself.** There is no lock to coordinate with — a case that wrote its own
-/// would corrupt the framing under every concurrent case in the binary. A case
-/// that needs a different credential should pass it to
+/// This establishes the baseline for the whole test binary: the `LazyLock` runs
+/// once, before any case can observe the credential, and never writes again.
+/// A case that needs a different credential for a tunnel passes it to
 /// [`TunnelSpec::credential`], which is per tunnel and touches nothing global.
+/// A case that sets or clears the process credential itself holds
+/// [`PROCESS_CREDENTIAL_TEST_LOCK`](pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK),
+/// and so does every case in its binary that relies on the credential: the
+/// framing in every concurrent case reads it.
 pub fn init_test_env() {
     static TEST_ENV: LazyLock<()> = LazyLock::new(|| {
         init_tracing();
@@ -115,14 +115,20 @@ pub fn init_test_env() {
     *TEST_ENV
 }
 
+/// [`TEST_ADMIN_KEY`]'s bytes. A key of any other length fails to compile.
+const ADMIN_KEY: [u8; ADMIN_KEY_LEN] = match TEST_ADMIN_KEY.as_bytes().first_chunk() {
+    Some(key) if TEST_ADMIN_KEY.len() == ADMIN_KEY_LEN => *key,
+    _ => panic!("TEST_ADMIN_KEY must be exactly one administrator key"),
+};
+
 /// The administrator credential matching [`TEST_ADMIN_KEY`].
 pub fn admin_credential() -> Credential {
-    Credential::Admin(*TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap())
+    Credential::Admin(ADMIN_KEY)
 }
 
 /// The 32 raw bytes of [`TEST_ADMIN_KEY`], as [`pb_mapper_auth::AuthRuntime`] wants them.
 pub fn admin_key_bytes() -> [u8; 32] {
-    *TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap()
+    ADMIN_KEY
 }
 
 /// A private authentication state directory, unique per relay.

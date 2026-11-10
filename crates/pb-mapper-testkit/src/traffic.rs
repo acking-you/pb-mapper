@@ -12,6 +12,7 @@ use uni_stream::addr::ToSocketAddrs;
 use uni_stream::stream::{StreamProvider, StreamSplit};
 use uni_stream::udp::tune_udp_socket;
 
+use crate::poll::poll_until;
 use crate::{PROBE, RAW_TCP_PAYLOAD_MAX, READY_TIMEOUT, UDP_TEST_PAYLOAD_MAX};
 
 /// What an echo server replies to `payload`, given the tag it still owes.
@@ -82,26 +83,21 @@ pub async fn probe_udp_socket(socket: &UdpSocket, expected: &[u8]) -> Result<(),
 
 pub async fn wait_until_udp_socket_forwards(socket: &UdpSocket, tag: Option<u8>) {
     let expected = tagged_echo(tag, PROBE);
-    let deadline = Instant::now() + READY_TIMEOUT;
-    let mut last_error = String::from("no attempt completed");
-    while Instant::now() < deadline {
-        match probe_udp_socket(socket, &expected).await {
-            Ok(()) => return,
-            Err(error) => last_error = error,
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    let expected = expected.as_slice();
+    let forwarding = poll_until(READY_TIMEOUT, Duration::from_millis(50), move || {
+        probe_udp_socket(socket, expected)
+    })
+    .await;
+    if let Err(last_error) = forwarding {
+        panic!("udp socket never forwarded through the tunnel: {last_error}");
     }
-    panic!("udp socket never forwarded through the tunnel: {last_error}");
 }
 
 /// Random payload; the length is random too, so framing is exercised at many sizes.
 pub fn gen_random_msg(max_len: usize) -> Vec<u8> {
-    let len = rand::rng().random_range(0_usize..max_len);
-    let mut vec = Vec::with_capacity(len);
-    for _ in 0..len {
-        vec.push(rand::rng().random_range(0..212));
-    }
-    vec
+    let mut rng = rand::rng();
+    let len = rng.random_range(0_usize..max_len);
+    (0..len).map(|_| rng.random_range(0..212)).collect()
 }
 
 /// Send `rounds` × `burst` datagrams through the tunnel and assert each comes back.
