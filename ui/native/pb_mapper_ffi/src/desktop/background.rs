@@ -581,8 +581,11 @@ pub(super) async fn start_background(
         let snapshot = if let Some(saved) =
             legacy.filter(|saved| saved.matches(&scope) && saved.settings.service == start.service)
         {
-            desktop::privileged::background::configure_with_identity(options, saved.identity()?)
-                .await
+            desktop::privileged::background::configure_with_identity(
+                options,
+                saved.identity().clone(),
+            )
+            .await
         } else {
             desktop::privileged::background::configure(options).await
         }
@@ -726,7 +729,7 @@ async fn enable(
         previous.as_ref(),
         local.as_ref().map(|local| &local.identity),
     )?;
-    let identity = pending.identity()?;
+    let identity = pending.identity().clone();
     // Fails before anything changes, never after the running host has gone.
     let credential = credential_text(credential)?;
     tokio::task::spawn_blocking({

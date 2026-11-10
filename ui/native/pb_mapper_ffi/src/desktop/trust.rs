@@ -76,11 +76,11 @@ impl Saved {
         } else if let Some(saved) =
             previous.filter(|saved| saved.matches(scope) && saved.settings.service == service)
         {
-            saved.identity()?
+            saved.identity().clone()
         } else {
             HostIdentity::generate().map_err(err)?
         };
-        Self::new(
+        Ok(Self::new(
             scope,
             Settings {
                 service,
@@ -92,32 +92,32 @@ impl Saved {
                 background: true,
             },
             &identity,
-        )
+        ))
     }
 
-    pub fn new(
-        scope: &Scope,
-        settings: Settings,
-        identity: &HostIdentity,
-    ) -> Result<Self, CtlError> {
+    pub fn new(scope: &Scope, settings: Settings, identity: &HostIdentity) -> Self {
         let display_device = desktop::displays().ok().and_then(|displays| {
             displays
                 .into_iter()
                 .find(|display| display.id == settings.display_id)
                 .map(|display| display.name)
         });
-        Ok(Self {
+        Self {
             scope: scope.relay(),
             settings,
             identity: identity.clone(),
             display_device,
-        })
+        }
     }
     pub fn matches(&self, scope: &Scope) -> bool {
-        self.scope == scope.relay()
+        self.matches_relay(&scope.relay, scope.namespace)
     }
-    pub fn identity(&self) -> Result<HostIdentity, CtlError> {
-        Ok(self.identity.clone())
+    /// Whether this grant is for `relay` and `namespace`.
+    pub fn matches_relay(&self, relay: &str, namespace: u64) -> bool {
+        self.scope.relay == relay && self.scope.namespace == namespace
+    }
+    pub fn identity(&self) -> &HostIdentity {
+        &self.identity
     }
     /// `invitation` is the saved identity's own, offered only for the
     /// current relay and namespace.
@@ -295,7 +295,7 @@ mod tests {
         assert!(loaded.matches(&scope));
         assert_eq!(loaded.settings.service, "desktop:trust-test");
 
-        let saved = Saved::new(&scope, settings, &identity).unwrap();
+        let saved = Saved::new(&scope, settings, &identity);
         save(&root, &saved).unwrap();
         let loaded = load(&root).unwrap().unwrap();
         assert!(loaded.matches(&scope));
@@ -305,7 +305,7 @@ mod tests {
         }));
         assert_eq!(
             identity.encode_secret().unwrap(),
-            loaded.identity().unwrap().encode_secret().unwrap()
+            loaded.identity().encode_secret().unwrap()
         );
         let mut encrypted = std::fs::read(path(&root)).unwrap();
         assert!(
@@ -362,10 +362,10 @@ mod tests {
         let identity = HostIdentity::generate().unwrap();
         let docked = Saved {
             display_device: Some(r"\\.\DISPLAY99".into()),
-            ..Saved::new(&scope, settings.clone(), &identity).unwrap()
+            ..Saved::new(&scope, settings.clone(), &identity)
         };
         save(&root, &docked).unwrap();
-        let undocked = Saved::new(&scope, settings, &identity).unwrap();
+        let undocked = Saved::new(&scope, settings, &identity);
         assert_eq!(undocked.display_device, None);
         save(&root, &undocked).unwrap();
         let stored = load(&root).unwrap().unwrap();
@@ -439,7 +439,7 @@ mod tests {
         .unwrap();
         assert!(!resumed.settings.allow_control);
         assert_eq!(
-            resumed.identity().unwrap().encode_secret().unwrap(),
+            resumed.identity().encode_secret().unwrap(),
             identity.encode_secret().unwrap()
         );
         let different = Saved::for_background(
@@ -455,7 +455,7 @@ mod tests {
         )
         .unwrap();
         assert_ne!(
-            different.identity().unwrap().encode_secret().unwrap(),
+            different.identity().encode_secret().unwrap(),
             identity.encode_secret().unwrap()
         );
         revoke(&root).unwrap();

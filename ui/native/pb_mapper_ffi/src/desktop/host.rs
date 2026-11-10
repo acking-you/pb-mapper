@@ -132,13 +132,7 @@ pub(super) async fn trust_status(handle: &PbMapperHandle) -> Result<Value, CtlEr
         .ok()
         .map(|credential| credential.key_id());
     let matches = saved.as_ref().is_some_and(|saved| {
-        namespace.is_some_and(|namespace| {
-            saved.matches(&trust::Scope {
-                directory: Default::default(),
-                relay: relay.clone(),
-                namespace,
-            })
-        })
+        namespace.is_some_and(|namespace| saved.matches_relay(&relay, namespace))
     });
     // The invitation resumes sharing without setup, so only a grant
     // for this relay and namespace offers one.
@@ -146,7 +140,7 @@ pub(super) async fn trust_status(handle: &PbMapperHandle) -> Result<Value, CtlEr
         Some(saved) => {
             let invitation = if matches {
                 let service = saved.settings.service.clone();
-                Some(saved.identity()?.invitation(service).map_err(err)?.encode())
+                Some(saved.identity().invitation(service).map_err(err)?.encode())
             } else {
                 None
             };
@@ -424,13 +418,11 @@ pub(super) async fn start_local(handle: &PbMapperHandle, start: Start) -> Result
             .as_ref()
             .filter(|saved| saved.matches(&scope) && saved.settings.service == settings.service)
     {
-        saved.identity()?
+        saved.identity().clone()
     } else {
         desktop::HostIdentity::generate().map_err(err)?
     };
-    let persisted = remember
-        .then(|| trust::Saved::new(&scope, settings.clone(), &identity))
-        .transpose()?;
+    let persisted = remember.then(|| trust::Saved::new(&scope, settings.clone(), &identity));
     let local_identity = LocalIdentity {
         scope,
         identity: identity.clone(),
@@ -529,8 +521,7 @@ pub(super) async fn restart_host(
     }
     let persisted = local
         .remembered
-        .then(|| trust::Saved::new(&local.scope, settings.clone(), &local.identity))
-        .transpose()?;
+        .then(|| trust::Saved::new(&local.scope, settings.clone(), &local.identity));
     let Some(host) = slot.host.take() else {
         return Err(err("desktop is not shared"));
     };
