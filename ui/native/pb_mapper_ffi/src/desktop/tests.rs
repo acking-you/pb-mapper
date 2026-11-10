@@ -417,6 +417,64 @@ async fn late_background_discovery_cannot_hide_a_new_grant() {
     assert_eq!(state.background.lock().snapshot.as_ref(), Some(&configured));
 }
 
+/// What the background card reads, key for key: to it a key that is absent
+/// and one that is null differ.
+#[test]
+fn background_snapshots_keep_their_keys() {
+    let json = |value: Value| value;
+    let unavailable = json!({"configured": false, "enabled": false, "host": null,
+        "invitation": null, "settings": null, "server": null, "namespace": null,
+        "supported": cfg!(windows), "message": "off"});
+    assert_eq!(json(unavailable_background("off")), unavailable);
+    let mut failed = unavailable.clone();
+    failed["message"] = json!("lost");
+    failed["service_disabled"] = json!(false);
+    assert_eq!(json(failed_background(None, err("lost"))), failed);
+
+    // As the service answers: no `supported`, and nothing it did not say.
+    let configured = json!({"configured": true, "enabled": true, "host": null,
+        "invitation": "pbd1.invitation", "settings": null, "server": "relay:7666",
+        "namespace": 1, "message": "sharing"});
+    let state = DesktopState::default();
+    assert_eq!(json(state.cache_background(configured.clone())), configured);
+    let mut lost = configured.clone();
+    lost["message"] = json!("lost");
+    lost["service_disabled"] = json!(false);
+    assert_eq!(
+        json(failed_background(Some(&configured), err("lost"))),
+        lost
+    );
+    let mut matched = configured.clone();
+    matched["matches_relay"] = json!(true);
+    let current = RelayScope {
+        server: "relay:7666".into(),
+        namespace: Some(1),
+    };
+    assert_eq!(
+        with_relay_match(configured.clone(), Some(&current)),
+        matched
+    );
+    matched["matches_relay"] = Value::Null;
+    assert_eq!(with_relay_match(configured.clone(), None), matched);
+
+    // Windows forbids the service to start: the saved grant stays, off.
+    let mut disabled = unavailable_background("disabled");
+    disabled["service_disabled"] = json!(true);
+    let mut kept = configured;
+    kept["enabled"] = json!(false);
+    kept["message"] = json!("disabled");
+    kept["service_disabled"] = json!(true);
+    assert_eq!(json(state.cache_background(disabled.clone())), kept);
+    // With nothing saved, the observation is all there is.
+    let mut alone = unavailable;
+    alone["message"] = json!("disabled");
+    alone["service_disabled"] = json!(true);
+    assert_eq!(
+        json(DesktopState::default().cache_background(disabled)),
+        alone
+    );
+}
+
 #[test]
 fn a_host_matches_the_settings_only_on_their_relay_and_namespace() {
     let current = RelayScope {

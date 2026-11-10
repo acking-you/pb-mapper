@@ -132,7 +132,7 @@ pub(super) fn unavailable_background(message: impl Into<String>) -> Value {
         "supported": cfg!(windows), "message": message.into()})
 }
 
-fn failed_background(previous: Option<&Value>, error: CtlError) -> Value {
+pub(super) fn failed_background(previous: Option<&Value>, error: CtlError) -> Value {
     let mut snapshot = previous
         .cloned()
         .unwrap_or_else(|| unavailable_background(""));
