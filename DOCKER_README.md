@@ -16,17 +16,16 @@ docker run -d --name pb-mapper \
   -p 7666:7666/tcp -p 7666:7666/udp \
   -e RUST_LOG=error \
   -v pb-mapper-auth:/var/lib/pb-mapper/auth \
-  ackingliu/pb-mapper:latest-x86_64_musl
+  ackingliu/pb-mapper:latest
 ```
 
-On an arm64 host use `latest-aarch64_musl`. With Compose, save this as
-`compose.yaml` and run `docker compose up -d`:
+With Compose, save this as `compose.yaml` and run `docker compose up -d`:
 
 ```yaml
 services:
   pb-mapper:
     container_name: pb-mapper
-    image: ackingliu/pb-mapper:latest-x86_64_musl
+    image: ackingliu/pb-mapper:latest
     environment:
       RUST_LOG: error
     volumes:
@@ -77,13 +76,14 @@ UDP. With `USE_IPV6: true`, publish on the IPv6 address:
 
 | Tag | Image |
 | --- | --- |
-| `latest-x86_64_musl`, `latest-aarch64_musl` | The newest release, for linux/amd64 and linux/arm64 |
-| `X.Y.Z-x86_64_musl`, `X.Y.Z-aarch64_musl` | One release, also as `vX.Y.Z-…`; `X.Y-…` and `X-…` follow the newest release of that line |
+| `latest` | The newest release |
+| `X.Y.Z` | One release, also as `vX.Y.Z`; `X.Y` and `X` follow the newest release of that line |
 
-Releases after 0.11.0 also publish each tag without its suffix (`latest`,
-`X.Y.Z`, `X.Y`, `X`, `vX.Y.Z`) as one image for both architectures. For any
-other architecture, build the binary and then `docker/pb-mapper.dockerfile`,
-as `scripts/release/release-docker-image.sh` in the
+Each tag is one image for linux/amd64 and linux/arm64. Either half is also
+tagged alone, as `<tag>-x86_64_musl` and `<tag>-aarch64_musl`, the only form
+releases before 0.11.0 have. For any other architecture, build the binary and
+then `docker/pb-mapper.dockerfile`, as
+`scripts/release/release-docker-image.sh` in the
 [repository](https://github.com/acking-you/pb-mapper) does.
 
 ## Security
