@@ -21,8 +21,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 use pb_mapper_auth::KeyId;
-use pb_mapper_core::durable_file;
-use rand::RngExt;
+use pb_mapper_core::durable_file::{self, NewFileMode};
 use ring::digest::{SHA256, SHA256_OUTPUT_LEN, digest};
 
 use super::{CONNECTION_SALT_LEN, pack, unix_seconds};
@@ -351,30 +350,9 @@ impl ReplayGuard {
         let Some(path) = &self.log_path else {
             return Ok(());
         };
-        let random_suffix = u64::from_be_bytes(rand::rng().random::<[u8; 8]>());
-        let temporary = path.with_file_name(format!(
-            ".{}.tmp-{}-{random_suffix:016x}",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("connection.replay"),
-            std::process::id(),
-        ));
         let records = live.iter().map(ReplayRecord::to_bytes).collect::<Vec<_>>();
-        let result = (|| {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)?;
-            file.write_all(records.as_flattened())?;
-            file.sync_all()?;
-            drop(file);
-            durable_file::replace_file(&temporary, path)?;
-            durable_file::sync_parent_directory(path)
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        result
+        durable_file::replace_contents(path, records.as_flattened(), NewFileMode::Default)
+            .map_err(std::io::Error::from)
     }
 }
 
