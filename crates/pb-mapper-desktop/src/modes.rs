@@ -269,7 +269,7 @@ impl Journal {
     }
 
     /// Replace its entries, durably; none removes the file.
-    fn write(&self, entries: &[Entry]) -> Result<()> {
+    fn write(&self, entries: Vec<Entry>) -> Result<()> {
         let Some(path) = &self.path else {
             return Err(no_journal());
         };
@@ -280,23 +280,12 @@ impl Journal {
                 Err(failure) => Err(failure),
             };
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let stored = Stored {
             version: Stored::VERSION,
-            entries: entries.to_vec(),
+            entries,
         };
         let bytes = serde_json::to_vec(&stored).map_err(error)?;
-        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&temporary)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-        }
-        pb_mapper_core::durable_file::replace_file(&temporary, path)?;
-        pb_mapper_core::durable_file::sync_parent_directory(path)
+        crate::trust::write_durably(path, &bytes)
     }
 
     /// Its entries with `device`'s replaced by `entry`, or removed.
@@ -307,7 +296,7 @@ impl Journal {
         if entries.len() > MAX_ENTRIES {
             return Err(error("too many displays are changed"));
         }
-        self.write(&entries)
+        self.write(entries)
     }
 }
 
@@ -574,7 +563,7 @@ pub(crate) fn recover<M: DisplayModes>(modes: &mut M, journal: &Journal) -> Resu
         settled(&entry.device);
     }
     if kept != entries {
-        journal.write(&kept)?;
+        journal.write(kept)?;
     }
     Ok(restored)
 }
