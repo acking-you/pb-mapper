@@ -334,26 +334,11 @@ mod tests {
     use super::*;
     use crate::routing::{ImutableKey, ServerConnInfo, service_conn_count};
     use pb_mapper_auth::{AuthConfig, AuthRuntime, LegacyProtocolPolicy};
-    use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
+    use pb_mapper_core::test_support::{
+        PROCESS_CREDENTIAL_TEST_LOCK, TEST_ADMIN_KEY_BYTES, TempPath,
+    };
     use pb_mapper_protocol::command::CONTROL_PROTOCOL_V2;
-    use rand::RngExt;
-    use std::path::PathBuf;
     use std::time::Duration;
-
-    fn temp_state_dir(name: &str) -> PathBuf {
-        let mut suffix = [0_u8; 8];
-        let mut rng = rand::rng();
-        for byte in &mut suffix {
-            *byte = rng.random();
-        }
-        std::env::temp_dir().join(format!(
-            "pb-mapper-{name}-{}",
-            suffix
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        ))
-    }
 
     /// A retired connection's ID must not be handed out again until its own socket
     /// task has deregistered.
@@ -366,9 +351,9 @@ mod tests {
     /// would remove the replacement's sender and its service-map entry instead.
     #[tokio::test]
     async fn a_retired_conn_id_is_withheld_until_its_socket_task_deregisters() {
-        let state_dir = temp_state_dir("retired-id");
+        let state_dir = TempPath::new("retired-id");
         let auth = AuthRuntime::from_isolated_state(AuthConfig {
-            state_dir: state_dir.clone(),
+            state_dir: state_dir.to_path_buf(),
             ..AuthConfig::default()
         })
         .await
@@ -468,7 +453,6 @@ mod tests {
         drop(router);
         auth.shutdown_actor().await;
         drop(auth);
-        let _ = std::fs::remove_dir_all(state_dir);
     }
 
     /// The capacity of a connection's `ConnTask` mailbox; the value does not
@@ -478,10 +462,10 @@ mod tests {
     #[tokio::test]
     async fn shutdown_releases_auth_lock_while_a_connection_is_open() {
         let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-        let state_dir = temp_state_dir("shutdown-lock");
-        let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+        let state_dir = TempPath::new("shutdown-lock");
+        let admin_key = TEST_ADMIN_KEY_BYTES;
         let config = AuthConfig {
-            state_dir: state_dir.clone(),
+            state_dir: state_dir.to_path_buf(),
             max_temporary_keys: 4,
             max_temporary_key_ttl: Duration::from_secs(3600),
             legacy_protocol: LegacyProtocolPolicy::Allow,
@@ -507,7 +491,6 @@ mod tests {
         let restarted = AuthRuntime::start(admin_key, config).await.unwrap();
         restarted.shutdown_actor().await;
         drop(restarted);
-        let _ = std::fs::remove_dir_all(state_dir);
     }
 }
 
@@ -520,10 +503,9 @@ mod cancellation_audit {
     };
     #[tokio::test]
     async fn dropping_relay_future_must_release_its_listener() {
-        let state_dir =
-            std::env::temp_dir().join(format!("pb-audit-abort-{}", rand::random::<u64>()));
+        let state_dir = pb_mapper_core::test_support::TempPath::new("audit-abort");
         let config = AuthConfig {
-            state_dir: state_dir.clone(),
+            state_dir: state_dir.to_path_buf(),
             ..AuthConfig::default()
         };
         let auth = AuthRuntime::from_isolated_state(config).await.unwrap();
@@ -554,7 +536,6 @@ mod cancellation_audit {
             tokio::task::yield_now().await;
         }
         drop(auth);
-        let _ = std::fs::remove_dir_all(state_dir);
         assert!(
             !leaked,
             "relay future dropped, but detached listener task still owns {addr}"

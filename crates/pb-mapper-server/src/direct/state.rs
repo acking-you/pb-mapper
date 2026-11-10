@@ -506,21 +506,18 @@ impl DirectState {
 mod tests {
     use super::*;
     use pb_mapper_auth::{ADMIN_KEY_ID, AuthConfig, AuthRuntime};
+    use pb_mapper_core::test_support::TempPath;
 
     /// Revocation has to stop one key's setups without touching its namespace's
     /// others, including a setup that was already in flight when the key died.
     #[tokio::test]
     async fn revoking_one_key_of_a_namespace_stops_only_its_direct_setups() {
         let key = [18; 32];
-        let dir = std::env::temp_dir().join(format!(
-            "pb-direct-namespace-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
+        let dir = TempPath::new("direct-namespace");
         let auth = AuthRuntime::start(
             key,
             AuthConfig {
-                state_dir: dir.clone(),
+                state_dir: dir.to_path_buf(),
                 ..AuthConfig::default()
             },
         )
@@ -693,21 +690,16 @@ mod tests {
 
         drop(state);
         auth.shutdown_actor().await;
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
     async fn relay_grants_are_scoped_single_use_and_observations_cannot_authorize_them() {
         let key = [17; 32];
-        let dir = std::env::temp_dir().join(format!(
-            "pb-direct-state-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
+        let dir = TempPath::new("direct-state");
         let auth = AuthRuntime::start(
             key,
             AuthConfig {
-                state_dir: dir.clone(),
+                state_dir: dir.to_path_buf(),
                 ..AuthConfig::default()
             },
         )
@@ -905,6 +897,5 @@ mod tests {
         drop(state);
         drop(restarted);
         auth.shutdown_actor().await;
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

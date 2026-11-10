@@ -399,25 +399,22 @@ async fn audit_action(
 #[cfg(test)]
 mod tests {
     use std::future::{Future, poll_fn};
-    use std::path::PathBuf;
     use std::task::Poll;
 
     use super::*;
     use pb_mapper_auth::ADMIN_KEY_ID;
     use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
+    use pb_mapper_core::test_support::{TEST_ADMIN_KEY_BYTES, TempPath};
 
-    const ADMIN_KEY: [u8; 32] = *b"0123456789abcdefghijklmnopqrstuv";
-
-    /// A runtime started on a fresh state directory with [`ADMIN_KEY`], and its
+    /// A runtime started on a fresh state directory with [`TEST_ADMIN_KEY_BYTES`], and its
     /// administrator. Starting it this way syncs the process credential, so the
     /// caller holds `PROCESS_CREDENTIAL_TEST_LOCK`.
-    async fn admin_runtime(name: &str) -> (AuthRuntime, AuthContext, PathBuf) {
-        let state_dir =
-            std::env::temp_dir().join(format!("pb-mapper-admin-{name}-{}", rand::random::<u64>()));
+    async fn admin_runtime(name: &str) -> (AuthRuntime, AuthContext, TempPath) {
+        let state_dir = TempPath::new(&format!("admin-{name}"));
         let runtime = AuthRuntime::start(
-            ADMIN_KEY,
+            TEST_ADMIN_KEY_BYTES,
             AuthConfig {
-                state_dir: state_dir.clone(),
+                state_dir: state_dir.to_path_buf(),
                 max_temporary_keys: 4,
                 max_temporary_key_ttl: Duration::from_secs(3600),
                 legacy_protocol: LegacyProtocolPolicy::Allow,
@@ -426,17 +423,17 @@ mod tests {
         .await
         .expect("authentication runtime should start");
         let admin = runtime
-            .authenticate_presented(ADMIN_KEY_ID, &ADMIN_KEY)
+            .authenticate_presented(ADMIN_KEY_ID, &TEST_ADMIN_KEY_BYTES)
             .expect("administrator key should authenticate");
         (runtime, admin, state_dir)
     }
 
     /// Stop the runtime's actor, which releases the state directory, and
     /// remove the directory.
-    async fn shut_down(runtime: AuthRuntime, state_dir: PathBuf) {
+    async fn shut_down(runtime: AuthRuntime, state_dir: TempPath) {
         runtime.shutdown_actor().await;
         drop(runtime);
-        let _ = std::fs::remove_dir_all(state_dir);
+        drop(state_dir);
     }
 
     async fn inventory_query_rejects_rotation(connection_query: bool) {
@@ -613,10 +610,9 @@ mod tests {
 
     #[tokio::test]
     async fn applied_mutation_must_not_be_reported_as_cancelled() {
-        let state_dir =
-            std::env::temp_dir().join(format!("pb-audit-admin-{}", rand::random::<u64>()));
+        let state_dir = TempPath::new("audit-admin");
         let config = AuthConfig {
-            state_dir: state_dir.clone(),
+            state_dir: state_dir.to_path_buf(),
             ..AuthConfig::default()
         };
         let auth = AuthRuntime::from_isolated_state(config).await.unwrap();
