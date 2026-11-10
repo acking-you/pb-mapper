@@ -923,7 +923,10 @@ mod tests {
             PbConnResponse::Error(error) => assert_eq!(error.code, "admin_protocol_v2_required"),
             other => panic!("expected a refusal, got {other:?}"),
         }
-        assert!(auth.legacy_protocol_allowed().unwrap(), "the change was not made");
+        assert!(
+            auth.legacy_protocol_allowed().unwrap(),
+            "the change was not made"
+        );
 
         shutdown.cancel();
         relay.await.unwrap().unwrap();
