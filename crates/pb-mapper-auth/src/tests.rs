@@ -19,19 +19,15 @@ use crate::config::{
 };
 use crate::config::{parse_legacy_protocol_policy, platform_default_auth_state_dir};
 use crate::persistence::{
-    auth_snapshot_path, prepare_state_dir, read_instance_id_file, seal_blob, sync_parent_directory,
-    try_load_persisted_state,
+    auth_snapshot_path, prepare_state_dir, random_bytes, read_instance_id_file, seal_blob,
+    sync_parent_directory, try_load_persisted_state,
 };
 
 mod namespaces;
 mod schedule;
 
 fn temp_state_dir(name: &str) -> PathBuf {
-    let mut suffix = [0_u8; 8];
-    let mut rng = rand::rng();
-    for byte in &mut suffix {
-        *byte = rng.random();
-    }
+    let suffix: [u8; 8] = random_bytes();
     std::env::temp_dir().join(format!("pb-mapper-{name}-{}", hex(&suffix)))
 }
 

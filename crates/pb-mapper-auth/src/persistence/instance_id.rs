@@ -1,8 +1,8 @@
 //! The server instance id: the salt every temporary key is derived with.
 use super::super::*;
 use super::{
-    atomic_write, auth_snapshot_path, instance_id_path, open_blob, staged_instance_id_path,
-    truncate_auth_wal,
+    atomic_write, auth_snapshot_path, instance_id_path, open_blob, random_bytes,
+    staged_instance_id_path, truncate_auth_wal,
 };
 
 pub(crate) fn load_or_create_instance_id(
@@ -87,12 +87,7 @@ pub(crate) fn recover_instance_id_after_reset(
 }
 
 pub(crate) fn random_instance_id() -> [u8; INSTANCE_ID_LEN] {
-    let mut instance_id = [0_u8; INSTANCE_ID_LEN];
-    let mut rng = rand::rng();
-    for byte in &mut instance_id {
-        *byte = rng.random();
-    }
-    instance_id
+    random_bytes()
 }
 
 pub(crate) fn reset_already_installed(

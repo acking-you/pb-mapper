@@ -6,6 +6,9 @@ use super::{
 };
 use pb_mapper_core::paging::paginate;
 
+/// The longest label a key may carry, after trimming.
+const MAX_LABEL_BYTES: usize = 64;
+
 fn validate_ttl(config: &AuthConfig, ttl: Duration) -> Result<u64, AuthFailure> {
     if ttl < MIN_TEMP_KEY_TTL {
         return Err(AuthFailure::new(
@@ -34,10 +37,13 @@ fn validate_label(label: Option<String>) -> Result<Option<String>, AuthFailure> 
     let label = label
         .map(|label| label.trim().to_string())
         .filter(|label| !label.is_empty());
-    if label.as_ref().is_some_and(|label| label.len() > 64) {
+    if label
+        .as_ref()
+        .is_some_and(|label| label.len() > MAX_LABEL_BYTES)
+    {
         return Err(AuthFailure::new(
             codes::TEMPORARY_KEY_LABEL_TOO_LONG,
-            "temporary key label must not exceed 64 UTF-8 bytes",
+            format!("temporary key label must not exceed {MAX_LABEL_BYTES} UTF-8 bytes"),
             false,
         ));
     }
@@ -247,7 +253,7 @@ pub(super) fn actor_list(
     all.sort_by_key(|item| std::cmp::Reverse(item.issued_at));
     let (items, next_page) = paginate(&all, page, page_size);
     Ok(KeyPage {
-        schema_version: 1,
+        schema_version: ADMIN_SCHEMA_VERSION,
         items,
         next_page,
     })

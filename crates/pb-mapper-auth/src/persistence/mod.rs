@@ -105,6 +105,13 @@ pub fn encrypted_auth_state_exists(state_dir: &Path) -> bool {
     auth_snapshot_path(state_dir).exists() || auth_wal_path(state_dir).exists()
 }
 
+/// `N` bytes from the thread's cryptographically secure generator.
+pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0; N];
+    rand::fill(&mut bytes);
+    bytes
+}
+
 pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);

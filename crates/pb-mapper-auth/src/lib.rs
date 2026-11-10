@@ -110,12 +110,28 @@ const MAX_SCHEDULABLE_DELAY: Duration =
     Duration::from_secs(MAX_TEMP_KEY_TTL.as_secs() + TOMBSTONE_RETENTION.as_secs());
 const SNAPSHOT_COMPACTION_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const SNAPSHOT_SCHEMA_VERSION: u16 = 1;
+/// The `schema_version` of the [`KeyPage`] and [`AuthStatus`] this crate builds.
+const ADMIN_SCHEMA_VERSION: u16 = 1;
 const STATE_BLOB_MAGIC: &[u8; 5] = b"PBAS1";
 const STATE_AAD: &[u8] = b"pb-mapper-auth-state-v1";
 const INSTANCE_ID_LEN: usize = 16;
 const ADMIN_REPLAY_RETENTION: Duration = Duration::from_secs(10 * 60);
 const ADMIN_REPLAY_CAPACITY: usize = 65_536;
 const AUDIT_RECORD_CAPACITY: usize = 4096;
+
+const _: () = assert!(
+    MAX_TEMP_KEY_CAPACITY as u64 <= u32::MAX as u64 + 1,
+    "every slot index has to fit SlotIndex's 32 bits"
+);
+const _: () = assert!(
+    DEFAULT_TEMP_KEY_CAPACITY <= MAX_TEMP_KEY_CAPACITY,
+    "the default capacity has to be one the configuration accepts"
+);
+const _: () = assert!(
+    MIN_TEMP_KEY_TTL.as_secs() <= DEFAULT_MAX_TEMP_KEY_TTL.as_secs()
+        && DEFAULT_MAX_TEMP_KEY_TTL.as_secs() <= MAX_TEMP_KEY_TTL.as_secs(),
+    "the default maximum TTL has to be one the configuration accepts"
+);
 
 mod actor;
 mod clock;

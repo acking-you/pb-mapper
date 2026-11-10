@@ -297,7 +297,7 @@ fn actor_status(inner: &Arc<AuthStateInner>) -> AuthStatus {
             .count();
     let last_legacy_connection_at = inner.last_legacy_connection_at.load(Ordering::Acquire);
     AuthStatus {
-        schema_version: 1,
+        schema_version: ADMIN_SCHEMA_VERSION,
         safe_mode: inner.safe_mode.load(Ordering::Acquire),
         capacity: slots.len(),
         active_keys,

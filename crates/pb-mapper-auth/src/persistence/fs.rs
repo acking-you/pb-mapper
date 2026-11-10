@@ -1,6 +1,6 @@
 //! Directory lock, atomic replace, and parent-directory durability.
 use super::super::*;
-use super::{hex, lock_path};
+use super::{hex, lock_path, random_bytes};
 
 /// Create the state directory and take `auth.lock` before any credential or
 /// snapshot file is read or written.
@@ -224,11 +224,7 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), Au
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("auth-state");
-    let mut random_suffix = [0_u8; 8];
-    let mut rng = rand::rng();
-    for byte in &mut random_suffix {
-        *byte = rng.random();
-    }
+    let random_suffix: [u8; 8] = random_bytes();
     let temporary = path.with_file_name(format!(
         ".{file_name}.tmp-{}-{}",
         std::process::id(),

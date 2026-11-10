@@ -405,8 +405,12 @@ fn reap(inner: &Arc<AuthStateInner>, key_id: KeyId) {
     inner.cold_mut().remove(&key_id);
 }
 
+/// Buckets per level of the timing wheel.
+const WHEEL_RADIX: u64 = 64;
+const _: () = assert!(WHEEL_RADIX > 1, "a wheel level needs at least two buckets");
+
 /// The wheel every schedule uses: wide enough for the longest lifetime a key can
-/// have, at 64 buckets per level.
+/// have, at `WHEEL_RADIX` buckets per level.
 fn new_wheel() -> TimingWheel {
-    TimingWheel::new(MAX_SCHEDULABLE_DELAY.as_secs(), 64)
+    TimingWheel::new(MAX_SCHEDULABLE_DELAY.as_secs(), WHEEL_RADIX)
 }

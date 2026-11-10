@@ -61,6 +61,11 @@ pub const ADMIN_KEY_ID: KeyId = KeyId(0);
 /// no key id uses. See the module docs.
 pub const MAX_ALLOCATED_NAMESPACE: u64 = u32::MAX as u64;
 
+const _: () = assert!(
+    MAX_ALLOCATED_NAMESPACE < 1 << 32,
+    "allocated namespaces stay in generation 0, which no key id uses"
+);
+
 impl KeyId {
     pub const fn new(generation: Generation, slot: SlotIndex) -> Self {
         Self(((generation.0 as u64) << 32) | slot.0 as u64)
