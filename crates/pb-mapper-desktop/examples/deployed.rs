@@ -14,7 +14,7 @@
 //! selftest viewer take it, and `controller.json` hands it to the phone tool.
 mod probe_support;
 
-use pb_mapper_client::sdk::{ConnectOptions, PathPolicy, RelayTransport};
+use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy, RelayTransport};
 use pb_mapper_desktop::{
     DisplaySelection, Host, HostOptions, Pull, QualityPreset, Resolution, VideoCodec, VideoLimits,
     Viewer, ViewerConfig, ViewerState,
@@ -22,9 +22,11 @@ use pb_mapper_desktop::{
 use probe_support::{option, relay_client};
 use serde::Deserialize;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+
+type Outcome<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Deserialize)]
 struct Configuration {
@@ -38,8 +40,73 @@ struct Configuration {
     lan_first: bool,
 }
 
+/// What the command line asks for after the configuration path.
+struct Run {
+    output: PathBuf,
+    /// `serve` hosts until `output/stop` appears; anything else is a selftest.
+    mode: String,
+    seconds: u64,
+    limits: VideoLimits,
+    quality: QualityPreset,
+    codecs: Vec<VideoCodec>,
+    fps_override: bool,
+    /// The host allows control.
+    control: bool,
+    /// The phone tool configures its decoder with the low-latency hint.
+    decoder_hints: bool,
+}
+impl Run {
+    fn parse(args: &[String]) -> Outcome<Self> {
+        let output = PathBuf::from(args.get(2).ok_or("output directory required")?);
+        let mode = args.get(3).map_or("selftest", String::as_str).to_owned();
+        let seconds: u64 = args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(20);
+        if !(5..=1800).contains(&seconds) {
+            return Err("duration outside 5..1800 seconds".into());
+        }
+        let (max_width, max_height) = Resolution::default().bounds();
+        let mut limits = VideoLimits {
+            max_width,
+            max_height,
+            max_fps: 60,
+        };
+        for (name, value) in [
+            ("--max-width", &mut limits.max_width),
+            ("--max-height", &mut limits.max_height),
+            ("--fps", &mut limits.max_fps),
+        ] {
+            if let Some(text) = option(args, name) {
+                *value = text.parse()?;
+            }
+        }
+        limits.validate()?;
+        let quality = match option(args, "--quality") {
+            None | Some("balanced") => QualityPreset::Balanced,
+            Some("quality") => QualityPreset::Quality,
+            Some("smooth") => QualityPreset::Smooth,
+            Some(_) => return Err("--quality must be quality, balanced or smooth".into()),
+        };
+        let codecs = match option(args, "--codec") {
+            None | Some("h264") => vec![VideoCodec::H264],
+            Some("h265") => vec![VideoCodec::H265, VideoCodec::H264],
+            Some(_) => return Err("--codec must be h264 or h265".into()),
+        };
+        let flag = |name: &str| args.iter().any(|arg| arg == name);
+        Ok(Self {
+            output,
+            mode,
+            seconds,
+            limits,
+            quality,
+            codecs,
+            fps_override: flag("--fps-override"),
+            control: flag("--control"),
+            decoder_hints: !flag("--no-decoder-hints"),
+        })
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Outcome {
     let args: Vec<_> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--feedback-log") {
         // Deliberately ignore RUST_LOG: these diagnostics expose only feedback
@@ -59,111 +126,175 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|s| s == "--tcp") {
         config.relay_transport = RelayTransport::Tcp;
     }
-    let output = PathBuf::from(args.get(2).ok_or("output directory required")?);
-    let mode = args.get(3).map(String::as_str).unwrap_or("selftest");
-    let seconds: u64 = args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(20);
-    if !(5..=1800).contains(&seconds) {
-        return Err("duration outside 5..1800 seconds".into());
-    }
-    let (max_width, max_height) = Resolution::default().bounds();
-    let mut limits = VideoLimits {
-        max_width,
-        max_height,
-        max_fps: 60,
-    };
-    for (name, value) in [
-        ("--max-width", &mut limits.max_width),
-        ("--max-height", &mut limits.max_height),
-        ("--fps", &mut limits.max_fps),
-    ] {
-        if let Some(text) = option(&args, name) {
-            *value = text.parse()?;
-        }
-    }
-    limits.validate()?;
-    let quality = match option(&args, "--quality") {
-        None | Some("balanced") => QualityPreset::Balanced,
-        Some("quality") => QualityPreset::Quality,
-        Some("smooth") => QualityPreset::Smooth,
-        Some(_) => return Err("--quality must be quality, balanced or smooth".into()),
-    };
-    let codecs = match option(&args, "--codec") {
-        None | Some("h264") => vec![VideoCodec::H264],
-        Some("h265") => vec![VideoCodec::H265, VideoCodec::H264],
-        Some(_) => return Err("--codec must be h264 or h265".into()),
-    };
-    let fps_override = args.iter().any(|arg| arg == "--fps-override");
-    std::fs::create_dir_all(&output)?;
+    let run = Run::parse(&args)?;
+    std::fs::create_dir_all(&run.output)?;
     let admin_client = relay_client(
         config.server_address.clone(),
-        config.msg_header_key,
+        config.msg_header_key.clone(),
         config.relay_transport,
     )?;
     let admin = admin_client.admin()?;
     let key = admin
         .issue_key(
-            Duration::from_secs(seconds + 300),
+            Duration::from_secs(run.seconds + 300),
             Some("desktop-acceptance-ephemeral".into()),
         )
         .await?;
-    let result = async {
-        let client = relay_client(config.server_address.clone(), key.credential.clone(), config.relay_transport)?;
-        let display = pb_mapper_desktop::displays()?.into_iter().next().ok_or("no display")?;
-        let mut options = HostOptions::new(format!("desktop:acceptance-{}", std::process::id()));
-        options.display = DisplaySelection::Id(display.id);
-        options.allow_control = args.iter().any(|arg| arg == "--control");
-        options.lan_first = config.lan_first;
-        let host = Host::start(&client, options).await?;
-        // The phone tool follows `lan_first` as it follows the carrier, so
-        // both ends run the host's arm and the report records it.
-        let controller = serde_json::json!({"server":config.server_address,"credential":key.credential,"transport":config.relay_transport,"lan_first":config.lan_first,"invitation":host.invitation().encode(),"decoder_hints":!args.iter().any(|arg| arg == "--no-decoder-hints")});
-        std::fs::write(output.join("controller.json"),serde_json::to_vec(&controller)?)?;
-        println!("host_ready display={}x{} duration={seconds} mode={mode} lan_first={}", display.width,display.height,config.lan_first);
-        if mode == "serve" {
-            for _ in 0..seconds {
-                if output.join("stop").exists() { break; }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                let s=host.status();
-                println!("state={:?} viewer={:?} message={}",s.state,s.viewer,s.message);
-            }
-        } else {
-            for policy in [PathPolicy::Auto,PathPolicy::RelayOnly] {
-                let viewer = Viewer::connect(&client,host.invitation(),ConnectOptions { path: policy, lan_first: config.lan_first, ..Default::default() },ViewerConfig { codecs: codecs.clone(), limits, fps_override, quality, progress: None }).await?;
-                let consumer = viewer.video_sink().attach()?;
-                // The renderer blocks on the sink, so it gets its own thread.
-                let renderer = tokio::task::spawn_blocking(move || {
-                    let start = Instant::now(); let (mut received, mut bytes) = (0u64, 0u64);
-                    let mut capacity = 4 << 20;
-                    while start.elapsed() < Duration::from_secs(seconds) {
-                        match consumer.next(Duration::from_millis(100), capacity) {
-                            Pull::Unit(unit) => {
-                                received += u64::from(!unit.duplicate);
-                                bytes += unit.bytes.len() as u64;
-                                consumer.presented(unit.generation, unit.frame_id);
-                            }
-                            Pull::NeedCapacity(needed) => capacity = needed,
-                            Pull::Timeout | Pull::Paused => {}
-                            Pull::Closed => break,
-                        }
-                    }
-                    (received, bytes, start.elapsed().as_secs_f64())
-                });
-                let (received, bytes, elapsed) = renderer.await?;
-                let status = viewer.status();
-                if matches!(status.state, ViewerState::Stopped | ViewerState::CaptureUnavailable) {
-                    let _ = viewer.stop().await;
-                    return Err(format!("{:?}: {}", status.reason, status.message).into());
-                }
-                let stats = &status.stats;
-                println!("path={} codec={:?} video={}x{} fps_limit={} fps_override={fps_override} unique_receive_fps={:.2} presented_fps={:.2} source_fps={:.2} receive_mbps={:.2} speed_rx_bps={} speed_tx_bps={} dropped={} picture_latency_ms={:?}", stats.path,stats.codec,stats.width,stats.height,limits.max_fps,received as f64/elapsed,stats.presented_fps,stats.capture_fps, bytes as f64*8.0/elapsed/1e6,stats.speed_rx_bps,stats.speed_tx_bps,stats.dropped_frames,stats.picture_latency_ms);
-                viewer.stop().await?;
-            }
-        }
-        host.stop().await?;
-        Ok::<_,Box<dyn std::error::Error>>(())
-    }.await;
+    let result = host_and_run(&config, &key.credential, &run).await;
     let revoke = admin.revoke_key(key.key_id).await;
-    let _ = std::fs::remove_file(output.join("controller.json"));
+    let _ = std::fs::remove_file(run.output.join("controller.json"));
     revoke?;
     result
+}
+
+/// Host the first display under the test credential, hand the phone tool its
+/// setup in `controller.json`, then serve or measure.
+async fn host_and_run(config: &Configuration, credential: &str, run: &Run) -> Outcome {
+    let client = relay_client(
+        config.server_address.clone(),
+        credential.to_owned(),
+        config.relay_transport,
+    )?;
+    let display = pb_mapper_desktop::displays()?
+        .into_iter()
+        .next()
+        .ok_or("no display")?;
+    let mut options = HostOptions::new(format!("desktop:acceptance-{}", std::process::id()));
+    options.display = DisplaySelection::Id(display.id);
+    options.allow_control = run.control;
+    options.lan_first = config.lan_first;
+    let host = Host::start(&client, options).await?;
+    // The phone tool follows `lan_first` as it follows the carrier, so both
+    // ends run the host's arm and the report records it.
+    let controller = controller_json(
+        config,
+        credential,
+        host.invitation().encode(),
+        run.decoder_hints,
+    );
+    std::fs::write(
+        run.output.join("controller.json"),
+        serde_json::to_vec(&controller)?,
+    )?;
+    println!(
+        "host_ready display={}x{} duration={} mode={} lan_first={}",
+        display.width, display.height, run.seconds, run.mode, config.lan_first
+    );
+    if run.mode == "serve" {
+        serve(&host, &run.output, run.seconds).await;
+    } else {
+        for policy in [PathPolicy::Auto, PathPolicy::RelayOnly] {
+            measure(&client, &host, policy, config.lan_first, run).await?;
+        }
+    }
+    host.stop().await?;
+    Ok(())
+}
+
+/// The phone tool's setup: the relay, the test credential, the carrier,
+/// LAN-first and the invitation.
+fn controller_json(
+    config: &Configuration,
+    credential: &str,
+    invitation: String,
+    decoder_hints: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "server": config.server_address,
+        "credential": credential,
+        "transport": config.relay_transport,
+        "lan_first": config.lan_first,
+        "invitation": invitation,
+        "decoder_hints": decoder_hints,
+    })
+}
+
+/// The host's state once a second for `seconds`, or until `output/stop`
+/// appears.
+async fn serve(host: &Host, output: &Path, seconds: u64) {
+    for _ in 0..seconds {
+        if output.join("stop").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let status = host.status();
+        println!(
+            "state={:?} viewer={:?} message={}",
+            status.state, status.viewer, status.message
+        );
+    }
+}
+
+/// View the host over `path` for the run's seconds through a renderer that
+/// presents every unit at once, and print what the session measured.
+async fn measure(
+    client: &Client,
+    host: &Host,
+    path: PathPolicy,
+    lan_first: bool,
+    run: &Run,
+) -> Outcome {
+    let options = ConnectOptions {
+        path,
+        lan_first,
+        ..Default::default()
+    };
+    let config = ViewerConfig {
+        codecs: run.codecs.clone(),
+        limits: run.limits,
+        fps_override: run.fps_override,
+        quality: run.quality,
+        progress: None,
+    };
+    let viewer = Viewer::connect(client, host.invitation(), options, config).await?;
+    let consumer = viewer.video_sink().attach()?;
+    let seconds = run.seconds;
+    // The renderer blocks on the sink, so it gets its own thread.
+    let renderer = tokio::task::spawn_blocking(move || {
+        let start = Instant::now();
+        let (mut received, mut bytes) = (0u64, 0u64);
+        let mut capacity = 4 << 20;
+        while start.elapsed() < Duration::from_secs(seconds) {
+            match consumer.next(Duration::from_millis(100), capacity) {
+                Pull::Unit(unit) => {
+                    received += u64::from(!unit.duplicate);
+                    bytes += unit.bytes.len() as u64;
+                    consumer.presented(unit.generation, unit.frame_id);
+                }
+                Pull::NeedCapacity(needed) => capacity = needed,
+                Pull::Timeout | Pull::Paused => {}
+                Pull::Closed => break,
+            }
+        }
+        (received, bytes, start.elapsed().as_secs_f64())
+    });
+    let (received, bytes, elapsed) = renderer.await?;
+    let status = viewer.status();
+    if matches!(
+        status.state,
+        ViewerState::Stopped | ViewerState::CaptureUnavailable
+    ) {
+        let _ = viewer.stop().await;
+        return Err(format!("{:?}: {}", status.reason, status.message).into());
+    }
+    let stats = &status.stats;
+    let fps_override = run.fps_override;
+    println!(
+        "path={} codec={:?} video={}x{} fps_limit={} fps_override={fps_override} unique_receive_fps={:.2} presented_fps={:.2} source_fps={:.2} receive_mbps={:.2} speed_rx_bps={} speed_tx_bps={} dropped={} picture_latency_ms={:?}",
+        stats.path,
+        stats.codec,
+        stats.width,
+        stats.height,
+        run.limits.max_fps,
+        received as f64 / elapsed,
+        stats.presented_fps,
+        stats.capture_fps,
+        bytes as f64 * 8.0 / elapsed / 1e6,
+        stats.speed_rx_bps,
+        stats.speed_tx_bps,
+        stats.dropped_frames,
+        stats.picture_latency_ms
+    );
+    viewer.stop().await?;
+    Ok(())
 }
