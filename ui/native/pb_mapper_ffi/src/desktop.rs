@@ -294,5 +294,4 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests;

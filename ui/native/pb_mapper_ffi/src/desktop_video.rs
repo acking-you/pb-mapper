@@ -910,7 +910,6 @@ mod test_source {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::time::Instant;

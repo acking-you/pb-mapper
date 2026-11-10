@@ -3,8 +3,6 @@
 //! pull-only, so there is no `JNI_OnLoad`, no cached `JavaVM` and no Android
 //! context. A JNI failure clears its pending exception and returns `INVALID`,
 //! so Kotlin always sees a code, never a throw.
-#![allow(non_snake_case)]
-
 use crate::desktop_video::{self as video, INVALID, NEED_CAPACITY, Pulled, UNIT};
 use jni::{
     JNIEnv,

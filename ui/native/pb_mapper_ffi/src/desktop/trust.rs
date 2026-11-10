@@ -255,7 +255,6 @@ pub(crate) fn protect(_: &[u8], _: bool, _: &[u8], _: &str) -> Result<Vec<u8>, C
 }
 
 #[cfg(all(test, windows))]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::error::ErrorCode;
