@@ -19,8 +19,7 @@ desktop-test-source = ["dep:bytes"]
 
 [dependencies]
 serde.workspace = true
-# The workspace takes it without its default, `std`, which this crate uses.
-serde_json = { workspace = true, features = ["std"] }
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
