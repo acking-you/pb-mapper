@@ -15,6 +15,7 @@ pub mod durable_file;
 pub mod error;
 pub mod paging;
 pub mod test_support;
+pub mod time;
 pub mod timeout;
 
 /// The width of the length prefix on a framed message.
