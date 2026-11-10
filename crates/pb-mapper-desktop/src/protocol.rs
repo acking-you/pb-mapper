@@ -560,4 +560,68 @@ mod tests {
         assert!(!valid_capabilities(&["Lock".into()]));
         assert!(!valid_capabilities(&vec!["a".into(); MAX_CAPABILITIES + 1]));
     }
+
+    /// `Stats` as peers of every v2 version read it: the tag first, the
+    /// fields in their order, and an absent optional figure left out.
+    #[test]
+    fn stats_keep_their_wire_bytes() {
+        let full = HostMessage::Stats {
+            capture_fps: 59.5,
+            pace_fps: 60,
+            target_fps: 50,
+            fps_cap: 45,
+            bitrate: 4_000_000,
+            encoder_bitrate: 3_800_000,
+            sent_bitrate: 3_900_000,
+            rtt_ms: Some(40),
+            base_rtt_ms: Some(35),
+            queue_delay_ms: Some(2),
+            ack_queue_ms: 1,
+            encoder_dwell_ms: Some(3),
+            dropped_frames: 4,
+            skipped_ticks: 5,
+            keyframes: 6,
+            frames: 60,
+            bytes: 500_000,
+            adaptation: Adaptation::LoweringFps,
+            rate_model: RateModel::Timestamp,
+            gop: u32::MAX,
+        };
+        let sparse = HostMessage::Stats {
+            capture_fps: 0.0,
+            pace_fps: 1,
+            target_fps: 2,
+            fps_cap: 0,
+            bitrate: 3,
+            encoder_bitrate: 4,
+            sent_bitrate: 5,
+            rtt_ms: None,
+            base_rtt_ms: None,
+            queue_delay_ms: None,
+            ack_queue_ms: 6,
+            encoder_dwell_ms: None,
+            dropped_frames: 7,
+            skipped_ticks: 8,
+            keyframes: 9,
+            frames: 10,
+            bytes: 11,
+            adaptation: Adaptation::Startup,
+            rate_model: RateModel::Nominal,
+            gop: 0,
+        };
+        for (message, golden) in [
+            (
+                full,
+                r#"{"t":"stats","capture_fps":59.5,"pace_fps":60,"target_fps":50,"fps_cap":45,"bitrate":4000000,"encoder_bitrate":3800000,"sent_bitrate":3900000,"rtt_ms":40,"base_rtt_ms":35,"queue_delay_ms":2,"ack_queue_ms":1,"encoder_dwell_ms":3,"dropped_frames":4,"skipped_ticks":5,"keyframes":6,"frames":60,"bytes":500000,"adaptation":"lowering_fps","rate_model":"timestamp","gop":4294967295}"#,
+            ),
+            (
+                sparse,
+                r#"{"t":"stats","capture_fps":0.0,"pace_fps":1,"target_fps":2,"fps_cap":0,"bitrate":3,"encoder_bitrate":4,"sent_bitrate":5,"ack_queue_ms":6,"dropped_frames":7,"skipped_ticks":8,"keyframes":9,"frames":10,"bytes":11,"adaptation":"startup","rate_model":"nominal","gop":0}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&message).unwrap(), golden);
+            let read: HostMessage = serde_json::from_str(golden).unwrap();
+            assert_eq!(serde_json::to_string(&read).unwrap(), golden);
+        }
+    }
 }
