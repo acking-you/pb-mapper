@@ -110,10 +110,11 @@ pub(crate) async fn handle_control(
         }
         Ok::<(), std::io::Error>(())
     };
+    // Unbiased on purpose: a peer that keeps `read` always ready must not
+    // keep `write` from ever sending its events.
     tokio::select! {
-        biased;
-        () = cancellation.cancelled() => Ok(()),
         result = read => result,
         result = write => result,
+        () = cancellation.cancelled() => Ok(()),
     }
 }

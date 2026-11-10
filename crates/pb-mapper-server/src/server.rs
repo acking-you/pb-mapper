@@ -624,8 +624,10 @@ async fn run_control_writer<T: MessageWriter>(
             }
         }
     };
+    // Unbiased on purpose: the router queues `Retire` and cancels the token in
+    // one step, so both are ready together, and a responsive writer must get
+    // its turn to drain what is queued ahead of the `Retire`.
     tokio::select! {
-        biased;
         () = retire_token.cancelled() => {
             tracing::warn!(
                 event = "server_conn_writer_cancelled",
