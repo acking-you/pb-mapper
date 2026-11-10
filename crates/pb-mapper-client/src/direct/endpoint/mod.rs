@@ -22,6 +22,7 @@ use tokio::{
 mod dial;
 mod discovery;
 
+pub(super) use dial::Dialed;
 pub(super) use discovery::Discovered;
 use discovery::Discovery;
 

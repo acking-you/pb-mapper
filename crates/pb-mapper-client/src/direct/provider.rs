@@ -1,8 +1,9 @@
 use super::{
     conn::{DirectConn, QuicGuard, forward_direct},
     endpoint::{Arrival, Discovered, Network},
+    grant_fits,
     lan::Assessment,
-    link::{counts, direct_link, lan_missed, log_path, stun_timings, summary},
+    link::{counts, direct_link, first_answers, lan_missed, log_path, stun_timings, summary},
     reports::{Latest, SessionReporter, Sink},
     tcp,
 };
@@ -360,13 +361,7 @@ fn admit_offer(
         );
         None
     };
-    if sessions >= MAX_SESSIONS
-        || !grant.consumer.valid()
-        || grant.service != key
-        || grant.is_datagram != is_datagram
-        || grant.ttl_ms == 0
-        || grant.ttl_ms > SETUP_TTL_MS
-    {
+    if sessions >= MAX_SESSIONS || !grant.consumer.valid() || !grant_fits(grant, key, is_datagram) {
         return reject("invalid offer or provider capacity reached".into());
     }
     if let Some(network) = network {
@@ -615,17 +610,11 @@ async fn open(ctx: &SessionContext, c: &mut Committed) -> io::Result<Opened> {
     c.incoming.conn.write_all(&[3]).await?;
     let framing = c.incoming.conn.framing_key(&c.grant)?;
     let learned = c.network.learned(&c.grant.id);
-    let first = |lan_only: bool| {
-        learned
-            .iter()
-            .filter(|(addr, _)| !lan_only || c.lan.is_lan(*addr))
-            .map(|(_, at)| ms(at.saturating_duration_since(c.probing_started)))
-            .min()
-    };
+    let (first_pong, lan_first_pong) = first_answers(&learned, c.probing_started, &c.lan);
     let timings = SetupTimings {
         discover_ms: Some(c.discover_ms),
-        first_pong_ms: first(false),
-        lan_first_pong_ms: first(true),
+        first_pong_ms: first_pong.map(ms),
+        lan_first_pong_ms: lan_first_pong.map(ms),
         commit_ms: Some(ms(c.committing.elapsed())),
         setup_ms: ms(c.started.elapsed()),
         ..stun_timings(SetupTimings::default(), &c.discovered)

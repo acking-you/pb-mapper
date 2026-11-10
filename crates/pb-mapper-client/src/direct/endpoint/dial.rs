@@ -6,6 +6,7 @@ use crate::{
     direct::{
         conn::{DirectConn, QuicGuard},
         lan::Assessment,
+        link::first_answers,
         tcp,
     },
 };
@@ -106,19 +107,13 @@ impl Network {
         let mut probe = tokio::time::interval(Duration::from_millis(120));
         let dialed = |handshakes: u32, handshake| {
             let learned = self.learned(&id);
-            let first = |lan_only: bool| {
-                learned
-                    .iter()
-                    .filter(|(addr, _)| !lan_only || lan.is_lan(*addr))
-                    .map(|(_, at)| at.saturating_duration_since(started))
-                    .min()
-            };
+            let (first_pong, lan_first_pong) = first_answers(&learned, started, lan);
             Dialed {
                 probed,
                 answered: learned.len() as u32,
                 handshakes,
-                first_pong: first(false),
-                lan_first_pong: first(true),
+                first_pong,
+                lan_first_pong,
                 handshake,
             }
         };

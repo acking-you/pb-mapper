@@ -9,7 +9,8 @@ use crate::diagnostics::{
     SetupTimings,
 };
 use pb_mapper_protocol::direct::{AddressFamily, LinkSummary};
-use std::{io, net::SocketAddr};
+use std::{io, net::SocketAddr, time::Duration};
+use tokio::time::Instant;
 
 /// The figures from before the search: discovery's, with how STUN went.
 pub(super) fn stun_timings(timings: SetupTimings, discovered: &Discovered) -> SetupTimings {
@@ -18,6 +19,23 @@ pub(super) fn stun_timings(timings: SetupTimings, discovered: &Discovered) -> Se
         stun: discovered.stun,
         ..timings
     }
+}
+
+/// How long after `since` a path first answered a probe, and a path on the
+/// LAN, from what the endpoint `learned`.
+pub(super) fn first_answers(
+    learned: &[(SocketAddr, Instant)],
+    since: Instant,
+    lan: &Assessment,
+) -> (Option<Duration>, Option<Duration>) {
+    let first = |lan_only: bool| {
+        learned
+            .iter()
+            .filter(|(addr, _)| !lan_only || lan.is_lan(*addr))
+            .map(|(_, at)| at.saturating_duration_since(since))
+            .min()
+    };
+    (first(false), first(true))
 }
 
 /// The candidates each end offered.
