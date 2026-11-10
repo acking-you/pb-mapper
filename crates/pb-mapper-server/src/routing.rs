@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use pb_mapper_auth::AuthContext;
 use pb_mapper_core::config::server_lease_timeout;
 use pb_mapper_core::conn_id::RemoteConnId;
+use pb_mapper_core::time::saturating_millis;
 use pb_mapper_protocol::command::{CONTROL_PROTOCOL_V2, PbServiceConnStatus};
 use tokio_util::sync::CancellationToken;
 
@@ -358,7 +359,7 @@ pub(crate) fn service_status_connections(
                     generation: info.generation,
                     protocol_version: info.protocol_version,
                     healthy: info.health == ServerConnHealth::Healthy,
-                    last_rx_age_ms: now.duration_since(info.last_rx_at).as_millis() as u64,
+                    last_rx_age_ms: saturating_millis(now.duration_since(info.last_rx_at)),
                 })
                 .collect()
         })

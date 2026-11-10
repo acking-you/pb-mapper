@@ -4,6 +4,7 @@ use super::RelaySelection;
 use crate::{ConnTask, ConnTaskSender, ImutableKey, ServerConnHealth, ServerConnMap};
 use pb_mapper_auth::AuthContext;
 use pb_mapper_core::conn_id::RemoteConnId;
+use pb_mapper_core::time::saturating_millis;
 use pb_mapper_protocol::direct::*;
 use std::{
     collections::HashMap,
@@ -404,10 +405,8 @@ impl DirectState {
                     && peer.valid() =>
             {
                 entry.grant.provider = peer;
-                entry.grant.ttl_ms = entry
-                    .deadline
-                    .saturating_duration_since(Instant::now())
-                    .as_millis() as u64;
+                entry.grant.ttl_ms =
+                    saturating_millis(entry.deadline.saturating_duration_since(Instant::now()));
                 entry.phase = Phase::Granted;
                 let event = DirectEvent::Granted {
                     request: entry.request,

@@ -6,6 +6,7 @@ use std::time::Instant;
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_core::paging::paginate;
 use pb_mapper_core::snafu_error_handle;
+use pb_mapper_core::time::saturating_millis;
 use pb_mapper_protocol::command::{
     AdminConnectionInfo, AdminConnectionPage, AdminServiceInfo, AdminServicePage, PbConnResponse,
     PbConnStatusReq, PbConnStatusResp,
@@ -153,8 +154,9 @@ impl Router {
                         healthy: connection.health == ServerConnHealth::Healthy,
                         transport: if connection.is_datagram { "udp" } else { "tcp" }.to_string(),
                         codec_enabled: connection.need_codec,
-                        last_rx_age_ms: now.duration_since(connection.last_rx_at).as_millis()
-                            as u64,
+                        last_rx_age_ms: saturating_millis(
+                            now.duration_since(connection.last_rx_at),
+                        ),
                     })
                 })
             })

@@ -2,6 +2,7 @@
 //! sessions, kept for inventory and never used to authorize anything.
 use super::DirectState;
 use pb_mapper_auth::AuthContext;
+use pb_mapper_core::time::saturating_millis;
 use pb_mapper_protocol::direct::*;
 use std::time::{Duration, Instant};
 
@@ -135,7 +136,7 @@ impl DirectState {
                 let observed = |r: &Option<(SessionReport, Instant)>| {
                     r.as_ref().map(|(report, at)| ObservedReport {
                         report: report.clone(),
-                        age_ms: at.elapsed().as_millis() as u64,
+                        age_ms: saturating_millis(at.elapsed()),
                     })
                 };
                 let consumer = observed(&o.consumer);
