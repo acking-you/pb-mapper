@@ -52,38 +52,6 @@ pub trait MessageWriter {
     async fn write_msg(&mut self, msg: &[u8]) -> Result<()>;
 }
 
-macro_rules! gen_write_network_with_error {
-    ($func_name:ident, $write_method:ident, $error:expr, $input_type:ty) => {
-        #[inline]
-        async fn $func_name<T: AsyncWriteExt + Unpin>(
-            writer: &mut T,
-            data: $input_type,
-        ) -> Result<()> {
-            writer.$write_method(data).await.context($error)
-        }
-    };
-}
-
-gen_write_network_with_error!(write_checksum, write_u32, MsgNetworkWriteCheckSumSnafu, u32);
-
-gen_write_network_with_error!(write_datalen, write_u32, MsgNetworkWriteDatalenSnafu, u32);
-
-gen_write_network_with_error!(write_msg_body, write_all, MsgNetworkWriteBodySnafu, &[u8]);
-
-gen_write_network_with_error!(
-    write_codec_msg,
-    write_all,
-    MsgNetworkWriteCodecMsgSnafu,
-    &[u8]
-);
-
-gen_write_network_with_error!(
-    write_codec_tag,
-    write_all,
-    MsgNetworkWriteCodecTagSnafu,
-    &[u8]
-);
-
 fn checksum_key_bytes(key: &Option<AesKeyType>) -> Option<&[u8]> {
     key.as_ref().map(|key| key.as_slice())
 }
@@ -120,8 +88,14 @@ async fn set_msg_len<T: AsyncWriteExt + Unpin>(
     len: DataLenType,
     checksum_key: Option<&[u8]>,
 ) -> Result<()> {
-    write_checksum(writer, checksum_for(len, checksum_key)?).await?;
-    write_datalen(writer, len).await
+    writer
+        .write_u32(checksum_for(len, checksum_key)?)
+        .await
+        .context(MsgNetworkWriteCheckSumSnafu)?;
+    writer
+        .write_u32(len)
+        .await
+        .context(MsgNetworkWriteDatalenSnafu)
 }
 
 pub struct NormalMessageReader<'a, T: AsyncReadExt + Unpin> {
@@ -162,9 +136,9 @@ impl<'a, T: AsyncReadExt + Unpin> NormalMessageReader<'a, T> {
                 .await
                 .context(MsgNetworkReadCheckSumSnafu)?;
         }
-        let header = self.frame.header;
-        let checksum = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
-        let datalen = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+        let [c0, c1, c2, c3, l0, l1, l2, l3] = self.frame.header;
+        let checksum = u32::from_be_bytes([c0, c1, c2, c3]);
+        let datalen = u32::from_be_bytes([l0, l1, l2, l3]);
         ensure!(
             checksum_matches(datalen, checksum, checksum_key_bytes(&self.checksum_key)),
             MsgDatalenValidateSnafu { datalen, checksum }
@@ -211,22 +185,20 @@ impl<'a, T: AsyncWriteExt + Unpin> NormalMessageWriter<'a, T> {
         self.checksum_key = Some(key);
         self
     }
+}
 
-    async fn write_msg_inner(&mut self, msg: &[u8]) -> Result<()> {
+impl<'a, T: AsyncWriteExt + Unpin> MessageWriter for NormalMessageWriter<'a, T> {
+    async fn write_msg(&mut self, msg: &[u8]) -> Result<()> {
         set_msg_len(
             &mut self.writer,
             msg.len() as u32,
             checksum_key_bytes(&self.checksum_key),
         )
         .await?;
-
-        write_msg_body(&mut self.writer, msg).await
-    }
-}
-
-impl<'a, T: AsyncWriteExt + Unpin> MessageWriter for NormalMessageWriter<'a, T> {
-    async fn write_msg(&mut self, msg: &[u8]) -> Result<()> {
-        self.write_msg_inner(msg).await
+        self.writer
+            .write_all(msg)
+            .await
+            .context(MsgNetworkWriteBodySnafu)
     }
 }
 
@@ -328,8 +300,14 @@ impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> MessageWriter for CodecMessageW
         let msg_len = (buf.len() + tag.as_ref().len()) as DataLenType;
 
         set_msg_len(self.writer, msg_len, checksum_key_bytes(&self.checksum_key)).await?;
-        write_codec_msg(self.writer, &buf).await?;
-        write_codec_tag(self.writer, tag.as_ref()).await
+        self.writer
+            .write_all(&buf)
+            .await
+            .context(MsgNetworkWriteCodecMsgSnafu)?;
+        self.writer
+            .write_all(tag.as_ref())
+            .await
+            .context(MsgNetworkWriteCodecTagSnafu)
     }
 }
 
