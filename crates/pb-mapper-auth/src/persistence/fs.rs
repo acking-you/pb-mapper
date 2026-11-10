@@ -1,6 +1,8 @@
 //! Directory lock, atomic replace, and parent-directory durability.
 use super::super::*;
-use super::{hex, lock_path, random_bytes};
+use pb_mapper_core::durable_file::{NewFileMode, ReplaceStep, replace_contents};
+
+use super::lock_path;
 
 /// Create the state directory and take `auth.lock` before any credential or
 /// snapshot file is read or written.
@@ -168,8 +170,7 @@ pub(crate) fn create_new_write(path: &Path, data: &[u8], mode: u32) -> Result<bo
     options.create_new(true).write(true);
     // Created with its mode, not chmod-ed afterwards: this path is the
     // destination, so a window where it is readable by anyone is a window on the
-    // real file. `atomic_write` can chmod late because its window is on a
-    // temporary name nobody else looks at.
+    // real file.
     #[cfg(unix)]
     options.mode(mode);
     #[cfg(not(unix))]
@@ -210,6 +211,11 @@ pub(crate) fn create_new_write(path: &Path, data: &[u8], mode: u32) -> Result<bo
     }
 }
 
+/// Replace `path` with `data` all at once, `mode` on unix, creating its
+/// directory first.
+///
+/// The sequence is core's [`replace_contents`]; each of its steps fails with
+/// the code and text this crate has always reported for it.
 pub(crate) fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), AuthFailure> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -220,57 +226,24 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), Au
             )
         })?;
     }
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("auth-state");
-    let random_suffix: [u8; 8] = random_bytes();
-    let temporary = path.with_file_name(format!(
-        ".{file_name}.tmp-{}-{}",
-        std::process::id(),
-        hex(&random_suffix)
-    ));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|error| {
-            AuthFailure::new(
-                codes::AUTH_STATE_UNAVAILABLE,
-                format!("failed to open `{}`: {error}", temporary.display()),
-                false,
-            )
-        })?;
-    let result = (|| {
-        #[cfg(unix)]
-        file.set_permissions(std::fs::Permissions::from_mode(mode))
-            .map_err(|error| {
+    replace_contents(path, data, NewFileMode::Exactly(mode)).map_err(|failure| {
+        // The temporary file for the first three steps, `path` for the last two.
+        let at = failure.path.display();
+        let error = failure.io();
+        let unavailable = |message| AuthFailure::new(codes::AUTH_STATE_UNAVAILABLE, message, false);
+        match failure.step {
+            ReplaceStep::Create => unavailable(format!("failed to open `{at}`: {error}")),
+            ReplaceStep::SetPermissions => {
                 AuthFailure::internal(format!("failed to set key permissions: {error}"))
-            })?;
-        #[cfg(not(unix))]
-        let _ = mode;
-        file.write_all(data)
-            .and_then(|()| file.sync_all())
-            .map_err(|error| {
-                AuthFailure::new(
-                    codes::AUTH_STATE_UNAVAILABLE,
-                    format!("failed to write `{}`: {error}", temporary.display()),
-                    false,
-                )
-            })?;
-        drop(file);
-        pb_mapper_core::durable_file::replace_file(&temporary, path).map_err(|error| {
-            AuthFailure::new(
-                codes::AUTH_STATE_UNAVAILABLE,
-                format!("failed to replace `{}`: {error}", path.display()),
+            }
+            ReplaceStep::Write => unavailable(format!("failed to write `{at}`: {error}")),
+            ReplaceStep::Replace => unavailable(format!("failed to replace `{at}`: {error}")),
+            // What `sync_parent_directory` reports for the same failure.
+            ReplaceStep::SyncParent => AuthFailure::new(
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
+                format!("failed to sync `{at}`: {error}"),
                 false,
-            )
-        })?;
-        sync_parent_directory(path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
+            ),
+        }
+    })
 }
