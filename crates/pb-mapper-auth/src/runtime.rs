@@ -230,15 +230,21 @@ impl AuthRuntime {
         presented_key: &AesKeyType,
     ) -> Result<AuthContext, AuthFailure> {
         let inner = self.inner()?;
+        // Counts a failure in `AuthStatus::auth_failures`. Three are left out: a
+        // stopped state manager, a rotated administrator lease, and a derivation
+        // error.
+        let counted = |failure: AuthFailure| {
+            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
+            failure
+        };
         if key_id.is_admin() {
             let admin = inner.admin.read();
             if !bool::from(presented_key.ct_eq(&admin.key)) {
-                inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-                return Err(AuthFailure::new(
+                return Err(counted(AuthFailure::new(
                     codes::ADMINISTRATOR_KEY_INVALID,
                     "administrator credential does not match the active root key",
                     false,
-                ));
+                )));
             }
             let lease = admin.lease.upgrade().ok_or_else(|| {
                 AuthFailure::new(
@@ -251,38 +257,34 @@ impl AuthRuntime {
             return Ok(AuthContext::from_lease(ADMIN_KEY_ID, true, &lease));
         }
         if inner.safe_mode.load(Ordering::Acquire) {
-            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(AuthFailure::new(
+            return Err(counted(AuthFailure::new(
                 codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 "temporary key state is unavailable; administrator reset is required",
                 false,
-            ));
+            )));
         }
 
         let expected_key = derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)?;
         if !bool::from(presented_key.ct_eq(&expected_key)) {
-            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(temporary_key_material_mismatch(&inner, key_id));
+            return Err(counted(temporary_key_material_mismatch(&inner, key_id)));
         }
 
         let index = key_id.slot().as_index();
         let generation = key_id.generation();
         let slots = inner.slots();
         let Some(slot) = slots.get(index) else {
-            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(AuthFailure::new(
+            return Err(counted(AuthFailure::new(
                 codes::TEMPORARY_KEY_NOT_FOUND,
                 "temporary key id is outside the configured slot table",
                 false,
-            ));
+            )));
         };
         if slot.generation != generation {
-            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(AuthFailure::new(
+            return Err(counted(AuthFailure::new(
                 codes::TEMPORARY_KEY_GENERATION_MISMATCH,
                 "temporary key generation does not match the current slot",
                 false,
-            ));
+            )));
         }
         let failure = match slot.state {
             SlotState::Free => Some(AuthFailure::new(
@@ -301,13 +303,12 @@ impl AuthRuntime {
             SlotState::Active => None,
         };
         if let Some(failure) = failure {
-            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(failure);
+            return Err(counted(failure));
         }
-        let lease = slot.lease.upgrade().ok_or_else(|| {
-            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            AuthFailure::key_lease_inactive()
-        })?;
+        let lease = slot
+            .lease
+            .upgrade()
+            .ok_or_else(|| counted(AuthFailure::key_lease_inactive()))?;
         inner.auth_successes.fetch_add(1, Ordering::Relaxed);
         Ok(AuthContext::from_lease(key_id, false, &lease))
     }
