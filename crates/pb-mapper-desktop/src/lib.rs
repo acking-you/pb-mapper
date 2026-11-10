@@ -477,21 +477,20 @@ pub struct InputEvent {
 
 impl Input {
     pub(crate) fn validate(&self, display: &Display) -> Result<()> {
-        match self {
-            Self::Move { x, y } if *x >= display.width || *y >= display.height => {
-                Err(error("pointer outside display"))
+        let refused = match self {
+            Self::Move { x, y } => {
+                (*x >= display.width || *y >= display.height).then_some("pointer outside display")
             }
-            Self::Text { text } if text.len() > 1024 || text.contains('\0') => {
-                Err(error("text input too large or invalid"))
-            }
+            Self::Text { text } => (text.len() > 1024 || text.contains('\0'))
+                .then_some("text input too large or invalid"),
             Self::Wheel {
                 horizontal,
                 vertical,
-            } if horizontal.unsigned_abs() > 100 || vertical.unsigned_abs() > 100 => {
-                Err(error("scroll input too large"))
-            }
-            _ => Ok(()),
-        }
+            } => (horizontal.unsigned_abs() > 100 || vertical.unsigned_abs() > 100)
+                .then_some("scroll input too large"),
+            Self::Button { .. } | Self::Key { .. } | Self::Lock {} => None,
+        };
+        refused.map_or(Ok(()), |reason| Err(error(reason)))
     }
 }
 

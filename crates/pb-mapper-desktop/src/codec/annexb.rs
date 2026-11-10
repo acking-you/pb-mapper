@@ -90,13 +90,32 @@ pub(crate) fn nal(kind: VideoCodec, header: u8) -> Nal {
             35 => Nal::Delimiter,
             _ => Nal::Other,
         },
-        _ => match header & 0x1f {
+        VideoCodec::H264 | VideoCodec::Jpeg => match header & 0x1f {
             5 => Nal::Irap,
             7 => Nal::Sps,
             8 => Nal::Pps,
             9 => Nal::Delimiter,
             _ => Nal::Other,
         },
+    }
+}
+
+/// A parameter set a decoder needs before a keyframe.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParamSet {
+    Vps,
+    Sps,
+    Pps,
+}
+impl ParamSet {
+    /// The set a NAL unit of this kind is, if it is one.
+    fn of(nal: Nal) -> Option<Self> {
+        match nal {
+            Nal::Vps => Some(Self::Vps),
+            Nal::Sps => Some(Self::Sps),
+            Nal::Pps => Some(Self::Pps),
+            Nal::Irap | Nal::Delimiter | Nal::Other => None,
+        }
     }
 }
 
@@ -118,39 +137,44 @@ impl ParameterSets {
     }
     /// The sets this codec's decoder needs, in decoding order: H.265's VPS
     /// first.
-    fn needed(&self) -> impl Iterator<Item = Nal> + use<> {
-        let vps = (self.kind == VideoCodec::H265).then_some(Nal::Vps);
-        vps.into_iter().chain([Nal::Sps, Nal::Pps])
+    fn needed(&self) -> impl Iterator<Item = ParamSet> + use<> {
+        let vps = (self.kind == VideoCodec::H265).then_some(ParamSet::Vps);
+        vps.into_iter().chain([ParamSet::Sps, ParamSet::Pps])
     }
-    fn set(&self, nal: Nal) -> &[u8] {
-        match nal {
-            Nal::Vps => &self.vps,
-            Nal::Sps => &self.sps,
-            _ => &self.pps,
+    fn set(&self, set: ParamSet) -> &[u8] {
+        match set {
+            ParamSet::Vps => &self.vps,
+            ParamSet::Sps => &self.sps,
+            ParamSet::Pps => &self.pps,
+        }
+    }
+    fn set_mut(&mut self, set: ParamSet) -> &mut Vec<u8> {
+        match set {
+            ParamSet::Vps => &mut self.vps,
+            ParamSet::Sps => &mut self.sps,
+            ParamSet::Pps => &mut self.pps,
         }
     }
     pub(crate) fn complete(&self) -> bool {
-        self.needed().all(|nal| !self.set(nal).is_empty())
+        self.needed().all(|set| !self.set(set).is_empty())
     }
     /// Whether the units carry every set this codec needs.
     pub(crate) fn carried(&self, bytes: &[u8], units: &[(usize, usize)]) -> bool {
         self.needed().all(|needed| {
             units
                 .iter()
-                .any(|&(start, _)| nal(self.kind, bytes[start]) == needed)
+                .any(|&(start, _)| ParamSet::of(nal(self.kind, bytes[start])) == Some(needed))
         })
     }
     pub(crate) fn observe(&mut self, bytes: &[u8], units: &[(usize, usize)]) -> Result<()> {
         for &(start, end) in units {
-            let target = match nal(self.kind, bytes[start]) {
-                Nal::Vps => &mut self.vps,
-                Nal::Sps => &mut self.sps,
-                Nal::Pps => &mut self.pps,
-                Nal::Irap | Nal::Delimiter | Nal::Other => continue,
+            let Some(set) = ParamSet::of(nal(self.kind, bytes[start])) else {
+                continue;
             };
             if end - start > 64 * 1024 {
                 return Err(error("parameter set exceeds limit"));
             }
+            let target = self.set_mut(set);
             target.clear();
             target.extend_from_slice(&bytes[start..end]);
         }
@@ -173,9 +197,9 @@ impl ParameterSets {
             self.vps.len() + self.sps.len() + self.pps.len() + keyframe.len() + 12,
         );
         unit.extend_from_slice(&keyframe[..at]);
-        for nal in self.needed() {
+        for set in self.needed() {
             unit.extend_from_slice(&[0, 0, 0, 1]);
-            unit.extend_from_slice(self.set(nal));
+            unit.extend_from_slice(self.set(set));
         }
         unit.extend_from_slice(&keyframe[at..]);
         if unit.len() > MAX_ACCESS_UNIT {
