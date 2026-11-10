@@ -177,7 +177,9 @@ impl ConsoleMemo {
 /// atomic epoch; it never captures, injects, or opens interactive windows.
 pub(crate) struct DesktopBinding {
     original: isize,
-    bound: isize,
+    /// The input desktop the thread is on once bound. It drops after `Drop`
+    /// has put the thread back on `original`.
+    bound: Option<Desk>,
     session: os::SessionIdentity,
     checked: ConsoleMemo,
     state: BindingState,
@@ -200,7 +202,7 @@ impl DesktopBinding {
         let original = unsafe { GetThreadDesktop(GetCurrentThreadId()) }.map_err(error)?;
         Ok(Self {
             original: original.0 as isize,
-            bound: 0,
+            bound: None,
             session,
             checked: ConsoleMemo::default(),
             state: BindingState::default(),
@@ -247,56 +249,60 @@ impl DesktopBinding {
                 return Err(failure);
             }
         };
-        let desktop = unsafe { OpenInputDesktop(Default::default(), false, INPUT_DESKTOP_ACCESS) }
-            .map_err(error)?;
-        let mut bound = false;
-        let result = (|| {
-            let name = desktop_name(desktop)?.to_ascii_lowercase();
-            if name != "default" && name != "winlogon" {
-                return Err(error("unsupported input desktop"));
-            }
-            self.state.enter(name, epoch, console, before_switch, || {
-                // Ask Windows itself before binding, and keep its answer: a
-                // stale one must not fail every retry until it ages out.
-                let fresh = self
-                    .checked
-                    .fresh(epoch, std::time::Instant::now(), || self.session.check())?;
-                if fresh != console || EPOCH.load(Ordering::Acquire) != epoch {
-                    return Err(error("input desktop changed before binding"));
-                }
-                // The caller has released input and desktop-affine capture/COM
-                // resources before SetThreadDesktop can reject an old window
-                // or hook with ERROR_BUSY.
-                unsafe { SetThreadDesktop(desktop) }.map_err(error)?;
-                let previous = std::mem::replace(&mut self.bound, desktop.0 as isize);
-                bound = true;
-                if previous != 0 {
-                    unsafe {
-                        let _ = CloseDesktop(HDESK(previous as *mut _));
-                    }
-                }
-                Ok(())
-            })?;
-            if self.changed() {
-                return Err(error("input desktop changed during binding"));
-            }
-            Ok(())
-        })();
-        if !bound {
-            unsafe {
-                let _ = CloseDesktop(desktop);
-            }
+        // Closed unless it becomes the bound desktop.
+        let desk = Desk(
+            unsafe { OpenInputDesktop(Default::default(), false, INPUT_DESKTOP_ACCESS) }
+                .map_err(error)?
+                .0 as isize,
+        );
+        let name = desktop_name(desk.handle())?.to_ascii_lowercase();
+        if name != "default" && name != "winlogon" {
+            return Err(error("unsupported input desktop"));
         }
-        result
+        self.state.enter(name, epoch, console, before_switch, || {
+            // Ask Windows itself before binding, and keep its answer: a
+            // stale one must not fail every retry until it ages out.
+            let fresh = self
+                .checked
+                .fresh(epoch, std::time::Instant::now(), || self.session.check())?;
+            if fresh != console || EPOCH.load(Ordering::Acquire) != epoch {
+                return Err(error("input desktop changed before binding"));
+            }
+            // The caller has released input and desktop-affine capture/COM
+            // resources before SetThreadDesktop can reject an old window
+            // or hook with ERROR_BUSY.
+            unsafe { SetThreadDesktop(desk.handle()) }.map_err(error)?;
+            // The thread has left the previous desktop, which closes.
+            self.bound = Some(desk);
+            Ok(())
+        })?;
+        if self.changed() {
+            return Err(error("input desktop changed during binding"));
+        }
+        Ok(())
     }
 }
 impl Drop for DesktopBinding {
     fn drop(&mut self) {
+        // The bound desktop closes after this, as its field drops.
         unsafe {
             let _ = SetThreadDesktop(HDESK(self.original as *mut _));
-            if self.bound != 0 {
-                let _ = CloseDesktop(HDESK(self.bound as *mut _));
-            }
+        }
+    }
+}
+
+/// A desktop handle the binding opened, closed when it drops. It is kept as
+/// an integer, as the original handle is, so the binding stays `Send`.
+struct Desk(isize);
+impl Desk {
+    fn handle(&self) -> HDESK {
+        HDESK(self.0 as *mut _)
+    }
+}
+impl Drop for Desk {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseDesktop(self.handle());
         }
     }
 }
