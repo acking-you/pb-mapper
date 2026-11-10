@@ -4,7 +4,7 @@ use super::ImutableKey;
 use pb_mapper_auth::AuthContext;
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::direct::*;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::sync::{mpsc, oneshot};
 
 #[cfg(feature = "p2p")]
@@ -26,6 +26,27 @@ pub struct DirectServerConfig {
     /// TCP one, including behind cloud 1:1 NAT where the host never sees its
     /// public IP.
     pub advertise: SocketAddr,
+}
+
+impl DirectServerConfig {
+    /// Direct coordination on the relay's own port number over UDP, announcing
+    /// only that port: each client pairs it with the relay address it dialed.
+    pub fn on_relay_port(ip: IpAddr, port: u16) -> Self {
+        Self {
+            listen: SocketAddr::new(ip, port),
+            advertise: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        }
+    }
+
+    /// [`Self::on_relay_port`] if that UDP port can be bound now, so that a
+    /// relay asked for no direct service in particular can still start,
+    /// relay-only, when the port is taken. The probe socket is closed again
+    /// before this returns.
+    pub fn probe_relay_port(ip: IpAddr, port: u16) -> std::io::Result<Self> {
+        let config = Self::on_relay_port(ip, port);
+        drop(std::net::UdpSocket::bind(config.listen)?);
+        Ok(config)
+    }
 }
 
 /// The STUN service direct coordination runs: what it announces to clients,
@@ -113,4 +134,27 @@ pub enum DirectTask {
         secret: SessionSecret,
         response: oneshot::Sender<Option<RelaySelection>>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default a relay offers: the relay's port, announced without an IP,
+    /// and nothing at all where that UDP port is already taken.
+    #[test]
+    fn the_relay_port_default_yields_to_a_taken_port() {
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let held = std::net::UdpSocket::bind((ip, 0)).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let config = DirectServerConfig::on_relay_port(ip, port);
+        assert_eq!(config.listen, SocketAddr::new(ip, port));
+        assert_eq!(
+            config.advertise,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+        );
+        assert!(DirectServerConfig::probe_relay_port(ip, port).is_err());
+        let free = DirectServerConfig::probe_relay_port(ip, 0).unwrap();
+        assert_eq!(free.listen, SocketAddr::new(ip, 0));
+    }
 }
