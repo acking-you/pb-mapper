@@ -133,7 +133,30 @@ pub(crate) const RESTORE_PENDING: u32 = 3;
 
 const SERVICE: &str = "PbMapperDesktop";
 const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v7";
+const _: () = assert!(
+    names_protocol(PIPE, HELPER_PROTOCOL),
+    "the helper pipe's name ends in .v and HELPER_PROTOCOL"
+);
 const EXECUTABLE: &str = "pb-mapper-desktop-helper.exe";
+
+/// Whether pipe `name` ends in `.v` and `version`'s digits: each pipe of the
+/// helper changes its name with [`HELPER_PROTOCOL`].
+const fn names_protocol(name: &str, version: u32) -> bool {
+    let (mut rest, mut version) = (name.as_bytes(), version);
+    loop {
+        let Some((&digit, head)) = rest.split_last() else {
+            return false;
+        };
+        if digit != b'0' + (version % 10) as u8 {
+            return false;
+        }
+        rest = head;
+        version /= 10;
+        if version == 0 {
+            return matches!(rest, [.., b'.', b'v']);
+        }
+    }
+}
 
 /// Entry point of the dedicated helper executable, never the Flutter process.
 #[cfg(feature = "windows-helper")]
@@ -158,5 +181,22 @@ pub fn run() -> Result<()> {
         _ => Err(error(
             "expected install <UI bundle> <authorized SID> [enable], service, enable, disable or uninstall",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names_protocol;
+
+    /// The guard that keeps both pipe names on `HELPER_PROTOCOL` holds.
+    #[test]
+    fn a_pipe_name_carries_exactly_its_protocol() {
+        assert!(names_protocol(r"\\.\pipe\helper.v7", 7));
+        assert!(names_protocol("helper.v10", 10));
+        assert!(!names_protocol("helper.v17", 7));
+        assert!(!names_protocol("helper.v7", 17));
+        assert!(!names_protocol("helper7", 7));
+        assert!(!names_protocol("helper.7", 7));
+        assert!(!names_protocol("", 0));
     }
 }
