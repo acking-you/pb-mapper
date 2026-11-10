@@ -55,11 +55,10 @@ pub(crate) async fn handle_control(
         MessageReader, MessageWriter,
         command::{MessageSerializer, PbConnResponse},
     };
-    let io = |error: pb_mapper_core::error::Error| std::io::Error::other(error.to_string());
+    // Causes stay typed inside the `io::Error`; their text is what it displays.
+    let io = std::io::Error::other::<pb_mapper_core::error::Error>;
     let auth = session.context().map_err(io)?.clone();
-    let cancellation = auth
-        .cancellation_token()
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let cancellation = auth.cancellation_token().map_err(std::io::Error::other)?;
     let (events, mut rx) = mpsc::channel(64);
     // Dropped, never awaited: whichever way this returns, the drop queues the
     // cleanup without waiting on the manager.
