@@ -65,14 +65,13 @@ impl LiveTunnel {
         // Retain ownership while awaiting: cancellation of stop must not detach
         // the worker, and concurrent stop calls must observe the same cleanup.
         let mut slot = self.join.lock().await;
+        let mut result = Ok(());
         if let Some(handle) = slot.as_mut() {
             match tokio::time::timeout(Duration::from_secs(5), &mut *handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(join_error)) if join_error.is_cancelled() => {}
                 Ok(Err(join_error)) => {
-                    slot.take();
-                    self.diagnostics.stop();
-                    return Err(Error::protocol(format!("tunnel task failed: {join_error}")));
+                    result = Err(Error::protocol(format!("tunnel task failed: {join_error}")));
                 }
                 Err(_) => {
                     handle.abort();
@@ -82,7 +81,7 @@ impl LiveTunnel {
             slot.take();
         }
         self.diagnostics.stop();
-        Ok(())
+        result
     }
 }
 
@@ -201,7 +200,6 @@ tunnel_handle!(
 );
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::{future::Future, task::Poll};

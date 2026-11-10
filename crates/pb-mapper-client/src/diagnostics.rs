@@ -43,6 +43,7 @@ pub use link::{
     LinkVia, SetupTimings, StunOutcome,
 };
 use metrics::Bucket;
+pub(crate) use metrics::sample_period;
 pub use metrics::{
     ByteCount, LanCounts, LinkSample, PathTraffic, RelayHealth, SessionCounts, TunnelMetrics,
     TunnelMetricsStream,
@@ -519,7 +520,6 @@ pub(crate) fn ms(time: Duration) -> u64 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::events::EVENT_CAPACITY;
     use super::*;

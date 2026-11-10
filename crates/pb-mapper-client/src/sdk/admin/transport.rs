@@ -155,7 +155,6 @@ fn protocol(error: impl std::fmt::Display) -> Error {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;

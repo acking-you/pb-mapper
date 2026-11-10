@@ -181,6 +181,11 @@ const MIN_GAP: Duration = Duration::from_millis(100);
 /// The longest a stream's period may be.
 const MAX_EVERY: Duration = Duration::from_secs(60 * 60);
 
+/// The period a stream asked to sample `every` samples at: 100 ms to an hour.
+pub(crate) fn sample_period(every: Duration) -> Duration {
+    every.clamp(MIN_GAP, MAX_EVERY)
+}
+
 /// A running tunnel's [`TunnelMetrics`], sampled as time passes and as it
 /// changes: from `subscribe_metrics` on a
 /// [`Registration`](crate::sdk::Registration) or a
@@ -230,7 +235,7 @@ impl TunnelMetricsStream {
             diagnostics,
             transport,
             revision,
-            every: every.clamp(MIN_GAP, MAX_EVERY),
+            every: sample_period(every),
             last: None,
             next: Next::First,
         }
@@ -288,7 +293,6 @@ impl TunnelMetricsStream {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::diagnostics::TunnelEventKind;

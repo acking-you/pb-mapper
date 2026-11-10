@@ -53,6 +53,16 @@ const COLLECT_PAGE_SIZE: u16 = MAX_PAGE_SIZE;
 /// Ample at [`COLLECT_PAGE_SIZE`]: the relay's hard capacity needs 1,049 pages.
 const MAX_PAGES: u32 = 10_000;
 
+// The `*_all` helpers have to be able to drain a relay filled to its hard
+// capacity. At a smaller page size they cannot: 1,048,576 credentials over
+// pages of 100 is 10,486 pages, past the `MAX_PAGES` guard, so a full
+// inventory would come back as a pagination error instead of a listing.
+const _: () = assert!(
+    pb_mapper_auth::MAX_TEMP_KEY_CAPACITY.div_ceil(COLLECT_PAGE_SIZE as usize)
+        <= MAX_PAGES as usize,
+    "*_all must drain a relay filled to capacity within MAX_PAGES pages"
+);
+
 /// Administrator RPCs. Constructed via [`super::Client::admin`].
 #[derive(Clone)]
 pub struct Admin {
@@ -465,25 +475,6 @@ mod tests {
         }
     }
 
-    /// The `*_all` helpers have to be able to drain a relay filled to its hard
-    /// capacity. At a smaller page size they cannot: 1,048,576 credentials over
-    /// pages of 100 is 10,486 pages, past the [`MAX_PAGES`] guard, so a full
-    /// inventory would come back as a pagination error instead of a listing.
-    #[test]
-    fn the_collect_page_size_can_drain_a_relay_at_capacity() {
-        assert_eq!(
-            COLLECT_PAGE_SIZE, MAX_PAGE_SIZE,
-            "paging below the relay's maximum multiplies its per-page re-sort \
-             and shrinks what `*_all` can drain"
-        );
-        let pages_at_capacity =
-            pb_mapper_auth::MAX_TEMP_KEY_CAPACITY.div_ceil(usize::from(COLLECT_PAGE_SIZE));
-        assert!(
-            pages_at_capacity <= MAX_PAGES as usize,
-            "a full inventory needs {pages_at_capacity} pages, over the {MAX_PAGES} cap"
-        );
-    }
-
     /// `validate_page_size` rejects locally, so an oversized request never
     /// reaches the relay to come back as an opaque protocol error.
     #[test]
@@ -533,7 +524,7 @@ mod tests {
         .await
         .expect_err("an endless cursor must fail rather than hang");
 
-        assert!(error.to_string().contains("pagination exceeded"));
+        assert!(matches!(error, Error::Protocol { .. }));
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::Relaxed),
             MAX_PAGES,

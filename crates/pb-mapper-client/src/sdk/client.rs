@@ -140,10 +140,7 @@ impl Client {
     pub fn subscribe_relay_metrics(&self, every: std::time::Duration) -> RelayMetricsStream {
         RelayMetricsStream {
             client: Arc::downgrade(&self.inner),
-            every: every.clamp(
-                std::time::Duration::from_millis(100),
-                std::time::Duration::from_secs(60 * 60),
-            ),
+            every: crate::diagnostics::sample_period(every),
             due: None,
         }
     }

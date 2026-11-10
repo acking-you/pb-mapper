@@ -141,13 +141,18 @@ admin_page!(
 
 /// Converts a wire page into its SDK mirror, mapping each item on the way.
 macro_rules! impl_page_from {
-    ($wire:ty => $owned:ty, $item:ty) => {
+    ($wire:ident => $owned:ty, $item:ty) => {
         impl From<$wire> for $owned {
             fn from(value: $wire) -> Self {
+                let $wire {
+                    schema_version,
+                    items,
+                    next_page,
+                } = value;
                 Self {
-                    schema_version: value.schema_version,
-                    items: value.items.into_iter().map(<$item>::from).collect(),
-                    next_page: value.next_page,
+                    schema_version,
+                    items: items.into_iter().map(<$item>::from).collect(),
+                    next_page,
                 }
             }
         }
@@ -160,77 +165,133 @@ impl_page_from!(AdminConnectionPage => ConnectionPage, ConnectionInfo);
 
 impl From<IssuedTemporaryKey> for IssuedKey {
     fn from(value: IssuedTemporaryKey) -> Self {
+        let IssuedTemporaryKey {
+            metadata,
+            credential,
+        } = value;
+        let KeyMetadata {
+            key_id,
+            namespace,
+            state,
+            issued_at,
+            expires_at,
+            label,
+        } = metadata.into();
         Self {
-            key_id: value.metadata.key_id.as_u64(),
-            namespace: value.metadata.effective_namespace(),
-            state: value.metadata.state,
-            issued_at: value.metadata.issued_at,
-            expires_at: value.metadata.expires_at,
-            label: value.metadata.label,
-            credential: value.credential,
+            key_id,
+            namespace,
+            state,
+            issued_at,
+            expires_at,
+            label,
+            credential,
         }
     }
 }
 
 impl From<TemporaryKeyMetadata> for KeyMetadata {
     fn from(value: TemporaryKeyMetadata) -> Self {
+        let namespace = value.effective_namespace();
+        let TemporaryKeyMetadata {
+            key_id,
+            state,
+            issued_at,
+            expires_at,
+            label,
+            namespace: _,
+        } = value;
         Self {
-            key_id: value.key_id.as_u64(),
-            namespace: value.effective_namespace(),
-            state: value.state,
-            issued_at: value.issued_at,
-            expires_at: value.expires_at,
-            label: value.label,
+            key_id: key_id.as_u64(),
+            namespace,
+            state,
+            issued_at,
+            expires_at,
+            label,
         }
     }
 }
 
 impl From<AdminServiceInfo> for ServiceInfo {
     fn from(value: AdminServiceInfo) -> Self {
+        let AdminServiceInfo {
+            key_id,
+            namespace,
+            service_name,
+            transport,
+            codec_enabled,
+            connection_count,
+        } = value;
         Self {
-            key_id: value.key_id,
-            namespace: value.namespace,
-            service_name: value.service_name,
-            transport: value.transport,
-            codec_enabled: value.codec_enabled,
-            connection_count: value.connection_count,
+            key_id,
+            namespace,
+            service_name,
+            transport,
+            codec_enabled,
+            connection_count,
         }
     }
 }
 
 impl From<AdminConnectionInfo> for ConnectionInfo {
     fn from(value: AdminConnectionInfo) -> Self {
+        let AdminConnectionInfo {
+            key_id,
+            namespace,
+            service_name,
+            conn_id,
+            generation,
+            protocol_version,
+            healthy,
+            transport,
+            codec_enabled,
+            last_rx_age_ms,
+        } = value;
         Self {
-            key_id: value.key_id,
-            namespace: value.namespace,
-            service_name: value.service_name,
-            conn_id: value.conn_id,
-            generation: value.generation,
-            protocol_version: value.protocol_version,
-            healthy: value.healthy,
-            transport: value.transport,
-            codec_enabled: value.codec_enabled,
-            last_rx_age_ms: value.last_rx_age_ms,
+            key_id,
+            namespace,
+            service_name,
+            conn_id,
+            generation,
+            protocol_version,
+            healthy,
+            transport,
+            codec_enabled,
+            last_rx_age_ms,
         }
     }
 }
 
 impl From<AuthStatus> for AuthStatusInfo {
     fn from(value: AuthStatus) -> Self {
+        let AuthStatus {
+            schema_version,
+            safe_mode,
+            capacity,
+            active_keys,
+            expired_keys,
+            revoked_keys,
+            legacy_protocol,
+            active_legacy_connections,
+            last_legacy_connection_at,
+            auth_successes,
+            auth_failures,
+            server_instance_id,
+            capabilities,
+        } = value;
         Self {
-            schema_version: value.schema_version,
-            safe_mode: value.safe_mode,
-            capacity: value.capacity,
-            active_keys: value.active_keys,
-            expired_keys: value.expired_keys,
-            revoked_keys: value.revoked_keys,
-            legacy_protocol: value.legacy_protocol.into(),
-            active_legacy_connections: value.active_legacy_connections,
-            last_legacy_connection_at: value.last_legacy_connection_at,
-            auth_successes: value.auth_successes,
-            auth_failures: value.auth_failures,
-            server_instance_id: value.server_instance_id,
-            capabilities: value.capabilities,
+            schema_version,
+            safe_mode,
+            capacity,
+            active_keys,
+            expired_keys,
+            revoked_keys,
+            legacy_protocol: legacy_protocol.into(),
+            active_legacy_connections,
+            last_legacy_connection_at,
+            auth_successes,
+            auth_failures,
+            server_instance_id,
+            capabilities,
         }
     }
 }

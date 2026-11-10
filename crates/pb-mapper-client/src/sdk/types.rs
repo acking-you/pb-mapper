@@ -127,12 +127,19 @@ pub struct ServiceConnection {
 
 impl From<PbServiceConnStatus> for ServiceConnection {
     fn from(value: PbServiceConnStatus) -> Self {
+        let PbServiceConnStatus {
+            conn_id,
+            generation,
+            protocol_version,
+            healthy,
+            last_rx_age_ms,
+        } = value;
         Self {
-            conn_id: value.conn_id,
-            generation: value.generation,
-            protocol_version: value.protocol_version,
-            healthy: value.healthy,
-            last_rx_age_ms: value.last_rx_age_ms,
+            conn_id,
+            generation,
+            protocol_version,
+            healthy,
+            last_rx_age_ms,
         }
     }
 }
@@ -345,7 +352,13 @@ impl Default for RegisterOptions {
 /// to the direct core. It exists without `p2p` as well, since the workers
 /// that carry it do, though only the direct core reads it.
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(not(feature = "p2p"), allow(dead_code))]
+#[cfg_attr(
+    not(feature = "p2p"),
+    expect(
+        dead_code,
+        reason = "only the direct core, behind p2p, reads its fields"
+    )
+)]
 pub(crate) struct DirectPolicy {
     pub port_mapping: PortMapping,
     pub lan_first: bool,
