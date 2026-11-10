@@ -4,7 +4,7 @@ use super::{
     ConnectError, CursorSlot, Notice, Stopped, VideoSink, VideoUnit, ViewerConfig, ViewerLink,
     ViewerReason, ViewerShared,
     outbound::Next,
-    status::{HostStats, Traffic},
+    stats::{HostStats, Traffic},
 };
 use crate::{
     Input, QualityPreset, VideoCodec, VideoLimits,

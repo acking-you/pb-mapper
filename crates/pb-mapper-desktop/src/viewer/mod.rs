@@ -25,6 +25,7 @@ mod outbound;
 mod recovery;
 mod session;
 mod sink;
+mod stats;
 mod status;
 
 pub use config::{ConnectStage, Decoders, ViewerConfig};
@@ -50,7 +51,8 @@ use pb_mapper_client::sdk::{
     Client, ConnectOptions, Connection, TunnelMetrics, TunnelMetricsStream,
 };
 use session::{Session, handshake, run};
-use status::{CursorSlot, ViewerStatsAcc, millis};
+use stats::ViewerStatsAcc;
+use status::millis;
 use std::{
     io,
     sync::Arc,
@@ -182,6 +184,40 @@ impl ViewerShared {
         if state.stopped.is_none() {
             state.stopped = Some(Stopped { reason, message });
         }
+    }
+}
+
+/// The newest cursor of the current generation.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CursorSlot {
+    pub generation: u64,
+    pub x: i32,
+    pub y: i32,
+    pub visible: bool,
+    /// Advances with every update, so a reader can tell a new position.
+    pub seq: u64,
+    /// The generation and sequence of the last move written to the host.
+    pub moved: Option<(u64, u64)>,
+}
+impl CursorSlot {
+    /// A report of `generation` the host sampled before it took the last move
+    /// this viewer wrote in that generation (`input_sequence` below the
+    /// move's) is superseded while this viewer controls: the host's pointer has
+    /// gone where this viewer put it since, and the host does not report that
+    /// echo, so taking the report would leave the cursor where the host's is
+    /// not. The first report of a generation is never superseded, nor is one
+    /// without a watermark (an older host).
+    pub fn superseded(
+        &self,
+        generation: u64,
+        input_sequence: Option<u64>,
+        controlling: bool,
+    ) -> bool {
+        controlling
+            && self.generation == generation
+            && input_sequence
+                .zip(self.moved)
+                .is_some_and(|(taken, moved)| moved.0 == generation && taken < moved.1)
     }
 }
 

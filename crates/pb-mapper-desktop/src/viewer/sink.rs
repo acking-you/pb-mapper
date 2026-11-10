@@ -28,7 +28,7 @@ use super::{
     DecoderInfo, InputError, IntervalStats, ViewerShared,
     fps_cap::FpsCap,
     recovery::{Recovery, STALL_WATCHDOG},
-    status::PresentStats,
+    stats::PresentStats,
 };
 use crate::{
     KeyframeReason, QualityPreset, VideoCodec,
