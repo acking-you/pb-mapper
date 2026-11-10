@@ -49,8 +49,6 @@ const FIRST_PREFIX_REMAINDER_LEN: usize =
     size_of::<u8>() + size_of::<u8>() + size_of::<u16>() + size_of::<u64>() + CONNECTION_SALT_LEN;
 /// Counter, then ciphertext length.
 const FRAME_HEADER_LEN: usize = size_of::<u64>() + size_of::<DataLenType>();
-const DIRECTION_CLIENT_TO_SERVER: u8 = 0;
-const DIRECTION_SERVER_TO_CLIENT: u8 = 1;
 const MAX_CONNECTION_CLOCK_SKEW_SECONDS: u64 = 5 * 60;
 /// Each Bloom generation must outlive the accepted clock-skew interval. A
 /// salt inserted at the end of a window with `ts = now + skew` stays valid
@@ -98,7 +96,7 @@ impl SessionKeys {
         &self,
         framing_key: &AesKeyType,
         reader: &'a mut T,
-        direction: u8,
+        direction: Direction,
         counter: u64,
     ) -> Result<HeaderMessageReader<'a, T>> {
         Ok(match self {
@@ -123,7 +121,7 @@ impl SessionKeys {
         &self,
         framing_key: &AesKeyType,
         writer: &'a mut T,
-        direction: u8,
+        direction: Direction,
         counter: u64,
         legacy_label: &str,
     ) -> Result<HeaderMessageWriter<'a, T>> {
@@ -158,12 +156,7 @@ impl ClientHeaderSession {
     }
 
     pub fn new_v2(credential: &Credential) -> Result<Self> {
-        let mut salt = [0_u8; CONNECTION_SALT_LEN];
-        salt[..8].copy_from_slice(&unix_seconds().to_be_bytes());
-        let mut rng = rand::rng();
-        for byte in &mut salt[8..] {
-            *byte = rng.random();
-        }
+        let salt = connection_salt(unix_seconds());
         let material =
             derive_material(KeyId::from_u64(credential.key_id()), credential.key(), salt)?;
         Ok(Self {
@@ -204,7 +197,7 @@ impl ClientHeaderSession {
             .writer(
                 &self.framing_key,
                 writer,
-                DIRECTION_CLIENT_TO_SERVER,
+                Direction::ClientToServer,
                 0,
                 "legacy writer",
             )?
@@ -217,7 +210,7 @@ impl ClientHeaderSession {
         reader: &'a mut T,
     ) -> Result<HeaderMessageReader<'a, T>> {
         self.keys
-            .reader(&self.framing_key, reader, DIRECTION_SERVER_TO_CLIENT, 0)
+            .reader(&self.framing_key, reader, Direction::ServerToClient, 0)
     }
 
     pub async fn exchange<T: AsyncReadExt + AsyncWriteExt + Unpin>(
@@ -253,7 +246,7 @@ impl ClientHeaderSession {
         self.keys.writer(
             &self.framing_key,
             writer,
-            DIRECTION_CLIENT_TO_SERVER,
+            Direction::ClientToServer,
             1,
             "legacy writer",
         )
@@ -312,7 +305,7 @@ impl ServerHeaderSession {
         self.keys.writer(
             &self.framing_key,
             writer,
-            DIRECTION_SERVER_TO_CLIENT,
+            Direction::ServerToClient,
             0,
             "legacy response writer",
         )
@@ -323,7 +316,7 @@ impl ServerHeaderSession {
         reader: &'a mut T,
     ) -> Result<HeaderMessageReader<'a, T>> {
         self.keys
-            .reader(&self.framing_key, reader, DIRECTION_CLIENT_TO_SERVER, 1)
+            .reader(&self.framing_key, reader, Direction::ClientToServer, 1)
     }
 }
 
@@ -539,10 +532,14 @@ impl ServerSecurity {
                 true,
             )
         })?;
-        let version = remainder[0];
-        let flags = remainder[1];
-        let reserved = u16::from_be_bytes([remainder[2], remainder[3]]);
-        if version != PROTOCOL_V2_VERSION || flags != 0 || reserved != 0 {
+        let PrefixFields {
+            version,
+            flags,
+            reserved,
+            key_id,
+            salt,
+        } = PrefixFields::parse(remainder);
+        if version != PROTOCOL_V2_VERSION || flags != PREFIX_FLAGS || reserved != PREFIX_RESERVED {
             return Err(ServerInitialError::fail(
                 if version != PROTOCOL_V2_VERSION {
                     "protocol_version_unsupported"
@@ -555,17 +552,7 @@ impl ServerSecurity {
                 false,
             ));
         }
-        // The prefix-length check above fixes all three widths, so none of these
-        // can fail. Reported rather than asserted: this parses the first bytes an
-        // unauthenticated peer sends, and a panic there is a remote abort.
-        let malformed =
-            || ServerInitialError::fail("protocol_error", "v2 prefix is malformed", false);
-        let key_id = KeyId::from_u64(u64::from_be_bytes(
-            remainder[4..12].try_into().map_err(|_| malformed())?,
-        ));
-        let salt: [u8; CONNECTION_SALT_LEN] =
-            remainder[12..28].try_into().map_err(|_| malformed())?;
-        let client_timestamp = u64::from_be_bytes(salt[..8].try_into().map_err(|_| malformed())?);
+        let client_timestamp = salt_timestamp(&salt);
         let now = unix_seconds();
         if now.abs_diff(client_timestamp) > MAX_CONNECTION_CLOCK_SKEW_SECONDS {
             return Err(ServerInitialError::fail_key(
@@ -601,7 +588,7 @@ impl ServerSecurity {
         let fingerprint = replay_fingerprint(key_id, &salt);
         let work = match open_v2_payload(
             &material,
-            DIRECTION_CLIENT_TO_SERVER,
+            Direction::ClientToServer,
             counter,
             &mut current_ciphertext,
         ) {
@@ -683,7 +670,10 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for HeaderMessageWriter<'_, T> {
 }
 
 mod frame;
-use frame::{V2Material, derive_material, first_prefix, open_v2_payload, read_v2_frame};
+use frame::{
+    Direction, PREFIX_FLAGS, PREFIX_RESERVED, PrefixFields, V2Material, connection_salt,
+    derive_material, first_prefix, open_v2_payload, read_v2_frame, salt_timestamp,
+};
 pub use frame::{V2MessageReader, V2MessageWriter};
 mod replay;
 use replay::{FirstFlightAdmit, ReplayGuard, replay_fingerprint};

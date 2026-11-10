@@ -100,7 +100,7 @@ pub(super) fn stale_root_first_flight(
     let mut previous_ciphertext = ciphertext.to_vec();
     open_v2_payload(
         &previous_material,
-        DIRECTION_CLIENT_TO_SERVER,
+        Direction::ClientToServer,
         counter,
         &mut previous_ciphertext,
     )

@@ -38,7 +38,7 @@ async fn interrupted_v2_writer_cannot_reuse_a_nonce_or_restart_a_partial_frame()
     let (mut tx, mut rx) = tokio::io::duplex(1);
     {
         let mut writer =
-            V2MessageWriter::new(&mut tx, material, DIRECTION_SERVER_TO_CLIENT, 0).unwrap();
+            V2MessageWriter::new(&mut tx, material, Direction::ServerToClient, 0).unwrap();
         {
             let mut pending = std::pin::pin!(writer.write_msg(b"cancelled frame"));
             poll_fn(|cx| {
@@ -77,7 +77,7 @@ async fn v2_control_frames_keep_their_wire_bytes() {
     );
     for (direction, counter, expected) in [
         (
-            DIRECTION_CLIENT_TO_SERVER,
+            Direction::ClientToServer,
             1,
             concat!(
                 "0000000000000001",
@@ -89,7 +89,7 @@ async fn v2_control_frames_keep_their_wire_bytes() {
             ),
         ),
         (
-            DIRECTION_SERVER_TO_CLIENT,
+            Direction::ServerToClient,
             0,
             concat!(
                 "0000000000000000",
@@ -106,7 +106,7 @@ async fn v2_control_frames_keep_their_wire_bytes() {
             V2MessageWriter::new(&mut wire, material.clone(), direction, counter).unwrap();
         writer.write_msg(b"golden").await.unwrap();
         writer.write_msg(b"").await.unwrap();
-        assert_eq!(hex(&wire), expected, "direction {direction}");
+        assert_eq!(hex(&wire), expected, "direction {direction:?}");
     }
 }
 
@@ -115,7 +115,7 @@ async fn exhausted_v2_writer_fails_before_emitting_any_ciphertext() {
     let material = derive_material(ADMIN_KEY_ID, &[7; 32], [3; CONNECTION_SALT_LEN]).unwrap();
     let mut wire = Vec::new();
     let mut writer =
-        V2MessageWriter::new(&mut wire, material, DIRECTION_SERVER_TO_CLIENT, u64::MAX).unwrap();
+        V2MessageWriter::new(&mut wire, material, Direction::ServerToClient, u64::MAX).unwrap();
     assert!(writer.write_msg(b"overflow").await.is_err());
     assert!(writer.write_msg(b"retry").await.is_err());
     assert!(wire.is_empty());
@@ -126,14 +126,14 @@ async fn v2_fragmented_frame_survives_read_cancellation() {
     let material = derive_material(ADMIN_KEY_ID, &[7; 32], [3; CONNECTION_SALT_LEN]).unwrap();
     let mut wire = Vec::new();
     let mut writer =
-        V2MessageWriter::new(&mut wire, material.clone(), DIRECTION_SERVER_TO_CLIENT, 0).unwrap();
+        V2MessageWriter::new(&mut wire, material.clone(), Direction::ServerToClient, 0).unwrap();
     writer.write_msg(b"first fragmented message").await.unwrap();
     writer.write_msg(b"next message").await.unwrap();
     let first_len = FRAME_HEADER_LEN + b"first fragmented message".len() + AES_256_GCM.tag_len();
     for split in 1..first_len {
         let (mut tx, mut rx) = tokio::io::duplex(4096);
         let mut reader =
-            V2MessageReader::new(&mut rx, material.clone(), DIRECTION_SERVER_TO_CLIENT, 0).unwrap();
+            V2MessageReader::new(&mut rx, material.clone(), Direction::ServerToClient, 0).unwrap();
         tx.write_all(&wire[..split]).await.unwrap();
         cancel_partial_read(&mut reader).await;
         tx.write_all(&wire[split..]).await.unwrap();
@@ -576,7 +576,7 @@ async fn oversized_initial_frame_is_rejected_before_reading_its_body() {
     let SessionKeys::V2(material) = &session.keys else {
         panic!("new clients speak protocol v2");
     };
-    let mut bytes = first_prefix(material);
+    let mut bytes = first_prefix(material).to_vec();
     bytes.extend_from_slice(&0_u64.to_be_bytes());
     bytes.extend_from_slice(&(MAX_INITIAL_PLAINTEXT_LEN + 17).to_be_bytes());
     let config = temp_config();

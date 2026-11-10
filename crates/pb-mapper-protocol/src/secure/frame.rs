@@ -11,23 +11,56 @@
 //! a body; continuation frames retain the normal protocol maximum.
 
 use pb_mapper_auth::KeyId;
+use ring::aead::NONCE_LEN;
 
 use super::*;
+
+/// Which way a frame travels. Each direction has its own key and its own
+/// counter, and the authenticated data names it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(super) enum Direction {
+    ClientToServer = 0,
+    ServerToClient = 1,
+}
+
+/// The flags this version writes; the relay rejects any other value.
+pub(super) const PREFIX_FLAGS: u8 = 0;
+/// The reserved field's only accepted value.
+pub(super) const PREFIX_RESERVED: u16 = 0;
+/// A first flight's clear-text prefix: the magic, then its remainder.
+const FIRST_PREFIX_LEN: usize = PROTOCOL_V2_MAGIC.len() + FIRST_PREFIX_REMAINDER_LEN;
+/// What a frame authenticates besides its payload: the connection's prefix,
+/// the direction, then the frame header.
+const FRAME_AAD_LEN: usize = FIRST_PREFIX_LEN + size_of::<Direction>() + FRAME_HEADER_LEN;
 
 #[derive(Clone)]
 pub(super) struct V2Material {
     pub(super) key_id: KeyId,
-    pub(super) flags: u8,
-    pub(super) salt: [u8; CONNECTION_SALT_LEN],
-    pub(super) client_to_server: AesKeyType,
-    pub(super) server_to_client: AesKeyType,
+    salt: [u8; CONNECTION_SALT_LEN],
+    client_to_server: AesKeyType,
+    server_to_client: AesKeyType,
+}
+
+impl V2Material {
+    /// The AEAD key for frames travelling in `direction`; `invalid` reports a
+    /// key ring refuses.
+    fn aead_key(&self, direction: Direction, invalid: &'static str) -> Result<LessSafeKey> {
+        let key = match direction {
+            Direction::ClientToServer => &self.client_to_server,
+            Direction::ServerToClient => &self.server_to_client,
+        };
+        UnboundKey::new(&AES_256_GCM, key)
+            .map(LessSafeKey::new)
+            .map_err(|_| protocol_error(invalid))
+    }
 }
 
 pub struct V2MessageReader<'a, T: AsyncReadExt + Unpin> {
     reader: &'a mut T,
     material: V2Material,
     key: LessSafeKey,
-    direction: u8,
+    direction: Direction,
     expected_counter: u64,
     buffer: Vec<u8>,
     frame: crate::frame_read::FrameRead<FRAME_HEADER_LEN>,
@@ -37,14 +70,10 @@ impl<'a, T: AsyncReadExt + Unpin> V2MessageReader<'a, T> {
     pub(super) fn new(
         reader: &'a mut T,
         material: V2Material,
-        direction: u8,
+        direction: Direction,
         expected_counter: u64,
     ) -> Result<Self> {
-        let key_bytes = direction_key(&material, direction);
-        let key = LessSafeKey::new(
-            UnboundKey::new(&AES_256_GCM, key_bytes)
-                .map_err(|_| protocol_error("invalid protocol-v2 read key"))?,
-        );
+        let key = material.aead_key(direction, "invalid protocol-v2 read key")?;
         Ok(Self {
             reader,
             material,
@@ -68,12 +97,10 @@ impl<'a, T: AsyncReadExt + Unpin> V2MessageReader<'a, T> {
             .body(self.reader, &mut self.buffer)
             .await
             .map_err(|error| protocol_error(format!("failed to read v2 payload: {error}")))?;
-        let datalen = u32::try_from(self.buffer.len())
-            .map_err(|_| protocol_error("protocol-v2 payload exceeds u32 length"))?;
         let aad = frame_aad(&self.material, self.direction, counter, datalen);
         let plain = self
             .key
-            .open_in_place(nonce(counter), Aad::from(aad.as_slice()), &mut self.buffer)
+            .open_in_place(nonce(counter), Aad::from(aad), &mut self.buffer)
             .map_err(|_| protocol_error("protocol-v2 payload authentication failed"))?;
         let plain_len = plain.len();
         self.buffer.truncate(plain_len);
@@ -111,15 +138,14 @@ fn validate_frame_header(
     expected_counter: u64,
     max_plaintext_len: u32,
 ) -> Result<(u64, u32)> {
-    let counter = u64::from_be_bytes([
-        header[0], header[1], header[2], header[3], header[4], header[5], header[6], header[7],
-    ]);
+    let [counter @ .., l0, l1, l2, l3] = *header;
+    let counter = u64::from_be_bytes(counter);
     if counter != expected_counter {
         return Err(protocol_error(format!(
             "protocol-v2 counter mismatch: expected {expected_counter}, got {counter}"
         )));
     }
-    let datalen = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
+    let datalen = u32::from_be_bytes([l0, l1, l2, l3]);
     let max_encrypted_len = max_plaintext_len.saturating_add(crate::CODEC_TAG_LEN);
     if datalen < crate::CODEC_TAG_LEN || datalen > max_encrypted_len {
         return Err(protocol_error(format!(
@@ -139,7 +165,7 @@ pub struct V2MessageWriter<'a, T: AsyncWriteExt + Unpin> {
     writer: &'a mut T,
     material: V2Material,
     key: LessSafeKey,
-    direction: u8,
+    direction: Direction,
     counter: u64,
     poisoned: bool,
 }
@@ -148,14 +174,10 @@ impl<'a, T: AsyncWriteExt + Unpin> V2MessageWriter<'a, T> {
     pub(super) fn new(
         writer: &'a mut T,
         material: V2Material,
-        direction: u8,
+        direction: Direction,
         counter: u64,
     ) -> Result<Self> {
-        let key_bytes = direction_key(&material, direction);
-        let key = LessSafeKey::new(
-            UnboundKey::new(&AES_256_GCM, key_bytes)
-                .map_err(|_| protocol_error("invalid protocol-v2 write key"))?,
-        );
+        let key = material.aead_key(direction, "invalid protocol-v2 write key")?;
         Ok(Self {
             writer,
             material,
@@ -195,7 +217,7 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for V2MessageWriter<'_, T> {
         let aad = frame_aad(&self.material, self.direction, counter, encrypted_len);
         let mut encrypted = message.to_vec();
         self.key
-            .seal_in_place_append_tag(nonce(counter), Aad::from(aad.as_slice()), &mut encrypted)
+            .seal_in_place_append_tag(nonce(counter), Aad::from(aad), &mut encrypted)
             .map_err(|_| protocol_error("failed to encrypt protocol-v2 message"))?;
         self.writer
             .write_u64(counter)
@@ -216,20 +238,16 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for V2MessageWriter<'_, T> {
 
 pub(super) fn open_v2_payload(
     material: &V2Material,
-    direction: u8,
+    direction: Direction,
     counter: u64,
     ciphertext: &mut [u8],
 ) -> Result<Vec<u8>> {
-    let key_bytes = direction_key(material, direction);
-    let key = LessSafeKey::new(
-        UnboundKey::new(&AES_256_GCM, key_bytes)
-            .map_err(|_| protocol_error("invalid protocol-v2 read key"))?,
-    );
+    let key = material.aead_key(direction, "invalid protocol-v2 read key")?;
     let datalen = u32::try_from(ciphertext.len())
         .map_err(|_| protocol_error("protocol-v2 payload length is invalid"))?;
     let aad = frame_aad(material, direction, counter, datalen);
     let plain = key
-        .open_in_place(nonce(counter), Aad::from(aad.as_slice()), ciphertext)
+        .open_in_place(nonce(counter), Aad::from(aad), ciphertext)
         .map_err(|_| protocol_error("protocol-v2 payload authentication failed"))?;
     Ok(plain.to_vec())
 }
@@ -245,7 +263,6 @@ pub(super) fn derive_material(
     let server_to_client = expand_direction(&pseudo_random_key, b"pb-mapper-v2-s2c")?;
     Ok(V2Material {
         key_id,
-        flags: 0,
         salt: salt_bytes,
         client_to_server,
         server_to_client,
@@ -275,38 +292,100 @@ impl ring::hkdf::KeyType for HkdfLen {
     }
 }
 
-fn direction_key(material: &V2Material, direction: u8) -> &AesKeyType {
-    if direction == DIRECTION_CLIENT_TO_SERVER {
-        &material.client_to_server
-    } else {
-        &material.server_to_client
+/// A connection salt: the client's clock, then random bytes.
+pub(super) fn connection_salt(timestamp: u64) -> [u8; CONNECTION_SALT_LEN] {
+    pack(&[&timestamp.to_be_bytes(), &rand::rng().random::<[u8; 8]>()])
+}
+
+/// The client's clock when it opened the connection, from its salt.
+pub(super) fn salt_timestamp(salt: &[u8; CONNECTION_SALT_LEN]) -> u64 {
+    let [t0, t1, t2, t3, t4, t5, t6, t7, ..] = *salt;
+    u64::from_be_bytes([t0, t1, t2, t3, t4, t5, t6, t7])
+}
+
+/// A first flight's clear-text prefix; [`PrefixFields::parse`] reads it back.
+pub(super) fn first_prefix(material: &V2Material) -> [u8; FIRST_PREFIX_LEN] {
+    pack(&[
+        &PROTOCOL_V2_MAGIC,
+        &[PROTOCOL_V2_VERSION, PREFIX_FLAGS],
+        &PREFIX_RESERVED.to_be_bytes(),
+        &material.key_id.to_be_bytes(),
+        &material.salt,
+    ])
+}
+
+/// What a first flight's prefix says after its magic, unchecked.
+pub(super) struct PrefixFields {
+    pub(super) version: u8,
+    pub(super) flags: u8,
+    pub(super) reserved: u16,
+    pub(super) key_id: KeyId,
+    pub(super) salt: [u8; CONNECTION_SALT_LEN],
+}
+
+impl PrefixFields {
+    /// The inverse of [`first_prefix`] past the magic.
+    pub(super) fn parse(remainder: [u8; FIRST_PREFIX_REMAINDER_LEN]) -> Self {
+        let [
+            version,
+            flags,
+            r0,
+            r1,
+            k0,
+            k1,
+            k2,
+            k3,
+            k4,
+            k5,
+            k6,
+            k7,
+            salt @ ..,
+        ] = remainder;
+        Self {
+            version,
+            flags,
+            reserved: u16::from_be_bytes([r0, r1]),
+            key_id: KeyId::from_u64(u64::from_be_bytes([k0, k1, k2, k3, k4, k5, k6, k7])),
+            salt,
+        }
     }
 }
 
-pub(super) fn first_prefix(material: &V2Material) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(PROTOCOL_V2_MAGIC.len() + FIRST_PREFIX_REMAINDER_LEN);
-    prefix.extend_from_slice(&PROTOCOL_V2_MAGIC);
-    prefix.push(PROTOCOL_V2_VERSION);
-    prefix.push(material.flags);
-    prefix.extend_from_slice(&0_u16.to_be_bytes());
-    prefix.extend_from_slice(&material.key_id.to_be_bytes());
-    prefix.extend_from_slice(&material.salt);
-    prefix
+fn frame_aad(
+    material: &V2Material,
+    direction: Direction,
+    counter: u64,
+    datalen: u32,
+) -> [u8; FRAME_AAD_LEN] {
+    pack(&[
+        &first_prefix(material),
+        &[direction as u8],
+        &counter.to_be_bytes(),
+        &datalen.to_be_bytes(),
+    ])
 }
 
-fn frame_aad(material: &V2Material, direction: u8, counter: u64, datalen: u32) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(
-        PROTOCOL_V2_MAGIC.len() + FIRST_PREFIX_REMAINDER_LEN + 1 + FRAME_HEADER_LEN,
-    );
-    aad.extend_from_slice(&first_prefix(material));
-    aad.push(direction);
-    aad.extend_from_slice(&counter.to_be_bytes());
-    aad.extend_from_slice(&datalen.to_be_bytes());
-    aad
-}
-
+/// Four zero bytes, then the frame counter.
 fn nonce(counter: u64) -> Nonce {
-    let mut bytes = [0_u8; 12];
-    bytes[4..].copy_from_slice(&counter.to_be_bytes());
-    Nonce::assume_unique_for_key(bytes)
+    Nonce::assume_unique_for_key(pack(&[&[0; 4], &counter.to_be_bytes()]))
+}
+
+const _: () = assert!(
+    NONCE_LEN == 4 + size_of::<u64>(),
+    "a nonce is a zero prefix, then the counter"
+);
+
+/// `fields` back to back. Every caller's field widths add up to `N`; the
+/// golden test pins the bytes this lays out.
+fn pack<const N: usize>(fields: &[&[u8]]) -> [u8; N] {
+    debug_assert_eq!(
+        fields.iter().map(|field| field.len()).sum::<usize>(),
+        N,
+        "the field widths add up to the packed length"
+    );
+    let mut packed = [0; N];
+    for (slot, byte) in packed.iter_mut().zip(fields.iter().copied().flatten()) {
+        *slot = *byte;
+    }
+    packed
 }
