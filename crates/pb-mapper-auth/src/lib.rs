@@ -75,7 +75,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
 use rand::RngExt;
@@ -91,6 +91,7 @@ use pb_mapper_core::checksum::{
     env_safe_admin_key_error, get_process_credential, is_env_safe_admin_key, parse_credential,
     process_credential_configured, set_process_msg_header_key,
 };
+use pb_mapper_core::time::unix_seconds;
 
 /// The namespace administrator connections operate in. A key that was not issued
 /// into a namespace owns the one its id names, so this mirrors [`ADMIN_KEY_ID`].
@@ -135,7 +136,6 @@ const _: () = assert!(
 );
 
 mod actor;
-mod clock;
 pub mod codes;
 mod config;
 mod ids;
@@ -168,7 +168,6 @@ pub use types::{
 
 // What the child modules share through their `use super::*`.
 use actor::{Actor, AdminReplays, AuthCommand};
-use clock::unix_seconds;
 use keys::{load_isolated_server_admin_credential, load_server_admin_credential};
 use leases::Leases;
 use persistence::{
