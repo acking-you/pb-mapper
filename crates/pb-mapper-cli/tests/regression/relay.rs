@@ -28,6 +28,10 @@ use crate::fixtures::{
     serve_one_stream, subscribe,
 };
 
+/// How long a case waits for what the relay does at once: a bound for a
+/// loaded machine, not a timing the case asserts.
+const READY: Duration = Duration::from_secs(5);
+
 /// How a control connection that never opens a data stream ends.
 enum StaleEnd {
     /// It receives a stream request and leaves it unacknowledged.
@@ -123,7 +127,7 @@ async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
     }
 
     let mut reader = get_header_msg_reader(&mut stream).unwrap();
-    let response = timeout(Duration::from_secs(1), reader.read_msg())
+    let response = timeout(READY, reader.read_msg())
         .await
         .expect("status keys response timed out")
         .unwrap();
@@ -148,7 +152,7 @@ async fn send_v2_request(
         .unwrap();
     let response = {
         let mut reader = session.response_reader(&mut stream).unwrap();
-        let message = timeout(Duration::from_secs(1), reader.read_msg())
+        let message = timeout(READY, reader.read_msg())
             .await
             .expect("v2 response timed out")
             .unwrap();
@@ -259,7 +263,7 @@ async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
         PbConnResponse::Admin(AdminResponse::KeyRevoked(_))
     ));
     let mut byte = [0_u8; 1];
-    let closed = timeout(Duration::from_secs(1), first_control.read(&mut byte))
+    let closed = timeout(READY, first_control.read(&mut byte))
         .await
         .expect("revoked control connection was not closed")
         .unwrap();
@@ -305,7 +309,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
         .unwrap();
     let (mut control_read, mut control_write) = control.into_split();
     let mut control_reader = control_session.response_reader(&mut control_read).unwrap();
-    let register_response = timeout(Duration::from_secs(1), control_reader.read_msg())
+    let register_response = timeout(READY, control_reader.read_msg())
         .await
         .expect("register response timed out")
         .unwrap();
@@ -329,7 +333,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
         .await
         .unwrap();
 
-    let stream_request = timeout(Duration::from_secs(1), control_reader.read_msg())
+    let stream_request = timeout(READY, control_reader.read_msg())
         .await
         .expect("stream request timed out")
         .unwrap();
@@ -374,7 +378,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
         .unwrap();
     {
         let mut subscriber_reader = subscriber_session.response_reader(&mut subscriber).unwrap();
-        let response = timeout(Duration::from_secs(1), subscriber_reader.read_msg())
+        let response = timeout(READY, subscriber_reader.read_msg())
             .await
             .expect("subscribe response timed out")
             .unwrap();
@@ -385,7 +389,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
     }
     {
         let mut provider_reader = provider_session.response_reader(&mut provider).unwrap();
-        let response = timeout(Duration::from_secs(1), provider_reader.read_msg())
+        let response = timeout(READY, provider_reader.read_msg())
             .await
             .expect("provider stream response timed out")
             .unwrap();
@@ -397,7 +401,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
 
     subscriber.write_all(b"ready").await.unwrap();
     let mut ready = [0_u8; 5];
-    timeout(Duration::from_secs(1), provider.read_exact(&mut ready))
+    timeout(READY, provider.read_exact(&mut ready))
         .await
         .expect("active data stream did not forward")
         .unwrap();
@@ -417,7 +421,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
     ));
 
     let mut byte = [0_u8; 1];
-    let read = timeout(Duration::from_secs(1), subscriber.read(&mut byte))
+    let read = timeout(READY, subscriber.read(&mut byte))
         .await
         .expect("revoked subscriber data stream was not closed")
         .unwrap();
@@ -446,7 +450,7 @@ async fn status_service_reports_registered_v2_control_connection() {
         key,
         V2ControlSpec::new()
             .instance_id("regression-test-client")
-            .response_timeout(Duration::from_secs(1)),
+            .response_timeout(READY),
     )
     .await;
 
@@ -463,7 +467,7 @@ async fn status_service_reports_registered_v2_control_connection() {
     }
 
     let mut reader = get_header_msg_reader(&mut status).unwrap();
-    let response = timeout(Duration::from_secs(1), reader.read_msg())
+    let response = timeout(READY, reader.read_msg())
         .await
         .expect("service status response timed out")
         .unwrap();
@@ -651,7 +655,8 @@ async fn subscribe_missing_key_closes_without_hanging() {
 
     let mut stream = subscribe(relay.addr, "missing-key").await;
     let mut reader = get_header_msg_reader(&mut stream).unwrap();
-    let result = timeout(Duration::from_millis(200), reader.read_msg())
+    // Well inside the 2.5 s a subscribe would wait for a provider to appear.
+    let result = timeout(Duration::from_secs(1), reader.read_msg())
         .await
         .expect("missing-key subscribe hung instead of closing");
     let response = PbConnResponse::decode(result.unwrap()).unwrap();

@@ -133,7 +133,7 @@ pub(crate) async fn register_control_conn_parts(
     .unwrap();
     writer.write_msg(&request).await.unwrap();
 
-    let response = timeout(Duration::from_secs(1), reader.read_msg())
+    let response = timeout(Duration::from_secs(5), reader.read_msg())
         .await
         .expect("register response timed out")
         .unwrap();
