@@ -205,7 +205,7 @@ fn parse_lan_transport(raw: &str) -> Result<LanTransport, CtlError> {
 }
 
 /// The carrier `raw` names.
-pub(crate) fn parse_transport(raw: &str) -> Result<RelayTransport, CtlError> {
+fn parse_transport(raw: &str) -> Result<RelayTransport, CtlError> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "" | "tcp" => Ok(RelayTransport::Tcp),
         "quic" => Ok(RelayTransport::Quic),

@@ -39,6 +39,7 @@ mod views;
 use runtime::EmbeddedRelay;
 use status::LocalStatusCache;
 pub use status::{force_refresh_server_status, get_server_status_detail, get_service_conns};
+pub(crate) use stored::map_when_needed;
 pub use stored::{
     AppConfig, ClientConfigData, ClientConfigStore, DirectOptions, ServiceConfigData,
     ServiceConfigStore,

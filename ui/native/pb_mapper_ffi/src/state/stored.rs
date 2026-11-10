@@ -46,7 +46,7 @@ fn direct_by_default() -> bool {
     true
 }
 
-fn map_when_needed() -> PortMapping {
+pub(crate) fn map_when_needed() -> PortMapping {
     PortMapping::Auto
 }
 

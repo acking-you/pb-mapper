@@ -74,6 +74,7 @@ pub fn start(
         tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    biased;
                     _ = shutdown.cancelled() => break,
                     result = server.connect() => {
                         if let Err(e) = result {
@@ -104,6 +105,7 @@ pub fn start(
         tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    biased;
                     _ = shutdown.cancelled() => break,
                     result = listener.accept() => match result {
                         Ok((stream, _)) => {

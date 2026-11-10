@@ -26,7 +26,7 @@ use crate::state::{self, PbMapperState};
 /// Who asked. Not part of the wire format: the control server stamps `Cli` on
 /// whatever arrives over the socket, the FFI stamps `Ui`, and the background
 /// status refreshers stamp `Internal`. `PbMapperState` never has to know.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Origin {
     Ui,
@@ -64,7 +64,7 @@ pub struct RegisterArgs {
         num_args = 0..=1,
         default_missing_value = "always"
     )]
-    #[serde(default = "map_when_needed")]
+    #[serde(default = "crate::state::map_when_needed")]
     pub port_mapping: PortMapping,
 }
 
@@ -100,7 +100,7 @@ pub struct ConnectArgs {
         num_args = 0..=1,
         default_missing_value = "always"
     )]
-    #[serde(default = "map_when_needed")]
+    #[serde(default = "crate::state::map_when_needed")]
     pub port_mapping: PortMapping,
 }
 
@@ -167,10 +167,6 @@ impl Command {
     }
 }
 
-fn map_when_needed() -> PortMapping {
-    PortMapping::Auto
-}
-
 fn parse_port_mapping(raw: &str) -> Result<PortMapping, String> {
     match raw {
         "off" => Ok(PortMapping::Off),
@@ -195,7 +191,7 @@ pub async fn dispatch(
     origin: Origin,
 ) -> proto::Response {
     let affected = command.affects();
-    match run(state, command, origin).await {
+    match run(state, command).await {
         Ok(response) => {
             // Announce only what succeeded, and only from here — the boundary
             // is where the origin is known, so `PbMapperState` never has to
@@ -212,7 +208,6 @@ pub async fn dispatch(
 async fn run(
     state: &Arc<Mutex<PbMapperState>>,
     command: Command,
-    _origin: Origin,
 ) -> Result<proto::Response, CtlError> {
     match command {
         Command::Hello => Ok(proto::Response::ok(
