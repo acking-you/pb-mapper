@@ -24,6 +24,7 @@ use crate::persistence::{
 };
 
 mod namespaces;
+mod schedule;
 
 fn temp_state_dir(name: &str) -> PathBuf {
     let mut suffix = [0_u8; 8];

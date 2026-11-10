@@ -13,29 +13,41 @@
 //!              row removed
 //! ```
 //!
-//! Both stages are timers, so nothing sweeps and no queue has to stay in step
-//! with the wheel. Every way a key can end runs the same callback: a deadline
-//! arriving runs it on schedule, [`Timer::fire`] runs it early for a revoke or a
-//! GC, and dropping the wheel runs it for a rotation or shutdown.
+//! Both stages are timers, so no queue has to stay in step with the wheel.
+//! Every way a key can end runs the same callback: a deadline arriving runs it
+//! on schedule, [`Timer::fire`] runs it early for a revoke or a GC, and dropping
+//! the wheel runs it for a rotation or shutdown.
 //!
-//! `timers` maps each key to a `Weak` handle on its current timer, which is what
-//! keeps key identity out of the wheel. Renewing moves the callback onto a fresh
-//! timer at the new deadline, sooner or later than the old one: the earlier
-//! placement still drains, but the timer it holds has nothing left to run. Because
-//! the map holds only `Weak` references, an entry whose timer has fired costs
-//! nothing but a stale key, cleared by the callback itself.
+//! `stages` maps each key to `Weak` handles on its two current timers, which is
+//! what keeps key identity out of the wheel. Renewing moves the callbacks onto
+//! fresh timers at the new deadline, sooner or later than the old one: the
+//! earlier placements still drain, but the timers they hold have nothing left to
+//! run. Because the map holds only `Weak` references, an entry whose timers have
+//! both fired keeps nothing alive but two small allocations and a stale key; no
+//! callback can reach the map, so `tick` sweeps such entries out every
+//! `STAGE_SWEEP_INTERVAL`.
 //!
 //! The callbacks hold a `Weak<AuthStateInner>`, so they neither keep the state
 //! alive nor touch it after a runtime has shut down.
 
 use super::*;
 
+/// How often `tick` forgets the keys whose stages have all run.
+const STAGE_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
 /// A key's two scheduled stages. Both are `Weak`, so a stage that has already
-/// run costs nothing but a stale map key.
+/// run keeps nothing alive but its allocation.
 #[derive(Default)]
 struct Stages {
     retire: Weak<Timer>,
     reap: Weak<Timer>,
+}
+
+impl Stages {
+    /// Whether either stage can still run.
+    fn pending(&self) -> bool {
+        self.retire.strong_count() > 0 || self.reap.strong_count() > 0
+    }
 }
 
 pub(super) struct Leases {
@@ -48,6 +60,8 @@ pub(super) struct Leases {
     /// Each key's stages, so a renew or an early end can reach them without the
     /// wheel knowing what a key is.
     stages: HashMap<KeyId, Stages>,
+    /// When `tick` next sweeps `stages` for keys with nothing left to run.
+    next_sweep_at: u64,
 }
 
 impl Leases {
@@ -60,6 +74,7 @@ impl Leases {
             wheel: new_wheel(),
             now,
             stages: HashMap::new(),
+            next_sweep_at: next_sweep(now),
         };
         let mut dead = Vec::new();
         for (index, slot) in inner.slots().iter().enumerate() {
@@ -193,6 +208,12 @@ impl Leases {
             self.now += 1;
             self.wheel.tick();
         }
+        if self.now >= self.next_sweep_at {
+            // A key that ended on schedule leaves its entry behind: its
+            // callbacks cannot reach this map.
+            self.stages.retain(|_, stages| stages.pending());
+            self.next_sweep_at = next_sweep(self.now);
+        }
     }
 
     /// Ends every key at once, for a root rotation or state reset. Dropping the
@@ -235,10 +256,17 @@ impl Leases {
         due.len() as u64
     }
 
+    /// How many keys the schedule still has an entry for.
+    #[cfg(test)]
+    pub(super) fn tracked_keys(&self) -> usize {
+        self.stages.len()
+    }
+
     /// Replaces the whole schedule, running every callback the old one held.
     fn drop_schedule(&mut self, now: u64) {
         self.stages.clear();
         self.now = now;
+        self.next_sweep_at = next_sweep(now);
         self.wheel = new_wheel();
     }
 
@@ -257,7 +285,7 @@ impl Leases {
     ) -> Option<Arc<Timer>> {
         let stages = self.stages.get(&key_id)?;
         let timer = which(stages).upgrade();
-        if stages.retire.strong_count() == 0 && stages.reap.strong_count() == 0 {
+        if !stages.pending() {
             self.stages.remove(&key_id);
         }
         timer
@@ -320,6 +348,10 @@ impl Leases {
 
 fn retention_ends(tombstoned_at: u64) -> u64 {
     tombstoned_at.saturating_add(TOMBSTONE_RETENTION.as_secs())
+}
+
+fn next_sweep(now: u64) -> u64 {
+    now.saturating_add(STAGE_SWEEP_INTERVAL.as_secs())
 }
 
 /// Ends a key's active stage: cancels the lease, marks the row dead, records when
