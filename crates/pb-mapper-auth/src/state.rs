@@ -186,6 +186,9 @@ pub(crate) struct AuthStateInner {
     pub(crate) namespace_high_water: AtomicU64,
     pub(crate) previous_root: RwLock<Option<PreviousRoot>>,
     pub(crate) audit_records: RwLock<VecDeque<AuditRecord>>,
+    /// Never sent on. It drops with the rest of the state, which is the signal
+    /// a receiver from [`Self::subscribe_dropped`] waits for.
+    dropped: watch::Sender<()>,
 }
 
 impl AuthStateInner {
@@ -230,7 +233,13 @@ impl AuthStateInner {
             namespace_high_water: AtomicU64::new(namespace_high_water),
             previous_root: RwLock::new(None),
             audit_records: RwLock::new(audit_records),
+            dropped: watch::Sender::new(()),
         }
+    }
+
+    /// A receiver whose `changed()` fails once this state has been dropped.
+    pub(crate) fn subscribe_dropped(&self) -> watch::Receiver<()> {
+        self.dropped.subscribe()
     }
 
     /// Rows the configured capacity no longer covers. See the field's docs; the

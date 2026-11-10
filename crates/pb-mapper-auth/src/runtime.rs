@@ -31,6 +31,8 @@ struct RuntimeShared {
     _state_lock: Arc<File>,
     actor: Mutex<Option<tokio::task::JoinHandle<()>>>,
     actor_abort: tokio::task::AbortHandle,
+    /// Fails `changed()` once the state is dropped, for `abort_actor`.
+    state_dropped: watch::Receiver<()>,
 }
 
 pub struct LegacyConnectionGuard {
@@ -141,6 +143,7 @@ impl AuthRuntime {
                 _state_lock: state_lock.clone(),
                 actor: Mutex::new(Some(actor)),
                 actor_abort,
+                state_dropped: inner.subscribe_dropped(),
             }),
         };
         Ok(runtime)
@@ -166,10 +169,12 @@ impl AuthRuntime {
         if let Some(handle) = handle {
             let _ = handle.await;
         }
+        // Whatever still holds the state, such as a request mid-authentication,
+        // lets go of it shortly after the actor has gone.
+        let mut state_dropped = self.shared.state_dropped.clone();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while self.shared.inner.upgrade().is_some() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            // Nothing is ever sent, so this ends only when the state drops.
+            while state_dropped.changed().await.is_ok() {}
         })
         .await
         .map_err(|_| {

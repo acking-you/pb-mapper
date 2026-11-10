@@ -468,6 +468,32 @@ async fn safe_mode_denies_legacy_protocol_instead_of_restoring_the_default() {
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
+/// The app's stop path aborts a wedged actor and relies on the state being gone
+/// once this returns.
+#[tokio::test]
+async fn abort_actor_returns_once_the_state_has_dropped() {
+    let state_dir = temp_state_dir("abort-actor");
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 4,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let runtime = AuthRuntime::start(admin_key, config).await.unwrap();
+    authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
+
+    runtime.abort_actor().await.unwrap();
+    assert_eq!(
+        authenticate_for_test(&runtime, ADMIN_KEY_ID)
+            .unwrap_err()
+            .code,
+        "auth_state_unavailable"
+    );
+    drop(runtime);
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
 #[tokio::test]
 async fn overlapping_runtimes_cannot_share_an_auth_state_directory() {
     let state_dir = temp_state_dir("auth-dir-lock");
