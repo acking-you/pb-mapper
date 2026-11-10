@@ -21,7 +21,7 @@ pub(super) const RESTORE_FOR: std::time::Duration = std::time::Duration::from_se
 pub fn run(name: &str, parent: u32) -> Result<()> {
     if !name.starts_with(&format!("{PIPE}.worker."))
         || name.len() > 160
-        || os::current_sid()? != "S-1-5-18"
+        || os::current_sid()? != os::LOCAL_SYSTEM_SID
     {
         return Err(error("invalid worker launch"));
     }
@@ -160,7 +160,7 @@ pub(super) fn journal(session: u32) -> Result<Journal> {
 /// ten minutes, then exits. A logoff or a reboot undoes a dynamic mode
 /// anyway.
 pub fn restore(session: u32) -> Result<()> {
-    if os::current_sid()? != "S-1-5-18" || os::session(std::process::id())? != session {
+    if os::current_sid()? != os::LOCAL_SYSTEM_SID || os::session(std::process::id())? != session {
         return Err(error("invalid restore launch"));
     }
     let journal = journal(session)?;

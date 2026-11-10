@@ -102,7 +102,7 @@ fn entry(_: Vec<OsString>) {
             .map_err(error)?;
         let config = configuration()?;
         if !os::same_path(&std::env::current_exe()?, &config.helper_executable)
-            || os::current_sid()? != "S-1-5-18"
+            || os::current_sid()? != os::LOCAL_SYSTEM_SID
         {
             return Err(error("helper service identity is invalid"));
         }

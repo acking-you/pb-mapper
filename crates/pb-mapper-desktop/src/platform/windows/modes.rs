@@ -28,13 +28,10 @@ use windows::{
             ENUM_DISPLAY_SETTINGS_MODE, EnumDisplayDevicesW, EnumDisplaySettingsExW,
         },
         System::RemoteDesktop::ProcessIdToSessionId,
+        UI::WindowsAndMessaging::EDD_GET_DEVICE_INTERFACE_NAME,
     },
     core::PCWSTR,
 };
-
-/// `EnumDisplayDevicesW`'s flag for a monitor's device interface name
-/// (`WindowsAndMessaging`, a feature this crate does not otherwise need).
-const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 1;
 
 /// No mode is offered below this.
 const MIN_SIZE: (u32, u32) = (800, 600);

@@ -24,6 +24,10 @@ use {
     windows::{Win32::System::RemoteDesktop::ProcessIdToSessionId, core::PCWSTR},
 };
 
+/// LocalSystem's SID: the service and its workers run as it.
+#[cfg(feature = "windows-helper")]
+pub const LOCAL_SYSTEM_SID: &str = "S-1-5-18";
+
 pub fn token_for_process(process: HANDLE) -> Result<Handle> {
     let mut token = HANDLE::default();
     unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.map_err(error)?;
@@ -208,7 +212,7 @@ fn verify_pipe_identity(
     let internal = capture
         && id == std::process::id()
         && caller_session == 0
-        && caller_sid == "S-1-5-18"
+        && caller_sid == LOCAL_SYSTEM_SID
         && same_path(&image(process.raw())?, &config.helper_executable);
     if !internal
         && (caller_session == 0

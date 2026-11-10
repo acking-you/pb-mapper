@@ -186,7 +186,7 @@ pub(crate) struct DesktopBinding {
 impl DesktopBinding {
     #[cfg(feature = "windows-helper")]
     pub fn new(session: os::SessionIdentity) -> Result<Self> {
-        if os::current_sid()? != "S-1-5-18" {
+        if os::current_sid()? != os::LOCAL_SYSTEM_SID {
             return Err(error(
                 "secure desktop backend requires the installed worker",
             ));

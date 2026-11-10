@@ -50,7 +50,8 @@ fn start(service: &Service) -> Result<()> {
     match service.start::<OsString>(&[]) {
         Ok(()) => {}
         // A queued SCM recovery may win the race with an explicit Enable.
-        Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1056) => {}
+        Err(windows_service::Error::Winapi(e))
+            if e.raw_os_error() == Some(ERROR_SERVICE_ALREADY_RUNNING.0 as i32) => {}
         Err(e) => return Err(error(e)),
     }
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -173,7 +174,7 @@ impl Installation {
         let handle = unsafe {
             CreateFileW(
                 PCWSTR(os::wide(&path).as_ptr()),
-                GENERIC_READ.0 | GENERIC_WRITE.0 | 0x00010000,
+                GENERIC_READ.0 | GENERIC_WRITE.0 | DELETE.0,
                 FILE_SHARE_MODE(0),
                 Some(descriptor.attributes()),
                 OPEN_ALWAYS,
@@ -370,9 +371,18 @@ fn remove_tree(
         } else {
             std::fs::remove_file(path)
         };
+        // Still open, or not yet empty: removed at the next reboot instead.
+        const ACCESS_DENIED: i32 = ERROR_ACCESS_DENIED.0 as i32;
+        const SHARING_VIOLATION: i32 = ERROR_SHARING_VIOLATION.0 as i32;
+        const LOCK_VIOLATION: i32 = ERROR_LOCK_VIOLATION.0 as i32;
+        const DIR_NOT_EMPTY: i32 = ERROR_DIR_NOT_EMPTY.0 as i32;
         match result {
             Ok(()) => return Ok(()),
-            Err(e) if matches!(e.raw_os_error(), Some(5 | 32 | 33 | 145)) => {}
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(ACCESS_DENIED | SHARING_VIOLATION | LOCK_VIOLATION | DIR_NOT_EMPTY)
+                ) => {}
             Err(e) => return Err(e),
         }
     }
@@ -562,13 +572,17 @@ fn install_bundle(
                 stop(&service)?;
                 (service, Some((start_type, running)), Some(recovery))
             }
-            Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1060) => (
-                manager
-                    .create_service(&info(&config, ServiceStartType::AutoStart), access)
-                    .map_err(error)?,
-                None,
-                None,
-            ),
+            Err(windows_service::Error::Winapi(e))
+                if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST.0 as i32) =>
+            {
+                (
+                    manager
+                        .create_service(&info(&config, ServiceStartType::AutoStart), access)
+                        .map_err(error)?,
+                    None,
+                    None,
+                )
+            }
             Err(e) => return Err(error(e)),
         };
         let update = (|| {
@@ -740,7 +754,8 @@ pub fn uninstall() -> Result<()> {
                 stop(&service)?;
                 service.delete().map_err(error)?;
             }
-            Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1060) => {}
+            Err(windows_service::Error::Winapi(e))
+                if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST.0 as i32) => {}
             Err(e) => return Err(error(e)),
         }
         let config = installation.root.join("installation.json");

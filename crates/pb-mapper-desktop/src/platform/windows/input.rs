@@ -112,14 +112,14 @@ fn native_input_error(failure: impl std::fmt::Display) -> std::io::Error {
                 token,
                 TokenUIAccess,
                 Some((&mut ui_access as *mut u32).cast()),
-                4,
+                size_of::<u32>() as u32,
                 &mut length,
             )?;
             GetTokenInformation(
                 token,
                 TokenSessionId,
                 Some((&mut session as *mut u32).cast()),
-                4,
+                size_of::<u32>() as u32,
                 &mut length,
             )?;
         }

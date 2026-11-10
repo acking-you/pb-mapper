@@ -82,7 +82,7 @@ fn service_backend(
     display_device: Option<String>,
 ) -> Result<RemoteBackend<NamedPipeClient>> {
     let config = configuration()?;
-    if os::current_sid()? != "S-1-5-18"
+    if os::current_sid()? != os::LOCAL_SYSTEM_SID
         || os::session(std::process::id())? != 0
         || !os::same_path(&std::env::current_exe()?, &config.helper_executable)
     {

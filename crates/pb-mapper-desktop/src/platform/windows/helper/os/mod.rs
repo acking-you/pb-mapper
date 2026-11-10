@@ -22,7 +22,9 @@ pub use elevate::{Action, request_installation};
 #[cfg(all(test, feature = "windows-helper"))]
 pub use identity::image;
 #[cfg(feature = "windows-helper")]
-pub use identity::{ScopedPrivileges, session, verify_client, verify_management_client};
+pub use identity::{
+    LOCAL_SYSTEM_SID, ScopedPrivileges, session, verify_client, verify_management_client,
+};
 pub use identity::{current_sid, verify_running_service, verify_server};
 #[cfg(feature = "windows-helper")]
 pub use log::{open_service_log, record_service_event, record_service_failure, rotate_service_log};

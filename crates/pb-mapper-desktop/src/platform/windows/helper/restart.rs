@@ -5,6 +5,7 @@ use super::{configuration, os};
 use crate::{Result, error};
 use std::process::Stdio;
 use tokio::io::AsyncReadExt;
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 pub async fn prepare() -> Result<()> {
     let config = configuration()?;
@@ -20,7 +21,7 @@ pub async fn prepare() -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW; no elevation.
+        .creation_flags(CREATE_NO_WINDOW.0) // No elevation.
         .spawn()?;
     let ready = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         child
@@ -101,7 +102,7 @@ mod tests {
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .creation_flags(0x0800_0000)
+            .creation_flags(CREATE_NO_WINDOW.0)
             .spawn()
             .unwrap();
         let id = parent.id();

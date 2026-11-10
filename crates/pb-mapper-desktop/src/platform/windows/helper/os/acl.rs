@@ -192,6 +192,10 @@ pub fn check_acl(path: &Path, forbidden: u32) -> Result<()> {
     let _descriptor = unsafe { LocalAllocation::own(descriptor.0) };
     check_descriptor(owner, acl, forbidden)
 }
+/// The ACE types a protected DACL may hold (`Win32_System_SystemServices`,
+/// a feature this crate does not otherwise need).
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+const ACCESS_DENIED_ACE_TYPE: u8 = 1;
 fn check_descriptor(owner: PSID, acl: *const ACL, forbidden: u32) -> Result<()> {
     // Descriptors obtained from Windows are validated before reaching this
     // routine. Deny entries cannot grant access, so they are harmless.
@@ -203,8 +207,7 @@ fn check_descriptor(owner: PSID, acl: *const ACL, forbidden: u32) -> Result<()> 
             let mut ace = std::ptr::null_mut();
             unsafe { GetAce(acl, u32::from(index), &mut ace) }.map_err(error)?;
             let header = unsafe { &*ace.cast::<ACE_HEADER>() };
-            if header.AceType == 0 {
-                // ACCESS_ALLOWED_ACE_TYPE
+            if header.AceType == ACCESS_ALLOWED_ACE_TYPE {
                 let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
                 let sid = PSID((&allowed.SidStart as *const u32).cast_mut().cast());
                 if allowed.Mask & forbidden != 0 && !trusted_sid(sid) {
@@ -212,7 +215,7 @@ fn check_descriptor(owner: PSID, acl: *const ACL, forbidden: u32) -> Result<()> 
                         "helper files grant an unprivileged identity forbidden access",
                     ));
                 }
-            } else if header.AceType != 1 {
+            } else if header.AceType != ACCESS_DENIED_ACE_TYPE {
                 return Err(error("unsupported installation ACL"));
             }
         }
