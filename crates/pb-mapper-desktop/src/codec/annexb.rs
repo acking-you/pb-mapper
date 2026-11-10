@@ -6,6 +6,14 @@ use crate::{Result, VideoCodec, error};
 
 /// The largest access unit an encoder may hand over.
 pub(crate) const MAX_ACCESS_UNIT: usize = 4 * 1024 * 1024;
+const _: () = assert!(
+    crate::oop::ipc::MAX_FRAME >= MAX_ACCESS_UNIT,
+    "the helper pipe carries a whole access unit"
+);
+const _: () = assert!(
+    crate::wire::MAX_PAYLOAD >= MAX_ACCESS_UNIT,
+    "a whole access unit fits one payload record"
+);
 
 pub(crate) fn codec_name(kind: VideoCodec) -> &'static str {
     match kind {

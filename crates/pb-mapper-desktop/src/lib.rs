@@ -95,10 +95,14 @@ pub type Result<T> = io::Result<T>;
 pub(crate) fn error(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
+/// What every desktop service name starts with.
+pub(crate) const SERVICE_PREFIX: &str = "desktop:";
+/// The longest service name, its prefix included.
+pub(crate) const MAX_SERVICE_LEN: usize = 128;
 pub(crate) fn valid_service(service: &str) -> bool {
-    service.starts_with("desktop:")
-        && service.len() > 8
-        && service.len() <= 128
+    service.starts_with(SERVICE_PREFIX)
+        && service.len() > SERVICE_PREFIX.len()
+        && service.len() <= MAX_SERVICE_LEN
         && service
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c))
@@ -151,6 +155,16 @@ pub enum QualityPreset {
     Smooth,
 }
 
+/// The largest picture a session encodes: 3840x2160.
+pub(crate) const MAX_VIDEO_WIDTH: u32 = 3840;
+pub(crate) const MAX_VIDEO_HEIGHT: u32 = 2160;
+/// The smallest side of a viewer's limits.
+pub(crate) const MIN_VIDEO_SIDE: u32 = 2;
+/// The frame rates a viewer's limits may ask for.
+pub(crate) const MIN_VIEWER_FPS: u32 = 30;
+/// The highest frame rate anything paces at.
+pub(crate) const MAX_FPS: u32 = 120;
+
 /// Renderer limits, fixed for the session. Encoded dimensions preserve the
 /// display's aspect ratio and never upscale; `Display` remains in physical
 /// desktop pixels for input and pointer metadata.
@@ -164,9 +178,9 @@ pub struct VideoLimits {
 impl VideoLimits {
     /// Reject invalid limits before opening a session or creating GPU resources.
     pub fn validate(&self) -> Result<()> {
-        if !(2..=3840).contains(&self.max_width)
-            || !(2..=2160).contains(&self.max_height)
-            || !(30..=120).contains(&self.max_fps)
+        if !(MIN_VIDEO_SIDE..=MAX_VIDEO_WIDTH).contains(&self.max_width)
+            || !(MIN_VIDEO_SIDE..=MAX_VIDEO_HEIGHT).contains(&self.max_height)
+            || !(MIN_VIEWER_FPS..=MAX_FPS).contains(&self.max_fps)
         {
             return Err(error("video limits outside supported bounds"));
         }
@@ -185,11 +199,13 @@ impl VideoLimits {
     /// rate that is not finite and positive counts as 60 Hz.
     pub fn choose(refresh_hz: f64, resolution: Resolution, max_fps: Option<u32>) -> Self {
         let fps = if let Some(fps) = max_fps {
-            fps.clamp(30, 120)
+            fps.clamp(MIN_VIEWER_FPS, MAX_FPS)
         } else if cfg!(target_os = "android") {
             60
         } else if refresh_hz.is_finite() && refresh_hz > 0.0 {
-            refresh_hz.round().clamp(30.0, 120.0) as u32
+            refresh_hz
+                .round()
+                .clamp(f64::from(MIN_VIEWER_FPS), f64::from(MAX_FPS)) as u32
         } else {
             60
         };
@@ -211,8 +227,8 @@ impl VideoLimits {
             (self.max_width.min(short), self.max_height.min(long))
         };
         Self {
-            max_width: max_width.max(2),
-            max_height: max_height.max(2),
+            max_width: max_width.max(MIN_VIDEO_SIDE),
+            max_height: max_height.max(MIN_VIDEO_SIDE),
             ..self
         }
     }
@@ -239,15 +255,35 @@ pub enum Resolution {
 
 impl Resolution {
     /// Its bounds, width by height.
-    pub fn bounds(self) -> (u32, u32) {
+    pub const fn bounds(self) -> (u32, u32) {
         match self {
             Self::P720 => (1280, 720),
             Self::P1080 => (1920, 1080),
             Self::P1440 => (2560, 1440),
-            Self::Native => (3840, 2160),
+            Self::Native => (MAX_VIDEO_WIDTH, MAX_VIDEO_HEIGHT),
         }
     }
 }
+const _: () = {
+    let presets = [
+        Resolution::P720,
+        Resolution::P1080,
+        Resolution::P1440,
+        Resolution::Native,
+    ];
+    let mut at = 0;
+    while at < presets.len() {
+        let (width, height) = presets[at].bounds();
+        assert!(
+            MIN_VIDEO_SIDE <= width
+                && width <= MAX_VIDEO_WIDTH
+                && MIN_VIDEO_SIDE <= height
+                && height <= MAX_VIDEO_HEIGHT,
+            "every preset's bounds pass VideoLimits::validate"
+        );
+        at += 1;
+    }
+};
 
 /// Why a viewer asks for an independently decodable picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
