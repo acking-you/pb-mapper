@@ -7,7 +7,7 @@ use crate::endpoint::RelayEndpoint;
 use crate::relay::CarrierId;
 use std::fmt::Debug;
 use std::ops::ControlFlow;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use snafu::ResultExt;
@@ -237,7 +237,11 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     remote_addr.start();
     let mut wake = remote_addr.wake();
     diagnostics.network_seen(remote_addr.network_generation());
-    set_custom_timeout(Duration::from_secs(120));
+    // uni-stream keeps its UDP session timeout in a `static mut` that it reads
+    // once. Write it once per process, so tunnels starting together never
+    // write it at the same time; every write was this same value.
+    static UDP_TIMEOUT: Once = Once::new();
+    UDP_TIMEOUT.call_once(|| set_custom_timeout(Duration::from_secs(120)));
 
     let credential = match pinned_credential {
         Some(credential) => credential,
