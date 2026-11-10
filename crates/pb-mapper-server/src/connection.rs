@@ -22,6 +22,7 @@ use pb_mapper_auth::{ADMIN_KEY_ID, AuthContext};
 use pb_mapper_core::config::control_io_timeout;
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_core::snafu_error_handle;
+use pb_mapper_core::timeout::RetryBackoff;
 use pb_mapper_protocol::MessageWriter;
 use pb_mapper_protocol::command::{
     AdminRequest, CONTROL_PROTOCOL_V2, MessageSerializer, PbConnRequest, PbConnResponse,
@@ -32,8 +33,8 @@ use pb_mapper_protocol::secure::{
     FirstFlightProof, HeaderProtocol, ServerHeaderSession, ServerSecurity,
 };
 use pb_mapper_protocol::transport::RelayStream;
-use snafu::ResultExt;
-use tokio::net::TcpListener;
+use snafu::{IntoError, ResultExt};
+use tokio::net::{TcpListener, TcpStream};
 use tracing::instrument;
 use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay};
 
@@ -50,13 +51,63 @@ use crate::service_key::scoped_service_key;
 use crate::status::handle_show_status;
 use crate::task::{ManagerTask, ManagerTaskSender};
 
+/// Where the relay takes TCP connections from: its listener, or in tests one
+/// that fails on cue.
+pub(super) trait Accept {
+    fn accept(&self) -> impl Future<Output = std::io::Result<(TcpStream, SocketAddr)>> + Send;
+}
+
+impl Accept for TcpListener {
+    fn accept(&self) -> impl Future<Output = std::io::Result<(TcpStream, SocketAddr)>> + Send {
+        TcpListener::accept(self)
+    }
+}
+
+/// Accept connections until the routing manager is gone.
+///
+/// A failed accept never ends the loop. A peer that reset before it was
+/// accepted costs only itself; anything else, such as a full descriptor
+/// table, is retried after a pause that grows to a second, so a relay that
+/// ran out of descriptors under a flood serves again once the flood ends.
 pub(super) async fn handle_listener(
     task_sender: ManagerTaskSender,
-    listener: TcpListener,
+    listener: impl Accept,
     keep_alive: bool,
 ) -> Result<()> {
+    let mut backoff = RetryBackoff::default();
     loop {
-        let (stream, addr) = listener.accept().await.context(ServerListenSnafu)?;
+        let (stream, addr) = match listener.accept().await {
+            Ok(accepted) => {
+                backoff.reset();
+                accepted
+            }
+            Err(source) => {
+                let peer_gone = matches!(
+                    source.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionRefused
+                );
+                let error = ServerListenSnafu.into_error(source);
+                if peer_gone {
+                    tracing::debug!(
+                        event = "tcp_accept_failed",
+                        error = %snafu::Report::from_error(error),
+                        "a connection ended before it was accepted"
+                    );
+                } else {
+                    let retry_in = backoff.next_delay();
+                    tracing::error!(
+                        event = "tcp_accept_failed",
+                        error = %snafu::Report::from_error(error),
+                        ?retry_in,
+                        "accepting tcp connections failed"
+                    );
+                    tokio::time::sleep(retry_in).await;
+                }
+                continue;
+            }
+        };
         tracing::debug!(
             event = "tcp_conn_accepted",
             peer_addr = %addr,
@@ -874,6 +925,50 @@ mod tests {
         CodecMessageReader, CodecMessageWriter, MessageReader, get_decodec, get_encodec,
     };
     use tokio_util::sync::CancellationToken;
+
+    /// A listener whose next accepts fail with `failures`, in order.
+    struct Failing {
+        listener: TcpListener,
+        failures: std::sync::Mutex<Vec<std::io::Error>>,
+    }
+
+    impl Accept for Failing {
+        fn accept(&self) -> impl Future<Output = std::io::Result<(TcpStream, SocketAddr)>> + Send {
+            let failure = self.failures.lock().unwrap().pop();
+            async move {
+                match failure {
+                    Some(failure) => Err(failure),
+                    None => self.listener.accept().await,
+                }
+            }
+        }
+    }
+
+    /// A failed accept costs one connection, never the listener: neither a
+    /// peer that reset before it was accepted nor a full descriptor table
+    /// leaves the relay deaf to TCP.
+    #[tokio::test]
+    async fn the_listener_outlives_failed_accepts() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let listener = Failing {
+            listener,
+            failures: std::sync::Mutex::new(vec![
+                std::io::Error::other("too many open files"),
+                std::io::ErrorKind::ConnectionReset.into(),
+            ]),
+        };
+        let (sender, mut receiver) = crate::manager::task_channel(8);
+        let listening = tokio::spawn(handle_listener(sender, listener, false));
+
+        let _client = TcpStream::connect(addr).await.unwrap();
+        let task = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .expect("no connection was accepted")
+            .expect("the listener stopped");
+        assert!(matches!(task, ManagerTask::Accept { .. }));
+        listening.abort();
+    }
 
     /// An administrator change needs protocol v2's first-flight proof to claim
     /// against replay. Sent with the administrator key over legacy framing, it
