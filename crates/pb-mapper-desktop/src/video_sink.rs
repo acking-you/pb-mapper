@@ -192,8 +192,8 @@ struct SinkState {
     fps_cap: FpsCap,
     present: PresentStats,
     discarded: u64,
+    /// Times the queue dropped to the next IDR, for age or overflow.
     backlog_drops: u64,
-    overflow_drops: u64,
     /// The name and hardware flag the consumer reported; the state comes
     /// from `recovery`.
     decoder: DecoderInfo,
@@ -217,7 +217,6 @@ impl SinkState {
             present: PresentStats::new(epoch),
             discarded: 0,
             backlog_drops: 0,
-            overflow_drops: 0,
             decoder: DecoderInfo::default(),
             decoder_error: String::new(),
         }
@@ -419,10 +418,7 @@ impl VideoSink {
     /// ask for one, and let the fps cap know once it judges the consumer.
     fn drop_to_idr(&self, state: &mut SinkState, cause: Backlog, now: Instant) {
         let units = state.restart();
-        match cause {
-            Backlog::Age => state.backlog_drops += 1,
-            Backlog::Overflow => state.overflow_drops += 1,
-        }
+        state.backlog_drops += 1;
         if state.judged(now) {
             state.fps_cap.on_backlog_drop();
         }
@@ -582,7 +578,7 @@ impl VideoSink {
             present_interval: state.present.intervals(now),
             viewer_ms: state.present.viewer_ms(now),
             discarded: state.discarded,
-            backlog_drops: state.backlog_drops + state.overflow_drops,
+            backlog_drops: state.backlog_drops,
             keyframes_requested: state.recovery.requested(),
             decoder,
         }

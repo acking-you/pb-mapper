@@ -296,12 +296,26 @@ pub(crate) struct ViewerStateSlot {
     control_wanted: Option<bool>,
     /// A reason the viewer itself caused, until control is requested again.
     local_reason: Option<ViewerReason>,
-    /// The last notice, its number in this session, and when it came.
-    notice: Option<(NoticeCode, String, u64, Instant)>,
-    stopped: Option<(Option<ViewerReason>, String)>,
+    notice: Option<Notice>,
+    stopped: Option<Stopped>,
     /// When the session last became streaming: video is due only from then,
     /// so a pause or unavailable capture never counts as time without it.
     entered_streaming: Instant,
+}
+/// The host's last notice.
+struct Notice {
+    code: NoticeCode,
+    message: String,
+    /// Its number in this session.
+    seq: u64,
+    /// When it came.
+    at: Instant,
+}
+/// How the session ended; no reason: stopped here.
+#[derive(Clone, Default)]
+struct Stopped {
+    reason: Option<ViewerReason>,
+    message: String,
 }
 impl ViewerStateSlot {
     /// Make a change, noting when it starts the session streaming.
@@ -343,7 +357,7 @@ impl ViewerStateSlot {
     }
     fn reason(&self) -> Option<ViewerReason> {
         match &self.stopped {
-            Some((reason, _)) => *reason,
+            Some(stopped) => stopped.reason,
             None => self
                 .local_reason
                 .or_else(|| self.host.as_ref()?.reason.map(ViewerReason::from)),
@@ -380,7 +394,7 @@ impl ViewerShared {
     fn mark_stopped(&self, reason: Option<ViewerReason>, message: String) {
         let mut state = self.state.lock();
         if state.stopped.is_none() {
-            state.stopped = Some((reason, message));
+            state.stopped = Some(Stopped { reason, message });
         }
     }
 }
@@ -477,7 +491,7 @@ impl Viewer {
     }
 
     /// Authenticate over an established stream, then run the session on it.
-    pub(crate) async fn start<S>(
+    async fn start<S>(
         mut stream: S,
         token: String,
         config: ViewerConfig,
@@ -560,7 +574,7 @@ impl Viewer {
 
     /// The session for polls: never waits on the network.
     pub fn status(&self) -> ViewerStatus {
-        self.status_handle().status()
+        current_status(&self.shared, &self.sink)
     }
 
     /// What reads this viewer's status, apart from the viewer.
@@ -580,91 +594,93 @@ pub(crate) struct ViewerStatusHandle {
 }
 impl ViewerStatusHandle {
     pub(crate) fn status(&self) -> ViewerStatus {
-        let now = Instant::now();
-        let sink = self.sink.snapshot(now);
-        let mut stats = ViewerStats::default();
-        let last_video = {
-            let mut acc = self.shared.stats.lock();
-            acc.fill(now, sink.viewer_ms, &mut stats);
-            (acc.last_video_at, acc.last_video_size)
-        };
-        let state = self.shared.state.lock();
-        let generation = state.generation();
-        let fresh = sink
-            .presented
-            .is_some_and(|presented| presented.fresh(state.streaming(), generation, now));
-        let video = state
-            .video_size()
-            .map(|size| (size.width, size.height))
-            .or(last_video.1)
-            .map(|(width, height)| VideoInfo {
-                codec: state.codec,
-                width,
-                height,
-            });
-        let (path, relay_transport) = match state.route {
-            Some(Route::Direct) => ("direct", None),
-            Some(Route::RelayTcp) => ("relay", Some("tcp")),
-            Some(Route::RelayQuic) => ("relay", Some("quic")),
-            None => ("", None),
-        };
-        stats.path = path.into();
-        stats.relay_transport = relay_transport.map(Into::into);
-        stats.preset = state.quality;
-        stats.link = state.link.clone();
-        stats.presented_fps = sink.presented_fps;
-        stats.width = video.map_or(0, |video| video.width);
-        stats.height = video.map_or(0, |video| video.height);
-        stats.codec = state.codec;
-        stats.keyframes_requested = sink.keyframes_requested;
-        stats.backlog_drops = sink.backlog_drops;
-        stats.dropped_frames += sink.discarded;
-        stats.present_interval = sink.present_interval;
-        let host = state.host.as_ref();
-        ViewerStatus {
-            state: state.viewer_state(),
-            stage: None,
-            reason: state.reason(),
-            message: match &state.stopped {
-                Some((_, message)) => message.clone(),
-                None => host.map(|host| host.message.clone()).unwrap_or_default(),
-            },
-            control_allowed: state.control_allowed(),
-            controlling: state.controlling(),
-            control_wanted: state.control_wanted,
-            fresh,
-            paused: state.paused,
-            generation,
-            display: host.and_then(|host| host.display.clone()),
-            desktop: host.map_or(DesktopKind::Ordinary, |host| host.desktop),
-            video,
-            presented: sink.presented.map(|presented| PresentedInfo {
-                generation: presented.generation,
-                frame_id: presented.frame_id,
-                age_ms: millis(now.saturating_duration_since(presented.presented_at)),
-            }),
-            last_video_age_ms: last_video
-                .0
-                .map(|at| millis(now.saturating_duration_since(at.max(state.entered_streaming)))),
-            quality: state.quality,
-            modes: state.modes().cloned(),
-            host_os: state
-                .capabilities
-                .iter()
-                .find_map(|capability| HostOs::from_capability(capability)),
-            capabilities: state.capabilities.clone(),
-            notice: state
-                .notice
-                .as_ref()
-                .map(|(code, message, seq, at)| NoticeInfo {
-                    code: *code,
-                    message: message.clone(),
-                    seq: *seq,
-                    age_ms: millis(now.saturating_duration_since(*at)),
-                }),
-            decoder: sink.decoder,
-            stats,
-        }
+        current_status(&self.shared, &self.sink)
+    }
+}
+
+/// The session's status now, as `Viewer::status` reports it.
+fn current_status(shared: &ViewerShared, sink: &VideoSink) -> ViewerStatus {
+    let now = Instant::now();
+    let sink = sink.snapshot(now);
+    let mut stats = ViewerStats::default();
+    let last_video = {
+        let mut acc = shared.stats.lock();
+        acc.fill(now, sink.viewer_ms, &mut stats);
+        (acc.last_video_at, acc.last_video_size)
+    };
+    let state = shared.state.lock();
+    let generation = state.generation();
+    let fresh = sink
+        .presented
+        .is_some_and(|presented| presented.fresh(state.streaming(), generation, now));
+    let video = state
+        .video_size()
+        .map(|size| (size.width, size.height))
+        .or(last_video.1)
+        .map(|(width, height)| VideoInfo {
+            codec: state.codec,
+            width,
+            height,
+        });
+    let (path, relay_transport) = match state.route {
+        Some(Route::Direct) => ("direct", None),
+        Some(Route::RelayTcp) => ("relay", Some("tcp")),
+        Some(Route::RelayQuic) => ("relay", Some("quic")),
+        None => ("", None),
+    };
+    stats.path = path.into();
+    stats.relay_transport = relay_transport.map(Into::into);
+    stats.preset = state.quality;
+    stats.link = state.link.clone();
+    stats.presented_fps = sink.presented_fps;
+    stats.width = video.map_or(0, |video| video.width);
+    stats.height = video.map_or(0, |video| video.height);
+    stats.codec = state.codec;
+    stats.keyframes_requested = sink.keyframes_requested;
+    stats.backlog_drops = sink.backlog_drops;
+    stats.dropped_frames += sink.discarded;
+    stats.present_interval = sink.present_interval;
+    let host = state.host.as_ref();
+    ViewerStatus {
+        state: state.viewer_state(),
+        stage: None,
+        reason: state.reason(),
+        message: match &state.stopped {
+            Some(stopped) => stopped.message.clone(),
+            None => host.map(|host| host.message.clone()).unwrap_or_default(),
+        },
+        control_allowed: state.control_allowed(),
+        controlling: state.controlling(),
+        control_wanted: state.control_wanted,
+        fresh,
+        paused: state.paused,
+        generation,
+        display: host.and_then(|host| host.display.clone()),
+        desktop: host.map_or(DesktopKind::Ordinary, |host| host.desktop),
+        video,
+        presented: sink.presented.map(|presented| PresentedInfo {
+            generation: presented.generation,
+            frame_id: presented.frame_id,
+            age_ms: millis(now.saturating_duration_since(presented.presented_at)),
+        }),
+        last_video_age_ms: last_video
+            .0
+            .map(|at| millis(now.saturating_duration_since(at.max(state.entered_streaming)))),
+        quality: state.quality,
+        modes: state.modes().cloned(),
+        host_os: state
+            .capabilities
+            .iter()
+            .find_map(|capability| HostOs::from_capability(capability)),
+        capabilities: state.capabilities.clone(),
+        notice: state.notice.as_ref().map(|notice| NoticeInfo {
+            code: notice.code,
+            message: notice.message.clone(),
+            seq: notice.seq,
+            age_ms: millis(now.saturating_duration_since(notice.at)),
+        }),
+        decoder: sink.decoder,
+        stats,
     }
 }
 
@@ -1068,7 +1084,10 @@ async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, session: Ses
     shared.mark_stopped(reason, message);
     // The first stop recorded, not this one: a local stop after a failure
     // keeps the failure. No reason: stopped here.
-    let (reason, detail) = shared.state.lock().stopped.clone().unwrap_or_default();
+    let Stopped {
+        reason,
+        message: detail,
+    } = shared.state.lock().stopped.clone().unwrap_or_default();
     let keyframes = shared.stats.lock().host.map_or(0, |host| host.keyframes);
     let local = sink.snapshot(Instant::now());
     tracing::info!(
@@ -1269,8 +1288,13 @@ impl Reader<'_> {
             }
             HostMessage::Notice { code, message } => {
                 let mut state = self.shared.state.lock();
-                let seq = state.notice.as_ref().map_or(1, |(_, _, seq, _)| seq + 1);
-                state.notice = Some((code, message, seq, Instant::now()));
+                let seq = state.notice.as_ref().map_or(1, |notice| notice.seq + 1);
+                state.notice = Some(Notice {
+                    code,
+                    message,
+                    seq,
+                    at: Instant::now(),
+                });
             }
             HostMessage::Stopped { reason, message } => {
                 return Err(Ended::Stopped(reason.into(), message));
