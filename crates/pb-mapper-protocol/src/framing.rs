@@ -325,7 +325,6 @@ pub fn get_header_msg_writer<T: AsyncWriteExt + Unpin>(
     Ok(CodecMessageWriter::new(writer, get_default_encodec()?))
 }
 
-#[inline]
 pub fn get_default_encodec() -> Result<Aes256GcmEnCodec> {
     let key = get_msg_header_key().map_err(|detail| error::Error::MsgCodec {
         action: "load configured credential",
@@ -337,7 +336,6 @@ pub fn get_default_encodec() -> Result<Aes256GcmEnCodec> {
     })
 }
 
-#[inline]
 pub fn get_default_decodec() -> Result<Aes256GcmDeCodec> {
     let key = get_msg_header_key().map_err(|detail| error::Error::MsgCodec {
         action: "load configured credential",
@@ -349,7 +347,6 @@ pub fn get_default_decodec() -> Result<Aes256GcmDeCodec> {
     })
 }
 
-#[inline]
 pub fn get_encodec(key: &[u8]) -> Result<Aes256GcmEnCodec> {
     Aes256GcmEnCodec::try_new(key).map_err(|e| error::Error::MsgCodec {
         action: "create encodec",
@@ -357,7 +354,6 @@ pub fn get_encodec(key: &[u8]) -> Result<Aes256GcmEnCodec> {
     })
 }
 
-#[inline]
 pub fn get_decodec(key: &[u8]) -> Result<Aes256GcmDeCodec> {
     Aes256GcmDeCodec::try_new(key).map_err(|e| error::Error::MsgCodec {
         action: "create decodec",
