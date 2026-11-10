@@ -10,7 +10,7 @@ use crate::{
     desktop_video,
     error::CtlError,
     handle::PbMapperHandle,
-    response::{err_ctl, err_null_handle, ok_data, parse_c_string},
+    response::{Reply, parse_c_string, respond},
 };
 use pb_mapper::desktop::{self, Invitation};
 use pb_mapper_core::checksum::get_process_credential;
@@ -175,39 +175,30 @@ pub unsafe extern "C" fn pb_mapper_desktop_call_json(
     handle: *mut PbMapperHandle,
     request: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-    // SAFETY: null or NUL-terminated, as the caller guarantees.
-    let request = match unsafe { parse_c_string(request, "request") }.and_then(|text| {
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let text = unsafe { parse_c_string(request, "request") }?;
         if text.len() > 16384 {
             return Err(CtlError::invalid_argument("desktop request too large"));
         }
-        serde_json::from_str::<Value>(&text)
-            .map_err(|_| CtlError::invalid_argument("invalid desktop request"))
-    }) {
-        Ok(request) => request,
-        Err(e) => return err_ctl(&e),
-    };
-    let handle = unsafe { &*handle };
-    // The remembered computers have their own strict request type.
-    let result = if request["op"]
-        .as_str()
-        .is_some_and(|op| op.starts_with("computers_"))
-    {
-        handle
-            .runtime
-            .block_on(crate::desktop_computers::call(handle, request))
-    } else {
-        match serde_json::from_value::<Request>(request) {
-            Ok(request) => handle.runtime.block_on(call(handle, request)),
-            Err(_) => Err(CtlError::invalid_argument("invalid desktop request")),
-        }
-    };
-    match result {
-        Ok(value) => ok_data(value),
-        Err(e) => err_ctl(&e),
-    }
+        let request = serde_json::from_str::<Value>(&text)
+            .map_err(|_| CtlError::invalid_argument("invalid desktop request"))?;
+        // The remembered computers have their own strict request type.
+        let reply = if request["op"]
+            .as_str()
+            .is_some_and(|op| op.starts_with("computers_"))
+        {
+            handle
+                .runtime
+                .block_on(crate::desktop_computers::call(handle, request))
+        } else {
+            let request = serde_json::from_value::<Request>(request)
+                .map_err(|_| CtlError::invalid_argument("invalid desktop request"))?;
+            handle.runtime.block_on(call(handle, request))
+        };
+        reply.map(Reply::Data)
+    })
 }
 
 /// The `capabilities` op's `capabilities`: the keys the app has always read,

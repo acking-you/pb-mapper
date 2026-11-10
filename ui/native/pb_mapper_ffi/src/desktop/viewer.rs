@@ -4,7 +4,7 @@ use crate::{
     desktop_video,
     error::{CtlError, ErrorCode},
     handle::PbMapperHandle,
-    response::{err_ctl, err_null_handle, ok_data, parse_c_string},
+    response::{Reply, parse_c_string, respond},
 };
 use pb_mapper::{
     ConnectOptions, PathPolicy,
@@ -17,6 +17,7 @@ use pb_mapper::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::ffi::c_char;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use tokio_util::sync::CancellationToken;
@@ -572,27 +573,25 @@ pub unsafe extern "C" fn pb_mapper_desktop_viewer_call_json(
     handle: *mut PbMapperHandle,
     request: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-    let handle = unsafe { &*handle };
-    let failed = || CtlError::internal("desktop viewer call failed");
-    let result = desktop_video::guard(Err(failed()), || {
-        // SAFETY: null or NUL-terminated, as the caller guarantees.
-        let text = unsafe { parse_c_string(request, "request") }?;
-        if text.len() > MAX_VIEWER_REQUEST {
-            return Err(CtlError::invalid_argument(
-                "desktop viewer request too large",
-            ));
-        }
-        let request = serde_json::from_str(&text)
-            .map_err(|_| CtlError::invalid_argument("invalid desktop viewer request"))?;
-        viewer_call(&handle.desktop, request)
-    });
-    match result {
-        Ok(value) => ok_data(value),
-        Err(e) => err_ctl(&e),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        // A panic is an answer, never an unwind into Dart; its reply is
+        // built only then.
+        catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: null or NUL-terminated, as the caller guarantees.
+            let text = unsafe { parse_c_string(request, "request") }?;
+            if text.len() > MAX_VIEWER_REQUEST {
+                return Err(CtlError::invalid_argument(
+                    "desktop viewer request too large",
+                ));
+            }
+            let request = serde_json::from_str(&text)
+                .map_err(|_| CtlError::invalid_argument("invalid desktop viewer request"))?;
+            viewer_call(&handle.desktop, request)
+        }))
+        .unwrap_or_else(|_| Err(CtlError::internal("desktop viewer call failed")))
+        .map(Reply::Data)
+    })
 }
 
 /// Without a viewer, giving up control, releasing, pausing and choosing a
@@ -724,6 +723,7 @@ pub unsafe extern "C" fn pb_mapper_desktop_view_v1(
         return -1;
     }
     desktop_video::guard(-1, || {
+        // SAFETY: checked non-null; live, as the caller guarantees.
         let handle = unsafe { &*handle };
         let (code, view) = match handle.desktop.viewer() {
             Some(viewer) => (1, viewer.view().into()),
