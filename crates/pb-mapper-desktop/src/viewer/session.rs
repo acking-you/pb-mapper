@@ -9,7 +9,7 @@ use super::{
 use crate::{
     Input, QualityPreset, VideoCodec, VideoLimits,
     protocol::{HostMessage, RejectReason, Route, SessionState, ViewerMessage, valid_capabilities},
-    wire,
+    wire::{self, WireError},
 };
 use pb_mapper_client::sdk::{Connection, RelayTransport, TunnelMetrics};
 use std::{
@@ -67,7 +67,7 @@ pub(super) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     };
     wire::write_message(stream, &authenticate, None)
         .await
-        .map_err(ConnectError::Transport)?;
+        .map_err(|failure| ConnectError::Transport(failure.into()))?;
     drop(authenticate);
     match wire::read_header::<_, HostMessage>(stream, ACCEPT_TIMEOUT).await {
         Ok(Some(HostMessage::Accepted {
@@ -109,17 +109,11 @@ pub(super) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
             io::ErrorKind::UnexpectedEof,
             "the remote computer closed the connection during authentication",
         ))),
-        Err(failure) if wire_violation(&failure) => {
-            Err(ConnectError::Protocol(failure.to_string()))
+        Err(WireError::Framing(framing)) => Err(ConnectError::Protocol(framing.into())),
+        Err(failure @ (WireError::TimedOut | WireError::Io(_))) => {
+            Err(ConnectError::Transport(failure.into()))
         }
-        Err(failure) => Err(ConnectError::Transport(failure)),
     }
-}
-
-/// `wire` reports malformed and oversized records as `Other`; the transport
-/// reports its own kinds.
-fn wire_violation(failure: &io::Error) -> bool {
-    failure.kind() == io::ErrorKind::Other
 }
 
 /// How a session ended.
@@ -130,11 +124,15 @@ enum Ended {
     Stopped(ViewerReason, String),
 }
 impl Ended {
-    fn failed(failure: io::Error) -> Self {
-        let reason = match failure.kind() {
-            io::ErrorKind::TimedOut => ViewerReason::Timeout,
-            _ if wire_violation(&failure) => ViewerReason::Protocol,
-            _ => ViewerReason::Transport,
+    fn failed(failure: WireError) -> Self {
+        let reason = match &failure {
+            // A timeout first, the transport's own included.
+            WireError::TimedOut => ViewerReason::Timeout,
+            WireError::Io(failure) if failure.kind() == io::ErrorKind::TimedOut => {
+                ViewerReason::Timeout
+            }
+            WireError::Framing(_) => ViewerReason::Protocol,
+            WireError::Io(_) => ViewerReason::Transport,
         };
         Self::Stopped(reason, failure.to_string())
     }

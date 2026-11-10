@@ -23,14 +23,13 @@ use crate::{
     },
     qos::{Qos, TargetValues},
     shared::{Policy, SessionShared, Targets},
-    wire,
+    wire::{self, WireError},
     worker::WorkerExit,
 };
 use parking_lot::Mutex;
 use std::{
     fmt,
     future::Future,
-    io,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -74,7 +73,7 @@ enum Violation {
     /// A display mode request from a viewer this host offered none.
     DisplayModeNotOffered,
     /// A malformed or oversized message, as the framing reported it.
-    Framing(io::Error),
+    Framing(&'static str),
 }
 impl fmt::Display for Violation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -85,7 +84,7 @@ impl fmt::Display for Violation {
             Self::DisplayModeNotOffered => {
                 f.write_str("a display mode request without the capability")
             }
-            Self::Framing(failure) => failure.fmt(f),
+            Self::Framing(framing) => f.write_str(framing),
         }
     }
 }
@@ -437,13 +436,8 @@ async fn receive<R: AsyncRead + Unpin>(session: &Session, mut reader: R) -> Opti
                     return Some(violation);
                 }
             }
-            Ok(None) => return None,
-            // The framing reports a malformed or oversized message as `Other`;
-            // every other kind is the transport failing or timing out.
-            Err(failure) if failure.kind() == io::ErrorKind::Other => {
-                return Some(Violation::Framing(failure));
-            }
-            Err(_) => return None,
+            Ok(None) | Err(WireError::TimedOut | WireError::Io(_)) => return None,
+            Err(WireError::Framing(framing)) => return Some(Violation::Framing(framing)),
         }
     }
 }
