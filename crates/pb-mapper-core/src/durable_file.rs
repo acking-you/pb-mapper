@@ -20,8 +20,9 @@ use snafu::Snafu;
 pub enum NewFileMode {
     /// What creating a file gives it: `0o666` less the umask.
     Default,
-    /// Exactly this mode, set on the open file before its first byte is
-    /// written, so a secret is never readable by others whatever the umask.
+    /// Exactly this mode. The file is created with it, so it is never more
+    /// open than this, and set to it before its first byte is written, so
+    /// the umask takes nothing away either.
     Exactly(u32),
     /// The replaced file's permissions, or [`Self::Default`]'s when there is
     /// no file to replace.
@@ -92,7 +93,9 @@ impl From<ReplaceError> for std::io::Error {
 /// unless only the final directory sync failed, by which time it is replaced.
 ///
 /// The directory must exist: each caller creates it with its own wording for
-/// that failure. A bare file name lives in the current directory.
+/// that failure. The directory synced is the one [`sync_parent_directory`]
+/// syncs, so a bare file name, whose parent is the empty path, fails that last
+/// step; join it to `.` to mean the current directory.
 pub fn replace_contents(path: &Path, bytes: &[u8], mode: NewFileMode) -> Result<(), ReplaceError> {
     let Some(file_name) = path.file_name() else {
         return Err(ReplaceError {
@@ -107,15 +110,14 @@ pub fn replace_contents(path: &Path, bytes: &[u8], mode: NewFileMode) -> Result<
         file_name.to_string_lossy(),
         std::process::id()
     ));
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|source| ReplaceError {
-            step: ReplaceStep::Create,
-            path: temporary.clone(),
-            source,
-        })?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    create_with_mode(&mut options, mode);
+    let file = options.open(&temporary).map_err(|source| ReplaceError {
+        step: ReplaceStep::Create,
+        path: temporary.clone(),
+        source,
+    })?;
     let result = write_and_replace(file, &temporary, path, bytes, mode);
     if result.is_err() {
         // Best effort: after a rename this names nothing, and either way no
@@ -142,13 +144,19 @@ fn write_and_replace(
         .map_err(failed(ReplaceStep::Write, temporary))?;
     drop(file);
     replace_file(temporary, path).map_err(failed(ReplaceStep::Replace, path))?;
-    // A bare file name's parent is the empty path, which names no directory.
-    let directory = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    sync_directory(directory).map_err(failed(ReplaceStep::SyncParent, path))
+    sync_parent_directory(path).map_err(failed(ReplaceStep::SyncParent, path))
 }
+
+#[cfg(unix)]
+fn create_with_mode(options: &mut OpenOptions, mode: NewFileMode) {
+    use std::os::unix::fs::OpenOptionsExt;
+    if let NewFileMode::Exactly(mode) = mode {
+        options.mode(mode);
+    }
+}
+
+#[cfg(not(unix))]
+fn create_with_mode(_: &mut OpenOptions, _: NewFileMode) {}
 
 #[cfg(unix)]
 fn set_mode(file: &File, target: &Path, mode: NewFileMode) -> std::io::Result<()> {
@@ -189,8 +197,8 @@ pub fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Fsyncs the directory holding `path`, so a rename into it survives a crash.
 ///
 /// A path with no parent is a no-op rather than an error. A bare file name's
-/// parent is the empty path, which fails to open; [`replace_contents`] syncs
-/// the current directory for one instead.
+/// parent is the empty path, which fails to open, so its sync fails; join it
+/// to `.` to sync the current directory.
 pub fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
