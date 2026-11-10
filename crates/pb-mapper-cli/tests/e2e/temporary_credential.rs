@@ -1,13 +1,11 @@
-// See the note in `regression.rs`: the whole file is test code.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 //! End-to-end tunnels authenticated by a temporary credential.
 //!
-//! `regression.rs` already covers the credential lifecycle at the hand-rolled
-//! frame level. These cases run the real `register` and `connect` entry points
-//! instead, so they also exercise connection pooling, the heartbeat window,
-//! control-connection reconnect, the stream-establishment handshake, and
-//! `connect`'s startup status probe — none of which a hand-written frame touches.
+//! The `regression` binary already covers the credential lifecycle at the
+//! hand-rolled frame level. These cases run the real `register` and `connect`
+//! entry points instead, so they also exercise connection pooling, the
+//! heartbeat window, control-connection reconnect, the stream-establishment
+//! handshake, and `connect`'s startup status probe — none of which a
+//! hand-written frame touches.
 //!
 //! Every case builds its own relay through `pb-mapper-testkit`, so they run
 //! concurrently and never collide with a relay already on the machine.
@@ -23,50 +21,46 @@ use pb_mapper_testkit::{
 /// A TTL long enough that nothing expires mid-test.
 const LONG_TTL: Duration = Duration::from_secs(600);
 
-/// Drive traffic through a tunnel a temporary credential registered and subscribed.
-async fn assert_temporary_credential_echoes(transport: Transport, need_codec: bool) {
-    let label = format!(
-        "temp-{}-{}",
-        transport.name(),
-        if need_codec { "codec" } else { "plain" }
-    );
-    let relay = Relay::start(&label).await;
-    let (_key_id, credential) = relay.issue_credential(LONG_TTL, &label).await;
+/// One temporary credential registers and subscribes a tunnel of every
+/// transport and codec, side by side on one relay, and each carries traffic.
+#[tokio::test]
+async fn temporary_credential_tunnels_echo_across_transports_and_codecs() {
+    let relay = Relay::start("temp-matrix").await;
+    let (_key_id, credential) = relay.issue_credential(LONG_TTL, "temp-matrix").await;
 
-    // `namespace: None` resolves to the credential's own namespace, which is its
-    // key ID — so the temporary tunnel needs no explicit namespace anywhere.
-    let tunnel = relay
-        .start_tunnel(
-            TunnelSpec::new(transport)
-                .codec(need_codec)
-                .credential(credential),
-        )
-        .await;
-
-    match transport {
-        Transport::Tcp => run_framed_tcp_echo(tunnel.addr(), 10).await,
-        Transport::Udp => run_udp_datagram_echo(tunnel.addr(), 10, 8, None).await,
+    let mut tunnels = Vec::new();
+    let mut traffic = Vec::new();
+    for transport in [Transport::Tcp, Transport::Udp] {
+        for need_codec in [false, true] {
+            // `namespace: None` resolves to the credential's own namespace, which
+            // is its key ID — so the temporary tunnel needs no explicit namespace
+            // anywhere. Each combination has a service key of its own.
+            let tunnel = relay
+                .start_tunnel(
+                    TunnelSpec::new(transport)
+                        .codec(need_codec)
+                        .credential(credential),
+                )
+                .await;
+            let addr = tunnel.addr();
+            let label = format!("{} tunnel, codec {need_codec}", transport.name());
+            traffic.push((
+                label,
+                tokio::spawn(async move {
+                    match transport {
+                        Transport::Tcp => run_framed_tcp_echo(addr, 10).await,
+                        Transport::Udp => run_udp_datagram_echo(addr, 10, 8, None).await,
+                    }
+                }),
+            ));
+            tunnels.push(tunnel);
+        }
     }
-}
-
-#[tokio::test]
-async fn temporary_credential_tcp_tunnel_echoes_without_codec() {
-    assert_temporary_credential_echoes(Transport::Tcp, false).await;
-}
-
-#[tokio::test]
-async fn temporary_credential_tcp_tunnel_echoes_with_codec() {
-    assert_temporary_credential_echoes(Transport::Tcp, true).await;
-}
-
-#[tokio::test]
-async fn temporary_credential_udp_tunnel_echoes_without_codec() {
-    assert_temporary_credential_echoes(Transport::Udp, false).await;
-}
-
-#[tokio::test]
-async fn temporary_credential_udp_tunnel_echoes_with_codec() {
-    assert_temporary_credential_echoes(Transport::Udp, true).await;
+    for (label, echoed) in traffic {
+        echoed
+            .await
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+    }
 }
 
 /// Two credentials may register the same service name; neither sees the other's.

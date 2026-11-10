@@ -1,42 +1,18 @@
-#![cfg(feature = "p2p")]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+use std::time::Duration;
 
 use pb_mapper_client::sdk::{
     Client, ConnectOptions, ConnectRequest, DirectStage, DirectTransport, FallbackReason,
-    LanTransport, PathPolicy, RegisterOptions, RegisterRequest, Transport, TunnelEventKind,
+    LanTransport, PathPolicy, RegisterOptions, RelayTransport, Transport, TunnelEventKind,
 };
-use pb_mapper_server::DirectServerConfig;
-use pb_mapper_testkit::{READY_TIMEOUT, Relay, admin_credential, reserve_addr};
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use pb_mapper_protocol::direct::{SessionPath, SessionState};
+use pb_mapper_server::RelayServerOptions;
+use pb_mapper_testkit::{
+    READY_TIMEOUT, Relay, admin_client, loopback_direct, loopback_quic, publish, subscribe,
+    tcp_echo, udp_echo,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-};
-use tokio_util::task::AbortOnDropHandle;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
 
-async fn echo() -> (
-    std::net::SocketAddr,
-    Arc<AtomicUsize>,
-    AbortOnDropHandle<()>,
-) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let count = Arc::new(AtomicUsize::new(0));
-    let accepted = count.clone();
-    let task = AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut tasks = tokio::task::JoinSet::new();
-        loop {
-            tokio::select! {
-                result=listener.accept()=>{let (mut socket,_)=result.unwrap(); accepted.fetch_add(1,Ordering::Relaxed); tasks.spawn(async move {let (mut r,mut w)=socket.split();let _=tokio::io::copy(&mut r,&mut w).await;});}
-                Some(_)=tasks.join_next()=>{}
-            }
-        }
-    }));
-    (addr, count, task)
-}
 async fn roundtrip(socket: &mut TcpStream) {
     tokio::time::timeout(READY_TIMEOUT, async {
         let payload = vec![0x37; 32_000];
@@ -49,74 +25,54 @@ async fn roundtrip(socket: &mut TcpStream) {
     .unwrap();
 }
 
+fn allow_direct() -> RegisterOptions {
+    RegisterOptions {
+        allow_direct: true,
+        ..Default::default()
+    }
+}
+
+fn auto_path() -> ConnectOptions {
+    ConnectOptions {
+        path: PathPolicy::Auto,
+        ..Default::default()
+    }
+}
+
 #[tokio::test]
 async fn direct_tcp_survives_server_restart_and_local_stop_closes_it() {
-    direct_survives_coordinator_loss(pb_mapper_client::sdk::RelayTransport::Tcp).await;
+    direct_survives_coordinator_loss(RelayTransport::Tcp).await;
 }
 
 #[cfg(feature = "relay-quic")]
 #[tokio::test]
 async fn direct_sessions_survive_quic_coordinator_loss() {
-    direct_survives_coordinator_loss(pb_mapper_client::sdk::RelayTransport::Quic).await;
+    direct_survives_coordinator_loss(RelayTransport::Quic).await;
 }
 
-async fn direct_survives_coordinator_loss(carrier: pb_mapper_client::sdk::RelayTransport) {
+async fn direct_survives_coordinator_loss(carrier: RelayTransport) {
     let mut relay = Relay::start_with_options(
         "direct-tcp",
-        pb_mapper_server::RelayServerOptions {
-            direct: Some(DirectServerConfig {
-                listen: "127.0.0.1:0".parse().unwrap(),
-                advertise: "127.0.0.1:0".parse().unwrap(),
-            }),
-            quic: (carrier == pb_mapper_client::sdk::RelayTransport::Quic).then(|| {
-                pb_mapper_server::QuicServerConfig {
-                    listen: "127.0.0.1:0".parse().unwrap(),
-                    advertise_port: 0,
-                }
-            }),
+        RelayServerOptions {
+            direct: Some(loopback_direct()),
+            quic: (carrier == RelayTransport::Quic).then(loopback_quic),
         },
     )
     .await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None)
+    let client = admin_client(relay.addr())
         .with_relay_transport(carrier)
         .unwrap();
-    let (backend, count, _echo) = echo().await;
-    let registration = client
-        .register_with_options(
-            RegisterRequest {
-                key: "echo".into(),
-                local_addr: backend.to_string(),
-                transport: Transport::Tcp,
-                codec: true,
-                force_namespace: false,
-            },
-            RegisterOptions {
-                allow_direct: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    registration
-        .wait_ready_timeout(READY_TIMEOUT)
-        .await
-        .unwrap();
-    let addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = client
-        .connect_with_options(
-            ConnectRequest {
-                key: "echo".into(),
-                local_addr: addr.to_string(),
-                transport: Transport::Tcp,
-            },
-            ConnectOptions {
-                path: PathPolicy::Auto,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let backend = tcp_echo(None).await;
+    let registration = publish(
+        &client,
+        "echo",
+        backend.addr(),
+        Transport::Tcp,
+        true,
+        allow_direct(),
+    )
+    .await;
+    let (connection, addr) = subscribe(&client, "echo", Transport::Tcp, auto_path()).await;
     let mut socket = TcpStream::connect(addr).await.unwrap();
     roundtrip(&mut socket).await;
     assert_eq!(connection.diagnostics().direct.unwrap().active_direct, 1);
@@ -129,11 +85,7 @@ async fn direct_survives_coordinator_loss(carrier: pb_mapper_client::sdk::RelayT
             .any(|event| matches!(event.kind, TunnelEventKind::DirectEstablished { .. }))
     );
     assert_eq!(registration.diagnostics().direct.unwrap().active_direct, 1);
-    assert_eq!(
-        count.load(Ordering::Relaxed),
-        1,
-        "exactly one backend connection"
-    );
+    assert_eq!(backend.reached(), 1, "exactly one backend connection");
     // A completed sibling must drain its final response and leave this session alive.
     let mut sibling = TcpStream::connect(addr).await.unwrap();
     let payload = vec![0x63; 256_000];
@@ -148,32 +100,27 @@ async fn direct_survives_coordinator_loss(carrier: pb_mapper_client::sdk::RelayT
     assert!(response == payload);
     relay.stop_server().await;
     roundtrip(&mut socket).await;
-    relay
-        .restart_server(Some(DirectServerConfig {
-            listen: "127.0.0.1:0".parse().unwrap(),
-            advertise: "127.0.0.1:0".parse().unwrap(),
-        }))
-        .await;
+    relay.restart_server(Some(loopback_direct())).await;
     // Existing data survives a fresh coordinator incarnation. Both endpoints
     // replay observations, which do not recreate a grant or a relay attach.
-    let restored = tokio::time::timeout(std::time::Duration::from_secs(25), async {
+    let restored = tokio::time::timeout(Duration::from_secs(25), async {
         loop {
             let sessions_result = client.sessions().await;
             if let Ok(sessions) = sessions_result
                 && let Some(session) = sessions.into_iter().find(|s| {
                     s.restored
                         && !s.stale
-                        && s.consumer.as_ref().is_some_and(|r| {
-                            r.report.state == pb_mapper_protocol::direct::SessionState::Active
-                        })
-                        && s.provider.as_ref().is_some_and(|r| {
-                            r.report.state == pb_mapper_protocol::direct::SessionState::Active
-                        })
+                        && s.consumer
+                            .as_ref()
+                            .is_some_and(|r| r.report.state == SessionState::Active)
+                        && s.provider
+                            .as_ref()
+                            .is_some_and(|r| r.report.state == SessionState::Active)
                 })
             {
                 break session;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
@@ -204,66 +151,32 @@ async fn udp_direct_over_lan_tcp_preserves_datagrams() {
 }
 
 async fn udp_direct(lan_transport: LanTransport) {
-    use std::time::Duration;
-    use tokio::net::UdpSocket;
-    let relay = Relay::start_with_direct(
-        "direct-udp",
-        Some(DirectServerConfig {
-            listen: "127.0.0.1:0".parse().unwrap(),
-            advertise: "127.0.0.1:0".parse().unwrap(),
-        }),
-    )
-    .await;
+    let relay = Relay::start_with_direct("direct-udp", Some(loopback_direct())).await;
     let (id, credential) = relay
         .issue_credential(Duration::from_secs(600), "direct-udp")
         .await;
     let client = Client::from_credential(relay.addr().to_string(), credential, false, None);
-    let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let backend = echo.local_addr().unwrap();
-    let _echo = AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut bytes = vec![0; 65536];
-        loop {
-            let (len, from) = echo.recv_from(&mut bytes).await.unwrap();
-            echo.send_to(&bytes[..len], from).await.unwrap();
-        }
-    }));
-    let registration = client
-        .register_with_options(
-            RegisterRequest {
-                key: "udp".into(),
-                local_addr: backend.to_string(),
-                transport: Transport::Udp,
-                codec: true,
-                force_namespace: false,
-            },
-            RegisterOptions {
-                allow_direct: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    registration
-        .wait_ready_timeout(READY_TIMEOUT)
-        .await
-        .unwrap();
-    let addr = reserve_addr(pb_mapper_testkit::Transport::Udp).await;
-    let connection = client
-        .connect_with_options(
-            ConnectRequest {
-                key: "udp".into(),
-                local_addr: addr.to_string(),
-                transport: Transport::Udp,
-            },
-            ConnectOptions {
-                path: PathPolicy::Auto,
-                lan_transport,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let backend = udp_echo(None).await;
+    let registration = publish(
+        &client,
+        "udp",
+        backend.addr(),
+        Transport::Udp,
+        true,
+        allow_direct(),
+    )
+    .await;
+    let (connection, addr) = subscribe(
+        &client,
+        "udp",
+        Transport::Udp,
+        ConnectOptions {
+            path: PathPolicy::Auto,
+            lan_transport,
+            ..Default::default()
+        },
+    )
+    .await;
     let application = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     application.connect(addr).await.unwrap();
     for size in [1, 1200, 8000] {
@@ -285,13 +198,15 @@ async fn udp_direct(lan_transport: LanTransport) {
         LanTransport::Tcp => DirectTransport::Tcp,
     };
     assert_eq!(direct.link.unwrap().transport, transport);
+    // Each poll is a status request to the relay, so it is paced like the
+    // relay-restart poll above rather than sent back to back.
     let observation = tokio::time::timeout(READY_TIMEOUT, async {
         loop {
             let sessions = client.sessions().await.unwrap();
             if let Some(s) = sessions.into_iter().find(|s| !s.stale) {
                 break s;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
@@ -299,11 +214,10 @@ async fn udp_direct(lan_transport: LanTransport) {
     assert!(!observation.conflicting);
     assert_eq!(
         observation.consumer.unwrap().report.path,
-        pb_mapper_protocol::direct::SessionPath::Direct
+        SessionPath::Direct
     );
     // Other namespaces must not see these authenticated endpoint observations.
-    let outsider =
-        Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let outsider = admin_client(relay.addr());
     assert!(outsider.sessions().await.unwrap().is_empty());
     relay.revoke(id).await;
     // Auto mode preserves an established direct session, but a new tunnel with
@@ -315,10 +229,7 @@ async fn udp_direct(lan_transport: LanTransport) {
                 local_addr: "127.0.0.1:0".into(),
                 transport: Transport::Udp,
             },
-            ConnectOptions {
-                path: PathPolicy::Auto,
-                ..Default::default()
-            },
+            auto_path(),
         )
         .await
         .unwrap();
@@ -346,53 +257,23 @@ async fn udp_direct(lan_transport: LanTransport) {
 async fn either_side_can_keep_connections_on_the_existing_relay_path() {
     // One server without the capability, then a capable server with an opt-out provider.
     for server_direct in [false, true] {
-        let relay = Relay::start_with_direct(
-            "direct-disabled",
-            server_direct.then(|| DirectServerConfig {
-                listen: "127.0.0.1:0".parse().unwrap(),
-                advertise: "127.0.0.1:0".parse().unwrap(),
-            }),
+        let relay =
+            Relay::start_with_direct("direct-disabled", server_direct.then(loopback_direct)).await;
+        let client = admin_client(relay.addr());
+        let backend = tcp_echo(None).await;
+        let registration = publish(
+            &client,
+            "relay",
+            backend.addr(),
+            Transport::Tcp,
+            true,
+            RegisterOptions {
+                allow_direct: !server_direct,
+                ..Default::default()
+            },
         )
         .await;
-        let client =
-            Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-        let (backend, count, _echo) = echo().await;
-        let registration = client
-            .register_with_options(
-                RegisterRequest {
-                    key: "relay".into(),
-                    local_addr: backend.to_string(),
-                    transport: Transport::Tcp,
-                    codec: true,
-                    force_namespace: false,
-                },
-                RegisterOptions {
-                    allow_direct: !server_direct,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        registration
-            .wait_ready_timeout(READY_TIMEOUT)
-            .await
-            .unwrap();
-        let addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-        let connection = client
-            .connect_with_options(
-                ConnectRequest {
-                    key: "relay".into(),
-                    local_addr: addr.to_string(),
-                    transport: Transport::Tcp,
-                },
-                ConnectOptions {
-                    path: PathPolicy::Auto,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+        let (connection, addr) = subscribe(&client, "relay", Transport::Tcp, auto_path()).await;
         let mut socket = TcpStream::connect(addr).await.unwrap();
         roundtrip(&mut socket).await;
         assert_eq!(connection.diagnostics().direct.unwrap().direct_sessions, 0);
@@ -413,7 +294,7 @@ async fn either_side_can_keep_connections_on_the_existing_relay_path() {
         // The share counts the session too, on the relay it came over.
         let shared = registration.diagnostics().direct.unwrap();
         assert_eq!((shared.relay_sessions, shared.direct_sessions), (1, 0));
-        assert_eq!(count.load(Ordering::Relaxed), 1);
+        assert_eq!(backend.reached(), 1);
         connection.stop().await.unwrap();
         registration.stop().await.unwrap();
     }

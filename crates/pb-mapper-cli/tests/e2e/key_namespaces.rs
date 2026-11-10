@@ -1,6 +1,3 @@
-#![cfg(all(feature = "p2p", feature = "relay-quic"))]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 //! Several keys in one allocated namespace, over everything that authenticates:
 //! the TCP and QUIC relay carriers, and direct setup. Driven through the SDK's
 //! administrator API, the way a backend holding the administrator key would.
@@ -9,41 +6,29 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, Connection, Error, IssuedKey, PathPolicy,
-    RegisterOptions, RegisterRequest, Registration, RelayTransport, Transport,
+    Client, ConnectOptions, ConnectRequest, Error, IssuedKey, PathPolicy, RegisterOptions,
+    RegisterRequest, RelayTransport, Transport,
 };
 use pb_mapper_core::checksum::parse_credential;
-use pb_mapper_server::{DirectServerConfig, QuicServerConfig, RelayServerOptions};
-use pb_mapper_testkit::{READY_TIMEOUT, Relay, admin_credential, reserve_addr};
+use pb_mapper_server::RelayServerOptions;
+use pb_mapper_testkit::{
+    READY_TIMEOUT, Relay, admin_client, loopback_direct, loopback_quic, publish, reserve_addr,
+    subscribe, tcp_echo,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio_util::task::AbortOnDropHandle;
+use tokio::net::TcpStream;
 
 const LONG_TTL: Duration = Duration::from_secs(600);
-
-fn loopback() -> SocketAddr {
-    "127.0.0.1:0".parse().unwrap()
-}
 
 async fn relay_with_everything(label: &str) -> Relay {
     Relay::start_with_options(
         label,
         RelayServerOptions {
-            direct: Some(DirectServerConfig {
-                listen: loopback(),
-                advertise: loopback(),
-            }),
-            quic: Some(QuicServerConfig {
-                listen: loopback(),
-                advertise_port: 0,
-            }),
+            direct: Some(loopback_direct()),
+            quic: Some(loopback_quic()),
         },
     )
     .await
-}
-
-fn admin_of(relay: &Relay) -> Client {
-    Client::from_credential(relay.addr().to_string(), admin_credential(), false, None)
 }
 
 fn client_for(relay: &Relay, key: &IssuedKey, carrier: RelayTransport) -> Client {
@@ -57,80 +42,25 @@ fn client_for(relay: &Relay, key: &IssuedKey, carrier: RelayTransport) -> Client
     .unwrap()
 }
 
-/// An echo server that first names itself, so a test can tell whose service it
-/// reached: a leak between namespaces would otherwise echo byte for byte.
-async fn tagged_echo(tag: u8) -> (SocketAddr, AbortOnDropHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let task = AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut tasks = tokio::task::JoinSet::new();
-        loop {
-            tokio::select! {
-                Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
-                accepted = listener.accept() => {
-                    let (mut stream, _) = accepted.unwrap();
-                    tasks.spawn(async move {
-                        stream.write_u8(tag).await.unwrap();
-                        let (mut read, mut write) = stream.split();
-                        let _ = tokio::io::copy(&mut read, &mut write).await;
-                    });
-                }
-            }
-        }
-    }));
-    (addr, task)
+fn register_options(allow_direct: bool) -> RegisterOptions {
+    RegisterOptions {
+        allow_direct,
+        ..Default::default()
+    }
 }
 
-async fn publish(
-    client: &Client,
-    service: &str,
-    backend: SocketAddr,
-    direct: bool,
-) -> Registration {
-    let registration = client
-        .register_with_options(
-            RegisterRequest {
-                key: service.into(),
-                local_addr: backend.to_string(),
-                transport: Transport::Tcp,
-                codec: false,
-                force_namespace: false,
-            },
-            RegisterOptions {
-                allow_direct: direct,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    registration
-        .wait_ready_timeout(READY_TIMEOUT)
-        .await
-        .unwrap();
-    registration
-}
-
-async fn subscribe(client: &Client, service: &str, path: PathPolicy) -> (Connection, SocketAddr) {
-    let local = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = client
-        .connect_with_options(
-            ConnectRequest {
-                key: service.into(),
-                local_addr: local.to_string(),
-                transport: Transport::Tcp,
-            },
-            ConnectOptions {
-                path,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
-    (connection, local)
+fn connect_options(path: PathPolicy) -> ConnectOptions {
+    ConnectOptions {
+        path,
+        ..Default::default()
+    }
 }
 
 /// A session through `addr`, checked to end at the backend tagged `expected`.
+///
+/// The backends name themselves with a tag as they accept, so a test can tell
+/// whose service it reached: a leak between namespaces would otherwise echo
+/// byte for byte.
 async fn session_with(addr: SocketAddr, expected: u8) -> TcpStream {
     let mut socket = TcpStream::connect(addr).await.unwrap();
     let tag = tokio::time::timeout(READY_TIMEOUT, socket.read_u8())
@@ -192,10 +122,7 @@ async fn assert_new_register_and_subscribe_refused(client: &Client, backend: Soc
                 local_addr: "127.0.0.1:0".into(),
                 transport: Transport::Tcp,
             },
-            ConnectOptions {
-                path: PathPolicy::Auto,
-                ..Default::default()
-            },
+            connect_options(PathPolicy::Auto),
         )
         .await
         .unwrap();
@@ -204,8 +131,8 @@ async fn assert_new_register_and_subscribe_refused(client: &Client, backend: Soc
 
 async fn namespace_boundary_over(label: &str, carrier: RelayTransport) {
     let relay = relay_with_everything(label).await;
-    let admin_client = admin_of(&relay);
-    let admin = admin_client.admin().unwrap();
+    let administrator = admin_client(relay.addr());
+    let admin = administrator.admin().unwrap();
     assert!(admin.supports_key_namespaces().await.unwrap());
 
     let namespace = admin.allocate_namespace().await.unwrap();
@@ -237,11 +164,20 @@ async fn namespace_boundary_over(label: &str, carrier: RelayTransport) {
     assert_eq!(legacy_key.namespace, legacy_key.key_id);
     let other = client_for(&relay, &other_key, carrier);
     let legacy = client_for(&relay, &legacy_key, carrier);
+    let relay_only = connect_options(PathPolicy::RelayOnly);
 
     // One key publishes, another subscribes: that is what sharing a namespace is.
-    let (backend, _backend) = tagged_echo(b'A').await;
-    let _registration = publish(&publisher, "shared", backend, false).await;
-    let (_connection, local) = subscribe(&consumer, "shared", PathPolicy::RelayOnly).await;
+    let backend = tcp_echo(Some(b'A')).await;
+    let _registration = publish(
+        &publisher,
+        "shared",
+        backend.addr(),
+        Transport::Tcp,
+        false,
+        register_options(false),
+    )
+    .await;
+    let (_connection, local) = subscribe(&consumer, "shared", Transport::Tcp, relay_only).await;
     let mut session = session_with(local, b'A').await;
     assert_eq!(consumer.list_keys().await.unwrap(), ["shared"]);
     let listed = admin.list_services_all(Some(namespace)).await.unwrap();
@@ -251,25 +187,35 @@ async fn namespace_boundary_over(label: &str, carrier: RelayTransport) {
     // The same name elsewhere is a different service, and neither sees the other.
     assert!(other.list_keys().await.unwrap().is_empty());
     assert!(legacy.list_keys().await.unwrap().is_empty());
-    let (other_backend, _other_backend) = tagged_echo(b'B').await;
-    let _other_registration = publish(&other, "shared", other_backend, false).await;
-    let (_other_connection, other_local) = subscribe(&other, "shared", PathPolicy::RelayOnly).await;
+    let other_backend = tcp_echo(Some(b'B')).await;
+    let _other_registration = publish(
+        &other,
+        "shared",
+        other_backend.addr(),
+        Transport::Tcp,
+        false,
+        register_options(false),
+    )
+    .await;
+    let (_other_connection, other_local) =
+        subscribe(&other, "shared", Transport::Tcp, relay_only).await;
     let _other_session = session_with(other_local, b'B').await;
     assert_eq!(consumer.list_keys().await.unwrap(), ["shared"]);
     roundtrip(&mut session).await;
 
     // Revoking one key refuses it at every new door and costs its peers nothing.
-    let (unused_backend, _unused_backend) = tagged_echo(b'X').await;
+    let unused_backend = tcp_echo(Some(b'X')).await;
     admin.revoke_key(bystander_key.key_id).await.unwrap();
-    assert_new_register_and_subscribe_refused(&bystander, unused_backend).await;
+    assert_new_register_and_subscribe_refused(&bystander, unused_backend.addr()).await;
     roundtrip(&mut session).await;
-    let (_second, second_local) = subscribe(&consumer, "shared", PathPolicy::RelayOnly).await;
+    let (_second, second_local) = subscribe(&consumer, "shared", Transport::Tcp, relay_only).await;
     let _second_session = session_with(second_local, b'A').await;
 
     // A key issued later lands in the same namespace and meets the same services.
     let late_key = issue("late").await;
     let late = client_for(&relay, &late_key, carrier);
-    let (_late_connection, late_local) = subscribe(&late, "shared", PathPolicy::RelayOnly).await;
+    let (_late_connection, late_local) =
+        subscribe(&late, "shared", Transport::Tcp, relay_only).await;
     let _late_session = session_with(late_local, b'A').await;
 }
 
@@ -285,8 +231,8 @@ async fn namespace_boundary_holds_over_quic() {
 
 async fn direct_setup_over(label: &str, carrier: RelayTransport) {
     let relay = relay_with_everything(label).await;
-    let admin_client = admin_of(&relay);
-    let admin = admin_client.admin().unwrap();
+    let administrator = admin_client(relay.addr());
+    let admin = administrator.admin().unwrap();
     let namespace = admin.allocate_namespace().await.unwrap();
     let issue = || {
         let admin = admin.clone();
@@ -303,23 +249,32 @@ async fn direct_setup_over(label: &str, carrier: RelayTransport) {
     let publisher = client_for(&relay, &publisher_key, carrier);
     let consumer = client_for(&relay, &consumer_key, carrier);
     let peer = client_for(&relay, &peer_key, carrier);
+    let auto = connect_options(PathPolicy::Auto);
 
     // A grant names the namespace, which no longer equals either key's id.
-    let (backend, _backend) = tagged_echo(b'A').await;
-    let registration = publish(&publisher, "shared", backend, true).await;
-    let (connection, local) = subscribe(&consumer, "shared", PathPolicy::Auto).await;
+    let backend = tcp_echo(Some(b'A')).await;
+    let registration = publish(
+        &publisher,
+        "shared",
+        backend.addr(),
+        Transport::Tcp,
+        false,
+        register_options(true),
+    )
+    .await;
+    let (connection, local) = subscribe(&consumer, "shared", Transport::Tcp, auto).await;
     let mut session = session_with(local, b'A').await;
     assert_eq!(connection.diagnostics().direct.unwrap().active_direct, 1);
 
     // Revoking the consumer refuses its new setups and leaves the established
     // session to its endpoints, as direct sessions always are.
-    let (unused_backend, _unused_backend) = tagged_echo(b'X').await;
+    let unused_backend = tcp_echo(Some(b'X')).await;
     admin.revoke_key(consumer_key.key_id).await.unwrap();
-    assert_new_register_and_subscribe_refused(&consumer, unused_backend).await;
+    assert_new_register_and_subscribe_refused(&consumer, unused_backend.addr()).await;
     roundtrip(&mut session).await;
 
     // The publisher never noticed: a peer still gets a direct session from it.
-    let (peer_connection, peer_local) = subscribe(&peer, "shared", PathPolicy::Auto).await;
+    let (peer_connection, peer_local) = subscribe(&peer, "shared", Transport::Tcp, auto).await;
     let _peer_session = session_with(peer_local, b'A').await;
     assert_eq!(
         peer_connection.diagnostics().direct.unwrap().active_direct,
@@ -341,6 +296,7 @@ async fn direct_setup_over(label: &str, carrier: RelayTransport) {
     })
     .await
     .expect("the revoked publisher's registration should leave the relay");
+    // Not `subscribe`: what is asserted here is before, and instead of, ready.
     let local = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
     let late = peer
         .connect_with_options(
@@ -349,10 +305,7 @@ async fn direct_setup_over(label: &str, carrier: RelayTransport) {
                 local_addr: local.to_string(),
                 transport: Transport::Tcp,
             },
-            ConnectOptions {
-                path: PathPolicy::Auto,
-                ..Default::default()
-            },
+            auto,
         )
         .await
         .unwrap();
@@ -391,8 +344,8 @@ async fn direct_setup_works_in_a_namespace_and_stops_at_revocation_over_quic() {
 #[tokio::test]
 async fn the_wire_api_refuses_a_namespace_that_was_not_allocated() {
     let relay = Relay::start("namespace-wire").await;
-    let admin_client = admin_of(&relay);
-    let admin = admin_client.admin().unwrap();
+    let administrator = admin_client(relay.addr());
+    let admin = administrator.admin().unwrap();
     let own = admin.issue_key(LONG_TTL, None).await.unwrap();
 
     for refused in [0, own.key_id, 1] {
@@ -401,7 +354,7 @@ async fn the_wire_api_refuses_a_namespace_that_was_not_allocated() {
             .await
             .unwrap_err();
         assert!(
-            format!("{error}").contains("namespace_not_allocated"),
+            matches!(&error, Error::Remote { code, .. } if code == "namespace_not_allocated"),
             "namespace {refused}: {error}"
         );
     }

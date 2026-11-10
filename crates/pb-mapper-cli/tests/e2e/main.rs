@@ -19,7 +19,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod data_compatibility;
+#[cfg(feature = "p2p")]
 mod direct;
+#[cfg(all(feature = "p2p", feature = "relay-quic"))]
 mod key_namespaces;
 mod sdk;
 mod temporary_credential;

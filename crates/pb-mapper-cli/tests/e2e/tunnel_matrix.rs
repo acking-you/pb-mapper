@@ -1,13 +1,10 @@
-// See the note in `regression.rs`: the whole file is test code.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 //! End-to-end tunnel tests over the full `server` + `register` + `connect` path.
 //!
 //! Every case builds its own relay, echo server, and tunnel on reserved loopback
 //! ports, so the four transport/codec combinations run concurrently and none of
 //! them collides with a relay already running on the machine. The scaffolding
 //! lives in `pb-mapper-testkit`, so any other test file can stand up the same
-//! flow — see `temporary_credential_e2e.rs`.
+//! flow — see `temporary_credential.rs`.
 
 use pb_mapper_testkit::{Transport, TunnelHarness, run_framed_tcp_echo, run_udp_datagram_echo};
 

@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 //! End-to-end coverage of the client SDK: tunnels and administrator RPCs.
 
 use std::time::Duration;
@@ -7,13 +5,14 @@ use std::time::Duration;
 use pb_mapper_auth::MIN_TEMP_KEY_TTL;
 use pb_mapper_client::sdk::{
     Admin, Client, ClientConfig, ConnectOptions, ConnectRequest, ConnectionInfo, PathPolicy,
-    RegisterRequest, Transport, TunnelMetrics, TunnelStatus,
+    RegisterOptions, RegisterRequest, Registration, Transport, TunnelMetrics, TunnelStatus,
 };
 use pb_mapper_testkit::{
-    READY_TIMEOUT, Relay, admin_credential, reserve_addr, run_raw_tcp_echo, run_udp_datagram_echo,
+    Echo, READY_TIMEOUT, Relay, admin_client, admin_credential, publish, reserve_addr,
+    run_raw_tcp_echo, run_udp_datagram_echo, subscribe, tcp_echo, udp_echo,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UdpSocket};
+use tokio::net::TcpListener;
 
 const LONG_TTL: Duration = Duration::from_secs(600);
 
@@ -43,75 +42,30 @@ async fn wait_for_control_pool(admin: &Admin, service_name: &str) -> Vec<Connect
     }
 }
 
-async fn spawn_tcp_echo() -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
-            tokio::spawn(async move {
-                let mut buf = vec![0_u8; 4096];
-                loop {
-                    match stream.read(&mut buf).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => {
-                            if stream.write_all(&buf[..n]).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
-            });
-        }
-    });
-    addr
-}
-
-async fn spawn_udp_echo() -> std::net::SocketAddr {
-    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let addr = socket.local_addr().unwrap();
-    tokio::spawn(async move {
-        let mut buf = vec![0_u8; 2048];
-        loop {
-            let Ok((n, peer)) = socket.recv_from(&mut buf).await else {
-                return;
-            };
-            if socket.send_to(&buf[..n], peer).await.is_err() {
-                return;
-            }
-        }
-    });
-    addr
-}
-
+/// An echo backend published as `key` with the SDK's default options, ready.
+///
+/// The [`Echo`] is the backend: hold it for as long as the tunnel should work.
 async fn register_echo(
     client: &Client,
     key: &str,
     transport: Transport,
     codec: bool,
-) -> (pb_mapper_client::sdk::Registration, std::net::SocketAddr) {
-    let echo_addr = match transport {
-        Transport::Tcp => spawn_tcp_echo().await,
-        Transport::Udp => spawn_udp_echo().await,
+) -> (Registration, Echo) {
+    let echo = match transport {
+        Transport::Tcp => tcp_echo(None).await,
+        Transport::Udp => udp_echo(None).await,
     };
-    let registration = client
-        .register(RegisterRequest {
-            key: key.into(),
-            local_addr: echo_addr.to_string(),
-            transport,
-            codec,
-            force_namespace: false,
-        })
-        .await
-        .unwrap();
-    registration
-        .wait_ready_timeout(READY_TIMEOUT)
-        .await
-        .unwrap();
+    let registration = publish(
+        client,
+        key,
+        echo.addr(),
+        transport,
+        codec,
+        RegisterOptions::default(),
+    )
+    .await;
     assert_eq!(registration.status(), TunnelStatus::Connected);
-    (registration, echo_addr)
+    (registration, echo)
 }
 
 #[tokio::test]
@@ -134,11 +88,11 @@ async fn sdk_tcp_tunnel_round_trips() {
         pb_mapper_client::sdk::RelayTransport::Tcp
     );
 
-    let echo_addr = spawn_tcp_echo().await;
+    let echo = tcp_echo(None).await;
     let registration = client
         .register(RegisterRequest {
             key: "echo".into(),
-            local_addr: echo_addr.to_string(),
+            local_addr: echo.addr().to_string(),
             transport: Transport::Tcp,
             codec: false,
             force_namespace: false,
@@ -182,9 +136,8 @@ async fn sdk_tcp_tunnel_round_trips() {
 #[tokio::test]
 async fn sdk_admin_issue_list_revoke() {
     let relay = Relay::start("sdk-admin").await;
-    let admin_client =
-        Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let admin = admin_client.admin().unwrap();
+    let administrator = admin_client(relay.addr());
+    let admin = administrator.admin().unwrap();
 
     let issued = admin
         .issue_key(LONG_TTL.max(MIN_TEMP_KEY_TTL), Some("sdk-admin".into()))
@@ -204,21 +157,16 @@ async fn sdk_admin_issue_list_revoke() {
     .unwrap();
     assert!(temporary.admin().is_err());
 
-    let echo_addr = spawn_tcp_echo().await;
-    let registration = temporary
-        .register(RegisterRequest {
-            key: "echo".into(),
-            local_addr: echo_addr.to_string(),
-            transport: Transport::Tcp,
-            codec: false,
-            force_namespace: false,
-        })
-        .await
-        .unwrap();
-    registration
-        .wait_ready_timeout(READY_TIMEOUT)
-        .await
-        .unwrap();
+    let echo = tcp_echo(None).await;
+    let registration = publish(
+        &temporary,
+        "echo",
+        echo.addr(),
+        Transport::Tcp,
+        false,
+        RegisterOptions::default(),
+    )
+    .await;
 
     admin.revoke_key(issued.key_id).await.unwrap();
 
@@ -241,19 +189,16 @@ async fn sdk_admin_issue_list_revoke() {
 #[tokio::test]
 async fn sdk_tcp_codec_tunnel_round_trips() {
     let relay = Relay::start("sdk-tcp-codec").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (registration, _) = register_echo(&client, "echo-codec", Transport::Tcp, true).await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-codec", Transport::Tcp, true).await;
 
-    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = client
-        .connect(ConnectRequest {
-            key: "echo-codec".into(),
-            local_addr: listen_addr.to_string(),
-            transport: Transport::Tcp,
-        })
-        .await
-        .unwrap();
-    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let (connection, listen_addr) = subscribe(
+        &client,
+        "echo-codec",
+        Transport::Tcp,
+        ConnectOptions::default(),
+    )
+    .await;
     run_raw_tcp_echo(listen_addr, 4, None).await;
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
@@ -265,24 +210,18 @@ async fn sdk_tcp_codec_tunnel_round_trips() {
 #[tokio::test]
 async fn sdk_relay_sessions_count_with_their_bytes_on_both_ends() {
     let relay = Relay::start("sdk-relay-metrics").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (registration, _) = register_echo(&client, "metered", Transport::Tcp, false).await;
-    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = client
-        .connect_with_options(
-            ConnectRequest {
-                key: "metered".into(),
-                local_addr: listen_addr.to_string(),
-                transport: Transport::Tcp,
-            },
-            ConnectOptions {
-                path: PathPolicy::RelayOnly,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "metered", Transport::Tcp, false).await;
+    let (connection, listen_addr) = subscribe(
+        &client,
+        "metered",
+        Transport::Tcp,
+        ConnectOptions {
+            path: PathPolicy::RelayOnly,
+            ..Default::default()
+        },
+    )
+    .await;
     // An hour apart: only a change makes it sample.
     let mut followed = registration.subscribe_metrics(Duration::from_secs(3600));
     assert_eq!(followed.recv().await.unwrap().sessions.relay, 0);
@@ -328,19 +267,16 @@ async fn sdk_relay_sessions_count_with_their_bytes_on_both_ends() {
 #[tokio::test]
 async fn sdk_udp_tunnel_round_trips() {
     let relay = Relay::start("sdk-udp-tunnel").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (registration, _) = register_echo(&client, "echo-udp", Transport::Udp, false).await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-udp", Transport::Udp, false).await;
 
-    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Udp).await;
-    let connection = client
-        .connect(ConnectRequest {
-            key: "echo-udp".into(),
-            local_addr: listen_addr.to_string(),
-            transport: Transport::Udp,
-        })
-        .await
-        .unwrap();
-    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let (connection, listen_addr) = subscribe(
+        &client,
+        "echo-udp",
+        Transport::Udp,
+        ConnectOptions::default(),
+    )
+    .await;
     run_udp_datagram_echo(listen_addr, 4, 4, None).await;
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
@@ -349,8 +285,8 @@ async fn sdk_udp_tunnel_round_trips() {
 #[tokio::test]
 async fn sdk_status_and_admin_inventory() {
     let relay = Relay::start("sdk-inventory").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (registration, _) = register_echo(&client, "echo-inv", Transport::Tcp, false).await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-inv", Transport::Tcp, false).await;
 
     let keys = client.list_keys().await.unwrap();
     assert!(keys.iter().any(|key| key == "echo-inv"));
@@ -383,19 +319,16 @@ async fn sdk_status_and_admin_inventory() {
 #[tokio::test]
 async fn sdk_connect_stop_releases_local_port() {
     let relay = Relay::start("sdk-stop").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (registration, _) = register_echo(&client, "echo-stop", Transport::Tcp, false).await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-stop", Transport::Tcp, false).await;
 
-    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = client
-        .connect(ConnectRequest {
-            key: "echo-stop".into(),
-            local_addr: listen_addr.to_string(),
-            transport: Transport::Tcp,
-        })
-        .await
-        .unwrap();
-    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let (connection, listen_addr) = subscribe(
+        &client,
+        "echo-stop",
+        Transport::Tcp,
+        ConnectOptions::default(),
+    )
+    .await;
     connection.stop().await.unwrap();
 
     let mut last_error = None;
@@ -424,7 +357,7 @@ async fn sdk_connect_stop_releases_local_port() {
 #[tokio::test]
 async fn sdk_admin_show_reveal_renew() {
     let relay = Relay::start("sdk-admin-lifecycle").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let client = admin_client(relay.addr());
     let admin = client.admin().unwrap();
 
     let issued = admin
@@ -454,8 +387,8 @@ async fn sdk_admin_show_reveal_renew() {
 #[tokio::test]
 async fn sdk_connect_is_not_ready_while_local_port_is_occupied() {
     let relay = Relay::start("sdk-occupied-port").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (registration, _) = register_echo(&client, "echo-busy", Transport::Tcp, false).await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-busy", Transport::Tcp, false).await;
 
     // Held for the whole case, so the SDK's bind can never succeed.
     let squatter = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -494,19 +427,16 @@ async fn sdk_connect_is_not_ready_while_local_port_is_occupied() {
 #[tokio::test]
 async fn sdk_stop_closes_established_forwarded_stream() {
     let relay = Relay::start("sdk-stop-stream").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (registration, _) = register_echo(&client, "echo-live", Transport::Tcp, false).await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-live", Transport::Tcp, false).await;
 
-    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = client
-        .connect(ConnectRequest {
-            key: "echo-live".into(),
-            local_addr: listen_addr.to_string(),
-            transport: Transport::Tcp,
-        })
-        .await
-        .unwrap();
-    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let (connection, listen_addr) = subscribe(
+        &client,
+        "echo-live",
+        Transport::Tcp,
+        ConnectOptions::default(),
+    )
+    .await;
 
     // An established session: the round trip proves the whole path is forwarding.
     let mut stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
@@ -537,17 +467,17 @@ async fn sdk_stop_closes_established_forwarded_stream() {
 #[tokio::test]
 async fn sdk_register_reports_permanent_rejection_as_failed() {
     let relay = Relay::start("sdk-reject").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let client = admin_client(relay.addr());
 
     // Holds the name as TCP, so the UDP registration below is a transport
     // mismatch — one of the relay's non-retryable rejections.
-    let (registration, _) = register_echo(&client, "echo-clash", Transport::Tcp, false).await;
+    let (registration, _echo) = register_echo(&client, "echo-clash", Transport::Tcp, false).await;
 
-    let udp_echo = spawn_udp_echo().await;
+    let udp_backend = udp_echo(None).await;
     let clashing = client
         .register(RegisterRequest {
             key: "echo-clash".into(),
-            local_addr: udp_echo.to_string(),
+            local_addr: udp_backend.addr().to_string(),
             transport: Transport::Udp,
             codec: false,
             force_namespace: false,
@@ -627,8 +557,8 @@ async fn sdk_connect_reports_permanent_rejection_as_failed() {
 #[tokio::test]
 async fn sdk_admin_retires_registered_connections() {
     let relay = Relay::start("sdk-retire").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (registration, _) = register_echo(&client, "echo-retire", Transport::Tcp, false).await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-retire", Transport::Tcp, false).await;
     let admin = client.admin().unwrap();
 
     let before = wait_for_control_pool(&admin, "echo-retire").await;
@@ -683,16 +613,13 @@ async fn sdk_admin_retires_registered_connections() {
     );
 
     // And the tunnel still carries traffic, which no connection count can show.
-    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = client
-        .connect(ConnectRequest {
-            key: "echo-retire".into(),
-            local_addr: listen_addr.to_string(),
-            transport: Transport::Tcp,
-        })
-        .await
-        .unwrap();
-    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let (connection, listen_addr) = subscribe(
+        &client,
+        "echo-retire",
+        Transport::Tcp,
+        ConnectOptions::default(),
+    )
+    .await;
     run_raw_tcp_echo(listen_addr, 2, None).await;
 
     connection.stop().await.unwrap();
@@ -703,8 +630,9 @@ async fn sdk_admin_retires_registered_connections() {
 #[tokio::test]
 async fn sdk_admin_retires_a_single_connection_by_id() {
     let relay = Relay::start("sdk-retire-one").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (registration, _) = register_echo(&client, "echo-retire-one", Transport::Tcp, false).await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) =
+        register_echo(&client, "echo-retire-one", Transport::Tcp, false).await;
     let admin = client.admin().unwrap();
 
     let mut ours: Vec<u32> = wait_for_control_pool(&admin, "echo-retire-one")
@@ -742,7 +670,7 @@ async fn sdk_admin_retires_a_single_connection_by_id() {
 #[tokio::test]
 async fn publisher_idle_policy_reclaims_abandoned_encrypted_probes() {
     let relay = Relay::start("sdk-idle-policy").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let client = admin_client(relay.addr());
     assert!(
         client
             .register_with_idle_timeout(
@@ -773,12 +701,12 @@ async fn publisher_idle_policy_reclaims_abandoned_encrypted_probes() {
             .await
             .is_err()
     );
-    let echo = spawn_tcp_echo().await;
+    let echo = tcp_echo(None).await;
     let registration = client
         .register_with_idle_timeout(
             RegisterRequest {
                 key: "bounded".into(),
-                local_addr: echo.to_string(),
+                local_addr: echo.addr().to_string(),
                 transport: Transport::Tcp,
                 codec: true,
                 force_namespace: false,
@@ -791,12 +719,13 @@ async fn publisher_idle_policy_reclaims_abandoned_encrypted_probes() {
         .wait_ready_timeout(READY_TIMEOUT)
         .await
         .unwrap();
-    let (unbounded, _) = register_echo(&client, "default", Transport::Tcp, true).await;
+    let (unbounded, _unbounded_echo) =
+        register_echo(&client, "default", Transport::Tcp, true).await;
     let disabled = client
         .register_with_idle_timeout(
             RegisterRequest {
                 key: "disabled".into(),
-                local_addr: echo.to_string(),
+                local_addr: echo.addr().to_string(),
                 transport: Transport::Tcp,
                 codec: true,
                 force_namespace: false,

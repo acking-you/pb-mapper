@@ -1,5 +1,4 @@
 //! Mixed data formats on a real relay; old peers omit capability fields.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use pb_mapper_core::checksum::Credential;
 use pb_mapper_protocol::command::{LocalServer, MessageSerializer, PbConnRequest, PbConnResponse};
@@ -153,10 +152,7 @@ async fn read_selection(
 async fn legacy_authentication_cannot_opt_a_publisher_into_direct_grants() {
     let relay = Relay::start_with_direct(
         "legacy-direct-rejected",
-        Some(pb_mapper_server::DirectServerConfig {
-            listen: "127.0.0.1:0".parse().unwrap(),
-            advertise: "127.0.0.1:0".parse().unwrap(),
-        }),
+        Some(pb_mapper_testkit::loopback_direct()),
     )
     .await;
     let mut socket = TcpStream::connect(relay.addr()).await.unwrap();
