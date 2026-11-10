@@ -1,6 +1,7 @@
 //! Logging system for FFI interface.
 
 use std::ffi::{CString, c_char, c_int};
+use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::callback::CallbackSlot;
@@ -60,6 +61,10 @@ where
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        // Nothing listens: nothing to format.
+        if !LOG_CALLBACK.is_set() {
+            return;
+        }
         let level = match *event.metadata().level() {
             tracing::Level::TRACE => 0,
             tracing::Level::DEBUG => 1,
@@ -88,20 +93,20 @@ impl tracing::field::Visit for MessageVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
             self.message = Some(format!("{value:?}"));
-        } else if self.message.is_none() {
+        } else if let Some(message) = &mut self.message {
+            let _ = write!(message, ", {}: {value:?}", field.name());
+        } else {
             self.message = Some(format!("{}: {value:?}", field.name()));
-        } else if let Some(msg) = self.message.take() {
-            self.message = Some(format!("{msg}, {}: {value:?}", field.name()));
         }
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if field.name() == "message" {
             self.message = Some(value.to_string());
-        } else if self.message.is_none() {
+        } else if let Some(message) = &mut self.message {
+            let _ = write!(message, ", {}: {value}", field.name());
+        } else {
             self.message = Some(format!("{}: {value}", field.name()));
-        } else if let Some(msg) = self.message.take() {
-            self.message = Some(format!("{msg}, {}: {value}", field.name()));
         }
     }
 }

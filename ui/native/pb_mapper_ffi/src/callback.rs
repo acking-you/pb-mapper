@@ -23,6 +23,12 @@ impl<F: Copy> CallbackSlot<F> {
         *self.0.write() = callback;
     }
 
+    /// Whether a callback is installed, for a caller that can skip work when
+    /// none is.
+    pub(crate) fn is_set(&self) -> bool {
+        self.0.read().is_some()
+    }
+
     /// Runs `invoke` with the installed callback, holding the slot until it
     /// returns; `None` if nothing is listening.
     pub(crate) fn with<R>(&self, invoke: impl FnOnce(F) -> R) -> Option<R> {
