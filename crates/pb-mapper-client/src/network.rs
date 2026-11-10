@@ -10,12 +10,14 @@ use tokio_util::task::AbortOnDropHandle;
 pub(crate) struct NetworkHints {
     changes: watch::Sender<u64>,
     task: Mutex<Option<AbortOnDropHandle<()>>>,
+    /// When [`Self::notify`] last raised a hint. On the process clock, not
+    /// tokio's: the shared hints serve every runtime in the process, and a
+    /// tokio clock belongs to one.
     last_manual_hint: Mutex<Option<std::time::Instant>>,
 }
 
 impl NetworkHints {
-    #[cfg(test)]
-    pub(crate) fn isolated() -> Arc<Self> {
+    fn new() -> Arc<Self> {
         let (changes, _) = watch::channel(0);
         Arc::new(Self {
             changes,
@@ -23,18 +25,19 @@ impl NetworkHints {
             last_manual_hint: Mutex::new(None),
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn isolated() -> Arc<Self> {
+        Self::new()
+    }
+
     pub(crate) fn shared() -> Arc<Self> {
         static SHARED: Mutex<Weak<NetworkHints>> = Mutex::new(Weak::new());
         let mut slot = SHARED.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(shared) = slot.upgrade() {
             return shared;
         }
-        let (changes, _) = watch::channel(0);
-        let shared = Arc::new(Self {
-            changes,
-            task: Mutex::new(None),
-            last_manual_hint: Mutex::new(None),
-        });
+        let shared = Self::new();
         *slot = Arc::downgrade(&shared);
         shared
     }
