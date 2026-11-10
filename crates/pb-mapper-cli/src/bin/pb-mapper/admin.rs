@@ -10,7 +10,23 @@
 //! while NDJSON deliberately streams one item at a time. Root-key rotation stages
 //! a recovery copy before contacting the relay, then verifies the new credential.
 
-use super::*;
+use std::error::Error;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use clap::{Args, Subcommand, ValueEnum};
+use pb_mapper_auth::{
+    KeyPage, discard_staged_admin_key, generate_admin_key, stage_admin_key_candidate,
+    write_admin_key_file,
+};
+use pb_mapper_core::checksum::set_process_msg_header_key;
+use pb_mapper_core::config::pb_mapper_server_addr;
+use pb_mapper_protocol::command::{
+    AdminConnectionPage, AdminRequest, AdminResponse, AdminServicePage,
+};
+
+use crate::parse_duration;
+use crate::server::LegacyProtocolArg;
 
 #[derive(Debug, Args)]
 pub(super) struct AdminArgs {
