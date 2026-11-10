@@ -115,7 +115,7 @@ impl Client {
             .inner
             .endpoint
             .with_transport(transport)
-            .map_err(|error| Error::invalid_config(error.to_string()))?;
+            .ok_or_else(|| Error::invalid_config("SDK built without relay-quic"))?;
         Ok(Self {
             inner: Arc::new(ClientInner {
                 server: self.inner.server.clone(),

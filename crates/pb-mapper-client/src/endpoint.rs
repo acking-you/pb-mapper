@@ -388,19 +388,17 @@ impl RelayEndpoint {
         }
         RelayTransport::Tcp
     }
-    /// The process's endpoint for this relay over `transport`. Only for an
-    /// endpoint from [`Self::shared`], whose name is what it is shared under.
-    pub(crate) fn with_transport(&self, transport: RelayTransport) -> std::io::Result<Self> {
+    /// The process's endpoint for this relay over `transport`, or `None`
+    /// when this build has no QUIC to carry it. Only for an endpoint from
+    /// [`Self::shared`], whose name is what it is shared under.
+    pub(crate) fn with_transport(&self, transport: RelayTransport) -> Option<Self> {
         if transport == self.transport() {
-            return Ok(self.clone());
+            return Some(self.clone());
         }
         if cfg!(not(feature = "relay-quic")) && transport == RelayTransport::Quic {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "SDK built without relay-quic",
-            ));
+            return None;
         }
-        Ok(Self::registered(&self.0.name, transport))
+        Some(Self::registered(&self.0.name, transport))
     }
     /// The UDP port the relay offers QUIC on, asked over TCP whatever this
     /// endpoint's carrier.
