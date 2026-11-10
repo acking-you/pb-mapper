@@ -22,7 +22,8 @@ use pb_mapper_auth::{
 use pb_mapper_core::checksum::set_process_msg_header_key;
 use pb_mapper_core::config::pb_mapper_server_addr;
 use pb_mapper_protocol::command::{
-    AdminConnectionPage, AdminRequest, AdminResponse, AdminServicePage,
+    ACTION_ADMINISTRATOR_KEY_ROTATED, AdminConnectionPage, AdminRequest, AdminResponse,
+    AdminServicePage,
 };
 
 use crate::parse_duration;
@@ -366,7 +367,7 @@ async fn rotate_root_key(
     let client = admin_client(remote_addr)?;
     let response = match client.admin()?.rotate_root_key(Some(new_key.clone())).await {
         Ok(_) => AdminResponse::Ok {
-            action: "administrator_key_rotated".to_string(),
+            action: ACTION_ADMINISTRATOR_KEY_ROTATED.to_string(),
         },
         Err(error) => {
             return Err(std::io::Error::other(format!(
