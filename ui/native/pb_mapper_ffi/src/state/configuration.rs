@@ -369,4 +369,15 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"second");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     }
+
+    /// A save that cannot replace the file fails and leaves nothing beside it.
+    #[test]
+    fn a_failed_save_leaves_no_temporary() {
+        let root = TempRoot::new("replace-fails");
+        let path = root.path().join("services.json");
+        fs::create_dir_all(path.join("kept")).unwrap();
+        replace_contents(&path, b"new").unwrap_err();
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        assert!(path.join("kept").is_dir());
+    }
 }

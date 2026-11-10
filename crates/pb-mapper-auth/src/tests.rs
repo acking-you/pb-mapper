@@ -88,6 +88,42 @@ fn snapshot_for_test(
     }
 }
 
+/// The state and key files: replaced whole in a directory created for them,
+/// owner-only on unix; a replace that fails reports against the target and
+/// leaves nothing beside it.
+#[test]
+fn atomic_write_replaces_whole_and_a_failed_one_leaves_no_temporary() {
+    let state_dir = TempPath::new("atomic-write");
+    let path = state_dir.join("admin.key");
+    atomic_write(&path, b"first", 0o600).unwrap();
+    atomic_write(&path, b"second", 0o600).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"second");
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let occupied = state_dir.join("occupied");
+    std::fs::create_dir_all(occupied.join("kept")).unwrap();
+    let failure = atomic_write(&occupied, b"new", 0o600).unwrap_err();
+    assert_eq!(failure.code, codes::AUTH_STATE_UNAVAILABLE);
+    assert!(!failure.retryable);
+    assert!(
+        failure
+            .message
+            .starts_with(&format!("failed to replace `{}`: ", occupied.display())),
+        "{}",
+        failure.message
+    );
+    let mut entries = std::fs::read_dir(&state_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    entries.sort();
+    assert_eq!(entries, ["admin.key", "occupied"]);
+}
+
 #[test]
 fn initialize_admin_key_refuses_to_replace_a_key_when_encrypted_state_exists() {
     let state_dir = TempPath::new("force-init-state");

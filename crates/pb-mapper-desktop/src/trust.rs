@@ -408,4 +408,14 @@ mod tests {
         file.revoke().unwrap();
         std::fs::remove_dir(directory).unwrap();
     }
+
+    /// A write that cannot replace its file fails and leaves nothing beside it.
+    #[test]
+    fn a_failed_durable_write_leaves_no_temporary() {
+        let directory = pb_mapper_core::test_support::TempPath::new("trust-fails");
+        let path = directory.join(FILE);
+        std::fs::create_dir_all(path.join("kept")).unwrap();
+        assert!(write_durably(&path, b"new").is_err());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+    }
 }
