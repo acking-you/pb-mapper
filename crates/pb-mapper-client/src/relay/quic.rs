@@ -140,34 +140,34 @@ struct FailedDial {
     at: Instant,
     credential: Credential,
     generation: u64,
-    rejected: Option<PbErrorResponse>,
-    transport: (io::ErrorKind, String),
+    failure: DialFailure,
 }
 
-impl FailedDial {
-    fn new(error: &ConnectError, credential: Credential, generation: u64) -> Self {
-        let (rejected, transport) = match error {
-            ConnectError::Rejected { response } => (
-                Some(response.clone()),
-                (io::ErrorKind::PermissionDenied, String::new()),
-            ),
-            ConnectError::Transport { source } => (None, (source.kind(), source.to_string())),
-        };
-        Self {
-            at: Instant::now(),
-            credential,
-            generation,
-            rejected,
-            transport,
+/// How a dial failed: the relay's refusal, or the transport error itself,
+/// shared so that every caller's error keeps its sources.
+enum DialFailure {
+    Rejected(PbErrorResponse),
+    Transport(Arc<io::Error>),
+}
+
+impl From<ConnectError> for DialFailure {
+    fn from(error: ConnectError) -> Self {
+        match error {
+            ConnectError::Rejected { response } => Self::Rejected(response),
+            ConnectError::Transport { source } => Self::Transport(Arc::new(source)),
         }
     }
+}
 
+impl DialFailure {
+    /// The error a caller of the failed dial gets, the dial's own one
+    /// included: its kind, text and sources are the dial's.
     fn error(&self) -> ConnectError {
-        match &self.rejected {
-            Some(response) => ConnectError::Rejected {
+        match self {
+            Self::Rejected(response) => ConnectError::Rejected {
                 response: response.clone(),
             },
-            None => io::Error::new(self.transport.0, self.transport.1.clone()).into(),
+            Self::Transport(source) => io::Error::new(source.kind(), Arc::clone(source)).into(),
         }
     }
 }
@@ -265,7 +265,7 @@ impl Pool {
                                 && failed.credential == credential
                                 && failed.generation == generation
                         })
-                        .map(FailedDial::error);
+                        .map(|failed| failed.failure.error());
                     if let Some(error) = failed {
                         return Err(error);
                     }
@@ -321,7 +321,14 @@ impl Pool {
                     error => error,
                 };
                 state.error = Some(error.to_string());
-                state.failed = Some(FailedDial::new(&error, credential, generation));
+                let failure = DialFailure::from(error);
+                let error = failure.error();
+                state.failed = Some(FailedDial {
+                    at: Instant::now(),
+                    credential,
+                    generation,
+                    failure,
+                });
                 return Err(error);
             }
         };
