@@ -188,9 +188,10 @@ const RESERVED_PORTS_PER_PROCESS: u16 = 64;
 ///
 /// TCP and UDP have separate port spaces, so this has to use the same protocol the
 /// caller will bind. A relay and an echo server keep the socket they bound; this is
-/// for `connect`, whose bind happens inside the client and cannot be handed a
-/// pre-bound socket. A test that can own its socket outright should do that instead
-/// of calling this.
+/// for `connect`, whose bind happens inside the client — which binds the address
+/// again after a local listener failure — so it cannot be handed a pre-bound
+/// socket. A test that can own its socket outright should do that instead of
+/// calling this.
 ///
 /// The socket still has to be dropped before the client binds, so the port is not
 /// held for the caller — what this guarantees is that nothing else is going to pick
