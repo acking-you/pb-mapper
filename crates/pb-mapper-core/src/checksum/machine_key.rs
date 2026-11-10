@@ -130,9 +130,13 @@ fn get_machine_mac_addresses_from_ip_link() -> io::Result<Vec<String>> {
     if !output.status.success() {
         return Err(io::Error::other("`ip link` returned non-zero status"));
     }
+    Ok(macs_from_ip_link(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn macs_from_ip_link(stdout: &str) -> Vec<String> {
     let mut mac_addresses = Vec::new();
     let mut current_interface: Option<String> = None;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in stdout.lines() {
         if !line.starts_with(' ') {
             current_interface = parse_interface_name_from_ip_link(line);
             continue;
@@ -153,7 +157,7 @@ fn get_machine_mac_addresses_from_ip_link() -> io::Result<Vec<String>> {
         mac_addresses.push(format!("{interface}:{mac}"));
     }
     normalize_and_validate_mac_entries(&mut mac_addresses);
-    Ok(mac_addresses)
+    mac_addresses
 }
 
 fn get_machine_mac_addresses_from_ifconfig() -> io::Result<Vec<String>> {
@@ -161,9 +165,13 @@ fn get_machine_mac_addresses_from_ifconfig() -> io::Result<Vec<String>> {
     if !output.status.success() {
         return Err(io::Error::other("`ifconfig` returned non-zero status"));
     }
+    Ok(macs_from_ifconfig(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn macs_from_ifconfig(stdout: &str) -> Vec<String> {
     let mut mac_addresses = Vec::new();
     let mut current_interface: Option<String> = None;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in stdout.lines() {
         if !line.starts_with('\t') && !line.starts_with(' ') {
             current_interface = parse_interface_name_from_ifconfig(line);
             continue;
@@ -184,7 +192,7 @@ fn get_machine_mac_addresses_from_ifconfig() -> io::Result<Vec<String>> {
         mac_addresses.push(format!("{interface}:{mac}"));
     }
     normalize_and_validate_mac_entries(&mut mac_addresses);
-    Ok(mac_addresses)
+    mac_addresses
 }
 
 fn normalize_and_validate_mac_entries(mac_addresses: &mut Vec<String>) {
@@ -308,6 +316,74 @@ mod tests {
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 32);
         assert!(key1.chars().all(|ch| ch.is_ascii_alphanumeric()));
+    }
+
+    /// Discovery feeds the derivation, so what each listing yields is the key:
+    /// loopback, link-less and zero addresses are skipped, a `@peer` suffix is
+    /// dropped, and entries come back lower-case, sorted and deduplicated.
+    #[test]
+    fn ip_link_listing_yields_each_ethernet_interface_once() {
+        use super::*;
+        let listing = "\
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000
+    link/ether 52:54:00:12:34:56 brd ff:ff:ff:ff:ff:ff
+    altname enp0s3
+3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN mode DEFAULT group default
+    link/ether 02:42:AC:11:00:02 brd ff:ff:ff:ff:ff:ff
+4: veth1a2b@if5: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master docker0 state UP mode DEFAULT group default
+    link/ether 9a:3f:01:02:03:04 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+5: wg0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+    link/none
+6: dummy0: <BROADCAST,NOARP> mtu 1500 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+    link/ether 00:00:00:00:00:00 brd ff:ff:ff:ff:ff:ff
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000
+    link/ether 52:54:00:12:34:56 brd ff:ff:ff:ff:ff:ff
+";
+        assert_eq!(
+            macs_from_ip_link(listing),
+            [
+                "docker0:02:42:ac:11:00:02",
+                "eth0:52:54:00:12:34:56",
+                "veth1a2b:9a:3f:01:02:03:04",
+            ]
+        );
+    }
+
+    /// Both `ifconfig` dialects: BSD/macOS (tab-indented) and Linux net-tools
+    /// (space-indented, blank line between interfaces).
+    #[test]
+    fn ifconfig_listing_yields_each_ethernet_interface_once() {
+        use super::*;
+        let listing = "\
+lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+\toptions=1203<RXCSUM,TXCSUM,TXSTATUS,SW_TIMESTAMP>
+\tinet 127.0.0.1 netmask 0xff000000
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\toptions=6463<RXCSUM,TXCSUM,TSO4,TSO6,CHANNEL_IO,PARTIAL_CSUM,ZEROINVERT_CSUM>
+\tether a4:83:e7:12:34:56
+\tinet 192.168.1.20 netmask 0xffffff00 broadcast 192.168.1.255
+bridge0: flags=8822<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500
+\tether 36:1C:2B:00:00:01
+utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
+\tinet6 fe80::1%utun0 prefixlen 64 scopeid 0xc
+eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet 10.0.0.5  netmask 255.255.255.0  broadcast 10.0.0.255
+        ether 52:54:00:ab:cd:ef  txqueuelen 1000  (Ethernet)
+
+lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536
+        inet 127.0.0.1  netmask 255.0.0.0
+        ether 52:54:00:ff:ff:ff  txqueuelen 1000  (Local Loopback)
+";
+        assert_eq!(
+            macs_from_ifconfig(listing),
+            [
+                "bridge0:36:1c:2b:00:00:01",
+                "en0:a4:83:e7:12:34:56",
+                "eth0:52:54:00:ab:cd:ef",
+            ]
+        );
     }
 
     /// The key file is the key and a newline (the relay's legacy migration
