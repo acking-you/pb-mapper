@@ -23,16 +23,10 @@ pub(crate) enum CarrierId {}
 /// registration, subscription or administrator request has been sent.
 #[derive(Debug, snafu::Snafu)]
 pub(crate) enum ConnectError {
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Transport { source: std::io::Error },
     #[snafu(display("{}: {}", response.code, response.message))]
     Rejected { response: PbErrorResponse },
-}
-
-impl From<std::io::Error> for ConnectError {
-    fn from(source: std::io::Error) -> Self {
-        Self::Transport { source }
-    }
 }
 
 impl From<ConnectError> for std::io::Error {
