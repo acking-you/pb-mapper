@@ -742,14 +742,9 @@ mod tests {
         let quic = |request| run_over(&relay, RelayTransport::Quic, TEST_ADMIN_KEY, request);
         // What the window's own client does: holds the process's pool for
         // this relay while each call makes and drops a client of its own.
-        let _held = Client::from_credential(
-            relay.addr().to_string(),
-            parse_credential(TEST_ADMIN_KEY).unwrap(),
-            false,
-            None,
-        )
-        .with_relay_transport(RelayTransport::Quic)
-        .unwrap();
+        let _held = pb_mapper_testkit::admin_client(relay.addr())
+            .with_relay_transport(RelayTransport::Quic)
+            .unwrap();
 
         quic(json!({ "op": "auth_status" })).await.unwrap();
         quic(json!({ "op": "keys" })).await.unwrap();

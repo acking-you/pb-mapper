@@ -260,9 +260,7 @@ fn to_value(next: Next) -> Result<Value, CtlError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pb_mapper_client::sdk::{
-        Client, ClientConfig, RegisterOptions, RegisterRequest, Transport,
-    };
+    use pb_mapper_client::sdk::{RegisterOptions, Transport};
     use std::{future::Future, task::Poll};
 
     use crate::test_support::{TempRoot, test_handle};
@@ -277,34 +275,20 @@ mod tests {
         let handle = test_handle(root.path());
         handle.runtime.block_on(async {
             let relay = pb_mapper_testkit::Relay::start("ffi-tunnel-events").await;
-            let client = Client::new(ClientConfig {
-                server: relay.addr().to_string(),
-                credential: pb_mapper_testkit::TEST_ADMIN_KEY.into(),
-                keep_alive: false,
-                namespace: None,
-            })
-            .unwrap();
+            let client = pb_mapper_testkit::admin_client(relay.addr());
             let backend = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let registration = client
-                .register_with_options(
-                    RegisterRequest {
-                        key: "idle".into(),
-                        local_addr: backend.local_addr().unwrap().to_string(),
-                        transport: Transport::Tcp,
-                        codec: false,
-                        force_namespace: false,
-                    },
-                    RegisterOptions {
-                        allow_direct: false,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            registration
-                .wait_ready_timeout(Duration::from_secs(5))
-                .await
-                .unwrap();
+            let registration = pb_mapper_testkit::publish(
+                &client,
+                "idle",
+                backend.local_addr().unwrap(),
+                Transport::Tcp,
+                false,
+                RegisterOptions {
+                    allow_direct: false,
+                    ..Default::default()
+                },
+            )
+            .await;
             let tunnel = Arc::new(TunnelHandle::Share(registration));
             let reader = |metrics: Option<u64>| {
                 Arc::new(Reader {

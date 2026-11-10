@@ -8,7 +8,7 @@ use pb_mapper_client::sdk::{
 use pb_mapper_core::checksum::{parse_credential, set_process_msg_header_key};
 use pb_mapper_core::config::ResolvedAddrs;
 use pb_mapper_core::test_support::{PROCESS_CREDENTIAL_TEST_LOCK, TEST_ADMIN_KEY};
-use pb_mapper_server::{DirectServerConfig, QuicServerConfig};
+use pb_mapper_server::QuicServerConfig;
 use tokio::sync::Mutex;
 
 use super::tunnel::{PinnedTunnel, TunnelHandle, TunnelRuntime};
@@ -268,24 +268,13 @@ async fn the_list_says_which_path_each_tunnel_takes() {
     let (_process_credential_guard, state, _root) = temp_state("paths").await;
     let relay = pb_mapper_testkit::Relay::start_with_direct(
         "ffi-paths",
-        Some(DirectServerConfig {
-            listen: "127.0.0.1:0".parse().unwrap(),
-            advertise: "127.0.0.1:0".parse().unwrap(),
-        }),
+        Some(pb_mapper_testkit::loopback_direct()),
     )
     .await;
     set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
     state.lock().await.config.server_address = relay.addr().to_string();
-    let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let backend = echo.local_addr().unwrap().to_string();
-    tokio::spawn(async move {
-        while let Ok((mut socket, _)) = echo.accept().await {
-            tokio::spawn(async move {
-                let (mut read, mut write) = socket.split();
-                let _ = tokio::io::copy(&mut read, &mut write).await;
-            });
-        }
-    });
+    let echo = pb_mapper_testkit::tcp_echo(None).await;
+    let backend = echo.addr().to_string();
 
     let mut ports = Vec::new();
     for (key, direct) in [("direct", true), ("relayed", false)] {
@@ -395,7 +384,7 @@ async fn the_list_says_which_path_each_tunnel_takes() {
 
     drop(sessions);
     drop(state);
-    drop(relay);
+    drop((relay, echo));
     let _ = set_process_msg_header_key(None);
 }
 
@@ -414,16 +403,8 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
         state.config.server_address = relay.addr().to_string();
         state.config.relay_transport = RelayTransport::Quic;
     }
-    let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let backend = echo.local_addr().unwrap().to_string();
-    tokio::spawn(async move {
-        while let Ok((mut socket, _)) = echo.accept().await {
-            tokio::spawn(async move {
-                let (mut read, mut write) = socket.split();
-                let _ = tokio::io::copy(&mut read, &mut write).await;
-            });
-        }
-    });
+    let echo = pb_mapper_testkit::tcp_echo(None).await;
+    let backend = echo.addr().to_string();
 
     // Kept on the relay, so the bytes cross the QUIC carrier.
     register_service(
@@ -533,7 +514,7 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
     assert!(refused.to_string().contains("QUIC"), "{refused}");
 
     drop(socket);
-    drop((relay, tcp_only));
+    drop((relay, tcp_only, echo));
     let _ = set_process_msg_header_key(None);
 }
 
