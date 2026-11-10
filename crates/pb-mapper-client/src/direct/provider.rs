@@ -1,8 +1,8 @@
 use super::{
     conn::{DirectConn, QuicGuard, forward_direct},
-    endpoint::{Arrival, Network},
+    endpoint::{Arrival, Discovered, Network},
     lan::Assessment,
-    link::{counts, direct_link, log_path, stun_timings, summary},
+    link::{counts, direct_link, lan_missed, log_path, stun_timings, summary},
     reports::{Latest, SessionReporter, Sink},
     tcp,
 };
@@ -11,19 +11,40 @@ use crate::{
     server::LocalControlWrite,
 };
 use pb_mapper_core::config::ResolvedAddrs;
-use pb_mapper_protocol::{direct::*, forward::StreamForward};
+use pb_mapper_protocol::{
+    direct::*,
+    forward::{ByteMeter, StreamForward},
+};
 use std::{
     collections::{HashMap, HashSet},
     io,
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
-use tokio::{sync::mpsc, task::JoinSet, time::Instant};
+use tokio::{
+    sync::mpsc,
+    task::{JoinError, JoinSet},
+    time::{Instant, error::Elapsed},
+};
 use tokio_util::sync::CancellationToken;
 use uni_stream::stream::StreamProvider;
+
+/// Coordination events queued for the actor; a full queue drops them.
+const ENVELOPE_QUEUE: usize = 128;
+/// Coordination events queued for one session; a full queue drops them.
+const SESSION_EVENTS: usize = 8;
+/// Setups and committed sessions one registration runs at once.
+const MAX_SESSIONS: usize = 64;
+/// Accepted connections still reading the grant they claim.
+const MAX_ARRIVALS: usize = 64;
+/// How long an accepted connection has to name its grant.
+const BIND_TIMEOUT: Duration = Duration::from_secs(2);
+/// How often reports no route took are offered again.
+const REPORT_RETRY: Duration = Duration::from_millis(500);
 
 type Reply = mpsc::Sender<LocalControlWrite>;
 struct Envelope {
@@ -61,26 +82,31 @@ impl Provider {
     where
         L::Item: StreamForward,
     {
-        let (tx, rx) = mpsc::channel(128);
+        let (tx, rx) = mpsc::channel(ENVELOPE_QUEUE);
         let active = Arc::new(AtomicUsize::new(0));
         let done = CancellationToken::new();
         let done_guard = done.clone().drop_guard();
-        let actor_shutdown = shutdown.clone();
-        let actor_active = active.clone();
-        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            let _done_guard = done_guard;
-            run::<L>(
-                rx,
+        let actor = Actor {
+            key,
+            is_datagram,
+            ctx: SessionContext {
                 local,
-                key,
-                is_datagram,
-                actor_shutdown,
                 idle,
                 diagnostics,
-                actor_active,
+                active: active.clone(),
+                reports: Arc::default(),
                 policy,
-            )
-            .await;
+            },
+            spawn_session: spawn_session::<L>,
+            network: None,
+            sessions: HashMap::new(),
+            tasks: JoinSet::new(),
+            arrivals: JoinSet::new(),
+        };
+        let actor_shutdown = shutdown.clone();
+        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let _done_guard = done_guard;
+            actor.run(rx, actor_shutdown).await;
         }));
         Arc::new(Self {
             tx,
@@ -108,104 +134,211 @@ impl Provider {
         self.active.load(Ordering::Acquire) != 0 && !self.task.is_finished()
     }
 }
-#[allow(clippy::too_many_arguments)]
-async fn run<L: StreamProvider + Send + 'static>(
-    mut rx: mpsc::Receiver<Envelope>,
+
+/// What every session of one registration shares.
+#[derive(Clone)]
+struct SessionContext {
+    /// The local service, dialed once a session commits.
     local: ResolvedAddrs,
-    key: Arc<str>,
-    is_datagram: bool,
-    shutdown: CancellationToken,
     idle: Option<Duration>,
     diagnostics: Diagnostics,
+    /// Committed sessions, for [`Provider::has_active`].
     active: Arc<AtomicUsize>,
+    reports: Arc<ProviderReports>,
     policy: crate::sdk::DirectPolicy,
+}
+
+/// An admitted offer: what its session starts from.
+struct Offer {
+    network: Arc<Network>,
+    grant: SessionGrant,
+    stun_addr: SocketAddr,
+    /// The control connection the offer came on, which answers it.
+    reply: Reply,
+    events: mpsc::Receiver<SessionEvent>,
+}
+
+/// Starts an admitted offer's session: the one part of the actor that knows
+/// the local service's stream type, so that the rest is built once.
+type SpawnSession = fn(&mut JoinSet<SessionId>, SessionContext, Offer);
+
+fn spawn_session<L: StreamProvider + Send + 'static>(
+    tasks: &mut JoinSet<SessionId>,
+    ctx: SessionContext,
+    offer: Offer,
 ) where
     L::Item: StreamForward,
 {
-    let mut network: Option<Arc<Network>> = None;
-    let reports = Arc::new(ProviderReports::default());
-    // Every setup and committed session, keyed by grant: the per-registration
-    // session cap counts committed data, not only pending setup.
-    let mut sessions = HashMap::<SessionId, mpsc::Sender<SessionEvent>>::new();
-    let mut tasks = JoinSet::new();
-    let mut arrivals = JoinSet::new();
-    // Only polled while a report is undelivered, so it costs nothing otherwise.
-    let mut report_retry = tokio::time::interval(Duration::from_millis(500));
-    loop {
-        tokio::select! {
-            () = shutdown.cancelled() => break,
-            _ = report_retry.tick(), if reports.has_unsent() => reports.retry(),
-            envelope = rx.recv() => {
-                let Some(Envelope { event, reply }) = envelope else { break };
-                reports.connected(reply.clone());
-                let (id, event) = match event {
-                    Some(DirectEvent::Offer { grant, stun_addr }) => {
-                        if sessions.contains_key(&grant.id) {
-                            continue;
-                        }
-                        let admitted =
-                            admit_offer(&grant, &key, is_datagram, sessions.len(), &mut network, &reply, || Network::new(true, policy.port_mapping, &diagnostics));
-                        let Some(net) = admitted else { continue };
-                        let (tx, rx) = mpsc::channel(8);
-                        let id = grant.id;
-                        sessions.insert(id, tx);
-                        let session = session::<L>(
-                            net, grant, stun_addr, reply, rx, local.clone(), idle,
-                            diagnostics.clone(), active.clone(), reports.clone(), policy,
-                        );
-                        tasks.spawn(async move {
-                            if let Err(error) = session.await {
-                                tracing::debug!(%error, "provider direct session ended");
-                            }
-                            id
-                        });
-                        continue;
+    let id = offer.grant.id;
+    let session = session::<L>(ctx, offer);
+    tasks.spawn(async move {
+        if let Err(error) = session.await {
+            tracing::debug!(%error, "provider direct session ended");
+        }
+        id
+    });
+}
+
+/// An accepted connection's claim, once it named its grant or timed out.
+type Bound = Result<io::Result<(SessionId, Incoming)>, Elapsed>;
+
+/// What the actor does with a coordination event.
+enum Dispatch {
+    /// Admit an offer, and start its session.
+    Offer {
+        grant: SessionGrant,
+        stun_addr: SocketAddr,
+    },
+    /// Pass an event to the session it names.
+    Route(SessionId, SessionEvent),
+    /// Nothing: the envelope only says which control connection is live, or
+    /// carries an event meant for a consumer.
+    Ignore,
+}
+
+fn dispatch(event: Option<DirectEvent>) -> Dispatch {
+    match event {
+        Some(DirectEvent::Offer { grant, stun_addr }) => Dispatch::Offer { grant, stun_addr },
+        Some(DirectEvent::Granted { grant, .. }) => {
+            Dispatch::Route(grant.id, SessionEvent::Granted)
+        }
+        Some(DirectEvent::RelaySelect { id }) => Dispatch::Route(id, SessionEvent::Relay),
+        Some(DirectEvent::Cancel { id }) => Dispatch::Route(id, SessionEvent::Cancel),
+        None
+        | Some(
+            DirectEvent::Ready(_)
+            | DirectEvent::LegacyRelay { .. }
+            | DirectEvent::Rejected { .. }
+            | DirectEvent::RelaySelected { .. }
+            | DirectEvent::Pong,
+        ) => Dispatch::Ignore,
+    }
+}
+
+/// One registration's direct sessions: the endpoint, opened for the first
+/// offer admitted, and every session from setup to its end.
+struct Actor {
+    key: Arc<str>,
+    is_datagram: bool,
+    ctx: SessionContext,
+    spawn_session: SpawnSession,
+    network: Option<Arc<Network>>,
+    /// Every setup and committed session, keyed by grant: the per-registration
+    /// session cap counts committed data, not only pending setup.
+    sessions: HashMap<SessionId, mpsc::Sender<SessionEvent>>,
+    tasks: JoinSet<SessionId>,
+    arrivals: JoinSet<Bound>,
+}
+
+impl Actor {
+    async fn run(mut self, mut rx: mpsc::Receiver<Envelope>, shutdown: CancellationToken) {
+        // Only polled while a report is undelivered, so it costs nothing otherwise.
+        let mut report_retry = tokio::time::interval(REPORT_RETRY);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                _ = report_retry.tick(), if self.ctx.reports.has_unsent() => {
+                    self.ctx.reports.retry();
+                }
+                envelope = rx.recv() => {
+                    let Some(Envelope { event, reply }) = envelope else { break };
+                    self.envelope(event, reply);
+                }
+                arrival = accept(self.network.as_deref()) => {
+                    if let Some(arrival) = arrival {
+                        self.arrival(arrival);
                     }
-                    Some(DirectEvent::Granted { grant, .. }) => (grant.id, SessionEvent::Granted),
-                    Some(DirectEvent::RelaySelect { id }) => (id, SessionEvent::Relay),
-                    Some(DirectEvent::Cancel { id }) => (id, SessionEvent::Cancel),
-                    _ => continue,
-                };
-                if let Some(tx) = sessions.get(&id) {
-                    let _ = tx.try_send(event);
                 }
-            }
-            arrival = async {
-                match &network {
-                    Some(net) => net.accept().await,
-                    None => std::future::pending().await,
+                Some(result) = self.arrivals.join_next(), if !self.arrivals.is_empty() => {
+                    self.bound(result);
                 }
-            } => {
-                let Some(arrival) = arrival else { continue };
-                if arrivals.len() >= 64 {
-                    if let Arrival::Quic(connection) = arrival {
-                        connection.close(0u32.into(), b"session capacity");
+                Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
+                    if let Ok(id) = result {
+                        self.sessions.remove(&id);
                     }
-                    continue;
-                }
-                let bind = session_bind(arrival);
-                arrivals.spawn(tokio::time::timeout(Duration::from_secs(2), bind));
-            }
-            Some(result) = arrivals.join_next(), if !arrivals.is_empty() => {
-                if let Ok(Ok(Ok((id, incoming)))) = result
-                    && let Some(tx) = sessions.get(&id)
-                {
-                    let _ = tx.try_send(SessionEvent::Incoming(incoming));
-                }
-            }
-            Some(result) = tasks.join_next(), if !tasks.is_empty() => {
-                if let Ok(id) = result {
-                    sessions.remove(&id);
                 }
             }
         }
+        self.tasks.shutdown().await;
+        self.arrivals.shutdown().await;
+        if let Some(network) = self.network {
+            network.shutdown().await;
+        }
     }
-    tasks.shutdown().await;
-    arrivals.shutdown().await;
-    if let Some(network) = network {
-        network.shutdown().await;
+
+    /// Every envelope names a live route for reports, whatever it carries.
+    fn envelope(&mut self, event: Option<DirectEvent>, reply: Reply) {
+        self.ctx.reports.connected(reply.clone());
+        match dispatch(event) {
+            Dispatch::Offer { grant, stun_addr } => self.offer(grant, stun_addr, reply),
+            Dispatch::Route(id, event) => self.route(id, event),
+            Dispatch::Ignore => {}
+        }
+    }
+
+    /// Start a session for an offer, unless one runs for its grant or the
+    /// offer is refused.
+    fn offer(&mut self, grant: SessionGrant, stun_addr: SocketAddr, reply: Reply) {
+        if self.sessions.contains_key(&grant.id) {
+            return;
+        }
+        let (port_mapping, diagnostics) = (self.ctx.policy.port_mapping, &self.ctx.diagnostics);
+        let admitted = admit_offer(
+            &grant,
+            &self.key,
+            self.is_datagram,
+            self.sessions.len(),
+            &mut self.network,
+            &reply,
+            || Network::new(true, port_mapping, diagnostics),
+        );
+        let Some(network) = admitted else { return };
+        let (tx, events) = mpsc::channel(SESSION_EVENTS);
+        self.sessions.insert(grant.id, tx);
+        let offer = Offer {
+            network,
+            grant,
+            stun_addr,
+            reply,
+            events,
+        };
+        (self.spawn_session)(&mut self.tasks, self.ctx.clone(), offer);
+    }
+
+    /// Best effort: a session whose queue is full, or that ended, misses it.
+    fn route(&self, id: SessionId, event: SessionEvent) {
+        if let Some(tx) = self.sessions.get(&id) {
+            let _ = tx.try_send(event);
+        }
+    }
+
+    fn arrival(&mut self, arrival: Arrival) {
+        if self.arrivals.len() >= MAX_ARRIVALS {
+            if let Arrival::Quic(connection) = arrival {
+                connection.close(0u32.into(), b"session capacity");
+            }
+            return;
+        }
+        self.arrivals
+            .spawn(tokio::time::timeout(BIND_TIMEOUT, session_bind(arrival)));
+    }
+
+    /// A connection named its grant: it goes to that grant's session.
+    fn bound(&self, result: Result<Bound, JoinError>) {
+        if let Ok(Ok(Ok((id, incoming)))) = result {
+            self.route(id, SessionEvent::Incoming(incoming));
+        }
     }
 }
+
+/// The next connection the endpoint accepted; never, until it is open.
+async fn accept(network: Option<&Network>) -> Option<Arrival> {
+    match network {
+        Some(network) => network.accept().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Validate an offer and lazily create the shared endpoint with `open`, or
 /// reject it.
 fn admit_offer(
@@ -227,7 +360,7 @@ fn admit_offer(
         );
         None
     };
-    if sessions >= 64
+    if sessions >= MAX_SESSIONS
         || !grant.consumer.valid()
         || grant.service != key
         || grant.is_datagram != is_datagram
@@ -290,26 +423,71 @@ async fn send_until(
         .map_err(|_| io::Error::other("coordination route closed"))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn session<L: StreamProvider>(
-    network: Arc<Network>,
-    mut grant: SessionGrant,
-    stun_addr: std::net::SocketAddr,
-    reply: Reply,
-    mut events: mpsc::Receiver<SessionEvent>,
-    local: ResolvedAddrs,
-    idle: Option<Duration>,
-    diagnostics: Diagnostics,
-    active: Arc<AtomicUsize>,
-    reports: Arc<ProviderReports>,
-    policy: crate::sdk::DirectPolicy,
-) -> io::Result<()>
+/// One session, from its offer to its end. Only the backend dial and the
+/// forwarding know the local service's stream type.
+async fn session<L: StreamProvider>(ctx: SessionContext, offer: Offer) -> io::Result<()>
 where
     L::Item: StreamForward,
 {
+    let Some(mut committed) = commit(&ctx, offer).await? else {
+        return Ok(());
+    };
+    // A committed session belongs to the endpoints even while its backend dial
+    // is pending. A simultaneous credential rejection must not tear it down.
+    let _active = ActiveSession::new(ctx.active.clone());
+    // This is the sole backend dial for direct. No backend is opened while probing.
+    let dial = L::from_addr(ctx.local.as_slice());
+    let local = match tokio::time::timeout_at(committed.deadline, dial).await {
+        Ok(Ok(local)) => local,
+        _ => {
+            let _ = committed.incoming.conn.write_all(&[4]).await;
+            return Err(io::Error::other("local service connect failed"));
+        }
+    };
+    let Opened {
+        framing,
+        meter,
+        mut report,
+    } = open(&ctx, &mut committed).await?;
+    let conn = committed.incoming.conn;
+    report
+        .during(forward_direct(local, conn, framing, ctx.idle, Some(meter)))
+        .await
+}
+
+/// A session past its commit point. What it held while it set up, it holds
+/// until it ends: the probe state, the coordination route and its events.
+struct Committed {
+    incoming: Incoming,
+    lan: Assessment,
+    discovered: Discovered,
+    discover_ms: u64,
+    started: Instant,
+    deadline: Instant,
+    probing_started: Instant,
+    committing: Instant,
+    _probe_guard: ProbeGuard,
+    _events: mpsc::Receiver<SessionEvent>,
+    _reply: Reply,
+    grant: SessionGrant,
+    network: Arc<Network>,
+}
+
+/// Answer an offer and run its setup to the commit point: discover this
+/// end, probe the consumer until its connection is bound and the grant
+/// confirmed, then commit. `None` when the setup ended without a session
+/// and without failing: cancelled, or with the relay selected.
+async fn commit(ctx: &SessionContext, offer: Offer) -> io::Result<Option<Committed>> {
+    let Offer {
+        network,
+        mut grant,
+        stun_addr,
+        reply,
+        mut events,
+    } = offer;
     let started = Instant::now();
     let deadline = started + Duration::from_millis(grant.ttl_ms);
-    let _probe_guard = ProbeGuard {
+    let probe_guard = ProbeGuard {
         network: network.clone(),
         id: grant.id,
     };
@@ -320,17 +498,12 @@ where
     let lan = Assessment::new(
         discovered.local.clone(),
         &grant.consumer.candidates,
-        policy.lan_first,
+        ctx.policy.lan_first,
     );
     if let Some(evidence) = lan.evidence {
-        diagnostics.lan_detected(evidence, lan.prefers());
+        ctx.diagnostics.lan_detected(evidence, lan.prefers());
     }
-    let tcp_offer = offer_tcp(&network, &mut grant, &lan, stun_addr, policy.lan_tcp);
-    let missed = |took: Option<LinkKind>| {
-        if let Some(evidence) = lan.evidence {
-            diagnostics.lan_missed(evidence, took);
-        }
-    };
+    let tcp_offer = offer_tcp(&network, &mut grant, &lan, stun_addr, ctx.policy.lan_tcp);
     let accept = DirectProviderMessage::Accept {
         id: grant.id,
         peer: grant.provider.clone(),
@@ -363,16 +536,17 @@ where
                             Err(error) => tracing::debug!(%error, "direct session binding rejected"),
                         }
                     }
+                    // A later bind for a session that has one is let go.
+                    Some(SessionEvent::Incoming(_)) => {}
                     Some(SessionEvent::Relay) => {
                         // The consumer chose the relay before any path committed:
                         // the punch did not get through.
                         network.punching_failed();
-                        missed(None);
+                        lan_missed(&ctx.diagnostics, &lan, None);
                         let selected = DirectProviderMessage::RelaySelected { id: grant.id };
-                        return send_until(&reply, selected, deadline).await;
+                        return send_until(&reply, selected, deadline).await.map(|()| None);
                     }
-                    Some(SessionEvent::Cancel) | None => return Ok(()),
-                    _ => {}
+                    Some(SessionEvent::Cancel) | None => return Ok(None),
                 }
             }
         }
@@ -399,78 +573,98 @@ where
                 }
                 event = events.recv() => match event {
                     Some(SessionEvent::Relay) => {
-                        missed(None);
+                        lan_missed(&ctx.diagnostics, &lan, None);
                         let selected = DirectProviderMessage::RelaySelected { id: grant.id };
-                        return send_until(&reply, selected, deadline).await;
+                        return send_until(&reply, selected, deadline).await.map(|()| None);
                     }
-                    Some(SessionEvent::Cancel) | None => return Ok(()),
-                    _ => {}
+                    Some(SessionEvent::Cancel) | None => return Ok(None),
+                    Some(SessionEvent::Granted | SessionEvent::Incoming(_)) => {}
                 }
             }
         }
     }
     // Committed: no other TCP connection is waited for.
     drop(tcp_offer);
-    // A committed session belongs to the endpoints even while its backend dial
-    // is pending. A simultaneous credential rejection must not tear it down.
-    let _active = ActiveSession::new(active);
-    // This is the sole backend dial for direct. No backend is opened while probing.
-    let local = match tokio::time::timeout_at(deadline, L::from_addr(local.as_slice())).await {
-        Ok(Ok(local)) => local,
-        _ => {
-            let _ = incoming.conn.write_all(&[4]).await;
-            return Err(io::Error::other("local service connect failed"));
-        }
-    };
-    incoming.conn.write_all(&[3]).await?;
-    let framing = incoming.conn.framing_key(&grant)?;
-    let learned = network.learned(&grant.id);
+    Ok(Some(Committed {
+        incoming,
+        lan,
+        discovered,
+        discover_ms,
+        started,
+        deadline,
+        probing_started,
+        committing,
+        _probe_guard: probe_guard,
+        _events: events,
+        _reply: reply,
+        grant,
+        network,
+    }))
+}
+
+/// A committed session, opened: what its forwarding takes, and its reports.
+struct Opened {
+    framing: [u8; 32],
+    meter: Arc<ByteMeter>,
+    report: SessionReporter,
+}
+
+/// Tell the consumer that the local service is connected, then describe the
+/// session's path and start reporting it.
+async fn open(ctx: &SessionContext, c: &mut Committed) -> io::Result<Opened> {
+    c.incoming.conn.write_all(&[3]).await?;
+    let framing = c.incoming.conn.framing_key(&c.grant)?;
+    let learned = c.network.learned(&c.grant.id);
     let first = |lan_only: bool| {
         learned
             .iter()
-            .filter(|(addr, _)| !lan_only || lan.is_lan(*addr))
-            .map(|(_, at)| ms(at.saturating_duration_since(probing_started)))
+            .filter(|(addr, _)| !lan_only || c.lan.is_lan(*addr))
+            .map(|(_, at)| ms(at.saturating_duration_since(c.probing_started)))
             .min()
     };
     let timings = SetupTimings {
-        discover_ms: Some(discover_ms),
+        discover_ms: Some(c.discover_ms),
         first_pong_ms: first(false),
         lan_first_pong_ms: first(true),
-        commit_ms: Some(ms(committing.elapsed())),
-        setup_ms: ms(started.elapsed()),
-        ..stun_timings(SetupTimings::default(), &discovered)
+        commit_ms: Some(ms(c.committing.elapsed())),
+        setup_ms: ms(c.started.elapsed()),
+        ..stun_timings(SetupTimings::default(), &c.discovered)
     };
     let candidates = CandidateCounts {
-        probed: network.reachable(&grant.consumer.candidates),
+        probed: c.network.reachable(&c.grant.consumer.candidates),
         answered: learned.len() as u32,
-        ..counts(&discovered, &lan, &grant.consumer.candidates)
+        ..counts(&c.discovered, &c.lan, &c.grant.consumer.candidates)
     };
     let link = direct_link(
-        &incoming.conn,
-        &lan,
-        &grant.consumer.candidates,
+        &c.incoming.conn,
+        &c.lan,
+        &c.grant.consumer.candidates,
         timings,
         candidates,
     )?;
     if link.kind != LinkKind::Lan {
-        missed(Some(link.kind));
+        lan_missed(&ctx.diagnostics, &c.lan, Some(link.kind));
     }
-    log_path(&grant.service, &link);
+    log_path(&c.grant.service, &link);
     let summary = summary(&link);
-    let link_guard = diagnostics.link_opened(link, incoming.conn.probe());
-    let session = diagnostics.session_opened(SessionPath::Direct, Some(summary));
-    let meter = Some(session.meter());
-    let mut report = SessionReporter::start(
-        Sink::Provider(reports),
-        &grant,
+    let link_guard = ctx.diagnostics.link_opened(link, c.incoming.conn.probe());
+    let session = ctx
+        .diagnostics
+        .session_opened(SessionPath::Direct, Some(summary));
+    let meter = session.meter();
+    let report = SessionReporter::start(
+        Sink::Provider(ctx.reports.clone()),
+        &c.grant,
         SessionPath::Direct,
         Some(summary),
         session,
         Some(link_guard),
     );
-    report
-        .during(forward_direct(local, incoming.conn, framing, idle, meter))
-        .await
+    Ok(Opened {
+        framing,
+        meter,
+        report,
+    })
 }
 /// The connection is the granted consumer's, by the one certificate it
 /// presented, and is bound to this grant.
@@ -708,24 +902,27 @@ mod tests {
         let (replies, mut reply_rx) = mpsc::channel(16);
         let (events, event_rx) = mpsc::channel(8);
         let active = Arc::new(AtomicUsize::new(0));
-        let task = AbortOnDropHandle::new(tokio::spawn(session::<TcpStreamProvider>(
-            provider.clone(),
-            grant.clone(),
-            stun,
-            replies,
-            event_rx,
-            ResolvedAddrs::from(backend.local_addr().unwrap()),
-            None,
-            Diagnostics::default(),
-            active.clone(),
-            Arc::new(ProviderReports::default()),
-            crate::sdk::DirectPolicy {
+        let ctx = SessionContext {
+            local: ResolvedAddrs::from(backend.local_addr().unwrap()),
+            idle: None,
+            diagnostics: Diagnostics::default(),
+            active: active.clone(),
+            reports: Arc::new(ProviderReports::default()),
+            policy: crate::sdk::DirectPolicy {
                 port_mapping: crate::sdk::PortMapping::Off,
                 lan_first: true,
                 lan_transport: crate::sdk::LanTransport::Quic,
                 lan_tcp: true,
             },
-        )));
+        };
+        let offer = Offer {
+            network: provider.clone(),
+            grant: grant.clone(),
+            stun_addr: stun,
+            reply: replies,
+            events: event_rx,
+        };
+        let task = AbortOnDropHandle::new(tokio::spawn(session::<TcpStreamProvider>(ctx, offer)));
         let Some(LocalControlWrite::Direct(accepted)) = reply_rx.recv().await else {
             panic!("expected accepted offer");
         };

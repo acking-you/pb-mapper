@@ -5,7 +5,8 @@ use super::{
     lan::{self, Assessment},
 };
 use crate::diagnostics::{
-    CandidateCounts, DirectLink, LanEvidence, LinkStats, LinkVia, SetupTimings,
+    CandidateCounts, Diagnostics, DirectLink, LanEvidence, LinkKind, LinkStats, LinkVia,
+    SetupTimings,
 };
 use pb_mapper_protocol::direct::{AddressFamily, LinkSummary};
 use std::{io, net::SocketAddr};
@@ -78,6 +79,14 @@ fn via(peer: SocketAddr, offered: &[SocketAddr]) -> LinkVia {
         LinkVia::Mapped
     } else {
         LinkVia::Public
+    }
+}
+
+/// A LAN the peer's offer gave evidence of did not carry the session: `took`
+/// is the path that did, or none when the relay will.
+pub(super) fn lan_missed(diagnostics: &Diagnostics, lan: &Assessment, took: Option<LinkKind>) {
+    if let Some(evidence) = lan.evidence {
+        diagnostics.lan_missed(evidence, took);
     }
 }
 
