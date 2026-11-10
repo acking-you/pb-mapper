@@ -70,9 +70,10 @@ pub fn image(process: HANDLE) -> Result<PathBuf> {
         )
     }
     .map_err(error)?;
-    Ok(PathBuf::from(String::from_utf16_lossy(
-        &text[..len as usize],
-    )))
+    let name = text
+        .get(..len as usize)
+        .ok_or_else(|| error("process image name exceeds its buffer"))?;
+    Ok(PathBuf::from(String::from_utf16_lossy(name)))
 }
 #[cfg(feature = "windows-helper")]
 pub fn process(id: u32) -> Result<Handle> {

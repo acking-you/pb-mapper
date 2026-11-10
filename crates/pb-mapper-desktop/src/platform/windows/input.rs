@@ -5,8 +5,9 @@ use crate::{
     Button, DoubleClickGuard, Key, Result, error, input::held::Pressed, platform::Injector,
 };
 use enigo::{Axis, Direction, Enigo, Keyboard, Mouse};
+use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use windows::Win32::{
-    Foundation::{CloseHandle, GetLastError, HANDLE},
+    Foundation::{E_UNEXPECTED, GetLastError, HANDLE},
     Security::{
         GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
         TOKEN_QUERY, TokenIntegrityLevel, TokenSessionId, TokenUIAccess,
@@ -101,9 +102,11 @@ fn native_input_error(failure: impl std::fmt::Display) -> std::io::Error {
     // launch context so a failed worker can be diagnosed without guessing or
     // requesting broader privileges. This runs only after failed injection.
     let code = unsafe { GetLastError() }.0;
-    let mut token = HANDLE::default();
     let context = (|| -> windows::core::Result<String> {
+        let mut token = HANDLE::default();
         unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }?;
+        // Closed once the context is read.
+        let _token = unsafe { OwnedHandle::from_raw_handle(token.0) };
         let mut ui_access = 0u32;
         let mut session = 0u32;
         let mut length = 0;
@@ -134,17 +137,15 @@ fn native_input_error(failure: impl std::fmt::Display) -> std::io::Error {
             )?;
             let sid = (*label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
             let count = *GetSidSubAuthorityCount(sid);
-            let integrity = *GetSidSubAuthority(sid, u32::from(count - 1));
+            let last = count.checked_sub(1).ok_or_else(|| {
+                windows::core::Error::new(E_UNEXPECTED, "integrity label without a level")
+            })?;
+            let integrity = *GetSidSubAuthority(sid, u32::from(last));
             Ok(format!(
                 "session={session}, integrity={integrity:#x}, ui_access={ui_access}"
             ))
         }
     })();
-    if !token.is_invalid() {
-        unsafe {
-            let _ = CloseHandle(token);
-        }
-    }
     let detail = format!(
         "{failure}; Win32={code}; {}",
         context.unwrap_or_else(|e| format!("worker token unavailable: {e}"))
