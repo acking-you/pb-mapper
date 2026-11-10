@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::error::AdminOperationSnafu;
 use super::{ManagerTask, ManagerTaskSender, Result, compose_service_key, validate_service_name};
-use pb_mapper_auth::{AuthContext, AuthFailure, AuthRuntime, KeyId};
+use pb_mapper_auth::{AuthContext, AuthFailure, AuthRuntime, KeyId, codes};
 use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::MessageWriter;
@@ -159,11 +159,13 @@ async fn execute(
             })
         }
         AdminRequest::RootKeyRotate { new_admin_key } => {
-            let Credential::Admin(new_key) = parse_credential(new_admin_key.trim())
-                .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?
+            let Credential::Admin(new_key) =
+                parse_credential(new_admin_key.trim()).map_err(|error| {
+                    AuthFailure::new(codes::ADMINISTRATOR_KEY_INVALID, error, false)
+                })?
             else {
                 return Err(AuthFailure::new(
-                    "administrator_key_invalid",
+                    codes::ADMINISTRATOR_KEY_INVALID,
                     "root rotation requires a 32-byte administrator key",
                     false,
                 ));
@@ -364,7 +366,7 @@ fn cancelled_authorization(authorization: &AuthContext) -> AuthFailure {
     match authorization.ensure_active() {
         Err(error) => error,
         Ok(_) => AuthFailure::new(
-            "administrator_key_rotated",
+            codes::ADMINISTRATOR_KEY_ROTATED,
             "administrator credential lease was cancelled during the inventory query",
             false,
         ),
@@ -504,7 +506,7 @@ mod tests {
             .await
             .expect("inventory task should not panic")
             .expect_err("rotated administrator must not receive inventory");
-        assert_eq!(failure.code, "administrator_key_rotated");
+        assert_eq!(failure.code, codes::ADMINISTRATOR_KEY_ROTATED);
 
         shut_down(runtime, state_dir).await;
     }

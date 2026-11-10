@@ -718,7 +718,7 @@ async fn serve_admin(
             &mut conn,
             &session,
             &pb_mapper_auth::AuthFailure::new(
-                "admin_permission_required",
+                pb_mapper_auth::codes::ADMIN_PERMISSION_REQUIRED,
                 "administrator credential is required for this operation",
                 false,
             ),
