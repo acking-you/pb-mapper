@@ -884,7 +884,7 @@ impl Viewer {
         }
         join.take();
         match &self.connection {
-            Some(connection) => connection.stop().await.map_err(error),
+            Some(connection) => connection.stop().await.map_err(io::Error::other),
             None => Ok(()),
         }
     }
