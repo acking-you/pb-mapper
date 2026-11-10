@@ -1,8 +1,8 @@
 //! A committed session's connection, on whichever carrier won, and the
 //! forwarding over it that both ends run.
 use super::{
+    binding,
     control::io_error,
-    endpoint,
     tcp::{self, TlsTcp},
 };
 use crate::diagnostics::LinkProbe;
@@ -92,20 +92,20 @@ impl DirectConn {
     }
     pub(super) fn binding(&self, grant: &SessionGrant) -> io::Result<[u8; 32]> {
         match self {
-            Self::Quic { connection, .. } => endpoint::binding(&connection.0, grant),
-            Self::Tcp { stream, .. } => endpoint::binding(&**stream, grant),
+            Self::Quic { connection, .. } => binding::binding(&connection.0, grant),
+            Self::Tcp { stream, .. } => binding::binding(&**stream, grant),
         }
     }
     pub(super) fn verify_binding(&self, grant: &SessionGrant, tag: &[u8]) -> io::Result<()> {
         match self {
-            Self::Quic { connection, .. } => endpoint::verify_binding(&connection.0, grant, tag),
-            Self::Tcp { stream, .. } => endpoint::verify_binding(&**stream, grant, tag),
+            Self::Quic { connection, .. } => binding::verify_binding(&connection.0, grant, tag),
+            Self::Tcp { stream, .. } => binding::verify_binding(&**stream, grant, tag),
         }
     }
     pub(super) fn framing_key(&self, grant: &SessionGrant) -> io::Result<[u8; 32]> {
         match self {
-            Self::Quic { connection, .. } => endpoint::framing_key(&connection.0, grant),
-            Self::Tcp { stream, .. } => endpoint::framing_key(&**stream, grant),
+            Self::Quic { connection, .. } => binding::framing_key(&connection.0, grant),
+            Self::Tcp { stream, .. } => binding::framing_key(&**stream, grant),
         }
     }
     /// Setup bytes, sent at once: over TLS, flushed rather than left with

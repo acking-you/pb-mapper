@@ -1,4 +1,5 @@
 //! Client-owned direct sessions. Control sockets never own an established data task.
+mod binding;
 mod candidates;
 mod conn;
 mod consumer;

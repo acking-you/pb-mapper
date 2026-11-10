@@ -1,8 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::{
+    binding,
     conn::DirectConn,
     consumer::{COOLDOWN_INITIAL, COOLDOWN_MAX, Consumer, Cooldown, DataPath, Prepared},
-    endpoint::{self, Arrival, InterfaceSource, Network},
+    endpoint::{Arrival, InterfaceSource, Network},
     lan::{Assessment, Interface, Interfaces},
     tcp,
 };
@@ -587,10 +588,10 @@ async fn peer_certificate_and_session_binding_are_both_required() {
         panic!("expected a QUIC arrival");
     };
     let tag = outgoing.binding(&grant).unwrap();
-    endpoint::verify_binding(&incoming, &grant, &tag).unwrap();
+    binding::verify_binding(&incoming, &grant, &tag).unwrap();
     let mut wrong = grant.clone();
     wrong.service = "another-service".into();
-    assert!(endpoint::verify_binding(&incoming, &wrong, &tag).is_err());
+    assert!(binding::verify_binding(&incoming, &wrong, &tag).is_err());
     let stranger = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
     stranger
         .authorize(&grant, false, Instant::now() + Duration::from_secs(3))
@@ -665,11 +666,11 @@ async fn peer_certificate_and_session_binding_are_both_required() {
     else {
         panic!("expected a TCP arrival");
     };
-    let tag = endpoint::binding(&*outgoing, &grant).unwrap();
-    endpoint::verify_binding(&*incoming, &grant, &tag).unwrap();
-    let quic_label = endpoint::tag(&*outgoing, b"pb-mapper/direct/1", &grant).unwrap();
+    let tag = binding::binding(&*outgoing, &grant).unwrap();
+    binding::verify_binding(&*incoming, &grant, &tag).unwrap();
+    let quic_label = binding::tag(&*outgoing, b"pb-mapper/direct/1", &grant).unwrap();
     assert!(
-        endpoint::verify_binding(&*incoming, &grant, &quic_label).is_err(),
+        binding::verify_binding(&*incoming, &grant, &quic_label).is_err(),
         "a binding made for QUIC is worthless over TCP"
     );
     let _ = tcp::Race::start(&addrs[..1], client(&stranger))

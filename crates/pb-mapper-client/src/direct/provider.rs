@@ -836,7 +836,7 @@ mod tests {
             panic!("a consumer that did not ask for TCP takes QUIC");
         };
         send.write_all(&grant.id).await.unwrap();
-        send.write_all(&super::super::endpoint::binding(&connection.0, &grant).unwrap())
+        send.write_all(&super::super::binding::binding(&connection.0, &grant).unwrap())
             .await
             .unwrap();
         tokio::time::timeout_at(deadline, dispatch)

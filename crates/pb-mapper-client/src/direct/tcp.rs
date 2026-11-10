@@ -1,8 +1,8 @@
 //! The TCP half of a direct path within a local network: the provider's
 //! acceptor, the consumer's dialer, and the stream both ends forward over.
-//! QUIC stays in `endpoint.rs`. What the two share is everything that makes a
-//! path trustworthy: the per-session identity, the binding to the grant, and
-//! the commit bytes.
+//! QUIC stays in the `endpoint` module. What the two share is everything that
+//! makes a path trustworthy: the per-session identity, the binding to the
+//! grant, and the commit bytes.
 //!
 //! TCP is offered only on a network both ends share, so a path across the
 //! internet never takes it. Unlike QUIC, whose probes open the provider's
@@ -10,11 +10,7 @@
 //! to let it in: a consumer that asked for it falls back to QUIC within the
 //! head start when it does not get through.
 
-use super::{
-    endpoint::{Arrival, Exporter},
-    identity::Identity,
-    lan::Interfaces,
-};
+use super::{binding::Exporter, endpoint::Arrival, identity::Identity, lan::Interfaces};
 use crate::diagnostics::LanTcpMiss;
 use pb_mapper_protocol::direct::MAX_LAN_TCP;
 use quinn::rustls::{self, pki_types::ServerName};
