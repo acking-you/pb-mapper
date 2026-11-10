@@ -286,7 +286,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
             result = LocalListener::bind(local_addr.as_slice()) => match result.context(BindLocalListenerSnafu) {
                 Ok(listener) => listener,
                 Err(error) => {
-                    tracing::warn!(event = "client_local_bind_failed", %key, %local_addr, %error);
+                    tracing::warn!(event = "client_local_bind_failed", %key, %local_addr, error = %snafu::Report::from_error(error));
                     if let Some(sink) = &status { sink(&WorkerStatus::Retrying); }
                     tokio::select! {
                         () = shutdown.cancelled() => break,
@@ -335,7 +335,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                     let (stream, _) = match accepted.context(AcceptLocalStreamSnafu) {
                         Ok(accepted) => accepted,
                         Err(error) => {
-                            tracing::warn!(event = "client_local_accept_failed", %key, %local_addr, %error);
+                            tracing::warn!(event = "client_local_accept_failed", %key, %local_addr, error = %snafu::Report::from_error(error));
                             break;
                         }
                     };
