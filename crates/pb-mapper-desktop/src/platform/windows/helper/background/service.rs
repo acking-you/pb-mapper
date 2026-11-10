@@ -376,6 +376,7 @@ async fn manage(
     let mut requests = JoinSet::new();
     loop {
         tokio::select! {
+            biased;
             () = stop.cancelled() => break,
             Some(_) = requests.join_next(), if !requests.is_empty() => {},
             connected = listener.connect(), if requests.len() < 8 => {

@@ -112,13 +112,19 @@ fn entry(_: Vec<OsString>) {
             .build()?;
         runtime.block_on(async {
             let mut listener = pipe::bind(PIPE, Some(&config.owner_sid), true)?;
-            status.set_service_status(state(ServiceState::Running, 0)).map_err(error)?;
+            status
+                .set_service_status(state(ServiceState::Running, 0))
+                .map_err(error)?;
             let restores = Restores::default();
             restore_left_modes(&config, &restores).await;
             let mut background = tokio::spawn(super::background::run(stop.clone()));
             let capture = async {
                 loop {
-                    tokio::select! { () = stop.cancelled() => break, result = listener.connect() => result? }
+                    tokio::select! {
+                        biased;
+                        () = stop.cancelled() => break,
+                        result = listener.connect() => result?,
+                    }
                     // Keep one live server instance while replacing the listener,
                     // so another process can never claim the pipe name in between.
                     let next = pipe::bind(PIPE, Some(&config.owner_sid), false)?;
