@@ -72,7 +72,6 @@ pub async fn adopt(host: Host, options: Options, resumes_at_once: bool) -> Resul
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::{

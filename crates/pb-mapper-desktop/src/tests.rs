@@ -1,4 +1,3 @@
-#![allow(clippy::unwrap_used)]
 use super::*;
 use crate::protocol::{HostMessage, ViewerMessage};
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};

@@ -236,7 +236,6 @@ fn drain<B: Backend>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::Input;

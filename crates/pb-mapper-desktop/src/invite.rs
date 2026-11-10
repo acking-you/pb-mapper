@@ -314,7 +314,6 @@ fn is_setup_string(text: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::HostIdentity;

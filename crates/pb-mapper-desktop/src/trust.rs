@@ -279,7 +279,6 @@ pub fn write_durably(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

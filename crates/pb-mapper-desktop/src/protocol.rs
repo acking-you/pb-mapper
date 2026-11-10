@@ -323,7 +323,6 @@ pub enum StopReason {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::{Button, Input, Key, security};

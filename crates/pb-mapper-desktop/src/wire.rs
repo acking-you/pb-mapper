@@ -99,7 +99,6 @@ pub(crate) async fn read_payload<R: AsyncRead + Unpin>(r: &mut R) -> Result<byte
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::protocol::{HostMessage, ViewerMessage};

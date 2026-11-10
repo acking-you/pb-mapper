@@ -348,7 +348,6 @@ impl<T: Transport> Drop for RemoteBackend<T> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tokio::io::DuplexStream;

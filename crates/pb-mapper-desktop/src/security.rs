@@ -233,7 +233,6 @@ pub(crate) fn server() -> Result<(tokio_rustls::TlsAcceptor, [u8; 32])> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 pub(crate) mod tests {
     use super::*;
     use tokio::io::DuplexStream;
