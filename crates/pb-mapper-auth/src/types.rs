@@ -41,6 +41,59 @@ impl AuthFailure {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(codes::AUTH_INTERNAL_ERROR, message, false)
     }
+
+    // The failures more than one check reports, built in one place each.
+
+    pub(crate) fn key_expired() -> Self {
+        Self::new(
+            codes::TEMPORARY_KEY_EXPIRED,
+            "temporary key has expired",
+            false,
+        )
+    }
+
+    pub(crate) fn key_revoked() -> Self {
+        Self::new(
+            codes::TEMPORARY_KEY_REVOKED,
+            "temporary key was revoked",
+            false,
+        )
+    }
+
+    pub(crate) fn key_rotated() -> Self {
+        Self::new(
+            codes::TEMPORARY_KEY_ROTATED,
+            "temporary credential was invalidated by administrator root rotation or auth-state reset",
+            false,
+        )
+    }
+
+    pub(crate) fn key_material_mismatch() -> Self {
+        Self::new(
+            codes::TEMPORARY_KEY_INVALID,
+            "temporary credential does not match the active relay key material",
+            false,
+        )
+    }
+
+    /// A key that looked active a moment earlier no longer is, so a retry sees
+    /// how it ended. Distinct from the "credential lease ..." failures an
+    /// [`AuthContext`] reports.
+    pub(crate) fn key_lease_inactive() -> Self {
+        Self::new(
+            codes::TEMPORARY_KEY_INACTIVE,
+            "temporary key lease is no longer active",
+            true,
+        )
+    }
+
+    pub(crate) fn state_manager_stopped() -> Self {
+        Self::new(
+            codes::AUTH_STATE_UNAVAILABLE,
+            "authentication state manager is not running",
+            true,
+        )
+    }
 }
 
 impl fmt::Display for AuthFailure {

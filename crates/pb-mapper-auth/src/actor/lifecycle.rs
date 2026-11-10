@@ -303,11 +303,7 @@ pub(super) fn actor_renew(
     if let Some(slot) = slots.get_mut(index) {
         validate_slot_identity(slot, key_id)?;
         if slot.state != SlotState::Active {
-            return Err(AuthFailure::new(
-                codes::TEMPORARY_KEY_INACTIVE,
-                "temporary key lease is no longer active",
-                true,
-            ));
+            return Err(AuthFailure::key_lease_inactive());
         }
         slot.expires_at = expires_at;
         match slot.lease.upgrade() {
@@ -332,11 +328,7 @@ pub(super) fn actor_renew(
         let mut high = inner.high_mut();
         let entry = high_slot_entry_mut(&mut high, key_id)?;
         if entry.state != SlotState::Active {
-            return Err(AuthFailure::new(
-                codes::TEMPORARY_KEY_INACTIVE,
-                "temporary key lease is no longer active",
-                true,
-            ));
+            return Err(AuthFailure::key_lease_inactive());
         }
         entry.expires_at = expires_at;
         entry.tombstoned_at = None;

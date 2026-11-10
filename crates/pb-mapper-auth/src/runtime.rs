@@ -191,13 +191,10 @@ impl AuthRuntime {
     }
 
     fn inner(&self) -> Result<Arc<AuthStateInner>, AuthFailure> {
-        self.shared.inner.upgrade().ok_or_else(|| {
-            AuthFailure::new(
-                codes::AUTH_STATE_UNAVAILABLE,
-                "authentication state manager is not running",
-                true,
-            )
-        })
+        self.shared
+            .inner
+            .upgrade()
+            .ok_or_else(AuthFailure::state_manager_stopped)
     }
 
     pub fn admin_key(&self) -> Result<AesKeyType, AuthFailure> {
@@ -293,25 +290,13 @@ impl AuthRuntime {
                 "temporary key does not exist",
                 false,
             )),
-            SlotState::Expired => Some(AuthFailure::new(
-                codes::TEMPORARY_KEY_EXPIRED,
-                "temporary key has expired",
-                false,
-            )),
-            SlotState::Revoked => Some(AuthFailure::new(
-                codes::TEMPORARY_KEY_REVOKED,
-                "temporary key was revoked",
-                false,
-            )),
+            SlotState::Expired => Some(AuthFailure::key_expired()),
+            SlotState::Revoked => Some(AuthFailure::key_revoked()),
             SlotState::Active if slot.expires_at <= unix_seconds() => {
                 if let Some(lease) = slot.lease.upgrade() {
                     lease.cancel_expired();
                 }
-                Some(AuthFailure::new(
-                    codes::TEMPORARY_KEY_EXPIRED,
-                    "temporary key has expired",
-                    false,
-                ))
+                Some(AuthFailure::key_expired())
             }
             SlotState::Active => None,
         };
@@ -321,11 +306,7 @@ impl AuthRuntime {
         }
         let lease = slot.lease.upgrade().ok_or_else(|| {
             inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            AuthFailure::new(
-                codes::TEMPORARY_KEY_INACTIVE,
-                "temporary key lease is no longer active",
-                true,
-            )
+            AuthFailure::key_lease_inactive()
         })?;
         inner.auth_successes.fetch_add(1, Ordering::Relaxed);
         Ok(AuthContext::from_lease(key_id, false, &lease))
@@ -360,13 +341,7 @@ impl AuthRuntime {
             .command_tx
             .send(build(response))
             .await
-            .map_err(|_| {
-                AuthFailure::new(
-                    codes::AUTH_STATE_UNAVAILABLE,
-                    "authentication state manager is not running",
-                    true,
-                )
-            })?;
+            .map_err(|_| AuthFailure::state_manager_stopped())?;
         receiver.await.map_err(|_| {
             AuthFailure::new(
                 codes::AUTH_STATE_UNAVAILABLE,
@@ -601,26 +576,14 @@ fn temporary_key_material_mismatch(inner: &AuthStateInner, key_id: KeyId) -> Aut
         .get(index)
         .is_some_and(|slot| slot.state == SlotState::Active && slot.generation == generation);
     if slot_is_active {
-        return AuthFailure::new(
-            codes::TEMPORARY_KEY_INVALID,
-            "temporary credential does not match the active relay key material",
-            false,
-        );
+        return AuthFailure::key_material_mismatch();
     }
     let current_epoch = inner.root_epoch.load(Ordering::Acquire);
     if current_epoch > 0
         && generation > Generation::FIRST
         && current_generation.is_some_and(|issued| generation <= issued)
     {
-        return AuthFailure::new(
-            codes::TEMPORARY_KEY_ROTATED,
-            "temporary credential was invalidated by administrator root rotation or auth-state reset",
-            false,
-        );
+        return AuthFailure::key_rotated();
     }
-    AuthFailure::new(
-        codes::TEMPORARY_KEY_INVALID,
-        "temporary credential does not match the active relay key material",
-        false,
-    )
+    AuthFailure::key_material_mismatch()
 }

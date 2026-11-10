@@ -128,11 +128,7 @@ impl AuthContext {
         }
         if !self.is_admin && lease.expires_at() <= unix_seconds() {
             lease.cancel_expired();
-            return Err(AuthFailure::new(
-                codes::TEMPORARY_KEY_EXPIRED,
-                "temporary key has expired",
-                false,
-            ));
+            return Err(AuthFailure::key_expired());
         }
         Ok(lease)
     }
@@ -174,21 +170,9 @@ fn cancelled_lease_failure(is_admin: bool, lease: &AuthLease) -> AuthFailure {
         );
     }
     match lease.cancel_reason() {
-        CancelReason::Expired => AuthFailure::new(
-            codes::TEMPORARY_KEY_EXPIRED,
-            "temporary key has expired",
-            false,
-        ),
-        CancelReason::Rotated => AuthFailure::new(
-            codes::TEMPORARY_KEY_ROTATED,
-            "temporary credential was invalidated by administrator root rotation or auth-state reset",
-            false,
-        ),
-        CancelReason::Revoked => AuthFailure::new(
-            codes::TEMPORARY_KEY_REVOKED,
-            "temporary key was revoked",
-            false,
-        ),
+        CancelReason::Expired => AuthFailure::key_expired(),
+        CancelReason::Rotated => AuthFailure::key_rotated(),
+        CancelReason::Revoked => AuthFailure::key_revoked(),
         CancelReason::None => AuthFailure::new(
             codes::TEMPORARY_KEY_INACTIVE,
             "credential lease has been cancelled",
