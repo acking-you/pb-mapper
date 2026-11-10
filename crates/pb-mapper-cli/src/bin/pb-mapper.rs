@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use better_mimalloc_rs::MiMalloc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use pb_mapper_client::client::show_status_scoped;
+use pb_mapper_client::client::fetch_status_scoped;
 use pb_mapper_core::config::resolve_pb_mapper_server_async;
 use pb_mapper_protocol::command::PbConnStatusReq;
 
@@ -125,7 +125,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
 
 async fn run_status(args: StatusArgs) -> Result<(), Box<dyn Error>> {
     let remote_addr = resolve_pb_mapper_server_async(args.server.as_deref()).await?;
-    show_status_scoped(remote_addr.as_slice(), args.op.into(), args.namespace).await
+    let status =
+        fetch_status_scoped(remote_addr.as_slice(), args.op.into(), args.namespace).await?;
+    let status = serde_json::to_string_pretty(&status)?;
+    println!("Status:{status}");
+    Ok(())
 }
 
 fn parse_duration(raw: &str) -> Result<Duration, String> {
