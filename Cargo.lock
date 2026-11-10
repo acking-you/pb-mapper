@@ -3226,7 +3226,6 @@ dependencies = [
  "pb-mapper-core",
  "pb-mapper-protocol",
  "quinn-plus",
- "rand 0.10.2",
  "snafu",
  "stun-proto",
  "tokio",
