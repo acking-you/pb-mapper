@@ -1,7 +1,9 @@
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use snafu::ResultExt;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -18,6 +20,7 @@ use pb_mapper_protocol::MessageWriter;
 use pb_mapper_protocol::command::{
     CONTROL_PROTOCOL_V2, LocalServer, MessageSerializer, PbServerRequest,
 };
+use pb_mapper_protocol::direct::DirectEvent;
 
 fn get_ping_message(protocol_version: u16, seq: u64) -> error::Result<Vec<u8>> {
     if protocol_version >= CONTROL_PROTOCOL_V2 {
@@ -40,6 +43,86 @@ pub(crate) enum LocalControlWrite {
         client_id: u32,
         server_generation: u64,
     },
+}
+
+/// The registration's direct-session provider, as its control plane sees it:
+/// one, or none when the registration refuses direct sessions.
+///
+/// Without `p2p` there is never one: this is then empty and every call does
+/// nothing, so the worker and its attempts are written once for both builds.
+#[derive(Clone, Default)]
+pub(super) struct DirectProvider(
+    #[cfg(feature = "p2p")] pub(super) Option<Arc<crate::direct::Provider>>,
+);
+
+#[cfg(feature = "p2p")]
+impl DirectProvider {
+    /// The direct protocol a registration offers the relay: only with a
+    /// provider to serve the sessions it would be offered.
+    pub(super) fn version(&self) -> Option<u16> {
+        self.0
+            .as_ref()
+            .map(|_| pb_mapper_protocol::direct::DIRECT_VERSION)
+    }
+
+    pub(super) fn has_active(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|provider| provider.has_active())
+    }
+
+    /// A control connection registered; the provider replies over it.
+    pub(super) fn connected(&self, write_tx: &mpsc::Sender<LocalControlWrite>) {
+        if let Some(provider) = &self.0 {
+            provider.connected(write_tx.clone());
+        }
+    }
+
+    /// Hand the relay's direct event to the provider. `relay` is the relay
+    /// address this registration is connected to: the one to probe when the
+    /// relay advertises only its STUN port.
+    pub(super) fn event(
+        &self,
+        mut event: Box<DirectEvent>,
+        relay: Option<&SocketAddr>,
+        write_tx: &mpsc::Sender<LocalControlWrite>,
+    ) {
+        if let Some(provider) = &self.0 {
+            if let (DirectEvent::Offer { stun_addr, .. }, Some(relay)) = (&mut *event, relay) {
+                *stun_addr = pb_mapper_protocol::direct::stun_target(*stun_addr, relay.ip());
+            }
+            provider.event(*event, write_tx.clone());
+        }
+    }
+
+    pub(super) async fn stop(&self) {
+        if let Some(provider) = &self.0 {
+            provider.stop().await;
+        }
+    }
+}
+
+#[cfg(not(feature = "p2p"))]
+impl DirectProvider {
+    pub(super) fn version(&self) -> Option<u16> {
+        None
+    }
+
+    pub(super) fn has_active(&self) -> bool {
+        false
+    }
+
+    pub(super) fn connected(&self, _write_tx: &mpsc::Sender<LocalControlWrite>) {}
+
+    pub(super) fn event(
+        &self,
+        _event: Box<DirectEvent>,
+        _relay: Option<&SocketAddr>,
+        _write_tx: &mpsc::Sender<LocalControlWrite>,
+    ) {
+    }
+
+    pub(super) async fn stop(&self) {}
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -156,35 +239,19 @@ pub(super) async fn handle_request(
     diagnostics: &Diagnostics,
     key: Arc<str>,
     conn_id: u32,
-    write_tx: &tokio::sync::mpsc::Sender<LocalControlWrite>,
+    write_tx: &mpsc::Sender<LocalControlWrite>,
     lease_state: &ControlLeaseState,
     stream_tasks: &mut JoinSet<()>,
     spawn: SpawnStream,
     shutdown: &CancellationToken,
     setup_slots: &Arc<tokio::sync::Semaphore>,
-    #[cfg(feature = "p2p")] direct: Option<&Arc<crate::direct::Provider>>,
+    direct: &DirectProvider,
 ) -> error::Result<()> {
     let req = LocalServer::decode(msg).context(DecodeStreamReqSnafu)?;
 
     match req {
         LocalServer::Direct(event) => {
-            #[cfg(feature = "p2p")]
-            if let Some(direct) = direct {
-                let mut event = event;
-                // `remote_addr` is the relay address this registration is
-                // connected to: the one to probe when the relay advertises
-                // only its STUN port.
-                if let (
-                    pb_mapper_protocol::direct::DirectEvent::Offer { stun_addr, .. },
-                    Some(relay),
-                ) = (&mut *event, target.remote_addr.as_slice().first())
-                {
-                    *stun_addr = pb_mapper_protocol::direct::stun_target(*stun_addr, relay.ip());
-                }
-                direct.event(*event, write_tx.clone());
-            }
-            #[cfg(not(feature = "p2p"))]
-            let _ = event;
+            direct.event(event, target.remote_addr.as_slice().first(), write_tx);
         }
         LocalServer::Stream {
             client_id,

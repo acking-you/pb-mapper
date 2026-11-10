@@ -5,12 +5,13 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::attempt::{ServerCliRunConfig, Status, run_server_side_cli_inner};
+use super::control::DirectProvider;
 use super::status::{PoolStatus, WorkerStatus};
 use super::stream::spawn_stream;
 use super::{ServerTunnelOptions, StatusCallback};
 use crate::diagnostics::{Diagnostics, RecoveryFailure};
 use crate::endpoint::RelayEndpoint;
-use crate::recovery::{RecoveryTiming, jitter, transport_backoff};
+use crate::recovery::{REVOKED_DIRECT_RECHECK, RecoveryTiming, jitter, transport_backoff};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{ResolvedAddrs, control_conn_pool_size, registration_reject_backoff};
 use pb_mapper_core::timeout::RetryBackoff;
@@ -107,7 +108,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
         "starting local server control connection pool"
     );
     #[cfg(feature = "p2p")]
-    let direct = allow_direct.then(|| {
+    let direct = DirectProvider(allow_direct.then(|| {
         crate::direct::Provider::spawn::<LocalStream>(
             local_addr.clone(),
             key.clone(),
@@ -117,9 +118,12 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
             diagnostics.clone(),
             policy,
         )
-    });
+    }));
     #[cfg(not(feature = "p2p"))]
-    let _ = (allow_direct, policy);
+    let direct = {
+        let _ = (allow_direct, policy);
+        DirectProvider::default()
+    };
     let config = ServerCliRunConfig {
         local_addr,
         remote_addr,
@@ -129,7 +133,6 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
         worker_index: 0,
         credential,
         idle_timeout,
-        #[cfg(feature = "p2p")]
         direct,
         spawn_stream: spawn_stream::<LocalStream>,
     };
@@ -173,10 +176,7 @@ async fn run_control_pool(
             );
         }
     }
-    #[cfg(feature = "p2p")]
-    if let Some(direct) = config.direct {
-        direct.stop().await;
-    }
+    config.direct.stop().await;
 }
 
 /// One control worker: hold a registration with the relay, reconnecting on
@@ -253,15 +253,9 @@ async fn run_server_side_cli_worker(
         }
         let (retry_interval, retry_count) = match status {
             Status::Cancelled => break 'outer,
-            #[cfg(feature = "p2p")]
-            Status::Rejected(_)
-                if config
-                    .direct
-                    .as_ref()
-                    .is_some_and(|provider| provider.has_active()) =>
-            {
+            Status::Rejected(_) if config.direct.has_active() => {
                 // Revocation closes the control plane, not endpoint-owned direct sessions.
-                (crate::recovery::REVOKED_DIRECT_RECHECK, 0)
+                (REVOKED_DIRECT_RECHECK, 0)
             }
             Status::Rejected(reason) => {
                 diagnostics.failed(RecoveryFailure::Rejected, Duration::ZERO);

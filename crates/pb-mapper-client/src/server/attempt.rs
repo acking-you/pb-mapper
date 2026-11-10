@@ -11,8 +11,8 @@ use tracing::instrument;
 
 use super::ServerTunnelOptions;
 use super::control::{
-    ControlLeaseState, ControlRegistration, LocalControlWrite, handle_ping_interval,
-    handle_request, write_stream_ack,
+    ControlLeaseState, ControlRegistration, DirectProvider, LocalControlWrite,
+    handle_ping_interval, handle_request, write_stream_ack,
 };
 use super::error::{
     DecodeRegisterRespSnafu, EncodeRegisterReqSnafu, ReadRegisterRespSnafu, ReadStreamReqSnafu,
@@ -130,8 +130,7 @@ pub(super) struct ServerCliRunConfig {
     pub(super) worker_index: usize,
     pub(super) credential: Credential,
     pub(super) idle_timeout: Option<Duration>,
-    #[cfg(feature = "p2p")]
-    pub(super) direct: Option<Arc<crate::direct::Provider>>,
+    pub(super) direct: DirectProvider,
     pub(super) spawn_stream: SpawnStream,
 }
 
@@ -187,7 +186,6 @@ pub(super) async fn run_server_side_cli_inner(
         worker_index,
         credential,
         idle_timeout,
-        #[cfg(feature = "p2p")]
         direct,
         spawn_stream,
     } = config;
@@ -263,12 +261,7 @@ pub(super) async fn run_server_side_cli_inner(
     };
     let heartbeat_interval = control_heartbeat_interval();
     let heartbeat_tolerance = control_heartbeat_tolerance();
-    #[cfg(feature = "p2p")]
-    let direct_version = direct
-        .as_ref()
-        .map(|_| pb_mapper_protocol::direct::DIRECT_VERSION);
-    #[cfg(not(feature = "p2p"))]
-    let direct_version = None;
+    let direct_version = direct.version();
     let request = match namespace {
         Some(namespace) => PbConnRequest::RegisterScoped {
             direct: direct_version,
@@ -399,10 +392,7 @@ pub(super) async fn run_server_side_cli_inner(
     tracing::debug!(event = "local_server_setup_latency", elapsed_ms = ms(started.elapsed()), next_timeout_ms = ms(backoff.timing.timeout()), %key, worker_index);
     backoff.reset();
     let (write_tx, write_rx) = mpsc::channel::<LocalControlWrite>(64);
-    #[cfg(feature = "p2p")]
-    if let Some(direct) = &direct {
-        direct.connected(write_tx.clone());
-    }
+    direct.connected(&write_tx);
     let lease_state = Arc::new(ControlLeaseState::new());
     let mut writer_handle =
         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(run_control_writer(
@@ -465,8 +455,7 @@ pub(super) async fn run_server_side_cli_inner(
                         spawn_stream,
                         &shutdown,
                         setup_slots,
-                        #[cfg(feature = "p2p")]
-                        direct.as_ref(),
+                        &direct,
                     )
                     .await
                 );
