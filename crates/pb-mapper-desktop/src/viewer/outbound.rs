@@ -77,6 +77,9 @@ struct Controls {
     revoke: bool,
     release: bool,
     grant: bool,
+    /// Input below this sequence was submitted before the latest barrier,
+    /// which makes it obsolete; input submitted since is not.
+    obsolete_below: u64,
 }
 impl Controls {
     fn push(&mut self, barrier: Barrier) {
@@ -138,12 +141,6 @@ struct InputQueue {
     events: VecDeque<Queued>,
     bytes: usize,
 }
-impl InputQueue {
-    fn clear(&mut self) {
-        self.events.clear();
-        self.bytes = 0;
-    }
-}
 
 /// The write task's next step.
 pub(crate) enum Next {
@@ -181,8 +178,15 @@ impl Outbound {
     }
 
     pub fn barrier(&self, barrier: Barrier) {
-        self.controls.lock().push(barrier);
+        self.push_barrier(barrier);
         self.notify.notify_one();
+    }
+    /// Queue `barrier`, which makes the input submitted so far obsolete. A
+    /// submit that this call happens before stamps a later sequence.
+    fn push_barrier(&self, barrier: Barrier) {
+        let mut controls = self.controls.lock();
+        controls.push(barrier);
+        controls.obsolete_below = self.sequence.load(Ordering::Relaxed);
     }
     pub fn probe(&self, nonce: u64) {
         self.update(|slots| slots.probe = Some(nonce));
@@ -263,7 +267,7 @@ impl Outbound {
         if queue.events.len() + inputs.len() > INPUT_QUEUE
             || queue.bytes + bytes > INPUT_QUEUE_BYTES
         {
-            self.controls.lock().push(Barrier::Revoke);
+            self.push_barrier(Barrier::Revoke);
             on_congestion();
             drop(queue);
             self.notify.notify_one();
@@ -289,10 +293,22 @@ impl Outbound {
     pub fn next(&self, now: Instant, last_write: Instant) -> Next {
         // Never hold `controls` while taking `inputs`: `submit` takes them in
         // the other order.
-        let barrier = self.controls.lock().take();
+        let (barrier, obsolete_below) = {
+            let mut controls = self.controls.lock();
+            (controls.take(), controls.obsolete_below)
+        };
         if let Some(barrier) = barrier {
-            // A barrier makes every queued gesture obsolete.
-            self.inputs.lock().clear();
+            // A barrier makes every gesture queued before it obsolete. The
+            // queue runs in sequence order: a replaced tail move takes a new
+            // sequence.
+            let mut queue = self.inputs.lock();
+            while let Some(head) = queue.events.front()
+                && head.event.sequence < obsolete_below
+            {
+                let len = head.len;
+                queue.events.pop_front();
+                queue.bytes -= len;
+            }
             return Next::Send(barrier);
         }
         {
@@ -444,6 +460,24 @@ mod tests {
             send(&outbound, now),
             ViewerMessage::Control { enabled: true }
         ));
+        assert!(idle(&outbound, now));
+    }
+
+    /// A barrier discards the input queued before it, never input that came
+    /// while it waited to be written.
+    #[test]
+    fn a_barrier_keeps_the_input_that_follows_it() {
+        let outbound = Outbound::new();
+        let now = Instant::now();
+        let fresh = || Ok((1, 1));
+        outbound.submit(&[key(true)], fresh, || {}).unwrap();
+        outbound.barrier(Barrier::Release);
+        outbound.submit(&[key(false)], fresh, || {}).unwrap();
+        assert!(matches!(send(&outbound, now), ViewerMessage::Release {}));
+        let ViewerMessage::Input { event } = send(&outbound, now) else {
+            panic!("the input after the release was discarded");
+        };
+        assert_eq!(event.sequence, 2);
         assert!(idle(&outbound, now));
     }
 
