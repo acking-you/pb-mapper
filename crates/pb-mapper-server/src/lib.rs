@@ -34,8 +34,9 @@ use tracing::instrument;
 use self::admin::handle_admin_request;
 use self::client::handle_client_conn;
 use self::error::{
-    TaskCenterInitRequestTimeoutSnafu, TaskCenterSendListenerSnafu, TaskCenterSendStatusRespSnafu,
-    TaskCenterSendStreamRespToManagerSnafu, TaskCenterSetKeepAliveSnafu,
+    MailboxError, TaskCenterInitRequestTimeoutSnafu, TaskCenterSendListenerSnafu,
+    TaskCenterSendStatusRespSnafu, TaskCenterSendStreamRespToManagerSnafu,
+    TaskCenterSetKeepAliveSnafu,
 };
 use self::server::{LEGACY_SERVER_IDLE_TIMEOUT, ServerRegistration, handle_server_conn};
 use self::status::handle_show_status;
@@ -110,7 +111,7 @@ pub enum ManagerTask {
         server_generation: u64,
     },
     Status {
-        conn_sender: ConnTaskSender,
+        response_sender: tokio::sync::oneshot::Sender<PbConnResponse>,
         status: PbConnStatusReq,
         namespace: u64,
         conn_id: RemoteConnId,
@@ -219,7 +220,6 @@ pub enum ConnTask {
         stream: RelayStream,
         session: ServerHeaderSession,
     },
-    StatusResp(PbConnResponse),
 }
 
 impl ManagerTask {
@@ -576,6 +576,26 @@ use connection::{
     compose_service_key, decrement_namespace_stream_count, handle_conn, handle_listener,
     release_namespace_rate_limit_if_idle, split_scoped_service_key, validate_service_name,
 };
+
+#[cfg(test)]
+mod task_tests {
+    use super::*;
+
+    /// A mailbox slot is as wide as the widest task, and every registered
+    /// connection preallocates its slots. Handing over a stream is the one large
+    /// task routing needs; anything wider is boxed, as `ConnTask::Direct` is.
+    #[test]
+    fn no_conn_task_is_wider_than_a_stream_hand_off() {
+        let stream_hand_off = size_of::<RelayStream>()
+            + size_of::<ServerHeaderSession>()
+            + size_of::<(Option<u16>, RemoteConnId, u64)>();
+        assert!(
+            size_of::<ConnTask>() <= stream_hand_off,
+            "ConnTask is {} bytes, a stream hand-off {stream_hand_off}",
+            size_of::<ConnTask>()
+        );
+    }
+}
 
 #[cfg(test)]
 mod lease_tests {

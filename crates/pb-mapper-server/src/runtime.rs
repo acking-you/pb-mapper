@@ -465,7 +465,7 @@ pub async fn run_server_on_listener_with_options(
                 );
             }
             ManagerTask::Status {
-                conn_sender,
+                response_sender,
                 status,
                 namespace,
                 conn_id,
@@ -527,8 +527,9 @@ pub async fn run_server_on_listener_with_options(
                     }
                 };
                 snafu_error_get_or_continue!(
-                    conn_sender
-                        .try_send(ConnTask::StatusResp(resp))
+                    response_sender
+                        .send(resp)
+                        .map_err(|_| MailboxError::Closed)
                         .context(TaskCenterSendStatusRespSnafu { conn_id })
                 );
             }

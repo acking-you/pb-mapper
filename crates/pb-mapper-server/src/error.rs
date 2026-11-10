@@ -54,7 +54,6 @@ pub enum Error {
     #[snafu(display("send server status response error with `conn_id:{conn_id}`"))]
     TaskCenterSendStatusResp {
         conn_id: RemoteConnId,
-        #[snafu(source(from(kanal::SendTimeoutError<ConnTask>, MailboxError::from)))]
         source: MailboxError,
     },
     #[snafu(display("send server register response error with `key:{key}` `conn_id:{conn_id}`"))]
@@ -255,10 +254,10 @@ pub enum Error {
     },
     #[snafu(display("send status manager task error"))]
     StatusSendManagerTask { source: ManagerClosed },
-    #[snafu(display("receive `ConnTask::StatusResp` error"))]
-    StatusRecvConnTask { source: kanal::ReceiveError },
-    #[snafu(display("we expected `ConnTask::StatusResp`"))]
-    StatusConnTaskNotMatch,
+    #[snafu(display("receive status response error"))]
+    StatusRecvResp {
+        source: tokio::sync::oneshot::error::RecvError,
+    },
     #[snafu(display("encode status response error"))]
     StatusEncodeResp { source: common::error::Error },
     #[snafu(display("write status response error"))]

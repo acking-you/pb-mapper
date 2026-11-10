@@ -3,10 +3,10 @@ use snafu::ResultExt;
 use tracing::{Instrument, info_span};
 
 use super::error::{
-    Result, StatusConnTaskNotMatchSnafu, StatusCreateHeaderToolSnafu, StatusEncodeRespSnafu,
-    StatusRecvConnTaskSnafu, StatusSendManagerTaskSnafu, StatusWriteRespSnafu,
+    Result, StatusCreateHeaderToolSnafu, StatusEncodeRespSnafu, StatusRecvRespSnafu,
+    StatusSendManagerTaskSnafu, StatusWriteRespSnafu,
 };
-use super::{ConnTask, ManagerTask, ManagerTaskSender};
+use super::{ManagerTask, ManagerTaskSender};
 use crate::manager::TrySendError;
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::MessageWriter;
@@ -96,9 +96,9 @@ pub async fn handle_show_status(
     let info_span = info_span!("show status", "{status:?},{conn_id:?}");
     let mut guard = StatusConnGuard::new(conn_id, manager_sender.clone());
     let result = async {
-        let (tx, rx) = kanal::bounded_async(5);
+        let (response_sender, response) = tokio::sync::oneshot::channel();
         let req = ManagerTask::Status {
-            conn_sender: tx,
+            response_sender,
             status,
             namespace,
             conn_id,
@@ -108,19 +108,15 @@ pub async fn handle_show_status(
             .await
             .context(StatusSendManagerTaskSnafu)?;
 
-        let resp = rx.recv().await.context(StatusRecvConnTaskSnafu)?;
-        if let ConnTask::StatusResp(resp) = resp {
-            let msg = resp.encode().context(StatusEncodeRespSnafu)?;
-            let mut msg_writer = session
-                .response_writer(&mut conn)
-                .context(StatusCreateHeaderToolSnafu { tool: "writer" })?;
-            msg_writer
-                .write_msg(&msg)
-                .await
-                .context(StatusWriteRespSnafu)
-        } else {
-            StatusConnTaskNotMatchSnafu {}.fail()
-        }
+        let resp = response.await.context(StatusRecvRespSnafu)?;
+        let msg = resp.encode().context(StatusEncodeRespSnafu)?;
+        let mut msg_writer = session
+            .response_writer(&mut conn)
+            .context(StatusCreateHeaderToolSnafu { tool: "writer" })?;
+        msg_writer
+            .write_msg(&msg)
+            .await
+            .context(StatusWriteRespSnafu)
     }
     .instrument(info_span)
     .await;
