@@ -5,9 +5,12 @@
 use std::time::Duration;
 
 use pb_mapper_core::config::{
-    PB_MAPPER_KEEP_ALIVE, PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX,
+    DEFAULT_NEW_STREAMS_PER_SECOND, PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT, PB_MAPPER_KEEP_ALIVE,
+    PB_MAPPER_NEW_STREAMS_PER_SECOND, PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX,
     PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL,
-    keep_alive_from_env, registration_reject_backoff, server_lease_sweep_interval,
+    PB_MAPPER_TUNNEL_IDLE_TIMEOUT, half_close_idle_timeout, keep_alive_from_env,
+    new_streams_per_second, registration_reject_backoff, server_lease_sweep_interval,
+    tunnel_idle_timeout,
 };
 
 fn main() {
@@ -51,5 +54,18 @@ fn main() {
         }
         std::env::set_var(PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL, "0s");
         assert_eq!(server_lease_sweep_interval(), sweep_default);
+
+        // Zero turns the tunnel idle timeouts off, where it means the default above.
+        std::env::set_var(PB_MAPPER_TUNNEL_IDLE_TIMEOUT, "0");
+        std::env::set_var(PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT, "0s");
+        assert!(tunnel_idle_timeout().is_zero());
+        assert!(half_close_idle_timeout().is_zero());
+
+        // A positive integer as written, or the default.
+        let default = DEFAULT_NEW_STREAMS_PER_SECOND as usize;
+        for (value, expected) in [("250", 250), ("0", default), (" 5", default)] {
+            std::env::set_var(PB_MAPPER_NEW_STREAMS_PER_SECOND, value);
+            assert_eq!(new_streams_per_second().get(), expected, "{value:?}");
+        }
     }
 }
