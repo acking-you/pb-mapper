@@ -229,29 +229,33 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), CtlError> {
 pub(super) fn revoke(directory: &Path) -> Result<(), CtlError> {
     file(directory).revoke().map_err(err)
 }
-/// Current-user DPAPI. `entropy` and `description` belong to the data: the
-/// same entropy must be given to decrypt it again.
-#[cfg(windows)]
-pub(crate) fn protect(
+/// Current-user DPAPI sealing `bytes`. `entropy` and `description` belong
+/// to the data: the same entropy must be given to open it again.
+pub(crate) fn dpapi_seal(
     bytes: &[u8],
-    encrypt: bool,
     entropy: &'static [u8],
     description: &'static str,
 ) -> Result<Vec<u8>, CtlError> {
-    let dpapi = Dpapi {
+    dpapi(entropy, description).seal(bytes).map_err(err)
+}
+/// Current-user DPAPI opening what `dpapi_seal` sealed with `entropy`.
+pub(crate) fn dpapi_open(
+    sealed: &[u8],
+    entropy: &'static [u8],
+    description: &'static str,
+) -> Result<Vec<u8>, CtlError> {
+    dpapi(entropy, description).open(sealed).map_err(err)
+}
+#[cfg(windows)]
+fn dpapi(entropy: &'static [u8], description: &'static str) -> Dpapi {
+    Dpapi {
         entropy,
         description,
-    };
-    if encrypt {
-        dpapi.seal(bytes)
-    } else {
-        dpapi.open(bytes)
     }
-    .map_err(err)
 }
 #[cfg(not(windows))]
-pub(crate) fn protect(_: &[u8], _: bool, _: &[u8], _: &str) -> Result<Vec<u8>, CtlError> {
-    Err(err("Windows DPAPI is not available on this platform"))
+fn dpapi(_: &'static [u8], _: &'static str) -> Dpapi {
+    Dpapi
 }
 
 #[cfg(all(test, windows))]
@@ -288,9 +292,8 @@ mod tests {
             "settings": settings, "identity": identity.encode_secret().unwrap(),
         }))
         .unwrap();
-        let sealed = protect(
+        let sealed = dpapi_seal(
             &written,
-            true,
             b"pb-mapper/desktop-trust/v1",
             "pb-mapper desktop trust",
         )
@@ -420,9 +423,8 @@ mod tests {
         save(&root, &pending).unwrap();
         // Data protected for another purpose never decrypts as trust.
         assert!(
-            protect(
+            dpapi_open(
                 &std::fs::read(path(&root)).unwrap(),
-                false,
                 b"pb-mapper remembered computers",
                 "pb-mapper desktop trust"
             )

@@ -12,7 +12,7 @@
 use crate::{
     desktop::{
         Connected,
-        trust::{protect, write_private},
+        trust::{dpapi_open, dpapi_seal, write_private},
         valid_max_fps,
     },
     error::CtlError,
@@ -265,8 +265,7 @@ impl Vault {
 
     fn seal(&self, mut plain: Vec<u8>) -> Result<Vec<u8>, CtlError> {
         match &self.protection {
-            Protection::Dpapi => protect(&plain, true, ENTROPY, DESCRIPTION)
-                .map_err(|failure| CtlError::io(failure.to_string())),
+            Protection::Dpapi => dpapi_seal(&plain, ENTROPY, DESCRIPTION),
             Protection::Sealed(key) => {
                 let failed = || CtlError::io("the remembered computers could not be encrypted");
                 let mut nonce = [0; NONCE_LEN];
@@ -285,7 +284,7 @@ impl Vault {
     fn open(&self, mut sealed: Vec<u8>) -> Result<Vec<u8>, CtlError> {
         match &self.protection {
             Protection::Dpapi => {
-                protect(&sealed, false, ENTROPY, DESCRIPTION).map_err(|_| unreadable())
+                dpapi_open(&sealed, ENTROPY, DESCRIPTION).map_err(|_| unreadable())
             }
             Protection::Sealed(key) => {
                 if sealed.len() < NONCE_LEN + AES_256_GCM.tag_len() {
