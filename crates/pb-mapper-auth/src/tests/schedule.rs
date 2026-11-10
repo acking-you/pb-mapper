@@ -154,6 +154,65 @@ fn a_restored_key_ends_at_its_persisted_deadline() {
     assert_eq!(state_of(&inner, key_id), SlotState::Expired);
 }
 
+/// How many `temporary_key_expired` events `run` logs on this thread.
+fn expiry_events(run: impl FnOnce()) -> usize {
+    use std::sync::atomic::AtomicUsize;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+
+    struct Count(Arc<AtomicUsize>);
+    struct IsExpiry(bool);
+    impl Visit for IsExpiry {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0 |= field.name() == "event" && value == "temporary_key_expired";
+        }
+        fn record_debug(&mut self, _: &Field, _: &dyn fmt::Debug) {}
+    }
+    impl tracing::Subscriber for Count {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visit = IsExpiry(false);
+            event.record(&mut visit);
+            if visit.0 {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    let count = Arc::new(AtomicUsize::new(0));
+    tracing::subscriber::with_default(Count(count.clone()), run);
+    count.load(Ordering::Relaxed)
+}
+
+/// A key is logged as expired only when it ran out: not when a rotation
+/// ended it, nor when the actor stopped.
+#[test]
+fn only_a_key_that_ran_out_is_logged_as_expired() {
+    let (inner, mut leases) = schedule();
+    issue(&inner, &mut leases, 0, T + 10);
+    let (_, rotated) = issue(&inner, &mut leases, 1, T + 3600);
+    assert_eq!(expiry_events(|| leases.tick(T + 10)), 1);
+
+    // What `actor_rotate_root` does to the keys of the old root.
+    assert_eq!(expiry_events(|| leases.wipe(T + 11)), 0);
+    assert!(rotated.is_cancelled());
+
+    // What the actor does when it stops: its `stop`, then its schedule drops.
+    let (_, stopped) = issue(&inner, &mut leases, 2, T + 3600);
+    cancel_all_temporary_leases(&inner);
+    assert_eq!(expiry_events(|| drop(leases)), 0);
+    assert!(stopped.is_cancelled());
+}
+
 /// A dead row above the configured capacity keeps its own tombstone time
 /// across a restart: one that died long before is recycled at once, not a
 /// retention window after the restart.

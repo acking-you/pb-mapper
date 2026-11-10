@@ -401,13 +401,17 @@ fn retire(inner: &Arc<AuthStateInner>, key_id: KeyId, lease: &Arc<AuthLease>) {
         .cold_mut()
         .entry(key_id)
         .and_modify(|cold| cold.tombstoned_at = tombstoned_at);
-    tracing::info!(
-        event = "temporary_key_expired",
-        auth_stage = "expiry",
-        key_id = key_id.as_u64(),
-        expires_at = tombstoned_at,
-        "temporary key expired and active work was cancelled"
-    );
+    // A rotation or a stopping actor ends every key through here too, having
+    // cancelled it first; only a key that ran out is reported as expired.
+    if lease.ran_out() {
+        tracing::info!(
+            event = "temporary_key_expired",
+            auth_stage = "expiry",
+            key_id = key_id.as_u64(),
+            expires_at = tombstoned_at,
+            "temporary key expired and active work was cancelled"
+        );
+    }
 }
 
 /// Frees a dead key's row and forgets it.

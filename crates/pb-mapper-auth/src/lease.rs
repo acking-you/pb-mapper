@@ -75,6 +75,15 @@ impl AuthLease {
         self.cancellation.is_cancelled()
     }
 
+    /// Whether running out is what ended this lease, rather than a revoke, a
+    /// rotation or the relay stopping.
+    pub(crate) fn ran_out(&self) -> bool {
+        match self.cancel_reason() {
+            CancelReason::Expired => true,
+            CancelReason::None | CancelReason::Revoked | CancelReason::Rotated => false,
+        }
+    }
+
     /// Moves the deadline `ensure_active` checks, for a renewal.
     pub(crate) fn set_expires_at(&self, expires_at: u64) {
         self.expires_at.store(expires_at, Ordering::Release);
