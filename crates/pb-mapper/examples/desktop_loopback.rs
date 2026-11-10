@@ -222,7 +222,7 @@ async fn main() -> Outcome {
     let presented = renderer.join().map_err(|_| "the renderer panicked")?;
     host.stop().await?;
     host_log.await?;
-    relay.stop();
+    drop(relay);
     println!("desktop_loopback: ok, {presented} frames presented");
     Ok(())
 }
@@ -318,6 +318,6 @@ async fn serve_until_ctrl_c(relay: LocalRelay, host: Host, panel: &Panel) -> Out
         }
     }
     host.stop().await?;
-    relay.stop();
+    drop(relay);
     Ok(())
 }

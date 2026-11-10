@@ -19,11 +19,13 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// A relay on loopback, with direct coordination on the same port, as
-/// `pb-mapper server` runs one, under a key made for this run.
+/// `pb-mapper server` runs one, under a key made for this run. Dropping it
+/// stops it and removes its state, on every way out of an example.
 pub struct LocalRelay {
     pub addr: SocketAddr,
     pub key: String,
     shutdown: CancellationToken,
+    server: tokio::task::JoinHandle<std::io::Result<()>>,
     state_dir: PathBuf,
 }
 impl LocalRelay {
@@ -41,7 +43,7 @@ impl LocalRelay {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let shutdown = CancellationToken::new();
-        tokio::spawn(pb_mapper_server::run_server_on_listener_with_direct(
+        let server = tokio::spawn(pb_mapper_server::run_server_on_listener_with_direct(
             listener,
             shutdown.clone(),
             None,
@@ -56,6 +58,7 @@ impl LocalRelay {
             addr,
             key,
             shutdown,
+            server,
             state_dir,
         })
     }
@@ -67,9 +70,12 @@ impl LocalRelay {
             namespace: None,
         })
     }
-    pub fn stop(self) {
+}
+impl Drop for LocalRelay {
+    fn drop(&mut self) {
         self.shutdown.cancel();
-        let _ = std::fs::remove_dir_all(self.state_dir);
+        self.server.abort();
+        let _ = std::fs::remove_dir_all(&self.state_dir);
     }
 }
 

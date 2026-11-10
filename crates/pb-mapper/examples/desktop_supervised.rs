@@ -128,7 +128,7 @@ async fn main() -> Outcome {
         renderer.join().map_err(|_| "the renderer panicked")?;
     }
     println!("{} the supervisor gave up after {viewers} viewers", at());
-    relay.stop();
+    drop(relay);
     if viewers != 4 {
         return Err(format!("expected 4 viewers, saw {viewers}").into());
     }
