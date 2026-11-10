@@ -150,7 +150,19 @@ impl Reconnect {
                     drop_h265: true,
                 })
             }
-            _ => None,
+            // H.264, or H.265 already dropped.
+            ViewerReason::DecoderFailed
+            | ViewerReason::HostStopped
+            | ViewerReason::HostEnded
+            | ViewerReason::Revoked
+            | ViewerReason::SecureDesktop
+            | ViewerReason::HelperUnavailable
+            | ViewerReason::DisplayLost
+            | ViewerReason::InputFailed
+            | ViewerReason::ControlDenied
+            | ViewerReason::InputCongestion
+            | ViewerReason::StalePresentation
+            | ViewerReason::DisplayChanging => None,
         }
     }
     /// After a connect failed at `now`: when to try again, or `None` to give
@@ -158,7 +170,12 @@ impl Reconnect {
     pub fn refused(&mut self, failure: &ConnectError, now: Instant) -> Option<Retry> {
         match failure {
             ConnectError::Transport(_) | ConnectError::Busy => self.backoff(now),
-            _ => None,
+            ConnectError::IdentityChanged
+            | ConnectError::VersionMismatch
+            | ConnectError::Denied
+            | ConnectError::InvalidRequest
+            | ConnectError::Cancelled
+            | ConnectError::Protocol(_) => None,
         }
     }
     fn backoff(&mut self, now: Instant) -> Option<Retry> {
