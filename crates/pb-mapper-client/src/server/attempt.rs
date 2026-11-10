@@ -403,7 +403,7 @@ pub(super) async fn run_server_side_cli_inner(
     if let Some(direct) = &direct {
         direct.connected(write_tx.clone());
     }
-    let lease_state = Arc::new(tokio::sync::Mutex::new(ControlLeaseState::new()));
+    let lease_state = Arc::new(ControlLeaseState::new());
     let mut writer_handle =
         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(run_control_writer(
             session,
@@ -442,7 +442,7 @@ pub(super) async fn run_server_side_cli_inner(
                 };
                 remote_addr.protocol_succeeded();
                 diagnostics.heard();
-                lease_state.lock().await.record_rx();
+                lease_state.record_rx();
                 control_deadline = tokio::time::Instant::now() + heartbeat_tolerance + suspect_grace;
                 snafu_error_get_or_continue!(
                     handle_request(
@@ -460,7 +460,7 @@ pub(super) async fn run_server_side_cli_inner(
                         key.clone(),
                         registration.conn_id,
                         &write_tx,
-                        lease_state.clone(),
+                        &lease_state,
                         stream_tasks,
                         spawn_stream,
                         &shutdown,
@@ -497,7 +497,7 @@ pub(super) async fn run_server_side_cli_inner(
                     break Status::SendPing;
                 }
 
-                let last_rx_age = lease_state.lock().await.last_rx_age();
+                let last_rx_age = lease_state.last_rx_age();
                 if registration.protocol_version >= CONTROL_PROTOCOL_V2
                     && last_rx_age >= heartbeat_tolerance
                     && probes.is_empty()
@@ -546,7 +546,7 @@ pub(super) async fn run_server_side_cli_inner(
             }
             Some(probe_result) = probes.join_next() => {
                 let probe_result = probe_result.unwrap_or_else(|error| RegistrationProbeResult::Failed(error.to_string()));
-                let last_rx_age = lease_state.lock().await.last_rx_age();
+                let last_rx_age = lease_state.last_rx_age();
                 match probe_result {
                     RegistrationProbeResult::Present => {
                         tracing::debug!(
@@ -623,7 +623,7 @@ async fn run_control_writer(
     mut write_rx: mpsc::Receiver<LocalControlWrite>,
     key: Arc<str>,
     registration: ControlRegistration,
-    lease: Arc<tokio::sync::Mutex<ControlLeaseState>>,
+    lease: Arc<ControlLeaseState>,
     heartbeat_interval: Duration,
 ) -> Status {
     let mut msg_writer = match session.continuation_writer(&mut writer) {
@@ -653,7 +653,7 @@ async fn run_control_writer(
             LocalControlWrite::Ping { seq } => {
                 // Timed from the write, not the tick: the round trip
                 // leaves out this queue.
-                lease.lock().await.ping_sent(seq);
+                lease.ping_sent(seq);
                 snafu_error_get_or_return!(
                     handle_ping_interval(&mut msg_writer, key.clone(), registration, seq).await,
                     "[send ping]",

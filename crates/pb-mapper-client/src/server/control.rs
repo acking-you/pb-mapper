@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use snafu::ResultExt;
@@ -50,8 +50,16 @@ pub(super) struct ControlRegistration {
     pub(super) lease_ttl_ms: u64,
 }
 
+/// When the relay was last heard on a control connection, and the heartbeat
+/// awaiting its pong: shared by the control loop and its writer.
+///
+/// Every call locks for the call alone, so no lock is held across an
+/// `.await`.
 #[derive(Debug)]
-pub(super) struct ControlLeaseState {
+pub(super) struct ControlLeaseState(Mutex<LeaseTimes>);
+
+#[derive(Debug)]
+struct LeaseTimes {
     last_rx_at: Instant,
     last_pong_at: Option<Instant>,
     /// The latest heartbeat written, by sequence number, and when.
@@ -60,14 +68,42 @@ pub(super) struct ControlLeaseState {
 
 impl ControlLeaseState {
     pub(super) fn new() -> Self {
-        Self {
+        Self(Mutex::new(LeaseTimes {
             last_rx_at: Instant::now(),
             last_pong_at: None,
             ping: None,
-        }
+        }))
     }
 
-    pub(super) fn record_rx(&mut self) {
+    fn times(&self) -> MutexGuard<'_, LeaseTimes> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(super) fn record_rx(&self) {
+        self.times().record_rx();
+    }
+
+    fn record_pong(&self) {
+        self.times().record_pong();
+    }
+
+    pub(super) fn ping_sent(&self, seq: u64) {
+        self.times().ping_sent(seq);
+    }
+
+    /// The pong to heartbeat `seq`: its round trip, when it answers the
+    /// latest heartbeat written.
+    fn record_pong_to(&self, seq: u64) -> Option<Duration> {
+        self.times().record_pong_to(seq)
+    }
+
+    pub(super) fn last_rx_age(&self) -> Duration {
+        self.times().last_rx_age()
+    }
+}
+
+impl LeaseTimes {
+    fn record_rx(&mut self) {
         self.last_rx_at = Instant::now();
     }
 
@@ -77,19 +113,17 @@ impl ControlLeaseState {
         self.last_pong_at = Some(now);
     }
 
-    pub(super) fn ping_sent(&mut self, seq: u64) {
+    fn ping_sent(&mut self, seq: u64) {
         self.ping = Some((seq, Instant::now()));
     }
 
-    /// The pong to heartbeat `seq`: its round trip, when it answers the
-    /// latest heartbeat written.
     fn record_pong_to(&mut self, seq: u64) -> Option<Duration> {
         self.record_pong();
         let (_, at) = self.ping.take_if(|(sent, _)| *sent == seq)?;
         Some(at.elapsed())
     }
 
-    pub(super) fn last_rx_age(&self) -> Duration {
+    fn last_rx_age(&self) -> Duration {
         self.last_rx_at.elapsed()
     }
 }
@@ -123,7 +157,7 @@ pub(super) async fn handle_request(
     key: Arc<str>,
     conn_id: u32,
     write_tx: &tokio::sync::mpsc::Sender<LocalControlWrite>,
-    lease_state: Arc<tokio::sync::Mutex<ControlLeaseState>>,
+    lease_state: &ControlLeaseState,
     stream_tasks: &mut JoinSet<()>,
     spawn: SpawnStream,
     shutdown: &CancellationToken,
@@ -192,7 +226,7 @@ pub(super) async fn handle_request(
         }
         // got pong response
         LocalServer::Pong => {
-            lease_state.lock().await.record_pong();
+            lease_state.record_pong();
             tracing::debug!(
                 event = "local_server_pong_received",
                 key = %key,
@@ -201,7 +235,7 @@ pub(super) async fn handle_request(
             );
         }
         LocalServer::PongV2 { seq } => {
-            let rtt = lease_state.lock().await.record_pong_to(seq);
+            let rtt = lease_state.record_pong_to(seq);
             if let Some(rtt) = rtt {
                 diagnostics.relay_rtt(&relay_endpoint, rtt);
             }
