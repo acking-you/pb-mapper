@@ -55,9 +55,23 @@ pub(super) enum Arrival {
     },
 }
 
+/// One address family's UDP socket, and the QUIC endpoint on it.
+struct Transport {
+    socket: Socket,
+    endpoint: quinn::Endpoint,
+}
+
+/// The transport of `transports` for IPv4, or for IPv6: there is at most
+/// one of each.
+fn transport_for(transports: &[Transport], ipv4: bool) -> Option<&Transport> {
+    transports
+        .iter()
+        .find(|transport| transport.socket.local_addr().is_ipv4() == ipv4)
+}
+
 pub(super) struct Network {
     pub identity: Identity,
-    transports: Vec<(Socket, quinn::Endpoint)>,
+    transports: Vec<Transport>,
     /// Accepted connections on either carrier, in one queue.
     incoming: Mutex<mpsc::Receiver<Arrival>>,
     arrivals: mpsc::Sender<Arrival>,
@@ -139,19 +153,14 @@ impl Network {
                     accept,
                 )));
             }
-            transports.push((socket, endpoint));
+            transports.push(Transport { socket, endpoint });
         }
         let network = crate::network::NetworkHints::shared();
         #[cfg(feature = "port-mapping")]
         let mapper = (port_mapping != crate::sdk::PortMapping::Off)
             .then(|| {
-                transports.iter().find_map(|(socket, _)| {
-                    socket
-                        .local_addr()
-                        .ok()
-                        .filter(SocketAddr::is_ipv4)
-                        .and_then(|addr| std::num::NonZeroU16::new(addr.port()))
-                })
+                transport_for(&transports, true)
+                    .and_then(|v4| std::num::NonZeroU16::new(v4.socket.local_addr().port()))
             })
             .flatten()
             .map(|port| Mapper {
@@ -201,7 +210,7 @@ impl Network {
                 let udp: Vec<_> = self
                     .transports
                     .iter()
-                    .filter_map(|(socket, _)| socket.local_addr().ok())
+                    .map(|transport| transport.socket.local_addr())
                     .collect();
                 tcp::Acceptor::open(&udp, loopback, &self.identity, self.arrivals.clone())
                     .inspect_err(|error| tracing::debug!(%error, "direct TCP unavailable"))
@@ -216,7 +225,7 @@ impl Network {
     }
     #[cfg(test)]
     pub fn block_quic(&self) {
-        for (socket, _) in &self.transports {
+        for Transport { socket, .. } in &self.transports {
             socket.block_quic();
         }
     }
@@ -233,13 +242,13 @@ impl Network {
         }
         // One wake for the session, whichever socket hears from the peer.
         let wake = Arc::new(Notify::new());
-        for (socket, _) in &self.transports {
+        for Transport { socket, .. } in &self.transports {
             socket.authorize(grant.id, grant.secret, deadline, wake.clone());
         }
         Ok(())
     }
     pub fn forget(&self, id: &SessionId) {
-        for (socket, _) in &self.transports {
+        for Transport { socket, .. } in &self.transports {
             socket.forget(id);
         }
     }
@@ -248,7 +257,7 @@ impl Network {
     pub fn wake(&self, id: &SessionId) -> Arc<Notify> {
         self.transports
             .iter()
-            .find_map(|(socket, _)| socket.wake(id))
+            .find_map(|transport| transport.socket.wake(id))
             .unwrap_or_default()
     }
     /// Probe `candidates` in order, on the socket of each one's family, and
@@ -256,34 +265,32 @@ impl Network {
     pub fn probe(&self, id: SessionId, candidates: &[SocketAddr]) -> Vec<SocketAddr> {
         self.transports
             .iter()
-            .flat_map(|(socket, _)| socket.probe(id, candidates))
+            .flat_map(|transport| transport.socket.probe(id, candidates))
             .collect()
     }
     /// The paths that have answered so far, on both families, and when.
     pub fn learned(&self, id: &SessionId) -> Vec<(SocketAddr, Instant)> {
         self.transports
             .iter()
-            .flat_map(|(socket, _)| socket.learned(id))
+            .flat_map(|transport| transport.socket.learned(id))
             .collect()
     }
     /// How many of `candidates` a socket of this end can probe.
     pub fn reachable(&self, candidates: &[SocketAddr]) -> u32 {
         candidates
             .iter()
-            .filter(|addr| {
-                self.transports.iter().any(|(socket, _)| {
-                    socket
-                        .local_addr()
-                        .is_ok_and(|local| local.is_ipv4() == addr.is_ipv4())
-                })
-            })
+            .filter(|addr| self.transport_for(addr.is_ipv4()).is_some())
             .count() as u32
+    }
+    /// This end's transport for IPv4, or for IPv6, if it has one.
+    fn transport_for(&self, ipv4: bool) -> Option<&Transport> {
+        transport_for(&self.transports, ipv4)
     }
     pub async fn accept(&self) -> Option<Arrival> {
         self.incoming.lock().await.recv().await
     }
     pub async fn shutdown(&self) {
-        for (_, endpoint) in &self.transports {
+        for Transport { endpoint, .. } in &self.transports {
             endpoint.close(0u32.into(), b"local tunnel stopped");
         }
         // Keep the endpoints, and so their drivers, alive while Quinn sends and
@@ -291,7 +298,7 @@ impl Network {
         // peer waiting for its idle timeout. Bound draining so an unreachable
         // peer cannot prevent a local stop.
         let _ = tokio::time::timeout(CLOSE_DRAIN, async {
-            for (_, endpoint) in &self.transports {
+            for Transport { endpoint, .. } in &self.transports {
                 endpoint.wait_idle().await;
             }
         })
@@ -339,8 +346,8 @@ async fn handshake(incoming: quinn::Incoming, arrivals: mpsc::Sender<Arrival>) {
 
 impl Drop for Network {
     fn drop(&mut self) {
-        for (_, ep) in &self.transports {
-            ep.close(0u32.into(), b"local tunnel stopped");
+        for Transport { endpoint, .. } in &self.transports {
+            endpoint.close(0u32.into(), b"local tunnel stopped");
         }
         self.acceptors.clear();
     }

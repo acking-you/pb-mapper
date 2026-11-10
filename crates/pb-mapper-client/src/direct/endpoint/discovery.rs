@@ -56,21 +56,16 @@ impl Network {
         let mut reflexive = None;
         let mut stun_outcome = StunOutcome::Unavailable;
         let started = Instant::now();
-        for (socket, _) in &self.transports {
-            if socket
-                .local_addr()
-                .is_ok_and(|a| a.is_ipv4() == stun.is_ipv4())
-            {
-                match socket.mapped_addr(stun).await {
-                    Ok(addr) => {
-                        reflexive = Some(addr);
-                        stun_outcome = StunOutcome::Ok;
-                    }
-                    Err(error) => {
-                        tracing::debug!(%error, "STUN discovery unavailable");
-                        if error.kind() == io::ErrorKind::TimedOut {
-                            stun_outcome = StunOutcome::Timeout;
-                        }
+        if let Some(transport) = self.transport_for(stun.is_ipv4()) {
+            match transport.socket.mapped_addr(stun).await {
+                Ok(addr) => {
+                    reflexive = Some(addr);
+                    stun_outcome = StunOutcome::Ok;
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "STUN discovery unavailable");
+                    if error.kind() == io::ErrorKind::TimedOut {
+                        stun_outcome = StunOutcome::Timeout;
                     }
                 }
             }
@@ -87,16 +82,12 @@ impl Network {
                 if ip.is_loopback() && !stun.ip().is_loopback() {
                     continue;
                 }
-                for (socket, _) in &self.transports {
-                    if let Ok(local) = socket.local_addr()
-                        && local.is_ipv4() == ip.is_ipv4()
-                    {
-                        hosts.push(Host {
-                            addr: SocketAddr::new(ip, local.port()),
-                            tier: interface.tier,
-                            interface: index,
-                        });
-                    }
+                if let Some(transport) = self.transport_for(ip.is_ipv4()) {
+                    hosts.push(Host {
+                        addr: SocketAddr::new(ip, transport.socket.local_addr().port()),
+                        tier: interface.tier,
+                        interface: index,
+                    });
                 }
             }
         }

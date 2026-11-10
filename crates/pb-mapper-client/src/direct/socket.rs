@@ -77,6 +77,8 @@ struct Control {
 #[derive(Clone)]
 pub(super) struct Socket {
     inner: Arc<tokio::net::UdpSocket>,
+    /// The address it is bound to, which does not change.
+    local: SocketAddr,
     control: Arc<Control>,
     #[cfg(test)]
     block_quic: Arc<std::sync::atomic::AtomicBool>,
@@ -258,6 +260,7 @@ fn is_quic(segment: &[u8]) -> bool {
 impl Socket {
     pub fn bind(addr: SocketAddr) -> io::Result<(Self, Demux)> {
         let udp = std::net::UdpSocket::bind(addr)?;
+        let local = udp.local_addr()?;
         udp.set_nonblocking(true)?;
         // Share one socket and one reactor registration. Quinn owns its only
         // reader; control sends use Tokio's independent write waiters.
@@ -273,6 +276,7 @@ impl Socket {
         });
         let socket = Self {
             inner: control_socket,
+            local,
             control,
             #[cfg(test)]
             block_quic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -288,8 +292,8 @@ impl Socket {
         self.block_quic
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.inner.local_addr()
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local
     }
     pub fn authorize(
         &self,
@@ -369,12 +373,12 @@ impl Socket {
                 std::mem::take(&mut probe.triggered),
             )
         };
-        let family = self.local_addr().map(|local| local.is_ipv4());
+        let ipv4 = self.local.is_ipv4();
         let mut refused = Vec::new();
         for addr in triggered
             .iter()
             .chain(candidates.iter().filter(|addr| !triggered.contains(addr)))
-            .filter(|a| valid_candidate(a) && family.as_ref().is_ok_and(|v4| *v4 == a.is_ipv4()))
+            .filter(|a| valid_candidate(a) && a.is_ipv4() == ipv4)
             .take(2 * MAX_CANDIDATES)
         {
             // Probes are retried every 120 ms. A congested or unreachable
@@ -390,10 +394,10 @@ impl Socket {
     /// STUN Binding over this socket. Responses arrive through the Quinn
     /// endpoint driver, which runs for as long as the endpoint exists.
     pub async fn mapped_addr(&self, server: SocketAddr) -> io::Result<SocketAddr> {
-        if self.local_addr()?.is_ipv4() != server.is_ipv4() {
+        if self.local.is_ipv4() != server.is_ipv4() {
             return Err(io::Error::other("STUN address family mismatch"));
         }
-        let mut agent = StunAgent::builder(TransportType::Udp, self.local_addr()?).build();
+        let mut agent = StunAgent::builder(TransportType::Udp, self.local).build();
         let mut message = Message::builder_request(BINDING, MessageWriteVec::new());
         message.add_fingerprint().map_err(io::Error::other)?;
         let bytes = message.finish();
@@ -517,7 +521,7 @@ mod tests {
             let mut buffer = [0; 1500];
             // Only the provider knows a working candidate. Its source address
             // was not advertised to the consumer (as with a changed NAT port).
-            provider.probe(id, &[consumer.local_addr().unwrap()]);
+            provider.probe(id, &[consumer.local_addr()]);
             let (len, source) = consumer.inner.recv_from(&mut buffer).await.unwrap();
             consumer.handle_control(&buffer[..len], source);
             // The session hears at once that a source is owed a challenge.
@@ -533,7 +537,7 @@ mod tests {
             consumer.handle_control(&buffer[..len], source);
             wake.notified().await;
             let learned: Vec<_> = consumer.learned(&id).into_iter().map(|(a, _)| a).collect();
-            assert_eq!(learned, [provider.local_addr().unwrap()]);
+            assert_eq!(learned, [provider.local_addr()]);
         })
         .await
         .unwrap();
@@ -601,7 +605,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(3), async {
             let (socket, mut quic) = Socket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
             let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-            let local = socket.local_addr().unwrap();
+            let local = socket.local_addr();
             let peer_addr = peer.local_addr().unwrap();
             let mut buffer = [0; 1500];
             let mut meta = [RecvMeta::default()];

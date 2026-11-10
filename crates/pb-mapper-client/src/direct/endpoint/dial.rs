@@ -156,13 +156,11 @@ impl Network {
                     continue;
                 }
                 tried.push(addr);
-                let endpoint = self.transports.iter().find(|(socket, _)| {
-                    socket
-                        .local_addr()
-                        .is_ok_and(|a| a.is_ipv4() == addr.is_ipv4())
-                });
-                if let Some((_, endpoint)) = endpoint
-                    && let Ok(connecting) = endpoint.connect_with(config.clone(), addr, SERVER_NAME)
+                if let Some(transport) = self.transport_for(addr.is_ipv4())
+                    && let Ok(connecting) =
+                        transport
+                            .endpoint
+                            .connect_with(config.clone(), addr, SERVER_NAME)
                 {
                     lan_dialed += u32::from(on_lan);
                     attempts.spawn(async move {
