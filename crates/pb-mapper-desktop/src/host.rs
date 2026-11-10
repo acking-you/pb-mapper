@@ -43,7 +43,7 @@ use tokio_util::sync::CancellationToken;
 /// whether it encodes H.265; the viewer waits 5 s for `Accepted`. A slower
 /// answer leaves that session on H.264, its first IDR budgeted for the
 /// viewer's bounds, with the capabilities its launcher falls back to.
-const BACKEND_ANSWER_WAIT: Duration = Duration::from_secs(3);
+pub(crate) const BACKEND_ANSWER_WAIT: Duration = Duration::from_secs(3);
 /// How soon a display mode a session could not put back is tried again
 /// while no session is live; each try that leaves it doubles the wait, up to
 /// `RESTORE_RETRY_MAX`.
