@@ -17,7 +17,9 @@ use tokio_util::sync::CancellationToken;
 use uni_stream::stream::TcpStreamImpl;
 use uni_stream::udp::set_custom_timeout;
 
-use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
+use self::error::{
+    AcceptLocalStreamSnafu, BindLocalListenerSnafu, ConnectSnafu, FetchStatusError, ResolveSnafu,
+};
 use self::health::Health;
 use self::status::get_status_scoped;
 use self::stream::{StreamSetup, handle_local_stream};
@@ -27,7 +29,7 @@ use crate::recovery::{SharedTiming, jitter, transport_backoff};
 use crate::worker_status::{StatusSink, WorkerStatus, text_sink};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{ResolvedAddrs, StatusOp};
-use pb_mapper_protocol::command::PbConnStatusReq;
+use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
 use pb_mapper_protocol::forward::StreamForward;
 use uni_stream::addr::ToSocketAddrs;
 use uni_stream::stream::{ListenerProvider, StreamAccept};
@@ -465,19 +467,58 @@ pub async fn handle_status_cli_scoped<A: ToSocketAddrs>(
     }
 }
 
+/// Ask the relay at `remote_addr` for `req`, under the process credential,
+/// in `namespace` when one is given.
+///
+/// Every resolved address is a candidate, raced as a tunnel's are.
+pub async fn fetch_status_scoped<A: ToSocketAddrs>(
+    remote_addr: A,
+    req: PbConnStatusReq,
+    namespace: Option<u64>,
+) -> Result<PbConnStatusResp, FetchStatusError> {
+    let remote_addr = resolve_all(remote_addr).await.context(ResolveSnafu)?;
+    let mut stream = crate::addr::connect_tcp(&remote_addr)
+        .await
+        .context(ConnectSnafu)?;
+    Ok(get_status_scoped(&mut stream, req, namespace).await?)
+}
+
+/// Print [`fetch_status_scoped`]'s answer as the `status` command does.
 pub async fn show_status_scoped<A: ToSocketAddrs>(
     remote_addr: A,
     req: PbConnStatusReq,
     namespace: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let remote_addr = resolve_all(remote_addr).await?;
-    let mut stream = crate::addr::connect_tcp(&remote_addr)
-        .await
-        .map_err(|error| format!("get status stream: {error}"))?;
-    let status = get_status_scoped(&mut stream, req, namespace).await?;
+    let status = fetch_status_scoped(remote_addr, req, namespace).await?;
     let status = serde_json::to_string_pretty(&status)?;
     println!("Status:{status}");
     Ok(())
+}
+
+#[cfg(test)]
+mod status_query_tests {
+    use super::*;
+
+    /// A relay address that names nothing, and one that nothing answers on,
+    /// fail before any request, each as itself; the second says so in the
+    /// text the `status` command has always printed.
+    #[tokio::test]
+    async fn a_status_query_says_where_it_failed() {
+        let unnamed = fetch_status_scoped("not an address", PbConnStatusReq::Keys, None).await;
+        assert!(matches!(unnamed, Err(FetchStatusError::Resolve { .. })));
+
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = closed.local_addr().unwrap();
+        drop(closed);
+        let error = fetch_status_scoped(addr, PbConnStatusReq::Keys, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, FetchStatusError::Connect { .. }));
+        assert!(
+            error.to_string().starts_with("get status stream: "),
+            "{error}"
+        );
+    }
 }
 
 #[cfg(test)]

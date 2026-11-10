@@ -120,3 +120,18 @@ impl Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// Why [`fetch_status_scoped`](super::fetch_status_scoped) got no status.
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(super)))]
+pub enum FetchStatusError {
+    /// The relay address named no address.
+    #[snafu(display("{source}"))]
+    Resolve { source: std::io::Error },
+    /// No stream to the relay could be opened.
+    #[snafu(display("get status stream: {source}"))]
+    Connect { source: std::io::Error },
+    /// The relay was reached, but the exchange failed or the relay refused it.
+    #[snafu(transparent)]
+    Status { source: Error },
+}
