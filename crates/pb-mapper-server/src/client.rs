@@ -8,8 +8,7 @@ use tracing::instrument;
 
 use super::error::{
     ClientConnAuthContextSnafu, ClientConnAuthInactiveSnafu, ClientConnEncodeSubcribeRespSnafu,
-    ClientConnRecvStreamSnafu, ClientConnRecvSubcribeRespSnafu,
-    ClientConnRecvSubcribeRespTimeoutSnafu, ClientConnSendSubcribeSnafu,
+    ClientConnRecvStreamSnafu, ClientConnRecvSubcribeRespSnafu, ClientConnSendSubcribeSnafu,
     ClientConnStreamRespNotMatchSnafu, ClientConnSubcribeFailedSnafu,
     ClientConnSubcribeRespNotMatchSnafu, ClientConnWriteSubcribeRespSnafu,
 };
@@ -83,7 +82,6 @@ impl Deregistration for ClientDeregistration {
 }
 
 const DEFAULT_CLIENT_CHAN_CAP: usize = 32;
-const CLIENT_CONN_CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 1. Request server stream
 /// 2. Forward the traffic between client stream and server stream
@@ -131,6 +129,7 @@ pub(super) async fn handle_client_conn_selected(
         },
         task_sender.clone(),
     );
+    // Bounds the whole subscribe exchange, every wait for the manager included.
     let setup_timeout = pb_mapper_core::config::control_io_timeout().min(Duration::from_secs(5));
     let setup_result = timeout(
         setup_timeout,
@@ -501,20 +500,12 @@ async fn get_server_stream(
             "subscribe task sent to manager"
         );
 
-        let response_deadline = tokio::time::Instant::now() + CLIENT_CONN_CONTROL_TIMEOUT;
+        // Bounded by the caller's setup timeout, which covers this whole exchange.
         let resp = loop {
-            let resp = match tokio::time::timeout_at(response_deadline, rx.recv()).await {
-                Ok(resp) => resp.context(ClientConnRecvSubcribeRespSnafu {
-                    key: key.clone(),
-                    conn_id,
-                })?,
-                Err(_) => ClientConnRecvSubcribeRespTimeoutSnafu {
-                    key: key.clone(),
-                    conn_id,
-                    timeout: CLIENT_CONN_CONTROL_TIMEOUT,
-                }
-                .fail()?,
-            };
+            let resp = rx.recv().await.context(ClientConnRecvSubcribeRespSnafu {
+                key: key.clone(),
+                conn_id,
+            })?;
             // An ACK/data socket from the previous candidate can arrive while
             // the next selection is queued. It cannot become that selection's
             // response; dropping it preserves the generation boundary.

@@ -184,15 +184,6 @@ pub enum Error {
         conn_id: RemoteConnId,
         source: kanal::ReceiveError,
     },
-    #[snafu(display(
-        "timed out waiting for subcribe response with `key:{key}` `client_id:{conn_id}` after \
-         {timeout:?}"
-    ))]
-    ClientConnRecvSubcribeRespTimeout {
-        key: Arc<str>,
-        conn_id: RemoteConnId,
-        timeout: Duration,
-    },
     #[snafu(display("receive server stream error with `key:{key}` `client_id:{conn_id}`"))]
     ClientConnRecvStream {
         key: Arc<str>,
