@@ -324,11 +324,11 @@ impl Host {
     /// nothing to ask: no session, and no journal this host replays.
     pub fn restore_display_mode(&self) -> bool {
         if let Some(live) = self.shared.session.lock().as_ref() {
-            return live
-                .session
+            live.session
                 .shared
                 .lane
-                .push(LaneCommand::DisplayMode(ModeCommand::HostRestore));
+                .push_owner(LaneCommand::DisplayMode(ModeCommand::HostRestore));
+            return true;
         }
         if self.launch.recovery().is_none() {
             return false;

@@ -58,6 +58,13 @@ impl InputLane {
         queued
     }
 
+    /// Queue the owner's `command` and wake C, past a lane the viewer filled:
+    /// it is not the viewer's input, and the owner's requests bound it.
+    pub fn push_owner(&self, command: LaneCommand) {
+        self.q.lock().push_back((command, Instant::now()));
+        self.wake.notify();
+    }
+
     /// Replace `out`'s contents with every queued command, and give the lane
     /// `out`'s emptied allocation: two buffers trade places, so neither side
     /// allocates again for a lane no fuller than before.

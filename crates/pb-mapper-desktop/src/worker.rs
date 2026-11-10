@@ -363,15 +363,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
         self.state.record.control_allowed = shared.policy.allowed();
         if shared.lane.take_overflow() {
-            let mut drained = std::mem::take(&mut self.drained);
-            shared.lane.drain_into(&mut drained);
-            for (command, _) in drained.drain(..) {
-                if let LaneCommand::Input(event) = command {
-                    self.taken(&event);
-                }
-            }
-            self.drained = drained;
-            self.congested();
+            self.overflowed();
         }
         if shared.auth.lock().take_stale() {
             self.backend.release();

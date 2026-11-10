@@ -23,6 +23,32 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         ));
     }
 
+    /// The lane overflowed: its input is late beyond repair, only counted as
+    /// taken, and control ends. A display mode command is not input and runs
+    /// as a drain would have run it, the owner's restore above all, which the
+    /// host already said was queued. Nothing runs once cancelled.
+    pub(super) fn overflowed(&mut self) {
+        let mut drained = std::mem::take(&mut self.drained);
+        self.shared.lane.drain_into(&mut drained);
+        for (command, _) in drained.drain(..) {
+            match command {
+                LaneCommand::Input(event) => {
+                    self.taken(&event);
+                }
+                LaneCommand::DisplayMode(command) if !self.shared.cancel.is_cancelled() => {
+                    let now = self.clock.now();
+                    self.display_mode(command, now);
+                }
+                LaneCommand::DisplayMode(_)
+                | LaneCommand::Control { .. }
+                | LaneCommand::Release
+                | LaneCommand::EndControl => {}
+            }
+        }
+        self.drained = drained;
+        self.congested();
+    }
+
     /// Execute every queued command in order. False when cancelled: the rest
     /// of the lane is dropped, never executed.
     pub(super) fn drain_lane(&mut self) -> bool {

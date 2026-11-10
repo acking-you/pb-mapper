@@ -41,6 +41,8 @@ struct Log {
     captures: Vec<(Instant, Instant, bool, VideoRate)>,
     inputs: Vec<(Instant, Input)>,
     releases: u32,
+    /// Display mode restores asked for.
+    restores: u32,
     /// Desktop reads, by context checks, the cursor and the injection boundary.
     contexts: u32,
 }
@@ -215,6 +217,10 @@ impl Backend for Fake {
     }
     fn double_click_guard(&mut self) -> Option<crate::DoubleClickGuard> {
         *self.guard.lock()
+    }
+    fn restore_display_mode(&mut self) -> Result<bool> {
+        self.log.lock().restores += 1;
+        Ok(false)
     }
 }
 
@@ -1008,4 +1014,20 @@ fn a_display_mode_change_needs_control_but_the_owners_restore_does_not() {
     h.send(LaneCommand::DisplayMode(ModeCommand::HostRestore));
     h.step();
     assert_eq!(h.state().notice.map(|notice| notice.2), Some(serial));
+}
+
+/// A viewer's burst that overflows the lane drops its input, not the
+/// owner's restore queued among it, nor one asked for once the lane is full.
+#[test]
+fn an_overflowing_lane_still_runs_the_owners_restore() {
+    let mut h = Harness::new(true, None);
+    h.present();
+    h.send(LaneCommand::DisplayMode(ModeCommand::HostRestore));
+    while h.shared.lane.push(LaneCommand::Release) {}
+    h.shared
+        .lane
+        .push_owner(LaneCommand::DisplayMode(ModeCommand::HostRestore));
+    h.step();
+    assert_eq!(h.fake.log.lock().restores, 2);
+    assert_eq!(h.state().record.reason, Some(StateReason::InputCongestion));
 }
