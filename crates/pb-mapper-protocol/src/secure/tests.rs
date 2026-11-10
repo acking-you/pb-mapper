@@ -9,13 +9,11 @@
 //! These tests intentionally exercise both administrator and derived temporary
 //! credentials, while lifecycle persistence remains covered by `pb-mapper-auth`'s own tests.
 
-use std::path::PathBuf;
-
 use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
 use pb_mapper_core::checksum::{
     encode_temporary_credential, parse_credential, set_process_msg_header_key,
 };
-use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
+use pb_mapper_core::test_support::{PROCESS_CREDENTIAL_TEST_LOCK, TEST_ADMIN_KEY_BYTES, TempPath};
 use ring::aead::AES_256_GCM;
 
 use super::replay::{
@@ -146,28 +144,11 @@ async fn v2_fragmented_frame_survives_read_cancellation() {
     }
 }
 
-/// A fresh path under the temporary directory, removed with whatever is
-/// there when dropped, so a failing assertion leaks nothing.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(label: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("pb-mapper-{label}-{}", rand::random::<u64>())))
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 /// A relay configuration whose state lives as long as the returned guard.
-fn temp_config() -> (AuthConfig, Scratch) {
-    let state = Scratch::new("v2");
+fn temp_config() -> (AuthConfig, TempPath) {
+    let state = TempPath::new("v2");
     let config = AuthConfig {
-        state_dir: state.0.clone(),
+        state_dir: state.to_path_buf(),
         max_temporary_keys: 8,
         max_temporary_key_ttl: std::time::Duration::from_secs(3600),
         legacy_protocol: LegacyProtocolPolicy::Allow,
@@ -177,7 +158,7 @@ fn temp_config() -> (AuthConfig, Scratch) {
 
 #[tokio::test]
 async fn v2_round_trip_uses_directional_counters() {
-    let credential = Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv");
+    let credential = Credential::Admin(TEST_ADMIN_KEY_BYTES);
     let client = ClientHeaderSession::new_v2(&credential).unwrap();
     let (config, _state) = temp_config();
     let auth = AuthRuntime::start(*credential.key(), config.clone())
@@ -205,7 +186,7 @@ async fn v2_round_trip_uses_directional_counters() {
 
 #[tokio::test]
 async fn temporary_credential_authenticates_without_storing_secret() {
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let admin = TEST_ADMIN_KEY_BYTES;
     let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
@@ -248,7 +229,7 @@ async fn encode_initial(session: &ClientHeaderSession, payload: &[u8]) -> Vec<u8
 
 #[tokio::test]
 async fn identical_initial_frames_are_admitted_only_once() {
-    let credential = Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv");
+    let credential = Credential::Admin(TEST_ADMIN_KEY_BYTES);
     let session = ClientHeaderSession::new_v2(&credential).unwrap();
     let bytes = encode_initial(&session, b"same-request").await;
     let (config, _state) = temp_config();
@@ -288,7 +269,7 @@ async fn identical_initial_frames_are_admitted_only_once() {
 
 #[tokio::test]
 async fn revoked_first_flights_do_not_consume_the_replay_filter() {
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let admin = TEST_ADMIN_KEY_BYTES;
     let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
@@ -332,7 +313,7 @@ async fn revoked_first_flights_do_not_consume_the_replay_filter() {
 
 #[tokio::test]
 async fn accepted_then_revoked_replay_does_not_reuse_the_session_nonce() {
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let admin = TEST_ADMIN_KEY_BYTES;
     let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
@@ -373,7 +354,7 @@ async fn accepted_then_revoked_replay_does_not_reuse_the_session_nonce() {
 #[tokio::test]
 async fn rotated_temporary_first_flight_returns_a_readable_rotated_error() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let admin = TEST_ADMIN_KEY_BYTES;
     let new_admin = *b"abcdefghijklmnopqrstuvwxyz012345";
     let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
@@ -418,7 +399,7 @@ async fn rotated_temporary_first_flight_returns_a_readable_rotated_error() {
 #[tokio::test]
 async fn stale_root_replay_omits_the_rotated_error_session() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let admin = TEST_ADMIN_KEY_BYTES;
     let new_admin = *b"abcdefghijklmnopqrstuvwxyz012345";
     let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
@@ -461,7 +442,7 @@ async fn stale_root_replay_omits_the_rotated_error_session() {
 #[tokio::test]
 async fn reset_temporary_first_flight_returns_a_readable_rotated_error() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let admin = TEST_ADMIN_KEY_BYTES;
     let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
@@ -504,7 +485,7 @@ async fn reset_temporary_first_flight_returns_a_readable_rotated_error() {
 
 #[tokio::test]
 async fn mistyped_temporary_first_flight_does_not_send_an_unreadable_error() {
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let admin = TEST_ADMIN_KEY_BYTES;
     let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
@@ -538,7 +519,7 @@ async fn mistyped_temporary_first_flight_does_not_send_an_unreadable_error() {
 
 #[tokio::test]
 async fn oversized_initial_frame_is_rejected_before_reading_its_body() {
-    let credential = Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv");
+    let credential = Credential::Admin(TEST_ADMIN_KEY_BYTES);
     let session = ClientHeaderSession::new_v2(&credential).unwrap();
     let SessionKeys::V2(material) = &session.keys else {
         panic!("new clients speak protocol v2");
@@ -565,7 +546,7 @@ async fn oversized_initial_frame_is_rejected_before_reading_its_body() {
 async fn oversized_legacy_initial_frame_is_rejected_before_reading_its_body() {
     use pb_mapper_core::checksum::get_checksum_for_key;
 
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let admin = TEST_ADMIN_KEY_BYTES;
     let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let datalen = MAX_INITIAL_CIPHERTEXT_LEN + 1;
@@ -681,8 +662,8 @@ fn aggregate_admission_limit_covers_all_keys() {
 
 #[test]
 fn persisted_first_flights_survive_a_torn_trailing_record() {
-    let scratch = Scratch::new("replay-torn");
-    let path = scratch.0.clone();
+    let scratch = TempPath::new("replay-torn");
+    let path = scratch.to_path_buf();
     let now = unix_seconds();
     let fingerprint = [17_u8; 32];
     {
@@ -704,8 +685,9 @@ fn persisted_first_flights_survive_a_torn_trailing_record() {
 
 #[test]
 fn replay_rewrite_succeeds_when_a_pid_temporary_file_already_exists() {
-    let scratch = Scratch::new("replay-tmp");
-    let path = scratch.0.clone();
+    let scratch = TempPath::new("replay-tmp");
+    std::fs::create_dir(&scratch).unwrap();
+    let path = scratch.join("connection.replay");
     let now = unix_seconds();
     let fingerprint = [19_u8; 32];
     {
@@ -715,12 +697,8 @@ fn replay_rewrite_succeeds_when_a_pid_temporary_file_already_exists() {
             FirstFlightAdmit::Fresh
         );
     }
-    let leftover = Scratch(path.with_file_name(format!(
-        ".{}.tmp-{}",
-        path.file_name().unwrap().to_str().unwrap(),
-        std::process::id()
-    )));
-    std::fs::write(&leftover.0, b"stale").unwrap();
+    let leftover = path.with_file_name(format!(".connection.replay.tmp-{}", std::process::id()));
+    std::fs::write(&leftover, b"stale").unwrap();
     let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
         restored.admit(KeyId::from_u64(9), &fingerprint, now),
@@ -738,8 +716,8 @@ fn replay_log_records_keep_their_layout() {
         hex(&fingerprint),
         "d771a0d52b7477ba0b9fa8e6d5319f353ba65029bdd6fffd5118ed0cebe80b1f"
     );
-    let scratch = Scratch::new("replay-layout");
-    let path = scratch.0.clone();
+    let scratch = TempPath::new("replay-layout");
+    let path = scratch.to_path_buf();
     let now = unix_seconds();
     let mut written = fingerprint.to_vec();
     written.extend_from_slice(&now.to_be_bytes());
@@ -767,8 +745,8 @@ fn replay_log_records_keep_their_layout() {
 
 #[test]
 fn persisted_first_flights_survive_replay_guard_restart() {
-    let scratch = Scratch::new("replay");
-    let path = scratch.0.clone();
+    let scratch = TempPath::new("replay");
+    let path = scratch.to_path_buf();
     let now = unix_seconds();
     let fingerprint = [13_u8; 32];
     {
@@ -787,8 +765,8 @@ fn persisted_first_flights_survive_replay_guard_restart() {
 
 #[test]
 fn restored_replay_log_consumes_the_aggregate_budget() {
-    let scratch = Scratch::new("replay-total");
-    let path = scratch.0.clone();
+    let scratch = TempPath::new("replay-total");
+    let path = scratch.to_path_buf();
     let now = unix_seconds();
     {
         let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
@@ -814,8 +792,8 @@ fn restored_replay_log_consumes_the_aggregate_budget() {
 
 #[test]
 fn restored_replay_generation_ages_with_loaded_records() {
-    let scratch = Scratch::new("replay-age");
-    let path = scratch.0.clone();
+    let scratch = TempPath::new("replay-age");
+    let path = scratch.to_path_buf();
     let start = unix_seconds().saturating_sub(DEFAULT_REPLAY_WINDOW_SECONDS / 2);
     {
         let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
@@ -848,8 +826,8 @@ fn restored_replay_generation_ages_with_loaded_records() {
 // guard unavailable for every admission after the first minute.
 #[test]
 fn replay_log_accepts_admissions_after_compaction() {
-    let scratch = Scratch::new("replay-compact");
-    let path = scratch.0.clone();
+    let scratch = TempPath::new("replay-compact");
+    let path = scratch.to_path_buf();
     let now = unix_seconds();
     let later = now.saturating_add(REPLAY_COMPACT_INTERVAL_SECONDS);
     let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
@@ -876,8 +854,8 @@ fn replay_log_accepts_admissions_after_compaction() {
 fn replay_log_rollback_removes_a_partial_record() {
     use std::io::Write;
 
-    let scratch = Scratch::new("replay-rollback");
-    let path = scratch.0.clone();
+    let scratch = TempPath::new("replay-rollback");
+    let path = scratch.to_path_buf();
     let now = unix_seconds();
     {
         let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
