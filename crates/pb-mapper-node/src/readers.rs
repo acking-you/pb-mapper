@@ -42,8 +42,17 @@ pub(crate) fn period(every_ms: Option<u32>) -> Duration {
 /// event as it happens. Nothing queues on the JS side while no one reads.
 #[napi]
 pub struct TunnelEvents {
-    pub(crate) events: tokio::sync::Mutex<sdk::TunnelEvents>,
-    pub(crate) closed: tokio_util::sync::CancellationToken,
+    events: tokio::sync::Mutex<sdk::TunnelEvents>,
+    closed: tokio_util::sync::CancellationToken,
+}
+
+impl TunnelEvents {
+    pub(crate) fn new(events: sdk::TunnelEvents) -> Self {
+        Self {
+            events: tokio::sync::Mutex::new(events),
+            closed: tokio_util::sync::CancellationToken::new(),
+        }
+    }
 }
 
 #[napi]
@@ -79,8 +88,17 @@ impl TunnelEvents {
 /// queues and a slow reader gets fewer, fresher samples.
 #[napi]
 pub struct TunnelMetricsReader {
-    pub(crate) stream: tokio::sync::Mutex<sdk::TunnelMetricsStream>,
-    pub(crate) closed: tokio_util::sync::CancellationToken,
+    stream: tokio::sync::Mutex<sdk::TunnelMetricsStream>,
+    closed: tokio_util::sync::CancellationToken,
+}
+
+impl TunnelMetricsReader {
+    pub(crate) fn new(stream: sdk::TunnelMetricsStream) -> Self {
+        Self {
+            stream: tokio::sync::Mutex::new(stream),
+            closed: tokio_util::sync::CancellationToken::new(),
+        }
+    }
 }
 
 #[napi]
@@ -107,8 +125,17 @@ impl TunnelMetricsReader {
 /// then one a period, for as long as the client is kept.
 #[napi]
 pub struct RelayMetricsReader {
-    pub(crate) stream: tokio::sync::Mutex<sdk::RelayMetricsStream>,
-    pub(crate) closed: tokio_util::sync::CancellationToken,
+    stream: tokio::sync::Mutex<sdk::RelayMetricsStream>,
+    closed: tokio_util::sync::CancellationToken,
+}
+
+impl RelayMetricsReader {
+    pub(crate) fn new(stream: sdk::RelayMetricsStream) -> Self {
+        Self {
+            stream: tokio::sync::Mutex::new(stream),
+            closed: tokio_util::sync::CancellationToken::new(),
+        }
+    }
 }
 
 #[napi]

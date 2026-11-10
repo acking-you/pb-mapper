@@ -150,10 +150,7 @@ impl Client {
     /// absent; 100 ms to an hour), read one at a time.
     #[napi]
     pub fn subscribe_relay_metrics(&self, every_ms: Option<u32>) -> RelayMetricsReader {
-        RelayMetricsReader {
-            stream: tokio::sync::Mutex::new(self.inner.subscribe_relay_metrics(period(every_ms))),
-            closed: tokio_util::sync::CancellationToken::new(),
-        }
+        RelayMetricsReader::new(self.inner.subscribe_relay_metrics(period(every_ms)))
     }
 
     /// The relay carrier this client uses: `tcp` or `quic`.

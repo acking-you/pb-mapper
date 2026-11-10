@@ -79,10 +79,7 @@ macro_rules! tunnel_class {
             /// its own.
             #[napi]
             pub fn subscribe_events(&self) -> TunnelEvents {
-                TunnelEvents {
-                    events: tokio::sync::Mutex::new(self.inner.subscribe_events()),
-                    closed: tokio_util::sync::CancellationToken::new(),
-                }
+                TunnelEvents::new(self.inner.subscribe_events())
             }
 
             /// Its sessions, bytes per path, relay health and direct link,
@@ -98,10 +95,7 @@ macro_rules! tunnel_class {
             /// and logs need five or more.
             #[napi]
             pub fn subscribe_metrics(&self, every_ms: Option<u32>) -> TunnelMetricsReader {
-                TunnelMetricsReader {
-                    stream: tokio::sync::Mutex::new(self.inner.subscribe_metrics(period(every_ms))),
-                    closed: tokio_util::sync::CancellationToken::new(),
-                }
+                TunnelMetricsReader::new(self.inner.subscribe_metrics(period(every_ms)))
             }
 
             /// Resolves with the next status this tunnel reports, rendered as
