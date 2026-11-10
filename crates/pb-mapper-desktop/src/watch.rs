@@ -193,7 +193,6 @@ fn spawn<S: Send + Sync + 'static>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::{same_host, same_viewer};
     use crate::{

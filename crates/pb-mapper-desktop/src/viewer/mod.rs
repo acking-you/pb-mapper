@@ -1444,7 +1444,6 @@ impl From<&LinkSample> for ViewerLink {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::{Display, Key, protocol::StopReason, video_sink::Pull};

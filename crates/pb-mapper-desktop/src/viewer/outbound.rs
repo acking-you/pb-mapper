@@ -397,7 +397,6 @@ fn encoded_len(input: &Input) -> usize {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::{Button, Key};

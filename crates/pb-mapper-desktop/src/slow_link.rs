@@ -4,7 +4,6 @@
 //! the relay and reads the host's once-a-second `desktop_feedback_interval`
 //! trace. The cases run one at a time. Run with:
 //! cargo test -p pb-mapper-desktop -- --ignored --nocapture slow_link
-#![allow(clippy::unwrap_used)]
 use crate::*;
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
 use pb_mapper_testkit::{Relay, Shape, admin_credential, shaped_link};
