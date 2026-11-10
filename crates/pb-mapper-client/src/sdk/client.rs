@@ -12,6 +12,7 @@ use std::sync::{Arc, RwLock};
 use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_core::config::control_io_timeout;
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
+use tokio::net::{TcpListener, TcpStream};
 use uni_stream::stream::{
     TcpListenerProvider, TcpStreamProvider, UdpListenerProvider, UdpStreamProvider,
 };
@@ -20,7 +21,7 @@ use snafu::ResultExt;
 
 use super::Error;
 use super::admin::Admin;
-use super::error::{Result, StatusSnafu};
+use super::error::{IoSnafu, Result, StatusSnafu};
 use super::handle::{Connection, Registration};
 use super::types::{
     ClientConfig, ConnectRequest, RegisterRequest, RemoteId, ServiceConnection, Transport,
@@ -349,12 +350,9 @@ impl Client {
         &self,
         key: impl Into<String>,
         options: ConnectOptions,
-    ) -> Result<(tokio::net::TcpStream, Connection)> {
+    ) -> Result<(TcpStream, Connection)> {
         use crate::client::stream::{StreamSetup, handle_local_stream};
-        use tokio::{
-            net::{TcpListener, TcpStream},
-            sync::{Mutex, Semaphore, mpsc},
-        };
+        use tokio::sync::{Mutex, Semaphore, mpsc};
         use uni_stream::stream::TcpStreamImpl;
 
         let key = key.into();
@@ -364,23 +362,7 @@ impl Client {
             ));
         }
         options.port_mapping.check_supported()?;
-        let io_error = |error: std::io::Error| Error::protocol(error.to_string());
-        // Retain the bound socket until our own connection has been accepted;
-        // there is no reserve/drop/rebind race or reusable external listener.
-        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_error)?;
-        let stream = TcpStream::connect(listener.local_addr().map_err(io_error)?)
-            .await
-            .map_err(io_error)?;
-        let peer = stream.local_addr().map_err(io_error)?;
-        let accepted = loop {
-            let (candidate, address) = listener.accept().await.map_err(io_error)?;
-            if address == peer {
-                break candidate;
-            }
-        };
-        drop(listener);
-        stream.set_nodelay(true).map_err(io_error)?;
-        accepted.set_nodelay(true).map_err(io_error)?;
+        let (stream, accepted) = loopback_pair().await.context(IoSnafu)?;
         let worker = TunnelWorker::prepare(&self.inner.endpoint, &key, "127.0.0.1:0").await?;
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
@@ -432,6 +414,7 @@ impl Client {
             tokio::pin!(forward);
             loop {
                 tokio::select! {
+                    biased;
                     () = context.shutdown.cancelled() => break,
                     Some(_) = ready.recv() => (context.status_callback)("connected"),
                     result = &mut forward => {
@@ -622,6 +605,26 @@ impl RelayMetricsStream {
         self.due = Some(tokio::time::Instant::now() + self.every);
         Some(client.endpoint.relay_diagnostics().await)
     }
+}
+
+/// Two connected loopback TCP sockets with Nagle off: the end
+/// [`Client::connect_tcp`] hands its caller, and the end its worker forwards.
+async fn loopback_pair() -> std::io::Result<(TcpStream, TcpStream)> {
+    // Retain the bound socket until our own connection has been accepted;
+    // there is no reserve/drop/rebind race or reusable external listener.
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let stream = TcpStream::connect(listener.local_addr()?).await?;
+    let peer = stream.local_addr()?;
+    let accepted = loop {
+        let (candidate, address) = listener.accept().await?;
+        if address == peer {
+            break candidate;
+        }
+    };
+    drop(listener);
+    stream.set_nodelay(true)?;
+    accepted.set_nodelay(true)?;
+    Ok((stream, accepted))
 }
 
 /// The I/O bound of a status query. Queries share admission with recovery: a
