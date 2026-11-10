@@ -1,8 +1,6 @@
 //! Status as a stream: `Host::watch` and `Viewer::watch` publish a status
 //! when it changes, and end with the host or the viewer.
-use crate::{Host, HostStatus, Viewer, ViewerState, ViewerStatus};
-use serde::Serialize;
-use serde_json::Value;
+use crate::{Host, HostStatus, HostViewer, NoticeInfo, Viewer, ViewerState, ViewerStatus};
 use std::{future::Future, time::Duration};
 use tokio::sync::watch;
 
@@ -23,11 +21,7 @@ impl Host {
             move || handle.status(),
             done,
             |_| false,
-            |value| {
-                if let Some(viewer) = value.get_mut("viewer").and_then(Value::as_object_mut) {
-                    viewer.remove("since_ms");
-                }
-            },
+            same_host,
         )
     }
 }
@@ -48,39 +42,126 @@ impl Viewer {
             move || Some(handle.status()),
             std::future::pending::<Option<ViewerStatus>>(),
             |status| status.state == ViewerState::Stopped,
-            |value| {
-                if let Some(status) = value.as_object_mut() {
-                    for field in ["stats", "presented", "last_video_age_ms", "fresh"] {
-                        status.remove(field);
-                    }
-                    if let Some(notice) = status.get_mut("notice").and_then(Value::as_object_mut) {
-                        notice.remove("age_ms");
-                    }
-                }
-            },
+            same_viewer,
         )
     }
 }
 
-/// A receiver of `first`, then of `status()` whenever its projection (its
-/// JSON value less what `project` removes) differs from the last one sent.
-/// The task ends after sending a status that is `last`; once `done`
-/// resolves, after sending the status it gives, or else the one `status()`
-/// reads then; or when `status()` has nothing left to read.
-fn spawn<S: Serialize + Send + Sync + 'static>(
+/// The same host status, a viewer's `since_ms` aside.
+fn same_host(a: &HostStatus, b: &HostStatus) -> bool {
+    let HostStatus {
+        state,
+        reason,
+        message,
+        control_allowed,
+        viewer,
+        display,
+        desktop,
+        capabilities,
+        display_mode,
+    } = a;
+    *state == b.state
+        && *reason == b.reason
+        && *message == b.message
+        && *control_allowed == b.control_allowed
+        && match (viewer, &b.viewer) {
+            (Some(a), Some(b)) => same_host_viewer(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        }
+        && *display == b.display
+        && *desktop == b.desktop
+        && *capabilities == b.capabilities
+        && *display_mode == b.display_mode
+}
+
+fn same_host_viewer(a: &HostViewer, b: &HostViewer) -> bool {
+    let HostViewer {
+        since_ms: _,
+        started_unix_ms,
+        path,
+        controlling,
+        paused,
+        quality,
+    } = a;
+    *started_unix_ms == b.started_unix_ms
+        && *path == b.path
+        && *controlling == b.controlling
+        && *paused == b.paused
+        && *quality == b.quality
+}
+
+/// The same viewer status, what moves with every frame aside.
+fn same_viewer(a: &ViewerStatus, b: &ViewerStatus) -> bool {
+    let ViewerStatus {
+        state,
+        stage,
+        reason,
+        message,
+        control_allowed,
+        controlling,
+        control_wanted,
+        fresh: _,
+        paused,
+        generation,
+        display,
+        desktop,
+        video,
+        presented: _,
+        last_video_age_ms: _,
+        quality,
+        modes,
+        host_os,
+        capabilities,
+        notice,
+        decoder,
+        stats: _,
+    } = a;
+    *state == b.state
+        && *stage == b.stage
+        && *reason == b.reason
+        && *message == b.message
+        && *control_allowed == b.control_allowed
+        && *controlling == b.controlling
+        && *control_wanted == b.control_wanted
+        && *paused == b.paused
+        && *generation == b.generation
+        && *display == b.display
+        && *desktop == b.desktop
+        && *video == b.video
+        && *quality == b.quality
+        && *modes == b.modes
+        && *host_os == b.host_os
+        && *capabilities == b.capabilities
+        && match (notice, &b.notice) {
+            (Some(a), Some(b)) => same_notice(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        }
+        && *decoder == b.decoder
+}
+
+fn same_notice(a: &NoticeInfo, b: &NoticeInfo) -> bool {
+    let NoticeInfo {
+        code,
+        message,
+        seq,
+        age_ms: _,
+    } = a;
+    *code == b.code && *message == b.message && *seq == b.seq
+}
+
+/// A receiver of `first`, then of `status()` whenever it is not the `same`
+/// as the last one sent. The task ends after sending a status that is
+/// `last`; once `done` resolves, after sending the status it gives, or else
+/// the one `status()` reads then; or when `status()` has nothing left to
+/// read.
+fn spawn<S: Send + Sync + 'static>(
     every: Duration,
     first: S,
     status: impl Fn() -> Option<S> + Send + 'static,
     done: impl Future<Output = Option<S>> + Send + 'static,
     last: fn(&S) -> bool,
-    project: fn(&mut Value),
+    same: fn(&S, &S) -> bool,
 ) -> watch::Receiver<S> {
-    let projection = move |status: &S| {
-        let mut value = serde_json::to_value(status).unwrap_or(Value::Null);
-        project(&mut value);
-        value
-    };
-    let mut sent = projection(&first);
     let (sender, receiver) = watch::channel(first);
     tokio::spawn(async move {
         let mut ticks = tokio::time::interval(every.max(Duration::from_millis(1)));
@@ -89,20 +170,19 @@ fn spawn<S: Serialize + Send + Sync + 'static>(
         tokio::pin!(done);
         loop {
             let (finished, status) = tokio::select! {
-                _ = ticks.tick() => (false, status()),
-                final_status = &mut done => (true, final_status.or_else(&status)),
+                biased;
                 () = sender.closed() => return,
+                final_status = &mut done => (true, final_status.or_else(&status)),
+                _ = ticks.tick() => (false, status()),
             };
             let Some(status) = status else {
                 return;
             };
             let end = finished || last(&status);
-            let value = projection(&status);
-            if value != sent {
-                sent = value;
-                if sender.send(status).is_err() {
-                    return;
-                }
+            // Only this task sends, so the channel holds the last status sent.
+            let unchanged = same(&sender.borrow(), &status);
+            if !unchanged && sender.send(status).is_err() {
+                return;
             }
             if end {
                 return;
@@ -115,12 +195,84 @@ fn spawn<S: Serialize + Send + Sync + 'static>(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use super::{same_host, same_viewer};
     use crate::{
-        Backend, Display, Host, HostOptions, HostState, Input, Pull, Result, VideoCodec, Viewer,
-        ViewerConfig, ViewerState,
+        Backend, DecoderInfo, DesktopKind, Display, Host, HostOptions, HostState, HostStatus,
+        Input, NoticeCode, NoticeInfo, PresentedInfo, Pull, QualityPreset, Result, VideoCodec,
+        Viewer, ViewerConfig, ViewerState, ViewerStats, ViewerStatus,
     };
     use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
     use std::time::Duration;
+
+    /// What moves with every frame or with the clock is no change; a new
+    /// notice, or anything else about the session, is.
+    #[test]
+    fn what_moves_with_frames_or_the_clock_is_no_change() {
+        let viewer = ViewerStatus {
+            state: ViewerState::Streaming,
+            stage: None,
+            reason: None,
+            message: String::new(),
+            control_allowed: true,
+            controlling: false,
+            control_wanted: None,
+            fresh: false,
+            paused: false,
+            generation: 1,
+            display: None,
+            desktop: DesktopKind::Ordinary,
+            video: None,
+            presented: None,
+            last_video_age_ms: None,
+            quality: QualityPreset::Balanced,
+            modes: None,
+            host_os: None,
+            capabilities: Vec::new(),
+            notice: Some(NoticeInfo {
+                code: NoticeCode::Locked,
+                message: String::new(),
+                seq: 1,
+                age_ms: 0,
+            }),
+            decoder: DecoderInfo::default(),
+            stats: ViewerStats::default(),
+        };
+        let mut framed = viewer.clone();
+        framed.fresh = true;
+        framed.presented = Some(PresentedInfo {
+            generation: 1,
+            frame_id: 2,
+            age_ms: 3,
+        });
+        framed.last_video_age_ms = Some(4);
+        framed.stats.presented_fps = 60.0;
+        framed.notice.as_mut().unwrap().age_ms = 5;
+        assert!(same_viewer(&viewer, &framed));
+        framed.notice.as_mut().unwrap().seq = 2;
+        assert!(!same_viewer(&viewer, &framed));
+
+        let host: HostStatus = serde_json::from_value(serde_json::json!({
+            "state": "streaming",
+            "message": "",
+            "control_allowed": true,
+            "viewer": {
+                "since_ms": 0,
+                "started_unix_ms": 1,
+                "path": "relay",
+                "controlling": false,
+                "paused": false,
+                "quality": "balanced",
+            },
+            "desktop": "ordinary",
+            "capabilities": [],
+        }))
+        .unwrap();
+        let mut later = host.clone();
+        later.viewer.as_mut().unwrap().since_ms = 1000;
+        assert!(same_host(&host, &later));
+        later.viewer.as_mut().unwrap().paused = true;
+        assert!(!same_host(&host, &later));
+    }
 
     struct Still;
     impl Backend for Still {
