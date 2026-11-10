@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 pub type SessionId = [u8; 16];
 pub fn random_session_id() -> SessionId {
@@ -14,6 +15,19 @@ pub const MAX_CANDIDATES: usize = 8;
 pub const MAX_LAN_TCP: usize = 4;
 pub const MAX_CERT_LEN: usize = 2048;
 pub const SETUP_TTL_MS: u64 = 8_000;
+
+/// A direct-control connection that reads nothing for this long is dropped,
+/// at either end.
+pub const CONTROL_IDLE: Duration = Duration::from_secs(45);
+/// How often a consumer pings the relay over its direct-control connection;
+/// the relay answers each ping.
+pub const CONTROL_PING: Duration = Duration::from_secs(15);
+/// The longest writing one direct-control message may take, at either end.
+pub const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const _: () = assert!(
+    CONTROL_PING.as_secs() * 3 <= CONTROL_IDLE.as_secs(),
+    "a live consumer pings three times within the idle window of either end"
+);
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct SessionSecret(pub [u8; 32]);

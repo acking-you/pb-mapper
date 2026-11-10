@@ -3,14 +3,11 @@ use super::DirectTask;
 use crate::ManagerTask;
 use crate::guard::{DeregisterGuard, Deregistration};
 use pb_mapper_core::conn_id::RemoteConnId;
+// Also brings `CONTROL_IDLE` and `CONTROL_WRITE_TIMEOUT`, the timings both
+// ends of a control connection share.
 use pb_mapper_protocol::direct::*;
-use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// How long a control connection may stay silent; clients ping well inside it.
-const CONTROL_IDLE: Duration = Duration::from_secs(45);
-/// How long one event may take to write before the connection is dropped.
-const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Events the manager may queue for one control connection.
 const CONTROL_EVENT_QUEUE: usize = 64;
 
