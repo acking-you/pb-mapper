@@ -9,10 +9,6 @@ publish = false
 
 [lib]
 crate-type = ["cdylib"]
-# Nothing here is testable on its own (the SDK carries the logic and its
-# tests), and rustdoc cannot run doctests for a `cdylib`.
-test = false
-doctest = false
 
 [lints]
 workspace = true
