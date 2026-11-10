@@ -11,6 +11,7 @@
 //! initialization succeed, preventing the UI from displaying a phantom running relay.
 
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -101,7 +102,7 @@ impl PbMapperState {
             CtlError::address_in_use(format!("Failed to bind server on {bind_addr}: {e}"))
         })?;
         let auth_config = AuthConfig {
-            state_dir: self.config_dir.join("auth"),
+            state_dir: self.auth_state_dir(),
             ..AuthConfig::default()
         };
         let auth = AuthRuntime::from_isolated_state(auth_config)
@@ -122,18 +123,8 @@ impl PbMapperState {
         // Direct sessions, on the same port over UDP, as `pb-mapper server`
         // offers them by default: tunnels through this relay may then go
         // direct. A UDP port someone else holds leaves it relaying only.
-        let direct_listen = std::net::SocketAddr::new(ip_addr, port);
-        let direct = match std::net::UdpSocket::bind(direct_listen) {
-            Ok(socket) => {
-                drop(socket);
-                Some(DirectServerConfig {
-                    listen: direct_listen,
-                    // Only the bound port is announced: each client pairs it
-                    // with the relay address it dialled, which is right
-                    // wherever the UDP port is reached like the TCP one.
-                    advertise: std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-                })
-            }
+        let direct = match DirectServerConfig::probe_relay_port(ip_addr, port) {
+            Ok(direct) => Some(direct),
             Err(error) => {
                 tracing::warn!("UDP port {port} unavailable, relaying only: {error}");
                 None
@@ -177,6 +168,12 @@ impl PbMapperState {
 
         tracing::info!("pb-mapper server started successfully");
         Ok(())
+    }
+
+    /// Where the embedded relay keeps its authentication state, its
+    /// administrator key among it.
+    pub(super) fn auth_state_dir(&self) -> PathBuf {
+        self.config_dir.join("auth")
     }
 
     /// Clear what a relay that ended on its own left behind — a listener

@@ -141,7 +141,7 @@ impl PbMapperState {
     }
 
     pub fn isolated_admin_key(&self) -> Option<String> {
-        let path = self.config_dir.join("auth").join("admin.key");
+        let path = pb_mapper_auth::admin_key_path(&self.auth_state_dir());
         std::fs::read_to_string(path).ok().and_then(|raw| {
             let key = raw.trim().to_string();
             (!key.is_empty()).then_some(key)
