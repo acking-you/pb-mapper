@@ -295,7 +295,9 @@ impl CreditLedger {
             .map(|(_, delay)| *delay)
             .collect();
         delays.sort_unstable();
-        delays[delays.len() / 2].saturating_sub(base_rtt)
+        delays
+            .get(delays.len() / 2)
+            .map_or(Duration::ZERO, |median| median.saturating_sub(base_rtt))
     }
 
     /// Bits per second receipted over the last `DELIVERY_WINDOW`.
