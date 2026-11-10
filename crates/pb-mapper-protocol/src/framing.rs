@@ -1,11 +1,11 @@
 //! The checksum + length framing every relay connection speaks, and the
 //! reader and writer traits over it.
 
-use snafu::{ResultExt, ensure};
+use snafu::{IntoError, ResultExt, ensure};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::buffer::CommonBuffer;
-use crate::{DataLenType, MAX_MSG_LEN, frame_read};
+use crate::{CODEC_TAG_LEN, DataLenType, MAX_MSG_LEN, frame_read};
 use pb_mapper_core::checksum::{
     AesKeyType, get_checksum, get_checksum_for_key, get_msg_header_key, process_checksum_is_ready,
     valid_checksum, valid_checksum_for_key,
@@ -288,27 +288,63 @@ impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> CodecMessageWriter<'a, T, E> {
 }
 
 impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> MessageWriter for CodecMessageWriter<'a, T, E> {
+    /// Builds the whole frame in the copy it encrypts and writes it in one go:
+    /// one send per frame, not one per field.
     async fn write_msg(&mut self, msg: &[u8]) -> Result<()> {
-        let mut buf = msg.to_vec();
+        let mut frame = Vec::with_capacity(HEADER_LEN + msg.len() + CODEC_TAG_LEN as usize);
+        frame.extend_from_slice(&[0; HEADER_LEN]);
+        frame.extend_from_slice(msg);
+        // In bounds: `frame` begins with the header just pushed.
+        let (header, body) = frame.split_at_mut(HEADER_LEN);
         let tag = self
             .encryptor
-            .encrypt(&mut buf)
+            .encrypt(body)
             .map_err(|e| error::Error::MsgCodec {
                 action: "encrypt",
                 detail: format!("got {e} when we read msg"),
             })?;
-        let msg_len = (buf.len() + tag.as_ref().len()) as DataLenType;
-
-        set_msg_len(self.writer, msg_len, checksum_key_bytes(&self.checksum_key)).await?;
-        self.writer
-            .write_all(&buf)
-            .await
-            .context(MsgNetworkWriteCodecMsgSnafu)?;
-        self.writer
-            .write_all(tag.as_ref())
-            .await
-            .context(MsgNetworkWriteCodecTagSnafu)
+        let msg_len = (body.len() + tag.as_ref().len()) as DataLenType;
+        let checksum = checksum_for(msg_len, checksum_key_bytes(&self.checksum_key))?;
+        header.copy_from_slice(&((u64::from(checksum) << 32) | u64::from(msg_len)).to_be_bytes());
+        frame.extend_from_slice(tag.as_ref());
+        write_frame(self.writer, &frame, msg.len()).await
     }
+}
+
+/// Bytes of a frame's checksum, the first field of its header.
+const CHECKSUM_LEN: usize = 4;
+/// Bytes of a frame header: the checksum, then the length.
+const HEADER_LEN: usize = CHECKSUM_LEN + 4;
+
+/// Write `frame`, a header, `body_len` bytes of ciphertext and a tag. A
+/// failure carries the context of the field it fell in, as writing the fields
+/// one after another would.
+async fn write_frame<T: AsyncWriteExt + Unpin>(
+    writer: &mut T,
+    frame: &[u8],
+    body_len: usize,
+) -> Result<()> {
+    let mut written = 0;
+    while let Some(rest) = frame.get(written..).filter(|rest| !rest.is_empty()) {
+        let source = match writer.write(rest).await {
+            Ok(0) => std::io::Error::from(std::io::ErrorKind::WriteZero),
+            Ok(n) => {
+                written += n;
+                continue;
+            }
+            Err(source) => source,
+        };
+        return Err(if written < CHECKSUM_LEN {
+            MsgNetworkWriteCheckSumSnafu.into_error(source)
+        } else if written < HEADER_LEN {
+            MsgNetworkWriteDatalenSnafu.into_error(source)
+        } else if written < HEADER_LEN + body_len {
+            MsgNetworkWriteCodecMsgSnafu.into_error(source)
+        } else {
+            MsgNetworkWriteCodecTagSnafu.into_error(source)
+        });
+    }
+    Ok(())
 }
 
 #[inline]
@@ -389,6 +425,65 @@ mod tests {
                 b"next message",
                 "split {split}"
             );
+        }
+    }
+
+    /// Takes `room` bytes, then fails every write.
+    struct Breaks {
+        room: usize,
+    }
+
+    impl tokio::io::AsyncWrite for Breaks {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            if self.room == 0 {
+                return std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+            }
+            let n = buf.len().min(self.room);
+            self.room -= n;
+            std::task::Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// An encrypted frame cut short names the field it was cut in, as writing
+    /// the fields one by one does.
+    #[tokio::test]
+    async fn a_codec_frame_cut_short_names_the_field_it_was_cut_in() {
+        let body = b"payload";
+        for (room, field) in [
+            (0, "checksum"),
+            (5, "datalen"),
+            (8, "codec_msg"),
+            (8 + body.len(), "codec_tag"),
+        ] {
+            let mut sink = Breaks { room };
+            let mut writer = CodecMessageWriter::new(&mut sink, get_encodec(&[7; 32]).unwrap())
+                .with_checksum_key([7; 32]);
+            let failed = match writer.write_msg(body).await.unwrap_err() {
+                error::Error::MsgNetworkWriteCheckSum { .. } => "checksum",
+                error::Error::MsgNetworkWriteDatalen { .. } => "datalen",
+                error::Error::MsgNetworkWriteCodecMsg { .. } => "codec_msg",
+                error::Error::MsgNetworkWriteCodecTag { .. } => "codec_tag",
+                other => panic!("unexpected failure {other}"),
+            };
+            assert_eq!(failed, field, "room {room}");
         }
     }
 }
