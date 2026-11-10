@@ -1,116 +1,101 @@
 #![cfg(feature = "relay-quic")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, PathPolicy, RegisterOptions, RegisterRequest,
-    RelayTransport, Transport, TunnelStatus,
-};
-use pb_mapper_testkit::{READY_TIMEOUT, Relay, admin_credential};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream, UdpSocket},
+
+use pb_mapper_client::sdk::{
+    Client, ConnectOptions, ConnectRequest, Connection, Error, PathPolicy, QUIC_UNAVAILABLE,
+    RecoveryFailure, RegisterOptions, RegisterRequest, Registration, RelayTransport, Transport,
+    TunnelStatus,
 };
+use pb_mapper_core::checksum::Credential;
+use pb_mapper_protocol::command::{MessageSerializer, PbConnRequest, PbConnResponse, QuicEndpoint};
+use pb_mapper_protocol::secure::{ClientHeaderSession, ServerSecurity};
+use pb_mapper_protocol::{MessageReader, MessageWriter, quic};
+use pb_mapper_server::RelayServerOptions;
+use pb_mapper_testkit::{
+    READY_TIMEOUT, Relay, admin_client, admin_credential, loopback_quic, publish,
+    run_udp_datagram_echo, subscribe, tcp_echo, udp_echo,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio_util::task::AbortOnDropHandle;
 
 fn client(relay: &Relay, transport: RelayTransport) -> Client {
-    Client::from_credential(relay.addr().to_string(), admin_credential(), false, None)
+    admin_client(relay.addr())
         .with_relay_transport(transport)
         .unwrap()
 }
 
-async fn echo() -> (std::net::SocketAddr, AbortOnDropHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let task = AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut tasks = tokio::task::JoinSet::new();
-        loop {
-            tokio::select! {
-                Some(_) = tasks.join_next(), if !tasks.is_empty() => {},
-                accepted = listener.accept() => {
-                    let (mut stream, _) = accepted.unwrap();
-                    tasks.spawn(async move {
-                        let (mut read, mut write) = stream.split();
-                        let _ = tokio::io::copy(&mut read, &mut write).await;
-                        let _ = write.shutdown().await;
-                    });
-                }
-            }
-        }
-    }));
-    (addr, task)
-}
-
+/// [`tunnel_as`] under the key `echo`.
 async fn tunnel(
     publisher: &Client,
     consumer: &Client,
-    backend: std::net::SocketAddr,
+    backend: SocketAddr,
     transport: Transport,
     codec: bool,
-) -> (
-    pb_mapper_client::sdk::Registration,
-    pb_mapper_client::sdk::Connection,
-    std::net::SocketAddr,
-) {
+) -> (Registration, Connection, SocketAddr) {
     tunnel_as("echo", publisher, consumer, backend, transport, codec).await
 }
 
+/// A relay-only tunnel, ready: what crosses the carrier is the case's subject,
+/// so neither end may take a direct path around it.
 async fn tunnel_as(
     key: &str,
     publisher: &Client,
     consumer: &Client,
-    backend: std::net::SocketAddr,
+    backend: SocketAddr,
     transport: Transport,
     codec: bool,
-) -> (
-    pb_mapper_client::sdk::Registration,
-    pb_mapper_client::sdk::Connection,
-    std::net::SocketAddr,
-) {
-    let registration = publisher
-        .register_with_options(
-            RegisterRequest {
-                key: key.into(),
-                local_addr: backend.to_string(),
-                transport,
-                codec,
-                force_namespace: false,
-            },
-            RegisterOptions {
-                allow_direct: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    registration
-        .wait_ready_timeout(READY_TIMEOUT)
-        .await
-        .unwrap();
-    let local_addr = pb_mapper_testkit::reserve_addr(match transport {
-        Transport::Tcp => pb_mapper_testkit::Transport::Tcp,
-        Transport::Udp => pb_mapper_testkit::Transport::Udp,
-    })
+) -> (Registration, Connection, SocketAddr) {
+    let registration = publish(
+        publisher,
+        key,
+        backend,
+        transport,
+        codec,
+        RegisterOptions {
+            allow_direct: false,
+            ..Default::default()
+        },
+    )
     .await;
-    let connection = consumer
-        .connect_with_options(
-            ConnectRequest {
-                key: key.into(),
-                local_addr: local_addr.to_string(),
-                transport,
-            },
-            ConnectOptions {
-                path: PathPolicy::RelayOnly,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let (connection, local_addr) = subscribe(
+        consumer,
+        key,
+        transport,
+        ConnectOptions {
+            path: PathPolicy::RelayOnly,
+            ..Default::default()
+        },
+    )
+    .await;
     (registration, connection, local_addr)
 }
 
-async fn exchange(addr: std::net::SocketAddr, byte: u8) {
+/// The QUIC listener the relay at `relay` reports to `credential` over TCP.
+async fn discover_quic(relay: SocketAddr, credential: &Credential) -> QuicEndpoint {
+    let mut tcp = TcpStream::connect(relay).await.unwrap();
+    let reply = ClientHeaderSession::new_v2(credential)
+        .unwrap()
+        .exchange(
+            &mut tcp,
+            &PbConnRequest::QuicEndpoint.encode().unwrap(),
+            READY_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    let PbConnResponse::QuicEndpoint(Some(capability)) = PbConnResponse::decode(&reply).unwrap()
+    else {
+        panic!("missing QUIC capability");
+    };
+    capability
+}
+
+async fn exchange(addr: SocketAddr, byte: u8) {
     let mut socket = TcpStream::connect(addr).await.unwrap();
     let payload = vec![byte; 256 << 10];
     let mut returned = Vec::new();
@@ -139,9 +124,9 @@ async fn exchange(addr: std::net::SocketAddr, byte: u8) {
 async fn multiplexed_quic_streams_preserve_fin_and_report_real_statistics() {
     let relay = Relay::start_with_quic("quic-multiplex").await;
     let client = client(&relay, RelayTransport::Quic);
-    let (backend, _echo) = echo().await;
+    let backend = tcp_echo(None).await;
     let (registration, connection, addr) =
-        tunnel(&client, &client, backend, Transport::Tcp, false).await;
+        tunnel(&client, &client, backend.addr(), Transport::Tcp, false).await;
     let mut tasks = tokio::task::JoinSet::new();
     for byte in 0..8 {
         tasks.spawn(exchange(addr, byte));
@@ -193,7 +178,7 @@ async fn stalled_downloads_do_not_hold_back_other_tunnels() {
             });
         }
     }));
-    let (backend, _echo) = echo().await;
+    let backend = tcp_echo(None).await;
     let (bulk_registration, bulk_connection, bulk) = tunnel_as(
         "bulk",
         &client,
@@ -204,7 +189,7 @@ async fn stalled_downloads_do_not_hold_back_other_tunnels() {
     )
     .await;
     let (registration, connection, addr) =
-        tunnel(&client, &client, backend, Transport::Tcp, false).await;
+        tunnel(&client, &client, backend.addr(), Transport::Tcp, false).await;
 
     let mut stalled = Vec::new();
     for _ in 0..STALLED {
@@ -249,9 +234,9 @@ async fn mixed_tcp_quic_peers_share_existing_codec_and_routing() {
         let relay = Relay::start_with_quic("quic-mixed").await;
         let publisher = client(&relay, publisher_transport);
         let consumer = client(&relay, consumer_transport);
-        let (backend, _echo) = echo().await;
+        let backend = tcp_echo(None).await;
         let (registration, connection, addr) =
-            tunnel(&publisher, &consumer, backend, Transport::Tcp, true).await;
+            tunnel(&publisher, &consumer, backend.addr(), Transport::Tcp, true).await;
         exchange(addr, 42).await;
         assert_eq!(publisher.relay_transport(), publisher_transport);
         assert_eq!(consumer.relay_transport(), consumer_transport);
@@ -264,18 +249,10 @@ async fn mixed_tcp_quic_peers_share_existing_codec_and_routing() {
 async fn udp_service_over_quic_preserves_datagrams() {
     let relay = Relay::start_with_quic("quic-udp").await;
     let client = client(&relay, RelayTransport::Quic);
-    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let backend = udp.local_addr().unwrap();
-    let _echo = AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut buf = [0; 65536];
-        loop {
-            let (n, peer) = udp.recv_from(&mut buf).await.unwrap();
-            udp.send_to(&buf[..n], peer).await.unwrap();
-        }
-    }));
+    let backend = udp_echo(None).await;
     let (registration, connection, addr) =
-        tunnel(&client, &client, backend, Transport::Udp, true).await;
-    pb_mapper_testkit::run_udp_datagram_echo(addr, 8, 4, None).await;
+        tunnel(&client, &client, backend.addr(), Transport::Udp, true).await;
+    run_udp_datagram_echo(addr, 8, 4, None).await;
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
 }
@@ -288,8 +265,8 @@ async fn explicit_quic_never_silently_uses_tcp() {
     assert_eq!(tcp.relay_quic_port().await.unwrap(), None);
     assert!(matches!(
         quic.list_keys().await,
-        Err(pb_mapper_client::sdk::Error::Remote { code, retryable: false, .. })
-            if code == pb_mapper_client::sdk::QUIC_UNAVAILABLE
+        Err(Error::Remote { code, retryable: false, .. })
+            if code == QUIC_UNAVAILABLE
     ));
     assert!(quic.relay_diagnostics().await.last_error.is_some());
     assert_eq!(quic.relay_diagnostics().await.connections_created, 0);
@@ -308,7 +285,7 @@ async fn explicit_quic_never_silently_uses_tcp() {
         .unwrap();
     assert!(matches!(
         registration.wait_ready_timeout(READY_TIMEOUT).await,
-        Err(pb_mapper_client::sdk::Error::TunnelFailed { .. })
+        Err(Error::TunnelFailed { .. })
     ));
     registration.stop().await.unwrap();
 
@@ -331,9 +308,9 @@ async fn revoked_credential_closes_quic_and_cannot_be_reused() {
     let client = Client::from_credential(relay.addr().to_string(), credential, false, None)
         .with_relay_transport(RelayTransport::Quic)
         .unwrap();
-    let (backend, _echo) = echo().await;
+    let backend = tcp_echo(None).await;
     let (registration, connection, addr) =
-        tunnel(&client, &client, backend, Transport::Tcp, false).await;
+        tunnel(&client, &client, backend.addr(), Transport::Tcp, false).await;
     let mut active = TcpStream::connect(addr).await.unwrap();
     active.write_all(b"x").await.unwrap();
     assert_eq!(active.read_u8().await.unwrap(), b'x');
@@ -353,7 +330,7 @@ async fn revoked_credential_closes_quic_and_cannot_be_reused() {
     // a status query asks once more on a fresh one and gets the verdict.
     assert!(matches!(
         client.list_keys().await,
-        Err(pb_mapper_client::sdk::Error::Remote {
+        Err(Error::Remote {
             retryable: false,
             ..
         })
@@ -387,7 +364,7 @@ async fn rejected_discovery_terminates_new_tunnels_and_preserves_sdk_errors() {
         .unwrap();
     assert!(matches!(
         client.list_keys().await,
-        Err(pb_mapper_client::sdk::Error::Remote {
+        Err(Error::Remote {
             retryable: false,
             ..
         })
@@ -427,14 +404,8 @@ async fn rejected_discovery_terminates_new_tunnels_and_preserves_sdk_errors() {
         registration.wait_ready_timeout(READY_TIMEOUT),
         connection.wait_ready_timeout(READY_TIMEOUT)
     );
-    assert!(matches!(
-        registered,
-        Err(pb_mapper_client::sdk::Error::TunnelFailed { .. })
-    ));
-    assert!(matches!(
-        connected,
-        Err(pb_mapper_client::sdk::Error::TunnelFailed { .. })
-    ));
+    assert!(matches!(registered, Err(Error::TunnelFailed { .. })));
+    assert!(matches!(connected, Err(Error::TunnelFailed { .. })));
     assert_eq!(client.relay_diagnostics().await.connections_created, 0);
     registration.stop().await.unwrap();
     connection.stop().await.unwrap();
@@ -458,36 +429,18 @@ async fn root_rotation_delivers_its_committed_response_and_reauthenticates() {
 /// Answers the refusal's code when the relay turns it away.
 async fn admit(
     relay: &Relay,
-    credential: pb_mapper_core::checksum::Credential,
+    credential: Credential,
 ) -> Result<(quinn::Endpoint, quinn::Connection), String> {
-    use pb_mapper_protocol::{
-        command::{MessageSerializer, PbConnRequest, PbConnResponse},
-        quic,
-        secure::ClientHeaderSession,
-    };
-    let mut tcp = TcpStream::connect(relay.addr()).await.unwrap();
-    let reply = ClientHeaderSession::new_v2(&credential)
-        .unwrap()
-        .exchange(
-            &mut tcp,
-            &PbConnRequest::QuicEndpoint.encode().unwrap(),
-            READY_TIMEOUT,
-        )
-        .await
-        .unwrap();
-    let PbConnResponse::QuicEndpoint(Some(capability)) = PbConnResponse::decode(&reply).unwrap()
-    else {
-        panic!("missing QUIC capability");
-    };
+    let capability = discover_quic(relay.addr(), &credential).await;
     let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
     endpoint.set_default_client_config(quic::client_config(&capability.certificate).unwrap());
-    let peer = std::net::SocketAddr::new(relay.addr().ip(), capability.port);
+    let peer = SocketAddr::new(relay.addr().ip(), capability.port);
     let connection = endpoint
         .connect(peer, quic::SERVER_NAME)
         .unwrap()
         .await
         .unwrap();
-    let shared = std::sync::Arc::new(quic::QuicConnection {
+    let shared = Arc::new(quic::QuicConnection {
         connection: connection.clone(),
         endpoint: endpoint.clone(),
         relay_addr: relay.addr(),
@@ -533,7 +486,7 @@ async fn saturated_quic_admission_returns_an_authenticated_retryable_rejection()
     }
     let rejected = client(&relay, RelayTransport::Quic);
     assert!(matches!(rejected.list_keys().await,
-        Err(pb_mapper_client::sdk::Error::Remote { code, retryable: true, .. }) if code == "quic_connection_capacity"));
+        Err(Error::Remote { code, retryable: true, .. }) if code == "quic_connection_capacity"));
     assert_eq!(rejected.relay_diagnostics().await.connections_created, 0);
     // Rejection must neither consume a slot nor close an admitted sibling.
     assert!(
@@ -556,9 +509,9 @@ async fn saturated_quic_admission_returns_an_authenticated_retryable_rejection()
 async fn running_tunnels_recover_after_quic_relay_restart() {
     let mut relay = Relay::start_with_quic("quic-restart").await;
     let client = client(&relay, RelayTransport::Quic);
-    let (backend, _echo) = echo().await;
+    let backend = tcp_echo(None).await;
     let (registration, connection, addr) =
-        tunnel(&client, &client, backend, Transport::Tcp, false).await;
+        tunnel(&client, &client, backend.addr(), Transport::Tcp, false).await;
     exchange(addr, 1).await;
     relay.stop_server().await;
     relay.restart_server(None).await;
@@ -576,14 +529,11 @@ async fn running_tunnels_recover_after_quic_relay_restart() {
 /// as from a refusal that may clear, and recovers.
 #[tokio::test]
 async fn running_tunnels_wait_out_a_relay_back_without_quic() {
-    use pb_mapper_client::sdk::RecoveryFailure;
-    use pb_mapper_server::{QuicServerConfig, RelayServerOptions};
-
     let mut relay = Relay::start_with_quic("quic-rollback").await;
     let client = client(&relay, RelayTransport::Quic);
-    let (backend, _echo) = echo().await;
+    let backend = tcp_echo(None).await;
     let (registration, connection, addr) =
-        tunnel(&client, &client, backend, Transport::Tcp, false).await;
+        tunnel(&client, &client, backend.addr(), Transport::Tcp, false).await;
     exchange(addr, 1).await;
 
     relay
@@ -605,10 +555,7 @@ async fn running_tunnels_wait_out_a_relay_back_without_quic() {
     relay
         .restart_server_with_options(RelayServerOptions {
             direct: None,
-            quic: Some(QuicServerConfig {
-                listen: "127.0.0.1:0".parse().unwrap(),
-                advertise_port: 0,
-            }),
+            quic: Some(loopback_quic()),
         })
         .await;
     let mut status = registration.subscribe();
@@ -639,29 +586,10 @@ async fn running_tunnels_wait_out_a_relay_back_without_quic() {
 
 #[tokio::test]
 async fn quic_requires_the_discovered_certificate_and_exporter_bound_authentication() {
-    use pb_mapper_protocol::{
-        MessageReader,
-        command::{MessageSerializer, PbConnRequest, PbConnResponse},
-        quic,
-        secure::ClientHeaderSession,
-    };
     let relay = Relay::start_with_quic("quic-security").await;
-    let mut tcp = TcpStream::connect(relay.addr()).await.unwrap();
-    let session = ClientHeaderSession::new_v2(&admin_credential()).unwrap();
-    let reply = session
-        .exchange(
-            &mut tcp,
-            &PbConnRequest::QuicEndpoint.encode().unwrap(),
-            READY_TIMEOUT,
-        )
-        .await
-        .unwrap();
-    let PbConnResponse::QuicEndpoint(Some(capability)) = PbConnResponse::decode(&reply).unwrap()
-    else {
-        panic!("missing QUIC capability");
-    };
+    let capability = discover_quic(relay.addr(), &admin_credential()).await;
     let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-    let peer = std::net::SocketAddr::new(relay.addr().ip(), capability.port);
+    let peer = SocketAddr::new(relay.addr().ip(), capability.port);
     let (_, unrelated_certificate) = quic::server_config().unwrap();
     endpoint.set_default_client_config(quic::client_config(&unrelated_certificate).unwrap());
     assert!(
@@ -700,33 +628,9 @@ async fn quic_requires_the_discovered_certificate_and_exporter_bound_authenticat
 
 #[tokio::test]
 async fn a_blackholed_carrier_is_replaced_after_an_sdk_query_timeout() {
-    use pb_mapper_protocol::{
-        MessageWriter,
-        command::{MessageSerializer, PbConnRequest, PbConnResponse},
-        secure::{ClientHeaderSession, ServerSecurity},
-    };
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-
     let relay = Relay::start_with_quic("quic-blackhole").await;
-    let mut tcp = TcpStream::connect(relay.addr()).await.unwrap();
-    let session = ClientHeaderSession::new_v2(&admin_credential()).unwrap();
-    let reply = session
-        .exchange(
-            &mut tcp,
-            &PbConnRequest::QuicEndpoint.encode().unwrap(),
-            READY_TIMEOUT,
-        )
-        .await
-        .unwrap();
-    let PbConnResponse::QuicEndpoint(Some(mut capability)) =
-        PbConnResponse::decode(&reply).unwrap()
-    else {
-        panic!("QUIC listener must be available");
-    };
-    let upstream = std::net::SocketAddr::new(relay.addr().ip(), capability.port);
+    let mut capability = discover_quic(relay.addr(), &admin_credential()).await;
+    let upstream = SocketAddr::new(relay.addr().ip(), capability.port);
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     capability.port = udp.local_addr().unwrap().port();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -830,33 +734,23 @@ async fn retiring_twenty_registrations_does_not_accumulate_quic_carriers() {
         .with_relay_transport(RelayTransport::Quic)
         .unwrap();
     let observer = Client::from_credential(relay.addr().to_string(), credential, false, None);
-    let admin = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None)
-        .admin()
-        .unwrap();
-    let (backend, _echo) = echo().await;
+    let admin = admin_client(relay.addr()).admin().unwrap();
+    let backend = tcp_echo(None).await;
     let mut shares = Vec::new();
     for i in 0..20 {
         let key = format!("share-{i:02}");
-        let registration = client
-            .register_with_options(
-                RegisterRequest {
-                    key: key.clone(),
-                    local_addr: backend.to_string(),
-                    transport: Transport::Tcp,
-                    codec: false,
-                    force_namespace: false,
-                },
-                RegisterOptions {
-                    allow_direct: false,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        registration
-            .wait_ready_timeout(READY_TIMEOUT)
-            .await
-            .unwrap();
+        let registration = publish(
+            &client,
+            &key,
+            backend.addr(),
+            Transport::Tcp,
+            false,
+            RegisterOptions {
+                allow_direct: false,
+                ..Default::default()
+            },
+        )
+        .await;
         shares.push((key, registration));
     }
     for (key, _) in &shares {
