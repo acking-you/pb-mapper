@@ -7,7 +7,7 @@ use pb_mapper_client::sdk::{
 };
 use pb_mapper_core::checksum::{parse_credential, set_process_msg_header_key};
 use pb_mapper_core::config::ResolvedAddrs;
-use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
+use pb_mapper_core::test_support::{PROCESS_CREDENTIAL_TEST_LOCK, TEST_ADMIN_KEY};
 use pb_mapper_server::{DirectServerConfig, QuicServerConfig};
 use tokio::sync::Mutex;
 
@@ -274,7 +274,7 @@ async fn the_list_says_which_path_each_tunnel_takes() {
         }),
     )
     .await;
-    set_process_msg_header_key(Some(pb_mapper_testkit::TEST_ADMIN_KEY)).unwrap();
+    set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
     state.lock().await.config.server_address = relay.addr().to_string();
     let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend = echo.local_addr().unwrap().to_string();
@@ -408,7 +408,7 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
 
     let (_process_credential_guard, state, _root) = temp_state("carrier").await;
     let relay = pb_mapper_testkit::Relay::start_with_quic("ffi-carrier").await;
-    set_process_msg_header_key(Some(pb_mapper_testkit::TEST_ADMIN_KEY)).unwrap();
+    set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
     {
         let mut state = state.lock().await;
         state.config.server_address = relay.addr().to_string();
@@ -503,7 +503,7 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
         assert_eq!(read(Some(true.into())), PortMapping::Always);
         assert_eq!(read(Some(false.into())), PortMapping::Off);
         assert_eq!(read(Some("off".into())), PortMapping::Off);
-        let admin = parse_credential(pb_mapper_testkit::TEST_ADMIN_KEY).unwrap();
+        let admin = parse_credential(TEST_ADMIN_KEY).unwrap();
         let moving =
             state.on_other_carrier(&relay.addr().to_string(), None, admin, RelayTransport::Tcp);
         assert_eq!(moving.shares, ["web"]);
@@ -511,7 +511,7 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
     }
 
     let tcp_only = pb_mapper_testkit::Relay::start("ffi-carrier-tcp-only").await;
-    set_process_msg_header_key(Some(pb_mapper_testkit::TEST_ADMIN_KEY)).unwrap();
+    set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
     state.lock().await.config.server_address = tcp_only.addr().to_string();
     let refused = register_service(
         &state,
@@ -557,7 +557,7 @@ async fn a_relay_whose_quic_port_is_blocked_is_named_as_such() {
         },
     )
     .await;
-    set_process_msg_header_key(Some(pb_mapper_testkit::TEST_ADMIN_KEY)).unwrap();
+    set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
     {
         let mut state = state.lock().await;
         state.config.server_address = relay.addr().to_string();
@@ -635,7 +635,7 @@ async fn a_failed_registration_releases_its_claim() {
             let _ = set_process_msg_header_key(None);
         }
     }
-    set_process_msg_header_key(Some("0123456789abcdefghijklmnopqrstuv")).expect("test credential");
+    set_process_msg_header_key(Some(TEST_ADMIN_KEY)).expect("test credential");
     let _restore_process_key = RestoreProcessKey;
 
     // Fails in phase 2, while the claim is held.
@@ -741,7 +741,7 @@ async fn a_state_reads_nothing_until_its_directory_arrives() {
     std::fs::create_dir_all(root.path().join("pb-mapper-ui")).unwrap();
     let saved = AppConfig {
         server_address: "relay.example:7666".into(),
-        msg_header_key: pb_mapper_testkit::TEST_ADMIN_KEY.into(),
+        msg_header_key: TEST_ADMIN_KEY.into(),
         ..AppConfig::default()
     };
     std::fs::write(

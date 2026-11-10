@@ -2,10 +2,10 @@
 //! a handle rooted in one, and reading an export's answer.
 
 use std::ffi::{CStr, c_char};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use pb_mapper_core::test_support::TempPath;
 
 use crate::handle::PbMapperHandle;
 use crate::state::PbMapperState;
@@ -13,32 +13,17 @@ use crate::state::PbMapperState;
 /// A new, empty directory of its own under the system's temporary one,
 /// removed with everything in it when this is dropped, a panicking test's
 /// included.
-pub(crate) struct TempRoot(PathBuf);
+pub(crate) struct TempRoot(TempPath);
 
 impl TempRoot {
     pub(crate) fn new(name: &str) -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "pb-mapper-ffi-{name}-{}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let path = TempPath::new(&format!("ffi-{name}"));
         std::fs::create_dir_all(&path).expect("create a temporary directory");
         Self(path)
     }
 
     pub(crate) fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempRoot {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        self.0.path()
     }
 }
 
