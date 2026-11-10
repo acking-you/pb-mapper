@@ -18,9 +18,8 @@ use pb_mapper_core::config::{ResolvedAddrs, resolve_addrs_async, resolve_pb_mapp
 
 use super::{DirectOptions, PathInfo, PbMapperState};
 use crate::ctl::Origin;
-use crate::error::CtlError;
+use crate::error::{CtlError, no_quic, sdk_error, sdk_refusal};
 use crate::events;
-use crate::relay::{no_quic, sdk_error};
 
 /// Whether the relay can carry a tunnel now, asked before one starts so that
 /// a relay it cannot use is refused with its reason instead of retried: one
@@ -304,11 +303,6 @@ fn transport_of(protocol: &str) -> Transport {
     } else {
         Transport::Udp
     }
-}
-
-/// What the SDK said when it refused a tunnel before starting it.
-fn sdk_refusal(error: pb_mapper_client::sdk::Error) -> CtlError {
-    CtlError::invalid_argument(error.to_string())
 }
 
 /// Registers a service, holding the state lock only for the bookkeeping.

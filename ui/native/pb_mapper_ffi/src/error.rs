@@ -12,6 +12,7 @@
 
 use std::fmt;
 
+use pb_mapper_client::sdk::{Error as SdkError, QUIC_UNAVAILABLE};
 use serde::{Deserialize, Serialize};
 
 /// What kind of failure this is, for a caller that has to branch on it.
@@ -158,6 +159,36 @@ impl fmt::Display for CtlError {
 }
 
 impl std::error::Error for CtlError {}
+
+/// Why nothing can reach this relay over QUIC, in the words the window shows.
+pub(crate) fn no_quic() -> CtlError {
+    CtlError::server_unreachable(
+        "The relay does not offer QUIC. Choose TCP in Settings, or give the relay a QUIC port",
+    )
+}
+
+/// What an SDK refusal means to the window, as a coded sentence.
+pub(crate) fn sdk_error(error: SdkError) -> CtlError {
+    match error {
+        SdkError::NotAdministrator => CtlError::invalid_argument(
+            "This computer's credential is not the relay's administrator key",
+        ),
+        SdkError::InvalidConfig { message } => CtlError::invalid_argument(message),
+        SdkError::Address { .. } => CtlError::invalid_address(error.to_string()),
+        SdkError::Connect { .. } => CtlError::server_unreachable(error.to_string()),
+        SdkError::TimedOut { .. } => CtlError::timeout(error.to_string()),
+        SdkError::Remote { code, .. } if code == QUIC_UNAVAILABLE => no_quic(),
+        SdkError::Remote { code, message, .. } => {
+            CtlError::protocol(format!("The relay refused: {message} ({code})"))
+        }
+        other => CtlError::protocol(other.to_string()),
+    }
+}
+
+/// What the SDK said when it refused a tunnel before starting it.
+pub(crate) fn sdk_refusal(error: pb_mapper_client::sdk::Error) -> CtlError {
+    CtlError::invalid_argument(error.to_string())
+}
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]

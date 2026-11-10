@@ -42,7 +42,7 @@ pub unsafe extern "C" fn pb_mapper_register_service(
         Ok(v) => v,
         Err(e) => return err_ctl(&e),
     };
-    let port_mapping = match crate::state::port_mapping_from_c(port_mapping) {
+    let port_mapping = match crate::response::port_mapping_from_c(port_mapping) {
         Ok(v) => v,
         Err(e) => return err_ctl(&e),
     };

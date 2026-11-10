@@ -32,8 +32,7 @@ use super::{
     ServerStatusDetail, ServiceConfigInfo, ServiceConnInfo, ServiceStatusResponse,
     process_credential,
 };
-use crate::error::{CtlError, ErrorCode};
-use crate::relay::sdk_error;
+use crate::error::{CtlError, ErrorCode, sdk_error};
 
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
 const FORCE_REFRESH_TIMEOUT: Duration = Duration::from_millis(5000);

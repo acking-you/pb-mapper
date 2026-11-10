@@ -30,7 +30,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use pb_mapper_auth::AuthRuntime;
-use pb_mapper_client::sdk::{Client, PortMapping};
+use pb_mapper_client::sdk::Client;
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_server::ServerStatusInfo;
 
@@ -55,18 +55,6 @@ pub use views::{
     ClientConfigInfo, ClientStatusResponse, LocalServerStatus, PathInfo, RelayTunnels,
     ServerStatusDetail, ServiceConfigInfo, ServiceConnInfo, ServiceStatusResponse,
 };
-
-/// The port mapping a C caller names: 0 off, 1 when needed, 2 always.
-pub fn port_mapping_from_c(raw: std::ffi::c_int) -> Result<PortMapping, CtlError> {
-    match raw {
-        0 => Ok(PortMapping::Off),
-        1 => Ok(PortMapping::Auto),
-        2 => Ok(PortMapping::Always),
-        _ => Err(CtlError::invalid_argument(format!(
-            "port_mapping must be 0, 1 or 2, got {raw}"
-        ))),
-    }
-}
 
 #[derive(Clone)]
 #[allow(dead_code)]

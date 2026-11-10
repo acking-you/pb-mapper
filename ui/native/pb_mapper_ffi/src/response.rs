@@ -3,6 +3,7 @@
 use std::ffi::{CStr, CString, c_char};
 use std::ptr;
 
+use pb_mapper_client::sdk::PortMapping;
 use serde_json::json;
 
 use crate::error::CtlError;
@@ -61,6 +62,18 @@ pub(crate) fn parse_c_string(ptr: *const c_char, field: &str) -> Result<String, 
             .to_str()
             .map(|s| s.to_string())
             .map_err(|_| CtlError::invalid_argument(format!("{field} is not valid UTF-8")))
+    }
+}
+
+/// The port mapping a C caller names: 0 off, 1 when needed, 2 always.
+pub fn port_mapping_from_c(raw: std::ffi::c_int) -> Result<PortMapping, CtlError> {
+    match raw {
+        0 => Ok(PortMapping::Off),
+        1 => Ok(PortMapping::Auto),
+        2 => Ok(PortMapping::Always),
+        _ => Err(CtlError::invalid_argument(format!(
+            "port_mapping must be 0, 1 or 2, got {raw}"
+        ))),
     }
 }
 

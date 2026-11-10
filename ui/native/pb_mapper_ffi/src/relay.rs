@@ -16,15 +16,14 @@ use std::time::Duration;
 use pb_mapper_auth::generate_admin_key;
 use pb_mapper_client::sdk::{
     Admin, AuthStatusInfo, Client, ConnectionInfo, Error as SdkError, IssuedKey, KeyMetadata,
-    LegacyProtocol, QUIC_UNAVAILABLE, RelayDiagnostics, RelayTransport, ServiceInfo,
-    SessionObservation,
+    LegacyProtocol, RelayDiagnostics, RelayTransport, ServiceInfo, SessionObservation,
 };
 use pb_mapper_core::checksum::{Credential, get_process_credential, parse_credential};
 use pb_mapper_core::config::resolve_pb_mapper_server_async;
 use serde_json::{Value, json};
 
 use crate::ctl::Origin;
-use crate::error::CtlError;
+use crate::error::{CtlError, sdk_error};
 use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, parse_c_string};
@@ -421,31 +420,6 @@ async fn accepts(relay: &Target<'_>, credential: Credential) -> bool {
         tokio::time::timeout(PROBE_TIMEOUT, admin.auth_status()).await,
         Ok(Ok(_))
     )
-}
-
-/// Why nothing can reach this relay over QUIC, in the words the window shows.
-pub(crate) fn no_quic() -> CtlError {
-    CtlError::server_unreachable(
-        "The relay does not offer QUIC. Choose TCP in Settings, or give the relay a QUIC port",
-    )
-}
-
-/// What an SDK refusal means to the window, as a coded sentence.
-pub(crate) fn sdk_error(error: SdkError) -> CtlError {
-    match error {
-        SdkError::NotAdministrator => CtlError::invalid_argument(
-            "This computer's credential is not the relay's administrator key",
-        ),
-        SdkError::InvalidConfig { message } => CtlError::invalid_argument(message),
-        SdkError::Address { .. } => CtlError::invalid_address(error.to_string()),
-        SdkError::Connect { .. } => CtlError::server_unreachable(error.to_string()),
-        SdkError::TimedOut { .. } => CtlError::timeout(error.to_string()),
-        SdkError::Remote { code, .. } if code == QUIC_UNAVAILABLE => no_quic(),
-        SdkError::Remote { code, message, .. } => {
-            CtlError::protocol(format!("The relay refused: {message} ({code})"))
-        }
-        other => CtlError::protocol(other.to_string()),
-    }
 }
 
 /// The relay carrier as the Relay page shows it.
