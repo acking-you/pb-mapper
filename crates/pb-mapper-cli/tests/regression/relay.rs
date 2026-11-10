@@ -11,15 +11,19 @@ use pb_mapper_protocol::secure::ClientHeaderSession;
 use pb_mapper_protocol::{
     MessageReader, MessageWriter, get_header_msg_reader, get_header_msg_writer,
 };
-use pb_mapper_testkit::{V2ControlSpec, admin_credential, register_v2_control};
+use pb_mapper_server::run_server_with_auth_config;
+use pb_mapper_testkit::{
+    Transport, V2ControlSpec, admin_credential, register_v2_control, reserve_addr,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 use crate::support::{
-    ENV_OVERRIDE_LOCK, InProcessRelay, StaleEnd, auth_config, issue_before_start, read_status_keys,
-    send_v2_request, serve_one_stream, stale_control, subscribe,
+    ENV_OVERRIDE_LOCK, InProcessRelay, StaleEnd, StateDir, auth_config, issue_before_start,
+    read_status_keys, send_v2_request, serve_one_stream, stale_control, subscribe, wait_for_server,
 };
 
 #[tokio::test]
@@ -499,4 +503,33 @@ async fn subscribe_bypasses_acked_control_connection_without_stream() {
     healthy_task.abort();
     stale_task.abort();
     relay.stop().await;
+}
+
+/// `run_server_with_auth_config`, the published entry point that binds for
+/// its caller and that `InProcessRelay` inlines: it loads the process
+/// credential, binds, serves, and returns `Ok` once cancelled.
+#[tokio::test]
+async fn run_server_with_auth_config_serves_until_cancelled() {
+    let config = auth_config();
+    let _state = StateDir(config.state_dir.clone());
+    // It binds the address itself, so it cannot be handed a bound socket.
+    let addr = reserve_addr(Transport::Tcp).await;
+    let shutdown = CancellationToken::new();
+    let server = tokio::spawn(run_server_with_auth_config(
+        addr,
+        shutdown.clone(),
+        None,
+        false,
+        config,
+    ));
+
+    wait_for_server(addr).await;
+    assert!(read_status_keys(addr).await.is_empty());
+
+    shutdown.cancel();
+    timeout(Duration::from_secs(5), server)
+        .await
+        .expect("the relay did not stop once cancelled")
+        .unwrap()
+        .unwrap();
 }

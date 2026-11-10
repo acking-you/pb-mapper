@@ -102,9 +102,9 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// Connect once something listens on `server_addr`: a relay in a child process
-/// binds its port some time after it is spawned.
-async fn wait_for_server(server_addr: SocketAddr) -> TcpStream {
+/// Connect once something listens on `server_addr`: a relay that binds its own
+/// port, in a child process or a task, does so some time after it is spawned.
+pub(crate) async fn wait_for_server(server_addr: SocketAddr) -> TcpStream {
     timeout(Duration::from_secs(2), async {
         loop {
             match TcpStream::connect(server_addr).await {
