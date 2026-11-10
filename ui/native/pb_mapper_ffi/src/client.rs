@@ -126,7 +126,7 @@ pub unsafe extern "C" fn pb_mapper_get_client_configs_json(
     respond(unsafe { handle.as_ref() }, |handle| {
         let clients = handle
             .runtime
-            .block_on(async { handle.state.lock().await.get_client_configs() });
+            .block_on(async { handle.state.lock().await.get_client_configs() })?;
         Ok(Reply::Data(json!({"clients": clients})))
     })
 }

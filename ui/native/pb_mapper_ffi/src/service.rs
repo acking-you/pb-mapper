@@ -122,7 +122,7 @@ pub unsafe extern "C" fn pb_mapper_get_service_configs_json(
     respond(unsafe { handle.as_ref() }, |handle| {
         let services = handle
             .runtime
-            .block_on(async { handle.state.lock().await.get_service_configs() });
+            .block_on(async { handle.state.lock().await.get_service_configs() })?;
         Ok(Reply::Data(json!({"services": services})))
     })
 }

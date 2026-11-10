@@ -222,7 +222,7 @@ async fn run(
         }
 
         Command::Services => {
-            let services = state.lock().await.get_service_configs();
+            let services = state.lock().await.get_service_configs()?;
             Ok(proto::Response::ok(
                 Some(json!({ "services": services })),
                 None,
@@ -230,7 +230,7 @@ async fn run(
         }
 
         Command::Clients => {
-            let clients = state.lock().await.get_client_configs();
+            let clients = state.lock().await.get_client_configs()?;
             Ok(proto::Response::ok(
                 Some(json!({ "clients": clients })),
                 None,

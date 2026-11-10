@@ -176,8 +176,8 @@ impl PbMapperState {
         self.config_dir.join("clients.json")
     }
 
-    pub fn load_service_configs(&self) -> ServiceConfigStore {
-        read_store(&self.get_service_config_path())
+    pub fn load_service_configs(&self) -> Result<ServiceConfigStore, CtlError> {
+        read_store(&self.get_service_config_path(), "config")
     }
 
     pub fn save_service_configs(&self, store: &ServiceConfigStore) -> Result<(), CtlError> {
@@ -197,7 +197,7 @@ impl PbMapperState {
                     port_mapping,
                 },
         } = spec;
-        let mut store = self.load_service_configs();
+        let mut store = self.load_service_configs()?;
         let now = SystemTime::now();
 
         let config = ServiceConfigData {
@@ -219,13 +219,13 @@ impl PbMapperState {
     }
 
     pub fn delete_service_config(&self, service_key: &str) -> Result<(), CtlError> {
-        let mut store = self.load_service_configs();
+        let mut store = self.load_service_configs()?;
         store.services.remove(service_key);
         self.save_service_configs(&store)
     }
 
-    pub fn load_client_configs(&self) -> ClientConfigStore {
-        read_store(&self.get_client_config_path())
+    pub fn load_client_configs(&self) -> Result<ClientConfigStore, CtlError> {
+        read_store(&self.get_client_config_path(), "client config")
     }
 
     pub fn save_client_configs(&self, store: &ClientConfigStore) -> Result<(), CtlError> {
@@ -245,7 +245,7 @@ impl PbMapperState {
                     port_mapping,
                 },
         } = spec;
-        let mut store = self.load_client_configs();
+        let mut store = self.load_client_configs()?;
         let now = SystemTime::now();
 
         let config = ClientConfigData {
@@ -267,19 +267,33 @@ impl PbMapperState {
     }
 
     pub fn delete_client_config(&self, service_key: &str) -> Result<(), CtlError> {
-        let mut store = self.load_client_configs();
+        let mut store = self.load_client_configs()?;
         store.clients.remove(service_key);
         self.save_client_configs(&store)
     }
 }
 
-/// The store saved at `path`, or an empty one when there is none or it does
-/// not parse.
-fn read_store<T: DeserializeOwned + Default>(path: &Path) -> T {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
+/// The store saved at `path`, or an empty one when there is none; `noun`
+/// names it in the errors. One that cannot be read or does not parse is an
+/// error, never an empty store: a save would then write over every tunnel in
+/// it.
+fn read_store<T: DeserializeOwned + Default>(path: &Path, noun: &str) -> Result<T, CtlError> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(e) => {
+            return Err(CtlError::io(format!(
+                "Failed to read {noun} file {}: {e}",
+                path.display()
+            )));
+        }
+    };
+    serde_json::from_str(&content).map_err(|e| {
+        CtlError::io(format!(
+            "Failed to parse {noun} file {}: {e}; fix or remove it",
+            path.display()
+        ))
+    })
 }
 
 /// Saves `store` at `path` as pretty JSON; `noun` names it in the errors.

@@ -198,8 +198,8 @@ impl PbMapperState {
         Ok(())
     }
 
-    pub fn get_service_configs(&self) -> Vec<ServiceConfigInfo> {
-        let store = self.load_service_configs();
+    pub fn get_service_configs(&self) -> Result<Vec<ServiceConfigInfo>, CtlError> {
+        let store = self.load_service_configs()?;
         let mut services = Vec::new();
 
         let mut sorted_configs: Vec<_> = store.services.values().collect();
@@ -225,7 +225,7 @@ impl PbMapperState {
             });
         }
 
-        services
+        Ok(services)
     }
 
     pub fn get_service_status(&self, service_key: String) -> TunnelStatusResponse {
@@ -237,8 +237,8 @@ impl PbMapperState {
         }
     }
 
-    pub fn get_client_configs(&self) -> Vec<ClientConfigInfo> {
-        let store = self.load_client_configs();
+    pub fn get_client_configs(&self) -> Result<Vec<ClientConfigInfo>, CtlError> {
+        let store = self.load_client_configs()?;
         let mut client_infos = Vec::new();
 
         for (service_key, config) in store.clients.iter() {
@@ -266,7 +266,7 @@ impl PbMapperState {
         }
 
         client_infos.sort_by_key(|info| info.created_at_ms);
-        client_infos
+        Ok(client_infos)
     }
 
     pub fn get_client_status(&self, service_key: String) -> TunnelStatusResponse {

@@ -342,11 +342,13 @@ async fn the_list_says_which_path_each_tunnel_takes() {
     };
     let clients: Vec<_> = state
         .get_client_configs()
+        .unwrap()
         .into_iter()
         .map(|client| (client.service_key, client.path))
         .collect();
     let shares: Vec<_> = state
         .get_service_configs()
+        .unwrap()
         .into_iter()
         .map(|share| (share.service_key, share.path))
         .collect();
@@ -458,8 +460,8 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
     assert!(detail.quic_port.is_some());
     {
         let state = state.lock().await;
-        let share = &state.get_service_configs()[0];
-        let client = &state.get_client_configs()[0];
+        let share = &state.get_service_configs().unwrap()[0];
+        let client = &state.get_client_configs().unwrap()[0];
         assert_eq!(share.relay_transport, Some(RelayTransport::Quic));
         assert_eq!(client.relay_transport, Some(RelayTransport::Quic));
         // Saved with each tunnel, but one kept on the relay asks no router.
@@ -469,7 +471,8 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
         assert!(tunnel.diagnostics().port_mapping.is_none());
         // A tunnel saved before the choice maps when needed; one saved
         // with the first draft's switch keeps what it meant.
-        let saved = serde_json::to_value(&state.load_service_configs().services["web"]).unwrap();
+        let saved =
+            serde_json::to_value(&state.load_service_configs().unwrap().services["web"]).unwrap();
         let read = |port_mapping: Option<serde_json::Value>| {
             let mut saved = saved.clone();
             match port_mapping {
@@ -742,6 +745,58 @@ async fn a_state_reads_nothing_until_its_directory_arrives() {
     assert!(pb_mapper_core::checksum::process_credential_configured());
 
     set_process_msg_header_key(None).unwrap();
+}
+
+/// A tunnel list that does not parse is refused, not taken for an empty
+/// one: a save would write it over with the one tunnel it saves, and every
+/// other one in the file would be gone.
+#[tokio::test]
+async fn a_tunnel_list_that_does_not_parse_is_kept() {
+    let (_guard, state, _root) = temp_state("unparsed-lists").await;
+    let state = state.lock().await;
+    let services = state.config_dir.join("services.json");
+    let clients = state.config_dir.join("clients.json");
+    let broken = br#"{"services": {"web": {"service_key": "web","#;
+    std::fs::write(&services, broken).unwrap();
+    std::fs::write(&clients, broken).unwrap();
+    let direct = DirectOptions {
+        allow_direct: true,
+        port_mapping: PortMapping::Auto,
+    };
+
+    let saved = state.save_service_config(&ShareSpec {
+        service_key: "cam".into(),
+        local_address: "127.0.0.1:8080".into(),
+        protocol: "TCP".into(),
+        enable_encryption: true,
+        enable_keep_alive: false,
+        direct,
+    });
+    assert_eq!(saved.unwrap_err().code(), ErrorCode::Io);
+    let saved = state.save_client_config(&ConnectSpec {
+        service_key: "cam".into(),
+        local_address: "127.0.0.1:9090".into(),
+        protocol: "TCP".into(),
+        enable_keep_alive: false,
+        namespace: None,
+        direct,
+    });
+    assert_eq!(saved.unwrap_err().code(), ErrorCode::Io);
+    assert_eq!(
+        state.delete_service_config("web").unwrap_err().code(),
+        ErrorCode::Io
+    );
+    assert_eq!(std::fs::read(&services).unwrap(), broken);
+    assert_eq!(std::fs::read(&clients).unwrap(), broken);
+    // The lists say why they cannot be shown.
+    assert_eq!(
+        state.get_service_configs().err().map(|e| e.code()),
+        Some(ErrorCode::Io)
+    );
+    assert_eq!(
+        state.get_client_configs().err().map(|e| e.code()),
+        Some(ErrorCode::Io)
+    );
 }
 
 /// The states the window matches on, as it reads them.
