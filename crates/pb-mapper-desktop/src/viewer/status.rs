@@ -627,7 +627,7 @@ impl ViewerStatsAcc {
         prune(&mut self.host_ms, now, LATENCY_WINDOW);
     }
 
-    pub fn host_ms(&mut self, now: Instant) -> Option<u32> {
+    fn host_ms(&mut self, now: Instant) -> Option<u32> {
         windowed_median(&mut self.host_ms, now, LATENCY_WINDOW)
     }
 
@@ -650,13 +650,9 @@ impl ViewerStatsAcc {
     }
 
     /// `host_ms + rtt / 2 + viewer_ms`, once both medians exist.
-    pub fn picture_latency(&mut self, now: Instant, viewer_ms: Option<u32>) -> Option<u32> {
+    fn picture_latency(&self, host_ms: Option<u32>, viewer_ms: Option<u32>) -> Option<u32> {
         let rtt = self.host.and_then(|host| host.rtt_ms).unwrap_or(0);
-        Some(
-            self.host_ms(now)?
-                .saturating_add(rtt / 2)
-                .saturating_add(viewer_ms?),
-        )
+        Some(host_ms?.saturating_add(rtt / 2).saturating_add(viewer_ms?))
     }
 
     /// The host's figures, the received rates, the latency medians and
@@ -682,9 +678,10 @@ impl ViewerStatsAcc {
             stats.dropped_frames = host.dropped_frames;
         }
         stats.max_fps = self.max_fps;
-        stats.host_ms = self.host_ms(now);
+        let host_ms = self.host_ms(now);
+        stats.host_ms = host_ms;
         stats.viewer_ms = viewer_ms;
-        stats.picture_latency_ms = self.picture_latency(now, viewer_ms);
+        stats.picture_latency_ms = self.picture_latency(host_ms, viewer_ms);
         stats.received_fps = self.received_fps;
         stats.received_bitrate = self.received_bitrate;
         stats.speed_rx_bps = self.speed_rx_bps;
@@ -738,7 +735,8 @@ impl ViewerStatsAcc {
             self.good_since = None;
             return;
         }
-        let latency = self.picture_latency(now, viewer_ms);
+        let host_ms = self.host_ms(now);
+        let latency = self.picture_latency(host_ms, viewer_ms);
         let host = self.host;
         let pace = host.map_or(0, |host| host.pace_fps);
         let poor = host
