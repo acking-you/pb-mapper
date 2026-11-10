@@ -98,6 +98,15 @@ HKDF-SHA256 使用 connection salt 作为 salt，凭据的 32 字节 secret 作�
 在十分钟内跨重启、跨 compact 保留，不能通过等待 Bloom 窗口结束或重启进程来重放
 旧操作。客户端首帧时间戳仍用于新鲜度检查，但不决定这条记录保留多久。
 
+中继还会把每个被接纳的首帧追加到认证状态目录下的 `connection.replay`，启动时重新
+载入其中最近十分钟的记录，所以重启不会让重放窗口重新打开。这份日志 fail closed：
+启动时读不出来（追加到一半时崩溃会留下截断的最后一条记录），或追加失败后无法回滚、
+新建文件后无法同步目录、compact 失败时，中继会以
+`connection_replay_store_unavailable` 拒绝所有 protocol-v2 首帧，直到它带着一份
+可读的日志重启。原因只记一次，在 error 级别：事件 `replay_log_unavailable` 给出
+文件、失败的步骤和操作系统错误。删除截断的 `connection.replay` 后重启即可恢复接纳，
+代价是忘掉最近十分钟内的首帧。
+
 根密钥轮换或认证状态重置之后，进程会在内存里保留上一份根密钥和 instance id。
 仍用旧临时凭据加密的首帧会用这份材料解密，从而把稳定的
 `temporary_key_rotated` 错误返回给客户端，而不是解密失败。
@@ -175,8 +184,9 @@ tombstone 以给出稳定错误后，槽位可以复用。显式 `key gc` 可立
 的 session。`temporary_key_invalid` 只用于派生之后材料仍不匹配的进程内校验。
 CLI 在发请求前保存候选 key，完成后再用
 新 key 执行一次 `admin status` 验证。未指定 `--key-file` 时，恢复副本默认写到
-`$XDG_CONFIG_HOME/pb-mapper`（或 `$HOME/.config/pb-mapper`），不要求本机能写
-`/var/lib`。
+`$XDG_CONFIG_HOME/pb-mapper`（或 `$HOME/.config/pb-mapper`；Windows 上没有 `HOME`
+时为 `%USERPROFILE%\.config\pb-mapper`），不要求本机能写 `/var/lib`。这些变量都
+没有设置、或只有相对路径时，命令在联系中继之前就拒绝执行，并要求指定 `--key-file`。
 
 `auth-state reset --confirm` 同样会清空临时凭据，并轮换 server instance ID。这样即使
 原槽位表损坏或丢失，旧凭据也不会因为未来复用了相同 key ID 而重新有效。

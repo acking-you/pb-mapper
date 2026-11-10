@@ -128,6 +128,18 @@ old captured mutation cannot be replayed after the Bloom window or a process
 restart. The client-supplied first-flight timestamp is still checked for
 freshness, but it does not control how long the claim is retained.
 
+The relay also appends every admitted first flight to `connection.replay` in
+the auth state directory and reloads the last ten minutes of it at start, so a
+restart does not reopen the window. The log fails closed. If it cannot be
+read at start (a crash in the middle of an append leaves a cut-off last
+record), or a failed append cannot be rolled back, its new directory entry
+synced or the log compacted, the relay refuses every protocol-v2 first flight
+with `connection_replay_store_unavailable` until it restarts with a log it can
+read. It says why once, at error level: the event `replay_log_unavailable`
+names the file, the step that failed and the operating system's error.
+Removing a cut-off `connection.replay` and restarting lets the relay admit
+again, at the cost of forgetting the first flights of the last ten minutes.
+
 After a live root rotation or auth-state reset, the relay keeps the immediately
 previous root key and instance id in memory. A first flight still encrypted with
 the old temporary credential is decrypted with that previous material so the
@@ -233,8 +245,11 @@ the presenter can open. `temporary_key_invalid` is the in-process result when
 presented material does not match after derivation. The CLI
 stages the candidate key before the request and verifies the new key with an
 authenticated status call. When `--key-file` is omitted, the recovery copy is
-written below `$XDG_CONFIG_HOME/pb-mapper` (or `$HOME/.config/pb-mapper`)
-rather than requiring local `/var/lib` access.
+written below `$XDG_CONFIG_HOME/pb-mapper` (or `$HOME/.config/pb-mapper`, or,
+on Windows without `HOME`, `%USERPROFILE%\.config\pb-mapper`) rather than
+requiring local `/var/lib` access. With none of these set, or only relative
+values, the command refuses before contacting the relay and asks for
+`--key-file`.
 
 An explicit auth-state reset also invalidates all temporary credentials. It
 rotates the server instance ID so credentials from a corrupted or lost slot

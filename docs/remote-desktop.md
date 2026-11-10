@@ -1267,7 +1267,9 @@ presentation is never forwarded.
 ### Input and cursor
 
 The viewer queues input in order behind a revoke barrier: at most 512 events or
-256 KiB, with consecutive pointer moves coalescing into the newest. It sends a
+256 KiB, with consecutive pointer moves coalescing into the newest. A barrier (a
+release, a grant or a revoke) discards only the input queued before it, never
+input submitted after the call that set it. It sends a
 pending presentation ahead of input, and revokes control rather than grow the
 queue. The host's reader checks the control policy and pushes input onto a
 bounded lane without waiting. The desktop-bound thread drains that lane before
@@ -1276,7 +1278,9 @@ encoding. It applies each event only after checking its sequence, the display
 geometry and generation, control, and a presentation its own ledger recorded
 within 2 s. Nothing queued before a stop is executed, and reconnect never
 replays queued pointer or keyboard actions. A full lane ends control
-(`input_congestion`) rather than inject a burst the user no longer expects.
+(`input_congestion`) rather than inject a burst the user no longer expects; the
+display-mode commands in it still run, the owner's restore among them, and the
+owner's restore is queued even past a full lane.
 
 `input_wait`, from the reader's enqueue to the start of execution, is traced as
 p50/p99/max each second. The acceptance gate is p99 ≤ 5 ms on the ordinary

@@ -6,7 +6,9 @@
 文中的测试名是当时的名称：`direct_e2e`、`sdk_e2e`、`temporary_credential_e2e`、
 `data_compatibility` 与 `test_delay` 现在是 CLI 集成测试 `e2e` 的模块
 （`direct`、`sdk`、`temporary_credential`、`data_compatibility`、`tunnel_matrix`），
-`regression` 现在是 `tests/regression/`。
+`regression` 现在分成三个测试二进制：中继用例在 `tests/regression/`，`register`
+与 `connect` 用例在 `tests/regression_client/`，运行 `pb-mapper` 二进制的用例在
+`tests/regression_cli/`。
 
 测试日期：2026-10-23。实现与边界见 [设计说明](issue-13-direct-connect-design.zh-CN.md)。没有对生产 7666 服务做替换或重启。双 NAT 和公网回退测试完成后，已停止对应临时进程、删除独立凭据和认证目录、清理 network namespace/bridge 及专用防火墙规则。随后按用户要求重新使用 12111/10811 启动独立 HTTP 演示，保留运行供用户查看；生产 7666 始终保留。
 
