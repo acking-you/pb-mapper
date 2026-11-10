@@ -185,10 +185,15 @@ async fn main() -> Result<()> {
     }
     .await;
     // Even errors/timeouts revoke the dedicated scoped credential. The TTL also
-    // bounds the grant if the process is forcibly terminated.
-    admin.revoke_key(key.key_id).await?;
-    println!("temporary_credential_revoked=true");
-    result
+    // bounds the grant if the process is forcibly terminated. A failed case
+    // reports its own error before a failed revoke.
+    let revoked = admin.revoke_key(key.key_id).await;
+    if revoked.is_ok() {
+        println!("temporary_credential_revoked=true");
+    }
+    result?;
+    revoked?;
+    Ok(())
 }
 
 fn tls_pair() -> Result<(TlsAcceptor, TlsConnector)> {

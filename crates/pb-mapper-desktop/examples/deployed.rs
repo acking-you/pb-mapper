@@ -149,8 +149,10 @@ async fn main() -> Outcome {
     let revoke = admin.revoke_key(key.key_id).await;
     let _ = std::fs::remove_file(run.output.join(CONTROLLER));
     let _ = std::fs::remove_file(run.output.join(CONTROLLER_STAGED));
+    // A failed run reports its own error before a failed revoke.
+    result?;
     revoke?;
-    result
+    Ok(())
 }
 
 /// Host the first display under the test credential, hand the phone tool its
