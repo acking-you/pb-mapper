@@ -10,7 +10,6 @@ use crate::{
     shared::{CursorReport, EngineState},
     wire::{self, MAX_PAYLOAD},
 };
-use serde::Serialize;
 use std::{
     sync::atomic::Ordering,
     time::{Duration, Instant},
@@ -31,11 +30,11 @@ struct Abandoned;
 /// Write one message. Once the session is cancelled, the message in flight and
 /// the final `Stopped` share `STOP_WRITE_TIMEOUT`, so a local stop never waits
 /// for a slow viewer to drain video.
-async fn write<W: AsyncWrite + Unpin, T: Serialize>(
+async fn write<W: AsyncWrite + Unpin>(
     writer: &mut W,
     cancel: &CancellationToken,
     stop_at: &mut Option<Instant>,
-    header: &T,
+    header: &HostMessage,
     payload: Option<&[u8]>,
 ) -> Result<(), Abandoned> {
     let write = wire::write_message(writer, header, payload);
@@ -118,9 +117,9 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         self.stop().await
     }
 
-    async fn send<T: Serialize>(
+    async fn send(
         &mut self,
-        header: &T,
+        header: &HostMessage,
         payload: Option<&[u8]>,
     ) -> Result<(), Abandoned> {
         write(
