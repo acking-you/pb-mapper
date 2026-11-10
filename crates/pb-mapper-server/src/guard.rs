@@ -208,8 +208,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(is_deregistration(&delivered));
-        // The cancelled send delivered nothing and the drop sent one task, so
-        // nothing can still be on its way.
+        // Let anything the drop deferred to a task run, so a second
+        // deregistration on its way would be in the queue by now.
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
         assert!(
             receiver.is_empty(),
             "cancelling cleanup after channel delivery emitted a second deregistration"
