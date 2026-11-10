@@ -1,6 +1,8 @@
 //! Thread C's capture: the desktop context, the encoder and its output.
 
-use super::{CONTEXT_CHECK_INTERVAL, Clock, ENCODER_DEPTH, Engine, H265_FAILED, TRANSPORT_GATE};
+use super::{
+    CONTEXT_CHECK_INTERVAL, Clock, ENCODER_DEPTH, Engine, H265_FAILED, TRANSPORT_GATE, link_lost,
+};
 use crate::{
     Backend, EncodedFrame, FailureKind, Result, VideoCodec, VideoRate, error, failure_kind,
     idr::IdrReason,
@@ -74,8 +76,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     /// off for the rest of the process, and the viewer reconnects to H.264.
     pub(super) fn fail(&mut self, failure: io::Error, now: Instant) {
         let message = failure.to_string();
-        if failure.kind() == io::ErrorKind::NotConnected {
-            self.fatal = Some(message);
+        if link_lost(&failure) {
+            self.fatal = Some(message.clone());
         } else if self.codec == VideoCodec::H265
             && failure_kind(&failure)
                 == Some(FailureKind::EncoderFailed {
@@ -88,7 +90,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 event = "desktop_h265_failed",
                 detail = ?message,
             );
-            self.fatal = Some(message);
+            self.fatal = Some(message.clone());
         }
         self.context_due = if self.unavailable.is_none() && self.streaming {
             self.invalidate();
@@ -102,7 +104,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         } else {
             unavailable_reason(&failure)
         };
-        self.unavailable = Some((reason, failure.to_string()));
+        self.unavailable = Some((reason, message));
     }
 
     /// Capturing, not paused, with a frame produced in this generation.

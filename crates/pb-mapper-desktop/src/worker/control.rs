@@ -1,16 +1,13 @@
 //! Thread C's input lane and the control grant.
 
-use super::{Clock, Engine};
+use super::{Clock, Engine, link_lost};
 use crate::{
     Backend, Button, Input, InputEvent,
     idr::IdrReason,
     lane::LaneCommand,
     protocol::{NoticeCode, StateReason},
 };
-use std::{
-    io,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 /// The least time between two helper lease renewals.
 const LEASE_RENEW_MIN: Duration = Duration::from_millis(250);
@@ -220,7 +217,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 }
             }
             Err(failure) => {
-                if failure.kind() == io::ErrorKind::NotConnected {
+                if link_lost(&failure) {
                     self.fatal = Some(failure.to_string());
                 } else {
                     // The boundary may have seen a desktop change this engine
@@ -272,7 +269,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         self.last_lease = Some(now);
         if let Some(context) = self.context.clone()
             && let Err(failure) = self.backend.presented(&context)
-            && failure.kind() == io::ErrorKind::NotConnected
+            && link_lost(&failure)
         {
             self.fatal = Some(failure.to_string());
         }

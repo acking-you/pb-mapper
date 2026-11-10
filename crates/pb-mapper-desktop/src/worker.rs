@@ -29,6 +29,7 @@ use crate::{
     timer::TimerResolution,
 };
 use std::{
+    io,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -231,6 +232,12 @@ fn run<B: Backend>(
 enum Step {
     Wait(Instant),
     Exit(WorkerExit),
+}
+
+/// A sticky backend link failure (`Backend`'s `NotConnected`): the session
+/// ends instead of retrying.
+fn link_lost(failure: &io::Error) -> bool {
+    failure.kind() == io::ErrorKind::NotConnected
 }
 
 /// The engine of thread C: its backend, the desktop generation and the

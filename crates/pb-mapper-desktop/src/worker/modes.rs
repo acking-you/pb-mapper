@@ -1,12 +1,12 @@
 //! Thread C's display mode changes and restores.
 
-use super::{Clock, Engine};
+use super::{Clock, Engine, link_lost};
 use crate::{
     Backend, DesktopContext, DesktopKind,
     modes::{ModeCommand, ModeList, SETTLE},
     protocol::NoticeCode,
 };
-use std::{io, time::Instant};
+use std::time::Instant;
 
 impl<B: Backend, K: Clock> Engine<B, K> {
     /// A viewer's display mode change or restore, refused with a notice
@@ -51,7 +51,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         };
         match changed {
             Ok(changed) => self.mode_changed(changed, now),
-            Err(failure) if failure.kind() == io::ErrorKind::NotConnected => {
+            Err(failure) if link_lost(&failure) => {
                 self.fatal = Some(failure.to_string());
             }
             Err(failure) => self.notice(NoticeCode::DisplayModeFailed, failure.to_string(), now),
@@ -63,7 +63,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     pub(super) fn restore_mode(&mut self, now: Instant) {
         match self.backend.restore_display_mode() {
             Ok(changed) => self.mode_changed(changed, now),
-            Err(failure) if failure.kind() == io::ErrorKind::NotConnected => {
+            Err(failure) if link_lost(&failure) => {
                 self.fatal = Some(failure.to_string());
             }
             Err(failure) => tracing::warn!(
