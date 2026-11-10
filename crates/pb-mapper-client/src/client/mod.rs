@@ -6,6 +6,7 @@ use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
 use crate::endpoint::RelayEndpoint;
 use crate::relay::CarrierId;
 use std::fmt::Debug;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -284,11 +285,21 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
             }
         };
         tracing::info!(event = "client_local_listener_bound", %key, %local_addr, "local listener bound; checking remote service");
-        let mut probes = JoinSet::new();
-        let mut next_probe = Instant::now();
-        let mut last_success = None;
-        let mut connected = false;
-        let mut consecutive_health_failures = 0usize;
+        let mut health = Health {
+            remote_addr: &remote_addr,
+            key: &key,
+            namespace,
+            credential,
+            diagnostics: &diagnostics,
+            status_callback: status_callback.as_ref(),
+            timing: &timing,
+            retry_backoff: &mut retry_backoff,
+            probes: JoinSet::new(),
+            next_probe: Instant::now(),
+            last_success: None,
+            connected: false,
+            consecutive_health_failures: 0,
+        };
         let (stream_event_tx, mut stream_event_rx) = tokio::sync::mpsc::channel(1);
 
         loop {
@@ -300,9 +311,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                         #[cfg(feature = "p2p")]
                         if let Some(direct) = &direct { direct.invalidate(); }
                     }
-                    probes.abort_all();
-                    next_probe = Instant::now();
-                    retry_backoff.reset();
+                    health.recheck_now();
                 },
                 accepted = async {
                     // Backpressure stays in the listener backlog while setup is
@@ -334,99 +343,19 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                         }
                     });
                 }
-                () = tokio::time::sleep_until(next_probe), if probes.is_empty() => {
-                    diagnostics.attempt();
-                    diagnostics.phase(RecoveryPhase::Handshake);
-                    let probe_remote = remote_addr.clone();
-                    let probe_key = key.clone();
-                    let budget = timing.lock().await.timeout().min(client_health_check_timeout());
-                    probes.spawn(async move {
-                        let _permit = probe_remote.control_permit().await;
-                        let started = Instant::now();
-                        let mut trace = ProbeTrace::default();
-                        let result = probe_remote_key(&probe_remote, &probe_key, namespace, credential, budget, &mut trace).await;
-                        (started, started.elapsed(), result, trace)
-                    });
+                () = tokio::time::sleep_until(health.next_probe), if health.probes.is_empty() => {
+                    health.spawn_probe().await;
                 }
-                Some(result) = probes.join_next() => {
-                    let (started, elapsed, result, ProbeTrace { carrier, rtt }) = match result {
-                        Ok(result) => result,
-                        Err(error) if error.is_cancelled() => continue,
-                        Err(error) => (Instant::now(), Duration::ZERO, Err(ProbeFailure::transient(error.to_string())), ProbeTrace::default()),
-                    };
-                    if let Some(rtt) = rtt {
-                        diagnostics.relay_rtt(&remote_addr, rtt);
-                    }
-                    match result {
-                        Ok(()) => {
-                            timing.lock().await.record(elapsed);
-                            remote_addr.protocol_succeeded();
-                            diagnostics.succeeded(elapsed);
-                            last_success = Some(Instant::now());
-                            consecutive_health_failures = 0;
-                            retry_backoff.reset();
-                            next_probe = Instant::now() + client_health_check_interval();
-                            if !connected {
-                                connected = true;
-                                if let Some(callback) = &status_callback { callback("connected"); }
-                            }
-                        }
-                        Err(failure) if failure.permanent && diagnostics.has_active_direct() => {
-                            diagnostics.failed(failure.kind, Duration::ZERO);
-                            if let Some(callback) = &status_callback { callback("retrying"); }
-                            next_probe = Instant::now() + Duration::from_secs(30);
-                        }
-                        Err(failure) if failure.permanent => {
-                            if failure.protocol_replied {
-                                remote_addr.protocol_succeeded();
-                                diagnostics.responded(elapsed);
-                            }
-                            diagnostics.failed(failure.kind, Duration::ZERO);
-                            if let Some(callback) = &status_callback { callback(&format!("failed: {failure}")); }
-                            break 'outer;
-                        }
-                        Err(_) if last_success.is_some_and(|success| success > started) => {
-                            // Actual traffic completed after this probe began.
-                            next_probe = Instant::now() + client_health_check_interval();
-                        }
-                        Err(failure) => {
-                            failure.update_timing(&mut *timing.lock().await, elapsed);
-                            if failure.protocol_replied {
-                                remote_addr.protocol_succeeded();
-                                diagnostics.responded(elapsed);
-                            } else { remote_addr.transport_failed(carrier); }
-                            consecutive_health_failures = consecutive_health_failures.saturating_add(1);
-                            if !connected || consecutive_health_failures >= client_health_failure_threshold() {
-                                connected = false;
-                                if let Some(callback) = &status_callback { callback("retrying"); }
-                            }
-                            let delay = jitter(retry_backoff.next_delay());
-                            next_probe = Instant::now() + delay;
-                            if diagnostics.failed(failure.kind, delay) {
-                            tracing::warn!(event = "client_remote_probe_failed", %key, reason = %failure, consecutive_health_failures, retry_delay = ?delay, "remote probe failed; listener remains active");
-                            }
-                        }
+                Some(result) = health.probes.join_next() => {
+                    if health.on_probe_result(result).await.is_break() {
+                        break 'outer;
                     }
                 }
-                Some(success) = stream_event_rx.recv() => {
-                    if success {
-                        last_success = Some(Instant::now());
-                        consecutive_health_failures = 0;
-                        retry_backoff.reset();
-                        if !connected {
-                            connected = true;
-                            if let Some(callback) = &status_callback { callback("connected"); }
-                        }
-                    } else if probes.is_empty() {
-                        // Coalesce failures and rate limit probes independently
-                        // of the number of callers arriving during an outage.
-                        next_probe = next_probe.min(Instant::now() + Duration::from_millis(100));
-                    }
-                }
+                Some(success) = stream_event_rx.recv() => health.on_stream_event(success),
                 Some(_) = stream_tasks.join_next() => {}
             }
         }
-        drop(probes);
+        drop(health);
         if let Some(callback) = &status_callback {
             callback("retrying");
         }
@@ -510,6 +439,186 @@ impl std::fmt::Display for ProbeFailure {
 struct ProbeTrace {
     carrier: Option<CarrierId>,
     rtt: Option<Duration>,
+}
+
+/// One probe's result: when it started, how long it took, its verdict and
+/// what it learned on the way.
+type ProbeOutcome = (
+    Instant,
+    Duration,
+    std::result::Result<(), ProbeFailure>,
+    ProbeTrace,
+);
+
+/// What a bound listener knows about the remote service, and the probes that
+/// find out.
+///
+/// Lives as long as one listener. Not generic: only binding and accepting name
+/// the local listener type, so the health bookkeeping is compiled once.
+struct Health<'a> {
+    remote_addr: &'a RelayEndpoint,
+    key: &'a Arc<str>,
+    namespace: Option<u64>,
+    credential: Credential,
+    diagnostics: &'a Diagnostics,
+    status_callback: Option<&'a ClientStatusCallback>,
+    timing: &'a Mutex<RecoveryTiming>,
+    /// Shared with the listener's own rebinds, which wait on it too.
+    retry_backoff: &'a mut RetryBackoff,
+    probes: JoinSet<ProbeOutcome>,
+    next_probe: Instant,
+    last_success: Option<Instant>,
+    connected: bool,
+    consecutive_health_failures: usize,
+}
+
+impl Health<'_> {
+    fn report(&self, status: &str) {
+        if let Some(callback) = self.status_callback {
+            callback(status);
+        }
+    }
+
+    /// Something changed that a waiting probe would not see: drop the ones in
+    /// flight and ask again now.
+    fn recheck_now(&mut self) {
+        self.probes.abort_all();
+        self.next_probe = Instant::now();
+        self.retry_backoff.reset();
+    }
+
+    async fn spawn_probe(&mut self) {
+        self.diagnostics.attempt();
+        self.diagnostics.phase(RecoveryPhase::Handshake);
+        let probe_remote = self.remote_addr.clone();
+        let probe_key = self.key.clone();
+        let (namespace, credential) = (self.namespace, self.credential);
+        let budget = self
+            .timing
+            .lock()
+            .await
+            .timeout()
+            .min(client_health_check_timeout());
+        self.probes.spawn(async move {
+            let _permit = probe_remote.control_permit().await;
+            let started = Instant::now();
+            let mut trace = ProbeTrace::default();
+            let result = probe_remote_key(
+                &probe_remote,
+                &probe_key,
+                namespace,
+                credential,
+                budget,
+                &mut trace,
+            )
+            .await;
+            (started, started.elapsed(), result, trace)
+        });
+    }
+
+    /// Act on a finished probe. Breaks when the relay refused for good, which
+    /// ends the tunnel.
+    async fn on_probe_result(
+        &mut self,
+        result: std::result::Result<ProbeOutcome, tokio::task::JoinError>,
+    ) -> ControlFlow<()> {
+        let (started, elapsed, result, ProbeTrace { carrier, rtt }) = match result {
+            Ok(result) => result,
+            Err(error) if error.is_cancelled() => return ControlFlow::Continue(()),
+            Err(error) => (
+                Instant::now(),
+                Duration::ZERO,
+                Err(ProbeFailure::transient(error.to_string())),
+                ProbeTrace::default(),
+            ),
+        };
+        if let Some(rtt) = rtt {
+            self.diagnostics.relay_rtt(self.remote_addr, rtt);
+        }
+        match result {
+            Ok(()) => {
+                self.timing.lock().await.record(elapsed);
+                self.remote_addr.protocol_succeeded();
+                self.diagnostics.succeeded(elapsed);
+                self.last_success = Some(Instant::now());
+                self.consecutive_health_failures = 0;
+                self.retry_backoff.reset();
+                self.next_probe = Instant::now() + client_health_check_interval();
+                if !self.connected {
+                    self.connected = true;
+                    self.report("connected");
+                }
+            }
+            Err(failure) if failure.permanent && self.diagnostics.has_active_direct() => {
+                self.diagnostics.failed(failure.kind, Duration::ZERO);
+                self.report("retrying");
+                self.next_probe = Instant::now() + Duration::from_secs(30);
+            }
+            Err(failure) if failure.permanent => {
+                if failure.protocol_replied {
+                    self.remote_addr.protocol_succeeded();
+                    self.diagnostics.responded(elapsed);
+                }
+                self.diagnostics.failed(failure.kind, Duration::ZERO);
+                self.report(&format!("failed: {failure}"));
+                return ControlFlow::Break(());
+            }
+            Err(_) if self.last_success.is_some_and(|success| success > started) => {
+                // Actual traffic completed after this probe began.
+                self.next_probe = Instant::now() + client_health_check_interval();
+            }
+            Err(failure) => {
+                failure.update_timing(&mut *self.timing.lock().await, elapsed);
+                if failure.protocol_replied {
+                    self.remote_addr.protocol_succeeded();
+                    self.diagnostics.responded(elapsed);
+                } else {
+                    self.remote_addr.transport_failed(carrier);
+                }
+                self.consecutive_health_failures =
+                    self.consecutive_health_failures.saturating_add(1);
+                if !self.connected
+                    || self.consecutive_health_failures >= client_health_failure_threshold()
+                {
+                    self.connected = false;
+                    self.report("retrying");
+                }
+                let delay = jitter(self.retry_backoff.next_delay());
+                self.next_probe = Instant::now() + delay;
+                if self.diagnostics.failed(failure.kind, delay) {
+                    tracing::warn!(
+                        event = "client_remote_probe_failed",
+                        key = %self.key,
+                        reason = %failure,
+                        consecutive_health_failures = self.consecutive_health_failures,
+                        retry_delay = ?delay,
+                        "remote probe failed; listener remains active"
+                    );
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// A local stream finished its setup: proof the service is reachable when
+    /// it succeeded, a reason to probe soon when it did not.
+    fn on_stream_event(&mut self, success: bool) {
+        if success {
+            self.last_success = Some(Instant::now());
+            self.consecutive_health_failures = 0;
+            self.retry_backoff.reset();
+            if !self.connected {
+                self.connected = true;
+                self.report("connected");
+            }
+        } else if self.probes.is_empty() {
+            // Coalesce failures and rate limit probes independently
+            // of the number of callers arriving during an outage.
+            self.next_probe = self
+                .next_probe
+                .min(Instant::now() + Duration::from_millis(100));
+        }
+    }
 }
 
 async fn probe_remote_key(
