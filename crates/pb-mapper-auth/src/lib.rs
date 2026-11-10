@@ -165,5 +165,8 @@ use persistence::{
     truncate_auth_wal, write_admin_key, write_namespace_high_water,
     write_snapshot_and_truncate_wal,
 };
-use state::{AdminState, AuthStateInner, ColdMetadata, PreviousRoot, SlotHot, SlotState};
+use state::{
+    AdminState, AuthStateInner, ColdMetadata, LiveLeases, PreviousRoot, RestoredState, SlotHot,
+    SlotState,
+};
 use timing_wheel::{Timer, TimingWheel};

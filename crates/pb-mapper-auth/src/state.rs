@@ -150,7 +150,7 @@ pub(crate) struct AuthStateInner {
     pub(crate) admin: RwLock<AdminState>,
     pub(crate) sync_process_credential: bool,
     pub(crate) instance_id: RwLock<[u8; INSTANCE_ID_LEN]>,
-    /// Preallocated, indexed directly by `key_slot(key_id)`. Documented on
+    /// Preallocated, indexed directly by `key_id.slot()`. Documented on
     /// [`SlotState`].
     pub(crate) slots: RwLock<Box<[SlotHot]>>,
     /// Rows the configured capacity no longer covers, because a restart shrank
@@ -189,6 +189,50 @@ pub(crate) struct AuthStateInner {
 }
 
 impl AuthStateInner {
+    /// The state a start begins with: `admin_lease` as the current
+    /// administrator lease, and the tables `restored` from the persisted state.
+    pub(crate) fn new(
+        admin_key: AesKeyType,
+        admin_lease: &Arc<AuthLease>,
+        sync_process_credential: bool,
+        instance_id: [u8; INSTANCE_ID_LEN],
+        safe_mode: bool,
+        restored: RestoredState,
+    ) -> Self {
+        let RestoredState {
+            slots,
+            cold,
+            high_slot_generations,
+            high_slot_entries,
+            legacy_protocol,
+            audit_records,
+            root_epoch,
+            namespace_high_water,
+        } = restored;
+        Self {
+            admin: RwLock::new(AdminState {
+                key: admin_key,
+                lease: Arc::downgrade(admin_lease),
+            }),
+            sync_process_credential,
+            instance_id: RwLock::new(instance_id),
+            slots: RwLock::new(slots),
+            high_slot_generations,
+            high_slot_entries: RwLock::new(high_slot_entries),
+            cold: RwLock::new(cold),
+            safe_mode: AtomicBool::new(safe_mode),
+            legacy_protocol_allowed: AtomicBool::new(legacy_protocol.is_allowed()),
+            active_legacy_connections: AtomicU64::new(0),
+            last_legacy_connection_at: AtomicU64::new(0),
+            auth_successes: AtomicU64::new(0),
+            auth_failures: AtomicU64::new(0),
+            root_epoch: AtomicU64::new(root_epoch),
+            namespace_high_water: AtomicU64::new(namespace_high_water),
+            previous_root: RwLock::new(None),
+            audit_records: RwLock::new(audit_records),
+        }
+    }
+
     /// Rows the configured capacity no longer covers. See the field's docs; the
     /// fallback is a scan because the range is small and rarely touched.
     pub(crate) fn high(&self) -> parking_lot::RwLockReadGuard<'_, Vec<PersistedEntry>> {
@@ -233,4 +277,157 @@ pub(crate) struct ColdMetadata {
     /// The namespace this key was issued into, if any. See [`KeyId::namespace`].
     pub(crate) namespace: Option<u64>,
     pub(crate) tombstoned_at: u64,
+}
+
+/// The leases of the keys still live, with their ids, in slot order.
+pub(crate) type LiveLeases = Vec<(KeyId, Arc<AuthLease>)>;
+
+/// What a start rebuilds from the persisted state, before it becomes an
+/// [`AuthStateInner`].
+pub(crate) struct RestoredState {
+    pub(crate) slots: Box<[SlotHot]>,
+    pub(crate) cold: HashMap<KeyId, ColdMetadata>,
+    pub(crate) high_slot_generations: Box<[Generation]>,
+    pub(crate) high_slot_entries: Vec<PersistedEntry>,
+    pub(crate) legacy_protocol: LegacyProtocolPolicy,
+    pub(crate) audit_records: VecDeque<AuditRecord>,
+    pub(crate) root_epoch: u64,
+    /// The encrypted state's copy of the allocator's mark, which the caller
+    /// reconciles with the allocator file.
+    pub(crate) namespace_high_water: u64,
+}
+
+impl RestoredState {
+    /// Rebuilds the tables from `state`, or empty ones when nothing loaded.
+    ///
+    /// Also returns the leases of the keys still live, in slot order. Nothing
+    /// else holds them, so the caller hands them to `Leases::restored`, which
+    /// gives each to the timing wheel that owns it from then on.
+    pub(crate) fn from_snapshot(
+        state: Option<&PersistedSnapshot>,
+        safe_mode: bool,
+        config: &AuthConfig,
+        now: u64,
+    ) -> (Self, LiveLeases) {
+        let capacity = config.max_temporary_keys;
+        let (slots, cold, live) = restore_slots(state, capacity, now);
+        let (high_slot_generations, high_slot_entries) = restore_high_slots(state, capacity, now);
+        let legacy_protocol = if safe_mode {
+            LegacyProtocolPolicy::Deny
+        } else {
+            state
+                .map(|state| state.legacy_protocol)
+                .unwrap_or(config.legacy_protocol)
+        };
+        let mut audit_records: VecDeque<AuditRecord> = state
+            .map(|state| state.audit_records.iter().cloned().collect())
+            .unwrap_or_default();
+        while audit_records.len() > AUDIT_RECORD_CAPACITY {
+            audit_records.pop_front();
+        }
+        let restored = Self {
+            slots,
+            cold,
+            high_slot_generations,
+            high_slot_entries,
+            legacy_protocol,
+            audit_records,
+            root_epoch: state.map(|state| state.root_epoch).unwrap_or(0),
+            namespace_high_water: state.map_or(0, |state| state.namespace_high_water),
+        };
+        (restored, live)
+    }
+}
+
+/// The indexable rows: every generation the state recorded, and each entry
+/// whose generation still matches its row. A key past its deadline comes back
+/// expired.
+fn restore_slots(
+    state: Option<&PersistedSnapshot>,
+    capacity: usize,
+    now: u64,
+) -> (Box<[SlotHot]>, HashMap<KeyId, ColdMetadata>, LiveLeases) {
+    let mut slots = (0..capacity)
+        .map(|_| SlotHot::default())
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let mut cold = HashMap::new();
+    // Every lease built below, alive until the table's own references to them
+    // are collected at the end.
+    let mut built = Vec::new();
+    if let Some(state) = state {
+        for (index, generation) in state.generations.iter().copied().enumerate() {
+            if let Some(slot) = slots.get_mut(index) {
+                slot.generation = generation;
+            }
+        }
+        for entry in &state.entries {
+            let index = entry.key_id.slot().as_index();
+            let Some(slot) = slots.get_mut(index) else {
+                continue;
+            };
+            if slot.generation != entry.key_id.generation() {
+                continue;
+            }
+            let state = if entry.state == SlotState::Active && entry.expires_at <= now {
+                SlotState::Expired
+            } else {
+                entry.state
+            };
+            slot.state = state;
+            slot.expires_at = entry.expires_at;
+            cold.insert(
+                entry.key_id,
+                ColdMetadata {
+                    issued_at: entry.issued_at,
+                    label: entry.label.clone(),
+                    namespace: entry.namespace,
+                    tombstoned_at: match state {
+                        SlotState::Expired => entry.tombstoned_at.unwrap_or(entry.expires_at),
+                        SlotState::Revoked => entry.tombstoned_at.unwrap_or(now),
+                        SlotState::Free | SlotState::Active => 0,
+                    },
+                },
+            );
+            if state == SlotState::Active {
+                let lease = Arc::new(AuthLease::new(
+                    entry.key_id,
+                    entry.namespace,
+                    entry.expires_at,
+                ));
+                slot.lease = Arc::downgrade(&lease);
+                built.push(lease);
+            }
+        }
+    }
+    let live = slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.state == SlotState::Active)
+        .filter_map(|(index, slot)| {
+            let key_id = KeyId::new(slot.generation, SlotIndex::from_index(index));
+            slot.lease.upgrade().map(|lease| (key_id, lease))
+        })
+        .collect();
+    drop(built);
+    (slots, cold, live)
+}
+
+/// The rows above the configured capacity, which keep their generations and
+/// entries out of line. A key past its deadline comes back expired.
+fn restore_high_slots(
+    state: Option<&PersistedSnapshot>,
+    capacity: usize,
+    now: u64,
+) -> (Box<[Generation]>, Vec<PersistedEntry>) {
+    let (high_slot_generations, mut high_slot_entries) = state
+        .map(|state| split_high_slot_state(state, capacity))
+        .unwrap_or_default();
+    for entry in &mut high_slot_entries {
+        if entry.state == SlotState::Active && entry.expires_at <= now {
+            entry.state = SlotState::Expired;
+            entry.tombstoned_at = Some(entry.tombstoned_at.unwrap_or(entry.expires_at));
+        }
+    }
+    (high_slot_generations.into_boxed_slice(), high_slot_entries)
 }

@@ -51,23 +51,23 @@ pub(super) struct Leases {
 }
 
 impl Leases {
-    /// Rebuilds a loaded state's schedule: live keys wait for their expiry, and
-    /// keys that were already dead wait out the rest of their retention.
-    pub(super) fn restored(inner: &Arc<AuthStateInner>, now: u64) -> Self {
+    /// Rebuilds a loaded state's schedule: `live` keys, with the leases the
+    /// slot table points at, wait for their expiry, and keys that were already
+    /// dead wait out the rest of their retention.
+    pub(super) fn restored(inner: &Arc<AuthStateInner>, now: u64, live: LiveLeases) -> Self {
         let mut leases = Self {
             inner: Arc::downgrade(inner),
             wheel: new_wheel(),
             now,
             stages: HashMap::new(),
         };
-        let mut live = Vec::new();
         let mut dead = Vec::new();
         for (index, slot) in inner.slots().iter().enumerate() {
-            let key_id = KeyId::new(slot.generation, SlotIndex::from_index(index));
             match slot.state {
-                SlotState::Active => live.extend(slot.lease.upgrade().map(|l| (key_id, l))),
-                SlotState::Expired | SlotState::Revoked => dead.push(key_id),
-                SlotState::Free => {}
+                SlotState::Expired | SlotState::Revoked => {
+                    dead.push(KeyId::new(slot.generation, SlotIndex::from_index(index)));
+                }
+                SlotState::Free | SlotState::Active => {}
             }
         }
         dead.extend(

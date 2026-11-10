@@ -50,7 +50,7 @@ impl AuthRuntime {
                 false,
             ));
         };
-        Self::start_locked(admin_key, config, true, state_lock).await
+        Self::start_locked(admin_key, config, true, state_lock)
     }
 
     /// Start an embedded relay with an administrator key owned only by its state directory.
@@ -67,15 +67,17 @@ impl AuthRuntime {
                 false,
             ));
         };
-        Self::start_locked(admin_key, config, false, state_lock).await
+        Self::start_locked(admin_key, config, false, state_lock)
     }
 
     pub async fn start(admin_key: AesKeyType, config: AuthConfig) -> Result<Self, AuthFailure> {
         let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
-        Self::start_locked(admin_key, config, true, state_lock).await
+        Self::start_locked(admin_key, config, true, state_lock)
     }
 
-    async fn start_locked(
+    /// Restores the state under the directory lock already taken, and starts
+    /// the actor that owns it.
+    fn start_locked(
         admin_key: AesKeyType,
         config: AuthConfig,
         sync_process_credential: bool,
@@ -91,126 +93,32 @@ impl AuthRuntime {
         {
             write_snapshot_and_truncate_wal(&config, &admin_key, state)?;
         }
-        let mut slots = (0..config.max_temporary_keys)
-            .map(|_| SlotHot::default())
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let mut cold = HashMap::new();
-        let mut restored_leases = Vec::new();
-
-        let admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, None, u64::MAX));
-        if let Some(state) = loaded.as_ref() {
-            for (index, generation) in state.generations.iter().copied().enumerate() {
-                if let Some(slot) = slots.get_mut(index) {
-                    slot.generation = generation;
-                }
-            }
-            for entry in &state.entries {
-                let index = entry.key_id.slot().as_index();
-                let Some(slot) = slots.get_mut(index) else {
-                    continue;
-                };
-                if slot.generation != entry.key_id.generation() {
-                    continue;
-                }
-                let state = if entry.state == SlotState::Active && entry.expires_at <= now {
-                    SlotState::Expired
-                } else {
-                    entry.state
-                };
-                slot.state = state;
-                slot.expires_at = entry.expires_at;
-                cold.insert(
-                    entry.key_id,
-                    ColdMetadata {
-                        issued_at: entry.issued_at,
-                        label: entry.label.clone(),
-                        namespace: entry.namespace,
-                        tombstoned_at: match state {
-                            SlotState::Expired => entry.tombstoned_at.unwrap_or(entry.expires_at),
-                            SlotState::Revoked => entry.tombstoned_at.unwrap_or(now),
-                            SlotState::Free | SlotState::Active => 0,
-                        },
-                    },
-                );
-                if state == SlotState::Active {
-                    let lease = Arc::new(AuthLease::new(
-                        entry.key_id,
-                        entry.namespace,
-                        entry.expires_at,
-                    ));
-                    slot.lease = Arc::downgrade(&lease);
-                    // Held only until the schedule below adopts them; the wheel
-                    // is the lasting owner.
-                    restored_leases.push(lease);
-                }
-            }
-        }
-
-        let legacy_protocol = if safe_mode {
-            LegacyProtocolPolicy::Deny
-        } else {
-            loaded
-                .as_ref()
-                .map(|state| state.legacy_protocol)
-                .unwrap_or(config.legacy_protocol)
-        };
+        let (mut restored, live) =
+            RestoredState::from_snapshot(loaded.as_ref(), safe_mode, &config, now);
         let admin_replays = AdminReplays::restored(
             loaded.as_ref().map_or(&[], |state| &state.admin_replays),
             now,
         );
-        let mut audit_records: VecDeque<AuditRecord> = loaded
-            .as_ref()
-            .map(|state| state.audit_records.iter().cloned().collect())
-            .unwrap_or_default();
-        while audit_records.len() > AUDIT_RECORD_CAPACITY {
-            audit_records.pop_front();
-        }
-        let (high_slot_generations, mut high_slot_entries) = loaded
-            .as_ref()
-            .map(|state| split_high_slot_state(state, config.max_temporary_keys))
-            .unwrap_or_default();
-        for entry in &mut high_slot_entries {
-            if entry.state == SlotState::Active && entry.expires_at <= now {
-                entry.state = SlotState::Expired;
-                entry.tombstoned_at = Some(entry.tombstoned_at.unwrap_or(entry.expires_at));
-            }
-        }
-        let namespace_high_water = restore_namespace_high_water(
-            &config.state_dir,
-            loaded
-                .as_ref()
-                .map_or(0, |state| state.namespace_high_water),
-        );
-        let inner = Arc::new(AuthStateInner {
-            admin: RwLock::new(AdminState {
-                key: admin_key,
-                lease: Arc::downgrade(&admin_lease),
-            }),
+        restored.namespace_high_water =
+            restore_namespace_high_water(&config.state_dir, restored.namespace_high_water);
+        let admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, None, u64::MAX));
+        let inner = Arc::new(AuthStateInner::new(
+            admin_key,
+            &admin_lease,
             sync_process_credential,
-            instance_id: RwLock::new(instance_id),
-            slots: RwLock::new(slots),
-            high_slot_generations: high_slot_generations.into_boxed_slice(),
-            high_slot_entries: RwLock::new(high_slot_entries),
-            safe_mode: AtomicBool::new(safe_mode),
-            legacy_protocol_allowed: AtomicBool::new(legacy_protocol.is_allowed()),
-            active_legacy_connections: AtomicU64::new(0),
-            last_legacy_connection_at: AtomicU64::new(0),
-            auth_successes: AtomicU64::new(0),
-            auth_failures: AtomicU64::new(0),
-            root_epoch: AtomicU64::new(loaded.as_ref().map(|state| state.root_epoch).unwrap_or(0)),
-            namespace_high_water: AtomicU64::new(namespace_high_water),
-            previous_root: RwLock::new(None),
-            audit_records: RwLock::new(audit_records),
-            cold: RwLock::new(cold),
-        });
+            instance_id,
+            safe_mode,
+            restored,
+        ));
+        // Before the spawn: a reap already due runs while scheduling.
+        let leases = Leases::restored(&inner, now, live);
         let (command_tx, command_rx) = mpsc::channel(256);
         let actor = tokio::spawn(
             Actor::new(
                 inner.clone(),
                 admin_lease,
                 config.clone(),
-                Leases::restored(&inner, now),
+                leases,
                 admin_replays,
                 state_lock.clone(),
             )
