@@ -5,6 +5,7 @@
 //! There is no arbitrary command execution, file or clipboard API. The
 //! backend it serves crosses the pipe through the platform-neutral `oop`.
 pub mod background;
+pub(crate) mod binding;
 #[cfg(feature = "windows-helper")]
 mod child;
 mod config;
@@ -20,18 +21,19 @@ mod readiness;
 mod restart;
 #[cfg(feature = "windows-helper")]
 mod service;
-pub(crate) mod worker;
+#[cfg(feature = "windows-helper")]
+mod worker;
 
 use crate::{
-    BackendCaps, DisplaySelection, HostOs, Result, error,
+    BackendCaps, DisplaySelection, HostOs, Result,
     launch::{Launch, Launcher},
     oop::{client::RemoteBackend, ipc},
 };
 use config::{Configuration, configuration};
-#[cfg(feature = "windows-helper")]
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::windows::named_pipe::NamedPipeClient;
+#[cfg(feature = "windows-helper")]
+use {crate::error, std::path::PathBuf};
 
 pub use os::{Action, request_installation};
 pub use readiness::{NotReady, Status, status};

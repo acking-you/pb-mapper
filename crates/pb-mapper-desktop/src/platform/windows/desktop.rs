@@ -2,7 +2,7 @@
 //! of this process, checked before every use, or, in the privileged
 //! helper's worker, the input desktop it is bound to; and the selected
 //! display's geometry, under per-monitor DPI awareness.
-use super::helper::worker::DesktopBinding;
+use super::helper::binding::DesktopBinding;
 use crate::{
     BackendError, DesktopKind, Display, DisplaySelection, FailureKind, Result, error,
     platform::Desktop,

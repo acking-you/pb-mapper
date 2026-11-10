@@ -89,7 +89,7 @@ pub(crate) fn open_bound(
     session: crate::oop::proto::SessionIdentity,
     journal: crate::modes::Journal,
 ) -> Result<crate::native::PlatformBackend<Windows>> {
-    let mut binding = helper::worker::DesktopBinding::new(session)?;
+    let mut binding = helper::binding::DesktopBinding::new(session)?;
     binding.enter(|| {})?;
     let desktop = desktop::WinDesktop::bound(display_id, display_device, binding)?;
     Ok(crate::native::PlatformBackend::from_parts(
