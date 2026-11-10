@@ -129,7 +129,6 @@ pub async fn handle_show_status(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod cancellation_audit {
     use super::*;
     use std::{

@@ -44,7 +44,7 @@ use crate::error::{
     TaskCenterSendStreamRespToClientSnafu, TaskCenterSendSubcribeRespSnafu,
     TaskCenterStreamConnIdNotExistSnafu,
 };
-use crate::manager::{ForwardMessage, ReceiverChan, SenderChan, TaskManager};
+use crate::manager::{ReceiverChan, SenderChan, TaskManager};
 use pb_mapper_auth::{ADMIN_KEY_ID, AuthConfig, AuthContext, AuthRuntime};
 use pb_mapper_core::config::{
     control_io_timeout, keep_alive_from_env, server_lease_sweep_interval, server_lease_timeout,
@@ -175,7 +175,6 @@ pub enum ManagerTask {
 pub enum ConnTask {
     /// Boxed: rare and large, it must not widen every relay mailbox slot.
     Direct(Box<pb_mapper_protocol::direct::DirectEvent>),
-    Forward(ForwardMessage),
     RegisterResp {
         generation: u64,
         protocol_version: u16,

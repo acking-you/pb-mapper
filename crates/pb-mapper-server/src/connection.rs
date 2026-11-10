@@ -587,7 +587,7 @@ where
         }
     };
     tokio::select! {
-        result = work(conn, session) => result?,
+        biased;
         _ = cancellation.cancelled() => {
             tracing::info!(
                 event = "connection_auth_expired",
@@ -596,6 +596,7 @@ where
                 "closing {closed_what}"
             );
         }
+        result = work(conn, session) => result?,
     }
     Ok(())
 }

@@ -75,7 +75,7 @@ pub async fn run_server_with_auth_config<A: ToSocketAddrs>(
 ) -> std::io::Result<()> {
     let auth = AuthRuntime::from_process(auth_config)
         .await
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        .map_err(std::io::Error::other)?;
     let listener = TcpListener::bind(addr).await?;
     run_server_on_listener(listener, shutdown_token, status_channel, keep_alive, auth).await
 }
@@ -199,13 +199,14 @@ pub async fn run_server_on_listener_with_options(
 
     let listener_handle = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         tokio::select! {
+            biased;
+            _ = shutdown_token_clone.cancelled() => {
+                tracing::info!("Listener shutdown requested");
+            }
             result = handle_listener(task_sender, listener, keep_alive) => {
                 if let Err(e) = result {
                     tracing::error!("Listener error: {}", e);
                 }
-            }
-            _ = shutdown_token_clone.cancelled() => {
-                tracing::info!("Listener shutdown requested");
             }
         }
     }));
@@ -578,7 +579,6 @@ pub async fn run_server_on_listener_with_options(
                 let manager_task_sender = manager.get_task_sender().for_connection();
                 let security = security.clone();
                 let quic_capability = quic_capability.clone();
-                while connection_tasks.try_join_next().is_some() {}
                 connection_tasks.spawn(async move {
                     snafu_error_handle!(
                         handle_conn(
@@ -1559,7 +1559,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod cancellation_audit {
     use super::*;
     use std::{

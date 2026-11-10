@@ -5,7 +5,7 @@ use std::sync::{
 };
 use tracing::instrument;
 
-use pb_mapper_core::conn_id::{ConnId, ConnIdProvider, ConnIdTrait};
+use pb_mapper_core::conn_id::{ConnIdProvider, ConnIdTrait};
 
 /// The manager owns this rather than the core error enum: it is the only thing
 /// that waits on a task channel, and it keeps `kanal` out of the bottom layer.
@@ -16,17 +16,6 @@ pub struct MngWaitForTaskError {
 }
 
 type Result<T, E = MngWaitForTaskError> = std::result::Result<T, E>;
-
-/// The [`ConnId::local_id`] of the server is the same as the client. and it is only generated
-/// by the client. The [`ConnId::remote_id`] and [`ConnId::local_id`] of the client can be used to
-/// uniquely identify a socket connection with that client on the server side. So for now, the
-/// server-side local_id has no effect.
-#[derive(Debug)]
-pub struct ForwardMessage {
-    pub from: ConnId,
-    pub to: ConnId,
-    pub msg: Vec<u8>,
-}
 
 pub type SenderChan<T> = kanal::AsyncSender<T>;
 pub type ReceiverChan<T> = kanal::AsyncReceiver<T>;
@@ -392,7 +381,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::unwrap_used)]
     async fn old_connection_cannot_clean_up_or_update_a_reused_id() {
         use crate::ManagerTask;
         let (sender, mut receiver) = task_channel(8);
