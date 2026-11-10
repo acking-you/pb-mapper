@@ -15,6 +15,7 @@ use pb_mapper_core::checksum::{
     MACHINE_MSG_HEADER_KEY_PATH, set_process_msg_header_key, setup_machine_msg_header_key,
 };
 use pb_mapper_core::config::keep_alive_from_env;
+use pb_mapper_server::DirectServerConfig;
 use tokio_util::sync::CancellationToken;
 
 use crate::parse_duration;
@@ -215,10 +216,7 @@ pub(super) async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
 /// started without any direct flag keeps serving if that UDP port is taken —
 /// upgrading must not turn a running relay into one that will not start —
 /// while one given an explicit direct flag fails as asked.
-fn direct_config(
-    args: &ServerArgs,
-    ip_addr: IpAddr,
-) -> Option<pb_mapper_server::DirectServerConfig> {
+fn direct_config(args: &ServerArgs, ip_addr: IpAddr) -> Option<DirectServerConfig> {
     let explicit =
         args.enable_direct || args.direct_listen.is_some() || args.direct_advertise.is_some();
     // A build without `p2p` has no direct service to offer by default; an
@@ -226,22 +224,26 @@ fn direct_config(
     if args.relay_only || (!explicit && !cfg!(feature = "p2p")) {
         return None;
     }
-    let listen = args
-        .direct_listen
-        .unwrap_or(SocketAddr::new(ip_addr, args.port));
-    let advertise = args
-        .direct_advertise
-        .unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
-    if !explicit && let Err(error) = std::net::UdpSocket::bind(listen) {
-        tracing::warn!(
-            event = "direct_service_unavailable",
-            %listen,
-            %error,
-            "UDP port unavailable; serving relay only (pass --direct-listen to choose another)"
-        );
-        return None;
+    if !explicit {
+        return match DirectServerConfig::probe_relay_port(ip_addr, args.port) {
+            Ok(config) => Some(config),
+            Err(error) => {
+                let listen = SocketAddr::new(ip_addr, args.port);
+                tracing::warn!(
+                    event = "direct_service_unavailable",
+                    %listen,
+                    %error,
+                    "UDP port unavailable; serving relay only (pass --direct-listen to choose another)"
+                );
+                None
+            }
+        };
     }
-    Some(pb_mapper_server::DirectServerConfig { listen, advertise })
+    let defaults = DirectServerConfig::on_relay_port(ip_addr, args.port);
+    Some(DirectServerConfig {
+        listen: args.direct_listen.unwrap_or(defaults.listen),
+        advertise: args.direct_advertise.unwrap_or(defaults.advertise),
+    })
 }
 
 #[cfg(test)]
