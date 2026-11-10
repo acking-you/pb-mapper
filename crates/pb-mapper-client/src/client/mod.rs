@@ -3,6 +3,8 @@ mod health;
 pub mod status;
 pub(crate) mod stream;
 
+pub use crate::worker_status::StatusCallback as ClientStatusCallback;
+
 use crate::diagnostics::Diagnostics;
 use crate::endpoint::RelayEndpoint;
 use std::sync::{Arc, Once};
@@ -37,8 +39,6 @@ use uni_stream::stream::{ListenerProvider, StreamAccept};
 /// Local streams of one connect tunnel in setup at once. More wait in the
 /// listener's backlog; a stream that starts forwarding gives its slot back.
 const LOCAL_SETUPS: usize = 64;
-
-pub use crate::worker_status::StatusCallback as ClientStatusCallback;
 
 /// Resolve both ends, reporting a bad address through `status`.
 ///
