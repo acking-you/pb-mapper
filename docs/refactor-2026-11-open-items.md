@@ -128,10 +128,12 @@ Each works as designed; the line says what the other choice would cost.
 
 - `RetryBackoff` has no jitter. Jitter spreads retry storms but changes
   retry timing everywhere.
-- Public DNS servers are asked before the system resolver, so names behind
-  split-horizon DNS or a blocked UDP 53 reach the system resolver only after
-  NXDOMAIN or a timeout, and every relay name is sent to public servers.
-  Changing the order changes what names resolve to.
+- `resolve_addrs_async` asks public DNS servers before the system resolver,
+  so names behind split-horizon DNS or a blocked UDP 53 reach the system
+  resolver only after NXDOMAIN or a timeout, and every relay name is sent to
+  public servers. Changing the order changes what names resolve to. (The
+  blocking `resolve_addrs` asks only the system resolver, whatever its doc
+  comment says.)
 - `resolve_addrs_async` repeats the system lookup on failure: twice the
   latency of a failure, for one implicit retry.
 - The config accessors read the environment on every call: documented
