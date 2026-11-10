@@ -8,8 +8,11 @@
 //!                       +-> admin    (credential/control plane)
 //! ```
 //!
-//! Role-specific execution stays below this dispatch layer. Administrator parsing,
-//! pagination, wire requests, and output rendering live in the `admin` module.
+//! Role-specific execution stays below this dispatch layer, a module per role:
+//! `server` (the relay, its authentication settings and direct coordination),
+//! `tunnel` (`register` and `connect`, and the log kept of a running tunnel)
+//! and `admin` (parsing, pagination, wire requests and output rendering).
+//! `status` is one request and stays here.
 
 use std::error::Error;
 use std::time::Duration;
