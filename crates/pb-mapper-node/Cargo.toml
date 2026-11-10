@@ -8,6 +8,10 @@ publish = false
 
 [lib]
 crate-type = ["cdylib"]
+# Nothing here is testable on its own (the SDK carries the logic and its
+# tests), and rustdoc cannot run doctests for a `cdylib`.
+test = false
+doctest = false
 
 [lints]
 workspace = true
@@ -17,7 +21,8 @@ napi = { version = "3.12.2", default-features = false, features = ["napi8", "asy
 napi-derive = "3.6.3"
 pb-mapper-client = { workspace = true, features = ["p2p", "relay-quic", "port-mapping"] }
 serde_json.workspace = true
-# Already linked through the SDK; named here only for the status watch types.
+# Already linked through the SDK; named here for the readers' `Mutex`,
+# `timeout` and `select!`, and the status `watch`.
 tokio.workspace = true
 tokio-util.workspace = true
 
