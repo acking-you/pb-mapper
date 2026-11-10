@@ -335,78 +335,16 @@ impl StillCapture for SynStill {
 mod tests {
     use super::*;
     use crate::{
-        Backend, Host, HostOptions, Input, Pull, QualityPreset, StateReason, Viewer, ViewerConfig,
-        ViewerStatus, launch::Launcher, modes::Journal, native::PlatformBackend,
+        Backend, DisplayModeError, Host, HostOptions, Input, ModeTarget, NoticeCode, StateReason,
+        ViewerReason, ViewerStatus,
+        launch::Launcher,
+        modes::Journal,
+        native::PlatformBackend,
         platform::fallback_caps,
+        test_util::{Presenting, until},
     };
-    use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
+    use pb_mapper_client::sdk::Client;
     use pb_mapper_testkit::{Relay, admin_credential};
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    /// A viewer that presents every unit at once, on its own thread.
-    struct Watching {
-        viewer: Viewer,
-        stop: Arc<AtomicBool>,
-        renderer: Option<std::thread::JoinHandle<()>>,
-    }
-    impl Watching {
-        async fn connect(client: &Client, host: &Host) -> Self {
-            let config = ViewerConfig {
-                codecs: vec![VideoCodec::H264],
-                limits: VideoLimits::for_viewer(60.0),
-                fps_override: false,
-                quality: QualityPreset::Balanced,
-                progress: None,
-            };
-            let options = ConnectOptions {
-                path: PathPolicy::RelayOnly,
-                ..Default::default()
-            };
-            let viewer = Viewer::connect(client, host.invitation(), options, config)
-                .await
-                .unwrap();
-            let consumer = viewer.video_sink().attach().unwrap();
-            let stop = Arc::new(AtomicBool::new(false));
-            let done = stop.clone();
-            let renderer = std::thread::spawn(move || {
-                while !done.load(Ordering::Acquire) {
-                    match consumer.next(Duration::from_millis(50), 4 << 20) {
-                        Pull::Unit(unit) => {
-                            consumer.presented(unit.generation, unit.frame_id);
-                        }
-                        Pull::Closed => break,
-                        _ => {}
-                    }
-                }
-            });
-            Self {
-                viewer,
-                stop,
-                renderer: Some(renderer),
-            }
-        }
-        async fn until(&self, condition: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
-            until(|| condition(&self.viewer.status())).await;
-            self.viewer.status()
-        }
-        async fn stop(mut self) {
-            self.viewer.stop().await.unwrap();
-            self.stop.store(true, Ordering::Release);
-            if let Some(renderer) = self.renderer.take() {
-                renderer.join().unwrap();
-            }
-        }
-    }
-
-    async fn until(mut condition: impl FnMut() -> bool) {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !condition() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
 
     /// One session streams, applies input at the display's own offset and
     /// releases the key it holds when it ends; the next reports its display
@@ -445,12 +383,8 @@ mod tests {
             .await
             .unwrap();
 
-        let watching = Watching::connect(&client, &host).await;
-        watching.until(|status| status.fresh).await;
-        watching.viewer.request_control(true).unwrap();
-        let controlled = watching
-            .until(|status| status.controlling && status.fresh)
-            .await;
+        let watching = Presenting::connect(&client, &host).await;
+        let controlled = watching.control().await;
         let shift = Input::Key {
             key: Key::Shift,
             down: true,
@@ -477,7 +411,7 @@ mod tests {
         watching.stop().await;
         until(|| probe.0.lock().released.contains(&Pressed::Key(Key::Shift))).await;
 
-        let watching = Watching::connect(&client, &host).await;
+        let watching = Presenting::connect(&client, &host).await;
         watching.until(|status| status.fresh).await;
         probe.lose(true);
         until(|| host.status().reason == Some(StateReason::DisplayLost)).await;
@@ -494,91 +428,25 @@ mod tests {
     async fn a_pushed_platform_is_drained_when_it_wakes_thread_c() {
         session::<true>("desktop-synthetic-push").await;
     }
-}
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod modes_tests {
-    use super::*;
-    use crate::{
-        DisplayModeError, Host, HostOptions, ModeTarget, NoticeCode, Pull, StateReason, Viewer,
-        ViewerConfig, ViewerReason, ViewerStatus, launch::Launcher, modes::Journal,
-        native::PlatformBackend, platform::fallback_caps,
-    };
-    use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
-    use pb_mapper_testkit::{Relay, admin_credential};
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    async fn until(mut condition: impl FnMut() -> bool) {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !condition() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+    /// A viewer that controls `host`.
+    async fn controlling(client: &Client, host: &Host) -> Presenting {
+        let watching = Presenting::connect(client, host).await;
+        watching.control().await;
+        watching
     }
 
-    /// A controlling viewer that presents every unit at once.
-    struct Controlling {
-        viewer: Viewer,
-        stop: Arc<AtomicBool>,
-        renderer: std::thread::JoinHandle<()>,
-    }
-    impl Controlling {
-        async fn connect(client: &Client, host: &Host) -> Self {
-            let options = ConnectOptions {
-                path: PathPolicy::RelayOnly,
-                ..Default::default()
-            };
-            let config = ViewerConfig::new(vec![VideoCodec::H264]);
-            let viewer = Viewer::connect(client, host.invitation(), options, config)
-                .await
-                .unwrap();
-            let consumer = viewer.video_sink().attach().unwrap();
-            let stop = Arc::new(AtomicBool::new(false));
-            let done = stop.clone();
-            let renderer = std::thread::spawn(move || {
-                while !done.load(Ordering::Acquire) {
-                    if let Pull::Unit(unit) = consumer.next(Duration::from_millis(20), 4 << 20) {
-                        consumer.presented(unit.generation, unit.frame_id);
-                    }
-                }
-            });
-            let this = Self {
-                viewer,
-                stop,
-                renderer,
-            };
-            this.control().await;
-            this
-        }
-        async fn control(&self) {
-            self.until(|status| status.fresh).await;
-            self.viewer.request_control(true).unwrap();
-            self.until(|status| status.controlling && status.fresh)
-                .await;
-        }
-        async fn until(&self, condition: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
-            until(|| condition(&self.viewer.status())).await;
-            self.viewer.status()
-        }
-        /// The display is `width` wide, presented in a generation after
-        /// `since`.
-        async fn shows(&self, width: u32, since: u64) -> ViewerStatus {
-            self.until(|status| {
+    /// The status once the display is `width` wide, presented in a
+    /// generation after `since`.
+    async fn shows(watching: &Presenting, width: u32, since: u64) -> ViewerStatus {
+        watching
+            .until(|status| {
                 status.display.as_ref().is_some_and(|d| d.width == width)
                     && status.video.is_some_and(|video| video.width == width)
                     && status.generation > since
                     && status.fresh
             })
             .await
-        }
-        async fn stop(self) {
-            self.viewer.stop().await.unwrap();
-            self.stop.store(true, Ordering::Release);
-            self.renderer.join().unwrap();
-        }
     }
 
     /// The remote resolution, end to end on a synthetic display: a viewer
@@ -626,7 +494,7 @@ mod modes_tests {
             |status: &ViewerStatus| status.display.as_ref().is_some_and(|d| d.width == 48);
 
         // Fit the viewer's display: a new generation at the new size.
-        let watching = Controlling::connect(&client, &host).await;
+        let watching = controlling(&client, &host).await;
         let before = watching.viewer.status();
         let listed = before.modes.clone().unwrap();
         assert_eq!(
@@ -639,7 +507,7 @@ mod modes_tests {
                 .set_display_mode(ModeTarget::FitLocal(small)),
             Ok(small)
         );
-        let fitted = watching.shows(small.width, before.generation).await;
+        let fitted = shows(&watching, small.width, before.generation).await;
         assert_eq!(fitted.modes.unwrap().original, own);
         assert_eq!(host.status().display_mode.unwrap().current, small);
 
@@ -671,7 +539,7 @@ mod modes_tests {
         assert_eq!((probe.current().width, resets()), (small.width, 0));
         watching.control().await;
         host.set_control_allowed(false);
-        watching.shows(own.width, settled.generation).await;
+        shows(&watching, own.width, settled.generation).await;
         assert_eq!(resets(), 1);
         assert_eq!(
             watching.viewer.set_display_mode(ModeTarget::Size(small)),
@@ -687,7 +555,7 @@ mod modes_tests {
             .viewer
             .set_display_mode(ModeTarget::Size(small))
             .unwrap();
-        watching.shows(small.width, generation).await;
+        shows(&watching, small.width, generation).await;
         probe.0.lock().size = Some(Mode {
             width: 48,
             height: 36,
@@ -699,13 +567,13 @@ mod modes_tests {
 
         // The session's end puts the display back, and so does the owner.
         for owner in [false, true] {
-            let watching = Controlling::connect(&client, &host).await;
+            let watching = controlling(&client, &host).await;
             let generation = watching.viewer.status().generation;
             watching
                 .viewer
                 .set_display_mode(ModeTarget::Size(small))
                 .unwrap();
-            watching.shows(small.width, generation).await;
+            shows(&watching, small.width, generation).await;
             if owner {
                 // The owner's Restore needs no control, but waits out the
                 // settle window like any change. The host's card follows at

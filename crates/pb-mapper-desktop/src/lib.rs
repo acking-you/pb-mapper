@@ -40,6 +40,8 @@ mod slow_link;
 mod status;
 pub mod supervisor;
 #[cfg(test)]
+mod test_util;
+#[cfg(test)]
 mod tests;
 mod timer;
 pub mod trust;
