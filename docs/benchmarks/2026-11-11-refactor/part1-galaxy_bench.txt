@@ -1,0 +1,121 @@
+### p1-galaxy
+=== base round 0 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   14.6 us  mean   11.0 us  max   17.3 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.8 us  p99   29.5 us  mean   21.2 us  max  220.8 us  (2000 frames)
+=== refactored round 0 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   13.7 us  mean   10.9 us  max   19.3 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   26.2 us  mean   21.0 us  max   33.3 us  (2000 frames)
+=== refactored round 1 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   13.0 us  mean   10.9 us  max   25.3 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.5 us  p99   23.6 us  mean   20.7 us  max   37.5 us  (2000 frames)
+=== base round 1 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   13.7 us  mean   10.9 us  max   20.4 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   26.4 us  mean   20.8 us  max  132.9 us  (2000 frames)
+=== base round 2 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   14.4 us  mean   11.0 us  max   67.2 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   28.1 us  mean   21.0 us  max   33.5 us  (2000 frames)
+=== refactored round 2 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   15.0 us  mean   11.0 us  max   42.5 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   26.9 us  mean   20.9 us  max   41.5 us  (2000 frames)
+=== refactored round 3 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   15.8 us  mean   11.1 us  max  117.4 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   28.6 us  mean   21.0 us  max   82.9 us  (2000 frames)
+=== base round 3 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   13.3 us  mean   10.9 us  max   18.8 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.5 us  p99   27.2 us  mean   20.8 us  max   56.3 us  (2000 frames)
+=== base round 4 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   15.2 us  mean   10.9 us  max   25.8 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.5 us  p99   23.4 us  mean   20.7 us  max   32.2 us  (2000 frames)
+=== refactored round 4 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   15.9 us  mean   11.1 us  max  135.4 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   28.7 us  mean   21.0 us  max   91.9 us  (2000 frames)
+=== refactored round 5 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   15.4 us  mean   11.0 us  max   26.0 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   26.0 us  mean   20.8 us  max   35.5 us  (2000 frames)
+=== base round 5 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   12.7 us  mean   10.8 us  max   18.3 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   31.6 us  mean   21.0 us  max   43.1 us  (2000 frames)
+=== base round 6 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   14.7 us  mean   10.9 us  max   18.8 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   29.8 us  mean   21.0 us  max   47.0 us  (2000 frames)
+=== refactored round 6 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   17.3 us  mean   11.0 us  max   21.6 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   26.3 us  mean   20.8 us  max   40.1 us  (2000 frames)
+=== refactored round 7 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   18.0 us  mean   11.4 us  max   26.4 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   26.7 us  mean   20.9 us  max   46.3 us  (2000 frames)
+=== base round 7 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   11.0 us  p99   15.3 us  mean   11.1 us  max   19.5 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   28.8 us  mean   21.0 us  max   37.3 us  (2000 frames)
+=== base round 8 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   13.3 us  mean   10.9 us  max   90.4 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.8 us  p99   23.9 us  mean   21.0 us  max   28.3 us  (2000 frames)
+=== refactored round 8 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   15.5 us  mean   11.0 us  max   19.8 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   28.8 us  mean   21.0 us  max   32.7 us  (2000 frames)
+=== refactored round 9 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   15.9 us  mean   10.9 us  max   22.7 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   23.4 us  mean   20.7 us  max   34.4 us  (2000 frames)
+=== base round 9 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   14.4 us  mean   11.0 us  max   26.6 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   24.2 us  mean   20.9 us  max  112.6 us  (2000 frames)
+=== base round 10 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   13.3 us  mean   10.9 us  max   18.6 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   26.3 us  mean   20.8 us  max   33.2 us  (2000 frames)
+=== refactored round 10 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   15.6 us  mean   10.9 us  max   42.8 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   23.3 us  mean   20.7 us  max   34.4 us  (2000 frames)
+=== refactored round 11 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   12.3 us  mean   10.8 us  max   22.3 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   25.6 us  mean   20.8 us  max   33.7 us  (2000 frames)
+=== base round 11 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   14.3 us  mean   10.9 us  max   21.2 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   25.3 us  mean   20.9 us  max   57.3 us  (2000 frames)
+=== base round 12 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   15.2 us  mean   11.0 us  max   19.5 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   26.7 us  mean   21.0 us  max   31.9 us  (2000 frames)
+=== refactored round 12 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   14.7 us  mean   11.0 us  max   19.4 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   25.3 us  mean   20.8 us  max   34.3 us  (2000 frames)
+=== refactored round 13 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   15.7 us  mean   11.1 us  max   18.2 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.8 us  p99   25.7 us  mean   21.0 us  max   32.4 us  (2000 frames)
+=== base round 13 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   15.5 us  mean   11.0 us  max   28.0 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   26.2 us  mean   20.9 us  max   36.9 us  (2000 frames)
+=== base round 14 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   11.3 us  mean   10.9 us  max   21.1 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.8 us  p99   25.3 us  mean   21.0 us  max   72.8 us  (2000 frames)
+=== refactored round 14 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   11.0 us  p99   13.6 us  mean   11.0 us  max   18.9 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   29.9 us  mean   22.0 us  max   40.3 us  (2000 frames)
+=== refactored round 15 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   13.1 us  mean   10.8 us  max   17.6 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.5 us  p99   32.6 us  mean   21.3 us  max   40.1 us  (2000 frames)
+=== base round 15 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   13.6 us  mean   10.8 us  max   20.4 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   23.5 us  mean   20.8 us  max   38.9 us  (2000 frames)
+=== base round 16 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   14.5 us  mean   10.9 us  max   29.8 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   25.2 us  mean   20.9 us  max   32.0 us  (2000 frames)
+=== refactored round 16 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   13.7 us  mean   10.9 us  max   18.2 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   24.0 us  mean   20.9 us  max   32.0 us  (2000 frames)
+=== refactored round 17 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   13.9 us  mean   10.9 us  max   18.6 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   28.4 us  mean   21.0 us  max   32.5 us  (2000 frames)
+=== base round 17 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   15.3 us  mean   11.0 us  max   18.1 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   24.9 us  mean   20.9 us  max  149.9 us  (2000 frames)
+=== base round 18 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   15.0 us  mean   10.9 us  max   55.1 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   26.2 us  mean   20.9 us  max   37.8 us  (2000 frames)
+=== refactored round 18 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.8 us  p99   15.5 us  mean   11.0 us  max   18.2 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   25.9 us  mean   20.9 us  max   30.3 us  (2000 frames)
+=== refactored round 19 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   12.7 us  mean   10.9 us  max   18.2 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.6 us  p99   31.0 us  mean   20.9 us  max   38.8 us  (2000 frames)
+=== base round 19 ===
+typical  scene  1313 f64  out  2533..2565  f32  p50   10.9 us  p99   16.6 us  mean   11.0 us  max   25.8 us  (2000 frames)
+busy     scene  2005 f64  out  4736..4776  f32  p50   20.7 us  p99   26.4 us  mean   20.9 us  max   34.5 us  (2000 frames)

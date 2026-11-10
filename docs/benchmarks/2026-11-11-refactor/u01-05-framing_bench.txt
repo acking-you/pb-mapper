@@ -1,0 +1,181 @@
+### u0105-framing
+=== before round 0 ===
+case=process-16B write_ns=22.25 read_ns=25.51
+case=process-1024B write_ns=25.44 read_ns=30.30
+case=session-16B write_ns=17.18 read_ns=26.29
+case=session-1024B write_ns=26.73 read_ns=32.84
+case=datagram-64B write_ns=108.87 read_ns=118.47
+case=datagram-1200B write_ns=223.24 read_ns=189.37
+case=stream-1024B write_ns=177.70 read_ns=142.93
+case=stream-8192B write_ns=975.71 read_ns=790.50
+=== after round 0 ===
+case=process-16B write_ns=8.62 read_ns=15.06
+case=process-1024B write_ns=18.55 read_ns=21.44
+case=session-16B write_ns=17.18 read_ns=26.77
+case=session-1024B write_ns=28.09 read_ns=31.69
+case=datagram-64B write_ns=112.97 read_ns=113.77
+case=datagram-1200B write_ns=225.76 read_ns=189.48
+case=stream-1024B write_ns=178.10 read_ns=145.01
+case=stream-8192B write_ns=974.68 read_ns=778.10
+=== after round 1 ===
+case=process-16B write_ns=8.74 read_ns=15.23
+case=process-1024B write_ns=17.84 read_ns=21.14
+case=session-16B write_ns=17.34 read_ns=27.16
+case=session-1024B write_ns=27.70 read_ns=32.01
+case=datagram-64B write_ns=109.38 read_ns=112.83
+case=datagram-1200B write_ns=221.78 read_ns=191.90
+case=stream-1024B write_ns=176.34 read_ns=145.63
+case=stream-8192B write_ns=955.37 read_ns=776.64
+=== before round 1 ===
+case=process-16B write_ns=22.09 read_ns=28.11
+case=process-1024B write_ns=27.43 read_ns=34.55
+case=session-16B write_ns=17.21 read_ns=26.45
+case=session-1024B write_ns=28.45 read_ns=33.58
+case=datagram-64B write_ns=111.23 read_ns=112.83
+case=datagram-1200B write_ns=222.28 read_ns=189.32
+case=stream-1024B write_ns=175.76 read_ns=144.34
+case=stream-8192B write_ns=940.19 read_ns=760.33
+=== before round 2 ===
+case=process-16B write_ns=22.34 read_ns=28.41
+case=process-1024B write_ns=25.67 read_ns=32.05
+case=session-16B write_ns=17.07 read_ns=26.38
+case=session-1024B write_ns=27.32 read_ns=32.00
+case=datagram-64B write_ns=109.85 read_ns=113.28
+case=datagram-1200B write_ns=224.92 read_ns=191.26
+case=stream-1024B write_ns=174.96 read_ns=142.84
+case=stream-8192B write_ns=948.61 read_ns=771.44
+=== after round 2 ===
+case=process-16B write_ns=9.02 read_ns=15.29
+case=process-1024B write_ns=18.44 read_ns=22.24
+case=session-16B write_ns=17.32 read_ns=27.18
+case=session-1024B write_ns=28.56 read_ns=33.65
+case=datagram-64B write_ns=112.02 read_ns=119.83
+case=datagram-1200B write_ns=221.54 read_ns=186.85
+case=stream-1024B write_ns=176.01 read_ns=141.83
+case=stream-8192B write_ns=969.80 read_ns=773.44
+=== after round 3 ===
+case=process-16B write_ns=8.59 read_ns=15.03
+case=process-1024B write_ns=19.82 read_ns=22.33
+case=session-16B write_ns=17.13 read_ns=26.65
+case=session-1024B write_ns=28.48 read_ns=32.66
+case=datagram-64B write_ns=110.44 read_ns=112.19
+case=datagram-1200B write_ns=219.81 read_ns=187.72
+case=stream-1024B write_ns=174.68 read_ns=142.86
+case=stream-8192B write_ns=946.26 read_ns=760.28
+=== before round 3 ===
+case=process-16B write_ns=22.07 read_ns=28.00
+case=process-1024B write_ns=26.29 read_ns=34.03
+case=session-16B write_ns=17.09 read_ns=26.25
+case=session-1024B write_ns=27.43 read_ns=31.97
+case=datagram-64B write_ns=109.77 read_ns=114.81
+case=datagram-1200B write_ns=225.23 read_ns=192.21
+case=stream-1024B write_ns=176.13 read_ns=145.62
+case=stream-8192B write_ns=931.23 read_ns=762.16
+=== before round 4 ===
+case=process-16B write_ns=22.48 read_ns=32.59
+case=process-1024B write_ns=25.77 read_ns=36.20
+case=session-16B write_ns=17.11 read_ns=26.16
+case=session-1024B write_ns=27.54 read_ns=32.56
+case=datagram-64B write_ns=109.14 read_ns=116.49
+case=datagram-1200B write_ns=222.44 read_ns=189.81
+case=stream-1024B write_ns=174.07 read_ns=141.34
+case=stream-8192B write_ns=942.46 read_ns=750.07
+=== after round 4 ===
+case=process-16B write_ns=8.65 read_ns=14.93
+case=process-1024B write_ns=17.92 read_ns=21.48
+case=session-16B write_ns=17.23 read_ns=26.77
+case=session-1024B write_ns=28.44 read_ns=32.56
+case=datagram-64B write_ns=108.86 read_ns=111.51
+case=datagram-1200B write_ns=222.82 read_ns=194.40
+case=stream-1024B write_ns=174.34 read_ns=141.51
+case=stream-8192B write_ns=941.92 read_ns=762.26
+=== after round 5 ===
+case=process-16B write_ns=8.74 read_ns=14.95
+case=process-1024B write_ns=17.40 read_ns=20.43
+case=session-16B write_ns=17.29 read_ns=27.29
+case=session-1024B write_ns=27.38 read_ns=31.49
+case=datagram-64B write_ns=109.14 read_ns=112.86
+case=datagram-1200B write_ns=224.43 read_ns=193.22
+case=stream-1024B write_ns=177.96 read_ns=145.84
+case=stream-8192B write_ns=956.93 read_ns=764.06
+=== before round 5 ===
+case=process-16B write_ns=22.29 read_ns=28.25
+case=process-1024B write_ns=26.89 read_ns=39.19
+case=session-16B write_ns=17.17 read_ns=26.39
+case=session-1024B write_ns=27.91 read_ns=34.59
+case=datagram-64B write_ns=109.91 read_ns=102.98
+case=datagram-1200B write_ns=224.61 read_ns=193.31
+case=stream-1024B write_ns=177.25 read_ns=144.87
+case=stream-8192B write_ns=935.96 read_ns=757.10
+=== before round 6 ===
+case=process-16B write_ns=22.18 read_ns=28.19
+case=process-1024B write_ns=26.21 read_ns=32.55
+case=session-16B write_ns=17.09 read_ns=26.38
+case=session-1024B write_ns=27.57 read_ns=32.50
+case=datagram-64B write_ns=109.00 read_ns=113.08
+case=datagram-1200B write_ns=223.09 read_ns=189.99
+case=stream-1024B write_ns=176.99 read_ns=146.32
+case=stream-8192B write_ns=920.48 read_ns=752.78
+=== after round 6 ===
+case=process-16B write_ns=8.77 read_ns=14.86
+case=process-1024B write_ns=18.02 read_ns=20.97
+case=session-16B write_ns=17.26 read_ns=27.02
+case=session-1024B write_ns=27.52 read_ns=31.98
+case=datagram-64B write_ns=113.44 read_ns=113.45
+case=datagram-1200B write_ns=225.16 read_ns=190.06
+case=stream-1024B write_ns=176.16 read_ns=144.65
+case=stream-8192B write_ns=946.97 read_ns=756.45
+=== after round 7 ===
+case=process-16B write_ns=9.09 read_ns=15.13
+case=process-1024B write_ns=17.83 read_ns=21.09
+case=session-16B write_ns=17.62 read_ns=27.52
+case=session-1024B write_ns=27.80 read_ns=32.50
+case=datagram-64B write_ns=109.66 read_ns=116.00
+case=datagram-1200B write_ns=229.32 read_ns=195.47
+case=stream-1024B write_ns=176.62 read_ns=145.60
+case=stream-8192B write_ns=935.86 read_ns=755.91
+=== before round 7 ===
+case=process-16B write_ns=21.58 read_ns=28.23
+case=process-1024B write_ns=25.80 read_ns=31.88
+case=session-16B write_ns=17.39 read_ns=26.41
+case=session-1024B write_ns=27.57 read_ns=33.63
+case=datagram-64B write_ns=109.78 read_ns=113.92
+case=datagram-1200B write_ns=226.82 read_ns=194.45
+case=stream-1024B write_ns=176.26 read_ns=146.31
+case=stream-8192B write_ns=960.62 read_ns=762.04
+=== before round 8 ===
+case=process-16B write_ns=22.06 read_ns=28.15
+case=process-1024B write_ns=26.70 read_ns=32.98
+case=session-16B write_ns=17.05 read_ns=26.25
+case=session-1024B write_ns=27.97 read_ns=33.90
+case=datagram-64B write_ns=110.36 read_ns=113.92
+case=datagram-1200B write_ns=219.52 read_ns=190.68
+case=stream-1024B write_ns=174.40 read_ns=143.21
+case=stream-8192B write_ns=923.22 read_ns=742.97
+=== after round 8 ===
+case=process-16B write_ns=8.71 read_ns=15.13
+case=process-1024B write_ns=17.79 read_ns=21.04
+case=session-16B write_ns=17.14 read_ns=26.89
+case=session-1024B write_ns=27.31 read_ns=31.67
+case=datagram-64B write_ns=109.77 read_ns=110.56
+case=datagram-1200B write_ns=221.05 read_ns=187.79
+case=stream-1024B write_ns=175.25 read_ns=143.28
+case=stream-8192B write_ns=934.16 read_ns=774.76
+=== after round 9 ===
+case=process-16B write_ns=8.64 read_ns=15.48
+case=process-1024B write_ns=18.61 read_ns=21.70
+case=session-16B write_ns=17.36 read_ns=27.11
+case=session-1024B write_ns=28.20 read_ns=32.71
+case=datagram-64B write_ns=109.44 read_ns=113.29
+case=datagram-1200B write_ns=222.43 read_ns=189.00
+case=stream-1024B write_ns=175.41 read_ns=144.74
+case=stream-8192B write_ns=944.82 read_ns=770.48
+=== before round 9 ===
+case=process-16B write_ns=22.37 read_ns=28.25
+case=process-1024B write_ns=25.60 read_ns=34.72
+case=session-16B write_ns=17.05 read_ns=26.25
+case=session-1024B write_ns=27.61 read_ns=35.85
+case=datagram-64B write_ns=110.56 read_ns=112.31
+case=datagram-1200B write_ns=226.09 read_ns=192.89
+case=stream-1024B write_ns=175.22 read_ns=142.46
+case=stream-8192B write_ns=946.26 read_ns=751.95
