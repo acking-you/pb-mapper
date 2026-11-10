@@ -969,6 +969,9 @@ impl Ended {
     }
 }
 
+/// What `run` owns besides the stream. Dropping it ends the session however
+/// `run` ends: returned, dropped with its runtime (polled or not) or
+/// unwinding.
 struct Session {
     shared: Arc<ViewerShared>,
     sink: Arc<VideoSink>,
@@ -976,6 +979,16 @@ struct Session {
     cancel: CancellationToken,
     codec: VideoCodec,
     limits: VideoLimits,
+}
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Each step is idempotent and the first stop wins, so after `run`'s
+        // own end this changes nothing; otherwise the consumer exits and the
+        // status says stopped, with no reason, as after a local stop.
+        self.cancel.cancel();
+        self.sink.close();
+        self.shared.mark_stopped(None, String::new());
+    }
 }
 
 /// The supervisor: the first task to end ends the session.
@@ -988,25 +1001,25 @@ async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, session: Ses
         cancel,
         codec,
         limits,
-    } = session;
+    } = &session;
     let (mut read, mut write) = tokio::io::split(stream);
     let mut reader = Reader {
-        shared: &shared,
-        sink: &sink,
-        codec,
-        limits,
+        shared,
+        sink,
+        codec: *codec,
+        limits: *limits,
         last_seq: 0,
         generation: 0,
     };
     let mut writer = Writer {
-        shared: &shared,
-        sink: &sink,
+        shared,
+        sink,
         connection: connection.as_deref(),
         ticks: 0,
     };
     let ended = tokio::select! {
         biased;
-        ended = writer.run(&mut write, &cancel) => ended,
+        ended = writer.run(&mut write, cancel) => ended,
         ended = reader.run(&mut read) => ended,
     };
     let (reason, message) = match ended {
@@ -2008,6 +2021,33 @@ mod tests {
         assert_eq!(viewer.status().stats.keyframes_requested, 0);
         drop(host);
         viewer.stop().await.unwrap();
+    }
+
+    /// A session task dropped mid-session, as its runtime shutting down
+    /// drops it, still ends the session: the consumer exits and the status
+    /// says stopped, with no reason, as a local stop does.
+    #[test]
+    fn a_session_dropped_with_its_runtime_ends_stopped() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (viewer, consumer, host) = runtime.block_on(async {
+            let (viewer, mut host, _) = connect(accepted()).await;
+            let viewer = viewer.unwrap();
+            let consumer = viewer.video_sink().attach().unwrap();
+            send(&mut host, state(1, false), None).await;
+            eventually(|| viewer.status().generation == 1).await;
+            (viewer, consumer, host)
+        });
+        drop(runtime);
+        assert!(matches!(
+            consumer.next(Duration::ZERO, 1 << 20),
+            Pull::Closed
+        ));
+        let status = viewer.status();
+        assert_eq!((status.state, status.reason), (ViewerState::Stopped, None));
+        drop(host);
     }
 
     #[tokio::test]
