@@ -17,7 +17,90 @@
 //! silent would otherwise hold every other call for as long as the check
 //! waits.
 
-use super::*;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use tokio::sync::Mutex;
+
+use pb_mapper_client::sdk::{Client, RelayTransport, RemoteId};
+
+use super::stored::normalize_msg_header_key;
+use super::tunnel::{TunnelHandle, TunnelView};
+use super::{
+    AppConfig, ClientConfigInfo, ClientStatusResponse, LocalServerStatus, PbMapperState,
+    ServerStatusDetail, ServiceConfigInfo, ServiceConnInfo, ServiceStatusResponse,
+    process_credential,
+};
+use crate::error::{CtlError, ErrorCode};
+use crate::relay::sdk_error;
+
+const STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
+const FORCE_REFRESH_TIMEOUT: Duration = Duration::from_millis(5000);
+
+/// What the relay answered: its services, the routing table, and how long
+/// the services took to come back.
+type RelayAnswer = (Vec<String>, RemoteId, Duration);
+
+/// What the relay holds, asked over the carrier this computer uses within
+/// [`FORCE_REFRESH_TIMEOUT`]; and with `ask_quic`, beside it and over TCP
+/// whichever carrier that is, what the relay says about QUIC: the UDP port it
+/// offers it on, or `None` for none, or nothing when it did not answer.
+async fn fetch_real_status(
+    client: &Client,
+    ask_quic: bool,
+) -> (Result<RelayAnswer, CtlError>, Option<Option<u16>>) {
+    let answer = async {
+        let keys = async {
+            let started = Instant::now();
+            (client.list_keys().await, started.elapsed())
+        };
+        let ((keys_result, latency), remote_id_result) = tokio::join!(keys, client.remote_id());
+        // The reason as it is: Settings' Test shows it to the user, after its
+        // own "The relay didn't answer".
+        let services = keys_result.map_err(sdk_error)?;
+        let remote_id = remote_id_result.unwrap_or_else(|e| {
+            tracing::warn!("Failed to get remote-id data: {}, using empty data", e);
+            RemoteId {
+                server_map: String::new(),
+                active: String::new(),
+                idle: String::new(),
+            }
+        });
+        Ok((services, remote_id, latency))
+    };
+    let answer = async {
+        tokio::time::timeout(FORCE_REFRESH_TIMEOUT, answer)
+            .await
+            .unwrap_or_else(|_| {
+                Err(CtlError::timeout(format!(
+                    "{} did not answer within {} seconds",
+                    client.server(),
+                    FORCE_REFRESH_TIMEOUT.as_secs()
+                )))
+            })
+    };
+    // Bounded by the SDK's own timeout; outside the one above, so a TCP
+    // question that stalls cannot make a relay that answered look silent.
+    let quic = async {
+        if !ask_quic {
+            return None;
+        }
+        client
+            .relay_quic_port()
+            .await
+            .inspect_err(|e| tracing::debug!("The relay did not say whether it offers QUIC: {e}"))
+            .ok()
+    };
+    tokio::join!(answer, quic)
+}
+
+fn cache_is_stale(last_update: Option<Instant>, ttl: Duration) -> bool {
+    match last_update {
+        Some(ts) => ts.elapsed() > ttl,
+        None => true,
+    }
+}
 
 impl PbMapperState {
     /// The share (`share`) or connection running under `key`.

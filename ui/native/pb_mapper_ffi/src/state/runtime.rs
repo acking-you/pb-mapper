@@ -10,7 +10,30 @@
 //! Readiness is published only after both listener binding and authentication
 //! initialization succeed, preventing the UI from displaying a phantom running relay.
 
-use super::*;
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
+use std::time::{Instant, SystemTime};
+
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+
+use pb_mapper_auth::{AuthConfig, AuthRuntime};
+use pb_mapper_client::sdk::{LanTransport, RelayTransport};
+use pb_mapper_core::checksum::Credential;
+use pb_mapper_core::config::ResolvedAddrs;
+use pb_mapper_server::{
+    DirectServerConfig, QuicServerConfig, RelayServerOptions, run_server_on_listener_with_options,
+};
+
+use super::tunnel::{
+    ConnectCommit, KeyClaim, RegisterCommit, TunnelHandle, TunnelRuntime, abort_runtime, claim_key,
+    watch_tunnel,
+};
+use super::{
+    ConnectionInfo, DirectOptions, LocalServerStatus, PbMapperState, RelayTunnels, ServiceInfo,
+};
+use crate::error::CtlError;
+use crate::events;
 
 impl PbMapperState {
     /// Run a relay on `port`. With `quic_port` it also takes QUIC there, on
@@ -531,43 +554,4 @@ impl PbMapperState {
 
         self.delete_client_config(&service_key)
     }
-}
-
-/// Tell the window when `handle`'s state or path changes, until the tunnel
-/// ends. Both are read when its status or one of its events says something
-/// may have changed, and announced only when they did: which paths its
-/// sessions use, not how many, and not the message, which for a failing
-/// tunnel says when it tries again. Holds the handle weakly, so it never
-/// keeps a tunnel alive.
-fn watch_tunnel(handle: &Arc<TunnelHandle>, kind: events::ChangeKind, key: &str) {
-    let tunnel = Arc::downgrade(handle);
-    let mut status = handle.subscribe();
-    let mut events = handle.subscribe_events();
-    let key = key.to_string();
-    let shape = |view: TunnelView| (view.status, view.path.map(|path| path.shape()));
-    let mut seen = shape(handle.view());
-    tokio::spawn(async move {
-        let mut status_open = true;
-        loop {
-            let live = tokio::select! {
-                changed = status.changed(), if status_open => {
-                    status_open = changed.is_ok();
-                    true
-                },
-                // A missed event may have been a change too: read it all again.
-                event = events.recv() => event.is_some(),
-            };
-            let Some(handle) = tunnel.upgrade() else {
-                return;
-            };
-            let now = shape(handle.view());
-            drop(handle);
-            if std::mem::replace(&mut seen, now) != now {
-                events::emit(kind, Some(&key), Origin::Internal);
-            }
-            if !live {
-                return;
-            }
-        }
-    });
 }
