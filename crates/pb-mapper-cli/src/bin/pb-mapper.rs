@@ -26,7 +26,8 @@ use pb_mapper_auth::{
 use pb_mapper_client::client::show_status_scoped;
 use pb_mapper_client::sdk::{
     Client, ConnectOptions, ConnectRequest, LanTransport, PathPolicy, PortMapping, RegisterOptions,
-    RegisterRequest, TunnelDiagnostics, TunnelEventKind, TunnelEvents, TunnelMetrics, TunnelStatus,
+    RegisterRequest, RelayTransport, TunnelDiagnostics, TunnelEventKind, TunnelEvents,
+    TunnelMetrics, TunnelStatus,
 };
 use pb_mapper_core::checksum::set_process_msg_header_key;
 use pb_mapper_core::checksum::{MACHINE_MSG_HEADER_KEY_PATH, setup_machine_msg_header_key};
@@ -304,6 +305,15 @@ enum RelayTransportArg {
     Quic,
 }
 
+impl From<RelayTransportArg> for RelayTransport {
+    fn from(value: RelayTransportArg) -> Self {
+        match value {
+            RelayTransportArg::Tcp => Self::Tcp,
+            RelayTransportArg::Quic => Self::Quic,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum PortMappingArg {
     Off,
@@ -346,6 +356,15 @@ enum PathArg {
 enum Transport {
     Tcp,
     Udp,
+}
+
+impl From<Transport> for pb_mapper_client::sdk::Transport {
+    fn from(value: Transport) -> Self {
+        match value {
+            Transport::Tcp => Self::Tcp,
+            Transport::Udp => Self::Udp,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -546,17 +565,7 @@ fn tunnel_client(relay: &RelayArgs, namespace: Option<u64>) -> Result<Client, Bo
         relay.keep_alive || keep_alive_from_env(),
         namespace,
     )
-    .with_relay_transport(match relay.relay_transport {
-        RelayTransportArg::Tcp => pb_mapper_client::sdk::RelayTransport::Tcp,
-        RelayTransportArg::Quic => pb_mapper_client::sdk::RelayTransport::Quic,
-    })?)
-}
-
-fn sdk_transport(transport: Transport) -> pb_mapper_client::sdk::Transport {
-    match transport {
-        Transport::Tcp => pb_mapper_client::sdk::Transport::Tcp,
-        Transport::Udp => pb_mapper_client::sdk::Transport::Udp,
-    }
+    .with_relay_transport(relay.relay_transport.into())?)
 }
 
 async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
@@ -566,16 +575,16 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
             RegisterRequest {
                 key: args.key,
                 local_addr: args.addr,
-                transport: sdk_transport(args.transport),
+                transport: args.transport.into(),
                 codec: args.codec,
                 force_namespace: args.force,
             },
             RegisterOptions {
                 allow_direct: !args.relay_only && RegisterOptions::default().allow_direct,
+                idle_timeout: None,
                 port_mapping: args.port_mapping.into(),
                 lan_first: args.lan_first,
                 lan_tcp: args.lan_tcp,
-                ..Default::default()
             },
         )
         .await?;
@@ -598,7 +607,7 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
             ConnectRequest {
                 key: args.key,
                 local_addr: args.addr,
-                transport: sdk_transport(args.transport),
+                transport: args.transport.into(),
             },
             ConnectOptions {
                 path: match (args.relay_only, args.path) {
