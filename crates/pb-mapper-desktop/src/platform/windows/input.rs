@@ -249,7 +249,6 @@ fn key_code(key: Key) -> enigo::Key {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod key_tests {
     use super::*;
 

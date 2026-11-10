@@ -609,7 +609,6 @@ fn private_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     fn options() -> Options {

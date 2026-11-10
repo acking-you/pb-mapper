@@ -642,7 +642,6 @@ pub(super) fn record_service_event(event: &str, detail: &str) {
 }
 
 #[cfg(all(test, feature = "windows-helper"))]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     #[test]

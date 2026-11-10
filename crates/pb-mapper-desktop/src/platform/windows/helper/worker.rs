@@ -472,7 +472,6 @@ pub fn restore(session: u32) -> Result<()> {
 }
 
 #[cfg(all(test, feature = "windows-helper"))]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -192,7 +192,6 @@ mod service;
 pub(super) use service::{revoke_installation, run};
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

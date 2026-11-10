@@ -421,7 +421,6 @@ pub fn run() -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod readiness_tests {
     use super::{Configuration, HELPER_PROTOCOL, NotReady, Status, update_required};
 

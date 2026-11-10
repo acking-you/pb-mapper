@@ -75,7 +75,6 @@ pub(super) fn allow_identity_query(owner: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::{
