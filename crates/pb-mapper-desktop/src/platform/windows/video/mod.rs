@@ -45,6 +45,14 @@ use windows_capture::{
 /// Thread C's encoder bound decides how deep the pipeline runs; this only
 /// keeps a caller without it from queueing more.
 const MAX_IN_FLIGHT: usize = crate::worker::ENCODER_DEPTH;
+/// The NV12 samples the scaler writes into: allocated up front, and at most.
+const SAMPLES: (u32, u32) = (4, 6);
+const _: () = assert!(
+    MAX_IN_FLIGHT <= SAMPLES.1 as usize,
+    "the sample pool holds every unit in flight"
+);
+/// The largest capture, and the largest encoded size.
+const MAX_SIZE: (u32, u32) = (7680, 4320);
 /// An output that took longer than this is discarded, and output resumes at
 /// the next IDR. A unit's time counts from when the encoder could start it:
 /// see `late`.
@@ -54,6 +62,10 @@ const LATE_OUTPUT: Duration = Duration::from_millis(250);
 const FIRST_SUBMIT_WAIT: Duration = Duration::from_secs(3);
 /// An encoder that has held a unit this long is stuck.
 const OUTPUT_WAIT: Duration = Duration::from_secs(2);
+const _: () = assert!(
+    LATE_OUTPUT.as_millis() < OUTPUT_WAIT.as_millis(),
+    "a late unit is discarded before the encoder counts as stalled"
+);
 /// A static desktop still submits a verified repeat this often, which keeps a
 /// presented frame fresh enough to authorise input.
 const LIVENESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -240,7 +252,7 @@ impl Encoder {
         }
         let (OutputSize::Fit(max_width, max_height) | OutputSize::Exact(max_width, max_height)) =
             size;
-        if !(2..=7680).contains(&max_width) || !(2..=4320).contains(&max_height) {
+        if !(2..=MAX_SIZE.0).contains(&max_width) || !(2..=MAX_SIZE.1).contains(&max_height) {
             return Err(error("video size outside supported bounds"));
         }
         let runtime = Runtime::new()?;
@@ -264,7 +276,11 @@ impl Encoder {
         }
         let input_width = desc.ModeDesc.Width;
         let input_height = desc.ModeDesc.Height;
-        if input_width < 2 || input_height < 2 || input_width > 7680 || input_height > 4320 {
+        if input_width < 2
+            || input_height < 2
+            || input_width > MAX_SIZE.0
+            || input_height > MAX_SIZE.1
+        {
             return Err(error("unsupported GPU capture dimensions"));
         }
         let (width, height) = match size {
@@ -305,8 +321,8 @@ impl Encoder {
             allocator.SetDirectXManager(&manager).map_err(error)?;
             allocator
                 .InitializeSampleAllocatorEx(
-                    4,
-                    6,
+                    SAMPLES.0,
+                    SAMPLES.1,
                     &attributes,
                     &media_type(&MFVideoFormat_NV12, width, height, fps)?,
                 )
