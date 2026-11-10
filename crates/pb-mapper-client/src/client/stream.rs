@@ -87,67 +87,16 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
                 });
         }
     }
-    let mut wake = remote_addr.wake();
-    let mut retry = pb_mapper_core::timeout::RetryBackoff::default();
-    let ((mut remote_stream, codec_key, client_id, server_id), setup_latency) = loop {
-        let attempt_started = Instant::now();
-        let attempt_budget = setup
-            .timing
-            .lock()
-            .await
-            .timeout()
-            .max(std::time::Duration::from_secs(3));
-        let attempt_deadline = (Instant::now() + attempt_budget).min(deadline);
-        wake.acknowledge();
-        let mut carrier = None;
-        let result = tokio::select! {
-            () = wake.network_changed(), if Instant::now() < deadline => continue,
-            result = tokio::time::timeout_at(
-            attempt_deadline,
-            subscribe(&key, remote_addr.clone(), keep_alive, namespace, credential, LocalStream::supports_data_v2(), &mut carrier),
-        ) => result,
-        };
-        match result {
-            Ok(Ok(ready)) => break (ready, attempt_started.elapsed()),
-            Ok(Err(error)) => {
-                let retryable = matches!(
-                    &error,
-                    super::error::Error::ConnectRemoteStream { .. }
-                        | super::error::Error::WriteSubcribeReq { .. }
-                        | super::error::Error::SubscribeRemoteError {
-                            retryable: true,
-                            ..
-                        }
-                );
-                if error.remote_retryable().is_some() {
-                    remote_addr.protocol_succeeded();
-                } else {
-                    remote_addr.transport_failed(carrier);
-                }
-                if !retryable || Instant::now() >= deadline {
-                    return Err(error);
-                }
-            }
-            Err(_) => {
-                remote_addr.transport_failed(carrier);
-                setup
-                    .diagnostics
-                    .failed(RecoveryFailure::Timeout, std::time::Duration::ZERO);
-                setup.timing.lock().await.timed_out();
-                if Instant::now() >= deadline {
-                    return super::error::ControlIoTimeoutSnafu {
-                        action: "subscribe",
-                        timeout: budget,
-                    }
-                    .fail();
-                }
-            }
-        }
-        tokio::select! {
-            () = tokio::time::sleep_until((Instant::now() + crate::recovery::jitter(retry.next_delay())).min(deadline)) => {},
-            _ = wake.changed() => retry.reset(),
-        }
+    let subscription = Subscription {
+        key: &key,
+        remote_addr: &remote_addr,
+        keep_alive,
+        namespace,
+        credential,
+        offered_v2: LocalStream::supports_data_v2(),
     };
+    let ((mut remote_stream, codec_key, client_id, server_id), setup_latency) =
+        subscription.with_retry(&setup, deadline, budget).await?;
     drop(global_permit);
     remote_addr.protocol_succeeded();
     setup.diagnostics.succeeded(setup_latency);
@@ -178,35 +127,114 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
     Ok(())
 }
 
-async fn subscribe(
-    key: &str,
-    remote_addr: RelayEndpoint,
+/// A subscribed relay stream: the stream, its data codec, and the ids the relay
+/// gave this end and the serving one.
+type Subscribed = (RelayStream, Option<DataCodec>, u32, u32);
+
+/// What a local stream subscribes to over the relay, and how. Not generic:
+/// the local stream type contributes only whether it offers data protocol v2.
+struct Subscription<'a> {
+    key: &'a str,
+    remote_addr: &'a RelayEndpoint,
     keep_alive: bool,
     namespace: Option<u64>,
     credential: Credential,
     offered_v2: bool,
-    carrier: &mut Option<CarrierId>,
-) -> Result<(RelayStream, Option<DataCodec>, u32, u32)> {
-    let request = match namespace {
-        Some(namespace) => PbConnRequest::SubcribeScoped {
-            data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
-            key: key.to_string(),
-            namespace,
-        },
-        None => PbConnRequest::Subcribe {
-            data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
-            key: key.to_string(),
-        },
-    };
-    subscribe_request(
-        request,
-        remote_addr,
-        keep_alive,
-        credential,
-        offered_v2,
-        carrier,
-    )
-    .await
+}
+
+impl Subscription<'_> {
+    /// Subscribe, retrying the failures a fresh attempt can fix until
+    /// `deadline`, which is `budget` after the stream's setup began. Answers
+    /// the subscription and how long its successful attempt took.
+    async fn with_retry(
+        &self,
+        setup: &StreamSetup,
+        deadline: Instant,
+        budget: std::time::Duration,
+    ) -> Result<(Subscribed, std::time::Duration)> {
+        let mut wake = self.remote_addr.wake();
+        let mut retry = pb_mapper_core::timeout::RetryBackoff::default();
+        loop {
+            let attempt_started = Instant::now();
+            let attempt_budget = setup
+                .timing
+                .lock()
+                .await
+                .timeout()
+                .max(std::time::Duration::from_secs(3));
+            let attempt_deadline = (Instant::now() + attempt_budget).min(deadline);
+            wake.acknowledge();
+            let mut carrier = None;
+            let result = tokio::select! {
+                () = wake.network_changed(), if Instant::now() < deadline => continue,
+                result = tokio::time::timeout_at(attempt_deadline, self.attempt(&mut carrier)) => result,
+            };
+            match result {
+                Ok(Ok(ready)) => return Ok((ready, attempt_started.elapsed())),
+                Ok(Err(error)) => {
+                    let retryable = matches!(
+                        &error,
+                        super::error::Error::ConnectRemoteStream { .. }
+                            | super::error::Error::WriteSubcribeReq { .. }
+                            | super::error::Error::SubscribeRemoteError {
+                                retryable: true,
+                                ..
+                            }
+                    );
+                    if error.remote_retryable().is_some() {
+                        self.remote_addr.protocol_succeeded();
+                    } else {
+                        self.remote_addr.transport_failed(carrier);
+                    }
+                    if !retryable || Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                }
+                Err(_) => {
+                    self.remote_addr.transport_failed(carrier);
+                    setup
+                        .diagnostics
+                        .failed(RecoveryFailure::Timeout, std::time::Duration::ZERO);
+                    setup.timing.lock().await.timed_out();
+                    if Instant::now() >= deadline {
+                        return super::error::ControlIoTimeoutSnafu {
+                            action: "subscribe",
+                            timeout: budget,
+                        }
+                        .fail();
+                    }
+                }
+            }
+            tokio::select! {
+                () = tokio::time::sleep_until((Instant::now() + crate::recovery::jitter(retry.next_delay())).min(deadline)) => {},
+                _ = wake.changed() => retry.reset(),
+            }
+        }
+    }
+
+    /// One subscription attempt, over the carrier it reports in `carrier`.
+    async fn attempt(&self, carrier: &mut Option<CarrierId>) -> Result<Subscribed> {
+        let request = match self.namespace {
+            Some(namespace) => PbConnRequest::SubcribeScoped {
+                data_protocol: self.offered_v2.then_some(DATA_PROTOCOL_V2),
+                key: self.key.to_string(),
+                namespace,
+            },
+            None => PbConnRequest::Subcribe {
+                data_protocol: self.offered_v2.then_some(DATA_PROTOCOL_V2),
+                key: self.key.to_string(),
+            },
+        };
+        subscribe_request(
+            request,
+            self.remote_addr.clone(),
+            self.keep_alive,
+            self.credential,
+            self.offered_v2,
+            carrier,
+        )
+        .await
+    }
 }
 
 pub(crate) async fn subscribe_request(
@@ -216,7 +244,7 @@ pub(crate) async fn subscribe_request(
     credential: Credential,
     offered_v2: bool,
     carrier: &mut Option<CarrierId>,
-) -> Result<(RelayStream, Option<DataCodec>, u32, u32)> {
+) -> Result<Subscribed> {
     let mut remote_stream = remote_addr
         .connect(credential, carrier)
         .await
