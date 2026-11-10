@@ -22,20 +22,7 @@ use super::replay::{
     truncate_replay_log,
 };
 use super::*;
-
-// A heartbeat/select branch may cancel a read at any byte boundary. The next
-// read must resume that frame, including its authenticated counter.
-async fn cancel_partial_read(reader: &mut impl MessageReader) {
-    use std::future::{Future, poll_fn};
-    use std::task::Poll;
-
-    let mut read = std::pin::pin!(reader.read_msg());
-    poll_fn(|cx| {
-        assert!(read.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
-}
+use crate::frame_read::cancel_partial_read;
 
 #[tokio::test]
 async fn interrupted_v2_writer_cannot_reuse_a_nonce_or_restart_a_partial_frame() {
@@ -141,32 +128,6 @@ async fn v2_fragmented_frame_survives_read_cancellation() {
         let (mut tx, mut rx) = tokio::io::duplex(4096);
         let mut reader =
             V2MessageReader::new(&mut rx, material.clone(), Direction::ServerToClient, 0).unwrap();
-        tx.write_all(&wire[..split]).await.unwrap();
-        cancel_partial_read(&mut reader).await;
-        tx.write_all(&wire[split..]).await.unwrap();
-        drop(tx);
-        assert_eq!(
-            reader.read_msg().await.unwrap(),
-            b"first fragmented message",
-            "split {split}"
-        );
-        assert_eq!(
-            reader.read_msg().await.unwrap(),
-            b"next message",
-            "split {split}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn legacy_fragmented_frame_survives_read_cancellation() {
-    let mut wire = Vec::new();
-    let mut writer = crate::NormalMessageWriter::new(&mut wire).with_checksum_key([7; 32]);
-    writer.write_msg(b"first fragmented message").await.unwrap();
-    writer.write_msg(b"next message").await.unwrap();
-    for split in 1..8 + b"first fragmented message".len() {
-        let (mut tx, mut rx) = tokio::io::duplex(4096);
-        let mut reader = crate::NormalMessageReader::new(&mut rx).with_checksum_key([7; 32]);
         tx.write_all(&wire[..split]).await.unwrap();
         cancel_partial_read(&mut reader).await;
         tx.write_all(&wire[split..]).await.unwrap();
