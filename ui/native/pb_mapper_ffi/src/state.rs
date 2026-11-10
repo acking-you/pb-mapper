@@ -24,10 +24,10 @@ use std::sync::Arc;
 
 use parking_lot::Mutex as SyncMutex;
 
-use pb_mapper_client::sdk::Client;
+use pb_mapper_client::sdk::{Client, RelayTransport};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 
-use crate::error::CtlError;
+use crate::error::{CtlError, sdk_error};
 
 mod configuration;
 mod runtime;
@@ -82,6 +82,21 @@ pub(crate) fn process_credential() -> Result<Credential, CtlError> {
     get_process_credential().map_err(|error| {
         CtlError::invalid_argument(format!("This computer has no usable credential: {error}"))
     })
+}
+
+/// A client of the relay at `server` over `transport`, as `credential`, in
+/// `namespace` when that is not the credential's own. Clients of one relay
+/// and carrier share the process's connections to it.
+pub(crate) fn relay_client_for(
+    server: &str,
+    credential: Credential,
+    keep_alive: bool,
+    namespace: Option<u64>,
+    transport: RelayTransport,
+) -> Result<Client, CtlError> {
+    Client::from_credential(server, credential, keep_alive, namespace)
+        .with_relay_transport(transport)
+        .map_err(sdk_error)
 }
 
 #[cfg(test)]

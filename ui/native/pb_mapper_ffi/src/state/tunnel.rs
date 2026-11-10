@@ -16,7 +16,7 @@ use pb_mapper_client::sdk::{
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{ResolvedAddrs, resolve_addrs_async, resolve_pb_mapper_server_async};
 
-use super::{DirectOptions, PathInfo, PbMapperState, TunnelState};
+use super::{DirectOptions, PathInfo, PbMapperState, TunnelState, relay_client_for};
 use crate::ctl::Origin;
 use crate::error::{CtlError, no_quic, sdk_error, sdk_refusal};
 use crate::events;
@@ -327,6 +327,21 @@ pub(super) struct ConnectCommit {
     pub(super) pin: PinnedTunnel,
 }
 
+/// Where a tunnel's two ends are: `local`, the address it serves or listens
+/// on, and `server`, the relay.
+async fn resolve_ends(
+    local: &str,
+    server: &str,
+) -> Result<(ResolvedAddrs, ResolvedAddrs), CtlError> {
+    let local = resolve_addrs_async(local)
+        .await
+        .map_err(|e| CtlError::invalid_address(format!("Invalid local address: {e}")))?;
+    let server = resolve_pb_mapper_server_async(Some(server))
+        .await
+        .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
+    Ok((local, server))
+}
+
 /// The transport `protocol` names: TCP, or else UDP.
 fn transport_of(protocol: &str) -> Transport {
     if protocol.eq_ignore_ascii_case("TCP") {
@@ -367,15 +382,14 @@ pub async fn register_service(
 
     // 2. The slow parts, with the lock released, ending with the tunnel
     //    started.
-    resolve_addrs_async(&spec.local_address)
-        .await
-        .map_err(|e| CtlError::invalid_address(format!("Invalid local address: {e}")))?;
-    let remote_addrs = resolve_pb_mapper_server_async(Some(&server_address))
-        .await
-        .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
-    let client = Client::from_credential(&server_address, credential, spec.enable_keep_alive, None)
-        .with_relay_transport(relay_transport)
-        .map_err(sdk_refusal)?;
+    let (_, remote_addrs) = resolve_ends(&spec.local_address, &server_address).await?;
+    let client = relay_client_for(
+        &server_address,
+        credential,
+        spec.enable_keep_alive,
+        None,
+        relay_transport,
+    )?;
     // Surface a relay this tunnel cannot use now, rather than retrying it.
     preflight(&client).await?;
     let handle = client
@@ -434,12 +448,7 @@ pub async fn connect_service(
         )
     };
 
-    let local_addrs = resolve_addrs_async(&spec.local_address)
-        .await
-        .map_err(|e| CtlError::invalid_address(format!("Invalid local address: {e}")))?;
-    let remote_addrs = resolve_pb_mapper_server_async(Some(&server_address))
-        .await
-        .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
+    let (local_addrs, remote_addrs) = resolve_ends(&spec.local_address, &server_address).await?;
 
     // Preflight local bind to detect "port already in use" before starting client.
     let transport = transport_of(&spec.protocol);
@@ -457,14 +466,13 @@ pub async fn connect_service(
             spec.local_address
         ))
     })?;
-    let client = Client::from_credential(
+    let client = relay_client_for(
         &server_address,
         credential,
         spec.enable_keep_alive,
         spec.namespace,
-    )
-    .with_relay_transport(relay_transport)
-    .map_err(sdk_refusal)?;
+        relay_transport,
+    )?;
     // A relay that is down is retried, as it always was: the connection
     // listens locally meanwhile. One that offers no QUIC never will.
     if relay_transport == RelayTransport::Quic {

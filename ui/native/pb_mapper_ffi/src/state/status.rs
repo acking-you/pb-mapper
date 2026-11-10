@@ -29,7 +29,7 @@ use super::stored::normalize_msg_header_key;
 use super::tunnel::{TunnelHandle, TunnelView};
 use super::{
     AppConfig, ClientConfigInfo, LocalServerStatus, PbMapperState, ServerStatusDetail,
-    ServiceConfigInfo, ServiceConnInfo, TunnelStatusResponse, process_credential,
+    ServiceConfigInfo, ServiceConnInfo, TunnelStatusResponse, process_credential, relay_client_for,
 };
 use crate::error::{CtlError, ErrorCode, sdk_error};
 
@@ -157,15 +157,13 @@ impl PbMapperState {
         {
             return Ok(client.clone());
         }
-        let credential = process_credential()?;
-        let client = Client::from_credential(
+        let client = relay_client_for(
             &self.config.server_address,
-            credential,
+            process_credential()?,
             self.config.keep_alive_enabled,
             None,
-        )
-        .with_relay_transport(self.config.relay_transport)
-        .map_err(sdk_error)?;
+            self.config.relay_transport,
+        )?;
         *cached = Some((self.config.clone(), client.clone()));
         Ok(client)
     }

@@ -28,7 +28,7 @@ use crate::error::{CtlError, sdk_error};
 use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{Reply, parse_c_string, respond};
-use crate::state::AppConfig;
+use crate::state::{AppConfig, relay_client_for};
 
 /// Long enough for an inventory paged across a large relay, short enough
 /// that a relay that stopped answering is reported rather than waited on.
@@ -192,9 +192,13 @@ impl Target<'_> {
     /// A client of this relay as `credential`. Clients of one relay and
     /// carrier share the process's connections to it, the tunnels' too.
     fn client(&self, credential: Credential) -> Result<Client, CtlError> {
-        Client::from_credential(self.server, credential, self.keep_alive, None)
-            .with_relay_transport(self.transport)
-            .map_err(sdk_error)
+        relay_client_for(
+            self.server,
+            credential,
+            self.keep_alive,
+            None,
+            self.transport,
+        )
     }
 }
 
