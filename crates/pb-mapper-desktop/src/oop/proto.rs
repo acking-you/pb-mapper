@@ -103,7 +103,51 @@ impl Request {
             | Self::DisplayModes { .. }
             | Self::SetDisplayMode { .. }
             | Self::RestoreDisplayMode {} => MODE_TIMEOUT,
-            _ => TIMEOUT,
+            Self::Attach { .. }
+            | Self::Context {}
+            | Self::Capture {}
+            | Self::ConfigureVideo { .. }
+            | Self::Video { .. }
+            | Self::Presented { .. }
+            | Self::Input { .. }
+            | Self::H265 {}
+            | Self::Release {}
+            | Self::Close {} => TIMEOUT,
+        }
+    }
+    /// Its answer reports the bound desktop, which the host keeps.
+    pub(crate) fn reports_context(&self) -> bool {
+        match self {
+            Self::Release {} | Self::Close {} | Self::RestoreDisplayMode {} => false,
+            Self::Start { .. }
+            | Self::Attach { .. }
+            | Self::Context {}
+            | Self::Capture {}
+            | Self::ConfigureVideo { .. }
+            | Self::Video { .. }
+            | Self::Presented { .. }
+            | Self::Input { .. }
+            | Self::H265 {}
+            | Self::DisplayModes { .. }
+            | Self::SetDisplayMode { .. } => true,
+        }
+    }
+    /// The worker reads the pointer for it. An applied input reads it too,
+    /// but only when it can, so its answer may carry none.
+    pub(crate) fn observes_cursor(&self) -> bool {
+        match self {
+            Self::Context {} | Self::Capture {} | Self::Video { .. } => true,
+            Self::Start { .. }
+            | Self::Attach { .. }
+            | Self::ConfigureVideo { .. }
+            | Self::Presented { .. }
+            | Self::Input { .. }
+            | Self::H265 {}
+            | Self::DisplayModes { .. }
+            | Self::SetDisplayMode { .. }
+            | Self::RestoreDisplayMode {}
+            | Self::Release {}
+            | Self::Close {} => false,
         }
     }
 }

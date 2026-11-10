@@ -119,10 +119,7 @@ pub(crate) fn serve<B: Backend>(
     // Context checks observe the pointer too, so it follows while capture is
     // idle. The backend checks this desktop identity; observing it never
     // renews last_input or acknowledges video.
-    let observe_cursor = matches!(
-        request,
-        Request::Context {} | Request::Capture {} | Request::Video { .. }
-    );
+    let observe_cursor = request.observes_cursor();
     let image = match request {
         Request::Start { .. } => {
             // This worker runs in the interactive session: its settings are
@@ -132,8 +129,9 @@ pub(crate) fn serve<B: Backend>(
             response.caps = Some((&backend.describe(false)?.caps).into());
             vec![]
         }
-        Request::Context {}
-        | Request::Release {}
+        Request::Context {} => vec![],
+        // Answered above, before the context read.
+        Request::Release {}
         | Request::Close {}
         | Request::Input { .. }
         | Request::RestoreDisplayMode {} => vec![],

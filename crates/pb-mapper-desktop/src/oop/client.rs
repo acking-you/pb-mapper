@@ -96,14 +96,8 @@ impl<T: Transport> RemoteBackend<T> {
         if self.failed {
             return Err(disconnected("helper disconnected; restart desktop sharing"));
         }
-        let reports = !matches!(
-            request,
-            Request::Release {} | Request::Close {} | Request::RestoreDisplayMode {}
-        );
-        let observes = matches!(
-            request,
-            Request::Context {} | Request::Capture {} | Request::Video { .. }
-        );
+        let reports = request.reports_context();
+        let observes = request.observes_cursor();
         let applies = matches!(request, Request::Input { .. });
         let bound = request.timeout();
         let result = self.runtime.block_on(async {
