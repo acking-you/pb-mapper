@@ -26,6 +26,17 @@ pub(super) use dial::Dialed;
 pub(super) use discovery::Discovered;
 use discovery::Discovery;
 
+/// Handshakes an acceptor runs at once, on either carrier; past it, a new
+/// connection is turned away.
+pub(super) const MAX_HANDSHAKES: usize = 64;
+/// How long one accepted handshake may take, on either carrier.
+pub(super) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Accepted connections waiting for the provider; past it, one is closed.
+const ARRIVAL_QUEUE: usize = 64;
+/// How long a stopping endpoint keeps its drivers alive to close with its
+/// peers.
+const CLOSE_DRAIN: Duration = Duration::from_secs(3);
+
 /// Where this machine's interface table comes from.
 pub(super) enum InterfaceSource {
     System,
@@ -96,7 +107,7 @@ impl Network {
         diagnostics: &crate::diagnostics::Diagnostics,
     ) -> io::Result<Arc<Self>> {
         let identity = Identity::new()?;
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(ARRIVAL_QUEUE);
         let mut transports = Vec::new();
         let mut acceptors = Vec::new();
         for addr in [
@@ -123,36 +134,10 @@ impl Network {
                 Arc::new(quinn::TokioRuntime),
             )?;
             if server {
-                let ep = endpoint.clone();
-                let tx = tx.clone();
-                acceptors.push(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-                    let mut handshakes = JoinSet::new();
-                    loop {
-                        tokio::select! {
-                            incoming = ep.accept() => {
-                                let Some(incoming) = incoming else { break };
-                                if handshakes.len() >= 64 {
-                                    incoming.refuse();
-                                    continue;
-                                }
-                                let tx = tx.clone();
-                                handshakes.spawn(async move {
-                                    match tokio::time::timeout(Duration::from_secs(3), incoming).await {
-                                        Ok(Ok(connection)) => {
-                                            if let Err(error) = tx.try_send(Arrival::Quic(connection))
-                                                && let Arrival::Quic(connection) = error.into_inner()
-                                            {
-                                                connection.close(0u32.into(), b"accept capacity");
-                                            }
-                                        }
-                                        result => tracing::debug!(?result, "direct TLS accept failed"),
-                                    }
-                                });
-                            }
-                            Some(_) = handshakes.join_next() => {}
-                        }
-                    }
-                })));
+                let accept = accept_quic(endpoint.clone(), tx.clone());
+                acceptors.push(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+                    accept,
+                )));
             }
             transports.push((socket, endpoint));
         }
@@ -305,7 +290,7 @@ impl Network {
         // retransmits CLOSE; dropping them with the last session can leave the
         // peer waiting for its idle timeout. Bound draining so an unreachable
         // peer cannot prevent a local stop.
-        let _ = tokio::time::timeout(Duration::from_secs(3), async {
+        let _ = tokio::time::timeout(CLOSE_DRAIN, async {
             for (_, endpoint) in &self.transports {
                 endpoint.wait_idle().await;
             }
@@ -315,6 +300,40 @@ impl Network {
         if let Some(mapping) = self.mapper.as_ref().and_then(|m| m.started.get()) {
             mapping.shutdown().await;
         }
+    }
+}
+
+/// Accept QUIC connections for as long as `endpoint` lives, refusing those
+/// past [`MAX_HANDSHAKES`] at once.
+async fn accept_quic(endpoint: quinn::Endpoint, arrivals: mpsc::Sender<Arrival>) {
+    let mut handshakes = JoinSet::new();
+    loop {
+        tokio::select! {
+            incoming = endpoint.accept() => {
+                let Some(incoming) = incoming else { break };
+                if handshakes.len() >= MAX_HANDSHAKES {
+                    incoming.refuse();
+                    continue;
+                }
+                handshakes.spawn(handshake(incoming, arrivals.clone()));
+            }
+            Some(_) = handshakes.join_next() => {}
+        }
+    }
+}
+
+/// Finish one QUIC handshake and hand the connection to `arrivals`, or close
+/// it when they are full.
+async fn handshake(incoming: quinn::Incoming, arrivals: mpsc::Sender<Arrival>) {
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming).await {
+        Ok(Ok(connection)) => {
+            if let Err(error) = arrivals.try_send(Arrival::Quic(connection))
+                && let Arrival::Quic(connection) = error.into_inner()
+            {
+                connection.close(0u32.into(), b"accept capacity");
+            }
+        }
+        result => tracing::debug!(?result, "direct TLS accept failed"),
     }
 }
 

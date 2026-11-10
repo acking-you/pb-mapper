@@ -46,6 +46,10 @@ const MAX_ARRIVALS: usize = 64;
 const BIND_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often reports no route took are offered again.
 const REPORT_RETRY: Duration = Duration::from_millis(500);
+/// Control connections reports may go out on.
+const MAX_ROUTES: usize = 64;
+/// Sessions whose newest report is kept for another try.
+const MAX_UNSENT: usize = 1024;
 
 type Reply = mpsc::Sender<LocalControlWrite>;
 struct Envelope {
@@ -719,7 +723,7 @@ impl ProviderReports {
         let mut routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
         routes.retain(|route| !route.is_closed());
         if !routes.iter().any(|route| route.same_channel(&reply)) {
-            if routes.len() < 64 {
+            if routes.len() < MAX_ROUTES {
                 routes.push(reply.clone());
             }
             drop(routes);
@@ -753,7 +757,7 @@ impl ProviderReports {
         let mut unsent = self.unsent.lock().unwrap_or_else(|e| e.into_inner());
         if delivered {
             unsent.remove(&id);
-        } else if unsent.len() < 1024 {
+        } else if unsent.len() < MAX_UNSENT {
             unsent.insert(id);
         }
     }

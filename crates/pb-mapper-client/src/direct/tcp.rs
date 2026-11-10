@@ -10,7 +10,12 @@
 //! to let it in: a consumer that asked for it falls back to QUIC within the
 //! head start when it does not get through.
 
-use super::{binding::Exporter, endpoint::Arrival, identity::Identity, lan::Interfaces};
+use super::{
+    binding::Exporter,
+    endpoint::{Arrival, HANDSHAKE_TIMEOUT, MAX_HANDSHAKES},
+    identity::{Identity, KEEP_ALIVE, SERVER_NAME},
+    lan::Interfaces,
+};
 use crate::diagnostics::LanTcpMiss;
 use pb_mapper_protocol::direct::MAX_LAN_TCP;
 use quinn::rustls::{self, pki_types::ServerName};
@@ -40,19 +45,10 @@ pub(super) type TlsTcp = TlsStream<TcpStream>;
 /// are dialed too. A LAN connect and a TLS 1.3 handshake take a few
 /// milliseconds; a SYN a firewall drops is not retried for about a second,
 /// so waiting longer would only delay the QUIC fallback.
-pub(super) const TCP_HEAD_START: Duration = Duration::from_millis(300);
+const TCP_HEAD_START: Duration = Duration::from_millis(300);
 
-/// Handshakes an acceptor runs at once, and how long each may take: as the
-/// QUIC endpoint's.
-const MAX_HANDSHAKES: usize = 64;
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Keep-alive on both ends, as QUIC's 15 s: a peer gone without a word is
-/// noticed rather than waited for.
-const KEEP_ALIVE: Duration = Duration::from_secs(15);
-
-/// The name both ends' certificates carry.
-const SERVER_NAME: &str = "pb-mapper.invalid";
+/// How long the acceptor waits before accepting again after accept failed.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
 impl Exporter for TlsTcp {
     const BINDING: &'static [u8] = b"pb-mapper/direct-tcp/1";
@@ -323,7 +319,7 @@ async fn accept(
                     Err(error) => {
                         // Out of descriptors, say: let some close before the next.
                         tracing::debug!(%error, "direct TCP accept failed");
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        tokio::time::sleep(ACCEPT_BACKOFF).await;
                         continue;
                     }
                 };

@@ -16,6 +16,10 @@ use std::{
 };
 use tokio::time::Instant;
 
+/// How long a discovery is reused for the same STUN server on the same
+/// network.
+const DISCOVERY_TTL: Duration = Duration::from_secs(10);
+
 pub(super) struct Discovery {
     at: Instant,
     server: SocketAddr,
@@ -45,7 +49,7 @@ impl Network {
         if let Some(discovery) = &*cached
             && discovery.server == stun
             && discovery.generation == generation
-            && discovery.at.elapsed() < Duration::from_secs(10)
+            && discovery.at.elapsed() < DISCOVERY_TTL
         {
             return self.discovered(discovery, mapped, StunOutcome::Cached, None);
         }

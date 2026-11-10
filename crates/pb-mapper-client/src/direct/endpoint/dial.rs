@@ -5,6 +5,7 @@ use crate::{
     diagnostics::LanEvidence,
     direct::{
         conn::{DirectConn, QuicGuard},
+        identity::SERVER_NAME,
         lan::Assessment,
         link::first_answers,
         tcp,
@@ -13,6 +14,12 @@ use crate::{
 use pb_mapper_protocol::direct::SessionGrant;
 use std::{io, net::SocketAddr, time::Duration};
 use tokio::{task::JoinSet, time::Instant};
+
+/// How often a peer's candidates are all probed.
+const PROBE_INTERVAL: Duration = Duration::from_millis(120);
+/// QUIC handshakes one setup starts at most: an attempt is bounded work, and
+/// the setup deadline ends the search anyway.
+const MAX_DIALS_PER_SETUP: usize = 16;
 
 /// How long a path that is not on the LAN waits after its first answer,
 /// with LAN-first on, once the LAN is known to be there (by strong evidence,
@@ -24,6 +31,10 @@ const LAN_HEAD_START: Duration = Duration::from_millis(150);
 /// dropped by a firewall the peer's own probe had not opened yet, costs
 /// 20 ms, not 120.
 const LAN_REPROBES: [Duration; 2] = [Duration::from_millis(20), Duration::from_millis(50)];
+const _: () = assert!(
+    LAN_REPROBES[1].as_nanos() < PROBE_INTERVAL.as_nanos(),
+    "a LAN re-probe lands before the next round"
+);
 
 /// How the search for a path went, once one connected.
 pub(in crate::direct) struct Dialed {
@@ -39,10 +50,10 @@ pub(in crate::direct) struct Dialed {
 }
 
 impl Network {
-    /// How a peer's candidates are probed: every 120 ms all of them. With
-    /// LAN-first on, those on a local network go first, and on evidence of
-    /// one again shortly after the first round; off, they keep the peer's
-    /// order and nothing is probed again early.
+    /// How a peer's candidates are probed: all of them every
+    /// [`PROBE_INTERVAL`]. With LAN-first on, those on a local network go
+    /// first, and on evidence of one again shortly after the first round;
+    /// off, they keep the peer's order and nothing is probed again early.
     fn probing(candidates: &[SocketAddr], lan: &Assessment) -> (Vec<SocketAddr>, Vec<SocketAddr>) {
         let ordered = lan.order(candidates);
         let reprobed = ordered
@@ -61,7 +72,7 @@ impl Network {
         let wake = self.wake(&id);
         let started = Instant::now();
         let mut reprobes = reprobe_times(started, lan.preferred(), &reprobed);
-        let mut probes = tokio::time::interval(Duration::from_millis(120));
+        let mut probes = tokio::time::interval(PROBE_INTERVAL);
         loop {
             let reprobe = reprobes.first().copied();
             tokio::select! {
@@ -104,7 +115,7 @@ impl Network {
         // LAN handshakes started and failed, and whether the system refused
         // to send to a LAN address: either way the head start is over.
         let (mut lan_dialed, mut lan_failed, mut lan_refused) = (0, 0, false);
-        let mut probe = tokio::time::interval(Duration::from_millis(120));
+        let mut probe = tokio::time::interval(PROBE_INTERVAL);
         let dialed = |handshakes: u32, handshake| {
             let learned = self.learned(&id);
             let (first_pong, lan_first_pong) = first_answers(&learned, started, lan);
@@ -129,9 +140,10 @@ impl Network {
             // the LAN, where the offer was only evidence of it.
             let hold = lan.holds(learned.iter().any(|(addr, _)| lan.is_lan(*addr)));
             for (addr, answered) in learned {
-                // At most 16 handshakes per setup: an attempt is bounded
-                // work, and the setup deadline ends the search anyway.
-                if tried.contains(&addr) || tried.len() >= 16 || tcp_holds.is_some() {
+                if tried.contains(&addr)
+                    || tried.len() >= MAX_DIALS_PER_SETUP
+                    || tcp_holds.is_some()
+                {
                     continue;
                 }
                 let on_lan = lan.is_lan(addr);
@@ -150,8 +162,7 @@ impl Network {
                         .is_ok_and(|a| a.is_ipv4() == addr.is_ipv4())
                 });
                 if let Some((_, endpoint)) = endpoint
-                    && let Ok(connecting) =
-                        endpoint.connect_with(config.clone(), addr, "pb-mapper.invalid")
+                    && let Ok(connecting) = endpoint.connect_with(config.clone(), addr, SERVER_NAME)
                 {
                     lan_dialed += u32::from(on_lan);
                     attempts.spawn(async move {

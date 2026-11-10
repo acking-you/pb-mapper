@@ -10,12 +10,29 @@ use std::{
     collections::HashMap,
     io,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 /// The protocol a direct connection speaks, by its carrier: a connection
 /// made for one is refused by the other.
 const QUIC_ALPN: &[u8] = b"pb-mapper/direct/1";
 const TCP_ALPN: &[u8] = b"pb-mapper/direct-tcp/1";
+
+/// The name every direct certificate carries, and every dial asks for.
+pub(super) const SERVER_NAME: &str = "pb-mapper.invalid";
+
+/// Keep-alive on both carriers: a peer gone without a word is noticed
+/// rather than waited for.
+pub(super) const KEEP_ALIVE: Duration = Duration::from_secs(15);
+/// How long a QUIC connection may go without hearing from its peer.
+const QUIC_IDLE: Duration = Duration::from_secs(60);
+const _: () = assert!(
+    QUIC_IDLE.as_secs() > KEEP_ALIVE.as_secs(),
+    "keep-alives arrive before the idle timeout"
+);
+
+/// Peer certificates with a live grant that a provider admits at once.
+const MAX_PERMITTED: usize = 1024;
 
 pub(super) struct Identity {
     pub certificate: Vec<u8>,
@@ -25,7 +42,7 @@ pub(super) struct Identity {
 impl Identity {
     pub fn new() -> io::Result<Self> {
         let (rcgen::CertifiedKey { cert, .. }, key) =
-            rcgen::generate_simple_self_signed(vec!["pb-mapper.invalid".into()])
+            rcgen::generate_simple_self_signed(vec![SERVER_NAME.into()])
                 .map_err(io::Error::other)?;
         Ok(Self {
             certificate: cert.der().to_vec(),
@@ -118,12 +135,8 @@ fn transport() -> io::Result<quinn::TransportConfig> {
         .max_concurrent_uni_streams(0u32.into())
         .stream_receive_window(STREAM_WINDOW.into())
         .send_window(u64::from(STREAM_WINDOW));
-    config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
-    config.max_idle_timeout(Some(
-        std::time::Duration::from_secs(60)
-            .try_into()
-            .map_err(io::Error::other)?,
-    ));
+    config.keep_alive_interval(Some(KEEP_ALIVE));
+    config.max_idle_timeout(Some(QUIC_IDLE.try_into().map_err(io::Error::other)?));
     config.datagram_receive_buffer_size(None);
     Ok(config)
 }
@@ -138,7 +151,7 @@ impl Permissions {
     pub fn allow(&self, cert: Vec<u8>, expires: tokio::time::Instant) -> io::Result<()> {
         let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
         map.retain(|_, until| *until > tokio::time::Instant::now());
-        if map.len() >= 1024 && !map.contains_key(&cert) {
+        if map.len() >= MAX_PERMITTED && !map.contains_key(&cert) {
             return Err(io::Error::other("peer certificate capacity reached"));
         }
         map.entry(cert)
