@@ -74,7 +74,7 @@ pub struct PbDesktopVideoMetaV1 {
 const _: () = {
     use std::mem::offset_of;
     type M = PbDesktopVideoMetaV1;
-    assert!(size_of::<M>() == 56);
+    assert!(size_of::<M>() == 56 && align_of::<M>() == 8);
     assert!(offset_of!(M, generation) == 0);
     assert!(offset_of!(M, frame_id) == 8);
     assert!(offset_of!(M, seq) == 16);

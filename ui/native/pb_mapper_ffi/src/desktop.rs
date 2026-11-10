@@ -38,6 +38,9 @@ pub(crate) use viewer::Connected;
 use viewer::{ConnectRequest, Live, PendingConnect, connect_request, inspection, invitation_error};
 pub use viewer::{PbDesktopViewV1, pb_mapper_desktop_view_v1, pb_mapper_desktop_viewer_call_json};
 
+/// The longest lifecycle request.
+const MAX_REQUEST: usize = 16 * 1024;
+
 #[derive(Default)]
 pub(crate) struct DesktopState {
     // Outbound connection setup must never hold the local host's stop/revoke
@@ -179,7 +182,7 @@ pub unsafe extern "C" fn pb_mapper_desktop_call_json(
     respond(unsafe { handle.as_ref() }, |handle| {
         // SAFETY: null or NUL-terminated, as the caller guarantees.
         let text = unsafe { parse_c_string(request, "request") }?;
-        if text.len() > 16384 {
+        if text.len() > MAX_REQUEST {
             return Err(CtlError::invalid_argument("desktop request too large"));
         }
         let request = serde_json::from_str::<Value>(&text)

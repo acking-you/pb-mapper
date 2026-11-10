@@ -13,7 +13,12 @@ use jni::{
 /// `next` fills `meta[0..10]`: generation, frame id, seq, pts, age, width,
 /// height, len, flags, 0.
 const META_LEN: i32 = 10;
+/// Where `len` sits in `meta`.
 const META_INDEX_LEN: i32 = 7;
+const _: () = assert!(
+    META_INDEX_LEN < META_LEN,
+    "len is one of the values next fills"
+);
 
 /// Runs a JNI body; a JNI error or a panic becomes `INVALID`, with any
 /// exception it left pending cleared.
@@ -74,7 +79,7 @@ pub extern "system" fn Java_com_pb_1mapper_ui_DesktopVideoNative_next(
         let pulled = unsafe { video::pull_into(consumer, timeout_ms, address, capacity) };
         Ok(match pulled {
             Pulled::Unit(meta_of) => {
-                let values = [
+                let values: [jlong; META_LEN as usize] = [
                     meta_of.generation,
                     meta_of.frame_id,
                     meta_of.seq,
