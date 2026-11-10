@@ -51,12 +51,20 @@ clap = { version = "4.5", features = ["derive"] }
 dirs = "6.0.0"
 hashbrown = { version = "0.17.1" }
 hickory-resolver = { version = "0.26.1" }
+if-addrs = { version = "0.15", features = ["link-local"] }
+if-watch = { version = "3.2.2", default-features = false, features = ["tokio"] }
 # The Android video feeder's exports in pb-mapper-ffi. Already locked through
 # netdev, so an offline `--locked` build needs nothing new.
 jni = "0.21.1"
 # The published fork is source-equivalent to the former Git dependency. Keep
 # the local crate name so server code does not need to know the package name.
 kanal = { package = "kanal-plus", version = "0.2.0" }
+napi = { version = "3.12.2", default-features = false, features = ["napi8", "async"] }
+napi-build = "2.4.1"
+napi-derive = "3.6.3"
+# Interface types and gateways, to put LAN candidates first. The same version
+# portmapper's netwatch already brings in.
+netdev = "0.46.3"
 parking_lot = "0.12"
 portmapper = { package = "portmapper-plus", path = "deps/portmapper/portmapper", version = "0.20.0", default-features = false }
 rand = "0.10"

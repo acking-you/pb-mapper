@@ -29,14 +29,12 @@ tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 uni-stream.workspace = true
-serde = { workspace = true, features = ["derive"] }
-if-addrs = { version = "0.15", features = ["link-local"] }
-# Interface types and gateways, to put LAN candidates first. The same version
-# portmapper's netwatch already brings in.
-netdev = { version = "0.46.3", optional = true }
+serde.workspace = true
+if-addrs.workspace = true
+netdev = { workspace = true, optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-if-watch = { version = "3.2.2", default-features = false, features = ["tokio"] }
+if-watch.workspace = true
 
 [dev-dependencies]
 pb-mapper-server = { workspace = true, features = ["p2p"] }
