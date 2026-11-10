@@ -416,7 +416,6 @@ enum SlotState {
 }
 
 /// One row of the slot table. `generation` outlives every other field.
-#[derive(Debug)]
 struct SlotHot {
     generation: Generation,
     state: SlotState,
@@ -465,19 +464,19 @@ impl Default for SlotHot {
     }
 }
 
-#[derive(Debug)]
+// No `Debug` on the three types that hold the administrator key: a stray `{:?}`
+// would print it. Write one by hand, with the key redacted, if it is ever needed.
 struct AdminState {
     key: AesKeyType,
     lease: Weak<AuthLease>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct PreviousRoot {
     admin_key: AesKeyType,
     instance_id: [u8; INSTANCE_ID_LEN],
 }
 
-#[derive(Debug)]
 struct AuthStateInner {
     admin: RwLock<AdminState>,
     sync_process_credential: bool,
@@ -621,7 +620,7 @@ pub struct AuthStatus {
     pub capabilities: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ColdMetadata {
     issued_at: u64,
     label: Option<String>,
@@ -751,7 +750,7 @@ struct PersistedEntry {
     namespace: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct PersistedSnapshot {
     schema_version: u16,
     instance_id: [u8; INSTANCE_ID_LEN],
@@ -791,7 +790,7 @@ impl AdminReplayRecord {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 enum StateMutation {
     Issue(PersistedEntry),
     Renew { key_id: KeyId, expires_at: u64 },
@@ -812,7 +811,7 @@ struct AuditRecord {
     namespace: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 enum WalRecord {
     Mutation {
         mutation: StateMutation,
