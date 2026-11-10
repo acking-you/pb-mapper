@@ -28,6 +28,11 @@ use std::{
 
 type Outcome<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+/// The phone tool's setup in the output directory, which a bootstrap may be
+/// serving while it is written: it is staged beside it and renamed over it.
+const CONTROLLER: &str = "controller.json";
+const CONTROLLER_STAGED: &str = "controller.json.tmp";
+
 #[derive(Deserialize)]
 struct Configuration {
     server_address: String,
@@ -142,7 +147,8 @@ async fn main() -> Outcome {
         .await?;
     let result = host_and_run(&config, &key.credential, &run).await;
     let revoke = admin.revoke_key(key.key_id).await;
-    let _ = std::fs::remove_file(run.output.join("controller.json"));
+    let _ = std::fs::remove_file(run.output.join(CONTROLLER));
+    let _ = std::fs::remove_file(run.output.join(CONTROLLER_STAGED));
     revoke?;
     result
 }
@@ -172,10 +178,9 @@ async fn host_and_run(config: &Configuration, credential: &str, run: &Run) -> Ou
         host.invitation().encode(),
         run.decoder_hints,
     );
-    std::fs::write(
-        run.output.join("controller.json"),
-        serde_json::to_vec(&controller)?,
-    )?;
+    let staged = run.output.join(CONTROLLER_STAGED);
+    std::fs::write(&staged, serde_json::to_vec(&controller)?)?;
+    pb_mapper_core::durable_file::replace_file(&staged, &run.output.join(CONTROLLER))?;
     println!(
         "host_ready display={}x{} duration={} mode={} lan_first={}",
         display.width, display.height, run.seconds, run.mode, config.lan_first
