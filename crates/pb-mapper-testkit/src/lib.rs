@@ -59,6 +59,7 @@ mod traffic;
 mod tunnel;
 
 pub use control::{V2ControlSpec, register_v2_control};
+pub use echo::{Echo, tcp_echo, udp_echo};
 pub use relay::Relay;
 pub use shaped::{Shape, shaped_link};
 pub use traffic::{

@@ -20,14 +20,15 @@ pub struct Shape {
 
 /// A TCP hop in front of `relay`, shaped by `shape` while connections run.
 /// Each direction queues at most 256 reads, so the sender's own flow control
-/// bounds what is in flight. Bytes stay in order.
+/// bounds what is in flight. Bytes stay in order. A connection the relay
+/// refuses is closed, and the hop goes on accepting, as a network would.
 pub async fn shaped_link(relay: SocketAddr, shape: Arc<Shape>) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         while let Ok((near, _)) = listener.accept().await {
             let Ok(far) = tokio::net::TcpStream::connect(relay).await else {
-                return;
+                continue;
             };
             near.set_nodelay(true).unwrap();
             far.set_nodelay(true).unwrap();
