@@ -1,6 +1,6 @@
 use super::{
-    DirectConn, QuicGuard,
     candidates::{Candidates, Host},
+    conn::{DirectConn, QuicGuard},
     control::io_error,
     identity::Identity,
     lan::{Assessment, Interfaces, Local},

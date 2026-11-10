@@ -1,8 +1,9 @@
 use super::{
-    DirectConn, QuicGuard,
+    conn::{DirectConn, QuicGuard, forward_direct},
     control::io_error,
     endpoint::{Arrival, Network},
     lan::Assessment,
+    link::{counts, direct_link, log_path, stun_timings, summary},
     tcp,
 };
 use crate::{
@@ -439,14 +440,14 @@ where
         lan_first_pong_ms: first(true),
         commit_ms: Some(ms(committing.elapsed())),
         setup_ms: ms(started.elapsed()),
-        ..super::stun_timings(SetupTimings::default(), &discovered)
+        ..stun_timings(SetupTimings::default(), &discovered)
     };
     let candidates = CandidateCounts {
         probed: network.reachable(&grant.consumer.candidates),
         answered: learned.len() as u32,
-        ..super::counts(&discovered, &lan, &grant.consumer.candidates)
+        ..counts(&discovered, &lan, &grant.consumer.candidates)
     };
-    let link = super::direct_link(
+    let link = direct_link(
         &incoming.conn,
         &lan,
         &grant.consumer.candidates,
@@ -456,8 +457,8 @@ where
     if link.kind != LinkKind::Lan {
         missed(Some(link.kind));
     }
-    super::log_path(&grant.service, &link);
-    let summary = super::summary(&link);
+    log_path(&grant.service, &link);
+    let summary = summary(&link);
     let _link = diagnostics.link_opened(link, incoming.conn.probe());
     let session = diagnostics.session_opened(SessionPath::Direct, Some(summary));
     let meter = Some(session.meter());
@@ -471,7 +472,7 @@ where
         _link,
     };
     report.tick();
-    let forwarding = super::forward_direct(local, incoming.conn, framing, idle, meter);
+    let forwarding = forward_direct(local, incoming.conn, framing, idle, meter);
     tokio::pin!(forwarding);
     let mut tick = tokio::time::interval(Duration::from_secs(15));
     tick.tick().await;
