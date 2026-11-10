@@ -189,15 +189,15 @@ impl ViewerShared {
 
 /// The newest cursor of the current generation.
 #[derive(Clone, Copy, Default)]
-pub(crate) struct CursorSlot {
-    pub generation: u64,
-    pub x: i32,
-    pub y: i32,
-    pub visible: bool,
+struct CursorSlot {
+    generation: u64,
+    x: i32,
+    y: i32,
+    visible: bool,
     /// Advances with every update, so a reader can tell a new position.
-    pub seq: u64,
+    seq: u64,
     /// The generation and sequence of the last move written to the host.
-    pub moved: Option<(u64, u64)>,
+    moved: Option<(u64, u64)>,
 }
 impl CursorSlot {
     /// A report of `generation` the host sampled before it took the last move
@@ -207,12 +207,7 @@ impl CursorSlot {
     /// echo, so taking the report would leave the cursor where the host's is
     /// not. The first report of a generation is never superseded, nor is one
     /// without a watermark (an older host).
-    pub fn superseded(
-        &self,
-        generation: u64,
-        input_sequence: Option<u64>,
-        controlling: bool,
-    ) -> bool {
+    fn superseded(&self, generation: u64, input_sequence: Option<u64>, controlling: bool) -> bool {
         controlling
             && self.generation == generation
             && input_sequence
