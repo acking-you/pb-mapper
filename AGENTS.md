@@ -174,8 +174,6 @@ run.
   once, before anything starts, in its own `tests/*.rs` binary; code that
   reads the environment is tested in a single-threaded `harness = false`
   binary such as `crates/pb-mapper-core/tests/process_environment.rs`.
-  The regression binary's per-test `EnvOverrides`
-  (`tests/regression/support.rs`) predates this; do not extend it.
 - The testkit's `Relay` sets the process credential to `TEST_ADMIN_KEY` once
   per binary; a case that needs another credential passes it to
   `TunnelSpec::credential`. A test that sets or clears the process credential
