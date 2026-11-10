@@ -207,11 +207,10 @@ pub(super) async fn host_status(handle: &PbMapperHandle) -> Result<Value, CtlErr
                 // Set beside the host, under the lock held here.
                 if let Some(scope) = slot.identity.as_ref().map(|local| &local.scope) {
                     value["server"] = json!(scope.relay);
-                    value["matches_relay"] = json!(
-                        relay
-                            .as_ref()
-                            .map(|current| { current.holds(&scope.relay, Some(scope.namespace)) })
-                    );
+                    let matches_relay = relay
+                        .as_ref()
+                        .map(|current| current.holds(&scope.relay, Some(scope.namespace)));
+                    value["matches_relay"] = json!(matches_relay);
                 }
                 value
             }),
