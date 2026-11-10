@@ -273,13 +273,15 @@ impl ReplayGuard {
         .to_bytes();
         if let Err(error) = file.write_all(&record).and_then(|()| file.sync_data()) {
             drop(file);
-            if truncate_replay_log(path, start_len).is_err() {
+            if let Err(rollback) = truncate_replay_log(path, start_len) {
                 self.log_failed = true;
+                log_unavailable(path, "roll back a partial record", &rollback);
             }
             return Err(error);
         }
         if created && let Err(error) = durable_file::sync_parent_directory(path) {
             self.log_failed = true;
+            log_unavailable(path, "sync its directory", &error);
             return Err(error);
         }
         Ok(())
@@ -295,8 +297,9 @@ impl ReplayGuard {
         let now = unix_seconds();
         let records = match read_complete_replay_records(&path) {
             Ok(records) => records,
-            Err(_) => {
+            Err(error) => {
                 self.log_failed = true;
+                log_unavailable(&path, "read", &error);
                 return;
             }
         };
@@ -315,8 +318,9 @@ impl ReplayGuard {
             .unwrap_or(u32::MAX)
             .min(self.max_total);
         self.total_started_at = self.bloom.current_started_at;
-        if self.rewrite_live(&live).is_err() {
+        if let Err(error) = self.rewrite_live(&live) {
             self.log_failed = true;
+            log_unavailable(&path, "rewrite", &error);
             return;
         }
         self.last_compact_at = now;
@@ -329,8 +333,9 @@ impl ReplayGuard {
         };
         let records = match read_complete_replay_records(path) {
             Ok(records) => records,
-            Err(_) => {
+            Err(error) => {
                 self.log_failed = true;
+                log_unavailable(path, "read", &error);
                 return;
             }
         };
@@ -338,8 +343,9 @@ impl ReplayGuard {
             .into_iter()
             .filter(|record| now.saturating_sub(record.timestamp) <= self.window_seconds)
             .collect::<Vec<_>>();
-        if self.rewrite_live(&live).is_err() {
+        if let Err(error) = self.rewrite_live(&live) {
             self.log_failed = true;
+            log_unavailable(path, "rewrite", &error);
             return;
         }
         self.last_compact_at = now;
@@ -353,6 +359,19 @@ impl ReplayGuard {
         durable_file::replace_contents(path, records.as_flattened(), NewFileMode::Default)
             .map_err(std::io::Error::from)
     }
+}
+
+/// Say why the log stopped admitting. From here on every protocol-v2 first
+/// flight is refused, and a peer learns only that the store is unavailable:
+/// the operator who has to act needs the file and the cause.
+fn log_unavailable(path: &Path, step: &'static str, error: &std::io::Error) {
+    tracing::error!(
+        event = "replay_log_unavailable",
+        path = %path.display(),
+        step,
+        %error,
+        "first-flight replay log failed; protocol-v2 connections are refused while it is unavailable"
+    );
 }
 
 /// Reads every record in the log, and closes it before returning.
