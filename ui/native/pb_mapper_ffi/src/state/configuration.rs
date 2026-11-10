@@ -22,7 +22,6 @@ use pb_mapper_core::durable_file::{self, NewFileMode, ReplaceStep};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::status::LocalStatusCache;
 use super::stored::normalize_msg_header_key;
 use super::{
     AppConfig, ClientConfigData, ClientConfigStore, ConnectSpec, DirectOptions, PbMapperState,
@@ -33,9 +32,6 @@ use crate::error::CtlError;
 impl PbMapperState {
     pub(crate) fn desktop_config_dir(&self) -> PathBuf {
         self.config_dir.clone()
-    }
-    pub(super) fn reset_status_caches(&self) {
-        *self.local_server_status.lock() = LocalStatusCache::default();
     }
     /// A state that has read nothing: the default configuration and no
     /// credential, until `set_app_directory_path` names its directory. Every

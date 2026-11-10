@@ -154,6 +154,14 @@ async fn ui_server_uses_its_writable_config_directory_and_reports_readiness() {
         let status = state.get_local_server_status();
         assert!(status.is_running);
         assert_eq!(status.quic_port, Some(quic_port));
+        // Pointing this computer at another relay leaves this one running,
+        // and the window keeps saying so.
+        let elsewhere = AppConfig {
+            server_address: "relay.example:7666".into(),
+            ..state.get_config_status()
+        };
+        state.update_config(elsewhere).unwrap();
+        assert!(state.get_local_server_status().is_running);
         auth_dir
     };
 

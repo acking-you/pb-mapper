@@ -176,8 +176,10 @@ impl PbMapperState {
     }
 
     /// Save `candidate` as this computer's config, its credential checked
-    /// and in effect for the process. What is cached about the relay is
-    /// dropped only when the relay settings changed.
+    /// and in effect for the process. What is cached about the relay, its
+    /// client and what it said about QUIC, is kept with the settings it was
+    /// learned under, so a change of relay settings leaves it unused; the
+    /// embedded relay's figures do not depend on them.
     pub fn update_config(&mut self, candidate: AppConfig) -> Result<(), CtlError> {
         let candidate = AppConfig {
             msg_header_key: normalize_msg_header_key(candidate.msg_header_key)?,
@@ -191,9 +193,6 @@ impl PbMapperState {
             let _ = self.write_config_file(&previous);
             let _ = self.apply_msg_header_key_env();
             return Err(error);
-        }
-        if !previous.same_relay(&self.config) {
-            self.reset_status_caches();
         }
         Ok(())
     }
