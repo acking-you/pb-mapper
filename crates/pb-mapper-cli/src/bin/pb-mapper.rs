@@ -648,6 +648,9 @@ async fn monitor_tunnel(
 ) -> Result<(), Box<dyn Error>> {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // One listener for the whole loop: one made per pass would be gone while
+    // a pass logs, and a Ctrl-C arriving then would be lost.
+    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
     let mut events_open = true;
     loop {
         let state = status.borrow_and_update().clone();
@@ -657,7 +660,8 @@ async fn monitor_tunnel(
             _ => {}
         }
         tokio::select! {
-            result = tokio::signal::ctrl_c() => { result?; return Ok(()); },
+            biased;
+            result = &mut ctrl_c => { result?; return Ok(()); },
             result = status.changed() => { if result.is_err() { return Ok(()); } },
             event = events.recv(), if events_open => match event {
                 Some(Ok(event)) => match &event.kind {
