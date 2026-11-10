@@ -181,6 +181,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     async fn wait(&mut self, wake_at: Instant) {
         let session = self.session;
         tokio::select! {
+            biased;
             () = session.shared.cancel.cancelled() => {}
             () = session.shared.outgoing.notified() => {}
             () = session.credit_changed.notified() => {}

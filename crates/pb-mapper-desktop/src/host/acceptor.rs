@@ -123,6 +123,7 @@ impl Acceptor {
         let mut connections = JoinSet::new();
         loop {
             tokio::select! {
+                biased;
                 () = self.cancel.cancelled() => break,
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 accepted = listener.accept(), if connections.len() < MAX_CONNECTIONS => {
@@ -137,6 +138,7 @@ impl Acceptor {
 
     async fn serve(self: Arc<Self>, socket: TcpStream) {
         let accepted = tokio::select! {
+            biased;
             () = self.cancel.cancelled() => return,
             accepted = self.accept_session(socket) => accepted,
         };

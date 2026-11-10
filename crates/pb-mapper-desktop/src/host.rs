@@ -501,6 +501,7 @@ async fn restore_retry(shared: Arc<Shared>, recovery: Recovery, cancel: Cancella
             }
         };
         tokio::select! {
+            biased;
             () = cancel.cancelled() => return,
             () = shared.restore.notified() => wait = RESTORE_RETRY,
             () = retry => wait = (wait * 2).min(RESTORE_RETRY_MAX),
