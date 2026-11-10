@@ -184,8 +184,8 @@ use persistence::{
     push_persisted_audit, random_instance_id, read_admin_key, read_namespace_high_water,
     recover_admin_key_after_rotation, recover_instance_id_after_reset, reset_already_installed,
     restore_namespace_high_water, rotation_already_installed, rotation_key_path,
-    split_high_slot_state, staged_instance_id_path, write_admin_key, write_namespace_high_water,
-    write_snapshot_and_truncate_wal,
+    split_high_slot_state, staged_instance_id_path, validate_admin_key, write_admin_key,
+    write_namespace_high_water, write_snapshot_and_truncate_wal,
 };
 use state::{
     AdminState, AuthStateInner, ColdMetadata, LiveLeases, PreviousRoot, RestoredState, SlotHot,

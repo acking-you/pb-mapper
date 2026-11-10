@@ -27,7 +27,7 @@ pub use admin_key::{
 };
 pub(crate) use admin_key::{
     persist_recovery_admin_key, read_admin_key, recover_admin_key_after_rotation,
-    rotation_already_installed, write_admin_key,
+    rotation_already_installed, validate_admin_key, write_admin_key,
 };
 pub(crate) use blob::{open_blob, seal_blob};
 pub(crate) use format::{

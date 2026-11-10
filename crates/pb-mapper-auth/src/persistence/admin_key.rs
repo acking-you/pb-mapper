@@ -138,7 +138,7 @@ pub fn initialize_admin_key(path: &Path, force: bool) -> Result<String, AuthFail
 }
 
 /// Reject anything that is not a 32-byte administrator key before it reaches disk.
-fn validate_admin_key(key: &str) -> Result<(), AuthFailure> {
+pub(crate) fn validate_admin_key(key: &str) -> Result<(), AuthFailure> {
     let Credential::Admin(_) = parse_credential(key)
         .map_err(|error| AuthFailure::new(codes::ADMINISTRATOR_KEY_INVALID, error, false))?
     else {

@@ -87,6 +87,11 @@ pub(super) fn actor_rotate_root(
             false,
         )
     })?;
+    // The key file is read back through `parse_credential`, which refuses some
+    // printable keys too (one that starts like a temporary credential). Such a
+    // key fails the first write below, and a failed write fails the store
+    // closed, so it is refused here, before anything has changed.
+    validate_admin_key(&new_key_string)?;
 
     inner.root_epoch.fetch_add(1, Ordering::AcqRel);
     let rotate_audit = audit(audit_action::ADMINISTRATOR_KEY_ROTATE, None, None);

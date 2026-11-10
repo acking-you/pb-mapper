@@ -633,15 +633,31 @@ async fn reset_clears_retained_high_slot_entries() {
     stop(runtime).await;
 }
 
+/// A key no relay could start with is refused before anything changes: the
+/// store stays out of safe mode and live temporary keys keep working.
 #[tokio::test]
-async fn rotate_root_rejects_a_nul_containing_key() {
-    let state_dir = TempPath::new("rotate-nul");
+async fn rotate_root_refuses_an_unusable_key_and_leaves_the_relay_serving() {
+    let state_dir = TempPath::new("rotate-unusable");
     let config = config(&state_dir, 4);
     let (runtime, admin) = start(&config).await;
-    let mut bad = TEST_ADMIN_KEY_BYTES;
-    bad[4] = 0;
-    let error = runtime.rotate_root(&admin, bad).await.unwrap_err();
-    assert_eq!(error.code, "administrator_key_invalid");
+    let live = runtime.issue(&admin, HOUR, None).await.unwrap();
+    let session = authenticate_for_test(&runtime, live.metadata.key_id)
+        .unwrap()
+        .cancellation_token()
+        .unwrap();
+
+    let mut with_nul = TEST_ADMIN_KEY_BYTES;
+    with_nul[4] = 0;
+    // Printable, but read back as a malformed temporary credential.
+    let temporary_prefix = *b"pbmt1_abcdefghijklmnopqrstuvwxyz";
+    for bad in [with_nul, temporary_prefix] {
+        let error = runtime.rotate_root(&admin, bad).await.unwrap_err();
+        assert_eq!(error.code, "administrator_key_invalid");
+    }
+
+    assert!(!runtime.status(&admin).await.unwrap().safe_mode);
+    assert!(!session.is_cancelled());
+    authenticate_for_test(&runtime, live.metadata.key_id).unwrap();
     stop(runtime).await;
 }
 
