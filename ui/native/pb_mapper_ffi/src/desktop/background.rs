@@ -16,6 +16,7 @@ use pb_mapper::desktop::HostStatus;
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The service's background host as the app reads it: the service's
@@ -109,6 +110,25 @@ impl BackgroundCache {
     }
 }
 
+/// How often a status poll asks the service again.
+const BACKGROUND_REFRESH: Duration = Duration::from_secs(2);
+
+/// A status poll's refresh while it runs. Ended without an answer, by a
+/// panic or a dropped task, it clears `refreshing`, so later polls refresh
+/// again rather than show this snapshot for good.
+struct Refresh {
+    cache: Arc<parking_lot::Mutex<BackgroundCache>>,
+    /// The answer was taken, and `refreshing` cleared with it.
+    done: bool,
+}
+impl Drop for Refresh {
+    fn drop(&mut self) {
+        if !self.done {
+            self.cache.lock().refreshing = false;
+        }
+    }
+}
+
 impl DesktopState {
     pub(super) fn cache_background(&self, snapshot: Background) -> Background {
         self.background.lock().store(snapshot)
@@ -124,15 +144,20 @@ impl DesktopState {
             && !cache.refreshing
             && cache
                 .checked
-                .is_none_or(|time| time.elapsed() >= Duration::from_secs(2))
+                .is_none_or(|time| time.elapsed() >= BACKGROUND_REFRESH)
         {
             cache.refreshing = true;
             let revision = cache.revision;
             let shared = self.background.clone();
             runtime.spawn(async move {
+                let mut refresh = Refresh {
+                    cache: shared,
+                    done: false,
+                };
                 let result = query_background().await;
-                let mut cache = shared.lock();
+                let mut cache = refresh.cache.lock();
                 cache.refreshing = false;
+                refresh.done = true;
                 if cache.revision == revision {
                     let snapshot = match result {
                         Ok(snapshot) => snapshot,
