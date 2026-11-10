@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::ctl::endpoint;
-use crate::ctl::proto::{self, PROTOCOL_VERSION, Request, Response};
+use crate::ctl::proto::{self, FrameError, PROTOCOL_VERSION, Request, Response};
 use crate::ctl::{Origin, dispatch};
 use crate::error::CtlError;
 use crate::state::PbMapperState;
@@ -125,7 +125,7 @@ pub fn start(
 }
 
 /// Send one command to a running UI and read its answer.
-pub async fn request(command: crate::ctl::Command) -> std::io::Result<Response> {
+pub async fn request(command: crate::ctl::Command) -> Result<Response, FrameError> {
     let name = endpoint::endpoint();
     let mut stream = endpoint::connect(&name).await?;
     let request = Request {

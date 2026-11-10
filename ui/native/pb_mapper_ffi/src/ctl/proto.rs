@@ -5,6 +5,8 @@
 //! input it has not validated yet, and because it matches how pb-mapper frames
 //! its own messages.
 
+use std::{fmt, io};
+
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -83,24 +85,75 @@ impl Response {
     }
 }
 
-pub async fn write_frame<W>(writer: &mut W, value: &impl Serialize) -> std::io::Result<()>
+/// Why a control message could not be sent or read. Each says what its
+/// cause says, as the `io::Error`s it replaces did.
+#[derive(Debug)]
+pub enum FrameError {
+    /// The channel failed, or there is no one at the other end.
+    Io(io::Error),
+    /// A message over [`MAX_FRAME`].
+    TooLarge,
+    /// A message that is not the JSON it should be.
+    Json(serde_json::Error),
+}
+
+impl FrameError {
+    /// Whether nothing is listening at the endpoint, as opposed to a channel
+    /// that failed, so the CLI says `no UI to attach to` only when that is
+    /// what happened.
+    pub fn is_not_listening(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(error) if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            )
+        )
+    }
+}
+
+impl fmt::Display for FrameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(f),
+            Self::TooLarge => f.write_str("control message too large"),
+            Self::Json(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for FrameError {
+    /// What the cause's own source is: the cause's text is already this
+    /// error's, so it is not repeated as a source.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => error.source(),
+            Self::TooLarge => None,
+            Self::Json(error) => error.source(),
+        }
+    }
+}
+
+impl From<io::Error> for FrameError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+pub async fn write_frame<W>(writer: &mut W, value: &impl Serialize) -> Result<(), FrameError>
 where
     W: AsyncWrite + Unpin,
 {
-    let body = serde_json::to_vec(value)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let body = serde_json::to_vec(value).map_err(FrameError::Json)?;
     if body.len() as u64 > MAX_FRAME as u64 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "control message too large",
-        ));
+        return Err(FrameError::TooLarge);
     }
     writer.write_all(&(body.len() as u32).to_be_bytes()).await?;
     writer.write_all(&body).await?;
-    writer.flush().await
+    Ok(writer.flush().await?)
 }
 
-pub async fn read_frame<R, T>(reader: &mut R) -> std::io::Result<T>
+pub async fn read_frame<R, T>(reader: &mut R) -> Result<T, FrameError>
 where
     R: AsyncRead + Unpin,
     T: serde::de::DeserializeOwned,
@@ -109,21 +162,25 @@ where
     reader.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len);
     if len > MAX_FRAME {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "control message too large",
-        ));
+        return Err(FrameError::TooLarge);
     }
     let mut body = vec![0u8; len as usize];
     reader.read_exact(&mut body).await?;
-    serde_json::from_slice(&body)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    serde_json::from_slice(&body).map_err(FrameError::Json)
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// A length over the limit is refused before anything is allocated
+    /// for it or read.
+    #[tokio::test]
+    async fn an_oversized_frame_is_refused_from_its_length() {
+        let mut cursor = std::io::Cursor::new((MAX_FRAME + 1).to_be_bytes().to_vec());
+        let refused = read_frame::<_, Request>(&mut cursor).await.unwrap_err();
+        assert!(matches!(refused, FrameError::TooLarge), "{refused:?}");
+    }
 
     #[tokio::test]
     async fn a_frame_survives_the_round_trip() {

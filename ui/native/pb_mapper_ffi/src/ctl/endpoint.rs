@@ -8,8 +8,6 @@
 //! Access control is the OS boundary and nothing else: no token file, no TCP
 //! port, no shared secret that could end up in a log.
 
-use std::io;
-
 /// Overrides the computed endpoint. For tests, and for running two profiles
 /// side by side.
 pub const ENDPOINT_ENV: &str = "PB_MAPPER_UI_SOCK";
@@ -275,13 +273,4 @@ pub use imp::{bind_first, connect, endpoint};
 #[allow(dead_code)] // used by the headless fallback in phase 3
 pub async fn probe() -> bool {
     connect(&endpoint()).await.is_ok()
-}
-
-/// Distinguishes "nothing is listening" from a real transport failure, so the
-/// CLI can say `no UI to attach to` only when that is actually what happened.
-pub fn is_not_listening(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-    )
 }
