@@ -1,9 +1,11 @@
 use crate::endpoint::RelayEndpoint;
 use pb_mapper_core::{checksum::Credential, config::control_io_timeout};
+// Also brings `CONTROL_IDLE`, `CONTROL_PING` and `CONTROL_WRITE_TIMEOUT`, the
+// timings both ends of a control connection share.
+use pb_mapper_protocol::direct::*;
 use pb_mapper_protocol::{
     MessageReader, MessageWriter,
     command::{MessageSerializer, PbConnRequest, PbConnResponse},
-    direct::*,
     secure::{ClientHeaderSession, HeaderMessageReader, HeaderMessageWriter},
     transport::{RelayReadHalf, RelayStream, RelayWriteHalf},
 };
@@ -14,7 +16,6 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -22,16 +23,6 @@ use tokio::sync::{mpsc, oneshot};
 const CONTROL_QUEUE: usize = 64;
 /// Grants one control connection waits for at once.
 const MAX_PENDING_OPENS: usize = 64;
-/// How long the relay may stay silent before the connection is dropped.
-const CONTROL_IDLE: Duration = Duration::from_secs(45);
-/// How often the relay is pinged; it answers each ping.
-const CONTROL_PING: Duration = Duration::from_secs(15);
-/// How long writing one message may take.
-const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-const _: () = assert!(
-    CONTROL_IDLE.as_secs() > CONTROL_PING.as_secs(),
-    "a live relay answers a ping before the read times out"
-);
 
 type GrantReply = oneshot::Sender<io::Result<Option<SessionGrant>>>;
 struct Pending {

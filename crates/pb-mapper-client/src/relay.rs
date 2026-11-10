@@ -2,7 +2,10 @@
 use pb_mapper_core::{checksum::Credential, config::ResolvedAddrs};
 pub use pb_mapper_protocol::transport::RelayTransport;
 use pb_mapper_protocol::{
-    command::{MessageSerializer, PbConnRequest, PbConnResponse, PbErrorResponse, QuicEndpoint},
+    command::{
+        MessageSerializer, PbConnRequest, PbConnResponse, PbErrorResponse, QuicEndpoint,
+        REQUEST_DECODE_FAILED,
+    },
     secure::ClientHeaderSession,
     transport::CONNECT_TIMEOUT,
 };
@@ -45,10 +48,6 @@ impl From<ConnectError> for std::io::Error {
 /// Final, since retrying the same relay cannot change it, and so a tunnel
 /// asked to use QUIC there fails rather than retrying forever.
 pub const QUIC_UNAVAILABLE: &str = "quic_unavailable";
-
-/// What an older relay answers a request it cannot decode, which is how it
-/// answers [`PbConnRequest::QuicEndpoint`].
-const REQUEST_DECODE_FAILED: &str = "request_decode_failed";
 
 /// The largest QUIC certificate discovery accepts from a relay: a bound on
 /// what it takes from the wire.
@@ -110,6 +109,7 @@ pub(crate) async fn discover(
         )
         .into()),
         PbConnResponse::QuicEndpoint(None) => Err(quic_unavailable()),
+        // How a relay from before QUIC answers the question.
         PbConnResponse::Error(error) if error.code == REQUEST_DECODE_FAILED => {
             Err(quic_unavailable())
         }

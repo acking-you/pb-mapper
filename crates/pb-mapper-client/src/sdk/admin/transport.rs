@@ -10,15 +10,10 @@ use pb_mapper_protocol::MessageReader;
 use pb_mapper_protocol::command::{
     AdminRequest, AdminResponse, MessageSerializer, PbConnRequest, PbConnResponse,
 };
-use pb_mapper_protocol::secure::ClientHeaderSession;
+use pb_mapper_protocol::secure::{CONNECTION_SALT_REPLAYED, ClientHeaderSession};
 
 use super::super::Error;
 use super::super::error::Result;
-
-/// The relay refuses a first flight whose salt it has already seen, and answers
-/// with this code. It is retryable by construction: a fresh session gets a fresh
-/// salt, so one retry is enough.
-const REPLAYED_SALT_CODE: &str = "connection_salt_replayed";
 
 /// How many times a request may be sent. Two: one attempt, plus one retry for
 /// the two failures a retry can actually fix — a replayed salt, and a failure
@@ -77,8 +72,11 @@ pub(super) async fn send_admin_request(
 
         match response {
             PbConnResponse::Admin(response) => return Ok(response),
+            // The relay refused a first flight whose salt it had already
+            // seen, before looking at the request. The next attempt's fresh
+            // session draws a fresh salt, so one retry is enough.
             PbConnResponse::Error(error)
-                if error.code == REPLAYED_SALT_CODE && error.retryable && !last_attempt =>
+                if error.code == CONNECTION_SALT_REPLAYED && error.retryable && !last_attempt =>
             {
                 continue;
             }
