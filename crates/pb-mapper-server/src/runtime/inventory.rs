@@ -3,6 +3,7 @@
 
 use std::time::Instant;
 
+use pb_mapper_auth::ADMIN_SCHEMA_VERSION;
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_core::paging::paginate;
 use pb_mapper_core::snafu_error_handle;
@@ -121,7 +122,7 @@ impl Router {
         });
         let (items, next_page) = paginate(&all, page, page_size);
         let _ = response_sender.send(AdminServicePage {
-            schema_version: 1,
+            schema_version: ADMIN_SCHEMA_VERSION,
             items,
             next_page,
         });
@@ -169,7 +170,7 @@ impl Router {
         });
         let (items, next_page) = paginate(&all, page, page_size);
         let _ = response_sender.send(AdminConnectionPage {
-            schema_version: 1,
+            schema_version: ADMIN_SCHEMA_VERSION,
             items,
             next_page,
         });

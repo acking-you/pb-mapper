@@ -99,6 +99,10 @@ pub const ADMIN_NAMESPACE: u64 = ADMIN_KEY_ID.as_u64();
 /// Reported in [`AuthStatus::capabilities`] by a relay that can allocate
 /// namespaces, issue keys into them, and persist each key's namespace.
 pub const CAPABILITY_KEY_NAMESPACES: &str = "key_namespaces";
+/// The `schema_version` every administrator answer carries: the [`KeyPage`]
+/// and [`AuthStatus`] this crate builds, and the relay's service and
+/// connection pages.
+pub const ADMIN_SCHEMA_VERSION: u16 = 1;
 pub const DEFAULT_AUTH_STATE_DIR: &str = "/var/lib/pb-mapper/auth";
 pub const DEFAULT_TEMP_KEY_CAPACITY: usize = 65_536;
 pub const MAX_TEMP_KEY_CAPACITY: usize = 1_048_576;
@@ -112,8 +116,6 @@ const MAX_SCHEDULABLE_DELAY: Duration =
     Duration::from_secs(MAX_TEMP_KEY_TTL.as_secs() + TOMBSTONE_RETENTION.as_secs());
 const SNAPSHOT_COMPACTION_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const SNAPSHOT_SCHEMA_VERSION: u16 = 1;
-/// The `schema_version` of the [`KeyPage`] and [`AuthStatus`] this crate builds.
-const ADMIN_SCHEMA_VERSION: u16 = 1;
 const STATE_BLOB_MAGIC: &[u8; 5] = b"PBAS1";
 const STATE_AAD: &[u8] = b"pb-mapper-auth-state-v1";
 const INSTANCE_ID_LEN: usize = 16;

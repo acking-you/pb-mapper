@@ -406,7 +406,7 @@ mod tests {
 
     use super::*;
     use pb_mapper_auth::ADMIN_KEY_ID;
-    use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
+    use pb_mapper_auth::{ADMIN_SCHEMA_VERSION, AuthConfig, LegacyProtocolPolicy};
     use pb_mapper_core::test_support::{TEST_ADMIN_KEY_BYTES, TempPath};
 
     /// A runtime started on a fresh state directory with [`TEST_ADMIN_KEY_BYTES`], and its
@@ -483,7 +483,7 @@ mod tests {
                 response_sender, ..
             } => {
                 let _ = response_sender.send(pb_mapper_protocol::command::AdminServicePage {
-                    schema_version: 1,
+                    schema_version: ADMIN_SCHEMA_VERSION,
                     items: Vec::new(),
                     next_page: None,
                 });
@@ -492,7 +492,7 @@ mod tests {
                 response_sender, ..
             } => {
                 let _ = response_sender.send(pb_mapper_protocol::command::AdminConnectionPage {
-                    schema_version: 1,
+                    schema_version: ADMIN_SCHEMA_VERSION,
                     items: Vec::new(),
                     next_page: None,
                 });
