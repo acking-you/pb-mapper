@@ -58,6 +58,30 @@ pub(super) struct PendingConnect {
     paused: bool,
 }
 
+/// A registered connect until it settles. Dropped before that, its future
+/// abandoned, it unregisters the attempt, unless a newer one took its place,
+/// so a later connect is not refused as already pending.
+struct Registration<'a> {
+    state: &'a DesktopState,
+    epoch: u64,
+    /// The attempt settled, and took its registration with it.
+    settled: bool,
+}
+impl Drop for Registration<'_> {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let mut pending = self.state.connecting.lock();
+        if pending
+            .as_ref()
+            .is_some_and(|attempt| attempt.epoch == self.epoch)
+        {
+            *pending = None;
+        }
+    }
+}
+
 impl DesktopState {
     /// The live viewer's computer and the relay scope it was reached through.
     pub(crate) fn connected(&self) -> Option<Connected> {
@@ -98,6 +122,11 @@ impl DesktopState {
             });
             epoch
         };
+        let mut registration = Registration {
+            state: self,
+            epoch,
+            settled: false,
+        };
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => Err(connect_error(ConnectError::Cancelled)),
@@ -120,6 +149,7 @@ impl DesktopState {
             } else {
                 false
             };
+            registration.settled = true;
             let (viewer, connected) = result?;
             let mut slot = self.viewer.write();
             if cancel.is_cancelled()

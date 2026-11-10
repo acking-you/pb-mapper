@@ -978,6 +978,24 @@ async fn disconnect_cancels_setup_while_the_last_viewer_stops() {
     assert!(state.connecting.lock().is_none());
 }
 
+/// An attempt whose caller gave up on it does not hold the next one off.
+#[test]
+fn an_abandoned_connect_does_not_stay_pending() {
+    let state = DesktopState::default();
+    let mut attempt = Box::pin(
+        state.connect_viewer(|_| std::future::pending::<Result<(Viewer, Connected), CtlError>>()),
+    );
+    assert!(
+        attempt
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert!(state.connecting.lock().is_some());
+    drop(attempt);
+    assert!(state.connecting.lock().is_none());
+}
+
 #[tokio::test]
 async fn disconnect_cancels_pending_setup_without_waiting_for_network() {
     let state = Arc::new(DesktopState::default());
