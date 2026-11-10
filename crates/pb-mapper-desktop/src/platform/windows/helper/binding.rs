@@ -2,7 +2,7 @@
 //! console login: which desktop that is, whether it changed, and the capture
 //! thread's switch to it.
 use super::os;
-use crate::{Result, error};
+use crate::{Result, error, platform::windows::win32::desktop_name};
 use std::sync::atomic::{AtomicU64, Ordering};
 use windows::Win32::{Foundation::*, System::StationsAndDesktops::*, UI::WindowsAndMessaging::*};
 #[cfg(feature = "windows-helper")]
@@ -251,21 +251,7 @@ impl DesktopBinding {
             .map_err(error)?;
         let mut bound = false;
         let result = (|| {
-            let mut text = [0u16; 256];
-            unsafe {
-                GetUserObjectInformationW(
-                    HANDLE(desktop.0),
-                    UOI_NAME,
-                    Some(text.as_mut_ptr().cast()),
-                    size_of_val(&text) as u32,
-                    None,
-                )
-            }
-            .map_err(error)?;
-            let name = String::from_utf16_lossy(
-                &text[..text.iter().position(|c| *c == 0).unwrap_or(text.len())],
-            )
-            .to_ascii_lowercase();
+            let name = desktop_name(desktop)?.to_ascii_lowercase();
             if name != "default" && name != "winlogon" {
                 return Err(error("unsupported input desktop"));
             }

@@ -15,6 +15,7 @@ pub(crate) mod still;
 pub(crate) mod timer;
 pub mod video;
 pub(crate) mod waiter;
+pub(crate) mod win32;
 
 use super::{HostSupport, Parts, Platform, UnsupportedReason, VideoSource};
 use crate::{

@@ -1,18 +1,10 @@
 //! Let the approved UI verify this service's image without elevating the UI.
 use super::{Result, error, os};
+use crate::platform::windows::win32::LocalAllocation;
 use windows::{
-    Win32::{Foundation::*, Security::Authorization::*, Security::*, System::Threading::*},
+    Win32::{Security::Authorization::*, Security::*, System::Threading::*},
     core::{PCWSTR, PWSTR},
 };
-
-struct LocalAllocation(*mut std::ffi::c_void);
-impl Drop for LocalAllocation {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = LocalFree(Some(HLOCAL(self.0)));
-        }
-    }
-}
 
 /// Called by the service itself before publishing Running/listening. Preserve
 /// its existing DACL and add only image-query access for the configured owner.
@@ -36,13 +28,13 @@ pub(super) fn allow_identity_query(owner: &str) -> Result<()> {
     }
     .ok()
     .map_err(error)?;
-    let _descriptor = LocalAllocation(descriptor.0);
+    let _descriptor = unsafe { LocalAllocation::own(descriptor.0) };
     if old_acl.is_null() {
         return Err(error("helper process has no restrictive DACL"));
     }
     let mut sid = PSID::default();
     unsafe { ConvertStringSidToSidW(PCWSTR(os::wide(owner).as_ptr()), &mut sid) }.map_err(error)?;
-    let _sid = LocalAllocation(sid.0);
+    let _sid = unsafe { LocalAllocation::own(sid.0) };
     let entry = EXPLICIT_ACCESS_W {
         grfAccessPermissions: PROCESS_QUERY_LIMITED_INFORMATION.0,
         grfAccessMode: GRANT_ACCESS,
@@ -58,7 +50,7 @@ pub(super) fn allow_identity_query(owner: &str) -> Result<()> {
     unsafe { SetEntriesInAclW(Some(&[entry]), Some(old_acl), &mut new_acl) }
         .ok()
         .map_err(error)?;
-    let _acl = LocalAllocation(new_acl.cast());
+    let _acl = unsafe { LocalAllocation::own(new_acl.cast()) };
     unsafe {
         SetSecurityInfo(
             process,
@@ -82,6 +74,7 @@ mod tests {
         os::windows::process::CommandExt,
         process::{Command, Stdio},
     };
+    use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, HANDLE};
 
     #[test]
     fn identity_query_does_not_grant_process_control() {

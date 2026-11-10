@@ -1,13 +1,11 @@
 //! Windows DPAPI for every store that keeps a desktop secret at rest: the
 //! app's remembered grant and computers, and the helper's background grant.
+use super::win32::{LocalAllocation, wide};
 use crate::{Result, error};
 use windows::{
-    Win32::{
-        Foundation::{HLOCAL, LocalFree},
-        Security::Cryptography::{
-            CRYPT_INTEGER_BLOB, CRYPTPROTECT_LOCAL_MACHINE, CRYPTPROTECT_UI_FORBIDDEN,
-            CryptProtectData, CryptUnprotectData,
-        },
+    Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_LOCAL_MACHINE, CRYPTPROTECT_UI_FORBIDDEN,
+        CryptProtectData, CryptUnprotectData,
     },
     core::PCWSTR,
 };
@@ -44,7 +42,7 @@ pub fn protect(
         cbData: u32::try_from(entropy.len()).map_err(|_| too_large())?,
         pbData: entropy.as_ptr().cast_mut(),
     };
-    let description: Vec<u16> = description.encode_utf16().chain(Some(0)).collect();
+    let description = wide(description);
     let flags = match scope {
         Scope::CurrentUser => CRYPTPROTECT_UI_FORBIDDEN,
         Scope::Machine => CRYPTPROTECT_UI_FORBIDDEN | CRYPTPROTECT_LOCAL_MACHINE,
@@ -74,13 +72,10 @@ pub fn protect(
         }
     }
     .map_err(|_| error("Windows could not protect or unlock this data"))?;
-    let result = if output.pbData.is_null() || output.cbData as u64 > limit {
-        Err(error("Windows returned invalid protected data"))
-    } else {
-        Ok(unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec())
-    };
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
+    // Windows allocated the output for this caller to free.
+    let _output = unsafe { LocalAllocation::own(output.pbData.cast()) };
+    if output.pbData.is_null() || output.cbData as u64 > limit {
+        return Err(error("Windows returned invalid protected data"));
     }
-    result
+    Ok(unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec())
 }

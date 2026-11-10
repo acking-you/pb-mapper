@@ -1,4 +1,5 @@
 use super::*;
+use crate::platform::windows::win32::LocalAllocation;
 use std::{
     ffi::OsString,
     fs::File,
@@ -460,18 +461,18 @@ fn validate_service(service: &Service, config: &Configuration) -> Result<Service
     if arguments.is_null() {
         return Err(error("invalid helper service command line"));
     }
-    let command_matches = count == 2
-        && unsafe {
-            (*arguments)
-                .to_string()
-                .is_ok_and(|path| os::same_path(Path::new(&path), &config.helper_executable))
-                && (*arguments.add(1))
+    let command_matches = {
+        let _arguments = unsafe { LocalAllocation::own(arguments.cast()) };
+        count == 2
+            && unsafe {
+                (*arguments)
                     .to_string()
-                    .is_ok_and(|arg| arg == "service")
-        };
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(arguments.cast())));
-    }
+                    .is_ok_and(|path| os::same_path(Path::new(&path), &config.helper_executable))
+                    && (*arguments.add(1))
+                        .to_string()
+                        .is_ok_and(|arg| arg == "service")
+            }
+    };
     if !command_matches
         || actual.service_type != ServiceType::OWN_PROCESS
         || actual

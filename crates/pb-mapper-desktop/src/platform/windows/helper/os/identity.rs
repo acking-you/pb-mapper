@@ -2,7 +2,7 @@
 //! scoped privileges the service enables, and the checks that admit an
 //! approved caller or trust a helper server.
 use super::{Handle, acl::same_path, scm::running_service_pid};
-use crate::{Result, error};
+use crate::{Result, error, platform::windows::win32::LocalAllocation};
 use std::path::{Path, PathBuf};
 use windows::{
     Win32::{
@@ -48,11 +48,8 @@ pub fn sid(token: HANDLE) -> Result<String> {
     let info = unsafe { &*data.as_ptr().cast::<TOKEN_USER>() };
     let mut text = PWSTR::null();
     unsafe { ConvertSidToStringSidW(info.User.Sid, &mut text) }.map_err(error)?;
-    let result = unsafe { text.to_string() }.map_err(error);
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(text.0.cast())));
-    }
-    result
+    let _text = unsafe { LocalAllocation::own(text.0.cast()) };
+    unsafe { text.to_string() }.map_err(error)
 }
 pub fn current_sid() -> Result<String> {
     sid(token_for_process(unsafe { GetCurrentProcess() })?.raw())

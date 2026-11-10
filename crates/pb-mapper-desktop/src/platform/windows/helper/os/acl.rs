@@ -1,11 +1,11 @@
 //! The protected installation: its root, the owner and DACL every file in
 //! it must have, and the descriptors new files and pipes are created with.
 use super::wide;
-use crate::{Result, error};
+use crate::{Result, error, platform::windows::win32::LocalAllocation};
 use std::path::{Path, PathBuf};
 use windows::{
     Win32::{
-        Foundation::*, Security::Authorization::*, Security::*, Storage::FileSystem::*,
+        Security::Authorization::*, Security::*, Storage::FileSystem::*,
         System::Com::CoTaskMemFree, UI::Shell::*,
     },
     core::PCWSTR,
@@ -13,8 +13,9 @@ use windows::{
 
 #[cfg(feature = "windows-helper")]
 pub struct Descriptor {
-    descriptor: PSECURITY_DESCRIPTOR,
     attributes: SECURITY_ATTRIBUTES,
+    /// The descriptor `attributes` points to.
+    _descriptor: LocalAllocation,
 }
 #[cfg(feature = "windows-helper")]
 impl Descriptor {
@@ -30,24 +31,16 @@ impl Descriptor {
         }
         .map_err(error)?;
         Ok(Self {
-            descriptor,
             attributes: SECURITY_ATTRIBUTES {
                 nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
                 lpSecurityDescriptor: descriptor.0,
                 bInheritHandle: false.into(),
             },
+            _descriptor: unsafe { LocalAllocation::own(descriptor.0) },
         })
     }
     pub fn attributes(&self) -> *mut SECURITY_ATTRIBUTES {
         (&self.attributes as *const SECURITY_ATTRIBUTES).cast_mut()
-    }
-}
-#[cfg(feature = "windows-helper")]
-impl Drop for Descriptor {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = LocalFree(Some(HLOCAL(self.descriptor.0)));
-        }
     }
 }
 
@@ -140,11 +133,9 @@ pub fn check_acl(path: &Path, forbidden: u32) -> Result<()> {
     }
     .ok()
     .map_err(error)?;
-    let result = check_descriptor(owner, acl, forbidden);
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
-    }
-    result
+    // `owner` and `acl` point into the descriptor, freed after the check.
+    let _descriptor = unsafe { LocalAllocation::own(descriptor.0) };
+    check_descriptor(owner, acl, forbidden)
 }
 fn check_descriptor(owner: PSID, acl: *const ACL, forbidden: u32) -> Result<()> {
     // Descriptors obtained from Windows are validated before reaching this
@@ -179,20 +170,15 @@ mod tests {
     use super::*;
     fn validate(sddl: &str, forbidden: u32) -> Result<()> {
         let descriptor = Descriptor::new(sddl)?;
+        let raw = PSECURITY_DESCRIPTOR(descriptor.attributes.lpSecurityDescriptor);
         let mut owner = PSID::default();
         let mut acl = std::ptr::null_mut();
         let mut defaulted = windows::core::BOOL(0);
         let mut present = windows::core::BOOL(0);
         unsafe {
-            GetSecurityDescriptorOwner(descriptor.descriptor, &mut owner, &mut defaulted)
+            GetSecurityDescriptorOwner(raw, &mut owner, &mut defaulted).map_err(error)?;
+            GetSecurityDescriptorDacl(raw, &mut present, &mut acl, &mut defaulted)
                 .map_err(error)?;
-            GetSecurityDescriptorDacl(
-                descriptor.descriptor,
-                &mut present,
-                &mut acl,
-                &mut defaulted,
-            )
-            .map_err(error)?;
         }
         check_descriptor(owner, acl, forbidden)
     }

@@ -1,15 +1,15 @@
 //! The approved console login: whether one is active, who it is, and
 //! whether it is still the same login.
 use super::SessionIdentity;
-use crate::{Result, error};
-use std::ffi::c_void;
-use windows::{Win32::System::RemoteDesktop::*, core::PWSTR};
+use crate::{Result, error, platform::windows::win32::session_info};
+use windows::Win32::System::RemoteDesktop::*;
 #[cfg(feature = "windows-helper")]
 use {
     super::{
         Handle,
         identity::{ScopedPrivileges, sid},
     },
+    crate::platform::windows::win32::from_wide_nul,
     windows::Win32::{Foundation::HANDLE, Security::SE_TCB_NAME},
 };
 
@@ -65,24 +65,7 @@ fn console_info(session: u32) -> Result<WTSINFOEX_LEVEL1_W> {
     if session == 0 || session == u32::MAX || session != active_session() {
         return Err(error("Only the active console session is supported"));
     }
-    let mut buffer = PWSTR::null();
-    let mut len = 0;
-    unsafe { WTSQuerySessionInformationW(None, session, WTSSessionInfoEx, &mut buffer, &mut len) }
-        .map_err(error)?;
-    let info = if len as usize >= size_of::<WTSINFOEXW>() {
-        let info = unsafe { &*buffer.0.cast::<WTSINFOEXW>() };
-        if info.Level == 1 {
-            Some(unsafe { info.Data.WTSInfoExLevel1 })
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    unsafe {
-        WTSFreeMemory(buffer.0.cast::<c_void>());
-    }
-    info.ok_or_else(|| error("Console session information is unavailable"))
+    session_info(session)?.ok_or_else(|| error("Console session information is unavailable"))
 }
 
 fn console_state(session: u32, info: &WTSINFOEX_LEVEL1_W) -> Option<ConsoleState> {
@@ -108,17 +91,12 @@ fn session_state(
     info: &WTSINFOEX_LEVEL1_W,
 ) -> Option<(SessionIdentity, ConsoleState)> {
     let state = console_state(session, info)?;
-    let text = |value: &[u16]| {
-        String::from_utf16_lossy(
-            &value[..value.iter().position(|c| *c == 0).unwrap_or(value.len())],
-        )
-    };
     Some((
         SessionIdentity {
             session,
             logon_time: info.LogonTime,
-            user: text(&info.UserName),
-            domain: text(&info.DomainName),
+            user: from_wide_nul(&info.UserName),
+            domain: from_wide_nul(&info.DomainName),
         },
         state,
     ))

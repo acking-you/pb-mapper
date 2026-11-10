@@ -11,6 +11,7 @@ mod log;
 mod scm;
 
 pub(crate) use crate::oop::proto::SessionIdentity;
+pub(crate) use crate::platform::windows::win32::wide;
 #[cfg(feature = "windows-helper")]
 pub use acl::{Descriptor, check_acl, protected_path};
 pub use acl::{install_root, protected_file, same_path};
@@ -26,15 +27,9 @@ pub use identity::{current_sid, verify_running_service, verify_server};
 #[cfg(feature = "windows-helper")]
 pub use log::{open_service_log, record_service_event, record_service_failure, rotate_service_log};
 pub use scm::service_state;
-use std::os::windows::{
-    ffi::OsStrExt,
-    io::{AsRawHandle, FromRawHandle, OwnedHandle},
-};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use windows::Win32::Foundation::HANDLE;
 
-pub fn wide(value: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
-    value.as_ref().encode_wide().chain(Some(0)).collect()
-}
 pub struct Handle(pub OwnedHandle);
 impl Handle {
     pub unsafe fn own(handle: HANDLE) -> Self {
