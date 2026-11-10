@@ -11,12 +11,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use parking_lot::Mutex as SyncMutex;
 use pb_mapper_core::checksum::set_process_msg_header_key;
+use pb_mapper_core::durable_file;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -161,7 +164,8 @@ impl PbMapperState {
         let config_path = self.get_config_file_path();
         let contents =
             serde_json::to_string_pretty(config).map_err(|e| CtlError::io(e.to_string()))?;
-        fs::write(config_path, contents).map_err(|e| CtlError::io(e.to_string()))?;
+        replace_contents(&config_path, contents.as_bytes())
+            .map_err(|e| CtlError::io(e.to_string()))?;
         Ok(())
     }
 
@@ -289,7 +293,80 @@ fn write_store<T: Serialize>(path: &Path, store: &T, noun: &str) -> Result<(), C
     let content = serde_json::to_string_pretty(store)
         .map_err(|e| CtlError::io(format!("Failed to serialize {noun}: {e}")))?;
 
-    fs::write(path, content)
+    replace_contents(path, content.as_bytes())
         .map_err(|e| CtlError::io(format!("Failed to write {noun} file: {e}")))?;
     Ok(())
+}
+
+/// Replaces `path` with `bytes` all at once, so that a crash leaves the old
+/// file or the new one, never a torn one: a file beside it is written and
+/// synced, then renamed over it. Making the rename itself durable is best
+/// effort: by then the new contents are in place, and a file system that
+/// cannot sync a directory should not turn every save into a failure.
+fn replace_contents(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let Some(name) = path.file_name() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} names no file", path.display()),
+        ));
+    };
+    // A bare file name is in the current directory, whose path is empty.
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    // Named for this process and save, so no other save writes it; one a
+    // crash left behind is never read, and is overwritten if ever named again.
+    let temporary = directory.join(format!(
+        "{}.{}-{}.tmp",
+        name.to_string_lossy(),
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&temporary)?;
+        // What a file written in place keeps: its mode, where there is one.
+        if cfg!(unix)
+            && let Ok(existing) = fs::metadata(path)
+        {
+            fs::set_permissions(&temporary, existing.permissions())?;
+        }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        durable_file::replace_file(&temporary, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written?;
+    if let Err(error) = durable_file::sync_parent_directory(&directory.join(name)) {
+        tracing::debug!(
+            "Saved {} without syncing its directory: {error}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TempRoot;
+
+    /// A save replaces the file whole and leaves nothing beside it.
+    #[test]
+    fn a_save_replaces_the_file_and_leaves_no_temporary() {
+        let root = TempRoot::new("replace");
+        let path = root.path().join("services.json");
+        replace_contents(&path, b"first").unwrap();
+        replace_contents(&path, b"second").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 }
