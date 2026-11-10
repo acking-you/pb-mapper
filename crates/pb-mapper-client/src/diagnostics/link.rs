@@ -6,10 +6,12 @@
 
 #[cfg(feature = "p2p")]
 use super::LinkSample;
+#[cfg(any(feature = "p2p", feature = "relay-quic"))]
+use pb_mapper_core::time::saturating_micros;
 pub use pb_mapper_protocol::direct::{AddressFamily, DirectTransport, LinkKind};
 use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
-#[cfg(any(feature = "p2p", feature = "relay-quic"))]
+#[cfg(feature = "p2p")]
 use std::time::Duration;
 
 /// What a local interface is. Candidates are offered, and probed, in this
@@ -254,8 +256,8 @@ impl LinkStats {
     pub(crate) fn of_quic(connection: &quinn::Connection) -> Self {
         let stats = connection.stats();
         Self {
-            rtt_us: micros(connection.rtt()),
-            min_rtt_us: micros(stats.path.min_rtt),
+            rtt_us: saturating_micros(connection.rtt()),
+            min_rtt_us: saturating_micros(stats.path.min_rtt),
             congestion_window: stats.path.cwnd,
             mtu: stats.path.current_mtu,
             sent_packets: stats.path.sent_packets,
@@ -276,8 +278,8 @@ impl LiveLink {
         match &self.probe {
             LinkProbe::Quic(connection) => LinkStats::of_quic(connection),
             LinkProbe::Tcp { handshake_rtt } => LinkStats {
-                rtt_us: micros(*handshake_rtt),
-                min_rtt_us: micros(*handshake_rtt),
+                rtt_us: saturating_micros(*handshake_rtt),
+                min_rtt_us: saturating_micros(*handshake_rtt),
                 ..LinkStats::default()
             },
         }
@@ -308,9 +310,4 @@ impl LiveLink {
             stats: self.stats(),
         }
     }
-}
-
-#[cfg(any(feature = "p2p", feature = "relay-quic"))]
-fn micros(time: Duration) -> u64 {
-    time.as_micros().min(u128::from(u64::MAX)) as u64
 }

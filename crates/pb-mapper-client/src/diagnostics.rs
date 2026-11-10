@@ -10,6 +10,8 @@
 
 use crate::endpoint::RelayEndpoint;
 use crate::relay::RelayTransport;
+// Short, for the dozens of `*_ms` figures the crate's diagnostics fill in.
+pub(crate) use pb_mapper_core::time::saturating_millis as ms;
 #[cfg(feature = "p2p")]
 use pb_mapper_protocol::direct::DirectTransport;
 use pb_mapper_protocol::direct::{LinkSummary, SessionPath};
@@ -478,10 +480,6 @@ impl Diagnostics {
             events: state.events.iter().map(|event| event.public(now)).collect(),
         }
     }
-}
-
-pub(crate) fn ms(time: Duration) -> u64 {
-    time.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]

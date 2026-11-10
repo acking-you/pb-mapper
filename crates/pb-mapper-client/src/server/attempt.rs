@@ -2,7 +2,7 @@
 
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use snafu::ResultExt;
 use tokio::sync::mpsc;
@@ -165,10 +165,7 @@ impl Debug for ServerCliRunConfig {
 }
 
 fn new_client_instance_id(worker_index: usize) -> String {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(ms)
-        .unwrap_or_default();
+    let now_ms = pb_mapper_core::time::unix_millis();
     format!("{}-{worker_index}-{now_ms}", std::process::id())
 }
 
