@@ -531,4 +531,36 @@ mod tests {
             "the cap is what stops it, and it stops exactly there"
         );
     }
+
+    /// A relay that takes the request and never answers is reported as a
+    /// timeout, within the bound the caller gave.
+    #[tokio::test]
+    async fn administrator_request_times_out_when_peer_stalls() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let remote_addr = listener.local_addr().unwrap();
+        let stalled_peer = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let error = crate::sdk::Client::from_credential(
+            remote_addr.to_string(),
+            pb_mapper_core::checksum::Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv"),
+            false,
+            None,
+        )
+        .admin()
+        .unwrap()
+        .request_with_timeout(AdminRequest::AuthStatus, Duration::from_millis(50))
+        .await
+        .expect_err("a stalled administrator request should time out");
+
+        assert!(
+            matches!(error, Error::TimedOut { .. }),
+            "timeout should be reported as TimedOut, got {error}"
+        );
+        stalled_peer.abort();
+    }
 }
