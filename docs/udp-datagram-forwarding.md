@@ -174,9 +174,9 @@ This reduces false positives from pipeline startup timing.
 Recommended commands:
 
 - Codec path:
-  - `CARGO_HOME=target/cargo-home CARGO_TARGET_DIR=target cargo test -p pb-mapper --test test_delay test_pb_mapper_server_codec -- --nocapture`
-- No-codec path (ignored by default):
-  - `CARGO_HOME=target/cargo-home CARGO_TARGET_DIR=target cargo test -p pb-mapper --test test_delay test_pb_mapper_server_no_codec -- --ignored --nocapture`
+  - `cargo test -p pb-mapper-cli --test e2e tunnel_matrix::udp_tunnel_echoes_with_codec -- --nocapture`
+- No-codec path:
+  - `cargo test -p pb-mapper-cli --test e2e tunnel_matrix::udp_tunnel_echoes_without_codec -- --nocapture`
 
 ## Migration notes
 

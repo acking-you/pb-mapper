@@ -333,7 +333,7 @@ it asked for or a `DisplayModeError` (`Closed`, `NotOffered`,
 `host_os`, `Host::restore_display_mode()`, `HostStatus::display_mode` while
 the display is changed, and `recover_display_modes(state_dir)`. The wire
 messages are `display_mode {width, height}` and `restore_display_mode {}`.
-`examples/display_mode_probe.rs` is the hardware acceptance; it changes the
+`examples/display_mode_probe/` is the hardware acceptance; it changes the
 display it runs on, so run it only where the owner agreed (see
 [the acceptance runbook](../scripts/test/desktop-ui-acceptance.md)).
 
@@ -808,7 +808,8 @@ crates/pb-mapper-desktop/src/
   input/{held,cursor}.rs                         release obligation, confinement
   oop/{proto,ipc,client,server}.rs               the out-of-process backend
   platform/mod.rs  unsupported.rs  waiter.rs     traits, Current, facade
-  platform/windows/{desktop,video,input,cursor,still,waiter,timer,mf,dpapi}.rs
+  platform/windows/{desktop,input,cursor,still,waiter,timer,mf,dpapi,modes,win32}.rs
+  platform/windows/video/                        capture, scale and encode, fused
   platform/windows/helper/                       service, install, worker, pipes
   privileged/                                    public helper facade
 ```
@@ -816,10 +817,10 @@ crates/pb-mapper-desktop/src/
 | Part | Windows |
 | --- | --- |
 | `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope |
-| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video.rs`), drained every 2 ms |
+| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`), drained every 2 ms |
 | `Input` | enigo, `SetCursorPos` for absolute moves, `LockWorkStation` |
 | `Cursor` | `GetCursorInfo` |
-| `Modes` / `Still` | `NoModes` / xcap JPEG |
+| `Modes` / `Still` | `WinModes` (dynamic changes only; see [Remote resolution](#remote-resolution)) / xcap JPEG |
 
 ### Adding an operating system
 

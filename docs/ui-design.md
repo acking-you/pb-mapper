@@ -153,7 +153,7 @@ relayed path is not a fault, so it is never amber or red; why it is the
 relay is in words, on hover and in the panel.
 
 The FFI reports each running tunnel's `path` (`PathInfo` in
-`native/pb_mapper_ffi/src/state.rs`) from its handle's diagnostics, and a
+`native/pb_mapper_ffi/src/state/views.rs`) from its handle's diagnostics, and a
 task per tunnel emits a change event when its state or which paths it uses
 changes, so the window follows a path as it is chosen. The embedded relay
 offers direct as `pb-mapper server` does, over UDP on its TCP port.

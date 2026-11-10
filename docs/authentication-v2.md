@@ -391,20 +391,24 @@ state.
 ## Code index
 
 - Credential format and process configuration:
-  `crates/pb-mapper-core/src/checksum.rs`
-- Authentication facade and shared model: `crates/pb-mapper-auth/src/lib.rs`
+  `crates/pb-mapper-core/src/checksum.rs` and
+  `crates/pb-mapper-core/src/checksum/`
+- Shared model: `crates/pb-mapper-auth/src/lib.rs` (constants and the module
+  map), `types.rs`, `lease.rs`, `state.rs`, and `codes.rs` for every failure
+  code
 - Lifecycle actor: `crates/pb-mapper-auth/src/actor/`
 - Persistence: `crates/pb-mapper-auth/src/persistence/`
-- Runtime and timing wheel: `crates/pb-mapper-auth/src/runtime.rs` and
-  `crates/pb-mapper-auth/src/timing_wheel.rs`
+- Runtime facade, lease schedule and timing wheel:
+  `crates/pb-mapper-auth/src/runtime.rs`, `leases.rs` and `timing_wheel.rs`
 - V2 session facade plus frame, limiter, and replay modules:
   `crates/pb-mapper-protocol/src/secure.rs` and
   `crates/pb-mapper-protocol/src/secure/`
 - Relay state, runtime loop, and connection dispatch:
-  `crates/pb-mapper-server/src/lib.rs`, `runtime.rs`, and `connection.rs`
+  `crates/pb-mapper-server/src/routing.rs`, `runtime/`, and `connection.rs`
 - Administrator request execution: `crates/pb-mapper-server/src/admin.rs`
-- Unified CLI and administrator command module:
-  `crates/pb-mapper-cli/src/bin/pb-mapper.rs` and
+- Unified CLI, the relay's authentication flags, and administrator command
+  module: `crates/pb-mapper-cli/src/bin/pb-mapper.rs`,
+  `crates/pb-mapper-cli/src/bin/pb-mapper/server.rs` and
   `crates/pb-mapper-cli/src/bin/pb-mapper/admin.rs`
 
 ## Summary

@@ -136,11 +136,11 @@ cause or duration of an unobserved production outage.
 - `crates/pb-mapper-protocol/src/frame_read.rs`: persistent frame progress.
 - `crates/pb-mapper-protocol/src/secure/frame.rs`: V2 framing/authentication.
 - `crates/pb-mapper-client/src/recovery.rs`: setup latency estimation and jitter.
-- `crates/pb-mapper-client/src/client/mod.rs`: independent listener/probe lifecycle.
+- `crates/pb-mapper-client/src/client/mod.rs` and `client/health.rs`: independent listener/probe lifecycle.
 - `crates/pb-mapper-client/src/client/stream.rs`: bounded, pre-payload setup retries.
-- `crates/pb-mapper-client/src/server/mod.rs`: register deadlines and control watchdog.
+- `crates/pb-mapper-client/src/server/attempt.rs`: register deadlines and control watchdog.
 - `crates/pb-mapper-server/src/client.rs`: candidate fallback and whole-setup deadline.
-- `crates/pb-mapper-server/src/runtime.rs`: suspicion confirmation and ACK budgets.
+- `crates/pb-mapper-server/src/runtime/lease.rs` and `runtime/subscribe.rs`: suspicion confirmation and ACK budgets.
 - `crates/pb-mapper-cli/tests/network_recovery.rs`: fault proxy and end-to-end cases.
 
 ## Additional SDK review for 0.5.1
