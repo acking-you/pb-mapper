@@ -218,6 +218,39 @@ const DEFAULT_SERVER_LEASE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_CLIENT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_CLIENT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD: usize = 3;
+const MAX_CONTROL_CONN_POOL_SIZE: usize = 16;
+const MAX_CLIENT_HEALTH_FAILURE_THRESHOLD: usize = 100;
+
+const _: () = assert!(
+    !DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN.is_zero()
+        && !DEFAULT_REGISTRATION_REJECT_BACKOFF_MAX.is_zero()
+        && !DEFAULT_SERVER_LEASE_SWEEP_INTERVAL.is_zero(),
+    "positive_duration_from_env falls back to these defaults, so they must be positive"
+);
+const _: () = assert!(
+    DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN.as_nanos()
+        <= DEFAULT_REGISTRATION_REJECT_BACKOFF_MAX.as_nanos(),
+    "the default registration reject backoff must be a valid RetryBackoff range"
+);
+const _: () = assert!(
+    DEFAULT_CONTROL_HEARTBEAT_INTERVAL.as_nanos() < DEFAULT_CONTROL_HEARTBEAT_TOLERANCE.as_nanos(),
+    "a control connection becomes suspect only after missing heartbeats"
+);
+const _: () = assert!(
+    DEFAULT_CONTROL_HEARTBEAT_INTERVAL.as_nanos() < DEFAULT_SERVER_LEASE_TIMEOUT.as_nanos(),
+    "a lease must outlast the heartbeat that renews it"
+);
+const _: () = assert!(
+    DEFAULT_SERVER_LEASE_SWEEP_INTERVAL.as_nanos() * 3 == DEFAULT_SERVER_LEASE_TIMEOUT.as_nanos(),
+    "server_lease_sweep_interval documents its default as a third of the lease"
+);
+const _: () = assert!(
+    0 < DEFAULT_CONTROL_CONN_POOL_SIZE
+        && DEFAULT_CONTROL_CONN_POOL_SIZE <= MAX_CONTROL_CONN_POOL_SIZE
+        && 0 < DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD
+        && DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD <= MAX_CLIENT_HEALTH_FAILURE_THRESHOLD,
+    "a default count must be one bounded_count_from_env could return"
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
@@ -328,13 +361,23 @@ pub fn stream_recovery_timeout() -> Duration {
     )
 }
 
-pub fn control_conn_pool_size() -> usize {
-    std::env::var(PB_MAPPER_CONTROL_CONN_POOL_SIZE)
+/// A positive count from `name`, capped at `max`, or `default` when it is
+/// unset, unparsable or zero.
+fn bounded_count_from_env(name: &str, max: usize, default: usize) -> usize {
+    std::env::var(name)
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|size| *size > 0)
-        .map(|size| size.min(16))
-        .unwrap_or(DEFAULT_CONTROL_CONN_POOL_SIZE)
+        .filter(|count| *count > 0)
+        .map(|count| count.min(max))
+        .unwrap_or(default)
+}
+
+pub fn control_conn_pool_size() -> usize {
+    bounded_count_from_env(
+        PB_MAPPER_CONTROL_CONN_POOL_SIZE,
+        MAX_CONTROL_CONN_POOL_SIZE,
+        DEFAULT_CONTROL_CONN_POOL_SIZE,
+    )
 }
 
 pub fn control_heartbeat_interval() -> Duration {
@@ -384,11 +427,13 @@ pub fn registration_probe_timeout() -> Duration {
 /// are different. An inverted range is a legible request — wait exactly this long
 /// — and collapsing it to a fixed delay honours it. A zero minimum is not: it
 /// asks for no wait at all, and since [`RetryBackoff`] caps its multiplier at
-/// 1024, a millisecond minimum would never climb past about a second no matter
-/// how high the maximum, hammering the very quota the ladder exists to let clear.
+/// 1024 ([`RetryBackoff::MAX_DOUBLINGS`]), a millisecond minimum would never
+/// climb past about a second no matter how high the maximum, hammering the very
+/// quota the ladder exists to let clear.
 ///
 /// [`RetryBackoff`]: crate::timeout::RetryBackoff
 /// [`RetryBackoff::new`]: crate::timeout::RetryBackoff::new
+/// [`RetryBackoff::MAX_DOUBLINGS`]: crate::timeout::RetryBackoff::MAX_DOUBLINGS
 pub fn registration_reject_backoff() -> (Duration, Duration) {
     let min = positive_duration_from_env(
         PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN,
@@ -439,12 +484,11 @@ pub fn client_health_check_timeout() -> Duration {
 }
 
 pub fn client_health_failure_threshold() -> usize {
-    std::env::var(PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|threshold| *threshold > 0)
-        .map(|threshold| threshold.min(100))
-        .unwrap_or(DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD)
+    bounded_count_from_env(
+        PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD,
+        MAX_CLIENT_HEALTH_FAILURE_THRESHOLD,
+        DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD,
+    )
 }
 
 /// Whether the environment asks for TCP keep-alive, from `PB_MAPPER_KEEP_ALIVE`.
