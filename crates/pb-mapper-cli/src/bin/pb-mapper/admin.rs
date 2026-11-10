@@ -688,6 +688,9 @@ mod tests {
 
     #[tokio::test]
     async fn administrator_request_times_out_when_peer_stalls() {
+        let _credential = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
+            .lock()
+            .await;
         set_process_msg_header_key(Some("0123456789abcdefghijklmnopqrstuv"))
             .expect("test administrator credential should be valid");
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
