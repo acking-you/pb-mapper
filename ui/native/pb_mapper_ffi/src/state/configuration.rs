@@ -299,22 +299,22 @@ fn write_store<T: Serialize>(path: &Path, store: &T, noun: &str) -> Result<(), C
 
 /// Replaces `path` with `bytes` all at once, so that a crash leaves the old
 /// file or the new one, never a torn one: core's `replace_contents`, keeping
-/// the mode a file written in place keeps, where there is one. Making the
-/// rename itself durable is best effort: by then the new contents are in
-/// place, and a file system that cannot sync a directory should not turn
-/// every save into a failure.
+/// the mode a file written in place keeps, where there is one. Where an
+/// in-place write worked, so does this: a symbolic link at `path` keeps
+/// naming the file it points to, which is the one replaced (or created, for
+/// a dangling link), and a directory that takes no new file has its existing
+/// file written in place. Making the rename itself durable is best effort: by
+/// then the new contents are in place, and a file system that cannot sync a
+/// directory should not turn every save into a failure.
 fn replace_contents(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let target = linked_file(path)?;
     // A bare file name is in the current directory, whose path is empty and
     // so names no directory to sync.
-    let in_current_directory;
-    let target = match path.parent() {
-        Some(parent) if parent.as_os_str().is_empty() => {
-            in_current_directory = Path::new(".").join(path);
-            &in_current_directory
-        }
-        _ => path,
+    let target = match target.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Path::new(".").join(target),
+        _ => target,
     };
-    match durable_file::replace_contents(target, bytes, NewFileMode::KeepExisting) {
+    match durable_file::replace_contents(&target, bytes, NewFileMode::KeepExisting) {
         Err(failure) if failure.step == ReplaceStep::SyncParent => {
             tracing::debug!(
                 "Saved {} without syncing its directory: {}",
@@ -323,8 +323,44 @@ fn replace_contents(path: &Path, bytes: &[u8]) -> io::Result<()> {
             );
             Ok(())
         }
+        Err(failure)
+            if failure.step == ReplaceStep::Create
+                && failure.io().kind() == io::ErrorKind::PermissionDenied =>
+        {
+            tracing::debug!(
+                "Saving {} in place, its directory takes no new file: {}",
+                path.display(),
+                failure.io()
+            );
+            fs::write(&target, bytes)
+        }
         result => result.map_err(io::Error::from),
     }
+}
+
+/// The file a write to `path` reaches: `path` itself, or the end of the
+/// chain of symbolic links at it, a relative one taken from the link's own
+/// directory. The end need not exist.
+fn linked_file(path: &Path) -> io::Result<PathBuf> {
+    /// Links followed before giving up, as Linux does, so a loop ends.
+    const MAX_LINKS: usize = 40;
+    let mut target = path.to_path_buf();
+    for _ in 0..MAX_LINKS {
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let link = fs::read_link(&target)?;
+                target = match target.parent() {
+                    Some(directory) => directory.join(link),
+                    None => link,
+                };
+            }
+            _ => return Ok(target),
+        }
+    }
+    Err(io::Error::other(format!(
+        "{} leads through too many symbolic links",
+        path.display()
+    )))
 }
 
 #[cfg(test)]
@@ -352,5 +388,70 @@ mod tests {
         replace_contents(&path, b"new").unwrap_err();
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
         assert!(path.join("kept").is_dir());
+    }
+
+    /// A save through a symbolic link writes the file it points to and keeps
+    /// the link; a dangling link has its file created.
+    #[test]
+    fn a_save_through_a_link_writes_the_linked_file() {
+        let root = TempRoot::new("replace-link");
+        fs::create_dir(root.path().join("dotfiles")).unwrap();
+        let link = root.path().join("services.json");
+        let linked = Path::new("dotfiles").join("services.json");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&linked, &link).unwrap();
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_file(&linked, &link).is_err() {
+            // Windows makes links only in Developer Mode or elevated.
+            return;
+        }
+        let target = root.path().join(linked);
+        replace_contents(&link, b"created").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"created");
+        replace_contents(&link, b"replaced").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"replaced");
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+    }
+
+    /// A directory that takes no new file still has its file saved, in
+    /// place.
+    #[test]
+    fn a_save_in_a_directory_that_takes_no_new_file_writes_in_place() {
+        let root = TempRoot::new("replace-locked");
+        let directory = root.path().join("locked");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("services.json");
+        fs::write(&path, b"old").unwrap();
+        lock(&directory, true);
+        let saved = replace_contents(&path, b"new");
+        lock(&directory, false);
+        saved.unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+    }
+
+    /// Makes `directory` take no new file, or take them again; its files stay
+    /// writable.
+    #[cfg(unix)]
+    fn lock(directory: &Path, locked: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if locked { 0o555 } else { 0o755 };
+        fs::set_permissions(directory, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Makes `directory` take no new file, or take them again; its files stay
+    /// writable: a deny entry for this user that its files do not inherit.
+    #[cfg(windows)]
+    fn lock(directory: &Path, locked: bool) {
+        let user = std::env::var("USERNAME").unwrap();
+        let mut icacls = std::process::Command::new("icacls");
+        icacls.arg(directory);
+        if locked {
+            icacls.args(["/deny", &format!("{user}:(WD,AD)")]);
+        } else {
+            icacls.args(["/remove:d", &user]);
+        }
+        let output = icacls.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
     }
 }
