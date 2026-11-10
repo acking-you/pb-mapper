@@ -227,7 +227,7 @@ impl<S: Sealer, T: Serialize + DeserializeOwned> TrustFile<S, T> {
             identity: remembered.identity.encode_secret()?,
             display_device: remembered.display_device.clone(),
         })
-        .map_err(error)?;
+        .map_err(io::Error::other)?;
         if plain.len() as u64 > LIMIT {
             return Err(error("desktop trust exceeds its size limit"));
         }

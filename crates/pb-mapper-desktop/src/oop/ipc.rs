@@ -10,7 +10,7 @@ pub const MAX_JSON: usize = 8192;
 pub const MAX_FRAME: usize = 4 * 1024 * 1024;
 
 pub async fn write_json<W: AsyncWrite + Unpin, T: Serialize>(io: &mut W, value: &T) -> Result<()> {
-    let bytes = serde_json::to_vec(value).map_err(error)?;
+    let bytes = serde_json::to_vec(value).map_err(std::io::Error::other)?;
     write_bytes(io, &bytes, MAX_JSON).await
 }
 pub async fn read_json<R: AsyncRead + Unpin, T: DeserializeOwned>(io: &mut R) -> Result<T> {

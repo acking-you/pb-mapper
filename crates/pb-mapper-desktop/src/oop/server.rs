@@ -48,13 +48,13 @@ where
         let close = matches!(request, Request::Close {});
         let (response, image) = tokio::time::timeout(request.timeout(), serve(request))
             .await
-            .map_err(error)??;
+            .map_err(std::io::Error::other)??;
         tokio::time::timeout(TIMEOUT, async {
             ipc::write_json(pipe, &response).await?;
             ipc::write_bytes(pipe, &image, ipc::MAX_FRAME).await
         })
         .await
-        .map_err(error)??;
+        .map_err(std::io::Error::other)??;
         if close {
             return Ok(());
         }

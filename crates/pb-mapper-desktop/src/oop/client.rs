@@ -153,7 +153,10 @@ impl<T: Transport> RemoteBackend<T> {
         })
     }
 
-    fn fail(&mut self, failure: impl std::fmt::Display) -> std::io::Error {
+    fn fail(
+        &mut self,
+        failure: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> std::io::Error {
         self.failed = true;
         self.cursor = None;
         self.pending = 0;
@@ -197,8 +200,9 @@ struct Answer {
     /// In the `RestoreDisplayMode` response.
     restored: Option<bool>,
 }
-fn disconnected(failure: impl std::fmt::Display) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::NotConnected, failure.to_string())
+/// `failure`, which ends the session, kept as the cause.
+fn disconnected(failure: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::NotConnected, failure)
 }
 #[deny(clippy::missing_trait_methods)]
 impl<T: Transport> Backend for RemoteBackend<T> {

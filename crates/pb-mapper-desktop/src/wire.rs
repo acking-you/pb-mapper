@@ -29,7 +29,7 @@ pub(crate) async fn write_message<W: AsyncWrite + Unpin, T: Serialize>(
     header: &T,
     payload: Option<&[u8]>,
 ) -> Result<()> {
-    let header = serde_json::to_vec(header).map_err(error)?;
+    let header = serde_json::to_vec(header).map_err(std::io::Error::other)?;
     if header.len() > MAX_HEADER {
         return Err(error("desktop message too large"));
     }

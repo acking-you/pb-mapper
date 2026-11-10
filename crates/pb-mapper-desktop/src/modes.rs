@@ -284,7 +284,7 @@ impl Journal {
             version: Stored::VERSION,
             entries,
         };
-        let bytes = serde_json::to_vec(&stored).map_err(error)?;
+        let bytes = serde_json::to_vec(&stored).map_err(std::io::Error::other)?;
         crate::trust::write_durably(path, &bytes)
     }
 
