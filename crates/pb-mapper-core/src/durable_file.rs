@@ -85,9 +85,9 @@ impl From<ReplaceError> for std::io::Error {
 /// the new one, never a torn one.
 ///
 /// The bytes go to a new file beside `path`, named
-/// `.{file name}.tmp-{pid}-{16 random hex digits}` and opened with
-/// `create_new`, which `mode` applies to before the first byte. That file is
-/// synced, renamed over `path` with [`replace_file`], and the directory synced.
+/// `.{file name}.tmp-{pid}-{16 random hex digits}`, opened with `create_new`
+/// and given `mode` before its first byte. That file is synced, renamed over
+/// `path` with [`replace_file`], and the directory synced.
 /// On failure the temporary file is removed and `path` is left as it was —
 /// unless only the final directory sync failed, by which time it is replaced.
 ///
