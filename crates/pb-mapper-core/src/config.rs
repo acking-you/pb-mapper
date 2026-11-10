@@ -1,4 +1,5 @@
 use std::net::{AddrParseError, SocketAddr};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
@@ -204,6 +205,10 @@ pub const PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD: &str =
 pub const PB_MAPPER_LOG_FORMAT: &str = "PB_MAPPER_LOG_FORMAT";
 pub const PB_MAPPER_TUNNEL_IDLE_TIMEOUT: &str = "PB_MAPPER_TUNNEL_IDLE_TIMEOUT";
 pub const PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT: &str = "PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT";
+pub const PB_MAPPER_NEW_STREAMS_PER_SECOND: &str = "PB_MAPPER_NEW_STREAMS_PER_SECOND";
+/// What [`new_streams_per_second`] is when the variable is unset or not a
+/// positive integer.
+pub const DEFAULT_NEW_STREAMS_PER_SECOND: u32 = 100;
 const DEFAULT_CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_STREAM_ACK_TIMEOUT: Duration = Duration::from_millis(300);
 const DEFAULT_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -509,6 +514,22 @@ pub fn half_close_idle_timeout() -> Duration {
         DEFAULT_HALF_CLOSE_IDLE_TIMEOUT,
     )
 }
+
+/// New streams a namespace may open per second, sustained: the relay's
+/// stream rate limit, and the basis of the first-flight replay budget. The
+/// variable as a positive integer, untrimmed, or
+/// [`DEFAULT_NEW_STREAMS_PER_SECOND`].
+pub fn new_streams_per_second() -> NonZeroUsize {
+    const DEFAULT: NonZeroUsize = match NonZeroUsize::new(DEFAULT_NEW_STREAMS_PER_SECOND as usize) {
+        Some(rate) => rate,
+        None => panic!("the default stream rate is positive"),
+    };
+    std::env::var(PB_MAPPER_NEW_STREAMS_PER_SECOND)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT)
+}
+
 /// Whether the environment asks for TCP keep-alive, from `PB_MAPPER_KEEP_ALIVE`.
 ///
 /// A default for a process to read once at startup — not something the tunnels

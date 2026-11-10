@@ -237,10 +237,7 @@ impl RoutingConfig {
                 "PB_MAPPER_MAX_STREAMS_PER_NAMESPACE",
                 const { limit(1024) },
             ),
-            new_streams_per_second: env_limit(
-                "PB_MAPPER_NEW_STREAMS_PER_SECOND",
-                const { limit(100) },
-            ),
+            new_streams_per_second: pb_mapper_core::config::new_streams_per_second(),
             new_streams_burst: env_limit("PB_MAPPER_NEW_STREAMS_BURST", const { limit(200) }),
             stream_ack_timeout: pb_mapper_core::config::stream_ack_timeout(),
             lease_timeout: server_lease_timeout(),

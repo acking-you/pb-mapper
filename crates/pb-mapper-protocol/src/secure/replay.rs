@@ -21,12 +21,12 @@ use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 use pb_mapper_auth::KeyId;
+use pb_mapper_core::config;
 use pb_mapper_core::durable_file::{self, NewFileMode};
 use ring::digest::{SHA256, SHA256_OUTPUT_LEN, digest};
 
 use super::{CONNECTION_SALT_LEN, pack, unix_seconds};
 
-const DEFAULT_NEW_STREAMS_PER_SECOND: u32 = 100;
 /// A first-flight fingerprint: SHA-256 of the key id and connection salt.
 const FINGERPRINT_LEN: usize = SHA256_OUTPUT_LEN;
 /// One admission in the log: its fingerprint, then the admission time.
@@ -34,11 +34,10 @@ pub(super) const REPLAY_RECORD_LEN: usize = FINGERPRINT_LEN + size_of::<u64>();
 pub(super) const REPLAY_COMPACT_INTERVAL_SECONDS: u64 = 60;
 
 fn first_flight_budget(window_seconds: u64) -> u32 {
-    let streams_per_sec = std::env::var("PB_MAPPER_NEW_STREAMS_PER_SECOND")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_NEW_STREAMS_PER_SECOND)
+    // A rate past `u32` takes the default, as it did when this read the
+    // variable as a `u32` itself.
+    let streams_per_sec = u32::try_from(config::new_streams_per_second().get())
+        .unwrap_or(config::DEFAULT_NEW_STREAMS_PER_SECOND)
         .min(1_000_000);
     let window = u32::try_from(window_seconds).unwrap_or(u32::MAX);
     streams_per_sec
