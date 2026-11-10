@@ -11,12 +11,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use parking_lot::Mutex as SyncMutex;
 use pb_mapper_core::checksum::set_process_msg_header_key;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use super::status::LocalStatusCache;
 use super::stored::normalize_msg_header_key;
@@ -172,30 +174,11 @@ impl PbMapperState {
     }
 
     pub fn load_service_configs(&self) -> ServiceConfigStore {
-        let path = self.get_service_config_path();
-        match fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| ServiceConfigStore {
-                services: HashMap::new(),
-            }),
-            Err(_) => ServiceConfigStore {
-                services: HashMap::new(),
-            },
-        }
+        read_store(&self.get_service_config_path())
     }
 
     pub fn save_service_configs(&self, store: &ServiceConfigStore) -> Result<(), CtlError> {
-        let path = self.get_service_config_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| CtlError::io(format!("Failed to create config dir: {e}")))?;
-        }
-
-        let content = serde_json::to_string_pretty(store)
-            .map_err(|e| CtlError::io(format!("Failed to serialize config: {e}")))?;
-
-        fs::write(&path, content)
-            .map_err(|e| CtlError::io(format!("Failed to write config file: {e}")))?;
-        Ok(())
+        write_store(&self.get_service_config_path(), store, "config")
     }
 
     pub fn save_service_config(&self, spec: &ShareSpec) -> Result<(), CtlError> {
@@ -220,11 +203,10 @@ impl PbMapperState {
             protocol: protocol.to_string(),
             enable_encryption: *enable_encryption,
             enable_keep_alive: *enable_keep_alive,
-            created_at: if store.services.contains_key(service_key) {
-                store.services[service_key].created_at
-            } else {
-                now
-            },
+            created_at: store
+                .services
+                .get(service_key)
+                .map_or(now, |saved| saved.created_at),
             allow_direct: *allow_direct,
             port_mapping: *port_mapping,
         };
@@ -240,30 +222,11 @@ impl PbMapperState {
     }
 
     pub fn load_client_configs(&self) -> ClientConfigStore {
-        let path = self.get_client_config_path();
-        match fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| ClientConfigStore {
-                clients: HashMap::new(),
-            }),
-            Err(_) => ClientConfigStore {
-                clients: HashMap::new(),
-            },
-        }
+        read_store(&self.get_client_config_path())
     }
 
     pub fn save_client_configs(&self, store: &ClientConfigStore) -> Result<(), CtlError> {
-        let path = self.get_client_config_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| CtlError::io(format!("Failed to create config dir: {e}")))?;
-        }
-
-        let content = serde_json::to_string_pretty(store)
-            .map_err(|e| CtlError::io(format!("Failed to serialize client config: {e}")))?;
-
-        fs::write(&path, content)
-            .map_err(|e| CtlError::io(format!("Failed to write client config file: {e}")))?;
-        Ok(())
+        write_store(&self.get_client_config_path(), store, "client config")
     }
 
     pub fn save_client_config(&self, spec: &ConnectSpec) -> Result<(), CtlError> {
@@ -287,11 +250,10 @@ impl PbMapperState {
             local_address: local_address.to_string(),
             protocol: protocol.to_string(),
             enable_keep_alive: *enable_keep_alive,
-            created_at: if store.clients.contains_key(service_key) {
-                store.clients[service_key].created_at
-            } else {
-                now
-            },
+            created_at: store
+                .clients
+                .get(service_key)
+                .map_or(now, |saved| saved.created_at),
             namespace: *namespace,
             allow_direct: *allow_direct,
             port_mapping: *port_mapping,
@@ -306,4 +268,28 @@ impl PbMapperState {
         store.clients.remove(service_key);
         self.save_client_configs(&store)
     }
+}
+
+/// The store saved at `path`, or an empty one when there is none or it does
+/// not parse.
+fn read_store<T: DeserializeOwned + Default>(path: &Path) -> T {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+/// Saves `store` at `path` as pretty JSON; `noun` names it in the errors.
+fn write_store<T: Serialize>(path: &Path, store: &T, noun: &str) -> Result<(), CtlError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| CtlError::io(format!("Failed to create config dir: {e}")))?;
+    }
+
+    let content = serde_json::to_string_pretty(store)
+        .map_err(|e| CtlError::io(format!("Failed to serialize {noun}: {e}")))?;
+
+    fs::write(path, content)
+        .map_err(|e| CtlError::io(format!("Failed to write {noun} file: {e}")))?;
+    Ok(())
 }

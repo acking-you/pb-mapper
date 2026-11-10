@@ -76,7 +76,7 @@ pub struct DirectOptions {
     pub port_mapping: PortMapping,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct ServiceConfigStore {
     pub services: HashMap<String, ServiceConfigData>,
 }
@@ -101,7 +101,7 @@ pub struct ClientConfigData {
     pub port_mapping: PortMapping,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct ClientConfigStore {
     pub clients: HashMap<String, ClientConfigData>,
 }
