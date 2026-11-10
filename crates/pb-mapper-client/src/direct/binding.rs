@@ -54,8 +54,17 @@ fn binding_exporter(
     label: &[u8],
     grant: &SessionGrant,
 ) -> io::Result<[u8; 32]> {
+    let context = binding_context(grant)?;
+    let mut exporter = [0; 32];
+    connection.export(&mut exporter, label, &context)?;
+    Ok(exporter)
+}
+/// What a binding is exported with: the grant's identity, as JSON, with the
+/// certificates as digests. Every peer computes the same bytes, so they never
+/// change.
+fn binding_context(grant: &SessionGrant) -> io::Result<Vec<u8>> {
     use ring::digest;
-    let context = serde_json::to_vec(&(
+    serde_json::to_vec(&(
         grant.id,
         grant.server_instance,
         grant.generation,
@@ -67,10 +76,7 @@ fn binding_exporter(
         digest::digest(&digest::SHA256, &grant.consumer.certificate).as_ref(),
         digest::digest(&digest::SHA256, &grant.provider.certificate).as_ref(),
     ))
-    .map_err(io::Error::other)?;
-    let mut exporter = [0; 32];
-    connection.export(&mut exporter, label, &context)?;
-    Ok(exporter)
+    .map_err(io::Error::other)
 }
 /// The key UDP services frame their datagrams with: each TLS session
 /// exports its own, whatever the carrier.
