@@ -5,17 +5,55 @@ use super::{
     push_audit_record, seal_blob, sync_parent_directory,
 };
 
+/// What a failed append leaves the store fit for.
+#[derive(Debug)]
+pub(crate) enum WalState {
+    /// Nothing reached the WAL, or what did was rolled back, so a later append
+    /// starts at a known-good offset.
+    Intact,
+    /// The WAL, or the means to keep it, is in doubt: the store fails closed.
+    Uncertain,
+}
+
+/// A failed append: the failure for the caller, and what it means for the store.
+#[derive(Debug)]
+pub(crate) struct WalAppendError {
+    pub(crate) failure: AuthFailure,
+    pub(crate) wal: WalState,
+}
+
+impl WalAppendError {
+    fn intact(failure: AuthFailure) -> Self {
+        Self {
+            failure,
+            wal: WalState::Intact,
+        }
+    }
+
+    fn uncertain(failure: AuthFailure) -> Self {
+        Self {
+            failure,
+            wal: WalState::Uncertain,
+        }
+    }
+}
+
+/// Enters safe mode when a failed append leaves the WAL uncertain, and hands
+/// the caller its failure either way.
 pub(crate) fn fail_closed_on_uncertain_wal(
     inner: &AuthStateInner,
-    result: Result<(), AuthFailure>,
+    result: Result<(), WalAppendError>,
 ) -> Result<(), AuthFailure> {
-    if let Err(error) = &result
-        && !error.retryable
-    {
-        inner.safe_mode.store(true, Ordering::Release);
-        cancel_all_temporary_leases(inner);
-    }
-    result
+    result.map_err(|WalAppendError { failure, wal }| {
+        match wal {
+            WalState::Intact => {}
+            WalState::Uncertain => {
+                inner.safe_mode.store(true, Ordering::Release);
+                cancel_all_temporary_leases(inner);
+            }
+        }
+        failure
+    })
 }
 
 pub(crate) fn append_mutation(
@@ -52,17 +90,22 @@ pub(crate) fn append_audit(
     Ok(())
 }
 
+/// Appends `record` to the WAL and makes it durable. A failure the WAL is known
+/// to have survived is retryable for the client; any other fails the store closed.
 pub(crate) fn append_wal(
     config: &AuthConfig,
     admin_key: &AesKeyType,
     record: &WalRecord,
-) -> Result<(), AuthFailure> {
-    let plain = serde_json::to_vec(record).map_err(|error| {
-        AuthFailure::internal(format!("failed to encode auth WAL record: {error}"))
-    })?;
-    let sealed = seal_blob(admin_key, &plain)?;
+) -> Result<(), WalAppendError> {
+    let plain = serde_json::to_vec(record)
+        .map_err(|error| {
+            AuthFailure::internal(format!("failed to encode auth WAL record: {error}"))
+        })
+        .map_err(WalAppendError::uncertain)?;
+    let sealed = seal_blob(admin_key, &plain).map_err(WalAppendError::uncertain)?;
     let length = u32::try_from(sealed.len())
-        .map_err(|_| AuthFailure::internal("auth WAL record is too large"))?;
+        .map_err(|_| AuthFailure::internal("auth WAL record is too large"))
+        .map_err(WalAppendError::uncertain)?;
     let path = auth_wal_path(&config.state_dir);
     let created = !path.exists();
     let mut file = OpenOptions::new()
@@ -70,57 +113,61 @@ pub(crate) fn append_wal(
         .append(true)
         .open(&path)
         .map_err(|error| {
-            AuthFailure::new(
+            WalAppendError::intact(AuthFailure::new(
                 codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to open `{}`: {error}", path.display()),
                 true,
-            )
+            ))
         })?;
     #[cfg(unix)]
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .map_err(|error| {
-            AuthFailure::new(
+            WalAppendError::uncertain(AuthFailure::new(
                 codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to secure `{}`: {error}", path.display()),
                 false,
-            )
+            ))
         })?;
     let start_len = file
         .metadata()
         .map(|metadata| metadata.len())
         .map_err(|error| {
-            AuthFailure::new(
+            WalAppendError::intact(AuthFailure::new(
                 codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to inspect `{}`: {error}", path.display()),
                 true,
-            )
+            ))
         })?;
     if let Err(error) = file
         .write_all(&length.to_be_bytes())
         .and_then(|()| file.write_all(&sealed))
         .and_then(|()| file.sync_data())
     {
-        // retryable == rolled_back. A later append can then start at a known
-        // good offset. If truncation fails, the next record would be unreadable.
+        // Rolled back, a later append can start at a known-good offset. If
+        // truncation fails, the next record would be unreadable.
         let rolled_back = file
             .set_len(start_len)
             .and_then(|()| file.sync_data())
             .is_ok();
-        return Err(AuthFailure::new(
-            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
-            if rolled_back {
-                format!("failed to durably append `{}`: {error}", path.display())
-            } else {
+        return Err(if rolled_back {
+            WalAppendError::intact(AuthFailure::new(
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
+                format!("failed to durably append `{}`: {error}", path.display()),
+                true,
+            ))
+        } else {
+            WalAppendError::uncertain(AuthFailure::new(
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!(
                     "failed to durably append `{}` and could not restore the previous WAL length: {error}",
                     path.display()
-                )
-            },
-            rolled_back,
-        ));
+                ),
+                false,
+            ))
+        });
     }
     if created {
-        sync_parent_directory(&path)?;
+        sync_parent_directory(&path).map_err(WalAppendError::uncertain)?;
     }
     Ok(())
 }
