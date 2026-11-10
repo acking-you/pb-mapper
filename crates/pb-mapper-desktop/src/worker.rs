@@ -77,9 +77,9 @@ const NOTICE_TTL: Duration = Duration::from_secs(5);
 /// What a session's thread C is started with.
 pub(crate) struct WorkerConfig {
     pub codec: VideoCodec,
+    /// The viewer's bounds; `max_fps` is the encoder's nominal rate for the
+    /// whole session.
     pub limits: VideoLimits,
-    /// `limits.max_fps`: the encoder's nominal rate for the whole session.
-    pub nominal_fps: u32,
     pub admission: Option<Arc<dyn ControlAdmission>>,
 }
 
@@ -248,7 +248,6 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     clock: K,
     codec: VideoCodec,
     limits: VideoLimits,
-    nominal_fps: u32,
     admission: Option<Arc<dyn ControlAdmission>>,
     lease: Option<Box<dyn ControlLease>>,
     /// The copy published to `shared.state` after every iteration.
@@ -304,7 +303,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     ) -> Result<Self> {
         config.limits.validate()?;
         backend.bind(Waker(shared.wake.clone()));
-        backend.configure_video(config.limits, config.nominal_fps)?;
+        backend.configure_video(config.limits, config.limits.max_fps)?;
         let now = clock.now();
         let pace_fps = shared.targets.pace_fps.load(Ordering::Acquire).max(1);
         Ok(Self {
@@ -313,7 +312,6 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             clock,
             codec: config.codec,
             limits: config.limits,
-            nominal_fps: config.nominal_fps,
             admission: config.admission,
             lease: None,
             state: shared.state.borrow().clone(),

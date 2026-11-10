@@ -49,7 +49,10 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 self.invalidate();
             }
             self.keyframe = true;
-            if let Err(failure) = self.backend.configure_video(self.limits, self.nominal_fps) {
+            if let Err(failure) = self
+                .backend
+                .configure_video(self.limits, self.limits.max_fps)
+            {
                 self.fail(failure, now);
                 return false;
             }

@@ -230,7 +230,6 @@ fn config(admission: Option<Arc<dyn ControlAdmission>>) -> WorkerConfig {
     WorkerConfig {
         codec: VideoCodec::H264,
         limits: LIMITS,
-        nominal_fps: 60,
         admission,
     }
 }

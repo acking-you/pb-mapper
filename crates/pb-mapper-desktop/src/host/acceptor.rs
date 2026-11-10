@@ -190,7 +190,6 @@ impl Acceptor {
             WorkerConfig {
                 codec,
                 limits: request.limits,
-                nominal_fps: request.limits.max_fps,
                 admission: self.admission.clone(),
             },
         );
