@@ -13,7 +13,22 @@ use tokio::sync::mpsc;
 
 mod observe;
 
-use observe::Observation;
+use observe::{OBSERVATION_RETENTION, Observation};
+
+/// Direct control connections registered as consumers at once.
+const MAX_CONSUMERS: usize = 1024;
+/// Setups held at once, pending or ended but not yet past their deadline.
+const MAX_SETUPS: usize = 4096;
+/// The longest service name a setup or a session report may carry: the limit
+/// every service name has.
+const MAX_SERVICE_KEY_LEN: usize = crate::service_key::MAX_SERVICE_NAME_LEN;
+/// Characters kept of a reason a peer supplies.
+const MAX_REASON_CHARS: usize = 256;
+
+const _: () = assert!(
+    FallbackCredits::CAPACITY >= MAX_SETUPS,
+    "every setup abandoned before its grant can leave a credit"
+);
 
 fn conn_task(event: DirectEvent) -> ConnTask {
     ConnTask::Direct(Box::new(event))
@@ -140,7 +155,7 @@ impl DirectState {
         sender: mpsc::Sender<DirectEvent>,
     ) {
         if let Some(capability) = &self.capability
-            && self.consumers.len() < 1024
+            && self.consumers.len() < MAX_CONSUMERS
             && auth.ensure_active().is_ok()
             && sender
                 .try_send(DirectEvent::Ready(capability.clone()))
@@ -174,8 +189,8 @@ impl DirectState {
         if consumer.auth.ensure_active().is_err()
             || !peer.valid()
             || key.is_empty()
-            || key.len() > 1024
-            || self.entries.len() >= 4096
+            || key.len() > MAX_SERVICE_KEY_LEN
+            || self.entries.len() >= MAX_SETUPS
         {
             self.send(
                 connection,
@@ -410,7 +425,7 @@ impl DirectState {
                     consumer,
                     DirectEvent::Rejected {
                         request,
-                        reason: reason.chars().take(256).collect(),
+                        reason: reason.chars().take(MAX_REASON_CHARS).collect(),
                     },
                 );
             }
@@ -480,7 +495,7 @@ impl DirectState {
             .retain(|_, entry| entry.deadline > Instant::now());
         self.fallback_credits.sweep();
         self.observations
-            .retain(|_, observation| observation.touched.elapsed() < Duration::from_secs(120));
+            .retain(|_, observation| observation.touched.elapsed() < OBSERVATION_RETENTION);
     }
 }
 

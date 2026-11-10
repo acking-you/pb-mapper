@@ -3,7 +3,25 @@
 use super::DirectState;
 use pb_mapper_auth::AuthContext;
 use pb_mapper_protocol::direct::*;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Sessions observed at once, across every namespace.
+const MAX_OBSERVATIONS: usize = 4096;
+/// Sessions observed at once in one namespace.
+const MAX_OBSERVATIONS_PER_NAMESPACE: usize = 1024;
+/// How long an observation nobody reports on is kept.
+pub(super) const OBSERVATION_RETENTION: Duration = Duration::from_secs(120);
+/// Age past which a report, or a missing one, marks its session stale.
+const STALE_REPORT_MS: u64 = 45_000;
+
+const _: () = assert!(
+    MAX_OBSERVATIONS_PER_NAMESPACE <= MAX_OBSERVATIONS,
+    "one namespace cannot hold more than every observation"
+);
+const _: () = assert!(
+    STALE_REPORT_MS / 1000 < OBSERVATION_RETENTION.as_secs(),
+    "a session is reported stale while it is still observed"
+);
 
 impl DirectState {
     pub(super) fn observe(
@@ -27,7 +45,7 @@ impl DirectState {
                 } else {
                     session.provider_key
                 }
-            || session.service.len() > 1024
+            || session.service.len() > super::MAX_SERVICE_KEY_LEN
             || crate::scoped_service_key(auth, namespace, &session.service).is_err()
         {
             return;
@@ -76,7 +94,9 @@ impl DirectState {
         if slot.as_ref().is_some_and(|(old, _)| old.seq >= report.seq) {
             return;
         }
-        report.reason = report.reason.map(|r| r.chars().take(256).collect());
+        report.reason = report
+            .reason
+            .map(|r| r.chars().take(super::MAX_REASON_CHARS).collect());
         observation.touched = Instant::now();
         *slot = Some((report, observation.touched));
     }
@@ -86,8 +106,8 @@ impl DirectState {
             .values()
             .filter(|o| o.session.namespace == namespace)
             .count()
-            >= 1024;
-        if !namespace_full && self.observations.len() < 4096 {
+            >= MAX_OBSERVATIONS_PER_NAMESPACE;
+        if !namespace_full && self.observations.len() < MAX_OBSERVATIONS {
             return true;
         }
         // Retention is a history budget, not a reason to hide new active
@@ -122,7 +142,7 @@ impl DirectState {
                 let provider = observed(&o.provider);
                 let stale = [&consumer, &provider]
                     .into_iter()
-                    .any(|r| r.as_ref().is_none_or(|r| r.age_ms > 45_000));
+                    .any(|r| r.as_ref().is_none_or(|r| r.age_ms > STALE_REPORT_MS));
                 let conflicting = consumer
                     .as_ref()
                     .zip(provider.as_ref())

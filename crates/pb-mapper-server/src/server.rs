@@ -87,10 +87,14 @@ impl Deregistration for ServerDeregistration {
 
 const DEFAULT_SERVER_CHAN_CAP: usize = 32 * 4;
 /// Idle threshold for a protocol-v1 registration, which has no lease to renew.
-///
-/// Must be greater than the local server ping interval (5 minutes). Equal values race
-/// under scheduler/network jitter and can drop a healthy registration.
 pub(super) const LEGACY_SERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 11);
+/// How often a protocol-v1 local server pings its registration.
+const LEGACY_PING_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+const _: () = assert!(
+    LEGACY_SERVER_IDLE_TIMEOUT.as_secs() > LEGACY_PING_INTERVAL.as_secs(),
+    "equal values race under scheduler and network jitter and drop a healthy registration"
+);
 
 enum ServerControlWrite {
     Pong(Vec<u8>),
@@ -626,7 +630,7 @@ mod tests {
     use pb_mapper_protocol::MessageWriter;
     use tokio_util::sync::CancellationToken;
 
-    use super::{ConnTask, LEGACY_SERVER_IDLE_TIMEOUT, ServerControlWrite, run_control_writer};
+    use super::{ConnTask, ServerControlWrite, run_control_writer};
 
     /// A writer whose every write blocks forever.
     ///
@@ -698,10 +702,5 @@ mod tests {
             .await
             .expect("cancelling the retire token did not unwind the blocked writer")
             .expect("an interrupted write should not surface as an error");
-    }
-
-    #[test]
-    fn server_timeout_has_slack_over_local_server_ping_interval() {
-        assert!(LEGACY_SERVER_IDLE_TIMEOUT > Duration::from_secs(5 * 60));
     }
 }

@@ -31,6 +31,23 @@ const CONNECTIONS_PER_CREDENTIAL: usize = 16;
 /// temporary credentials between them cannot lock it out.
 const ADMIN_RESERVED: usize = 8;
 
+const _: () = assert!(
+    UNVALIDATED_HANDSHAKES <= HANDSHAKES,
+    "unvalidated handshakes are a share of all handshakes"
+);
+const _: () = assert!(
+    HANDSHAKES_PER_ADDRESS <= HANDSHAKES,
+    "one address cannot hold more than every slot"
+);
+const _: () = assert!(
+    ADMIN_RESERVED < CONNECTIONS,
+    "the reserve must leave room for temporary credentials"
+);
+const _: () = assert!(
+    CONNECTIONS_PER_CREDENTIAL <= CONNECTIONS - ADMIN_RESERVED,
+    "one credential cannot exceed what all temporary credentials share"
+);
+
 /// Authenticated connections held, in all and per temporary credential.
 pub(super) struct Admission {
     total: Arc<Semaphore>,

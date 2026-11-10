@@ -6,6 +6,9 @@ use pb_mapper_auth::AuthContext;
 
 use crate::routing::ImutableKey;
 
+/// The longest service name, in bytes; the rejection below spells it out.
+pub(crate) const MAX_SERVICE_NAME_LEN: usize = 1024;
+
 pub(crate) fn scoped_service_key(
     context: &AuthContext,
     namespace: u64,
@@ -37,7 +40,10 @@ pub(crate) fn scoped_service_key(
 pub(crate) fn validate_service_name(
     service_name: &str,
 ) -> std::result::Result<(), pb_mapper_auth::AuthFailure> {
-    if service_name.is_empty() || service_name.len() > 1024 || service_name.contains('\0') {
+    if service_name.is_empty()
+        || service_name.len() > MAX_SERVICE_NAME_LEN
+        || service_name.contains('\0')
+    {
         return Err(pb_mapper_auth::AuthFailure::new(
             "service_name_invalid",
             "service names must be 1-1024 bytes and must not contain NUL",

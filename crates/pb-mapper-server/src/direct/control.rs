@@ -7,6 +7,13 @@ use pb_mapper_protocol::direct::*;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+/// How long a control connection may stay silent; clients ping well inside it.
+const CONTROL_IDLE: Duration = Duration::from_secs(45);
+/// How long one event may take to write before the connection is dropped.
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Events the manager may queue for one control connection.
+const CONTROL_EVENT_QUEUE: usize = 64;
+
 /// A direct control connection: its consumer state, then its ID.
 ///
 /// Cleanup owns no sockets and is fenced by the connection's scope, so it logs
@@ -59,7 +66,7 @@ pub(crate) async fn handle_control(
     let io = std::io::Error::other::<pb_mapper_core::error::Error>;
     let auth = session.context().map_err(io)?.clone();
     let cancellation = auth.cancellation_token().map_err(std::io::Error::other)?;
-    let (events, mut rx) = mpsc::channel(64);
+    let (events, mut rx) = mpsc::channel(CONTROL_EVENT_QUEUE);
     // Dropped, never awaited: whichever way this returns, the drop queues the
     // cleanup without waiting on the manager.
     let _guard = DeregisterGuard::new(ControlDeregistration { connection }, sender.clone());
@@ -77,7 +84,7 @@ pub(crate) async fn handle_control(
     let mut writer = session.response_writer(&mut writer).map_err(io)?;
     let read = async {
         loop {
-            let msg = tokio::time::timeout(Duration::from_secs(45), reader.read_msg())
+            let msg = tokio::time::timeout(CONTROL_IDLE, reader.read_msg())
                 .await
                 .map_err(|_| std::io::Error::other("direct control idle"))?
                 .map_err(io)?;
@@ -96,7 +103,7 @@ pub(crate) async fn handle_control(
     let write = async {
         while let Some(event) = rx.recv().await {
             let bytes = PbConnResponse::Direct(event).encode().map_err(io)?;
-            tokio::time::timeout(Duration::from_secs(5), writer.write_msg(&bytes))
+            tokio::time::timeout(CONTROL_WRITE_TIMEOUT, writer.write_msg(&bytes))
                 .await
                 .map_err(|_| std::io::Error::other("direct control write timed out"))?
                 .map_err(io)?;
