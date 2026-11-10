@@ -10,17 +10,14 @@ use super::error::{
     self, ControlIoTimeoutSnafu, DecodeStreamReqSnafu, EncodePingMsgSnafu, EncodeStreamAckMsgSnafu,
     WritePingMsgSnafu, WriteStreamAckMsgSnafu,
 };
-use super::stream::{StreamConnect, handle_stream_on_endpoint};
+use super::stream::{SpawnStream, StreamConnect, StreamJob};
 use crate::diagnostics::Diagnostics;
 use crate::endpoint::RelayEndpoint;
 use pb_mapper_core::config::control_io_timeout;
-use pb_mapper_core::snafu_error_handle;
 use pb_mapper_protocol::MessageWriter;
 use pb_mapper_protocol::command::{
     CONTROL_PROTOCOL_V2, LocalServer, MessageSerializer, PbServerRequest,
 };
-use pb_mapper_protocol::forward::StreamForward;
-use uni_stream::stream::StreamProvider;
 
 fn get_ping_message(protocol_version: u16, seq: u64) -> error::Result<Vec<u8>> {
     if protocol_version >= CONTROL_PROTOCOL_V2 {
@@ -118,7 +115,7 @@ pub(super) async fn handle_ping_interval<T: MessageWriter>(
 
 #[instrument(skip_all, fields(%key, conn_id))]
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_request<LocalStream: StreamProvider>(
+pub(super) async fn handle_request(
     msg: &[u8],
     target: StreamConnect,
     relay_endpoint: RelayEndpoint,
@@ -128,13 +125,11 @@ pub(super) async fn handle_request<LocalStream: StreamProvider>(
     write_tx: &tokio::sync::mpsc::Sender<LocalControlWrite>,
     lease_state: Arc<tokio::sync::Mutex<ControlLeaseState>>,
     stream_tasks: &mut JoinSet<()>,
+    spawn: SpawnStream,
     shutdown: &CancellationToken,
     setup_slots: &Arc<tokio::sync::Semaphore>,
     #[cfg(feature = "p2p")] direct: Option<&Arc<crate::direct::Provider>>,
-) -> error::Result<()>
-where
-    LocalStream::Item: StreamForward,
-{
+) -> error::Result<()> {
     let req = LocalServer::decode(msg).context(DecodeStreamReqSnafu)?;
 
     match req {
@@ -181,27 +176,19 @@ where
                 .map_err(|_| error::Error::ControlWriterClosed {
                     action: "stream ack message",
                 })?;
-            let key = key.clone();
-            let stream_shutdown = shutdown.clone();
-            let diagnostics = diagnostics.clone();
-            // Tracked rather than detached: a cancelled registration must take its
-            // in-flight forwarded sessions with it, so `stop()` returning means no
-            // stream of this tunnel is still moving bytes.
-            stream_tasks.spawn(async move {
-                let forward = handle_stream_on_endpoint::<LocalStream>(
+            spawn(
+                stream_tasks,
+                StreamJob {
                     key,
                     client_id,
                     server_generation,
                     target,
                     permit,
-                    relay_endpoint,
-                    diagnostics,
-                );
-                tokio::select! {
-                    () = stream_shutdown.cancelled() => {}
-                    result = forward => snafu_error_handle!(result),
-                }
-            });
+                    endpoint: relay_endpoint,
+                    diagnostics: diagnostics.clone(),
+                    shutdown: shutdown.clone(),
+                },
+            );
         }
         // got pong response
         LocalServer::Pong => {

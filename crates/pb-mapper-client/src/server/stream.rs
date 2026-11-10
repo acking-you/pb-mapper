@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
 use snafu::ResultExt;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use super::error::{
@@ -35,10 +38,67 @@ pub struct StreamConnect {
     pub idle_timeout: Option<std::time::Duration>,
 }
 
+/// Starts one forwarded session in a worker's set of sessions.
+///
+/// The only step of a registration that names the local stream type, so the
+/// control pool, its workers and their attempts are compiled once rather than
+/// once per stream type: they carry [`spawn_stream`] for the type the tunnel
+/// was started with, as a plain function pointer called once per session.
+pub(super) type SpawnStream = fn(&mut JoinSet<()>, StreamJob);
+
+/// What one forwarded session needs, handed from the control loop that
+/// accepted the relay's stream request to the session's own task.
+pub(super) struct StreamJob {
+    pub(super) key: Arc<str>,
+    pub(super) client_id: u32,
+    pub(super) server_generation: u64,
+    pub(super) target: StreamConnect,
+    pub(super) permit: OwnedSemaphorePermit,
+    pub(super) endpoint: RelayEndpoint,
+    pub(super) diagnostics: Diagnostics,
+    pub(super) shutdown: CancellationToken,
+}
+
+/// The [`SpawnStream`] for `LocalStream`.
+///
+/// Tracked rather than detached: a cancelled registration must take its
+/// in-flight forwarded sessions with it, so `stop()` returning means no
+/// stream of this tunnel is still moving bytes.
+pub(super) fn spawn_stream<LocalStream: StreamProvider>(tasks: &mut JoinSet<()>, job: StreamJob)
+where
+    LocalStream::Item: StreamForward,
+{
+    let StreamJob {
+        key,
+        client_id,
+        server_generation,
+        target,
+        permit,
+        endpoint,
+        diagnostics,
+        shutdown,
+    } = job;
+    tasks.spawn(async move {
+        let forward = handle_stream_on_endpoint::<LocalStream>(
+            key,
+            client_id,
+            server_generation,
+            target,
+            permit,
+            endpoint,
+            diagnostics,
+        );
+        tokio::select! {
+            () = shutdown.cancelled() => {}
+            result = forward => snafu_error_handle!(result),
+        }
+    });
+}
+
 /// Forward a stream using the carrier and relay selected by its registration,
 /// counted as one of the tunnel's relay sessions once it starts forwarding.
 #[instrument(skip(connect, setup_permit, endpoint, diagnostics), fields(key = %key))]
-pub(crate) async fn handle_stream_on_endpoint<LocalStream: StreamProvider>(
+async fn handle_stream_on_endpoint<LocalStream: StreamProvider>(
     key: Arc<str>,
     client_id: u32,
     server_generation: u64,

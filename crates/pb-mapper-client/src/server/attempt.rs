@@ -19,7 +19,7 @@ use super::error::{
 };
 use super::probe::{RegistrationProbeResult, probe_remote_registration};
 use super::status::WorkerStatus;
-use super::stream::StreamConnect;
+use super::stream::{SpawnStream, StreamConnect};
 use super::worker::ControlBackoff;
 use crate::diagnostics::{Diagnostics, RecoveryPhase};
 use crate::endpoint::{RecoveryWake, RelayEndpoint};
@@ -42,9 +42,7 @@ use pb_mapper_protocol::command::PbServerRequest;
 use pb_mapper_protocol::command::{
     CONTROL_PROTOCOL_V2, MessageSerializer, PbConnRequest, PbConnResponse,
 };
-use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
-use uni_stream::stream::StreamProvider;
 
 /// Why one attempt at holding a control connection ended, and therefore how the
 /// worker should treat it.
@@ -101,6 +99,7 @@ pub(super) struct ServerCliRunConfig {
     pub(super) idle_timeout: Option<Duration>,
     #[cfg(feature = "p2p")]
     pub(super) direct: Option<Arc<crate::direct::Provider>>,
+    pub(super) spawn_stream: SpawnStream,
 }
 
 impl Debug for ServerCliRunConfig {
@@ -133,7 +132,7 @@ fn new_client_instance_id(worker_index: usize) -> String {
 // print two ladders' internals on every span the worker enters.
 #[allow(clippy::too_many_arguments)]
 #[instrument(skip(backoff, report, shutdown, stream_tasks, setup_slots, wake, carrier))]
-pub(super) async fn run_server_side_cli_inner<LocalStream: StreamProvider>(
+pub(super) async fn run_server_side_cli_inner(
     backoff: &mut ControlBackoff,
     config: ServerCliRunConfig,
     report: &impl Fn(WorkerStatus),
@@ -142,10 +141,7 @@ pub(super) async fn run_server_side_cli_inner<LocalStream: StreamProvider>(
     setup_slots: &Arc<tokio::sync::Semaphore>,
     wake: &mut RecoveryWake,
     carrier: &mut Option<CarrierId>,
-) -> std::result::Result<(), Status>
-where
-    LocalStream::Item: StreamForward,
-{
+) -> std::result::Result<(), Status> {
     let ServerCliRunConfig {
         local_addr,
         remote_addr,
@@ -164,6 +160,7 @@ where
         idle_timeout,
         #[cfg(feature = "p2p")]
         direct,
+        spawn_stream,
     } = config;
     let control_permit = tokio::select! {
         () = shutdown.cancelled() => return Err(Status::Cancelled),
@@ -478,7 +475,7 @@ where
                 lease_state.lock().await.record_rx();
                 control_deadline = tokio::time::Instant::now() + heartbeat_tolerance + suspect_grace;
                 snafu_error_get_or_continue!(
-                    handle_request::<LocalStream>(
+                    handle_request(
                         msg,
                         StreamConnect {
                             local_addr: local_addr.clone(),
@@ -495,6 +492,7 @@ where
                         &write_tx,
                         lease_state.clone(),
                         stream_tasks,
+                        spawn_stream,
                         &shutdown,
                         setup_slots,
                         #[cfg(feature = "p2p")]

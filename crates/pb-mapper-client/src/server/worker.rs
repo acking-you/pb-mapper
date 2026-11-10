@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::attempt::{ServerCliRunConfig, Status, run_server_side_cli_inner};
 use super::status::{PoolStatus, WorkerStatus};
+use super::stream::spawn_stream;
 use super::{ServerTunnelOptions, StatusCallback};
 use crate::diagnostics::{Diagnostics, RecoveryFailure};
 use crate::endpoint::RelayEndpoint;
@@ -119,6 +120,33 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
     });
     #[cfg(not(feature = "p2p"))]
     let _ = (allow_direct, policy);
+    let config = ServerCliRunConfig {
+        local_addr,
+        remote_addr,
+        diagnostics,
+        key,
+        options,
+        worker_index: 0,
+        credential,
+        idle_timeout,
+        #[cfg(feature = "p2p")]
+        direct,
+        spawn_stream: spawn_stream::<LocalStream>,
+    };
+    run_control_pool(config, pool_size, status_callback, shutdown).await;
+}
+
+/// Run `pool_size` control workers for the registration `config` describes,
+/// and return once every one of them has.
+///
+/// Not generic: the local stream type is reached only through
+/// `config.spawn_stream`, so this and everything below it is compiled once.
+async fn run_control_pool(
+    config: ServerCliRunConfig,
+    pool_size: usize,
+    status_callback: Option<StatusCallback>,
+    shutdown: CancellationToken,
+) {
     let mut workers = JoinSet::new();
     // Every worker reports here, and the pool's aggregate is what the caller is
     // told: one healthy control connection is a reachable service, whichever
@@ -126,31 +154,15 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
     let pool_status =
         status_callback.map(|callback| Arc::new(PoolStatus::new(callback, pool_size)));
     for worker_index in 0..pool_size {
-        let worker_key = key.clone();
-        let worker_status = pool_status.clone();
-        let worker_shutdown = shutdown.clone();
-        let worker_local = local_addr.clone();
-        let worker_remote = remote_addr.clone();
-        let worker_diagnostics = diagnostics.clone();
-        #[cfg(feature = "p2p")]
-        let worker_direct = direct.clone();
-        workers.spawn(async move {
-            run_server_side_cli_worker::<LocalStream>(
-                worker_local,
-                worker_remote,
-                worker_key,
-                options,
-                worker_status,
-                worker_index,
-                credential,
-                worker_shutdown,
-                worker_diagnostics,
-                idle_timeout,
-                #[cfg(feature = "p2p")]
-                worker_direct,
-            )
-            .await;
-        });
+        let worker = ServerCliRunConfig {
+            worker_index,
+            ..config.clone()
+        };
+        workers.spawn(run_server_side_cli_worker(
+            worker,
+            pool_status.clone(),
+            shutdown.clone(),
+        ));
     }
     while let Some(result) = workers.join_next().await {
         if let Err(e) = result {
@@ -162,46 +174,33 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
         }
     }
     #[cfg(feature = "p2p")]
-    if let Some(direct) = direct {
+    if let Some(direct) = config.direct {
         direct.stop().await;
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_server_side_cli_worker<LocalStream>(
-    local_addr: ResolvedAddrs,
-    remote_addr: RelayEndpoint,
-    key: Arc<str>,
-    options: ServerTunnelOptions,
+/// One control worker: hold a registration with the relay, reconnecting on
+/// whichever ladder the last attempt's outcome calls for, until it is
+/// cancelled or permanently rejected.
+async fn run_server_side_cli_worker(
+    config: ServerCliRunConfig,
     pool_status: Option<Arc<PoolStatus>>,
-    worker_index: usize,
-    credential: Credential,
     shutdown: CancellationToken,
-    diagnostics: Diagnostics,
-    idle_timeout: Option<Duration>,
-    #[cfg(feature = "p2p")] direct: Option<Arc<crate::direct::Provider>>,
-) where
-    LocalStream: StreamProvider + Send + 'static,
-    LocalStream::Item: StreamForward,
-{
+) {
+    let worker_index = config.worker_index;
+    let ServerCliRunConfig {
+        local_addr,
+        remote_addr,
+        diagnostics,
+        key,
+        ..
+    } = &config;
     let report = |status: WorkerStatus| {
         if let Some(ref pool_status) = pool_status {
             pool_status.report(worker_index, status);
         }
     };
     let mut backoff = ControlBackoff::new();
-    let run_config = ServerCliRunConfig {
-        local_addr: local_addr.clone(),
-        remote_addr: remote_addr.clone(),
-        diagnostics: diagnostics.clone(),
-        key: key.clone(),
-        options,
-        worker_index,
-        credential,
-        idle_timeout,
-        #[cfg(feature = "p2p")]
-        direct: direct.clone(),
-    };
     // Forwarded sessions outlive a single control connection, so the set lives
     // here rather than inside the attempt: a reconnect is not a reason to drop
     // streams that are still healthy. It is drained before this worker returns.
@@ -216,9 +215,9 @@ async fn run_server_side_cli_worker<LocalStream>(
         wake.acknowledge();
         diagnostics.attempt();
         let mut carrier = None;
-        let status = if let Err(status) = run_server_side_cli_inner::<LocalStream>(
+        let status = if let Err(status) = run_server_side_cli_inner(
             &mut backoff,
-            run_config.clone(),
+            config.clone(),
             &report,
             shutdown.clone(),
             &mut stream_tasks,
@@ -262,7 +261,8 @@ async fn run_server_side_cli_worker<LocalStream>(
             Status::Cancelled => break 'outer,
             #[cfg(feature = "p2p")]
             Status::Rejected(_)
-                if direct
+                if config
+                    .direct
                     .as_ref()
                     .is_some_and(|provider| provider.has_active()) =>
             {
