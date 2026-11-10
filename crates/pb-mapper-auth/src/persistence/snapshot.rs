@@ -2,10 +2,6 @@
 use super::super::*;
 use super::{auth_snapshot_path, auth_wal_path, open_blob, read_wal};
 
-pub(crate) fn compaction_is_allowed(safe_mode: bool) -> bool {
-    !safe_mode
-}
-
 pub(crate) fn push_audit_record(inner: &AuthStateInner, record: AuditRecord) {
     let mut records = inner.audit_records.write();
     while records.len() >= AUDIT_RECORD_CAPACITY {

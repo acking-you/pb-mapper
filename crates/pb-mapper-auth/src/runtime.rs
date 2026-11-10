@@ -155,24 +155,10 @@ impl AuthRuntime {
                 .map(|state| state.legacy_protocol)
                 .unwrap_or(config.legacy_protocol)
         };
-        let mut admin_replay_order = loaded
-            .as_ref()
-            .map(|state| {
-                state
-                    .admin_replays
-                    .iter()
-                    .filter(|record| record.within_retention(now))
-                    .cloned()
-                    .collect::<VecDeque<_>>()
-            })
-            .unwrap_or_default();
-        while admin_replay_order.len() > ADMIN_REPLAY_CAPACITY {
-            admin_replay_order.pop_front();
-        }
-        let admin_replays = admin_replay_order
-            .iter()
-            .map(|record| record.fingerprint)
-            .collect::<HashSet<_>>();
+        let admin_replays = AdminReplays::restored(
+            loaded.as_ref().map_or(&[], |state| &state.admin_replays),
+            now,
+        );
         let mut audit_records: VecDeque<AuditRecord> = loaded
             .as_ref()
             .map(|state| state.audit_records.iter().cloned().collect())
@@ -219,18 +205,17 @@ impl AuthRuntime {
             cold: RwLock::new(cold),
         });
         let (command_tx, command_rx) = mpsc::channel(256);
-        let actor = tokio::spawn(run_auth_actor(
-            inner.clone(),
-            admin_lease,
-            command_rx,
-            config.clone(),
-            AuthActorState::new(
+        let actor = tokio::spawn(
+            Actor::new(
+                inner.clone(),
+                admin_lease,
+                config.clone(),
                 Leases::restored(&inner, now),
                 admin_replays,
-                admin_replay_order,
-            ),
-            state_lock.clone(),
-        ));
+                state_lock.clone(),
+            )
+            .run(command_rx),
+        );
         let actor_abort = actor.abort_handle();
         let runtime = Self {
             inner: Arc::downgrade(&inner),

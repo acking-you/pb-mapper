@@ -50,9 +50,8 @@ pub(crate) use namespaces::{
 #[cfg(test)]
 pub(crate) use snapshot::try_load_persisted_state;
 pub(crate) use snapshot::{
-    build_snapshot, cancel_all_temporary_leases, compaction_is_allowed, empty_snapshot,
-    load_persisted_state, normalize_tombstone_times, push_audit_record, push_persisted_audit,
-    split_high_slot_state,
+    build_snapshot, cancel_all_temporary_leases, empty_snapshot, load_persisted_state,
+    normalize_tombstone_times, push_audit_record, push_persisted_audit, split_high_slot_state,
 };
 pub(crate) use wal::{
     append_audit, append_mutation, append_wal, fail_closed_on_uncertain_wal, read_wal,

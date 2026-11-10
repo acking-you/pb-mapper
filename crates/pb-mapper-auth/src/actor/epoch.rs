@@ -14,11 +14,10 @@ pub(super) fn actor_reset(
     config: &AuthConfig,
     leases: &mut Leases,
     admin_replays: &VecDeque<AdminReplayRecord>,
-    action: &str,
 ) -> Result<(), AuthFailure> {
     let new_instance_id = random_instance_id();
     inner.root_epoch.fetch_add(1, Ordering::AcqRel);
-    let reset_audit = audit(action, None, None);
+    let reset_audit = audit("auth_state_reset", None, None);
     let mut snapshot = empty_snapshot(inner, new_instance_id, admin_replays);
     push_persisted_audit(&mut snapshot.audit_records, reset_audit.clone());
     let admin_key = inner.admin_key();

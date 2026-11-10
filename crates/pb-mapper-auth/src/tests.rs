@@ -630,12 +630,6 @@ async fn from_isolated_state_takes_the_state_lock_before_creating_admin_key() {
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
-#[test]
-fn safe_mode_startup_does_not_allow_compaction() {
-    assert!(!compaction_is_allowed(true));
-    assert!(compaction_is_allowed(false));
-}
-
 #[tokio::test]
 async fn reset_clears_retained_high_slot_entries() {
     let state_dir = temp_state_dir("reset-high-slots");
@@ -1591,75 +1585,47 @@ async fn revoking_keeps_the_row_until_its_retention_elapses() {
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
+/// Retention counts from the relay's own acceptance time, falling back to the
+/// client's timestamp only for records written before that was kept.
 #[test]
 fn replay_pruning_removes_only_records_outside_the_retention_window() {
     let now = 10_000;
-    let expired = AdminReplayRecord {
-        fingerprint: [1; 32],
-        client_timestamp: now - ADMIN_REPLAY_RETENTION.as_secs() - 1,
-        accepted_at: now - ADMIN_REPLAY_RETENTION.as_secs() - 1,
-    };
-    let current = AdminReplayRecord {
-        fingerprint: [2; 32],
-        client_timestamp: now,
-        accepted_at: now,
-    };
-    let mut replay_set = HashSet::from([expired.fingerprint, current.fingerprint]);
-    let mut replay_order = VecDeque::from([expired, current.clone()]);
-
-    super::actor::prune_expired_admin_replays(now, &mut replay_set, &mut replay_order);
-
-    assert_eq!(replay_set, HashSet::from([current.fingerprint]));
-    assert_eq!(replay_order.len(), 1);
-    assert_eq!(replay_order[0].fingerprint, current.fingerprint);
-}
-
-#[test]
-fn replay_pruning_uses_server_acceptance_not_client_timestamp() {
-    let now = 10_000;
     let retention = ADMIN_REPLAY_RETENTION.as_secs();
-    let backdated = AdminReplayRecord {
-        fingerprint: [3; 32],
-        client_timestamp: now - retention - 1,
-        accepted_at: now - 1,
+    let record = |fingerprint: u8, client_timestamp: u64, accepted_at: u64| AdminReplayRecord {
+        fingerprint: [fingerprint; 32],
+        client_timestamp,
+        accepted_at,
     };
-    let future_dated_but_expired = AdminReplayRecord {
-        fingerprint: [4; 32],
-        client_timestamp: now + retention / 2,
-        accepted_at: now - retention - 1,
-    };
-    let mut replay_set =
-        HashSet::from([backdated.fingerprint, future_dated_but_expired.fingerprint]);
-    let mut replay_order = VecDeque::from([backdated.clone(), future_dated_but_expired]);
+    let records = [
+        record(1, now - retention - 1, now - retention - 1),
+        record(2, now, now),
+        // Backdated by the client, but accepted recently.
+        record(3, now - retention - 1, now - 1),
+        // Future-dated by the client, but accepted too long ago.
+        record(4, now + retention / 2, now - retention - 1),
+        // Legacy records, without an acceptance time.
+        record(5, now - retention - 1, 0),
+        record(6, now, 0),
+    ];
+    // Restored at time 0, nothing has left the window yet.
+    let mut replays = AdminReplays::restored(&records, 0);
+    assert_eq!(replays.records().len(), records.len());
 
-    super::actor::prune_expired_admin_replays(now, &mut replay_set, &mut replay_order);
+    replays.prune(now);
 
-    assert_eq!(replay_set, HashSet::from([backdated.fingerprint]));
-    assert_eq!(replay_order.len(), 1);
-    assert_eq!(replay_order[0].fingerprint, backdated.fingerprint);
-}
-
-#[test]
-fn replay_pruning_falls_back_to_client_timestamp_for_legacy_records() {
-    let now = 10_000;
-    let legacy_expired = AdminReplayRecord {
-        fingerprint: [5; 32],
-        client_timestamp: now - ADMIN_REPLAY_RETENTION.as_secs() - 1,
-        accepted_at: 0,
-    };
-    let legacy_current = AdminReplayRecord {
-        fingerprint: [6; 32],
-        client_timestamp: now,
-        accepted_at: 0,
-    };
-    let mut replay_set = HashSet::from([legacy_expired.fingerprint, legacy_current.fingerprint]);
-    let mut replay_order = VecDeque::from([legacy_expired, legacy_current.clone()]);
-
-    super::actor::prune_expired_admin_replays(now, &mut replay_set, &mut replay_order);
-
-    assert_eq!(replay_set, HashSet::from([legacy_current.fingerprint]));
-    assert_eq!(replay_order.len(), 1);
-    assert_eq!(replay_order[0].fingerprint, legacy_current.fingerprint);
+    let kept = replays
+        .records()
+        .iter()
+        .map(|record| record.fingerprint[0])
+        .collect::<Vec<_>>();
+    assert_eq!(kept, [2, 3, 6]);
+    for fingerprint in 1..=6 {
+        assert_eq!(
+            replays.admitted(&[fingerprint; 32]),
+            kept.contains(&fingerprint),
+            "fingerprint {fingerprint}"
+        );
+    }
 }
 
 #[test]
