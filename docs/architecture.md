@@ -104,7 +104,8 @@ pb-mapper-ffi ─▶ pb-mapper (feature desktop) ─▶ pb-mapper-desktop ─▶
 only the FFI enables it, so no CLI, relay or plain SDK build links capture,
 codec or input code. `pb-mapper-desktop` also uses `pb-mapper-core` on every
 target, for `durable_file` (the trust file and the display-mode journal),
-`time` and `RetryBackoff`.
+`time`, `RetryBackoff` and `checksum`'s temporary-credential prefix, which
+`Invitation::decode` uses to recognise a pasted setup string.
 
 Note that the binary is still named `pb-mapper`, discovered from
 `src/bin/pb-mapper.rs` inside `pb-mapper-cli`. The release workflows, both

@@ -147,9 +147,9 @@ base runs, 3 of 30 refactored), so a third session ran base against
 | part 1, session 3 | A | base 3207797 | 50 | 2 | 0 |
 | | B | 03d1dd0f | 50 | 2 | 0 |
 | u05-02 | before | 03d1dd0f | 30 | 1 | 0 |
-| | after | 2d26640d | 30 | 2 | 0 |
-| one-write | before | 2cdd5b3b | 60 | 2 | 0 |
-| | after | 65b434af | 60 | 5 | 1 |
+| | after | 91c6d5d5 | 30 | 2 | 0 |
+| one-write | before | 967847e1 | 60 | 2 | 0 |
+| | after | 006152f8 | 60 | 5 | 1 |
 
 Base stalls too (2 of 80 runs, against 5 of 80 for 03d1dd0f: Fisher exact
 p = 0.44; 2 of 80 against 16 of 260 for every build after the refactor:
@@ -158,7 +158,7 @@ them measurably more frequent. Their cause was not found.
 
 ## Part 2: the deferred findings and report-only items
 
-### u05-02: the relay's forwarding body as one generic function (kept, 2d26640d)
+### u05-02: the relay's forwarding body as one generic function (kept, 91c6d5d5)
 
 `with_relay_stream!` pasted the subscriber-to-provider forwarding body once
 per carrier pair, four times with `relay-quic`. It is now `relay_legs`,
@@ -167,7 +167,7 @@ the relay codecs are built once, before the dispatch, after the setup
 responses as before. This is a duplication fix first; the measurement
 checks that the extra async-fn layer costs nothing.
 
-`relay_transport_bench`, before = 03d1dd0f, after = 2d26640d, 30 rounds
+`relay_transport_bench`, before = 03d1dd0f, after = 91c6d5d5, 30 rounds
 each:
 
 | metric | before (n=30) | after (n=30) | change | p |
@@ -194,7 +194,7 @@ p = 0.33). The TCP latency gains (p 0.01 to 0.04) are of the size
 the A/A check produced by chance and are not claimed. Verdict: kept, no
 slower and simpler.
 
-### u01-05: the process credential's checksum in one atomic (kept, 64b94733)
+### u01-05: the process credential's checksum in one atomic (kept, 77c65aa6)
 
 `valid_checksum` took two read locks (cloning the load error) and an atomic
 load per frame keyed by the process credential. Readiness and the hash are
@@ -208,7 +208,7 @@ session key), so `relay_transport_bench` does not reach this path; it is
 the SDK's `get_header_msg_reader` / `get_header_msg_writer` framing, which
 `framing_bench`'s `process` rows drive.
 
-`framing_bench`, before = 2d26640d, after = 64b94733, 10 rounds each:
+`framing_bench`, before = 91c6d5d5, after = 77c65aa6, 10 rounds each:
 
 | metric | before (n=10) | after (n=10) | change | p |
 |---|---|---|---|---|
@@ -233,13 +233,13 @@ Verdict: kept. The `process` rows are the changed path, 31-61% faster; the
 other rows are controls, which moved by the code placement noise described
 under "Method".
 
-### Report-only (u03): a codec datagram copied twice (kept, 2cdd5b3b)
+### Report-only (u03): a codec datagram copied twice (kept, 967847e1)
 
 `CodecDatagramWriter::send` copied each datagram into a new `Vec` before
 passing it to the codec writer, which copies it again to encrypt it in
 place. The first copy is gone; bytes, order and errors are unchanged.
 
-`framing_bench`, before = 64b94733, after = 2cdd5b3b, 10 rounds each:
+`framing_bench`, before = 77c65aa6, after = 967847e1, 10 rounds each:
 
 | metric | before (n=10) | after (n=10) | change | p |
 |---|---|---|---|---|
@@ -263,7 +263,7 @@ place. The first copy is gone; bytes, order and errors are unchanged.
 Verdict: kept. The changed rows, the encrypted datagram writes, are 12-17%
 faster.
 
-### Report-only (u03): an encrypted frame in one write (kept, 65b434af)
+### Report-only (u03): an encrypted frame in one write (kept, 006152f8)
 
 `CodecMessageWriter::write_msg` wrote every encrypted frame as four writes:
 checksum, length, ciphertext, tag. On a TCP leg with `TCP_NODELAY` each is
@@ -276,11 +276,11 @@ each field's boundary; the old writer passes it too). Every encrypted data
 leg (the relay and both tunnel ends) and the legacy control session write
 through it.
 
-`relay_transport_bench`, before = 2cdd5b3b, after = 65b434af, two
+`relay_transport_bench`, before = 967847e1, after = 006152f8, two
 sessions of 30 rounds (60 per side). Both builds also carried the then
 uncommitted auth change below; only `framing.rs` differed.
 
-| metric | before (n=60) | after (n=60) | change | p |
+| metric | before (n=60) | after (n=59) | change | p |
 |---|---|---|---|---|
 | Tcp codec=false MiB/s | 51.70 [9.100..68.30] | 54.10 [9.800..73.40] | 4.6% | 0.604 |
 | Tcp codec=false p50 us | 167.7 [142.2..281.3] | 161.5 [138.9..362.8] | -3.7% | 0.386 |
@@ -301,7 +301,7 @@ uncommitted auth change below; only `framing.rs` differed.
 
 The encrypted TCP round trip halves: p50 -54%, p95 -49%, p99 -44%, each at
 p < 0.001. Nothing is slower beyond the noise. The two sessions disagreed on encrypted TCP
-throughput (-11% at p = 0.05 in the first, +29% at p = 0.01 in the second);
+throughput (-11% at p = 0.05 in the first, +19% at p = 0.03 in the second);
 pooled it is +1.5% at p = 0.75. Encrypted QUIC throughput, +5.0% at
 p = 0.03, is not claimed. One after-side run never finished its
 `Tcp codec=false` echo, a path this change does not reach; see "Stalls".
@@ -332,7 +332,7 @@ frame costs what the four writes did (the changed rows are the `stream` and
 Verdict: kept. Encrypted TCP legs answer twice as fast and no metric is
 worse.
 
-### u02-19: one HKDF extraction per root, not per derivation (kept, 30ad1b6a)
+### u02-19: one HKDF extraction per root, not per derivation (kept, 36a3c1fd)
 
 A temporary key is HKDF-SHA256 of the administrator key, salted with the
 instance id, expanded with the key id. The relay derives one twice for each
@@ -348,7 +348,7 @@ and output; the reset and rotation tests now also assert that the kept
 extraction derives what the full derivation does.
 
 `auth_bench` (new), before = pb-mapper-auth as 03d1dd0f has it, after =
-30ad1b6a, 10 rounds each; each run prints the median of 9 samples of
+36a3c1fd, 10 rounds each; each run prints the median of 9 samples of
 200,000 calls:
 
 | metric | before (n=10) | after (n=10) | change | p |
@@ -380,7 +380,7 @@ Each comparison changed only its own files; what else was uncommitted at
 the time (the one-write framing and the auth change, and for u09-11 and
 u09-13 each other) was in both builds.
 
-#### u09-12: the ack queue's median in a reused buffer (kept, de3fc3c9)
+#### u09-12: the ack queue's median in a reused buffer (kept, bf6652e1)
 
 `CreditLedger::ack_queue` collected the recent receipt delays into a new
 `Vec` and sorted it on every admission check (each unit, each 20 ms recheck
@@ -388,7 +388,7 @@ of a waiting head, each probe echo, each `Stats`). It now refills a buffer
 the ledger keeps and takes the middle with `select_nth_unstable`, the value
 the sort put there.
 
-before = 2cdd5b3b, after = de3fc3c9, 10 rounds each:
+before = 967847e1, after = bf6652e1, 10 rounds each:
 
 | metric | before (n=10) | after (n=10) | change | p |
 |---|---|---|---|---|
@@ -403,7 +403,7 @@ before = 2cdd5b3b, after = de3fc3c9, 10 rounds each:
 Verdict: kept: one allocation fewer per unit admitted, 65 a second at
 60 fps, with and without input.
 
-#### u09-11: B-send keeps the engine state instead of cloning it every pass (kept, 0f0d01ab)
+#### u09-11: B-send keeps the engine state instead of cloning it every pass (kept, cbcf2054)
 
 B-send cloned the whole `EngineState` out of its watch on every pass (each
 unit pushed, each receipt, each cursor report, each state change), and
@@ -420,7 +420,7 @@ It now compares the values, which holds however the receiver was woken.
 The runs of the first version, and some that by mistake overlapped another
 bench loop, were discarded; the table is a clean rerun of the final code.
 
-before = pb-mapper-desktop as de3fc3c9 has it plus the u09-13 change below,
+before = pb-mapper-desktop as bf6652e1 has it plus the u09-13 change below,
 after = the same plus this change, 10 rounds each:
 
 | metric | before (n=10) | after (n=10) | change | p |
@@ -436,7 +436,7 @@ after = the same plus this change, 10 rounds each:
 Verdict: kept: 4.1 allocations fewer per unit, 248 a second at 60 fps, with
 and without input.
 
-#### u09-13: thread C reuses its window and lane buffers (kept, c1245812)
+#### u09-13: thread C reuses its window and lane buffers (kept, f641b573)
 
 `Window::roll` ended with `*self = Self::new(now)`, freeing the input-wait
 and encoder-dwell sample buffers every second for the next samples to
@@ -448,7 +448,7 @@ keeps, for both the normal drain and the overflow drain. A cancelled drain
 still drops, never runs, what is left. Published values and the order of
 commands are unchanged.
 
-before = pb-mapper-desktop as de3fc3c9 has it plus the u09-11 change above,
+before = pb-mapper-desktop as bf6652e1 has it plus the u09-11 change above,
 after = the same plus this change, 10 rounds each:
 
 | metric | before (n=10) | after (n=10) | change | p |
