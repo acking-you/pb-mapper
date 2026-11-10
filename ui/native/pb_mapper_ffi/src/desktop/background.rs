@@ -11,36 +11,96 @@ use crate::{error::CtlError, handle::PbMapperHandle};
 use crate::{error::ErrorCode, state::process_credential};
 #[cfg(windows)]
 use pb_mapper::desktop;
-use pb_mapper::desktop::Host;
+use pb_mapper::desktop::{Host, HostStatus};
 #[cfg(windows)]
 use pb_mapper_core::checksum::{Credential, get_process_credential};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
+/// The service's background host as the app reads it: the service's
+/// `Snapshot`, and beside it what this app observed itself. Every reply
+/// carries it through `serde_json::Value`, so its keys come out sorted.
+#[derive(Clone, Default, Serialize)]
+pub(super) struct Background {
+    pub(super) configured: bool,
+    pub(super) enabled: bool,
+    pub(super) host: Option<HostStatus>,
+    pub(super) invitation: Option<String>,
+    pub(super) settings: Option<BackgroundSettings>,
+    pub(super) server: Option<String>,
+    pub(super) namespace: Option<u64>,
+    pub(super) message: String,
+    /// Whether this platform has the service: said only by an answer made
+    /// here, never by the service's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) supported: Option<bool>,
+    /// Whether Windows forbids the service to start: absent until this app
+    /// observed it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) service_disabled: Option<bool>,
+}
+
+/// What the service hosts with.
+#[cfg(windows)]
+pub(super) type BackgroundSettings = desktop::privileged::background::Settings;
+/// Off Windows there is no service, so there are never any settings.
+#[cfg(not(windows))]
+#[derive(Clone, Serialize)]
+pub(super) enum BackgroundSettings {}
+
+#[cfg(windows)]
+impl From<desktop::privileged::background::Snapshot> for Background {
+    fn from(snapshot: desktop::privileged::background::Snapshot) -> Self {
+        let desktop::privileged::background::Snapshot {
+            configured,
+            enabled,
+            host,
+            invitation,
+            settings,
+            server,
+            namespace,
+            message,
+        } = snapshot;
+        Self {
+            configured,
+            enabled,
+            host,
+            invitation,
+            settings,
+            server,
+            namespace,
+            message,
+            supported: None,
+            service_disabled: None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct BackgroundCache {
-    pub(super) snapshot: Option<Value>,
+    pub(super) snapshot: Option<Background>,
     checked: Option<Instant>,
     refreshing: bool,
     revision: u64,
 }
 impl BackgroundCache {
-    fn store(&mut self, mut snapshot: Value) -> Value {
-        if snapshot["service_disabled"] == true
+    fn store(&mut self, mut snapshot: Background) -> Background {
+        if snapshot.service_disabled == Some(true)
             && let Some(previous) = self
                 .snapshot
                 .as_ref()
-                .filter(|value| background_configured(value))
+                .filter(|previous| previous.configured)
         {
             // SCM Disabled proves there is no active/restarting service, but
             // does not destroy its saved grant. Preserve that distinction.
-            let message = snapshot["message"].clone();
-            snapshot = previous.clone();
-            snapshot["enabled"] = json!(false);
-            snapshot["host"] = Value::Null;
-            snapshot["service_disabled"] = json!(true);
-            snapshot["message"] = message;
+            snapshot = Background {
+                enabled: false,
+                host: None,
+                service_disabled: Some(true),
+                message: snapshot.message,
+                ..previous.clone()
+            };
         }
         self.revision += 1;
         self.checked = Some(Instant::now());
@@ -50,15 +110,17 @@ impl BackgroundCache {
 }
 
 impl DesktopState {
-    pub(super) fn cache_background(&self, snapshot: Value) -> Value {
+    pub(super) fn cache_background(&self, snapshot: Background) -> Background {
         self.background.lock().store(snapshot)
     }
 
-    pub(super) fn background_status(&self, runtime: &tokio::runtime::Handle) -> Option<Value> {
+    pub(super) fn background_status(&self, runtime: &tokio::runtime::Handle) -> Option<Background> {
         let mut cache = self.background.lock();
         let snapshot = cache.snapshot.clone();
         // Discovery is explicit. An unused helper adds no IPC to status polls.
-        if snapshot.as_ref().is_some_and(background_configured)
+        if snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.configured)
             && !cache.refreshing
             && cache
                 .checked
@@ -103,48 +165,51 @@ pub(super) enum BackgroundVerb {
     Start,
 }
 
-pub(super) fn background_configured(snapshot: &Value) -> bool {
-    snapshot["configured"].as_bool().unwrap_or(false)
-}
-
-#[cfg(windows)]
-pub(super) fn background_enabled(snapshot: &Value) -> bool {
-    snapshot["enabled"].as_bool().unwrap_or(false)
-}
-
 /// `snapshot` with `matches_relay`: whether the background host it describes
 /// is published where the settings in `current` name. Null while they have
 /// not been read; with nothing configured, nothing is elsewhere.
-pub(super) fn with_relay_match(mut snapshot: Value, current: Option<&RelayScope>) -> Value {
-    let matches = current.map(|current| {
-        !background_configured(&snapshot)
-            || snapshot["server"]
-                .as_str()
-                .is_some_and(|server| current.holds(server, snapshot["namespace"].as_u64()))
+pub(super) fn with_relay_match(snapshot: &Background, current: Option<&RelayScope>) -> Value {
+    #[derive(Serialize)]
+    struct Matched<'a> {
+        #[serde(flatten)]
+        snapshot: &'a Background,
+        matches_relay: Option<bool>,
+    }
+    let matches_relay = current.map(|current| {
+        !snapshot.configured
+            || snapshot
+                .server
+                .as_deref()
+                .is_some_and(|server| current.holds(server, snapshot.namespace))
     });
-    snapshot["matches_relay"] = json!(matches);
-    snapshot
+    json!(Matched {
+        snapshot,
+        matches_relay,
+    })
 }
 
-pub(super) fn unavailable_background(message: impl Into<String>) -> Value {
-    json!({"configured": false, "enabled": false, "host": null,
-        "invitation": null, "settings": null, "server": null, "namespace": null,
-        "supported": cfg!(windows), "message": message.into()})
+pub(super) fn unavailable_background(message: impl Into<String>) -> Background {
+    Background {
+        supported: Some(cfg!(windows)),
+        message: message.into(),
+        ..Background::default()
+    }
 }
 
-pub(super) fn failed_background(previous: Option<&Value>, error: CtlError) -> Value {
-    let mut snapshot = previous
-        .cloned()
-        .unwrap_or_else(|| unavailable_background(""));
-    snapshot["message"] = json!(error.to_string());
-    snapshot["host"] = Value::Null;
-    // A previous Disabled observation cannot authorize a new local host after
-    // service state becomes unknown. Fresh queries still fail closed.
-    snapshot["service_disabled"] = json!(false);
-    snapshot
+pub(super) fn failed_background(previous: Option<&Background>, error: CtlError) -> Background {
+    Background {
+        message: error.to_string(),
+        host: None,
+        // A previous Disabled observation cannot authorize a new local host after
+        // service state becomes unknown. Fresh queries still fail closed.
+        service_disabled: Some(false),
+        ..previous
+            .cloned()
+            .unwrap_or_else(|| unavailable_background(""))
+    }
 }
 
-pub(super) async fn query_background() -> Result<Value, CtlError> {
+pub(super) async fn query_background() -> Result<Background, CtlError> {
     #[cfg(windows)]
     {
         let helper = tokio::task::spawn_blocking(desktop::privileged::status)
@@ -154,7 +219,7 @@ pub(super) async fn query_background() -> Result<Value, CtlError> {
             let snapshot = desktop::privileged::background::status()
                 .await
                 .map_err(err)?;
-            serde_json::to_value(snapshot).map_err(err)
+            Ok(snapshot.into())
         })
         .await
     }
@@ -167,17 +232,18 @@ pub(super) async fn query_background() -> Result<Value, CtlError> {
 #[cfg(windows)]
 pub(super) async fn query_background_for_helper(
     helper: desktop::privileged::Status,
-    query: impl std::future::Future<Output = Result<Value, CtlError>>,
-) -> Result<Value, CtlError> {
+    query: impl std::future::Future<Output = Result<Background, CtlError>>,
+) -> Result<Background, CtlError> {
     if !helper.installed {
         return Ok(unavailable_background(helper.message));
     }
     if helper.startup_disabled && !helper.running {
-        let mut snapshot = unavailable_background(
-            "Background service is disabled; enable it to resume remembered sharing",
-        );
-        snapshot["service_disabled"] = json!(true);
-        return Ok(snapshot);
+        return Ok(Background {
+            service_disabled: Some(true),
+            ..unavailable_background(
+                "Background service is disabled; enable it to resume remembered sharing",
+            )
+        });
     }
     // Whose it is comes first: running or not, another user's helper, or one
     // whose installation cannot be read, stays out of this app's reach.
@@ -219,8 +285,8 @@ fn helper_not_ready(reason: desktop::privileged::NotReady) -> CtlError {
 
 pub(super) async fn discover_background(
     state: &DesktopState,
-    query: impl std::future::Future<Output = Result<Value, CtlError>>,
-) -> Value {
+    query: impl std::future::Future<Output = Result<Background, CtlError>>,
+) -> Background {
     let revision = state.background.lock().revision;
     let result = query.await;
     let mut cache = state.background.lock();
@@ -250,16 +316,16 @@ pub(super) async fn background_action(
         BackgroundVerb::Status => {
             let snapshot = discover_background(&handle.desktop, query_background()).await;
             let relay = handle.desktop.relay_scope(&handle.state).await;
-            Ok(with_relay_match(snapshot, relay.as_ref()))
+            Ok(with_relay_match(&snapshot, relay.as_ref()))
         }
         #[cfg(windows)]
         BackgroundVerb::Start => {
-            let mut reply = resume_background(handle, move_relay).await?;
-            if reply["background"].is_object() {
-                let relay = handle.desktop.relay_scope(&handle.state).await;
-                reply["background"] = with_relay_match(reply["background"].take(), relay.as_ref());
-            }
-            Ok(reply)
+            let enabled = resume_background(handle, move_relay).await?;
+            let relay = match &enabled {
+                Enabled::Restart => None,
+                Enabled::Hosting(_) => handle.desktop.relay_scope(&handle.state).await,
+            };
+            Ok(enabled.reply(|snapshot| with_relay_match(snapshot, relay.as_ref())))
         }
         #[cfg(not(windows))]
         BackgroundVerb::Start => {
@@ -280,7 +346,7 @@ pub(super) async fn background_action(
 /// always does), which installs, updates or enables it behind one consent
 /// prompt and may restart the app into it.
 #[cfg(windows)]
-async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<Value, CtlError> {
+async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<Enabled, CtlError> {
     // As `enable_host`: the host slot, then the settings.
     let mut slot = handle.desktop.host.lock().await;
     if slot.is_some() {
@@ -315,16 +381,15 @@ async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<
             allow_control,
             ..
         } = options.settings;
-        return enable_host(handle, &mut slot, service, display_id, allow_control, true).await;
+        return enable(handle, &mut slot, service, display_id, allow_control, true).await;
     }
     disable_legacy_startup(handle).await?;
     let snapshot = desktop::privileged::background::configure(options)
         .await
         .map_err(err)?;
-    let snapshot = handle
-        .desktop
-        .cache_background(serde_json::to_value(snapshot).map_err(err)?);
-    Ok(json!({"restart": false, "invitation": snapshot["invitation"], "background": snapshot}))
+    Ok(Enabled::Hosting(
+        handle.desktop.cache_background(snapshot.into()),
+    ))
 }
 
 /// What resuming the service's `saved` host configures: the service, display
@@ -334,7 +399,7 @@ async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<
 /// namespace needs `move_relay`.
 #[cfg(windows)]
 pub(super) fn resume_options(
-    saved: &Value,
+    saved: &Background,
     config: crate::state::AppConfig,
     namespace: u64,
     credential: String,
@@ -343,10 +408,10 @@ pub(super) fn resume_options(
     use desktop::privileged::background::{Options, ResumeTarget, Snapshot};
     // Only what a resume reads, from the snapshot the card showed.
     let saved = Snapshot {
-        configured: background_configured(saved),
-        settings: serde_json::from_value(saved["settings"].clone()).ok(),
-        server: saved["server"].as_str().map(Into::into),
-        namespace: saved["namespace"].as_u64(),
+        configured: saved.configured,
+        settings: saved.settings.clone(),
+        server: saved.server.clone(),
+        namespace: saved.namespace,
         ..Snapshot::default()
     };
     let target = ResumeTarget {
@@ -368,16 +433,16 @@ pub(super) fn resume_options(
 pub(super) async fn stop_background(state: &DesktopState) -> Result<(), CtlError> {
     let snapshot = query_background().await?;
     #[cfg(windows)]
-    if background_configured(&snapshot) && snapshot["service_disabled"] != true {
+    if snapshot.configured && snapshot.service_disabled != Some(true) {
         let snapshot = desktop::privileged::background::stop().await.map_err(err)?;
-        state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
+        state.cache_background(snapshot.into());
         return Ok(());
     }
     state.cache_background(snapshot);
     Ok(())
 }
 
-pub(super) async fn revoke_background(handle: &PbMapperHandle) -> Result<Value, CtlError> {
+pub(super) async fn revoke_background(handle: &PbMapperHandle) -> Result<Background, CtlError> {
     #[cfg(windows)]
     {
         let server = handle.state.lock().await.get_config_status().server_address;
@@ -387,7 +452,7 @@ pub(super) async fn revoke_background(handle: &PbMapperHandle) -> Result<Value, 
         let snapshot = desktop::privileged::background::revoke_scope(server, namespace)
             .await
             .map_err(err)?;
-        serde_json::to_value(snapshot).map_err(err)
+        Ok(snapshot.into())
     }
     #[cfg(not(windows))]
     {
@@ -497,14 +562,12 @@ pub(super) async fn start_background(
             desktop::privileged::background::configure(options).await
         }
         .map_err(err)?;
-        let snapshot = handle
-            .desktop
-            .cache_background(serde_json::to_value(snapshot).map_err(err)?);
+        let snapshot = handle.desktop.cache_background(snapshot.into());
         *handle.desktop.host_identity.lock().await = None;
         tokio::task::spawn_blocking(move || trust::revoke(&directory))
             .await
             .map_err(err)??;
-        Ok(json!({"invitation": snapshot["invitation"], "background": snapshot}))
+        Ok(json!({"invitation": snapshot.invitation, "background": snapshot}))
     }
     #[cfg(not(windows))]
     {
@@ -537,10 +600,35 @@ fn credential_text(credential: Credential) -> Result<String, CtlError> {
     }
 }
 
-/// The product has one durable host owner. Setup intent and any existing local
-/// identity survive the installed application's restart; only the service owns
-/// registration after the handoff. Internal SDK/local-host APIs remain separate.
-/// `slot` is the locked host lifecycle slot.
+/// What enabling the service's host came to.
+#[cfg(windows)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "returned once by a lifecycle op, never stored or queued"
+)]
+enum Enabled {
+    /// Setup installs the service first, and this app restarts into it.
+    Restart,
+    /// The service hosts it.
+    Hosting(Background),
+}
+#[cfg(windows)]
+impl Enabled {
+    /// As `host_enable` answers, with the snapshot as `background` shows it.
+    fn reply(self, background: impl FnOnce(&Background) -> Value) -> Value {
+        match self {
+            Self::Restart => json!({"restart": true}),
+            Self::Hosting(snapshot) => json!({
+                "restart": false,
+                "invitation": snapshot.invitation,
+                "background": background(&snapshot),
+            }),
+        }
+    }
+}
+
+/// `host_enable`, and `host_restore` of a grant the service is to own:
+/// `enable`, answered.
 #[cfg(windows)]
 pub(super) async fn enable_host(
     handle: &PbMapperHandle,
@@ -550,6 +638,31 @@ pub(super) async fn enable_host(
     allow_control: bool,
     allow_install: bool,
 ) -> Result<Value, CtlError> {
+    let enabled = enable(
+        handle,
+        slot,
+        service,
+        display_id,
+        allow_control,
+        allow_install,
+    )
+    .await?;
+    Ok(enabled.reply(|snapshot| json!(snapshot)))
+}
+
+/// The product has one durable host owner. Setup intent and any existing local
+/// identity survive the installed application's restart; only the service owns
+/// registration after the handoff. Internal SDK/local-host APIs remain separate.
+/// `slot` is the locked host lifecycle slot.
+#[cfg(windows)]
+async fn enable(
+    handle: &PbMapperHandle,
+    slot: &mut Option<Host>,
+    service: String,
+    display_id: u32,
+    allow_control: bool,
+    allow_install: bool,
+) -> Result<Enabled, CtlError> {
     let (directory, config) = {
         let state = handle.state.lock().await;
         (state.desktop_config_dir(), state.get_config_status())
@@ -647,7 +760,7 @@ pub(super) async fn enable_host(
             desktop::privileged::prepare_application_restart()
                 .await
                 .map_err(err)?;
-            return Ok(json!({"restart": true}));
+            return Ok(Enabled::Restart);
         }
     }
     let options = desktop::privileged::background::Options {
@@ -669,15 +782,13 @@ pub(super) async fn enable_host(
         None => desktop::privileged::background::configure_with_identity(options, identity).await,
     }
     .map_err(err)?;
-    let snapshot = handle
-        .desktop
-        .cache_background(serde_json::to_value(snapshot).map_err(err)?);
+    let snapshot = handle.desktop.cache_background(snapshot.into());
     // The service now durably owns the key. Retiring the legacy copy also
     // prevents an explicit legacy restore after service revocation.
     tokio::task::spawn_blocking(move || trust::revoke(&directory))
         .await
         .map_err(err)??;
-    Ok(json!({"restart": false, "invitation": snapshot["invitation"], "background": snapshot}))
+    Ok(Enabled::Hosting(snapshot))
 }
 
 /// What setup asks of Windows before the service can host, if anything: for

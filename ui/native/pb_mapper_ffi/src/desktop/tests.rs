@@ -361,9 +361,11 @@ fn background_consent_and_ui_ownership_boundaries() {
             assert_eq!(failure.code(), ErrorCode::InvalidArgument);
         }
 
-        let mut snapshot = unavailable_background("waiting for an interactive session");
-        snapshot["configured"] = json!(true);
-        snapshot["enabled"] = json!(true);
+        let snapshot = Background {
+            configured: true,
+            enabled: true,
+            ..unavailable_background("waiting for an interactive session")
+        };
         handle.desktop.cache_background(snapshot.clone());
         // A blocked service mutation cannot hold up host status, which
         // reads the held lock as busy and still shows the pending
@@ -387,12 +389,19 @@ fn background_consent_and_ui_ownership_boundaries() {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(
-            handle.desktop.background.lock().snapshot.as_ref(),
-            Some(&snapshot)
-        );
+        assert_eq!(cached(&handle.desktop), Some(json(&snapshot)));
         drop(config);
     });
+}
+
+/// A snapshot as the app reads it.
+fn json(value: impl serde::Serialize) -> Value {
+    serde_json::to_value(value).unwrap()
+}
+
+/// The cached background snapshot, as the app reads it.
+fn cached(state: &DesktopState) -> Option<Value> {
+    state.background.lock().snapshot.as_ref().map(json)
 }
 
 #[tokio::test]
@@ -408,20 +417,21 @@ async fn late_background_discovery_cannot_hide_a_new_grant() {
             .poll(&mut Context::from_waker(Waker::noop()))
             .is_pending()
     );
-    let mut configured = unavailable_background("");
-    configured["configured"] = json!(true);
-    configured["enabled"] = json!(true);
+    let configured = Background {
+        configured: true,
+        enabled: true,
+        ..unavailable_background("")
+    };
     state.cache_background(configured.clone());
-    reply.send(unavailable_background("")).unwrap();
-    assert_eq!(discovery.await, configured);
-    assert_eq!(state.background.lock().snapshot.as_ref(), Some(&configured));
+    assert!(reply.send(unavailable_background("")).is_ok());
+    assert_eq!(json(discovery.await), json(&configured));
+    assert_eq!(cached(&state), Some(json(&configured)));
 }
 
 /// What the background card reads, key for key: to it a key that is absent
 /// and one that is null differ.
 #[test]
 fn background_snapshots_keep_their_keys() {
-    let json = |value: Value| value;
     let unavailable = json!({"configured": false, "enabled": false, "host": null,
         "invitation": null, "settings": null, "server": null, "namespace": null,
         "supported": cfg!(windows), "message": "off"});
@@ -435,31 +445,36 @@ fn background_snapshots_keep_their_keys() {
     let configured = json!({"configured": true, "enabled": true, "host": null,
         "invitation": "pbd1.invitation", "settings": null, "server": "relay:7666",
         "namespace": 1, "message": "sharing"});
+    let service = Background {
+        configured: true,
+        enabled: true,
+        invitation: Some("pbd1.invitation".into()),
+        server: Some("relay:7666".into()),
+        namespace: Some(1),
+        message: "sharing".into(),
+        ..Background::default()
+    };
     let state = DesktopState::default();
-    assert_eq!(json(state.cache_background(configured.clone())), configured);
+    assert_eq!(json(state.cache_background(service.clone())), configured);
     let mut lost = configured.clone();
     lost["message"] = json!("lost");
     lost["service_disabled"] = json!(false);
-    assert_eq!(
-        json(failed_background(Some(&configured), err("lost"))),
-        lost
-    );
+    assert_eq!(json(failed_background(Some(&service), err("lost"))), lost);
     let mut matched = configured.clone();
     matched["matches_relay"] = json!(true);
     let current = RelayScope {
         server: "relay:7666".into(),
         namespace: Some(1),
     };
-    assert_eq!(
-        with_relay_match(configured.clone(), Some(&current)),
-        matched
-    );
+    assert_eq!(with_relay_match(&service, Some(&current)), matched);
     matched["matches_relay"] = Value::Null;
-    assert_eq!(with_relay_match(configured.clone(), None), matched);
+    assert_eq!(with_relay_match(&service, None), matched);
 
     // Windows forbids the service to start: the saved grant stays, off.
-    let mut disabled = unavailable_background("disabled");
-    disabled["service_disabled"] = json!(true);
+    let disabled = Background {
+        service_disabled: Some(true),
+        ..unavailable_background("disabled")
+    };
     let mut kept = configured;
     kept["enabled"] = json!(false);
     kept["message"] = json!("disabled");
@@ -475,6 +490,31 @@ fn background_snapshots_keep_their_keys() {
     );
 }
 
+/// The service's own answer reaches the app as the service wrote it.
+#[cfg(windows)]
+#[test]
+fn a_service_snapshot_keeps_its_keys() {
+    use desktop::privileged::background::{Settings, Snapshot};
+    let snapshot = Snapshot {
+        configured: true,
+        enabled: false,
+        host: None,
+        invitation: Some("pbd1.invitation".into()),
+        settings: Some(Settings {
+            service: "desktop:study".into(),
+            display_id: 2,
+            display_device: Some(r"\\.\DISPLAY2".into()),
+            allow_control: true,
+            allow_direct: false,
+            auto_start: true,
+        }),
+        server: Some("relay:7666".into()),
+        namespace: Some(3),
+        message: "stopped".into(),
+    };
+    assert_eq!(json(Background::from(snapshot.clone())), json(snapshot));
+}
+
 #[test]
 fn a_host_matches_the_settings_only_on_their_relay_and_namespace() {
     let current = RelayScope {
@@ -486,16 +526,18 @@ fn a_host_matches_the_settings_only_on_their_relay_and_namespace() {
     assert!(!current.holds("relay:7666", Some(2)));
     // The background service's host says so; until the settings are
     // read, it says nothing.
-    let mut elsewhere = unavailable_background("");
-    elsewhere["configured"] = json!(true);
-    elsewhere["server"] = json!("old-relay:7666");
-    elsewhere["namespace"] = json!(1);
+    let elsewhere = Background {
+        configured: true,
+        server: Some("old-relay:7666".into()),
+        namespace: Some(1),
+        ..unavailable_background("")
+    };
     assert_eq!(
-        with_relay_match(elsewhere.clone(), Some(&current))["matches_relay"],
+        with_relay_match(&elsewhere, Some(&current))["matches_relay"],
         false
     );
     assert_eq!(
-        with_relay_match(elsewhere, None)["matches_relay"],
+        with_relay_match(&elsewhere, None)["matches_relay"],
         Value::Null
     );
 }
@@ -517,18 +559,28 @@ fn resume_configures_the_saved_host_from_the_current_settings() {
     };
     let nothing = unavailable_background("");
     assert!(resume_options(&nothing, config.clone(), 1, "key".into(), true).is_err());
-    let mut saved = unavailable_background("");
-    saved["configured"] = json!(true);
-    saved["server"] = json!("old-relay:7666");
-    saved["namespace"] = json!(1);
-    saved["settings"] = json!({"service": "desktop:study", "display_id": 2,
-        "allow_control": true, "allow_direct": false, "auto_start": false});
+    let saved = Background {
+        configured: true,
+        server: Some("old-relay:7666".into()),
+        namespace: Some(1),
+        settings: Some(Settings {
+            service: "desktop:study".into(),
+            display_id: 2,
+            display_device: None,
+            allow_control: true,
+            allow_direct: false,
+            auto_start: false,
+        }),
+        ..unavailable_background("")
+    };
     let unconfirmed = resume_options(&saved, config.clone(), 1, "new-key".into(), false);
     assert_eq!(unconfirmed.unwrap_err().code(), ErrorCode::RelayChanged);
     // The same relay in another namespace is elsewhere too; in the same
     // one it resumes unasked.
-    let mut here = saved.clone();
-    here["server"] = json!("new-relay:7666");
+    let here = Background {
+        server: Some("new-relay:7666".into()),
+        ..saved.clone()
+    };
     let other = resume_options(&here, config.clone(), 2, "new-key".into(), false);
     assert_eq!(other.unwrap_err().code(), ErrorCode::RelayChanged);
     assert!(resume_options(&here, config.clone(), 1, "new-key".into(), false).is_ok());
@@ -589,7 +641,11 @@ fn revocation_waits_for_handoff_and_uses_the_actual_owner() {
 
         // Failed service revocation stays visible, retaining the observed
         // grant; the removed local pending record cannot resurrect it.
-        let configured = json!({"configured": true, "enabled": true});
+        let configured = Background {
+            configured: true,
+            enabled: true,
+            ..Background::default()
+        };
         handle.desktop.cache_background(configured.clone());
         assert!(
             revoke_trust_with_background(&handle, async {
@@ -598,10 +654,7 @@ fn revocation_waits_for_handoff_and_uses_the_actual_owner() {
             .await
             .is_err()
         );
-        assert_eq!(
-            handle.desktop.background.lock().snapshot.as_ref(),
-            Some(&configured)
-        );
+        assert_eq!(cached(&handle.desktop), Some(json(&configured)));
         assert!(trust::load(&directory).unwrap().is_none());
         std::fs::remove_dir(&directory).unwrap();
     });
@@ -611,11 +664,19 @@ fn revocation_waits_for_handoff_and_uses_the_actual_owner() {
 #[tokio::test]
 async fn disabled_service_allows_local_host_but_unknown_background_stays_blocked() {
     let state = DesktopState::default();
-    let mut configured = unavailable_background("");
-    configured["configured"] = json!(true);
-    configured["enabled"] = json!(true);
-    configured["settings"] = json!({"auto_start": true});
-    state.cache_background(configured);
+    state.cache_background(Background {
+        configured: true,
+        enabled: true,
+        settings: Some(desktop::privileged::background::Settings {
+            service: "desktop:study".into(),
+            display_id: 1,
+            display_device: None,
+            allow_control: false,
+            allow_direct: true,
+            auto_start: true,
+        }),
+        ..unavailable_background("")
+    });
 
     // A portable UI may share normally when SCM explicitly forbids service
     // restart. No management IPC is required and the saved grant survives.
@@ -634,10 +695,15 @@ async fn disabled_service_allows_local_host_but_unknown_background_stays_blocked
     .unwrap()
     .unwrap();
     let disabled = state.cache_background(disabled);
-    assert!(background_configured(&disabled));
-    assert!(!background_enabled(&disabled));
-    assert_eq!(disabled["settings"]["auto_start"], true);
-    assert_eq!(disabled["service_disabled"], true);
+    assert!(disabled.configured);
+    assert!(!disabled.enabled);
+    assert!(
+        disabled
+            .settings
+            .as_ref()
+            .is_some_and(|settings| settings.auto_start)
+    );
+    assert_eq!(disabled.service_disabled, Some(true));
 
     // Stopped with automatic recovery pending, Running under another
     // authorized application, and another user's (whose it is is said
@@ -665,14 +731,15 @@ async fn disabled_service_allows_local_host_but_unknown_background_stays_blocked
         .unwrap();
         assert_eq!(result.as_ref().map_err(CtlError::code).err(), Some(code));
         let observed = discover_background(&state, async { result }).await;
-        assert!(background_configured(&observed));
-        assert_eq!(observed["service_disabled"], false);
+        assert!(observed.configured);
+        assert_eq!(observed.service_disabled, Some(false));
     }
 
-    let mut active = disabled;
-    active["enabled"] = json!(true);
-    active["service_disabled"] = json!(false);
-    state.cache_background(active);
+    state.cache_background(Background {
+        enabled: true,
+        service_disabled: Some(false),
+        ..disabled
+    });
     // An installed/running service is not usable if its image cannot be
     // verified. Fail before management IPC and preserve the unknown grant.
     let unverified = query_background_for_helper(
@@ -690,8 +757,8 @@ async fn disabled_service_allows_local_host_but_unknown_background_stays_blocked
         Some(ErrorCode::HelperUnverified)
     );
     let observed = discover_background(&state, async { unverified }).await;
-    assert!(background_configured(&observed));
-    assert!(background_enabled(&observed));
+    assert!(observed.configured);
+    assert!(observed.enabled);
     let disconnected = query_background_for_helper(
         desktop::privileged::Status {
             installed: true,
@@ -705,8 +772,8 @@ async fn disabled_service_allows_local_host_but_unknown_background_stays_blocked
     .await;
     assert!(disconnected.is_err());
     let observed = discover_background(&state, async { disconnected }).await;
-    assert!(background_configured(&observed));
-    assert!(background_enabled(&observed));
+    assert!(observed.configured);
+    assert!(observed.enabled);
 }
 
 #[cfg(windows)]

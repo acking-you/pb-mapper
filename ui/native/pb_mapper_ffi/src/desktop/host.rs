@@ -1,9 +1,7 @@
 //! The local host this app owns: start, restore, restart and its remembered
 //! trust.
-#[cfg(windows)]
-use super::background::background_enabled;
 use super::background::{
-    background_configured, enable_host, query_background, stop_background, with_relay_match,
+    Background, enable_host, query_background, stop_background, with_relay_match,
 };
 use super::{err, trust};
 use crate::{error::CtlError, handle::PbMapperHandle, state::process_credential};
@@ -67,7 +65,7 @@ pub(super) async fn disable_legacy_startup(handle: &PbMapperHandle) -> Result<()
 
 pub(super) async fn revoke_trust_with_background(
     handle: &PbMapperHandle,
-    background: impl std::future::Future<Output = Result<Value, CtlError>>,
+    background: impl std::future::Future<Output = Result<Background, CtlError>>,
 ) -> Result<(), CtlError> {
     // The handoff and its revocation share one lifecycle lock. In particular,
     // observe/revoke the service only after an in-flight Configure has finished;
@@ -157,7 +155,7 @@ pub(super) async fn host_status(handle: &PbMapperHandle) -> Result<Value, CtlErr
     let relay = state.relay_scope(&handle.state).await;
     let background = state
         .background_status(handle.runtime.handle())
-        .map(|snapshot| with_relay_match(snapshot, relay.as_ref()));
+        .map(|snapshot| with_relay_match(&snapshot, relay.as_ref()));
     // A lifecycle call (a display switch, a rename, a helper action
     // waiting on UAC) holds the host lock, but must never delay a
     // status poll. `busy` says the host is then unknown, not absent.
@@ -251,11 +249,11 @@ pub(super) async fn host_permission(
         #[cfg(windows)]
         {
             let snapshot = query_background().await?;
-            if background_enabled(&snapshot) {
+            if snapshot.enabled {
                 let snapshot = desktop::privileged::background::set_control_allowed(allow_control)
                     .await
                     .map_err(err)?;
-                state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
+                state.cache_background(snapshot.into());
                 return Ok(json!({}));
             }
         }
@@ -303,12 +301,12 @@ pub(super) async fn host_restore_display_mode(handle: &PbMapperHandle) -> Result
         .lock()
         .snapshot
         .as_ref()
-        .is_some_and(background_enabled)
+        .is_some_and(|snapshot| snapshot.enabled)
     {
         let snapshot = desktop::privileged::background::restore_display_mode()
             .await
             .map_err(err)?;
-        state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
+        state.cache_background(snapshot.into());
         return Ok(json!({"restored": true}));
     }
     Err(err("desktop is not shared"))
@@ -331,12 +329,12 @@ pub(super) async fn host_end_session(handle: &PbMapperHandle) -> Result<Value, C
         .lock()
         .snapshot
         .as_ref()
-        .is_some_and(background_enabled)
+        .is_some_and(|snapshot| snapshot.enabled)
     {
         let snapshot = desktop::privileged::background::end_session()
             .await
             .map_err(err)?;
-        state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
+        state.cache_background(snapshot.into());
         return Ok(json!({}));
     }
     Err(err("desktop is not shared"))
@@ -351,7 +349,7 @@ pub(super) async fn start_local(handle: &PbMapperHandle, start: Start) -> Result
         return Err(err("desktop is already shared"));
     }
     let background = handle.desktop.cache_background(query_background().await?);
-    if background_configured(&background) {
+    if background.configured {
         return Err(err(match start {
             Start::Fresh(_) => {
                 "this desktop belongs to the background service; enable it to reuse its invitation"
@@ -498,7 +496,7 @@ pub(super) async fn restart_host(
     let mut slot = state.host.lock().await;
     // The service has no display switch or rename: a background host is
     // stopped and enabled again instead.
-    if background_configured(&state.cache_background(query_background().await?)) {
+    if state.cache_background(query_background().await?).configured {
         return Err(CtlError::invalid_argument("stop the background host first"));
     }
     let local = state.host_identity.lock().await.clone();
