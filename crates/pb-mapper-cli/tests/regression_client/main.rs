@@ -1,12 +1,36 @@
 //! `register` and `connect` against fake relays.
+//!
+//! A binary of its own, because its cases shorten the timings a tunnel reads
+//! from the environment: one control worker per registration, so retries are
+//! countable; heartbeats and registration probes in tens of milliseconds;
+//! the reject ladder in hundreds; health checks every 20 ms. They are set
+//! once, before any case starts a tunnel (`client_env`), and never written
+//! again, so no case reads another's values or a value half restored.
+//! `register` reads only the first group and `connect` only the last.
+
+// An integration test: a failed `unwrap` is a failed test, which is the report
+// this target exists to produce. `allow-unwrap-in-tests` covers `#[cfg(test)]`
+// modules but not a `tests/` target, whose whole body is test code.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+#[path = "../regression/credential.rs"]
+mod credential;
+mod fake;
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use pb_mapper_client::client::run_client_side_cli_with_callback;
 use pb_mapper_client::server::run_server_side_cli_with_callback;
+use pb_mapper_core::config::{
+    PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL, PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD,
+    PB_MAPPER_CONTROL_CONN_POOL_SIZE, PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL,
+    PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE, PB_MAPPER_CONTROL_SUSPECT_GRACE,
+    PB_MAPPER_REGISTRATION_PROBE_TIMEOUT, PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX,
+    PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN,
+};
 use pb_mapper_protocol::MessageWriter;
 use pb_mapper_protocol::command::{
     MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
@@ -19,22 +43,52 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 use uni_stream::stream::{TcpListenerProvider, TcpStreamProvider};
 
-use crate::support::{
-    EnvOverrides, FakeRelay, Reply, plain_tcp_options, read_secure_request, relay_security,
-    status_recorder,
+use fake::{
+    FakeRelay, Reply, plain_tcp_options, read_secure_request, relay_security, status_recorder,
 };
+
+/// How long a case waits for what it expects to happen at once: a bound for
+/// a loaded machine, not a timing the case asserts.
+const READY: Duration = Duration::from_secs(5);
+
+/// Set this binary's timings, once, before the calling case starts a tunnel.
+fn client_env() {
+    static ENV: LazyLock<()> = LazyLock::new(|| {
+        for (name, value) in [
+            (PB_MAPPER_CONTROL_CONN_POOL_SIZE, "1"),
+            (PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL, "20ms"),
+            (PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE, "50ms"),
+            (PB_MAPPER_CONTROL_SUSPECT_GRACE, "20ms"),
+            (PB_MAPPER_REGISTRATION_PROBE_TIMEOUT, "50ms"),
+            (PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "400ms"),
+            (PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX, "800ms"),
+            (PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL, "20ms"),
+            (PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD, "3"),
+        ] {
+            // SAFETY: mutating the environment is unsafe in edition 2024
+            // because it is process-global. Every case calls this before it
+            // starts a tunnel, the first call writes while the others wait on
+            // the lock, and nothing writes these names again.
+            unsafe { std::env::set_var(name, value) };
+        }
+    });
+    *ENV
+}
+
+/// Poll `ready` every 10 ms until it holds, for up to [`READY`].
+async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    timeout(READY, async {
+        while !ready() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what}"));
+}
 
 #[tokio::test]
 async fn local_server_reconnects_when_registered_conn_is_missing_from_remote_status() {
-    let _env = EnvOverrides::set(&[
-        ("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1"),
-        ("PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL", "20ms"),
-        ("PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE", "50ms"),
-        ("PB_MAPPER_CONTROL_SUSPECT_GRACE", "20ms"),
-        ("PB_MAPPER_REGISTRATION_PROBE_TIMEOUT", "50ms"),
-    ])
-    .await;
-
+    client_env();
     let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = remote_listener.local_addr().unwrap();
     let register_count = AtomicUsize::new(0);
@@ -84,7 +138,7 @@ async fn local_server_reconnects_when_registered_conn_is_missing_from_remote_sta
         None,
     ));
 
-    timeout(Duration::from_secs(2), second_register_rx)
+    timeout(READY, second_register_rx)
         .await
         .expect("local server did not reconnect after remote status lost its registration")
         .unwrap();
@@ -94,6 +148,7 @@ async fn local_server_reconnects_when_registered_conn_is_missing_from_remote_sta
 
 #[tokio::test]
 async fn client_closes_initial_status_probe_after_key_check() {
+    client_env();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = listener.local_addr().unwrap();
     let (security, _state) = relay_security().await;
@@ -128,7 +183,7 @@ async fn client_closes_initial_status_probe_after_key_check() {
         }
 
         let mut buf = [0u8; 1];
-        timeout(Duration::from_secs(1), stream.read(&mut buf))
+        timeout(READY, stream.read(&mut buf))
             .await
             .expect("client kept the one-shot status probe connection open")
             .unwrap()
@@ -149,13 +204,7 @@ async fn client_closes_initial_status_probe_after_key_check() {
 
 #[tokio::test]
 async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
-    let _env = EnvOverrides::set(&[
-        ("PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL", "20ms"),
-        ("PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT", "200ms"),
-        ("PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD", "3"),
-    ])
-    .await;
-
+    client_env();
     let local_addr = reserve_addr(Transport::Tcp).await;
 
     let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -221,22 +270,12 @@ async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
         Some(record_status),
     ));
 
-    timeout(Duration::from_secs(1), async {
-        loop {
-            if status_count.load(Ordering::SeqCst) >= 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    wait_until("client did not run initial key probe", || {
+        status_count.load(Ordering::SeqCst) >= 1
     })
-    .await
-    .expect("client did not run initial key probe");
-
-    timeout(Duration::from_secs(1), async {
-        loop {
-            if TcpStream::connect(local_addr).await.is_ok() {
-                break;
-            }
+    .await;
+    timeout(READY, async {
+        while TcpStream::connect(local_addr).await.is_err() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -246,16 +285,11 @@ async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
     let baseline = status_count.load(Ordering::SeqCst);
     failed_status_responses.store(2, Ordering::SeqCst);
 
-    timeout(Duration::from_secs(1), async {
-        loop {
-            if status_count.load(Ordering::SeqCst) >= baseline + 3 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("client did not recover after one failed health check");
+    wait_until(
+        "client did not recover after one failed health check",
+        || status_count.load(Ordering::SeqCst) >= baseline + 3,
+    )
+    .await;
 
     assert!(
         TcpStream::connect(local_addr).await.is_ok(),
@@ -313,34 +347,9 @@ async fn rejecting_relay(
     (relay, attempts)
 }
 
-/// Wait until the fake relay has seen `count` register attempts.
-async fn wait_for_register_attempts(
-    attempts: &Arc<Mutex<Vec<tokio::time::Instant>>>,
-    count: usize,
-    within: Duration,
-) -> Vec<tokio::time::Instant> {
-    timeout(within, async {
-        loop {
-            let seen = attempts.lock().unwrap().clone();
-            if seen.len() >= count {
-                return seen;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("relay saw fewer than {count} register attempts"))
-}
-
 #[tokio::test]
 async fn retryable_registration_rejection_waits_on_the_slow_ladder() {
-    let _env = EnvOverrides::set(&[
-        ("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1"),
-        ("PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN", "400ms"),
-        ("PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX", "800ms"),
-    ])
-    .await;
-
+    client_env();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = listener.local_addr().unwrap();
     let (_relay, attempts) =
@@ -356,7 +365,11 @@ async fn retryable_registration_rejection_waits_on_the_slow_ladder() {
         Some(record_status),
     ));
 
-    let seen = wait_for_register_attempts(&attempts, 2, Duration::from_secs(5)).await;
+    wait_until("relay saw fewer than 2 register attempts", || {
+        attempts.lock().unwrap().len() >= 2
+    })
+    .await;
+    let seen = attempts.lock().unwrap().clone();
     let gap = seen[1].duration_since(seen[0]);
     // The transport ladder's first delay is 100ms, so anything under the reject
     // ladder's 400ms minimum means the rejection was retried as a transport
@@ -380,8 +393,7 @@ async fn retryable_registration_rejection_waits_on_the_slow_ladder() {
 
 #[tokio::test]
 async fn terminal_registration_rejection_stops_the_worker() {
-    let _env = EnvOverrides::set(&[("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1")]).await;
-
+    client_env();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = listener.local_addr().unwrap();
     let (_relay, attempts) = rejecting_relay(listener, "service_transport_mismatch", false).await;
@@ -398,7 +410,7 @@ async fn terminal_registration_rejection_stops_the_worker() {
 
     // The pool returns once its only worker gives up, which is the whole point:
     // a permanent rejection has to end the tunnel rather than retry it forever.
-    timeout(Duration::from_secs(5), local_server)
+    timeout(READY, local_server)
         .await
         .expect("a permanently rejected registration kept retrying")
         .unwrap();

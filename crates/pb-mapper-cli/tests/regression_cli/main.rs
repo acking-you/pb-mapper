@@ -1,18 +1,36 @@
 //! Cases that run the `pb-mapper` binary.
+//!
+//! A binary of its own, because they start processes. On Windows a child
+//! inherits every socket open in its parent when it starts (Tokio's sockets
+//! come from mio 1.1, which marks none non-inheritable) and keeps it until it
+//! exits, so a connection another case dropped stays open, then resets, and
+//! a listener it dropped keeps its port. No case here waits for a close.
 
+// An integration test: a failed `unwrap` is a failed test, which is the report
+// this target exists to produce. `allow-unwrap-in-tests` covers `#[cfg(test)]`
+// modules but not a `tests/` target, whose whole body is test code.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+#[path = "../regression/credential.rs"]
+mod credential;
+#[path = "../regression/fixtures.rs"]
+mod fixtures;
+
+use std::net::SocketAddr;
 use std::process::Stdio;
 use std::time::Duration;
 
 use pb_mapper_core::test_support::TempPath;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnResponse};
-use pb_mapper_protocol::{MessageReader, get_header_msg_reader};
+use pb_mapper_protocol::{MessageReader, get_header_msg_reader, get_header_msg_writer};
 use pb_mapper_testkit::{TEST_ADMIN_KEY, Transport, reserve_addr};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
-use crate::support::{
-    InProcessRelay, StaleEnd, StateDir, auth_config, issue_before_start, serve_one_stream,
-    stale_control, subscribe,
+use credential::{StateDir, auth_config};
+use fixtures::{
+    InProcessRelay, issue_before_start, register_control_conn_parts, serve_one_stream, subscribe,
+    wait_for_server,
 };
 
 #[tokio::test]
@@ -95,6 +113,18 @@ async fn subscribe_failover_reuses_its_namespace_slot_and_rate_token() {
     bypass_unacked_control(true).await;
 }
 
+/// A provider that registers `key` as a legacy control connection, reports
+/// it `ready`, and reads nothing more.
+async fn parked_control(addr: SocketAddr, key: String, ready: oneshot::Sender<()>) {
+    let control = wait_for_server(addr).await;
+    let (mut reader_stream, mut writer_stream) = control.into_split();
+    let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+    let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+    register_control_conn_parts(&mut reader, &mut writer, &key).await;
+    ready.send(()).unwrap();
+    std::future::pending::<()>().await;
+}
+
 async fn bypass_unacked_control(at_capacity: bool) {
     // Bound by the child relay, so only an address no `:0` bind can be handed.
     let server_addr = reserve_addr(Transport::Tcp).await;
@@ -142,12 +172,7 @@ async fn bypass_unacked_control(at_capacity: bool) {
     healthy_ready_rx.await.unwrap();
 
     let (stale_ready_tx, stale_ready_rx) = oneshot::channel();
-    let stale_task = tokio::spawn(stale_control(
-        server_addr,
-        key.to_string(),
-        stale_ready_tx,
-        StaleEnd::Park,
-    ));
+    let stale_task = tokio::spawn(parked_control(server_addr, key.to_string(), stale_ready_tx));
     stale_ready_rx.await.unwrap();
 
     let mut client = subscribe(server_addr, key).await;

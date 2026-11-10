@@ -3,8 +3,10 @@
 //! Cargo builds and links each `tests/*.rs` file as a binary of its own, so a
 //! case lives here unless it changes state the whole process shares:
 //!
-//! - `regression` writes the environment at run time and sets the process
-//!   credential itself;
+//! - `regression`, `regression_client` and `regression_cli` set the process
+//!   credential themselves, the second sets client timings for its whole
+//!   process, and the third starts processes, which on Windows inherit every
+//!   socket open at the time (see `regression/main.rs`);
 //! - `lease_reclaim` shortens the lease of every relay in its process;
 //! - `network_recovery` sets the health-check interval and announces network
 //!   changes;

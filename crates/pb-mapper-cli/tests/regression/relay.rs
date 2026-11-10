@@ -1,8 +1,9 @@
 //! The relay's own behavior, driven with hand-written frames.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
-use pb_mapper_core::checksum::parse_credential;
+use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_protocol::command::{
     AdminRequest, AdminResponse, LocalServer, MessageSerializer, PbConnRequest, PbConnResponse,
     PbConnStatusReq, PbConnStatusResp, PbServerRequest,
@@ -21,10 +22,109 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::support::{
-    ENV_OVERRIDE_LOCK, InProcessRelay, StaleEnd, StateDir, auth_config, issue_before_start,
-    read_status_keys, send_v2_request, serve_one_stream, stale_control, subscribe, wait_for_server,
+use crate::credential::{StateDir, auth_config};
+use crate::fixtures::{
+    InProcessRelay, issue_before_start, read_stream_request, register_control_conn_parts,
+    serve_one_stream, subscribe, wait_for_server,
 };
+
+/// How a control connection that never opens a data stream ends.
+enum StaleEnd {
+    /// It receives a stream request and leaves it unacknowledged.
+    IgnoreStream,
+    /// As `IgnoreStream`, then waits for the relay to retire it and reports that.
+    IgnoreStreamUntilRetired(oneshot::Sender<()>),
+    /// It acknowledges its first stream request and opens nothing.
+    AckStream,
+}
+
+/// A stale provider: register `key` as a legacy control connection, report it
+/// `ready`, and end as `end` says.
+async fn stale_control(addr: SocketAddr, key: String, ready: oneshot::Sender<()>, end: StaleEnd) {
+    let control = wait_for_server(addr).await;
+    let (mut reader_stream, mut writer_stream) = control.into_split();
+    let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+        register_control_conn_parts(&mut reader, &mut writer, &key).await;
+    }
+    ready.send(()).unwrap();
+    match end {
+        StaleEnd::IgnoreStream => {
+            read_stream_request(&mut reader, "stale control").await;
+        }
+        StaleEnd::IgnoreStreamUntilRetired(retired) => {
+            read_stream_request(&mut reader, "stale control").await;
+            // A missed stream ACK first receives a two-second confirmation grace.
+            let closed = timeout(Duration::from_secs(3), reader.read_msg())
+                .await
+                .expect("stale control was not retired by the server");
+            if let Ok(bytes) = closed {
+                assert!(bytes.is_empty());
+            }
+            retired.send(()).unwrap();
+            return;
+        }
+        StaleEnd::AckStream => {
+            let (client_id, server_generation) =
+                read_stream_request(&mut reader, "stale control").await;
+            let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+            let ack = PbServerRequest::StreamAck {
+                client_id,
+                server_generation,
+            }
+            .encode()
+            .unwrap();
+            writer.write_msg(&ack).await.unwrap();
+        }
+    }
+    std::future::pending::<()>().await;
+}
+
+async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
+    let mut stream = TcpStream::connect(server_addr).await.unwrap();
+    let request = PbConnRequest::Status(PbConnStatusReq::Keys)
+        .encode()
+        .unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut stream).unwrap();
+        writer.write_msg(&request).await.unwrap();
+    }
+
+    let mut reader = get_header_msg_reader(&mut stream).unwrap();
+    let response = timeout(Duration::from_secs(1), reader.read_msg())
+        .await
+        .expect("status keys response timed out")
+        .unwrap();
+    let PbConnResponse::Status(PbConnStatusResp::Keys(keys)) =
+        PbConnResponse::decode(response).unwrap()
+    else {
+        panic!("unexpected status keys response");
+    };
+    keys
+}
+
+async fn send_v2_request(
+    server_addr: SocketAddr,
+    credential: &Credential,
+    request: PbConnRequest,
+) -> (TcpStream, ClientHeaderSession, PbConnResponse) {
+    let mut stream = TcpStream::connect(server_addr).await.unwrap();
+    let session = ClientHeaderSession::new_v2(credential).unwrap();
+    session
+        .write_initial(&mut stream, &request.encode().unwrap())
+        .await
+        .unwrap();
+    let response = {
+        let mut reader = session.response_reader(&mut stream).unwrap();
+        let message = timeout(Duration::from_secs(1), reader.read_msg())
+            .await
+            .expect("v2 response timed out")
+            .unwrap();
+        PbConnResponse::decode(message).unwrap()
+    };
+    (stream, session, response)
+}
 
 #[tokio::test]
 async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
@@ -356,7 +456,6 @@ async fn status_service_reports_registered_v2_control_connection() {
 
 #[tokio::test]
 async fn subscribe_retires_unacked_control_connection() {
-    let _config_guard = ENV_OVERRIDE_LOCK.lock().await;
     let relay = InProcessRelay::start(auth_config()).await;
 
     let key = "sf-backend";
@@ -395,7 +494,6 @@ async fn subscribe_retires_unacked_control_connection() {
 
 #[tokio::test]
 async fn subscribe_waits_for_replacement_after_retiring_stale_control_connection() {
-    let _config_guard = ENV_OVERRIDE_LOCK.lock().await;
     let relay = InProcessRelay::start(auth_config()).await;
 
     let key = "sf-backend";
