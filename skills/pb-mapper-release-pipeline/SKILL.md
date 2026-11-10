@@ -49,27 +49,22 @@ Use semantic tags and never retag an existing version:
 
 Apply required code/workflow changes and update changelog.
 
-In `CHANGELOG.md`, add a new section at the top using this exact heading style:
+In `CHANGELOG.md`, rename the `## [Unreleased]` heading at the top, under which
+each change added its bullet, to this exact heading style (add the section if
+no change opened one):
 
 ```md
 ## [X.Y.Z] - YYYY-MM-DD
 ```
 
-Use concise bullets for user-visible release items.
+Use concise bullets for user-visible release items. The UI release notes are
+this section, so it must not be empty.
 
 ## Step 2: Run Local Validation
 
-Run the same strict checks used in CI:
-
-```bash
-cargo fmt --all
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-flutter analyze
-cd js && bun install --frozen-lockfile && bun run build:release && bun test
-```
-
-Run `flutter analyze` from `ui/` or with `--project-dir ui`.
+Run every check under "Verification" in the repository's `AGENTS.md`: Rust,
+Node, the app and `scripts/release`. That list is CI's; this skill keeps no
+copy of it.
 
 If release workflow logic changed, also validate syntax:
 

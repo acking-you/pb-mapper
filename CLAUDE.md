@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+It maps the code. The rules for changing it — subagent models, invariants, the Rust guide, verification — are in @AGENTS.md and apply to every task.
+
 ## Project Overview
 
 This is a Rust-based network tunneling/proxy system called `pb-mapper` that allows exposing local services to clients over a public network. The project enables users to access their home services (like file transfer servers) from anywhere by creating secure tunnels through a public server.
@@ -700,11 +702,12 @@ and in the tray.
 ## Development Notes
 
 ### Project Structure & Dependencies
-- **Workspace Configuration**: Virtual manifest at the root; versions are pinned
-  once in `[workspace.dependencies]` and crates take them with `.workspace = true`
+- **Workspace Configuration**: Virtual manifest at the root; shared versions live
+  in `[workspace.dependencies]`
 - **Memory Optimization**: Uses mimalloc-rust for improved memory allocation performance
-- **Error Handling**: snafu, with each crate owning its own error type and wrapping
-  the layer below as a `source` rather than sharing one workspace-wide enum
+- **Error Handling**: snafu in core, protocol, server and client, each owning its
+  error types and wrapping the layer below as a `source`; auth, the desktop and
+  the FFI keep hand-written types
 - **Async Runtime**: Built on Tokio with full async/await support
 - **Serialization**: serde and serde_json for message serialization
 - **Networking**: uni-stream for the stream/listener abstractions, hickory-resolver
@@ -714,9 +717,9 @@ and in the tray.
 
 ### Code Quality & Standards
 - **Linting**: `unwrap_used` and `expect_used` are denied for the whole workspace
-  via `[workspace.lints]`; `clippy.toml` exempts test code, and `tests/` and
-  `examples/` targets carry a file-level allow. A production `unwrap` needs a
-  reason recorded at the site.
+  via `[workspace.lints]`; `clippy.toml` exempts test code, and each `tests/` or
+  `examples/` target that unwraps carries a file-level allow. A production
+  `unwrap` needs a reason recorded at the site.
 - **Formatting**: rustfmt.toml configuration for consistent code style
 - **Toolchain**: rust-toolchain.toml for reproducible builds
 - **Testing**: Unit tests live beside the code; integration tests are in

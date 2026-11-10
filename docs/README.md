@@ -61,6 +61,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 
 | Page | Covers |
 | --- | --- |
+| [Rust engineering guide](rust-engineering-guide.md) | how Rust is written here: crates, types, errors, async, processes, wire formats, tests and lints |
 | [Bugfix notes](bugfixes.md) · [中文](bugfixes.zh-CN.md) | how recurring problems were found and fixed |
 | [Claude code review](claude-code-review.md) | the pull-request review workflow |
 | [Introduction](pb-mapper-intro.zh-CN.md) | 中文; why the project exists and how it grew |
