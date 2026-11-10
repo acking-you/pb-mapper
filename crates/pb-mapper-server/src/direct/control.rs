@@ -1,32 +1,46 @@
 //! One direct coordination connection's socket loop.
 use super::DirectTask;
+use crate::ManagerTask;
+use crate::guard::{DeregisterGuard, Deregistration};
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::direct::*;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-struct ControlGuard {
-    sender: crate::ManagerTaskSender,
+/// A direct control connection: its consumer state, then its ID.
+///
+/// Cleanup owns no sockets and is fenced by the connection's scope, so it logs
+/// nothing when the manager is gone or busy.
+struct ControlDeregistration {
     connection: RemoteConnId,
 }
-impl Drop for ControlGuard {
-    fn drop(&mut self) {
-        let sender = self.sender.clone();
-        let connection = self.connection;
-        // Cleanup owns no sockets and is fenced by the existing connection incarnation.
-        tokio::spawn(async move {
-            let _ = sender
-                .send(crate::ManagerTask::Direct(DirectTask::Disconnect {
-                    connection,
-                }))
-                .await;
-            let _ = sender
-                .send(crate::ManagerTask::DeRegisterClientConn {
-                    server_id: None,
-                    client_id: connection,
-                })
-                .await;
-        });
+
+impl Deregistration for ControlDeregistration {
+    fn release(&self) -> Option<ManagerTask> {
+        Some(ManagerTask::Direct(DirectTask::Disconnect {
+            connection: self.connection,
+        }))
+    }
+
+    fn task(&self) -> ManagerTask {
+        ManagerTask::DeRegisterClientConn {
+            server_id: None,
+            client_id: self.connection,
+        }
+    }
+
+    fn manager_closed(&self) {}
+
+    fn dropped_manager_closed(&self) {}
+
+    fn dropped_queue_full(&self) {}
+
+    fn deferred_manager_closed() {}
+
+    fn no_runtime() {
+        tracing::warn!(
+            "cannot defer direct control deregister because no Tokio runtime is available"
+        );
     }
 }
 
@@ -47,12 +61,11 @@ pub(crate) async fn handle_control(
         .cancellation_token()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let (events, mut rx) = mpsc::channel(64);
-    let _guard = ControlGuard {
-        sender: sender.clone(),
-        connection,
-    };
+    // Dropped, never awaited: whichever way this returns, the drop queues the
+    // cleanup without waiting on the manager.
+    let _guard = DeregisterGuard::new(ControlDeregistration { connection }, sender.clone());
     sender
-        .send(crate::ManagerTask::Direct(DirectTask::Connect {
+        .send(ManagerTask::Direct(DirectTask::Connect {
             connection,
             namespace,
             auth,
@@ -71,7 +84,7 @@ pub(crate) async fn handle_control(
                 .map_err(io)?;
             let message = DirectClientMessage::decode(msg).map_err(io)?;
             sender
-                .send(crate::ManagerTask::Direct(DirectTask::Client {
+                .send(ManagerTask::Direct(DirectTask::Client {
                     connection,
                     message,
                 }))

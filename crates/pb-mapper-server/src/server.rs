@@ -13,7 +13,7 @@ use super::error::{
     ServerConnWriteRegisterRespSnafu, ServerConnWriteStreamRequestSnafu,
 };
 use super::{ConnTask, ConnTaskReceiver, ImutableKey, ManagerTask, ManagerTaskSender, Result};
-use crate::manager::TrySendError;
+use crate::guard::{DeregisterGuard, Deregistration};
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::command::{
     CONTROL_PROTOCOL_V2, LocalServer, MessageSerializer, PbConnResponse, PbServerRequest,
@@ -21,105 +21,67 @@ use pb_mapper_protocol::command::{
 use pb_mapper_protocol::secure::ServerHeaderSession;
 use pb_mapper_protocol::{MessageReader, MessageWriter};
 
-/// Ensure that server-side connections are properly deregistered before a normal connection is
-/// disconnected or an exception occurs
-struct ServerConnGuard {
+/// A registered control connection, returned to the manager when its socket
+/// task ends, however it ends.
+struct ServerDeregistration {
     key: ImutableKey,
     conn_id: RemoteConnId,
-    sender: ManagerTaskSender,
-    active: bool,
 }
 
-impl ServerConnGuard {
-    fn new(key: ImutableKey, conn_id: RemoteConnId, sender: ManagerTaskSender) -> Self {
-        Self {
-            key,
-            conn_id,
-            sender,
-            active: true,
-        }
-    }
-
-    fn deregister_task(&self) -> ManagerTask {
+impl Deregistration for ServerDeregistration {
+    fn task(&self) -> ManagerTask {
         ManagerTask::DeRegisterServerConn {
             key: self.key.clone(),
             conn_id: self.conn_id,
         }
     }
 
-    async fn deregister(&mut self) {
-        if !self.active {
-            return;
-        }
-        let task = self.deregister_task();
-        match self.sender.send(task).await {
-            Ok(()) => {
-                self.active = false;
-                tracing::info!(
-                    "Server conn deregistered! key:{} conn_id:{}",
-                    self.key,
-                    self.conn_id
-                );
-            }
-            Err(_) => {
-                self.active = false;
-                tracing::debug!(
-                    "skip async deregister because manager channel is closed: key:{} conn_id:{}",
-                    self.key,
-                    self.conn_id
-                );
-            }
-        }
+    fn sent(&self) {
+        tracing::info!(
+            "Server conn deregistered! key:{} conn_id:{}",
+            self.key,
+            self.conn_id
+        );
     }
 
-    fn spawn_deregister(sender: ManagerTaskSender, task: ManagerTask) {
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    if sender.send(task).await.is_err() {
-                        tracing::debug!(
-                            "skip deferred deregister because manager channel is closed"
-                        );
-                    }
-                });
-            }
-            Err(_) => {
-                tracing::warn!("cannot defer deregister because no Tokio runtime is available");
-            }
-        }
+    fn manager_closed(&self) {
+        tracing::debug!(
+            "skip async deregister because manager channel is closed: key:{} conn_id:{}",
+            self.key,
+            self.conn_id
+        );
     }
-}
 
-impl Drop for ServerConnGuard {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        let task = self.deregister_task();
-        match self.sender.try_send(task) {
-            Ok(()) => {
-                tracing::info!(
-                    "Server conn drop! key:{} conn_id:{}",
-                    self.key,
-                    self.conn_id
-                );
-            }
-            Err(TrySendError::Closed(_)) => {
-                tracing::debug!(
-                    "skip deregister on drop because manager channel is closed: key:{} conn_id:{}",
-                    self.key,
-                    self.conn_id
-                );
-            }
-            Err(TrySendError::Full(task)) => {
-                tracing::warn!(
-                    "manager queue is full; defer server deregister: key:{} conn_id:{}",
-                    self.key,
-                    self.conn_id
-                );
-                Self::spawn_deregister(self.sender.clone(), task);
-            }
-        }
+    fn dropped_sent(&self) {
+        tracing::info!(
+            "Server conn drop! key:{} conn_id:{}",
+            self.key,
+            self.conn_id
+        );
+    }
+
+    fn dropped_manager_closed(&self) {
+        tracing::debug!(
+            "skip deregister on drop because manager channel is closed: key:{} conn_id:{}",
+            self.key,
+            self.conn_id
+        );
+    }
+
+    fn dropped_queue_full(&self) {
+        tracing::warn!(
+            "manager queue is full; defer server deregister: key:{} conn_id:{}",
+            self.key,
+            self.conn_id
+        );
+    }
+
+    fn deferred_manager_closed() {
+        tracing::debug!("skip deferred deregister because manager channel is closed");
+    }
+
+    fn no_runtime() {
+        tracing::warn!("cannot defer deregister because no Tokio runtime is available");
     }
 }
 
@@ -193,7 +155,13 @@ pub async fn handle_server_conn(
         "server register task sent to manager"
     );
 
-    let mut guard = ServerConnGuard::new(key.clone(), conn_id, task_sender.clone());
+    let mut guard = DeregisterGuard::new(
+        ServerDeregistration {
+            key: key.clone(),
+            conn_id,
+        },
+        task_sender.clone(),
+    );
     let result = async {
         let response = rx
             .recv()
@@ -654,15 +622,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::ManagerTask;
     use pb_mapper_core::conn_id::RemoteConnId;
     use pb_mapper_protocol::MessageWriter;
     use tokio_util::sync::CancellationToken;
 
-    use super::{
-        ConnTask, LEGACY_SERVER_IDLE_TIMEOUT, ServerConnGuard, ServerControlWrite,
-        run_control_writer,
-    };
+    use super::{ConnTask, LEGACY_SERVER_IDLE_TIMEOUT, ServerControlWrite, run_control_writer};
 
     /// A writer whose every write blocks forever.
     ///
@@ -739,74 +703,5 @@ mod tests {
     #[test]
     fn server_timeout_has_slack_over_local_server_ping_interval() {
         assert!(LEGACY_SERVER_IDLE_TIMEOUT > Duration::from_secs(5 * 60));
-    }
-
-    #[tokio::test]
-    async fn server_conn_guard_does_not_drop_deregister_when_manager_queue_is_full() {
-        let (sender, mut receiver) = crate::manager::task_channel(1);
-        sender.send(ManagerTask::Shutdown).await.unwrap();
-        let key: Arc<str> = Arc::from("sf-backend");
-
-        drop(ServerConnGuard::new(
-            key,
-            RemoteConnId::from(7),
-            sender.clone(),
-        ));
-
-        assert!(matches!(
-            receiver.recv().await.unwrap(),
-            ManagerTask::Shutdown
-        ));
-        let task = tokio::time::timeout(Duration::from_millis(200), receiver.recv())
-            .await
-            .expect("deregister task was lost when manager queue was full")
-            .unwrap();
-        assert!(matches!(
-            task,
-            ManagerTask::DeRegisterServerConn { conn_id, .. } if conn_id == RemoteConnId::from(7)
-        ));
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod cancellation_audit {
-    use super::*;
-    use std::{
-        future::{Future, poll_fn},
-        task::Poll,
-    };
-    #[tokio::test]
-    async fn cancelled_pending_deregister_delivers_exactly_one_cleanup() {
-        let (sender, mut receiver) = crate::manager::task_channel(1);
-        sender.send(ManagerTask::SweepServerLeases).await.unwrap();
-        let mut guard = ServerConnGuard::new("audit".into(), 7_u32.into(), sender.clone());
-        let mut deregister = Box::pin(guard.deregister());
-        poll_fn(|cx| {
-            assert!(deregister.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        assert!(matches!(
-            receiver.recv().await.unwrap(),
-            ManagerTask::SweepServerLeases
-        ));
-        assert!(
-            receiver.is_empty(),
-            "a pending send must not deliver before it is polled"
-        );
-        drop(deregister);
-        drop(guard);
-        let delivered = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        drop(delivered);
-        let duplicate =
-            tokio::time::timeout(std::time::Duration::from_millis(20), receiver.recv()).await;
-        assert!(
-            duplicate.is_err(),
-            "cancelling cleanup after channel delivery emitted a second deregistration"
-        );
     }
 }

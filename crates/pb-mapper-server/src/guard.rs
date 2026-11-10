@@ -14,8 +14,16 @@ use crate::task::{ManagerTask, ManagerTaskSender};
 /// The log calls stay with each kind of connection, so their text and target do
 /// not depend on this module.
 pub(crate) trait Deregistration: 'static {
-    /// The task to send. Built afresh for every attempt rather than moved into a
-    /// send future, which a cancelled send would drop along with the task.
+    /// A task releasing what the manager keeps for this connection besides its
+    /// ID, sent before [`task`](Self::task). It has to go first: `task` ends the
+    /// connection's scope, and the manager discards whatever the scope sends
+    /// after that.
+    fn release(&self) -> Option<ManagerTask> {
+        None
+    }
+    /// The task that ends the connection. Built afresh for every attempt rather
+    /// than moved into a send future, which a cancelled send would drop along
+    /// with the task.
     fn task(&self) -> ManagerTask;
     /// The awaited send delivered the task.
     fn sent(&self) {}
@@ -36,7 +44,17 @@ pub(crate) trait Deregistration: 'static {
 pub(crate) struct DeregisterGuard<D: Deregistration> {
     what: D,
     sender: ManagerTaskSender,
-    active: bool,
+    owed: Owed,
+}
+
+/// What a guard still owes the manager.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Owed {
+    /// The release, if the kind has one, then the task.
+    All,
+    /// The task; the release was delivered.
+    Task,
+    Nothing,
 }
 
 impl<D: Deregistration> DeregisterGuard<D> {
@@ -44,19 +62,35 @@ impl<D: Deregistration> DeregisterGuard<D> {
         Self {
             what,
             sender,
-            active: true,
+            owed: Owed::All,
         }
+    }
+
+    /// What this guard will deregister, for a connection that learns more
+    /// about itself after the guard was armed.
+    pub(crate) fn what_mut(&mut self) -> &mut D {
+        &mut self.what
     }
 
     /// Send the deregistration and wait until the manager has it.
     pub(crate) async fn deregister(&mut self) {
-        if !self.active {
+        if self.owed == Owed::All {
+            if let Some(release) = self.what.release()
+                && self.sender.send(release).await.is_err()
+            {
+                self.owed = Owed::Nothing;
+                self.what.manager_closed();
+                return;
+            }
+            self.owed = Owed::Task;
+        }
+        if self.owed == Owed::Nothing {
             return;
         }
         let result = self.sender.send(self.what.task()).await;
         // Cleared only once the send has finished: a send cancelled while it
-        // waits leaves the guard active, and dropping it delivers the task.
-        self.active = false;
+        // waits leaves the task owed, and dropping the guard delivers it.
+        self.owed = Owed::Nothing;
         match result {
             Ok(()) => self.what.sent(),
             Err(ManagerClosed) => self.what.manager_closed(),
@@ -66,27 +100,42 @@ impl<D: Deregistration> DeregisterGuard<D> {
 
 impl<D: Deregistration> Drop for DeregisterGuard<D> {
     fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        match self.sender.try_send(self.what.task()) {
-            Ok(()) => self.what.dropped_sent(),
-            Err(TrySendError::Closed(_)) => self.what.dropped_manager_closed(),
-            Err(TrySendError::Full(task)) => {
-                self.what.dropped_queue_full();
-                match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => {
-                        let sender = self.sender.clone();
-                        handle.spawn(async move {
-                            if sender.send(task).await.is_err() {
-                                D::deferred_manager_closed();
-                            }
-                        });
+        let release = match self.owed {
+            Owed::Nothing => return,
+            Owed::All => self.what.release(),
+            Owed::Task => None,
+        };
+        let mut owed = release.into_iter().chain([self.what.task()]);
+        while let Some(task) = owed.next() {
+            match self.sender.try_send(task) {
+                Ok(()) => {}
+                Err(TrySendError::Closed(_)) => {
+                    self.what.dropped_manager_closed();
+                    return;
+                }
+                Err(TrySendError::Full(task)) => {
+                    self.what.dropped_queue_full();
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(handle) => {
+                            let sender = self.sender.clone();
+                            // In order: the release must reach the manager
+                            // before the task that ends the connection's scope.
+                            handle.spawn(async move {
+                                for task in std::iter::once(task).chain(owed) {
+                                    if sender.send(task).await.is_err() {
+                                        D::deferred_manager_closed();
+                                        return;
+                                    }
+                                }
+                            });
+                        }
+                        Err(_) => D::no_runtime(),
                     }
-                    Err(_) => D::no_runtime(),
+                    return;
                 }
             }
         }
+        self.what.dropped_sent();
     }
 }
 
@@ -99,11 +148,23 @@ mod tests {
     use pb_mapper_core::conn_id::RemoteConnId;
 
     use super::*;
+    use crate::direct::DirectTask;
     use crate::manager::task_channel;
 
-    struct Probe;
+    /// Deregisters connection 7, releasing its direct state first when
+    /// `release` is set.
+    struct Probe {
+        release: bool,
+    }
 
     impl Deregistration for Probe {
+        fn release(&self) -> Option<ManagerTask> {
+            self.release.then(|| {
+                ManagerTask::Direct(DirectTask::Disconnect {
+                    connection: RemoteConnId::from(7),
+                })
+            })
+        }
         fn task(&self) -> ManagerTask {
             ManagerTask::DeRegisterClientConn {
                 server_id: None,
@@ -125,7 +186,7 @@ mod tests {
     async fn cancelled_pending_deregister_delivers_exactly_one_cleanup() {
         let (sender, mut receiver) = task_channel(1);
         sender.send(ManagerTask::SweepServerLeases).await.unwrap();
-        let mut guard = DeregisterGuard::new(Probe, sender.clone());
+        let mut guard = DeregisterGuard::new(Probe { release: false }, sender.clone());
         let mut deregister = Box::pin(guard.deregister());
         poll_fn(|cx| {
             assert!(deregister.as_mut().poll(cx).is_pending());
@@ -147,9 +208,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(is_deregistration(&delivered));
-        let duplicate = tokio::time::timeout(Duration::from_millis(20), receiver.recv()).await;
+        // The cancelled send delivered nothing and the drop sent one task, so
+        // nothing can still be on its way.
         assert!(
-            duplicate.is_err(),
+            receiver.is_empty(),
             "cancelling cleanup after channel delivery emitted a second deregistration"
         );
     }
@@ -159,7 +221,10 @@ mod tests {
         let (sender, mut receiver) = task_channel(1);
         sender.send(ManagerTask::Shutdown).await.unwrap();
 
-        drop(DeregisterGuard::new(Probe, sender.clone()));
+        drop(DeregisterGuard::new(
+            Probe { release: false },
+            sender.clone(),
+        ));
 
         assert!(matches!(
             receiver.recv().await.unwrap(),
@@ -170,5 +235,30 @@ mod tests {
             .expect("deregister task was lost when manager queue was full")
             .unwrap();
         assert!(is_deregistration(&task));
+    }
+
+    /// The manager discards what a connection's scope sends after the task
+    /// that ends it, so a release overtaken by that task would be lost: a
+    /// direct consumer left registered for good.
+    #[tokio::test]
+    async fn a_release_deferred_by_a_full_queue_still_precedes_the_task() {
+        let (sender, mut receiver) = task_channel(1);
+        sender.send(ManagerTask::Shutdown).await.unwrap();
+
+        drop(DeregisterGuard::new(
+            Probe { release: true },
+            sender.clone(),
+        ));
+
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            ManagerTask::Shutdown
+        ));
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            ManagerTask::Direct(DirectTask::Disconnect { connection })
+                if connection == RemoteConnId::from(7)
+        ));
+        assert!(is_deregistration(&receiver.recv().await.unwrap()));
     }
 }
