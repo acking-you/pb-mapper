@@ -198,6 +198,19 @@ pub(super) fn read_wal_record(
     file.read_exact(sealed).map_err(WalRecordError::Truncated)
 }
 
+/// Reads the first byte of the next frame's length prefix into `first`, or
+/// returns `false` at a clean end of file. The byte is read alone so that end
+/// of file between frames is told apart from one inside a length prefix, and
+/// an interrupted read is retried, as `read_exact` does for the rest.
+fn frame_begins(file: &mut impl Read, first: &mut u8) -> std::io::Result<bool> {
+    loop {
+        match file.read(std::slice::from_mut(first)) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            result => return result.map(|read| read != 0),
+        }
+    }
+}
+
 pub(crate) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRecord>, AuthFailure> {
     let mut file = File::open(path).map_err(|error| {
         AuthFailure::new(
@@ -209,12 +222,11 @@ pub(crate) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRec
     let mut records = Vec::new();
     let mut sealed = Vec::new();
     loop {
-        // The first byte alone, so a clean end of file between frames is told
-        // apart from one inside a length prefix.
         let mut length = [0_u8; 4];
-        match file.read(&mut length[..1]) {
-            Ok(0) => break,
-            Ok(_) => {}
+        let [first, ..] = &mut length;
+        match frame_begins(&mut file, first) {
+            Ok(false) => break,
+            Ok(true) => {}
             Err(error) => {
                 return Err(AuthFailure::new(
                     codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
@@ -294,4 +306,40 @@ pub(crate) fn truncate_auth_wal(state_dir: &Path) -> Result<(), AuthFailure> {
         sync_parent_directory(&wal_path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Error, ErrorKind, Read};
+
+    use super::frame_begins;
+
+    /// Answers each read from a script: an error kind, or the bytes to hand out.
+    struct Script(Vec<Result<&'static [u8], ErrorKind>>);
+
+    impl Read for Script {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.remove(0) {
+                Ok(bytes) => {
+                    buf[..bytes.len()].copy_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                Err(kind) => Err(Error::from(kind)),
+            }
+        }
+    }
+
+    /// A signal landing on the read between two frames is not damage: the
+    /// read is retried, as `read_exact` retries the rest of the frame.
+    #[test]
+    fn an_interrupted_read_between_frames_is_retried() {
+        let mut first = 0;
+        let mut file = Script(vec![Err(ErrorKind::Interrupted), Ok(&[7])]);
+        assert!(frame_begins(&mut file, &mut first).unwrap());
+        assert_eq!(first, 7);
+        let mut file = Script(vec![Err(ErrorKind::Interrupted), Ok(&[])]);
+        assert!(!frame_begins(&mut file, &mut first).unwrap());
+        let mut file = Script(vec![Err(ErrorKind::PermissionDenied)]);
+        assert!(frame_begins(&mut file, &mut first).is_err());
+    }
 }
