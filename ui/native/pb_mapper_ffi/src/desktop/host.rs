@@ -482,13 +482,37 @@ fn host_options(settings: &trust::Settings, lan_first: bool) -> HostOptions {
     options
 }
 
+/// What `restart_host` changes of the running local host.
+pub(super) enum HostChange {
+    /// `host_set_display`: the host resumes at once with the same
+    /// invitation, so the viewer reconnects.
+    Display(u32),
+    /// `host_rename`: the renamed service is no longer what the viewer
+    /// reaches.
+    Service(String),
+}
+impl HostChange {
+    /// How the viewer's session ends.
+    fn reason(&self) -> StopReason {
+        match self {
+            Self::Display(_) => StopReason::Restarting,
+            Self::Service(_) => StopReason::HostStopped,
+        }
+    }
+
+    fn apply(self, settings: &mut trust::Settings) {
+        match self {
+            Self::Display(display_id) => settings.display_id = display_id,
+            Self::Service(service) => settings.service = service,
+        }
+    }
+}
+
 /// `host_set_display` and `host_rename`: the running local host again, with
-/// its identity, on another display or under another service. Its viewer's
-/// session ends with `reason`.
+/// its identity, on another display or under another service.
 pub(super) async fn restart_host(
     handle: &PbMapperHandle,
-    reason: StopReason,
-    change: impl FnOnce(&mut trust::Settings),
+    change: HostChange,
 ) -> Result<Value, CtlError> {
     let state = &handle.desktop;
     let mut slot = state.host.lock().await;
@@ -503,7 +527,8 @@ pub(super) async fn restart_host(
     let mut settings = local.settings.clone();
     // The live policy, which "make view-only" may have changed since.
     settings.allow_control = host.status().control_allowed;
-    change(&mut settings);
+    let reason = change.reason();
+    change.apply(&mut settings);
     // Check the new service before the running host goes.
     local
         .identity

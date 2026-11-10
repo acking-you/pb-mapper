@@ -12,7 +12,7 @@ use crate::{
     handle::PbMapperHandle,
     response::{err_ctl, err_null_handle, ok_data, parse_c_string},
 };
-use pb_mapper::desktop::{self, Invitation, StopReason};
+use pb_mapper::desktop::{self, Invitation};
 use pb_mapper_core::checksum::get_process_credential;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -30,7 +30,7 @@ use background::{
     revoke_background, start_background,
 };
 use host::{
-    HostSlot, HostStart, Start, host_end_session, host_permission, host_restore,
+    HostChange, HostSlot, HostStart, Start, host_end_session, host_permission, host_restore,
     host_restore_display_mode, host_status, host_stop, restart_host, revoke_trust_with_background,
     start_local, trust_status,
 };
@@ -276,20 +276,10 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
         Request::HostPermission { allow_control } => host_permission(handle, allow_control).await,
         Request::HostRestoreDisplayMode => host_restore_display_mode(handle).await,
         Request::HostEndSession => host_end_session(handle).await,
-        // A display switch resumes at once with the same invitation, so the
-        // viewer reconnects; a renamed service is no longer what it reaches.
         Request::HostSetDisplay { display_id } => {
-            restart_host(handle, StopReason::Restarting, |settings| {
-                settings.display_id = display_id;
-            })
-            .await
+            restart_host(handle, HostChange::Display(display_id)).await
         }
-        Request::HostRename { service } => {
-            restart_host(handle, StopReason::HostStopped, |settings| {
-                settings.service = service;
-            })
-            .await
-        }
+        Request::HostRename { service } => restart_host(handle, HostChange::Service(service)).await,
         Request::InspectInvitation { invitation } => Ok(inspection(
             &Invitation::decode(&invitation).map_err(invitation_error)?,
         )),
