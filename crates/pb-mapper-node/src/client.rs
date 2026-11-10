@@ -10,7 +10,7 @@ use pb_mapper_client::sdk::{self, ClientConfig, ConnectRequest, RegisterRequest}
 use crate::admin::Admin;
 use crate::convert::{
     as_opt_u64, invalid_argument, parse_lan_transport, parse_path, parse_port_mapping,
-    parse_relay_transport, parse_transport, to_napi, transport_name,
+    parse_relay_transport, parse_transport, to_napi,
 };
 use crate::diagnostics::JsRelayDiagnostics;
 use crate::readers::{RelayMetricsReader, period};
@@ -156,7 +156,7 @@ impl Client {
     /// The relay carrier this client uses: `tcp` or `quic`.
     #[napi]
     pub fn relay_transport(&self) -> String {
-        transport_name(self.inner.relay_transport())
+        self.inner.relay_transport().as_str().into()
     }
 
     /// The UDP port the relay offers QUIC on, or `null` when it offers none.

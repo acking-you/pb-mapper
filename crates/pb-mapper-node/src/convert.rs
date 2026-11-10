@@ -12,22 +12,6 @@ pub(crate) fn number(value: u64) -> f64 {
     value.min((1_u64 << 53) - 1) as f64
 }
 
-pub(crate) fn path_name(path: sdk::SessionPath) -> &'static str {
-    match path {
-        sdk::SessionPath::Direct => "direct",
-        sdk::SessionPath::Relay => "relay",
-    }
-}
-
-/// The name of a relay carrier, as the JS API spells it.
-pub(crate) fn transport_name(transport: sdk::RelayTransport) -> String {
-    match transport {
-        sdk::RelayTransport::Tcp => "tcp",
-        sdk::RelayTransport::Quic => "quic",
-    }
-    .into()
-}
-
 pub(crate) fn to_napi(error: sdk::Error) -> Error {
     Error::from_reason(error.to_string())
 }
@@ -58,61 +42,50 @@ pub(crate) fn narrow_page_size(value: Option<u32>) -> Result<u16> {
     u16::try_from(value).map_err(|_| invalid_argument(format!("pageSize {value} is out of range")))
 }
 
+// The option parsers below take the SDK's own labels (`FromStr`, exact and
+// case-sensitive). `transport` and the legacy policy are lowercased first, so
+// they also take any case; every option keeps its JS default and message.
+
 pub(crate) fn parse_transport(raw: &str) -> Result<Transport> {
-    match raw.to_ascii_lowercase().as_str() {
-        "tcp" => Ok(Transport::Tcp),
-        "udp" => Ok(Transport::Udp),
-        _ => Err(invalid_argument(format!(
-            "transport must be \"tcp\" or \"udp\", got {raw}"
-        ))),
-    }
+    raw.to_ascii_lowercase()
+        .parse()
+        .map_err(|_| invalid_argument(format!("transport must be \"tcp\" or \"udp\", got {raw}")))
 }
 
 pub(crate) fn parse_relay_transport(raw: Option<&str>) -> Result<sdk::RelayTransport> {
-    match raw.unwrap_or("tcp") {
-        "tcp" => Ok(sdk::RelayTransport::Tcp),
-        "quic" => Ok(sdk::RelayTransport::Quic),
-        _ => Err(invalid_argument("relayTransport must be tcp or quic")),
-    }
+    raw.unwrap_or("tcp")
+        .parse()
+        .map_err(|_| invalid_argument("relayTransport must be tcp or quic"))
 }
 
 pub(crate) fn parse_path(raw: Option<&str>) -> Result<sdk::PathPolicy> {
-    match raw.unwrap_or("auto") {
-        "relay-only" => Ok(sdk::PathPolicy::RelayOnly),
-        "auto" => Ok(sdk::PathPolicy::Auto),
-        _ => Err(invalid_argument("path must be relay-only or auto")),
-    }
+    raw.unwrap_or("auto")
+        .parse()
+        .map_err(|_| invalid_argument("path must be relay-only or auto"))
 }
 
 pub(crate) fn parse_legacy_protocol(raw: &str) -> Result<sdk::LegacyProtocol> {
-    match raw.to_ascii_lowercase().as_str() {
-        "allow" => Ok(sdk::LegacyProtocol::Allow),
-        "deny" => Ok(sdk::LegacyProtocol::Deny),
-        _ => Err(invalid_argument(
-            "legacy protocol must be \"allow\" or \"deny\"",
-        )),
-    }
+    raw.to_ascii_lowercase()
+        .parse()
+        .map_err(|_| invalid_argument("legacy protocol must be \"allow\" or \"deny\""))
 }
 
 pub(crate) fn parse_lan_transport(raw: Option<&str>) -> Result<sdk::LanTransport> {
-    match raw.unwrap_or("quic") {
-        "quic" => Ok(sdk::LanTransport::Quic),
-        "tcp" => Ok(sdk::LanTransport::Tcp),
-        other => Err(invalid_argument(format!(
-            "lanTransport must be \"quic\" or \"tcp\", got {other}"
-        ))),
-    }
+    let raw = raw.unwrap_or("quic");
+    raw.parse().map_err(|_| {
+        invalid_argument(format!(
+            "lanTransport must be \"quic\" or \"tcp\", got {raw}"
+        ))
+    })
 }
 
 pub(crate) fn parse_port_mapping(raw: Option<&str>) -> Result<sdk::PortMapping> {
-    match raw.unwrap_or("auto") {
-        "off" => Ok(sdk::PortMapping::Off),
-        "auto" => Ok(sdk::PortMapping::Auto),
-        "always" => Ok(sdk::PortMapping::Always),
-        other => Err(invalid_argument(format!(
-            "portMapping must be \"off\", \"auto\" or \"always\", got {other}"
-        ))),
-    }
+    let raw = raw.unwrap_or("auto");
+    raw.parse().map_err(|_| {
+        invalid_argument(format!(
+            "portMapping must be \"off\", \"auto\" or \"always\", got {raw}"
+        ))
+    })
 }
 
 /// Render a tunnel status for JS.

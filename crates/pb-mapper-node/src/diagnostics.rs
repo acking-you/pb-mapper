@@ -3,7 +3,7 @@
 use napi_derive::napi;
 use pb_mapper_client::sdk;
 
-use crate::convert::{number, path_name, transport_name};
+use crate::convert::number;
 
 /// A tunnel's gateway port mapping after its latest change.
 #[napi(object)]
@@ -93,7 +93,7 @@ pub struct JsQuicConnectionDiagnostics {
 impl From<sdk::RelayDiagnostics> for JsRelayDiagnostics {
     fn from(value: sdk::RelayDiagnostics) -> Self {
         Self {
-            transport: transport_name(value.transport),
+            transport: value.transport.as_str().into(),
             connections_created: number(value.connections_created),
             streams_opened: number(value.streams_opened),
             streams_reused: number(value.streams_reused),
@@ -259,7 +259,7 @@ impl From<sdk::TunnelMetrics> for JsTunnelMetrics {
             },
             traffic: value.traffic.into(),
             relay: JsRelayHealth {
-                transport: transport_name(relay.transport),
+                transport: relay.transport.as_str().into(),
                 phase: relay.phase.as_str().into(),
                 consecutive_failures: number(relay.consecutive_failures),
                 rtt_ms: relay.rtt_ms.map(number),
@@ -586,7 +586,7 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 link,
             } => {
                 js.session = Some(number(session));
-                js.path = Some(path_name(path).into());
+                js.path = Some(path.as_str().into());
                 js.link = link.map(|link| link.as_str().into());
                 "session_opened"
             }
@@ -599,7 +599,7 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 received_bytes,
             } => {
                 js.session = Some(number(session));
-                js.path = Some(path_name(path).into());
+                js.path = Some(path.as_str().into());
                 js.link = link.map(|link| link.as_str().into());
                 js.duration_ms = Some(number(duration_ms));
                 js.sent_bytes = Some(number(sent_bytes));
@@ -712,7 +712,7 @@ impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
             }),
             traffic: value.traffic.into(),
             relay_rtt_ms: value.relay_rtt_ms.map(number),
-            relay_transport: transport_name(value.relay_transport),
+            relay_transport: value.relay_transport.as_str().into(),
             lan_first: value.lan_first,
             lan_transport: value.lan_transport.as_str().into(),
             sdk_version: value.sdk_version.to_string(),

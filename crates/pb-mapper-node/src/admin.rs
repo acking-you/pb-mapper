@@ -68,10 +68,7 @@ impl From<sdk::AuthStatusInfo> for JsAuthStatus {
             active_keys: value.active_keys as i64,
             expired_keys: value.expired_keys as i64,
             revoked_keys: value.revoked_keys as i64,
-            legacy_protocol: match value.legacy_protocol {
-                sdk::LegacyProtocol::Allow => "allow".into(),
-                sdk::LegacyProtocol::Deny => "deny".into(),
-            },
+            legacy_protocol: value.legacy_protocol.as_str().into(),
             active_legacy_connections: value.active_legacy_connections as i64,
             last_legacy_connection_at: value.last_legacy_connection_at.map(|at| at as i64),
             auth_successes: value.auth_successes as i64,
