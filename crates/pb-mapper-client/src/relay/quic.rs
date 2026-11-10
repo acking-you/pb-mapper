@@ -161,13 +161,61 @@ impl From<ConnectError> for DialFailure {
 
 impl DialFailure {
     /// The error a caller of the failed dial gets, the dial's own one
-    /// included: its kind, text and sources are the dial's.
+    /// included: its kind, text and sources are the dial's, and so is the
+    /// code of an operating-system error.
     fn error(&self) -> ConnectError {
         match self {
             Self::Rejected(response) => ConnectError::Rejected {
                 response: response.clone(),
             },
-            Self::Transport(source) => io::Error::new(source.kind(), Arc::clone(source)).into(),
+            // An OS error carries nothing but its code, so a copy is exact.
+            Self::Transport(source) => match source.raw_os_error() {
+                Some(code) => io::Error::from_raw_os_error(code).into(),
+                None => io::Error::new(source.kind(), Arc::clone(source)).into(),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod dial_failure_tests {
+    use super::*;
+    use std::error::Error as _;
+
+    fn transport(failure: &DialFailure) -> io::Error {
+        match failure.error() {
+            ConnectError::Transport { source } => source,
+            ConnectError::Rejected { response } => panic!("not a transport failure: {response:?}"),
+        }
+    }
+
+    /// Every caller of a failed dial, the dialling one included, gets the
+    /// dial's own error: an operating-system error with its code, which is
+    /// all such an error carries, and any other with its text and sources.
+    #[test]
+    fn a_failed_dial_hands_every_caller_its_own_error() {
+        let os = DialFailure::from(ConnectError::from(io::Error::from_raw_os_error(1)));
+        for _ in 0..2 {
+            let error = transport(&os);
+            assert_eq!(error.raw_os_error(), Some(1));
+            assert_eq!(error.kind(), io::Error::from_raw_os_error(1).kind());
+        }
+
+        #[derive(Debug, snafu::Snafu)]
+        #[snafu(display("handshake failed"))]
+        struct Handshake {
+            source: io::Error,
+        }
+        let cause = || io::Error::new(io::ErrorKind::ConnectionReset, "reset by the relay");
+        let payload = DialFailure::from(ConnectError::from(io::Error::other(Handshake {
+            source: cause(),
+        })));
+        for _ in 0..2 {
+            let error = transport(&payload);
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(error.to_string(), "handshake failed");
+            let source = error.source().expect("the payload's source is kept");
+            assert_eq!(source.to_string(), cause().to_string());
         }
     }
 }
