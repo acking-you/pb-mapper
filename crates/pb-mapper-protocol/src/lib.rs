@@ -15,7 +15,7 @@ pub mod secure;
 use snafu::{ResultExt, ensure};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::buffer::{BufferGetter, CommonBuffer, FixedSizeBuffer};
+use crate::buffer::CommonBuffer;
 use pb_mapper_core::checksum::{
     AesKeyType, get_checksum, get_checksum_for_key, get_msg_header_key, process_checksum_is_ready,
     valid_checksum, valid_checksum_for_key,
@@ -52,21 +52,6 @@ pub trait MessageReader {
 
 pub trait MessageWriter {
     async fn write_msg(&mut self, msg: &[u8]) -> Result<()>;
-
-    /// TODO: Implement this method to fix the encryption zero-copy data corruption bug
-    ///
-    /// This method should be used for encryption scenarios where:
-    /// - Zero-copy performance is needed
-    /// - The caller can provide mutable data
-    /// - No unsafe transmutation is required
-    ///
-    /// Default implementation falls back to the immutable version for compatibility.
-    /// Encryption implementations should override this for true zero-copy operation.
-    async fn write_msg_mut(&mut self, msg: &mut [u8]) -> Result<()> {
-        // Default implementation: delegate to immutable version
-        // This maintains backward compatibility but doesn't solve the corruption issue
-        self.write_msg(msg).await
-    }
 }
 
 /// Maximum plaintext payload size read from local services.
@@ -294,15 +279,16 @@ impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> CodecMessageReader<'a, T, D> {
 impl<T: AsyncReadExt + Unpin, D: Decryptor> CodecMessageReader<'_, T, D> {
     /// Byte-stream framing permits FIN between records. Control/datagram readers remain strict.
     pub(crate) async fn read_stream(&mut self) -> Result<&'_ [u8]> {
-        let Some(message) = self.reader.read_msg_inner::<true>().await? else {
+        if self.reader.read_msg_inner::<true>().await?.is_none() {
             return Ok(&[]);
-        };
-        let n = message.len();
-        self.decrypt(n)
+        }
+        self.decrypt()
     }
-    fn decrypt(&mut self, n: usize) -> Result<&'_ [u8]> {
+
+    /// Decrypts the frame just read, in place.
+    fn decrypt(&mut self) -> Result<&'_ [u8]> {
         self.decryptor
-            .decrypt(&mut self.reader.buffer.buffer_mut()[..n])
+            .decrypt(self.reader.buffer.buffer_mut())
             .map(|bytes| &*bytes)
             .map_err(|e| error::Error::MsgCodec {
                 action: "decrypt",
@@ -312,13 +298,12 @@ impl<T: AsyncReadExt + Unpin, D: Decryptor> CodecMessageReader<'_, T, D> {
 }
 impl<T: AsyncReadExt + Unpin, D: Decryptor> MessageReader for CodecMessageReader<'_, T, D> {
     async fn read_msg(&mut self) -> Result<&'_ [u8]> {
-        let n = self.reader.read_msg().await?.len();
-        self.decrypt(n)
+        self.reader.read_msg().await?;
+        self.decrypt()
     }
 }
 
-/// NOTE: We copy input data before encryption to avoid mutating shared buffers.
-/// This trades some performance for correctness until a zero-copy mutable API is added.
+/// Encrypts a copy of each message, leaving the caller's buffer untouched.
 pub struct CodecMessageWriter<'a, T: AsyncWriteExt + Unpin, E: Encryptor> {
     writer: &'a mut T,
     encryptor: E,

@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use snafu::ResultExt;
+use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use super::{
     CodecMessageReader, CodecMessageWriter, MessageReader, MessageWriter, NormalMessageReader,
     NormalMessageWriter,
 };
-use crate::buffer::{BufferReader, BufferedReader};
+use crate::buffer::BufferReader;
 use crate::data::DataCodec;
 use pb_mapper_core::checksum::AesKeyType;
 use pb_mapper_core::codec::{Decryptor, Encryptor};
@@ -292,7 +293,6 @@ impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> CodecForwardWriter<'a, T
 impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> ForwardWriter
     for CodecForwardWriter<'a, T, E>
 {
-    /// SAFETY: Same as [`CodecMessageWriter`]
     async fn write(&mut self, src: &[u8]) -> Result<()> {
         self.0.write_msg(src).await
     }
@@ -325,49 +325,13 @@ impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> DatagramWriter
     }
 }
 
-pub async fn copy<R: ForwardReader, W: ForwardWriter>(
-    mut reader: R,
-    mut writer: W,
-) -> Result<usize> {
-    let mut length: usize = 0;
-    loop {
-        let src = reader.read().await?;
-        let n = src.len();
-        if n == 0 {
-            break;
-        }
-        writer.write(src).await?;
-        length += n;
-    }
-    writer.shutdown().await;
-    Ok(length)
-}
-
-pub async fn transfer_datagrams<R: DatagramReader, W: DatagramWriter>(
-    label: &'static str,
-    reader: R,
-    writer: W,
-) -> Result<usize> {
-    let own = AtomicU64::new(0);
-    transfer_counted(
-        label,
-        reader,
-        writer,
-        Tally {
-            own: &own,
-            meter: None,
-        },
-    )
-    .await
-}
-
 /// Relay datagrams until either side fails, counting each into `tally`.
 async fn transfer_counted<R: DatagramReader, W: DatagramWriter>(
     label: &'static str,
     mut reader: R,
     mut writer: W,
     tally: Tally<'_>,
-) -> Result<usize> {
+) -> Result<Infallible> {
     loop {
         let src = reader.recv().await?;
         let n = src.len();
@@ -583,11 +547,13 @@ async fn datagram_forward<
     let client_to_server = transfer_counted("udp->tcp", client_reader, server_writer, sending);
     let server_to_client = transfer_counted("tcp->udp", server_reader, client_writer, receiving);
     tokio::select! {
-        result = client_to_server =>{
-            handle_forward_result( result,"udp->tcp");
+        result = client_to_server => {
+            let Err(error) = result;
+            handle_forward_result(Err(error), "udp->tcp");
         },
-        result = server_to_client =>{
-            handle_forward_result( result,"tcp->udp");
+        result = server_to_client => {
+            let Err(error) = result;
+            handle_forward_result(Err(error), "tcp->udp");
         }
     }
     ForwardTotals {
