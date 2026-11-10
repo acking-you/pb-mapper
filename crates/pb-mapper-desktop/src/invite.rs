@@ -26,7 +26,9 @@ use subtle::ConstantTimeEq;
 pub(crate) const SERVICE_PREFIX: &str = "desktop:";
 /// The longest service name, its prefix included.
 pub(crate) const MAX_SERVICE_LEN: usize = 128;
-pub(crate) fn valid_service(service: &str) -> bool {
+/// Whether `service` names a desktop service: `desktop:`, then 1 to 120
+/// ASCII letters, digits, periods, underscores, colons or hyphens.
+pub fn valid_service(service: &str) -> bool {
     service.starts_with(SERVICE_PREFIX)
         && service.len() > SERVICE_PREFIX.len()
         && service.len() <= MAX_SERVICE_LEN

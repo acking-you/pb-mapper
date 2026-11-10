@@ -60,8 +60,7 @@ pub use backend::{
 };
 pub use host::{Access, Custom, DisplaySelection, Host, HostBuilder, HostOptions, Native};
 pub use input::{Button, DoubleClickGuard, Input, InputEvent, Key, cursor::CursorPosition};
-pub(crate) use invite::valid_service;
-pub use invite::{Invitation, InvitationError, InvitationFormat};
+pub use invite::{Invitation, InvitationError, InvitationFormat, valid_service};
 pub use modes::{DisplayModeError, Mode, ModeList, ModeTarget};
 pub use native::{NativeBackend, native_backend};
 pub use platform::{HostSupport, UnsupportedReason, displays, host_support, recover_display_modes};
