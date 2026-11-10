@@ -153,7 +153,7 @@ mod timing_wheel;
 mod types;
 
 // The published API. Each name is listed, so nothing becomes public by accident.
-pub use config::default_auth_state_dir;
+pub use config::{AuthConfigOverrides, default_auth_state_dir};
 pub use ids::{ADMIN_KEY_ID, Generation, KeyId, MAX_ALLOCATED_NAMESPACE, SlotIndex};
 pub use keys::derive_temporary_key;
 pub use lease::{AuthContext, AuthLease};

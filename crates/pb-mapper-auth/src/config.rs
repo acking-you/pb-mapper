@@ -95,24 +95,62 @@ fn unix_path_is_writable(path: &Path) -> bool {
     unsafe { access(c_path.as_ptr(), W_OK) == 0 }
 }
 
-impl Default for AuthConfig {
-    fn default() -> Self {
+/// Values that take the place of the environment variables
+/// [`AuthConfig::from_env_with`] reads: each `Some` replaces one, which is then
+/// not read at all, and each `None` leaves it in charge.
+#[derive(Clone, Debug, Default)]
+pub struct AuthConfigOverrides {
+    /// Replaces `PB_MAPPER_AUTH_STATE_DIR` and the platform default behind it.
+    pub state_dir: Option<PathBuf>,
+    /// Replaces `PB_MAPPER_AUTH_MAX_TEMP_KEYS`.
+    pub max_temporary_keys: Option<usize>,
+    /// Replaces `PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS`.
+    pub max_temporary_key_ttl: Option<Duration>,
+    /// Replaces `PB_MAPPER_LEGACY_PROTOCOL`.
+    pub legacy_protocol: Option<LegacyProtocolPolicy>,
+}
+
+impl AuthConfig {
+    /// The configuration the environment sets, except where `overrides` says
+    /// otherwise. An overridden variable is not read, so it neither applies nor
+    /// logs a complaint about its value. Overrides are taken as given, as the
+    /// fields of an `AuthConfig` literal are: checking their range is the
+    /// caller's.
+    pub fn from_env_with(overrides: AuthConfigOverrides) -> Self {
+        let AuthConfigOverrides {
+            state_dir,
+            max_temporary_keys,
+            max_temporary_key_ttl,
+            legacy_protocol,
+        } = overrides;
         Self {
-            state_dir: default_auth_state_dir(),
-            max_temporary_keys: env_usize(
-                "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
-                DEFAULT_TEMP_KEY_CAPACITY,
-                1,
-                MAX_TEMP_KEY_CAPACITY,
-            ),
-            max_temporary_key_ttl: Duration::from_secs(env_u64(
-                "PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS",
-                DEFAULT_MAX_TEMP_KEY_TTL.as_secs(),
-                MIN_TEMP_KEY_TTL.as_secs(),
-                MAX_TEMP_KEY_TTL.as_secs(),
-            )),
-            legacy_protocol: legacy_protocol_from_env(),
+            state_dir: state_dir.unwrap_or_else(default_auth_state_dir),
+            max_temporary_keys: max_temporary_keys.unwrap_or_else(|| {
+                env_usize(
+                    "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
+                    DEFAULT_TEMP_KEY_CAPACITY,
+                    1,
+                    MAX_TEMP_KEY_CAPACITY,
+                )
+            }),
+            max_temporary_key_ttl: max_temporary_key_ttl.unwrap_or_else(|| {
+                Duration::from_secs(env_u64(
+                    "PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS",
+                    DEFAULT_MAX_TEMP_KEY_TTL.as_secs(),
+                    MIN_TEMP_KEY_TTL.as_secs(),
+                    MAX_TEMP_KEY_TTL.as_secs(),
+                ))
+            }),
+            legacy_protocol: legacy_protocol.unwrap_or_else(legacy_protocol_from_env),
         }
+    }
+}
+
+impl Default for AuthConfig {
+    /// The configuration the environment sets: [`AuthConfig::from_env_with`]
+    /// with no overrides.
+    fn default() -> Self {
+        Self::from_env_with(AuthConfigOverrides::default())
     }
 }
 
