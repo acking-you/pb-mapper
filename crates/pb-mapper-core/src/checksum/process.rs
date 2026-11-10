@@ -2,7 +2,7 @@
 //! runtime, and the frame checksum keyed by it.
 
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
@@ -12,10 +12,30 @@ use crate::DataLenType;
 /// Environment variable used by server/client processes to carry the 32-byte header key.
 pub const ENV_MSG_HEADER_KEY: &str = "MSG_HEADER_KEY";
 
+/// Set in [`MsgHeaderKeyState::checksum`] while a credential keys checksums.
+const CHECKSUM_READY: u64 = 1 << 32;
+
 struct MsgHeaderKeyState {
-    credential: RwLock<Option<Credential>>,
-    load_error: RwLock<Option<String>>,
-    hash: AtomicU32,
+    /// The credential, if any, or why the one in `MSG_HEADER_KEY` was
+    /// refused. Only the start can refuse one: every update replaces it with
+    /// a credential or none.
+    credential: RwLock<Result<Option<Credential>, String>>,
+    /// `CHECKSUM_READY | hash` while a credential is set, else 0, so one load
+    /// gives both whether a frame can be checksummed and the hash to use.
+    /// Stored under the credential's write lock.
+    checksum: AtomicU64,
+}
+
+/// What [`MsgHeaderKeyState::checksum`] holds for `credential`.
+fn packed_checksum(credential: Option<&Credential>) -> u64 {
+    credential.map_or(0, |credential| {
+        CHECKSUM_READY | u64::from(gen_checksum_by_key(credential.key()))
+    })
+}
+
+/// The hash half of a [`packed_checksum`]: 0 when no credential is set.
+fn checksum_hash(packed: u64) -> ChecksumType {
+    packed as ChecksumType
 }
 
 fn load_credential_from_env() -> Result<Option<Credential>, String> {
@@ -29,14 +49,12 @@ fn load_credential_from_env() -> Result<Option<Credential>, String> {
 }
 
 fn update_runtime_credential(credential: Option<Credential>) {
-    let hash = credential
-        .as_ref()
-        .map(|credential| gen_checksum_by_key(credential.key()))
-        .unwrap_or_default();
+    let checksum = packed_checksum(credential.as_ref());
     let mut guard = MSG_HEADER_KEY_STATE.credential.write();
-    *guard = credential;
-    *MSG_HEADER_KEY_STATE.load_error.write() = None;
-    MSG_HEADER_KEY_STATE.hash.store(hash, Ordering::Release);
+    *guard = Ok(credential);
+    MSG_HEADER_KEY_STATE
+        .checksum
+        .store(checksum, Ordering::Release);
 }
 
 /// Runtime key material and checksum hash.
@@ -44,32 +62,26 @@ fn update_runtime_credential(credential: Option<Credential>) {
 /// This state is mutable so FFI/UI can update `MSG_HEADER_KEY` at runtime
 /// without restarting the process.
 static MSG_HEADER_KEY_STATE: LazyLock<MsgHeaderKeyState> = LazyLock::new(|| {
-    let (credential, load_error) = match load_credential_from_env() {
-        Ok(credential) => (credential, None),
-        Err(error) => {
-            tracing::error!(reason = "credential_invalid", %error, "invalid MSG_HEADER_KEY");
-            (None, Some(error))
-        }
-    };
-    let hash = credential
-        .as_ref()
-        .map(|credential| gen_checksum_by_key(credential.key()))
-        .unwrap_or_default();
+    let credential = load_credential_from_env().inspect_err(|error| {
+        tracing::error!(reason = "credential_invalid", %error, "invalid MSG_HEADER_KEY");
+    });
     MsgHeaderKeyState {
+        checksum: AtomicU64::new(packed_checksum(
+            credential.as_ref().ok().and_then(Option::as_ref),
+        )),
         credential: RwLock::new(credential),
-        load_error: RwLock::new(load_error),
-        hash: AtomicU32::new(hash),
     }
 });
 
 /// Return the configured process credential, failing closed when none exists.
 pub fn get_process_credential() -> Result<Credential, String> {
-    if let Some(error) = MSG_HEADER_KEY_STATE.load_error.read().clone() {
-        return Err(error);
+    match &*MSG_HEADER_KEY_STATE.credential.read() {
+        Ok(Some(credential)) => Ok(*credential),
+        Ok(None) => Err(format!(
+            "`{ENV_MSG_HEADER_KEY}` is required; no insecure default credential is available"
+        )),
+        Err(error) => Err(error.clone()),
     }
-    MSG_HEADER_KEY_STATE.credential.read().ok_or_else(|| {
-        format!("`{ENV_MSG_HEADER_KEY}` is required; no insecure default credential is available")
-    })
 }
 
 /// Get current message header key bytes.
@@ -99,19 +111,18 @@ pub fn set_process_msg_header_key(msg_header_key: Option<&str>) -> Result<(), St
 
 /// Whether a process credential was supplied, valid or not.
 pub fn process_credential_configured() -> bool {
-    MSG_HEADER_KEY_STATE.load_error.read().is_some()
-        || MSG_HEADER_KEY_STATE.credential.read().is_some()
+    !matches!(*MSG_HEADER_KEY_STATE.credential.read(), Ok(None))
 }
 
 /// `true` when the process credential can key a length checksum.
 pub fn process_checksum_is_ready() -> bool {
-    get_process_credential().is_ok()
+    MSG_HEADER_KEY_STATE.checksum.load(Ordering::Acquire) & CHECKSUM_READY != 0
 }
 
 #[inline]
 /// Compute frame checksum from payload length and the current header key hash.
 pub fn get_checksum(datalen: DataLenType) -> ChecksumType {
-    datalen ^ MSG_HEADER_KEY_STATE.hash.load(Ordering::Acquire)
+    datalen ^ checksum_hash(MSG_HEADER_KEY_STATE.checksum.load(Ordering::Acquire))
 }
 
 #[inline]
@@ -120,8 +131,8 @@ pub fn get_checksum(datalen: DataLenType) -> ChecksumType {
 /// Missing or invalid process credentials fail closed instead of accepting
 /// an unkeyed `datalen` checksum (`hash == 0`).
 pub fn valid_checksum(datalen: DataLenType, checksum: ChecksumType) -> bool {
-    process_checksum_is_ready()
-        && datalen == (checksum ^ MSG_HEADER_KEY_STATE.hash.load(Ordering::Acquire))
+    let packed = MSG_HEADER_KEY_STATE.checksum.load(Ordering::Acquire);
+    packed & CHECKSUM_READY != 0 && datalen == checksum ^ checksum_hash(packed)
 }
 
 #[cfg(test)]
