@@ -13,7 +13,6 @@ mod cursor;
 mod hold;
 mod modes;
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests;
 mod window;
 

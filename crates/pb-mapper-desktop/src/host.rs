@@ -3,7 +3,6 @@
 mod acceptor;
 mod builder;
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests;
 
 use self::acceptor::Acceptor;

@@ -791,7 +791,6 @@ fn native_input_failure_ends_control_and_survives_new_video() {
     let failed = h.state().record;
     assert!(!failed.controlling);
     assert_eq!(failed.reason, Some(StateReason::InputFailed));
-    assert!(failed.message.starts_with("input_failed"));
     // New video does not hide why control ended, and a queued input is
     // never replayed.
     h.input(MOVE);

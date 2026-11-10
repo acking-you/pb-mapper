@@ -338,7 +338,10 @@ async fn display_modes_reach_only_a_viewer_that_listed_them() {
     /// What a stage6 viewer accepted as a `State`, as strictly.
     #[derive(Debug, serde::Deserialize)]
     #[serde(deny_unknown_fields)]
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "it mirrors what a stage6 viewer required; the test reads only `reason`"
+    )]
     struct Stage6Record {
         t: String,
         state: SessionState,

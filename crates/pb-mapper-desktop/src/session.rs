@@ -8,7 +8,6 @@
 
 mod sender;
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests;
 
 use self::sender::Sender;
