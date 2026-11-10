@@ -6,7 +6,7 @@
 //! and falls back to the relay before any byte is sent; reconnection and
 //! recovery are handled inside the returned handles.
 //!
-//! ```ignore
+//! ```no_run
 //! use std::time::Duration;
 //!
 //! use pb_mapper::{Client, ClientConfig, ConnectRequest, RegisterRequest, Transport};
