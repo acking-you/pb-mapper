@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use error::Result;
 use pb_mapper_protocol::transport::RelayStream;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tokio::net::{TcpListener, ToSocketAddrs};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -35,30 +35,23 @@ use tracing::instrument;
 use self::admin::handle_admin_request;
 use self::client::handle_client_conn;
 use self::error::{
-    MailboxError, TaskCenterInitRequestTimeoutSnafu, TaskCenterSendListenerSnafu,
-    TaskCenterSendStatusRespSnafu, TaskCenterSendStreamRespToManagerSnafu,
-    TaskCenterSetKeepAliveSnafu,
+    TaskCenterInitRequestTimeoutSnafu, TaskCenterSendListenerSnafu,
+    TaskCenterSendStreamRespToManagerSnafu, TaskCenterSetKeepAliveSnafu,
 };
 use self::server::{LEGACY_SERVER_IDLE_TIMEOUT, ServerRegistration, handle_server_conn};
 use self::status::handle_show_status;
-use crate::error::{
-    ServerListenSnafu, TaskCenterClientSendStreamSnafu, TaskCenterSendRegisterRespSnafu,
-    TaskCenterSendStreamRespToClientSnafu, TaskCenterSendSubcribeRespSnafu,
-    TaskCenterStreamConnIdNotExistSnafu,
-};
+use crate::error::ServerListenSnafu;
 use crate::manager::{ReceiverChan, SenderChan, TaskManager};
 use pb_mapper_auth::{ADMIN_KEY_ID, AuthConfig, AuthContext, AuthRuntime};
 use pb_mapper_core::config::{
     control_io_timeout, keep_alive_from_env, server_lease_sweep_interval, server_lease_timeout,
 };
 use pb_mapper_core::conn_id::RemoteConnId;
-use pb_mapper_core::paging::paginate;
-use pb_mapper_core::{snafu_error_get_or_return, snafu_error_handle};
+use pb_mapper_core::snafu_error_handle;
 use pb_mapper_protocol::MessageWriter;
 use pb_mapper_protocol::command::{
-    AdminConnectionInfo, AdminConnectionPage, AdminServiceInfo, AdminServicePage,
-    CONTROL_PROTOCOL_V2, MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq,
-    PbConnStatusResp, PbServiceConnStatus,
+    AdminConnectionPage, AdminServicePage, CONTROL_PROTOCOL_V2, MessageSerializer, PbConnRequest,
+    PbConnResponse, PbConnStatusReq, PbServiceConnStatus,
 };
 use pb_mapper_protocol::secure::{HeaderProtocol, ServerHeaderSession, ServerSecurity};
 use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay};
@@ -657,110 +650,6 @@ fn record_server_conn_activity_by_conn_id(
     info.last_rx_at = Instant::now();
     info.health = ServerConnHealth::Healthy;
     true
-}
-
-/// Why a registration was refused.
-#[derive(Clone, Copy)]
-enum RegisterRefusal {
-    TransportMismatch,
-    ServiceConnectionLimit,
-    NamespaceServiceLimit,
-}
-
-impl RegisterRefusal {
-    fn task(self) -> ConnTask {
-        let (code, reason, retryable) = match self {
-            Self::TransportMismatch => (
-                "service_transport_mismatch",
-                "the service name is already registered with a different transport",
-                false,
-            ),
-            Self::ServiceConnectionLimit => (
-                "service_connection_limit_exceeded",
-                "the service has reached its register connection limit",
-                true,
-            ),
-            Self::NamespaceServiceLimit => (
-                "namespace_service_limit_exceeded",
-                "the namespace has reached its service name limit",
-                true,
-            ),
-        };
-        ConnTask::RegisterFailed {
-            code: code.to_string(),
-            reason: reason.to_string(),
-            retryable,
-        }
-    }
-}
-
-/// Why a new subscription was refused before any registration was tried.
-#[derive(Clone, Copy)]
-enum SubscribeRefusal {
-    NamespaceStreamLimit,
-    NamespaceStreamRate,
-}
-
-impl SubscribeRefusal {
-    fn task(self) -> ConnTask {
-        let (code, reason) = match self {
-            Self::NamespaceStreamLimit => (
-                "namespace_stream_limit_exceeded",
-                "the namespace has reached its active stream limit",
-            ),
-            Self::NamespaceStreamRate => (
-                "namespace_stream_rate_exceeded",
-                "the namespace new-stream rate limit was exceeded",
-            ),
-        };
-        ConnTask::SubcribeFailed {
-            code: code.to_string(),
-            reason: reason.to_string(),
-            retryable: true,
-        }
-    }
-}
-
-/// Tell a subscriber that no registration can serve it: a retry when it is
-/// recovering from registrations it already excluded, a failure otherwise.
-fn reject_subscribe(
-    conn_sender: &ConnTaskSender,
-    key: &ImutableKey,
-    conn_id: RemoteConnId,
-    reason: String,
-    retry: bool,
-) {
-    if retry {
-        if conn_sender
-            .try_send(ConnTask::SubcribeRetry {
-                reason: reason.clone(),
-            })
-            .is_err()
-        {
-            tracing::debug!(
-                event = "subscribe_retry_receiver_dropped",
-                key = %key,
-                client_conn_id = %conn_id,
-                reason = %reason,
-                "subscribe retry receiver dropped"
-            );
-        }
-    } else if conn_sender
-        .try_send(ConnTask::SubcribeFailed {
-            code: "service_not_available".to_string(),
-            reason: reason.clone(),
-            retryable: true,
-        })
-        .is_err()
-    {
-        tracing::debug!(
-            event = "subscribe_failure_receiver_dropped",
-            key = %key,
-            client_conn_id = %conn_id,
-            reason = %reason,
-            "subscribe failure receiver dropped"
-        );
-    }
 }
 
 #[cfg(feature = "relay-quic")]
