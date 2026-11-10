@@ -181,14 +181,20 @@ impl Share {
 
 /// A consumer's endpoint on which this machine's loopback stands in for a
 /// LAN: injected as one, its subnet holds the share's 127.0.0.1, which is
-/// also what the relay's STUN sees of this end.
+/// also what the relay's STUN sees of this end, and it holds ::1, the other
+/// loopback a share on it offers TCP at. Which of the two a TCP race wins
+/// is the host's to say: under WSL's mirrored networking 127.0.0.1 takes a
+/// detour through the Windows host and ::1 wins.
 fn lan_network() -> Arc<Network> {
     let mut network = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
     Arc::get_mut(&mut network).unwrap().interfaces =
         InterfaceSource::Fixed(Interfaces::new(vec![Interface::new(
             "lan0",
             InterfaceTier::Lan,
-            [("127.0.0.2".parse().unwrap(), 8)],
+            [
+                ("127.0.0.2".parse().unwrap(), 8),
+                ("::1".parse().unwrap(), 128),
+            ],
         )]));
     network
 }
