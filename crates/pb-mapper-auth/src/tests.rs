@@ -19,7 +19,7 @@ use crate::config::{
 };
 use crate::config::{parse_legacy_protocol_policy, platform_default_auth_state_dir};
 use crate::persistence::{
-    prepare_state_dir, read_instance_id_file, seal_blob, sync_parent_directory,
+    auth_snapshot_path, prepare_state_dir, read_instance_id_file, seal_blob, sync_parent_directory,
     try_load_persisted_state,
 };
 

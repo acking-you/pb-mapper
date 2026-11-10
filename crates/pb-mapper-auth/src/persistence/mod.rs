@@ -58,8 +58,20 @@ pub(crate) use wal::{
     truncate_auth_wal, write_snapshot_and_truncate_wal,
 };
 
-pub(crate) const AUTH_SNAPSHOT_FILE: &str = "auth.snapshot";
-pub(crate) const AUTH_WAL_FILE: &str = "auth.wal";
+// The files of a state directory. Renaming one orphans the state an older
+// relay left there.
+const AUTH_SNAPSHOT_FILE: &str = "auth.snapshot";
+const AUTH_WAL_FILE: &str = "auth.wal";
+const LOCK_FILE: &str = "auth.lock";
+/// The live administrator key.
+const ADMIN_KEY_FILE: &str = "admin.key";
+/// The new key a root rotation stages while it installs it. Not the candidate
+/// [`staged_admin_key_path`] names for the CLI and SDK (`.admin.key.next`):
+/// those are two different files.
+const ROTATION_KEY_FILE: &str = "admin.key.next";
+const INSTANCE_ID_FILE: &str = "server-instance-id";
+/// The new instance id a reset stages until its snapshot is in place.
+const STAGED_INSTANCE_ID_FILE: &str = "server-instance-id.next";
 
 pub(crate) fn auth_snapshot_path(state_dir: &Path) -> PathBuf {
     state_dir.join(AUTH_SNAPSHOT_FILE)
@@ -67,6 +79,26 @@ pub(crate) fn auth_snapshot_path(state_dir: &Path) -> PathBuf {
 
 pub(crate) fn auth_wal_path(state_dir: &Path) -> PathBuf {
     state_dir.join(AUTH_WAL_FILE)
+}
+
+fn lock_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(LOCK_FILE)
+}
+
+pub(crate) fn admin_key_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(ADMIN_KEY_FILE)
+}
+
+pub(crate) fn rotation_key_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(ROTATION_KEY_FILE)
+}
+
+pub(crate) fn instance_id_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(INSTANCE_ID_FILE)
+}
+
+pub(crate) fn staged_instance_id_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(STAGED_INSTANCE_ID_FILE)
 }
 
 pub fn encrypted_auth_state_exists(state_dir: &Path) -> bool {

@@ -1,6 +1,6 @@
 //! Directory lock, atomic replace, and parent-directory durability.
 use super::super::*;
-use super::hex;
+use super::{hex, lock_path};
 
 /// Create the state directory and take `auth.lock` before any credential or
 /// snapshot file is read or written.
@@ -10,7 +10,7 @@ pub(crate) fn prepare_state_dir_and_lock(state_dir: &Path) -> Result<Arc<File>, 
 }
 
 pub fn acquire_state_dir_lock(state_dir: &Path) -> Result<File, AuthFailure> {
-    let path = state_dir.join("auth.lock");
+    let path = lock_path(state_dir);
     let file = OpenOptions::new()
         .create(true)
         .read(true)

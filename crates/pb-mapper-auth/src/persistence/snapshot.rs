@@ -227,7 +227,7 @@ pub(crate) fn try_load_persisted_state(
     Ok(snapshot)
 }
 
-pub(crate) fn apply_persisted_mutation(
+fn apply_persisted_mutation(
     snapshot: &mut PersistedSnapshot,
     mutation: StateMutation,
 ) -> Result<(), AuthFailure> {

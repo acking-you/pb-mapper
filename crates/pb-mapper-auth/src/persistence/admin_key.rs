@@ -1,8 +1,9 @@
-//! Administrator key files, instance id, and recovery-key identity checks.
+//! Administrator key files: the live key, the one a rotation stages, the
+//! candidate the CLI and SDK stage, and whether a key opens the encrypted state.
 use super::super::*;
 use super::{
-    atomic_write, auth_snapshot_path, auth_wal_path, create_new_write, encrypted_auth_state_exists,
-    open_blob, truncate_auth_wal,
+    ADMIN_KEY_FILE, admin_key_path, atomic_write, auth_snapshot_path, auth_wal_path,
+    create_new_write, encrypted_auth_state_exists, open_blob, rotation_key_path, truncate_auth_wal,
 };
 
 pub(crate) fn read_admin_key(path: &Path) -> Result<Option<String>, AuthFailure> {
@@ -88,7 +89,7 @@ pub(crate) fn recover_admin_key_after_rotation(
     {
         return Ok(current.to_string());
     }
-    let Some(next) = read_admin_key(&state_dir.join("admin.key.next"))? else {
+    let Some(next) = read_admin_key(&rotation_key_path(state_dir))? else {
         return Ok(current.to_string());
     };
     let Ok(Credential::Admin(next_key)) = parse_credential(next.trim()) else {
@@ -101,13 +102,13 @@ pub(crate) fn recover_admin_key_after_rotation(
     // records are still encrypted with the previous key.
     truncate_auth_wal(state_dir)?;
     write_admin_key(state_dir, next.trim())?;
-    let _ = std::fs::remove_file(state_dir.join("admin.key.next"));
+    let _ = std::fs::remove_file(rotation_key_path(state_dir));
     Ok(next)
 }
 
 pub(crate) fn write_admin_key(state_dir: &Path, key: &str) -> Result<(), AuthFailure> {
     atomic_write(
-        &state_dir.join("admin.key"),
+        &admin_key_path(state_dir),
         format!("{key}\n").as_bytes(),
         0o600,
     )
@@ -161,7 +162,7 @@ pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), A
             false,
         ));
     }
-    if path.file_name() == Some(std::ffi::OsStr::new("admin.key"))
+    if path.file_name() == Some(std::ffi::OsStr::new(ADMIN_KEY_FILE))
         && !key_matches_existing_state(path.parent(), key)
     {
         refuse_write_if_encrypted_state(path, force)?;
@@ -178,7 +179,7 @@ pub fn staged_admin_key_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("admin.key");
+        .unwrap_or(ADMIN_KEY_FILE);
     path.with_file_name(format!(".{name}.next"))
 }
 
@@ -272,7 +273,7 @@ pub(crate) fn rotation_already_installed(state_dir: &Path, new_key: &str) -> boo
 }
 
 fn live_admin_key_matches(state_dir: &Path, new_key: &str) -> bool {
-    let Ok(raw) = std::fs::read(state_dir.join("admin.key")) else {
+    let Ok(raw) = std::fs::read(admin_key_path(state_dir)) else {
         return false;
     };
     let Ok(text) = std::str::from_utf8(&raw) else {
@@ -281,7 +282,7 @@ fn live_admin_key_matches(state_dir: &Path, new_key: &str) -> bool {
     text.trim().as_bytes() == new_key.trim().as_bytes()
 }
 
-pub(crate) fn key_matches_existing_snapshot(state_dir: Option<&Path>, key: &str) -> bool {
+fn key_matches_existing_snapshot(state_dir: Option<&Path>, key: &str) -> bool {
     let Some(state_dir) = state_dir else {
         return false;
     };
@@ -298,7 +299,7 @@ pub(crate) fn key_matches_existing_snapshot(state_dir: Option<&Path>, key: &str)
     open_blob(&admin_key, &bytes).is_ok()
 }
 
-pub(crate) fn key_matches_existing_state(state_dir: Option<&Path>, key: &str) -> bool {
+fn key_matches_existing_state(state_dir: Option<&Path>, key: &str) -> bool {
     if key_matches_existing_snapshot(state_dir, key) {
         return true;
     }

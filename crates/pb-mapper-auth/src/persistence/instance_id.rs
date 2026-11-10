@@ -1,10 +1,14 @@
 //! The server instance id: the salt every temporary key is derived with.
 use super::super::*;
+use super::{
+    atomic_write, auth_snapshot_path, instance_id_path, open_blob, staged_instance_id_path,
+    truncate_auth_wal,
+};
 
 pub(crate) fn load_or_create_instance_id(
     path: &Path,
 ) -> Result<[u8; INSTANCE_ID_LEN], AuthFailure> {
-    let instance_path = path.join("server-instance-id");
+    let instance_path = instance_id_path(path);
     if let Some(instance_id) = read_instance_id_file(&instance_path)? {
         return Ok(instance_id);
     }
@@ -45,7 +49,7 @@ pub(crate) fn recover_instance_id_after_reset(
     admin_key: &AesKeyType,
     current: [u8; INSTANCE_ID_LEN],
 ) -> Result<[u8; INSTANCE_ID_LEN], AuthFailure> {
-    let next_path = state_dir.join("server-instance-id.next");
+    let next_path = staged_instance_id_path(state_dir);
     let Some(next) = read_instance_id_file(&next_path)? else {
         return Ok(current);
     };
@@ -77,7 +81,7 @@ pub(crate) fn recover_instance_id_after_reset(
     // The reset snapshot is complete. Any leftover WAL still belongs to the
     // previous instance and must not be replayed onto the new derivation id.
     truncate_auth_wal(state_dir)?;
-    atomic_write(&state_dir.join("server-instance-id"), &next, 0o600)?;
+    atomic_write(&instance_id_path(state_dir), &next, 0o600)?;
     let _ = std::fs::remove_file(&next_path);
     Ok(next)
 }
@@ -96,7 +100,7 @@ pub(crate) fn reset_already_installed(
     admin_key: &AesKeyType,
     new_instance_id: &[u8; INSTANCE_ID_LEN],
 ) -> bool {
-    let Ok(Some(live)) = read_instance_id_file(&state_dir.join("server-instance-id")) else {
+    let Ok(Some(live)) = read_instance_id_file(&instance_id_path(state_dir)) else {
         return false;
     };
     if live != *new_instance_id {

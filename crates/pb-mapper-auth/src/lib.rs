@@ -156,14 +156,14 @@ use keys::{load_isolated_server_admin_credential, load_server_admin_credential};
 use leases::Leases;
 use persistence::{
     AdminReplayRecord, AuditRecord, PersistedEntry, PersistedSnapshot, StateMutation, WalRecord,
-    append_audit, append_mutation, append_wal, atomic_write, auth_snapshot_path, build_snapshot,
+    admin_key_path, append_audit, append_mutation, append_wal, atomic_write, build_snapshot,
     cancel_all_temporary_leases, empty_snapshot, fail_closed_on_uncertain_wal, hex,
-    load_or_create_instance_id, load_persisted_state, normalize_tombstone_times, open_blob,
+    instance_id_path, load_or_create_instance_id, load_persisted_state, normalize_tombstone_times,
     persist_recovery_admin_key, prepare_state_dir_and_lock, push_audit_record,
     push_persisted_audit, random_instance_id, read_admin_key, read_namespace_high_water,
     recover_admin_key_after_rotation, recover_instance_id_after_reset, reset_already_installed,
-    restore_namespace_high_water, rotation_already_installed, split_high_slot_state,
-    truncate_auth_wal, write_admin_key, write_namespace_high_water,
+    restore_namespace_high_water, rotation_already_installed, rotation_key_path,
+    split_high_slot_state, staged_instance_id_path, write_admin_key, write_namespace_high_water,
     write_snapshot_and_truncate_wal,
 };
 use state::{

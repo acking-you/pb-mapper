@@ -15,7 +15,7 @@ fn validate_admin_credential(raw: &str) -> Result<Credential, AuthFailure> {
 }
 
 pub(super) fn load_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFailure> {
-    let path = state_dir.join("admin.key");
+    let path = admin_key_path(state_dir);
     let raw = if let Some(raw) = read_admin_key(&path)? {
         raw
     } else if process_credential_configured() {
@@ -86,7 +86,7 @@ pub(super) fn load_server_admin_credential(state_dir: &Path) -> Result<Credentia
 pub(super) fn load_isolated_server_admin_credential(
     state_dir: &Path,
 ) -> Result<Credential, AuthFailure> {
-    let path = state_dir.join("admin.key");
+    let path = admin_key_path(state_dir);
     let raw = match read_admin_key(&path)? {
         Some(raw) => raw,
         None => {

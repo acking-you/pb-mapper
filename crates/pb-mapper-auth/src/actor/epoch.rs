@@ -21,12 +21,12 @@ pub(super) fn actor_reset(
     let mut snapshot = empty_snapshot(inner, new_instance_id, admin_replays);
     push_persisted_audit(&mut snapshot.audit_records, reset_audit.clone());
     let admin_key = inner.admin_key();
-    let next_instance_path = config.state_dir.join("server-instance-id.next");
+    let next_instance_path = staged_instance_id_path(&config.state_dir);
     if let Err(error) = atomic_write(&next_instance_path, &new_instance_id, 0o600)
         .and_then(|()| write_snapshot_and_truncate_wal(config, &admin_key, &snapshot))
         .and_then(|()| {
             atomic_write(
-                &config.state_dir.join("server-instance-id"),
+                &instance_id_path(&config.state_dir),
                 &new_instance_id,
                 0o600,
             )
@@ -87,7 +87,7 @@ pub(super) fn actor_rotate_root(
     let rotate_audit = audit("administrator_key_rotate", None, None);
     let mut snapshot = empty_snapshot(inner, inner.instance_id(), &VecDeque::new());
     push_persisted_audit(&mut snapshot.audit_records, rotate_audit.clone());
-    let next_key_path = config.state_dir.join("admin.key.next");
+    let next_key_path = rotation_key_path(&config.state_dir);
     if let Err(error) = write_admin_key_file(&next_key_path, &new_key_string, true)
         .and_then(|()| write_snapshot_and_truncate_wal(config, &new_key, &snapshot))
         .and_then(|()| write_admin_key(&config.state_dir, &new_key_string))
