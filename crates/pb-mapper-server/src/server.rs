@@ -96,9 +96,8 @@ const _: () = assert!(
     "equal values race under scheduler and network jitter and drop a healthy registration"
 );
 
-enum ServerControlWrite {
-    Pong(Vec<u8>),
-}
+/// Pongs the reader may queue for the writer before a registration is dropped.
+const CONTROL_WRITE_QUEUE: usize = 64;
 
 pub struct ServerRegistration {
     pub key: ImutableKey,
@@ -242,7 +241,7 @@ pub async fn handle_server_conn(
             key: key.clone(),
             conn_id,
         })?;
-        let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<ServerControlWrite>(64);
+        let (write_tx, mut write_rx) = tokio::sync::mpsc::channel(CONTROL_WRITE_QUEUE);
         let writer_key = key.clone();
         let writer_retire_token = retire_token.clone();
         let mut writer_handle =
@@ -278,9 +277,10 @@ pub async fn handle_server_conn(
                 .await
             }));
 
+        // Read once: the environment it comes from is not written after startup.
+        let idle_timeout = crate::server_conn_idle_timeout(protocol_version);
         let reader_result = async {
             loop {
-                let idle_timeout = crate::server_conn_idle_timeout(protocol_version);
                 let msg = match tokio::time::timeout(idle_timeout, msg_reader.read_msg()).await {
                     Ok(Ok(msg)) => msg,
                     Ok(Err(e)) => {
@@ -305,8 +305,7 @@ pub async fn handle_server_conn(
                         break Ok(());
                     }
                 };
-                handle_control_message(msg, &write_tx, task_sender.clone(), key.clone(), conn_id)
-                    .await?;
+                handle_control_message(msg, &write_tx, &task_sender, &key, conn_id).await?;
             }
         };
 
@@ -354,9 +353,9 @@ pub async fn handle_server_conn(
 #[instrument(skip(msg, write_tx))]
 async fn handle_control_message(
     msg: &[u8],
-    write_tx: &tokio::sync::mpsc::Sender<ServerControlWrite>,
-    task_sender: ManagerTaskSender,
-    key: ImutableKey,
+    write_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    task_sender: &ManagerTaskSender,
+    key: &ImutableKey,
     conn_id: RemoteConnId,
 ) -> Result<()> {
     let req = match PbServerRequest::decode(msg) {
@@ -374,27 +373,21 @@ async fn handle_control_message(
     };
 
     match req {
-        PbServerRequest::Direct(message) => task_sender
-            .send(super::ManagerTask::Direct(
-                super::direct::DirectTask::Provider {
+        PbServerRequest::Direct(message) => {
+            send_control_task(
+                task_sender,
+                ManagerTask::Direct(super::direct::DirectTask::Provider {
                     connection: conn_id,
                     key: key.clone(),
                     message,
-                },
-            ))
+                }),
+                key,
+                conn_id,
+            )
             .await
-            .context(ServerConnSendControlTaskSnafu { key, conn_id }),
+        }
         PbServerRequest::Ping => {
-            task_sender
-                .send(ManagerTask::ServerConnActivity {
-                    key: key.clone(),
-                    conn_id,
-                })
-                .await
-                .context(ServerConnSendControlTaskSnafu {
-                    key: key.clone(),
-                    conn_id,
-                })?;
+            renew_lease(task_sender, key, conn_id).await?;
             let resp = match LocalServer::Pong.encode() {
                 Ok(v) => v,
                 Err(e) => {
@@ -415,21 +408,10 @@ async fn handle_control_message(
                 conn_id = %conn_id,
                 "received ping from local server"
             );
-            write_tx
-                .try_send(ServerControlWrite::Pong(resp))
-                .map_err(|_| super::error::Error::ServerConnControlWriterClosed { key, conn_id })
+            queue_pong(write_tx, resp, key, conn_id)
         }
         PbServerRequest::PingV2 { seq } => {
-            task_sender
-                .send(ManagerTask::ServerConnActivity {
-                    key: key.clone(),
-                    conn_id,
-                })
-                .await
-                .context(ServerConnSendControlTaskSnafu {
-                    key: key.clone(),
-                    conn_id,
-                })?;
+            renew_lease(task_sender, key, conn_id).await?;
             let resp = match (LocalServer::PongV2 { seq }).encode() {
                 Ok(v) => v,
                 Err(e) => {
@@ -452,9 +434,7 @@ async fn handle_control_message(
                 seq,
                 "received ping v2 from local server"
             );
-            write_tx
-                .try_send(ServerControlWrite::Pong(resp))
-                .map_err(|_| super::error::Error::ServerConnControlWriterClosed { key, conn_id })
+            queue_pong(write_tx, resp, key, conn_id)
         }
         PbServerRequest::StreamAck {
             client_id,
@@ -468,16 +448,64 @@ async fn handle_control_message(
                 server_generation,
                 "received stream ack from local server"
             );
-            task_sender
-                .send(ManagerTask::StreamAck {
+            send_control_task(
+                task_sender,
+                ManagerTask::StreamAck {
                     server_id: conn_id,
                     client_id: client_id.into(),
                     server_generation,
-                })
-                .await
-                .context(ServerConnSendControlTaskSnafu { key, conn_id })
+                },
+                key,
+                conn_id,
+            )
+            .await
         }
     }
+}
+
+/// Hand the manager a task a control message asked for.
+async fn send_control_task(
+    task_sender: &ManagerTaskSender,
+    task: ManagerTask,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+) -> Result<()> {
+    task_sender
+        .send(task)
+        .await
+        .with_context(|_| ServerConnSendControlTaskSnafu {
+            key: key.clone(),
+            conn_id,
+        })
+}
+
+/// Renew the registration's lease, as every ping does.
+async fn renew_lease(
+    task_sender: &ManagerTaskSender,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+) -> Result<()> {
+    let activity = ManagerTask::ServerConnActivity {
+        key: key.clone(),
+        conn_id,
+    };
+    send_control_task(task_sender, activity, key, conn_id).await
+}
+
+/// Queue a pong for the writer. A full queue ends the registration, as a
+/// closed one does.
+fn queue_pong(
+    write_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    pong: Vec<u8>,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+) -> Result<()> {
+    write_tx
+        .try_send(pong)
+        .map_err(|_| super::error::Error::ServerConnControlWriterClosed {
+            key: key.clone(),
+            conn_id,
+        })
 }
 
 /// Serve one registered control connection's writes until it is told to stop.
@@ -498,7 +526,7 @@ async fn handle_control_message(
 async fn run_control_writer<T: MessageWriter>(
     msg_writer: &mut T,
     task_rx: &ConnTaskReceiver,
-    write_rx: &mut tokio::sync::mpsc::Receiver<ServerControlWrite>,
+    write_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
     retire_token: &CancellationToken,
     key: ImutableKey,
     conn_id: RemoteConnId,
@@ -528,21 +556,17 @@ async fn run_control_writer<T: MessageWriter>(
                         }
                     }
                 }
-                cmd = write_rx.recv() => {
-                    let Some(cmd) = cmd else {
+                pong = write_rx.recv() => {
+                    let Some(pong) = pong else {
                         break Ok(());
                     };
-                    match cmd {
-                        ServerControlWrite::Pong(resp) => {
-                            msg_writer
-                                .write_msg(&resp)
-                                .await
-                                .context(ServerConnWritePongRespSnafu {
-                                    key: key.clone(),
-                                    conn_id,
-                                })?;
-                        }
-                    }
+                    msg_writer
+                        .write_msg(&pong)
+                        .await
+                        .context(ServerConnWritePongRespSnafu {
+                            key: key.clone(),
+                            conn_id,
+                        })?;
                 }
             }
         }
@@ -630,7 +654,7 @@ mod tests {
     use pb_mapper_protocol::MessageWriter;
     use tokio_util::sync::CancellationToken;
 
-    use super::{ConnTask, ServerControlWrite, run_control_writer};
+    use super::{ConnTask, run_control_writer};
 
     /// A writer whose every write blocks forever.
     ///
@@ -673,9 +697,7 @@ mod tests {
         // Wedge the writer first. Queuing the retirement alongside it would race:
         // `select!` polls its arms in a random order, and could take the retirement
         // before the write ever started.
-        write_tx
-            .try_send(ServerControlWrite::Pong(b"pong".to_vec()))
-            .unwrap();
+        write_tx.try_send(b"pong".to_vec()).unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(50), &mut control)
                 .await
