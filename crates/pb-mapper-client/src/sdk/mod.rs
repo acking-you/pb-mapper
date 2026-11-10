@@ -21,7 +21,7 @@ pub use handle::{Connection, Registration};
 pub use types::{
     ClientConfig, ConnectOptions, ConnectRequest, LanTransport, LegacyProtocol, PathPolicy,
     PortMapping, RegisterOptions, RegisterRequest, RemoteId, ServiceConnection, Transport,
-    TunnelStatus,
+    TunnelStatus, UnknownLabel,
 };
 
 /// The SDK version compiled into this process.

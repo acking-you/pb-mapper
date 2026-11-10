@@ -7,12 +7,58 @@
 use crate::worker_status::WorkerStatus;
 use pb_mapper_auth::LegacyProtocolPolicy;
 use pb_mapper_protocol::command::{PbConnStatusResp, PbServiceConnStatus};
+use snafu::Snafu;
+
+/// A label that names no value of the option it was parsed as.
+#[derive(Clone, Debug, Eq, PartialEq, Snafu)]
+#[snafu(display("unknown value `{label}`"))]
+pub struct UnknownLabel {
+    label: String,
+}
+
+impl UnknownLabel {
+    /// The label as it was given.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
+/// Give an option enum its one table of labels: `as_str`, and a `FromStr`
+/// that takes exactly those labels back, case and all.
+macro_rules! labels {
+    ($(#[$doc:meta])* $ty:ident { $($variant:ident => $label:literal),+ $(,)? }) => {
+        impl $ty {
+            $(#[$doc])*
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $label,)+
+                }
+            }
+        }
+
+        impl std::str::FromStr for $ty {
+            type Err = UnknownLabel;
+
+            fn from_str(label: &str) -> Result<Self, UnknownLabel> {
+                match label {
+                    $($label => Ok(Self::$variant),)+
+                    _ => UnknownLabelSnafu { label }.fail(),
+                }
+            }
+        }
+    };
+}
 
 /// Transport used by a registered service or a local subscriber.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Transport {
     Tcp,
     Udp,
+}
+
+labels! {
+    /// Stable label, as the CLI and the Node addon spell it.
+    Transport { Tcp => "tcp", Udp => "udp" }
 }
 
 impl Transport {
@@ -152,6 +198,11 @@ pub enum LegacyProtocol {
     Deny,
 }
 
+labels! {
+    /// Stable label, as the CLI and the Node addon spell it.
+    LegacyProtocol { Allow => "allow", Deny => "deny" }
+}
+
 impl From<LegacyProtocol> for LegacyProtocolPolicy {
     fn from(value: LegacyProtocol) -> Self {
         match value {
@@ -181,6 +232,11 @@ pub enum PathPolicy {
     /// Try a direct QUIC path first; fall back to the relay if it cannot be
     /// set up, before any application byte is sent.
     Auto,
+}
+
+labels! {
+    /// Stable label, as the CLI and the Node addon spell it.
+    PathPolicy { RelayOnly => "relay-only", Auto => "auto" }
 }
 
 impl Default for PathPolicy {
@@ -218,16 +274,12 @@ pub enum PortMapping {
     Always,
 }
 
-impl PortMapping {
+labels! {
     /// Stable label, matching the serialized representation.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Auto => "auto",
-            Self::Always => "always",
-        }
-    }
+    PortMapping { Off => "off", Auto => "auto", Always => "always" }
+}
 
+impl PortMapping {
     /// Refuse a mapping from the start that this build cannot make, rather
     /// than ignore it. One when needed is best effort, and the default:
     /// without the feature it never starts.
@@ -260,14 +312,9 @@ pub enum LanTransport {
     Tcp,
 }
 
-impl LanTransport {
+labels! {
     /// Stable label, matching the serialized representation.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Quic => "quic",
-            Self::Tcp => "tcp",
-        }
-    }
+    LanTransport { Quic => "quic", Tcp => "tcp" }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -364,5 +411,43 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(!debug.contains(&config.credential));
         assert!(debug.contains("[redacted]"));
+    }
+
+    /// The labels the CLI, the Node addon and the app read and write: each
+    /// value's label parses back to it, exactly as spelled, and where a
+    /// value is serialized, it is serialized as its label.
+    #[test]
+    fn option_labels_are_the_ones_every_front_end_spells() {
+        macro_rules! assert_labels {
+            ($($value:expr => $label:literal),+ $(,)?) => {$(
+                assert_eq!($value.as_str(), $label);
+                assert_eq!($label.parse(), Ok($value));
+            )+};
+        }
+        assert_labels!(
+            Transport::Tcp => "tcp",
+            Transport::Udp => "udp",
+            LegacyProtocol::Allow => "allow",
+            LegacyProtocol::Deny => "deny",
+            PathPolicy::RelayOnly => "relay-only",
+            PathPolicy::Auto => "auto",
+            PortMapping::Off => "off",
+            PortMapping::Auto => "auto",
+            PortMapping::Always => "always",
+            LanTransport::Quic => "quic",
+            LanTransport::Tcp => "tcp",
+        );
+        assert_eq!(
+            "TCP".parse::<Transport>(),
+            Err(UnknownLabel {
+                label: "TCP".into()
+            })
+        );
+        for mapping in [PortMapping::Off, PortMapping::Auto, PortMapping::Always] {
+            assert_eq!(serde_json::to_value(mapping).unwrap(), mapping.as_str());
+        }
+        for transport in [LanTransport::Quic, LanTransport::Tcp] {
+            assert_eq!(serde_json::to_value(transport).unwrap(), transport.as_str());
+        }
     }
 }
