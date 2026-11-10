@@ -76,11 +76,17 @@ impl Leases {
             stages: HashMap::new(),
             next_sweep_at: next_sweep(now),
         };
+        // Each dead key with its tombstone time where it carries one itself: a
+        // row above the table does, in its entry; the table's rows keep theirs
+        // in `cold`.
         let mut dead = Vec::new();
         for (index, slot) in inner.slots().iter().enumerate() {
             match slot.state {
                 SlotState::Expired | SlotState::Revoked => {
-                    dead.push(KeyId::new(slot.generation, SlotIndex::from_index(index)));
+                    dead.push((
+                        KeyId::new(slot.generation, SlotIndex::from_index(index)),
+                        None,
+                    ));
                 }
                 SlotState::Free | SlotState::Active => {}
             }
@@ -90,16 +96,14 @@ impl Leases {
                 .high()
                 .iter()
                 .filter(|entry| entry.state != SlotState::Active)
-                .map(|entry| entry.key_id),
+                .map(|entry| (entry.key_id, entry.tombstoned_at)),
         );
         for (key_id, lease) in live {
             leases.watch(key_id, lease);
         }
-        for key_id in dead {
-            let tombstoned_at = inner
-                .cold()
-                .get(&key_id)
-                .map(|cold| cold.tombstoned_at)
+        for (key_id, tombstoned_at) in dead {
+            let tombstoned_at = tombstoned_at
+                .or_else(|| inner.cold().get(&key_id).map(|cold| cold.tombstoned_at))
                 .filter(|at| *at != 0)
                 .unwrap_or(now);
             leases.schedule_reap(key_id, retention_ends(tombstoned_at));

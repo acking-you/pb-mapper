@@ -154,6 +154,33 @@ fn a_restored_key_ends_at_its_persisted_deadline() {
     assert_eq!(state_of(&inner, key_id), SlotState::Expired);
 }
 
+/// A dead row above the configured capacity keeps its own tombstone time
+/// across a restart: one that died long before is recycled at once, not a
+/// retention window after the restart.
+#[test]
+fn a_restored_dead_row_above_capacity_keeps_its_tombstone_time() {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(5));
+    let mut generations = vec![Generation::FIRST; 6];
+    generations[5] = key_id.generation();
+    let snapshot = PersistedSnapshot {
+        generations,
+        entries: vec![PersistedEntry {
+            key_id,
+            state: SlotState::Revoked,
+            issued_at: T - 7200,
+            expires_at: T + 3600,
+            label: None,
+            tombstoned_at: Some(T - 3600),
+            namespace: None,
+        }],
+        ..snapshot_for_test([0; INSTANCE_ID_LEN], 0, 0)
+    };
+    let (inner, mut leases) = restore(Some(&snapshot));
+
+    leases.tick(T + 1);
+    assert!(inner.high().is_empty());
+}
+
 /// A revoked key keeps its row for a retention window counted from the revoke,
 /// not from the deadline it no longer has, and records when that window began.
 #[test]
