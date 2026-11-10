@@ -258,40 +258,54 @@ pub enum TunnelEventKind {
 impl TunnelEventKind {
     /// Whether a repeat of `self` folds into the entry for `other`.
     pub(super) fn folds_into(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::RelayFailed { failure: a, .. }, Self::RelayFailed { failure: b, .. }) => a == b,
-            (
+        match self {
+            Self::RelayFailed { failure, .. } => {
+                matches!(other, Self::RelayFailed { failure: last, .. } if last == failure)
+            }
+            Self::DirectFallback { stage, reason } => matches!(
+                other,
                 Self::DirectFallback {
-                    stage: a,
-                    reason: x,
-                },
-                Self::DirectFallback {
-                    stage: b,
-                    reason: y,
-                },
-            ) => (a, x) == (b, y),
-            (Self::RelayReady { .. }, Self::RelayReady { .. })
-            | (Self::NetworkChanged, Self::NetworkChanged)
-            | (Self::DirectEstablished { .. }, Self::DirectEstablished { .. }) => true,
-            _ => false,
+                    stage: last_stage,
+                    reason: last_reason,
+                } if (last_stage, last_reason) == (stage, reason)
+            ),
+            Self::RelayReady { .. } => matches!(other, Self::RelayReady { .. }),
+            Self::NetworkChanged => matches!(other, Self::NetworkChanged),
+            Self::DirectEstablished { .. } => matches!(other, Self::DirectEstablished { .. }),
+            Self::Stopped
+            | Self::PhaseChanged { .. }
+            | Self::DirectStageChanged { .. }
+            | Self::DirectAbandoned { .. }
+            | Self::SessionOpened { .. }
+            | Self::SessionClosed { .. }
+            | Self::PortMappingChanged { .. }
+            | Self::LanDetected { .. }
+            | Self::PathSelected { .. }
+            | Self::LanMissed { .. }
+            | Self::LanTcpMissed { .. } => false,
         }
     }
 
     /// Whether this is a step delivered live only, never kept in the history.
     pub(super) fn is_live_only(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::PhaseChanged { .. }
-                | Self::DirectStageChanged { .. }
-                | Self::DirectAbandoned { .. }
-                | Self::SessionOpened { .. }
-                | Self::SessionClosed { .. }
-                | Self::PortMappingChanged { .. }
-                | Self::LanDetected { .. }
-                | Self::PathSelected { .. }
-                | Self::LanMissed { .. }
-                | Self::LanTcpMissed { .. }
-        )
+            | Self::DirectStageChanged { .. }
+            | Self::DirectAbandoned { .. }
+            | Self::SessionOpened { .. }
+            | Self::SessionClosed { .. }
+            | Self::PortMappingChanged { .. }
+            | Self::LanDetected { .. }
+            | Self::PathSelected { .. }
+            | Self::LanMissed { .. }
+            | Self::LanTcpMissed { .. } => true,
+            Self::RelayReady { .. }
+            | Self::RelayFailed { .. }
+            | Self::NetworkChanged
+            | Self::DirectEstablished { .. }
+            | Self::DirectFallback { .. }
+            | Self::Stopped => false,
+        }
     }
 }
 
@@ -339,10 +353,10 @@ impl TunnelEvents {
     pub async fn recv(&mut self) -> Option<Result<TunnelEvent, EventsLagged>> {
         // Aged as it is read, however long it waited in the queue.
         if let Some(event) = self.replay.pop_front() {
-            return Some(Ok(event.public(Instant::now())));
+            return Some(Ok(event.into_public(Instant::now())));
         }
         match self.receiver.recv().await {
-            Ok(event) => Some(Ok(event.public(Instant::now()))),
+            Ok(event) => Some(Ok(event.into_public(Instant::now()))),
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 Some(Err(EventsLagged { skipped }))
             }
@@ -374,12 +388,25 @@ pub(super) struct Event {
 }
 
 impl Event {
+    /// What a reader is shown of this event, read at `now`.
     pub(super) fn public(&self, now: Instant) -> TunnelEvent {
+        self.clone().into_public(now)
+    }
+
+    /// [`Self::public`], from an event the reader owns: its kind moves
+    /// rather than being copied.
+    pub(super) fn into_public(self, now: Instant) -> TunnelEvent {
+        let Self {
+            seq,
+            at,
+            repeats,
+            kind,
+        } = self;
         TunnelEvent {
-            seq: self.seq,
-            age_ms: ms(now.saturating_duration_since(self.at)),
-            repeats: self.repeats,
-            kind: self.kind.clone(),
+            seq,
+            age_ms: ms(now.saturating_duration_since(at)),
+            repeats,
+            kind,
         }
     }
 }

@@ -16,7 +16,10 @@ pub enum Transport {
 
 impl Transport {
     pub(crate) fn is_datagram(self) -> bool {
-        matches!(self, Self::Udp)
+        match self {
+            Self::Tcp => false,
+            Self::Udp => true,
+        }
     }
 }
 

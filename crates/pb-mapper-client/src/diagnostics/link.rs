@@ -63,7 +63,10 @@ pub enum LanEvidence {
 impl LanEvidence {
     /// Whether this is enough to hold other paths back for the LAN.
     pub fn strong(self) -> bool {
-        !matches!(self, Self::Subnet)
+        match self {
+            Self::Ipv6Prefix | Self::PublicIpSubnet => true,
+            Self::Subnet => false,
+        }
     }
 
     /// Stable label, matching the serialized representation.
@@ -245,21 +248,11 @@ pub(super) struct LiveLink {
 }
 
 #[cfg(feature = "p2p")]
-impl LiveLink {
-    /// The carrier's figures as they are now.
-    fn stats(&self) -> LinkStats {
-        let connection = match &self.probe {
-            LinkProbe::Quic(connection) => connection,
-            LinkProbe::Tcp { handshake_rtt } => {
-                return LinkStats {
-                    rtt_us: micros(*handshake_rtt),
-                    min_rtt_us: micros(*handshake_rtt),
-                    ..LinkStats::default()
-                };
-            }
-        };
+impl LinkStats {
+    /// QUIC's view of `connection`'s path, as it is now.
+    pub(crate) fn of_quic(connection: &quinn::Connection) -> Self {
         let stats = connection.stats();
-        LinkStats {
+        Self {
             rtt_us: micros(connection.rtt()),
             min_rtt_us: micros(stats.path.min_rtt),
             congestion_window: stats.path.cwnd,
@@ -271,6 +264,21 @@ impl LiveLink {
             received_bytes: stats.udp_rx.bytes,
             lost_bytes: stats.path.lost_bytes,
             bandwidth_bps: stats.path.bandwidth_estimate,
+        }
+    }
+}
+
+#[cfg(feature = "p2p")]
+impl LiveLink {
+    /// The carrier's figures as they are now.
+    fn stats(&self) -> LinkStats {
+        match &self.probe {
+            LinkProbe::Quic(connection) => LinkStats::of_quic(connection),
+            LinkProbe::Tcp { handshake_rtt } => LinkStats {
+                rtt_us: micros(*handshake_rtt),
+                min_rtt_us: micros(*handshake_rtt),
+                ..LinkStats::default()
+            },
         }
     }
 

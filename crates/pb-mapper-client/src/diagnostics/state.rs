@@ -4,13 +4,13 @@
 use super::events::{EVENT_CAPACITY, Event};
 #[cfg(feature = "p2p")]
 use super::link::LiveLink;
-use super::metrics::Bucket;
+use super::metrics::{Bucket, BucketBytes};
 use super::{
-    ByteCount, DirectStage, LanCounts, PathDiagnostics, PathTraffic, PortMappingDiagnostics,
-    RecoveryFailure, RecoveryPhase, RelayHealth, SessionCounts, TunnelEventKind, TunnelMetrics, ms,
+    DirectStage, LanCounts, PathDiagnostics, PathTraffic, PortMappingDiagnostics, RecoveryFailure,
+    RecoveryPhase, RelayHealth, SessionCounts, TunnelEventKind, TunnelMetrics, ms,
 };
 use crate::relay::RelayTransport;
-use pb_mapper_protocol::direct::{LinkSummary, SessionPath};
+use pb_mapper_protocol::direct::{DirectTransport, LinkSummary, SessionPath};
 use pb_mapper_protocol::forward::ByteMeter;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -31,8 +31,27 @@ pub(super) enum Lifecycle {
 pub(super) struct OpenSession {
     pub(super) path: SessionPath,
     pub(super) link: Option<LinkSummary>,
+    /// Where its bytes count, and whether it is a direct session over TCP:
+    /// decided once, as it opens, so that closing undoes exactly that.
+    pub(super) bucket: Bucket,
+    pub(super) tcp: bool,
     pub(super) opened: Instant,
     pub(super) meter: Arc<ByteMeter>,
+}
+
+impl OpenSession {
+    /// A session opening now on `path`, a direct one across `link`.
+    pub(super) fn new(path: SessionPath, link: Option<LinkSummary>, meter: Arc<ByteMeter>) -> Self {
+        Self {
+            path,
+            link,
+            bucket: Bucket::of(path, link.map(|link| link.kind)),
+            tcp: path == SessionPath::Direct
+                && link.is_some_and(|link| link.transport == DirectTransport::Tcp),
+            opened: Instant::now(),
+            meter,
+        }
+    }
 }
 
 pub(super) struct State {
@@ -54,8 +73,8 @@ pub(super) struct State {
     pub(super) direct: Option<PathDiagnostics>,
     pub(super) sessions: HashMap<u64, OpenSession>,
     pub(super) next_session: u64,
-    /// The bytes of the sessions that have closed, by [`Bucket`].
-    pub(super) closed: [ByteCount; Bucket::ALL],
+    /// The bytes of the sessions that have closed.
+    pub(super) closed: BucketBytes,
     /// The smoothed round trip of control exchanges with the relay.
     pub(super) relay_rtt: Option<Duration>,
     /// Until when sessions skip direct after a fallback, and how many have.
@@ -95,6 +114,45 @@ pub(super) struct State {
 }
 
 impl State {
+    /// A tunnel starting now, with nothing recorded yet.
+    pub(super) fn new() -> Self {
+        Self {
+            lifecycle: Lifecycle::Running,
+            started: Instant::now(),
+            cleanups: 0,
+            stream: None,
+            revision: Some(watch::channel(0).0),
+            direct: None,
+            sessions: HashMap::new(),
+            next_session: 0,
+            closed: BucketBytes::default(),
+            relay_rtt: None,
+            cooldown: None,
+            cooldown_skips: 0,
+            lan_first: false,
+            lan_transport: crate::sdk::LanTransport::Quic,
+            port_mapping: None,
+            phase: RecoveryPhase::Starting,
+            announced: RecoveryPhase::Starting,
+            attempts: 0,
+            failures: 0,
+            failure: None,
+            success: None,
+            latency: None,
+            retry: None,
+            ready: false,
+            network: None,
+            attempt: None,
+            in_flight: 0,
+            #[cfg(feature = "p2p")]
+            links: Vec::new(),
+            #[cfg(feature = "p2p")]
+            next_link: 0,
+            seq: 0,
+            events: VecDeque::new(),
+        }
+    }
+
     pub(super) fn record(&mut self, kind: TunnelEventKind) {
         if self.lifecycle == Lifecycle::Closed {
             return;
@@ -153,14 +211,17 @@ impl State {
 
     pub(super) fn enter(&mut self, phase: RecoveryPhase) {
         self.phase = phase;
-        let recheck = self.ready
-            && matches!(
-                phase,
-                RecoveryPhase::Capacity
-                    | RecoveryPhase::Resolving
-                    | RecoveryPhase::Connecting
-                    | RecoveryPhase::Handshake
-            );
+        let attempt_step = match phase {
+            RecoveryPhase::Capacity
+            | RecoveryPhase::Resolving
+            | RecoveryPhase::Connecting
+            | RecoveryPhase::Handshake => true,
+            RecoveryPhase::Starting
+            | RecoveryPhase::Ready
+            | RecoveryPhase::Backoff
+            | RecoveryPhase::Stopped => false,
+        };
+        let recheck = self.ready && attempt_step;
         if !recheck && self.announced != phase {
             self.announced = phase;
             self.record(TunnelEventKind::PhaseChanged { phase });
@@ -176,15 +237,20 @@ impl State {
         }
     }
 
+    /// Whether the event stream, and with it every metrics stream, has
+    /// ended.
+    pub(super) fn stream_ended(&self) -> bool {
+        self.revision.is_none()
+    }
+
     /// Application bytes by path: the closed sessions', and so far the
     /// open ones'.
     pub(super) fn traffic(&self) -> PathTraffic {
-        let mut buckets = self.closed;
+        let mut bytes = self.closed;
         for session in self.sessions.values() {
-            let bucket = Bucket::of(session.path, session.link.map(|link| link.kind)).index();
-            buckets[bucket] = buckets[bucket].add(session.meter.totals());
+            bytes.add(session.bucket, session.meter.totals());
         }
-        Bucket::traffic(buckets)
+        bytes.traffic()
     }
 
     pub(super) fn metrics(&self, transport: RelayTransport, now: Instant) -> TunnelMetrics {

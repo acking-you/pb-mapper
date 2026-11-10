@@ -10,9 +10,10 @@
 
 use crate::endpoint::RelayEndpoint;
 use crate::relay::RelayTransport;
-use pb_mapper_protocol::direct::{DirectTransport, LinkSummary, SessionPath};
+#[cfg(feature = "p2p")]
+use pb_mapper_protocol::direct::DirectTransport;
+use pb_mapper_protocol::direct::{LinkSummary, SessionPath};
 use pb_mapper_protocol::forward::ByteMeter;
-use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, watch};
 use tokio::time::{Duration, Instant};
@@ -63,46 +64,18 @@ pub(crate) fn smooth(smoothed: Option<Duration>, sample: Duration) -> Duration {
     }
 }
 
+/// How many open direct sessions a tunnel keeps the link of. A provider holds
+/// at most 64 sessions; a consumer has no such cap, and the newest is what is
+/// shown.
+#[cfg(feature = "p2p")]
+const MAX_LIVE_LINKS: usize = 64;
+
 #[derive(Clone)]
 pub(crate) struct Diagnostics(Arc<Mutex<State>>);
 
 impl Default for Diagnostics {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(State {
-            lifecycle: Lifecycle::Running,
-            started: Instant::now(),
-            cleanups: 0,
-            stream: None,
-            revision: Some(watch::channel(0).0),
-            direct: None,
-            sessions: HashMap::new(),
-            next_session: 0,
-            closed: [ByteCount::default(); Bucket::ALL],
-            relay_rtt: None,
-            cooldown: None,
-            cooldown_skips: 0,
-            lan_first: false,
-            lan_transport: crate::sdk::LanTransport::Quic,
-            port_mapping: None,
-            phase: RecoveryPhase::Starting,
-            announced: RecoveryPhase::Starting,
-            attempts: 0,
-            failures: 0,
-            failure: None,
-            success: None,
-            latency: None,
-            retry: None,
-            ready: false,
-            network: None,
-            attempt: None,
-            in_flight: 0,
-            #[cfg(feature = "p2p")]
-            links: Vec::new(),
-            #[cfg(feature = "p2p")]
-            next_link: 0,
-            seq: 0,
-            events: VecDeque::new(),
-        })))
+        Self(Arc::new(Mutex::new(State::new())))
     }
 }
 
@@ -177,16 +150,13 @@ impl Diagnostics {
     ) {
         let stage = match mode {
             crate::sdk::PortMapping::Auto => PortMappingStage::Standby,
-            _ => PortMappingStage::WaitingForDirect,
+            crate::sdk::PortMapping::Always | crate::sdk::PortMapping::Off => {
+                PortMappingStage::WaitingForDirect
+            }
         };
-        self.state()
-            .port_mapping
-            .get_or_insert_with(|| PortMappingDiagnostics {
-                current: PortMappingStatus::new(stage, network_generation),
-                attempts: 0,
-                renewals: 0,
-                failures: 0,
-            });
+        self.state().port_mapping.get_or_insert_with(|| {
+            PortMappingDiagnostics::new(PortMappingStatus::new(stage, network_generation))
+        });
     }
     #[cfg(feature = "port-mapping")]
     pub(crate) fn port_mapping_changed(&self, mut status: PortMappingStatus) {
@@ -201,17 +171,25 @@ impl Diagnostics {
         }
         let mapping = state
             .port_mapping
-            .get_or_insert_with(|| PortMappingDiagnostics {
-                current: status.clone(),
-                attempts: 0,
-                renewals: 0,
-                failures: 0,
-            });
+            .get_or_insert_with(|| PortMappingDiagnostics::new(status.clone()));
         match status.stage {
             PortMappingStage::Requesting => mapping.attempts += 1,
             PortMappingStage::Renewing => mapping.renewals += 1,
             PortMappingStage::Failed | PortMappingStage::ReleaseFailed => mapping.failures += 1,
-            _ => {}
+            PortMappingStage::Standby
+            | PortMappingStage::WaitingForDirect
+            | PortMappingStage::Discovering
+            | PortMappingStage::GatewayFound
+            | PortMappingStage::Discovered
+            | PortMappingStage::Active
+            | PortMappingStage::Expired
+            | PortMappingStage::Retrying
+            | PortMappingStage::NetworkChanged
+            | PortMappingStage::Releasing
+            | PortMappingStage::Released
+            | PortMappingStage::ReleaseSent
+            | PortMappingStage::Cancelled
+            | PortMappingStage::Stopped => {}
         }
         mapping.current = status.clone();
         state.record(TunnelEventKind::PortMappingChanged {
@@ -235,11 +213,7 @@ impl Diagnostics {
         let mut state = self.state();
         state.next_session += 1;
         let id = state.next_session;
-        let direct = |kind: fn(&LinkSummary) -> bool| {
-            path == SessionPath::Direct && link.as_ref().is_some_and(kind)
-        };
-        let lan = direct(|link| link.kind == LinkKind::Lan);
-        let tcp = direct(|link| link.transport == DirectTransport::Tcp);
+        let session = OpenSession::new(path, link, meter.clone());
         let p = state.direct.get_or_insert_default();
         match path {
             SessionPath::Direct => {
@@ -251,23 +225,15 @@ impl Diagnostics {
                 p.active_relay += 1;
             }
         }
-        if lan {
+        if session.bucket == Bucket::DirectLan {
             p.lan_sessions += 1;
             p.active_lan += 1;
         }
-        if tcp {
+        if session.tcp {
             p.lan_tcp_sessions += 1;
             p.active_lan_tcp += 1;
         }
-        state.sessions.insert(
-            id,
-            OpenSession {
-                path,
-                link,
-                opened: Instant::now(),
-                meter: meter.clone(),
-            },
-        );
+        state.sessions.insert(id, session);
         state.record(TunnelEventKind::SessionOpened {
             session: id,
             path,
@@ -285,20 +251,16 @@ impl Diagnostics {
             return;
         };
         let totals = session.meter.totals();
-        let bucket = Bucket::of(session.path, session.link.map(|link| link.kind)).index();
-        state.closed[bucket] = state.closed[bucket].add(totals);
+        state.closed.add(session.bucket, totals);
         let p = state.direct.get_or_insert_default();
         match session.path {
             SessionPath::Direct => p.active_direct = p.active_direct.saturating_sub(1),
             SessionPath::Relay => p.active_relay = p.active_relay.saturating_sub(1),
         }
-        if bucket == Bucket::DirectLan.index() {
+        if session.bucket == Bucket::DirectLan {
             p.active_lan = p.active_lan.saturating_sub(1);
         }
-        if session
-            .link
-            .is_some_and(|link| link.transport == DirectTransport::Tcp)
-        {
+        if session.tcp {
             p.active_lan_tcp = p.active_lan_tcp.saturating_sub(1);
         }
         state.record(TunnelEventKind::SessionClosed {
@@ -365,9 +327,7 @@ impl Diagnostics {
             via: link.via,
             transport: link.transport,
         });
-        // A provider holds at most 64 sessions; a consumer has no such cap,
-        // and the newest is what is shown.
-        if state.links.len() == 64 {
+        if state.links.len() == MAX_LIVE_LINKS {
             state.links.remove(0);
         }
         state.links.push(LiveLink { id, link, probe });
@@ -494,7 +454,7 @@ impl Diagnostics {
             traffic: state.traffic(),
             relay_rtt_ms: state.relay_rtt.map(ms),
             port_mapping: state.port_mapping.clone(),
-            sdk_version: env!("CARGO_PKG_VERSION"),
+            sdk_version: crate::sdk::SDK_VERSION,
             last_attempt_phase: state.phase,
             attempts: state.attempts,
             consecutive_failures: state.failures,
@@ -574,6 +534,56 @@ mod tests {
             .events;
         assert_eq!(events.len(), EVENT_CAPACITY);
         assert!(events.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+    }
+
+    /// A session is classed once, as it opens, and closing it takes back
+    /// exactly what opening it counted, its bytes kept on its path.
+    #[tokio::test]
+    async fn a_closed_session_leaves_the_counts_it_entered() {
+        use pb_mapper_protocol::direct::DirectTransport;
+        let diagnostics = Diagnostics::default();
+        let endpoint = RelayEndpoint::shared("127.0.0.1:1");
+        let link = |kind, transport| {
+            Some(LinkSummary {
+                kind,
+                family: AddressFamily::Ipv4,
+                transport,
+            })
+        };
+        let lan_tcp = diagnostics.session_opened(
+            SessionPath::Direct,
+            link(LinkKind::Lan, DirectTransport::Tcp),
+        );
+        let internet = diagnostics.session_opened(
+            SessionPath::Direct,
+            link(LinkKind::Internet, DirectTransport::Quic),
+        );
+        lan_tcp.meter().add_sent(5);
+        internet.meter().add_sent(9);
+        let open = diagnostics.snapshot(&endpoint);
+        let paths = open.direct.unwrap();
+        assert_eq!(
+            (paths.active_lan_tcp, paths.active_lan, paths.active_direct),
+            (1, 1, 2)
+        );
+        assert_eq!((open.traffic.lan.sent, open.traffic.direct.sent), (5, 14));
+        drop(lan_tcp);
+        drop(internet);
+        let closed = diagnostics.snapshot(&endpoint);
+        let paths = closed.direct.unwrap();
+        assert_eq!(
+            (paths.active_lan_tcp, paths.active_lan, paths.active_direct),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            (
+                paths.lan_tcp_sessions,
+                paths.lan_sessions,
+                paths.direct_sessions
+            ),
+            (1, 1, 2)
+        );
+        assert_eq!(closed.traffic, open.traffic);
     }
 
     #[cfg(feature = "p2p")]

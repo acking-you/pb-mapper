@@ -9,7 +9,7 @@
 
 use super::{Diagnostics, LanEvidence, LinkStats, LinkVia, RecoveryPhase};
 use crate::relay::RelayTransport;
-pub use pb_mapper_protocol::direct::{AddressFamily, DirectTransport, LinkKind};
+use pb_mapper_protocol::direct::{AddressFamily, DirectTransport, LinkKind, SessionPath};
 use pb_mapper_protocol::forward::ForwardTotals;
 use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
@@ -65,26 +65,40 @@ pub(super) enum Bucket {
 }
 
 impl Bucket {
-    pub(super) const ALL: usize = 3;
-
-    pub(super) fn of(
-        path: pb_mapper_protocol::direct::SessionPath,
-        link: Option<LinkKind>,
-    ) -> Self {
+    pub(super) fn of(path: SessionPath, link: Option<LinkKind>) -> Self {
         match (path, link) {
-            (pb_mapper_protocol::direct::SessionPath::Relay, _) => Self::Relay,
-            (_, Some(LinkKind::Lan)) => Self::DirectLan,
-            _ => Self::DirectOther,
+            (SessionPath::Relay, _) => Self::Relay,
+            (SessionPath::Direct, Some(LinkKind::Lan)) => Self::DirectLan,
+            (
+                SessionPath::Direct,
+                Some(LinkKind::Internet | LinkKind::Private | LinkKind::Unknown) | None,
+            ) => Self::DirectOther,
         }
     }
+}
 
-    pub(super) fn index(self) -> usize {
-        self as usize
+/// Application bytes by [`Bucket`].
+#[derive(Clone, Copy, Default)]
+pub(super) struct BucketBytes {
+    relay: ByteCount,
+    lan: ByteCount,
+    other: ByteCount,
+}
+
+impl BucketBytes {
+    /// Count `totals` in `bucket`.
+    pub(super) fn add(&mut self, bucket: Bucket, totals: ForwardTotals) {
+        let count = match bucket {
+            Bucket::Relay => &mut self.relay,
+            Bucket::DirectLan => &mut self.lan,
+            Bucket::DirectOther => &mut self.other,
+        };
+        *count = count.add(totals);
     }
 
     /// The buckets, summed into the paths they make up.
-    pub(super) fn traffic(buckets: [ByteCount; Self::ALL]) -> PathTraffic {
-        let [relay, lan, other] = buckets;
+    pub(super) fn traffic(self) -> PathTraffic {
+        let Self { relay, lan, other } = self;
         PathTraffic {
             relay,
             direct: lan.plus(other),
@@ -285,7 +299,7 @@ impl TunnelMetricsStream {
         }
         let (metrics, stopped) = {
             let state = self.diagnostics.state();
-            (state.metrics(self.transport, now), state.revision.is_none())
+            (state.metrics(self.transport, now), state.stream_ended())
         };
         self.next = if stopped { Next::End } else { Next::Wait };
         metrics

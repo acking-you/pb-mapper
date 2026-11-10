@@ -149,3 +149,15 @@ pub struct PortMappingDiagnostics {
     /// Failed discoveries, requests and releases.
     pub failures: u64,
 }
+
+impl PortMappingDiagnostics {
+    /// A mapping standing at `current`, with nothing counted yet.
+    pub(super) fn new(current: PortMappingStatus) -> Self {
+        Self {
+            current,
+            attempts: 0,
+            renewals: 0,
+            failures: 0,
+        }
+    }
+}
