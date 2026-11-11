@@ -29,9 +29,11 @@ abstract interface class DesktopVideoTexture {
 typedef DesktopTextureFactory =
     Future<DesktopVideoTexture> Function({required int instanceToken});
 
-/// Android and Windows can decode H.264 natively; the session's codec decides
-/// (Windows without Media Foundation takes JPEG).
-bool get nativeDesktopVideo => Platform.isAndroid || Platform.isWindows;
+/// Android, Windows and Linux can decode H.264 natively; the session's codec
+/// decides (Windows without Media Foundation, and Linux without GStreamer,
+/// take JPEG).
+bool get nativeDesktopVideo =>
+    Platform.isAndroid || Platform.isWindows || Platform.isLinux;
 
 /// What this device decodes natively, from the channel's `decoders` (I4),
 /// which enumerates and never creates a decoder: a bad driver can hang
