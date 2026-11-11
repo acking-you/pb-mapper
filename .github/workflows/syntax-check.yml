@@ -216,6 +216,57 @@ jobs:
       - name: Run tests
         run: cargo test -p pb-mapper-desktop -p pb-mapper-ffi --all-features
 
+  # The remote desktop's macOS host (ScreenCaptureKit, VideoToolbox, CGEvent,
+  # the Keychain) compiles only on macOS. Its tests need no person: the
+  # encoder and the display list run; capture and input need the owner's
+  # Screen Recording and Accessibility grants, which a runner never has, and
+  # are covered by the manual checklist.
+  rust-macos-desktop:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: macos-latest
+    env:
+      CARGO_INCREMENTAL: 0  # Incremental state only bloats the cached target/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-desktop-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-desktop-
+
+      - name: Run Clippy
+        run: cargo clippy -p pb-mapper-desktop -p pb-mapper-ffi --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test -p pb-mapper-desktop -p pb-mapper-ffi --all-features
+
+      # The app runs from macOS 10.15, ScreenCaptureKit arrived in 12.3: the
+      # FFI library must link it weakly, or it would not load before 12.3.
+      - name: Check ScreenCaptureKit is linked weakly
+        run: |
+          cargo build -p pb-mapper-ffi
+          kind="$(otool -l target/debug/libpb_mapper_ffi.dylib \
+            | awk '/^ *cmd LC_/ { cmd = $2 } /name .*ScreenCaptureKit/ { print cmd }')"
+          echo "ScreenCaptureKit load command: ${kind:-none}"
+          test "$kind" = "LC_LOAD_WEAK_DYLIB"
+
   node-e2e:
     needs: changes
     if: needs.changes.outputs.node == 'true'
