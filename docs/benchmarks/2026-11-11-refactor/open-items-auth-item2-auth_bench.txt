@@ -1,0 +1,321 @@
+### item2
+=== item1 round 0 ===
+case=derive_temporary_key ns=121.8
+case=authenticate_temporary ns=267.4
+case=authenticate_administrator ns=127.9
+case=renew_current ops=200 latency_p50_us=750.8 latency_p99_us=1113.5 hold_p50_us=4.6 hold_p99_us=24.7 hold_max_us=80.1
+case=status_current ops=200 latency_p50_us=30.7 latency_p99_us=52.7 hold_p50_us=3.0 hold_p99_us=5.8 hold_max_us=8.1
+case=gc65536_current ops=20 latency_p50_us=3810.4 latency_p99_us=5709.0 hold_p50_us=9.3 hold_p99_us=68.6 hold_max_us=68.6
+case=start65536_current ops=20 latency_p50_us=1635.3 latency_p99_us=3414.6 hold_p50_us=7.5 hold_p99_us=17.0 hold_max_us=17.0
+case=gc1048576_current ops=20 latency_p50_us=13150.9 latency_p99_us=15205.0 hold_p50_us=25.6 hold_p99_us=198.4 hold_max_us=198.4
+case=start1048576_current ops=20 latency_p50_us=13913.3 latency_p99_us=14731.2 hold_p50_us=29.8 hold_p99_us=190.5 hold_max_us=190.5
+case=renew_multi ops=200 latency_p50_us=838.1 latency_p99_us=1194.1 hold_p50_us=10.8 hold_p99_us=144.5 hold_max_us=193.5
+case=status_multi ops=200 latency_p50_us=30.7 latency_p99_us=41.5 hold_p50_us=5.7 hold_p99_us=12.0 hold_max_us=17.7
+case=gc65536_multi ops=20 latency_p50_us=3775.7 latency_p99_us=5222.2 hold_p50_us=16.5 hold_p99_us=155.0 hold_max_us=155.0
+case=start65536_multi ops=20 latency_p50_us=1720.7 latency_p99_us=2078.9 hold_p50_us=8.0 hold_p99_us=79.3 hold_max_us=79.3
+case=gc1048576_multi ops=20 latency_p50_us=12776.1 latency_p99_us=13477.2 hold_p50_us=48.5 hold_p99_us=294.4 hold_max_us=294.4
+case=start1048576_multi ops=20 latency_p50_us=13853.6 latency_p99_us=18052.6 hold_p50_us=131.2 hold_p99_us=295.6 hold_max_us=295.6
+=== item2 round 0 ===
+case=derive_temporary_key ns=124.1
+case=authenticate_temporary ns=267.8
+case=authenticate_administrator ns=127.7
+case=renew_current ops=200 latency_p50_us=825.1 latency_p99_us=1269.6 hold_p50_us=6.4 hold_p99_us=25.6 hold_max_us=134.4
+case=status_current ops=200 latency_p50_us=22.3 latency_p99_us=61.2 hold_p50_us=3.1 hold_p99_us=53.0 hold_max_us=173.0
+case=gc65536_current ops=20 latency_p50_us=3925.2 latency_p99_us=5461.8 hold_p50_us=9.6 hold_p99_us=38.1 hold_max_us=38.1
+case=start65536_current ops=20 latency_p50_us=1820.6 latency_p99_us=4276.2 hold_p50_us=7.8 hold_p99_us=29.1 hold_max_us=29.1
+case=gc1048576_current ops=20 latency_p50_us=13467.0 latency_p99_us=14231.6 hold_p50_us=22.1 hold_p99_us=165.7 hold_max_us=165.7
+case=start1048576_current ops=20 latency_p50_us=13018.9 latency_p99_us=15547.7 hold_p50_us=33.2 hold_p99_us=58.0 hold_max_us=58.0
+case=renew_multi ops=200 latency_p50_us=760.0 latency_p99_us=1035.1 hold_p50_us=7.3 hold_p99_us=146.6 hold_max_us=184.4
+case=status_multi ops=200 latency_p50_us=20.9 latency_p99_us=35.7 hold_p50_us=2.6 hold_p99_us=7.2 hold_max_us=8.1
+case=gc65536_multi ops=20 latency_p50_us=3839.2 latency_p99_us=6834.3 hold_p50_us=18.4 hold_p99_us=165.1 hold_max_us=165.1
+case=start65536_multi ops=20 latency_p50_us=1729.7 latency_p99_us=3054.3 hold_p50_us=20.6 hold_p99_us=180.8 hold_max_us=180.8
+case=gc1048576_multi ops=20 latency_p50_us=13164.9 latency_p99_us=17835.7 hold_p50_us=159.9 hold_p99_us=215.1 hold_max_us=215.1
+case=start1048576_multi ops=20 latency_p50_us=16094.4 latency_p99_us=20224.7 hold_p50_us=203.0 hold_p99_us=353.9 hold_max_us=353.9
+=== item2 round 1 ===
+case=derive_temporary_key ns=126.1
+case=authenticate_temporary ns=269.8
+case=authenticate_administrator ns=127.7
+case=renew_current ops=200 latency_p50_us=820.9 latency_p99_us=1210.5 hold_p50_us=6.7 hold_p99_us=197.2 hold_max_us=205.6
+case=status_current ops=200 latency_p50_us=24.5 latency_p99_us=43.7 hold_p50_us=3.1 hold_p99_us=5.9 hold_max_us=7.2
+case=gc65536_current ops=20 latency_p50_us=3889.9 latency_p99_us=6913.4 hold_p50_us=13.4 hold_p99_us=235.5 hold_max_us=235.5
+case=start65536_current ops=20 latency_p50_us=1828.0 latency_p99_us=3419.7 hold_p50_us=10.7 hold_p99_us=15.4 hold_max_us=15.4
+case=gc1048576_current ops=20 latency_p50_us=13854.5 latency_p99_us=15327.7 hold_p50_us=21.5 hold_p99_us=69.4 hold_max_us=69.4
+case=start1048576_current ops=20 latency_p50_us=13844.7 latency_p99_us=14592.6 hold_p50_us=24.6 hold_p99_us=239.9 hold_max_us=239.9
+case=renew_multi ops=200 latency_p50_us=853.5 latency_p99_us=1204.9 hold_p50_us=14.5 hold_p99_us=194.6 hold_max_us=218.7
+case=status_multi ops=200 latency_p50_us=30.7 latency_p99_us=58.0 hold_p50_us=3.0 hold_p99_us=55.9 hold_max_us=71.7
+case=gc65536_multi ops=20 latency_p50_us=3702.4 latency_p99_us=6196.1 hold_p50_us=52.9 hold_p99_us=213.2 hold_max_us=213.2
+case=start65536_multi ops=20 latency_p50_us=1870.9 latency_p99_us=4653.1 hold_p50_us=44.6 hold_p99_us=203.1 hold_max_us=203.1
+case=gc1048576_multi ops=20 latency_p50_us=13365.6 latency_p99_us=15301.8 hold_p50_us=154.2 hold_p99_us=264.2 hold_max_us=264.2
+case=start1048576_multi ops=20 latency_p50_us=14730.6 latency_p99_us=19456.4 hold_p50_us=194.9 hold_p99_us=396.6 hold_max_us=396.6
+=== item1 round 1 ===
+case=derive_temporary_key ns=123.8
+case=authenticate_temporary ns=268.7
+case=authenticate_administrator ns=127.7
+case=renew_current ops=200 latency_p50_us=761.6 latency_p99_us=1429.2 hold_p50_us=5.5 hold_p99_us=14.1 hold_max_us=109.8
+case=status_current ops=200 latency_p50_us=29.4 latency_p99_us=41.8 hold_p50_us=2.9 hold_p99_us=7.1 hold_max_us=8.8
+case=gc65536_current ops=20 latency_p50_us=3676.1 latency_p99_us=6406.0 hold_p50_us=8.5 hold_p99_us=13.9 hold_max_us=13.9
+case=start65536_current ops=20 latency_p50_us=1786.3 latency_p99_us=3002.8 hold_p50_us=13.4 hold_p99_us=173.4 hold_max_us=173.4
+case=gc1048576_current ops=20 latency_p50_us=13413.2 latency_p99_us=14885.5 hold_p50_us=26.8 hold_p99_us=105.9 hold_max_us=105.9
+case=start1048576_current ops=20 latency_p50_us=13442.0 latency_p99_us=14153.8 hold_p50_us=18.3 hold_p99_us=32.1 hold_max_us=32.1
+case=renew_multi ops=200 latency_p50_us=819.7 latency_p99_us=1145.0 hold_p50_us=9.5 hold_p99_us=182.5 hold_max_us=282.3
+case=status_multi ops=200 latency_p50_us=31.7 latency_p99_us=48.2 hold_p50_us=3.6 hold_p99_us=8.3 hold_max_us=16.6
+case=gc65536_multi ops=20 latency_p50_us=3994.0 latency_p99_us=4642.3 hold_p50_us=17.5 hold_p99_us=159.1 hold_max_us=159.1
+case=start65536_multi ops=20 latency_p50_us=1854.3 latency_p99_us=2731.3 hold_p50_us=14.8 hold_p99_us=169.1 hold_max_us=169.1
+case=gc1048576_multi ops=20 latency_p50_us=13974.2 latency_p99_us=18329.7 hold_p50_us=184.6 hold_p99_us=381.0 hold_max_us=381.0
+case=start1048576_multi ops=20 latency_p50_us=17372.9 latency_p99_us=25561.6 hold_p50_us=153.1 hold_p99_us=336.3 hold_max_us=336.3
+=== item1 round 2 ===
+case=derive_temporary_key ns=124.6
+case=authenticate_temporary ns=270.5
+case=authenticate_administrator ns=130.1
+case=renew_current ops=200 latency_p50_us=877.9 latency_p99_us=1170.7 hold_p50_us=6.6 hold_p99_us=26.2 hold_max_us=54.8
+case=status_current ops=200 latency_p50_us=29.7 latency_p99_us=60.7 hold_p50_us=3.0 hold_p99_us=7.7 hold_max_us=12.6
+case=gc65536_current ops=20 latency_p50_us=3990.5 latency_p99_us=6087.1 hold_p50_us=10.5 hold_p99_us=48.6 hold_max_us=48.6
+case=start65536_current ops=20 latency_p50_us=1773.9 latency_p99_us=3463.2 hold_p50_us=9.9 hold_p99_us=19.4 hold_max_us=19.4
+case=gc1048576_current ops=20 latency_p50_us=13342.2 latency_p99_us=14982.0 hold_p50_us=17.6 hold_p99_us=112.9 hold_max_us=112.9
+case=start1048576_current ops=20 latency_p50_us=13154.8 latency_p99_us=14097.2 hold_p50_us=21.4 hold_p99_us=45.1 hold_max_us=45.1
+case=renew_multi ops=200 latency_p50_us=771.8 latency_p99_us=1050.3 hold_p50_us=7.2 hold_p99_us=132.5 hold_max_us=155.7
+case=status_multi ops=200 latency_p50_us=30.2 latency_p99_us=48.5 hold_p50_us=2.7 hold_p99_us=7.0 hold_max_us=8.3
+case=gc65536_multi ops=20 latency_p50_us=3806.9 latency_p99_us=4466.9 hold_p50_us=17.7 hold_p99_us=170.6 hold_max_us=170.6
+case=start65536_multi ops=20 latency_p50_us=1956.6 latency_p99_us=3547.9 hold_p50_us=13.7 hold_p99_us=198.3 hold_max_us=198.3
+case=gc1048576_multi ops=20 latency_p50_us=13257.0 latency_p99_us=15308.4 hold_p50_us=23.0 hold_p99_us=163.4 hold_max_us=163.4
+case=start1048576_multi ops=20 latency_p50_us=13089.9 latency_p99_us=17094.8 hold_p50_us=31.9 hold_p99_us=122.3 hold_max_us=122.3
+=== item2 round 2 ===
+case=derive_temporary_key ns=124.8
+case=authenticate_temporary ns=270.1
+case=authenticate_administrator ns=127.0
+case=renew_current ops=200 latency_p50_us=778.4 latency_p99_us=4979.7 hold_p50_us=5.3 hold_p99_us=55.9 hold_max_us=216.5
+case=status_current ops=200 latency_p50_us=20.2 latency_p99_us=43.4 hold_p50_us=2.9 hold_p99_us=8.5 hold_max_us=9.7
+case=gc65536_current ops=20 latency_p50_us=3860.5 latency_p99_us=7961.0 hold_p50_us=8.6 hold_p99_us=14.9 hold_max_us=14.9
+case=start65536_current ops=20 latency_p50_us=1688.8 latency_p99_us=4478.7 hold_p50_us=8.1 hold_p99_us=126.2 hold_max_us=126.2
+case=gc1048576_current ops=20 latency_p50_us=21704.1 latency_p99_us=23530.5 hold_p50_us=13.5 hold_p99_us=119.8 hold_max_us=119.8
+case=start1048576_current ops=20 latency_p50_us=12763.7 latency_p99_us=15137.3 hold_p50_us=20.0 hold_p99_us=35.9 hold_max_us=35.9
+case=renew_multi ops=200 latency_p50_us=821.5 latency_p99_us=6098.4 hold_p50_us=8.5 hold_p99_us=127.8 hold_max_us=176.6
+case=status_multi ops=200 latency_p50_us=21.0 latency_p99_us=33.4 hold_p50_us=2.6 hold_p99_us=7.2 hold_max_us=12.6
+case=gc65536_multi ops=20 latency_p50_us=4195.6 latency_p99_us=8592.1 hold_p50_us=19.8 hold_p99_us=144.9 hold_max_us=144.9
+case=start65536_multi ops=20 latency_p50_us=1937.7 latency_p99_us=4118.1 hold_p50_us=17.9 hold_p99_us=103.1 hold_max_us=103.1
+case=gc1048576_multi ops=20 latency_p50_us=20536.7 latency_p99_us=21877.1 hold_p50_us=112.5 hold_p99_us=241.8 hold_max_us=241.8
+case=start1048576_multi ops=20 latency_p50_us=14175.6 latency_p99_us=18567.9 hold_p50_us=151.3 hold_p99_us=366.0 hold_max_us=366.0
+=== item2 round 3 ===
+case=derive_temporary_key ns=129.2
+case=authenticate_temporary ns=273.1
+case=authenticate_administrator ns=126.9
+case=renew_current ops=200 latency_p50_us=774.8 latency_p99_us=1264.8 hold_p50_us=4.6 hold_p99_us=15.7 hold_max_us=20.8
+case=status_current ops=200 latency_p50_us=20.5 latency_p99_us=32.3 hold_p50_us=3.0 hold_p99_us=7.4 hold_max_us=9.3
+case=gc65536_current ops=20 latency_p50_us=3814.1 latency_p99_us=6650.9 hold_p50_us=9.1 hold_p99_us=16.1 hold_max_us=16.1
+case=start65536_current ops=20 latency_p50_us=1702.9 latency_p99_us=2987.3 hold_p50_us=8.0 hold_p99_us=44.1 hold_max_us=44.1
+case=gc1048576_current ops=20 latency_p50_us=13318.7 latency_p99_us=16997.0 hold_p50_us=15.3 hold_p99_us=36.8 hold_max_us=36.8
+case=start1048576_current ops=20 latency_p50_us=13405.7 latency_p99_us=18654.6 hold_p50_us=24.6 hold_p99_us=185.4 hold_max_us=185.4
+case=renew_multi ops=200 latency_p50_us=801.4 latency_p99_us=1053.7 hold_p50_us=12.9 hold_p99_us=197.6 hold_max_us=248.9
+case=status_multi ops=200 latency_p50_us=20.6 latency_p99_us=34.8 hold_p50_us=2.7 hold_p99_us=12.7 hold_max_us=13.2
+case=gc65536_multi ops=20 latency_p50_us=3992.1 latency_p99_us=5828.4 hold_p50_us=14.9 hold_p99_us=77.7 hold_max_us=77.7
+case=start65536_multi ops=20 latency_p50_us=1719.0 latency_p99_us=2996.1 hold_p50_us=11.9 hold_p99_us=92.7 hold_max_us=92.7
+case=gc1048576_multi ops=20 latency_p50_us=12586.2 latency_p99_us=13693.2 hold_p50_us=19.6 hold_p99_us=199.5 hold_max_us=199.5
+case=start1048576_multi ops=20 latency_p50_us=12842.5 latency_p99_us=17063.0 hold_p50_us=24.5 hold_p99_us=176.4 hold_max_us=176.4
+=== item1 round 3 ===
+case=derive_temporary_key ns=129.1
+case=authenticate_temporary ns=268.3
+case=authenticate_administrator ns=127.9
+case=renew_current ops=200 latency_p50_us=788.8 latency_p99_us=1094.2 hold_p50_us=4.9 hold_p99_us=21.2 hold_max_us=37.7
+case=status_current ops=200 latency_p50_us=27.5 latency_p99_us=46.8 hold_p50_us=2.9 hold_p99_us=6.2 hold_max_us=9.7
+case=gc65536_current ops=20 latency_p50_us=3802.9 latency_p99_us=4606.1 hold_p50_us=11.8 hold_p99_us=126.1 hold_max_us=126.1
+case=start65536_current ops=20 latency_p50_us=1638.0 latency_p99_us=3038.9 hold_p50_us=7.9 hold_p99_us=130.6 hold_max_us=130.6
+case=gc1048576_current ops=20 latency_p50_us=12735.6 latency_p99_us=13978.9 hold_p50_us=15.3 hold_p99_us=130.2 hold_max_us=130.2
+case=start1048576_current ops=20 latency_p50_us=13475.2 latency_p99_us=15783.0 hold_p50_us=16.8 hold_p99_us=50.0 hold_max_us=50.0
+case=renew_multi ops=200 latency_p50_us=793.4 latency_p99_us=1181.7 hold_p50_us=9.0 hold_p99_us=202.7 hold_max_us=240.0
+case=status_multi ops=200 latency_p50_us=30.1 latency_p99_us=66.2 hold_p50_us=2.8 hold_p99_us=11.9 hold_max_us=15.3
+case=gc65536_multi ops=20 latency_p50_us=3810.2 latency_p99_us=8451.4 hold_p50_us=21.8 hold_p99_us=158.2 hold_max_us=158.2
+case=start65536_multi ops=20 latency_p50_us=1770.7 latency_p99_us=10204.0 hold_p50_us=14.8 hold_p99_us=134.7 hold_max_us=134.7
+case=gc1048576_multi ops=20 latency_p50_us=13082.7 latency_p99_us=16362.0 hold_p50_us=33.2 hold_p99_us=231.2 hold_max_us=231.2
+case=start1048576_multi ops=20 latency_p50_us=13090.5 latency_p99_us=14787.9 hold_p50_us=51.4 hold_p99_us=241.5 hold_max_us=241.5
+=== item1 round 4 ===
+case=derive_temporary_key ns=123.6
+case=authenticate_temporary ns=266.0
+case=authenticate_administrator ns=127.1
+case=renew_current ops=200 latency_p50_us=745.3 latency_p99_us=1135.2 hold_p50_us=4.5 hold_p99_us=13.9 hold_max_us=54.0
+case=status_current ops=200 latency_p50_us=29.5 latency_p99_us=55.4 hold_p50_us=2.9 hold_p99_us=7.1 hold_max_us=7.3
+case=gc65536_current ops=20 latency_p50_us=3682.7 latency_p99_us=5881.0 hold_p50_us=9.4 hold_p99_us=16.3 hold_max_us=16.3
+case=start65536_current ops=20 latency_p50_us=1851.0 latency_p99_us=2606.6 hold_p50_us=8.1 hold_p99_us=24.5 hold_max_us=24.5
+case=gc1048576_current ops=20 latency_p50_us=12673.9 latency_p99_us=13344.8 hold_p50_us=11.9 hold_p99_us=67.6 hold_max_us=67.6
+case=start1048576_current ops=20 latency_p50_us=12656.8 latency_p99_us=13552.4 hold_p50_us=19.0 hold_p99_us=63.1 hold_max_us=63.1
+case=renew_multi ops=200 latency_p50_us=759.3 latency_p99_us=1180.7 hold_p50_us=6.9 hold_p99_us=166.5 hold_max_us=206.0
+case=status_multi ops=200 latency_p50_us=30.4 latency_p99_us=43.0 hold_p50_us=2.5 hold_p99_us=7.2 hold_max_us=8.2
+case=gc65536_multi ops=20 latency_p50_us=3831.9 latency_p99_us=6505.9 hold_p50_us=23.5 hold_p99_us=235.7 hold_max_us=235.7
+case=start65536_multi ops=20 latency_p50_us=1759.4 latency_p99_us=3880.9 hold_p50_us=32.1 hold_p99_us=308.8 hold_max_us=308.8
+case=gc1048576_multi ops=20 latency_p50_us=13029.4 latency_p99_us=14652.0 hold_p50_us=14.4 hold_p99_us=139.6 hold_max_us=139.6
+case=start1048576_multi ops=20 latency_p50_us=13427.2 latency_p99_us=14974.3 hold_p50_us=86.2 hold_p99_us=280.1 hold_max_us=280.1
+=== item2 round 4 ===
+case=derive_temporary_key ns=125.3
+case=authenticate_temporary ns=268.1
+case=authenticate_administrator ns=126.8
+case=renew_current ops=200 latency_p50_us=747.7 latency_p99_us=1057.6 hold_p50_us=4.9 hold_p99_us=17.6 hold_max_us=42.4
+case=status_current ops=200 latency_p50_us=19.9 latency_p99_us=36.6 hold_p50_us=2.8 hold_p99_us=5.1 hold_max_us=5.3
+case=gc65536_current ops=20 latency_p50_us=3429.6 latency_p99_us=5768.4 hold_p50_us=7.6 hold_p99_us=56.9 hold_max_us=56.9
+case=start65536_current ops=20 latency_p50_us=1664.5 latency_p99_us=2456.9 hold_p50_us=10.9 hold_p99_us=84.1 hold_max_us=84.1
+case=gc1048576_current ops=20 latency_p50_us=12449.6 latency_p99_us=13474.5 hold_p50_us=19.3 hold_p99_us=33.7 hold_max_us=33.7
+case=start1048576_current ops=20 latency_p50_us=12407.5 latency_p99_us=12905.3 hold_p50_us=19.5 hold_p99_us=65.5 hold_max_us=65.5
+case=renew_multi ops=200 latency_p50_us=788.7 latency_p99_us=1338.5 hold_p50_us=7.5 hold_p99_us=135.7 hold_max_us=215.7
+case=status_multi ops=200 latency_p50_us=20.8 latency_p99_us=36.8 hold_p50_us=2.8 hold_p99_us=13.0 hold_max_us=25.5
+case=gc65536_multi ops=20 latency_p50_us=3906.9 latency_p99_us=10518.7 hold_p50_us=119.4 hold_p99_us=217.8 hold_max_us=217.8
+case=start65536_multi ops=20 latency_p50_us=1842.8 latency_p99_us=2720.8 hold_p50_us=14.3 hold_p99_us=162.0 hold_max_us=162.0
+case=gc1048576_multi ops=20 latency_p50_us=12868.2 latency_p99_us=14457.7 hold_p50_us=130.2 hold_p99_us=276.9 hold_max_us=276.9
+case=start1048576_multi ops=20 latency_p50_us=13053.4 latency_p99_us=15015.4 hold_p50_us=44.0 hold_p99_us=226.0 hold_max_us=226.0
+=== item2 round 5 ===
+case=derive_temporary_key ns=124.0
+case=authenticate_temporary ns=268.8
+case=authenticate_administrator ns=127.2
+case=renew_current ops=200 latency_p50_us=758.3 latency_p99_us=1165.1 hold_p50_us=4.6 hold_p99_us=22.4 hold_max_us=57.6
+case=status_current ops=200 latency_p50_us=22.8 latency_p99_us=39.1 hold_p50_us=3.7 hold_p99_us=13.9 hold_max_us=26.2
+case=gc65536_current ops=20 latency_p50_us=3724.1 latency_p99_us=6776.6 hold_p50_us=9.4 hold_p99_us=24.1 hold_max_us=24.1
+case=start65536_current ops=20 latency_p50_us=1633.9 latency_p99_us=3038.8 hold_p50_us=5.8 hold_p99_us=19.0 hold_max_us=19.0
+case=gc1048576_current ops=20 latency_p50_us=13211.6 latency_p99_us=13723.1 hold_p50_us=14.6 hold_p99_us=69.9 hold_max_us=69.9
+case=start1048576_current ops=20 latency_p50_us=13756.9 latency_p99_us=14710.7 hold_p50_us=22.9 hold_p99_us=364.8 hold_max_us=364.8
+case=renew_multi ops=200 latency_p50_us=790.2 latency_p99_us=1075.6 hold_p50_us=7.0 hold_p99_us=24.0 hold_max_us=150.0
+case=status_multi ops=200 latency_p50_us=24.2 latency_p99_us=40.3 hold_p50_us=3.6 hold_p99_us=7.5 hold_max_us=10.4
+case=gc65536_multi ops=20 latency_p50_us=4077.5 latency_p99_us=7176.4 hold_p50_us=19.4 hold_p99_us=105.7 hold_max_us=105.7
+case=start65536_multi ops=20 latency_p50_us=1820.7 latency_p99_us=7814.8 hold_p50_us=12.5 hold_p99_us=95.9 hold_max_us=95.9
+case=gc1048576_multi ops=20 latency_p50_us=13305.6 latency_p99_us=16638.0 hold_p50_us=119.1 hold_p99_us=351.2 hold_max_us=351.2
+case=start1048576_multi ops=20 latency_p50_us=13230.7 latency_p99_us=14858.9 hold_p50_us=25.7 hold_p99_us=176.6 hold_max_us=176.6
+=== item1 round 5 ===
+case=derive_temporary_key ns=123.2
+case=authenticate_temporary ns=269.7
+case=authenticate_administrator ns=127.3
+case=renew_current ops=200 latency_p50_us=795.1 latency_p99_us=4938.4 hold_p50_us=5.1 hold_p99_us=16.8 hold_max_us=56.9
+case=status_current ops=200 latency_p50_us=29.4 latency_p99_us=48.8 hold_p50_us=3.6 hold_p99_us=8.0 hold_max_us=10.0
+case=gc65536_current ops=20 latency_p50_us=3797.9 latency_p99_us=8408.7 hold_p50_us=9.3 hold_p99_us=149.3 hold_max_us=149.3
+case=start65536_current ops=20 latency_p50_us=1717.4 latency_p99_us=3920.3 hold_p50_us=7.1 hold_p99_us=14.9 hold_max_us=14.9
+case=gc1048576_current ops=20 latency_p50_us=21802.1 latency_p99_us=25324.1 hold_p50_us=18.9 hold_p99_us=59.0 hold_max_us=59.0
+case=start1048576_current ops=20 latency_p50_us=13251.9 latency_p99_us=14366.6 hold_p50_us=19.5 hold_p99_us=51.7 hold_max_us=51.7
+case=renew_multi ops=200 latency_p50_us=826.0 latency_p99_us=5684.6 hold_p50_us=7.7 hold_p99_us=138.0 hold_max_us=157.1
+case=status_multi ops=200 latency_p50_us=30.4 latency_p99_us=56.8 hold_p50_us=2.6 hold_p99_us=8.5 hold_max_us=9.1
+case=gc65536_multi ops=20 latency_p50_us=4079.6 latency_p99_us=9631.4 hold_p50_us=68.7 hold_p99_us=231.8 hold_max_us=231.8
+case=start65536_multi ops=20 latency_p50_us=1737.6 latency_p99_us=2413.4 hold_p50_us=14.9 hold_p99_us=150.1 hold_max_us=150.1
+case=gc1048576_multi ops=20 latency_p50_us=20178.9 latency_p99_us=26676.1 hold_p50_us=137.3 hold_p99_us=546.8 hold_max_us=546.8
+case=start1048576_multi ops=20 latency_p50_us=12737.3 latency_p99_us=13739.4 hold_p50_us=30.4 hold_p99_us=258.9 hold_max_us=258.9
+=== item1 round 6 ===
+case=derive_temporary_key ns=124.4
+case=authenticate_temporary ns=267.4
+case=authenticate_administrator ns=127.4
+case=renew_current ops=200 latency_p50_us=742.0 latency_p99_us=1185.0 hold_p50_us=5.1 hold_p99_us=46.4 hold_max_us=88.9
+case=status_current ops=200 latency_p50_us=29.6 latency_p99_us=46.7 hold_p50_us=3.0 hold_p99_us=8.3 hold_max_us=11.5
+case=gc65536_current ops=20 latency_p50_us=3480.7 latency_p99_us=5519.8 hold_p50_us=8.2 hold_p99_us=48.8 hold_max_us=48.8
+case=start65536_current ops=20 latency_p50_us=1592.7 latency_p99_us=2830.1 hold_p50_us=6.7 hold_p99_us=16.9 hold_max_us=16.9
+case=gc1048576_current ops=20 latency_p50_us=11950.9 latency_p99_us=13038.7 hold_p50_us=18.6 hold_p99_us=22.9 hold_max_us=22.9
+case=start1048576_current ops=20 latency_p50_us=12502.3 latency_p99_us=14007.6 hold_p50_us=18.0 hold_p99_us=96.5 hold_max_us=96.5
+case=renew_multi ops=200 latency_p50_us=770.6 latency_p99_us=1148.6 hold_p50_us=10.7 hold_p99_us=196.3 hold_max_us=252.0
+case=status_multi ops=200 latency_p50_us=30.2 latency_p99_us=45.8 hold_p50_us=3.9 hold_p99_us=117.1 hold_max_us=147.1
+case=gc65536_multi ops=20 latency_p50_us=3807.7 latency_p99_us=7772.7 hold_p50_us=37.1 hold_p99_us=164.6 hold_max_us=164.6
+case=start65536_multi ops=20 latency_p50_us=1718.5 latency_p99_us=3861.0 hold_p50_us=9.9 hold_p99_us=22.4 hold_max_us=22.4
+case=gc1048576_multi ops=20 latency_p50_us=13138.0 latency_p99_us=15035.8 hold_p50_us=54.8 hold_p99_us=193.3 hold_max_us=193.3
+case=start1048576_multi ops=20 latency_p50_us=13303.6 latency_p99_us=14634.6 hold_p50_us=117.0 hold_p99_us=286.3 hold_max_us=286.3
+=== item2 round 6 ===
+case=derive_temporary_key ns=129.8
+case=authenticate_temporary ns=276.2
+case=authenticate_administrator ns=129.1
+case=renew_current ops=200 latency_p50_us=760.4 latency_p99_us=1075.6 hold_p50_us=4.4 hold_p99_us=48.4 hold_max_us=110.3
+case=status_current ops=200 latency_p50_us=20.4 latency_p99_us=49.0 hold_p50_us=2.9 hold_p99_us=7.5 hold_max_us=8.5
+case=gc65536_current ops=20 latency_p50_us=3603.9 latency_p99_us=4484.1 hold_p50_us=8.0 hold_p99_us=14.2 hold_max_us=14.2
+case=start65536_current ops=20 latency_p50_us=1719.5 latency_p99_us=3279.5 hold_p50_us=7.3 hold_p99_us=153.8 hold_max_us=153.8
+case=gc1048576_current ops=20 latency_p50_us=12972.7 latency_p99_us=13724.3 hold_p50_us=14.7 hold_p99_us=76.5 hold_max_us=76.5
+case=start1048576_current ops=20 latency_p50_us=13139.1 latency_p99_us=14759.2 hold_p50_us=23.1 hold_p99_us=55.8 hold_max_us=55.8
+case=renew_multi ops=200 latency_p50_us=799.1 latency_p99_us=1189.1 hold_p50_us=12.0 hold_p99_us=202.7 hold_max_us=256.0
+case=status_multi ops=200 latency_p50_us=20.8 latency_p99_us=34.8 hold_p50_us=2.6 hold_p99_us=8.8 hold_max_us=17.3
+case=gc65536_multi ops=20 latency_p50_us=3906.1 latency_p99_us=5329.4 hold_p50_us=57.6 hold_p99_us=175.1 hold_max_us=175.1
+case=start65536_multi ops=20 latency_p50_us=1670.4 latency_p99_us=2572.3 hold_p50_us=16.8 hold_p99_us=230.7 hold_max_us=230.7
+case=gc1048576_multi ops=20 latency_p50_us=12768.4 latency_p99_us=15971.3 hold_p50_us=183.8 hold_p99_us=305.2 hold_max_us=305.2
+case=start1048576_multi ops=20 latency_p50_us=13828.6 latency_p99_us=17597.0 hold_p50_us=114.1 hold_p99_us=269.4 hold_max_us=269.4
+=== item2 round 7 ===
+case=derive_temporary_key ns=128.9
+case=authenticate_temporary ns=277.0
+case=authenticate_administrator ns=127.0
+case=renew_current ops=200 latency_p50_us=775.6 latency_p99_us=1124.6 hold_p50_us=4.9 hold_p99_us=23.5 hold_max_us=118.0
+case=status_current ops=200 latency_p50_us=20.2 latency_p99_us=29.4 hold_p50_us=2.9 hold_p99_us=5.2 hold_max_us=6.7
+case=gc65536_current ops=20 latency_p50_us=3549.2 latency_p99_us=4117.0 hold_p50_us=9.3 hold_p99_us=74.4 hold_max_us=74.4
+case=start65536_current ops=20 latency_p50_us=1685.4 latency_p99_us=2881.2 hold_p50_us=6.3 hold_p99_us=16.3 hold_max_us=16.3
+case=gc1048576_current ops=20 latency_p50_us=12923.6 latency_p99_us=14919.5 hold_p50_us=13.8 hold_p99_us=156.6 hold_max_us=156.6
+case=start1048576_current ops=20 latency_p50_us=13068.4 latency_p99_us=14840.1 hold_p50_us=17.0 hold_p99_us=53.8 hold_max_us=53.8
+case=renew_multi ops=200 latency_p50_us=792.0 latency_p99_us=1218.8 hold_p50_us=7.7 hold_p99_us=178.4 hold_max_us=206.0
+case=status_multi ops=200 latency_p50_us=21.0 latency_p99_us=35.9 hold_p50_us=3.0 hold_p99_us=58.2 hold_max_us=132.3
+case=gc65536_multi ops=20 latency_p50_us=3789.9 latency_p99_us=4037.1 hold_p50_us=13.3 hold_p99_us=150.6 hold_max_us=150.6
+case=start65536_multi ops=20 latency_p50_us=1760.4 latency_p99_us=3320.2 hold_p50_us=18.3 hold_p99_us=125.3 hold_max_us=125.3
+case=gc1048576_multi ops=20 latency_p50_us=13037.7 latency_p99_us=16342.4 hold_p50_us=30.0 hold_p99_us=364.5 hold_max_us=364.5
+case=start1048576_multi ops=20 latency_p50_us=13271.7 latency_p99_us=14317.9 hold_p50_us=126.3 hold_p99_us=205.4 hold_max_us=205.4
+=== item1 round 7 ===
+case=derive_temporary_key ns=124.0
+case=authenticate_temporary ns=270.6
+case=authenticate_administrator ns=127.0
+case=renew_current ops=200 latency_p50_us=773.8 latency_p99_us=6015.2 hold_p50_us=4.7 hold_p99_us=29.1 hold_max_us=104.6
+case=status_current ops=200 latency_p50_us=30.3 latency_p99_us=50.9 hold_p50_us=2.8 hold_p99_us=6.7 hold_max_us=8.5
+case=gc65536_current ops=20 latency_p50_us=3755.3 latency_p99_us=11799.2 hold_p50_us=10.2 hold_p99_us=38.9 hold_max_us=38.9
+case=start65536_current ops=20 latency_p50_us=1674.0 latency_p99_us=3897.7 hold_p50_us=6.9 hold_p99_us=39.1 hold_max_us=39.1
+case=gc1048576_current ops=20 latency_p50_us=21044.7 latency_p99_us=23534.6 hold_p50_us=19.9 hold_p99_us=106.4 hold_max_us=106.4
+case=start1048576_current ops=20 latency_p50_us=13137.0 latency_p99_us=14349.3 hold_p50_us=17.3 hold_p99_us=115.9 hold_max_us=115.9
+case=renew_multi ops=200 latency_p50_us=805.9 latency_p99_us=5730.2 hold_p50_us=11.5 hold_p99_us=225.7 hold_max_us=360.9
+case=status_multi ops=200 latency_p50_us=20.3 latency_p99_us=44.0 hold_p50_us=2.8 hold_p99_us=51.3 hold_max_us=200.4
+case=gc65536_multi ops=20 latency_p50_us=3896.0 latency_p99_us=8823.3 hold_p50_us=12.9 hold_p99_us=28.0 hold_max_us=28.0
+case=start65536_multi ops=20 latency_p50_us=1807.3 latency_p99_us=3438.2 hold_p50_us=9.0 hold_p99_us=116.9 hold_max_us=116.9
+case=gc1048576_multi ops=20 latency_p50_us=21108.4 latency_p99_us=40398.6 hold_p50_us=132.8 hold_p99_us=327.8 hold_max_us=327.8
+case=start1048576_multi ops=20 latency_p50_us=12820.7 latency_p99_us=13411.4 hold_p50_us=53.9 hold_p99_us=202.5 hold_max_us=202.5
+=== item1 round 8 ===
+case=derive_temporary_key ns=123.6
+case=authenticate_temporary ns=268.4
+case=authenticate_administrator ns=127.5
+case=renew_current ops=200 latency_p50_us=729.0 latency_p99_us=943.6 hold_p50_us=4.2 hold_p99_us=10.5 hold_max_us=14.8
+case=status_current ops=200 latency_p50_us=29.7 latency_p99_us=38.3 hold_p50_us=2.9 hold_p99_us=6.9 hold_max_us=7.9
+case=gc65536_current ops=20 latency_p50_us=3946.0 latency_p99_us=4359.8 hold_p50_us=10.4 hold_p99_us=25.8 hold_max_us=25.8
+case=start65536_current ops=20 latency_p50_us=1853.0 latency_p99_us=2851.3 hold_p50_us=10.9 hold_p99_us=23.5 hold_max_us=23.5
+case=gc1048576_current ops=20 latency_p50_us=12540.6 latency_p99_us=14837.0 hold_p50_us=15.1 hold_p99_us=28.3 hold_max_us=28.3
+case=start1048576_current ops=20 latency_p50_us=12525.7 latency_p99_us=13226.8 hold_p50_us=16.1 hold_p99_us=67.3 hold_max_us=67.3
+case=renew_multi ops=200 latency_p50_us=771.7 latency_p99_us=1053.8 hold_p50_us=13.4 hold_p99_us=202.3 hold_max_us=227.5
+case=status_multi ops=200 latency_p50_us=30.9 latency_p99_us=53.1 hold_p50_us=6.0 hold_p99_us=68.4 hold_max_us=201.2
+case=gc65536_multi ops=20 latency_p50_us=3888.9 latency_p99_us=5156.7 hold_p50_us=30.4 hold_p99_us=714.4 hold_max_us=714.4
+case=start65536_multi ops=20 latency_p50_us=1758.3 latency_p99_us=3138.2 hold_p50_us=23.1 hold_p99_us=223.2 hold_max_us=223.2
+case=gc1048576_multi ops=20 latency_p50_us=13020.9 latency_p99_us=14019.0 hold_p50_us=53.3 hold_p99_us=397.1 hold_max_us=397.1
+case=start1048576_multi ops=20 latency_p50_us=13052.0 latency_p99_us=14309.5 hold_p50_us=30.7 hold_p99_us=177.0 hold_max_us=177.0
+=== item2 round 8 ===
+case=derive_temporary_key ns=129.9
+case=authenticate_temporary ns=274.4
+case=authenticate_administrator ns=127.0
+case=renew_current ops=200 latency_p50_us=743.3 latency_p99_us=1168.9 hold_p50_us=4.8 hold_p99_us=17.2 hold_max_us=36.6
+case=status_current ops=200 latency_p50_us=20.1 latency_p99_us=47.2 hold_p50_us=2.9 hold_p99_us=7.1 hold_max_us=9.2
+case=gc65536_current ops=20 latency_p50_us=3498.8 latency_p99_us=4407.2 hold_p50_us=7.0 hold_p99_us=13.6 hold_max_us=13.6
+case=start65536_current ops=20 latency_p50_us=1634.2 latency_p99_us=2694.0 hold_p50_us=7.0 hold_p99_us=12.8 hold_max_us=12.8
+case=gc1048576_current ops=20 latency_p50_us=12213.2 latency_p99_us=13392.0 hold_p50_us=19.0 hold_p99_us=57.4 hold_max_us=57.4
+case=start1048576_current ops=20 latency_p50_us=12490.5 latency_p99_us=13570.0 hold_p50_us=16.2 hold_p99_us=127.3 hold_max_us=127.3
+case=renew_multi ops=200 latency_p50_us=770.4 latency_p99_us=1045.3 hold_p50_us=7.9 hold_p99_us=166.9 hold_max_us=190.1
+case=status_multi ops=200 latency_p50_us=20.8 latency_p99_us=35.9 hold_p50_us=2.5 hold_p99_us=7.4 hold_max_us=9.4
+case=gc65536_multi ops=20 latency_p50_us=3834.7 latency_p99_us=5733.9 hold_p50_us=8.9 hold_p99_us=115.1 hold_max_us=115.1
+case=start65536_multi ops=20 latency_p50_us=1746.0 latency_p99_us=3686.2 hold_p50_us=19.6 hold_p99_us=138.0 hold_max_us=138.0
+case=gc1048576_multi ops=20 latency_p50_us=13176.8 latency_p99_us=15315.7 hold_p50_us=33.5 hold_p99_us=179.0 hold_max_us=179.0
+case=start1048576_multi ops=20 latency_p50_us=13288.5 latency_p99_us=15051.8 hold_p50_us=25.0 hold_p99_us=210.8 hold_max_us=210.8
+=== item2 round 9 ===
+case=derive_temporary_key ns=122.7
+case=authenticate_temporary ns=265.2
+case=authenticate_administrator ns=126.3
+case=renew_current ops=200 latency_p50_us=772.4 latency_p99_us=5656.9 hold_p50_us=4.9 hold_p99_us=27.9 hold_max_us=135.9
+case=status_current ops=200 latency_p50_us=20.1 latency_p99_us=63.9 hold_p50_us=2.9 hold_p99_us=61.6 hold_max_us=105.3
+case=gc65536_current ops=20 latency_p50_us=3855.4 latency_p99_us=9797.5 hold_p50_us=12.5 hold_p99_us=240.7 hold_max_us=240.7
+case=start65536_current ops=20 latency_p50_us=1676.7 latency_p99_us=4103.8 hold_p50_us=8.3 hold_p99_us=30.5 hold_max_us=30.5
+case=gc1048576_current ops=20 latency_p50_us=13117.9 latency_p99_us=22655.0 hold_p50_us=20.4 hold_p99_us=74.6 hold_max_us=74.6
+case=start1048576_current ops=20 latency_p50_us=13343.3 latency_p99_us=14099.4 hold_p50_us=27.1 hold_p99_us=130.9 hold_max_us=130.9
+case=renew_multi ops=200 latency_p50_us=813.6 latency_p99_us=1042.8 hold_p50_us=7.1 hold_p99_us=169.5 hold_max_us=239.3
+case=status_multi ops=200 latency_p50_us=21.4 latency_p99_us=40.9 hold_p50_us=2.8 hold_p99_us=9.2 hold_max_us=16.3
+case=gc65536_multi ops=20 latency_p50_us=3665.9 latency_p99_us=5080.4 hold_p50_us=15.2 hold_p99_us=146.2 hold_max_us=146.2
+case=start65536_multi ops=20 latency_p50_us=1799.5 latency_p99_us=3466.9 hold_p50_us=16.2 hold_p99_us=185.3 hold_max_us=185.3
+case=gc1048576_multi ops=20 latency_p50_us=13258.8 latency_p99_us=15159.7 hold_p50_us=169.7 hold_p99_us=436.4 hold_max_us=436.4
+case=start1048576_multi ops=20 latency_p50_us=13332.1 latency_p99_us=15649.0 hold_p50_us=35.2 hold_p99_us=258.5 hold_max_us=258.5
+=== item1 round 9 ===
+case=derive_temporary_key ns=123.3
+case=authenticate_temporary ns=266.7
+case=authenticate_administrator ns=127.1
+case=renew_current ops=200 latency_p50_us=810.1 latency_p99_us=1131.7 hold_p50_us=5.3 hold_p99_us=39.6 hold_max_us=188.0
+case=status_current ops=200 latency_p50_us=27.8 latency_p99_us=65.8 hold_p50_us=3.0 hold_p99_us=7.6 hold_max_us=10.2
+case=gc65536_current ops=20 latency_p50_us=3738.0 latency_p99_us=4098.7 hold_p50_us=8.9 hold_p99_us=72.7 hold_max_us=72.7
+case=start65536_current ops=20 latency_p50_us=1611.1 latency_p99_us=3674.1 hold_p50_us=6.5 hold_p99_us=14.6 hold_max_us=14.6
+case=gc1048576_current ops=20 latency_p50_us=13039.3 latency_p99_us=14359.1 hold_p50_us=22.5 hold_p99_us=121.8 hold_max_us=121.8
+case=start1048576_current ops=20 latency_p50_us=13476.0 latency_p99_us=15174.3 hold_p50_us=18.4 hold_p99_us=101.4 hold_max_us=101.4
+case=renew_multi ops=200 latency_p50_us=800.7 latency_p99_us=1040.0 hold_p50_us=10.7 hold_p99_us=190.2 hold_max_us=208.6
+case=status_multi ops=200 latency_p50_us=29.9 latency_p99_us=47.4 hold_p50_us=2.8 hold_p99_us=9.4 hold_max_us=27.8
+case=gc65536_multi ops=20 latency_p50_us=3810.6 latency_p99_us=4246.6 hold_p50_us=9.8 hold_p99_us=130.3 hold_max_us=130.3
+case=start65536_multi ops=20 latency_p50_us=1700.2 latency_p99_us=3566.8 hold_p50_us=14.4 hold_p99_us=117.0 hold_max_us=117.0
+case=gc1048576_multi ops=20 latency_p50_us=12912.4 latency_p99_us=16307.8 hold_p50_us=84.7 hold_p99_us=276.8 hold_max_us=276.8
+case=start1048576_multi ops=20 latency_p50_us=12878.6 latency_p99_us=14899.6 hold_p50_us=54.0 hold_p99_us=236.1 hold_max_us=236.1
