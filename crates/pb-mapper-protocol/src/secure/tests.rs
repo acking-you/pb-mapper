@@ -885,6 +885,88 @@ fn replay_log_rollback_removes_a_partial_record() {
     drop(restored);
 }
 
+/// The `path` of each error event `run` logs on this thread.
+fn logged_error_paths(run: impl FnOnce()) -> Vec<String> {
+    use std::sync::Mutex;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+
+    struct Errors(Arc<Mutex<Vec<String>>>);
+    struct PathField(Option<String>);
+    impl Visit for PathField {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "path" {
+                self.0 = Some(format!("{value:?}"));
+            }
+        }
+    }
+    impl tracing::Subscriber for Errors {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() != tracing::Level::ERROR {
+                return;
+            }
+            let mut path = PathField(None);
+            event.record(&mut path);
+            self.0.lock().unwrap().push(path.0.unwrap_or_default());
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    let paths = Arc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::with_default(Errors(paths.clone()), run);
+    paths.lock().unwrap().clone()
+}
+
+/// An append that fails and leaves the log as it was, as on a full disk or
+/// where its directory cannot be created, refuses its connection and says why
+/// in the relay's log, with the file: once for a run of such failures, not
+/// once per connection, and again for a run that follows a success.
+#[test]
+fn a_failing_append_is_logged_once_per_run_of_failures() {
+    let scratch = TempPath::new("replay-blocked");
+    let path = scratch.join("connection.replay");
+    let block = || std::fs::write(&scratch, b"a file where the log's directory goes").unwrap();
+    let now = unix_seconds();
+    let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+
+    block();
+    let logged = logged_error_paths(|| {
+        for key in 1..=3 {
+            assert_eq!(
+                guard.admit(KeyId::from_u64(key), &[key as u8; 32], now),
+                FirstFlightAdmit::Unavailable
+            );
+        }
+    });
+    assert_eq!(logged, [path.display().to_string()]);
+
+    std::fs::remove_file(&scratch).unwrap();
+    let logged = logged_error_paths(|| {
+        assert_eq!(
+            guard.admit(KeyId::from_u64(4), &[4_u8; 32], now),
+            FirstFlightAdmit::Fresh
+        );
+        std::fs::remove_dir_all(&scratch).unwrap();
+        block();
+        for key in 5..=6 {
+            assert_eq!(
+                guard.admit(KeyId::from_u64(key), &[key as u8; 32], now),
+                FirstFlightAdmit::Unavailable
+            );
+        }
+    });
+    assert_eq!(logged, [path.display().to_string()]);
+}
+
 #[tokio::test]
 async fn legacy_initial_frame_validates_against_isolated_relay_key() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;

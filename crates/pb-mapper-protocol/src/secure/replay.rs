@@ -151,6 +151,9 @@ pub(super) struct ReplayGuard {
     log_path: Option<PathBuf>,
     last_compact_at: u64,
     log_failed: bool,
+    /// An append has failed, and been logged, since the last one that
+    /// succeeded.
+    append_failing: bool,
 }
 
 impl ReplayGuard {
@@ -169,6 +172,7 @@ impl ReplayGuard {
             log_path,
             last_compact_at: now,
             log_failed: false,
+            append_failing: false,
         };
         guard.load_persisted();
         guard
@@ -260,31 +264,29 @@ impl ReplayGuard {
         let Some(path) = &self.log_path else {
             return Ok(());
         };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let created = !path.exists();
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        let start_len = file.metadata()?.len();
         let record = ReplayRecord {
             fingerprint: *fingerprint,
             timestamp: now,
-        }
-        .to_bytes();
-        if let Err(error) = file.write_all(&record).and_then(|()| file.sync_data()) {
-            drop(file);
-            if let Err(rollback) = truncate_replay_log(path, start_len) {
-                self.log_failed = true;
-                log_unavailable(path, "roll back a partial record", &rollback);
+        };
+        match append_replay_record(path, &record) {
+            Ok(()) => {
+                self.append_failing = false;
+                Ok(())
             }
-            return Err(error);
+            Err(AppendFailure::Refused { step, error }) => {
+                // Said once for a run of failures, such as a full disk's, not
+                // once for every connection it refuses.
+                if !std::mem::replace(&mut self.append_failing, true) {
+                    log_append_failed(path, step, &error);
+                }
+                Err(error)
+            }
+            Err(AppendFailure::Latched { step, error, cause }) => {
+                self.log_failed = true;
+                log_unavailable(path, step, &error, cause.as_ref());
+                Err(error)
+            }
         }
-        if created && let Err(error) = durable_file::sync_parent_directory(path) {
-            self.log_failed = true;
-            log_unavailable(path, "sync its directory", &error);
-            return Err(error);
-        }
-        Ok(())
     }
 
     fn load_persisted(&mut self) {
@@ -299,7 +301,7 @@ impl ReplayGuard {
             Ok(records) => records,
             Err(error) => {
                 self.log_failed = true;
-                log_unavailable(&path, "read", &error);
+                log_unavailable(&path, "read", &error, None);
                 return;
             }
         };
@@ -320,7 +322,7 @@ impl ReplayGuard {
         self.total_started_at = self.bloom.current_started_at;
         if let Err(error) = self.rewrite_live(&live) {
             self.log_failed = true;
-            log_unavailable(&path, "rewrite", &error);
+            log_unavailable(&path, "rewrite", &error, None);
             return;
         }
         self.last_compact_at = now;
@@ -335,7 +337,7 @@ impl ReplayGuard {
             Ok(records) => records,
             Err(error) => {
                 self.log_failed = true;
-                log_unavailable(path, "read", &error);
+                log_unavailable(path, "read", &error, None);
                 return;
             }
         };
@@ -345,7 +347,7 @@ impl ReplayGuard {
             .collect::<Vec<_>>();
         if let Err(error) = self.rewrite_live(&live) {
             self.log_failed = true;
-            log_unavailable(path, "rewrite", &error);
+            log_unavailable(path, "rewrite", &error, None);
             return;
         }
         self.last_compact_at = now;
@@ -361,16 +363,95 @@ impl ReplayGuard {
     }
 }
 
+/// Why an admission could not be appended to the log.
+enum AppendFailure {
+    /// This admission is refused, and the next one tries again: the log is as
+    /// it was, as after a full disk's failed write that was rolled back.
+    Refused {
+        step: &'static str,
+        error: std::io::Error,
+    },
+    /// The log may hold what was never admitted, or lose what was, so every
+    /// admission is refused from now on. `cause` is the append error that a
+    /// failed rollback was undoing.
+    Latched {
+        step: &'static str,
+        error: std::io::Error,
+        cause: Option<std::io::Error>,
+    },
+}
+
+/// Append `record` to the log at `path` and make it durable, or say which
+/// step failed.
+fn append_replay_record(path: &Path, record: &ReplayRecord) -> Result<(), AppendFailure> {
+    let refused = |step| move |error| AppendFailure::Refused { step, error };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(refused("create its directory"))?;
+    }
+    let created = !path.exists();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(refused("open"))?;
+    let start_len = file.metadata().map_err(refused("read its length"))?.len();
+    if let Err(error) = file
+        .write_all(&record.to_bytes())
+        .and_then(|()| file.sync_data())
+    {
+        drop(file);
+        return Err(match truncate_replay_log(path, start_len) {
+            Ok(()) => AppendFailure::Refused {
+                step: "append a record",
+                error,
+            },
+            Err(rollback) => AppendFailure::Latched {
+                step: "roll back a partial record",
+                error: rollback,
+                cause: Some(error),
+            },
+        });
+    }
+    if created && let Err(error) = durable_file::sync_parent_directory(path) {
+        return Err(AppendFailure::Latched {
+            step: "sync its directory",
+            error,
+            cause: None,
+        });
+    }
+    Ok(())
+}
+
 /// Say why the log stopped admitting. From here on every protocol-v2 first
 /// flight is refused, and a peer learns only that the store is unavailable:
-/// the operator who has to act needs the file and the cause.
-fn log_unavailable(path: &Path, step: &'static str, error: &std::io::Error) {
+/// the operator who has to act needs the file and the cause. `cause` is what
+/// led to the failed step, when it was another failure.
+fn log_unavailable(
+    path: &Path,
+    step: &'static str,
+    error: &std::io::Error,
+    cause: Option<&std::io::Error>,
+) {
     tracing::error!(
         event = "replay_log_unavailable",
         path = %path.display(),
         step,
         %error,
+        cause = cause.map(tracing::field::display),
         "first-flight replay log failed; protocol-v2 connections are refused while it is unavailable"
+    );
+}
+
+/// Say why an append failed without leaving the log unusable, as a full disk's
+/// does: each protocol-v2 first flight is refused until one succeeds again,
+/// and a peer learns only that the store is unavailable.
+fn log_append_failed(path: &Path, step: &'static str, error: &std::io::Error) {
+    tracing::error!(
+        event = "replay_log_append_failed",
+        path = %path.display(),
+        step,
+        %error,
+        "first-flight replay log append failed; protocol-v2 connections are refused until an append succeeds"
     );
 }
 
