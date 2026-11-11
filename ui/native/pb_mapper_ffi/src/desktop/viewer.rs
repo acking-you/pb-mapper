@@ -6,6 +6,7 @@ use crate::{
     handle::PbMapperHandle,
     response::{Reply, parse_c_string, respond},
 };
+use base64::Engine as _;
 use pb_mapper::{
     ConnectOptions, PathPolicy,
     desktop::{
@@ -344,6 +345,13 @@ enum ViewerRequest {
     },
     Pause,
     Resume,
+    /// The definition of the shape the view names (`cursor_shape`), fetched
+    /// once per number: `{kind, width, height, hot_x, hot_y, rgba}`, the
+    /// pixels straight RGBA8 in base64; `null` once the viewer no longer
+    /// holds it, or without a viewer.
+    CursorShape {
+        shape: u16,
+    },
 }
 
 /// `ModeTarget` as the hot op takes it.
@@ -635,6 +643,20 @@ fn viewer_call(state: &DesktopState, request: ViewerRequest) -> Result<Value, Ct
         }
         ViewerRequest::Pause => state.set_paused(true),
         ViewerRequest::Resume => state.set_paused(false),
+        ViewerRequest::CursorShape { shape } => {
+            let Some(shape) = viewer.and_then(|viewer| viewer.cursor_shape(shape)) else {
+                return Ok(Value::Null);
+            };
+            let (hot_x, hot_y) = shape.hotspot();
+            return Ok(json!({
+                "kind": shape.kind(),
+                "width": shape.width(),
+                "height": shape.height(),
+                "hot_x": hot_x,
+                "hot_y": hot_y,
+                "rgba": base64::engine::general_purpose::STANDARD.encode(shape.rgba()),
+            }));
+        }
     }
     Ok(json!({}))
 }
@@ -665,7 +687,9 @@ pub struct PbDesktopViewV1 {
     /// Bit 0 cursor_visible, 1 controlling, 2 control_allowed,
     /// 3 secure_desktop, 4 fresh, 5 paused.
     pub flags: u8,
-    pub reserved: [u8; 2],
+    /// The pointer's shape, which the `cursor_shape` hot op resolves; a new
+    /// definition, a new number. 0: none, so the generic arrow.
+    pub cursor_shape: u16,
 }
 // The layout of perf 7.4, field by field: `From` fills it by name, so a
 // same-size reorder would otherwise compile. desktop_ffi_test.dart pins Dart's
@@ -686,7 +710,7 @@ const _: () = {
     assert!(offset_of!(V, cursor_y) == 48);
     assert!(offset_of!(V, state) == 52);
     assert!(offset_of!(V, flags) == 53);
-    assert!(offset_of!(V, reserved) == 54);
+    assert!(offset_of!(V, cursor_shape) == 54);
 };
 
 impl From<DesktopView> for PbDesktopViewV1 {
@@ -705,7 +729,7 @@ impl From<DesktopView> for PbDesktopViewV1 {
             cursor_y: view.cursor_y,
             state: view.state,
             flags: view.flags,
-            reserved: [0; 2],
+            cursor_shape: view.cursor_shape,
         }
     }
 }

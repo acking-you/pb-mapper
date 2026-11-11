@@ -79,6 +79,11 @@ async fn send(host: &mut DuplexStream, message: Value) {
 /// generation. The host side stays open and silent, so `stop()` waits out
 /// the viewer's close grace, seconds long: a held stop.
 async fn scripted_viewer() -> (Viewer, DuplexStream) {
+    scripted_viewer_listing(json!([])).await
+}
+
+/// [`scripted_viewer`], whose host listed `capabilities`.
+async fn scripted_viewer_listing(capabilities: Value) -> (Viewer, DuplexStream) {
     let (stream, mut host) = tokio::io::duplex(1 << 20);
     let connecting = tokio::spawn(Viewer::over_stream_for_test(
         stream,
@@ -98,7 +103,8 @@ async fn scripted_viewer() -> (Viewer, DuplexStream) {
     send(
         &mut host,
         json!({"t": "accepted", "codec": "h264", "nominal_fps": 60, "quality": "balanced",
-            "limits": {"max_width": 1920, "max_height": 1080, "max_fps": 60}, "capabilities": []}),
+            "limits": {"max_width": 1920, "max_height": 1080, "max_fps": 60},
+            "capabilities": capabilities}),
     )
     .await;
     send(
@@ -284,6 +290,50 @@ fn hot_ops_never_wait_for_a_slow_disconnect() {
         );
         assert_eq!(disconnecting.join().unwrap()["success"], true);
     });
+}
+
+/// The view names the pointer's shape by a number, which the hot op
+/// resolves to the definition the host sent; a number the viewer no longer
+/// holds resolves to nothing.
+#[test]
+fn the_view_names_a_shape_the_hot_op_resolves() {
+    let root = TempRoot::new("desktop-cursor-shape");
+    let handle = new_handle(&root);
+    let handle = &handle;
+    let host = handle.runtime.block_on(async {
+        let (viewer, mut host) = scripted_viewer_listing(json!(["cursor_shape"])).await;
+        handle
+            .desktop
+            .connect_viewer(|_| async { Ok((viewer, connected())) })
+            .await
+            .unwrap();
+        send(
+            &mut host,
+            json!({"t": "cursor_shape", "id": 3, "kind": "ibeam",
+                "hot_x": 1, "hot_y": 0, "width": 2, "height": 1}),
+        )
+        .await;
+        host.write_u32(8).await.unwrap();
+        host.write_all(&[1, 2, 3, 4, 5, 6, 7, 8]).await.unwrap();
+        send(
+            &mut host,
+            json!({"t": "cursor", "generation": 1, "x": 4, "y": 5, "visible": true, "shape": 3}),
+        )
+        .await;
+        host
+    });
+    eventually(|| view(handle).1.cursor_shape != 0);
+    let shape = view(handle).1.cursor_shape;
+    let resolved = hot(handle, json!({"op": "cursor_shape", "shape": shape}));
+    assert_eq!(
+        resolved["data"],
+        json!({"kind": "ibeam", "width": 2, "height": 1, "hot_x": 1, "hot_y": 0,
+            "rgba": base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4, 5, 6, 7, 8])})
+    );
+    let gone = hot(handle, json!({"op": "cursor_shape", "shape": shape + 1}));
+    assert_eq!(gone, json!({"success": true, "data": null}));
+    drop(host);
+    call_json(handle, json!({"op": "disconnect"}));
 }
 
 /// A lifecycle request names its op beside its fields, and nothing else.
