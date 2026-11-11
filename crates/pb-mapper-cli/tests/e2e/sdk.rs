@@ -660,8 +660,9 @@ async fn sdk_admin_retires_a_single_connection_by_id() {
         .unwrap();
     assert_eq!(retired, 1);
 
-    // The pool's replacement may be handed the same conn_id; it is the
-    // registration of that generation that must be gone.
+    // The pool's replacement does not take the retired id while it rests,
+    // but an id can serve again later: it is the registration of that
+    // generation that must be gone.
     let after = admin.list_connections_all(None).await.unwrap();
     assert!(
         !after
