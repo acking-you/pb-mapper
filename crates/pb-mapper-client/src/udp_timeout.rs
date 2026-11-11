@@ -49,8 +49,11 @@ impl Gate {
             return;
         }
         let _alone = self.undecided.write().await;
-        if !self.decided.swap(true, Ordering::AcqRel) {
+        if !self.decided.load(Ordering::Acquire) {
             write();
+            // Only now: whoever sees it decided skips the lock, and must not
+            // do so while the write is still under way.
+            self.decided.store(true, Ordering::Release);
         }
     }
 
@@ -100,7 +103,12 @@ mod tests {
         let gate = Gate::new();
         gate.dial(async { Err::<(), ()>(()) }).await.unwrap_err();
         let mut written = false;
-        gate.write_once(|| written = true).await;
+        gate.write_once(|| {
+            // Undecided until written, to whoever would skip the lock on it.
+            assert!(!gate.decided.load(Ordering::Acquire));
+            written = true;
+        })
+        .await;
         assert!(written);
 
         let gate = Gate::new();
