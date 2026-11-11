@@ -708,6 +708,75 @@ async fn subscribe_waits_for_replacement_of_a_slow_provider() {
     relay.stop().await;
 }
 
+/// A subscribe waiting for a replacement is served by any registration it
+/// has not passed over that becomes usable inside its window, not only by a
+/// new one: here an older registration the relay suspected for another
+/// subscriber, which then answers that subscriber late.
+#[tokio::test]
+async fn a_waiting_subscribe_is_served_by_a_registration_that_recovers() {
+    let relay = InProcessRelay::start(auth_config()).await;
+    let key = "recovering-backend";
+
+    // The older registration, asked for the first subscriber's stream, which
+    // it acknowledges only later.
+    let older = TcpStream::connect(relay.addr).await.unwrap();
+    let (mut older_read, mut older_write) = older.into_split();
+    let mut older_reader = get_header_msg_reader(&mut older_read).unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut older_write).unwrap();
+        register_control_conn_parts(&mut older_reader, &mut writer, key).await;
+    }
+    let mut older_writer = get_header_msg_writer(&mut older_write).unwrap();
+    let mut first = subscribe(relay.addr, key).await;
+    let first_request = read_stream_request(&mut older_reader, "older").await;
+
+    // A newer one, which answers nothing.
+    let (newer_ready_tx, newer_ready_rx) = oneshot::channel();
+    let newer = tokio::spawn(stale_control(
+        relay.addr,
+        key.to_string(),
+        newer_ready_tx,
+        StaleEnd::IgnoreStream,
+    ));
+    newer_ready_rx.await.unwrap();
+
+    // The second subscriber is asked of the newer, passes it over at its
+    // acknowledgement budget and, the older being suspected for the first,
+    // waits for a replacement.
+    let mut second = subscribe(relay.addr, key).await;
+    timeout(READY, async {
+        while read_service_health(relay.addr, key)
+            .await
+            .iter()
+            .any(|&(_, healthy)| healthy)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the relay did not suspect both registrations");
+
+    // The older answers the first subscriber, late: it is back in rotation,
+    // and serves the second.
+    acknowledge(&mut older_writer, first_request).await;
+    let second_request = read_stream_request(&mut older_reader, "older").await;
+    acknowledge(&mut older_writer, second_request).await;
+    let _stream = open_stream(relay.addr, key, second_request).await;
+    let mut reader = get_header_msg_reader(&mut second).unwrap();
+    let response = timeout(READY, reader.read_msg())
+        .await
+        .expect("the waiting subscriber was neither served nor refused")
+        .expect("the relay closed the waiting subscriber's connection unanswered");
+    assert!(matches!(
+        PbConnResponse::decode(response).unwrap(),
+        PbConnResponse::Subcribe { .. }
+    ));
+
+    first.shutdown().await.unwrap();
+    newer.abort();
+    relay.stop().await;
+}
+
 /// A real `connect` tunnel through its publisher's retire-and-replace: the
 /// first provider leaves its stream request unanswered, the relay retires it,
 /// and a real `register` started then carries the tunnel's connection. Within

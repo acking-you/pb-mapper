@@ -16,8 +16,8 @@ use crate::connection::handle_conn;
 use crate::guard::ConnLease;
 use crate::manager::TaskManager;
 use crate::routing::{
-    ImutableKey, NamespaceRateLimits, PendingStreams, RoutingConfig, ServerConnMap,
-    registered_server_conn_count, remove_server_conn,
+    ImutableKey, NamespaceRateLimits, PendingStreams, ReplacementWaiters, RoutingConfig,
+    ServerConnMap, registered_server_conn_count, remove_server_conn,
 };
 use crate::service_key::split_scoped_service_key;
 use crate::task::{ConnTask, ManagerTask};
@@ -36,6 +36,7 @@ impl Router {
             manager,
             server_conn_map: ServerConnMap::new(),
             pending_streams: PendingStreams::default(),
+            replacement_waiters: ReplacementWaiters::default(),
             namespace_rate_limits: NamespaceRateLimits::new(
                 config.new_streams_per_second,
                 config.new_streams_burst,
@@ -265,6 +266,9 @@ impl Router {
         let conn_sender = self.manager.get_conn_sender_chan(&conn_id);
         let removed = remove_server_conn(&mut self.server_conn_map, key, conn_id);
         let removed_from_service_map = removed.is_some();
+        if removed_from_service_map {
+            self.wake_if_unregistered(key);
+        }
         // The sender goes, but the ID does not come back yet: the socket task is
         // still running and still holds a guard that will deregister when it
         // unwinds. Recycling here would let a newly accepted socket register under
@@ -306,6 +310,15 @@ impl Router {
             idle_connections = self.manager.idle_conn_count(),
             "server connection retired"
         );
+    }
+
+    /// After a registration of `key` is removed: wake the subscribes waiting on
+    /// `key` if that was its last, so that one refused as its window ends is
+    /// told what it would be told if it asked then.
+    pub(super) fn wake_if_unregistered(&mut self, key: &ImutableKey) {
+        if !self.server_conn_map.contains_key(key) {
+            self.replacement_waiters.wake(key);
+        }
     }
 
     /// Drop `namespace`'s rate limiter once it has no registered service and no

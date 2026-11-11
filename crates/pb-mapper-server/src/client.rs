@@ -657,6 +657,18 @@ async fn subscriber_gone(conn: &mut RelayStream) -> std::io::Error {
     }
 }
 
+/// Until the routing manager says a registration may serve this waiting
+/// subscribe. With no request outstanding, a `SubcribeRetry` can only be that
+/// word; anything else is from a registration the subscribe passed over, and
+/// is dropped, as it is while a request is outstanding.
+async fn replacement_may_serve(receiver: &ConnTaskReceiver) {
+    while let Ok(task) = receiver.recv().await {
+        if matches!(task, ConnTask::SubcribeRetry { .. }) {
+            return;
+        }
+    }
+}
+
 /// How long after a suspected connection is retired a subscribe still waits
 /// for the replacement to register.
 const REPLACEMENT_MARGIN: Duration = Duration::from_millis(200);
@@ -807,33 +819,50 @@ async fn get_server_stream(
                 return Ok(Setup::Refused { refusal, reason });
             }
             ConnTask::SubcribeRetry { reason } => {
-                if Instant::now() >= recovery_deadline {
-                    tracing::warn!(
-                        event = "subscribe_recovery_timeout",
+                if Instant::now() < recovery_deadline {
+                    tracing::info!(
+                        event = "subscribe_waiting_for_replacement",
                         key = %key,
                         client_conn_id = %conn_id,
                         reason = %reason,
+                        excluded_server_conns = ?excluded_server_conns,
                         recovery_timeout = ?recovery_timeout,
-                        "subscribe recovery timed out"
+                        "waiting for replacement server control connection"
                     );
-                    // What a subscribe that may not wait for a replacement
-                    // is told at once.
-                    let refusal = PbConnResponse::error(SERVICE_NOT_AVAILABLE, &reason, true);
-                    return Ok(Setup::Refused { refusal, reason });
+                    // Asked again when the routing manager says a
+                    // registration may serve it, and not before: until then
+                    // it would find what it just found.
+                    let woken = subscriber
+                        .unless_gone(timeout_at(
+                            recovery_deadline,
+                            replacement_may_serve(&receiver),
+                        ))
+                        .await;
+                    match woken {
+                        Ok(Ok(())) => continue 'attempt,
+                        Ok(Err(_)) => {}
+                        Err(reason) => {
+                            return Ok(Setup::Abandoned(Abandoned {
+                                reason,
+                                receiver,
+                                asked,
+                                until: recovery_deadline,
+                            }));
+                        }
+                    }
                 }
-                tracing::info!(
-                    event = "subscribe_waiting_for_replacement",
+                tracing::warn!(
+                    event = "subscribe_recovery_timeout",
                     key = %key,
                     client_conn_id = %conn_id,
                     reason = %reason,
-                    excluded_server_conns = ?excluded_server_conns,
                     recovery_timeout = ?recovery_timeout,
-                    "waiting for replacement server control connection"
+                    "subscribe recovery timed out"
                 );
-                subscriber
-                    .meanwhile(tokio::time::sleep(Duration::from_millis(50)))
-                    .await;
-                continue 'attempt;
+                // What a subscribe that may not wait for a replacement is
+                // told at once.
+                let refusal = PbConnResponse::error(SERVICE_NOT_AVAILABLE, &reason, true);
+                return Ok(Setup::Refused { refusal, reason });
             }
             _ => ClientConnSubcribeRespNotMatchSnafu {
                 key: key.clone(),

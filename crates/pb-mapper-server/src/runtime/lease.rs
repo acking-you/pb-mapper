@@ -88,6 +88,7 @@ impl Router {
                 v.insert(vec![info]);
             }
         }
+        self.replacement_waiters.wake(&key);
 
         // response registered ok
         tracing::info!(
@@ -120,6 +121,9 @@ impl Router {
     pub(super) fn on_deregister_server_conn(&mut self, key: ImutableKey, conn_id: RemoteConnId) {
         let removed_from_service_map =
             remove_server_conn(&mut self.server_conn_map, &key, conn_id).is_some();
+        if removed_from_service_map {
+            self.wake_if_unregistered(&key);
+        }
         let removed_from_active_map = self.manager.drop_conn_sender(conn_id);
         // Direct setups reach their provider by this ID alone, and once it is
         // recycled it may name another tenant's connection.
@@ -149,11 +153,14 @@ impl Router {
 
     pub(super) fn on_server_conn_activity(&mut self, key: ImutableKey, conn_id: RemoteConnId) {
         let recorded = record_server_conn_activity(&mut self.server_conn_map, &key, conn_id);
+        if recorded == Some(true) {
+            self.replacement_waiters.wake(&key);
+        }
         tracing::debug!(
             event = "server_conn_lease_renewed",
             key = %key,
             conn_id = %conn_id,
-            recorded,
+            recorded = recorded.is_some(),
             "server control connection activity recorded"
         );
     }

@@ -16,8 +16,8 @@ use crate::error::{
 };
 use crate::guard::ConnLease;
 use crate::routing::{
-    ImutableKey, PendingStream, SERVICE_NOT_AVAILABLE, ServerConnHealth, ServerConnInfo,
-    cancel_and_remove_server_conn, record_server_conn_activity_by_conn_id,
+    ImutableKey, PendingStream, ReplacementWaiters, SERVICE_NOT_AVAILABLE, ServerConnHealth,
+    ServerConnInfo, cancel_and_remove_server_conn, record_server_conn_activity_by_conn_id,
     registered_server_conn_count, service_conn_count,
 };
 use crate::service_key::split_scoped_service_key;
@@ -62,7 +62,14 @@ impl Router {
                 server_connections = registered_server_conn_count(&self.server_conn_map),
                 "subscribe key is not registered"
             );
-            reject_subscribe(&conn_sender, &key, conn_id, reason, awaits_replacement);
+            reject_subscribe(
+                &mut self.replacement_waiters,
+                &conn_sender,
+                &key,
+                conn_id,
+                reason,
+                awaits_replacement,
+            );
             return;
         };
         // A direct setup that ended before its grant already paid for
@@ -106,7 +113,9 @@ impl Router {
                     reason = "sender_not_found",
                     "subscribe skipped stale server connection"
                 );
-                cancel_and_remove_server_conn(&mut self.server_conn_map, &key, server_conn_id);
+                if cancel_and_remove_server_conn(&mut self.server_conn_map, &key, server_conn_id) {
+                    self.wake_if_unregistered(&key);
+                }
                 let _ = self.manager.drop_conn_sender(server_conn_id);
                 continue;
             };
@@ -133,7 +142,9 @@ impl Router {
                     error = %report,
                     "failed to send stream request to registered server"
                 );
-                cancel_and_remove_server_conn(&mut self.server_conn_map, &key, server_conn_id);
+                if cancel_and_remove_server_conn(&mut self.server_conn_map, &key, server_conn_id) {
+                    self.wake_if_unregistered(&key);
+                }
                 let _ = self.manager.drop_conn_sender(server_conn_id);
                 continue;
             }
@@ -205,7 +216,14 @@ impl Router {
                 server_connections = registered_server_conn_count(&self.server_conn_map),
                 "no usable server connection for subscribe"
             );
-            reject_subscribe(&conn_sender, &key, conn_id, reason, awaits_replacement);
+            reject_subscribe(
+                &mut self.replacement_waiters,
+                &conn_sender,
+                &key,
+                conn_id,
+                reason,
+                awaits_replacement,
+            );
         }
     }
 
@@ -271,8 +289,9 @@ impl Router {
             .find(|info| {
                 info.conn_id == expected_control_conn_id && info.generation == expected_generation
             })
+            && info.restore()
         {
-            info.health = ServerConnHealth::Healthy;
+            self.replacement_waiters.wake(&key);
         }
         tracing::debug!(
             event = "stream_ready_for_client",
@@ -307,8 +326,11 @@ impl Router {
         client_id: RemoteConnId,
         server_generation: u64,
     ) {
-        let recorded_activity =
-            record_server_conn_activity_by_conn_id(&mut self.server_conn_map, server_id);
+        let activity = record_server_conn_activity_by_conn_id(&mut self.server_conn_map, server_id);
+        let recorded_activity = activity.is_some();
+        if let Some((key, true)) = &activity {
+            self.replacement_waiters.wake(key);
+        }
         let Some(&PendingStream {
             server_conn_id: expected_server_id,
             server_generation: expected_generation,
@@ -372,10 +394,11 @@ impl Router {
         server_id: Option<RemoteConnId>,
         client_id: RemoteConnId,
     ) {
-        let removed_namespace = self
-            .pending_streams
-            .remove(&client_id)
-            .map(|stream| split_scoped_service_key(&stream.key).0);
+        let removed = self.pending_streams.remove(&client_id);
+        if let Some(stream) = &removed {
+            self.replacement_waiters.leave(&stream.key, client_id);
+        }
+        let removed_namespace = removed.map(|stream| split_scoped_service_key(&stream.key).0);
         // Same rule as `DeRegisterServerConn`: the guard's arrival is what
         // makes recycling safe, so both IDs come back here even if their
         // senders were dropped earlier.
@@ -546,10 +569,11 @@ impl SubscribeRefusal {
     }
 }
 
-/// Tell a subscriber that no registration can serve it: a retry when it may
-/// wait for a replacement of registrations it already excluded, a failure
-/// otherwise.
+/// Tell a subscriber that no registration can serve it: a failure, or, when
+/// it may wait for a replacement of registrations it already excluded, a
+/// retry, noting it among `waiters` to be told when to ask again.
 fn reject_subscribe(
+    waiters: &mut ReplacementWaiters,
     conn_sender: &ConnTaskSender,
     key: &ImutableKey,
     conn_id: RemoteConnId,
@@ -557,6 +581,7 @@ fn reject_subscribe(
     retry: bool,
 ) {
     if retry {
+        waiters.wait(key, conn_id, conn_sender);
         if conn_sender
             .try_send(ConnTask::SubcribeRetry {
                 reason: reason.clone(),

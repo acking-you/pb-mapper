@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::server::LEGACY_SERVER_IDLE_TIMEOUT;
 use crate::service_key::split_scoped_service_key;
+use crate::task::{ConnTask, ConnTaskSender};
 
 pub type ImutableKey = Arc<str>;
 
@@ -76,10 +77,15 @@ pub(crate) enum Confirmation {
 
 impl ServerConnInfo {
     /// Count authenticated control activity at `now`, which answers any
-    /// suspicion.
-    pub(crate) fn record_activity(&mut self, now: Instant) {
+    /// suspicion; whether that put this registration back in rotation.
+    pub(crate) fn record_activity(&mut self, now: Instant) -> bool {
         self.last_rx_at = now;
-        self.health = ServerConnHealth::Healthy;
+        self.restore()
+    }
+
+    /// Put this registration back in rotation; whether it was suspected.
+    pub(crate) fn restore(&mut self) -> bool {
+        std::mem::replace(&mut self.health, ServerConnHealth::Healthy) == ServerConnHealth::Suspect
     }
 
     /// Suspect this registration at `now`, after a stream it was asked for
@@ -519,34 +525,77 @@ pub(crate) fn sweep_server_conn_leases(
     stale
 }
 
+/// Count authenticated control activity of `conn_id`'s registration of
+/// `key`: `None` when there is none, otherwise whether that put it back in
+/// rotation.
 pub(crate) fn record_server_conn_activity(
     server_conn_map: &mut ServerConnMap,
     key: &ImutableKey,
     conn_id: RemoteConnId,
-) -> bool {
-    let Some(infos) = server_conn_map.get_mut(key) else {
-        return false;
-    };
-    let Some(info) = infos.iter_mut().find(|info| info.conn_id == conn_id) else {
-        return false;
-    };
-    info.record_activity(Instant::now());
-    true
+) -> Option<bool> {
+    let info = server_conn_map
+        .get_mut(key)?
+        .iter_mut()
+        .find(|info| info.conn_id == conn_id)?;
+    Some(info.record_activity(Instant::now()))
 }
 
+/// [`record_server_conn_activity`] for `conn_id`'s registration of whichever
+/// service: its key, and whether it is back in rotation.
 pub(crate) fn record_server_conn_activity_by_conn_id(
     server_conn_map: &mut ServerConnMap,
     conn_id: RemoteConnId,
-) -> bool {
-    let Some(info) = server_conn_map
-        .values_mut()
-        .flat_map(|infos| infos.iter_mut())
-        .find(|info| info.conn_id == conn_id)
-    else {
-        return false;
-    };
-    info.record_activity(Instant::now());
-    true
+) -> Option<(ImutableKey, bool)> {
+    server_conn_map.iter_mut().find_map(|(key, infos)| {
+        let info = infos.iter_mut().find(|info| info.conn_id == conn_id)?;
+        Some((key.clone(), info.record_activity(Instant::now())))
+    })
+}
+
+/// Subscribes waiting for a registration of their service that they have not
+/// passed over, by service. Each is told to ask again, with a `SubcribeRetry`
+/// while it has no request outstanding, when what it would find changes: a
+/// registration comes, one is back in rotation, or the service has none left.
+/// None asks while nothing changes, and one that still finds none waits anew.
+#[derive(Default)]
+pub(crate) struct ReplacementWaiters {
+    by_key: hashbrown::HashMap<ImutableKey, Vec<(RemoteConnId, ConnTaskSender)>>,
+}
+
+impl ReplacementWaiters {
+    /// Note that the subscribe `conn_id` waits for a registration of `key`.
+    pub(crate) fn wait(
+        &mut self,
+        key: &ImutableKey,
+        conn_id: RemoteConnId,
+        sender: &ConnTaskSender,
+    ) {
+        let waiting = self.by_key.entry(key.clone()).or_default();
+        if waiting.iter().all(|(waiter, _)| *waiter != conn_id) {
+            waiting.push((conn_id, sender.clone()));
+        }
+    }
+
+    /// Tell every subscribe waiting for a registration of `key` to ask again.
+    pub(crate) fn wake(&mut self, key: &ImutableKey) {
+        for (_, sender) in self.by_key.remove(key).into_iter().flatten() {
+            // A waiting subscribe reads its mailbox as things come, so it is
+            // not full; one that is closed has gone.
+            let _ = sender.try_send(ConnTask::SubcribeRetry {
+                reason: format!("a registration of `{key}` may serve it"),
+            });
+        }
+    }
+
+    /// Forget the subscribe `conn_id`, which has ended, if it waits on `key`.
+    pub(crate) fn leave(&mut self, key: &ImutableKey, conn_id: RemoteConnId) {
+        if let Some(waiting) = self.by_key.get_mut(key) {
+            waiting.retain(|(waiter, _)| *waiter != conn_id);
+            if waiting.is_empty() {
+                self.by_key.remove(key);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -596,11 +645,11 @@ mod lease_tests {
         let mut map = map(vec![conn(1, CONTROL_PROTOCOL_V2, Duration::from_secs(60))]);
 
         assert!(sweep_server_conn_leases(&mut map, LEASE).is_empty());
-        assert!(record_server_conn_activity(
-            &mut map,
-            &key,
-            RemoteConnId::from(1)
-        ));
+        // Back in rotation, which wakes the subscribes waiting on its service.
+        assert_eq!(
+            record_server_conn_activity(&mut map, &key, RemoteConnId::from(1)),
+            Some(true)
+        );
 
         assert!(sweep_server_conn_leases(&mut map, LEASE).is_empty());
         assert_eq!(health(&map, 1), ServerConnHealth::Healthy);

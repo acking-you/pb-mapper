@@ -26,7 +26,9 @@ use crate::connection::handle_listener;
 use crate::manager::{TaskManager, TrySendError};
 #[cfg(feature = "relay-quic")]
 use crate::quic;
-use crate::routing::{NamespaceRateLimits, PendingStreams, RoutingConfig, ServerConnMap};
+use crate::routing::{
+    NamespaceRateLimits, PendingStreams, ReplacementWaiters, RoutingConfig, ServerConnMap,
+};
 use crate::task::ManagerTask;
 use crate::{DirectServerConfig, RelayServerOptions, ServerStatusInfo, direct};
 
@@ -309,6 +311,7 @@ struct Router {
     /// Registered control connections, by service key.
     server_conn_map: ServerConnMap,
     pending_streams: PendingStreams,
+    replacement_waiters: ReplacementWaiters,
     namespace_rate_limits: NamespaceRateLimits,
     config: RoutingConfig,
     next_server_generation: u64,
