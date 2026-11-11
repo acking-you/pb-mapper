@@ -181,6 +181,10 @@ pub(crate) struct AuthStateInner {
     /// can drop it without the actor being involved; see `leases.rs`.
     pub(crate) cold: RwLock<HashMap<KeyId, ColdMetadata>>,
     pub(crate) safe_mode: AtomicBool,
+    /// Whether anything a snapshot carries may have changed since the last
+    /// compaction wrote one, so that the next compaction has something to
+    /// write. See [`Self::mark_snapshot_stale`].
+    pub(crate) snapshot_stale: AtomicBool,
     pub(crate) legacy_protocol_allowed: AtomicBool,
     pub(crate) active_legacy_connections: AtomicU64,
     pub(crate) last_legacy_connection_at: AtomicU64,
@@ -231,6 +235,9 @@ impl AuthStateInner {
             high_slot_entries: RwLock::new(high_slot_entries),
             cold: RwLock::new(cold),
             safe_mode: AtomicBool::new(safe_mode),
+            // What a start restored may differ from the files it came from: a
+            // key it found past its deadline, say.
+            snapshot_stale: AtomicBool::new(true),
             legacy_protocol_allowed: AtomicBool::new(legacy_protocol.is_allowed()),
             active_legacy_connections: AtomicU64::new(0),
             last_legacy_connection_at: AtomicU64::new(0),
@@ -242,6 +249,19 @@ impl AuthStateInner {
             audit_records: RwLock::new(audit_records),
             dropped: watch::Sender::new(()),
         }
+    }
+
+    /// Records that something a snapshot carries has changed, or may have.
+    ///
+    /// A compaction writes only the state, so one with nothing changed since
+    /// the last would write what is already on disk, and is skipped. Every
+    /// change outside a snapshot write marks it: each WAL append, a key's
+    /// retirement or reap, and the replay window letting a record go. A
+    /// restart would recompute those last two from an older snapshot only
+    /// while the clock moves forward: after it steps back before a dead key's
+    /// deadline, that snapshot would bring the key back.
+    pub(crate) fn mark_snapshot_stale(&self) {
+        self.snapshot_stale.store(true, Ordering::Release);
     }
 
     /// A receiver whose `changed()` fails once this state has been dropped.

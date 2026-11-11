@@ -43,7 +43,8 @@ pub(super) struct Actor {
     /// reference, so replacing it is what ends the previous one.
     admin_lease: Arc<AuthLease>,
     replays: AdminReplays,
-    /// The wall-clock second of the last compaction, or of the actor's start.
+    /// The wall-clock second of the last compaction, whether or not it had
+    /// anything to write, or of the start.
     last_snapshot_at: u64,
     /// Keeps the state directory locked for as long as the actor runs.
     _state_lock: Arc<File>,
@@ -68,6 +69,7 @@ impl Actor {
         leases: Leases,
         replays: AdminReplays,
         state_lock: Arc<File>,
+        now: u64,
     ) -> Self {
         Self {
             inner,
@@ -75,7 +77,7 @@ impl Actor {
             leases,
             admin_lease,
             replays,
-            last_snapshot_at: unix_seconds(),
+            last_snapshot_at: now,
             _state_lock: state_lock,
         }
     }
@@ -137,23 +139,36 @@ impl Actor {
     }
 
     /// Runs the schedule and the replay window up to wall-clock second `now`.
-    fn advance(&mut self, now: u64) {
+    pub(super) fn advance(&mut self, now: u64) {
         self.leases.tick(now);
-        self.replays.prune(now);
+        if self.replays.prune(now) {
+            self.inner.mark_snapshot_stale();
+        }
     }
 
-    fn compaction_due(&self, now: u64) -> bool {
+    /// Whether to compact at wall-clock second `now`: once an interval, if
+    /// anything has changed since the last compaction. An interval with
+    /// nothing to write counts as compacted.
+    pub(super) fn compaction_due(&mut self, now: u64) -> bool {
         // WHY: A failed load starts safe mode with empty in-memory
         // generations. Compacting that reconstruction would replace the
         // damaged snapshot, truncate the WAL, and let the next start
         // exit safe mode without rotating the instance id.
-        !self.inner.safe_mode.load(Ordering::Acquire)
-            && now.saturating_sub(self.last_snapshot_at) >= SNAPSHOT_COMPACTION_INTERVAL.as_secs()
+        if self.inner.safe_mode.load(Ordering::Acquire)
+            || now.saturating_sub(self.last_snapshot_at) < SNAPSHOT_COMPACTION_INTERVAL.as_secs()
+        {
+            return false;
+        }
+        if !self.inner.snapshot_stale.load(Ordering::Acquire) {
+            self.last_snapshot_at = now;
+            return false;
+        }
+        true
     }
 
     /// Replaces the snapshot with the state as of wall-clock second `now` and
     /// empties the WAL, or fails the store closed.
-    fn compact(&mut self, now: u64) {
+    pub(super) fn compact(&mut self, now: u64) {
         let snapshot = build_snapshot(&self.inner, self.replays.records());
         if let Err(error) =
             write_snapshot_and_truncate_wal(&self.config, &self.inner.admin_key(), &snapshot)
@@ -168,12 +183,14 @@ impl Actor {
                 "authentication state compaction failed closed"
             );
         } else {
+            // Nothing else changes the state while this step runs.
+            self.inner.snapshot_stale.store(false, Ordering::Release);
             self.last_snapshot_at = now;
         }
     }
 
     /// Runs one command. Breaks once the actor should stop.
-    fn handle(&mut self, command: AuthCommand) -> ControlFlow<()> {
+    pub(super) fn handle(&mut self, command: AuthCommand) -> ControlFlow<()> {
         match command {
             AuthCommand::ClaimAdminMutation {
                 authority,

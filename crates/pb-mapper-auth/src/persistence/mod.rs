@@ -3,7 +3,7 @@
 //! ```text
 //! startup:   lock -> admin.key -> recover instance id -> decrypt snapshot -> replay WAL
 //! mutation:  command   -> fsync encrypted WAL -> publish hot-state change
-//! compact:   hot state + audit + replay set -> snapshot -> truncate WAL
+//! compact:   hot state + audit + replay set -> snapshot -> truncate WAL, when changed
 //! ```
 //!
 //! Snapshot replacement and administrator-key files use atomic rename. Bounded audit
@@ -54,9 +54,11 @@ pub(crate) use snapshot::{
     build_snapshot, cancel_all_temporary_leases, empty_snapshot, load_persisted_state,
     normalize_tombstone_times, push_audit_record, push_persisted_audit, split_high_slot_state,
 };
+#[cfg(test)]
+pub(crate) use wal::append_wal;
 pub(crate) use wal::{
-    append_audit, append_mutation, append_wal, fail_closed_on_uncertain_wal, read_wal,
-    truncate_auth_wal, write_snapshot_and_truncate_wal,
+    append_audit, append_mutation, append_record, read_wal, truncate_auth_wal,
+    write_snapshot_and_truncate_wal,
 };
 
 // The files of a state directory. Renaming one orphans the state an older

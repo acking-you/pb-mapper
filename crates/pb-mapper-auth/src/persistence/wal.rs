@@ -38,13 +38,16 @@ impl WalAppendError {
     }
 }
 
-/// Enters safe mode when a failed append leaves the WAL uncertain, and hands
-/// the caller its failure either way.
-pub(crate) fn fail_closed_on_uncertain_wal(
+/// Appends `record` to the WAL durably, as the actor's own change. Marks the
+/// snapshot stale, and enters safe mode when a failed append leaves the WAL
+/// uncertain, handing the caller its failure either way.
+pub(crate) fn append_record(
+    config: &AuthConfig,
     inner: &AuthStateInner,
-    result: Result<(), WalAppendError>,
+    record: &WalRecord,
 ) -> Result<(), AuthFailure> {
-    result.map_err(|WalAppendError { failure, wal }| {
+    inner.mark_snapshot_stale();
+    append_wal(config, &inner.admin_key(), record).map_err(|WalAppendError { failure, wal }| {
         match wal {
             WalState::Intact => {}
             WalState::Uncertain => {
@@ -62,16 +65,13 @@ pub(crate) fn append_mutation(
     mutation: StateMutation,
     audit: AuditRecord,
 ) -> Result<(), AuthFailure> {
-    fail_closed_on_uncertain_wal(
+    append_record(
+        config,
         inner,
-        append_wal(
-            config,
-            &inner.admin_key(),
-            &WalRecord::Mutation {
-                mutation,
-                audit: audit.clone(),
-            },
-        ),
+        &WalRecord::Mutation {
+            mutation,
+            audit: audit.clone(),
+        },
     )?;
     push_audit_record(inner, audit);
     Ok(())
@@ -82,10 +82,7 @@ pub(crate) fn append_audit(
     inner: &AuthStateInner,
     audit: AuditRecord,
 ) -> Result<(), AuthFailure> {
-    fail_closed_on_uncertain_wal(
-        inner,
-        append_wal(config, &inner.admin_key(), &WalRecord::Audit(audit.clone())),
-    )?;
+    append_record(config, inner, &WalRecord::Audit(audit.clone()))?;
     push_audit_record(inner, audit);
     Ok(())
 }

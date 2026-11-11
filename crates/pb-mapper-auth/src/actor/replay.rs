@@ -28,9 +28,11 @@ impl AdminReplays {
         Self { seen, order }
     }
 
-    /// Forgets every record that has left the retention window.
-    pub(crate) fn prune(&mut self, now: u64) {
+    /// Forgets every record that has left the retention window. Returns
+    /// whether there was one.
+    pub(crate) fn prune(&mut self, now: u64) -> bool {
         let Self { seen, order } = self;
+        let before = order.len();
         order.retain(|record| {
             let keep = record.within_retention(now);
             if !keep {
@@ -38,6 +40,7 @@ impl AdminReplays {
             }
             keep
         });
+        order.len() < before
     }
 
     /// Whether a mutation with `fingerprint` is inside the window.
@@ -82,14 +85,7 @@ impl AdminReplays {
             client_timestamp,
             accepted_at: now,
         };
-        fail_closed_on_uncertain_wal(
-            inner,
-            append_wal(
-                config,
-                &inner.admin_key(),
-                &WalRecord::AdminReplay(record.clone()),
-            ),
-        )?;
+        append_record(config, inner, &WalRecord::AdminReplay(record.clone()))?;
         self.seen.insert(fingerprint);
         self.order.push_back(record);
         Ok(())

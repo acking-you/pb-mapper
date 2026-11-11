@@ -579,6 +579,7 @@ impl Loaded {
                 leases,
                 admin_replays,
                 state_lock.clone(),
+                now,
             ),
             config,
             state_lock,

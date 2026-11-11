@@ -177,15 +177,15 @@ use keys::{
 use leases::Leases;
 use persistence::{
     AdminReplayRecord, AuditRecord, PersistedEntry, PersistedSnapshot, StateMutation, WalRecord,
-    append_audit, append_mutation, append_wal, atomic_write, audit_action, build_snapshot,
-    cancel_all_temporary_leases, empty_snapshot, fail_closed_on_uncertain_wal, hex,
-    instance_id_path, load_or_create_instance_id, load_persisted_state, normalize_tombstone_times,
-    persist_recovery_admin_key, prepare_state_dir_and_lock, push_audit_record,
-    push_persisted_audit, random_instance_id, read_admin_key, read_namespace_high_water,
-    recover_admin_key_after_rotation, recover_instance_id_after_reset, reset_already_installed,
-    restore_namespace_high_water, rotation_already_installed, rotation_key_path,
-    split_high_slot_state, staged_instance_id_path, validate_admin_key, write_admin_key,
-    write_namespace_high_water, write_snapshot_and_truncate_wal,
+    append_audit, append_mutation, append_record, atomic_write, audit_action, build_snapshot,
+    cancel_all_temporary_leases, empty_snapshot, hex, instance_id_path, load_or_create_instance_id,
+    load_persisted_state, normalize_tombstone_times, persist_recovery_admin_key,
+    prepare_state_dir_and_lock, push_audit_record, push_persisted_audit, random_instance_id,
+    read_admin_key, read_namespace_high_water, recover_admin_key_after_rotation,
+    recover_instance_id_after_reset, reset_already_installed, restore_namespace_high_water,
+    rotation_already_installed, rotation_key_path, split_high_slot_state, staged_instance_id_path,
+    validate_admin_key, write_admin_key, write_namespace_high_water,
+    write_snapshot_and_truncate_wal,
 };
 use runtime::off_runtime;
 use state::{

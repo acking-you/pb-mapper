@@ -446,6 +446,8 @@ fn next_sweep(now: u64) -> u64 {
 /// Ends a key's active stage: cancels the lease, marks the row dead, records when
 /// its retention starts, and schedules the reap that frees the row.
 fn retire(inner: &Arc<AuthStateInner>, key_id: KeyId, lease: Option<&Arc<AuthLease>>) {
+    // No WAL record says the key ended, so only the next snapshot can.
+    inner.mark_snapshot_stale();
     // WHY expiry is the fallback reason: a key ended for any other reason was
     // already cancelled by the code that knew that reason, and `record_cancel`
     // keeps the first one, so this cannot mislabel it.
@@ -494,6 +496,7 @@ fn retire(inner: &Arc<AuthStateInner>, key_id: KeyId, lease: Option<&Arc<AuthLea
 
 /// Frees a dead key's row and forgets it.
 fn reap(inner: &Arc<AuthStateInner>, key_id: KeyId) {
+    inner.mark_snapshot_stale();
     let mut slots = inner.slots_mut();
     match slots.get_mut(key_id.slot().as_index()) {
         Some(slot) if slot.holds(key_id) => {

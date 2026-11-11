@@ -23,8 +23,8 @@ use crate::config::{
 };
 use crate::config::{parse_legacy_protocol_policy, platform_default_auth_state_dir};
 use crate::persistence::{
-    auth_snapshot_path, prepare_state_dir, read_instance_id_file, seal_blob,
-    try_load_persisted_state,
+    append_wal, auth_snapshot_path, auth_wal_path, prepare_state_dir, read_instance_id_file,
+    seal_blob, try_load_persisted_state,
 };
 
 mod namespaces;
@@ -1443,6 +1443,111 @@ async fn snapshot_compaction_preserves_audit_records() {
     assert!(actions.contains(&"temporary_key_gc"));
 
     stop(runtime).await;
+}
+
+/// The five-minute compaction writes only when something a snapshot carries
+/// has changed since the last one. A key's expiry and reap are such changes,
+/// though no WAL record says so: a snapshot from before them would bring the
+/// key back at a restart after the clock stepped back before its deadline.
+#[test]
+fn a_compaction_writes_only_after_a_change_and_an_expiry_is_one() {
+    const T: u64 = 1_000_000;
+    let instance_id = [7; INSTANCE_ID_LEN];
+    let state_dir = TempPath::new("idle-compaction");
+    let config = config(&state_dir, 4);
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let mut generations = vec![Generation::FIRST; 4];
+    generations[0] = key_id.generation();
+    let snapshot = PersistedSnapshot {
+        generations,
+        entries: vec![PersistedEntry {
+            key_id,
+            state: SlotState::Active,
+            issued_at: T - 100,
+            expires_at: T + 650,
+            label: None,
+            tombstoned_at: None,
+            namespace: None,
+        }],
+        ..snapshot_for_test(instance_id, 0, 0)
+    };
+    // The actor a start at second T builds from that state.
+    let (restored, live) = RestoredState::from_snapshot(Some(&snapshot), false, &config, T);
+    let admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, None, u64::MAX));
+    let authority = Arc::downgrade(&admin_lease);
+    let inner = Arc::new(AuthStateInner::new(
+        TEST_ADMIN_KEY_BYTES,
+        &admin_lease,
+        false,
+        instance_id,
+        false,
+        restored,
+    ));
+    let leases = Leases::restored(&inner, T, live);
+    let state_lock = prepare_state_dir_and_lock(&state_dir).unwrap();
+    let replays = AdminReplays::restored(&[], T);
+    let mut actor = Actor::new(
+        inner,
+        admin_lease,
+        config.clone(),
+        leases,
+        replays,
+        state_lock,
+        T,
+    );
+    let written = || std::fs::read(auth_snapshot_path(&state_dir)).unwrap();
+    let persisted =
+        || try_load_persisted_state(&config, &TEST_ADMIN_KEY_BYTES, instance_id).unwrap();
+    // The key's row as a start at second `at` would restore it from `state`.
+    let restored_row = |state: &PersistedSnapshot, at| {
+        let (restored, _) = RestoredState::from_snapshot(Some(state), false, &config, at);
+        let row = &restored.slots[0];
+        (row.generation, row.state)
+    };
+
+    // A start may have changed what it restored, so the first compaction writes.
+    actor.advance(T + 300);
+    assert!(actor.compaction_due(T + 300));
+    actor.compact(T + 300);
+    let before_expiry = (written(), persisted());
+
+    // An interval with nothing changed writes nothing.
+    actor.advance(T + 600);
+    assert!(!actor.compaction_due(T + 600));
+    assert_eq!(written(), before_expiry.0);
+
+    // The key expires at T + 650 and its row is reaped a minute later.
+    actor.advance(T + 900);
+    assert!(actor.compaction_due(T + 900));
+    actor.compact(T + 900);
+    assert_ne!(written(), before_expiry.0);
+    // The clock steps back before the deadline: the row stays free, where
+    // the snapshot from before the expiry would have the key live again.
+    let step_back = T + 620;
+    assert_eq!(
+        restored_row(&persisted(), step_back),
+        (key_id.generation(), SlotState::Free)
+    );
+    assert_eq!(
+        restored_row(&before_expiry.1, step_back),
+        (key_id.generation(), SlotState::Active)
+    );
+
+    // A WAL append is a change too, and the compaction after it empties the WAL.
+    actor.advance(T + 1200);
+    assert!(!actor.compaction_due(T + 1200));
+    let (response, mut answer) = oneshot::channel();
+    let _ = actor.handle(AuthCommand::SetLegacyProtocol {
+        authority,
+        policy: LegacyProtocolPolicy::Deny,
+        response,
+    });
+    answer.try_recv().unwrap().unwrap();
+    actor.advance(T + 1500);
+    assert!(actor.compaction_due(T + 1500));
+    actor.compact(T + 1500);
+    let wal = std::fs::metadata(auth_wal_path(&state_dir)).unwrap();
+    assert_eq!(wal.len(), 0);
 }
 
 #[tokio::test]
