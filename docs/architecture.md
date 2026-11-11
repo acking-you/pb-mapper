@@ -172,6 +172,9 @@ Nothing in the SDK crates knows it exists.
     hierarchical wheel that drives credential expiry
   - `keys.rs`, `config.rs`: Which administrator credential a relay starts
     with, and temporary-key derivation; configuration and platform dirs
+  - `examples/`: `auth_bench` (derivation, authentication, and how long each
+    administrator command, compaction and start takes and holds up the
+    runtime's other tasks) and `snapshot_bench` (what an idle store writes)
 
 - **`pb-mapper-protocol/`**: Framing and the authenticated session
   - `lib.rs`: The module list, the crate-wide frame limits and the root re-exports
@@ -181,7 +184,9 @@ Nothing in the SDK crates knows it exists.
   - `command.rs`: Request/response types (`PbConnRequest`, `LocalServer`,
     `AdminRequest`, …), and the refusal codes and audit actions both ends name
   - `secure.rs`: Protocol-v2 single-flight sessions, client and server
-  - `secure/`: `frame.rs`, `first_flight.rs`, `replay.rs`, `limiter.rs`
+  - `secure/`: `frame.rs`, `first_flight.rs`, `replay.rs` (the first-flight
+    replay log, and the one writer thread per relay, `pb-mapper-replay-log`,
+    that appends to it), `limiter.rs`
   - `data.rs`: Optional data encryption, negotiated on each relay leg
   - `forward.rs`: Stream and datagram forwarding
   - `buffer.rs`: Read buffers for the framing
@@ -189,6 +194,8 @@ Nothing in the SDK crates knows it exists.
     TLS QUIC primitives relay clients and servers share
   - `direct.rs`: Direct coordination messages, and the control timings both
     ends share
+  - `examples/`: `data_codec_bench`, `framing_bench` and `handshake_bench`
+    (first flights admitted against the replay log, one to 256 at once)
 
 - **`pb-mapper-server/`**: The central relay
   - `lib.rs`: Module wiring, the public configuration types and re-exports
@@ -232,15 +239,16 @@ Nothing in the SDK crates knows it exists.
     `stream.rs` one forwarded session, `error.rs`
   - `client/`: `connect` — subscribes and listens locally (`mod.rs`,
     `health.rs` the remote probes, `stream.rs`, `listener.rs` the tunnel's
-    local listener bound through core's `listener`), plus `status.rs` and
-    `fetch_status_scoped`
+    local listeners, TCP bound through core's `listener` and UDP, each able to
+    say where it is bound), plus `status.rs` and `fetch_status_scoped`
   - `worker_status.rs`: What a tunnel worker reports about itself, and the
     one place the text of the public status callbacks is written
   - `relay.rs`, `relay/quic.rs`, `endpoint.rs`: The relay carrier and its
     pooled QUIC connections; relay resolution and bounded setup admission.
     `addr.rs` resolves a tunnel endpoint to every address it names,
-    `network.rs` holds the process-wide network hints and `recovery.rs` the
-    short, bounded setup attempts
+    `network.rs` holds the process-wide network hints, `udp_timeout.rs`
+    orders uni-stream's process-wide UDP session timeout before any UDP
+    stream reads it, and `recovery.rs` the short, bounded setup attempts
   - `test_relay.rs`, `status_text_tests.rs`: This crate's own loopback relay
     (it cannot use the testkit, which depends on it), and the pin on the
     status callbacks' text
@@ -432,7 +440,10 @@ Nothing in the SDK crates knows it exists.
     backend). `host/`, `session/`, `viewer/` and `worker/` keep their own
     `tests.rs`
   - `examples/`: Capture, transport and viewer probes, `video_bench` (the
-    Windows capture and encode benchmark), `deployed` (the selftest, native
+    Windows capture and encode benchmark, which also counts the encoder's
+    calls: allocations, time and thread cycles per unit), `host_send_bench`
+    (a relay, a host with a synthetic encoder and a viewer in one process,
+    counting allocations per video unit), `deployed` (the selftest, native
     size by default), `input_acceptance/` (native input into a window of its
     own, on Windows) and `display_mode_probe/`, the hardware acceptance of
     display modes, which changes the display it runs on; `probe_support/`
@@ -519,8 +530,11 @@ Nothing in the SDK crates knows it exists.
     each because it changes state the whole process shares;
     `tests/e2e/main.rs` says which
   - `examples/`: `compatibility_relay`, the loopback relay
-    `scripts/test_version_compatibility.py` builds at each revision, and
-    `relay_transport_bench`, TCP against QUIC relay on loopback
+    `scripts/test_version_compatibility.py` builds at each revision;
+    `relay_transport_bench`, TCP against QUIC relay on loopback;
+    `resubscribe_bench`, what subscribes waiting for a publisher's
+    replacement cost the relay; and `buffer_retention_bench`, the memory
+    idle tunnels hold after a burst
 
 #### Flutter UI (`ui/`)
 
@@ -702,20 +716,24 @@ The design and its rules are in `docs/ui-design.md`.
     `pb_mapper_connect_service` take `allow_direct` and `port_mapping`
     (0 off, 1 auto: once a punch fails, the default, 2 always), saved with
     the tunnel. By concern: `stored.rs` is what is saved (`config.json`,
-    `services.json`, `clients.json`, as the bytes on disk),
-    `configuration.rs` loads and saves it (atomically through core's
-    `durable_file` where the file can be replaced; in place, as 0.11.0 did,
-    for a file with other names or another user's on unix, a directory that
-    takes no new file and a file the rename may not replace; refusing a
+    `services.json`, `clients.json`, as the bytes on disk, keeping at each
+    level the keys a later build wrote), `configuration.rs` loads and saves
+    it (atomically through core's `durable_file` where the file can be
+    replaced; in place, as 0.11.0 did, for a file with other names, and on
+    unix another user's or one in a group other than this user's or its
+    directory's, a
+    directory that takes no new file and a file the rename may not replace;
+    a tunnel's entry is written only when it changed; refusing a
     file this user may not write; a store that cannot be read or parsed is
     an error, never an empty list, and one that holds nothing, empty or
     zero-filled, is an empty list), `tunnel.rs` is a tunnel's setup, SDK
     handle and view (a share or connection whose list cannot be read is
     refused before it starts), `views.rs` the JSON the window reads
     (`PathInfo` among it), `runtime.rs` the embedded relay and committing
-    and stopping tunnels (a connection whose save fails is refused unless
-    its list already holds it), and `status.rs` the window's reads and its
-    questions to the relay
+    and stopping tunnels (a connection whose changed entry cannot be saved
+    is refused, as a share is; stopping the embedded relay stops only the
+    tunnels dialling its port at this computer's addresses), and
+    `status.rs` the window's reads and its questions to the relay
   - `tunnel_events.rs`: `pb_mapper_tunnel_events_call_json`, the window's
     readers of a running tunnel's events (`subscribe`/`next`/`close`), each
     event carrying the tunnel's diagnostics and metrics as they are by then;
@@ -1020,8 +1038,10 @@ docker-compose -f docker/docker-compose.yml up
   --example display_mode_probe` changes the display it runs on and puts it
   back: run it only where that is allowed
 - **Examples**: the SDK's in `crates/pb-mapper/examples/`, the remote
-  desktop's probes and benchmark in `crates/pb-mapper-desktop/examples/`, and
-  the compatibility relay and relay transport benchmark in
+  desktop's probes and benchmarks in `crates/pb-mapper-desktop/examples/`,
+  the protocol's and the auth store's benchmarks in
+  `crates/pb-mapper-protocol/examples/` and `crates/pb-mapper-auth/examples/`,
+  and the compatibility relay and the relay's benchmarks in
   `crates/pb-mapper-cli/examples/`
 
 ### Service Deployment
