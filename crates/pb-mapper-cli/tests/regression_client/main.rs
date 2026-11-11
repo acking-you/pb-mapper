@@ -184,11 +184,26 @@ async fn client_closes_initial_status_probe_after_key_check() {
             writer.write_msg(&response).await.unwrap();
         }
 
+        // This binary probes every 20 ms, so a bound on time alone would pass
+        // a probe stream kept until the next probe answers or times out. The
+        // case checks order instead: the first stream has to close before the
+        // next probe connects, which fails a stream kept for the listener's
+        // life or until a later probe, and READY only bounds a hang. (One
+        // dropped as the next probe starts, before it connects, still passes:
+        // only a probe interval longer than READY would tell it from a prompt
+        // close.)
         let mut buf = [0u8; 1];
-        timeout(READY, stream.read(&mut buf))
-            .await
-            .expect("client kept the one-shot status probe connection open")
-            .unwrap()
+        timeout(READY, async {
+            tokio::select! {
+                biased;
+                read = stream.read(&mut buf) => read.unwrap(),
+                _ = listener.accept() => {
+                    panic!("client opened another probe before closing the first")
+                }
+            }
+        })
+        .await
+        .expect("client kept the one-shot status probe connection open")
     });
 
     let local_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
