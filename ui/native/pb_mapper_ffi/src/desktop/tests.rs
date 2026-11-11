@@ -173,6 +173,11 @@ fn hot_ops_never_wait_for_a_slow_disconnect() {
     let fit =
         json!({"op": "display_mode", "target": {"fit_local": {"width": 1280, "height": 720}}});
     assert_eq!(hot(handle, fit.clone())["code"], "DISPLAY_MODE_NOT_OFFERED");
+    // Nor physical keys: a batch holding one is refused before it waits for
+    // a picture.
+    let physical = json!({"op": "input", "generation": 1,
+        "inputs": [{"kind": "physical_key", "usage": 4, "down": true}]});
+    assert_eq!(hot(handle, physical)["code"], "INVALID_ARGUMENT");
     let local = json!({"op": "viewer_status", "local": {"width": 1280, "height": 720}});
     let status = &hot(handle, local)["data"];
     assert!(status.get("modes").is_none() && status["host_os"].is_null());

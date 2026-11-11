@@ -142,7 +142,7 @@ class _RemoteCompositionState extends State<RemoteComposition> {
 
   void _moved() {
     _settling?.cancel();
-    _settling = Timer(_settle, _place);
+    if (widget.text.attached.value) _settling = Timer(_settle, _place);
   }
 
   Offset get _at =>

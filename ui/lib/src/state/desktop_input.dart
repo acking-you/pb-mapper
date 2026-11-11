@@ -103,11 +103,6 @@ sealed class DesktopInput {
   factory DesktopInput.wheel(int horizontal, int vertical) = DesktopWheel;
   const factory DesktopInput.key(RemoteKey key, bool down) = DesktopKey;
 
-  /// A key by its place on the keyboard, only to a host that listed
-  /// `physical_keys`: [usage] is its USB HID usage on the keyboard page.
-  const factory DesktopInput.physicalKey(int usage, bool down) =
-      DesktopPhysicalKey;
-
   /// At most [DesktopText.maxBytes] of UTF-8.
   factory DesktopInput.text(String text) = DesktopText;
 
@@ -204,6 +199,9 @@ final class DesktopKey extends DesktopKeyInput {
   int get hashCode => Object.hash(key, down);
 }
 
+/// A key by its place on the keyboard, only to a host that listed
+/// `physical_keys`: [usage] is its USB HID usage on the keyboard page, and
+/// the host's layout and input method decide what it types.
 final class DesktopPhysicalKey extends DesktopKeyInput {
   const DesktopPhysicalKey(this.usage, this.down)
     : assert(usage >= minUsage && usage <= maxUsage);
