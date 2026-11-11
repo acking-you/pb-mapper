@@ -755,6 +755,26 @@ fn key_id_packs_generation_and_slot_into_a_plain_integer() {
     );
 }
 
+/// An issued key's `Debug` leaves its credential out, as `Credential`'s own
+/// does: an SDK caller that logs the answer to an issue must not log the
+/// secret with it.
+#[test]
+fn an_issued_keys_debug_output_leaves_the_credential_out() {
+    let issued = IssuedTemporaryKey {
+        metadata: TemporaryKeyMetadata {
+            key_id: KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0)),
+            state: "active".to_string(),
+            issued_at: 1,
+            expires_at: 2,
+            label: None,
+            namespace: None,
+        },
+        credential: "pbmt1_the-secret-itself".to_string(),
+    };
+    let debug = format!("{issued:?}");
+    assert!(!debug.contains("the-secret-itself"), "{debug}");
+}
+
 #[test]
 fn derived_key_is_bound_to_instance_and_key_id() {
     let instance_a = [1_u8; INSTANCE_ID_LEN];

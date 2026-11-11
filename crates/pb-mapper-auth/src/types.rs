@@ -125,11 +125,33 @@ impl TemporaryKeyMetadata {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IssuedTemporaryKey {
     #[serde(flatten)]
     pub metadata: TemporaryKeyMetadata,
+    /// The secret itself, or empty where the relay did not reveal it. Left out
+    /// of `Debug`, as `Credential`'s own is.
     pub credential: String,
+}
+
+impl fmt::Debug for IssuedTemporaryKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            metadata,
+            credential,
+        } = self;
+        // Whether there is one, which is all a log needs.
+        let credential = if credential.is_empty() {
+            ""
+        } else {
+            "[redacted]"
+        };
+        formatter
+            .debug_struct("IssuedTemporaryKey")
+            .field("metadata", metadata)
+            .field("credential", &credential)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
