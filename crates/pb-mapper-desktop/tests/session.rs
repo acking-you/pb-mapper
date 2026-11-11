@@ -28,10 +28,6 @@ struct Observation {
     /// A button is held down.
     held: AtomicBool,
     dropped: AtomicU32,
-    /// DIAGNOSTIC (temporary): when each encoded capture ran, and thread C's
-    /// QoS class.
-    stamps: Mutex<Vec<Instant>>,
-    qos: AtomicU32,
 }
 impl Observation {
     fn input(&self, input: &Input) {
@@ -108,8 +104,6 @@ impl Backend for Encoded {
     ) -> Result<Option<EncodedFrame>> {
         self.frames += 1;
         self.observed.captures.fetch_add(1, Ordering::Relaxed);
-        self.observed.stamps.lock().unwrap().push(Instant::now());
-        self.observed.qos.store(diag::qos(), Ordering::Relaxed);
         Ok(Some(EncodedFrame {
             format: VideoFormat {
                 codec: VideoCodec::H264,
@@ -470,30 +464,11 @@ async fn frozen_renderer_keeps_credit_and_cursor_but_never_input() {
         observed.held.load(Ordering::Acquire)
     })
     .await;
-    // DIAGNOSTIC (temporary): one second while presenting.
-    let (warm_at, warm_pulled, warm_captures, warm_cpu) = (
-        Instant::now(),
-        renderer.pulled(),
-        observed.captures.load(Ordering::Relaxed),
-        diag::cpu(),
-    );
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let presenting = format!(
-        "presenting {:.2}s: captures +{} pulled +{} cpu {:?} {}",
-        warm_at.elapsed().as_secs_f64(),
-        observed.captures.load(Ordering::Relaxed) - warm_captures,
-        renderer.pulled() - warm_pulled,
-        diag::cpu().zip(warm_cpu).map(|(now, then)| now - then),
-        diag::stats(&viewer),
-    );
 
     // The renderer freezes: it keeps pulling but never presents.
     renderer.present(false);
     let frozen = Instant::now();
     let pulled = renderer.pulled();
-    let (frozen_captures, frozen_cpu) = (observed.captures.load(Ordering::Relaxed), diag::cpu());
-    let mut skipped_max = 0f32;
-    let mut received_min = f32::MAX;
     // The slowest pace the host reported once its `Stats` began.
     let mut slowest = u32::MAX;
     let mut sample = |viewer: &Viewer| {
@@ -525,35 +500,11 @@ async fn frozen_renderer_keeps_credit_and_cursor_but_never_input() {
     ));
     while frozen.elapsed() < Duration::from_secs(5) {
         sample(&viewer);
-        let stats = viewer.status().stats;
-        skipped_max = skipped_max.max(stats.skipped_per_s);
-        received_min = received_min.min(stats.received_fps);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     // Video keeps arriving at the host's pace, and the session goes on: a
     // frozen renderer costs neither credit nor the connection.
     let arrived = renderer.pulled() - pulled;
-    // DIAGNOSTIC (temporary): where the units went, printed past the capture.
-    let stamps = observed.stamps.lock().unwrap().clone();
-    let intervals: Vec<Duration> = stamps
-        .windows(2)
-        .filter(|pair| pair[0] >= frozen)
-        .map(|pair| pair[1] - pair[0])
-        .collect();
-    let late = intervals
-        .iter()
-        .filter(|gap| **gap > Duration::from_millis(25))
-        .count();
-    diag::say(format_args!("frozen-test {presenting}"));
-    diag::say(format_args!(
-        "frozen-test frozen {:.2}s: captures +{} pulled +{arrived} pace {slowest} skipped_per_s max {skipped_max:.1} received_fps min {received_min:.1} cpu {:?} thread-C qos {:#x} capture intervals [{}] over 25ms {late} {}",
-        frozen.elapsed().as_secs_f64(),
-        observed.captures.load(Ordering::Relaxed) - frozen_captures,
-        diag::cpu().zip(frozen_cpu).map(|(now, then)| now - then),
-        observed.qos.load(Ordering::Relaxed),
-        diag::spread(intervals),
-        diag::stats(&viewer),
-    ));
     assert!(
         slowest < u32::MAX && arrived >= 4 * slowest as usize,
         "{arrived} units at pace {slowest}"
@@ -661,157 +612,4 @@ async fn control_grant_with_queued_video_keeps_the_session() {
     drop(renderer);
     viewer.stop().await.unwrap();
     host.stop().await.unwrap();
-}
-
-/// DIAGNOSTIC (temporary): how late this runner's waits end on a thread of
-/// their own: a condition variable (the portable `Waiter`'s) for a 2 ms
-/// poll and a 60 fps tick, a 2 ms sleep, and tokio sleeps as the session's
-/// tasks take them. Thread C's own waiter is probed in the unit tests.
-#[test]
-fn pacing_probe() {
-    std::thread::spawn(|| {
-        let pair = (parking_lot::Mutex::new(false), parking_lot::Condvar::new());
-        let condvar = |period: Duration| {
-            let deadline = Instant::now() + period;
-            let mut flag = pair.0.lock();
-            while !*flag {
-                if pair.1.wait_until(&mut flag, deadline).timed_out() {
-                    break;
-                }
-            }
-            drop(flag);
-            Instant::now().saturating_duration_since(deadline)
-        };
-        let (poll, tick) = (Duration::from_millis(2), Duration::from_micros(16_667));
-        let sleep: Vec<Duration> = (0..30)
-            .map(|_| {
-                let at = Instant::now();
-                std::thread::sleep(poll);
-                at.elapsed().saturating_sub(poll)
-            })
-            .collect();
-        let line = format!(
-            "probe plain: qos {:#x} condvar 2ms late [{}] condvar 16.7ms late [{}] sleep 2ms late [{}]",
-            diag::qos(),
-            diag::spread((0..30).map(|_| condvar(poll)).collect()),
-            diag::spread((0..15).map(|_| condvar(tick)).collect()),
-            diag::spread(sleep),
-        );
-        diag::say(format_args!("{line}"));
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
-        let (short, long) = runtime.block_on(async {
-            let mut short = Vec::new();
-            for _ in 0..30 {
-                let at = Instant::now();
-                tokio::time::sleep(poll).await;
-                short.push(at.elapsed().saturating_sub(poll));
-            }
-            let mut long = Vec::new();
-            for _ in 0..15 {
-                let at = Instant::now();
-                tokio::time::sleep(tick).await;
-                long.push(at.elapsed().saturating_sub(tick));
-            }
-            (short, long)
-        });
-        diag::say(format_args!(
-            "probe tokio: 2ms late [{}] 16.7ms late [{}]",
-            diag::spread(short),
-            diag::spread(long),
-        ));
-    })
-    .join()
-    .unwrap();
-}
-
-/// DIAGNOSTIC (temporary): measurements printed past the harness's capture.
-mod diag {
-    use std::{io::Write, time::Duration};
-
-    pub fn say(line: std::fmt::Arguments<'_>) {
-        let _ = writeln!(std::io::stderr(), "pacing-diag {line}");
-    }
-
-    pub fn spread(mut samples: Vec<Duration>) -> String {
-        if samples.is_empty() {
-            return "n=0".into();
-        }
-        samples.sort();
-        let at =
-            |q: f64| samples[((samples.len() - 1) as f64 * q).round() as usize].as_secs_f64() * 1e3;
-        format!(
-            "n={} p50={:.2}ms p90={:.2}ms p99={:.2}ms max={:.2}ms",
-            samples.len(),
-            at(0.5),
-            at(0.9),
-            at(0.99),
-            at(1.0)
-        )
-    }
-
-    pub fn stats(viewer: &pb_mapper_desktop::Viewer) -> String {
-        let stats = viewer.status().stats;
-        format!(
-            "stats capture_fps {:.1} received_fps {:.1} pace {} target {} cap {} skipped_per_s {:.1} rtt {:?} base_rtt {:?} queue {:?} ack_queue {:?} backlog_drops {} dropped {}",
-            stats.capture_fps,
-            stats.received_fps,
-            stats.pace_fps,
-            stats.target_fps,
-            stats.fps_cap,
-            stats.skipped_per_s,
-            stats.rtt_ms,
-            stats.base_rtt_ms,
-            stats.queue_delay_ms,
-            stats.ack_queue_ms,
-            stats.backlog_drops,
-            stats.dropped_frames,
-        )
-    }
-
-    #[cfg(unix)]
-    #[repr(C)]
-    struct Timespec {
-        sec: i64,
-        nsec: i64,
-    }
-    #[cfg(unix)]
-    unsafe extern "C" {
-        fn clock_gettime(clock: i32, time: *mut Timespec) -> i32;
-    }
-
-    /// This process's CPU time.
-    pub fn cpu() -> Option<Duration> {
-        #[cfg(target_os = "macos")]
-        const PROCESS: i32 = 12;
-        #[cfg(all(unix, not(target_os = "macos")))]
-        const PROCESS: i32 = 2;
-        #[cfg(unix)]
-        {
-            let mut time = Timespec { sec: 0, nsec: 0 };
-            // SAFETY: a local the call fills.
-            (unsafe { clock_gettime(PROCESS, &mut time) } == 0)
-                .then(|| Duration::new(time.sec as u64, time.nsec as u32))
-        }
-        #[cfg(not(unix))]
-        None
-    }
-
-    #[cfg(target_os = "macos")]
-    unsafe extern "C" {
-        fn qos_class_self() -> u32;
-    }
-
-    /// The calling thread's QoS class (0x21 user-interactive, 0x19
-    /// user-initiated, 0x15 default, 0x11 utility, 0x09 background, 0
-    /// unspecified).
-    pub fn qos() -> u32 {
-        #[cfg(target_os = "macos")]
-        // SAFETY: reads the calling thread's class.
-        return unsafe { qos_class_self() };
-        #[cfg(not(target_os = "macos"))]
-        0
-    }
 }

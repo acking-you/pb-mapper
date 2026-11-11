@@ -254,14 +254,6 @@ jobs:
       - name: Run Clippy
         run: cargo clippy -p pb-mapper-desktop -p pb-mapper-ffi --all-targets --all-features -- -D warnings
 
-      # DIAGNOSTIC (temporary): the macOS unit tests and the session binary's
-      # pacing tests alone, one at a time.
-      - name: Diagnose session pacing (temporary)
-        continue-on-error: true
-        run: |
-          cargo test -p pb-mapper-desktop --all-features --lib -- --test-threads=1 platform::macos::tests || true
-          cargo test -p pb-mapper-desktop --all-features --test session -- --test-threads=1 frozen_renderer pacing_probe
-
       - name: Run tests
         run: cargo test -p pb-mapper-desktop -p pb-mapper-ffi --all-features
 
