@@ -29,6 +29,24 @@
 //!
 //! The callbacks hold a `Weak<AuthStateInner>`, so they neither keep the state
 //! alive nor touch it after a runtime has shut down.
+//!
+//! Deadlines are wall-clock seconds, and every key ends at its own whichever
+//! way the clock steps. Forward, `tick` runs each second up to the new one, so
+//! whatever the clock passed ends at once. Backward, the wheel stays where it
+//! was: it only turns forward, and everything on it is due after its second,
+//! which the clock reaches again first, so those keys still end on time
+//! (turning the wheel back would end each of them the step's length early).
+//! A deadline set meanwhile that falls before the wheel's second waits in
+//! `behind`, which `tick` runs by the wall clock.
+//!
+//! ```text
+//!   the clock steps back from S, the wheel's second, to W
+//!
+//!   W ─────────────────── S ─────────────────>  wall clock
+//!   └ deadlines in (W, S] ┘└ deadlines after S ┘
+//!     in `behind`, each run   on the wheel, which turns
+//!     as the clock reaches it again once the clock passes S
+//! ```
 
 use super::*;
 
@@ -55,8 +73,11 @@ pub(super) struct Leases {
     wheel: TimingWheel,
     /// The wall-clock second the wheel's current tick corresponds to. The wheel
     /// itself only counts ticks, so this is where absolute deadlines are turned
-    /// into the relative delays it takes.
+    /// into the relative delays it takes. It never goes back; the clock can.
     now: u64,
+    /// Timers due at or before `now`, by their deadline, for a clock that has
+    /// stepped back behind it. Empty unless it has.
+    behind: BTreeMap<u64, Vec<Arc<Timer>>>,
     /// Each key's stages, so a renew or an early end can reach them without the
     /// wheel knowing what a key is.
     stages: HashMap<KeyId, Stages>,
@@ -65,14 +86,15 @@ pub(super) struct Leases {
 }
 
 impl Leases {
-    /// Rebuilds a loaded state's schedule: `live` keys, with the leases the
-    /// slot table points at, wait for their expiry, and keys that were already
-    /// dead wait out the rest of their retention.
+    /// Rebuilds a loaded state's schedule at wall-clock second `now`: `live`
+    /// keys, with the leases the slot table points at, wait for their expiry,
+    /// and keys that were already dead wait out the rest of their retention.
     pub(super) fn restored(inner: &Arc<AuthStateInner>, now: u64, live: LiveLeases) -> Self {
         let mut leases = Self {
             inner: Arc::downgrade(inner),
             wheel: new_wheel(),
             now,
+            behind: BTreeMap::new(),
             stages: HashMap::new(),
             next_sweep_at: next_sweep(now),
         };
@@ -99,20 +121,21 @@ impl Leases {
                 .map(|entry| (entry.key_id, entry.tombstoned_at)),
         );
         for (key_id, lease) in live {
-            leases.watch(key_id, lease);
+            leases.watch(key_id, lease, now);
         }
         for (key_id, tombstoned_at) in dead {
             let tombstoned_at = tombstoned_at
                 .or_else(|| inner.cold().get(&key_id).map(|cold| cold.tombstoned_at))
                 .filter(|at| *at != 0)
                 .unwrap_or(now);
-            leases.schedule_reap(key_id, retention_ends(tombstoned_at));
+            leases.schedule_reap(key_id, retention_ends(tombstoned_at), now);
         }
         leases
     }
 
     /// Takes over a newly issued key: records its description and schedules both
-    /// stages of its teardown.
+    /// stages of its teardown. `issued_at` is the wall-clock second its
+    /// deadline was counted from.
     pub(super) fn issue(
         &mut self,
         lease: &Arc<AuthLease>,
@@ -132,16 +155,16 @@ impl Leases {
                 tombstoned_at: 0,
             },
         );
-        self.watch(lease.key_id(), lease.clone());
+        self.watch(lease.key_id(), lease.clone(), issued_at);
     }
 
-    /// Hands a key's remaining life to a replacement lease, for a renewal whose
-    /// original lease had already been cancelled.
+    /// Hands a key's remaining life to a replacement lease, for a renewal at
+    /// wall-clock second `now` whose original lease had already been cancelled.
     ///
     /// The stages it replaces are disarmed first. They identify the key rather than
     /// the lease, so at the old deadline they would otherwise end the key this renewal
     /// just extended.
-    pub(super) fn adopt(&mut self, lease: &Arc<AuthLease>) {
+    pub(super) fn adopt(&mut self, lease: &Arc<AuthLease>, now: u64) {
         if let Some(stages) = self.stages.remove(&lease.key_id()) {
             for timer in [stages.retire, stages.reap]
                 .iter()
@@ -150,17 +173,17 @@ impl Leases {
                 timer.disarm();
             }
         }
-        self.watch(lease.key_id(), lease.clone());
+        self.watch(lease.key_id(), lease.clone(), now);
     }
 
-    /// Moves a renewed key to its new expiry, sooner or later than the old one,
-    /// and its reap along with it. Returns `false` for a key with no live stages,
-    /// as for a high slot.
+    /// Moves a key renewed at wall-clock second `now` to its new expiry, sooner
+    /// or later than the old one, and its reap along with it. Returns `false`
+    /// for a key with no live stages, as for a high slot.
     ///
     /// See [`Timer::supersede`] for why this cannot just schedule each timer a
     /// second time: a timer fires with its last placement, so a shortened key would
     /// keep running to its old deadline.
-    pub(super) fn renew(&mut self, key_id: KeyId, expires_at: u64) -> bool {
+    pub(super) fn renew(&mut self, key_id: KeyId, expires_at: u64, now: u64) -> bool {
         let Some(stages) = self.stages.get_mut(&key_id) else {
             return false;
         };
@@ -171,8 +194,8 @@ impl Leases {
         let reap = reap.supersede();
         stages.retire = Arc::downgrade(&retire);
         stages.reap = Arc::downgrade(&reap);
-        self.schedule_at(expires_at, retire);
-        self.schedule_at(retention_ends(expires_at), reap);
+        self.schedule_at(now, expires_at, retire);
+        self.schedule_at(now, retention_ends(expires_at), reap);
         true
     }
 
@@ -183,14 +206,10 @@ impl Leases {
         }
     }
 
-    /// Ends a key its revoke at second `at` has already marked: the credential
-    /// stops working now, and the row is held for a retention window from `at`,
-    /// long enough to report *why*, rather than until its old deadline.
-    ///
-    /// The window is counted from the schedule's own second when that is later:
-    /// after the system clock steps back, which `tick` ignores, a deadline
-    /// counted from `at` would already have passed, and the row would be freed
-    /// inside this call, before the revoke could even report it.
+    /// Ends a key its revoke at wall-clock second `at` has already marked: the
+    /// credential stops working now, and the row is held for a retention window
+    /// from `at`, long enough to report *why*, rather than until its old
+    /// deadline.
     pub(super) fn revoke(&mut self, key_id: KeyId, at: u64) {
         self.retire_now(key_id);
         if let Some(inner) = self.inner.upgrade() {
@@ -207,7 +226,7 @@ impl Leases {
         };
         let reap = reap.supersede();
         stages.reap = Arc::downgrade(&reap);
-        self.schedule_at(retention_ends(at.max(self.now)), reap);
+        self.schedule_at(at, retention_ends(at), reap);
     }
 
     /// Ends a key outright, running both stages. Skips the retention wait, so it
@@ -220,18 +239,23 @@ impl Leases {
         self.stages.remove(&key_id);
     }
 
-    /// Runs every callback whose deadline has passed.
+    /// Runs every callback whose deadline the wall clock's second `now` has
+    /// reached.
     pub(super) fn tick(&mut self, now: u64) {
         // A jump longer than anything a key can be scheduled for means every
         // timer is due, so the schedule is dropped wholesale instead of ticked up
         // to. That keeps a corrected hardware clock from spinning for hours.
-        //
-        // A clock stepping backwards is ignored: buckets are indexed relative to
-        // the wheel's `now`, so re-filing against an earlier one would place
-        // entries in slots it has already drained.
         if now.saturating_sub(self.now) > self.wheel.max_delay() {
             self.drop_schedule(now);
             return;
+        }
+        // These lie at or before the wheel's second, so they come due before
+        // anything on it. A clock behind that second turns the wheel no
+        // further; see the module docs.
+        while let Some(due) = self.behind.first_entry()
+            && *due.key() <= now
+        {
+            drop(due.remove());
         }
         while self.now < now {
             self.now += 1;
@@ -292,18 +316,29 @@ impl Leases {
     }
 
     /// Replaces the whole schedule, running every callback the old one held.
+    /// The new one starts at the wall clock's second `now`, which may be
+    /// behind the old one's: nothing is on it yet.
     fn drop_schedule(&mut self, now: u64) {
         self.stages.clear();
         self.now = now;
         self.next_sweep_at = next_sweep(now);
         self.wheel = new_wheel();
+        drop(std::mem::take(&mut self.behind));
     }
 
-    /// Schedules `timer` for an absolute second, as the delay from now the wheel
-    /// works in. A deadline already past releases the timer at once.
-    fn schedule_at(&mut self, deadline: u64, timer: Arc<Timer>) {
-        self.wheel
-            .schedule(deadline.saturating_sub(self.now), timer);
+    /// Schedules `timer` for the absolute second `deadline`, the wall clock
+    /// reading `now`. A deadline the wheel has yet to reach goes on it, as the
+    /// delay from its second; one the clock has already reached releases the
+    /// timer at once; and one in between, which only a clock stepped back
+    /// behind the wheel leaves, waits in `behind`.
+    fn schedule_at(&mut self, now: u64, deadline: u64, timer: Arc<Timer>) {
+        if deadline > self.now {
+            self.wheel.schedule(deadline - self.now, timer);
+        } else if deadline > now {
+            self.behind.entry(deadline).or_default().push(timer);
+        }
+        // Otherwise dropping `timer` here fires it, if this was the last
+        // reference.
     }
 
     /// Upgrades one of a key's stages, forgetting the key once both have run.
@@ -320,15 +355,15 @@ impl Leases {
         timer
     }
 
-    /// Schedules both stages of a live key: retirement at its lease's expiry, and
-    /// the reap a retention window later.
+    /// Schedules both stages of a live key, the wall clock reading `now`:
+    /// retirement at its lease's expiry, and the reap a retention window later.
     ///
     /// WHY the reap timer owns the lease rather than the retire timer: the slot
     /// table holds only a `Weak`, so this is the reference that lets a request
     /// during the retention window read *why* the key died instead of finding a
     /// vanished lease. Firing a timer consumes its callback, so an `Arc` held by
     /// the retire stage would be released the moment that stage ran.
-    fn watch(&mut self, key_id: KeyId, lease: Arc<AuthLease>) {
+    fn watch(&mut self, key_id: KeyId, lease: Arc<AuthLease>, now: u64) {
         let inner = self.inner.clone();
         let expires_at = lease.expires_at();
         let retire_lease = lease.clone();
@@ -345,12 +380,12 @@ impl Leases {
                 reap: Arc::downgrade(&reap),
             },
         );
-        self.schedule_at(expires_at, retire);
-        self.schedule_at(retention_ends(expires_at), reap);
+        self.schedule_at(now, expires_at, retire);
+        self.schedule_at(now, retention_ends(expires_at), reap);
     }
 
     /// Schedules only the reap, for a key that is already dead.
-    fn schedule_reap(&mut self, key_id: KeyId, deadline: u64) {
+    fn schedule_reap(&mut self, key_id: KeyId, deadline: u64, now: u64) {
         let reap = self.reap_timer(key_id, None);
         self.stages.insert(
             key_id,
@@ -359,7 +394,7 @@ impl Leases {
                 ..Stages::default()
             },
         );
-        self.schedule_at(deadline, reap);
+        self.schedule_at(now, deadline, reap);
     }
 
     /// Builds the reap stage. `lease` is the key's live lease when there is one,

@@ -66,7 +66,7 @@
 //! `runtime.rs`, the shared state in `state.rs`, the actor in `actor/`, the
 //! files in `persistence/`, and the expiry schedule in `leases.rs`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};

@@ -9,7 +9,8 @@ use pb_mapper_core::paging::paginate;
 /// The longest label a key may carry, after trimming.
 const MAX_LABEL_BYTES: usize = 64;
 
-fn validate_ttl(config: &AuthConfig, ttl: Duration) -> Result<u64, AuthFailure> {
+/// The deadline a key given `ttl` at wall-clock second `now` gets.
+fn validate_ttl(config: &AuthConfig, ttl: Duration, now: u64) -> Result<u64, AuthFailure> {
     if ttl < MIN_TEMP_KEY_TTL {
         return Err(AuthFailure::new(
             codes::TEMPORARY_KEY_TTL_TOO_SHORT,
@@ -30,7 +31,7 @@ fn validate_ttl(config: &AuthConfig, ttl: Duration) -> Result<u64, AuthFailure> 
             false,
         ));
     }
-    Ok(unix_seconds().saturating_add(ttl.as_secs()))
+    Ok(now.saturating_add(ttl.as_secs()))
 }
 
 fn validate_label(label: Option<String>) -> Result<Option<String>, AuthFailure> {
@@ -154,12 +155,13 @@ pub(super) fn actor_issue(
     label: Option<String>,
 ) -> Result<IssuedTemporaryKey, AuthFailure> {
     ensure_store_available(inner)?;
-    let expires_at = validate_ttl(config, ttl)?;
+    // One reading, so the schedule is told the second the deadline counts from.
+    let issued_at = unix_seconds();
+    let expires_at = validate_ttl(config, ttl, issued_at)?;
     let label = validate_label(label)?;
     if let Some(namespace) = namespace {
         ensure_namespace_allocated(inner, config, namespace)?;
     }
-    let issued_at = unix_seconds();
     let (index, generation, key_id, entry) = {
         let slots = inner.slots();
         // A row whose generation cannot advance is skipped rather than reused: it
@@ -291,10 +293,11 @@ pub(super) fn actor_renew(
     ttl: Duration,
 ) -> Result<IssuedTemporaryKey, AuthFailure> {
     ensure_store_available(inner)?;
-    let expires_at = validate_ttl(config, ttl)?;
+    let now = unix_seconds();
+    let expires_at = validate_ttl(config, ttl, now)?;
     let index = key_id.slot().as_index();
     let current = key_state(inner, key_id)?;
-    if current.state != SlotState::Active || current.expires_at <= unix_seconds() {
+    if current.state != SlotState::Active || current.expires_at <= now {
         return Err(key_not_renewable());
     }
     let KeyState {
@@ -321,7 +324,7 @@ pub(super) fn actor_renew(
             Some(lease) if !lease.is_cancelled() => {
                 lease.set_expires_at(expires_at);
                 drop(slots);
-                leases.renew(key_id, expires_at);
+                leases.renew(key_id, expires_at, now);
             }
             // A cancelled lease cannot be revived, so the renewal installs a
             // replacement; that drops the handle on the lease it succeeds.
@@ -329,7 +332,7 @@ pub(super) fn actor_renew(
                 let lease = Arc::new(AuthLease::new(key_id, namespace, expires_at));
                 slot.lease = Arc::downgrade(&lease);
                 drop(slots);
-                leases.adopt(&lease);
+                leases.adopt(&lease, now);
             }
         }
         return metadata_with_credential(inner, key_id, true);

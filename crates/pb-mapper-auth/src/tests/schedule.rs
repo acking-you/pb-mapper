@@ -74,7 +74,7 @@ fn a_renewed_key_ends_at_its_new_deadline() {
     };
     lease.set_expires_at(T + 10);
     drop(lease);
-    assert!(leases.renew(key_id, T + 10));
+    assert!(leases.renew(key_id, T + 10, T));
 
     leases.tick(T + 9);
     assert!(!cancellation.is_cancelled());
@@ -106,7 +106,7 @@ fn a_lease_adopted_by_a_renewal_outlives_the_old_deadline() {
         slots[0].expires_at = T + 3600;
         slots[0].lease = Arc::downgrade(&replacement);
     }
-    leases.adopt(&replacement);
+    leases.adopt(&replacement, T);
     let cancellation = replacement.cancellation_token();
     drop(replacement);
 
@@ -261,10 +261,10 @@ fn a_revoked_key_is_recycled_a_retention_window_after_the_revoke() {
 }
 
 /// A revoke while the system clock reads earlier than the schedule's, as after
-/// a step back that `tick` ignores, still keeps the row for a retention window,
-/// counted from the schedule's second. Counted from the revoke's, the window
-/// had already passed: the row was freed inside the call, and the revoke that
-/// had just taken effect answered that the key did not exist.
+/// a step back, still keeps the row for a retention window from the revoke by
+/// that clock. The schedule had already passed the window's end, so the row was
+/// once freed inside the call, and the revoke that had just taken effect
+/// answered that the key did not exist.
 #[test]
 fn a_revoke_behind_the_schedules_clock_keeps_the_row_for_its_retention() {
     let (inner, mut leases) = schedule();
@@ -279,10 +279,55 @@ fn a_revoke_behind_the_schedules_clock_keeps_the_row_for_its_retention() {
     assert_eq!(state_of(&inner, key_id), SlotState::Revoked);
     assert_eq!(inner.cold()[&key_id].tombstoned_at, T);
 
-    leases.tick(T + 600 + TOMBSTONE_RETENTION.as_secs() - 1);
+    leases.tick(T + TOMBSTONE_RETENTION.as_secs() - 1);
     assert_eq!(state_of(&inner, key_id), SlotState::Revoked);
-    leases.tick(T + 600 + TOMBSTONE_RETENTION.as_secs());
+    leases.tick(T + TOMBSTONE_RETENTION.as_secs());
     assert_eq!(state_of(&inner, key_id), SlotState::Free);
+}
+
+/// After the system clock steps back, every key still ends at its own deadline
+/// by the wall clock: one issued or renewed for less than the step does not
+/// come back already retired, and one scheduled before the step does not end
+/// the step's length early.
+#[test]
+fn a_backward_clock_step_keeps_every_deadline_on_the_wall_clock() {
+    let (inner, mut leases) = schedule();
+    let (scheduled, scheduled_cancelled) = issue(&inner, &mut leases, 0, T + 900);
+    let (renewed, renewed_cancelled) = issue(&inner, &mut leases, 1, T + 3600);
+    // The clock reached T + 600, then stepped back to T.
+    leases.tick(T + 600);
+
+    // At the stepped-back second: an issue, and a renewal as `actor_renew`
+    // makes one, each for less than the step.
+    let (issued, issued_cancelled) = issue(&inner, &mut leases, 2, T + 60);
+    let lease = {
+        let mut slots = inner.slots_mut();
+        slots[1].expires_at = T + 120;
+        slots[1].lease.upgrade().unwrap()
+    };
+    lease.set_expires_at(T + 120);
+    drop(lease);
+    assert!(leases.renew(renewed, T + 120, T));
+    assert_eq!(state_of(&inner, issued), SlotState::Active);
+    assert_eq!(state_of(&inner, renewed), SlotState::Active);
+
+    leases.tick(T + 59);
+    assert!(!issued_cancelled.is_cancelled());
+    leases.tick(T + 60);
+    assert!(issued_cancelled.is_cancelled());
+    assert_eq!(state_of(&inner, issued), SlotState::Expired);
+    leases.tick(T + 119);
+    assert!(!renewed_cancelled.is_cancelled());
+    leases.tick(T + 120);
+    assert!(renewed_cancelled.is_cancelled());
+    leases.tick(T + 60 + TOMBSTONE_RETENTION.as_secs());
+    assert_eq!(state_of(&inner, issued), SlotState::Free);
+
+    leases.tick(T + 899);
+    assert!(!scheduled_cancelled.is_cancelled());
+    assert_eq!(state_of(&inner, scheduled), SlotState::Active);
+    leases.tick(T + 900);
+    assert!(scheduled_cancelled.is_cancelled());
 }
 
 /// No callback can reach the schedule's map, so a key that ended on schedule
