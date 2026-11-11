@@ -175,6 +175,10 @@ impl CursorShape {
 /// `rgba`, `from` pixels, scaled down to `to` by averaging each target
 /// pixel's box, colours weighted by their alpha so that transparent pixels
 /// add no dark fringe.
+#[cfg_attr(
+    not(any(windows, test)),
+    expect(dead_code, reason = "for the platforms that read pointer bitmaps")
+)]
 fn shrink(rgba: &[u8], from: (u32, u32), to: (u32, u32)) -> Vec<u8> {
     let span = |target: u32, of: u32, total: u32| {
         let start = u64::from(target) * u64::from(total) / u64::from(of);
@@ -255,5 +259,26 @@ mod tests {
         // Both an off-display cursor and an OS-hidden cursor withhold position.
         assert_eq!(confine(&display, (0, 300), true), CursorPosition::default());
         assert_eq!(confine(&display, point, false), CursorPosition::default());
+    }
+
+    /// A pointer larger than a shape may be is scaled down to fit, its
+    /// hotspot with it; a bitmap of another size is refused.
+    #[test]
+    fn a_large_pointer_is_scaled_down_to_the_largest_shape() {
+        // Opaque white on the left half, clear on the right.
+        let (width, height) = (512, 300);
+        let rgba: Vec<u8> = (0..height)
+            .flat_map(|_| (0..width).flat_map(|x| if x < 256 { [255; 4] } else { [0; 4] }))
+            .collect();
+        let shape =
+            CursorShape::fitted(CursorKind::Custom, width, height, (511, 10), rgba).unwrap();
+        assert_eq!((shape.width(), shape.height()), (256, 150));
+        assert_eq!(shape.hotspot(), (255, 5));
+        let pixel = |x: u32| {
+            let at = x as usize * 4;
+            shape.rgba()[at..at + 4].to_vec()
+        };
+        assert_eq!((pixel(0), pixel(255)), (vec![255; 4], vec![0; 4]));
+        assert!(CursorShape::fitted(CursorKind::Arrow, 2, 2, (0, 0), vec![0; 4]).is_err());
     }
 }
