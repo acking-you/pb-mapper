@@ -1,11 +1,11 @@
-use std::net::{AddrParseError, SocketAddr};
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
 use snafu::ResultExt;
 
-use crate::error::{CfgPbServerEnvNotExistSnafu, Result};
+use crate::error::{CfgPbServerEnvNotExistSnafu, CfgResolveSockAddrSnafu, Result};
 
 #[derive(Debug, Clone, Copy)]
 pub enum StatusOp {
@@ -41,20 +41,16 @@ pub struct ResolvedAddrs {
 }
 
 impl ResolvedAddrs {
-    /// Build from resolver output, rejecting an empty result.
-    ///
-    /// `name` is what was resolved, and `parse_error` the failure from parsing it
-    /// as a literal `ip:port`, so an empty resolution reports the same error a
-    /// malformed address would.
-    fn new(name: &str, addrs: Vec<SocketAddr>, parse_error: AddrParseError) -> Result<Self> {
-        if addrs.is_empty() {
-            return Err(crate::error::Error::CfgParseSockAddr {
-                string: name.to_string(),
-                source: parse_error,
-            });
-        }
-        Ok(Self {
-            addrs: Arc::from(addrs),
+    /// Build from the outcome of looking `name` up, rejecting an empty result.
+    /// A failure keeps the resolver's reason.
+    fn looked_up(name: &str, lookup: std::io::Result<Vec<SocketAddr>>) -> Result<Self> {
+        let addrs = lookup.context(CfgResolveSockAddrSnafu { string: name })?;
+        Self::from_candidates(addrs).ok_or_else(|| crate::error::Error::CfgResolveSockAddr {
+            string: name.to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the resolver answered with no address",
+            ),
         })
     }
 
@@ -120,60 +116,69 @@ impl From<SocketAddr> for ResolvedAddrs {
     }
 }
 
+/// What an address to resolve names.
+enum Target<'a> {
+    /// A literal `ip:port`, which needs no resolver.
+    Literal(SocketAddr),
+    /// A host and port to look up.
+    Name(&'a str, u16),
+}
+
+impl<'a> Target<'a> {
+    /// Splits `addr` as the system resolver does, so that whatever it would
+    /// look up is looked up. Anything else is a malformed address, which fails
+    /// with its parse error.
+    fn of(addr: &'a str) -> Result<Self> {
+        let parse_error = match addr.parse::<SocketAddr>() {
+            Ok(socket_addr) => return Ok(Self::Literal(socket_addr)),
+            Err(error) => error,
+        };
+        match addr
+            .rsplit_once(':')
+            .and_then(|(host, port)| Some((host, port.parse().ok()?)))
+        {
+            Some((host, port)) => Ok(Self::Name(host, port)),
+            None => Err(crate::error::Error::CfgParseSockAddr {
+                string: addr.to_string(),
+                source: parse_error,
+            }),
+        }
+    }
+}
+
 /// Resolve `addr` to every candidate it names.
 ///
 /// A literal `ip:port` short-circuits; anything else goes to the system
-/// resolver. Only [`resolve_addrs_async`] asks the configured DNS servers
-/// first.
+/// resolver, once. Only [`resolve_addrs_async`] asks the configured DNS
+/// servers first.
 #[inline]
 pub fn resolve_addrs(addr: &str) -> Result<ResolvedAddrs> {
-    // The literal case returns here; otherwise the parse error is kept as the
-    // failure reported below, so a caller sees what it asked for rather than a
-    // resolver's internal complaint.
-    let parse_error = match addr.parse::<SocketAddr>() {
-        Ok(socket_addr) => return Ok(ResolvedAddrs::from(socket_addr)),
-        Err(error) => error,
+    let (host, port) = match Target::of(addr)? {
+        Target::Literal(literal) => return Ok(ResolvedAddrs::from(literal)),
+        Target::Name(host, port) => (host, port),
     };
-
-    let system = || match std::net::ToSocketAddrs::to_socket_addrs(addr) {
-        Ok(addrs) => addrs.collect(),
-        Err(_) => Vec::new(),
-    };
-
-    let addrs = if addr.starts_with("localhost:") {
-        system()
-    } else {
-        match crate::addr::get_socket_addrs(addr) {
-            Ok(addrs) if !addrs.is_empty() => addrs,
-            _ => system(),
-        }
-    };
-    ResolvedAddrs::new(addr, addrs, parse_error)
+    let lookup = std::net::ToSocketAddrs::to_socket_addrs(&(host, port));
+    ResolvedAddrs::looked_up(addr, lookup.map(Iterator::collect))
 }
 
 /// Async counterpart of [`resolve_addrs`], for Tokio contexts.
 pub async fn resolve_addrs_async(addr: &str) -> Result<ResolvedAddrs> {
-    let parse_error = match addr.parse::<SocketAddr>() {
-        Ok(socket_addr) => return Ok(ResolvedAddrs::from(socket_addr)),
-        Err(error) => error,
+    let (host, port) = match Target::of(addr)? {
+        Target::Literal(literal) => return Ok(ResolvedAddrs::from(literal)),
+        Target::Name(host, port) => (host, port),
     };
-
-    async fn system(addr: &str) -> Vec<SocketAddr> {
-        match tokio::net::lookup_host(addr).await {
-            Ok(addrs) => addrs.collect(),
-            Err(_) => Vec::new(),
-        }
+    if host != "localhost"
+        && let Ok(ips) = crate::addr::get_ip_addrs_async(host).await
+        && let Some(addrs) = ResolvedAddrs::from_candidates(
+            ips.into_iter()
+                .map(|ip| SocketAddr::new(ip, port))
+                .collect(),
+        )
+    {
+        return Ok(addrs);
     }
-
-    let addrs = if addr.starts_with("localhost:") {
-        system(addr).await
-    } else {
-        match crate::addr::get_socket_addrs_async(addr).await {
-            Ok(addrs) if !addrs.is_empty() => addrs,
-            _ => system(addr).await,
-        }
-    };
-    ResolvedAddrs::new(addr, addrs, parse_error)
+    let lookup = tokio::net::lookup_host((host, port)).await;
+    ResolvedAddrs::looked_up(addr, lookup.map(Iterator::collect))
 }
 
 const PB_MAPPER_SERVER: &str = "PB_MAPPER_SERVER";
@@ -660,6 +665,28 @@ mod tests {
     fn resolve_addrs_fails_when_nothing_can_be_resolved() {
         assert!(resolve_addrs("127.0.0.1").is_err(), "no port");
         assert!(resolve_addrs("localhost").is_err(), "no port");
+    }
+
+    /// A name that does not resolve reports the resolver's reason, not the
+    /// parse error a malformed address gets, which would send whoever has to
+    /// fix it to the address's syntax. A NUL byte fails every resolver before
+    /// a query is sent.
+    #[tokio::test]
+    async fn a_name_that_does_not_resolve_reports_the_resolvers_reason() {
+        let blocking = resolve_addrs("bad\0name:7666").expect_err("a NUL never resolves");
+        let asynchronous = resolve_addrs_async("bad\0name:7666")
+            .await
+            .expect_err("a NUL never resolves");
+        for error in [blocking, asynchronous] {
+            assert!(
+                matches!(error, crate::error::Error::CfgResolveSockAddr { .. }),
+                "{error:?}"
+            );
+        }
+        assert!(matches!(
+            resolve_addrs_async("localhost").await,
+            Err(crate::error::Error::CfgParseSockAddr { .. })
+        ));
     }
 
     /// The async path is the one the tunnels use, and has to agree with the

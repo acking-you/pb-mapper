@@ -76,6 +76,13 @@ pub enum Error {
         string: String,
         source: AddrParseError,
     },
+    /// A well-formed `host:port` whose host did not resolve. The reason is in
+    /// the message too: the CLI and the app show this one only by its message.
+    #[snafu(display("failed to resolve `{string}`: {source}"))]
+    CfgResolveSockAddr {
+        string: String,
+        source: std::io::Error,
+    },
     #[snafu(display("`PB_MAPPER_SERVER` env not set"))]
     CfgPbServerEnvNotExist { source: VarError },
 }
@@ -115,6 +122,7 @@ impl Error {
             | Error::MsgCodec { .. }
             | Error::MsgProtocol { .. }
             | Error::CfgParseSockAddr { .. }
+            | Error::CfgResolveSockAddr { .. }
             | Error::CfgPbServerEnvNotExist { .. } => false,
         }
     }
