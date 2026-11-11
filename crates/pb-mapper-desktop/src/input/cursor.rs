@@ -111,7 +111,7 @@ impl CursorShape {
     /// `MAX_SIDE` a side is scaled down to fit, its hotspot with it, and a
     /// hotspot outside the image is moved to its nearest edge.
     #[cfg_attr(
-        not(any(windows, test)),
+        not(any(windows, target_os = "macos", test)),
         expect(dead_code, reason = "for the platforms that read pointer bitmaps")
     )]
     pub(crate) fn fitted(
@@ -176,7 +176,7 @@ impl CursorShape {
 /// pixel's box, colours weighted by their alpha so that transparent pixels
 /// add no dark fringe.
 #[cfg_attr(
-    not(any(windows, test)),
+    not(any(windows, target_os = "macos", test)),
     expect(dead_code, reason = "for the platforms that read pointer bitmaps")
 )]
 fn shrink(rgba: &[u8], from: (u32, u32), to: (u32, u32)) -> Vec<u8> {

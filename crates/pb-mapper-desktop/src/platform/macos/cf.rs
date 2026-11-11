@@ -58,6 +58,12 @@ unsafe extern "C" {
 /// `RTLD_DEFAULT`: every image loaded.
 const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
 
+/// The address of function `name`, where this system has it.
+pub(crate) fn function(name: &CStr) -> Option<std::ptr::NonNull<c_void>> {
+    // SAFETY: a lookup; nothing is called.
+    std::ptr::NonNull::new(unsafe { dlsym(RTLD_DEFAULT, name.as_ptr()) })
+}
+
 /// The CF string constant `name` of a system newer than the app's oldest:
 /// looked up when used, so the library loads where the symbol is missing.
 pub(crate) fn symbol(name: &CStr) -> Option<&'static CFString> {

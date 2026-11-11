@@ -1,5 +1,6 @@
 //! The macOS host: ScreenCaptureKit capture fused with a VideoToolbox
-//! encoder, `CGEvent` injection and the pointer, Core Graphics display
+//! encoder, `CGEvent` injection (physical keys too), the pointer and its
+//! shape, Core Graphics display
 //! modes changed for this app only, ScreenCaptureKit stills; Screen
 //! Recording and Accessibility (event posting) as the permissions the owner
 //! grants; App Nap held off while a session captures; a Keychain key for
@@ -22,6 +23,8 @@ pub(crate) mod geometry;
 pub(crate) mod keys;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod mode_list;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod pixels;
 
 #[cfg(target_os = "macos")]
 mod capture;
