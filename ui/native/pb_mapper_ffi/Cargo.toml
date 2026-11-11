@@ -51,6 +51,13 @@ bytes = { workspace = true, optional = true }
 [target.'cfg(target_os = "android")'.dependencies]
 jni.workspace = true
 
+# Dart opens this library with dlopen after startup. mimalloc's default
+# initial-exec TLS must then fit the little static TLS glibc keeps for late
+# libraries, and with this library's thread locals it does not: the load
+# fails with "cannot allocate memory in static TLS block".
+[target.'cfg(target_os = "linux")'.dependencies]
+better_mimalloc_rs = { workspace = true, features = ["local_dynamic_tls"] }
+
 [dev-dependencies]
 # A live relay for the Relay page's calls; see src/relay.rs.
 pb-mapper-testkit.workspace = true
