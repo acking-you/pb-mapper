@@ -38,6 +38,10 @@ impl Router {
         // and a rate token until this subscription replaced it.
         let is_new_subscription =
             !self.pending_streams.contains(&conn_id) && pinned_provider.is_none();
+        // One that has excluded registrations is recovering and may wait for
+        // a replacement. A pinned one can take none, since only its pin is a
+        // candidate: it is refused once that cannot serve it.
+        let awaits_replacement = !excluded_server_conns.is_empty() && pinned_provider.is_none();
         if is_new_subscription
             && !self
                 .pending_streams
@@ -57,13 +61,7 @@ impl Router {
                 server_connections = registered_server_conn_count(&self.server_conn_map),
                 "subscribe key is not registered"
             );
-            reject_subscribe(
-                &conn_sender,
-                &key,
-                conn_id,
-                reason,
-                !excluded_server_conns.is_empty(),
-            );
+            reject_subscribe(&conn_sender, &key, conn_id, reason, awaits_replacement);
             return;
         };
         // A direct setup that ended before its grant already paid for
@@ -206,13 +204,7 @@ impl Router {
                 server_connections = registered_server_conn_count(&self.server_conn_map),
                 "no usable server connection for subscribe"
             );
-            reject_subscribe(
-                &conn_sender,
-                &key,
-                conn_id,
-                reason,
-                !excluded_server_conns.is_empty(),
-            );
+            reject_subscribe(&conn_sender, &key, conn_id, reason, awaits_replacement);
         }
     }
 
@@ -553,8 +545,9 @@ impl SubscribeRefusal {
     }
 }
 
-/// Tell a subscriber that no registration can serve it: a retry when it is
-/// recovering from registrations it already excluded, a failure otherwise.
+/// Tell a subscriber that no registration can serve it: a retry when it may
+/// wait for a replacement of registrations it already excluded, a failure
+/// otherwise.
 fn reject_subscribe(
     conn_sender: &ConnTaskSender,
     key: &ImutableKey,

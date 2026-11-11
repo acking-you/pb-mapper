@@ -743,6 +743,108 @@ mod tests {
         drop(auth);
     }
 
+    /// A direct setup's fallback to the relay is pinned to the registration
+    /// and generation its grant named, so no replacement can serve it. Once
+    /// its subscribe has given that registration up, or the registration is
+    /// gone, it is refused as a subscribe pinned to one that never existed
+    /// is, not told to wait for a replacement until its recovery deadline.
+    #[tokio::test]
+    async fn a_pinned_subscribe_is_refused_once_its_provider_cannot_serve_it() {
+        use crate::ConnTask;
+
+        let state_dir = TempPath::new("pinned-subscribe");
+        let auth = AuthRuntime::from_isolated_state(AuthConfig {
+            state_dir: state_dir.to_path_buf(),
+            ..AuthConfig::default()
+        })
+        .await
+        .unwrap();
+        let mut router = Router::new(
+            TaskManager::new(),
+            direct::DirectState::new(None),
+            ServerSecurity::new(auth.clone()),
+            None,
+            RoutingConfig::from_env(),
+            Instant::now(),
+        );
+        let key: ImutableKey = crate::compose_service_key(0, "echo");
+        let provider = router.manager.get_conn_id(std::iter::empty()).unwrap();
+        let (provider_sender, provider_mailbox) = kanal::bounded_async(MAILBOX_CAPACITY);
+        let _ = router.handle(ManagerTask::Register {
+            key: key.clone(),
+            conn_id: provider,
+            need_codec: false,
+            is_datagram: false,
+            protocol_version: CONTROL_PROTOCOL_V2,
+            conn_sender: provider_sender,
+            retire_token: CancellationToken::new(),
+            direct: None,
+        });
+        let Ok(Some(ConnTask::RegisterResp { generation, .. })) = provider_mailbox.try_recv()
+        else {
+            panic!("the provider was not registered");
+        };
+        let pin = (provider, generation);
+
+        let subscriber = router.manager.get_conn_id(std::iter::empty()).unwrap();
+        let (subscriber_sender, subscriber_mailbox) = kanal::bounded_async(MAILBOX_CAPACITY);
+        let subscribe = |router: &mut Router, selected, excluded_server_conns| {
+            let _ = router.handle(ManagerTask::Subcribe {
+                key: key.clone(),
+                conn_id: subscriber,
+                conn_sender: subscriber_sender.clone(),
+                excluded_server_conns,
+                selected: Some(selected),
+            });
+            match subscriber_mailbox.try_recv() {
+                Ok(Some(answer)) => answer,
+                other => panic!("the subscribe was not answered: {other:?}"),
+            }
+        };
+
+        // What a subscribe pinned to a registration that does not exist hears.
+        let ConnTask::SubcribeFailed {
+            code: missing,
+            retryable: true,
+            ..
+        } = subscribe(&mut router, (provider, generation + 1), Vec::new())
+        else {
+            panic!("a subscribe pinned to no registration was not refused");
+        };
+
+        // The pinned registration takes the stream request, and never
+        // acknowledges it: the subscribe suspects it and asks again without it.
+        assert!(matches!(
+            subscribe(&mut router, pin, Vec::new()),
+            ConnTask::SubcribeResp { .. }
+        ));
+        let _ = router.handle(ManagerTask::SuspectServerConn {
+            key: key.clone(),
+            conn_id: provider,
+            generation,
+        });
+        let answer = subscribe(&mut router, pin, vec![pin]);
+        assert!(
+            matches!(&answer, ConnTask::SubcribeFailed { code, retryable: true, .. } if *code == missing),
+            "a pinned subscribe whose provider was suspected heard {answer:?}"
+        );
+
+        // Its registration ends.
+        let _ = router.handle(ManagerTask::DeRegisterServerConn {
+            key: key.clone(),
+            conn_id: provider,
+        });
+        let answer = subscribe(&mut router, pin, vec![pin]);
+        assert!(
+            matches!(&answer, ConnTask::SubcribeFailed { code, retryable: true, .. } if *code == missing),
+            "a pinned subscribe whose provider is gone heard {answer:?}"
+        );
+
+        drop(router);
+        auth.shutdown_actor().await;
+        drop(auth);
+    }
+
     /// The capacity of a connection's `ConnTask` mailbox; the value does not
     /// matter here.
     const MAILBOX_CAPACITY: usize = 8;

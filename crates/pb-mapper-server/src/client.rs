@@ -89,7 +89,8 @@ const DEFAULT_CLIENT_CHAN_CAP: usize = 32;
 ///
 /// `selected` pins the registration and generation a direct setup's relay
 /// fallback was granted; a plain subscription leaves the choice to the manager.
-/// The function's name is its span's name in the logs.
+/// A pinned one waits for no replacement: the manager refuses it once its pin
+/// cannot serve it. The function's name is its span's name in the logs.
 #[instrument(skip(lease, task_sender, conn, session), fields(conn_id = %lease.conn_id()))]
 pub(super) async fn handle_client_conn_selected(
     key: ImutableKey,
