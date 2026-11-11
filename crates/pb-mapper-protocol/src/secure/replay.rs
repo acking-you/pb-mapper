@@ -183,8 +183,23 @@ impl Admission {
 
 pub(super) struct ReplayGuard {
     admissions: Arc<Mutex<Admissions>>,
-    /// Takes reservations to the log's writer; `None` when nothing is logged.
-    writer: Option<mpsc::Sender<Reservation>>,
+    /// The log's writer; `None` when nothing is logged.
+    writer: Option<Writer>,
+}
+
+/// The way to the log's writer, and the thread it runs on.
+struct Writer {
+    queue: mpsc::Sender<Queued>,
+    /// Taken by whoever closes the guard, to wait for the thread's end;
+    /// `None` too when the thread could not be started.
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+/// What the writer is sent.
+enum Queued {
+    Reservation(Reservation),
+    /// The guard is closed: nothing follows.
+    Close,
 }
 
 /// What admitting checks and reserves, all under one lock.
@@ -208,6 +223,8 @@ struct Admissions {
     /// The log may hold what was never admitted, or lack what was: every
     /// admission is refused from now on.
     log_failed: bool,
+    /// The guard is closed: every admission is refused from now on.
+    closed: bool,
 }
 
 /// An admission on its way to the log, and what it took from the budgets.
@@ -275,6 +292,7 @@ impl ReplayGuard {
             total_started_at: now,
             max_total: configured.min(bloom_insert_capacity(bytes)),
             log_failed: false,
+            closed: false,
         };
         let Some(path) = log_path else {
             return Self {
@@ -284,7 +302,7 @@ impl ReplayGuard {
         };
         load_persisted(&path, &mut admissions);
         let admissions = Arc::new(Mutex::new(admissions));
-        let (writer, queue) = mpsc::channel();
+        let (sender, queue) = mpsc::channel();
         let log = LogWriter {
             path: path.clone(),
             admissions: admissions.clone(),
@@ -298,13 +316,36 @@ impl ReplayGuard {
         let started = std::thread::Builder::new()
             .name("pb-mapper-replay-log".into())
             .spawn(move || tracing::dispatcher::with_default(&dispatch, || log.run(queue)));
-        if let Err(error) = started {
-            admissions.lock().log_failed = true;
-            log_unavailable(&path, "start its writer", &error, None);
-        }
+        let thread = match started {
+            Ok(thread) => Some(thread),
+            Err(error) => {
+                admissions.lock().log_failed = true;
+                log_unavailable(&path, "start its writer", &error, None);
+                None
+            }
+        };
         Self {
             admissions,
-            writer: Some(writer),
+            writer: Some(Writer {
+                queue: sender,
+                thread: Mutex::new(thread),
+            }),
+        }
+    }
+
+    /// Refuses every admission from now on, and returns once the log's writer
+    /// has logged what was queued and ended. Nothing of this guard touches
+    /// the log after, so whoever opens it next has it alone.
+    pub(super) fn close(&self) {
+        self.admissions.lock().closed = true;
+        let Some(writer) = &self.writer else {
+            return;
+        };
+        // Behind every reservation: each is sent under the lock just held.
+        let _ = writer.queue.send(Queued::Close);
+        if let Some(thread) = writer.thread.lock().take() {
+            // A writer that panicked has ended too.
+            let _ = thread.join();
         }
     }
 
@@ -361,7 +402,7 @@ impl ReplayGuard {
         fingerprint: &[u8; FINGERPRINT_LEN],
         now: u64,
     ) -> Admission {
-        if admissions.log_failed {
+        if admissions.log_failed || admissions.closed {
             return Admission::Answered(FirstFlightAdmit::Unavailable);
         }
         if let Some(key_id) = key_id {
@@ -383,8 +424,10 @@ impl ReplayGuard {
             total_started_at: admissions.total_started_at,
             answer,
         };
-        if let Err(mpsc::SendError(reservation)) = writer.send(reservation) {
-            // Only a panic stops the writer while this guard lives.
+        if let Err(mpsc::SendError(Queued::Reservation(reservation))) =
+            writer.queue.send(Queued::Reservation(reservation))
+        {
+            // Only a panic stops the writer of a guard that is not closed.
             admissions.pending.remove(fingerprint);
             admissions.release(reservation.count, reservation.total_started_at);
             admissions.log_failed = true;
@@ -396,6 +439,14 @@ impl ReplayGuard {
             return Admission::Answered(FirstFlightAdmit::Unavailable);
         }
         Admission::Logging(answered)
+    }
+}
+
+/// A guard let go without being closed still ends its writer before
+/// whoever dropped it can open the log again.
+impl Drop for ReplayGuard {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -513,13 +564,25 @@ struct LogWriter {
 }
 
 impl LogWriter {
-    /// Until the guard is dropped: wait for a reservation, then log it with
+    /// Until the guard is closed: wait for a reservation, then log it with
     /// every other one queued by then.
-    fn run(mut self, queue: mpsc::Receiver<Reservation>) {
-        while let Ok(first) = queue.recv() {
+    fn run(mut self, queue: mpsc::Receiver<Queued>) {
+        while let Ok(Queued::Reservation(first)) = queue.recv() {
             self.batch.push(first);
-            self.batch.extend(queue.try_iter().take(MAX_BATCH - 1));
+            let mut closed = false;
+            for queued in queue.try_iter().take(MAX_BATCH - 1) {
+                match queued {
+                    Queued::Reservation(reservation) => self.batch.push(reservation),
+                    Queued::Close => {
+                        closed = true;
+                        break;
+                    }
+                }
+            }
             self.write_batch();
+            if closed {
+                return;
+            }
         }
     }
 

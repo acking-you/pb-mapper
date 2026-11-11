@@ -294,6 +294,9 @@ pub async fn run_server_on_listener_with_options(
             .chain(stun_task),
     )
     .await;
+    // The replay log's writer too, before the state directory is let go: a
+    // relay restarted on it in this process must find the log its own.
+    router.security.close_replay_log().await;
     router.security.auth().shutdown_actor().await;
     tracing::info!("Server shutdown completed");
     Ok(())

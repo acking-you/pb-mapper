@@ -665,6 +665,43 @@ fn replay_record(fingerprint: [u8; 32], at: u64) -> Vec<u8> {
     [&fingerprint[..], &at.to_be_bytes()].concat()
 }
 
+/// A closed guard has logged what it admitted and touches the log no more,
+/// though it still lives, as a stopped relay's does in a connection not yet
+/// gone: it refuses what comes after, and the guard opened on the log next
+/// has it alone.
+#[test]
+fn a_closed_replay_guard_leaves_the_log_to_the_next() {
+    let scratch = TempPath::new("replay-closed");
+    let path = scratch.to_path_buf();
+    let now = unix_seconds();
+    let (before, after) = ([21_u8; 32], [22_u8; 32]);
+    let closed = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    assert_eq!(
+        closed.admit(KeyId::from_u64(7), &before, now).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    closed.close();
+    assert_eq!(
+        closed.admit(KeyId::from_u64(7), &after, now).wait(),
+        FirstFlightAdmit::Unavailable
+    );
+
+    let next = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    assert_eq!(
+        next.admit(KeyId::from_u64(7), &before, now).wait(),
+        FirstFlightAdmit::Replayed
+    );
+    assert_eq!(
+        next.admit(KeyId::from_u64(7), &after, now).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    drop(closed);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        [replay_record(before, now), replay_record(after, now)].concat()
+    );
+}
+
 /// A crash in the middle of an append leaves the log's last record cut off.
 /// A relay that restarts on that log drops the cut-off record, whose
 /// admission was never acknowledged, and keeps the records before it: what it
@@ -1297,6 +1334,11 @@ fn a_failing_append_is_logged_once_per_run_of_failures() {
     let now = unix_seconds();
     // The log's writer logs where the code that opened the log does.
     let errors = ErrorPaths::default();
+    // A second collector, kept as long as the first is read. With one alone,
+    // tracing asks whether anyone wants an event of whichever thread meets
+    // its call site first: another test's writer, which logs nowhere, would
+    // then turn this test's events away for the whole process.
+    let _second = tracing::Dispatch::new(ErrorPaths::default());
     let guard = tracing::subscriber::with_default(errors.clone(), || {
         ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
     });

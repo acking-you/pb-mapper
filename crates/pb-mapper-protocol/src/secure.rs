@@ -439,6 +439,16 @@ impl ServerSecurity {
         &self.auth
     }
 
+    /// Refuses protocol-v2 first flights from now on and waits for the replay
+    /// log's writer to end. A relay calls it as it stops, before it lets go
+    /// of its state directory, so that a relay started on that directory
+    /// after, in this process, has the log alone.
+    pub async fn close_replay_log(&self) {
+        let replay = self.replay.clone();
+        // The writer may be in a write or a sync.
+        let _ = tokio::task::spawn_blocking(move || replay.close()).await;
+    }
+
     pub fn record_failure_log(
         &self,
         peer_ip: std::net::IpAddr,
