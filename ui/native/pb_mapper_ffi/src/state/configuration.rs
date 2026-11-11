@@ -319,15 +319,18 @@ fn write_store<T: Serialize>(path: &Path, store: &T, noun: &str) -> Result<(), C
 /// dangling link).
 ///
 /// - **Atomic**, so a crash leaves the old file or the new one, never a torn
-///   one: core's `replace_contents`, a new file renamed over the old, which
-///   keeps the old one's mode. That is a new file, and an existing one with a
-///   single name that this user may write, in a directory that takes a new
-///   file and lets it replace the old.
+///   one: core's `replace_contents`, a new file renamed over the old. The new
+///   file keeps the old one's mode but is this user's, and on Windows takes
+///   its directory's inherited permissions. That is a new file, and an
+///   existing one this user may write that has a single name and, on unix,
+///   is this user's, in a directory that takes a new file and lets it
+///   replace the old.
 /// - **In place**, as 0.11.0 wrote, so a crash can cut the file short: a file
-///   with more than one name (a hard link, which unix can tell; on Windows it
-///   is replaced, and its other names keep the old contents), a directory
-///   that takes no new file, and a file the rename may not replace (refused,
-///   a mount point, or on another device).
+///   with more than one name (a hard link) or another user's that this user
+///   may write, both on unix (Windows replaces them: a hard link's other
+///   names keep the old contents, and another user's file becomes this
+///   user's), a directory that takes no new file, and a file the rename may
+///   not replace (refused, a mount point, or on another device).
 /// - **Refused**: an existing file this user may not open for writing, such
 ///   as a read-only one or another user's.
 ///
@@ -345,9 +348,12 @@ fn replace_contents(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // Opened for writing first, so a file `fs::write` refuses is refused
     // here too rather than replaced by one this user owns.
     match fs::OpenOptions::new().write(true).open(&target) {
-        Ok(file) if has_other_names(&file)? => {
+        Ok(file) if stays_in_place(&file)? => {
             drop(file);
-            tracing::debug!("Saving {} in place, it has other names", path.display());
+            tracing::debug!(
+                "Saving {} in place, a replacement would not be the same file",
+                path.display()
+            );
             return fs::write(&target, bytes);
         }
         Ok(_) => {}
@@ -390,17 +396,24 @@ fn writes_in_place(failure: &durable_file::ReplaceError) -> bool {
     }
 }
 
-/// Whether `file` has a name besides the one it was opened by: a hard link.
+/// Whether only an in-place write keeps `file` the same file: it has a name
+/// besides the one it was opened by (a hard link), or another user owns it,
+/// whose file a replacement, being this user's, would take away.
 #[cfg(unix)]
-fn has_other_names(file: &fs::File) -> io::Result<bool> {
+fn stays_in_place(file: &fs::File) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
-    Ok(file.metadata()?.nlink() > 1)
+    unsafe extern "C" {
+        /// The effective user, which owns a file this process creates.
+        safe fn geteuid() -> u32;
+    }
+    let metadata = file.metadata()?;
+    Ok(metadata.nlink() > 1 || metadata.uid() != geteuid())
 }
 
-/// Whether `file` has a name besides the one it was opened by: on Windows,
-/// where stable Rust cannot read the link count, never.
+/// Whether only an in-place write keeps `file` the same file: on Windows,
+/// where stable Rust can read neither its link count nor its owner, never.
 #[cfg(not(unix))]
-fn has_other_names(_: &fs::File) -> io::Result<bool> {
+fn stays_in_place(_: &fs::File) -> io::Result<bool> {
     Ok(false)
 }
 
@@ -510,6 +523,27 @@ mod tests {
         replace_contents(&path, b"second").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"second");
         assert_eq!(fs::read(&other).unwrap(), b"second");
+    }
+
+    /// Another user's file this user may write is written in place, so it
+    /// stays that user's, as 0.11.0's write left it, rather than becoming
+    /// this user's. Only root can give a file away; elsewhere this checks
+    /// nothing.
+    #[cfg(unix)]
+    #[test]
+    fn another_users_file_stays_theirs() {
+        use std::os::unix::fs::MetadataExt;
+        /// `nobody` on Linux.
+        const OTHER: u32 = 65534;
+        let root = TempRoot::new("replace-owner");
+        let path = root.path().join("config.json");
+        fs::write(&path, b"old").unwrap();
+        if std::os::unix::fs::chown(&path, Some(OTHER), None).is_err() {
+            return;
+        }
+        replace_contents(&path, b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::metadata(&path).unwrap().uid(), OTHER);
     }
 
     /// A file this user may not write is refused, as an in-place write
