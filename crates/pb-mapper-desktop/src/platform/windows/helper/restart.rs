@@ -85,10 +85,60 @@ fn wait_for_exit(parent: u32, ready: impl FnOnce() -> Result<()>) -> Result<()> 
     Ok(())
 }
 
-#[cfg(all(test, feature = "windows-helper"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A child the app starts as it starts this helper and the update
+    /// hand-off, through `std::process::Command`, which hands a child every
+    /// handle marked inheritable, must not keep a listener the app closed:
+    /// its port is free again while the child still runs. Tokio's sockets
+    /// come from mio, whose Windows sockets a child inherited before 1.2.1;
+    /// pb-mapper's own listeners come from `socket2`.
+    #[tokio::test]
+    async fn a_child_keeps_no_listener_the_app_closed() {
+        use std::os::windows::process::CommandExt;
+
+        /// Ends the child however the test ends.
+        struct Reaped(std::process::Child);
+        impl Drop for Reaped {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let loopback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+        let tokio_listener = tokio::net::TcpListener::bind(loopback).await.unwrap();
+        let own_listener = pb_mapper_core::listener::bind(loopback).unwrap();
+        let ports = [
+            ("Tokio's", tokio_listener.local_addr().unwrap()),
+            ("pb-mapper's", own_listener.local_addr().unwrap()),
+        ];
+        // It only waits, for far longer than the test takes.
+        let mut child = Reaped(
+            std::process::Command::new("ping.exe")
+                .args(["-n", "60", "127.0.0.1"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW.0)
+                .spawn()
+                .unwrap(),
+        );
+        drop((tokio_listener, own_listener));
+        for (whose, port) in ports {
+            if let Err(error) = std::net::TcpListener::bind(port) {
+                panic!("{whose} closed listener still holds {port} in the child: {error}");
+            }
+        }
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "the child ran throughout"
+        );
+    }
+
+    #[cfg(feature = "windows-helper")]
     #[test]
     fn replacement_waits_for_the_original_process_and_requires_acknowledgement() {
         use std::os::windows::process::CommandExt;
