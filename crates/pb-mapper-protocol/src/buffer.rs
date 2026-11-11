@@ -6,10 +6,18 @@ use tokio::io::AsyncReadExt;
 use pb_mapper_core::error::MsgNetworkReadBufferdRawDataSnafu;
 
 const INIT_BUF_SIZE: usize = 8 * 1024;
-/// The largest read handed on in one piece. An encrypting forwarder sends each
-/// read as one frame, so a read holds at most what one frame the peer accepts
-/// carries.
-const MAX_BUF_SIZE: usize = crate::MAX_PLAINTEXT_LEN as usize;
+/// The largest read handed on in one piece, and so the largest frame an
+/// encrypting forwarder sends; frames a peer sends are read up to
+/// `MAX_PLAINTEXT_LEN` whatever this is. A reader keeps the buffer of its
+/// largest read, and of its largest frame, until its stream ends: between
+/// peers of this version, this is the most a direction of an idle tunnel holds
+/// after a burst. 64 KiB cost QUIC throughput; see
+/// `docs/benchmarks/2026-11-11-refactor/open-items-relay.md`.
+const MAX_BUF_SIZE: usize = 1024 * 1024;
+const _: () = assert!(
+    MAX_BUF_SIZE <= crate::MAX_PLAINTEXT_LEN as usize,
+    "a forwarder's frame is one its peer reads"
+);
 
 pub struct CommonBuffer {
     buffer: Vec<u8>,
