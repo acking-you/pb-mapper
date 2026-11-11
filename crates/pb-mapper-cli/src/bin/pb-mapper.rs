@@ -132,6 +132,33 @@ async fn run_status(args: StatusArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Resolves when this process is asked to stop: Ctrl-C, or on unix SIGTERM,
+/// which `docker stop` and `systemctl stop` send. Without a handler SIGTERM
+/// ends a role before it cleans up (a tunnel's router mapping stays behind),
+/// and a container's first process ignores it until it is killed. Listening
+/// starts here, so a request that comes while the role starts is kept.
+fn stop_requests() -> std::io::Result<impl Future<Output = ()>> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        Ok(async move {
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+            }
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let mut interrupt = tokio::signal::windows::ctrl_c()?;
+        Ok(async move {
+            interrupt.recv().await;
+        })
+    }
+}
+
 fn parse_duration(raw: &str) -> Result<Duration, String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -270,6 +297,24 @@ mod tests {
             "--force",
         ])
         .expect("administrator namespace registration flags should parse");
+    }
+
+    /// SIGTERM, which `docker stop` and `systemctl stop` send, asks a role
+    /// to stop as Ctrl-C does, rather than ending it before it cleans up, or,
+    /// as a container's first process, being ignored until it is killed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigterm_asks_a_role_to_stop() {
+        unsafe extern "C" {
+            safe fn getpid() -> i32;
+            safe fn kill(pid: i32, signal: i32) -> i32;
+        }
+        const SIGTERM: i32 = 15;
+        let stop = stop_requests().unwrap();
+        assert_eq!(kill(getpid(), SIGTERM), 0);
+        tokio::time::timeout(Duration::from_secs(10), stop)
+            .await
+            .expect("SIGTERM asks the role to stop");
     }
 
     #[test]

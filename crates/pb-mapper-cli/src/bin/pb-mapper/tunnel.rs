@@ -12,6 +12,8 @@ use pb_mapper_client::sdk::{
 };
 use pb_mapper_core::config::{keep_alive_from_env, pb_mapper_server_addr};
 
+use crate::stop_requests;
+
 #[derive(Debug, Args)]
 pub(super) struct RegisterArgs {
     /// Keep every session to this service on the relay; refuse direct ones.
@@ -220,6 +222,7 @@ fn tunnel_client(relay: &RelayArgs, namespace: Option<u64>) -> Result<Client, Bo
 }
 
 pub(super) async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
+    let stop = stop_requests()?;
     let client = tunnel_client(&args.relay, args.namespace)?;
     let registration = client
         .register_with_options(
@@ -240,6 +243,7 @@ pub(super) async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error
         )
         .await?;
     monitor_tunnel(
+        stop,
         &client,
         registration.subscribe(),
         registration.subscribe_events(),
@@ -252,6 +256,7 @@ pub(super) async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error
 }
 
 pub(super) async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
+    let stop = stop_requests()?;
     let client = tunnel_client(&args.relay, args.namespace)?;
     let connection = client
         .connect_with_options(
@@ -273,6 +278,7 @@ pub(super) async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>>
         )
         .await?;
     monitor_tunnel(
+        stop,
         &client,
         connection.subscribe(),
         connection.subscribe_events(),
@@ -291,6 +297,7 @@ pub(super) async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>>
 /// state, recent events, and the direct link's setup timings and candidate
 /// counts, which a LAN-first A/B compares.
 async fn monitor_tunnel(
+    stop: impl Future<Output = ()>,
     client: &Client,
     mut status: tokio::sync::watch::Receiver<TunnelStatus>,
     mut events: TunnelEvents,
@@ -299,9 +306,10 @@ async fn monitor_tunnel(
 ) -> Result<(), Box<dyn Error>> {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // One listener for the whole loop: one made per pass would be gone while
-    // a pass logs, and a Ctrl-C arriving then would be lost.
-    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
+    // One listener for the whole run, made before the tunnel started: one
+    // made per pass would be gone while a pass logs, and a request to stop
+    // arriving then would be lost.
+    let mut stop = std::pin::pin!(stop);
     let mut events_open = true;
     loop {
         let state = status.borrow_and_update().clone();
@@ -313,7 +321,7 @@ async fn monitor_tunnel(
         // Unbiased: a backlog of events, ready on every pass, must not keep
         // the metrics tick from its turn.
         tokio::select! {
-            result = &mut ctrl_c => { result?; return Ok(()); },
+            () = &mut stop => return Ok(()),
             result = status.changed() => { if result.is_err() { return Ok(()); } },
             event = events.recv(), if events_open => match event {
                 Some(Ok(event)) => match &event.kind {

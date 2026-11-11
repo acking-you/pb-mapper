@@ -18,7 +18,7 @@ use pb_mapper_core::config::keep_alive_from_env;
 use pb_mapper_server::DirectServerConfig;
 use tokio_util::sync::CancellationToken;
 
-use crate::parse_duration;
+use crate::{parse_duration, stop_requests};
 
 #[derive(Debug, Args)]
 pub(super) struct ServerArgs {
@@ -154,6 +154,7 @@ fn server_auth_config(args: &ServerArgs) -> Result<AuthConfig, ServerFlagError> 
 }
 
 pub(super) async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
+    let stop = stop_requests()?;
     let auth_config = server_auth_config(&args)?;
     let admin_key_path = pb_mapper_auth::admin_key_path(&auth_config.state_dir);
     if args.init_admin_key {
@@ -202,10 +203,34 @@ pub(super) async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
     };
     let auth = pb_mapper_auth::AuthRuntime::from_process(auth_config).await?;
     let listener = pb_mapper_core::listener::bind(SocketAddr::new(ip_addr, args.port))?;
-    pb_mapper_server::run_server_on_listener_with_options(
-        listener, shutdown, None, keep_alive, auth, options,
-    )
-    .await?;
+    let relay = pb_mapper_server::run_server_on_listener_with_options(
+        listener,
+        shutdown.clone(),
+        None,
+        keep_alive,
+        auth,
+        options,
+    );
+    let mut relay = std::pin::pin!(relay);
+    tokio::select! {
+        result = &mut relay => return Ok(result?),
+        () = stop => {}
+    }
+    // Closes its connections and its authentication state, and frees its
+    // ports, before the process ends.
+    tracing::info!(
+        event = "relay_stopping",
+        "asked to stop; stopping the relay"
+    );
+    shutdown.cancel();
+    let again = stop_requests()?;
+    tokio::select! {
+        result = &mut relay => result?,
+        () = again => tracing::warn!(
+            event = "relay_stopped_at_once",
+            "asked to stop again; not waiting for the relay to finish"
+        ),
+    }
     Ok(())
 }
 
