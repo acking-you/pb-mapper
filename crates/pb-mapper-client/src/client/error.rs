@@ -67,6 +67,14 @@ pub enum Error {
         action: &'static str,
         timeout: Duration,
     },
+    /// A stream's setup deadline passed while its subscription was still
+    /// being retried: `source` is why the last attempt that failed by itself
+    /// failed, such as the relay refusing the connection.
+    #[snafu(display("control io `subscribe` timed out after {timeout:?}"))]
+    SubscribeTimedOut {
+        timeout: Duration,
+        source: Box<Error>,
+    },
 }
 
 impl Error {
@@ -92,7 +100,8 @@ impl Error {
             | Self::DecodeSubcribeResp { .. }
             | Self::SubcribeRespNotMatch { .. }
             | Self::CreateHeaderTool { .. }
-            | Self::ControlIoTimeout { .. } => None,
+            | Self::ControlIoTimeout { .. }
+            | Self::SubscribeTimedOut { .. } => None,
         }
     }
 
@@ -116,7 +125,8 @@ impl Error {
             | Self::DecodeSubcribeResp { .. }
             | Self::SubcribeRespNotMatch { .. }
             | Self::CreateHeaderTool { .. }
-            | Self::ControlIoTimeout { .. } => false,
+            | Self::ControlIoTimeout { .. }
+            | Self::SubscribeTimedOut { .. } => false,
         }
     }
 }

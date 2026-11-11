@@ -451,7 +451,9 @@ pub(crate) async fn run_owned_stream(
             Some(_) = ready.recv() => status(&WorkerStatus::Connected),
             result = &mut forward => {
                 if let Err(error) = result {
-                    status(&WorkerStatus::Failed(Some(error.to_string())));
+                    // Its causes too: the error names the step that failed,
+                    // and this text is all the caller learns of why.
+                    status(&WorkerStatus::Failed(Some(error::with_causes(&error))));
                 }
                 break;
             }

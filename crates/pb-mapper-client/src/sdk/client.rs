@@ -611,4 +611,38 @@ mod tests {
         );
         assert!(matches!(temporary.admin(), Err(Error::NotAdministrator)));
     }
+
+    /// A stream whose relay refuses every connection until its setup
+    /// deadline fails with why, not only with the deadline: the reason a
+    /// `connect_tcp` caller gets names the refusal the operating system gave.
+    #[tokio::test]
+    async fn an_unreachable_relay_fails_connect_tcp_with_its_cause() {
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = closed.local_addr().unwrap();
+        drop(closed);
+        let refused = TcpStream::connect(relay).await.unwrap_err().to_string();
+        let client = Client::from_credential(
+            relay.to_string(),
+            Credential::Admin(TEST_ADMIN_KEY_BYTES),
+            false,
+            None,
+        );
+        let (_stream, connection) = client
+            .connect_tcp(
+                "unreachable",
+                ConnectOptions {
+                    path: PathPolicy::RelayOnly,
+                    ..ConnectOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        let ready = connection
+            .wait_ready_timeout(std::time::Duration::from_secs(30))
+            .await;
+        let Err(Error::TunnelFailed { reason }) = ready else {
+            panic!("expected a failed tunnel, got {ready:?}");
+        };
+        assert!(reason.contains(&refused), "{reason}");
+    }
 }

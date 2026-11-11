@@ -162,7 +162,9 @@ struct Subscription<'a> {
 impl Subscription<'_> {
     /// Subscribe, retrying the failures a fresh attempt can fix until
     /// `deadline`, which is `budget` after the stream's setup began. Answers
-    /// the subscription and how long its successful attempt took.
+    /// the subscription and how long its successful attempt took. Past the
+    /// deadline it fails with the last attempt's own failure as the cause, if
+    /// one failed by itself rather than by running out of time.
     async fn with_retry(
         &self,
         setup: &StreamSetup,
@@ -171,6 +173,7 @@ impl Subscription<'_> {
     ) -> Result<(Subscribed, std::time::Duration)> {
         let mut wake = self.remote_addr.wake();
         let mut retry = pb_mapper_core::timeout::RetryBackoff::default();
+        let mut last_failure = None;
         loop {
             let attempt_started = Instant::now();
             let attempt_budget = setup.timing.timeout().max(MIN_SUBSCRIBE_ATTEMPT);
@@ -192,6 +195,7 @@ impl Subscription<'_> {
                     if !error.subscribe_retryable() || Instant::now() >= deadline {
                         return Err(error);
                     }
+                    last_failure = Some(error);
                 }
                 Err(_) => {
                     self.remote_addr.transport_failed(carrier);
@@ -200,11 +204,16 @@ impl Subscription<'_> {
                         .failed(RecoveryFailure::Timeout, std::time::Duration::ZERO);
                     setup.timing.timed_out();
                     if Instant::now() >= deadline {
-                        return super::error::ControlIoTimeoutSnafu {
-                            action: "subscribe",
-                            timeout: budget,
-                        }
-                        .fail();
+                        return Err(match last_failure {
+                            Some(source) => super::error::Error::SubscribeTimedOut {
+                                timeout: budget,
+                                source: Box::new(source),
+                            },
+                            None => super::error::Error::ControlIoTimeout {
+                                action: "subscribe",
+                                timeout: budget,
+                            },
+                        });
                     }
                 }
             }
