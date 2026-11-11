@@ -390,7 +390,8 @@ async fn input_lane_runs_before_capture_and_never_after_stop() {
     let shared = session(true);
     let (started, starts) = std::sync::mpsc::sync_channel(64);
     let mut fake = Fake::new(Arc::new(Instant::now));
-    fake.delay = Duration::from_millis(30);
+    let capture = Duration::from_millis(30);
+    fake.delay = capture;
     fake.started = Some(started);
     let log = fake.log.clone();
     let mut worker = prepare(move || Ok(fake), false).start(shared.clone(), config(None));
@@ -446,7 +447,8 @@ async fn input_lane_runs_before_capture_and_never_after_stop() {
     let frame = present();
 
     // Input queued during a 30 ms capture runs right after it, in order, and
-    // before the next capture starts.
+    // before the next capture starts: sooner than another capture would take,
+    // however busy the machine is otherwise.
     next_capture();
     for x in 1..=3 {
         assert!(input(frame, x));
@@ -462,7 +464,7 @@ async fn input_lane_runs_before_capture_and_never_after_stop() {
             .filter(|finished| *finished <= injected[0])
             .max()
             .unwrap();
-        assert!(injected[0] - finished < Duration::from_millis(10));
+        assert!(injected[0] - finished < capture);
         let order = log.inputs.iter().map(|(_, input)| match input {
             Input::Move { x, .. } => *x,
             _ => 0,

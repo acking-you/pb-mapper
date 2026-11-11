@@ -45,7 +45,7 @@ struct State {
     released: Vec<Pressed>,
     /// Every key, physical key and text injected, in order.
     typed: Vec<Typed>,
-    /// Submit to drain, per unit.
+    /// Ready to drained, per unit.
     latencies: Vec<Duration>,
     /// The display's size now, once a mode changed it.
     size: Option<Mode>,
@@ -229,8 +229,9 @@ fn setting(mode: Mode) -> Setting {
     }
 }
 
-/// Units in flight, each with its submit time and when it is ready.
-type Flight = Arc<Mutex<VecDeque<(Instant, Option<EncodedFrame>)>>>;
+/// Units in flight, in submit order, each with the time it became ready
+/// once it is.
+type Flight = Arc<Mutex<VecDeque<Option<(Instant, EncodedFrame)>>>>;
 
 pub(crate) struct SynVideo<const PUSH: bool> {
     probe: Probe,
@@ -268,7 +269,9 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
         Ok(())
     }
     /// Pulled, a unit is ready at the next poll; pushed, a millisecond later
-    /// on the encoder's own thread, which wakes thread C.
+    /// on the encoder's own thread, while thread C waits, which it wakes. The
+    /// millisecond is waited as thread C waits, on a timer the platform does
+    /// not coalesce.
     fn submit(&mut self, keyframe: bool) -> Result<()> {
         self.frames += 1;
         let display = self.probe.current();
@@ -285,16 +288,23 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
         };
         let mut flight = self.flight.lock();
         if !PUSH {
-            flight.push_back((Instant::now(), Some(frame)));
+            flight.push_back(Some((Instant::now(), frame)));
             return Ok(());
         }
-        flight.push_back((Instant::now(), None));
+        flight.push_back(None);
         drop(flight);
         let (flight, waker) = (self.flight.clone(), self.waker.clone());
+        let wake = crate::scheduler::Wake::new();
+        let encoder = crate::scheduler::Waiter::new(&wake)?;
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1));
-            if let Some(slot) = flight.lock().iter_mut().find(|(_, unit)| unit.is_none()) {
-                slot.1 = Some(frame);
+            let ready = Instant::now() + Duration::from_millis(1);
+            while Instant::now() < ready {
+                if encoder.wait(ready).is_err() {
+                    break;
+                }
+            }
+            if let Some(slot) = flight.lock().iter_mut().find(|unit| unit.is_none()) {
+                *slot = Some((Instant::now(), frame));
             }
             waker.wake();
         });
@@ -302,14 +312,14 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
     }
     fn drain(&mut self) -> Result<Option<EncodedFrame>> {
         let mut flight = self.flight.lock();
-        if flight.front().is_none_or(|(_, unit)| unit.is_none()) {
+        if flight.front().is_none_or(Option::is_none) {
             return Ok(None);
         }
-        let Some((submitted, frame)) = flight.pop_front() else {
+        let Some(Some((ready, frame))) = flight.pop_front() else {
             return Ok(None);
         };
-        self.probe.0.lock().latencies.push(submitted.elapsed());
-        Ok(frame)
+        self.probe.0.lock().latencies.push(ready.elapsed());
+        Ok(Some(frame))
     }
     fn pending(&self) -> usize {
         self.flight.lock().len()
@@ -508,13 +518,18 @@ mod tests {
             }
         }
         if PUSH {
-            // Drained when the source woke thread C, not at the next tick.
+            // Drained because the source woke thread C. Without the wake a
+            // ready unit would wait for thread C's next deadline, its 16 ms
+            // pointer sample at the latest: as often more than 8 ms after it
+            // was ready as less. Woken, nine units in ten go within 8 ms of
+            // being ready, room for a busy machine's scheduling.
+            until(|| probe.0.lock().latencies.len() >= 20).await;
             let latencies = probe.0.lock().latencies.clone();
             let prompt = latencies
                 .iter()
                 .filter(|latency| **latency < Duration::from_millis(8))
                 .count();
-            assert!(prompt * 2 >= latencies.len(), "{latencies:?}");
+            assert!(prompt * 10 >= latencies.len() * 9, "{latencies:?}");
         }
         watching.stop().await;
         until(|| probe.released().len() == 2).await;
