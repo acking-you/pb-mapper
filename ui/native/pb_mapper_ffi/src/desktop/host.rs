@@ -3,7 +3,7 @@
 use super::background::{
     Background, enable_host, query_background, stop_background, with_relay_match,
 };
-use super::{credential_namespace, err, trust};
+use super::{blocking, credential_namespace, err, trust};
 use crate::{error::CtlError, handle::PbMapperHandle, state::process_credential};
 use pb_mapper::{
     Client,
@@ -61,15 +61,14 @@ pub(super) enum Start {
 
 pub(super) async fn disable_legacy_startup(handle: &PbMapperHandle) -> Result<(), CtlError> {
     let directory = handle.state.lock().await.desktop_config_dir();
-    tokio::task::spawn_blocking(move || {
+    blocking(move || {
         if let Some(mut saved) = trust::load(&directory)? {
             saved.settings.auto_start = false;
             trust::save(&directory, &saved)?;
         }
         Ok::<_, CtlError>(())
     })
-    .await
-    .map_err(err)?
+    .await?
 }
 
 pub(super) async fn revoke_trust_with_background(
@@ -108,24 +107,18 @@ pub(super) async fn revoke_trust_with_background(
 
 /// The remembered grant, read off the runtime.
 pub(super) async fn load_trust(directory: PathBuf) -> Result<Option<trust::Saved>, CtlError> {
-    tokio::task::spawn_blocking(move || trust::load(&directory))
-        .await
-        .map_err(err)?
+    blocking(move || trust::load(&directory)).await?
 }
 
 /// `saved` remembered, written off the runtime.
 #[cfg(windows)]
 pub(super) async fn save_trust(directory: PathBuf, saved: trust::Saved) -> Result<(), CtlError> {
-    tokio::task::spawn_blocking(move || trust::save(&directory, &saved))
-        .await
-        .map_err(err)?
+    blocking(move || trust::save(&directory, &saved)).await?
 }
 
 /// The remembered grant forgotten, off the runtime.
 pub(super) async fn revoke_trust(directory: PathBuf) -> Result<(), CtlError> {
-    tokio::task::spawn_blocking(move || trust::revoke(&directory))
-        .await
-        .map_err(err)?
+    blocking(move || trust::revoke(&directory)).await?
 }
 
 /// `host` once `persisted`, its remembered grant if it has one, is saved.
@@ -138,9 +131,7 @@ async fn persist_or_stop(
 ) -> Result<Host, CtlError> {
     if let Some(saved) = persisted {
         let directory = directory.to_owned();
-        let stored = tokio::task::spawn_blocking(move || trust::save(&directory, &saved))
-            .await
-            .map_err(err)?;
+        let stored = blocking(move || trust::save(&directory, &saved)).await?;
         if let Err(failure) = stored {
             let _ = host.stop().await;
             return Err(failure);
@@ -300,7 +291,7 @@ pub(super) async fn host_permission(
         .map(|local| local.scope.clone())
     {
         let service = host.invitation().service.clone();
-        tokio::task::spawn_blocking(move || {
+        blocking(move || {
             let mut saved = trust::load(&scope.directory)?
                 .ok_or_else(|| err("remembered trust was revoked"))?;
             if !saved.matches(&scope) || saved.settings.service != service {
@@ -309,8 +300,7 @@ pub(super) async fn host_permission(
             saved.settings.allow_control = allow_control;
             trust::save(&scope.directory, &saved)
         })
-        .await
-        .map_err(err)??;
+        .await??;
     }
     host.set_control_allowed(allow_control);
     Ok(json!({}))

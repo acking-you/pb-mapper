@@ -239,9 +239,7 @@ pub(super) fn failed_background(previous: Option<&Background>, error: CtlError) 
 pub(super) async fn query_background() -> Result<Background, CtlError> {
     #[cfg(windows)]
     {
-        let helper = tokio::task::spawn_blocking(desktop::privileged::status)
-            .await
-            .map_err(err)?;
+        let helper = super::blocking(desktop::privileged::status).await?;
         query_background_for_helper(helper, async {
             let snapshot = desktop::privileged::background::status()
                 .await
@@ -385,9 +383,7 @@ async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<
     let credential = process_credential()?;
     let namespace = credential.key_id();
     let credential = credential_text(credential)?;
-    let helper = tokio::task::spawn_blocking(desktop::privileged::status)
-        .await
-        .map_err(err)?;
+    let helper = super::blocking(desktop::privileged::status).await?;
     // A helper that cannot be asked resumes the host the card showed.
     let saved = if helper.ensure_ready().is_ok() {
         handle.desktop.cache_background(query_background().await?)
@@ -511,9 +507,8 @@ pub(super) async fn helper_action(
             HelperVerb::Uninstall => Action::Uninstall,
         };
         let restart = matches!(action, Action::Install { .. });
-        tokio::task::spawn_blocking(move || desktop::privileged::request_installation(action))
-            .await
-            .map_err(err)?
+        super::blocking(move || desktop::privileged::request_installation(action))
+            .await?
             .map_err(err)?;
         if restart {
             desktop::privileged::prepare_application_restart()
@@ -719,9 +714,7 @@ async fn enable(
     // Fails before anything changes, never after the running host has gone.
     let credential = credential_text(credential)?;
     save_trust(directory.clone(), pending).await?;
-    let helper = tokio::task::spawn_blocking(desktop::privileged::status)
-        .await
-        .map_err(err)?;
+    let helper = super::blocking(desktop::privileged::status).await?;
     let setup = helper_setup(&helper, allow_install);
     // No two owners may publish the same desktop: the local host stops before
     // a service that could already hold an automatic grant is enabled. It
@@ -744,11 +737,9 @@ async fn enable(
                 "desktop setup is waiting for the installed background service",
             ));
         }
-        let installed =
-            tokio::task::spawn_blocking(move || desktop::privileged::request_installation(action))
-                .await
-                .map_err(err)?
-                .map_err(err);
+        let installed = super::blocking(move || desktop::privileged::request_installation(action))
+            .await?
+            .map_err(err);
         if let Err(failure) = installed {
             // A cancelled/failed first installation must not silently resume
             // the pending action on a later application launch.

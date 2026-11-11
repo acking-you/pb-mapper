@@ -1028,3 +1028,12 @@ async fn disconnect_cancels_pending_setup_without_waiting_for_network() {
     assert!(state.connecting.lock().is_none());
     assert_eq!(state.viewer_status(None).unwrap(), Value::Null);
 }
+
+/// A blocking task that panicked hit a bug, which trying again would hit
+/// again: `INTERNAL`, which ends a viewer's session, wherever it ran, never
+/// `IO`, which has the viewer reconnect.
+#[tokio::test]
+async fn a_panicked_blocking_task_is_internal() {
+    let panicked = blocking(|| panic!("a bug")).await.map(|()| ());
+    assert_eq!(panicked.unwrap_err().code(), ErrorCode::Internal);
+}

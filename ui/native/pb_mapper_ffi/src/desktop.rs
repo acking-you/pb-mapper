@@ -159,6 +159,17 @@ fn err(e: impl std::fmt::Display) -> CtlError {
     CtlError::io(e.to_string())
 }
 
+/// `work` run off the runtime, as file, service and OS-query work is. One
+/// that panicked hit a bug, which trying again would hit again: `INTERNAL`,
+/// never `IO`, which has a viewer connect again.
+pub(crate) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, CtlError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|failure| CtlError::internal(failure.to_string()))
+}
+
 /// A maximum frame rate as `connect` and a remembered computer take it: 0
 /// for Auto, otherwise one the user chose, 30..=120.
 pub(crate) fn valid_max_fps(max_fps: u32) -> bool {
@@ -223,7 +234,7 @@ fn capabilities_json(support: desktop::HostSupport) -> Value {
 /// The `capabilities` op: what this computer can do, its displays and the
 /// helper's state.
 async fn capabilities() -> Result<Value, CtlError> {
-    tokio::task::spawn_blocking(|| {
+    blocking(|| {
         // The app's first question: once per process, put back a
         // display mode a host of this app left changed when it died.
         static RECOVERED: std::sync::Once = std::sync::Once::new();
@@ -245,7 +256,6 @@ async fn capabilities() -> Result<Value, CtlError> {
         })
     })
     .await
-    .map_err(err)
 }
 
 async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlError> {

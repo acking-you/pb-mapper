@@ -637,11 +637,10 @@ pub(crate) async fn call(handle: &PbMapperHandle, request: Value) -> Result<Valu
         .map_err(|_| CtlError::invalid_argument("invalid remembered computers request"))?;
     let directory = handle.state.lock().await.desktop_config_dir();
     let current = handle.desktop.connected();
-    tokio::task::spawn_blocking(move || {
+    crate::desktop::blocking(move || {
         apply(&mut VAULT.lock(), &directory, PLATFORM, current, request)
     })
-    .await
-    .map_err(|failure| CtlError::internal(failure.to_string()))?
+    .await?
 }
 
 /// The invitation remembered under `id`, for `connect`. A locked or
@@ -652,9 +651,7 @@ pub(crate) async fn invitation_for(
 ) -> Result<Option<Invitation>, CtlError> {
     let directory = handle.state.lock().await.desktop_config_dir();
     let id = id.to_owned();
-    tokio::task::spawn_blocking(move || lookup(&mut VAULT.lock(), &directory, PLATFORM, &id))
-        .await
-        .map_err(|failure| CtlError::internal(failure.to_string()))?
+    crate::desktop::blocking(move || lookup(&mut VAULT.lock(), &directory, PLATFORM, &id)).await?
 }
 
 fn lookup(
