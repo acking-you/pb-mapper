@@ -44,10 +44,16 @@ pub(super) struct ControlBackoff {
 impl ControlBackoff {
     fn new() -> Self {
         let (reject_min, reject_max) = registration_reject_backoff();
+        let reject = RetryBackoff::new(reject_min, reject_max);
         Self {
             transport: transport_backoff(),
             timing: RecoveryTiming::default(),
-            reject: RetryBackoff::new(reject_min, reject_max).with_jitter(),
+            // A range set to one delay asks for exactly that delay.
+            reject: if reject_min < reject_max {
+                reject.with_jitter()
+            } else {
+                reject
+            },
         }
     }
 
