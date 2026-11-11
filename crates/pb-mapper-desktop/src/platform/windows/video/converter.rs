@@ -1,5 +1,6 @@
 //! The D3D11 video processor that scales the captured BGRA desktop into the
 //! encoder's NV12 samples on the GPU.
+use super::SAMPLES;
 use crate::{Result, error};
 use std::mem::ManuallyDrop;
 use windows::{
@@ -16,6 +17,12 @@ pub(super) struct Converter {
     context: ID3D11VideoContext,
     enumerator: ID3D11VideoProcessorEnumerator,
     processor: ID3D11VideoProcessor,
+    /// The view of the texture captures are copied into, which is the same
+    /// for every frame, with that texture.
+    input: Option<(ID3D11Texture2D, ID3D11VideoProcessorInputView)>,
+    /// A view of each sample texture and subresource the pool has handed
+    /// out, with that texture: at most `SAMPLES.1`.
+    outputs: Vec<(ID3D11Texture2D, u32, ID3D11VideoProcessorOutputView)>,
 }
 impl Converter {
     pub(super) fn new(
@@ -100,9 +107,66 @@ impl Converter {
             context,
             enumerator,
             processor,
+            input: None,
+            outputs: Vec::with_capacity(SAMPLES.1 as usize),
         })
     }
-    pub(super) fn convert(&self, source: &ID3D11Texture2D, sample: &IMFSample) -> Result<()> {
+    /// Scale `source` into `sample`. The views of both are created once
+    /// and kept: each holds its texture, so a texture seen again is the same
+    /// one.
+    pub(super) fn convert(&mut self, source: &ID3D11Texture2D, sample: &IMFSample) -> Result<()> {
+        let input = match &self.input {
+            Some((texture, view)) if texture.as_raw() == source.as_raw() => view.clone(),
+            _ => {
+                let view = self.input_view(source)?;
+                self.input = Some((source.clone(), view.clone()));
+                view
+            }
+        };
+        let output = self.output_view(sample)?;
+        let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
+            Enable: true.into(),
+            pInputSurface: ManuallyDrop::new(Some(input)),
+            ..Default::default()
+        };
+        let result = unsafe {
+            self.context.VideoProcessorBlt(
+                &self.processor,
+                &output,
+                0,
+                std::slice::from_ref(&stream),
+            )
+        };
+        unsafe {
+            ManuallyDrop::drop(&mut stream.pInputSurface);
+        }
+        result.map_err(error)
+    }
+    fn input_view(&self, source: &ID3D11Texture2D) -> Result<ID3D11VideoProcessorInputView> {
+        let mut input = None;
+        unsafe {
+            self.device
+                .CreateVideoProcessorInputView(
+                    source,
+                    &self.enumerator,
+                    &D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                        FourCC: 0,
+                        ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                        Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                            Texture2D: D3D11_TEX2D_VPIV {
+                                MipSlice: 0,
+                                ArraySlice: 0,
+                            },
+                        },
+                    },
+                    Some(&mut input),
+                )
+                .map_err(error)?;
+        }
+        input.ok_or_else(|| error("missing BGRA processor input"))
+    }
+    /// The view of the texture subresource that holds `sample`.
+    fn output_view(&mut self, sample: &IMFSample) -> Result<ID3D11VideoProcessorOutputView> {
         let buffer = unsafe { sample.GetBufferByIndex(0).map_err(error)? };
         let buffer: IMFDXGIBuffer = buffer.cast().map_err(error)?;
         let mut raw = std::ptr::null_mut();
@@ -113,6 +177,13 @@ impl Converter {
         }
         let texture = unsafe { ID3D11Texture2D::from_raw(raw) };
         let subresource = unsafe { buffer.GetSubresourceIndex().map_err(error)? };
+        if let Some((_, _, view)) = self
+            .outputs
+            .iter()
+            .find(|(kept, index, _)| kept.as_raw() == texture.as_raw() && *index == subresource)
+        {
+            return Ok(view.clone());
+        }
         let mut texture_desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
             texture.GetDesc(&mut texture_desc);
@@ -138,26 +209,8 @@ impl Converter {
                 },
             }
         };
-        let mut input = None;
         let mut output = None;
         unsafe {
-            self.device
-                .CreateVideoProcessorInputView(
-                    source,
-                    &self.enumerator,
-                    &D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
-                        FourCC: 0,
-                        ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
-                        Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
-                            Texture2D: D3D11_TEX2D_VPIV {
-                                MipSlice: 0,
-                                ArraySlice: 0,
-                            },
-                        },
-                    },
-                    Some(&mut input),
-                )
-                .map_err(error)?;
             self.device
                 .CreateVideoProcessorOutputView(
                     &texture,
@@ -168,22 +221,11 @@ impl Converter {
                 .map_err(error)?;
         }
         let output = output.ok_or_else(|| error("missing NV12 processor output"))?;
-        let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
-            Enable: true.into(),
-            pInputSurface: ManuallyDrop::new(input),
-            ..Default::default()
-        };
-        let result = unsafe {
-            self.context.VideoProcessorBlt(
-                &self.processor,
-                &output,
-                0,
-                std::slice::from_ref(&stream),
-            )
-        };
-        unsafe {
-            ManuallyDrop::drop(&mut stream.pInputSurface);
+        // A pool that replaced its textures: the views of the old ones go.
+        if self.outputs.len() >= SAMPLES.1 as usize {
+            self.outputs.clear();
         }
-        result.map_err(error)
+        self.outputs.push((texture, subresource, output.clone()));
+        Ok(output)
     }
 }
