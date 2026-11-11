@@ -233,21 +233,41 @@ impl<S: Sealer, T: Serialize + DeserializeOwned> TrustFile<S, T> {
         }
         write_durably(&self.path(), &self.sealer.seal(&plain)?)
     }
-    /// Forget the grant, durably: a crash after this returns cannot bring it
-    /// back. Nothing remembered is no failure.
+    /// Forget the grant. Nothing remembered is no failure: only a grant that
+    /// cannot be removed fails. Its directory is then synced, so a crash
+    /// after this returns cannot bring the grant back; a directory that
+    /// cannot be synced, such as one that takes no new file, is logged, not
+    /// failed: the grant is gone either way, and what follows a revoke, such
+    /// as revoking a background service's copy, must still run.
     pub fn revoke(&self) -> Result<()> {
-        let path = self.path();
-        match std::fs::remove_file(&path) {
-            Err(failure) if failure.kind() != io::ErrorKind::NotFound => return Err(failure),
-            _ => {}
-        }
-        // Synced even when already gone, which an earlier revoke that failed
-        // here leaves; no directory at all means nothing was ever saved.
-        match pb_mapper_core::durable_file::sync_parent_directory(&path) {
-            Err(failure) if failure.kind() == io::ErrorKind::NotFound => Ok(()),
-            synced => synced,
-        }
+        forget(
+            &self.path(),
+            pb_mapper_core::durable_file::sync_parent_directory,
+        )
     }
+}
+
+/// Removes `path`, then syncs its directory with `sync`: only a failed
+/// removal fails.
+fn forget(path: &Path, sync: impl FnOnce(&Path) -> io::Result<()>) -> Result<()> {
+    let removed = match std::fs::remove_file(path) {
+        Ok(()) => true,
+        Err(failure) if failure.kind() == io::ErrorKind::NotFound => false,
+        Err(failure) => return Err(failure),
+    };
+    // Synced even when already gone, which a revoke whose sync failed
+    // leaves; no directory at all means nothing was ever saved.
+    if let Err(failure) = sync(path)
+        && removed
+        && failure.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            event = "desktop_trust_revoke_unsynced",
+            path = %path.display(),
+            detail = %failure,
+        );
+    }
+    Ok(())
 }
 
 /// Replaces `path` with `bytes` all at once: a new file beside it, readable
@@ -399,6 +419,21 @@ mod tests {
         assert_eq!(Xor(1).open(&sealed).unwrap(), written);
         file.revoke().unwrap();
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+    }
+
+    /// A directory that cannot be synced, such as one that takes no new file,
+    /// fails no revoke: the grant is gone, and what follows the revoke, such
+    /// as revoking the background service's copy, must still run.
+    #[test]
+    fn a_directory_that_cannot_be_synced_fails_no_revoke() {
+        let directory = TempPath::new("trust-unsynced");
+        let path = directory.join(FILE);
+        let refused = |_: &Path| Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        // Nothing to forget.
+        forget(&path, refused).unwrap();
+        write_durably(&path, b"grant").unwrap();
+        forget(&path, refused).unwrap();
+        assert!(!path.exists());
     }
 
     /// A write that cannot replace its file fails and leaves nothing beside it.
