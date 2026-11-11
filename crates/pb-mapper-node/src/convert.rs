@@ -7,9 +7,19 @@ use pb_mapper_client::sdk::{self, Transport, TunnelStatus};
 /// Default page size for the `list*` calls that take an explicit page.
 const DEFAULT_PAGE_SIZE: u32 = 100;
 
+/// The largest integer a JS number holds exactly, `Number.MAX_SAFE_INTEGER`.
+const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
 /// A JS-safe integer: `u64` values past 2^53 - 1 saturate rather than round.
 pub(crate) fn number(value: u64) -> f64 {
-    value.min((1_u64 << 53) - 1) as f64
+    value.min(MAX_SAFE_INTEGER) as f64
+}
+
+/// A key id, namespace or generation as a JS number: one past 2^53 - 1
+/// saturates, naming nothing, rather than rounding to a neighbour's id.
+pub(crate) fn id(value: u64) -> i64 {
+    // Exact: MAX_SAFE_INTEGER is below i64::MAX.
+    value.min(MAX_SAFE_INTEGER) as i64
 }
 
 pub(crate) fn to_napi(error: sdk::Error) -> Error {

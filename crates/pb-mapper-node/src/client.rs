@@ -9,7 +9,7 @@ use pb_mapper_client::sdk::{self, ClientConfig, ConnectRequest, RegisterRequest}
 
 use crate::admin::Admin;
 use crate::convert::{
-    as_opt_u64, invalid_argument, parse_lan_transport, parse_path, parse_port_mapping,
+    as_opt_u64, id, invalid_argument, parse_lan_transport, parse_path, parse_port_mapping,
     parse_relay_transport, parse_transport, to_napi,
 };
 use crate::diagnostics::JsRelayDiagnostics;
@@ -103,7 +103,7 @@ impl From<sdk::ServiceConnection> for JsServiceConnection {
     fn from(value: sdk::ServiceConnection) -> Self {
         Self {
             conn_id: value.conn_id,
-            generation: value.generation as i64,
+            generation: id(value.generation),
             protocol_version: u32::from(value.protocol_version),
             healthy: value.healthy,
             last_rx_age_ms: value.last_rx_age_ms as i64,

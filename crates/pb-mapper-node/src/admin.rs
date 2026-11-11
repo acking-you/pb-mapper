@@ -7,7 +7,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use pb_mapper_client::sdk;
 
-use crate::convert::{as_opt_u64, as_u64, narrow_page_size, parse_legacy_protocol, to_napi};
+use crate::convert::{as_opt_u64, as_u64, id, narrow_page_size, parse_legacy_protocol, to_napi};
 
 #[napi(object)]
 pub struct JsIssuedKey {
@@ -22,7 +22,7 @@ pub struct JsIssuedKey {
 impl From<sdk::IssuedKey> for JsIssuedKey {
     fn from(value: sdk::IssuedKey) -> Self {
         Self {
-            key_id: value.key_id as i64,
+            key_id: id(value.key_id),
             state: value.state,
             issued_at: value.issued_at as i64,
             expires_at: value.expires_at as i64,
@@ -81,7 +81,7 @@ impl From<sdk::AuthStatusInfo> for JsAuthStatus {
 impl From<sdk::KeyMetadata> for JsKeyMetadata {
     fn from(value: sdk::KeyMetadata) -> Self {
         Self {
-            key_id: value.key_id as i64,
+            key_id: id(value.key_id),
             state: value.state,
             issued_at: value.issued_at as i64,
             expires_at: value.expires_at as i64,
@@ -103,8 +103,8 @@ pub struct JsServiceInfo {
 impl From<sdk::ServiceInfo> for JsServiceInfo {
     fn from(value: sdk::ServiceInfo) -> Self {
         Self {
-            key_id: value.key_id as i64,
-            namespace: value.namespace as i64,
+            key_id: id(value.key_id),
+            namespace: id(value.namespace),
             service_name: value.service_name,
             transport: value.transport,
             codec_enabled: value.codec_enabled,
@@ -130,11 +130,11 @@ pub struct JsConnectionInfo {
 impl From<sdk::ConnectionInfo> for JsConnectionInfo {
     fn from(value: sdk::ConnectionInfo) -> Self {
         Self {
-            key_id: value.key_id as i64,
-            namespace: value.namespace as i64,
+            key_id: id(value.key_id),
+            namespace: id(value.namespace),
             service_name: value.service_name,
             conn_id: value.conn_id,
-            generation: value.generation as i64,
+            generation: id(value.generation),
             protocol_version: u32::from(value.protocol_version),
             healthy: value.healthy,
             transport: value.transport,
@@ -303,5 +303,37 @@ impl Admin {
             .into_iter()
             .map(JsConnectionInfo::from)
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A key id past 2^53, after 2^21 reissues of one slot, cannot reach JS
+    /// as itself. It reaches it as the largest integer JS holds exactly,
+    /// which names no key, rather than rounded to a neighbouring slot's id,
+    /// which `revokeKey` would then reach.
+    #[test]
+    fn a_key_id_js_cannot_hold_names_no_key() {
+        let reissued = ((1_u64 << 21) << 32) | 1;
+        let listed = JsKeyMetadata::from(sdk::KeyMetadata {
+            key_id: reissued,
+            namespace: reissued,
+            state: "active".into(),
+            issued_at: 0,
+            expires_at: 0,
+            label: None,
+        });
+        assert_eq!(listed.key_id, (1 << 53) - 1);
+        let listed = JsKeyMetadata::from(sdk::KeyMetadata {
+            key_id: 7,
+            namespace: 7,
+            state: "active".into(),
+            issued_at: 0,
+            expires_at: 0,
+            label: None,
+        });
+        assert_eq!(listed.key_id, 7);
     }
 }
