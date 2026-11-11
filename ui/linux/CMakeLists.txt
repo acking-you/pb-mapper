@@ -139,3 +139,12 @@ if(EXISTS "${PB_MAPPER_FFI_DIR}/libpb_mapper_ffi.so")
     DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
 endif()
+
+# The native video decoder module, when runner/CMakeLists.txt built it. It
+# links the system GStreamer, which is never bundled: a bundled core would
+# load the system plugins of another version, and they decide what decodes.
+if(TARGET pb_mapper_desktop_video)
+  install(TARGETS pb_mapper_desktop_video
+    LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+endif()
