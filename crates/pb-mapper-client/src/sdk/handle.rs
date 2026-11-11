@@ -8,6 +8,7 @@ use crate::diagnostics::{
     Diagnostics, TunnelDiagnostics, TunnelEvents, TunnelMetrics, TunnelMetricsStream,
 };
 use crate::endpoint::RelayEndpoint;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::sync::{Mutex, watch};
@@ -20,6 +21,8 @@ pub(crate) struct LiveTunnel {
     shutdown: CancellationToken,
     join: Mutex<Option<JoinHandle<()>>>,
     status: watch::Receiver<TunnelStatus>,
+    /// Where its local listener is bound, once it is; a connect tunnel's.
+    bound: watch::Receiver<Option<SocketAddr>>,
     endpoint: RelayEndpoint,
     diagnostics: Diagnostics,
 }
@@ -29,6 +32,7 @@ impl LiveTunnel {
         shutdown: CancellationToken,
         join: JoinHandle<()>,
         status: watch::Receiver<TunnelStatus>,
+        bound: watch::Receiver<Option<SocketAddr>>,
         endpoint: RelayEndpoint,
         diagnostics: Diagnostics,
     ) -> Self {
@@ -36,6 +40,7 @@ impl LiveTunnel {
             shutdown,
             join: Mutex::new(Some(join)),
             status,
+            bound,
             endpoint,
             diagnostics,
         }
@@ -199,6 +204,17 @@ tunnel_handle!(
     Connection
 );
 
+impl Connection {
+    /// Where its local listener is bound, once it is: the port the system
+    /// chose when the request asked for port 0, which the listener keeps if
+    /// it is ever bound again. `None` before that, and for
+    /// [`Client::connect_tcp`](super::Client::connect_tcp), which listens
+    /// nowhere.
+    pub fn local_addr(&self) -> Option<SocketAddr> {
+        *self.inner.bound.borrow()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +241,7 @@ mod tests {
             CancellationToken::new(),
             worker,
             rx.clone(),
+            watch::channel(None).1,
             RelayEndpoint::shared("127.0.0.1:1"),
             Diagnostics::default(),
         );
@@ -253,6 +270,7 @@ mod tests {
             CancellationToken::new(),
             worker,
             rx,
+            watch::channel(None).1,
             RelayEndpoint::shared("127.0.0.1:1"),
             Diagnostics::default(),
         );

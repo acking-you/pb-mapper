@@ -8,8 +8,8 @@ use pb_mapper_client::sdk::{
     RegisterOptions, RegisterRequest, Registration, Transport, TunnelMetrics, TunnelStatus,
 };
 use pb_mapper_testkit::{
-    Echo, READY_TIMEOUT, Relay, admin_client, admin_credential, publish, reserve_addr,
-    run_raw_tcp_echo, run_udp_datagram_echo, subscribe, tcp_echo, udp_echo,
+    Echo, READY_TIMEOUT, Relay, admin_client, admin_credential, publish, run_raw_tcp_echo,
+    run_udp_datagram_echo, subscribe, tcp_echo, udp_echo,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -110,16 +110,16 @@ async fn sdk_tcp_tunnel_round_trips() {
     let keys = client.list_keys().await.unwrap();
     assert!(keys.iter().any(|key| key == "echo"));
 
-    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
     let connection = client
         .connect(ConnectRequest {
             key: "echo".into(),
-            local_addr: listen_addr.to_string(),
+            local_addr: "127.0.0.1:0".into(),
             transport: Transport::Tcp,
         })
         .await
         .unwrap();
     connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let listen_addr = connection.local_addr().unwrap();
 
     run_raw_tcp_echo(listen_addr, 8, None).await;
 
@@ -172,11 +172,10 @@ async fn sdk_admin_issue_list_revoke() {
 
     admin.revoke_key(issued.key_id).await.unwrap();
 
-    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
     let connection = temporary
         .connect(ConnectRequest {
             key: "echo".into(),
-            local_addr: listen_addr.to_string(),
+            local_addr: "127.0.0.1:0".into(),
             transport: Transport::Tcp,
         })
         .await
@@ -524,11 +523,10 @@ async fn sdk_connect_reports_permanent_rejection_as_failed() {
         Some(foreign_namespace),
     );
 
-    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
     let connection = client
         .connect(ConnectRequest {
             key: "echo-denied".into(),
-            local_addr: listen_addr.to_string(),
+            local_addr: "127.0.0.1:0".into(),
             transport: Transport::Tcp,
         })
         .await

@@ -12,8 +12,8 @@ use pb_mapper_client::sdk::{
 use pb_mapper_core::checksum::parse_credential;
 use pb_mapper_server::RelayServerOptions;
 use pb_mapper_testkit::{
-    READY_TIMEOUT, Relay, admin_client, loopback_direct, loopback_quic, publish, reserve_addr,
-    subscribe, tcp_echo,
+    READY_TIMEOUT, Relay, admin_client, loopback_direct, loopback_quic, publish, subscribe,
+    tcp_echo,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -297,12 +297,11 @@ async fn direct_setup_over(label: &str, carrier: RelayTransport) {
     .await
     .expect("the revoked publisher's registration should leave the relay");
     // Not `subscribe`: what is asserted here is before, and instead of, ready.
-    let local = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
     let late = peer
         .connect_with_options(
             ConnectRequest {
                 key: "shared".into(),
-                local_addr: local.to_string(),
+                local_addr: "127.0.0.1:0".into(),
                 transport: Transport::Tcp,
             },
             auto,
@@ -319,8 +318,11 @@ async fn direct_setup_over(label: &str, carrier: RelayTransport) {
         .wait_ready_timeout(Duration::from_secs(2))
         .await
         .is_ok()
-        && let Ok(Ok(mut socket)) =
-            tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(local)).await
+        && let Ok(Ok(mut socket)) = tokio::time::timeout(
+            Duration::from_secs(2),
+            TcpStream::connect(late.local_addr().unwrap()),
+        )
+        .await
     {
         let answered = tokio::time::timeout(Duration::from_secs(2), socket.read_u8()).await;
         assert!(

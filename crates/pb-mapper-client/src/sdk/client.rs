@@ -13,7 +13,7 @@ use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_core::config::control_io_timeout;
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
 use tokio::net::{TcpListener, TcpStream};
-use uni_stream::stream::{TcpStreamProvider, UdpListenerProvider, UdpStreamProvider};
+use uni_stream::stream::{TcpStreamProvider, UdpStreamProvider};
 
 use snafu::ResultExt;
 
@@ -28,7 +28,8 @@ use super::worker::TunnelWorker;
 use super::{ConnectOptions, LanTransport, PathPolicy, RegisterOptions};
 use crate::client::status::get_status_with_credential;
 use crate::client::{
-    LocalTcpListenerProvider, run_client_side_cli_recovering_with_path, run_owned_stream,
+    Bound, LocalTcpListener, LocalTcpListenerProvider, LocalUdpListener, LocalUdpListenerProvider,
+    run_client_side_cli_recovering_with_path, run_owned_stream,
 };
 use crate::server::{ServerTunnelOptions, run_server_side_cli_recovering};
 
@@ -428,10 +429,14 @@ impl Client {
                     context.diagnostics,
                     is_datagram,
                     direct,
+                    Some(Bound {
+                        addr_of: LocalTcpListener::local_addr,
+                        to: context.bound,
+                    }),
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
-                run_client_side_cli_recovering_with_path::<UdpListenerProvider>(
+                run_client_side_cli_recovering_with_path::<LocalUdpListenerProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
@@ -443,6 +448,10 @@ impl Client {
                     context.diagnostics,
                     is_datagram,
                     direct,
+                    Some(Bound {
+                        addr_of: LocalUdpListener::local_addr,
+                        to: context.bound,
+                    }),
                 )
             }),
         };
@@ -616,6 +625,52 @@ mod tests {
             None,
         );
         assert!(matches!(temporary.admin(), Err(Error::NotAdministrator)));
+    }
+
+    /// A connection asked to listen on port 0 says which port it got, for
+    /// either transport, and listens there: the relay need not be up for it.
+    #[tokio::test]
+    async fn a_connection_on_port_zero_says_where_it_listens() {
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = closed.local_addr().unwrap();
+        drop(closed);
+        let client = Client::from_credential(
+            relay.to_string(),
+            Credential::Admin(TEST_ADMIN_KEY_BYTES),
+            false,
+            None,
+        );
+        for transport in [Transport::Tcp, Transport::Udp] {
+            let connection = client
+                .connect_with_options(
+                    ConnectRequest {
+                        key: "anywhere".into(),
+                        local_addr: "127.0.0.1:0".into(),
+                        transport,
+                    },
+                    ConnectOptions {
+                        path: PathPolicy::RelayOnly,
+                        ..ConnectOptions::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let bound = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Some(bound) = connection.local_addr() {
+                        return bound;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(bound.ip().is_loopback() && bound.port() != 0, "{bound}");
+            if transport == Transport::Tcp {
+                TcpStream::connect(bound).await.unwrap();
+            }
+            connection.stop().await.unwrap();
+        }
     }
 
     /// A client on the other carrier is the same session, as a clone is: a

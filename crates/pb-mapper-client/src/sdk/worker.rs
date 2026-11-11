@@ -4,6 +4,7 @@
 
 use crate::diagnostics::Diagnostics;
 use crate::endpoint::RelayEndpoint;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use pb_mapper_core::config::{ResolvedAddrs, resolve_addrs_async};
@@ -66,6 +67,8 @@ pub(super) struct WorkerContext {
     pub(super) status: StatusSink,
     pub(super) shutdown: CancellationToken,
     pub(super) diagnostics: Diagnostics,
+    /// Where a connect tunnel tells its handle the address it listens on.
+    pub(super) bound: watch::Sender<Option<SocketAddr>>,
 }
 
 /// A tunnel resolved and wired up, waiting only for the transport-specific
@@ -170,6 +173,7 @@ impl TunnelWorker {
         let worker_shutdown = shutdown.clone();
         let worker_diagnostics = diagnostics.clone();
         let endpoint = remote_addr.clone();
+        let (bound, bound_rx) = watch::channel(None);
         let join = tokio::spawn(async move {
             start(WorkerContext {
                 local_addr,
@@ -178,11 +182,12 @@ impl TunnelWorker {
                 status: watch_sink(status_tx.clone()),
                 shutdown: worker_shutdown,
                 diagnostics: worker_diagnostics.clone(),
+                bound,
             })
             .await;
             worker_diagnostics.stop();
             settle_stopped(&status_tx);
         });
-        LiveTunnel::new(shutdown, join, status_rx, endpoint, diagnostics)
+        LiveTunnel::new(shutdown, join, status_rx, bound_rx, endpoint, diagnostics)
     }
 }

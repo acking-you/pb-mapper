@@ -4,6 +4,7 @@ mod listener;
 pub mod status;
 pub(crate) mod stream;
 
+pub(crate) use self::listener::{Bound, LocalUdpListener, LocalUdpListenerProvider};
 pub use self::listener::{LocalTcpListener, LocalTcpListenerProvider};
 pub use crate::worker_status::StatusCallback as ClientStatusCallback;
 
@@ -215,6 +216,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
         Diagnostics::default(),
         false,
         None,
+        None,
     )
     .await;
 }
@@ -224,7 +226,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
     reason = "the SDK starts a connection with each of its settings"
 )]
 pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: ListenerProvider>(
-    local_addr: ResolvedAddrs,
+    mut local_addr: ResolvedAddrs,
     remote_addr: RelayEndpoint,
     key: Arc<str>,
     keep_alive: bool,
@@ -235,6 +237,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     diagnostics: Diagnostics,
     is_datagram: bool,
     direct: Option<DirectPolicy>,
+    bound: Option<Bound<LocalListener::Listener>>,
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
@@ -294,6 +297,16 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                 }
             }
         };
+        if let Some(bound) = &bound
+            && let Ok(addr) = (bound.addr_of)(&listener)
+        {
+            // A port the system chose is kept: one bound again after a local
+            // failure is where the caller was told it is.
+            if local_addr.as_slice().iter().any(|asked| asked.port() == 0) {
+                local_addr = ResolvedAddrs::from(addr);
+            }
+            bound.to.send_replace(Some(addr));
+        }
         tracing::info!(event = "client_local_listener_bound", %key, %local_addr, "local listener bound; checking remote service");
         let mut health = Health {
             remote_addr: &remote_addr,

@@ -11,7 +11,7 @@ use pb_mapper_client::sdk::{
     Transport,
 };
 use pb_mapper_core::config::control_conn_pool_size;
-use pb_mapper_testkit::{Relay, admin_client, admin_credential, reserve_addr, tcp_echo};
+use pb_mapper_testkit::{Relay, admin_client, admin_credential, tcp_echo};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
@@ -307,18 +307,18 @@ async fn register(client: &Client, addr: SocketAddr) -> Registration {
         .unwrap()
 }
 
-/// Subscribe to `key` on a reserved port and give it three seconds to be ready.
+/// Subscribe to `key` on a port the system chooses and give it three seconds
+/// to be ready; answers the connection and where it listens.
 async fn connect_ready(
     client: &Client,
     key: &str,
     options: ConnectOptions,
 ) -> (Connection, SocketAddr) {
-    let listen = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
     let connection = client
         .connect_with_options(
             ConnectRequest {
                 key: key.into(),
-                local_addr: listen.to_string(),
+                local_addr: "127.0.0.1:0".into(),
                 transport: Transport::Tcp,
             },
             options,
@@ -329,6 +329,7 @@ async fn connect_ready(
         .wait_ready_timeout(Duration::from_secs(3))
         .await
         .unwrap();
+    let listen = connection.local_addr().unwrap();
     (connection, listen)
 }
 
@@ -736,11 +737,10 @@ async fn network_hint_replaces_stalled_setup_and_real_payload_recovers_promptly(
     let echo = tcp_echo(None).await;
     let registration = register(&host, echo.addr()).await;
     proxy.wait_blackholed(2).await;
-    let local = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
     let connection = direct
         .connect(ConnectRequest {
             key: "echo".into(),
-            local_addr: local.to_string(),
+            local_addr: "127.0.0.1:0".into(),
             transport: Transport::Tcp,
         })
         .await
@@ -751,10 +751,12 @@ async fn network_hint_replaces_stalled_setup_and_real_payload_recovers_promptly(
     timeout(Duration::from_secs(2), async {
         registration.wait_ready().await.unwrap();
         connection.wait_ready().await.unwrap();
+        let local = connection.local_addr().unwrap();
         round_trip(&mut TcpStream::connect(local).await.unwrap()).await;
     })
     .await
     .unwrap();
+    let local = connection.local_addr().unwrap();
     eprintln!(
         "network hint to encrypted payload: {:?}",
         restored.elapsed()
