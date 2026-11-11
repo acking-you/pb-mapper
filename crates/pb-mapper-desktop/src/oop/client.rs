@@ -4,7 +4,7 @@
 //! privileged agent can connect it over its own transport.
 use super::{
     Transport, ipc,
-    proto::{DRAIN_WAIT_MAX_MS, Request, Response},
+    proto::{DRAIN_WAIT_MAX_MS, Request, Response, ShapeHeader},
 };
 use crate::{
     Backend, BackendCaps, BackendError, Description, DesktopContext, Input, Result, Waker, error,
@@ -34,6 +34,12 @@ pub(crate) struct RemoteBackend<T: Transport> {
     rate: crate::VideoRate,
     sequence: u64,
     failed: bool,
+    /// Thread C asked for the pointer's shape, so the worker reads it.
+    shapes: bool,
+    /// The newest shape's number the worker reported, and the one this
+    /// client last fetched: a newer one is fetched once.
+    shape_serial: u64,
+    fetched_shape: u64,
 }
 impl<T: Transport> RemoteBackend<T> {
     /// Start the worker on `display_id`, found again by `display_device`
@@ -72,6 +78,9 @@ impl<T: Transport> RemoteBackend<T> {
             },
             sequence: 0,
             failed: false,
+            shapes: false,
+            shape_serial: 0,
+            fetched_shape: 0,
         }
     }
 
@@ -125,6 +134,8 @@ impl<T: Transport> RemoteBackend<T> {
             h265,
             modes,
             restored,
+            shape_serial,
+            shape,
         } = response;
         self.pending = pending as usize;
         if let Some(reason) = reason {
@@ -140,6 +151,11 @@ impl<T: Transport> RemoteBackend<T> {
         if request.observes_cursor() || applied {
             self.cursor = cursor;
         }
+        if request.observes_cursor()
+            && let Some(serial) = shape_serial
+        {
+            self.shape_serial = serial;
+        }
         self.double_click = double_click.or(self.double_click);
         if let Some(caps) = caps {
             self.caps = caps.into();
@@ -150,6 +166,7 @@ impl<T: Transport> RemoteBackend<T> {
             video,
             modes,
             restored,
+            shape,
         })
     }
 
@@ -199,6 +216,8 @@ struct Answer {
     modes: Option<ModeList>,
     /// In the `RestoreDisplayMode` response.
     restored: Option<bool>,
+    /// In the `CursorShape` response: `image`'s shape.
+    shape: Option<ShapeHeader>,
 }
 /// `failure`, which ends the session, kept as the cause.
 fn disconnected(failure: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> std::io::Error {
@@ -234,6 +253,28 @@ impl<T: Transport> Backend for RemoteBackend<T> {
             return Err(error("helper cursor belongs to a different desktop"));
         }
         Ok(self.cursor)
+    }
+    /// The first call asks the worker to read shapes from then on; later
+    /// ones cross the pipe only when an answer numbered a newer shape. The
+    /// worker's answer is checked here: a shape out of bounds, or a bitmap
+    /// of another length, is refused as `InvalidData`, and not asked again.
+    fn cursor_shape(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
+        if self.failed {
+            return Err(disconnected("helper disconnected; restart desktop sharing"));
+        }
+        if self.context.as_ref() != Some(expected) {
+            return Err(error("helper cursor belongs to a different desktop"));
+        }
+        if self.shapes && self.shape_serial == self.fetched_shape {
+            return Ok(None);
+        }
+        self.shapes = true;
+        let answer = self.call(Request::CursorShape {})?;
+        self.fetched_shape = self.shape_serial;
+        answer
+            .shape
+            .map(|shape| shape.shape(answer.image))
+            .transpose()
     }
     fn capture_video(
         &mut self,
@@ -424,12 +465,13 @@ mod tests {
         assert_eq!(ordinary, desktop());
     }
 
-    /// Protocol 7 over a pipe to a worker serving a synthetic display: its
+    /// Protocol 8 over a pipe to a worker serving a synthetic display: its
     /// `Start` answer says what it can do, H.265 is asked only for a viewer
-    /// that decodes it, its modes cross, a change and its restore apply
-    /// there, and a failure reads back as the kind the worker gave it.
+    /// that decodes it, the pointer's shape crosses once per new shape, its
+    /// modes cross, a change and its restore apply there, and a failure
+    /// reads back as the kind the worker gave it.
     #[test]
-    fn protocol_7_carries_caps_modes_and_failure_kinds() {
+    fn protocol_8_carries_caps_shapes_modes_and_failure_kinds() {
         use crate::{
             native::PlatformBackend,
             platform::{
@@ -444,9 +486,14 @@ mod tests {
         let (probe, modes) = Probe::with_modes();
         let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop");
         let asked_h265 = Arc::new(AtomicUsize::new(0));
+        let asked_shape = Arc::new(AtomicUsize::new(0));
         let (pipe, mut worker) = tokio::io::duplex(1 << 16);
-        let (worker_probe, worker_journal, asked) =
-            (probe.clone(), journal.to_path_buf(), asked_h265.clone());
+        let (worker_probe, worker_journal, asked, asked_for_shape) = (
+            probe.clone(),
+            journal.to_path_buf(),
+            asked_h265.clone(),
+            asked_shape.clone(),
+        );
         let helper = std::thread::spawn(move || {
             runtime().block_on(async move {
                 // The service reads the host's `Start`; the worker answers.
@@ -465,6 +512,9 @@ mod tests {
                 super::super::server::exchange(&mut worker, 1, display_device, |request| {
                     if matches!(request, Request::H265 {}) {
                         asked.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if matches!(request, Request::CursorShape {}) {
+                        asked_for_shape.fetch_add(1, Ordering::SeqCst);
                     }
                     let answer = super::super::server::serve(&mut backend, request, &mut state)
                         .unwrap_or_else(|failure| (Response::failed(&failure, 0), vec![]));
@@ -488,6 +538,28 @@ mod tests {
         assert_eq!(asked_h265.load(Ordering::SeqCst), 0);
         backend.describe(true).unwrap();
         assert_eq!(asked_h265.load(Ordering::SeqCst), 1);
+        assert!(described.caps.cursor_shapes);
+
+        // The first ask turns the worker's shape reads on; after it, only a
+        // newer shape crosses again.
+        let display = Probe::display();
+        probe.point(display.x + 1, 1);
+        let shape = |kind| crate::CursorShape::new(kind, 2, 2, (1, 1), vec![3; 16]).unwrap();
+        probe.set_shape(shape(crate::CursorKind::Ibeam));
+        let context = backend.context().unwrap();
+        assert_eq!(
+            backend.cursor_shape(&context).unwrap(),
+            Some(shape(crate::CursorKind::Ibeam))
+        );
+        backend.context().unwrap();
+        assert_eq!(backend.cursor_shape(&context).unwrap(), None);
+        probe.set_shape(shape(crate::CursorKind::Custom));
+        backend.context().unwrap();
+        assert_eq!(
+            backend.cursor_shape(&context).unwrap(),
+            Some(shape(crate::CursorKind::Custom))
+        );
+        assert_eq!(asked_shape.load(Ordering::SeqCst), 2);
 
         let context = backend.context().unwrap();
         let listed = backend.display_modes(&context).unwrap().unwrap();
@@ -560,6 +632,33 @@ mod tests {
         assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
         backend.presented(&desktop).unwrap();
         assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
+        drop(backend);
+        helper.join().unwrap();
+    }
+
+    /// A shape whose bitmap is not the size its header gives is refused,
+    /// and not asked for again until the worker numbers a newer one.
+    #[test]
+    fn a_misfit_helper_shape_is_refused() {
+        let desktop = desktop();
+        let reported = desktop.clone();
+        let (mut backend, helper) = remote(move |request| Response {
+            context: Some(reported.clone()),
+            shape_serial: request.observes_cursor().then_some(1),
+            // A pixel's header over the empty record `remote` writes.
+            shape: matches!(request, Request::CursorShape {}).then_some(ShapeHeader {
+                kind: crate::CursorKind::Arrow,
+                width: 1,
+                height: 1,
+                hot_x: 0,
+                hot_y: 0,
+            }),
+            ..Response::default()
+        });
+        backend.context().unwrap();
+        let refused = backend.cursor_shape(&desktop).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(backend.cursor_shape(&desktop).unwrap(), None);
         drop(backend);
         helper.join().unwrap();
     }

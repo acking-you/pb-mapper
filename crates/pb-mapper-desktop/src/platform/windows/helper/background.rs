@@ -5,7 +5,7 @@ use crate::{HostStatus, Result, error};
 use pb_mapper_client::sdk::RelayTransport;
 use serde::{Deserialize, Serialize};
 
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v7";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v8";
 const _: () = assert!(
     super::names_protocol(PIPE, super::HELPER_PROTOCOL),
     "the background pipe's name ends in .v and HELPER_PROTOCOL"

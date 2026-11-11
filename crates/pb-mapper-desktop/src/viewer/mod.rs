@@ -37,11 +37,12 @@ pub use status::{
 };
 
 use crate::{
-    HostOs, Input, Invitation, KeyframeReason, QualityPreset, Result, VideoCodec, error,
+    CursorShape, HostOs, Input, Invitation, KeyframeReason, QualityPreset, Result, VideoCodec,
+    error,
     modes::{DisplayModeError, Mode, ModeList, ModeTarget},
     protocol::{
-        CAPABILITY_DISPLAY_MODE, CAPABILITY_PHYSICAL_KEYS, DesktopKind, NoticeCode, Route,
-        SessionState, StateRecord, VideoSize,
+        CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE, CAPABILITY_PHYSICAL_KEYS, CURSOR_SLOTS,
+        DesktopKind, NoticeCode, Route, SessionState, ShapeSlot, StateRecord, VideoSize,
     },
     security, valid_service,
 };
@@ -176,6 +177,8 @@ struct ViewerShared {
     state: Mutex<ViewerStateSlot>,
     stats: Mutex<ViewerStatsAcc>,
     cursor: Mutex<CursorSlot>,
+    /// Taken apart from the others, never while one is held.
+    shapes: Mutex<ShapeTable>,
     outbound: Outbound,
 }
 impl ViewerShared {
@@ -200,6 +203,10 @@ struct CursorSlot {
     seq: u64,
     /// The generation and sequence of the last move written to the host.
     moved: Option<(u64, u64)>,
+    /// The slot of the pointer's shape, from the host's last report that
+    /// named one, and the number of the definition it holds (0: none).
+    slot: Option<ShapeSlot>,
+    shape: u16,
 }
 impl CursorSlot {
     /// A report of `generation` the host sampled before it took the last move
@@ -215,6 +222,44 @@ impl CursorSlot {
             && input_sequence
                 .zip(self.moved)
                 .is_some_and(|(taken, moved)| moved.0 == generation && taken < moved.1)
+    }
+}
+
+/// The pointer shapes the host defined, one per slot, each with the number
+/// this viewer gave its definition: what `DesktopView::cursor_shape` names.
+/// Exactly `CURSOR_SLOTS` slots, which the host overwrites as it chooses.
+#[derive(Default)]
+struct ShapeTable {
+    /// Empty until the first definition, then `CURSOR_SLOTS` long.
+    slots: Vec<Option<(u16, CursorShape)>>,
+    /// The last definition's number: 1, 2, … 65535, then 1 again.
+    defined: u16,
+}
+impl ShapeTable {
+    /// Hold `shape` in `slot`, in place of what it held; its number.
+    fn define(&mut self, slot: ShapeSlot, shape: CursorShape) -> u16 {
+        if self.slots.is_empty() {
+            self.slots.resize(CURSOR_SLOTS, None);
+        }
+        self.defined = self.defined.checked_add(1).unwrap_or(1);
+        if let Some(held) = self.slots.get_mut(slot.index()) {
+            *held = Some((self.defined, shape));
+        }
+        self.defined
+    }
+    /// The number of the definition `slot` holds; `None` before the host
+    /// defined it.
+    fn number(&self, slot: ShapeSlot) -> Option<u16> {
+        self.slots
+            .get(slot.index())
+            .and_then(|held| held.as_ref().map(|(number, _)| *number))
+    }
+    fn shape(&self, number: u16) -> Option<CursorShape> {
+        self.slots
+            .iter()
+            .flatten()
+            .find(|(held, _)| *held == number)
+            .map(|(_, shape)| shape.clone())
     }
 }
 
@@ -320,6 +365,11 @@ impl Viewer {
             quality = ?accepted.quality,
         );
         let now = Instant::now();
+        // This viewer always lists `cursor_shape`.
+        let cursor_shapes = accepted
+            .capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_CURSOR_SHAPE);
         let shared = Arc::new(ViewerShared {
             state: Mutex::new(ViewerStateSlot {
                 codec: accepted.codec,
@@ -338,6 +388,7 @@ impl Viewer {
             }),
             stats: Mutex::new(ViewerStatsAcc::new(now, config.limits.max_fps)),
             cursor: Mutex::new(CursorSlot::default()),
+            shapes: Mutex::new(ShapeTable::default()),
             outbound: Outbound::new(),
         });
         let sink = VideoSink::for_session(
@@ -355,6 +406,7 @@ impl Viewer {
                 cancel: cancel.clone(),
                 codec: accepted.codec,
                 limits: config.limits,
+                cursor_shapes,
             },
         ));
         Ok(Self {
@@ -528,6 +580,7 @@ impl Viewer {
             video_height: video.map_or(0, |video| video.height),
             cursor_x: if cursor_visible { cursor.x } else { 0 },
             cursor_y: if cursor_visible { cursor.y } else { 0 },
+            cursor_shape: cursor.shape,
             state: DesktopView::state_code(state.viewer_state()),
             flags: flag(cursor_visible, DesktopView::FLAG_CURSOR_VISIBLE)
                 | flag(state.controlling(), DesktopView::FLAG_CONTROLLING)
@@ -539,6 +592,17 @@ impl Viewer {
                 | flag(fresh, DesktopView::FLAG_FRESH)
                 | flag(state.paused, DesktopView::FLAG_PAUSED),
         }
+    }
+
+    /// The pointer shape `DesktopView::cursor_shape` names, while this
+    /// viewer holds that definition: fetch it once per number. `None` for 0,
+    /// and for a definition the host has since replaced, whose successor a
+    /// later view names.
+    pub fn cursor_shape(&self, shape: u16) -> Option<CursorShape> {
+        if shape == 0 {
+            return None;
+        }
+        self.shared.shapes.lock().shape(shape)
     }
 
     /// The session's single video sink, for its one native consumer.

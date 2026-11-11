@@ -5,9 +5,9 @@
 //! boundary.
 use super::{
     ipc,
-    proto::{DRAIN_WAIT_MAX_MS, Request, Response, TIMEOUT},
+    proto::{DRAIN_WAIT_MAX_MS, Request, Response, ShapeHeader, TIMEOUT},
 };
-use crate::{Backend, DesktopContext, Result, error, failure_kind};
+use crate::{Backend, CursorShape, DesktopContext, Result, error, failure_kind};
 
 /// What the worker keeps across requests.
 pub(crate) struct ServeState {
@@ -15,12 +15,22 @@ pub(crate) struct ServeState {
     pub sequence: u64,
     /// When input was last applied or a presentation renewed it.
     pub last_input: std::time::Instant,
+    /// The host asked for the pointer's shape: it is read with every pointer
+    /// observed from then on. Never before, so a session whose viewer draws
+    /// no shapes costs nothing here.
+    shapes: bool,
+    /// The newest shape read, and how many different ones were.
+    shape: Option<CursorShape>,
+    shape_serial: u64,
 }
 impl ServeState {
     pub(crate) fn new() -> Self {
         Self {
             sequence: 0,
             last_input: std::time::Instant::now(),
+            shapes: false,
+            shape: None,
+            shape_serial: 0,
         }
     }
 }
@@ -120,7 +130,8 @@ pub(crate) fn serve<B: Backend>(
     // idle. The backend checks this desktop identity; observing it never
     // renews last_input or acknowledges video.
     let observe_cursor = request.observes_cursor();
-    let image = match request {
+    let answer_shape = matches!(request, Request::CursorShape {});
+    let mut image = match request {
         Request::Start { .. } => {
             // This worker runs in the interactive session: its settings are
             // the user's, which the service in session 0 cannot read. What
@@ -208,12 +219,52 @@ pub(crate) fn serve<B: Backend>(
             state.last_input = std::time::Instant::now();
             vec![]
         }
+        // Answered below, once the pointer is observed.
+        Request::CursorShape {} => {
+            state.shapes = true;
+            vec![]
+        }
     };
     if observe_cursor {
         response.cursor = backend.cursor(&context)?;
+        if state.shapes {
+            if response.cursor.is_some() {
+                observe_shape(backend, &context, state)?;
+            }
+            response.shape_serial = Some(state.shape_serial);
+        }
+    }
+    if answer_shape && let Some(shape) = &state.shape {
+        response.shape = Some(ShapeHeader::of(shape));
+        image = shape.rgba().to_vec();
     }
     response.context = Some(context);
     Ok((response, image))
+}
+
+/// Read the pointer's shape into `state`, numbering a new one. A shape the
+/// backend could not read keeps the last; only a lost link fails.
+fn observe_shape<B: Backend>(
+    backend: &mut B,
+    context: &DesktopContext,
+    state: &mut ServeState,
+) -> Result<()> {
+    match backend.cursor_shape(context) {
+        Ok(Some(shape)) if state.shape.as_ref() != Some(&shape) => {
+            state.shape = Some(shape);
+            state.shape_serial += 1;
+        }
+        Ok(_) => {}
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotConnected => {
+            return Err(failure);
+        }
+        Err(failure) => tracing::debug!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_cursor_shape_failed",
+            detail = %failure,
+        ),
+    }
+    Ok(())
 }
 
 /// Drain one unit, waiting up to `wait` while the encoder still holds units,

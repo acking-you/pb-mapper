@@ -17,9 +17,9 @@ pub(crate) mod waiter;
 pub(crate) mod windows;
 
 use crate::{
-    Access, BackendCaps, BackendError, Button, CursorMode, DesktopKind, Display, DisplaySelection,
-    DoubleClickGuard, EncodedFrame, FailureKind, HostOptions, HostOs, Key, Result, VideoCodec,
-    VideoLimits, VideoRate, Waker,
+    Access, BackendCaps, BackendError, Button, CursorMode, CursorShape, DesktopKind, Display,
+    DisplaySelection, DoubleClickGuard, EncodedFrame, FailureKind, HostOptions, HostOs, Key,
+    Result, VideoCodec, VideoLimits, VideoRate, Waker,
     input::held::Pressed,
     launch::{Launch, Launcher},
     modes::{Journal, Mode, Setting},
@@ -196,12 +196,37 @@ pub(crate) trait Injector: Sized {
 
 pub(crate) trait CursorSource: Sized {
     const MODE: CursorMode;
+    /// `shape` reports the pointer's shape: the host lists `cursor_shape`.
+    const SHAPES: bool = false;
     fn mode(&self) -> CursorMode {
         Self::MODE
     }
     /// The absolute pointer and whether it shows; `None` where the platform
     /// has none.
     fn read(&mut self) -> Result<Option<(i32, i32, bool)>>;
+    /// The shape of the pointer the last `read` saw, when it may have
+    /// changed since the last `Some` this source returned; the first call
+    /// returns the shape now.
+    ///
+    /// - When: on thread C, only in a session whose viewer reads shapes,
+    ///   right after a `read` that found a pointer, every 16 ms while
+    ///   capturing, inside the desktop's scope. `PlatformBackend` checked
+    ///   the desktop around that `read`.
+    /// - Unchanged: decide it by the cheapest identity the OS gives the
+    ///   pointer (Windows: the `HCURSOR` the `read` saw; macOS: the
+    ///   `NSCursor`), never by reading pixels each call, and return `None`.
+    ///   Thread C compares content, so a new identity with an equal image
+    ///   costs one extraction and nothing on the wire. `None` also when the
+    ///   pointer has no shape now (hidden): the last one stays.
+    /// - Units and bounds: the bitmap in the host's physical pixels, straight
+    ///   RGBA8, at most `CursorShape::MAX_SIDE` a side; build it with
+    ///   `CursorShape::fitted`, which scales a larger one down. `kind` names a
+    ///   standard shape the OS identifies as such, else `Custom`.
+    /// - Failure: thread C keeps the last shape and goes on capturing; a
+    ///   source that failed on one identity does not retry it every call.
+    fn shape(&mut self) -> Result<Option<CursorShape>> {
+        Ok(None)
+    }
 }
 
 /// A display's modes, by its device name (`Display::name`), the key that
@@ -320,6 +345,7 @@ pub(crate) fn fallback_caps<P: Platform>() -> BackendCaps {
         physical_keys: <P::Input as Injector>::PHYSICAL_KEYS,
         os: Some(P::OS),
         cursor: <P::Cursor as CursorSource>::MODE,
+        cursor_shapes: <P::Cursor as CursorSource>::SHAPES,
         ..BackendCaps::default()
     }
 }

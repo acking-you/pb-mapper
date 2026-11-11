@@ -9,8 +9,9 @@ use super::{
     VideoSource,
 };
 use crate::{
-    BackendError, Button, CursorMode, DRAIN_POLL, Display, DisplaySelection, EncodedFrame,
-    FailureKind, HostOs, Key, Result, VideoCodec, VideoFormat, VideoLimits, VideoRate, Waker,
+    BackendError, Button, CursorMode, CursorShape, DRAIN_POLL, Display, DisplaySelection,
+    EncodedFrame, FailureKind, HostOs, Key, Result, VideoCodec, VideoFormat, VideoLimits,
+    VideoRate, Waker,
     input::held::Pressed,
     modes::{Mode, Setting},
 };
@@ -53,8 +54,20 @@ struct State {
     /// Every mode set, and how often one was reset.
     applied: Vec<Mode>,
     resets: usize,
+    /// The pointer's shape under a handle: 1, 2, … as the test sets them.
+    shape: Option<(u64, CursorShape)>,
 }
 impl Probe {
+    /// The pointer takes `shape`, under a new handle, as an OS sets a cursor.
+    pub(crate) fn set_shape(&self, shape: CursorShape) {
+        let mut state = self.0.lock();
+        let handle = state.shape.as_ref().map_or(1, |(handle, _)| handle + 1);
+        state.shape = Some((handle, shape));
+    }
+    /// Where the pointer is.
+    pub(crate) fn point(&self, x: i32, y: i32) {
+        self.0.lock().pointer = Some((x, y));
+    }
     /// A display device no real computer has, so that nothing here ever
     /// reaches a real one's modes.
     pub(crate) fn display() -> Display {
@@ -137,7 +150,10 @@ impl<const PUSH: bool> Platform for Synthetic<PUSH> {
     fn open(probe: &Probe, _: &Display) -> Result<Parts<Self>> {
         Ok(Parts {
             input: SynInput(probe.clone()),
-            cursor: SynCursor(probe.clone()),
+            cursor: SynCursor {
+                probe: probe.clone(),
+                shaped: 0,
+            },
             modes: SynModes(probe.clone()),
             still: SynStill,
             desktop: SynDesktop(probe.clone()),
@@ -339,11 +355,28 @@ impl Injector for SynInput {
     }
 }
 
-pub(crate) struct SynCursor(Probe);
+/// The pointer the test steers, and its shape, which it sets as an OS sets
+/// a new cursor handle.
+pub(crate) struct SynCursor {
+    probe: Probe,
+    /// The handle whose shape `shape` last reported.
+    shaped: u64,
+}
 impl CursorSource for SynCursor {
     const MODE: CursorMode = CursorMode::Separate;
+    const SHAPES: bool = true;
     fn read(&mut self) -> Result<Option<(i32, i32, bool)>> {
-        Ok(self.0.0.lock().pointer.map(|(x, y)| (x, y, true)))
+        Ok(self.probe.0.lock().pointer.map(|(x, y)| (x, y, true)))
+    }
+    fn shape(&mut self) -> Result<Option<CursorShape>> {
+        let state = self.probe.0.lock();
+        match &state.shape {
+            Some((handle, shape)) if *handle != self.shaped => {
+                self.shaped = *handle;
+                Ok(Some(shape.clone()))
+            }
+            _ => Ok(None),
+        }
     }
 }
 
@@ -458,6 +491,20 @@ mod tests {
                 Typed::Text("b".into()),
             ]
         );
+        if !PUSH {
+            // The pointer takes another shape where the controller's own
+            // move left it: the shape reaches the viewer all the same, and
+            // the next one under a number of its own.
+            let shown = |viewer: &crate::Viewer| {
+                let view = viewer.view();
+                viewer.cursor_shape(view.cursor_shape)
+            };
+            for kind in [crate::CursorKind::Ibeam, crate::CursorKind::Custom] {
+                let shape = CursorShape::new(kind, 2, 2, (1, 0), vec![9; 16]).unwrap();
+                probe.set_shape(shape.clone());
+                until(|| shown(&watching.viewer).as_ref() == Some(&shape)).await;
+            }
+        }
         if PUSH {
             // Drained when the source woke thread C, not at the next tick.
             let latencies = probe.0.lock().latencies.clone();

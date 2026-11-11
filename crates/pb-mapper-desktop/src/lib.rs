@@ -59,6 +59,7 @@ pub use backend::{
     Waker, failure_kind,
 };
 pub use host::{Access, Custom, DisplaySelection, Host, HostBuilder, HostOptions, Native};
+pub use input::cursor::{CursorKind, CursorShape};
 pub use input::{Button, DoubleClickGuard, Input, InputEvent, Key, cursor::CursorPosition};
 pub use invite::{Invitation, InvitationError, InvitationFormat, valid_service};
 pub use modes::{DisplayModeError, Mode, ModeList, ModeTarget};

@@ -122,6 +122,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
                 os: Some(P::OS),
                 cursor: self.parts.cursor.mode(),
                 physical_keys: <P::Input as Injector>::PHYSICAL_KEYS,
+                cursor_shapes: <P::Cursor as CursorSource>::SHAPES,
             },
             display,
         })
@@ -236,6 +237,12 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             return Err(error("desktop changed during cursor capture"));
         }
         Ok(read.map(|(x, y, showing)| confine(&expected.display, (x, y), showing)))
+    }
+    /// The shape of the pointer `cursor` just read, on the desktop it
+    /// checked around that read.
+    fn cursor_shape(&mut self, _expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
+        let _scope = self.parts.desktop.scope();
+        self.parts.cursor.shape()
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         let context = self.context()?;
@@ -437,6 +444,9 @@ impl Backend for NativeBackend {
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         self.0.cursor(expected)
+    }
+    fn cursor_shape(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
+        self.0.cursor_shape(expected)
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         self.0.input(event)

@@ -2,7 +2,7 @@
 //! one byte record (a unit or a still), in order, per call of the
 //! `Backend` it carries. A change to any of it bumps the helper protocol.
 use crate::{
-    BackendCaps, CursorMode, DesktopContext, FailureKind, HostOs, Input,
+    BackendCaps, CursorKind, CursorMode, CursorShape, DesktopContext, FailureKind, HostOs, Input,
     modes::{Mode, ModeList},
 };
 use serde::{Deserialize, Serialize};
@@ -92,6 +92,11 @@ pub(crate) enum Request {
     },
     /// Answered in `restored`.
     RestoreDisplayMode {},
+    /// The pointer's shape, answered in `shape` with its bitmap as the byte
+    /// record. From the first one on, the worker also reads the shape with
+    /// every pointer it observes, and numbers each new one in `shape_serial`,
+    /// so the host asks again only for a newer one.
+    CursorShape {},
     Release {},
     Close {},
 }
@@ -111,6 +116,7 @@ impl Request {
             | Self::Presented { .. }
             | Self::Input { .. }
             | Self::H265 {}
+            | Self::CursorShape {}
             | Self::Release {}
             | Self::Close {} => TIMEOUT,
         }
@@ -129,14 +135,15 @@ impl Request {
             | Self::Input { .. }
             | Self::H265 {}
             | Self::DisplayModes { .. }
-            | Self::SetDisplayMode { .. } => true,
+            | Self::SetDisplayMode { .. }
+            | Self::CursorShape {} => true,
         }
     }
     /// The worker reads the pointer for it. An applied input reads it too,
     /// but only when it can, so its answer may carry none.
     pub(crate) fn observes_cursor(&self) -> bool {
         match self {
-            Self::Context {} | Self::Capture {} | Self::Video { .. } => true,
+            Self::Context {} | Self::Capture {} | Self::Video { .. } | Self::CursorShape {} => true,
             Self::Start { .. }
             | Self::Attach { .. }
             | Self::ConfigureVideo { .. }
@@ -182,6 +189,48 @@ pub(crate) struct Response {
     /// In the `RestoreDisplayMode` response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored: Option<bool>,
+    /// To a request that observes the pointer, once the host asked for a
+    /// shape: the number of the newest shape the worker read, 0 before the
+    /// first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_serial: Option<u64>,
+    /// In the `CursorShape` response, when the worker has read one: the
+    /// shape whose bitmap the byte record holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<ShapeHeader>,
+}
+/// A pointer shape but its bitmap, which follows as the byte record. The
+/// host checks it, and the record's length, before it takes the shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ShapeHeader {
+    pub kind: CursorKind,
+    pub width: u32,
+    pub height: u32,
+    pub hot_x: u32,
+    pub hot_y: u32,
+}
+impl ShapeHeader {
+    pub(crate) fn of(shape: &CursorShape) -> Self {
+        let (hot_x, hot_y) = shape.hotspot();
+        Self {
+            kind: shape.kind(),
+            width: shape.width(),
+            height: shape.height(),
+            hot_x,
+            hot_y,
+        }
+    }
+    /// The shape with `rgba`; `InvalidData` when either is out of bounds.
+    pub(crate) fn shape(self, rgba: Vec<u8>) -> std::io::Result<CursorShape> {
+        CursorShape::new(
+            self.kind,
+            self.width,
+            self.height,
+            (self.hot_x, self.hot_y),
+            rgba,
+        )
+    }
 }
 /// What a worker's backend can do, as its `Start` answer says: never H.265,
 /// which costs a probe and is asked only when a viewer decodes it.
@@ -194,6 +243,8 @@ pub(crate) struct StartCaps {
     pub cursor: CursorMode,
     /// The worker injects `Input::PhysicalKey`.
     pub physical_keys: bool,
+    /// The worker reads the pointer's shape (`Request::CursorShape`).
+    pub cursor_shapes: bool,
 }
 impl From<&BackendCaps> for StartCaps {
     fn from(caps: &BackendCaps) -> Self {
@@ -204,6 +255,7 @@ impl From<&BackendCaps> for StartCaps {
             os,
             cursor,
             physical_keys,
+            cursor_shapes,
         } = *caps;
         Self {
             lock,
@@ -211,6 +263,7 @@ impl From<&BackendCaps> for StartCaps {
             os,
             cursor,
             physical_keys,
+            cursor_shapes,
         }
     }
 }
@@ -222,6 +275,7 @@ impl From<StartCaps> for BackendCaps {
             os,
             cursor,
             physical_keys,
+            cursor_shapes,
         } = caps;
         Self {
             h265: false,
@@ -230,6 +284,7 @@ impl From<StartCaps> for BackendCaps {
             os,
             cursor,
             physical_keys,
+            cursor_shapes,
         }
     }
 }

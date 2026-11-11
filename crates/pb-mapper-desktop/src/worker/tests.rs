@@ -82,6 +82,10 @@ struct Fake {
     discard: Arc<AtomicBool>,
     /// The display's modes; `None` offers none.
     modes: Arc<Mutex<Option<crate::ModeList>>>,
+    /// A shape the pointer took under a new handle, until the next read.
+    shape: Arc<Mutex<Option<crate::CursorShape>>>,
+    /// How often thread C asked for the shape.
+    shape_reads: Arc<AtomicU32>,
 }
 impl Fake {
     fn new(clock: Time) -> Self {
@@ -102,6 +106,8 @@ impl Fake {
             encoding: Arc::default(),
             discard: Arc::default(),
             modes: Arc::default(),
+            shape: Arc::default(),
+            shape_reads: Arc::default(),
         }
     }
 
@@ -150,6 +156,10 @@ impl Backend for Fake {
             y,
             visible: true,
         }))
+    }
+    fn cursor_shape(&mut self, _: &DesktopContext) -> Result<Option<crate::CursorShape>> {
+        self.shape_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(self.shape.lock().take())
     }
     fn capture_video(
         &mut self,
@@ -249,6 +259,7 @@ fn config(admission: Option<Arc<dyn ControlAdmission>>) -> WorkerConfig {
         codec: VideoCodec::H264,
         limits: LIMITS,
         admission,
+        cursor_shapes: false,
     }
 }
 
@@ -266,18 +277,15 @@ struct Harness {
 }
 impl Harness {
     fn new(allowed: bool, admission: Option<Arc<dyn ControlAdmission>>) -> Self {
+        Self::with(allowed, config(admission))
+    }
+    fn with(allowed: bool, config: WorkerConfig) -> Self {
         let now = Arc::new(Mutex::new(Instant::now()));
         let time = now.clone();
         let clock: Time = Arc::new(move || *time.lock());
         let fake = Fake::new(clock.clone());
         let shared = session(allowed);
-        let engine = Engine::start(
-            &shared,
-            fake.clone(),
-            config(admission),
-            Manual(now.clone()),
-        )
-        .unwrap();
+        let engine = Engine::start(&shared, fake.clone(), config, Manual(now.clone())).unwrap();
         Self {
             shared,
             engine,
@@ -724,13 +732,13 @@ fn input_requires_control_current_geometry_and_unique_sequence() {
 fn the_cursor_reports_every_change_but_the_controllers_own_move() {
     let mut h = Harness::new(true, None);
     let reported = |h: &Harness| {
-        h.shared.cursor.borrow().map(|report| {
+        h.shared.cursor.borrow().as_ref().map(|report| {
             let cursor = report.cursor;
             (report.serial, cursor.generation, cursor.x, cursor.y)
         })
     };
     // The last sequence C had taken when it sampled the last report.
-    let taken = |h: &Harness| h.shared.cursor.borrow().unwrap().input_sequence;
+    let taken = |h: &Harness| h.shared.cursor.borrow().as_ref().unwrap().input_sequence;
     h.send(LaneCommand::Control { enabled: true });
     h.step();
     h.present();
@@ -791,6 +799,47 @@ fn the_cursor_reports_every_change_but_the_controllers_own_move() {
     let (serial, moved, x, y) = reported(&h).unwrap();
     assert!(serial > first + 5 && moved > generation);
     assert_eq!((x, y), (5, 5));
+}
+
+/// The shape is no position: a new one is reported where the controller's
+/// own move left the pointer, which the echo rule would otherwise hold back,
+/// and an equal one read under a new handle is no change. A session whose
+/// viewer reads no shapes never asks the backend for one.
+#[test]
+fn a_new_shape_is_reported_even_at_the_controllers_own_move() {
+    let ibeam =
+        crate::CursorShape::new(crate::CursorKind::Ibeam, 1, 2, (0, 1), vec![1; 8]).unwrap();
+    for shapes in [false, true] {
+        let mut h = Harness::with(
+            true,
+            WorkerConfig {
+                cursor_shapes: shapes,
+                ..config(None)
+            },
+        );
+        let report = |h: &Harness| h.shared.cursor.borrow().clone().unwrap();
+        h.send(LaneCommand::Control { enabled: true });
+        h.step();
+        h.present();
+        h.input(Input::Move { x: 4, y: 3 });
+        h.run(Duration::from_millis(20), true);
+        let before = report(&h);
+        *h.fake.shape.lock() = Some(ibeam.clone());
+        h.run(Duration::from_millis(20), true);
+        let after = report(&h);
+        if !shapes {
+            assert_eq!(after.serial, before.serial);
+            assert_eq!(h.fake.shape_reads.load(Ordering::SeqCst), 0);
+            continue;
+        }
+        assert_eq!(after.serial, before.serial + 1);
+        assert_eq!((after.cursor.x, after.cursor.y), (4, 3));
+        assert_eq!(after.shape.as_ref(), Some(&ibeam));
+        // The same image under another handle.
+        *h.fake.shape.lock() = Some(ibeam.clone());
+        h.run(Duration::from_millis(20), true);
+        assert_eq!(report(&h).serial, after.serial);
+    }
 }
 
 #[test]

@@ -97,6 +97,7 @@ pub(super) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
             HostMessage::State { .. }
             | HostMessage::Video { .. }
             | HostMessage::Cursor { .. }
+            | HostMessage::CursorShape(_)
             | HostMessage::Probe { .. }
             | HostMessage::Stats { .. }
             | HostMessage::Notice { .. }
@@ -153,6 +154,8 @@ pub(super) struct Session {
     pub(super) cancel: CancellationToken,
     pub(super) codec: VideoCodec,
     pub(super) limits: VideoLimits,
+    /// The host listed `cursor_shape`, as this viewer always does.
+    pub(super) cursor_shapes: bool,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -182,6 +185,7 @@ pub(super) async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, s
         cancel,
         codec,
         limits,
+        cursor_shapes,
     } = &session;
     let (mut read, mut write) = tokio::io::split(stream);
     let mut reader = Reader {
@@ -189,6 +193,7 @@ pub(super) async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, s
         sink,
         codec: *codec,
         limits: *limits,
+        cursor_shapes: *cursor_shapes,
         last_seq: 0,
         generation: 0,
     };
@@ -251,6 +256,9 @@ struct Reader<'a> {
     sink: &'a VideoSink,
     codec: VideoCodec,
     limits: VideoLimits,
+    /// Both ends listed `cursor_shape`: shapes may come, and no other host
+    /// may send one.
+    cursor_shapes: bool,
     last_seq: u64,
     /// The generation of the last `State`.
     generation: u64,
@@ -373,20 +381,57 @@ impl Reader<'_> {
                 y,
                 visible,
                 input_sequence,
+                shape,
             } => {
-                if generation == self.generation {
-                    let controlling = self.shared.state.lock().controlling();
-                    let mut cursor = self.shared.cursor.lock();
-                    if !cursor.superseded(generation, input_sequence, controlling) {
-                        *cursor = CursorSlot {
-                            generation,
-                            x,
-                            y,
-                            visible,
-                            seq: cursor.seq + 1,
-                            ..*cursor
-                        };
+                // The shape of every report, whatever its position: a move
+                // of this viewer's never overtook a shape.
+                let named = match shape {
+                    Some(_) if !self.cursor_shapes => {
+                        return Err(Ended::protocol(
+                            "a cursor shape this viewer did not ask for",
+                        ));
                     }
+                    Some(slot) => match self.shared.shapes.lock().number(slot) {
+                        Some(number) => Some((slot, number)),
+                        None => return Err(Ended::protocol("a cursor shape never defined")),
+                    },
+                    None => None,
+                };
+                let controlling = self.shared.state.lock().controlling();
+                let mut cursor = self.shared.cursor.lock();
+                if let Some((slot, number)) = named {
+                    cursor.slot = Some(slot);
+                    cursor.shape = number;
+                }
+                if generation == self.generation
+                    && !cursor.superseded(generation, input_sequence, controlling)
+                {
+                    *cursor = CursorSlot {
+                        generation,
+                        x,
+                        y,
+                        visible,
+                        seq: cursor.seq + 1,
+                        ..*cursor
+                    };
+                }
+            }
+            HostMessage::CursorShape(record) => {
+                if !self.cursor_shapes {
+                    return Err(Ended::protocol(
+                        "a cursor shape this viewer did not ask for",
+                    ));
+                }
+                let rgba = wire::read_payload_of(read, record.payload_len())
+                    .await
+                    .map_err(Ended::failed)?;
+                let shape = record
+                    .shape(&rgba)
+                    .map_err(|_| Ended::protocol("cursor shape out of bounds"))?;
+                let number = self.shared.shapes.lock().define(record.id, shape);
+                let mut cursor = self.shared.cursor.lock();
+                if cursor.slot == Some(record.id) {
+                    cursor.shape = number;
                 }
             }
             HostMessage::Stats(host) => self.shared.stats.lock().on_host(Instant::now(), host),

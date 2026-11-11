@@ -122,6 +122,20 @@ pub trait Backend: 'static {
         let _ = expected;
         Ok(None)
     }
+    /// The pointer's shape, for a backend whose caps say `cursor_shapes`.
+    /// Thread C asks only in a session whose viewer reads shapes, right
+    /// after `cursor` reported a pointer for `expected`, every 16 ms while
+    /// it captures. `Some` when the shape may have changed since the last
+    /// `Some` this backend returned (the first call: the shape now); `None`
+    /// when it is unchanged or unknown, which keeps the last one. Tell a
+    /// change by the cheapest identity the OS offers, a cursor handle, never
+    /// by reading pixels each time: thread C compares the content itself. A
+    /// failure keeps the last shape and does not end capture, except a lost
+    /// link (`NotConnected`).
+    fn cursor_shape(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
+        let _ = expected;
+        Ok(None)
+    }
     fn input(&mut self, event: &Input) -> Result<()>;
     /// The injection boundary: inject only while the desktop is `expected`.
     /// Backends that can switch desktops override it without switching again
@@ -233,6 +247,9 @@ impl<B: Backend + ?Sized> Backend for Box<B> {
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         (**self).cursor(expected)
     }
+    fn cursor_shape(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
+        (**self).cursor_shape(expected)
+    }
     fn input(&mut self, event: &Input) -> Result<()> {
         (**self).input(event)
     }
@@ -280,6 +297,8 @@ pub struct BackendCaps {
     /// It injects `Input::PhysicalKey`: keys by their place on the
     /// keyboard, which the host's layout and input method type.
     pub physical_keys: bool,
+    /// `Backend::cursor_shape` reports the pointer's shape.
+    pub cursor_shapes: bool,
 }
 impl BackendCaps {
     /// The values a host lists in `Accepted.capabilities` for these.
@@ -294,10 +313,14 @@ impl BackendCaps {
         let physical_keys = self
             .physical_keys
             .then(|| crate::protocol::CAPABILITY_PHYSICAL_KEYS.to_string());
+        let shapes = self
+            .cursor_shapes
+            .then(|| crate::protocol::CAPABILITY_CURSOR_SHAPE.to_string());
         lock.into_iter()
             .chain(modes)
             .chain(os)
             .chain(physical_keys)
+            .chain(shapes)
             .collect()
     }
 }
