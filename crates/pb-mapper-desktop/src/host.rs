@@ -27,16 +27,14 @@ use pb_mapper_client::sdk::{
 use pb_mapper_core::timeout::RetryBackoff;
 use std::{
     io,
+    net::{Ipv4Addr, SocketAddr},
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
-use tokio::{
-    net::TcpListener,
-    sync::{Mutex as AsyncMutex, Semaphore},
-};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 /// How long `Accepted` waits for a new backend to describe itself: which
@@ -128,7 +126,7 @@ impl Host {
         };
         let tls = identity.acceptor()?;
         let invitation = identity.invitation(options.service.clone())?;
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let listener = pb_mapper_core::listener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
         let registration = client
             .register_with_options(
                 RegisterRequest {

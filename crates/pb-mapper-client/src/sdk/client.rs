@@ -13,9 +13,7 @@ use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_core::config::control_io_timeout;
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
 use tokio::net::{TcpListener, TcpStream};
-use uni_stream::stream::{
-    TcpListenerProvider, TcpStreamProvider, UdpListenerProvider, UdpStreamProvider,
-};
+use uni_stream::stream::{TcpStreamProvider, UdpListenerProvider, UdpStreamProvider};
 
 use snafu::ResultExt;
 
@@ -29,7 +27,9 @@ use super::types::{
 use super::worker::TunnelWorker;
 use super::{ConnectOptions, LanTransport, PathPolicy, RegisterOptions};
 use crate::client::status::get_status_with_credential;
-use crate::client::{run_client_side_cli_recovering_with_path, run_owned_stream};
+use crate::client::{
+    LocalTcpListenerProvider, run_client_side_cli_recovering_with_path, run_owned_stream,
+};
 use crate::server::{ServerTunnelOptions, run_server_side_cli_recovering};
 
 pub(crate) struct ClientInner {
@@ -410,7 +410,7 @@ impl Client {
         );
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
-                run_client_side_cli_recovering_with_path::<TcpListenerProvider>(
+                run_client_side_cli_recovering_with_path::<LocalTcpListenerProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,

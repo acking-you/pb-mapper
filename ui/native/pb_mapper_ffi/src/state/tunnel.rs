@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex as SyncMutex;
 use tokio::sync::Mutex;
-use uni_stream::stream::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
+use uni_stream::stream::{ListenerProvider, UdpListenerProvider};
 
+use pb_mapper_client::client::LocalTcpListenerProvider;
 use pb_mapper_client::sdk::{
     Client, ConnectOptions, ConnectRequest, Connection, Error as SdkError, PathPolicy,
     RecoveryFailure, RegisterOptions, RegisterRequest, Registration, RelayTransport, Transport,
@@ -457,10 +458,11 @@ pub async fn connect_service(
 
     let (local_addrs, remote_addrs) = resolve_ends(&spec.local_address, &server_address).await?;
 
-    // Preflight local bind to detect "port already in use" before starting client.
+    // Preflight local bind to detect "port already in use" before starting
+    // client, bound as the tunnel will bind it.
     let transport = transport_of(&spec.protocol);
     let bound = match transport {
-        Transport::Tcp => TcpListenerProvider::bind(local_addrs.as_slice())
+        Transport::Tcp => LocalTcpListenerProvider::bind(local_addrs.as_slice())
             .await
             .map(drop),
         Transport::Udp => UdpListenerProvider::bind(local_addrs.as_slice())

@@ -1,8 +1,10 @@
 pub mod error;
 mod health;
+mod listener;
 pub mod status;
 pub(crate) mod stream;
 
+pub use self::listener::{LocalTcpListener, LocalTcpListenerProvider};
 pub use crate::worker_status::StatusCallback as ClientStatusCallback;
 
 use crate::diagnostics::Diagnostics;
@@ -38,7 +40,8 @@ use uni_stream::addr::ToSocketAddrs;
 use uni_stream::stream::{ListenerProvider, StreamAccept};
 
 /// Local streams of one connect tunnel in setup at once. More wait in the
-/// listener's backlog; a stream that starts forwarding gives its slot back.
+/// listener's backlog, for TCP as deep as [`LocalTcpListenerProvider`] binds
+/// it; a stream that starts forwarding gives its slot back.
 const LOCAL_SETUPS: usize = 64;
 
 /// Resolve both ends, reporting a bad address through `status`.

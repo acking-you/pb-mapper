@@ -1,5 +1,6 @@
 //! The bottom layer: credential primitives, framing checksums, configuration,
-//! address resolution, and the file primitives the durable stores build on.
+//! address resolution, the TCP listeners every role binds, and the file
+//! primitives the durable stores build on.
 //!
 //! Nothing here depends on another `pb-mapper` crate, which is what makes it
 //! the bottom. `DataLenType` lives here rather than with the message framing
@@ -13,6 +14,7 @@ pub mod config;
 pub mod conn_id;
 pub mod durable_file;
 pub mod error;
+pub mod listener;
 pub mod paging;
 pub mod test_support;
 pub mod time;

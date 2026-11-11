@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use tokio::net::TcpListener;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -98,7 +97,7 @@ impl PbMapperState {
             None => None,
         };
 
-        let listener = TcpListener::bind(bind_addr).await.map_err(|e| {
+        let listener = pb_mapper_core::listener::bind(bind_addr).map_err(|e| {
             CtlError::address_in_use(format!("Failed to bind server on {bind_addr}: {e}"))
         })?;
         let auth_config = AuthConfig {

@@ -201,7 +201,7 @@ pub(super) async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
             }),
     };
     let auth = pb_mapper_auth::AuthRuntime::from_process(auth_config).await?;
-    let listener = tokio::net::TcpListener::bind((ip_addr, args.port)).await?;
+    let listener = pb_mapper_core::listener::bind(SocketAddr::new(ip_addr, args.port))?;
     pb_mapper_server::run_server_on_listener_with_options(
         listener, shutdown, None, keep_alive, auth, options,
     )

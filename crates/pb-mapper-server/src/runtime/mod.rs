@@ -73,7 +73,7 @@ pub async fn run_server_with_auth_config<A: ToSocketAddrs>(
     let auth = AuthRuntime::from_process(auth_config)
         .await
         .map_err(std::io::Error::other)?;
-    let listener = TcpListener::bind(addr).await?;
+    let listener = pb_mapper_core::listener::bind_first(addr).await?;
     run_server_on_listener(listener, shutdown_token, status_channel, keep_alive, auth).await
 }
 

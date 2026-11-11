@@ -285,21 +285,16 @@ impl Drop for Offered {
     }
 }
 
+/// A listener on `addr` set up as pb-mapper's others are, whose accept queue
+/// holds no more connections than the acceptor takes into TLS at once.
 fn listen(addr: SocketAddr) -> io::Result<TcpListener> {
-    use socket2::{Domain, Protocol, Socket, Type};
-    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    let socket = pb_mapper_core::listener::socket(addr)?;
     if addr.is_ipv6() {
         // The IPv4 listener has its own socket on the same port.
-        socket.set_only_v6(true)?;
+        socket2::SockRef::from(&socket).set_only_v6(true)?;
     }
-    // As Tokio's own listeners: a restart need not wait out TIME_WAIT. Not on
-    // Windows, where it would let another socket take the port over.
-    #[cfg(unix)]
-    socket.set_reuse_address(true)?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&addr.into())?;
-    socket.listen(MAX_HANDSHAKES as i32)?;
-    TcpListener::from_std(socket.into())
+    socket.bind(addr)?;
+    socket.listen(MAX_HANDSHAKES as u32)
 }
 
 /// Accept on one listener for as long as it lives.
