@@ -3088,7 +3088,6 @@ dependencies = [
  "pb-mapper-server",
  "portmapper-plus",
  "quinn-plus",
- "rand 0.10.2",
  "rcgen-plus",
  "ring",
  "serde",
