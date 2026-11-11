@@ -34,6 +34,10 @@ pub enum ErrorCode {
     InvalidArgument,
     /// The pb-mapper server could not be reached.
     ServerUnreachable,
+    /// The relay answered that it offers no QUIC, which this computer is set
+    /// to reach it over: no retry reaches it, choosing TCP or giving the
+    /// relay a QUIC port does.
+    QuicUnavailable,
     /// A local port was already taken.
     AddressInUse,
     /// The server did not answer in time.
@@ -162,7 +166,8 @@ impl std::error::Error for CtlError {}
 
 /// Why nothing can reach this relay over QUIC, in the words the window shows.
 pub(crate) fn no_quic() -> CtlError {
-    CtlError::server_unreachable(
+    CtlError::new(
+        ErrorCode::QuicUnavailable,
         "The relay does not offer QUIC. Choose TCP in Settings, or give the relay a QUIC port",
     )
 }

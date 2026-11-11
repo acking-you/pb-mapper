@@ -452,13 +452,15 @@ async fn refresh_server_status(
 
     let (answer, mut asked) = fetch_real_status(&client, force || known.is_none()).await;
     // Over QUIC, a relay that does not answer at all may still answer
-    // over TCP, and then it is UDP that does not get through. Asked here,
-    // on that failure only, so the window can say what to open; not of a
-    // relay already known to offer no QUIC, which the refusal says.
+    // over TCP, and then it is UDP that does not get through; and one that
+    // says it offers no QUIC may have offered it when last asked. Asked
+    // here, on those failures only, so the window can say what to open and
+    // shows no port the relay has stopped offering; not of a relay already
+    // known to offer no QUIC, which the refusal says.
     let quic_unanswered = config.relay_transport == RelayTransport::Quic
         && matches!(&answer, Err(error) if matches!(
             error.code(),
-            ErrorCode::ServerUnreachable | ErrorCode::Timeout
+            ErrorCode::ServerUnreachable | ErrorCode::Timeout | ErrorCode::QuicUnavailable
         ));
     if quic_unanswered && asked.is_none() && known != Some(None) {
         asked = client.relay_quic_port().await.ok();

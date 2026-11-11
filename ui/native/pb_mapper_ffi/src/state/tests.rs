@@ -521,7 +521,7 @@ async fn tunnels_and_checks_follow_the_chosen_carrier() {
     )
     .await
     .unwrap_err();
-    assert_eq!(refused.code(), ErrorCode::ServerUnreachable, "{refused}");
+    assert_eq!(refused.code(), ErrorCode::QuicUnavailable, "{refused}");
     assert!(refused.to_string().contains("QUIC"), "{refused}");
 
     drop(socket);

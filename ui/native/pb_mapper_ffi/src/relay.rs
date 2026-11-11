@@ -770,5 +770,6 @@ mod tests {
             refused.to_string().contains("does not offer QUIC"),
             "{refused}"
         );
+        assert_eq!(refused.code(), ErrorCode::QuicUnavailable, "{refused}");
     }
 }
