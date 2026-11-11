@@ -27,9 +27,10 @@
 //!
 //! It prints the largest keyframe and access unit, which `wire::MAX_PAYLOAD`
 //! must hold. Driving the encoder, it also prints a `case=encoder` line: the
-//! heap allocations and bytes the encoder's own calls ask for per access unit,
-//! and the median and mean time, and cycles its thread ran, of a submit that
-//! converted a capture and of a drain that returned a unit.
+//! heap allocations and bytes the encoder's own calls ask for, and the time
+//! and the cycles its thread ran in them, per access unit; and the median and
+//! mean of each of a submit that converted a capture and of a drain that
+//! returned a unit.
 #[cfg(windows)]
 mod probe_support;
 
@@ -471,6 +472,10 @@ mod bench {
         calls: u64,
         /// What the encoder's own calls allocated, and bytes asked for.
         encoder_allocations: (u64, u64),
+        /// Every encoder call, an empty drain or a submit that took nothing
+        /// included: microseconds, and thousands of cycles this thread ran.
+        encoder_us: f64,
+        encoder_kcycles: f64,
         /// Each submit that converted a capture, and each drain that returned
         /// a unit: microseconds, and thousands of cycles this thread ran.
         submit_us: Vec<f64>,
@@ -484,11 +489,14 @@ mod bench {
         first_reported: bool,
     }
     impl Tally {
-        /// Count what an encoder call allocated since `before`.
-        fn encoder_calls(&mut self, before: (u64, u64)) {
+        /// Count what an encoder call allocated since `before`, and the
+        /// time and cycles it took.
+        fn encoder_calls(&mut self, before: (u64, u64), took: Duration, ran: u64) {
             let after = crate::counting::now();
             self.encoder_allocations.0 += after.0 - before.0;
             self.encoder_allocations.1 += after.1 - before.1;
+            self.encoder_us += took.as_secs_f64() * 1e6;
+            self.encoder_kcycles += ran as f64 / 1e3;
         }
 
         /// One access unit of `step`: the recovery check, the statistics, the
@@ -606,7 +614,7 @@ mod bench {
                                 (crate::counting::now(), Instant::now(), thread_cycles());
                             let frame = encoder.drain()?;
                             let (took, ran) = (at.elapsed(), thread_cycles() - ran);
-                            tally.encoder_calls(before);
+                            tally.encoder_calls(before, took, ran);
                             let Some(frame) = frame else {
                                 break;
                             };
@@ -619,7 +627,7 @@ mod bench {
                                 (crate::counting::now(), Instant::now(), thread_cycles());
                             let submitted = encoder.submit(force)?;
                             let (took, ran) = (at.elapsed(), thread_cycles() - ran);
-                            tally.encoder_calls(before);
+                            tally.encoder_calls(before, took, ran);
                             if submitted {
                                 tally.submit_us.push(took.as_secs_f64() * 1e6);
                                 tally.submit_kcycles.push(ran as f64 / 1e3);
@@ -689,10 +697,12 @@ mod bench {
             let units = stats.encoded.max(1) as f64;
             let (allocations, bytes) = tally.encoder_allocations;
             println!(
-                "case=encoder units={} allocs_per_unit={:.3} alloc_bytes_per_unit={:.0} submits={} submit_p50_us={:.1} submit_mean_us={:.1} drain_p50_us={:.1} drain_mean_us={:.1} submit_p50_kcycles={:.1} submit_mean_kcycles={:.1} drain_p50_kcycles={:.1} drain_mean_kcycles={:.1}",
+                "case=encoder units={} allocs_per_unit={:.3} alloc_bytes_per_unit={:.0} calls_us_per_unit={:.1} calls_kcycles_per_unit={:.1} submits={} submit_p50_us={:.1} submit_mean_us={:.1} drain_p50_us={:.1} drain_mean_us={:.1} submit_p50_kcycles={:.1} submit_mean_kcycles={:.1} drain_p50_kcycles={:.1} drain_mean_kcycles={:.1}",
                 stats.encoded,
                 allocations as f64 / units,
                 bytes as f64 / units,
+                tally.encoder_us / units,
+                tally.encoder_kcycles / units,
                 tally.submit_us.len(),
                 median(&tally.submit_us),
                 mean(&tally.submit_us),
