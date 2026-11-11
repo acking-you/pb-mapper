@@ -3,8 +3,9 @@
 //! shape, Core Graphics display
 //! modes changed for this app only, ScreenCaptureKit stills; Screen
 //! Recording and Accessibility (event posting) as the permissions the owner
-//! grants; App Nap held off while a session captures; a Keychain key for
-//! the remembered grant.
+//! grants; App Nap held off while a session captures, and thread C's waits
+//! on timers the kernel does not coalesce; a Keychain key for the
+//! remembered grant.
 //!
 //! ScreenCaptureKit arrived in macOS 12.3 while the app runs from 10.15: the
 //! FFI library links it weakly, and below 12.3 `support` answers
@@ -50,6 +51,8 @@ mod tests;
 pub(crate) mod timer;
 #[cfg(target_os = "macos")]
 mod video;
+#[cfg(target_os = "macos")]
+pub(crate) mod waiter;
 
 #[cfg(target_os = "macos")]
 pub(crate) use platform::Macos;

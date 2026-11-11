@@ -81,6 +81,27 @@ fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
     assert_eq!(encoder.pending(), 0);
 }
 
+/// Thread C's waits end on time where the kernel coalesces the process's
+/// timers: on a CI runner a 2 ms condition-variable wait ended 8 ms late,
+/// while this waiter's critical timer ends within about 1 ms.
+#[test]
+fn a_2ms_wait_is_not_coalesced() {
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    let mut late: Vec<Duration> = (0..21)
+        .map(|_| {
+            let deadline = Instant::now() + Duration::from_millis(2);
+            while Instant::now() < deadline {
+                waiter.wait(deadline).unwrap();
+            }
+            Instant::now().saturating_duration_since(deadline)
+        })
+        .collect();
+    late.sort_unstable();
+    let median = late[late.len() / 2];
+    assert!(median < Duration::from_millis(2), "{late:?}");
+}
+
 /// Every active display is named by its UUID and measured in its current
 /// mode's pixels, and its modes list. A runner without a display skips.
 #[test]

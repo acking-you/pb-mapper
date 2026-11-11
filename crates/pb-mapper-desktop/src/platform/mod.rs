@@ -14,8 +14,8 @@ pub(crate) mod macos;
 pub(crate) mod synthetic;
 #[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) mod unsupported;
-// Every platform's, until one has a better wait; Windows tests it too.
-#[cfg(any(not(windows), test))]
+// Every platform's without a better wait; Windows and macOS test it too.
+#[cfg(any(not(any(windows, target_os = "macos")), test))]
 pub(crate) mod waiter;
 #[cfg(windows)]
 pub(crate) mod windows;
@@ -40,7 +40,9 @@ pub(crate) type Current = macos::Macos;
 #[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) type Current = unsupported::Unsupported;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub(crate) use macos::waiter::{Waiter, Wake};
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) use waiter::{Waiter, Wake};
 #[cfg(windows)]
 pub(crate) use windows::waiter::{Waiter, Wake};

@@ -5,7 +5,9 @@
 //! On Windows, condition-variable timeout granularity can turn a 2 ms codec
 //! poll into a 15.6 ms wait, so the wait uses a per-worker high-resolution
 //! timer, without changing the timer resolution of the process or the machine.
-//! Elsewhere it is a condition variable.
+//! On macOS, where the kernel may coalesce a background process's timers to
+//! four times their interval, it is a kqueue timer marked critical. Elsewhere
+//! it is a condition variable.
 
 pub(crate) use crate::platform::{Waiter, Wake};
 
