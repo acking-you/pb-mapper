@@ -1034,6 +1034,6 @@ async fn disconnect_cancels_pending_setup_without_waiting_for_network() {
 /// `IO`, which has the viewer reconnect.
 #[tokio::test]
 async fn a_panicked_blocking_task_is_internal() {
-    let panicked = blocking(|| panic!("a bug")).await.map(|()| ());
+    let panicked = blocking::<()>(|| panic!("a bug")).await;
     assert_eq!(panicked.unwrap_err().code(), ErrorCode::Internal);
 }
