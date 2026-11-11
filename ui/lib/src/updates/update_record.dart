@@ -15,16 +15,25 @@ import 'package:pb_mapper_ui/src/updates/release.dart';
 
 /// An update handed off to an installer, on its way from [from] to [to].
 class PendingUpdate {
-  const PendingUpdate({required this.from, required this.to, required this.at});
+  const PendingUpdate({
+    required this.from,
+    required this.to,
+    required this.at,
+    this.installer,
+  });
 
   final Version from;
   final Version to;
   final DateTime at;
 
+  /// The downloaded Windows installer it runs, which cannot remove itself.
+  final String? installer;
+
   Map<String, Object> toJson() => {
     'from': '$from',
     'to': '$to',
     'at': at.toUtc().toIso8601String(),
+    'installer': ?installer,
   };
 
   static PendingUpdate? fromJson(Object? json) {
@@ -33,7 +42,13 @@ class PendingUpdate {
     final to = Version.tryParse('${json['to']}');
     final at = DateTime.tryParse('${json['at']}');
     if (from == null || to == null || at == null) return null;
-    return PendingUpdate(from: from, to: to, at: at);
+    final installer = json['installer'];
+    return PendingUpdate(
+      from: from,
+      to: to,
+      at: at,
+      installer: installer is String ? installer : null,
+    );
   }
 }
 
