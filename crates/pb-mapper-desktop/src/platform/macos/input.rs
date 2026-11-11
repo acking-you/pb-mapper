@@ -1,20 +1,23 @@
 //! Injection on macOS: `CGEvent`s posted to the HID event tap. The pointer
 //! goes to the global point of a pixel of the bound display; a press carries
 //! its click count and the modifiers held, which posted events otherwise
-//! lack; a move with a button down is a drag; keys are virtual key codes and
-//! text is a Unicode string per event. No main thread and no keyboard layout
-//! are needed. macOS posts nothing without the owner's Accessibility grant,
-//! and says nothing either, so the grant is checked first.
+//! lack; a move with a button down is a drag; keys are virtual key codes,
+//! the vocabulary's and a viewer's physical keys alike, so the Mac's own
+//! layout and input source decide what they type; text is a Unicode string
+//! per event. No main thread and no keyboard layout are needed. macOS posts
+//! nothing without the owner's Accessibility grant, and says nothing either,
+//! so the grant is checked first.
 
 use super::{
     clicks::{Clicks, SLOP},
     desktop::Shared,
-    keys::{self, Run},
+    keys::{self, Modifiers},
 };
 use crate::{
     BackendError, Button, DoubleClickGuard, FailureKind, Key, Permission, Result, error,
     platform::Injector,
 };
+use objc2::rc::autoreleasepool;
 use objc2_app_kit::NSEvent;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
@@ -31,8 +34,8 @@ const DEFAULT_DOUBLE_CLICK: Duration = Duration::from_millis(500);
 pub(crate) struct MacInput {
     geometry: Shared,
     source: CFRetained<CGEventSource>,
-    /// The modifier flags of the modifier keys held down.
-    flags: u64,
+    /// The modifier keys held down, and Caps Lock.
+    modifiers: Modifiers,
     /// Left, right, middle: down.
     buttons: [bool; 3],
     /// Where this injector last put the pointer, in global points.
@@ -49,7 +52,7 @@ impl MacInput {
         Ok(Self {
             geometry,
             source,
-            flags: 0,
+            modifiers: Modifiers::default(),
             buttons: [false; 3],
             position: None,
             clicks: Clicks::default(),
@@ -101,7 +104,7 @@ impl MacInput {
         let (x, y) = self.position();
         let event = CGEvent::new_mouse_event(Some(&self.source), kind, CGPoint { x, y }, button);
         if let Some(event) = &event {
-            CGEvent::set_flags(Some(event), CGEventFlags(self.flags));
+            CGEvent::set_flags(Some(event), CGEventFlags(self.modifiers.flags()));
             if let Some(count) = clicks {
                 CGEvent::set_integer_value_field(
                     Some(event),
@@ -118,6 +121,20 @@ impl MacInput {
             }
         }
         self.post(event)
+    }
+
+    /// Press or release the key `code`. A modifier posts as a flags change
+    /// carrying the flags with it; any other key carries the flags held, so
+    /// Cmd+C copies.
+    fn press(&mut self, code: u16, down: bool) -> Result<()> {
+        let mut modifiers = self.modifiers;
+        if modifiers.update(code, down) {
+            self.keyboard(code, down, modifiers.flags(), true)?;
+            self.modifiers = modifiers;
+            Ok(())
+        } else {
+            self.keyboard(code, down, self.modifiers.flags(), false)
+        }
     }
 
     fn keyboard(&self, code: u16, down: bool, flags: u64, modifier: bool) -> Result<()> {
@@ -188,6 +205,7 @@ fn index(button: Button) -> usize {
 impl Injector for MacInput {
     /// macOS has no public call that locks the screen.
     const LOCK: bool = false;
+    const PHYSICAL_KEYS: bool = true;
     fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
         self.allowed()?;
         let (x, y) = self.geometry.get().point((x, y));
@@ -206,8 +224,10 @@ impl Injector for MacInput {
         self.allowed()?;
         let (pressed, released, _, cg) = kinds(button);
         let count = if down {
-            let interval = Duration::try_from_secs_f64(NSEvent::doubleClickInterval())
-                .unwrap_or(DEFAULT_DOUBLE_CLICK);
+            let interval = autoreleasepool(|_| {
+                Duration::try_from_secs_f64(NSEvent::doubleClickInterval())
+                    .unwrap_or(DEFAULT_DOUBLE_CLICK)
+            });
             self.clicks
                 .press(button, Instant::now(), self.position(), interval)
         } else {
@@ -230,41 +250,34 @@ impl Injector for MacInput {
             0,
         );
         if let Some(event) = &event {
-            CGEvent::set_flags(Some(event), CGEventFlags(self.flags));
+            CGEvent::set_flags(Some(event), CGEventFlags(self.modifiers.flags()));
         }
         self.post(event)
     }
+    /// `Meta` is Command and `Control` Control: the viewer's Apple swap
+    /// relies on it.
     fn key(&mut self, key: Key, down: bool) -> Result<()> {
         self.allowed()?;
-        let code = keys::key_code(key);
-        match keys::modifier(code) {
-            Some(flag) => {
-                let flags = if down {
-                    self.flags | flag
-                } else {
-                    self.flags & !flag
-                };
-                self.keyboard(code, down, flags, true)?;
-                self.flags = flags;
-                Ok(())
-            }
-            None => self.keyboard(code, down, self.flags, false),
-        }
+        self.press(keys::key_code(key), down)
     }
     /// Text is typed with no modifier, whatever is held: a held Command
-    /// must not turn it into shortcuts.
+    /// must not turn it into shortcuts. It holds no line break or tab.
     fn text(&mut self, text: &str) -> Result<()> {
         self.allowed()?;
-        for run in keys::runs(text) {
-            match run {
-                Run::Text(units) => self.unicode(&units)?,
-                Run::Key(code) => {
-                    self.keyboard(code, true, 0, false)?;
-                    self.keyboard(code, false, 0, false)?;
-                }
-            }
+        for units in keys::runs(text) {
+            self.unicode(&units)?;
         }
         Ok(())
+    }
+    /// The key at that place on a Mac keyboard, by its virtual key code:
+    /// the host's layout and input source decide what it types. A usage a
+    /// Mac keyboard has no key for presses nothing.
+    fn physical_key(&mut self, usage: u16, down: bool) -> Result<()> {
+        let Some(code) = keys::usage_code(usage) else {
+            return Ok(());
+        };
+        self.allowed()?;
+        self.press(code, down)
     }
     fn lock(&mut self) -> Result<()> {
         Err(BackendError::new(FailureKind::Unsupported, "lock the desktop").into())
@@ -272,7 +285,7 @@ impl Injector for MacInput {
     /// The owner's double-click interval; the slop in pixels at this
     /// display's scale.
     fn double_click(&mut self) -> Option<DoubleClickGuard> {
-        let interval = NSEvent::doubleClickInterval().max(0.0);
+        let interval = autoreleasepool(|_| NSEvent::doubleClickInterval()).max(0.0);
         let half = (SLOP * self.geometry.get().scale).round() as u32;
         Some(DoubleClickGuard {
             time_ms: (interval * 1000.0).round() as u32,

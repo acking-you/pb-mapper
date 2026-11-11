@@ -1,11 +1,13 @@
 //! Keys as macOS posts them: the virtual key codes of `Events.h` (`kVK_*`),
 //! which name a key's position on an ANSI keyboard whatever the layout, so
-//! a shortcut works on any host layout; the modifier flags each modifier
-//! sets; and text cut into the runs one keyboard event carries.
+//! a shortcut works on any host layout, and the physical keys of a viewer's
+//! keyboard by their USB HID usage; the flags the modifiers held set on
+//! every posted event; and text cut into the runs one keyboard event
+//! carries.
 
 use crate::Key;
 
-/// `kVK_Return`, `kVK_Tab`: what a newline and a tab in text press.
+/// `kVK_Return`, `kVK_Tab`.
 pub(crate) const RETURN: u16 = 0x24;
 pub(crate) const TAB: u16 = 0x30;
 
@@ -87,34 +89,77 @@ pub(crate) fn key_code(key: Key) -> u16 {
     }
 }
 
-/// The modifier flags (`kCGEventFlagMask*`) of Shift, Control, Option and
-/// Command.
+/// The modifier flags (`kCGEventFlagMask*`) of Shift, Control, Option,
+/// Command and Caps Lock.
 pub(crate) const SHIFT: u64 = 0x2_0000;
 pub(crate) const CONTROL: u64 = 0x4_0000;
 pub(crate) const OPTION: u64 = 0x8_0000;
 pub(crate) const COMMAND: u64 = 0x10_0000;
+pub(crate) const CAPS_LOCK: u64 = 0x1_0000;
+/// `kVK_CapsLock`.
+const CAPS_LOCK_KEY: u16 = 0x39;
 
-/// The flag a modifier key sets while it is down; `None` for any other key.
-pub(crate) fn modifier(code: u16) -> Option<u64> {
-    match code {
-        0x38 | 0x3c => Some(SHIFT),
-        0x3b | 0x3e => Some(CONTROL),
-        0x3a | 0x3d => Some(OPTION),
-        0x37 | 0x36 => Some(COMMAND),
-        _ => None,
+/// The modifier keys, left then right, with the flags each sets while it is
+/// down: its modifier's, and its side's device bit (`NX_DEVICE*KEYMASK`),
+/// which apps that tell left from right read.
+const MODIFIERS: [(u16, u64); 8] = [
+    (0x3b, CONTROL | 0x01),
+    (0x38, SHIFT | 0x02),
+    (0x3a, OPTION | 0x20),
+    (0x37, COMMAND | 0x08),
+    (0x3e, CONTROL | 0x2000),
+    (0x3c, SHIFT | 0x04),
+    (0x3d, OPTION | 0x40),
+    (0x36, COMMAND | 0x10),
+];
+
+/// The modifier keys held down and Caps Lock's state, as every posted event
+/// carries them: posted events do not take them from the keys before them.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Modifiers {
+    /// One bit per entry of `MODIFIERS`.
+    held: u8,
+    caps_lock: bool,
+}
+
+impl Modifiers {
+    /// Account for `code` going `down`. Whether it is a modifier, which
+    /// posts as a flags change: Caps Lock turns on and off at each press.
+    pub(crate) fn update(&mut self, code: u16, down: bool) -> bool {
+        if code == CAPS_LOCK_KEY {
+            self.caps_lock ^= down;
+            return true;
+        }
+        let Some(at) = MODIFIERS.iter().position(|(modifier, _)| *modifier == code) else {
+            return false;
+        };
+        if down {
+            self.held |= 1 << at;
+        } else {
+            self.held &= !(1 << at);
+        }
+        true
+    }
+
+    /// The flags of everything held: a modifier stays while either of its
+    /// keys is down.
+    pub(crate) fn flags(&self) -> u64 {
+        let held = MODIFIERS
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| self.held & (1 << at) != 0)
+            .fold(0, |flags, (_, (_, flag))| flags | flag);
+        if self.caps_lock {
+            held | CAPS_LOCK
+        } else {
+            held
+        }
     }
 }
 
 /// The virtual key of the physical key at USB HID keyboard-page `usage`
 /// (`0x07`), for a viewer's physical keys; `None` for a key a Mac keyboard
 /// lacks (Application, Power).
-#[cfg_attr(
-    all(target_os = "macos", not(test)),
-    expect(
-        dead_code,
-        reason = "physical keys reach the injector in a later change"
-    )
-)]
 pub(crate) fn usage_code(usage: u16) -> Option<u16> {
     const LETTERS: [u16; 26] = [
         0x00, 0x0b, 0x08, 0x02, 0x0e, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2e, 0x2d, 0x1f,
@@ -200,45 +245,22 @@ pub(crate) fn usage_code(usage: u16) -> Option<u16> {
     })
 }
 
-/// One keyboard event's worth of text: up to [`TEXT_RUN`] UTF-16 units, or
-/// a key that text presses.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Run {
-    Text(Vec<u16>),
-    Key(u16),
-}
-
-/// `text` as runs: a newline is one Return and a tab one Tab, a carriage
-/// return is Return unless a newline follows it (`\r\n` is one Return), and
-/// the rest is cut into runs that never split a surrogate pair.
-pub(crate) fn runs(text: &str) -> Vec<Run> {
+/// `text` cut into the UTF-16 runs one keyboard event each carries: at
+/// most [`TEXT_RUN`] units, never splitting a surrogate pair. Line breaks
+/// and tabs never reach here; they are typed as keys.
+pub(crate) fn runs(text: &str) -> Vec<Vec<u16>> {
     let mut runs = Vec::new();
     let mut current: Vec<u16> = Vec::new();
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        let key = match c {
-            '\n' => Some(RETURN),
-            '\t' => Some(TAB),
-            '\r' if chars.peek() == Some(&'\n') => continue,
-            '\r' => Some(RETURN),
-            _ => None,
-        };
-        if let Some(key) = key {
-            if !current.is_empty() {
-                runs.push(Run::Text(std::mem::take(&mut current)));
-            }
-            runs.push(Run::Key(key));
-            continue;
-        }
+    for c in text.chars() {
         let mut units = [0; 2];
         let units = c.encode_utf16(&mut units);
         if current.len() + units.len() > TEXT_RUN {
-            runs.push(Run::Text(std::mem::take(&mut current)));
+            runs.push(std::mem::take(&mut current));
         }
         current.extend_from_slice(units);
     }
     if !current.is_empty() {
-        runs.push(Run::Text(current));
+        runs.push(current);
     }
     runs
 }
@@ -246,6 +268,12 @@ pub(crate) fn runs(text: &str) -> Vec<Run> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The flags `code` sets alone; `None` for a key that is no modifier.
+    fn modifier(code: u16) -> Option<u64> {
+        let mut held = Modifiers::default();
+        held.update(code, true).then(|| held.flags())
+    }
 
     /// Every key of the vocabulary presses its own virtual key, and the four
     /// modifiers set their flags.
@@ -329,9 +357,15 @@ mod tests {
                 .enumerate()
                 .all(|(i, code)| !codes[..i].contains(code))
         );
+        // Meta is Command and Control is Control: the Apple swap relies on it.
         assert_eq!(
             [Key::Shift, Key::Control, Key::Alt, Key::Meta].map(|key| modifier(key_code(key))),
-            [Some(SHIFT), Some(CONTROL), Some(OPTION), Some(COMMAND)]
+            [
+                Some(SHIFT | 0x02),
+                Some(CONTROL | 0x01),
+                Some(OPTION | 0x20),
+                Some(COMMAND | 0x08)
+            ]
         );
         assert_eq!(modifier(key_code(Key::A)), None);
     }
@@ -358,40 +392,42 @@ mod tests {
         for (usage, key) in pairs {
             assert_eq!(usage_code(usage), Some(key_code(key)), "usage {usage:#x}");
         }
-        assert_eq!(usage_code(0xe7).and_then(modifier), Some(COMMAND));
+        assert_eq!(usage_code(0xe7).and_then(modifier), Some(COMMAND | 0x10));
         assert_eq!((usage_code(0x65), usage_code(0x00)), (None, None));
     }
 
-    /// Text presses one Return per line break, `\r\n` included, and one Tab
-    /// per tab; runs never exceed an event's length or split a surrogate
-    /// pair.
+    /// Left and right modifiers are held apart: a chord keeps its flag while
+    /// either key is down, each side sets its own device bit, and Caps Lock
+    /// turns on and off at each press.
     #[test]
-    fn text_runs_press_line_breaks_and_keep_surrogate_pairs() {
-        assert_eq!(
-            runs("a\r\nb\tc\rd\n"),
-            [
-                Run::Text(vec![u16::from(b'a')]),
-                Run::Key(RETURN),
-                Run::Text(vec![u16::from(b'b')]),
-                Run::Key(TAB),
-                Run::Text(vec![u16::from(b'c')]),
-                Run::Key(RETURN),
-                Run::Text(vec![u16::from(b'd')]),
-                Run::Key(RETURN),
-            ]
-        );
+    fn modifiers_carry_their_flags_while_either_side_is_down() {
+        let (left, right) = (usage_code(0xe1).unwrap(), usage_code(0xe5).unwrap());
+        let mut held = Modifiers::default();
+        assert!(held.update(left, true) && held.update(right, true));
+        assert!(held.update(left, false));
+        assert_eq!(held.flags(), SHIFT | 0x04);
+        assert!(held.update(right, false));
+        assert_eq!(held.flags(), 0);
+        // Cmd+C: the C goes with Command's flag, and is no modifier itself.
+        assert!(held.update(key_code(Key::Meta), true));
+        assert!(!held.update(key_code(Key::C), true));
+        assert_eq!(held.flags() & COMMAND, COMMAND);
+        let caps = usage_code(0x39).unwrap();
+        assert!(held.update(caps, true) && held.update(caps, false));
+        assert_eq!(held.flags() & CAPS_LOCK, CAPS_LOCK);
+        held.update(caps, true);
+        assert_eq!(held.flags() & CAPS_LOCK, 0);
+    }
+
+    /// Runs never exceed an event's length or split a surrogate pair.
+    #[test]
+    fn text_runs_keep_surrogate_pairs() {
+        assert_eq!(runs("ab"), [vec![u16::from(b'a'), u16::from(b'b')]]);
         // 19 letters then an emoji (two units): the pair starts the next run.
-        let text = format!("{}\u{1f600}", "x".repeat(19));
+        let text = format!("{}😀", "x".repeat(19));
         let cut = runs(&text);
-        assert!(matches!(&cut[..], [Run::Text(a), Run::Text(b)] if a.len() == 19 && b.len() == 2));
-        let joined: Vec<u16> = cut
-            .iter()
-            .flat_map(|run| match run {
-                Run::Text(units) => units.clone(),
-                Run::Key(_) => Vec::new(),
-            })
-            .collect();
-        assert_eq!(String::from_utf16(&joined).unwrap(), text);
+        assert!(matches!(&cut[..], [a, b] if a.len() == 19 && b.len() == 2));
+        assert_eq!(String::from_utf16(&cut.concat()).unwrap(), text);
         assert!(runs("").is_empty());
     }
 }
