@@ -134,6 +134,28 @@ pub enum FetchStatusError {
     #[snafu(display("get status stream: {source}"))]
     Connect { source: std::io::Error },
     /// The relay was reached, but the exchange failed or the relay refused it.
-    #[snafu(transparent)]
+    ///
+    /// Its text carries the source's causes, as the other variants' do: the
+    /// source names only the step that failed, and the `status` command
+    /// prints the text alone.
+    #[snafu(display("{}", with_causes(source)))]
     Status { source: Error },
+}
+
+/// `error`'s text, then each of its causes', as `error: cause: …`, leaving
+/// out a cause whose text the one before already ends with: for an error
+/// that reaches its caller only as text, which would otherwise name the step
+/// that failed and not why.
+pub(crate) fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(current) = cause {
+        let more = current.to_string();
+        if !text.ends_with(&more) {
+            text.push_str(": ");
+            text.push_str(&more);
+        }
+        cause = current.source();
+    }
+    text
 }

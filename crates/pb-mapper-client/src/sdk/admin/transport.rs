@@ -150,7 +150,7 @@ impl Exchange {
 /// A framing or session failure as the SDK's protocol error, its causes
 /// written into its text.
 fn protocol(error: impl std::error::Error) -> Error {
-    Error::protocol(super::super::error::with_causes(&error))
+    Error::protocol(crate::client::error::with_causes(&error))
 }
 
 #[cfg(test)]

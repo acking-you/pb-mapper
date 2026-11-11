@@ -21,6 +21,7 @@ use uni_stream::udp::set_custom_timeout;
 
 use self::error::{
     AcceptLocalStreamSnafu, BindLocalListenerSnafu, ConnectSnafu, FetchStatusError, ResolveSnafu,
+    StatusSnafu,
 };
 use self::health::Health;
 use self::status::get_status_scoped;
@@ -480,7 +481,9 @@ pub async fn fetch_status_scoped<A: ToSocketAddrs>(
     let mut stream = crate::addr::connect_tcp(&remote_addr)
         .await
         .context(ConnectSnafu)?;
-    Ok(get_status_scoped(&mut stream, req, namespace).await?)
+    get_status_scoped(&mut stream, req, namespace)
+        .await
+        .context(StatusSnafu)
 }
 
 /// Print [`fetch_status_scoped`]'s answer as the `status` command does.
@@ -497,11 +500,15 @@ pub async fn show_status_scoped<A: ToSocketAddrs>(
 
 #[cfg(test)]
 mod status_query_tests {
+    use pb_mapper_core::test_support::{PROCESS_CREDENTIAL_TEST_LOCK, TEST_ADMIN_KEY};
+
     use super::*;
 
     /// A relay address that names nothing, and one that nothing answers on,
     /// fail before any request, each as itself; the second says so in the
-    /// text the `status` command has always printed.
+    /// text the `status` command has always printed. A relay that hangs up
+    /// on the request fails the exchange, and that text says why: it is all
+    /// the `status` command prints.
     #[tokio::test]
     async fn a_status_query_says_where_it_failed() {
         let unnamed = fetch_status_scoped("not an address", PbConnStatusReq::Keys, None).await;
@@ -518,6 +525,30 @@ mod status_query_tests {
             error.to_string().starts_with("get status stream: "),
             "{error}"
         );
+
+        let _credential = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+        pb_mapper_core::checksum::set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = relay.local_addr().unwrap();
+        let hang_up = tokio::spawn(async move { drop(relay.accept().await.unwrap()) });
+        let error = fetch_status_scoped(addr, PbConnStatusReq::Keys, None).await;
+        pb_mapper_core::checksum::set_process_msg_header_key(None).unwrap();
+        hang_up.await.unwrap();
+        let error = error.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                FetchStatusError::Status {
+                    source: error::Error::WriteStatusReq { .. }
+                }
+            ),
+            "{error:?}"
+        );
+        let mut cause: &dyn std::error::Error = &error;
+        while let Some(next) = cause.source() {
+            cause = next;
+        }
+        assert!(error.to_string().contains(&cause.to_string()), "{error}");
     }
 }
 
