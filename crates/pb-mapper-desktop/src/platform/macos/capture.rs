@@ -55,8 +55,11 @@ pub(crate) fn available() -> bool {
         minorVersion: 3,
         patchVersion: 0,
     };
-    NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(version)
-        && AnyClass::get(c"SCStream").is_some()
+    // Off the main thread, with no pool of its own: the call may autorelease.
+    objc2::rc::autoreleasepool(|_| {
+        NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(version)
+            && AnyClass::get(c"SCStream").is_some()
+    })
 }
 
 /// A picture the stream delivered.
@@ -286,8 +289,13 @@ struct Running {
 
 impl Stream {
     /// Display `id`'s stream at `width` x `height`, at most `fps` pictures a
-    /// second, started.
+    /// second, started. Thread C has no autorelease pool: this brings its
+    /// own.
     pub(crate) fn start(id: u32, width: u32, height: u32, fps: u32) -> Result<Self> {
+        objc2::rc::autoreleasepool(|_| Self::started(id, width, height, fps))
+    }
+
+    fn started(id: u32, width: u32, height: u32, fps: u32) -> Result<Self> {
         let display = display(id)?;
         let filter = filter(&display);
         let config = configuration(width, height, true);

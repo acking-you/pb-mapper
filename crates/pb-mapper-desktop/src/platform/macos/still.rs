@@ -44,7 +44,14 @@ impl SckStill {
 }
 
 impl StillCapture for SckStill {
+    /// In an autorelease pool of its own, which thread C lacks.
     fn jpeg(&mut self, display: &Display) -> Result<Vec<u8>> {
+        objc2::rc::autoreleasepool(|_| self.screenshot(display))
+    }
+}
+
+impl SckStill {
+    fn screenshot(&mut self, display: &Display) -> Result<Vec<u8>> {
         if AnyClass::get(c"SCScreenshotManager").is_none() {
             return Err(BackendError::new(
                 FailureKind::Unsupported,

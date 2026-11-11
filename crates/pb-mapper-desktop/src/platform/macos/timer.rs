@@ -32,10 +32,10 @@ pub(crate) fn acquire() {
     let options = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep
         | NSActivityOptions::IdleDisplaySleepDisabled
         | NSActivityOptions::LatencyCritical;
-    let reason = NSString::from_str("A remote desktop viewer is watching this screen");
-    held.activity = Some(Activity(
-        NSProcessInfo::processInfo().beginActivityWithOptions_reason(options, &reason),
-    ));
+    held.activity = Some(objc2::rc::autoreleasepool(|_| {
+        let reason = NSString::from_str("A remote desktop viewer is watching this screen");
+        Activity(NSProcessInfo::processInfo().beginActivityWithOptions_reason(options, &reason))
+    }));
 }
 
 pub(crate) fn release() {
