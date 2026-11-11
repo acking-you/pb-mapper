@@ -85,9 +85,24 @@ async fn watch_changes(changes: watch::Sender<u64>) -> std::io::Result<()> {
     })
     .await
     .map_err(std::io::Error::other)??;
-    let mut last_hint = None::<Instant>;
+    let mut debounce = Debounce::default();
+    let hint = || changes.send_modify(|generation| *generation = generation.wrapping_add(1));
     loop {
-        let event = std::future::poll_fn(|cx| watcher.poll_if_event(cx)).await?;
+        let due = debounce.due();
+        let event = tokio::select! {
+            event = std::future::poll_fn(|cx| watcher.poll_if_event(cx)) => event?,
+            () = async {
+                match due {
+                    Some(due) => tokio::time::sleep_until(due).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                tracing::debug!(event = "network_address_burst_ended");
+                hint();
+                debounce.raised(Instant::now());
+                continue;
+            }
+        };
         let (address, changed) = match event {
             if_watch::IfEvent::Up(address) => (address, known.insert(address.addr())),
             if_watch::IfEvent::Down(address) => (address, known.remove(&address.addr())),
@@ -95,12 +110,82 @@ async fn watch_changes(changes: watch::Sender<u64>) -> std::io::Result<()> {
         if address.addr().is_loopback() || !changed {
             continue;
         }
-        // An initial address dump or a burst of DHCP changes is one hint.
-        if last_hint.is_none_or(|last| last.elapsed() >= Duration::from_millis(250)) {
+        if debounce.changed(Instant::now()) {
             tracing::debug!(event = "network_address_changed", %address);
-            changes.send_modify(|generation| *generation = generation.wrapping_add(1));
-            last_hint = Some(Instant::now());
+            hint();
         }
+    }
+}
+
+/// How long after a hint further address changes belong to the same burst.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const BURST: Duration = Duration::from_millis(250);
+
+/// Which address changes raise a hint: one at the start of a burst, such as
+/// an initial address dump or a run of DHCP changes, and one more at its end
+/// if it went on. A hint wakes every tunnel, and the trailing one makes what
+/// follows the network (discovery, the direct pause, a router mapping) react
+/// to where it settled: a switch from one network to another is a Down
+/// then, a moment later, an Up.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[derive(Default)]
+struct Debounce {
+    /// When the last hint was raised.
+    last_hint: Option<Instant>,
+    /// Whether a change came after it, inside its burst.
+    held: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+impl Debounce {
+    /// An address changed at `now`: whether to raise a hint for it now.
+    fn changed(&mut self, now: Instant) -> bool {
+        if self
+            .last_hint
+            .is_some_and(|last| now.duration_since(last) < BURST)
+        {
+            self.held = true;
+            return false;
+        }
+        self.raised(now);
+        true
+    }
+
+    /// When a hint is due for changes held back, if any are.
+    fn due(&self) -> Option<Instant> {
+        self.last_hint
+            .filter(|_| self.held)
+            .map(|last| last + BURST)
+    }
+
+    /// A hint was raised at `now`.
+    fn raised(&mut self, now: Instant) {
+        self.last_hint = Some(now);
+        self.held = false;
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
+mod tests {
+    use super::*;
+
+    /// A burst of changes raises a hint at once, and one more at its end for
+    /// the changes it held back: what follows the network then reacts to
+    /// where it settled, not only to where it began. A change on its own
+    /// raises one hint.
+    #[test]
+    fn a_burst_hints_at_its_start_and_again_at_its_end() {
+        let start = Instant::now();
+        let mut debounce = Debounce::default();
+        assert!(debounce.changed(start));
+        assert_eq!(debounce.due(), None);
+        assert!(!debounce.changed(start + Duration::from_millis(100)));
+        assert!(!debounce.changed(start + Duration::from_millis(200)));
+        assert_eq!(debounce.due(), Some(start + BURST));
+        debounce.raised(start + BURST);
+        assert_eq!(debounce.due(), None);
+        assert!(debounce.changed(start + BURST * 3));
+        assert_eq!(debounce.due(), None);
     }
 }
 
