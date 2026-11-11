@@ -19,11 +19,11 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if self.paused || self.unavailable.is_some() || now < self.cursor_due {
             return;
         }
-        let Some(context) = self.context.clone() else {
+        let Some(context) = &self.context else {
             return;
         };
         self.cursor_due = now + CURSOR_INTERVAL;
-        match self.backend.cursor(&context) {
+        match self.backend.cursor(context) {
             Ok(position) => {
                 let cursor = position.map(|position| CursorUpdate {
                     generation: self.state.record.generation,

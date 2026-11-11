@@ -238,11 +238,11 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             self.backend.release();
             return;
         }
-        let Some(context) = self.context.clone() else {
+        let Some(context) = &self.context else {
             return;
         };
         let lock = matches!(event.input, Input::Lock {});
-        match self.backend.input_in_context(&context, &event.input) {
+        match self.backend.input_in_context(context, &event.input) {
             Ok(()) if lock => self.notice(
                 NoticeCode::Locked,
                 "The remote computer is locked".into(),
@@ -305,8 +305,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             return;
         }
         self.last_lease = Some(now);
-        if let Some(context) = self.context.clone()
-            && let Err(failure) = self.backend.presented(&context)
+        if let Some(context) = &self.context
+            && let Err(failure) = self.backend.presented(context)
             && link_lost(&failure)
         {
             self.fatal = Some(failure.to_string());

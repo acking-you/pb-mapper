@@ -157,7 +157,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if self.check_due(now) && !self.geometry(now) {
             return;
         }
-        let Some(context) = self.context.clone() else {
+        let Some(context) = &self.context else {
             return;
         };
         let pace_fps = targets.pace_fps.load(Ordering::Acquire).max(1);
@@ -176,7 +176,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 };
                 let result = self
                     .backend
-                    .capture_video(&context, self.codec, keyframe, rate);
+                    .capture_video(context, self.codec, keyframe, rate);
                 if keyframe {
                     // Handed over: an IDR still in the encoder at the next
                     // tick must not be asked for again.
@@ -194,7 +194,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             self.pacer.consume(now);
         } else if self.backend.pending_video() > 0 {
             let wait = HELPER_DRAIN_WAIT_MAX.min(self.pacer.next().saturating_duration_since(now));
-            let result = self.backend.drain_video(&context, wait);
+            let result = self.backend.drain_video(context, wait);
             let done = self.clock.now();
             let drained = matches!(result, Ok(Some(_)));
             // The ordinary backend returns at once: poll it again shortly. A
