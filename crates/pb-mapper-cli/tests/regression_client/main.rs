@@ -60,7 +60,11 @@ fn client_env() {
             (PB_MAPPER_CONTROL_CONN_POOL_SIZE, "1"),
             (PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL, "20ms"),
             (PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE, "50ms"),
-            (PB_MAPPER_CONTROL_SUSPECT_GRACE, "20ms"),
+            // Far past READY: a control connection that hears nothing is
+            // given up at tolerance + grace, which would re-register on its
+            // own. Only the registration probe's `Missing` answer can then
+            // make a case's tunnel register again in time.
+            (PB_MAPPER_CONTROL_SUSPECT_GRACE, "30s"),
             (PB_MAPPER_REGISTRATION_PROBE_TIMEOUT, "50ms"),
             (PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "400ms"),
             (PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX, "800ms"),
