@@ -31,6 +31,12 @@ Each would change bytes on a wire, a stored file or a published shape.
 - A subscribe whose recovery or setup times out is closed with no answer, so
   the client counts a transport failure. A structured, retryable error would
   add a message on a path that has never sent one.
+- A retire by connection ID (`ConnectionRetire`) carries no generation. An
+  ended registration's ID rests 10 s before another connection takes it;
+  past that the ID can name a newer connection of the same service, which a
+  retire from an older listing then reaches. An optional `generation`,
+  omitted when unset and matched when present, would close it, with the
+  CLI, SDK, Node and app calls taking it.
 
 ### pb-mapper-client
 
@@ -132,8 +138,7 @@ Each works as designed; the line says what the other choice would cost.
   so names behind split-horizon DNS or a blocked UDP 53 reach the system
   resolver only after NXDOMAIN or a timeout, and every relay name is sent to
   public servers. Changing the order changes what names resolve to. (The
-  blocking `resolve_addrs` asks only the system resolver, whatever its doc
-  comment says.)
+  blocking `resolve_addrs` asks only the system resolver.)
 - `resolve_addrs_async` repeats the system lookup on failure: twice the
   latency of a failure, for one implicit retry.
 - The config accessors read the environment on every call: documented
@@ -160,6 +165,12 @@ Each works as designed; the line says what the other choice would cost.
   wheel: an active one shows `active` past its deadline, and a revoked one
   is not reaped until a restart or a GC. Such keys cannot authenticate, so
   this is display only.
+- The lease schedule ignores the system clock stepping back and runs again
+  only once the clock has caught up, so after such a step `issue` and
+  `renew` with a TTL shorter than the step retire the key at once. Counting
+  a key's deadline from the schedule's own clock instead, as a revoke's
+  retention now is, would let sessions on the key outlast its `expires_at`
+  by up to the step.
 
 ### pb-mapper-protocol
 
@@ -182,7 +193,9 @@ Each works as designed; the line says what the other choice would cost.
 - Pre-authentication TCP connections are not capped. A failed accept no
   longer stops the listener, and idle sockets close after
   `control_io_timeout`; a cap would bound descriptors but also refuse real
-  clients during a flood, and its size is policy.
+  clients during a flood, and its size is policy. The pool of returned
+  connection IDs keeps the size of the most connections ever open at once,
+  a flood's included, until the relay stops.
 - Registered control writes have no write timeout, and a full pong queue
   ends the registration. A wedged writer is already bounded by that queue
   and by stream-acknowledgement suspicion; a timeout changes when slow
@@ -190,7 +203,16 @@ Each works as designed; the line says what the other choice would cost.
 - A replacement must register within 200 ms of the stale connection's
   retirement (`REPLACEMENT_MARGIN`), less than a reconnecting provider's
   backoff plus two round trips. Widening it lengthens every failing
-  subscribe and must stay under the client's 3 s minimum subscribe attempt.
+  subscribe; a subscriber that gives up first, as a client does after its
+  3 s attempt, is no longer waited for. The 5 s setup bound still ends the
+  wait before the retirement for an acknowledgement budget above about
+  1.6 s.
+- A pinned direct-relay fallback (a subscribe with `selected`) can take only
+  the registration it names, which its own suspicion has just excluded, yet
+  waits for a replacement as any subscribe does: it fails for certain, but
+  only when its client leaves or at the 5 s setup bound. Not extending a
+  pinned subscribe's wait would end it at the recovery deadline (2.5 s by
+  default).
 - The re-subscribe poll is a fixed 50 ms inside the recovery window; backoff
   or jitter would pick up a replacement later.
 
@@ -223,6 +245,10 @@ Each works as designed; the line says what the other choice would cost.
 - The elevated service's files reject unknown fields, so a same-version file
   it cannot read fails closed; loosening that trades it for downgrade
   tolerance.
+- A trust revoke whose folder cannot be synced is logged
+  (`desktop_trust_revoke_unsynced`) and succeeds, so a power loss soon after
+  it can still bring the grant back. Failing it would stop the app from
+  going on to revoke the background service's copy of the grant.
 - The background service's control pipe does not log the requests it
   refuses (an unverified caller, one silent past the timeout, pipe I/O).
   Logging them is a policy for a SYSTEM service's log.
@@ -243,6 +269,20 @@ Each works as designed; the line says what the other choice would cost.
 - Keys the app does not know are dropped when a file is rewritten. A
   flattened map carried through each rewrite would keep a newer build's
   fields across a downgrade, if it ships before that build.
+- A settings or tunnel file replaced in one step keeps only its mode: it
+  takes the owner and group a new file in its directory gets, and on
+  Windows that directory's inherited permissions. On unix another user's
+  file is written in place, so it keeps its owner, but a file this user
+  owns in another group (one shared through that group) takes the new
+  group; Windows, where stable Rust reads neither a file's owner nor its
+  link count, replaces another user's file and a hard-linked one. Keeping
+  them takes an in-place write, which a crash can cut short, or copying the
+  group and permissions onto the new file through each platform's own API.
+- A connection whose save fails still runs when its list already holds
+  its key, as resuming a saved connection on a full disk did in 0.11.0,
+  and the window shows its entry as last saved, whatever this start
+  changed. Refusing it, as a share whose save fails is refused, would
+  refuse that resume.
 - Stopping the embedded relay stops every tunnel. Keeping the others needs a
   rule for which tunnels used it; theirs would otherwise retry forever.
 - The control channel has no request timeouts; one on the CLI side must
