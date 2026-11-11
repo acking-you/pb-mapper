@@ -164,12 +164,16 @@ jobs:
       # The SDK's desktop quickstart: a relay, a host of a synthetic backend
       # and a viewer in one process, through control, input, a preset change
       # and pause. It exits non-zero when a step does not do what it should.
+      # Like the docs below, it runs whatever the steps above did, so a
+      # failing test hides no other failure.
       - name: Run the desktop loopback example
+        if: ${{ !cancelled() }}
         run: cargo run -p pb-mapper --features desktop --example desktop_loopback
 
       # The SDK release refuses to publish unless the docs build cleanly, so
       # a broken doc link has to fail here, not on the release tag.
       - name: Build docs
+        if: ${{ !cancelled() }}
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps
@@ -254,18 +258,22 @@ jobs:
       - name: Run Clippy
         run: cargo clippy -p pb-mapper-desktop -p pb-mapper-ffi --all-targets --all-features -- -D warnings
 
-      - name: Run tests
-        run: cargo test -p pb-mapper-desktop -p pb-mapper-ffi --all-features
-
       # The app runs from macOS 10.15, ScreenCaptureKit arrived in 12.3: the
       # FFI library must link it weakly, or it would not load before 12.3.
+      # Before the tests, and whatever the step above did, so that neither a
+      # lint nor a test failure hides it.
       - name: Check ScreenCaptureKit is linked weakly
+        if: ${{ !cancelled() }}
         run: |
           cargo build -p pb-mapper-ffi
           kind="$(otool -l target/debug/libpb_mapper_ffi.dylib \
             | awk '/^ *cmd LC_/ { cmd = $2 } /name .*ScreenCaptureKit/ { print cmd }')"
           echo "ScreenCaptureKit load command: ${kind:-none}"
           test "$kind" = "LC_LOAD_WEAK_DYLIB"
+
+      - name: Run tests
+        if: ${{ !cancelled() }}
+        run: cargo test -p pb-mapper-desktop -p pb-mapper-ffi --all-features
 
   node-e2e:
     needs: changes
