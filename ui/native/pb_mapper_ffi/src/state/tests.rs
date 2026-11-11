@@ -914,6 +914,107 @@ async fn settings_whose_directory_cannot_be_made_are_refused() {
     assert!(!std::path::Path::new("pb_mapper_config.json").exists());
 }
 
+/// Keys a newer build wrote survive this build's saves, at every level it
+/// rewrites: the settings the window saves, both tunnel lists, and each
+/// share's and connection's entry, saved again or after another's delete.
+#[test]
+fn keys_a_newer_build_wrote_survive_a_save() {
+    use std::ffi::CString;
+
+    let _guard = PROCESS_CREDENTIAL_TEST_LOCK.blocking_lock();
+    let root = TempRoot::new("newer-keys");
+    let dir = root.path().join("pb-mapper-ui");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("config.json"),
+        r#"{"server_address":"relay.example:7666","newer":{"kept":[1,2]}}"#,
+    )
+    .unwrap();
+    let entry = |local: &str| {
+        format!(
+            r#"{{"service_key":"web","local_address":"{local}","protocol":"TCP",
+            "enable_encryption":true,"enable_keep_alive":false,
+            "created_at":{{"secs_since_epoch":1,"nanos_since_epoch":0}},"newer":"kept"}}"#
+        )
+    };
+    let list = |name: &str, entry: String| {
+        let text = format!(r#"{{"{name}":{{"web":{entry}}},"newer":"kept"}}"#);
+        std::fs::write(dir.join(format!("{name}.json")), text).unwrap();
+    };
+    list("services", entry("127.0.0.1:8080"));
+    list("clients", entry("127.0.0.1:9090"));
+    let read = |name: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.join(name)).unwrap()).unwrap()
+    };
+
+    let handle = crate::test_support::test_handle(root.path());
+    let text = |value: &str| CString::new(value).unwrap();
+    let (server, key, carrier, lan) = (
+        text("relay.example:7667"),
+        text(""),
+        text("tcp"),
+        text("quic"),
+    );
+    // SAFETY: a live handle, and NUL-terminated strings that outlive the call.
+    let saved = crate::test_support::take_reply(unsafe {
+        crate::config::pb_mapper_update_config(
+            std::ptr::from_ref(&handle).cast_mut(),
+            server.as_ptr(),
+            1,
+            key.as_ptr(),
+            carrier.as_ptr(),
+            1,
+            lan.as_ptr(),
+        )
+    });
+    assert_eq!(saved["success"], true, "{saved}");
+    let share = |key: &str| ShareSpec {
+        service_key: key.into(),
+        local_address: "127.0.0.1:8081".into(),
+        protocol: "TCP".into(),
+        enable_encryption: true,
+        enable_keep_alive: false,
+        direct: DirectOptions {
+            allow_direct: true,
+            port_mapping: PortMapping::Auto,
+        },
+    };
+    let port = "127.0.0.1:9091".parse().unwrap();
+    handle.runtime.block_on(async {
+        let state = handle.state.lock().await;
+        for key in ["web", "cam"] {
+            state.save_service_config(&share(key)).unwrap();
+            state.save_client_config(&connection(key, port)).unwrap();
+        }
+        state.delete_service_config("cam").unwrap();
+    });
+    drop(handle);
+    set_process_msg_header_key(None).unwrap();
+
+    let config = read("config.json");
+    assert_eq!(config["server_address"], "relay.example:7667");
+    assert_eq!(config["newer"], serde_json::json!({ "kept": [1, 2] }));
+    for (name, list) in [
+        ("services", read("services.json")),
+        ("clients", read("clients.json")),
+    ] {
+        assert_eq!(list["newer"], "kept", "{name}");
+        let web = &list[name]["web"];
+        assert_eq!(web["newer"], "kept", "{name}");
+        assert_eq!(web["created_at"]["secs_since_epoch"], 1, "{name}");
+    }
+    assert_eq!(
+        read("services.json")["services"]["web"]["local_address"],
+        "127.0.0.1:8081"
+    );
+    assert!(read("services.json")["services"].get("cam").is_none());
+    assert!(
+        read("clients.json")["clients"]["cam"]
+            .get("newer")
+            .is_none()
+    );
+}
+
 /// The states the window matches on, as it reads them.
 #[test]
 fn tunnel_states_keep_their_names_on_the_wire() {

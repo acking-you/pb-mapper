@@ -22,7 +22,7 @@ use pb_mapper_core::durable_file::{self, NewFileMode, ReplaceStep};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::stored::normalize_msg_header_key;
+use super::stored::{Unknown, normalize_msg_header_key};
 use super::{
     AppConfig, ClientConfigData, ClientConfigStore, ConnectSpec, DirectOptions, PbMapperState,
     ServiceConfigData, ServiceConfigStore, ShareSpec,
@@ -193,7 +193,11 @@ impl PbMapperState {
                 },
         } = spec;
         let mut store = self.load_service_configs()?;
-        let now = SystemTime::now();
+        // What the entry saved before holds besides its settings is its own.
+        let (created_at, unknown) = store.services.remove(service_key).map_or_else(
+            || (SystemTime::now(), Unknown::new()),
+            |saved| (saved.created_at, saved.unknown),
+        );
 
         let config = ServiceConfigData {
             service_key: service_key.to_string(),
@@ -201,12 +205,10 @@ impl PbMapperState {
             protocol: protocol.to_string(),
             enable_encryption: *enable_encryption,
             enable_keep_alive: *enable_keep_alive,
-            created_at: store
-                .services
-                .get(service_key)
-                .map_or(now, |saved| saved.created_at),
+            created_at,
             allow_direct: *allow_direct,
             port_mapping: *port_mapping,
+            unknown,
         };
 
         store.services.insert(service_key.to_string(), config);
@@ -241,20 +243,22 @@ impl PbMapperState {
                 },
         } = spec;
         let mut store = self.load_client_configs()?;
-        let now = SystemTime::now();
+        // As a share's: what it holds besides its settings is kept.
+        let (created_at, unknown) = store.clients.remove(service_key).map_or_else(
+            || (SystemTime::now(), Unknown::new()),
+            |saved| (saved.created_at, saved.unknown),
+        );
 
         let config = ClientConfigData {
             service_key: service_key.to_string(),
             local_address: local_address.to_string(),
             protocol: protocol.to_string(),
             enable_keep_alive: *enable_keep_alive,
-            created_at: store
-                .clients
-                .get(service_key)
-                .map_or(now, |saved| saved.created_at),
+            created_at,
             namespace: *namespace,
             allow_direct: *allow_direct,
             port_mapping: *port_mapping,
+            unknown,
         };
 
         store.clients.insert(service_key.to_string(), config);

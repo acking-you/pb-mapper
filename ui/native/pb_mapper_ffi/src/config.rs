@@ -135,6 +135,8 @@ pub unsafe extern "C" fn pb_mapper_update_config(
             let carrier_changed = saved.relay_transport != relay_transport;
             let lan_first_changed = saved.lan_first != lan_first;
             let lan_transport_changed = saved.lan_transport != lan_transport;
+            // Every setting the window has; what a later build saved beside
+            // them is kept.
             state.update_config(AppConfig {
                 server_address: server_address.clone(),
                 keep_alive_enabled: enable_keep_alive != 0,
@@ -142,6 +144,7 @@ pub unsafe extern "C" fn pb_mapper_update_config(
                 relay_transport,
                 lan_first,
                 lan_transport,
+                ..saved
             })?;
             let credential = match get_process_credential() {
                 Ok(credential) if carrier_changed || lan_first_changed || lan_transport_changed => {

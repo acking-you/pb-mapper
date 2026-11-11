@@ -2,7 +2,9 @@
 //! `clients.json`, as the bytes on disk.
 //!
 //! Additive changes only: a field a build adds takes a default, so what any
-//! earlier build wrote still loads.
+//! earlier build wrote still loads; and a key this build does not know, which
+//! a later build wrote, is kept as it was at each level this build rewrites
+//! ([`Unknown`]), so saving here does not take it from that build.
 
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -12,6 +14,11 @@ use pb_mapper_core::checksum::parse_credential;
 use serde::{Deserialize, Serialize};
 
 use crate::error::CtlError;
+
+/// The keys of one object in a saved file that this build does not know, as
+/// a later build wrote them. Written back after the known ones, and nothing
+/// when there are none, so a file holding none is written as it always was.
+pub type Unknown = serde_json::Map<String, serde_json::Value>;
 
 pub(super) fn normalize_msg_header_key(msg_header_key: String) -> Result<String, CtlError> {
     let normalized = msg_header_key.trim().to_string();
@@ -40,6 +47,8 @@ pub struct ServiceConfigData {
     /// has failed. Kept while direct is off, to apply when it is on again.
     #[serde(default = "map_when_needed", deserialize_with = "saved_port_mapping")]
     pub port_mapping: PortMapping,
+    #[serde(flatten)]
+    pub unknown: Unknown,
 }
 
 fn direct_by_default() -> bool {
@@ -79,6 +88,8 @@ pub struct DirectOptions {
 #[derive(Serialize, Deserialize, Default)]
 pub struct ServiceConfigStore {
     pub services: HashMap<String, ServiceConfigData>,
+    #[serde(flatten)]
+    pub unknown: Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -99,11 +110,15 @@ pub struct ClientConfigData {
     /// As [`ServiceConfigData::port_mapping`].
     #[serde(default = "map_when_needed", deserialize_with = "saved_port_mapping")]
     pub port_mapping: PortMapping,
+    #[serde(flatten)]
+    pub unknown: Unknown,
 }
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct ClientConfigStore {
     pub clients: HashMap<String, ClientConfigData>,
+    #[serde(flatten)]
+    pub unknown: Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -125,6 +140,10 @@ pub struct AppConfig {
     /// remote-desktop connection takes it as it starts; as a provider this
     /// computer serves whichever the other end asks for.
     pub lan_transport: LanTransport,
+    /// Carried through every save: one made from the window's fields takes
+    /// it from the config it replaces.
+    #[serde(flatten)]
+    pub unknown: Unknown,
 }
 
 impl Default for AppConfig {
@@ -136,6 +155,7 @@ impl Default for AppConfig {
             relay_transport: RelayTransport::Tcp,
             lan_first: true,
             lan_transport: LanTransport::Quic,
+            unknown: Unknown::new(),
         }
     }
 }
@@ -154,10 +174,75 @@ impl AppConfig {
             relay_transport,
             lan_first: _,
             lan_transport: _,
+            unknown: _,
         } = self;
         *server_address == other.server_address
             && *keep_alive_enabled == other.keep_alive_enabled
             && *msg_header_key == other.msg_header_key
             && *relay_transport == other.relay_transport
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What this build writes when the files hold nothing it does not know,
+    /// pinned byte for byte: a newer build's keys, kept when there are some,
+    /// must leave it as it was.
+    #[test]
+    fn a_file_without_newer_keys_is_written_as_before() {
+        const CONFIG: &str = r#"{
+  "server_address": "localhost:7666",
+  "keep_alive_enabled": true,
+  "msg_header_key": "",
+  "relay_transport": "tcp",
+  "lan_first": true,
+  "lan_transport": "quic"
+}"#;
+        const SERVICES: &str = r#"{
+  "services": {
+    "web": {
+      "service_key": "web",
+      "local_address": "127.0.0.1:8080",
+      "protocol": "TCP",
+      "enable_encryption": true,
+      "enable_keep_alive": false,
+      "created_at": {
+        "secs_since_epoch": 1700000000,
+        "nanos_since_epoch": 500000000
+      },
+      "allow_direct": true,
+      "port_mapping": "auto"
+    }
+  }
+}"#;
+        const CLIENTS: &str = r#"{
+  "clients": {
+    "web": {
+      "service_key": "web",
+      "local_address": "127.0.0.1:9090",
+      "protocol": "UDP",
+      "enable_keep_alive": true,
+      "created_at": {
+        "secs_since_epoch": 1700000000,
+        "nanos_since_epoch": 500000000
+      },
+      "namespace": 7,
+      "allow_direct": false,
+      "port_mapping": "always"
+    }
+  }
+}"#;
+        assert_eq!(
+            serde_json::to_string_pretty(&AppConfig::default()).unwrap(),
+            CONFIG
+        );
+        let config: AppConfig = serde_json::from_str(CONFIG).unwrap();
+        assert_eq!(serde_json::to_string_pretty(&config).unwrap(), CONFIG);
+        let services: ServiceConfigStore = serde_json::from_str(SERVICES).unwrap();
+        assert_eq!(serde_json::to_string_pretty(&services).unwrap(), SERVICES);
+        let clients: ClientConfigStore = serde_json::from_str(CLIENTS).unwrap();
+        assert_eq!(serde_json::to_string_pretty(&clients).unwrap(), CLIENTS);
     }
 }
