@@ -56,7 +56,7 @@ pb-mapper/
 │   ├── pb-mapper-server/   # Central relay server, plus the task manager
 │   ├── pb-mapper-client/   # Both tunnel ends: `register` and `connect`
 │   ├── pb-mapper-desktop/  # Remote desktop: host, viewer, credit, QoS, display
-│   │                       # modes; platforms behind platform/ (Windows today)
+│   │                       # modes; platforms behind platform/ (Windows, macOS)
 │   ├── pb-mapper/          # The published SDK facade over pb-mapper-client;
 │   │                       # feature `desktop` re-exports pb-mapper-desktop
 │   ├── pb-mapper-node/     # Node-API bindings for the client SDK, built by js/
@@ -113,7 +113,9 @@ Dockerfiles, and the install scripts hardcode that name, and `cargo build --bin
 pb-mapper` resolves it from the workspace root regardless of the crate name.
 Likewise `pb-mapper-ffi` keeps its package name, because it determines the
 `libpb_mapper_ffi.{so,dylib,a}` / `pb_mapper_ffi.dll` filenames that the Dart
-loader, two CMakeLists, four xcconfigs, and the release-ui hash checks expect.
+loader, the native video decoders of the Windows, Apple and Linux runners
+(which find the library Dart loaded by name), two CMakeLists, three
+xcconfigs, and the release-ui hash checks expect.
 
 `pb-mapper-galaxy` sits outside that graph: a leaf with no dependencies that
 only `pb-mapper-ffi` uses, for the UI's galaxy view (see `docs/ui-design.md`).
@@ -294,7 +296,9 @@ Nothing in the SDK crates knows it exists.
   `pb_mapper::desktop`; how it works is in `docs/remote-desktop.md`
   - `host.rs` (`host/builder.rs` its options and builder, `host/acceptor.rs`
     each connection's handshake and session), `session.rs` (B-recv;
-    `session/sender.rs` B-send), `shared.rs`: The host, and one session's
+    `session/sender.rs` B-send; `session/shapes.rs` the host's table of the
+    64 pointer-shape slots the viewer holds, in B-send, so a definition is
+    never lost to a newer report), `shared.rs`: The host, and one session's
     network side, B-recv and B-send over TLS; `shared.rs` states the lock
     discipline
   - `worker.rs` (`worker/`: capture, the input lane and control grant, the
@@ -337,24 +341,45 @@ Nothing in the SDK crates knows it exists.
     and the opaque public `NativeBackend` / `native_backend()` that benches
     and decorators compose
   - `platform/`: `Platform` and its parts (`pub(crate)`), chosen once at
-    compile time: `Current` is `windows::Windows` on Windows and the
-    uninhabited `unsupported::Unsupported` elsewhere. No platform `cfg`
-    above this module, except the viewer's Android 60 fps rule and the
-    `windows` re-export. `host_support()` replaces the old `capabilities()`;
-    `displays()` lists displays, chosen by `DisplaySelection` with the
-    device name (`\\.\DISPLAYn`) as the stable key. `synthetic.rs` is the
-    test platform (pulled or pushed encoder). How to add Linux, macOS or
-    Android is "Platforms" in `docs/remote-desktop.md`
+    compile time: `Current` is `windows::Windows` on Windows,
+    `macos::Macos` on macOS and the uninhabited `unsupported::Unsupported`
+    elsewhere. No platform `cfg` above this module, except the viewer's
+    Android 60 fps rule, the `windows` re-export and the macOS Keychain
+    sealer in `trust.rs`. `host_support()` replaces the old `capabilities()`,
+    and on macOS carries `permissions` (`HostPermissions`), which
+    `request_permission(Permission)` asks the owner for; `displays()` lists
+    displays, chosen by `DisplaySelection` with the device name
+    (`\\.\DISPLAYn`, or a Mac display's UUID) as the stable key.
+    `CursorSource` reads the pointer and, where `SHAPES`, its shape;
+    `Injector` takes keys, text (never `\n`, `\r` or `\t`: the neutral
+    `Input::typed` taps Enter and Tab) and, where `PHYSICAL_KEYS`, keys by
+    place. `synthetic.rs` is the test platform (pulled or pushed encoder,
+    shapes, a log of what it typed). How to add Linux or Android is
+    "Platforms" in `docs/remote-desktop.md`
   - `platform/windows/`: the ordinary desktop, `video/` (Desktop
     Duplication → D3D11 → Media Foundation H.265 or H.264, the fused
     `VideoSource`: the `Encoder` in `mod.rs`, the Media Foundation encoder in
     `codec.rs`, the D3D11 scaler in `converter.rs`, the per-adapter H.265
     probe in `probe.rs`; H.265 only for a viewer that lists `h265`, on a GPU
     whose hardware HEVC encoder passes a probe kept per adapter, and one
-    encoder failure turns it off for the process), `input`, `cursor`,
-    `still`, `waiter`, `timer`, `mf`, `dpapi` (the one DPAPI call every
-    Windows store uses), `win32` (the Win32 glue the host and the helper
-    share), `modes.rs` and `helper/`
+    encoder failure turns it off for the process), `input` (enigo, and
+    `SendInput` scancodes for physical keys), `cursor` (the shape once per
+    new `HCURSOR`: kinds from the `LoadCursorW` handles, bitmaps from
+    `GetIconInfo`/`GetDIBits`), `still`, `waiter`, `timer`, `mf`, `dpapi`
+    (the one DPAPI call every Windows store uses), `win32` (the Win32 glue
+    the host and the helper share), `modes.rs` and `helper/`
+  - `platform/macos/` (macOS 12.3 or later; not yet run on a Mac): `mod.rs`
+    (`Macos`, its `support()` and the Screen Recording and Accessibility
+    permissions), `capture.rs` (ScreenCaptureKit) and `encoder.rs`
+    (`VTCompressionSession`) fused in `video.rs`, which pushes; `desktop.rs`
+    (displays by UUID, the lock and console check), `geometry.rs` (points
+    and pixels), `input.rs` (`CGEvent`), `clicks.rs`, `keys.rs` (`Key` and
+    HID usages to `kVK_*`), `cursor.rs` (position, and the shape when the
+    cursor seed moves), `pixels.rs`, `modes.rs` and `mode_list.rs`
+    (app-only Core Graphics modes), `still.rs` (`SCScreenshotManager`),
+    `timer.rs` (App Nap held off), `keychain.rs`, `cf.rs` (Core Foundation
+    glue, symbols looked up at run time). Its pure modules build and are
+    tested everywhere; `tests.rs` runs only on macOS
   - `platform/windows/helper/`: The opt-in UAC/Winlogon service —
     `service.rs`; the workers it starts (`worker.rs`, `child.rs`) and a
     worker's binding to the input desktop (`binding.rs`); `pipe.rs`;
@@ -362,10 +387,15 @@ Nothing in the SDK crates knows it exists.
     or is offered Update); `background.rs` and `background/`, its own host
     and that host's grant at rest; `os/`, its Win32 glue by concern. The
     service side and the `pb-mapper-desktop-helper` binary need `--features
-    windows-helper`. `HELPER_PROTOCOL` (now 7) and the `.v<n>` pipe names
+    windows-helper`. `HELPER_PROTOCOL` (now 8) and the `.v<n>` pipe names
     change together; an installed helper of another protocol, or of another
     build (its executable differs from the one bundled with the app), is
-    offered Update. Protocol 7: `Start`/`Attach` carry `display_device`;
+    offered Update. Protocol 8: `Request::CursorShape`, `shape_serial` on
+    every answer that observed the pointer once shapes were asked for, the
+    shape's `ShapeHeader` with its bitmap as the byte record (one round trip
+    per new shape), `Input::PhysicalKey` inside `Request::Input`, and
+    `StartCaps.{cursor_shapes, physical_keys}`. Protocol 7:
+    `Start`/`Attach` carry `display_device`;
     `DisplayModes`, `SetDisplayMode`, `RestoreDisplayMode`; responses carry
     `failure` (a `FailureKind`), `caps`, `modes`, `restored`. A worker exits 3
     with modes outstanding, and the service then runs `helper restore
@@ -381,11 +411,20 @@ Nothing in the SDK crates knows it exists.
     `support()`, and on Windows `status`, `request_installation`,
     `background::{configure, adopt, Options::resume, …}` (the app's
     hand-off to the service)
-  - `codec/annexb.rs`: neutral Annex B scanning and keyframe detection
+  - `codec/`: neutral Annex B scanning and keyframe detection
+    (`annexb.rs`), length-prefixed (AVCC/HVCC) samples to Annex B
+    (`avcc.rs`, for VideoToolbox), and the encoder rules both platforms
+    share (`pipeline.rs`: late output, first-submit and output waits,
+    liveness, what an H.265 failure is)
   - `input/`: the input vocabulary a controlling viewer sends (`Input`,
-    `Button`, `Key`, `InputEvent`, `DoubleClickGuard`) and the neutral rules
-    every platform's injector follows: held-input release (`held.rs`) and
-    cursor confinement (`cursor.rs`)
+    `Button`, `Key`, `InputEvent`, `DoubleClickGuard`; `Input` and `Key` are
+    `#[non_exhaustive]`, and `Input::PhysicalKey` carries a USB HID usage,
+    0x04 to 0xE7, sent only to a host that listed `physical_keys`) and the
+    neutral rules every platform's injector follows: held-input release
+    (`held.rs`, physical keys included), text as runs with one Enter or Tab
+    per line break or tab (`Input::typed`), and cursor confinement and the
+    pointer's shape (`cursor.rs`: `CursorShape`, `CursorKind`, the
+    scale-down to 256 a side)
   - `modes.rs`: display modes, platform-neutral — `Mode`, `ModeList`
     (`fit_local`: the local size if listed, else the largest inside it
     within 2 % of its shape), `ModeTarget`, `DisplayModeError`; the journal
@@ -425,7 +464,8 @@ Nothing in the SDK crates knows it exists.
     connects, waits on each viewer and keeps the control choice and preset.
     The app keeps its own Dart policy; this serves SDK integrators
   - `trust.rs`: `Sealer`, `CurrentUser` (current-user DPAPI under the app's
-    constants), `RelayScope`, `Remembered<T>`, `TrustFile<S, T>` — the app's
+    constants), `Keychain` (macOS: AES-256-GCM under a key the login
+    Keychain keeps), `RelayScope`, `Remembered<T>`, `TrustFile<S, T>` — the app's
     `desktop-trust.dpapi` format plus `display_device` — and
     `write_durably`, which the display-mode journal also writes through;
     `F/desktop/trust.rs` is a thin wrapper over `TrustFile<CurrentUser,
@@ -445,7 +485,9 @@ Nothing in the SDK crates knows it exists.
     (a relay, a host with a synthetic encoder and a viewer in one process,
     counting allocations per video unit), `deployed` (the selftest, native
     size by default), `input_acceptance/` (native input into a window of its
-    own, on Windows) and `display_mode_probe/`, the hardware acceptance of
+    own, on Windows: Unicode text, line breaks, physical keys and an input
+    method's composition, and the pointer's shapes over it) and
+    `display_mode_probe/`, the hardware acceptance of
     display modes, which changes the display it runs on; `probe_support/`
     holds what the probes share (their relay configuration, `--name value`
     options and SDK clients)
@@ -571,11 +613,23 @@ The design and its rules are in `docs/ui-design.md`.
     the shell. `viewer_stage.dart` (picture, remote cursor, overlays) is
     shared by `desktop_viewer.dart` (title bar, floating toolbar, menus) and
     `touch_viewer.dart` (gutters, modifier bar, minimap, virtual mouse,
-    gesture sheet). Input leaves through one door, `remote_input.dart`;
-    touch is decided by the pure `touch_gestures.dart`, modifiers by
-    `modifier_latch.dart`, hardware keys by `remote_keys.dart`, the soft
-    keyboard by `remote_text_input.dart`. The gestures and key rules are in
-    `docs/remote-desktop.md`
+    gesture sheet). Input leaves through one door, `remote_input.dart`
+    (which holds waiting modifiers back until what they modify, and swaps
+    Ctrl and Cmd between an Apple and another side); touch is decided by the
+    pure `touch_gestures.dart`, modifiers by `modifier_latch.dart`, hardware
+    keys by the pure `KeyRouting.route` of `remote_keys.dart` (this
+    computer's input method or the remote one's), the soft keyboard by
+    `remote_text_input.dart`, which `desktop_keyboard.dart` also attaches on
+    a desktop while the picture has the keyboard, with the composition
+    overlay at the remote pointer (`RemoteComposition`) and, on Windows, the
+    `pb_mapper/ime` channel (`ui/windows/runner/desktop_ime.cpp`,
+    `ImmAssociateContextEx` on the Flutter view's window) that turns the
+    window's input method off in the remote mode.
+    `remote_cursor_layer.dart` decides how the pointer looks
+    (`RemotePointerLook`: the local pointer in the host's shape, a painted
+    bitmap, or the generic arrow for an older host), `RemotePointerRegion`
+    sets the local pointer over the picture and `RemotePointer` carries the
+    choice. The gestures and key rules are in `docs/remote-desktop.md`
 
 - **`lib/src/shell/`**: Navigation and window chrome
   - `app_scope.dart`: `AppPage` (six places; the phone bar has five, Logs
@@ -598,7 +652,12 @@ The design and its rules are in `docs/ui-design.md`.
   own listeners, never `AppStore`), `RemoteDesktop` (`remote_desktop.dart`: which computer is
   open, Back pausing it, remembering at the first picture),
   `RemoteComputerStore` (`remote_computers.dart`: the remembered list and
-  its thumbnails) and `ViewerPrefs` (`viewer_prefs.dart`)
+  its thumbnails) and `ViewerPrefs` (`viewer_prefs.dart`, which also keeps
+  each computer's keyboard setting, `viewer_keyboard`: the input method and
+  the Ctrl/Cmd swap, by remembered computer, at most 64). `DesktopStore`
+  fetches each pointer-shape definition once by its number and keeps the
+  last 16 decoded; on a Mac it shares from the app alone and re-reads the
+  capabilities while a permission is missing
 
 - **`lib/src/galaxy/`**: The galaxy view — scene model, camera, frame buffer
   over `pb_mapper_galaxy_frame_v1` with its Dart mirror, painter, details panel
@@ -612,7 +671,12 @@ The design and its rules are in `docs/ui-design.md`.
   newest `vX.Y.Z-ui` release, check its Ed25519-signed manifest, download and
   hash the one package, apply it per platform. See "Updates" in
   `docs/ui-design.md`; `ui/pubspec.yaml`'s version must be bumped with the
-  workspace's at every release
+  workspace's at every release. On Windows the app starts the installer
+  itself with `/UPDATEPID` and quits once its log exists; the installer is
+  `ui/windows/packaging/exe/inno_setup.iss`, checked in so that it names
+  `pb_mapper_ui.exe` (fastforge would take the first `.exe` of the bundle,
+  the desktop helper), waits for the app and opens it again
+  (`docs/ui-updates.md`)
 
 - **`lib/src/common/`**: Shared utilities
   - `polling.dart`: `waitUntilSettled` and `firstWhereOrNull`
@@ -631,11 +695,13 @@ The design and its rules are in `docs/ui-design.md`.
     the hot ops and the per-frame view on the UI isolate. Its failures carry
     the FFI `ErrorCode`; never match their text
   - `desktop_video.dart`: The native decoder's Flutter texture, over the
-    `pb_mapper/desktop_video` channel. Dart binds it to a video source; the
-    decoder pulls the video from Rust itself. The channel's `decoders`
-    method says, without creating a decoder, how large H.264 and H.265 this
-    device decodes in hardware and its fastest refresh; the store offers
-    H.265 and the frame-rate choices from it
+    `pb_mapper/desktop_video` channel, on every platform the app runs on
+    (`nativeDesktopVideo`). Dart binds it to a video source; the decoder
+    pulls the video from Rust itself. The channel's `decoders` method says,
+    without creating a decoder, how large H.264 and H.265 this device
+    decodes and its fastest refresh; the store offers H.265 and the
+    frame-rate choices from it. A probe that fails or does not answer is no
+    decoder (JPEG) except on Android (`unprobedDesktopDecoders`)
   - `remote_computer_vault.dart`: `RemoteComputerVault`, the `computers_*`
     ops below, and on Android the `pb_mapper/keystore` channel that unlocks
     them; records cross without their invitations
@@ -645,15 +711,15 @@ The design and its rules are in `docs/ui-design.md`.
     — except the calls that return a plain integer:
     - `pb_mapper_galaxy_frame_v1`, made once per frame, and
       `pb_mapper_ed25519_verify_v1`, the update manifest's signature check,
-      both leaf calls over caller-owned buffers;
-    - `pb_mapper_spawn_hidden_powershell_v1`, which starts the Windows
-      update's hand-off so that it outlives the app (a detached Dart child
-      cannot: PowerShell without a console exits at once);
+      both leaf calls over caller-owned buffers (the Windows update's
+      `pb_mapper_spawn_hidden_powershell_v1` is gone: the app now starts the
+      installer itself, see `docs/ui-updates.md`);
     - `pb_mapper_desktop_view_v1`, the remote desktop's per-frame view leaf:
       it fills a caller-owned 56-byte `PbDesktopViewV1` (mirrored in
       `pb_mapper_ffi.dart`; `size_of` and `offset_of` asserts guard it, as
-      they guard `PbDesktopVideoMetaV1` on both sides) and returns 1, 0
-      without a viewer, or -1;
+      they guard `PbDesktopVideoMetaV1` on both sides; `cursor_shape`, a
+      `u16` at offset 54, is the number of the pointer's shape) and returns
+      1, 0 without a viewer, or -1;
     - the desktop video exports and their JNI twins, below
   - `desktop.rs`: The remote desktop. `pb_mapper_desktop_call_json` takes
     the lifecycle ops (sharing, the helper and background host, trust,
@@ -661,9 +727,15 @@ The design and its rules are in `docs/ui-design.md`.
     a background isolate calls it. `pb_mapper_desktop_viewer_call_json`
     takes the viewer's closed set of hot ops (`viewer_status`, `control`,
     `release`, `input`, `keyframe`, `quality`, `pause`, `resume`,
-    `display_mode`): it never enters the runtime, awaits or takes a tokio
-    lock, so the UI isolate calls it, as it calls the view leaf. Errors are
-    typed `ErrorCode`s (`error.rs`), never text to match. `connect` takes
+    `display_mode`, `cursor_shape`, which returns a shape's kind, hotspot,
+    size and base64 RGBA once per number): it never enters the runtime,
+    awaits or takes a tokio lock, so the UI isolate calls it, as it calls
+    the view leaf. Errors are typed `ErrorCode`s (`error.rs`), never text to
+    match; a physical key toward a host that does not take them is
+    `INVALID_ARGUMENT`, and a host start without a macOS permission
+    `PERMISSION_MISSING`. `capabilities` answers `background_service` (the
+    Windows service exists) and `permissions` (macOS), and
+    `host_request_permission` asks macOS for one. `connect` takes
     `decoders` (`{h264, h265}`, each `[w, h]` or null) and an optional
     `resolution` (absent: the display's own size), and dials with the app
     config's `lan_first` and `lan_transport`; `viewer_status{local}`
@@ -674,11 +746,15 @@ The design and its rules are in `docs/ui-design.md`.
     this app's own host, `desktop/background.rs` the Windows service's host
     as the app sees it, and `desktop/trust.rs` the remembered host grant
   - `desktop_video.rs`: Video goes from the viewer's `VideoSink` straight to
-    its consumer. On Android, and on Windows where Media Foundation is
-    installed, that is the native decoder (the runner's decoder thread in
-    `windows/runner/desktop_video.cpp`, the Android feeder), so H.264 and
-    H.265 never pass through Dart; elsewhere, Windows without Media
-    Foundation included, it is Dart's JPEG isolate. A unit's
+    its consumer. That is the native decoder: the runner's decoder thread
+    (`windows/runner/desktop_video.cpp` with Media Foundation;
+    `darwin/DesktopVideo.swift`, which the macOS and iOS runners both
+    compile, with VideoToolbox; `linux/runner/desktop_video.cc` with the
+    GStreamer module `linux/runner/desktop_video_gst.cc`, behind the C
+    interface `desktop_video_module.h` and loaded with `dlopen`), or the
+    Android feeder; so H.264 and H.265 never pass through Dart. Where there
+    is no decoder (Windows without Media Foundation, Linux without
+    GStreamer's decoders) it is Dart's JPEG isolate. A unit's
     `PbDesktopVideoMetaV1.flags` say its codec (`FLAG_H265`, bit 4). The runner and this DLL delay-load
     `mfplat.dll`, so the app starts without it. `connect` returns a
     `video_source`; a consumer attaches to it and pulls with
@@ -754,6 +830,13 @@ The design and its rules are in `docs/ui-design.md`.
     go through `relay_client()`, cached per config,
     which shares the process's QUIC connection with the tunnels. See
     "How this computer reaches the relay" in `docs/ui-design.md`
+  - On Linux the library builds mimalloc with `local_dynamic_tls` (a
+    Linux-only target dependency in its `Cargo.toml`): with initial-exec TLS
+    its static TLS block is larger than glibc 2.39 keeps for a late
+    `dlopen`, and the app could not load it. The iOS app links the static
+    library whole and keeps its symbols (`ui/ios/Flutter/PbMapperFfi.xcconfig`,
+    included by both xcconfigs), since everything is looked up by name at
+    run time; the macOS dylib links ScreenCaptureKit weakly (`build.rs`)
   - `unwrap_used` and `expect_used` are `deny` here — see its `Cargo.toml`
 
 - **`native/pb_mapper_galaxy/`**: The galaxy's per-frame geometry. Its
@@ -1025,7 +1108,15 @@ docker-compose -f docker/docker-compose.yml up
   --nocapture slow_link` runs the ignored acceptance cases: a synthetic encoder
   over a real relay and TLS on a shaped link. CI does not run them. The host's
   capture, encoder and helper compile only on Windows, where CI's
-  `rust-windows-desktop` job lints and tests them
+  `rust-windows-desktop` job lints and tests them; the macOS host only on
+  macOS, where `rust-macos-desktop` lints and tests it and checks that
+  ScreenCaptureKit is linked weakly
+- **App builds (CI)**: `linux-app` builds the Linux app with its GStreamer
+  module, checks the bundle's native libraries
+  (`scripts/build/check-linux-bundle.sh`) and decodes recorded clips through
+  the module with software decoders (`scripts/test/linux-desktop-video.sh`,
+  `ui/linux/test/`); `macos-app` and `ios-app` build the macOS app and the
+  unsigned iOS app, and check that the iOS app exports the FFI
 - **Android unit tests**: `./gradlew :app:testDebugUnitTest` from `ui/android`,
   JVM tests of `VideoFeeder`, the decoder rules, the presentation queue and
   `ComputerKeystore`. `gradlew` is git-ignored; `flutter build apk

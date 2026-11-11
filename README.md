@@ -63,7 +63,7 @@ service appears on a local port. Each connection picks its own path: a shared
   from another computer or a phone, with hardware H.265/H.264 video and real
   keyboard and mouse. Each session is TLS 1.3 pinned to the host's certificate
   by its invitation, so a relay credential alone can neither watch nor
-  control. Windows is the first computer that can be shared
+  control. Windows and macOS computers can be shared
   ([what runs where](#remote-desktop)).
 - **One SDK for all of it** — the Rust crate `pb-mapper` carries the tunnels
   and, with its `desktop` feature, the whole remote desktop: a host in a few
@@ -175,24 +175,28 @@ credentials and paths your tunnels already use; the relay needs nothing new.
 The aim is that every device can be controlled from any other. Everything
 above the operating system (the protocol, the session, QoS, the viewer and
 the SDK) is shared; a host adds only its own capture, encoder and input.
-Windows is the first, and this is what runs where today:
+Windows was the first and macOS the second; this is what runs where today:
 
 | Role | Where it runs today |
 | --- | --- |
-| Host | Windows with Media Foundation: GPU H.265 or H.264; the ordinary desktop, or also UAC prompts and the owner's lock screen through the opt-in helper |
-| Viewer in the app | Windows and Android decode H.265/H.264 natively; macOS, Linux and iOS (unverified) show the picture as JPEG, up to 8 FPS |
+| Host | Windows with Media Foundation: GPU H.265 or H.264; the ordinary desktop, or also UAC prompts and the owner's lock screen through the opt-in helper. macOS 12.3 or later, from the app: ScreenCaptureKit into VideoToolbox, after the owner grants Screen Recording and Accessibility (written, not yet run on a Mac) |
+| Viewer in the app | Every platform decodes H.265/H.264 natively: Windows and Android (run on hardware and in an Android VM), Linux through GStreamer (run in WSL2 only), macOS and iOS through VideoToolbox (written, not yet built or run); without a decoder the picture is JPEG, up to 8 FPS |
 | Viewer in the SDK | Any OS, with the decoder you bring |
 
-**In the app:** on the computer to share (Windows today), open **Remote
-desktop** and choose **Turn on remote control** (or **Share the ordinary
-desktop only**, without the helper). Copy the `pbd1.` invitation privately, or
+**In the app:** on the computer to share, open **Remote desktop** and choose
+**Turn on remote control** (or **Share the ordinary desktop only**, without
+the helper) on Windows, or **Share this computer** on a Mac, after allowing
+what the card asks for. Copy the `pbd1.` invitation privately, or
 show its QR code to a phone: whoever holds it can view, and control is a
 separate permission the host grants. On the other device, choose **Add
 computer** (**Scan to add** or **Paste invitation** on a phone) and
 **Connect**. The viewer's **Display** menu (on a phone, **More**) sets the
 resolution, maximum frame rate and codec, turns on the quality monitor (speed,
 frame rate, delay, bitrate, codec, resolution), and, while a desktop controls
-a Windows computer, changes that computer's resolution to **Fit local**.
+a Windows or Mac computer, changes that computer's resolution to **Fit
+local**. **Shortcuts → Input method** chooses whether your own input method
+composes or the remote computer's, and the pointer takes the remote
+computer's shape.
 
 **In your own app:** `pb-mapper = { version = "0.11", features = ["desktop"] }`
 gives you the host, the viewer's encoded picture for your own decoder, input,
@@ -205,11 +209,11 @@ The API and how to decode are in the SDK's
 helper, the video pipeline and measurements are in
 [docs/remote-desktop.md](docs/remote-desktop.md).
 
-Not yet: hosts on Linux, macOS or phones, audio, clipboard, file transfer, and
-more than one viewer at a time. The hosts are the way to every device: each
-is one backend behind a seam that already exists, and
+Not yet: hosts on Linux or phones, a Mac's lock screen, audio, clipboard,
+file transfer, and more than one viewer at a time. The hosts are the way to
+every device: each is one backend behind a seam that already exists, and
 [Platforms](docs/remote-desktop.md#platforms) is the guide to writing the
-ones for Linux, macOS and Android. The helper's acceptance for UAC prompts
+ones for Linux and Android. The helper's acceptance for UAC prompts
 under Windows' default secure-desktop policy, and for password entry on a
 locked screen, is still outstanding.
 

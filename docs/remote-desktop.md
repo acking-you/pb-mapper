@@ -1,17 +1,21 @@
 # Embedded remote desktop (issue #50)
 
-The optional Rust SDK component and existing Flutter UI share a Windows screen
-through an existing pb-mapper deployment. The implementation includes GPU H.265
-and H.264 video, native Windows/Android rendering, an opt-in Windows helper,
-and explicitly remembered host authorization. The relay needs no
-desktop-specific upgrade or additional rendezvous service.
+The optional Rust SDK component and existing Flutter UI share a Windows or Mac
+screen through an existing pb-mapper deployment. The implementation includes
+GPU H.265 and H.264 video, native decoding and rendering on every viewer
+platform the app runs on, an opt-in Windows helper, and explicitly remembered
+host authorization. The relay needs no desktop-specific upgrade or additional
+rendezvous service.
 
 **Issue #50 is not complete.** The helper has not passed administrator-consent
 and standard-user credential-prompt acceptance under the default secure-desktop
 policy. The development process is not elevated; it cannot approve its own UAC
 prompt. Android validation uses the Windows machine's Android VM, as requested
 by the user. This does not establish physical-phone or iOS support, independent
-cross-NAT operation, or the same presentation rate on every target device.
+cross-NAT operation, or the same presentation rate on every target device. The
+macOS host and the macOS and iOS viewers have not run on Apple hardware, and
+the Linux viewer has run only in WSL2 (see
+[Measurements and remaining acceptance](#measurements-and-remaining-acceptance)).
 
 The performance milestone is **1080p direct viewing at or near 90 presented
 FPS**. Both endpoints prefer pb-mapper's existing direct path, with pre-commit
@@ -56,7 +60,9 @@ is the Remote tab. How the page and the viewer are laid out is in
    input permission and automatic restoration. Complete any Windows consent
    yourself; a successful installation restarts the unprivileged UI on this
    page and resumes the saved operation. **Share the ordinary desktop only**
-   skips the helper, and with it UAC and the lock screen. The card selects
+   skips the helper, and with it UAC and the lock screen. On a Mac, see
+   [Sharing a Mac](#sharing-a-mac): the card has one **Share this computer**
+   button and first asks for the permissions macOS requires. The card selects
    the shared display; switching it reconnects the current viewer. While it
    shares, **More** renames the service, for example to
    `desktop:my-computer`. Names start with `desktop:` and contain only ASCII
@@ -92,10 +98,44 @@ is the Remote tab. How the page and the viewer are laid out is in
 There is one shared display and one viewer at a time. Input uses the shared
 display's physical coordinates, DPI, letterboxing and viewer transform,
 including negative monitor origins. A stale screen disables input while
-keeping the texture visible. The GPU capture backend currently rejects
-rotated displays instead of presenting incorrect geometry. Cursor metadata
-shows a generic position indicator, not the original Windows cursor bitmap or
-shape.
+keeping the texture visible. The Windows GPU capture backend currently rejects
+rotated displays instead of presenting incorrect geometry. The pointer travels
+beside the video: its position always, and its shape where both ends list
+`cursor_shape` (see [Input and cursor](#input-and-cursor)). On a desktop
+viewer in control, this computer's own pointer takes the host's shape over the
+picture, so one pointer shows; a phone paints the shape at the picture's
+scale. A host without shapes (0.11.0) shows the generic arrow, as before.
+
+### Sharing a Mac
+
+A Mac shares from the app itself, on macOS 12.3 or later (ScreenCaptureKit);
+below that, the Remote page says only Windows and macOS 12.3 or later can
+share. There is no helper or background service: hosting runs while the app
+runs, and resumes with the app when **Share this computer** was left on.
+
+- macOS asks the owner for two permissions, which the host card lists while
+  they are missing, each with **Allow in System Settings**: that asks macOS,
+  which prompts the first time, and otherwise opens Privacy & Security on the
+  right page. **Screen Recording** is needed to share at all and takes effect
+  once the app is reopened; **Accessibility** is needed for control and takes
+  effect at once. A start without Screen Recording fails with
+  `PERMISSION_MISSING`; an input without Accessibility ends control
+  (`input_failed`, naming Accessibility), because macOS would drop the events
+  silently, and viewing goes on.
+- The app stays sandboxed: neither permission needs an entitlement or a usage
+  key, and no entitlement or `Info.plist` key was added for hosting.
+- A remembered grant is sealed with a key kept in the login Keychain (see
+  [Remembered authorization](#remembered-authorization-and-unattended-use)).
+- Locking the Mac, or switching to another user, shows the viewer the secure
+  desktop state and stops input; the picture returns after unlocking. The
+  lock screen and the login window cannot be shared, and **Lock remote
+  computer** is not offered for a Mac.
+- While a viewer watches, the app holds off App Nap and timer coalescing and
+  keeps the display awake; a viewer that only watches could not wake it.
+
+None of this has run on a Mac yet. It has been type-checked and linted for
+macOS from Linux, without linking; CI's `rust-macos-desktop` job is the first
+to build and test it on macOS.
 
 ## Gestures, keys and modifiers
 
@@ -181,36 +221,77 @@ in Shortcuts releases whatever this viewer holds on the host.
 
 ### Keyboards
 
-A hardware keyboard, including a Bluetooth one on a phone, reaches the host
-by these rules:
+A hardware keyboard, including a Bluetooth one on a phone, types through one
+of two input methods, chosen per computer under **Shortcuts → Input method**
+(on a phone, in the panel's Shortcuts):
 
-- Ctrl, Alt, Shift and Win held down go to the host as real presses and
-  releases. They are never wrapped around another key, because the host does
-  not count presses and would release a modifier still held.
+- **This computer's** (the default). This device's input method composes and
+  the text it commits is sent; Chinese, Japanese and Korean input methods
+  work as in any text field here. A desktop viewer attaches a text-input
+  client while the picture has the keyboard and this viewer controls; the
+  composition shows next to the remote pointer and the candidate window is
+  placed there. While the input method composes, Enter, Backspace, the
+  arrows and Esc belong to it.
+- **The remote computer's.** Keys go by their place on the keyboard (a USB
+  HID usage, `Input::PhysicalKey`), so the host's layout and input method
+  type them: a German host's layout makes Z of a US key's Y. This needs a
+  host that lists `physical_keys` (0.12 on Windows and macOS); toward an older
+  one the menu says so, and letters, digits and Space go as keys and the rest
+  as text. On Windows the viewer window's own input method is turned off
+  (`ImmAssociateContextEx`) while the picture has the keyboard, and back on
+  when it loses it, when the mode changes and when the viewer closes; on
+  macOS, Linux and Android the picture sees keys before the input method
+  does, so it is left out without that.
+
+In either mode:
+
+- A modifier waits for what it modifies. With this computer's input method,
+  Shift, Ctrl, Alt and Win reach the host only with the next key, click or
+  wheel while they are held, or at once while a button or another key is
+  already held there; one pressed and released alone sends nothing, so
+  Shift, Ctrl+Shift, Alt+Shift, Ctrl+Space, Win+Space and Caps Lock stay this
+  computer's input-method and layout switches. With the remote computer's,
+  Shift, Ctrl and Alt go at once, since its input method needs their taps,
+  and Win still waits, so a lone Win tap opens neither Start menu. Modifiers
+  held down are real presses and releases, never wrapped around another key,
+  because the host does not count presses.
 - F1–F12, Enter, Esc, Tab, Backspace, Delete, Insert, Home, End, Page Up,
   Page Down and the arrows go as keys; with a modifier latched, as one
   wrapped tap. Tab never moves focus out of the picture.
 - A letter, digit or space typed while Ctrl, Alt or Win is held is a
   shortcut: Ctrl+S, Alt+F and Win+E reach the host as such. On layouts where
   AltGr (Ctrl+Alt) types a character, such as German, French or Polish, that
-  character is typed instead.
-- Anything else printable is typed as the character this computer's layout
-  produced.
-- **Not sent:** keys outside the host's vocabulary. PrintScreen, Caps Lock
-  and the Menu key do nothing, and Ctrl or Alt with punctuation (Ctrl+-,
-  Ctrl+=, Ctrl+[, Ctrl+], Ctrl+/) is not sent as a shortcut. Shortcuts that
-  this computer's system takes first — Alt+Tab, the Windows key, Win+L,
-  Ctrl+Alt+Del — never reach the app; use the Shortcuts menu. Ctrl+Alt+Del
-  is unsupported, since `SendInput` cannot produce it. **Lock remote
-  computer** is the host's own command: it needs control, and says so when
-  locking fails.
+  character is typed, with no Ctrl or Alt sent; on an Apple keyboard Option
+  with a printable key types its character and makes no chord.
+- To a host that lists `physical_keys`, keys the vocabulary cannot name go by
+  place in the local mode too: Ctrl or Alt with punctuation (Ctrl+/, Ctrl+-,
+  Ctrl+[), PrintScreen, Pause, the Menu key and F13–F24. Caps Lock, Num Lock,
+  Scroll Lock, the numpad's digits and the input-method keys stay this
+  computer's in the local mode; a 0.11.0 host gets none of them.
+- Cmd and Ctrl swap places when exactly one side is an Apple device, on by
+  default and per computer (**Cmd acts as Ctrl**, or **Ctrl acts as Cmd**):
+  a Mac's or iPad's Cmd+C is Ctrl+C on a Windows host, and a Windows viewer's
+  Ctrl+C is Cmd+C on a Mac. The host's system is known from its `os_*`
+  capability.
+- Shortcuts that this computer's system takes first — Alt+Tab, the Windows
+  key, Win+L, Win+Space, Ctrl+Alt+Del — never reach the app; use the
+  Shortcuts menu, whose **Switch input method** sends Win+Space to a Windows
+  host and Ctrl+Space to a Mac. Ctrl+Alt+Del is unsupported, since
+  `SendInput` cannot produce it. **Lock remote computer** is the host's own
+  command: it needs control, and says so when locking fails.
+- Everything held is released when the picture loses the keyboard; a
+  modifier still waiting was never sent and needs no release.
 
-Typed characters arrive as Unicode, so a remote input method does not compose
-them. Compose text here instead: **Type text…** on a desktop, or the soft
-keyboard on a phone, which sends what the input method commits, turns
-Backspace into deletions and Enter into Enter. While a modifier is latched
-the first 16 typed characters go as keys, so the bar's Ctrl followed by C on
-the soft keyboard sends Ctrl+C.
+The setting is kept by the app on this device (`viewer_keyboard`, by
+remembered computer, at most 64), not with the computer in the vault, since it
+describes this device's keyboard. **Type text…** on a desktop and the soft
+keyboard on a phone send what the input method commits in both modes, turn
+Backspace into deletions and Enter into Enter; a physical keyboard on a phone
+follows the rules above while the soft keyboard is open. While a modifier is
+latched the first 16 typed characters go as keys, so the bar's Ctrl followed
+by C on the soft keyboard sends Ctrl+C. A host types text as one Enter for
+each `\n`, `\r` or `\r\n` and one Tab for each `\t`; a Windows host before
+this version typed each twice.
 
 ## Viewer states
 
@@ -280,7 +361,7 @@ display mode, not only the picture. The phone viewer has no such menu; its
 screen says nothing about the size a desktop should run at.
 
 - A host offers it (the `display_mode` capability) where its platform changes
-  modes, which today is Windows, in an ordinary session or through the helper.
+  modes: Windows, in an ordinary session or through the helper, and macOS.
   A viewer that did not list the capability is never sent the modes, and its
   requests are protocol errors.
 - The state record carries the display's modes: the current one, the
@@ -326,6 +407,15 @@ screen says nothing about the size a desktop should run at.
 - A remembered computer keeps **Fit local** (never a fixed size, which the
   next display may not list) and applies it again whenever this viewer gains
   control of it.
+- On macOS a mode is a pixel size: the HiDPI and 1× modes of one size are one
+  entry, at the owner's current scale where the display offers it, else the
+  lower one, at the current refresh rate where offered, else the fastest. The
+  change goes through `CGConfigureDisplayWithDisplayMode` with
+  `kCGConfigureForAppOnly`, so macOS itself puts the mode back when the app
+  ends, a crash included; the journal entry's scope is the process, so a dead
+  process's entry is dropped, never replayed. **Original** and the restores
+  above put back the exact mode found (pixels, scale and refresh). Not yet run
+  on a Mac.
 
 The SDK side is `Viewer::set_display_mode(ModeTarget)`, which answers the mode
 it asked for or a `DisplayModeError` (`Closed`, `NotOffered`,
@@ -403,6 +493,12 @@ mismatch stops automatic retries and never replaces the pinned identity.
 | Close the app | Stops its viewer; service-owned sharing continues |
 | Upgrade legacy app-owned sharing | Transfers the saved identity if no same-scope service identity exists; an existing service identity remains authoritative |
 | Revoke invitation and stop sharing | Deletes remembered trust, closes the current host, and requires a new invitation for future sharing; its viewer is told the invitation was revoked, whether the app or the service hosts |
+
+On a Mac the app's remembered grant is sealed with AES-256-GCM under a random
+key kept as a generic password in the login Keychain (`trust::Keychain`,
+service "pb-mapper desktop trust"), created at the first seal; revoking
+deletes the sealed file, not the key. A development build that is not signed
+may ask once for access to that Keychain item.
 
 Legacy app-owned grants and a pending installation handoff use current-user
 DPAPI in `desktop-trust.dpapi` beneath the existing configuration directory.
@@ -590,10 +686,21 @@ setup as **Turn on remote control** does: one consent prompt installs, updates
 or enables it, the app restarts into the installed copy when it installed one,
 and the host resumes there. The app's startup restore never installs or asks.
 
-Protocol 7 is the current one, with the pipes
-`pb-mapper.desktop-helper.v7` and `pb-mapper.desktop-background.v7`. It adds
-display modes ([Remote resolution](#remote-resolution)): `Start` and `Attach`
-name the display's device (`\\.\DISPLAY1`), which finds it again when its
+Protocol 8 is the current one, with the pipes
+`pb-mapper.desktop-helper.v8` and `pb-mapper.desktop-background.v8`. It adds
+the pointer's shape and keys by place. The first `Request::CursorShape` turns
+the worker's shape reads on; from then on every request that observes the
+pointer (context, capture, video, shape) also reads the shape and answers
+`shape_serial`, which the worker advances only when the shape's content
+changes, and the host asks for the shape again (one more round trip per new
+shape, none per tick) only when it moved. The answer carries a `ShapeHeader`
+(kind, size, hotspot) with the bitmap as its byte record, and both ends check
+its bounds. `Request::Input` may carry `Input::PhysicalKey`, and the `Start`
+caps say whether the worker reads shapes and injects physical keys.
+
+Protocol 7 added display modes ([Remote resolution](#remote-resolution)):
+`Start` and `Attach` name the display's device (`\\.\DISPLAY1`), which finds
+it again when its
 monitor handle went stale after a mode change; `DisplayModes`,
 `SetDisplayMode` and `RestoreDisplayMode` requests, the last also on the
 background pipe for the host card's Restore; and the worker's `restore
@@ -649,10 +756,13 @@ does not require Flutter or a POCOX runtime.
   write lease below, and `.backend(factory)` captures with an embedder's
   backend instead of the platform's; `Host::start(client, options)` is the
   plain case. The platform's own host refuses before registering where
-  `host_support().host` is false (its `reason` says why: off Windows, or
-  without Media Foundation), or where `Access::Privileged` asks for a helper
-  that is not ready. `HostOptions` is non-exhaustive: `new` takes every path
-  default from `RegisterOptions::default()`, so a host is reached on a shared
+  `host_support().host` is false (its `reason` says why: on neither Windows
+  nor macOS 12.3 or later, without Media Foundation, or on a Mac without
+  Screen Recording, which `host_support().permissions` and
+  `request_permission` cover), or where `Access::Privileged` asks for a
+  helper that is not ready (Windows only). `HostOptions` is non-exhaustive:
+  `new` takes every path default from `RegisterOptions::default()`, so a
+  host is reached on a shared
   LAN first (QUIC, or TCP when the viewer asks and `lan_tcp` allows), then
   directly, then through the relay. `display` is a `DisplaySelection`:
   primary, a runtime id, or the device name (`\\.\DISPLAY1`), which survives a
@@ -686,7 +796,8 @@ does not require Flutter or a POCOX runtime.
   by the helper reports it as well. `describe(probe_h265)` runs right after
   the backend is built and within the 3 s before the host answers the viewer:
   first unprobed, for the display it captures (which sizes the first IDR) and
-  its `BackendCaps` (lock, the OS), from which the session's `Accepted`
+  its `BackendCaps` (lock, the OS, display modes, physical keys, pointer
+  shapes), from which the session's `Accepted`
   capabilities are built; then, only for a viewer that decodes H.265 while no
   H.265 encoder has failed in this process, probed, for H.265 alone, so a slow
   probe never costs the display. A description that misses the 3 s uses
@@ -694,8 +805,12 @@ does not require Flutter or a POCOX runtime.
   session's wake, and `drain_poll()` says whether thread C polls the encoder
   (`Some`, every 2 ms while units are pending) or waits to be woken (`None`).
   `capture` (a JPEG still) is optional. `cursor` reports the pointer as the
-  inputs the backend applied left it. A failure carries a `FailureKind`
-  (`failure_kind(&error)`): secure desktop, display lost, encoder failed, ...;
+  inputs the backend applied left it, and `cursor_shape`, asked only when the
+  viewer listed `cursor_shape` and the backend's `BackendCaps::cursor_shapes`
+  says it can, its shape when it changed (a `CursorShape`). A failure
+  carries a `FailureKind` (`failure_kind(&error)`): secure desktop, display
+  lost, encoder failed, permission missing (`missing_permission` says which),
+  ...;
   a sticky link failure returns `NotConnected`, which ends the session instead
   of retrying. `native_backend(&selection)` is this platform's own backend, an
   opaque `NativeBackend` an embedder may decorate.
@@ -746,15 +861,19 @@ does not require Flutter or a POCOX runtime.
   validated less than two seconds ago. `Viewer::input(generation, &inputs)`
   sends a batch of up to 16, stamps the presented frame and consecutive
   sequence numbers itself, and fails with a typed `InputError` (`NotFresh`,
-  `NotControlling`, `Congestion`, `Closed`, `Invalid`). The host checks the same
-  rule against its own ledger and rejects duplicate or reordered sequences.
+  `NotControlling`, `Congestion`, `Closed`, `Invalid`, and `NotOffered` for
+  an `Input::PhysicalKey` toward a host that did not list `physical_keys`,
+  nothing of the batch sent). `Input` and `Key` are `#[non_exhaustive]`. The
+  host checks the same rule against its own ledger and rejects duplicate or
+  reordered sequences.
   Permission revisions, desktop transitions and capture failures invalidate old
   input. Transport receipts, probes, cursor traffic and network heartbeats never
   grant or renew it.
 - `Viewer::status` returns a `ViewerStatus` (state and reason, control,
   freshness, video, decoder and the statistics below), and `Viewer::view` an
-  allocation-free per-frame snapshot (generation, presented frame, cursor and
-  flags) for a renderer.
+  allocation-free per-frame snapshot (generation, presented frame, cursor,
+  the number of its shape, and flags) for a renderer; `Viewer::cursor_shape`
+  resolves that number to the `CursorShape` while the viewer holds it.
 - Explicit `stop` cancels and joins the endpoint's worker/tasks and stops its
   registration/connection. Drop initiates cancellation. Coordinator loss or
   relay credential revocation does not forcibly close an established direct
@@ -764,9 +883,10 @@ does not require Flutter or a POCOX runtime.
 
 The host is split by platform at compile time; the engine, the session,
 QoS, credit, the protocol, the viewer and the SDK name no operating system.
-Windows is the one platform implemented. This section is the guide for the
-next ones (Linux, macOS, Android), in the spirit of RustDesk's per-platform
-services but monomorphised: no per-frame dynamic dispatch.
+Windows and macOS are implemented; macOS has not yet run on a Mac. This
+section is the guide for the next ones (Linux, Android), in the spirit of
+RustDesk's per-platform services but monomorphised: no per-frame dynamic
+dispatch.
 
 ### The two seams
 
@@ -790,37 +910,52 @@ services but monomorphised: no per-frame dynamic dispatch.
   of held input (`input/held.rs`), input validation, pointer confinement
   (`input/cursor.rs`) and the video source's lifetime live there once.
   Compile-time facts are associated consts (`Injector::LOCK`,
-  `CursorSource::MODE`, `VideoSource::DRAIN`); what varies by machine is a
-  method (`can_lock`, `mode`, `available`), which `describe` reports per
-  session. Failures carry a `FailureKind`, never a text to parse.
+  `Injector::PHYSICAL_KEYS`, `CursorSource::MODE`, `CursorSource::SHAPES`,
+  `VideoSource::DRAIN`); what varies by machine is a method (`can_lock`,
+  `mode`, `available`), which `describe` reports per session. Failures carry
+  a `FailureKind`, never a text to parse. `Injector::text` never sees `\n`,
+  `\r` or `\t`: the neutral `Input::typed` cuts text into runs and taps Enter
+  and Tab through the held-key obligation, so no platform can type a line
+  break twice. `CursorSource::shape` is asked only when the session
+  negotiated `cursor_shape`, on thread C's 16 ms pointer tick, and reads a
+  bitmap only when the OS says the pointer's image changed; it returns
+  physical pixels, straight RGBA8, at most 256 a side (`CursorShape::fitted`
+  scales a larger one down).
 
-`platform::Current` is the build's platform: `windows::Windows`, else
-`unsupported::Unsupported`, whose parts are uninhabited and which refuses
-before a host registers (`HostSupport::reason` is `platform`). The only
-platform `cfg`s above `platform/` are the viewer's Android 60 FPS rule, the
-public `windows` module, the `privileged` facade's Windows operations, and
-lint allowances for neutral code (`codec`, `oop`) that only Windows uses yet.
+`platform::Current` is the build's platform: `windows::Windows`,
+`macos::Macos`, else `unsupported::Unsupported`, whose parts are uninhabited
+and which refuses before a host registers (`HostSupport::reason` is
+`platform`). The only platform `cfg`s above `platform/` are the viewer's
+Android 60 FPS rule, the public `windows` module, the `privileged` facade's
+Windows operations, the macOS Keychain sealer in `trust`, and lint
+allowances for neutral code (`codec`, `oop`, the cursor scaler) that not
+every platform uses. The pure parts of `platform/macos/` (points and pixels,
+key codes, click counts, mode lists, un-premultiplying) build and are tested
+on every platform.
 
 ```
 crates/pb-mapper-desktop/src/
   backend.rs  native.rs  launch.rs  modes.rs     the seams and the glue
-  codec/annexb.rs                                Annex B NAL scan, parameter sets
-  input/{held,cursor}.rs                         release obligation, confinement
+  codec/{annexb,avcc,pipeline}.rs                Annex B and AVCC/HVCC, encoder rules
+  input/{held,cursor}.rs                         release obligation, confinement, shapes
   oop/{proto,ipc,client,server}.rs               the out-of-process backend
   platform/mod.rs  unsupported.rs  waiter.rs     traits, Current, facade
   platform/windows/{desktop,input,cursor,still,waiter,timer,mf,dpapi,modes,win32}.rs
   platform/windows/video/                        capture, scale and encode, fused
   platform/windows/helper/                       service, install, worker, pipes
+  platform/macos/{mod,cf,capture,encoder,video,desktop,geometry,input,clicks,
+    keys,pixels,cursor,modes,mode_list,still,timer,keychain}.rs
   privileged/                                    public helper facade
 ```
 
-| Part | Windows |
-| --- | --- |
-| `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope |
-| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`), drained every 2 ms |
-| `Input` | enigo, `SetCursorPos` for absolute moves, `LockWorkStation` |
-| `Cursor` | `GetCursorInfo` |
-| `Modes` / `Still` | `WinModes` (dynamic changes only; see [Remote resolution](#remote-resolution)) / xcap JPEG |
+| Part | Windows | macOS (not yet run) |
+| --- | --- | --- |
+| `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope | `CGDirectDisplayID` from `CGGetActiveDisplayList`, named by its UUID, which finds it again; `CGDisplayBounds` × the current mode's pixels per point; a session that is not on the console, or a locked screen, is the secure desktop |
+| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`), drained every 2 ms | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
+| `Input` | enigo; `SendInput` with `KEYEVENTF_SCANCODE` for physical keys (a HID usage to its set-1 scancode); `SetCursorPos` for absolute moves; `LockWorkStation` | `CGEvent` at the HID tap: pointer and wheel in the bound display's points, click counts for double clicks, keys by `kVK_*` code (physical keys too), modifiers as flag changes with left and right apart, text as Unicode string events of at most 20 UTF-16 units; no lock (`LOCK = false`) |
+| `Cursor` | `GetCursorInfo`; the shape once per new `HCURSOR`: its kind from the `LoadCursorW` standard handles, its bitmap from `GetIconInfo` and `GetDIBits` (colour, alpha or AND mask; monochrome AND/XOR, an inverting pixel drawn black outlined in white) | `CGEventGetLocation`, separate; the shape when the window server's cursor seed moves (a private `CGSCurrentCursorSeed`, looked up with `dlsym`; without it at most every 500 ms): `NSCursor.currentSystemCursor` drawn at the display's scale, a kind only where it equals a standard cursor pixel for pixel, else `custom` |
+| `Modes` / `Still` | `WinModes` (dynamic changes only; see [Remote resolution](#remote-resolution)) / xcap JPEG | Core Graphics modes for this app only (`kCGConfigureForAppOnly`) / `SCScreenshotManager` and ImageIO JPEG, macOS 14 and later |
+| `Grant` | none | the Screen Recording grant; Accessibility is checked at each input |
 
 ### Adding an operating system
 
@@ -864,10 +999,12 @@ trait Encoder { type Frame; type Device; const DRAIN: Option<Duration>;
   pushing source (`DRAIN = None`) that wakes thread C; input through the
   portal or libei; the cursor embedded or separate as the portal grants;
   `NoModes`; the portal picks the display.
-- **macOS**: ScreenCaptureKit into VideoToolbox, zero-copy and pushing;
-  `CGEventPost`, with keys on the main queue; `CGDisplay` modes with
-  `kCGConfigureForAppOnly`, which reverts by itself; TCC permissions as the
-  `Grant`, which `HostSupport` reports when missing.
+- **macOS** is implemented (the table above), as planned here except that
+  keys are posted from thread C rather than on the main queue: the `kVK_*`
+  table needs no layout lookup, so no enigo. Its `HostSupport` carries
+  `permissions`, and a missing one is `PermissionMissing`; the shared encoder
+  rules (late output, first-submit and output waits, liveness, H.265 failure)
+  live in `codec/pipeline.rs` for both platforms.
 - **Android**: MediaProjection's VirtualDisplay writes into MediaCodec's input
   surface, so the platform implements `VideoSource` directly and has no
   still (`NoStill`) and no modes; input through an AccessibilityService;
@@ -966,6 +1103,23 @@ JPEG. The encoder runs at the session's nominal frame rate (the viewer's
 the bitrate is set live, and sample times follow the real capture interval.
 GPU scaling preserves aspect ratio and never upscales; input and cursor
 coordinates still use the physical `Display` geometry.
+
+macOS hosting (not yet run on a Mac) uses ScreenCaptureKit, which scales the
+display to the encoder's size and delivers NV12 (BT.709) without the cursor;
+its output queue keeps only the newest complete picture, and thread C's
+capture call hands that IOSurface to a `VTCompressionSession` without a copy,
+or repeats the last one every 250 ms on a still screen. The session runs in
+real time with no frame reordering, an unbounded GOP (`gop` reports the
+read-back), IDRs as a per-frame `ForceKeyFrame` option and the bitrate set
+live, with low-latency rate control for H.264 on macOS 11.3 and later. H.265
+needs the hardware encoder; H.264 prefers it and takes VideoToolbox's
+software encoder where there is none, as on a virtual Mac. The output
+callback converts the length-prefixed sample to Annex B, with the parameter
+sets in front of a keyframe, queues the unit and wakes thread C, so nothing
+polls. The late-output, stall, liveness and H.265-failure rules are the
+Windows encoder's (`codec/pipeline.rs`). No picture for 3 s is a capture
+failure. While a session captures, the process holds off App Nap and keeps
+the display awake.
 
 The GOP is infinite. Before its media types are set, the encoder tries GOP
 lengths `u32::MAX`, `0x7FFF_FFFF`, 65 535 and 3 600 and keeps the first one it
@@ -1312,8 +1466,8 @@ capture call, also answers each input with the pointer, so its report is
 never older than the last move. A new generation, a display change included,
 always reports where the pointer is, and a viewer that does not control sees
 every change. The writer sends each report once, outside the video queue,
-after its generation's `State`. Cursor metadata is a generic position, not the
-Windows cursor bitmap, and observing it never renews input authorisation.
+after its generation's `State`. Observing the pointer, its shape included,
+never renews input authorisation.
 
 A report can still cross the controller's moves on the wire. Sampled before
 the thread took a move, it reaches the viewer after the move left; and since
@@ -1335,6 +1489,32 @@ it has taken a move, reports the next sample that is not that move's echo even
 when it equals the last report, at the newer watermark: the clamp, or the
 pointer still hidden, reaches the viewer with the move behind it.
 
+**The pointer's shape.** A viewer that renders shapes, and a host whose
+backend reports them, list `cursor_shape`; the host sends shapes only when
+both did, and otherwise writes exactly the bytes of a 0.11.0 host. The shape
+is a `cursor_shape {id, kind, hot_x, hot_y, width, height}` record followed by
+one payload of straight (not premultiplied) RGBA8, `width × height × 4`
+bytes, the only payload besides video; it is sent with its bitmap even for a
+standard kind, since a phone paints the bitmap and a desktop uses the kind.
+Each side is 1 to 256 pixels (a host scales a larger pointer down) and the
+hotspot lies inside; anything else, or a payload of another length, is a
+protocol error. `kind` is one of `arrow`, `ibeam`, `hand`, `wait`,
+`progress`, `crosshair`, `help`, `not_allowed`, `move`, `resize_ns`,
+`resize_ew`, `resize_nwse`, `resize_nesw`, `up_arrow` and `custom` (a shape
+the host cannot name); the list grows only with a new capability. `id` is a
+slot below 64: a record defines or overwrites its slot, B-send keeps the
+host's table of what the viewer read, reusing the slot of an equal image and
+overwriting the one named longest ago, and the viewer keeps exactly 64. Once
+a shape is known, every `cursor` report names its slot in `shape`, written
+only to a `cursor_shape` viewer. A new shape is reported even at the
+controller's own move, and the viewer takes every report's shape while it
+sets aside only stale positions. Thread C asks the backend for the shape only
+when the session negotiated it, on the 16 ms tick, and compares content, so
+an equal image under a new OS handle sends nothing. A failed read is the
+debug event `desktop_cursor_shape_failed` and keeps the last shape. The
+viewer hands Dart a number per definition in the view (`cursor_shape`), and
+the FFI's hot op `cursor_shape` returns that definition once.
+
 ### Constants
 
 | What | Value |
@@ -1351,7 +1531,7 @@ pointer still hidden, reaches the viewer with the move behind it.
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued; IDR grace 500 ms; stall watchdog 700 ms |
 | fps cap | tick 250 ms; × 0.9 direct, × 0.8 relay; minimum 5; +5 after 3 s; ≥ 1 s between changes |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
-| Cursor | sampled every 16 ms; the controller's own move never reported; a report older than the controller's last move set aside |
+| Cursor | sampled every 16 ms; the controller's own move never reported; a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated and the OS pointer changed, 1 to 256 px a side, 64 slots on each end |
 | Codec | `Accepted` waits at most 3 s for the backend's display and H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3 |
 
 ### Diagnostics
@@ -1454,8 +1634,10 @@ left out; while the connection is down the core rows show dashes.
   `stats` once a second and turns two reads into decoded and dropped
   pictures a second, the mean from a picture's release to the surface to
   Flutter consuming it, surface credits in use, low-latency decoding and the
-  refresh rate asked for (Android; Windows reports the counts only). Closing
-  the panel drops the decoder's timing accumulators.
+  refresh rate asked for (Android; Windows reports the counts only; macOS
+  and iOS the counts, the release-to-consume mean, VideoToolbox's real-time
+  mode as low latency and the display's maximum refresh; Linux the counts).
+  Closing the panel drops the decoder's timing accumulators.
 
 Read in order, the rates place a loss: capture below pace is the host's
 source or its capture gate; pace below the ceiling is the QoS controller
@@ -1487,20 +1669,29 @@ reconnects by its id; a pasted invitation that was not remembered stays in
 memory only.
 
 Windows decodes H.265 or H.264 with Media Foundation into D3D11 shared
-textures (or takes JPEG where Media Foundation is not installed), and Android
-with `MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer.
+textures (or takes JPEG where Media Foundation is not installed), Android
+with `MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer,
+macOS and iOS with VideoToolbox into IOSurface-backed BGRA pixel buffers
+handed to a `FlutterTexture`, and Linux with GStreamer into RGBA buffers
+handed to an `FlPixelBufferTexture`.
 Capture, encoding, decoding and blocking FFI calls stay off the Dart UI
 isolate, and pinch and pan keep the same texture and decoder. On Android a
 decoder reset is acknowledged by the codec worker, keeps the Surface, and cannot
 close a newer codec; after a stall the renderer drops obsolete decoded pictures
 but keeps compressed references. The decoders pull video from the session's
 `VideoSink` themselves, so compressed video never crosses Dart: a Kotlin feeder
-thread pulls through JNI on Android, and the runner's decoder thread through
-the `pb_mapper_desktop_video_*_v1` C exports on Windows. Each reports its
-presentations to `VideoConsumer::presented` directly. Dart reads only status,
+thread pulls through JNI on Android, and on every other platform a decoder
+thread of the runner through the `pb_mapper_desktop_video_*_v1` C exports,
+found in the library Dart loaded (`GetProcAddress` on Windows; `dlsym` on
+macOS from the bundled dylib opened with `RTLD_NOLOAD`, on iOS from the
+process, on Linux from the loaded `libpb_mapper_ffi.so` found with
+`dl_iterate_phdr`), never a second copy: the instance token must match
+Dart's. Each reports its presentations to `VideoConsumer::presented`
+directly, when the compositor took the picture. Dart reads only status,
 geometry, statistics and the latest cursor, through the per-frame view leaf.
-Other platforms, and Windows without Media Foundation, take JPEG, which Dart
-decodes off the UI isolate. Video bytes never become JSON or base64.
+A device with no decoder, Windows without Media Foundation and Linux without
+GStreamer's decoders included, takes JPEG, which Dart decodes off the UI
+isolate. Video bytes never become JSON or base64.
 
 ### What the viewer decodes
 
@@ -1510,10 +1701,13 @@ arguments and never creates a decoder, because a bad driver can hang there. It
 answers a map: `h264` and `h265`, each either `{max_width, max_height}` (the
 largest of the viewer's resolution bounds that codec decodes at) or null, and
 `display_max_hz`, the fastest refresh among the displays as they are set now.
-An error counts as H.264 only, and so does a probe that has not answered within
-2 s, for the attempts made meanwhile; the app keeps its later answer. A
-platform without the channel (macOS, Linux) has no decoder to offer, and its
-picture is JPEG, which Dart decodes. The app passes the answer to `connect` as
+An error, a missing channel, or a probe that has not answered within 2 s
+counts as H.264 at 1080p on Android and as no decoder everywhere else, where
+the session then takes JPEG, which Dart decodes, for the attempts made
+meanwhile; the app keeps its later answer. (Before 0.12 every platform took
+H.264 there, which offered a desktop a decoder it might not have.) An Android
+reply without a hardware AVC decoder still counts as H.264 at 1080p. The app
+passes the answer to `connect` as
 `decoders`, and the SDK's `ViewerConfig::for_decoders` makes the offer: H.265
 (the `h265` capability) wherever this device has its decoder, then H.264, else
 JPEG, with the limits fitted inside the largest picture of the decoder offered
@@ -1535,6 +1729,24 @@ an exact fraction (59.94, not 59), so Windows and Android report the same mode
 alike. A process outside the console session, such as one in a remote
 session, cannot query the paths and reads the display modes' whole hertz
 instead; the app allows a hertz of slack, so 59 still offers 60.
+
+On macOS and iOS (not yet run on a device) VideoToolbox has no size query, so
+the bounds are by device class: H.264 up to 3840×2160 on every Mac, where
+VideoToolbox decodes in software when the hardware cannot, and on iOS
+devices with HEVC hardware (A9 and later), else 1920×1080; H.265 up to
+3840×2160 where `VTIsHardwareDecodeSupported` says so, else none. The refresh
+is `NSScreen.maximumFramesPerSecond` (the fastest screen; before macOS 12 the
+fastest display mode's rate) or `UIScreen.maximumFramesPerSecond`, 60 when
+nothing is known.
+
+On Linux the module looks in GStreamer's registry and builds nothing: H.264
+is offered when any decoder factory for it exists, a hardware one (VA-API,
+NVDEC, V4L2) at the largest viewer bound its caps allow, a software one at
+1920×1080; H.265 only with a hardware decoder, as on Windows and Android
+(software H.265 remains a fallback at run time). The refresh is the fastest
+GDK monitor's. Without the module, without GStreamer, without decoder
+plugins, or under `FLUTTER_LINUX_RENDERER=software`, which has no external
+textures, `decoders` answers none and the session takes JPEG.
 
 On Android, `DecoderProbe` reads `MediaCodecList(REGULAR_CODECS)` off the main
 thread. It takes hardware decoders only: `isHardwareAccelerated` on API 29 and
@@ -1625,12 +1837,119 @@ It costs battery only while video shows. The `stats` method of the
 the pictures released and not yet consumed) and `refreshHz` (the mode asked
 for while viewing, otherwise the display's current one).
 
+### macOS, iOS and Linux decoders
+
+Both follow the Windows runner's rules: an older generation is dropped; a new
+generation or a discontinuity waits for a keyframe, and a P-frame meanwhile
+is dropped with a `keyframe_v1` request; a decoder is built or rebuilt only at
+a keyframe, for a new codec or size; a size over 3840×2160 is refused before
+any decoder sees it; `report_v1` names each configuration and `failed_v1`
+each failure unless the source is paused; at most two textures. A stream
+whose VUI names no colour matrix is read as BT.709, which every pb-mapper
+host encodes.
+
+**macOS and iOS** (`ui/darwin/DesktopVideo.swift`, compiled into both
+runners; not yet built or run). One decoder thread per attached source pulls
+with a 50 ms timeout and decodes synchronously in real time, so nothing is
+reordered or held back. The runner turns Annex B into 4-byte length-prefixed
+samples in one reused buffer and keeps the parameter sets of the last
+keyframe; a keyframe whose sets differ makes a new format description and
+session. Pixel buffers come from VideoToolbox's pool; a unit costs the
+`CMBlockBuffer` and `CMSampleBuffer` VideoToolbox requires. The newest picture
+waits for the compositor, which takes it in `copyPixelBuffer`: the first time
+it takes a picture of the current revision is the presentation receipt, and
+a picture replaced before that counts as dropped. A session the system takes
+back (`kVTInvalidSessionErr`, `kVTVideoDecoderNotAvailableNowErr`, as when
+iOS backgrounds the app) is rebuilt at the next keyframe and does not count
+as a failure. Log lines start with `PbDesktopVideo:`. The iOS app links the
+whole FFI static library and keeps its symbols (`-force_load`,
+`-Wl,-export_dynamic` in `ui/ios/Flutter/PbMapperFfi.xcconfig`): Dart and the
+decoder find every symbol by name at run time, so before this the linker took
+none of the library and every lookup would have failed.
+
+**Linux** (`ui/linux/runner/desktop_video.cc` for the channel and the
+texture; the GStreamer module `libpb_mapper_desktop_video.so`, built from
+`desktop_video_gst.cc` when the GStreamer development files are present and
+loaded with `dlopen` at the first probe or session, so the app starts without
+it). Each source's decoder thread pulls straight into pooled `GstBuffer`s
+(one copy of the compressed data) and feeds `appsrc → h264parse/h265parse →
+decoder → videoconvert → appsink` (RGBA), pulling the next unit only while
+fewer than four are inside the pipeline, so a backlog stays in Rust's sink,
+which drops to an IDR. Decoders are chosen from the registry, hardware first
+(VA-API, NVDEC, V4L2) and then by rank; one that fails to start is skipped,
+and one that fails or stalls before its first picture is left out for the
+rest of the run, so the next keyframe falls back, to software if need be. A
+decoder with units inside and no picture for 2 s is rebuilt with a keyframe
+request, as on Android. `copy_pixels` on the raster thread takes the newest
+picture, which is the presentation receipt. Each picture is converted to RGBA
+on the CPU and uploaded by Flutter: one CPU copy per frame, and no zero-copy
+(dma-buf or EGLImage) path yet. `G_MESSAGES_DEBUG=pb-mapper-video` shows the
+module's log, `GST_DEBUG=3` GStreamer's. A viewer needs GStreamer's base and
+bad plugins and a decoder: gst-libav (or openh264 for H.264) in software,
+the VA-API driver, or NVIDIA's driver; the user guide lists the packages.
+The release bundles no GStreamer library: `scripts/build/check-linux-bundle.sh`
+fails a bundle without the module, with a GStreamer or ORC library inside, or
+whose FFI or module does not load.
+
 ## Measurements and remaining acceptance
 
 Development environment: Windows 11 Enterprise 10.0.26300, Ryzen 9 9950X,
 NVIDIA RTX 5070 Ti, 2560×1440 display at 165 Hz; Rust 1.99.1 and Flutter 3.44.9.
 The [UI acceptance procedure](../scripts/test/desktop-ui-acceptance.md) measures
 native texture consumption through the product viewer and decoder.
+
+### This revision: platforms
+
+What each platform's new code has been through:
+
+- **Windows host.** It ran on the machine above. `input_acceptance
+  --run-owned-window` drove the product backend over a local relay, into a
+  window it owns:
+  - the shapes it read were arrow, I-beam, resize and a custom monochrome
+    cursor, the last matching pixel for pixel through a viewer;
+  - `Text("a\nb\tc")` read back `a\r\nb\tc`, where the old path typed
+    `a\r\n\r\nb\t\tc`;
+  - physical keys typed `hi!` by the active layout;
+  - through the same keys, Microsoft Pinyin composed `ni`;
+  - held keys were released at the disconnect.
+- **Windows app.** The app's local input method, the candidates' placement,
+  the remote-mode IME switch and the pointer's look were not run on screen;
+  widget tests cover them.
+- **Helper.** The helper at protocol 8 is tested over an in-memory pipe
+  with a synthetic worker, not installed.
+- **Linux viewer.** It ran in WSL2 (WSLg) on this machine, through the RTX
+  5070 Ti by `/dev/dxg` with NVDEC, and with gst-libav. A clip harness
+  outside Flutter passed every check: receipts, discontinuities,
+  pause/resume, a size change mid-stream, a 1.27 MB keyframe, and H.265. The
+  real app ran against a host replaying recorded clips. The figures and
+  their limits are in
+  [the 2026-11-12 record](benchmarks/2026-11-12-remote-desktop-platforms/README.md#the-viewers).
+  VA-API, V4L2 and a real Linux desktop have not run.
+- **macOS host.** Type-checked and clippy-clean for `aarch64-apple-darwin`
+  from WSL (zig as the C compiler), without linking; its pure parts are
+  tested on Windows and Linux. Not built, linked or run on a Mac.
+- **macOS and iOS viewers.** The Swift is written and reviewed, not compiled.
+- **Older peers.** A host and a viewer of this revision each ran against
+  the other side built from the tree before it (`151ed8d7`, 0.11.0's desktop
+  protocol), with the SDK's synthetic host (`desktop_loopback --serve`) and
+  `desktop_control`. Both directions connected, took control and applied
+  moves, a click, text and Enter, with no protocol error. Shapes and
+  physical keys toward an older peer are covered by tests: the 0.11 bytes for
+  a viewer without `cursor_shape`, and the viewer's refusal toward a host
+  without `physical_keys`.
+- **iOS FFI library.** The iOS FFI static library does not compile as
+  locked: netdev 0.46.3, reached through `pb-mapper-client` and portmapper,
+  uses `libc::in6_ifreq` for every Apple target, while libc 0.2.190 defines it
+  for macOS only. So no iOS app can be built until that is resolved; it
+  predates this revision.
+
+None of macOS or iOS has been measured. The data paths were measured before
+and after on Windows in
+[the 2026-11-12 record](benchmarks/2026-11-12-remote-desktop-platforms/README.md):
+- unchanged allocations per video unit, with and without pointer input;
+- no change beyond noise in the H.264 and H.265 encoders' calls.
+
+The pointer-shape path, when negotiated, has not been measured.
 
 ### This revision: receipt credit
 
@@ -1792,18 +2111,27 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Input / Unicode / touch mapping | Build 922's PR #51 gestures and text/scroll reached a benign Windows target from the Android VM; the current gestures, physical-device and secure-desktop acceptance outstanding |
 | Direct and forced relay | Android VM runtime baselines above and deployed TCP experiments recorded; independent cross-network UI acceptance outstanding |
 | Android viewer | Native MediaCodec/Flutter texture path exercised in an Android VM; physical phone validation outstanding |
-| iOS viewer | Shared Flutter/JPEG path exists; packaged build and device validation outstanding |
+| iOS viewer | Native VideoToolbox path and the FFI link fix written; never built or run (the iOS FFI static library does not compile as locked, see [This revision: platforms](#this-revision-platforms)); device validation outstanding |
+| macOS viewer | Native VideoToolbox path written; never built or run; a Mac's validation outstanding |
+| Linux viewer | Native GStreamer path ran in WSL2 (WSLg) with NVDEC and gst-libav, against a host replaying recorded clips; VA-API, V4L2 and a real Linux desktop outstanding |
+| macOS host | Written and tested in its pure parts on Windows and Linux, type-checked and linted for macOS without linking; never built or run on a Mac |
+| Pointer shapes | Windows host's shapes read over an owned window through a viewer, the custom one pixel for pixel; the app's rendering only in widget tests; macOS host's not run |
+| Keyboard modes and physical keys | Windows host injection, line breaks and Microsoft Pinyin composition through physical keys checked in an owned window; the app's text client and candidate placement only in widget tests |
 | Elevated windows / secure-desktop UAC | Helper implemented; default-policy administrator and standard-user prompt acceptance outstanding |
 | Remembered app-owned host policy | Current-user DPAPI; requires signed-in user and running app |
 | Windows service-owned background host | Final build 922 passed upgrade restart, live direct/relay delivery with its UI exited, and persistent Stop/Enable with the same invitation; OS boot, standalone SCM restart and sleep/resume acceptance pending |
 | Same owner's locked login / password entry | Session identity and desktop transition handling implemented; actual password-entry acceptance pending |
 | Pre-login boot, SAS, control across user switching | Unsupported; service waits for its approved owner's login |
-| Rotated GPU capture, macOS/Linux hosts, Windows hosts without Media Foundation | Unsupported |
+| Rotated GPU capture, Linux hosts, macOS before 12.3, Windows hosts without Media Foundation | Unsupported |
 | Audio, clipboard, file transfer, recording, multiple viewers | Not implemented |
 
-Background operation follows each platform's own constraints. Linux/macOS need
-their respective host capture/input backends and user-session service/launch
-integration; those are not implemented by the Windows service. Android remains
+Background operation follows each platform's own constraints. Linux needs its
+own host capture/input backend and user-session service integration. macOS
+hosts from the app only: lock-screen and login-window hosting would need a
+LaunchDaemon and LaunchAgent pair serving `PlatformBackend` over `oop`, and
+unattended hosting on macOS 15, which asks the owner to confirm screen
+capture again periodically, would need Apple's persistent-content-capture
+entitlement; neither is implemented. Android remains
 a controller here. Mobile hosting is not implemented: Android screen projection
 requires session consent and a media-projection foreground service, and iOS
 does not provide unlimited general background execution for a remote-control
@@ -1849,10 +2177,18 @@ second rendezvous or networking runtime.
 Dependencies include windows-capture 2.0.1 (MIT), windows-service 0.8.1
 (MIT OR Apache-2.0), enigo 0.6.1 (MIT), xcap 0.9.8 (Apache-2.0) for monitor/JPEG
 compatibility, image (MIT/Apache-2.0), and tokio-rustls/rustls. rustls is accessed
-through `quinn::rustls`; versions are pinned in workspace dependencies. Video
-uses installed Windows Media Foundation/driver codecs and Android MediaCodec;
-no FFmpeg executable or libraries are bundled. The app and the FFI DLL
-delay-load `mfplat.dll`. Where it is missing (Windows N/KN without the Media
+through `quinn::rustls`; versions are pinned in workspace dependencies. The
+macOS host binds ScreenCaptureKit, VideoToolbox, Core Graphics, ImageIO,
+AppKit and the Keychain through the `objc2` family (MIT, under
+`[target.'cfg(target_os = "macos")'.dependencies]`), not enigo. Video
+uses installed Windows Media Foundation/driver codecs, Android MediaCodec,
+Apple's VideoToolbox, and on Linux the system's GStreamer (LGPL) and its
+plugins, which the app loads but never bundles; no FFmpeg executable or
+libraries are bundled (gst-libav, where the user installed it, is the
+system's). The macOS FFI library links ScreenCaptureKit weakly
+(`-weak_framework`, set by `ui/native/pb_mapper_ffi/build.rs`), so the app
+still starts on macOS 10.15 to 12.2, where it cannot share. The app and the
+FFI DLL delay-load `mfplat.dll`. Where it is missing (Windows N/KN without the Media
 Feature Pack, Windows Server without the feature), the app still starts, this
 computer cannot share (a host refuses to start, so a remembered grant is not
 restored either) and the Remote page says why, and viewing falls back to JPEG.
@@ -1862,6 +2198,16 @@ then the normal Flutter Windows build. Keep the entire
 `ui/build/windows/x64/runner/Release` bundle, including DLLs, helper and data.
 The helper binary is built from `pb-mapper-desktop` with `--features windows-helper`;
 it is not loaded as a privileged entry point into the Flutter process.
+
+Build macOS with `make build-ui-macos-release` and iOS with
+`make build-pb-mapper-ffi-ios`, then Xcode (`ui/ios/Runner.xcworkspace`);
+neither has been built yet with the native video path. For Linux,
+`make build-ui-linux-release` builds the GStreamer module when `pkg-config`
+finds `gstreamer-1.0`, `gstreamer-app-1.0` and `gstreamer-video-1.0`
+(Debian and Ubuntu: `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev`),
+and leaves it out otherwise, so that build views over JPEG.
+`scripts/test/linux-desktop-video.sh [--software]` decodes recorded clips
+through the module outside Flutter (it needs GStreamer and ffmpeg).
 
 For Android, rebuild the FFI for the intended ABI before Flutter: ARM64 for a
 matching phone, or x86_64 for the development VM. For example,

@@ -247,10 +247,14 @@ silent.
 The Remote desktop page (`pages/remote/`) holds both ends: a card for this
 computer as a host, and the computers it views. A wide page sets them side
 by side, a narrower one stacks them. A phone shows the list and a note that
-it can view and control but not be controlled: only Windows shares its
-desktop for now. On Windows without Media Foundation the host card is
-replaced by a note saying sharing needs the Media Feature Pack; viewing
-still works, over JPEG.
+it can view and control but not be controlled: Windows and macOS share their
+desktop. On Windows without Media Foundation the host card is replaced by a
+note saying sharing needs the Media Feature Pack; viewing still works, over
+JPEG. On a Mac the card has no helper steps: one **Share this computer**
+button, disabled until Screen Recording is granted, and a row for each
+permission macOS still lacks (Screen Recording, Accessibility) with **Allow
+in System Settings**; the rows for running in the background and for UAC and
+the lock screen are left out.
 
 - **This computer** (`host_card.dart`). Off, one action turns remote
   control on: Windows' consent for the helper service when needed, then a
@@ -417,6 +421,15 @@ controls, one taken before its newest move, which crossed that move on the
 way, is set aside: it neither moves nor hides the arrow. A hidden cursor
 hides the arrow until this viewer moves it. A last move refused because the
 picture went stale is sent with the next fresh picture.
+
+The arrow takes the host's pointer shape where the host sends one
+(`remote_cursor_layer.dart`). A desktop viewer in control turns its own
+pointer into that shape over the picture and paints nothing, so one pointer
+shows; a custom shape hides the local pointer and paints the bitmap under
+it; viewing only, or when the host's pointer is elsewhere, the bitmap is
+painted at the host's pointer. A phone paints the bitmap at the picture's
+scale, at least 32 logical pixels on its longer side. A host that sends no
+shape gets the arrow, as before.
 
 How touch, the mouse and keys become remote input is in
 [the remote desktop's documentation](remote-desktop.md#gestures-keys-and-modifiers).
