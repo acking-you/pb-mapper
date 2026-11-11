@@ -127,7 +127,9 @@ enum Target<'a> {
 impl<'a> Target<'a> {
     /// Splits `addr` as the system resolver does, so that whatever it would
     /// look up is looked up. Anything else is a malformed address, which fails
-    /// with its parse error.
+    /// with its parse error: so does a host with a colon in it, which no name
+    /// has, and which is what the split leaves of an IPv6 address written
+    /// without its brackets and port.
     fn of(addr: &'a str) -> Result<Self> {
         let parse_error = match addr.parse::<SocketAddr>() {
             Ok(socket_addr) => return Ok(Self::Literal(socket_addr)),
@@ -135,6 +137,7 @@ impl<'a> Target<'a> {
         };
         match addr
             .rsplit_once(':')
+            .filter(|(host, _)| !host.contains(':'))
             .and_then(|(host, port)| Some((host, port.parse().ok()?)))
         {
             Some((host, port)) => Ok(Self::Name(host, port)),
@@ -414,7 +417,9 @@ pub fn registration_probe_timeout() -> Duration {
 /// a per-service connection quota that is full, a namespace at its service limit.
 /// Reconnecting a few times a second adds load to the very condition that has to
 /// clear, and it produced thousands of identical reject lines a minute in
-/// production. So the ladder starts at 5s and settles at 80s.
+/// production. So the ladder starts at 5s and settles at 80s, each wait cut
+/// short by up to a quarter so that publishers refused together do not come
+/// back together.
 ///
 /// Both ends come back together because they are only valid as a pair: a zero
 /// falls back to its default, and the maximum is then raised to the minimum,
@@ -683,10 +688,16 @@ mod tests {
                 "{error:?}"
             );
         }
-        assert!(matches!(
-            resolve_addrs_async("localhost").await,
-            Err(crate::error::Error::CfgParseSockAddr { .. })
-        ));
+        // No port, and an IPv6 address without one, are malformed, not names.
+        for malformed in ["localhost", "fe80::1", "::1"] {
+            assert!(
+                matches!(
+                    resolve_addrs_async(malformed).await,
+                    Err(crate::error::Error::CfgParseSockAddr { .. })
+                ),
+                "{malformed}"
+            );
+        }
     }
 
     /// The async path is the one the tunnels use, and has to agree with the
