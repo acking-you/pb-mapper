@@ -121,11 +121,9 @@ async fn until_retired(reader: &mut impl MessageReader, retired: oneshot::Sender
     retired.send(()).unwrap();
 }
 
-async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
+async fn read_status(server_addr: SocketAddr, request: PbConnStatusReq) -> PbConnStatusResp {
     let mut stream = TcpStream::connect(server_addr).await.unwrap();
-    let request = PbConnRequest::Status(PbConnStatusReq::Keys)
-        .encode()
-        .unwrap();
+    let request = PbConnRequest::Status(request).encode().unwrap();
     {
         let mut writer = get_header_msg_writer(&mut stream).unwrap();
         writer.write_msg(&request).await.unwrap();
@@ -134,14 +132,36 @@ async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
     let mut reader = get_header_msg_reader(&mut stream).unwrap();
     let response = timeout(READY, reader.read_msg())
         .await
-        .expect("status keys response timed out")
+        .expect("status response timed out")
         .unwrap();
-    let PbConnResponse::Status(PbConnStatusResp::Keys(keys)) =
-        PbConnResponse::decode(response).unwrap()
-    else {
+    let PbConnResponse::Status(status) = PbConnResponse::decode(response).unwrap() else {
+        panic!("unexpected status response");
+    };
+    status
+}
+
+async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
+    let PbConnStatusResp::Keys(keys) = read_status(server_addr, PbConnStatusReq::Keys).await else {
         panic!("unexpected status keys response");
     };
     keys
+}
+
+/// Whether the relay routes to each registration of `key`, as its status
+/// reports them; none once `key` has none.
+async fn read_service_health(server_addr: SocketAddr, key: &str) -> Vec<bool> {
+    let request = PbConnStatusReq::Service {
+        direct_query: None,
+        key: key.to_string(),
+    };
+    let PbConnStatusResp::Service { connections, .. } = read_status(server_addr, request).await
+    else {
+        panic!("unexpected service status response");
+    };
+    connections
+        .iter()
+        .map(|connection| connection.healthy)
+        .collect()
 }
 
 async fn send_v2_request(
@@ -459,28 +479,15 @@ async fn status_service_reports_registered_v2_control_connection() {
     )
     .await;
 
-    let mut status = TcpStream::connect(relay.addr).await.unwrap();
-    let request = PbConnRequest::Status(PbConnStatusReq::Service {
+    let request = PbConnStatusReq::Service {
         direct_query: None,
         key: key.to_string(),
-    })
-    .encode()
-    .unwrap();
-    {
-        let mut writer = get_header_msg_writer(&mut status).unwrap();
-        writer.write_msg(&request).await.unwrap();
-    }
-
-    let mut reader = get_header_msg_reader(&mut status).unwrap();
-    let response = timeout(READY, reader.read_msg())
-        .await
-        .expect("service status response timed out")
-        .unwrap();
-    let PbConnResponse::Status(PbConnStatusResp::Service {
+    };
+    let PbConnStatusResp::Service {
         direct: _,
         key: status_key,
         connections,
-    }) = PbConnResponse::decode(response).unwrap()
+    } = read_status(relay.addr, request).await
     else {
         panic!("unexpected service status response");
     };
@@ -781,6 +788,71 @@ async fn a_stream_is_not_set_up_for_a_subscriber_that_gave_up() {
     );
 
     relay.stop().await;
+}
+
+/// A subscriber that leaves while the relay waits for its provider to
+/// acknowledge the stream request does not take the relay's verdict on that
+/// acknowledgement with it: one that comes after the subscriber left, inside
+/// the provider's budget, keeps the registration in rotation, and one that
+/// never comes has it suspected at the budget, so that later subscribes pass
+/// it over, as if the subscriber had stayed.
+#[tokio::test]
+async fn a_subscriber_that_leaves_does_not_spare_a_silent_provider() {
+    let relay = InProcessRelay::start(auth_config()).await;
+    let key = "silent-backend";
+
+    let control = TcpStream::connect(relay.addr).await.unwrap();
+    let (mut reader_stream, mut writer_stream) = control.into_split();
+    let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+        register_control_conn_parts(&mut reader, &mut writer, key).await;
+    }
+    let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+
+    // Each subscriber leaves as soon as the provider is asked, well inside
+    // the relay's first acknowledgement budget of 300 ms.
+    let mut subscriber = subscribe(relay.addr, key).await;
+    let (client_id, server_generation) = read_stream_request(&mut reader, "provider").await;
+    subscriber.shutdown().await.unwrap();
+    let ack = PbServerRequest::StreamAck {
+        client_id,
+        server_generation,
+    }
+    .encode()
+    .unwrap();
+    writer.write_msg(&ack).await.unwrap();
+    closed_by_relay(&mut subscriber).await;
+    assert_eq!(
+        read_service_health(relay.addr, key).await,
+        [true],
+        "a provider that acknowledged in time was suspected because its subscriber had left"
+    );
+
+    let mut subscriber = subscribe(relay.addr, key).await;
+    read_stream_request(&mut reader, "provider").await;
+    subscriber.shutdown().await.unwrap();
+    closed_by_relay(&mut subscriber).await;
+    // Suspected, or, two seconds on, retired for its silence.
+    assert!(
+        !read_service_health(relay.addr, key).await.contains(&true),
+        "a provider that never acknowledged was not suspected because its subscriber had left"
+    );
+
+    relay.stop().await;
+}
+
+/// Wait for the relay to close `subscriber`'s connection, which it does once
+/// it is done with the subscribe, verdicts included.
+async fn closed_by_relay(subscriber: &mut TcpStream) {
+    let mut byte = [0_u8; 1];
+    let read = timeout(READY, subscriber.read(&mut byte))
+        .await
+        .expect("the relay kept the connection of a subscriber that had left");
+    assert!(
+        !read.is_ok_and(|read| read > 0),
+        "the relay answered a subscriber that had left"
+    );
 }
 
 #[tokio::test]
