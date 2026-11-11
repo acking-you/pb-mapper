@@ -438,10 +438,8 @@ where
     // is pending. A simultaneous credential rejection must not tear it down.
     let _active = ActiveSession::new(ctx.active.clone());
     // This is the sole backend dial for direct. No backend is opened while probing.
-    if ctx.is_datagram {
-        crate::udp_timeout::publisher_udp_stream();
-    }
-    let dial = L::from_addr(ctx.local.as_slice());
+    let dial =
+        crate::udp_timeout::publisher_dial(ctx.is_datagram, L::from_addr(ctx.local.as_slice()));
     let local = match tokio::time::timeout_at(committed.deadline, dial).await {
         Ok(Ok(local)) => local,
         _ => {

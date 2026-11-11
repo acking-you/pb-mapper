@@ -198,15 +198,11 @@ where
     };
 
     // start forward network traffic
-    if is_datagram {
-        crate::udp_timeout::publisher_udp_stream();
-    }
-    let mut local_stream = match tokio::time::timeout_at(
-        deadline,
+    let dial = crate::udp_timeout::publisher_dial(
+        is_datagram,
         LocalStream::from_addr(local_addr.as_slice()),
-    )
-    .await
-    {
+    );
+    let mut local_stream = match tokio::time::timeout_at(deadline, dial).await {
         Ok(result) => result.context(ConnectLocalStreamSnafu)?,
         Err(_) => {
             return ControlIoTimeoutSnafu {

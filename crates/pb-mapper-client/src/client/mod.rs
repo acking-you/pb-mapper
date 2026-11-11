@@ -244,7 +244,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     remote_addr.start();
     let mut wake = remote_addr.wake();
     diagnostics.network_seen(remote_addr.network_generation());
-    crate::udp_timeout::connect_tunnel_starting();
+    crate::udp_timeout::connect_tunnel_starting().await;
 
     let credential = match pinned_credential {
         Some(credential) => credential,
@@ -588,7 +588,7 @@ mod cancellation_audit {
     async fn cancelled_udp_accept_must_preserve_the_delivered_peer() {
         // A connect tunnel's listener: its first stream is ordered after the
         // timeout is written, as a tunnel's are.
-        crate::udp_timeout::connect_tunnel_starting();
+        crate::udp_timeout::connect_tunnel_starting().await;
         let listener = uni_stream::udp::UdpListener::bind("127.0.0.1:0")
             .await
             .unwrap();
