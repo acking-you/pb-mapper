@@ -391,15 +391,15 @@ pub(super) fn actor_revoke(
         // holds a `Weak` and a later request has to be able to read the revoked
         // reason rather than find a recycled row.
         leases.revoke(key_id, now);
-        let cold = inner.cold();
-        let metadata = cold.get(&key_id).ok_or_else(|| key_not_found(key_id))?;
+        // Answered from what was read before the revoke, not from the row it
+        // schedules for recycling: the revoke has taken effect either way.
         return Ok(TemporaryKeyMetadata {
             key_id,
             state,
-            issued_at: metadata.issued_at,
+            issued_at,
             expires_at,
-            label: metadata.label.clone(),
-            namespace: metadata.namespace,
+            label,
+            namespace,
         });
     }
     drop(slots);

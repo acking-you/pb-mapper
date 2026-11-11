@@ -260,6 +260,31 @@ fn a_revoked_key_is_recycled_a_retention_window_after_the_revoke() {
     assert!(!inner.cold().contains_key(&key_id));
 }
 
+/// A revoke while the system clock reads earlier than the schedule's, as after
+/// a step back that `tick` ignores, still keeps the row for a retention window,
+/// counted from the schedule's second. Counted from the revoke's, the window
+/// had already passed: the row was freed inside the call, and the revoke that
+/// had just taken effect answered that the key did not exist.
+#[test]
+fn a_revoke_behind_the_schedules_clock_keeps_the_row_for_its_retention() {
+    let (inner, mut leases) = schedule();
+    let (key_id, cancellation) = issue(&inner, &mut leases, 0, T + 3600);
+    // The clock reached T + 600, then stepped back to T.
+    leases.tick(T + 600);
+
+    // What `actor_revoke` does for a row in the table, at the stepped-back second.
+    inner.slots_mut()[0].state = SlotState::Revoked;
+    leases.revoke(key_id, T);
+    assert!(cancellation.is_cancelled());
+    assert_eq!(state_of(&inner, key_id), SlotState::Revoked);
+    assert_eq!(inner.cold()[&key_id].tombstoned_at, T);
+
+    leases.tick(T + 600 + TOMBSTONE_RETENTION.as_secs() - 1);
+    assert_eq!(state_of(&inner, key_id), SlotState::Revoked);
+    leases.tick(T + 600 + TOMBSTONE_RETENTION.as_secs());
+    assert_eq!(state_of(&inner, key_id), SlotState::Free);
+}
+
 /// No callback can reach the schedule's map, so a key that ended on schedule
 /// is swept out of it rather than kept for as long as the relay runs. A key
 /// whose reap is still to come stays, so collecting it can still end it early.

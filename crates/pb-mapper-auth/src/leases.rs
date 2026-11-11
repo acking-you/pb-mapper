@@ -186,6 +186,11 @@ impl Leases {
     /// Ends a key its revoke at second `at` has already marked: the credential
     /// stops working now, and the row is held for a retention window from `at`,
     /// long enough to report *why*, rather than until its old deadline.
+    ///
+    /// The window is counted from the schedule's own second when that is later:
+    /// after the system clock steps back, which `tick` ignores, a deadline
+    /// counted from `at` would already have passed, and the row would be freed
+    /// inside this call, before the revoke could even report it.
     pub(super) fn revoke(&mut self, key_id: KeyId, at: u64) {
         self.retire_now(key_id);
         if let Some(inner) = self.inner.upgrade() {
@@ -202,7 +207,7 @@ impl Leases {
         };
         let reap = reap.supersede();
         stages.reap = Arc::downgrade(&reap);
-        self.schedule_at(retention_ends(at), reap);
+        self.schedule_at(retention_ends(at.max(self.now)), reap);
     }
 
     /// Ends a key outright, running both stages. Skips the retention wait, so it
