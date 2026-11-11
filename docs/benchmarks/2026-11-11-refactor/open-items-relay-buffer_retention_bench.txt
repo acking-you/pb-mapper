@@ -1,0 +1,163 @@
+### br-cap
+=== base round 0 ===
+case=Tcp-codec=false idle_rss=18.8 idle_private=59.9 after_rss=266.4 after_private=336.1 burst_mib_s=185.7
+case=Tcp-codec=true idle_rss=18.6 idle_private=58.5 after_rss=234.9 after_private=365.6 burst_mib_s=168.4
+case=Quic-codec=false idle_rss=20.6 idle_private=62.7 after_rss=139.4 after_private=329.9 burst_mib_s=60.2
+case=Quic-codec=true idle_rss=20.9 idle_private=62.9 after_rss=218.6 after_private=378.4 burst_mib_s=58.2
+=== cap1m round 0 ===
+case=Tcp-codec=false idle_rss=18.9 idle_private=60.7 after_rss=114.0 after_private=187.0 burst_mib_s=125.4
+case=Tcp-codec=true idle_rss=19.0 idle_private=61.2 after_rss=187.8 after_private=330.7 burst_mib_s=105.3
+case=Quic-codec=false idle_rss=20.7 idle_private=62.5 after_rss=131.0 after_private=315.7 burst_mib_s=60.9
+case=Quic-codec=true idle_rss=20.6 idle_private=61.7 after_rss=214.4 after_private=371.2 burst_mib_s=65.0
+=== cap1m round 1 ===
+case=Tcp-codec=false idle_rss=18.7 idle_private=59.6 after_rss=114.4 after_private=184.1 burst_mib_s=183.2
+case=Tcp-codec=true idle_rss=19.0 idle_private=60.7 after_rss=206.2 after_private=336.5 burst_mib_s=120.2
+case=Quic-codec=false idle_rss=20.8 idle_private=62.6 after_rss=147.3 after_private=309.8 burst_mib_s=56.5
+case=Quic-codec=true idle_rss=20.9 idle_private=64.8 after_rss=213.3 after_private=368.7 burst_mib_s=66.5
+=== base round 1 ===
+case=Tcp-codec=false idle_rss=19.0 idle_private=60.0 after_rss=241.5 after_private=309.8 burst_mib_s=90.3
+case=Tcp-codec=true idle_rss=18.8 idle_private=60.5 after_rss=215.2 after_private=349.9 burst_mib_s=38.4
+case=Quic-codec=false idle_rss=20.8 idle_private=64.4 after_rss=152.2 after_private=336.7 burst_mib_s=58.0
+case=Quic-codec=true idle_rss=20.6 idle_private=61.7 after_rss=226.0 after_private=378.6 burst_mib_s=62.4
+=== base round 2 ===
+case=Tcp-codec=false idle_rss=18.6 idle_private=60.3 after_rss=261.1 after_private=328.7 burst_mib_s=103.6
+case=Tcp-codec=true idle_rss=19.0 idle_private=60.8 after_rss=207.8 after_private=336.5 burst_mib_s=101.8
+case=Quic-codec=false idle_rss=20.8 idle_private=62.5 after_rss=150.9 after_private=316.3 burst_mib_s=55.0
+case=Quic-codec=true idle_rss=20.5 idle_private=61.1 after_rss=219.0 after_private=382.0 burst_mib_s=62.8
+=== cap1m round 2 ===
+case=Tcp-codec=false idle_rss=18.8 idle_private=59.8 after_rss=111.1 after_private=181.9 burst_mib_s=121.9
+case=Tcp-codec=true idle_rss=19.0 idle_private=60.0 after_rss=194.2 after_private=320.9 burst_mib_s=163.2
+case=Quic-codec=false idle_rss=21.1 idle_private=65.6 after_rss=131.6 after_private=321.4 burst_mib_s=60.7
+case=Quic-codec=true idle_rss=20.4 idle_private=61.2 after_rss=194.0 after_private=331.5 burst_mib_s=57.1
+=== cap1m round 3 ===
+case=Tcp-codec=false idle_rss=18.7 idle_private=60.5 after_rss=114.9 after_private=187.8 burst_mib_s=139.3
+case=Tcp-codec=true idle_rss=18.9 idle_private=60.5 after_rss=191.8 after_private=324.4 burst_mib_s=107.2
+case=Quic-codec=false idle_rss=20.7 idle_private=63.1 after_rss=135.1 after_private=310.0 burst_mib_s=45.9
+case=Quic-codec=true idle_rss=20.7 idle_private=62.5 after_rss=212.1 after_private=346.6 burst_mib_s=53.1
+=== base round 3 ===
+case=Tcp-codec=false idle_rss=18.8 idle_private=60.7 after_rss=234.5 after_private=307.6 burst_mib_s=156.5
+case=Tcp-codec=true idle_rss=19.2 idle_private=62.8 after_rss=223.0 after_private=360.4 burst_mib_s=111.7
+case=Quic-codec=false idle_rss=21.0 idle_private=64.2 after_rss=140.5 after_private=315.1 burst_mib_s=51.4
+case=Quic-codec=true idle_rss=20.7 idle_private=62.8 after_rss=242.2 after_private=397.6 burst_mib_s=54.4
+=== base round 4 ===
+case=Tcp-codec=false idle_rss=18.9 idle_private=60.8 after_rss=263.7 after_private=335.8 burst_mib_s=105.6
+case=Tcp-codec=true idle_rss=19.2 idle_private=63.0 after_rss=201.2 after_private=333.4 burst_mib_s=107.8
+case=Quic-codec=false idle_rss=21.1 idle_private=64.7 after_rss=145.4 after_private=324.7 burst_mib_s=39.3
+case=Quic-codec=true idle_rss=20.7 idle_private=62.8 after_rss=215.6 after_private=364.8 burst_mib_s=62.9
+=== cap1m round 4 ===
+case=Tcp-codec=false idle_rss=19.1 idle_private=61.9 after_rss=115.0 after_private=190.8 burst_mib_s=134.3
+case=Tcp-codec=true idle_rss=19.0 idle_private=60.6 after_rss=205.6 after_private=337.6 burst_mib_s=131.1
+case=Quic-codec=false idle_rss=21.1 idle_private=64.4 after_rss=141.8 after_private=322.7 burst_mib_s=59.2
+case=Quic-codec=true idle_rss=20.7 idle_private=62.7 after_rss=199.8 after_private=351.8 burst_mib_s=65.1
+=== cap1m round 5 ===
+case=Tcp-codec=false idle_rss=18.6 idle_private=59.7 after_rss=113.7 after_private=187.2 burst_mib_s=86.7
+case=Tcp-codec=true idle_rss=19.0 idle_private=60.6 after_rss=204.3 after_private=334.5 burst_mib_s=171.0
+case=Quic-codec=false idle_rss=21.0 idle_private=65.7 after_rss=132.1 after_private=319.1 burst_mib_s=51.8
+case=Quic-codec=true idle_rss=20.9 idle_private=62.6 after_rss=208.6 after_private=369.7 burst_mib_s=63.1
+=== base round 5 ===
+case=Tcp-codec=false idle_rss=19.1 idle_private=62.8 after_rss=229.7 after_private=303.5 burst_mib_s=119.1
+case=Tcp-codec=true idle_rss=18.9 idle_private=60.1 after_rss=214.2 after_private=335.3 burst_mib_s=152.6
+case=Quic-codec=false idle_rss=21.0 idle_private=64.7 after_rss=147.5 after_private=330.8 burst_mib_s=45.2
+case=Quic-codec=true idle_rss=20.5 idle_private=61.3 after_rss=235.7 after_private=386.3 burst_mib_s=58.1
+=== base round 6 ===
+case=Tcp-codec=false idle_rss=18.7 idle_private=60.7 after_rss=255.9 after_private=324.4 burst_mib_s=147.3
+case=Tcp-codec=true idle_rss=18.8 idle_private=60.1 after_rss=209.1 after_private=336.5 burst_mib_s=95.0
+case=Quic-codec=false idle_rss=21.1 idle_private=65.4 after_rss=178.1 after_private=347.3 burst_mib_s=46.7
+case=Quic-codec=true idle_rss=20.7 idle_private=62.5 after_rss=226.3 after_private=386.0 burst_mib_s=65.3
+=== cap1m round 6 ===
+case=Tcp-codec=false idle_rss=18.8 idle_private=60.6 after_rss=115.9 after_private=187.9 burst_mib_s=124.8
+case=Tcp-codec=true idle_rss=19.2 idle_private=61.7 after_rss=200.8 after_private=333.7 burst_mib_s=132.1
+case=Quic-codec=false idle_rss=20.7 idle_private=62.6 after_rss=129.6 after_private=315.0 burst_mib_s=49.4
+case=Quic-codec=true idle_rss=20.8 idle_private=62.5 after_rss=209.7 after_private=334.1 burst_mib_s=49.4
+=== cap1m round 7 ===
+case=Tcp-codec=false idle_rss=18.8 idle_private=60.9 after_rss=110.9 after_private=182.9 burst_mib_s=104.9
+case=Tcp-codec=true idle_rss=18.9 idle_private=59.9 after_rss=182.1 after_private=313.5 burst_mib_s=167.9
+case=Quic-codec=false idle_rss=20.9 idle_private=64.0 after_rss=124.6 after_private=297.6 burst_mib_s=38.8
+case=Quic-codec=true idle_rss=20.7 idle_private=61.7 after_rss=212.8 after_private=353.9 burst_mib_s=66.9
+=== base round 7 ===
+case=Tcp-codec=false idle_rss=18.9 idle_private=60.1 after_rss=246.5 after_private=316.7 burst_mib_s=85.5
+case=Tcp-codec=true idle_rss=19.1 idle_private=60.6 after_rss=224.9 after_private=369.0 burst_mib_s=101.0
+case=Quic-codec=false idle_rss=20.7 idle_private=61.8 after_rss=142.9 after_private=330.9 burst_mib_s=64.8
+case=Quic-codec=true idle_rss=21.1 idle_private=65.2 after_rss=239.1 after_private=380.7 burst_mib_s=55.2
+
+### br-shrink
+=== base round 0 ===
+case=Tcp-codec=false idle_rss=18.5 idle_private=59.0 after_rss=263.8 after_private=337.0 burst_mib_s=126.8
+case=Tcp-codec=true idle_rss=19.1 idle_private=62.7 after_rss=198.6 after_private=342.9 burst_mib_s=121.9
+case=Quic-codec=false idle_rss=20.6 idle_private=62.7 after_rss=140.4 after_private=323.0 burst_mib_s=55.2
+case=Quic-codec=true idle_rss=20.6 idle_private=62.4 after_rss=228.2 after_private=398.0 burst_mib_s=55.0
+=== shrink round 0 ===
+case=Tcp-codec=false idle_rss=18.8 idle_private=60.6 after_rss=287.4 after_private=355.6 burst_mib_s=125.1
+case=Tcp-codec=true idle_rss=19.0 idle_private=60.7 after_rss=216.4 after_private=347.2 burst_mib_s=91.1
+case=Quic-codec=false idle_rss=21.2 idle_private=64.8 after_rss=136.9 after_private=324.6 burst_mib_s=59.6
+case=Quic-codec=true idle_rss=20.8 idle_private=61.7 after_rss=213.2 after_private=369.5 burst_mib_s=43.9
+=== shrink round 1 ===
+case=Tcp-codec=false idle_rss=18.6 idle_private=59.7 after_rss=274.8 after_private=347.9 burst_mib_s=110.8
+case=Tcp-codec=true idle_rss=19.4 idle_private=62.2 after_rss=250.6 after_private=390.0 burst_mib_s=87.0
+case=Quic-codec=false idle_rss=20.5 idle_private=61.7 after_rss=141.7 after_private=327.8 burst_mib_s=59.2
+case=Quic-codec=true idle_rss=21.0 idle_private=63.9 after_rss=221.5 after_private=368.0 burst_mib_s=64.9
+=== base round 1 ===
+case=Tcp-codec=false idle_rss=18.8 idle_private=60.6 after_rss=262.1 after_private=335.1 burst_mib_s=118.6
+case=Tcp-codec=true idle_rss=19.0 idle_private=60.4 after_rss=217.4 after_private=348.8 burst_mib_s=89.5
+case=Quic-codec=false idle_rss=20.5 idle_private=61.4 after_rss=148.3 after_private=328.4 burst_mib_s=62.0
+case=Quic-codec=true idle_rss=20.5 idle_private=61.8 after_rss=223.7 after_private=363.9 burst_mib_s=55.7
+=== base round 2 ===
+case=Tcp-codec=false idle_rss=18.9 idle_private=60.6 after_rss=228.0 after_private=299.5 burst_mib_s=96.5
+case=Tcp-codec=true idle_rss=19.1 idle_private=61.9 after_rss=209.6 after_private=341.9 burst_mib_s=91.2
+case=Quic-codec=false idle_rss=20.6 idle_private=61.9 after_rss=138.9 after_private=326.2 burst_mib_s=60.7
+case=Quic-codec=true idle_rss=20.8 idle_private=62.5 after_rss=218.2 after_private=377.1 burst_mib_s=66.4
+=== shrink round 2 ===
+case=Tcp-codec=false idle_rss=18.9 idle_private=62.4 after_rss=286.9 after_private=363.7 burst_mib_s=99.6
+case=Tcp-codec=true idle_rss=18.8 idle_private=59.9 after_rss=237.1 after_private=364.9 burst_mib_s=168.7
+case=Quic-codec=false idle_rss=20.7 idle_private=62.7 after_rss=185.0 after_private=350.0 burst_mib_s=50.5
+case=Quic-codec=true idle_rss=20.7 idle_private=61.6 after_rss=205.6 after_private=356.0 burst_mib_s=65.4
+=== shrink round 3 ===
+case=Tcp-codec=false idle_rss=18.7 idle_private=60.5 after_rss=304.7 after_private=382.0 burst_mib_s=125.4
+case=Tcp-codec=true idle_rss=18.9 idle_private=60.5 after_rss=256.1 after_private=405.6 burst_mib_s=102.2
+case=Quic-codec=false idle_rss=20.6 idle_private=61.9 after_rss=163.4 after_private=328.5 burst_mib_s=48.5
+case=Quic-codec=true idle_rss=20.8 idle_private=62.4 after_rss=257.7 after_private=449.7 burst_mib_s=63.5
+=== base round 3 ===
+case=Tcp-codec=false idle_rss=19.0 idle_private=61.1 after_rss=258.8 after_private=327.7 burst_mib_s=147.7
+case=Tcp-codec=true idle_rss=19.1 idle_private=62.6 after_rss=214.2 after_private=355.1 burst_mib_s=122.6
+case=Quic-codec=false idle_rss=20.7 idle_private=62.5 after_rss=161.1 after_private=333.5 burst_mib_s=48.9
+case=Quic-codec=true idle_rss=20.7 idle_private=61.9 after_rss=215.3 after_private=369.0 burst_mib_s=68.2
+=== base round 4 ===
+case=Tcp-codec=false idle_rss=18.9 idle_private=60.8 after_rss=244.4 after_private=314.1 burst_mib_s=141.1
+case=Tcp-codec=true idle_rss=18.9 idle_private=60.0 after_rss=240.1 after_private=372.5 burst_mib_s=122.4
+case=Quic-codec=false idle_rss=20.7 idle_private=63.0 after_rss=155.8 after_private=333.9 burst_mib_s=58.3
+case=Quic-codec=true idle_rss=20.5 idle_private=61.7 after_rss=217.4 after_private=367.2 burst_mib_s=60.9
+=== shrink round 4 ===
+case=Tcp-codec=false idle_rss=18.8 idle_private=60.6 after_rss=311.1 after_private=385.2 burst_mib_s=108.6
+case=Tcp-codec=true idle_rss=18.7 idle_private=59.2 after_rss=222.4 after_private=354.7 burst_mib_s=161.4
+case=Quic-codec=false idle_rss=20.4 idle_private=61.1 after_rss=145.4 after_private=328.2 burst_mib_s=63.1
+case=Quic-codec=true idle_rss=20.9 idle_private=64.5 after_rss=260.3 after_private=403.8 burst_mib_s=57.5
+=== shrink round 5 ===
+case=Tcp-codec=false idle_rss=19.2 idle_private=61.6 after_rss=275.1 after_private=349.9 burst_mib_s=114.0
+case=Tcp-codec=true idle_rss=19.2 idle_private=61.4 after_rss=240.1 after_private=377.8 burst_mib_s=110.4
+case=Quic-codec=false idle_rss=20.4 idle_private=61.1 after_rss=156.5 after_private=334.6 burst_mib_s=56.8
+case=Quic-codec=true idle_rss=20.8 idle_private=62.4 after_rss=226.0 after_private=376.8 burst_mib_s=66.2
+=== base round 5 ===
+case=Tcp-codec=false idle_rss=18.9 idle_private=59.8 after_rss=257.8 after_private=329.7 burst_mib_s=108.0
+case=Tcp-codec=true idle_rss=19.3 idle_private=62.7 after_rss=196.5 after_private=343.1 burst_mib_s=100.0
+case=Quic-codec=false idle_rss=20.5 idle_private=61.9 after_rss=148.0 after_private=330.1 burst_mib_s=53.8
+case=Quic-codec=true idle_rss=20.6 idle_private=61.6 after_rss=263.7 after_private=410.5 burst_mib_s=53.8
+=== base round 6 ===
+case=Tcp-codec=false idle_rss=18.9 idle_private=60.6 after_rss=266.8 after_private=334.2 burst_mib_s=136.7
+case=Tcp-codec=true idle_rss=19.0 idle_private=60.5 after_rss=221.0 after_private=351.7 burst_mib_s=75.9
+case=Quic-codec=false idle_rss=20.6 idle_private=62.4 after_rss=166.6 after_private=356.4 burst_mib_s=60.7
+case=Quic-codec=true idle_rss=20.5 idle_private=62.5 after_rss=222.9 after_private=378.8 burst_mib_s=66.9
+=== shrink round 6 ===
+case=Tcp-codec=false idle_rss=18.9 idle_private=61.4 after_rss=283.8 after_private=354.9 burst_mib_s=107.8
+case=Tcp-codec=true idle_rss=19.1 idle_private=61.6 after_rss=225.5 after_private=342.5 burst_mib_s=157.5
+case=Quic-codec=false idle_rss=20.7 idle_private=62.7 after_rss=181.4 after_private=332.7 burst_mib_s=55.8
+case=Quic-codec=true idle_rss=20.6 idle_private=61.8 after_rss=216.8 after_private=372.9 burst_mib_s=65.9
+=== shrink round 7 ===
+case=Tcp-codec=false idle_rss=18.6 idle_private=59.1 after_rss=314.3 after_private=388.0 burst_mib_s=109.6
+case=Tcp-codec=true idle_rss=19.3 idle_private=62.7 after_rss=214.0 after_private=343.1 burst_mib_s=125.9
+case=Quic-codec=false idle_rss=20.7 idle_private=62.8 after_rss=153.3 after_private=333.4 burst_mib_s=60.5
+case=Quic-codec=true idle_rss=21.1 idle_private=65.4 after_rss=224.1 after_private=371.3 burst_mib_s=30.3
+=== base round 7 ===
+case=Tcp-codec=false idle_rss=18.8 idle_private=60.4 after_rss=224.1 after_private=295.0 burst_mib_s=82.5
+case=Tcp-codec=true idle_rss=19.1 idle_private=60.1 after_rss=221.4 after_private=348.7 burst_mib_s=153.7
+case=Quic-codec=false idle_rss=20.8 idle_private=63.6 after_rss=148.0 after_private=330.7 burst_mib_s=60.5
+case=Quic-codec=true idle_rss=20.8 idle_private=62.5 after_rss=233.4 after_private=393.6 burst_mib_s=65.0

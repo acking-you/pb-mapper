@@ -1,0 +1,377 @@
+### hs-c-windows-C
+=== before round 0 ===
+case=c1 per_s=1114 p50_us=874.5 p99_us=1364.8 max_us=4423.4 failed=0
+case=c8 per_s=1098 p50_us=7239.3 p99_us=9071.2 max_us=11603.6 failed=0
+case=c64 per_s=1080 p50_us=59324.6 p99_us=64381.0 max_us=121043.4 failed=0
+case=c256 per_s=1077 p50_us=236264.7 p99_us=253775.4 max_us=255424.0 failed=0
+=== after round 0 ===
+case=c1 per_s=1101 p50_us=886.1 p99_us=1371.1 max_us=4302.4 failed=0
+case=c8 per_s=4710 p50_us=1669.6 p99_us=2217.5 max_us=4535.0 failed=0
+case=c64 per_s=39204 p50_us=1598.4 p99_us=2259.1 max_us=2294.3 failed=0
+case=c256 per_s=139664 p50_us=1736.2 p99_us=2133.4 max_us=2354.7 failed=0
+=== after round 1 ===
+case=c1 per_s=1123 p50_us=871.4 p99_us=1329.2 max_us=3059.9 failed=0
+case=c8 per_s=4717 p50_us=1653.4 p99_us=2213.6 max_us=7455.6 failed=0
+case=c64 per_s=37328 p50_us=1693.2 p99_us=2086.9 max_us=2189.6 failed=0
+case=c256 per_s=123203 p50_us=1966.1 p99_us=2386.3 max_us=2464.9 failed=0
+=== before round 1 ===
+case=c1 per_s=1126 p50_us=867.2 p99_us=1341.4 max_us=4373.6 failed=0
+case=c8 per_s=1115 p50_us=7156.3 p99_us=8301.5 max_us=10810.3 failed=0
+case=c64 per_s=1065 p50_us=59837.4 p99_us=67820.6 max_us=68766.8 failed=0
+case=c256 per_s=1085 p50_us=236710.3 p99_us=249497.4 max_us=370094.8 failed=0
+=== before round 2 ===
+case=c1 per_s=976 p50_us=878.4 p99_us=6014.7 max_us=8111.5 failed=0
+case=c8 per_s=1041 p50_us=7386.3 p99_us=12334.4 max_us=18356.5 failed=0
+case=c64 per_s=1090 p50_us=58969.8 p99_us=65072.9 max_us=66010.8 failed=0
+case=c256 per_s=1081 p50_us=236237.0 p99_us=252168.9 max_us=253587.7 failed=0
+=== after round 2 ===
+case=c1 per_s=1128 p50_us=866.9 p99_us=1352.3 max_us=3764.0 failed=0
+case=c8 per_s=4717 p50_us=1669.2 p99_us=2317.4 max_us=6233.4 failed=0
+case=c64 per_s=38571 p50_us=1630.8 p99_us=2143.0 max_us=2166.6 failed=0
+case=c256 per_s=144246 p50_us=1685.0 p99_us=2164.8 max_us=2452.1 failed=0
+=== after round 3 ===
+case=c1 per_s=1129 p50_us=863.3 p99_us=1349.3 max_us=4723.3 failed=0
+case=c8 per_s=4827 p50_us=1638.6 p99_us=2195.1 max_us=4793.2 failed=0
+case=c64 per_s=35300 p50_us=1764.1 p99_us=2493.5 max_us=2545.8 failed=0
+case=c256 per_s=122933 p50_us=1966.9 p99_us=2468.5 max_us=2720.7 failed=0
+=== before round 3 ===
+case=c1 per_s=1113 p50_us=878.7 p99_us=1349.4 max_us=4582.2 failed=0
+case=c8 per_s=1056 p50_us=7543.1 p99_us=9308.0 max_us=11064.6 failed=0
+case=c64 per_s=1064 p50_us=60150.5 p99_us=66177.4 max_us=67110.1 failed=0
+case=c256 per_s=1062 p50_us=240872.3 p99_us=269095.8 max_us=271014.9 failed=0
+=== before round 4 ===
+case=c1 per_s=1105 p50_us=882.7 p99_us=1396.0 max_us=4100.5 failed=0
+case=c8 per_s=1077 p50_us=7383.5 p99_us=8993.2 max_us=11591.7 failed=0
+case=c64 per_s=1070 p50_us=59943.1 p99_us=68796.3 max_us=71067.7 failed=0
+case=c256 per_s=1059 p50_us=240958.8 p99_us=261079.4 max_us=262962.9 failed=0
+=== after round 4 ===
+case=c1 per_s=1096 p50_us=890.3 p99_us=1360.0 max_us=3863.5 failed=0
+case=c8 per_s=4743 p50_us=1655.2 p99_us=2246.1 max_us=5155.0 failed=0
+case=c64 per_s=36408 p50_us=1712.7 p99_us=2262.2 max_us=2276.5 failed=0
+case=c256 per_s=124370 p50_us=1919.8 p99_us=2541.7 max_us=2675.4 failed=0
+=== after round 5 ===
+case=c1 per_s=1075 p50_us=907.3 p99_us=1387.1 max_us=5383.5 failed=0
+case=c8 per_s=4661 p50_us=1683.4 p99_us=2264.9 max_us=8387.9 failed=0
+case=c64 per_s=33442 p50_us=1869.3 p99_us=2339.6 max_us=2426.9 failed=0
+case=c256 per_s=123988 p50_us=1983.1 p99_us=2450.8 max_us=2640.4 failed=0
+=== before round 5 ===
+case=c1 per_s=1089 p50_us=895.2 p99_us=1378.6 max_us=4973.7 failed=0
+case=c8 per_s=1079 p50_us=7350.3 p99_us=10541.0 max_us=14020.3 failed=0
+case=c64 per_s=1069 p50_us=59892.6 p99_us=64541.4 max_us=65511.5 failed=0
+case=c256 per_s=1057 p50_us=240785.7 p99_us=249843.1 max_us=445883.4 failed=0
+=== before round 6 ===
+case=c1 per_s=1099 p50_us=887.6 p99_us=1397.8 max_us=3718.5 failed=0
+case=c8 per_s=1065 p50_us=7442.2 p99_us=10473.3 max_us=13327.9 failed=0
+case=c64 per_s=1057 p50_us=60133.2 p99_us=68027.2 max_us=68909.5 failed=0
+case=c256 per_s=1046 p50_us=245350.8 p99_us=250054.9 max_us=250661.7 failed=0
+=== after round 6 ===
+case=c1 per_s=1072 p50_us=912.4 p99_us=1377.1 max_us=4191.2 failed=0
+case=c8 per_s=4815 p50_us=1642.2 p99_us=2143.9 max_us=4061.8 failed=0
+case=c64 per_s=36590 p50_us=1698.2 p99_us=2527.9 max_us=2542.9 failed=0
+case=c256 per_s=140056 p50_us=1732.0 p99_us=2131.7 max_us=2461.6 failed=0
+=== after round 7 ===
+case=c1 per_s=1082 p50_us=902.6 p99_us=1379.4 max_us=3664.9 failed=0
+case=c8 per_s=4710 p50_us=1662.1 p99_us=2306.4 max_us=5145.9 failed=0
+case=c64 per_s=36162 p50_us=1733.8 p99_us=2121.7 max_us=2187.4 failed=0
+case=c256 per_s=127178 p50_us=1905.3 p99_us=2493.1 max_us=2910.3 failed=0
+=== before round 7 ===
+case=c1 per_s=1126 p50_us=863.8 p99_us=1363.9 max_us=3811.3 failed=0
+case=c8 per_s=1097 p50_us=7215.3 p99_us=9000.2 max_us=11074.5 failed=0
+case=c64 per_s=1100 p50_us=58118.4 p99_us=61874.2 max_us=63910.8 failed=0
+case=c256 per_s=1105 p50_us=230734.4 p99_us=241377.2 max_us=474090.9 failed=0
+=== before round 8 ===
+case=c1 per_s=1133 p50_us=864.3 p99_us=1344.9 max_us=3509.7 failed=0
+case=c8 per_s=1085 p50_us=7323.1 p99_us=8635.2 max_us=10971.0 failed=0
+case=c64 per_s=1094 p50_us=58218.0 p99_us=63477.3 max_us=112788.9 failed=0
+case=c256 per_s=1075 p50_us=236257.0 p99_us=254386.0 max_us=255390.3 failed=0
+=== after round 8 ===
+case=c1 per_s=1146 p50_us=855.3 p99_us=1327.4 max_us=3793.9 failed=0
+case=c8 per_s=4792 p50_us=1643.0 p99_us=2226.3 max_us=4945.3 failed=0
+case=c64 per_s=38925 p50_us=1593.8 p99_us=2056.1 max_us=2112.7 failed=0
+case=c256 per_s=140848 p50_us=1730.2 p99_us=2077.5 max_us=2372.0 failed=0
+=== after round 9 ===
+case=c1 per_s=1106 p50_us=880.3 p99_us=1391.7 max_us=3118.7 failed=0
+case=c8 per_s=4980 p50_us=1588.4 p99_us=2085.1 max_us=4394.7 failed=0
+case=c64 per_s=37536 p50_us=1655.3 p99_us=3023.9 max_us=3062.4 failed=0
+case=c256 per_s=133221 p50_us=1809.2 p99_us=2465.1 max_us=2951.5 failed=0
+=== before round 9 ===
+case=c1 per_s=1133 p50_us=862.8 p99_us=1334.9 max_us=4084.8 failed=0
+case=c8 per_s=1088 p50_us=7295.9 p99_us=10183.1 max_us=13345.6 failed=0
+case=c64 per_s=1094 p50_us=58234.1 p99_us=63905.9 max_us=116087.4 failed=0
+case=c256 per_s=1055 p50_us=242935.4 p99_us=248023.2 max_us=248462.5 failed=0
+=== before round 10 ===
+case=c1 per_s=1081 p50_us=909.5 p99_us=1339.2 max_us=4437.0 failed=0
+case=c8 per_s=1062 p50_us=7471.8 p99_us=8789.4 max_us=11854.5 failed=0
+case=c64 per_s=1049 p50_us=60618.4 p99_us=66408.7 max_us=67396.4 failed=0
+case=c256 per_s=1064 p50_us=238928.7 p99_us=257230.4 max_us=259149.6 failed=0
+=== after round 10 ===
+case=c1 per_s=1093 p50_us=894.4 p99_us=1355.4 max_us=3838.6 failed=0
+case=c8 per_s=4645 p50_us=1697.2 p99_us=2156.9 max_us=2513.3 failed=0
+case=c64 per_s=36062 p50_us=1739.1 p99_us=2393.3 max_us=2421.0 failed=0
+case=c256 per_s=125148 p50_us=1931.2 p99_us=2487.4 max_us=2817.3 failed=0
+=== after round 11 ===
+case=c1 per_s=1110 p50_us=882.2 p99_us=1349.5 max_us=4427.7 failed=0
+case=c8 per_s=4988 p50_us=1584.8 p99_us=2041.6 max_us=5781.3 failed=0
+case=c64 per_s=37721 p50_us=1643.6 p99_us=2172.5 max_us=2409.4 failed=0
+case=c256 per_s=136734 p50_us=1731.1 p99_us=2228.7 max_us=2600.2 failed=0
+=== before round 11 ===
+case=c1 per_s=1127 p50_us=869.6 p99_us=1335.5 max_us=4241.1 failed=0
+case=c8 per_s=1098 p50_us=7235.7 p99_us=8395.4 max_us=11915.3 failed=0
+case=c64 per_s=1082 p50_us=59032.4 p99_us=64379.6 max_us=114860.9 failed=0
+case=c256 per_s=1087 p50_us=232980.6 p99_us=245902.6 max_us=247049.2 failed=0
+=== before round 12 ===
+case=c1 per_s=1118 p50_us=869.9 p99_us=1362.0 max_us=4181.1 failed=0
+case=c8 per_s=1110 p50_us=7150.6 p99_us=8633.5 max_us=11019.0 failed=0
+case=c64 per_s=1080 p50_us=58895.1 p99_us=64095.6 max_us=64847.4 failed=0
+case=c256 per_s=1108 p50_us=230275.9 p99_us=238899.2 max_us=239467.4 failed=0
+=== after round 12 ===
+case=c1 per_s=1137 p50_us=862.0 p99_us=1344.7 max_us=3889.5 failed=0
+case=c8 per_s=4928 p50_us=1599.1 p99_us=2123.7 max_us=5518.5 failed=0
+case=c64 per_s=38513 p50_us=1631.6 p99_us=2003.5 max_us=2045.1 failed=0
+case=c256 per_s=136499 p50_us=1790.5 p99_us=2120.6 max_us=2335.6 failed=0
+=== after round 13 ===
+case=c1 per_s=1147 p50_us=851.4 p99_us=1346.2 max_us=3778.6 failed=0
+case=c8 per_s=4827 p50_us=1621.5 p99_us=2484.6 max_us=4131.2 failed=0
+case=c64 per_s=38231 p50_us=1644.2 p99_us=2041.0 max_us=2091.8 failed=0
+case=c256 per_s=136278 p50_us=1746.6 p99_us=2191.6 max_us=2400.7 failed=0
+=== before round 13 ===
+case=c1 per_s=1134 p50_us=863.5 p99_us=1327.0 max_us=3761.7 failed=0
+case=c8 per_s=1110 p50_us=7156.7 p99_us=8433.7 max_us=13205.9 failed=0
+case=c64 per_s=1106 p50_us=57564.6 p99_us=62255.2 max_us=63690.7 failed=0
+case=c256 per_s=1093 p50_us=233850.2 p99_us=243291.7 max_us=463336.5 failed=0
+=== before round 14 ===
+case=c1 per_s=983 p50_us=872.1 p99_us=5998.2 max_us=9490.2 failed=0
+case=c8 per_s=1047 p50_us=7282.5 p99_us=12701.5 max_us=15517.5 failed=0
+case=c64 per_s=1094 p50_us=58222.6 p99_us=64702.5 max_us=65222.0 failed=0
+case=c256 per_s=1088 p50_us=233684.5 p99_us=243198.7 max_us=466957.2 failed=0
+=== after round 14 ===
+case=c1 per_s=1126 p50_us=864.5 p99_us=1369.9 max_us=5599.7 failed=0
+case=c8 per_s=4974 p50_us=1587.9 p99_us=2027.7 max_us=5585.8 failed=0
+case=c64 per_s=37735 p50_us=1632.5 p99_us=5407.5 max_us=5422.1 failed=0
+case=c256 per_s=136023 p50_us=1787.0 p99_us=2383.6 max_us=2819.6 failed=0
+
+### hs-d-windows-D
+=== before round 0 ===
+case=c1 per_s=344 p50_us=2944.4 p99_us=3164.7 max_us=5018.1 failed=0
+case=c8 per_s=344 p50_us=23080.3 p99_us=25026.1 max_us=27122.1 failed=0
+case=c64 per_s=345 p50_us=186021.4 p99_us=191089.6 max_us=193007.2 failed=0
+case=c256 per_s=344 p50_us=744119.5 p99_us=753107.3 max_us=755997.5 failed=0
+=== after round 0 ===
+case=c1 per_s=348 p50_us=2945.5 p99_us=3188.2 max_us=5995.8 failed=0
+case=c8 per_s=1458 p50_us=5892.1 p99_us=6378.8 max_us=7970.8 failed=0
+case=c64 per_s=11108 p50_us=5979.9 p99_us=6120.7 max_us=6248.7 failed=0
+case=c256 per_s=41998 p50_us=5955.7 p99_us=6307.8 max_us=6492.1 failed=0
+=== after round 1 ===
+case=c1 per_s=341 p50_us=2945.1 p99_us=3181.7 max_us=7036.6 failed=0
+case=c8 per_s=1400 p50_us=5990.5 p99_us=6164.0 max_us=8048.4 failed=0
+case=c64 per_s=10986 p50_us=5989.2 p99_us=6145.2 max_us=6978.3 failed=0
+case=c256 per_s=42911 p50_us=5944.5 p99_us=6195.6 max_us=6359.6 failed=0
+=== before round 1 ===
+case=c1 per_s=349 p50_us=2943.7 p99_us=3173.7 max_us=5079.5 failed=0
+case=c8 per_s=344 p50_us=23101.3 p99_us=25996.5 max_us=28026.2 failed=0
+case=c64 per_s=343 p50_us=187090.2 p99_us=192106.1 max_us=196061.8 failed=0
+case=c256 per_s=333 p50_us=748997.3 p99_us=1097120.0 max_us=1099221.3 failed=0
+=== before round 2 ===
+case=c1 per_s=344 p50_us=2941.5 p99_us=3190.2 max_us=6016.8 failed=0
+case=c8 per_s=345 p50_us=23088.4 p99_us=26005.0 max_us=28163.6 failed=0
+case=c64 per_s=342 p50_us=187132.1 p99_us=193054.8 max_us=195150.7 failed=0
+case=c256 per_s=342 p50_us=749925.1 p99_us=765036.9 max_us=767077.3 failed=0
+=== after round 2 ===
+case=c1 per_s=345 p50_us=2942.1 p99_us=3180.9 max_us=7051.7 failed=0
+case=c8 per_s=1411 p50_us=5992.0 p99_us=6937.8 max_us=9050.1 failed=0
+case=c64 per_s=10990 p50_us=5996.4 p99_us=6173.5 max_us=6199.0 failed=0
+case=c256 per_s=43861 p50_us=5908.0 p99_us=6242.4 max_us=6564.0 failed=0
+=== after round 3 ===
+case=c1 per_s=344 p50_us=2944.5 p99_us=3163.6 max_us=6989.2 failed=0
+case=c8 per_s=1435 p50_us=5977.1 p99_us=6149.4 max_us=10014.4 failed=0
+case=c64 per_s=11143 p50_us=5985.8 p99_us=7906.4 max_us=8118.7 failed=0
+case=c256 per_s=43912 p50_us=5900.6 p99_us=6178.6 max_us=6371.9 failed=0
+=== before round 3 ===
+case=c1 per_s=345 p50_us=2944.2 p99_us=3207.8 max_us=6906.5 failed=0
+case=c8 per_s=353 p50_us=23083.2 p99_us=25993.2 max_us=29092.8 failed=0
+case=c64 per_s=341 p50_us=187996.5 p99_us=195026.8 max_us=196132.4 failed=0
+case=c256 per_s=342 p50_us=748880.6 p99_us=764024.2 max_us=765128.5 failed=0
+=== before round 4 ===
+case=c1 per_s=342 p50_us=2945.9 p99_us=3177.7 max_us=7011.4 failed=0
+case=c8 per_s=340 p50_us=23915.3 p99_us=26074.9 max_us=28170.6 failed=0
+case=c64 per_s=341 p50_us=187972.1 p99_us=195090.5 max_us=197123.4 failed=0
+case=c256 per_s=342 p50_us=748018.1 p99_us=766878.2 max_us=767896.1 failed=0
+=== after round 4 ===
+case=c1 per_s=344 p50_us=2946.2 p99_us=3210.9 max_us=6098.4 failed=0
+case=c8 per_s=1393 p50_us=5999.1 p99_us=6187.3 max_us=7958.4 failed=0
+case=c64 per_s=11077 p50_us=5988.2 p99_us=6086.7 max_us=6200.7 failed=0
+case=c256 per_s=42958 p50_us=5968.7 p99_us=6234.0 max_us=6429.9 failed=0
+=== after round 5 ===
+case=c1 per_s=343 p50_us=2946.3 p99_us=3158.6 max_us=6087.4 failed=0
+case=c8 per_s=1394 p50_us=5996.7 p99_us=6117.7 max_us=7681.0 failed=0
+case=c64 per_s=10812 p50_us=5999.6 p99_us=6105.8 max_us=6204.2 failed=0
+case=c256 per_s=42514 p50_us=5964.5 p99_us=6236.1 max_us=6338.7 failed=0
+=== before round 5 ===
+case=c1 per_s=374 p50_us=2930.0 p99_us=3156.4 max_us=5084.7 failed=0
+case=c8 per_s=389 p50_us=20631.6 p99_us=24144.2 max_us=27131.6 failed=0
+case=c64 per_s=343 p50_us=187018.5 p99_us=191936.6 max_us=193060.0 failed=0
+case=c256 per_s=342 p50_us=750089.2 p99_us=757138.5 max_us=759028.6 failed=0
+=== before round 6 ===
+case=c1 per_s=345 p50_us=2947.8 p99_us=3175.7 max_us=4995.0 failed=0
+case=c8 per_s=342 p50_us=23854.3 p99_us=25118.5 max_us=27000.5 failed=0
+case=c64 per_s=344 p50_us=185989.9 p99_us=190913.8 max_us=192073.0 failed=0
+case=c256 per_s=344 p50_us=743979.0 p99_us=759926.3 max_us=760169.1 failed=0
+=== after round 6 ===
+case=c1 per_s=346 p50_us=2946.9 p99_us=3170.4 max_us=5917.8 failed=0
+case=c8 per_s=1410 p50_us=5947.9 p99_us=6164.6 max_us=9094.1 failed=0
+case=c64 per_s=11060 p50_us=5992.5 p99_us=6106.2 max_us=6131.8 failed=0
+case=c256 per_s=42856 p50_us=5917.6 p99_us=6275.8 max_us=6797.4 failed=0
+=== after round 7 ===
+case=c1 per_s=343 p50_us=2946.6 p99_us=3176.4 max_us=5115.6 failed=0
+case=c8 per_s=1400 p50_us=5993.8 p99_us=6112.6 max_us=7050.7 failed=0
+case=c64 per_s=10983 p50_us=5996.7 p99_us=6142.8 max_us=6283.5 failed=0
+case=c256 per_s=42878 p50_us=5977.8 p99_us=6358.3 max_us=6833.8 failed=0
+=== before round 7 ===
+case=c1 per_s=344 p50_us=2946.5 p99_us=3165.8 max_us=5126.6 failed=0
+case=c8 per_s=341 p50_us=23877.7 p99_us=25089.6 max_us=27102.1 failed=0
+case=c64 per_s=342 p50_us=187918.0 p99_us=209990.4 max_us=212329.2 failed=0
+case=c256 per_s=340 p50_us=751965.7 p99_us=764035.9 max_us=765147.3 failed=0
+=== before round 8 ===
+case=c1 per_s=339 p50_us=2952.9 p99_us=3173.4 max_us=5974.8 failed=0
+case=c8 per_s=341 p50_us=23852.8 p99_us=25907.2 max_us=28091.7 failed=0
+case=c64 per_s=342 p50_us=187055.6 p99_us=192943.6 max_us=196111.0 failed=0
+case=c256 per_s=341 p50_us=750931.5 p99_us=774088.7 max_us=775128.5 failed=0
+=== after round 8 ===
+case=c1 per_s=343 p50_us=2951.0 p99_us=3175.8 max_us=6069.4 failed=0
+case=c8 per_s=1405 p50_us=5962.1 p99_us=6166.3 max_us=8067.7 failed=0
+case=c64 per_s=11041 p50_us=5983.4 p99_us=6795.4 max_us=6967.4 failed=0
+case=c256 per_s=42101 p50_us=5974.7 p99_us=6256.6 max_us=6418.0 failed=0
+=== after round 9 ===
+case=c1 per_s=343 p50_us=2949.5 p99_us=3173.4 max_us=6093.1 failed=0
+case=c8 per_s=1388 p50_us=5993.2 p99_us=6167.7 max_us=8029.2 failed=0
+case=c64 per_s=10767 p50_us=6013.3 p99_us=6113.1 max_us=6173.4 failed=0
+case=c256 per_s=41085 p50_us=5930.8 p99_us=9304.4 max_us=9548.0 failed=0
+=== before round 9 ===
+case=c1 per_s=330 p50_us=2950.6 p99_us=3189.8 max_us=443101.0 failed=0
+case=c8 per_s=341 p50_us=23944.6 p99_us=26100.4 max_us=28126.2 failed=0
+case=c64 per_s=341 p50_us=188029.7 p99_us=193021.6 max_us=194100.9 failed=0
+case=c256 per_s=342 p50_us=749850.4 p99_us=761051.5 max_us=762082.4 failed=0
+
+### hs-wsl-linux-ext4
+=== before round 0 ===
+case=c1 per_s=195 p50_us=5026.2 p99_us=6141.3 max_us=9083.1 failed=0
+case=c8 per_s=199 p50_us=40002.2 p99_us=48038.2 max_us=119997.5 failed=0
+case=c64 per_s=202 p50_us=316996.3 p99_us=325233.9 max_us=326900.9 failed=0
+case=c256 per_s=201 p50_us=1272924.8 p99_us=1284980.7 max_us=1286289.2 failed=0
+=== after round 0 ===
+case=c1 per_s=200 p50_us=5017.3 p99_us=6080.4 max_us=9147.1 failed=0
+case=c8 per_s=807 p50_us=10014.1 p99_us=11970.8 max_us=13032.4 failed=0
+case=c64 per_s=6446 p50_us=9998.6 p99_us=11034.7 max_us=11078.0 failed=0
+case=c256 per_s=24929 p50_us=9951.4 p99_us=10398.0 max_us=10780.2 failed=0
+=== after round 1 ===
+case=c1 per_s=200 p50_us=5017.1 p99_us=6072.0 max_us=8986.5 failed=0
+case=c8 per_s=804 p50_us=10019.2 p99_us=11950.4 max_us=13065.1 failed=0
+case=c64 per_s=6519 p50_us=9995.0 p99_us=11041.5 max_us=11085.2 failed=0
+case=c256 per_s=24692 p50_us=10057.7 p99_us=11089.1 max_us=11140.8 failed=0
+=== before round 1 ===
+case=c1 per_s=201 p50_us=5017.3 p99_us=6055.0 max_us=9097.8 failed=0
+case=c8 per_s=201 p50_us=39939.8 p99_us=43060.1 max_us=45145.4 failed=0
+case=c64 per_s=202 p50_us=317974.3 p99_us=326076.7 max_us=328037.6 failed=0
+case=c256 per_s=201 p50_us=1274822.2 p99_us=1297122.6 max_us=1301033.3 failed=0
+=== before round 2 ===
+case=c1 per_s=199 p50_us=5019.6 p99_us=6069.6 max_us=9027.9 failed=0
+case=c8 per_s=218 p50_us=38072.4 p99_us=43053.8 max_us=47085.4 failed=0
+case=c64 per_s=201 p50_us=318143.2 p99_us=326994.1 max_us=331040.9 failed=0
+case=c256 per_s=199 p50_us=1282070.0 p99_us=1317203.9 max_us=1319148.0 failed=0
+=== after round 2 ===
+case=c1 per_s=197 p50_us=5025.0 p99_us=6090.5 max_us=9050.5 failed=0
+case=c8 per_s=792 p50_us=10036.6 p99_us=12076.1 max_us=13967.2 failed=0
+case=c64 per_s=6283 p50_us=10004.3 p99_us=11936.7 max_us=12073.2 failed=0
+case=c256 per_s=24737 p50_us=9990.2 p99_us=11151.3 max_us=11468.2 failed=0
+=== after round 3 ===
+case=c1 per_s=197 p50_us=5022.5 p99_us=6091.3 max_us=8938.3 failed=0
+case=c8 per_s=791 p50_us=10033.5 p99_us=11952.6 max_us=15043.2 failed=0
+case=c64 per_s=6291 p50_us=10001.3 p99_us=12970.0 max_us=13062.3 failed=0
+case=c256 per_s=24735 p50_us=10018.3 p99_us=11440.7 max_us=11496.3 failed=0
+=== before round 3 ===
+case=c1 per_s=196 p50_us=5022.8 p99_us=6095.7 max_us=9094.5 failed=0
+case=c8 per_s=198 p50_us=40080.7 p99_us=43220.0 max_us=47960.8 failed=0
+case=c64 per_s=198 p50_us=323005.5 p99_us=335268.0 max_us=338128.9 failed=0
+case=c256 per_s=190 p50_us=1315113.1 p99_us=1822177.3 max_us=1824124.9 failed=0
+=== before round 4 ===
+case=c1 per_s=198 p50_us=5023.3 p99_us=6097.5 max_us=9082.5 failed=0
+case=c8 per_s=198 p50_us=40063.6 p99_us=44111.4 max_us=47109.8 failed=0
+case=c64 per_s=200 p50_us=319850.2 p99_us=325010.9 max_us=327113.1 failed=0
+case=c256 per_s=200 p50_us=1280922.5 p99_us=1298019.2 max_us=1300232.1 failed=0
+=== after round 4 ===
+case=c1 per_s=198 p50_us=5020.1 p99_us=6093.5 max_us=9071.9 failed=0
+case=c8 per_s=807 p50_us=10017.7 p99_us=11998.0 max_us=13151.5 failed=0
+case=c64 per_s=6401 p50_us=9990.1 p99_us=11075.6 max_us=11918.7 failed=0
+case=c256 per_s=23938 p50_us=10008.6 p99_us=14257.0 max_us=14407.0 failed=0
+=== after round 5 ===
+case=c1 per_s=198 p50_us=5012.5 p99_us=6068.3 max_us=9119.8 failed=0
+case=c8 per_s=797 p50_us=10015.5 p99_us=12105.1 max_us=14073.1 failed=0
+case=c64 per_s=6334 p50_us=10002.3 p99_us=11126.4 max_us=11170.8 failed=0
+case=c256 per_s=24891 p50_us=10017.5 p99_us=10901.8 max_us=10965.5 failed=0
+=== before round 5 ===
+case=c1 per_s=197 p50_us=5013.6 p99_us=6092.3 max_us=11824.0 failed=0
+case=c8 per_s=196 p50_us=40832.6 p99_us=44990.1 max_us=46957.8 failed=0
+case=c64 per_s=197 p50_us=325109.9 p99_us=336990.9 max_us=344101.5 failed=0
+case=c256 per_s=196 p50_us=1304872.4 p99_us=1322148.3 max_us=1326052.3 failed=0
+
+### hs-compact-windows-C
+=== before round 0 ===
+case=c1 per_s=1132 p50_us=861.1 p99_us=1340.7 max_us=4318.7 failed=0
+case=c8 per_s=1094 p50_us=7194.3 p99_us=9833.3 max_us=11292.7 failed=0
+case=c64 per_s=1098 p50_us=58252.5 p99_us=64442.3 max_us=65811.2 failed=0
+case=c256 per_s=1114 p50_us=229819.6 p99_us=246085.9 max_us=248468.8 failed=0
+case=compact200000 per_s=1105 p50_us=57531.6 p99_us=64321.1 max_us=79275.0 failed=1
+=== after round 0 ===
+case=c1 per_s=1151 p50_us=848.0 p99_us=1292.6 max_us=4606.3 failed=0
+case=c8 per_s=5050 p50_us=1568.2 p99_us=2046.8 max_us=3798.2 failed=0
+case=c64 per_s=37339 p50_us=1686.5 p99_us=2151.0 max_us=2283.3 failed=0
+case=c256 per_s=128135 p50_us=1879.3 p99_us=2337.3 max_us=2717.6 failed=0
+case=compact200000 per_s=33346 p50_us=1582.7 p99_us=21631.5 max_us=21703.9 failed=0
+=== after round 1 ===
+case=c1 per_s=1161 p50_us=841.5 p99_us=1303.8 max_us=5837.3 failed=0
+case=c8 per_s=4856 p50_us=1621.9 p99_us=2255.3 max_us=2964.2 failed=0
+case=c64 per_s=34954 p50_us=1723.7 p99_us=5444.2 max_us=5484.1 failed=0
+case=c256 per_s=133665 p50_us=1810.5 p99_us=2366.1 max_us=2507.5 failed=0
+case=compact200000 per_s=33972 p50_us=1527.5 p99_us=21264.7 max_us=21387.6 failed=0
+=== before round 1 ===
+case=c1 per_s=1150 p50_us=847.8 p99_us=1305.5 max_us=3404.3 failed=0
+case=c8 per_s=1113 p50_us=7132.3 p99_us=8406.3 max_us=10776.5 failed=0
+case=c64 per_s=1109 p50_us=57970.8 p99_us=63543.0 max_us=64232.3 failed=0
+case=c256 per_s=1105 p50_us=232727.4 p99_us=238980.8 max_us=240295.2 failed=0
+case=compact200000 per_s=1108 p50_us=57846.6 p99_us=62768.1 max_us=78360.4 failed=1
+=== before round 2 ===
+case=c1 per_s=1121 p50_us=873.1 p99_us=1333.4 max_us=3767.7 failed=0
+case=c8 per_s=1131 p50_us=7022.3 p99_us=8439.4 max_us=10571.8 failed=0
+case=c64 per_s=1126 p50_us=56883.6 p99_us=61605.5 max_us=113340.8 failed=0
+case=c256 per_s=1103 p50_us=232650.4 p99_us=247178.3 max_us=472648.9 failed=0
+case=compact200000 per_s=1106 p50_us=57470.2 p99_us=62851.3 max_us=119452.8 failed=0
+=== after round 2 ===
+case=c1 per_s=1145 p50_us=854.0 p99_us=1291.0 max_us=5776.8 failed=0
+case=c8 per_s=4806 p50_us=1631.2 p99_us=2341.1 max_us=5065.3 failed=0
+case=c64 per_s=38580 p50_us=1622.0 p99_us=2267.7 max_us=2292.7 failed=0
+case=c256 per_s=135925 p50_us=1750.1 p99_us=2418.2 max_us=2599.8 failed=0
+case=compact200000 per_s=30956 p50_us=1659.8 p99_us=25592.1 max_us=25756.4 failed=0
+
+### strace-linux-ext4 (one run of each build, strace -f -c -e trace=fdatasync,fsync)
+=== before ===
+case=c1 per_s=151 p50_us=6101.6 p99_us=11999.5 max_us=23821.2 failed=0
+case=c8 per_s=159 p50_us=48952.8 p99_us=71874.6 max_us=175905.1 failed=0
+case=c64 per_s=164 p50_us=389261.7 p99_us=408952.1 max_us=420395.7 failed=0
+case=c256 per_s=158 p50_us=1581361.4 p99_us=1919863.5 max_us=1931110.0 failed=0
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 99.95    1.516344          93     16256           fdatasync
+  0.05    0.000759          63        12           fsync
+------ ----------- ----------- --------- --------- ----------------
+100.00    1.517103          93     16268           total
+=== after ===
+case=c1 per_s=158 p50_us=6052.8 p99_us=8167.8 max_us=116339.7 failed=0
+case=c8 per_s=621 p50_us=12089.4 p99_us=17997.8 max_us=109341.6 failed=0
+case=c64 per_s=5196 p50_us=12034.1 p99_us=15629.9 max_us=16081.8 failed=0
+case=c256 per_s=20581 p50_us=11922.9 p99_us=14708.7 max_us=15179.3 failed=0
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 99.87    0.388147          71      5413           fdatasync
+  0.13    0.000523          43        12           fsync
+------ ----------- ----------- --------- --------- ----------------
+100.00    0.388670          71      5425           total
