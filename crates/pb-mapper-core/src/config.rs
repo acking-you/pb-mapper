@@ -165,6 +165,13 @@ pub fn resolve_addrs(addr: &str) -> Result<ResolvedAddrs> {
 }
 
 /// Async counterpart of [`resolve_addrs`], for Tokio contexts.
+///
+/// It asks the built-in public DNS servers before the system resolver, and
+/// that order is decided, not an oversight: a device whose own resolver
+/// answers wrongly, but answers, still finds its relay. The price is that a
+/// name which resolves differently inside a private network gets its public
+/// answer, and that a network which drops DNS to all but its own resolver
+/// makes each lookup wait out the public servers first.
 pub async fn resolve_addrs_async(addr: &str) -> Result<ResolvedAddrs> {
     let (host, port) = match Target::of(addr)? {
         Target::Literal(literal) => return Ok(ResolvedAddrs::from(literal)),
