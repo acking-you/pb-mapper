@@ -1,12 +1,12 @@
 //! The SDK script: a host of the guarded backend, a viewer that presents
 //! what it receives, and the input it sends.
-use crate::fixture::{Fixture, LINES, State, TEXT, failure, modifier_held};
+use crate::fixture::{CUSTOM_HOTSPOT, Fixture, LINES, State, TEXT, failure, modifier_held};
 use crate::guarded::Guarded;
 use crate::probe_support::{RelayConfig, option, relay_client};
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy, RelayTransport};
 use pb_mapper_desktop::{
-    Button, DesktopView, Display, DisplaySelection, Host, HostOptions, Input, Pull, QualityPreset,
-    Result, VideoCodec, VideoLimits, Viewer, ViewerConfig,
+    Button, CursorKind, CursorShape, DesktopView, Display, DisplaySelection, Host, HostOptions,
+    Input, Pull, QualityPreset, Result, VideoCodec, VideoLimits, Viewer, ViewerConfig,
 };
 use pb_mapper_testkit::Relay;
 use std::{
@@ -137,6 +137,109 @@ fn present(viewer: &Viewer) -> Result<JoinHandle<()>> {
         }
     }))
 }
+/// The pointer's shape as the viewer sees it, over the owned window: the
+/// class arrow, the EDIT's text beam, a resize arrow and this test's own
+/// monochrome cursor, which must arrive pixel for pixel. One line per shape
+/// for the record; with `--dump-cursors DIR`, each as a JPEG over grey, 8×.
+async fn shapes(viewer: &Viewer, state: &State, display: &Display) -> Result<String> {
+    let mut lines = Vec::new();
+    for (name, (x, y), kind) in [
+        ("client", (320, 120), CursorKind::Arrow),
+        ("edit", (320, 66), CursorKind::Ibeam),
+        ("resize_box", (600, 270), CursorKind::ResizeNwse),
+        ("custom_box", (64, 270), CursorKind::Custom),
+    ] {
+        let point = state.client_point(x, y)?;
+        let (x, y) = ((point.x - display.x) as u32, (point.y - display.y) as u32);
+        send(viewer, state, Input::Move { x, y })?;
+        wait_for(
+            state,
+            &format!("the {name} pointer shape at the viewer"),
+            || shape_of(viewer).is_some_and(|shape| shape.kind() == kind),
+        )
+        .await?;
+        let shape = shape_of(viewer).ok_or_else(|| failure("the shape went away"))?;
+        if kind == CursorKind::Custom {
+            check_custom(&shape)?;
+        }
+        let pixels = shape.rgba().as_chunks::<4>().0;
+        let (opaque, clear) = (
+            pixels.iter().filter(|p| p[3] == 255).count(),
+            pixels.iter().filter(|p| p[3] == 0).count(),
+        );
+        // Straight alpha: a colour channel above its pixel's alpha.
+        let straight = pixels.iter().any(|p| p[..3].iter().any(|c| *c > p[3]));
+        lines.push(format!(
+            "cursor_shape over={name} kind={:?} size={}x{} hotspot={:?} opaque={opaque} clear={clear} partial={} straight_alpha_seen={straight}",
+            shape.kind(),
+            shape.width(),
+            shape.height(),
+            shape.hotspot(),
+            pixels.len() - opaque - clear,
+        ));
+        if let Some(dir) = option(&std::env::args().collect::<Vec<_>>(), "--dump-cursors") {
+            dump(
+                &shape,
+                &std::path::Path::new(dir).join(format!("{name}.jpg")),
+            )?;
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+fn shape_of(viewer: &Viewer) -> Option<CursorShape> {
+    viewer.cursor_shape(viewer.view().cursor_shape)
+}
+
+/// The custom cursor as `fixture::custom_planes` drew it, at its own size.
+fn check_custom(shape: &CursorShape) -> Result<()> {
+    let at = |x: u32, y: u32| {
+        let i = ((y * shape.width() + x) * 4) as usize;
+        shape.rgba().get(i..i + 4).map(|p| [p[0], p[1], p[2], p[3]])
+    };
+    let expected = [
+        ((2, 5), [0, 0, 0, 255]),
+        ((20, 5), [255; 4]),
+        ((12, 20), [0, 0, 0, 255]),
+        ((7, 20), [255; 4]),
+        ((12, 21), [255; 4]),
+        ((30, 30), [0; 4]),
+    ];
+    let size = (shape.width(), shape.height(), shape.hotspot());
+    if size != (32, 32, CUSTOM_HOTSPOT)
+        || expected
+            .iter()
+            .any(|((x, y), pixel)| at(*x, *y) != Some(*pixel))
+    {
+        return Err(failure(format!(
+            "the custom cursor arrived as {size:?} with {:?}",
+            expected.map(|((x, y), _)| at(x, y))
+        )));
+    }
+    Ok(())
+}
+
+/// `shape` over mid grey, eight times its size, as a JPEG at `path`.
+fn dump(shape: &CursorShape, path: &std::path::Path) -> Result<()> {
+    const SCALE: u32 = 8;
+    let (width, height) = (shape.width() * SCALE, shape.height() * SCALE);
+    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let i = (((y / SCALE) * shape.width() + x / SCALE) * 4) as usize;
+            let p = &shape.rgba()[i..i + 4];
+            let over = |c: u8| {
+                ((u32::from(c) * u32::from(p[3]) + 128 * (255 - u32::from(p[3]))) / 255) as u8
+            };
+            rgb.extend([over(p[0]), over(p[1]), over(p[2])]);
+        }
+    }
+    let file = std::fs::File::create(path)?;
+    image::codecs::jpeg::JpegEncoder::new_with_quality(file, 95)
+        .encode(&rgb, width, height, image::ExtendedColorType::Rgb8)
+        .map_err(failure)
+}
+
 /// Text, a click and a drag-start press on the owned window, then the
 /// release of that press when the viewer disconnects.
 async fn exercise(
@@ -168,6 +271,7 @@ async fn exercise(
         return Err(e);
     }
     let keyboard = keyboard(viewer, state).await?;
+    let shapes = shapes(viewer, state, display).await?;
     let point = state.client_point(320, 220)?;
     if point.x < display.x
         || point.y < display.y
@@ -241,6 +345,7 @@ async fn exercise(
     if unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON.0)) } < 0 {
         return Err(failure("native left button remains held after disconnect"));
     }
+    println!("{shapes}");
     println!(
         "native_input_acceptance path={topology} unicode_verified=true {keyboard} button_down={} button_up={} drag_press_gap_ms={press_gap_ms} double_click_ms={double_click_ms} double_clicks={double_clicks} disconnect_release_ms={:.3} physical_display={}x{}",
         state.downs.load(Ordering::Acquire),

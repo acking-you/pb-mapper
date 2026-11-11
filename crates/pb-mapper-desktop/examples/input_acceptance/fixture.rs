@@ -35,6 +35,34 @@ struct ImeSaved {
     conversion: u32,
     sentence: u32,
 }
+/// Client areas of the owned window whose pointer is a resize arrow, and a
+/// monochrome cursor of this test's own ([`custom_planes`]).
+pub(crate) const RESIZE_BOX: RECT = RECT {
+    left: 560,
+    top: 240,
+    right: 640,
+    bottom: 300,
+};
+pub(crate) const CUSTOM_BOX: RECT = RECT {
+    left: 24,
+    top: 240,
+    right: 104,
+    bottom: 300,
+};
+/// The custom cursor: 32×32 with its hotspot at (8, 8); rows 4..12 are
+/// black on the left half (columns 0..16) and white on the right (16..32),
+/// row 20 inverts the screen at columns 8..24; everything else is clear.
+pub(crate) const CUSTOM_HOTSPOT: (u32, u32) = (8, 8);
+fn custom_planes() -> ([u8; 128], [u8; 128]) {
+    // AND: 1 is clear (or inverting); XOR: 1 is white (or inverting).
+    let (mut and, mut xor) = ([0xFF_u8; 128], [0_u8; 128]);
+    for row in 4..12 {
+        and[row * 4..row * 4 + 4].fill(0);
+        xor[row * 4 + 2..row * 4 + 4].fill(0xFF);
+    }
+    xor[20 * 4 + 1..20 * 4 + 3].fill(0xFF);
+    (and, xor)
+}
 pub(crate) fn failure(message: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(message.to_string())
 }
@@ -60,6 +88,8 @@ impl Drop for DpiScope {
 pub(crate) struct State {
     window: AtomicIsize,
     edit: AtomicIsize,
+    /// This test's own cursor, shown over [`CUSTOM_BOX`].
+    custom: AtomicIsize,
     armed: AtomicBool,
     aborted: AtomicBool,
     rect: parking_lot::Mutex<RECT>,
@@ -380,6 +410,32 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, w: WPARAM, l: 
                         let _ = SetFocus(Some(state.edit()));
                     }
                 }
+                // The pointer's shape over the boxes; the class cursor, an
+                // arrow, elsewhere in the client area.
+                WM_SETCURSOR if w.0 == window.0 as usize && (l.0 & 0xffff) as u32 == HTCLIENT => {
+                    let mut point = POINT::default();
+                    if GetCursorPos(&mut point).is_ok()
+                        && ScreenToClient(window, &mut point).as_bool()
+                    {
+                        let inside = |r: RECT| {
+                            point.x >= r.left
+                                && point.x < r.right
+                                && point.y >= r.top
+                                && point.y < r.bottom
+                        };
+                        let cursor = if inside(RESIZE_BOX) {
+                            LoadCursorW(None, IDC_SIZENWSE).ok()
+                        } else if inside(CUSTOM_BOX) {
+                            Some(HCURSOR(state.custom.load(Ordering::Acquire) as *mut _))
+                        } else {
+                            None
+                        };
+                        if let Some(cursor) = cursor {
+                            SetCursor(Some(cursor));
+                            return LRESULT(1);
+                        }
+                    }
+                }
                 WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                     // The class has CS_DBLCLKS: a press Windows merges
                     // with the click before it arrives as a double click.
@@ -409,6 +465,12 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, w: WPARAM, l: 
                             .encode_utf16()
                             .collect();
                     let _ = TextOutW(dc, 24, 140, &text);
+                    // The boxes whose pointer shape the viewer must see.
+                    for (r, label) in [(CUSTOM_BOX, "custom"), (RESIZE_BOX, "resize")] {
+                        let _ = FrameRect(dc, &r, HBRUSH(GetStockObject(BLACK_BRUSH).0));
+                        let label: Vec<u16> = label.encode_utf16().collect();
+                        let _ = TextOutW(dc, r.left + 6, r.top + 6, &label);
+                    }
                     let _ = EndPaint(window, &paint);
                     return LRESULT(0);
                 }
@@ -430,11 +492,24 @@ unsafe fn window_loop(
 ) -> Result<()> {
     unsafe {
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let (and, xor) = custom_planes();
+        let custom = CreateCursor(
+            None,
+            CUSTOM_HOTSPOT.0 as i32,
+            CUSTOM_HOTSPOT.1 as i32,
+            32,
+            32,
+            and.as_ptr().cast(),
+            xor.as_ptr().cast(),
+        )
+        .map_err(failure)?;
+        state.custom.store(custom.0 as isize, Ordering::Release);
         let class = WNDCLASSW {
             style: CS_DBLCLKS,
             lpfnWndProc: Some(window_proc),
             lpszClassName: w!("PbMapperOwnedInputAcceptance"),
             hbrBackground: HBRUSH(GetStockObject(WHITE_BRUSH).0),
+            hCursor: LoadCursorW(None, IDC_ARROW).map_err(failure)?,
             ..Default::default()
         };
         if RegisterClassW(&class) == 0 {
@@ -506,6 +581,7 @@ unsafe fn window_loop(
             DispatchMessageW(&message);
         }
         state.window.store(0, Ordering::Release);
+        let _ = DestroyCursor(custom);
         Ok(())
     }
 }
