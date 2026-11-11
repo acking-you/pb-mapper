@@ -19,6 +19,9 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    // The remote desktop's H.264/H.265 decoder (ui/darwin/DesktopVideo.swift).
+    DesktopVideoPlugin.register(
+      with: flutterViewController.registrar(forPlugin: "PbMapperDesktopVideo"))
 
     super.awakeFromNib()
   }
