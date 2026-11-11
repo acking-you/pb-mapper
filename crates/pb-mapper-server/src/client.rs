@@ -18,7 +18,7 @@ use crate::error::{
     ClientConnWriteStreamRespSnafu,
 };
 use crate::guard::{ConnLease, Deregistration};
-use crate::task::{ConnTaskReceiver, ConnTaskSender};
+use crate::task::ConnTaskReceiver;
 use pb_mapper_core::checksum::{AesKeyType, gen_random_key};
 use pb_mapper_core::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec};
 use pb_mapper_core::config::{stream_ack_timeout, stream_ready_timeout, stream_recovery_timeout};
@@ -117,31 +117,24 @@ pub(super) async fn handle_client_conn_selected(
     // Bounds the whole subscribe exchange, every wait for the manager included.
     let setup_timeout = pb_mapper_core::config::control_io_timeout().min(Duration::from_secs(5));
     let setup_result = timeout(setup_timeout, async {
-        let mut mailbox = Mailbox::new();
-        // A subscriber that gives up, as a client does when its own attempt
-        // runs out, is no longer waited for: nothing takes a provider's stream
-        // on its behalf from then on. Only an acknowledgement the relay was
-        // waiting for still is, until it is due, so that a provider that never
-        // sends it is suspected all the same.
-        let setup = tokio::select! {
-            biased;
-            source = subscriber_gone(&mut conn) => {
-                mailbox.settle(&task_sender, &key, conn_id).await;
-                return Err(super::error::Error::ClientConnLeft {
-                    key: key.clone(),
-                    conn_id,
-                    source,
-                });
-            }
-            setup = get_server_stream(
-                key.clone(),
-                conn_id,
-                task_sender.clone(),
-                selected,
-                &mut mailbox,
-            ) => {
-                setup?
-            }
+        let mut subscriber = Subscriber {
+            conn: &mut conn,
+            left: None,
+        };
+        let setup = get_server_stream(
+            key.clone(),
+            conn_id,
+            task_sender.clone(),
+            selected,
+            &mut subscriber,
+        )
+        .await;
+        // A subscriber that gave up, as a client does when its own attempt
+        // runs out, is answered nothing, whatever the wait came to: a stream
+        // that came for it is dropped.
+        let setup = match subscriber.left {
+            Some(source) => Setup::Abandoned(source),
+            None => setup?,
         };
         match setup {
             Setup::Ready(ready) => Ok(ready),
@@ -154,6 +147,11 @@ pub(super) async fn handle_client_conn_selected(
                 }
                 .fail()
             }
+            Setup::Abandoned(source) => Err(super::error::Error::ClientConnLeft {
+                key: key.clone(),
+                conn_id,
+                source,
+            }),
         }
     })
     .await
@@ -512,6 +510,51 @@ enum Setup {
         refusal: PbConnResponse,
         reason: String,
     },
+    /// The subscriber left, for this reason, and the relay has finished what
+    /// the registration it asked owed it.
+    Abandoned(std::io::Error),
+}
+
+/// The subscriber's connection while the relay finds it a stream, and why
+/// the subscriber left, once it has.
+struct Subscriber<'a> {
+    conn: &'a mut RelayStream,
+    left: Option<std::io::Error>,
+}
+
+impl Subscriber<'_> {
+    /// `work`'s result, noting on the way whether the subscriber leaves.
+    /// Leaving does not cut `work` short: what the relay waits for on a
+    /// subscriber's behalf, a registration owes it, and the relay's verdict on
+    /// that registration is the same whether or not anyone still waits.
+    async fn meanwhile<T>(&mut self, work: impl Future<Output = T>) -> T {
+        let mut work = std::pin::pin!(work);
+        if self.left.is_none() {
+            tokio::select! {
+                biased;
+                source = subscriber_gone(self.conn) => self.left = Some(source),
+                done = &mut work => return done,
+            }
+        }
+        work.await
+    }
+
+    /// `work`'s result, unless the subscriber has left or leaves first, which
+    /// drops `work` and answers why it left: for asking on the subscriber's
+    /// behalf, which nothing does once it has gone.
+    async fn unless_gone<T>(
+        &mut self,
+        work: impl Future<Output = T>,
+    ) -> std::result::Result<T, std::io::Error> {
+        if let Some(source) = self.left.take() {
+            return Err(source);
+        }
+        tokio::select! {
+            biased;
+            source = subscriber_gone(self.conn) => Err(source),
+            done = work => Ok(done),
+        }
+    }
 }
 
 /// Why the subscriber is gone, once its connection ends, fails or carries
@@ -556,162 +599,49 @@ fn replacement_deadline(ack_timeout: Duration) -> Instant {
     Instant::now() + grace + REPLACEMENT_MARGIN
 }
 
-/// The routing manager's answers to one subscribe, and the provider's
-/// acknowledgement the subscribe is waiting for, if any.
+/// Find the subscriber a stream: ask the routing manager for a registration,
+/// wait for its acknowledgement and then its stream, and move on to another
+/// registration, or wait for a replacement, when one falls silent.
 ///
-/// The subscribe's handler holds it, not the wait for a stream, so that a
-/// subscriber leaving, which drops that wait, does not drop the relay's
-/// verdict on the acknowledgement with it (see [`Mailbox::settle`]).
-struct Mailbox {
-    sender: ConnTaskSender,
-    receiver: ConnTaskReceiver,
-    /// Owed while a wait for it is under way, and until its verdict is sent.
-    owed: Option<OwedAck>,
-}
-
-/// A registration's acknowledgement of the stream request the routing manager
-/// sent it for this subscribe, and when the relay stops waiting for it.
-#[derive(Clone, Copy)]
-struct OwedAck {
-    server_conn_id: RemoteConnId,
-    server_generation: u64,
-    ack_timeout: Duration,
-    due: Instant,
-}
-
-impl OwedAck {
-    /// Owed from now, for the registration's acknowledgement budget.
-    fn from_now(
-        server_conn_id: RemoteConnId,
-        server_generation: u64,
-        ack_timeout: Duration,
-    ) -> Self {
-        Self {
-            server_conn_id,
-            server_generation,
-            ack_timeout,
-            due: Instant::now() + ack_timeout,
-        }
-    }
-}
-
-impl Mailbox {
-    fn new() -> Self {
-        let (sender, receiver) = kanal::bounded_async(DEFAULT_CLIENT_CHAN_CAP);
-        Self {
-            sender,
-            receiver,
-            owed: None,
-        }
-    }
-
-    /// The next answer, if it comes before `owed` is due: as a rule the
-    /// acknowledgement, or the stream, which implies it. `None` once it is
-    /// due, after the registration has been suspected for its silence, which
-    /// takes it out of rotation at once.
-    async fn await_ack(
-        &mut self,
-        owed: OwedAck,
-        task_sender: &ManagerTaskSender,
-        key: &ImutableKey,
-        conn_id: RemoteConnId,
-    ) -> Option<std::result::Result<ConnTask, kanal::ReceiveError>> {
-        self.owed = Some(owed);
-        let answer = timeout_at(owed.due, self.receiver.recv()).await.ok();
-        if answer.is_none() {
-            tracing::warn!(
-                event = "server_stream_ack_timeout",
-                key = %key,
-                client_conn_id = %conn_id,
-                server_conn_id = %owed.server_conn_id,
-                server_generation = owed.server_generation,
-                timeout = ?owed.ack_timeout,
-                "timed out waiting for server stream ack"
-            );
-            suspect_server_conn(
-                task_sender,
-                key.clone(),
-                owed.server_conn_id,
-                owed.server_generation,
-            )
-            .await;
-        }
-        self.owed = None;
-        answer
-    }
-
-    /// For a subscriber that has left, finish the wait for the
-    /// acknowledgement its subscribe is owed, if any, as if it had stayed:
-    /// until the acknowledgement is due, with the same verdict. An answer not
-    /// yet read that chose a registration owes one too.
-    ///
-    /// The stream request stays pending until the subscriber deregisters,
-    /// after this, so the acknowledgement can still reach this mailbox. Once
-    /// it has deregistered, a late one would reach no one, and suspecting the
-    /// registration regardless would wrong one that answered in time. No
-    /// stream is waited for and nothing is asked again: a stream that arrives
-    /// first ends the wait, and is dropped.
-    async fn settle(
-        &mut self,
-        task_sender: &ManagerTaskSender,
-        key: &ImutableKey,
-        conn_id: RemoteConnId,
-    ) {
-        if let Some(owed) = self.owed.or_else(|| self.announced()) {
-            let _ = self.await_ack(owed, task_sender, key, conn_id).await;
-        }
-    }
-
-    /// The acknowledgement owed for a registration that the routing manager
-    /// chose in an answer not yet read: its wait would have started now.
-    fn announced(&self) -> Option<OwedAck> {
-        while let Ok(Some(answer)) = self.receiver.try_recv() {
-            if let ConnTask::SubcribeResp {
-                ack_timeout,
-                server_conn_id,
-                server_generation,
-                ..
-            } = answer
-            {
-                return Some(OwedAck::from_now(
-                    server_conn_id,
-                    server_generation,
-                    ack_timeout,
-                ));
-            }
-        }
-        None
-    }
-}
-
+/// A subscriber that leaves is asked for no more: its subscribe ends with
+/// [`Setup::Abandoned`] once the registration already asked has given the
+/// relay what it owes, to the same deadlines and with the same verdicts as
+/// for a subscriber still waiting (see [`abandon`]).
 async fn get_server_stream(
     key: ImutableKey,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
     selected: Option<(RemoteConnId, u64)>,
-    mailbox: &mut Mailbox,
+    subscriber: &mut Subscriber<'_>,
 ) -> Result<Setup> {
+    let (sender, receiver) = kanal::bounded_async(DEFAULT_CLIENT_CHAN_CAP);
     let ready_timeout = stream_ready_timeout();
     let recovery_timeout = stream_recovery_timeout().max(
         pb_mapper_core::config::control_suspect_grace() + stream_ack_timeout() + REPLACEMENT_MARGIN,
     );
     let mut recovery_deadline = Instant::now() + recovery_timeout;
     let mut excluded_server_conns = Vec::new();
+    // The generation of the registration last asked for a stream for this
+    // subscribe, whose answers the routing manager passes on to it until
+    // another is asked.
+    let mut asked = None;
 
     'attempt: loop {
-        task_sender
-            .send(ManagerTask::Subcribe {
-                key: key.clone(),
-                conn_id,
-                conn_sender: mailbox.sender.clone(),
-                excluded_server_conns: excluded_server_conns.clone(),
-                selected,
-            })
-            .await
-            .context(ClientConnSendSubcribeSnafu {
-                key: key.clone(),
-                conn_id,
-            })?;
+        let request = ManagerTask::Subcribe {
+            key: key.clone(),
+            conn_id,
+            conn_sender: sender.clone(),
+            excluded_server_conns: excluded_server_conns.clone(),
+            selected,
+        };
+        let sent = match subscriber.unless_gone(task_sender.send(request)).await {
+            Ok(sent) => sent,
+            Err(left) => return Ok(abandon(&receiver, asked, recovery_deadline, left).await),
+        };
+        sent.context(ClientConnSendSubcribeSnafu {
+            key: key.clone(),
+            conn_id,
+        })?;
         tracing::debug!(
             event = "subscribe_task_sent",
             key = %key,
@@ -722,14 +652,12 @@ async fn get_server_stream(
 
         // Bounded by the caller's setup timeout, which covers this whole exchange.
         let resp = loop {
-            let resp = mailbox
-                .receiver
-                .recv()
-                .await
-                .context(ClientConnRecvSubcribeRespSnafu {
+            let resp = subscriber.meanwhile(receiver.recv()).await.context(
+                ClientConnRecvSubcribeRespSnafu {
                     key: key.clone(),
                     conn_id,
-                })?;
+                },
+            )?;
             // An ACK/data socket from the previous candidate can arrive while
             // the next selection is queued. It cannot become that selection's
             // response; dropping it preserves the generation boundary.
@@ -750,6 +678,7 @@ async fn get_server_stream(
                 server_conn_id,
                 server_generation,
             } => {
+                asked = Some(server_generation);
                 let codec_key = if need_codec {
                     Some(gen_random_key())
                 } else {
@@ -815,7 +744,12 @@ async fn get_server_stream(
                     recovery_timeout = ?recovery_timeout,
                     "waiting for replacement server control connection"
                 );
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                if let Err(left) = subscriber
+                    .unless_gone(tokio::time::sleep(Duration::from_millis(50)))
+                    .await
+                {
+                    return Ok(abandon(&receiver, asked, recovery_deadline, left).await);
+                }
                 continue 'attempt;
             }
             _ => ClientConnSubcribeRespNotMatchSnafu {
@@ -825,8 +759,23 @@ async fn get_server_stream(
             .fail()?,
         };
 
-        let owed = OwedAck::from_now(server_conn_id, server_generation, ack_timeout);
-        let Some(resp) = mailbox.await_ack(owed, &task_sender, &key, conn_id).await else {
+        // As a rule the acknowledgement, or the stream, which implies it.
+        let ack_due = Instant::now() + ack_timeout;
+        let Ok(resp) = subscriber
+            .meanwhile(timeout_at(ack_due, receiver.recv()))
+            .await
+        else {
+            tracing::warn!(
+                event = "server_stream_ack_timeout",
+                key = %key,
+                client_conn_id = %conn_id,
+                server_conn_id = %server_conn_id,
+                server_generation,
+                timeout = ?ack_timeout,
+                "timed out waiting for server stream ack"
+            );
+            // Out of rotation at once, for its silence.
+            suspect_server_conn(&task_sender, key.clone(), server_conn_id, server_generation).await;
             excluded_server_conns.push((server_conn_id, server_generation));
             recovery_deadline = recovery_deadline.max(replacement_deadline(ack_timeout));
             continue 'attempt;
@@ -881,7 +830,10 @@ async fn get_server_stream(
         }
 
         let ready_timeout = ready_timeout.max(ack_timeout.saturating_mul(2));
-        let resp = match timeout(ready_timeout, mailbox.receiver.recv()).await {
+        let resp = match subscriber
+            .meanwhile(timeout(ready_timeout, receiver.recv()))
+            .await
+        {
             Ok(resp) => resp.context(ClientConnRecvStreamSnafu {
                 key: key.clone(),
                 conn_id,
@@ -944,6 +896,41 @@ async fn get_server_stream(
     }
 }
 
+/// End a subscribe whose subscriber has left, for the reason `left`.
+///
+/// Nothing is asked on its behalf any more, but the registration asked last,
+/// of generation `asked`, still gets the verdict it would with the subscriber
+/// waiting: until `until`, the end of the subscribe's recovery, the subscribe
+/// keeps its place, so that the routing manager still takes that
+/// registration's late answer for it. An acknowledgement teaches the
+/// registration's budget, and either answer readmits it. The answer ends the
+/// wait, and a stream is dropped.
+async fn abandon(
+    receiver: &ConnTaskReceiver,
+    asked: Option<u64>,
+    until: Instant,
+    left: std::io::Error,
+) -> Setup {
+    if let Some(generation) = asked {
+        let answered = async {
+            while let Ok(answer) = receiver.recv().await {
+                if let ConnTask::StreamAck {
+                    server_generation, ..
+                }
+                | ConnTask::StreamResp {
+                    server_generation, ..
+                } = answer
+                    && server_generation == generation
+                {
+                    break;
+                }
+            }
+        };
+        let _ = timeout_at(until, answered).await;
+    }
+    Setup::Abandoned(left)
+}
+
 async fn write_subscribe_error(
     conn: &mut RelayStream,
     session: &ServerHeaderSession,
@@ -967,70 +954,4 @@ async fn write_subscribe_error(
             key: key.clone(),
             conn_id,
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use pb_mapper_core::conn_id::RemoteConnId;
-    use tokio::time::Instant;
-
-    use super::{Mailbox, OwedAck};
-    use crate::manager::task_channel;
-    use crate::routing::ImutableKey;
-    use crate::task::{ConnTask, ManagerTask};
-
-    /// A subscriber that leaves still has the acknowledgement its subscribe is
-    /// owed judged: one that arrives before it is due spares the
-    /// registration, and silence has it suspected once it is due, not before.
-    /// A registration chosen in an answer the subscribe had not read yet is
-    /// owed one too. (The timer is real: this crate's tokio has no paused
-    /// clock, and the budget is short.)
-    #[tokio::test]
-    async fn a_departed_subscribers_acknowledgement_is_still_judged() {
-        let (task_sender, mut tasks) = task_channel(8);
-        let key: ImutableKey = Arc::from("echo");
-        let (provider, subscriber) = (RemoteConnId::from(1), RemoteConnId::from(2));
-        let budget = Duration::from_millis(50);
-
-        // Its wait was dropped as the acknowledgement came in.
-        let mut mailbox = Mailbox::new();
-        mailbox.owed = Some(OwedAck::from_now(provider, 1, budget));
-        let ack = ConnTask::StreamAck {
-            server_id: provider,
-            server_generation: 1,
-        };
-        mailbox.sender.try_send(ack).unwrap();
-        mailbox.settle(&task_sender, &key, subscriber).await;
-        assert!(
-            tasks.is_empty(),
-            "a registration that acknowledged in time was suspected"
-        );
-
-        let mut mailbox = Mailbox::new();
-        let chosen = ConnTask::SubcribeResp {
-            ack_timeout: budget,
-            server_conn_id: provider,
-            server_generation: 2,
-            need_codec: false,
-            is_datagram: false,
-        };
-        mailbox.sender.try_send(chosen).unwrap();
-        let left = Instant::now();
-        mailbox.settle(&task_sender, &key, subscriber).await;
-        assert!(
-            left.elapsed() >= budget,
-            "suspected before the budget ran out"
-        );
-        assert!(
-            matches!(
-                tasks.recv().await,
-                Some(ManagerTask::SuspectServerConn { conn_id, generation: 2, .. })
-                    if conn_id == provider
-            ),
-            "a silent registration was not suspected"
-        );
-    }
 }

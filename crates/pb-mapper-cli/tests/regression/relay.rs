@@ -147,9 +147,9 @@ async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
     keys
 }
 
-/// Whether the relay routes to each registration of `key`, as its status
-/// reports them; none once `key` has none.
-async fn read_service_health(server_addr: SocketAddr, key: &str) -> Vec<bool> {
+/// Whether the relay routes to each registration of `key`, by connection id,
+/// as its status reports them; none once `key` has none.
+async fn read_service_health(server_addr: SocketAddr, key: &str) -> Vec<(u32, bool)> {
     let request = PbConnStatusReq::Service {
         direct_query: None,
         key: key.to_string(),
@@ -160,8 +160,42 @@ async fn read_service_health(server_addr: SocketAddr, key: &str) -> Vec<bool> {
     };
     connections
         .iter()
-        .map(|connection| connection.healthy)
+        .map(|connection| (connection.conn_id, connection.healthy))
         .collect()
+}
+
+/// Acknowledge a stream request on a control connection's `writer`.
+async fn acknowledge(writer: &mut impl MessageWriter, (client_id, server_generation): (u32, u64)) {
+    let ack = PbServerRequest::StreamAck {
+        client_id,
+        server_generation,
+    }
+    .encode()
+    .unwrap();
+    writer.write_msg(&ack).await.unwrap();
+}
+
+/// Open the data stream a stream request asked `key`'s provider for.
+async fn open_stream(
+    addr: SocketAddr,
+    key: &str,
+    (dst_id, server_generation): (u32, u64),
+) -> TcpStream {
+    let mut data = TcpStream::connect(addr).await.unwrap();
+    let request = PbConnRequest::Stream {
+        data_protocol: None,
+        key: key.to_string(),
+        dst_id,
+        server_generation,
+    }
+    .encode()
+    .unwrap();
+    get_header_msg_writer(&mut data)
+        .unwrap()
+        .write_msg(&request)
+        .await
+        .unwrap();
+    data
 }
 
 async fn send_v2_request(
@@ -793,9 +827,10 @@ async fn a_stream_is_not_set_up_for_a_subscriber_that_gave_up() {
 /// A subscriber that leaves while the relay waits for its provider to
 /// acknowledge the stream request does not take the relay's verdict on that
 /// acknowledgement with it: one that comes after the subscriber left, inside
-/// the provider's budget, keeps the registration in rotation, and one that
-/// never comes has it suspected at the budget, so that later subscribes pass
-/// it over, as if the subscriber had stayed.
+/// the provider's budget, keeps the registration in rotation (its stream,
+/// which no one takes, is dropped), and one that never comes has it suspected
+/// at the budget, so that later subscribes pass it over, as if the subscriber
+/// had stayed.
 #[tokio::test]
 async fn a_subscriber_that_leaves_does_not_spare_a_silent_provider() {
     let relay = InProcessRelay::start(auth_config()).await;
@@ -813,19 +848,16 @@ async fn a_subscriber_that_leaves_does_not_spare_a_silent_provider() {
     // Each subscriber leaves as soon as the provider is asked, well inside
     // the relay's first acknowledgement budget of 300 ms.
     let mut subscriber = subscribe(relay.addr, key).await;
-    let (client_id, server_generation) = read_stream_request(&mut reader, "provider").await;
+    let request = read_stream_request(&mut reader, "provider").await;
     subscriber.shutdown().await.unwrap();
-    let ack = PbServerRequest::StreamAck {
-        client_id,
-        server_generation,
-    }
-    .encode()
-    .unwrap();
-    writer.write_msg(&ack).await.unwrap();
+    acknowledge(&mut writer, request).await;
+    let _stream = open_stream(relay.addr, key, request).await;
     closed_by_relay(&mut subscriber).await;
-    assert_eq!(
-        read_service_health(relay.addr, key).await,
-        [true],
+    assert!(
+        read_service_health(relay.addr, key)
+            .await
+            .iter()
+            .all(|&(_, healthy)| healthy),
         "a provider that acknowledged in time was suspected because its subscriber had left"
     );
 
@@ -835,8 +867,114 @@ async fn a_subscriber_that_leaves_does_not_spare_a_silent_provider() {
     closed_by_relay(&mut subscriber).await;
     // Suspected, or, two seconds on, retired for its silence.
     assert!(
-        !read_service_health(relay.addr, key).await.contains(&true),
+        !read_service_health(relay.addr, key)
+            .await
+            .iter()
+            .any(|&(_, healthy)| healthy),
         "a provider that never acknowledged was not suspected because its subscriber had left"
+    );
+
+    relay.stop().await;
+}
+
+/// A subscriber that leaves after its provider acknowledged still has that
+/// provider judged on the stream it owes: one that opens none is suspected
+/// once the stream is due, as if the subscriber had stayed. No other
+/// registration is asked for a stream on behalf of a subscriber that has gone.
+#[tokio::test]
+async fn a_subscriber_that_leaves_does_not_spare_a_provider_that_opens_no_stream() {
+    let relay = InProcessRelay::start(auth_config()).await;
+    let key = "streamless-backend";
+
+    // An older registration, which the relay would ask next.
+    let sibling = TcpStream::connect(relay.addr).await.unwrap();
+    let (mut sibling_read, mut sibling_write) = sibling.into_split();
+    let mut sibling_reader = get_header_msg_reader(&mut sibling_read).unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut sibling_write).unwrap();
+        register_control_conn_parts(&mut sibling_reader, &mut writer, key).await;
+    }
+    // The newest, asked first: it acknowledges, and opens nothing.
+    let control = TcpStream::connect(relay.addr).await.unwrap();
+    let (mut reader_stream, mut writer_stream) = control.into_split();
+    let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+    let provider = {
+        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+        register_control_conn_parts(&mut reader, &mut writer, key).await
+    };
+    let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+
+    let mut subscriber = subscribe(relay.addr, key).await;
+    let request = read_stream_request(&mut reader, "provider").await;
+    acknowledge(&mut writer, request).await;
+    subscriber.shutdown().await.unwrap();
+    closed_by_relay(&mut subscriber).await;
+    // Suspected, or, two seconds on, retired for its silence.
+    assert!(
+        !read_service_health(relay.addr, key)
+            .await
+            .contains(&(provider, true)),
+        "a provider that opened no stream was not suspected because its subscriber had left"
+    );
+    assert!(
+        timeout(Duration::from_millis(500), sibling_reader.read_msg())
+            .await
+            .is_err(),
+        "another registration was asked for a stream after its subscriber had left"
+    );
+
+    relay.stop().await;
+}
+
+/// Late for the relay's first acknowledgement budget of 300 ms, which it then
+/// doubles to 600 ms; what the relay learns from it, a quarter of three
+/// times this on top of three quarters of that, is about 1.6 s.
+const SLOW_ACK: Duration = Duration::from_millis(1_500);
+
+/// A subscriber that leaves before a slow provider's acknowledgement does not
+/// take what that acknowledgement teaches the relay with it: one that comes
+/// past its budget still lengthens the relay's wait for the next, as if the
+/// subscriber had stayed, so the next subscribe that provider answers as
+/// slowly is served.
+#[tokio::test]
+async fn a_subscriber_that_leaves_does_not_take_a_late_acknowledgement_with_it() {
+    let relay = InProcessRelay::start(auth_config()).await;
+    let key = "late-ack-backend";
+
+    let control = TcpStream::connect(relay.addr).await.unwrap();
+    let (mut reader_stream, mut writer_stream) = control.into_split();
+    let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+        register_control_conn_parts(&mut reader, &mut writer, key).await;
+    }
+    let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+
+    let mut first = subscribe(relay.addr, key).await;
+    let request = read_stream_request(&mut reader, "provider").await;
+    first.shutdown().await.unwrap();
+    tokio::time::sleep(SLOW_ACK).await;
+    acknowledge(&mut writer, request).await;
+    closed_by_relay(&mut first).await;
+
+    // A second past the stream request: inside what the relay learned, and
+    // 400 ms past the 600 ms it would wait without it.
+    let mut second = subscribe(relay.addr, key).await;
+    let request = read_stream_request(&mut reader, "provider").await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    acknowledge(&mut writer, request).await;
+    let _stream = open_stream(relay.addr, key, request).await;
+    let mut second_reader = get_header_msg_reader(&mut second).unwrap();
+    let response = timeout(READY, second_reader.read_msg())
+        .await
+        .expect("the second subscriber was neither served nor refused")
+        .expect("the relay closed the second subscriber's connection unanswered");
+    assert!(
+        matches!(
+            PbConnResponse::decode(response).unwrap(),
+            PbConnResponse::Subcribe { .. }
+        ),
+        "the relay did not learn from an acknowledgement that came after its subscriber had left"
     );
 
     relay.stop().await;
