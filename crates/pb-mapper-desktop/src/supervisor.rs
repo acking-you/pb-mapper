@@ -205,6 +205,25 @@ enum Next {
     Done,
 }
 
+/// What [`Supervisor::ended`] keeps from one poll of a viewer to the next.
+struct Following {
+    /// The remembered control choice went to this viewer, or was not needed.
+    handed: bool,
+    /// Control lost on the host's side is asked for again.
+    again: bool,
+    /// When control was last asked for.
+    asked: Option<Instant>,
+}
+impl Default for Following {
+    fn default() -> Self {
+        Self {
+            handed: false,
+            again: true,
+            asked: None,
+        }
+    }
+}
+
 /// A viewer kept connected by a [`Reconnect`] policy. It connects, waits for
 /// each viewer to end or stall, and connects again as the policy says,
 /// keeping the control choice and the preset; after a decoder failure on
@@ -274,59 +293,75 @@ impl Supervisor {
     /// Control is the app's to choose ([`ViewerStatus::control_wanted`]):
     /// the remembered choice goes to a viewer the app has not asked yet, once
     /// its picture is current, and the supervisor never asks against what the
-    /// app asked. Control the app wants but lost on the host's side (a pause,
-    /// input congestion, a refusal) is asked for again, at most once a second,
-    /// until the host's input fails or the host allows no control, as in the
-    /// app; holding control again resumes that. The next viewer starts with
-    /// the app's choice, unless those requests had stopped.
+    /// app asked, even between a poll and the request it led to. Control the
+    /// app wants but lost on the host's side (a pause, input congestion, a
+    /// refusal) is asked for again, at most once a second, until the host's
+    /// input fails or the host allows no control, as in the app; holding
+    /// control again resumes that. The next viewer starts with the app's
+    /// choice, unless those requests had stopped.
     pub async fn ended(&mut self, viewer: &Viewer) -> ViewerStatus {
         let mut ticks = tokio::time::interval(POLL);
-        let mut handed = false;
-        // Control lost on the host's side is asked for again.
-        let mut again = true;
-        let mut asked: Option<Instant> = None;
+        let mut following = Following::default();
         loop {
             ticks.tick().await;
             let status = viewer.status();
-            if status.controlling {
-                again = true;
-            } else if status.reason == Some(ViewerReason::InputFailed)
-                || (status.fresh && !status.control_allowed)
-            {
-                again = false;
+            let Some(stalled) = self.follow(viewer, &status, &mut following) else {
+                continue;
+            };
+            if stalled {
+                let _ = viewer.stop().await;
             }
-            if !handed && status.control_wanted.is_none() && status.fresh {
-                handed = true;
-                asked = Some(Instant::now());
-                if self.control && again && viewer.request_control(true).is_err() {
-                    // Stopped meanwhile: the choice is kept for the next one.
-                    handed = false;
-                }
-            }
-            self.control = status.control_wanted.unwrap_or(self.control) && again;
-            let stalled = self.reconnect.stalled(&status);
-            if stalled || status.state == ViewerState::Stopped {
-                if stalled {
-                    let _ = viewer.stop().await;
-                }
-                let retry = self.reconnect.after(&status, Instant::now());
-                self.schedule(retry);
-                return status;
-            }
-            self.config.quality = status.quality;
-            if status.state == ViewerState::Streaming && status.presented.is_some() {
-                self.reconnect.connected();
-            }
-            if again
-                && status.control_wanted == Some(true)
-                && status.fresh
-                && !status.controlling
-                && asked.is_none_or(|at| at.elapsed() >= CONTROL_RETRY)
-            {
-                asked = Some(Instant::now());
-                let _ = viewer.request_control(true);
+            let retry = self.reconnect.after(&status, Instant::now());
+            self.schedule(retry);
+            return status;
+        }
+    }
+    /// One poll of [`Self::ended`], on the `status` it just read of
+    /// `viewer`: `Some(stalled)` once the viewer stopped or stalled. A
+    /// request for control is made only if the app's choice is still the
+    /// one `status` read when the viewer takes it.
+    fn follow(
+        &mut self,
+        viewer: &Viewer,
+        status: &ViewerStatus,
+        following: &mut Following,
+    ) -> Option<bool> {
+        if status.controlling {
+            following.again = true;
+        } else if status.reason == Some(ViewerReason::InputFailed)
+            || (status.fresh && !status.control_allowed)
+        {
+            following.again = false;
+        }
+        if !following.handed && status.control_wanted.is_none() && status.fresh {
+            following.handed = true;
+            following.asked = Some(Instant::now());
+            if self.control && following.again && viewer.ask_control(None).is_err() {
+                // Stopped meanwhile: the choice is kept for the next one.
+                following.handed = false;
             }
         }
+        self.control = status.control_wanted.unwrap_or(self.control) && following.again;
+        let stalled = self.reconnect.stalled(status);
+        if stalled || status.state == ViewerState::Stopped {
+            return Some(stalled);
+        }
+        self.config.quality = status.quality;
+        if status.state == ViewerState::Streaming && status.presented.is_some() {
+            self.reconnect.connected();
+        }
+        if following.again
+            && status.control_wanted == Some(true)
+            && status.fresh
+            && !status.controlling
+            && following
+                .asked
+                .is_none_or(|at| at.elapsed() >= CONTROL_RETRY)
+        {
+            following.asked = Some(Instant::now());
+            let _ = viewer.ask_control(Some(true));
+        }
+        None
     }
     /// The control choice the next viewer starts with, asked for once its
     /// picture is current unless the app asked that viewer first. During
@@ -679,6 +714,37 @@ mod tests {
         };
         let (_, ()) = tokio::join!(supervisor.ended(&viewer), script);
         assert!(!supervisor.control);
+        renderer.join().unwrap();
+    }
+
+    /// The supervisor acts on the status it read a moment before, and a
+    /// choice the app made since stands: a view-only choice made in between
+    /// is overridden neither by handing the remembered choice to a viewer
+    /// the app had not asked yet, nor by asking again for control wanted
+    /// but not held.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_choice_made_after_the_supervisor_read_the_status_stands() {
+        let (_relay, host, mut supervisor, viewer) =
+            supervised("desktop-supervisor-stale", false).await;
+        let renderer = present(&viewer, Arc::default());
+        let read = status_until(&viewer, |status| status.fresh).await;
+        assert_eq!(read.control_wanted, None);
+        viewer.request_control(false).unwrap();
+        let mut following = Following::default();
+        assert_eq!(supervisor.follow(&viewer, &read, &mut following), None);
+        let wanted = viewer.status().control_wanted;
+        assert_eq!(wanted, Some(false), "handed the remembered choice");
+
+        viewer.request_control(true).unwrap();
+        // Not granted yet: the host has not even heard the request.
+        let read = viewer.status();
+        assert!(read.control_wanted == Some(true) && read.fresh && !read.controlling);
+        viewer.request_control(false).unwrap();
+        following.asked = None;
+        assert_eq!(supervisor.follow(&viewer, &read, &mut following), None);
+        let wanted = viewer.status().control_wanted;
+        assert_eq!(wanted, Some(false), "asked again for control given up");
+        host.stop().await.unwrap();
         renderer.join().unwrap();
     }
 

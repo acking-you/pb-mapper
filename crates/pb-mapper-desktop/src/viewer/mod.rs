@@ -558,6 +558,27 @@ impl Viewer {
                 Ok(())
             };
         }
+        self.set_control(&mut state, enabled);
+        Ok(())
+    }
+
+    /// The supervisor's request for control, decided under the state lock:
+    /// made only while the app's choice is still `seen`, the one the
+    /// supervisor read, and control is not held, so that whatever the app
+    /// asked since stands. Fails once the session stopped.
+    pub(crate) fn ask_control(&self, seen: Option<bool>) -> Result<()> {
+        let mut state = self.shared.state.lock();
+        if self.cancel.is_cancelled() || state.stopped.is_some() {
+            return Err(error("desktop session is disconnected"));
+        }
+        if state.control_wanted == seen && !state.controlling() {
+            self.set_control(&mut state, true);
+        }
+        Ok(())
+    }
+
+    /// Take `enabled` as the app's choice and push its barrier.
+    fn set_control(&self, state: &mut ViewerStateSlot, enabled: bool) {
         state.control_requested = enabled;
         state.control_wanted = Some(enabled);
         if enabled {
@@ -571,7 +592,6 @@ impl Viewer {
         } else {
             Barrier::Revoke
         });
-        Ok(())
     }
 
     /// Release every held key and button on the host. Repeated releases
