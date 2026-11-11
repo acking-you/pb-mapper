@@ -268,8 +268,10 @@ impl<T: Transport> Backend for RemoteBackend<T> {
         if self.shapes && self.shape_serial == self.fetched_shape {
             return Ok(None);
         }
-        self.shapes = true;
+        // Until an ask is answered, the worker may not read shapes yet: the
+        // next tick asks again.
         let answer = self.call(Request::CursorShape {})?;
+        self.shapes = true;
         self.fetched_shape = self.shape_serial;
         answer
             .shape

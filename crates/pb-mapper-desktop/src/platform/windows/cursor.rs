@@ -317,6 +317,36 @@ fn compose(color: Option<&[u8]>, masks: &[u8], width: u32, height: u32) -> Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::{
+        System::Threading::{GR_GDIOBJECTS, GetCurrentProcess, GetGuiResources},
+        UI::WindowsAndMessaging::{CreateCursor, DestroyCursor},
+    };
+
+    /// Reading a colour cursor (the system arrow) and a monochrome one
+    /// releases every GDI object it makes.
+    #[test]
+    fn reading_a_cursor_leaks_no_gdi_object() {
+        let (and, xor) = ([0xFF_u8; 128], [0_u8; 128]);
+        let mono =
+            unsafe { CreateCursor(None, 1, 1, 32, 32, and.as_ptr().cast(), xor.as_ptr().cast()) }
+                .unwrap();
+        let arrow = unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap();
+        let objects = || unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
+        let read = || {
+            for cursor in [arrow, mono] {
+                read_shape(cursor, CursorKind::Custom).unwrap();
+            }
+        };
+        read();
+        let before = objects();
+        for _ in 0..100 {
+            read();
+        }
+        // Other tests of this process may hold a few for a moment; a leak
+        // here would be hundreds.
+        assert!(objects() < before + 20, "{before} -> {}", objects());
+        unsafe { DestroyCursor(mono) }.unwrap();
+    }
 
     /// A monochrome cursor: black, white, clear and an inverting pixel,
     /// which shows black with a white outline where it was clear.
