@@ -13,8 +13,9 @@ policy. The development process is not elevated; it cannot approve its own UAC
 prompt. Android validation uses the Windows machine's Android VM, as requested
 by the user. This does not establish physical-phone or iOS support, independent
 cross-NAT operation, or the same presentation rate on every target device. The
-macOS host and the macOS and iOS viewers have not run on Apple hardware, and
-the Linux viewer has run only in WSL2 (see
+macOS host and the macOS and iOS viewers are compiled, linked and unit-tested
+in CI but have never run on a real Mac or iPhone, and the Linux viewer has run
+only in WSL2 (see
 [Measurements and remaining acceptance](#measurements-and-remaining-acceptance)).
 
 The performance milestone is **1080p direct viewing at or near 90 presented
@@ -133,9 +134,13 @@ runs, and resumes with the app when **Share this computer** was left on.
 - While a viewer watches, the app holds off App Nap and timer coalescing and
   keeps the display awake; a viewer that only watches could not wake it.
 
-None of this has run on a Mac yet. It has been type-checked and linted for
-macOS from Linux, without linking; CI's `rust-macos-desktop` job is the first
-to build and test it on macOS.
+None of this has run on a real Mac yet. CI compiles, links and unit-tests it
+on a macOS runner: the VideoToolbox encoder (keyframes only when asked, each
+with its parameter sets), the display list, and reading the system pointer
+off the main thread in a window-server session. The app with the FFI library
+that carries this host also builds there. What needs a Mac and its owner
+(the permissions and their prompts, capture, input, display modes, the
+sandbox, the Keychain) has not been checked.
 
 ## Gestures, keys and modifiers
 
@@ -414,8 +419,8 @@ screen says nothing about the size a desktop should run at.
   `kCGConfigureForAppOnly`, so macOS itself puts the mode back when the app
   ends, a crash included; the journal entry's scope is the process, so a dead
   process's entry is dropped, never replayed. **Original** and the restores
-  above put back the exact mode found (pixels, scale and refresh). Not yet run
-  on a Mac.
+  above put back the exact mode found (pixels, scale and refresh). The mode
+  list is unit-tested in CI; changing a mode has not run on a Mac.
 
 The SDK side is `Viewer::set_display_mode(ModeTarget)`, which answers the mode
 it asked for or a `DisplayModeError` (`Closed`, `NotOffered`,
@@ -883,7 +888,8 @@ does not require Flutter or a POCOX runtime.
 
 The host is split by platform at compile time; the engine, the session,
 QoS, credit, the protocol, the viewer and the SDK name no operating system.
-Windows and macOS are implemented; macOS has not yet run on a Mac. This
+Windows and macOS are implemented; macOS is compiled, linked and unit-tested
+in CI but has never run on a real Mac. This
 section is the guide for the next ones (Linux, Android), in the spirit of
 RustDesk's per-platform services but monomorphised: no per-frame dynamic
 dispatch.
@@ -948,7 +954,7 @@ crates/pb-mapper-desktop/src/
   privileged/                                    public helper facade
 ```
 
-| Part | Windows | macOS (not yet run) |
+| Part | Windows | macOS (unit-tested in CI, not run on a Mac) |
 | --- | --- | --- |
 | `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope | `CGDirectDisplayID` from `CGGetActiveDisplayList`, named by its UUID, which finds it again; `CGDisplayBounds` × the current mode's pixels per point; a session that is not on the console, or a locked screen, is the secure desktop |
 | `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`), drained every 2 ms | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
@@ -1104,7 +1110,8 @@ the bitrate is set live, and sample times follow the real capture interval.
 GPU scaling preserves aspect ratio and never upscales; input and cursor
 coordinates still use the physical `Display` geometry.
 
-macOS hosting (not yet run on a Mac) uses ScreenCaptureKit, which scales the
+macOS hosting (its encoder unit-tested in CI; not run on a real Mac) uses
+ScreenCaptureKit, which scales the
 display to the encoder's size and delivers NV12 (BT.709) without the cursor;
 its output queue keeps only the newest complete picture, and thread C's
 capture call hands that IOSurface to a `VTCompressionSession` without a copy,
@@ -1849,7 +1856,8 @@ whose VUI names no colour matrix is read as BT.709, which every pb-mapper
 host encodes.
 
 **macOS and iOS** (`ui/darwin/DesktopVideo.swift`, compiled into both
-runners; not yet built or run). One decoder thread per attached source pulls
+runners; CI builds both apps with it, but it has never run on a device). One
+decoder thread per attached source pulls
 with a 50 ms timeout and decodes synchronously in real time, so nothing is
 reordered or held back. The runner turns Annex B into 4-byte length-prefixed
 samples in one reused buffer and keeps the parameter sets of the last
@@ -1865,7 +1873,13 @@ as a failure. Log lines start with `PbDesktopVideo:`. The iOS app links the
 whole FFI static library and keeps its symbols (`-force_load`,
 `-Wl,-export_dynamic` in `ui/ios/Flutter/PbMapperFfi.xcconfig`): Dart and the
 decoder find every symbol by name at run time, so before this the linker took
-none of the library and every lookup would have failed.
+none of the library and every lookup would have failed. CI's `ios-app` job
+builds the app without signing and checks that it exports the FFI's entry
+points. The iOS FFI is built without netdev, which does not compile for iOS
+(libc defines its `in6_ifreq` for macOS only): there, LAN-first ranks
+interfaces by their names and address ranges, and the app maps no router
+port (`PortMapping::Auto` never asks, `Always` is refused), as an SDK built
+without `port-mapping` does.
 
 **Linux** (`ui/linux/runner/desktop_video.cc` for the channel and the
 texture; the GStreamer module `libpb_mapper_desktop_video.so`, built from
@@ -1910,11 +1924,50 @@ What each platform's new code has been through:
   - `Text("a\nb\tc")` read back `a\r\nb\tc`, where the old path typed
     `a\r\n\r\nb\t\tc`;
   - physical keys typed `hi!` by the active layout;
-  - through the same keys, Microsoft Pinyin composed `ni`;
+  - through the same keys, the active input method (WeType on this PC)
+    composed `ni`;
   - held keys were released at the disconnect.
-- **Windows app.** The app's local input method, the candidates' placement,
-  the remote-mode IME switch and the pointer's look were not run on screen;
-  widget tests cover them.
+- **Windows app.** The real app (the acceptance entry of
+  `ui/tool/desktop_viewer_acceptance.dart`) viewed `desktop_ui_host`, a host
+  that replays a recorded clip in five bands, one pointer shape each, and logs
+  every input it applies (see
+  [the acceptance procedure](../scripts/test/desktop-ui-acceptance.md)). It
+  ran over the relay on loopback.
+  - Passed:
+    - the picture through the native texture at 60 FPS;
+    - viewing without control, the host's shape (arrow, I-beam, resize, hand
+      and the custom bitmap, pixel for pixel) painted at the host's pointer;
+    - in control with the host's pointer elsewhere, the same;
+    - a host without `cursor_shape` drew the generic arrow;
+    - in the local mode, typed letters reached the host as text, a lone
+      Shift sent nothing, and Enter and Backspace went as keys;
+    - in the remote mode, the same keys went as physical keys, Shift at once
+      and a lone Win not at all;
+    - the Shortcuts menu for a Windows host and for a Mac host (the swap
+      entry, and **Switch input method** as Win+Space or Ctrl+Space);
+    - **Type text…**.
+  - The run found that the local mode lost every printable key on Windows:
+    the embedder refuses a text-input client that names no view. The client
+    now names its view, as `EditableText` does.
+  - Not run:
+    - the local pointer taking the host's shape over the picture, and one
+      pointer showing;
+    - real keystrokes through the input method (composition at the remote
+      pointer, the candidates, Enter and Backspace while composing, Chinese
+      punctuation);
+    - Ctrl+C from a real keyboard;
+    - the window's input method coming back after the remote mode.
+
+    Pending Windows Firewall prompts dimmed the screen, so neither the real
+    pointer nor real keys could reach the app. The input was posted to the
+    app's view instead, which bypasses the input method.
+- **Android viewer.** The Android emulator ran the same entry against the
+  same host.
+  - Passed: the painted shapes, standard and custom; trackpad strokes moving
+    the host's pointer; the soft keyboard's committed text and Backspace.
+  - The emulator presented only 5 FPS at 640×360, and not at 720p.
+  - Pinch zoom could not be injected, so the bitmap's growth with zoom was
+    not seen; its 32-logical-pixel minimum was.
 - **Helper.** The helper at protocol 8 is tested over an in-memory pipe
   with a synthetic worker, not installed.
 - **Linux viewer.** It ran in WSL2 (WSLg) on this machine, through the RTX
@@ -1925,10 +1978,14 @@ What each platform's new code has been through:
   their limits are in
   [the 2026-11-12 record](benchmarks/2026-11-12-remote-desktop-platforms/README.md#the-viewers).
   VA-API, V4L2 and a real Linux desktop have not run.
-- **macOS host.** Type-checked and clippy-clean for `aarch64-apple-darwin`
-  from WSL (zig as the C compiler), without linking; its pure parts are
-  tested on Windows and Linux. Not built, linked or run on a Mac.
-- **macOS and iOS viewers.** The Swift is written and reviewed, not compiled.
+- **macOS host.** Compiled, linked, linted and unit-tested on a macOS
+  runner in CI. The unit tests cover the VideoToolbox encoder, the display
+  list, and the system pointer read off the main thread in a window-server
+  session. Its pure parts are also tested on Windows and Linux. It has
+  never run on a real Mac.
+- **macOS and iOS viewers.** CI builds the macOS app and the unsigned iOS
+  app with the Swift decoder. The iOS app links the FFI static library and
+  exports its entry points. Neither has run on a device.
 - **Older peers.** A host and a viewer of this revision each ran against
   the other side built from the tree before it (`151ed8d7`, 0.11.0's desktop
   protocol), with the SDK's synthetic host (`desktop_loopback --serve`) and
@@ -1937,11 +1994,14 @@ What each platform's new code has been through:
   physical keys toward an older peer are covered by tests: the 0.11 bytes for
   a viewer without `cursor_shape`, and the viewer's refusal toward a host
   without `physical_keys`.
-- **iOS FFI library.** The iOS FFI static library does not compile as
-  locked: netdev 0.46.3, reached through `pb-mapper-client` and portmapper,
-  uses `libc::in6_ifreq` for every Apple target, while libc 0.2.190 defines it
-  for macOS only. So no iOS app can be built until that is resolved; it
-  predates this revision.
+- **iOS FFI library.** It is built without netdev.
+  - Why: netdev 0.46.3 uses `libc::in6_ifreq` for every Apple target, but
+    libc defines that type for macOS only. So no iOS FFI had compiled since
+    netdev came in, in 0.10.0.
+  - The cost: the iOS app ranks LAN interfaces by name and address range,
+    and maps no router port.
+  - This lasts until netwatch takes a netdev that gates the type (netdev
+    0.47) or libc defines it for iOS.
 
 None of macOS or iOS has been measured. The data paths were measured before
 and after on Windows in
@@ -2111,12 +2171,12 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Input / Unicode / touch mapping | Build 922's PR #51 gestures and text/scroll reached a benign Windows target from the Android VM; the current gestures, physical-device and secure-desktop acceptance outstanding |
 | Direct and forced relay | Android VM runtime baselines above and deployed TCP experiments recorded; independent cross-network UI acceptance outstanding |
 | Android viewer | Native MediaCodec/Flutter texture path exercised in an Android VM; physical phone validation outstanding |
-| iOS viewer | Native VideoToolbox path and the FFI link fix written; never built or run (the iOS FFI static library does not compile as locked, see [This revision: platforms](#this-revision-platforms)); device validation outstanding |
-| macOS viewer | Native VideoToolbox path written; never built or run; a Mac's validation outstanding |
-| Linux viewer | Native GStreamer path ran in WSL2 (WSLg) with NVDEC and gst-libav, against a host replaying recorded clips; VA-API, V4L2 and a real Linux desktop outstanding |
-| macOS host | Written and tested in its pure parts on Windows and Linux, type-checked and linted for macOS without linking; never built or run on a Mac |
-| Pointer shapes | Windows host's shapes read over an owned window through a viewer, the custom one pixel for pixel; the app's rendering only in widget tests; macOS host's not run |
-| Keyboard modes and physical keys | Windows host injection, line breaks and Microsoft Pinyin composition through physical keys checked in an owned window; the app's text client and candidate placement only in widget tests |
+| iOS viewer | Native VideoToolbox path; the app, linking the FFI static library (built without netdev, so no port mapping on iOS), is built unsigned in CI with its exports checked; device validation outstanding |
+| macOS viewer | Native VideoToolbox path; the app is built in CI; a Mac's validation outstanding |
+| Linux viewer | Native GStreamer path ran in WSL2 (WSLg) with NVDEC and gst-libav, against a host replaying recorded clips; CI builds the app and decodes clips with software decoders; VA-API, V4L2 and a real Linux desktop outstanding |
+| macOS host | Compiled, linked and unit-tested in CI on a macOS runner (the encoder, the display list, the pointer read in a window-server session); never run on a real Mac |
+| Pointer shapes | Windows host's shapes read over an owned window through a viewer, the custom one pixel for pixel; the Windows app and the Android emulator paint the host's shapes; the local pointer taking the shape in control not run on a real screen; macOS host's not run on a Mac |
+| Keyboard modes and physical keys | Windows host injection, line breaks and the active input method's (WeType) composition through physical keys checked in an owned window; in the Windows app, local-mode text, the remote mode's physical keys, the modifier rules and the Shortcuts menu checked with input posted to the app's view; real keystrokes through the input method, composition and candidate placement outstanding |
 | Elevated windows / secure-desktop UAC | Helper implemented; default-policy administrator and standard-user prompt acceptance outstanding |
 | Remembered app-owned host policy | Current-user DPAPI; requires signed-in user and running app |
 | Windows service-owned background host | Final build 922 passed upgrade restart, live direct/relay delivery with its UI exited, and persistent Stop/Enable with the same invitation; OS boot, standalone SCM restart and sleep/resume acceptance pending |
@@ -2201,7 +2261,7 @@ it is not loaded as a privileged entry point into the Flutter process.
 
 Build macOS with `make build-ui-macos-release` and iOS with
 `make build-pb-mapper-ffi-ios`, then Xcode (`ui/ios/Runner.xcworkspace`);
-neither has been built yet with the native video path. For Linux,
+CI's `macos-app` and `ios-app` jobs build both, the iOS one unsigned. For Linux,
 `make build-ui-linux-release` builds the GStreamer module when `pkg-config`
 finds `gstreamer-1.0`, `gstreamer-app-1.0` and `gstreamer-video-1.0`
 (Debian and Ubuntu: `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev`),

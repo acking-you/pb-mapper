@@ -255,7 +255,8 @@ Nothing in the SDK crates knows it exists.
     (it cannot use the testkit, which depends on it), and the pin on the
     status callbacks' text
   - `direct/` (feature `p2p`): direct sessions. `lan.rs` ranks interfaces
-    (netdev, read in the background) and judges from a peer's candidates
+    (netdev, read in the background; on iOS, where netdev does not build,
+    by names and address ranges alone) and judges from a peer's candidates
     whether it shares a LAN; `candidates.rs` orders what is offered, LAN
     first; `socket.rs` and `endpoint/` (STUN discovery in `discovery.rs`,
     the dialing race in `dial.rs`) probe and dial each path as it answers;
@@ -368,7 +369,8 @@ Nothing in the SDK crates knows it exists.
     `GetIconInfo`/`GetDIBits`), `still`, `waiter`, `timer`, `mf`, `dpapi`
     (the one DPAPI call every Windows store uses), `win32` (the Win32 glue
     the host and the helper share), `modes.rs` and `helper/`
-  - `platform/macos/` (macOS 12.3 or later; not yet run on a Mac): `mod.rs`
+  - `platform/macos/` (macOS 12.3 or later; compiled, linked and
+    unit-tested in CI, not run on a real Mac): `mod.rs`
     (`Macos`, its `support()` and the Screen Recording and Accessibility
     permissions), `capture.rs` (ScreenCaptureKit) and `encoder.rs`
     (`VTCompressionSession`) fused in `video.rs`, which pushes; `desktop.rs`
@@ -496,7 +498,13 @@ Nothing in the SDK crates knows it exists.
   remote desktop. `examples/desktop_{loopback,host,viewer,control,
   supervised,display_mode}.rs` with `examples/desktop_support/` (in-process
   relay, synthetic `Backend`, renderer thread); `desktop_loopback` runs on
-  any OS and in the Linux CI job. `tests/default_path.rs` pins LAN → direct
+  any OS and in the Linux CI job. `desktop_ui_host` is the safe host for
+  checking the viewer apps on a real screen: a recorded clip as the desktop,
+  a pointer shape per band, every input logged, and `controller.json` for
+  the acceptance entry (`scripts/test/desktop-ui-acceptance.md`). The FFI
+  takes this crate with `desktop`, `p2p` and `relay-quic`, and with
+  `port-mapping` everywhere but iOS; the workspace dependency on it has its
+  default features off. `tests/default_path.rs` pins LAN → direct
   → relay as every entry point's default; `pb-mapper-client` alone is
   relay-only, as its crate docs say
 
@@ -836,7 +844,11 @@ The design and its rules are in `docs/ui-design.md`.
     `dlopen`, and the app could not load it. The iOS app links the static
     library whole and keeps its symbols (`ui/ios/Flutter/PbMapperFfi.xcconfig`,
     included by both xcconfigs), since everything is looked up by name at
-    run time; the macOS dylib links ScreenCaptureKit weakly (`build.rs`)
+    run time. For iOS the library is built without netdev, which does not
+    compile there: `port-mapping` comes only from a
+    `cfg(not(target_os = "ios"))` table, so an iOS app maps no router port
+    (`Auto` never asks, `Always` is refused). The macOS dylib links
+    ScreenCaptureKit weakly (`build.rs`)
   - `unwrap_used` and `expect_used` are `deny` here — see its `Cargo.toml`
 
 - **`native/pb_mapper_galaxy/`**: The galaxy's per-frame geometry. Its
@@ -1122,7 +1134,8 @@ docker-compose -f docker/docker-compose.yml up
   `ComputerKeystore`. `gradlew` is git-ignored; `flutter build apk
   --config-only` in `ui/` writes it. CI's `android-check` job runs them
 - **Device acceptance**: `scripts/test/desktop-ui-acceptance.md` (the viewer and
-  its native decoder on devices, against a test host) and
+  its native decoder on devices, against a test host; `desktop_ui_host` is the
+  safe one for pointer shapes and keys) and
   `scripts/test/windows-helper-acceptance.md` (the helper, UAC and Winlogon on an
   isolated Windows VM) — manual procedures. `cargo run -p pb-mapper-desktop
   --example display_mode_probe` changes the display it runs on and puts it

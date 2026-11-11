@@ -65,7 +65,7 @@ sequenceDiagram
 - CLI：`register` 或 `connect` 加 `--port-mapping off|auto|always`；不带值即 `always`。
 - Rust SDK：在 `RegisterOptions` 或 `ConnectOptions` 中设置 `port_mapping: PortMapping::{Auto, Always, Off}`。`port-mapping` Cargo feature 默认开启；关闭后 `Auto` 不会请求，`Always` 会被拒绝。
 - Node：在 `register` 或 `connect` 请求中设置 `portMapping: "auto" | "always" | "off"`。
-- 应用：隧道「更多选项」里「允许直连」（或「优先直连」）下方的「端口映射」：关闭、自动或始终。选择随隧道保存，关闭直连时也会保留。
+- 应用：隧道「更多选项」里「允许直连」（或「优先直连」）下方的「端口映射」：关闭、自动或始终。选择随隧道保存，关闭直连时也会保留。iOS 应用不做端口映射：在那里「自动」从不请求路由器，「始终」会被拒绝，因为查找网关的库无法为 iOS 构建。
 
 两台电脑在同一 Wi-Fi 或局域网时，直连会先尝试这个网络：先探测对端在其中的地址，并在 20、50 ms 后补发；一旦确知局域网存在（对端提交的地址足以证明，或某个局域网地址已回应认证探测），其他路径最多等它 150 ms。两个家庭只是网段编号相同，彼此的探测永远不会有回应，因此不会等待。默认开启，每一端各自决定；由发起连接、负责拨号的一端选路。关闭后，按对端提交的顺序探测，哪条路径先回应就立即拨哪条。各端提交的地址、路径的上报方式都不变。
 
@@ -326,7 +326,7 @@ flutter run
 
 **指针** 会显示对方的形状（文字上是 I 形光标，链接上是手形，窗口边缘是缩放箭头）。在桌面端操控时，你自己的指针移到画面上就会变成这个形状；手机上则把它画出来。对方的 pb-mapper 版本较旧时显示普通箭头。
 
-**尚未在真机上验证：** 共享 Mac，以及在 Mac、iPhone、iPad 上查看；Linux 查看端只在 WSL 下运行过。各项在哪里验证过见[远程桌面](remote-desktop.md#measurements-and-remaining-acceptance)（英文）。
+**尚未在真机上验证：** 共享 Mac，以及在 Mac、iPhone、iPad 上查看。这些代码已在 CI 中于苹果系统上编译、链接并通过单元测试，但从未在真实的 Mac 或 iPhone 上运行过。Linux 查看端只在 WSL 下运行过。各项在哪里验证过见[远程桌面](remote-desktop.md#measurements-and-remaining-acceptance)（英文）。
 
 **在 Windows 上安装与更新。** 安装程序会安装 pb-mapper（允许管理员提示时为所有用户安装），并在开始菜单添加「pb-mapper」。0.11.0 的安装程序让快捷方式启动的是桌面辅助程序，它不显示任何窗口，于是 pb-mapper 看起来没装上，登录时也不会启动：请手动安装一次 0.12.0（0.11.0 的应用内更新仍走旧流程），如果固定过任务栏，请重新固定。从 0.12.0 起，应用里的 **更新** 会保持应用打开，直到 Windows 允许安装，然后重新打开应用。如果在桌面服务共享本机时手动升级，请退出旧窗口，从开始菜单打开 pb-mapper，再在远程桌面页更新桌面服务。
 

@@ -204,7 +204,8 @@ a bearer token; control is a separate permission the host allows and the viewer
 asks for. Hosting is Windows, with GPU H.264 and H.265 and an opt-in
 privileged helper for UAC and the lock screen, and macOS 12.3 or later, with
 ScreenCaptureKit and VideoToolbox once the owner granted Screen Recording (and
-Accessibility for control; not yet run on a Mac); viewing runs anywhere. Both ends
+Accessibility for control; compiled and unit-tested in CI, never run on a real
+Mac); viewing runs anywhere. Both ends
 take the tunnel defaults: LAN first, then direct, then the relay. Nothing
 captures or injects until a host is started and an authorized viewer connects,
 and an SDK built without the feature carries none of it. The helper's real UAC
@@ -231,11 +232,12 @@ acceptance and the 60+ FPS end-to-end UI target are still unverified. See the
 | Example | Runs where | Shows |
 | --- | --- | --- |
 | `desktop_loopback` | any OS, no setup | A relay, a host of an example-defined `Backend` and a viewer in one process: control, a move, a click and chunked text the backend records, a preset change, pause and resume, a display fitted to the viewer and put back when it leaves, status and metrics. `--serve` hosts the synthetic desktop for the examples below |
-| `desktop_host` | Windows, and macOS 12.3 or later (not yet run there); elsewhere it prints `host_support().reason` | `HostOptions::new`, `--display`, `--allow-control`, `--relay-only`, `--privileged`, `--identity DIR` (a `TrustFile`); the invitation; a `watch()` loop; Ctrl+C stops |
+| `desktop_host` | Windows, and macOS 12.3 or later (never run on a real Mac); elsewhere it prints `host_support().reason` | `HostOptions::new`, `--display`, `--allow-control`, `--relay-only`, `--privileged`, `--identity DIR` (a `TrustFile`); the invitation; a `watch()` loop; Ctrl+C stops |
 | `desktop_viewer` | any OS | `ViewerConfig::for_decoders` for an H.264 decoder; every `ConnectError`; a thread recording Annex B to `remote.h264` for `ffplay`; status and metrics; `--resolution`, `--quality`, `--relay-only`, `--lan-transport` |
 | `desktop_control` | any OS, against a host you own | Taking control, `display_point`, batches, `text_chunks`, every `InputError`, `release_input` on the way out |
 | `desktop_supervised` | any OS, no setup | `Supervisor` through an H.265 decoder failure, a host restart, a stall and a stop |
 | `desktop_display_mode` | any OS, against a host you own; `desktop_loopback --serve` is the safe one | The host display's `ModeList`; `--fit WxH`, `--mode WxH`, `--original`; a `DisplayModeError` the viewer refuses with, and the host's refusal notice; the mode put back at the disconnect |
+| `desktop_ui_host` | any OS, with a recorded H.264 clip | A host whose desktop is the clip, never this computer's: a pointer shape per fifth of the display (arrow, I-beam, resize, hand, custom), every input and shape it applies logged, `--no-shapes`, `--macos`, `--view-only`, `--wander`, `--relay-only`; for checking the viewer apps on a real screen (`scripts/test/desktop-ui-acceptance.md`) |
 
 `cargo run -p pb-mapper --features desktop --example desktop_loopback` needs no
 relay of your own and runs in CI.

@@ -106,7 +106,9 @@ proxy.
   `connect` request.
 - App: **Port mapping** under **Allow direct connections** (or **Try direct
   first**) in a tunnel's **More options**: Off, Auto or Always. It is saved
-  with the tunnel and kept while direct is off.
+  with the tunnel and kept while direct is off. The iOS app maps no port:
+  there Auto never asks the router and Always is refused, because the library
+  that finds the gateway does not build for iOS.
 
 When both computers are on one Wi-Fi or LAN, a direct connection tries that
 network first: the other end's addresses on it are probed first, and again 20
@@ -424,7 +426,7 @@ Closing the window keeps it in the tray; quit from the tray menu.
 
 **The pointer** takes the remote computer's shape (a text beam over text, a hand over links, resize arrows at window edges). While you control from a desktop, your own pointer changes shape over the picture; a phone draws it. A remote computer on an older pb-mapper shows a plain arrow.
 
-**Not yet tried on the devices themselves:** sharing a Mac, and viewing on a Mac, an iPhone or an iPad; the Linux viewer has run only under WSL. See [remote desktop](remote-desktop.md#measurements-and-remaining-acceptance) for what was checked where.
+**Not yet tried on the devices themselves:** sharing a Mac, and viewing on a Mac, an iPhone or an iPad. Their code is compiled, linked and unit-tested on Apple systems in CI, but has never run on a real Mac or iPhone. The Linux viewer has run only under WSL. See [remote desktop](remote-desktop.md#measurements-and-remaining-acceptance) for what was checked where.
 
 **Installing and updating on Windows.** The setup program installs pb-mapper, for every user when you allow its administrator prompt, and adds a "pb-mapper" Start menu entry. The setup of 0.11.0 made its shortcuts start the desktop helper, which shows nothing, so pb-mapper seemed missing and did not start at sign-in: install 0.12.0 by hand once (the in-app update of 0.11.0 still takes its old way), and pin it to the taskbar again if you had pinned it. From 0.12.0 on, **Update** in the app keeps the app open until Windows has allowed the installation, then reopens it. If you upgrade by hand while the desktop service shares this computer, quit the old window, open pb-mapper from the Start menu, and update the desktop service from the Remote desktop page.
 

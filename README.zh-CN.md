@@ -106,8 +106,8 @@ Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/
 
 | 角色 | 目前支持 |
 | --- | --- |
-| 主机 | 装有 Media Foundation 的 Windows：GPU H.265 或 H.264；普通桌面，或经可选的辅助服务连同 UAC 提示和本人的锁屏。macOS 12.3 及以上，在应用里共享：ScreenCaptureKit 采集、VideoToolbox 编码，需要本人授予屏幕录制和辅助功能权限（已实现，尚未在 Mac 上运行） |
-| 应用里的查看端 | 每个平台都原生解码 H.265/H.264：Windows 与 Android（在真机和 Android 虚拟机上运行过），Linux 经 GStreamer（只在 WSL2 中运行过），macOS 与 iOS 经 VideoToolbox（已实现，尚未构建或运行）；没有解码器时以 JPEG 显示画面，最高 8 FPS |
+| 主机 | 装有 Media Foundation 的 Windows：GPU H.265 或 H.264；普通桌面，或经可选的辅助服务连同 UAC 提示和本人的锁屏。macOS 12.3 及以上，在应用里共享：ScreenCaptureKit 采集、VideoToolbox 编码，需要本人授予屏幕录制和辅助功能权限（已在 CI 中编译、链接并通过单元测试；从未在真实的 Mac 上运行） |
+| 应用里的查看端 | 每个平台都原生解码 H.265/H.264：Windows 与 Android（在真机和 Android 虚拟机上运行过），Linux 经 GStreamer（只在 WSL2 中运行过），macOS 与 iOS 经 VideoToolbox（两个应用都已在 CI 中构建；从未在真实的 Mac 或 iPhone 上运行）；没有解码器时以 JPEG 显示画面，最高 8 FPS |
 | SDK 里的查看端 | 任何系统，解码器由你提供 |
 
 **在应用里**：在要共享的电脑上打开**远程桌面**，Windows 选择**开启远程控制**（或**只共享普通桌面**，不安装辅助服务），Mac 在允许卡片要求的权限后选择**共享这台电脑**。私下复制 `pbd1.` 邀请，或把二维码给手机扫：持有邀请的人都能查看，操控是主机另外授予的权限。在另一台设备上选择**添加电脑**（手机上是**扫码添加**或**粘贴邀请**），再点**连接**。查看器的**显示**菜单（手机上在**更多**里）可以设置分辨率、最高帧率和编解码器，打开质量监测（速度、帧率、延迟、码率、编解码器、分辨率），在桌面端操控 Windows 或 Mac 电脑时，还能把对方的分辨率改成**适配本机**。**快捷键 → 输入法** 选择由你自己的输入法还是对方的输入法组字，指针也会显示对方的形状。
