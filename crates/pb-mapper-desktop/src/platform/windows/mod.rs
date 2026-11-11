@@ -97,7 +97,7 @@ pub(crate) fn open_bound(
 fn parts(desktop: desktop::WinDesktop) -> Result<Parts<Windows>> {
     Ok(Parts {
         input: input::WinInput::new()?,
-        cursor: cursor::WinCursor,
+        cursor: cursor::WinCursor::default(),
         modes: modes::WinModes,
         still: still::XcapJpeg,
         desktop,
