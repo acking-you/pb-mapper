@@ -101,6 +101,7 @@ impl Provider {
                 active: active.clone(),
                 reports: Arc::default(),
                 policy,
+                is_datagram,
             },
             spawn_session: spawn_session::<L>,
             network: None,
@@ -151,6 +152,8 @@ struct SessionContext {
     active: Arc<AtomicUsize>,
     reports: Arc<ProviderReports>,
     policy: crate::direct_policy::DirectPolicy,
+    /// Whether the local service is UDP.
+    is_datagram: bool,
 }
 
 /// An admitted offer: what its session starts from.
@@ -435,6 +438,9 @@ where
     // is pending. A simultaneous credential rejection must not tear it down.
     let _active = ActiveSession::new(ctx.active.clone());
     // This is the sole backend dial for direct. No backend is opened while probing.
+    if ctx.is_datagram {
+        crate::udp_timeout::publisher_udp_stream();
+    }
     let dial = L::from_addr(ctx.local.as_slice());
     let local = match tokio::time::timeout_at(committed.deadline, dial).await {
         Ok(Ok(local)) => local,
@@ -906,6 +912,7 @@ mod tests {
                 lan_transport: crate::sdk::LanTransport::Quic,
                 lan_tcp: true,
             },
+            is_datagram: false,
         };
         let offer = Offer {
             network: provider.clone(),

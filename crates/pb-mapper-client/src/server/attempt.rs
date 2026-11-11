@@ -460,6 +460,7 @@ pub(super) async fn run_server_side_cli_inner(
                             namespace,
                             credential,
                             idle_timeout,
+                            is_datagram,
                         },
                         remote_addr.clone(),
                         &diagnostics,

@@ -38,6 +38,8 @@ pub(super) struct StreamConnect {
     pub(super) namespace: Option<u64>,
     pub(super) credential: Credential,
     pub(super) idle_timeout: Option<std::time::Duration>,
+    /// Whether the local service is UDP.
+    pub(super) is_datagram: bool,
 }
 
 /// Starts one forwarded session in a worker's set of sessions.
@@ -119,6 +121,7 @@ where
         namespace,
         credential,
         idle_timeout,
+        is_datagram,
     } = connect;
 
     let offered_v2 = <LocalStream::Item as StreamForward>::supports_data_v2();
@@ -195,6 +198,9 @@ where
     };
 
     // start forward network traffic
+    if is_datagram {
+        crate::udp_timeout::publisher_udp_stream();
+    }
     let mut local_stream = match tokio::time::timeout_at(
         deadline,
         LocalStream::from_addr(local_addr.as_slice()),

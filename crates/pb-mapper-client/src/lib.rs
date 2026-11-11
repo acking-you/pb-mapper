@@ -28,6 +28,7 @@ mod recovery;
 mod direct;
 
 mod relay;
+mod udp_timeout;
 mod worker_status;
 
 #[cfg(test)]

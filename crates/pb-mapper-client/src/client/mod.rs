@@ -9,8 +9,7 @@ pub use crate::worker_status::StatusCallback as ClientStatusCallback;
 
 use crate::diagnostics::Diagnostics;
 use crate::endpoint::RelayEndpoint;
-use std::sync::{Arc, Once};
-use std::time::Duration;
+use std::sync::Arc;
 
 use snafu::ResultExt;
 use tokio::net::TcpStream;
@@ -19,7 +18,6 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uni_stream::stream::TcpStreamImpl;
-use uni_stream::udp::set_custom_timeout;
 
 use self::error::{
     AcceptLocalStreamSnafu, BindLocalListenerSnafu, ConnectSnafu, FetchStatusError, ResolveSnafu,
@@ -243,11 +241,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     remote_addr.start();
     let mut wake = remote_addr.wake();
     diagnostics.network_seen(remote_addr.network_generation());
-    // uni-stream keeps its UDP session timeout in a `static mut` that it reads
-    // once. Write it once per process, so tunnels starting together never
-    // write it at the same time; every write was this same value.
-    static UDP_TIMEOUT: Once = Once::new();
-    UDP_TIMEOUT.call_once(|| set_custom_timeout(Duration::from_secs(120)));
+    crate::udp_timeout::connect_tunnel_starting();
 
     let credential = match pinned_credential {
         Some(credential) => credential,
@@ -579,6 +573,9 @@ mod cancellation_audit {
     }
     #[tokio::test]
     async fn cancelled_udp_accept_must_preserve_the_delivered_peer() {
+        // A connect tunnel's listener: its first stream is ordered after the
+        // timeout is written, as a tunnel's are.
+        crate::udp_timeout::connect_tunnel_starting();
         let listener = uni_stream::udp::UdpListener::bind("127.0.0.1:0")
             .await
             .unwrap();
