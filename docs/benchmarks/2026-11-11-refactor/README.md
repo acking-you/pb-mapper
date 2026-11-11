@@ -8,6 +8,8 @@ Two questions, measured on one machine:
    pure run-time items in the audits' report-only lists: what each change
    does on its own path, before and after, and whether it stays.
 
+Build times before and after are a separate record, [compile-time.md](compile-time.md).
+
 Only measured figures are below. The raw runs are in the `*.txt` files next
 to this one (each run's result lines in run order; the tracing log the
 relay bench prints around them is left out).
