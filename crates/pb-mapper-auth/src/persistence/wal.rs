@@ -119,10 +119,14 @@ pub(crate) fn append_wal(
                 true,
             ))
         })?;
+    // WHY intact: nothing has been written, so the WAL still matches the
+    // state. Refusing this append keeps every record out of a file whose mode
+    // could not be secured without failing the store closed, which would end
+    // the sessions of every live key and need a reset that discards them all.
     #[cfg(unix)]
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .map_err(|error| {
-            WalAppendError::uncertain(AuthFailure::new(
+            WalAppendError::intact(AuthFailure::new(
                 codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to secure `{}`: {error}", path.display()),
                 false,

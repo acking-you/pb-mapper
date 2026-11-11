@@ -451,6 +451,36 @@ async fn admin_lifecycle_covers_high_slot_keys_after_capacity_shrink() {
     stop(runtime).await;
 }
 
+/// A WAL whose mode cannot be set refuses the append, having written nothing,
+/// and the store goes on serving: its state is not in doubt, so it does not
+/// fail closed and end the sessions of every live key.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_wal_whose_mode_cannot_be_set_refuses_the_append_and_keeps_serving() {
+    // Root could change /dev/null's mode, which is the failure this needs.
+    if unix_effective_uid() == 0 {
+        return;
+    }
+    let state_dir = TempPath::new("wal-mode");
+    let (runtime, admin) = start(&config(&state_dir, 4)).await;
+    let live = runtime.issue(&admin, HOUR, None).await.unwrap();
+    let session = authenticate_for_test(&runtime, live.metadata.key_id)
+        .unwrap()
+        .cancellation_token()
+        .unwrap();
+    // A WAL this user can write but does not own, so its mode cannot be set.
+    let wal = state_dir.join("auth.wal");
+    std::fs::remove_file(&wal).unwrap();
+    std::os::unix::fs::symlink("/dev/null", &wal).unwrap();
+
+    let refused = runtime.issue(&admin, HOUR, None).await.unwrap_err();
+    assert_eq!(refused.code, "temporary_key_store_unavailable");
+    assert!(!runtime.status(&admin).await.unwrap().safe_mode);
+    assert!(!session.is_cancelled());
+    authenticate_for_test(&runtime, live.metadata.key_id).unwrap();
+    stop(runtime).await;
+}
+
 #[tokio::test]
 async fn safe_mode_denies_legacy_protocol_instead_of_restoring_the_default() {
     let state_dir = TempPath::new("safe-mode-legacy");
