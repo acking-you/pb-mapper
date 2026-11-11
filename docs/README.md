@@ -25,7 +25,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 
 | Page | Covers |
 | --- | --- |
-| [Remote desktop](remote-desktop.md) | the app, gestures and keys, remote resolution, the Windows helper, the SDK, platforms, the video pipeline, measurements |
+| [Remote desktop](remote-desktop.md) | the app, gestures, keys and input methods, sharing a Mac, remote resolution, the Windows helper, the SDK, platforms, the video pipeline and each viewer's decoder, measurements |
 | [Validation records](validation/) | device and acceptance runs, by build |
 | [Overhaul notes](remote-desktop-overhaul/README.md) | 中文; the redesign's working notes: designs, performance priorities, work plan |
 
@@ -39,7 +39,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [QUIC relay](relay-quic.zh-CN.md) | 中文; the optional QUIC carrier to the relay |
 | [Weak-network recovery](weak-network-recovery.md) | how register, connect and the relay recover when a route returns |
 | [UDP datagram forwarding](udp-datagram-forwarding.md) | why UDP is framed, and how to validate it |
-| [Benchmarks](benchmarks/) | the QUIC measurements, the [refactor's performance pass](benchmarks/2026-11-11-refactor/README.md) its [build times](benchmarks/2026-11-11-refactor/compile-time.md) and the open-items passes ([credential store](benchmarks/2026-11-11-refactor/open-items-auth.md), [relay](benchmarks/2026-11-11-refactor/open-items-relay.md), [desktop](benchmarks/2026-11-11-refactor/open-items-desktop.md)), raw and summarised |
+| [Benchmarks](benchmarks/) | the QUIC measurements, the [refactor's performance pass](benchmarks/2026-11-11-refactor/README.md) its [build times](benchmarks/2026-11-11-refactor/compile-time.md) and the open-items passes ([credential store](benchmarks/2026-11-11-refactor/open-items-auth.md), [relay](benchmarks/2026-11-11-refactor/open-items-relay.md), [desktop](benchmarks/2026-11-11-refactor/open-items-desktop.md)), the [remote desktop's data paths before and after every platform](benchmarks/2026-11-12-remote-desktop-platforms/README.md), raw and summarised |
 
 ## Security
 
