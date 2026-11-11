@@ -57,8 +57,10 @@ must not hold the only copy of partial-frame state in a discarded future.
    sessions. The relay's whole selection/setup loop is also bounded to five
    seconds, even if new failing candidates continually register. That wait also
    ends as soon as its subscriber gives up: a client that abandons an attempt
-   closes its connection, and the relay stops holding a place for it or taking a
-   publisher's stream on its behalf. No application byte is read before
+   closes its connection, and the relay stops taking a publisher's stream on its
+   behalf; it holds the subscriber's place only until the publisher's
+   acknowledgement it asked for is due, so a publisher that never acknowledges
+   is still suspected. No application byte is read before
    subscribe succeeds, so these retries do not replay HTTP, SSH, or other
    application payloads. Permanent structured refusals are not retried.
 6. **Forwarding belongs to the tunnel, not its control socket.** Replacing a

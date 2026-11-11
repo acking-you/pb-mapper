@@ -207,6 +207,14 @@ Each works as designed; the line says what the other choice would cost.
   3 s attempt, is no longer waited for. The 5 s setup bound still ends the
   wait before the retirement for an acknowledgement budget above about
   1.6 s.
+- A subscriber that leaves after its provider acknowledged takes the relay's
+  wait for the stream with it, and the suspicion that wait records when no
+  stream comes; one that leaves before an acknowledgement due later than its
+  deadline takes the budget sample that acknowledgement would have given.
+  0.11.0 recorded both inside the 5 s setup bound; the first matters for
+  budgets of about 1 to 2.5 s. Waiting on would hold a departed subscriber's
+  place past its acknowledgement for a stream no one takes; a subscriber
+  that stays still records both.
 - The re-subscribe poll is a fixed 50 ms inside the recovery window; backoff
   or jitter would pick up a replacement later.
 
