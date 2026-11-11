@@ -627,13 +627,20 @@ mod tests {
         assert!(matches!(temporary.admin(), Err(Error::NotAdministrator)));
     }
 
+    /// A relay address that refuses every connection: a socket bound there
+    /// and never listening, which the caller keeps so nothing else takes it.
+    fn refusing_relay() -> (tokio::net::TcpSocket, std::net::SocketAddr) {
+        let held = tokio::net::TcpSocket::new_v4().unwrap();
+        held.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let relay = held.local_addr().unwrap();
+        (held, relay)
+    }
+
     /// A connection asked to listen on port 0 says which port it got, for
     /// either transport, and listens there: the relay need not be up for it.
     #[tokio::test]
     async fn a_connection_on_port_zero_says_where_it_listens() {
-        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let relay = closed.local_addr().unwrap();
-        drop(closed);
+        let (_held, relay) = refusing_relay();
         let client = Client::from_credential(
             relay.to_string(),
             Credential::Admin(TEST_ADMIN_KEY_BYTES),
@@ -698,9 +705,7 @@ mod tests {
     /// `connect_tcp` caller gets names the refusal the operating system gave.
     #[tokio::test]
     async fn an_unreachable_relay_fails_connect_tcp_with_its_cause() {
-        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let relay = closed.local_addr().unwrap();
-        drop(closed);
+        let (_held, relay) = refusing_relay();
         let refused = TcpStream::connect(relay).await.unwrap_err().to_string();
         let client = Client::from_credential(
             relay.to_string(),
