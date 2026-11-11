@@ -588,17 +588,20 @@ async fn sdk_admin_retires_registered_connections() {
     // Asserted on the relay's own view, not on `wait_ready_timeout`: the tunnel's
     // status may still read Connected from the pool that was just retired, so
     // waiting on it would return immediately and pass even if the service never
-    // came back. Replacement conn_ids are proof it did, since the counter only
-    // moves forward.
-    let retired_ids: std::collections::HashSet<u32> =
-        before.iter().map(|conn| conn.conn_id).collect();
+    // came back. A registration the retired set does not hold is proof it did.
+    // The relay hands a returned conn_id out again, so the id alone proves
+    // nothing; a registration's generation only rises.
+    let retired: std::collections::HashSet<(u32, u64)> = before
+        .iter()
+        .map(|conn| (conn.conn_id, conn.generation))
+        .collect();
     let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
     loop {
         let now = admin.list_connections_all(None).await.unwrap();
         let replaced = now
             .iter()
             .filter(|conn| conn.service_name == "echo-retire")
-            .any(|conn| !retired_ids.contains(&conn.conn_id));
+            .any(|conn| !retired.contains(&(conn.conn_id, conn.generation)));
         if replaced {
             break;
         }
@@ -637,10 +640,10 @@ async fn sdk_admin_retires_a_single_connection_by_id() {
         register_echo(&client, "echo-retire-one", Transport::Tcp, false).await;
     let admin = client.admin().unwrap();
 
-    let mut ours: Vec<u32> = wait_for_control_pool(&admin, "echo-retire-one")
+    let mut ours: Vec<(u32, u64)> = wait_for_control_pool(&admin, "echo-retire-one")
         .await
         .iter()
-        .map(|conn| conn.conn_id)
+        .map(|conn| (conn.conn_id, conn.generation))
         .collect();
     ours.sort_unstable();
     // A register opens a pool of control connections, so this is the interesting
@@ -649,18 +652,23 @@ async fn sdk_admin_retires_a_single_connection_by_id() {
         ours.len() > 1,
         "expected a control-connection pool, got {ours:?}"
     );
+    let (retired_id, retired_generation) = ours[0];
 
     let retired = admin
-        .retire_connections(None, "echo-retire-one".into(), Some(ours[0]))
+        .retire_connections(None, "echo-retire-one".into(), Some(retired_id))
         .await
         .unwrap();
     assert_eq!(retired, 1);
 
+    // The pool's replacement may be handed the same conn_id; it is the
+    // registration of that generation that must be gone.
     let after = admin.list_connections_all(None).await.unwrap();
     assert!(
         !after
             .iter()
-            .any(|conn| conn.service_name == "echo-retire-one" && conn.conn_id == ours[0]),
+            .any(|conn| conn.service_name == "echo-retire-one"
+                && conn.conn_id == retired_id
+                && conn.generation == retired_generation),
         "the named connection should be gone"
     );
 
