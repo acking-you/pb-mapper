@@ -592,6 +592,10 @@ abstract interface class DesktopApiClient {
   DisplayMode setDisplayMode(DisplayModeTarget target);
   void pause();
   void resume();
+
+  /// The definition [DesktopView.cursorShape] names, fetched once per
+  /// number; null once the viewer no longer holds it.
+  DesktopCursorShape? cursorShape(int shape);
   int instanceToken();
 
   // ---- JPEG consumer (platforms without a native decoder)
@@ -912,6 +916,14 @@ class DesktopApi implements DesktopApiClient {
   void resume() => _hot('resume');
 
   @override
+  DesktopCursorShape? cursorShape(int shape) {
+    final data = _hot('cursor_shape', {'shape': shape});
+    return data is Map
+        ? DesktopCursorShape.fromJson(Map<String, dynamic>.from(data))
+        : null;
+  }
+
+  @override
   int instanceToken() => PbMapperService().instanceToken();
 
   @override
@@ -946,6 +958,7 @@ DesktopView desktopViewFromLeaf(PbDesktopViewV1 leaf) {
     videoHeight: leaf.videoHeight,
     cursorX: leaf.cursorX,
     cursorY: leaf.cursorY,
+    cursorShape: leaf.cursorShape,
     state: leaf.state,
     cursorVisible: flag(0),
     controlling: flag(1),

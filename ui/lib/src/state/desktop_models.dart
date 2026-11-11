@@ -1,6 +1,7 @@
 // The values the desktop store publishes, and the ones the FFI returns that
 // the store passes on unchanged. Every one is immutable with value equality,
 // so a `ValueNotifier` holding it notifies only on a real change (D14).
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -730,6 +731,7 @@ class DesktopView {
     this.videoHeight = 0,
     this.cursorX = 0,
     this.cursorY = 0,
+    this.cursorShape = 0,
     this.state = 0,
     this.cursorVisible = false,
     this.controlling = false,
@@ -747,6 +749,11 @@ class DesktopView {
   final int generation, presentedFrameId, presentedAgeMs, cursorSeq;
   final int displayWidth, displayHeight, videoWidth, videoHeight;
   final int cursorX, cursorY;
+
+  /// The pointer's shape, by the number of its definition, which
+  /// [DesktopApiClient.cursorShape] resolves; 0 none: a host that sends no
+  /// shapes, whose pointer is the generic arrow.
+  final int cursorShape;
   final int state;
   final bool cursorVisible, controlling, controlAllowed, secureDesktop;
   final bool fresh, paused;
@@ -764,6 +771,7 @@ class DesktopView {
       other.videoHeight == videoHeight &&
       other.cursorX == cursorX &&
       other.cursorY == cursorY &&
+      other.cursorShape == cursorShape &&
       other.state == state &&
       other.cursorVisible == cursorVisible &&
       other.controlling == controlling &&
@@ -783,6 +791,7 @@ class DesktopView {
     videoHeight,
     cursorX,
     cursorY,
+    cursorShape,
     state,
     cursorVisible,
     controlling,
@@ -791,6 +800,98 @@ class DesktopView {
     fresh,
     paused,
   );
+}
+
+/// What the host's pointer looks like: a shape the viewer's own OS has
+/// too, or [custom], which only the bitmap shows. Mirrors Rust's
+/// `CursorKind`.
+enum DesktopCursorKind {
+  arrow,
+  ibeam,
+  hand,
+  wait,
+  progress,
+  crosshair,
+  help,
+  notAllowed,
+  move,
+  resizeNs,
+  resizeEw,
+  resizeNwse,
+  resizeNesw,
+  upArrow,
+  custom;
+
+  /// A value this build does not know is a shape only the bitmap shows.
+  static DesktopCursorKind parse(Object? wire) => switch (wire) {
+    'arrow' => arrow,
+    'ibeam' => ibeam,
+    'hand' => hand,
+    'wait' => wait,
+    'progress' => progress,
+    'crosshair' => crosshair,
+    'help' => help,
+    'not_allowed' => notAllowed,
+    'move' => move,
+    'resize_ns' => resizeNs,
+    'resize_ew' => resizeEw,
+    'resize_nwse' => resizeNwse,
+    'resize_nesw' => resizeNesw,
+    'up_arrow' => upArrow,
+    _ => custom,
+  };
+}
+
+/// One definition of the host's pointer shape: its kind, and its bitmap,
+/// straight RGBA8 in the host's physical pixels, with the hotspot in it.
+@immutable
+class DesktopCursorShape {
+  const DesktopCursorShape({
+    required this.kind,
+    required this.width,
+    required this.height,
+    required this.hotX,
+    required this.hotY,
+    required this.rgba,
+  });
+
+  /// The hot op's answer; null for one that is not a shape of that size.
+  static DesktopCursorShape? fromJson(Map<String, dynamic> json) {
+    final width = json['width'], height = json['height'];
+    final hotX = json['hot_x'], hotY = json['hot_y'], rgba = json['rgba'];
+    if (width is! int ||
+        height is! int ||
+        hotX is! int ||
+        hotY is! int ||
+        rgba is! String) {
+      return null;
+    }
+    final Uint8List pixels;
+    try {
+      pixels = base64Decode(rgba);
+    } on FormatException {
+      return null;
+    }
+    if (width <= 0 ||
+        height <= 0 ||
+        hotX >= width ||
+        hotY >= height ||
+        pixels.length != width * height * 4) {
+      return null;
+    }
+    return DesktopCursorShape(
+      kind: DesktopCursorKind.parse(json['kind']),
+      width: width,
+      height: height,
+      hotX: hotX,
+      hotY: hotY,
+      rgba: pixels,
+    );
+  }
+
+  final DesktopCursorKind kind;
+  final int width, height, hotX, hotY;
+  final Uint8List rgba;
 }
 
 /// Intervals between accepted presentations over the last 60 s.

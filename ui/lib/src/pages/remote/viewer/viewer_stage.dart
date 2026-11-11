@@ -26,7 +26,7 @@ import 'viewer_overlays.dart';
 /// It is its own layer, as are the cursor and the touch ring inside it (or
 /// above it, see [touchIndicator]): a stroke, a pan or a zoom repaints no
 /// gutter, bar or title.
-class ViewerStage extends StatelessWidget {
+class ViewerStage extends StatefulWidget {
   const ViewerStage({
     super.key,
     required this.session,
@@ -43,6 +43,8 @@ class ViewerStage extends StatelessWidget {
     this.compact = false,
     this.toolbarInset,
     this.touchIndicator = true,
+    this.cursor,
+    this.localPointer = false,
   });
 
   /// The stage over [desktop]'s own slices.
@@ -58,6 +60,7 @@ class ViewerStage extends StatelessWidget {
     bool compact = false,
     ValueListenable<double>? toolbarInset,
     bool touchIndicator = true,
+    bool localPointer = false,
   }) => ViewerStage(
     key: key,
     session: desktop.session,
@@ -74,6 +77,8 @@ class ViewerStage extends StatelessWidget {
     compact: compact,
     toolbarInset: toolbarInset,
     touchIndicator: touchIndicator,
+    cursor: desktop.cursor,
+    localPointer: localPointer,
   );
 
   final ValueListenable<DesktopSessionView> session;
@@ -99,11 +104,91 @@ class ViewerStage extends StatelessWidget {
   /// stroke or a long press may start.
   final bool touchIndicator;
 
+  /// The session's remote cursor, whose shape the host's pointer takes;
+  /// without it, the generic arrow.
+  final DesktopCursor? cursor;
+
+  /// A desktop viewer: the local pointer hovers the picture, and takes the
+  /// host's shape there while it controls (see [RemotePointerLook]).
+  final bool localPointer;
+
+  @override
+  State<ViewerStage> createState() => _ViewerStageState();
+}
+
+class _ViewerStageState extends State<ViewerStage> {
+  RemotePointer? _pointer;
+
+  @override
+  void initState() {
+    super.initState();
+    _pointer = _newPointer();
+  }
+
+  RemotePointer? _newPointer() {
+    final cursor = widget.cursor;
+    return cursor == null
+        ? null
+        : RemotePointer(
+            mouse: widget.localPointer,
+            cursor: cursor,
+            controlling: widget.input.ready,
+            geometry: widget.geometry,
+          );
+  }
+
+  @override
+  void didUpdateWidget(covariant ViewerStage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (identical(oldWidget.cursor, widget.cursor) &&
+        identical(oldWidget.input, widget.input) &&
+        identical(oldWidget.geometry, widget.geometry) &&
+        oldWidget.localPointer == widget.localPointer) {
+      return;
+    }
+    _pointer?.dispose();
+    _pointer = _newPointer();
+  }
+
+  @override
+  void dispose() {
+    _pointer?.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) => RepaintBoundary(child: _stack(context));
 
   Widget _stack(BuildContext context) {
     final l10n = context.l10n;
+    final ViewerStage(
+      :session,
+      :geometry,
+      :picture,
+      :jpegImage,
+      :viewport,
+      :input,
+      :machine,
+      :touchMode,
+      :title,
+      :actions,
+      :compact,
+      :touchIndicator,
+    ) = widget;
+    final pointer = _pointer;
+    final scene = ValueListenableBuilder(
+      valueListenable: picture,
+      builder: (context, picture, _) {
+        final id = picture?.textureId;
+        return id != null
+            ? Texture(
+                key: ValueKey(id),
+                textureId: id,
+                filterQuality: FilterQuality.low,
+              )
+            : JpegPicture(image: jpegImage);
+      },
+    );
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -128,23 +213,13 @@ class ViewerStage extends StatelessWidget {
             input: input,
             machine: machine,
             touchMode: touchMode,
-            child: ValueListenableBuilder(
-              valueListenable: picture,
-              builder: (context, picture, _) {
-                final id = picture?.textureId;
-                return id != null
-                    ? Texture(
-                        key: ValueKey(id),
-                        textureId: id,
-                        filterQuality: FilterQuality.low,
-                      )
-                    : JpegPicture(image: jpegImage);
-              },
-            ),
+            child: pointer != null && pointer.mouse
+                ? RemotePointerRegion(pointer: pointer, child: scene)
+                : scene,
           ),
         ),
         GreyStill(session: session, viewport: viewport),
-        RemoteCursorLayer(viewport: viewport, input: input),
+        RemoteCursorLayer(viewport: viewport, input: input, pointer: pointer),
         if (touchIndicator) TouchIndicator(machine: machine),
         if (compact)
           _PictureFrame(viewport: viewport, child: _overlays)
@@ -155,12 +230,12 @@ class ViewerStage extends StatelessWidget {
   }
 
   Widget get _overlays => ViewerOverlayLayer(
-    session: session,
-    stats: stats,
-    title: title,
-    actions: actions,
-    compact: compact,
-    toolbarInset: toolbarInset,
+    session: widget.session,
+    stats: widget.stats,
+    title: widget.title,
+    actions: widget.actions,
+    compact: widget.compact,
+    toolbarInset: widget.toolbarInset,
   );
 }
 

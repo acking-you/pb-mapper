@@ -58,6 +58,9 @@ class FakeDesktopApi implements DesktopApiClient {
   DesktopViewerStatus? viewerStatusValue;
   DesktopView? viewValue;
 
+  /// What `cursor_shape` resolves, by [DesktopView.cursorShape].
+  final cursorShapes = <int, DesktopCursorShape>{};
+
   /// The codec a `connect` reports; `h264` needs a texture factory.
   String codec = 'jpeg';
 
@@ -598,6 +601,7 @@ class FakeDesktopApi implements DesktopApiClient {
         videoHeight: view.videoHeight,
         cursorX: view.cursorX,
         cursorY: view.cursorY,
+        cursorShape: view.cursorShape,
         state: view.state,
         cursorVisible: view.cursorVisible,
         controlling: controlling,
@@ -660,6 +664,12 @@ class FakeDesktopApi implements DesktopApiClient {
   void resume() {
     _log('resume');
     viewerStatusValue = viewerStatusValue?.copyWith(paused: false);
+  }
+
+  @override
+  DesktopCursorShape? cursorShape(int shape) {
+    _log('cursor_shape', {'shape': shape});
+    return cursorShapes[shape];
   }
 
   @override

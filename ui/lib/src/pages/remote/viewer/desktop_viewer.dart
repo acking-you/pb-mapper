@@ -276,6 +276,7 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
                       title: widget.title,
                       actions: _actions,
                       toolbarInset: _toolbar.inset,
+                      localPointer: true,
                     ),
                   ),
                 ),

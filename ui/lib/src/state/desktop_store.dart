@@ -129,10 +129,15 @@ final class DesktopCursor extends ChangeNotifier {
   /// it since the host last said it is hidden.
   bool _shown = false;
 
+  /// The position is this viewer's last move, not a host report's.
+  bool _local = false;
+
   /// The last host report seen, and the geometry epoch of the last one
   /// that was not hidden.
   Offset? _report;
   int? _reportEpoch;
+
+  DesktopPointerShape? _shape;
 
   /// Where taps click and strokes start, normalised to the display.
   Offset get position => _position;
@@ -141,12 +146,33 @@ final class DesktopCursor extends ChangeNotifier {
   /// this viewer has not moved it since.
   Offset? get shown => _shown ? _position : null;
 
+  /// The cursor is where this viewer's own move put it, so under the
+  /// local pointer while that hovers the picture: no host report moved it
+  /// since.
+  bool get followsLocal => _local;
+
+  /// The host's pointer shape; null from a host that sends none (before
+  /// 0.12), or before it named one, which is drawn as the generic arrow.
+  DesktopPointerShape? get shape => _shape;
+
   /// A local move: the arrow shows here.
   void moveTo(Offset normalized) {
-    if (normalized == _position && _shown) return;
+    if (normalized == _position && _shown && _local) return;
     _position = normalized;
     _shown = true;
+    _local = true;
     notifyListeners();
+  }
+
+  void _setShape(DesktopPointerShape? shape) {
+    if (identical(shape, _shape)) return;
+    _shape = shape;
+    notifyListeners();
+  }
+
+  /// [shape]'s bitmap was decoded.
+  void _decoded(DesktopPointerShape shape) {
+    if (identical(shape, _shape)) notifyListeners();
   }
 
   /// The host's cursor as the store last read it, null while hidden or
@@ -169,7 +195,10 @@ final class DesktopCursor extends ChangeNotifier {
     _reportEpoch = g?.epoch;
     final follow = first || !controlling || _apart(report, g);
     if (!follow && _shown) return false;
-    if (follow) _position = report;
+    if (follow) {
+      _position = report;
+      _local = false;
+    }
     _shown = true;
     notifyListeners();
     return true;
@@ -190,10 +219,23 @@ final class DesktopCursor extends ChangeNotifier {
     _position = const Offset(0.5, 0.5);
     _report = null;
     _reportEpoch = null;
+    _local = false;
     if (!_shown) return;
     _shown = false;
     notifyListeners();
   }
+}
+
+/// One definition of the host's pointer shape, and its bitmap as an image
+/// to paint once decoded.
+final class DesktopPointerShape {
+  DesktopPointerShape(this.definition);
+
+  final DesktopCursorShape definition;
+
+  /// Null until decoded: a painter draws the generic arrow meanwhile.
+  ui.Image? get image => _image;
+  ui.Image? _image;
 }
 
 /// Owns the desktop host and the viewer session, independently of
@@ -1143,6 +1185,7 @@ class DesktopStore {
       _invalidateInput();
       _view = null;
       _publishCursor();
+      _forgetShapes();
       _bumpGeometry();
       if (!_visible) _pauseNative();
       try {
@@ -1578,7 +1621,7 @@ class DesktopStore {
     _view = view;
     // After paint a repaint asks for no frame: ask for the one that draws
     // the new cursor.
-    if (_publishCursor() && inFrame) {
+    if ((_publishCursor() | _publishShape(view)) && inFrame) {
       SchedulerBinding.instance.scheduleFrame();
     }
     if (view == null) return;
@@ -1634,6 +1677,83 @@ class DesktopStore {
       g,
       controlling: _session.value.controlling,
     );
+  }
+
+  /// The definitions of the shapes the view named, the latest last, at most
+  /// [_shapeCache]: a pointer that goes back and forth between shapes the
+  /// host defined fetches and decodes each once. The numbers are the Rust
+  /// viewer's, so a new one starts them over.
+  final _shapes = <int, DesktopPointerShape>{};
+  int _shapeNumber = 0;
+  static const _shapeCache = 16;
+
+  /// Gives [cursor] the shape [view] names, fetching a definition not seen
+  /// before. True when [cursor]'s shape changed.
+  bool _publishShape(DesktopView? view) {
+    if (view == null || view.cursorShape == _shapeNumber) return false;
+    final number = _shapeNumber = view.cursorShape;
+    if (number == 0) {
+      final changed = _cursor.shape != null;
+      _cursor._setShape(null);
+      return changed;
+    }
+    var shape = _shapes.remove(number);
+    if (shape == null) {
+      DesktopCursorShape? definition;
+      try {
+        definition = _api.cursorShape(number);
+      } catch (_) {
+        definition = null;
+      }
+      // Replaced since: a later view names its successor.
+      if (definition == null) return false;
+      shape = DesktopPointerShape(definition);
+      unawaited(_decodeShape(shape));
+    }
+    _shapes[number] = shape;
+    while (_shapes.length > _shapeCache) {
+      _disposeImageLater(_shapes.remove(_shapes.keys.first)?._image);
+    }
+    _cursor._setShape(shape);
+    return true;
+  }
+
+  /// A new Rust viewer: its numbers name other definitions.
+  void _forgetShapes() {
+    for (final shape in _shapes.values) {
+      _disposeImageLater(shape._image);
+    }
+    _shapes.clear();
+    _shapeNumber = 0;
+    _cursor._setShape(null);
+  }
+
+  /// [shape]'s bitmap as an image: premultiplied, as the engine takes it.
+  Future<void> _decodeShape(DesktopPointerShape shape) async {
+    final d = shape.definition;
+    final pixels = Uint8List.fromList(d.rgba);
+    for (var i = 0; i + 3 < pixels.length; i += 4) {
+      final alpha = pixels[i + 3];
+      if (alpha == 255) continue;
+      for (var c = i; c < i + 3; c++) {
+        pixels[c] = pixels[c] * alpha ~/ 255;
+      }
+    }
+    final decoded = Completer<ui.Image>();
+    ui.decodeImageFromPixels(
+      pixels,
+      d.width,
+      d.height,
+      ui.PixelFormat.rgba8888,
+      decoded.complete,
+    );
+    final image = await decoded.future;
+    if (_disposed || !_shapes.values.any((held) => identical(held, shape))) {
+      image.dispose();
+      return;
+    }
+    shape._image = image;
+    _cursor._decoded(shape);
   }
 
   int _geometryEpoch = 0;
@@ -2363,6 +2483,10 @@ class DesktopStore {
       unawaited(texture.dispose().catchError((Object _) {}));
     }
     _jpegImage.value?.dispose();
+    for (final shape in _shapes.values) {
+      shape._image?.dispose();
+    }
+    _shapes.clear();
     unawaited(shutdown());
     _hostView.dispose();
     _session.dispose();
