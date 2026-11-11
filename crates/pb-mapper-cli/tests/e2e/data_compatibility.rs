@@ -75,7 +75,8 @@ async fn check_pair(datagram: bool, subscriber_v2: bool, publisher_v2: bool) {
         panic!("expected stream request");
     };
     // Acknowledged first, as a publisher does: unacknowledged, the stream
-    // itself would have to arrive within the relay's ack timeout.
+    // itself would have to arrive within the relay's ack timeout. A stream
+    // that comes without its acknowledgement is `stream_before_ack`'s case.
     control_session
         .continuation_writer(&mut control_write)
         .unwrap()

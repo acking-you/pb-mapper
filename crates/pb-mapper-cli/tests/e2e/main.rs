@@ -8,6 +8,8 @@
 //!   process, and the third starts processes, which on Windows inherit every
 //!   inheritable socket open at the time (see `regression/main.rs`);
 //! - `lease_reclaim` shortens the lease of every relay in its process;
+//! - `stream_before_ack` lengthens every relay's wait for a stream
+//!   acknowledgement;
 //! - `network_recovery` sets the health-check interval and announces network
 //!   changes;
 //! - `quic_retired_carrier` announces a network change, which retires every
