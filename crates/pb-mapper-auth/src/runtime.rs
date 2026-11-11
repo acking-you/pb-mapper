@@ -51,6 +51,7 @@ impl Drop for LegacyConnectionGuard {
 
 impl AuthRuntime {
     pub async fn from_process(config: AuthConfig) -> Result<Self, AuthFailure> {
+        config.check_limits()?;
         let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
         let credential = load_server_admin_credential(&config.state_dir)?;
         let Credential::Admin(admin_key) = credential else {
@@ -68,6 +69,7 @@ impl AuthRuntime {
     /// This deliberately leaves the process credential untouched because the containing UI uses
     /// that credential for its outbound register, connect, status, and stream connections.
     pub async fn from_isolated_state(config: AuthConfig) -> Result<Self, AuthFailure> {
+        config.check_limits()?;
         let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
         let credential = load_isolated_server_admin_credential(&config.state_dir)?;
         let Credential::Admin(admin_key) = credential else {
@@ -81,6 +83,7 @@ impl AuthRuntime {
     }
 
     pub async fn start(admin_key: AesKeyType, config: AuthConfig) -> Result<Self, AuthFailure> {
+        config.check_limits()?;
         let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
         Self::start_locked(admin_key, config, true, state_lock)
     }

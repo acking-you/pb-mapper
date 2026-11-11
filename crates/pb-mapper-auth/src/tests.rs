@@ -287,6 +287,39 @@ fn a_truncated_staged_candidate_still_blocks_rotation() {
     );
 }
 
+/// A start refuses limits outside the range the CLI and the environment
+/// accept, before it touches the state directory. Taken as given, a capacity
+/// near `usize::MAX` aborted the start on allocation, and a maximum TTL past
+/// the timing wheel's span issued keys that were already retired.
+#[tokio::test]
+async fn a_start_refuses_limits_out_of_range() {
+    let state_dir = TempPath::new("config-range");
+    for out_of_range in [
+        AuthConfig {
+            max_temporary_keys: MAX_TEMP_KEY_CAPACITY + 1,
+            ..config(&state_dir, 1)
+        },
+        AuthConfig {
+            max_temporary_key_ttl: MAX_TEMP_KEY_TTL + Duration::from_secs(1),
+            ..config(&state_dir, 1)
+        },
+    ] {
+        let refused = AuthRuntime::start(TEST_ADMIN_KEY_BYTES, out_of_range)
+            .await
+            .err()
+            .expect("a limit out of range is refused");
+        assert_eq!(refused.code, "auth_config_invalid");
+    }
+    assert!(!state_dir.exists());
+
+    let (runtime, _) = start(&AuthConfig {
+        max_temporary_key_ttl: MAX_TEMP_KEY_TTL,
+        ..config(&state_dir, 1)
+    })
+    .await;
+    stop(runtime).await;
+}
+
 #[tokio::test]
 async fn shrinking_then_expanding_capacity_does_not_reuse_old_key_ids() {
     let state_dir = TempPath::new("capacity-shrink");

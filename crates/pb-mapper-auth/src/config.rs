@@ -114,8 +114,8 @@ impl AuthConfig {
     /// The configuration the environment sets, except where `overrides` says
     /// otherwise. An overridden variable is not read, so it neither applies nor
     /// logs a complaint about its value. Overrides are taken as given, as the
-    /// fields of an `AuthConfig` literal are: checking their range is the
-    /// caller's.
+    /// fields of an `AuthConfig` literal are; a start refuses a limit outside
+    /// the range the environment accepts.
     pub fn from_env_with(overrides: AuthConfigOverrides) -> Self {
         let AuthConfigOverrides {
             state_dir,
@@ -143,6 +143,29 @@ impl AuthConfig {
             }),
             legacy_protocol: legacy_protocol.unwrap_or_else(legacy_protocol_from_env),
         }
+    }
+
+    /// Refuses limits outside the range the CLI and the environment accept,
+    /// which a literal or an override can still hold. Past it, a capacity
+    /// near `usize::MAX` aborts on allocation, and a key could live longer
+    /// than the timing wheel can hold, so it would be retired as it is issued.
+    pub(crate) fn check_limits(&self) -> Result<(), AuthFailure> {
+        let invalid = |message| AuthFailure::new(codes::AUTH_CONFIG_INVALID, message, false);
+        if !(1..=MAX_TEMP_KEY_CAPACITY).contains(&self.max_temporary_keys) {
+            return Err(invalid(format!(
+                "the temporary key capacity must be between 1 and {MAX_TEMP_KEY_CAPACITY}, not {}",
+                self.max_temporary_keys
+            )));
+        }
+        if !(MIN_TEMP_KEY_TTL..=MAX_TEMP_KEY_TTL).contains(&self.max_temporary_key_ttl) {
+            return Err(invalid(format!(
+                "the maximum temporary key TTL must be between {} and {} seconds, not {:?}",
+                MIN_TEMP_KEY_TTL.as_secs(),
+                MAX_TEMP_KEY_TTL.as_secs(),
+                self.max_temporary_key_ttl
+            )));
+        }
+        Ok(())
     }
 }
 

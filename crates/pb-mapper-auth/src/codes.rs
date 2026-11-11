@@ -7,6 +7,8 @@
 pub const AUTH_STATE_UNAVAILABLE: &str = "auth_state_unavailable";
 pub const AUTH_STATE_LOCKED: &str = "auth_state_locked";
 pub const AUTH_INTERNAL_ERROR: &str = "auth_internal_error";
+/// An [`AuthConfig`](crate::AuthConfig) limit outside the range a start accepts.
+pub const AUTH_CONFIG_INVALID: &str = "auth_config_invalid";
 
 pub const ADMINISTRATOR_KEY_REQUIRED: &str = "administrator_key_required";
 pub const ADMINISTRATOR_KEY_INVALID: &str = "administrator_key_invalid";
