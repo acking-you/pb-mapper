@@ -30,7 +30,7 @@ use self::status::get_status_scoped;
 use self::stream::{StreamSetup, handle_local_stream};
 use crate::addr::{resolve_all, resolve_tunnel_ends};
 use crate::direct_policy::DirectPolicy;
-use crate::recovery::{SharedTiming, jitter, transport_backoff};
+use crate::recovery::{SharedTiming, transport_backoff};
 use crate::worker_status::{StatusSink, WorkerStatus, text_sink};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{ResolvedAddrs, StatusOp};
@@ -294,7 +294,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                     if let Some(sink) = &status { sink(&WorkerStatus::Retrying); }
                     tokio::select! {
                         () = shutdown.cancelled() => break,
-                        () = tokio::time::sleep(jitter(retry_backoff.next_delay())) => {}
+                        () = tokio::time::sleep(retry_backoff.next_delay()) => {}
                     }
                     continue;
                 }
@@ -377,7 +377,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
         }
         tokio::select! {
             () = shutdown.cancelled() => break,
-            () = tokio::time::sleep(jitter(retry_backoff.next_delay())) => {}
+            () = tokio::time::sleep(retry_backoff.next_delay()) => {}
         }
     }
 

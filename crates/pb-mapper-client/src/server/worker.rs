@@ -14,7 +14,7 @@ use super::stream::spawn_stream;
 use crate::diagnostics::{Diagnostics, RecoveryFailure};
 use crate::direct_policy::DirectPolicy;
 use crate::endpoint::RelayEndpoint;
-use crate::recovery::{REVOKED_DIRECT_RECHECK, RecoveryTiming, jitter, transport_backoff};
+use crate::recovery::{REVOKED_DIRECT_RECHECK, RecoveryTiming, transport_backoff};
 use crate::worker_status::{StatusSink, WorkerStatus};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{ResolvedAddrs, control_conn_pool_size, registration_reject_backoff};
@@ -34,7 +34,9 @@ pub(super) struct ControlBackoff {
     /// comes back.
     transport: RetryBackoff,
     /// The relay answered and refused, for something that may clear. Retry
-    /// slowly; see [`registration_reject_backoff`].
+    /// slowly; see [`registration_reject_backoff`]. Jittered, as the
+    /// transport ladder is: the publishers one full quota refused together
+    /// would otherwise all ask again at the same instants.
     reject: RetryBackoff,
     pub(super) timing: RecoveryTiming,
 }
@@ -45,7 +47,7 @@ impl ControlBackoff {
         Self {
             transport: transport_backoff(),
             timing: RecoveryTiming::default(),
-            reject: RetryBackoff::new(reject_min, reject_max),
+            reject: RetryBackoff::new(reject_min, reject_max).with_jitter(),
         }
     }
 
@@ -297,10 +299,7 @@ async fn run_server_side_cli_worker(
             | Status::SendPing
             | Status::ConnectRemote
             | Status::Resolve
-            | Status::Timeout => (
-                jitter(backoff.transport.next_delay()),
-                backoff.transport.failures(),
-            ),
+            | Status::Timeout => (backoff.transport.next_delay(), backoff.transport.failures()),
         };
         if diagnostics.failed(failure, retry_interval) {
             tracing::info!(

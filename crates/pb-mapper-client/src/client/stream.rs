@@ -172,7 +172,7 @@ impl Subscription<'_> {
         budget: std::time::Duration,
     ) -> Result<(Subscribed, std::time::Duration)> {
         let mut wake = self.remote_addr.wake();
-        let mut retry = pb_mapper_core::timeout::RetryBackoff::default();
+        let mut retry = pb_mapper_core::timeout::RetryBackoff::default().with_jitter();
         let mut last_failure = None;
         loop {
             let attempt_started = Instant::now();
@@ -218,7 +218,7 @@ impl Subscription<'_> {
                 }
             }
             tokio::select! {
-                () = tokio::time::sleep_until((Instant::now() + crate::recovery::jitter(retry.next_delay())).min(deadline)) => {},
+                () = tokio::time::sleep_until((Instant::now() + retry.next_delay()).min(deadline)) => {},
                 _ = wake.changed() => retry.reset(),
             }
         }

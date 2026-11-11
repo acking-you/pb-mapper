@@ -394,8 +394,9 @@ async fn retryable_registration_rejection_waits_on_the_slow_ladder() {
     .await;
     let seen = attempts.lock().unwrap().clone();
     let gap = seen[1].duration_since(seen[0]);
-    // The transport ladder's first delay is 100ms, so anything under the reject
-    // ladder's 400ms minimum means the rejection was retried as a transport
+    // The transport ladder's first delay is at most 100ms, so anything under
+    // the reject ladder's first, at least 300ms (its 400ms minimum, jittered
+    // by up to a quarter), means the rejection was retried as a transport
     // failure — which is what turned one refusal into thousands a minute.
     assert!(
         gap >= Duration::from_millis(300),

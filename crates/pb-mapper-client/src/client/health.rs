@@ -11,7 +11,7 @@ use tokio::time::Instant;
 use super::status::get_status_with_credential;
 use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
 use crate::endpoint::RelayEndpoint;
-use crate::recovery::{REVOKED_DIRECT_RECHECK, SharedTiming, jitter};
+use crate::recovery::{REVOKED_DIRECT_RECHECK, SharedTiming};
 use crate::relay::CarrierId;
 use crate::worker_status::{StatusSink, WorkerStatus};
 use pb_mapper_core::checksum::Credential;
@@ -226,7 +226,7 @@ impl Health<'_> {
                     self.connected = false;
                     self.report(WorkerStatus::Retrying);
                 }
-                let delay = jitter(self.retry_backoff.next_delay());
+                let delay = self.retry_backoff.next_delay();
                 self.next_probe = Instant::now() + delay;
                 if self.diagnostics.failed(failure.kind, delay) {
                     tracing::warn!(

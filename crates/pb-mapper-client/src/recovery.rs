@@ -92,15 +92,12 @@ impl SharedTiming {
     }
 }
 
-/// Preserve a real delay on fast failures, without synchronizing all pool workers.
-pub(crate) fn jitter(delay: Duration) -> Duration {
-    delay.mul_f64(rand::random_range(0.75..=1.0))
-}
-
 /// The ladder both tunnel directions climb when they cannot reach or hold the
-/// relay: quick, because retrying is how a tunnel comes back.
+/// relay: quick, because retrying is how a tunnel comes back, and jittered,
+/// so the tunnels of every process that lost the relay together do not come
+/// back at the same instants.
 pub(crate) fn transport_backoff() -> RetryBackoff {
-    RetryBackoff::new(Duration::from_millis(100), Duration::from_secs(2))
+    RetryBackoff::new(Duration::from_millis(100), Duration::from_secs(2)).with_jitter()
 }
 
 /// How often a tunnel whose credential the relay refused for good asks again

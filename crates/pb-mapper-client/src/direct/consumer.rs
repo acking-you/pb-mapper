@@ -637,7 +637,9 @@ async fn report_loop(
     wake: Arc<tokio::sync::Notify>,
 ) {
     let mut delay = REPORT_INTERVAL;
-    let mut retry = RetryBackoff::new(REPORT_RETRY, REPORT_INTERVAL);
+    // Jittered: the consumers of every process that lost the relay together
+    // deliver to the same relay again.
+    let mut retry = RetryBackoff::new(REPORT_RETRY, REPORT_INTERVAL).with_jitter();
     loop {
         tokio::select! { () = wake.notified() => {}, () = tokio::time::sleep(delay) => {} }
         let snapshot = reports.snapshot();
