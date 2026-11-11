@@ -284,7 +284,8 @@ impl TaskManager {
     /// An ID for a newly accepted connection: an idle one when one is free,
     /// otherwise one never handed out. `registered` names the IDs the service
     /// map still holds, which are never reused. An ended registration's ID is
-    /// idle only once it has rested; see [`REGISTRATION_ID_REST`].
+    /// idle only once it has rested ten seconds, so that the registration
+    /// replacing it does not take it.
     ///
     /// `None` once every ID is held, which takes four billion connections
     /// open at once: the caller refuses the connection, and an ID that comes
