@@ -65,9 +65,17 @@ impl PbMapperState {
     }
 
     pub fn set_app_directory_path(&mut self, path: Option<String>) -> Result<(), CtlError> {
+        let config_dir = Self::get_config_dir(&path);
+        // Said here, where it is set, rather than on every load and save:
+        // every file this state reads or writes is in it.
+        let whose = if path.is_some() {
+            "the app's"
+        } else {
+            "the platform's"
+        };
+        tracing::info!("Using {whose} config directory: {}", config_dir.display());
         self.app_directory_path = path;
-        self.config_dir = Self::get_config_dir(&self.app_directory_path);
-        tracing::info!("Using config directory: {:?}", self.config_dir);
+        self.config_dir = config_dir;
 
         // Reload config from new location if exists
         match self.load_config() {
@@ -100,9 +108,7 @@ impl PbMapperState {
         // discover — but honouring it on desktop too is what lets a test point
         // a state at a temporary directory instead of the user's real config.
         if let Some(app_dir) = app_directory_path {
-            let path = PathBuf::from(app_dir).join("pb-mapper-ui");
-            tracing::info!("Using caller-provided app directory: {:?}", path);
-            return path;
+            return PathBuf::from(app_dir).join("pb-mapper-ui");
         }
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
@@ -128,16 +134,14 @@ impl PbMapperState {
     /// that cannot be made is an error: the file holds the credential, and
     /// belongs nowhere else, the directory the app runs in least of all.
     fn get_config_file_path(&self) -> Result<PathBuf, CtlError> {
-        let config_dir = Self::get_config_dir(&self.app_directory_path);
-        std::fs::create_dir_all(&config_dir).map_err(|e| {
+        let config_dir = &self.config_dir;
+        std::fs::create_dir_all(config_dir).map_err(|e| {
             CtlError::io(format!(
                 "Failed to create config directory {}: {e}",
                 config_dir.display()
             ))
         })?;
-        let config_file = config_dir.join("config.json");
-        tracing::info!("Using config file path: {:?}", config_file);
-        Ok(config_file)
+        Ok(config_dir.join("config.json"))
     }
 
     pub fn load_config(&self) -> Result<AppConfig, CtlError> {
