@@ -16,7 +16,9 @@
 //! Both stages are timers, so no queue has to stay in step with the wheel.
 //! Every way a key can end runs the same callback: a deadline arriving runs it
 //! on schedule, [`Timer::fire`] runs it early for a revoke or a GC, and dropping
-//! the wheel runs it for a rotation or shutdown.
+//! the wheel runs it for a rotation or shutdown. A key in a row above the
+//! table, which a restart with a smaller capacity leaves, goes through both
+//! stages too, though without a lease, since it cannot authenticate.
 //!
 //! `stages` maps each key to `Weak` handles on its two current timers, which is
 //! what keeps key identity out of the wheel. Renewing moves the callbacks onto
@@ -88,7 +90,8 @@ pub(super) struct Leases {
 impl Leases {
     /// Rebuilds a loaded state's schedule at wall-clock second `now`: `live`
     /// keys, with the leases the slot table points at, wait for their expiry,
-    /// and keys that were already dead wait out the rest of their retention.
+    /// as do the live rows above the table, and keys that were already dead
+    /// wait out the rest of their retention.
     pub(super) fn restored(inner: &Arc<AuthStateInner>, now: u64, live: LiveLeases) -> Self {
         let mut leases = Self {
             inner: Arc::downgrade(inner),
@@ -113,15 +116,23 @@ impl Leases {
                 SlotState::Free | SlotState::Active => {}
             }
         }
-        dead.extend(
-            inner
-                .high()
-                .iter()
-                .filter(|entry| entry.state != SlotState::Active)
-                .map(|entry| (entry.key_id, entry.tombstoned_at)),
-        );
+        // Gathered before anything is scheduled: a stage already due runs
+        // while it is, and takes these rows' lock.
+        let mut live_above = Vec::new();
+        for entry in inner.high().iter() {
+            match entry.state {
+                SlotState::Active => live_above.push((entry.key_id, entry.expires_at)),
+                SlotState::Free | SlotState::Expired | SlotState::Revoked => {
+                    dead.push((entry.key_id, entry.tombstoned_at));
+                }
+            }
+        }
         for (key_id, lease) in live {
-            leases.watch(key_id, lease, now);
+            let expires_at = lease.expires_at();
+            leases.watch(key_id, Some(lease), expires_at, now);
+        }
+        for (key_id, expires_at) in live_above {
+            leases.watch(key_id, None, expires_at, now);
         }
         for (key_id, tombstoned_at) in dead {
             let tombstoned_at = tombstoned_at
@@ -155,17 +166,30 @@ impl Leases {
                 tombstoned_at: 0,
             },
         );
-        self.watch(lease.key_id(), lease.clone(), issued_at);
+        self.watch(
+            lease.key_id(),
+            Some(lease.clone()),
+            lease.expires_at(),
+            issued_at,
+        );
     }
 
-    /// Hands a key's remaining life to a replacement lease, for a renewal at
-    /// wall-clock second `now` whose original lease had already been cancelled.
+    /// Gives a key renewed at wall-clock second `now` fresh stages at its new
+    /// expiry: a key whose original lease had already been cancelled, which
+    /// hands its remaining life to the replacement `lease`, or a key in a row
+    /// above the table, which has no lease.
     ///
     /// The stages it replaces are disarmed first. They identify the key rather than
     /// the lease, so at the old deadline they would otherwise end the key this renewal
     /// just extended.
-    pub(super) fn adopt(&mut self, lease: &Arc<AuthLease>, now: u64) {
-        if let Some(stages) = self.stages.remove(&lease.key_id()) {
+    pub(super) fn adopt(
+        &mut self,
+        key_id: KeyId,
+        lease: Option<Arc<AuthLease>>,
+        expires_at: u64,
+        now: u64,
+    ) {
+        if let Some(stages) = self.stages.remove(&key_id) {
             for timer in [stages.retire, stages.reap]
                 .iter()
                 .filter_map(Weak::upgrade)
@@ -173,7 +197,7 @@ impl Leases {
                 timer.disarm();
             }
         }
-        self.watch(lease.key_id(), lease.clone(), now);
+        self.watch(key_id, lease, expires_at, now);
     }
 
     /// Moves a key renewed at wall-clock second `now` to its new expiry, sooner
@@ -356,23 +380,24 @@ impl Leases {
     }
 
     /// Schedules both stages of a live key, the wall clock reading `now`:
-    /// retirement at its lease's expiry, and the reap a retention window later.
+    /// retirement at `expires_at`, and the reap a retention window later.
+    /// `lease` is the key's lease; a key in a row above the table has none,
+    /// since it cannot authenticate.
     ///
     /// WHY the reap timer owns the lease rather than the retire timer: the slot
     /// table holds only a `Weak`, so this is the reference that lets a request
     /// during the retention window read *why* the key died instead of finding a
     /// vanished lease. Firing a timer consumes its callback, so an `Arc` held by
     /// the retire stage would be released the moment that stage ran.
-    fn watch(&mut self, key_id: KeyId, lease: Arc<AuthLease>, now: u64) {
+    fn watch(&mut self, key_id: KeyId, lease: Option<Arc<AuthLease>>, expires_at: u64, now: u64) {
         let inner = self.inner.clone();
-        let expires_at = lease.expires_at();
         let retire_lease = lease.clone();
         let retire = Timer::new(move || {
             if let Some(inner) = inner.upgrade() {
-                retire(&inner, key_id, &retire_lease);
+                retire(&inner, key_id, retire_lease.as_ref());
             }
         });
-        let reap = self.reap_timer(key_id, Some(lease));
+        let reap = self.reap_timer(key_id, lease);
         self.stages.insert(
             key_id,
             Stages {
@@ -420,13 +445,26 @@ fn next_sweep(now: u64) -> u64 {
 
 /// Ends a key's active stage: cancels the lease, marks the row dead, records when
 /// its retention starts, and schedules the reap that frees the row.
-fn retire(inner: &Arc<AuthStateInner>, key_id: KeyId, lease: &Arc<AuthLease>) {
+fn retire(inner: &Arc<AuthStateInner>, key_id: KeyId, lease: Option<&Arc<AuthLease>>) {
     // WHY expiry is the fallback reason: a key ended for any other reason was
     // already cancelled by the code that knew that reason, and `record_cancel`
     // keeps the first one, so this cannot mislabel it.
-    lease.cancel_expired();
+    if let Some(lease) = lease {
+        lease.cancel_expired();
+    }
     let mut slots = inner.slots_mut();
     let Some(slot) = slots.get_mut(key_id.slot().as_index()) else {
+        // Above the addressable table: no lease and no session, only the row
+        // to mark, as a restart past its deadline would.
+        drop(slots);
+        if let Some(entry) = inner
+            .high_mut()
+            .iter_mut()
+            .find(|entry| entry.key_id == key_id && entry.state == SlotState::Active)
+        {
+            entry.state = SlotState::Expired;
+            entry.tombstoned_at = Some(entry.expires_at);
+        }
         return;
     };
     // Already dead, or the row moved on: a revoke marks the row before it
@@ -443,7 +481,7 @@ fn retire(inner: &Arc<AuthStateInner>, key_id: KeyId, lease: &Arc<AuthLease>) {
         .and_modify(|cold| cold.tombstoned_at = tombstoned_at);
     // A rotation or a stopping actor ends every key through here too, having
     // cancelled it first; only a key that ran out is reported as expired.
-    if lease.ran_out() {
+    if lease.is_some_and(|lease| lease.ran_out()) {
         tracing::info!(
             event = "temporary_key_expired",
             auth_stage = "expiry",

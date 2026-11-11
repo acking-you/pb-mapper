@@ -106,7 +106,7 @@ fn a_lease_adopted_by_a_renewal_outlives_the_old_deadline() {
         slots[0].expires_at = T + 3600;
         slots[0].lease = Arc::downgrade(&replacement);
     }
-    leases.adopt(&replacement, T);
+    leases.adopt(key_id, Some(replacement.clone()), T + 3600, T);
     let cancellation = replacement.cancellation_token();
     drop(replacement);
 
@@ -238,6 +238,70 @@ fn a_restored_dead_row_above_capacity_keeps_its_tombstone_time() {
 
     leases.tick(T + 1);
     assert!(inner.high().is_empty());
+}
+
+/// A key in a row above the configured capacity is on the schedule like any
+/// other, though it cannot authenticate: it shows expired from its deadline
+/// and goes a retention window later, a revoked one goes a retention window
+/// after the revoke, and a reset or a rotation takes a live one with the rest.
+#[test]
+fn keys_above_the_capacity_end_on_schedule() {
+    let high = |slot| KeyId::new(Generation::from_u32(1), SlotIndex::from_index(slot));
+    let (expiring, revoked, live) = (high(4), high(5), high(6));
+    let mut generations = vec![Generation::FIRST; 7];
+    let entry = |key_id: KeyId, expires_at| PersistedEntry {
+        key_id,
+        state: SlotState::Active,
+        issued_at: T - 100,
+        expires_at,
+        label: None,
+        tombstoned_at: None,
+        namespace: None,
+    };
+    for key_id in [expiring, revoked, live] {
+        generations[key_id.slot().as_index()] = key_id.generation();
+    }
+    let snapshot = PersistedSnapshot {
+        generations,
+        entries: vec![
+            entry(expiring, T + 30),
+            entry(revoked, T + 3600),
+            entry(live, T + 3600),
+        ],
+        ..snapshot_for_test([0; INSTANCE_ID_LEN], 0, 0)
+    };
+    let (inner, mut leases) = restore(Some(&snapshot));
+    let row = |key_id: KeyId| {
+        inner
+            .high()
+            .iter()
+            .find(|entry| entry.key_id == key_id)
+            .map(|entry| (entry.state, entry.tombstoned_at))
+    };
+
+    // What `actor_revoke` does for a row above the table.
+    if let Some(entry) = inner
+        .high_mut()
+        .iter_mut()
+        .find(|entry| entry.key_id == revoked)
+    {
+        entry.state = SlotState::Revoked;
+        entry.tombstoned_at = Some(T);
+    }
+    leases.revoke(revoked, T);
+
+    leases.tick(T + 29);
+    assert_eq!(row(expiring), Some((SlotState::Active, None)));
+    leases.tick(T + 30);
+    assert_eq!(row(expiring), Some((SlotState::Expired, Some(T + 30))));
+    leases.tick(T + TOMBSTONE_RETENTION.as_secs());
+    assert_eq!(row(revoked), None);
+    leases.tick(T + 30 + TOMBSTONE_RETENTION.as_secs());
+    assert_eq!(row(expiring), None);
+
+    // What a reset or a root rotation does to the schedule.
+    leases.wipe(T + 100);
+    assert_eq!(row(live), None);
 }
 
 /// A revoked key keeps its row for a retention window counted from the revoke,

@@ -166,9 +166,11 @@ pub(crate) struct AuthStateInner {
     /// ```
     ///
     /// Their generations must be kept so growing the table again cannot reissue
-    /// a key id that was already handed out, and their entries so a still-live
-    /// credential in that range keeps working. This is the fallback path that
-    /// operations take after missing in `slots`.
+    /// a key id that was already handed out, and their entries so a key in that
+    /// range is still listed, renewed and revoked, and works again once a
+    /// restart grows the table back over it; until then it cannot authenticate.
+    /// Each is on the lease schedule like a row of the table. This is the
+    /// fallback path that operations take after missing in `slots`.
     ///
     /// Fixed at startup: nothing issues into these rows, so the generations
     /// never change and need no lock.

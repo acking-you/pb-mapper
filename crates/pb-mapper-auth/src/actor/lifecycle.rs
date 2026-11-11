@@ -332,7 +332,7 @@ pub(super) fn actor_renew(
                 let lease = Arc::new(AuthLease::new(key_id, namespace, expires_at));
                 slot.lease = Arc::downgrade(&lease);
                 drop(slots);
-                leases.adopt(&lease, now);
+                leases.adopt(key_id, Some(lease), expires_at, now);
             }
         }
         return metadata_with_credential(inner, key_id, true);
@@ -347,6 +347,7 @@ pub(super) fn actor_renew(
         entry.expires_at = expires_at;
         entry.tombstoned_at = None;
     }
+    leases.adopt(key_id, None, expires_at, now);
     metadata_with_credential(inner, key_id, true)
 }
 
@@ -415,7 +416,7 @@ pub(super) fn actor_revoke(
     entry.tombstoned_at = Some(now);
     let state = slot_state_name(entry.state).to_string();
     drop(high);
-    leases.retire_now(key_id);
+    leases.revoke(key_id, now);
     Ok(TemporaryKeyMetadata {
         key_id,
         state,

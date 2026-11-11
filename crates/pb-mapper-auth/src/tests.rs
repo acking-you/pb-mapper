@@ -686,6 +686,10 @@ async fn reset_clears_retained_high_slot_entries() {
     let config_one = config(&state_dir, 1);
     let (runtime, admin) = start(&config_one).await;
     runtime.reset(&admin).await.unwrap();
+    // Gone at once, not only from the snapshot the reset wrote: one still
+    // held in memory would reach the next compaction's snapshot.
+    let page = runtime.list(&admin, 0, 100).await.unwrap();
+    assert!(page.items.is_empty(), "{:?}", page.items);
     stop(runtime).await;
 
     let (runtime, admin) = start(&config_two).await;
