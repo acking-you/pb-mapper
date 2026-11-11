@@ -158,7 +158,16 @@ pub struct TaskManager {
     /// Held for the manager's whole life, so its receiver never reports closed.
     sender: TaskSender,
     receiver: TaskReceiver,
+    /// IDs returned by connections that ended, the next accept's first.
+    ///
+    /// Each was handed to a connection and comes back once, when it ends, and
+    /// an accept takes one back out, so the pool holds at most as many IDs as
+    /// were ever open at once, connections that never authenticated included,
+    /// and keeps that size until the relay stops.
     idle_conn_ids: Vec<RemoteConnId>,
+    /// The IDs in `idle_conn_ids`, so that a return is checked against them in
+    /// constant time on the routing loop, however large a flood made the pool.
+    idle_conn_set: hashbrown::HashSet<RemoteConnId>,
     active_conn_map: hashbrown::HashMap<RemoteConnId, SenderChan<ConnTask>>,
 }
 
@@ -176,6 +185,7 @@ impl TaskManager {
             sender,
             receiver,
             idle_conn_ids: Vec::new(),
+            idle_conn_set: hashbrown::HashSet::new(),
             active_conn_map: hashbrown::HashMap::new(),
         }
     }
@@ -234,10 +244,11 @@ impl TaskManager {
         self.active_conn_map.remove(&conn_id).is_some()
     }
 
-    /// Return an ID to the idle pool, if it is not already there.
+    /// Return an ID to the idle pool, if it is not already there: an ID queued
+    /// twice could go to two connections before either had signed up.
     #[inline]
     pub fn recycle_conn_id(&mut self, conn_id: RemoteConnId) {
-        if !self.idle_conn_ids.contains(&conn_id) {
+        if self.idle_conn_set.insert(conn_id) {
             self.idle_conn_ids.push(conn_id);
         }
     }
@@ -254,6 +265,7 @@ impl TaskManager {
         registered: impl Iterator<Item = RemoteConnId> + Clone,
     ) -> Option<RemoteConnId> {
         while let Some(conn_id) = self.idle_conn_ids.pop() {
+            self.idle_conn_set.remove(&conn_id);
             if self.is_issued(&conn_id)
                 && !self.active_conn_map.contains_key(&conn_id)
                 && !registered.clone().any(|id| id == conn_id)
@@ -335,12 +347,37 @@ mod tests {
         assert!(manager.get_conn_sender_chan(&live).is_some());
     }
 
+    /// The ends of a flood of connections, as many as the shipped descriptor
+    /// limit lets a peer hold open before it authenticates, each return their
+    /// ID without a scan of the IDs already returned: the routing loop doing it
+    /// serves every other connection meanwhile. The bound is far above what
+    /// that takes (milliseconds) and far below what a scan per return took
+    /// (seconds in a debug build).
+    #[test]
+    fn a_flood_of_connection_ends_returns_its_ids_cheaply() {
+        const FLOOD: u32 = 65_535;
+        let mut manager = TaskManager::new();
+        let ids = (0..FLOOD)
+            .map(|_| manager.get_conn_id(std::iter::empty()).unwrap())
+            .collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        for id in ids {
+            manager.recycle_conn_id(id);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "returning {FLOOD} ids took {elapsed:?}"
+        );
+        assert_eq!(manager.idle_conn_count(), FLOOD as usize);
+    }
+
     #[test]
     fn idle_id_is_not_reused_while_active() {
         let mut manager = TaskManager::new();
         let active = manager.get_conn_id(std::iter::empty()).unwrap();
         manager.sign_up_conn_sender(active, sender());
-        manager.idle_conn_ids.push(active);
+        manager.recycle_conn_id(active);
 
         assert_eq!(
             manager.get_conn_id(std::iter::empty()),
