@@ -18,6 +18,16 @@ pub enum Error {
         conn_id: RemoteConnId,
         timeout: Duration,
     },
+    /// The subscriber closed its connection, or broke it, before its stream
+    /// was ready: it sends nothing until it has its answer, so it gave up.
+    #[snafu(display(
+        "subscriber gave up before its stream was ready for key {key}, client {conn_id}"
+    ))]
+    ClientConnLeft {
+        key: Arc<str>,
+        conn_id: RemoteConnId,
+        source: std::io::Error,
+    },
     #[snafu(display("administrator operation failed: {what}"))]
     AdminOperation {
         what: &'static str,

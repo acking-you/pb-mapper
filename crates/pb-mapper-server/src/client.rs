@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use pb_mapper_protocol::transport::RelayStream;
 use snafu::ResultExt;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::time::{Instant, timeout};
 use tracing::instrument;
 
@@ -114,17 +114,36 @@ pub(super) async fn handle_client_conn_selected(
     let prev_time = Instant::now();
     // Bounds the whole subscribe exchange, every wait for the manager included.
     let setup_timeout = pb_mapper_core::config::control_io_timeout().min(Duration::from_secs(5));
-    let setup_result = timeout(
-        setup_timeout,
-        get_server_stream(
-            &mut conn,
-            &session,
-            key.clone(),
-            conn_id,
-            task_sender.clone(),
-            selected,
-        ),
-    )
+    let setup_result = timeout(setup_timeout, async {
+        // A subscriber that gives up, as a client does when its own attempt
+        // runs out, is no longer waited for: nothing holds its slot or takes a
+        // provider's stream on its behalf from then on.
+        let setup = tokio::select! {
+            biased;
+            source = subscriber_gone(&mut conn) => {
+                return Err(super::error::Error::ClientConnLeft {
+                    key: key.clone(),
+                    conn_id,
+                    source,
+                });
+            }
+            setup = get_server_stream(key.clone(), conn_id, task_sender.clone(), selected) => {
+                setup?
+            }
+        };
+        match setup {
+            Setup::Ready(ready) => Ok(ready),
+            Setup::Refused { refusal, reason } => {
+                write_subscribe_error(&mut conn, &session, refusal, &key, conn_id).await?;
+                ClientConnSubcribeFailedSnafu {
+                    key: key.clone(),
+                    conn_id,
+                    reason,
+                }
+                .fail()
+            }
+        }
+    })
     .await
     .unwrap_or_else(|_| {
         Err(super::error::Error::ClientConnSetupTimeout {
@@ -473,6 +492,35 @@ struct ReadyStream {
     data_protocol: Option<u16>,
 }
 
+/// How a subscribe's wait for a stream ended, short of an error.
+enum Setup {
+    Ready(ReadyStream),
+    /// The manager refused the subscribe, with `refusal` for the subscriber.
+    Refused {
+        refusal: PbConnResponse,
+        reason: String,
+    },
+}
+
+/// Why the subscriber is gone, once its connection ends, fails or carries
+/// data. A subscriber sends nothing before its subscribe answer, so any of the
+/// three means it is no longer waiting for one. Dropped before it resolves, it
+/// has read nothing.
+async fn subscriber_gone(conn: &mut RelayStream) -> std::io::Error {
+    let mut byte = [0_u8; 1];
+    match conn.read(&mut byte).await {
+        Ok(0) => std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the subscriber closed its connection",
+        ),
+        Ok(_) => std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the subscriber sent data before its subscribe answer",
+        ),
+        Err(error) => error,
+    }
+}
+
 /// How long after a suspected connection is retired a subscribe still waits
 /// for the replacement to register.
 const REPLACEMENT_MARGIN: Duration = Duration::from_millis(200);
@@ -486,19 +534,22 @@ const REPLACEMENT_MARGIN: Duration = Duration::from_millis(200);
 /// the subscribe's start instead, the wait ran out before the retirement for
 /// any provider the relay had learned to wait more than 500 ms for, and for
 /// any whose acknowledgement timer fired late.
+///
+/// The setup timeout still ends the wait, which cuts it short for a budget
+/// past about 1.6 s, and so does the subscriber leaving: this can outlast a
+/// client's own attempt, after which the client closes its connection and
+/// tries again.
 fn replacement_deadline(ack_timeout: Duration) -> Instant {
     let grace = pb_mapper_core::config::control_suspect_grace().max(ack_timeout.saturating_mul(2));
     Instant::now() + grace + REPLACEMENT_MARGIN
 }
 
 async fn get_server_stream(
-    conn: &mut RelayStream,
-    session: &ServerHeaderSession,
     key: ImutableKey,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
     selected: Option<(RemoteConnId, u64)>,
-) -> Result<ReadyStream> {
+) -> Result<Setup> {
     let (tx, rx) = kanal::bounded_async(DEFAULT_CLIENT_CHAN_CAP);
     let ready_timeout = stream_ready_timeout();
     let recovery_timeout = stream_recovery_timeout().max(
@@ -592,13 +643,7 @@ async fn get_server_stream(
                     "subscribe failed before stream forwarding"
                 );
                 let refusal = PbConnResponse::error(code, &reason, retryable);
-                write_subscribe_error(conn, session, refusal, &key, conn_id).await?;
-                ClientConnSubcribeFailedSnafu {
-                    key: key.clone(),
-                    conn_id,
-                    reason,
-                }
-                .fail()?
+                return Ok(Setup::Refused { refusal, reason });
             }
             ConnTask::SubcribeRetry { reason } => {
                 if Instant::now() >= recovery_deadline {
@@ -667,14 +712,14 @@ async fn get_server_stream(
                 stream,
                 session: stream_session,
             } if response_generation == server_generation => {
-                return Ok(ReadyStream {
+                return Ok(Setup::Ready(ReadyStream {
                     server_stream: stream,
                     server_session: stream_session,
                     server,
                     codec_key,
                     is_datagram,
                     data_protocol,
-                });
+                }));
             }
             ConnTask::StreamAck {
                 server_id,
@@ -736,14 +781,14 @@ async fn get_server_stream(
         } = resp
         {
             if response_generation == server_generation {
-                return Ok(ReadyStream {
+                return Ok(Setup::Ready(ReadyStream {
                     server_stream: stream,
                     server_session: stream_session,
                     server,
                     codec_key,
                     is_datagram,
                     data_protocol,
-                });
+                }));
             }
             tracing::warn!(
                 event = "server_stream_generation_mismatch",

@@ -1,5 +1,6 @@
 //! The relay's own behavior against hand-written frames (`relay`), each case
-//! on an in-process relay of its own.
+//! on an in-process relay of its own; one case runs a real `connect` and
+//! `register` against it, in this process.
 //!
 //! Three binaries share this file's modules, each for what it needs from its
 //! process:
@@ -26,6 +27,8 @@
 // modules but not a `tests/` target, whose whole body is test code.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "../e2e/bound_listener.rs"]
+mod bound_listener;
 mod credential;
 mod fixtures;
 mod relay;

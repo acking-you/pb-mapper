@@ -1,8 +1,11 @@
 //! The relay's own behavior, driven with hand-written frames.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
+use pb_mapper_client::client::run_client_side_cli_with_callback;
+use pb_mapper_client::server::{ServerTunnelOptions, run_server_side_cli_with_pinned_credential};
 use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_protocol::command::{
     AdminRequest, AdminResponse, LocalServer, MessageSerializer, PbConnRequest, PbConnResponse,
@@ -14,14 +17,16 @@ use pb_mapper_protocol::{
 };
 use pb_mapper_server::run_server_with_auth_config;
 use pb_mapper_testkit::{
-    Transport, V2ControlSpec, admin_credential, register_v2_control, reserve_addr,
+    PROBE, Transport, V2ControlSpec, admin_credential, register_v2_control, reserve_addr, tcp_echo,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use uni_stream::stream::TcpStreamProvider;
 
+use crate::bound_listener::{BoundListener, with_bound_listener};
 use crate::credential::{StateDir, auth_config};
 use crate::fixtures::{
     InProcessRelay, issue_before_start, read_stream_request, register_control_conn_parts,
@@ -646,6 +651,135 @@ async fn subscribe_waits_for_replacement_of_a_slow_provider() {
     drop(stream);
     stale_task.abort();
     replacement_task.abort();
+    relay.stop().await;
+}
+
+/// A real `connect` tunnel through its publisher's retire-and-replace: the
+/// first provider leaves its stream request unanswered, the relay retires it,
+/// and a real `register` started then carries the tunnel's connection. Within
+/// the client's first attempt as a rule; past it, on the attempt after, as
+/// the relay no longer serves one it has given up.
+#[tokio::test]
+async fn a_connect_tunnel_is_served_by_the_replacement_of_a_retired_provider() {
+    let relay = InProcessRelay::start(auth_config()).await;
+    let key = "replaced-backend";
+
+    let (stale_ready_tx, stale_ready_rx) = oneshot::channel();
+    let (retired_tx, retired_rx) = oneshot::channel();
+    let stale_task = tokio::spawn(stale_control(
+        relay.addr,
+        key.to_string(),
+        stale_ready_tx,
+        StaleEnd::IgnoreStreamUntilRetired(retired_tx),
+    ));
+    stale_ready_rx.await.unwrap();
+
+    let echo = tcp_echo(None).await;
+    let replacement = tokio::spawn({
+        let (backend, relay_addr) = (echo.addr(), relay.addr);
+        async move {
+            retired_rx.await.unwrap();
+            run_server_side_cli_with_pinned_credential::<TcpStreamProvider, _>(
+                backend,
+                relay_addr,
+                Arc::from(key),
+                ServerTunnelOptions {
+                    need_codec: false,
+                    is_datagram: false,
+                    keep_alive: false,
+                    namespace: None,
+                    force_namespace: false,
+                },
+                None,
+                admin_credential(),
+            )
+            .await;
+        }
+    });
+
+    let local = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = local.local_addr().unwrap();
+    let tunnel = tokio::spawn(with_bound_listener(
+        local,
+        run_client_side_cli_with_callback::<BoundListener, _>(
+            local_addr,
+            relay.addr,
+            Arc::from(key),
+            false,
+            None,
+        ),
+    ));
+
+    let mut app = TcpStream::connect(local_addr).await.unwrap();
+    app.write_all(PROBE).await.unwrap();
+    let mut echoed = vec![0; PROBE.len()];
+    // A hang bound: the client gives a stream's setup five seconds, and the
+    // relay retires the first provider about 2.3 s into it.
+    timeout(Duration::from_secs(10), app.read_exact(&mut echoed))
+        .await
+        .expect("the tunnel's connection was not served")
+        .expect("the tunnel closed its connection instead of serving it");
+    assert_eq!(echoed, PROBE);
+
+    tunnel.abort();
+    replacement.abort();
+    stale_task.abort();
+    relay.stop().await;
+}
+
+/// A subscriber that gives up, as a client does once its attempt runs out,
+/// closes its connection while the relay still waits for a stream on its
+/// behalf. The relay stops waiting then: a stream the provider opens for it
+/// afterwards is dropped, not set up for a subscriber that has gone.
+#[tokio::test]
+async fn a_stream_is_not_set_up_for_a_subscriber_that_gave_up() {
+    let relay = InProcessRelay::start(auth_config()).await;
+    let key = "late-backend";
+
+    // A provider that acknowledges at once and opens its stream only later.
+    let control = TcpStream::connect(relay.addr).await.unwrap();
+    let (mut reader_stream, mut writer_stream) = control.into_split();
+    let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+        register_control_conn_parts(&mut reader, &mut writer, key).await;
+    }
+    let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+
+    let subscriber = subscribe(relay.addr, key).await;
+    let (client_id, server_generation) = read_stream_request(&mut reader, "provider").await;
+    let ack = PbServerRequest::StreamAck {
+        client_id,
+        server_generation,
+    }
+    .encode()
+    .unwrap();
+    writer.write_msg(&ack).await.unwrap();
+
+    drop(subscriber);
+    let mut data = TcpStream::connect(relay.addr).await.unwrap();
+    let request = PbConnRequest::Stream {
+        data_protocol: None,
+        key: key.to_string(),
+        dst_id: client_id,
+        server_generation,
+    }
+    .encode()
+    .unwrap();
+    get_header_msg_writer(&mut data)
+        .unwrap()
+        .write_msg(&request)
+        .await
+        .unwrap();
+    let mut data_reader = get_header_msg_reader(&mut data).unwrap();
+    let answer = timeout(READY, data_reader.read_msg())
+        .await
+        .expect("the relay neither set the stream up nor dropped it");
+    assert!(
+        !answer.is_ok_and(|bytes| !bytes.is_empty()),
+        "the relay set a stream up for a subscriber that had gone"
+    );
+
     relay.stop().await;
 }
 
