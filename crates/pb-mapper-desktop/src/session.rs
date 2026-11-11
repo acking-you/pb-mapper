@@ -430,8 +430,15 @@ pub(crate) async fn run<S>(
 /// B-recv. Returns the protocol violation that ended it, or `None` when the
 /// transport closed, failed or went silent.
 async fn receive<R: AsyncRead + Unpin>(session: &Session, mut reader: R) -> Option<Violation> {
+    let mut record = Vec::new();
     loop {
-        match wire::read_header::<_, ViewerMessage>(&mut reader, HOST_READ_TIMEOUT).await {
+        match wire::read_header_with::<_, ViewerMessage>(
+            &mut reader,
+            &mut record,
+            HOST_READ_TIMEOUT,
+        )
+        .await
+        {
             Ok(Some(message)) => {
                 if let Err(violation) = session.handle(message, Instant::now()) {
                     return Some(violation);

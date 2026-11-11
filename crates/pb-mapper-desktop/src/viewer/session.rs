@@ -257,17 +257,19 @@ struct Reader<'a> {
 }
 impl Reader<'_> {
     async fn run<R: AsyncRead + Unpin>(&mut self, read: &mut R) -> Ended {
+        let mut record = Vec::new();
         loop {
-            let message = match wire::read_header(read, VIEWER_HEADER_TIMEOUT).await {
-                Ok(Some(message)) => message,
-                Ok(None) => {
-                    return Ended::Stopped(
-                        ViewerReason::Transport,
-                        "the remote computer closed the connection".into(),
-                    );
-                }
-                Err(failure) => return Ended::failed(failure),
-            };
+            let message =
+                match wire::read_header_with(read, &mut record, VIEWER_HEADER_TIMEOUT).await {
+                    Ok(Some(message)) => message,
+                    Ok(None) => {
+                        return Ended::Stopped(
+                            ViewerReason::Transport,
+                            "the remote computer closed the connection".into(),
+                        );
+                    }
+                    Err(failure) => return Ended::failed(failure),
+                };
             if let Err(ended) = self.handle(message, read).await {
                 return ended;
             }
@@ -423,6 +425,7 @@ impl Writer<'_> {
     ) -> Ended {
         let mut last_write = Instant::now();
         let mut next_tick = last_write;
+        let mut records = Vec::new();
         loop {
             let now = Instant::now();
             let mut failure = None;
@@ -452,7 +455,9 @@ impl Writer<'_> {
                     {
                         self.shared.cursor.lock().moved = Some((event.generation, event.sequence));
                     }
-                    if let Err(failure) = wire::write_message(write, &message, None).await {
+                    if let Err(failure) =
+                        wire::write_message_with(write, &mut records, &message, None).await
+                    {
                         return Ended::failed(failure);
                     }
                     last_write = Instant::now();

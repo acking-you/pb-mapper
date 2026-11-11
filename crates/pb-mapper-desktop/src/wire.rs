@@ -1,4 +1,5 @@
 use crate::error;
+use bytes::Buf;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{fmt, io, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -64,79 +65,98 @@ fn timed_out() -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, TIMED_OUT)
 }
 
-/// One message: `header` serialized, then written with `payload` as
-/// `write_records` writes them.
+/// One message, as `write_message_with` writes it.
 pub(crate) async fn write_message<W: AsyncWrite + Unpin, T: Serialize>(
     w: &mut W,
     header: &T,
     payload: Option<&[u8]>,
 ) -> Result<(), WireError> {
-    let header = serde_json::to_vec(header).map_err(io::Error::other)?;
-    write_records(w, &header, payload).await
+    write_message_with(w, &mut Vec::new(), header, payload).await
 }
 
-/// The header record and, for video only, its payload record, buffered
-/// together and flushed once, all within `write_timeout`.
-async fn write_records<W: AsyncWrite + Unpin>(
+/// One message: the header record and, for video only, its payload record,
+/// written as one write of their bytes would write them and flushed once, all
+/// within `write_timeout`. `records` holds everything but the payload; a
+/// writer that keeps it across messages allocates nothing for them, and the
+/// payload is not copied.
+pub(crate) async fn write_message_with<W: AsyncWrite + Unpin, T: Serialize>(
     w: &mut W,
-    header: &[u8],
+    records: &mut Vec<u8>,
+    header: &T,
     payload: Option<&[u8]>,
 ) -> Result<(), WireError> {
-    if header.len() > MAX_HEADER {
+    records.clear();
+    records.extend_from_slice(&[0; 4]);
+    serde_json::to_writer(&mut *records, header).map_err(io::Error::other)?;
+    let header_len = records.len() - 4;
+    if header_len > MAX_HEADER {
         return Err(WireError::Framing(TOO_LARGE));
     }
     let payload_len = payload.map_or(0, <[u8]>::len);
     if payload.is_some() && !(1..=MAX_PAYLOAD).contains(&payload_len) {
         return Err(WireError::Framing(PAYLOAD_SIZE));
     }
-    let records = 4 + header.len() + payload.map_or(0, |payload| 4 + payload.len());
-    tokio::time::timeout(write_timeout(header.len() + payload_len), async {
-        let mut out = tokio::io::BufWriter::with_capacity(records, &mut *w);
-        out.write_u32(header.len() as u32).await?;
-        out.write_all(header).await?;
-        if let Some(payload) = payload {
-            out.write_u32(payload.len() as u32).await?;
-            out.write_all(payload).await?;
-        }
-        out.flush().await
+    records[..4].copy_from_slice(&(header_len as u32).to_be_bytes());
+    if payload.is_some() {
+        records.extend_from_slice(&(payload_len as u32).to_be_bytes());
+    }
+    tokio::time::timeout(write_timeout(header_len + payload_len), async {
+        // A vectored TLS write cuts the records of both slices as it would
+        // cut one slice of their bytes.
+        let mut bytes = Buf::chain(records.as_slice(), payload.unwrap_or_default());
+        w.write_all_buf(&mut bytes).await?;
+        w.flush().await
     })
     .await
     .map_err(|_| WireError::TimedOut)?
     .map_err(WireError::Io)
 }
 
-/// The next header, waiting at most `timeout` for it. `None` is a clean EOF
-/// between messages; EOF inside a record is an error.
+/// The next header, as `read_header_with` reads it.
 pub(crate) async fn read_header<R: AsyncRead + Unpin, T: DeserializeOwned>(
     r: &mut R,
     timeout: Duration,
 ) -> Result<Option<T>, WireError> {
-    let Some(bytes) = read_record(r, timeout).await? else {
+    read_header_with(r, &mut Vec::new(), timeout).await
+}
+
+/// The next header, waiting at most `timeout` for it. `None` is a clean EOF
+/// between messages; EOF inside a record is an error. Its record is read into
+/// `record`, which a reader that keeps it reuses.
+pub(crate) async fn read_header_with<R: AsyncRead + Unpin, T: DeserializeOwned>(
+    r: &mut R,
+    record: &mut Vec<u8>,
+    timeout: Duration,
+) -> Result<Option<T>, WireError> {
+    if !read_record(r, record, timeout).await? {
         return Ok(None);
-    };
-    serde_json::from_slice(&bytes)
+    }
+    serde_json::from_slice(record)
         .map(Some)
         .map_err(|_| WireError::Framing("invalid desktop message"))
 }
 
-/// The next header record's bytes, as `read_header` waits for them.
+/// The next header record's bytes into `record`, as `read_header_with` waits
+/// for them; false at a clean EOF.
 async fn read_record<R: AsyncRead + Unpin>(
     r: &mut R,
+    record: &mut Vec<u8>,
     timeout: Duration,
-) -> Result<Option<Vec<u8>>, WireError> {
+) -> Result<bool, WireError> {
     tokio::time::timeout(timeout, async {
         let mut length = [0; 4];
         if r.read(&mut length[..1]).await? == 0 {
-            return Ok(None);
+            return Ok(false);
         }
         r.read_exact(&mut length[1..]).await?;
         let len = u32::from_be_bytes(length) as usize;
         if len > MAX_HEADER {
             return Err(WireError::Framing(TOO_LARGE));
         }
-        let mut bytes = vec![0; len];
-        r.read_exact(&mut bytes).await?;
-        Ok(Some(bytes))
+        record.clear();
+        record.resize(len, 0);
+        r.read_exact(record).await?;
+        Ok(true)
     })
     .await
     .map_err(|_| WireError::TimedOut)?
@@ -235,6 +255,115 @@ mod tests {
         let (client, mut server) = tls_pair().await;
         drop(client);
         assert!(eof(next(&mut server).await.err()));
+    }
+
+    /// What a TLS stream wrote to its transport.
+    struct Tap {
+        io: tokio::io::DuplexStream,
+        written: Vec<u8>,
+    }
+    impl tokio::io::AsyncRead for Tap {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::pin::Pin::new(&mut self.io).poll_read(cx, buf)
+        }
+    }
+    impl AsyncWrite for Tap {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            let this = &mut *self;
+            let written = std::task::ready!(std::pin::Pin::new(&mut this.io).poll_write(cx, buf))?;
+            this.written.extend_from_slice(&buf[..written]);
+            std::task::Poll::Ready(Ok(written))
+        }
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::pin::Pin::new(&mut self.io).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::pin::Pin::new(&mut self.io).poll_shutdown(cx)
+        }
+    }
+
+    /// The length of each TLS record the host wrote while `write` ran, and
+    /// the bytes its viewer read.
+    async fn records(
+        write: impl AsyncFnOnce(&mut tokio_rustls::server::TlsStream<Tap>),
+        expected: usize,
+    ) -> (Vec<usize>, Vec<u8>) {
+        let (acceptor, fingerprint) = crate::security::server().unwrap();
+        let connector = crate::security::client(fingerprint).unwrap();
+        let (viewer, host) = tokio::io::duplex(1 << 20);
+        let host = Tap {
+            io: host,
+            written: Vec::new(),
+        };
+        let (viewer, host) = tokio::join!(
+            connector.connect(
+                quinn::rustls::pki_types::ServerName::try_from(crate::security::NAME).unwrap(),
+                viewer,
+            ),
+            acceptor.accept(host),
+        );
+        let (mut viewer, mut host) = (viewer.unwrap(), host.unwrap());
+        host.get_mut().0.written.clear();
+        write(&mut host).await;
+        let mut lengths = Vec::new();
+        let mut rest = &host.get_ref().0.written[..];
+        while let [_, _, _, high, low, tail @ ..] = rest {
+            let length = usize::from(u16::from_be_bytes([*high, *low]));
+            lengths.push(length);
+            rest = &tail[length..];
+        }
+        let mut read = vec![0; expected];
+        viewer.read_exact(&mut read).await.unwrap();
+        (lengths, read)
+    }
+
+    /// A message leaves in the TLS records one write of its bytes makes: no
+    /// record ends between the header and its payload.
+    #[tokio::test]
+    async fn a_message_is_cut_into_records_as_one_write_of_its_bytes() {
+        let header = HostMessage::Probe { nonce: 1 };
+        let json = serde_json::to_vec(&header).unwrap();
+        for payload in [None, Some(vec![7; 3000]), Some(vec![9; 100_000])] {
+            let mut bytes = (json.len() as u32).to_be_bytes().to_vec();
+            bytes.extend_from_slice(&json);
+            if let Some(payload) = &payload {
+                bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(payload);
+            }
+            let (cut, read) = records(
+                async |host| {
+                    write_message(host, &header, payload.as_deref())
+                        .await
+                        .unwrap();
+                },
+                bytes.len(),
+            )
+            .await;
+            let (one_write, _) = records(
+                async |host| {
+                    host.write_all(&bytes).await.unwrap();
+                    host.flush().await.unwrap();
+                },
+                bytes.len(),
+            )
+            .await;
+            assert_eq!(cut, one_write);
+            assert!(read == bytes, "the viewer read other bytes");
+        }
     }
 
     /// A peer that breaks the framing is told apart from a silent one, and

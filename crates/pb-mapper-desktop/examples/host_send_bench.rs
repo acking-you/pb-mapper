@@ -1,11 +1,12 @@
-//! Heap allocations per video unit on the remote desktop's paths, end to end
-//! in one process: a relay, a host whose H.264 "encoder" returns one 4 KiB
-//! unit per capture, and a viewer whose renderer presents every unit at once.
-//! The first window streams video only; the second also moves the pointer
-//! every 4 ms under control, which feeds the host's input lane and its input
-//! wait window. Allocations are counted for the whole process, so the
-//! viewer's and the relay's are in every figure: compare runs of this
-//! harness with each other only.
+//! Heap allocations, and the bytes they ask for, per video unit on the remote
+//! desktop's paths, end to end in one process: a relay, a host whose H.264
+//! "encoder" returns one 4 KiB unit per capture, and a viewer whose renderer
+//! presents every unit at once. The first window streams video only; the
+//! second also moves the pointer every 4 ms under control, which feeds the
+//! host's input lane and its input wait window. Allocations are counted for
+//! the whole process, so the viewer's and the relay's are in every figure:
+//! compare runs of this harness with each other only. A reallocation counts
+//! as one allocation of its new size.
 //!
 //! ```text
 //! cargo run --release -p pb-mapper-desktop --example host_send_bench
@@ -24,28 +25,35 @@ use pb_mapper_desktop::{
 };
 use pb_mapper_testkit::{Relay, admin_credential};
 
-/// The system allocator, counting each allocation and reallocation.
+/// The system allocator, counting each allocation and reallocation and the
+/// bytes each asks for.
 struct Counting;
 
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static ALLOCATED: AtomicU64 = AtomicU64::new(0);
+
+fn count(bytes: usize) {
+    ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    ALLOCATED.fetch_add(bytes as u64, Ordering::Relaxed);
+}
 
 // SAFETY: every method forwards its arguments unchanged to `System`, which
 // upholds the `GlobalAlloc` contract; counting touches no memory it returns.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count(layout.size());
         // SAFETY: the caller's `layout` meets `alloc`'s requirements.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count(layout.size());
         // SAFETY: as for `alloc`.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count(new_size);
         // SAFETY: `ptr` came from this allocator with `layout`, as the caller
         // guarantees, and this allocator is `System`.
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -139,6 +147,7 @@ fn render(
 /// What one window counted.
 struct Tally {
     allocations: u64,
+    allocated: u64,
     presented: u64,
     inputs: u64,
     at: Instant,
@@ -148,6 +157,7 @@ impl Tally {
     fn now(presented: &AtomicU64, inputs: &AtomicU64) -> Self {
         Self {
             allocations: ALLOCATIONS.load(Ordering::Relaxed),
+            allocated: ALLOCATED.load(Ordering::Relaxed),
             presented: presented.load(Ordering::Relaxed),
             inputs: inputs.load(Ordering::Relaxed),
             at: Instant::now(),
@@ -158,13 +168,16 @@ impl Tally {
         let units = end.presented - self.presented;
         let inputs = end.inputs - self.inputs;
         let allocations = end.allocations - self.allocations;
+        let allocated = end.allocated - self.allocated;
         let seconds = end.at.duration_since(self.at).as_secs_f64();
+        let per_unit = units.max(1) as f64;
         println!(
-            "case={case} units_per_s={:.1} inputs_per_s={:.1} allocs_per_s={:.0} allocs_per_unit={:.2}",
+            "case={case} units_per_s={:.1} inputs_per_s={:.1} allocs_per_s={:.0} allocs_per_unit={:.2} alloc_bytes_per_unit={:.0}",
             units as f64 / seconds,
             inputs as f64 / seconds,
             allocations as f64 / seconds,
-            allocations as f64 / units.max(1) as f64,
+            allocations as f64 / per_unit,
+            allocated as f64 / per_unit,
         );
     }
 }

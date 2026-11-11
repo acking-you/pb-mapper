@@ -33,12 +33,13 @@ struct Abandoned;
 /// for a slow viewer to drain video.
 async fn write<W: AsyncWrite + Unpin>(
     writer: &mut W,
+    records: &mut Vec<u8>,
     cancel: &CancellationToken,
     stop_at: &mut Option<Instant>,
     header: &HostMessage,
     payload: Option<&[u8]>,
 ) -> Result<(), Abandoned> {
-    let write = wire::write_message(writer, header, payload);
+    let write = wire::write_message_with(writer, records, header, payload);
     tokio::pin!(write);
     loop {
         if let Some(deadline) = *stop_at {
@@ -70,6 +71,8 @@ struct Counters {
 pub(super) struct Sender<'a, W> {
     session: &'a Session,
     writer: W,
+    /// Each message's records but its payload, kept across messages.
+    records: Vec<u8>,
     state: watch::Receiver<EngineState>,
     /// What `state` held when B-send last looked: copied again only when it
     /// differs.
@@ -94,6 +97,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         Self {
             session,
             writer,
+            records: Vec::new(),
             state,
             engine,
             cursor: session.shared.cursor.subscribe(),
@@ -131,6 +135,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     ) -> Result<(), Abandoned> {
         write(
             &mut self.writer,
+            &mut self.records,
             &self.session.shared.cancel,
             &mut self.stop_at,
             header,
@@ -148,7 +153,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             .get_or_insert_with(|| Instant::now() + STOP_WRITE_TIMEOUT);
         let stopped = HostMessage::Stopped { reason, message };
         tokio::time::timeout_at(deadline.into(), async {
-            wire::write_message(&mut self.writer, &stopped, None).await?;
+            wire::write_message_with(&mut self.writer, &mut self.records, &stopped, None).await?;
             self.writer.shutdown().await
         })
         .await
