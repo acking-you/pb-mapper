@@ -202,7 +202,7 @@ impl Leases {
 
     /// Moves a key renewed at wall-clock second `now` to its new expiry, sooner
     /// or later than the old one, and its reap along with it. Returns `false`
-    /// for a key with no live stages, as for a high slot.
+    /// for a key with no live stages.
     ///
     /// See [`Timer::supersede`] for why this cannot just schedule each timer a
     /// second time: a timer fires with its last placement, so a shortened key would
