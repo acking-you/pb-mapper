@@ -131,22 +131,6 @@ Each works as designed; the line says what the other choice would cost.
 
 ### pb-mapper-core
 
-- `resolve_addrs_async` asks the built-in public DNS servers (Alibaba,
-  Tencent, Google) before the system resolver. It resolves the relay for
-  every SDK administrator request, every app tunnel start and
-  relay-settings change and `pb-mapper status`, and an SDK tunnel's local
-  address; the blocking `resolve_addrs`, and the SDK's tunnels for their
-  relay, ask only the system resolver. Public servers first was a choice,
-  and which order to keep is the owner's call. On Linux both honour the
-  hosts file. Public first sends those names to the public servers,
-  resolves a split-horizon or VPN name that also has a public record to its
-  public address, and, on a network that drops outbound DNS except to its
-  own resolver, makes each lookup wait out the public servers' timeouts.
-  System first gives a name the answer every other program gets: a device
-  whose own resolver answers wrongly but successfully loses the public
-  answer, and one whose resolver fails slowly pays that before the public
-  lookup. A change to system first is written and held for this decision;
-  no recorded measurement compares the two orders.
 - The config accessors read the environment on every call: documented
   re-read semantics against a few environment reads per control setup.
 - `duration_from_env` takes the default without a word when a variable does
