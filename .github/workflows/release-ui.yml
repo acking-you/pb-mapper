@@ -215,7 +215,8 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y locate ninja-build libgtk-3-dev libayatana-appindicator3-dev libnotify-dev \
-          binutils coreutils desktop-file-utils fakeroot fuse libgdk-pixbuf2.0-dev patchelf python3-pip python3-setuptools squashfs-tools strace util-linux zsync
+          binutils coreutils desktop-file-utils fakeroot fuse libgdk-pixbuf2.0-dev patchelf python3-pip python3-setuptools squashfs-tools strace util-linux zsync \
+          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - name: Build latest Linux FFI
         run: |
           make build-pb-mapper-ffi-linux
@@ -234,6 +235,10 @@ jobs:
             echo "FFI hash mismatch: src=${SRC_HASH} dst=${DST_HASH}"
             exit 1
           fi
+      # The GStreamer decoder module is in, the system's GStreamer is not, and
+      # both native libraries load as the app loads them.
+      - name: Check the Linux bundle's native libraries
+        run: bash scripts/build/check-linux-bundle.sh ui/build/linux/x64/release/bundle
       - name: Package Linux artifacts
         run: |
           cd ui
@@ -251,7 +256,10 @@ jobs:
           mkdir -p AppDir/usr/share/applications
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
 
-          # Copy binary and dependencies
+          # The bundle only: the binary, Flutter, the plugins, the FFI and the
+          # video decoder module. GTK, GStreamer and its decoder plugins are
+          # the user's system's; nothing collects system libraries into the
+          # AppImage or the ZIP.
           cp -r build/linux/x64/release/bundle/* AppDir/usr/bin/
 
           # Copy icon
