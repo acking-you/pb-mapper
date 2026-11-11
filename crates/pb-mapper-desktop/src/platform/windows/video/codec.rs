@@ -59,6 +59,8 @@ pub(super) struct Codec {
     pub(super) need_input: u32,
     pub(super) have_output: u32,
     parameter_sets: ParameterSets,
+    /// The NAL unit ranges of the unit being sent, kept across units.
+    nal_units: Vec<(usize, usize)>,
     pub(super) gop: u32,
 }
 impl Codec {
@@ -182,6 +184,7 @@ impl Codec {
             need_input: 0,
             have_output: 0,
             parameter_sets: ParameterSets::new(kind),
+            nal_units: Vec::new(),
             gop: 0,
         };
         let mut input_ids = [0];
@@ -374,26 +377,7 @@ impl Codec {
         }
     }
     fn update_header(&mut self) -> Result<()> {
-        let media_type = unsafe {
-            self.transform
-                .GetOutputCurrentType(self.output_id)
-                .map_err(error)?
-        };
-        if let Ok(size) = unsafe { media_type.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) } {
-            if size > 64 * 1024 {
-                return Err(error("sequence header exceeds limit"));
-            }
-            let mut bytes = vec![0; size as usize];
-            unsafe {
-                media_type
-                    .GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut bytes, None)
-                    .map_err(error)?;
-            }
-            if bytes.starts_with(&[0, 0, 0, 1]) || bytes.starts_with(&[0, 0, 1]) {
-                self.parameter_sets.observe(&AccessUnit::parse(&bytes)?)?;
-            }
-        }
-        Ok(())
+        update_header(&self.transform, self.output_id, &mut self.parameter_sets)
     }
     /// The access unit as sent, and whether it is a keyframe. MF's elementary
     /// H.264 and H.265 types produce Annex B; refuse an unexpected format
@@ -401,17 +385,40 @@ impl Codec {
     /// keyframe that comes without its parameter sets gets the last ones,
     /// in-band or from the media type, in front.
     pub(super) fn annex_b(&mut self, bytes: Vec<u8>) -> Result<(Vec<u8>, bool)> {
-        let unit = AccessUnit::parse(&bytes)?;
+        let unit = AccessUnit::parse(&bytes, &mut self.nal_units)?;
         self.parameter_sets.observe(&unit)?;
         let keyframe = unit.keyframe(self.kind);
         if !keyframe || self.parameter_sets.carried(&unit) {
             return Ok((bytes, keyframe));
         }
         if !self.parameter_sets.complete() {
-            self.update_header()?;
+            update_header(&self.transform, self.output_id, &mut self.parameter_sets)?;
         }
         Ok((self.parameter_sets.prepend(&unit)?, true))
     }
+}
+/// Keep the parameter sets the output type's sequence header carries.
+fn update_header(
+    transform: &IMFTransform,
+    output_id: u32,
+    parameter_sets: &mut ParameterSets,
+) -> Result<()> {
+    let media_type = unsafe { transform.GetOutputCurrentType(output_id).map_err(error)? };
+    if let Ok(size) = unsafe { media_type.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) } {
+        if size > 64 * 1024 {
+            return Err(error("sequence header exceeds limit"));
+        }
+        let mut bytes = vec![0; size as usize];
+        unsafe {
+            media_type
+                .GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut bytes, None)
+                .map_err(error)?;
+        }
+        if bytes.starts_with(&[0, 0, 0, 1]) || bytes.starts_with(&[0, 0, 1]) {
+            parameter_sets.observe(&AccessUnit::parse(&bytes, &mut Vec::new())?)?;
+        }
+    }
+    Ok(())
 }
 impl Drop for Codec {
     fn drop(&mut self) {

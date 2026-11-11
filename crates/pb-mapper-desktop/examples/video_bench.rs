@@ -26,7 +26,10 @@
 //!   `--pause-ms` (encoder recovery probe), `--poll-us` (backend polling).
 //!
 //! It prints the largest keyframe and access unit, which `wire::MAX_PAYLOAD`
-//! must hold.
+//! must hold. Driving the encoder, it also prints a `case=encoder` line: the
+//! heap allocations and bytes the encoder's own calls ask for per access unit,
+//! and the median and mean time, and cycles its thread ran, of a submit that
+//! converted a capture and of a drain that returned a unit.
 #[cfg(windows)]
 mod probe_support;
 
@@ -36,6 +39,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 #[cfg(not(windows))]
 fn main() {}
+
+/// The system allocator, counting each allocation and reallocation and the
+/// bytes each asks for.
+#[cfg(windows)]
+mod counting {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub struct Counting;
+
+    static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+    static ALLOCATED: AtomicU64 = AtomicU64::new(0);
+
+    fn count(bytes: usize) {
+        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Allocations and bytes asked for so far, process-wide.
+    pub fn now() -> (u64, u64) {
+        (
+            ALLOCATIONS.load(Ordering::Relaxed),
+            ALLOCATED.load(Ordering::Relaxed),
+        )
+    }
+
+    // SAFETY: every method forwards its arguments unchanged to `System`, which
+    // upholds the `GlobalAlloc` contract; counting touches no memory it returns.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            count(layout.size());
+            // SAFETY: the caller's `layout` meets `alloc`'s requirements.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            count(layout.size());
+            // SAFETY: as for `alloc`.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            count(new_size);
+            // SAFETY: `ptr` came from this allocator with `layout`, as the caller
+            // guarantees, and this allocator is `System`.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: as for `realloc`.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: Counting = Counting;
+}
 
 /// The benchmark: its options, the paced loop and the report.
 #[cfg(windows)]
@@ -189,6 +249,31 @@ mod bench {
         }
         let elapsed = start.elapsed().as_secs_f64();
         report(&tally, &stats, &rates, &limits, elapsed)
+    }
+
+    /// The cycles this thread has run, counted only while it runs, so a
+    /// preemption does not count.
+    fn thread_cycles() -> u64 {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThread() -> *mut std::ffi::c_void;
+            fn QueryThreadCycleTime(thread: *mut std::ffi::c_void, cycles: *mut u64) -> i32;
+        }
+        let mut cycles = 0;
+        // SAFETY: the current thread's pseudo-handle is always valid, and
+        // `cycles` outlives the call.
+        unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) };
+        cycles
+    }
+
+    fn median(samples: &[f64]) -> f64 {
+        let mut sorted = samples.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        sorted.get(sorted.len() / 2).copied().unwrap_or(0.0)
+    }
+
+    fn mean(samples: &[f64]) -> f64 {
+        samples.iter().sum::<f64>() / samples.len().max(1) as f64
     }
 
     fn flag(args: &[String], name: &str) -> bool {
@@ -384,6 +469,14 @@ mod bench {
         context_us: u128,
         capture_us: u128,
         calls: u64,
+        /// What the encoder's own calls allocated, and bytes asked for.
+        encoder_allocations: (u64, u64),
+        /// Each submit that converted a capture, and each drain that returned
+        /// a unit: microseconds, and thousands of cycles this thread ran.
+        submit_us: Vec<f64>,
+        drain_us: Vec<f64>,
+        submit_kcycles: Vec<f64>,
+        drain_kcycles: Vec<f64>,
         /// The pause probe stalled the encoder, and its next unit must be a
         /// keyframe.
         paused: bool,
@@ -391,6 +484,13 @@ mod bench {
         first_reported: bool,
     }
     impl Tally {
+        /// Count what an encoder call allocated since `before`.
+        fn encoder_calls(&mut self, before: (u64, u64)) {
+            let after = crate::counting::now();
+            self.encoder_allocations.0 += after.0 - before.0;
+            self.encoder_allocations.1 += after.1 - before.1;
+        }
+
         /// One access unit of `step`: the recovery check, the statistics, the
         /// files, and the first unit's line.
         fn record(
@@ -501,11 +601,29 @@ mod bench {
                 match coder {
                     Coder::Encoder(encoder) => {
                         encoder.set_rate(rate)?;
-                        while let Some(frame) = encoder.drain()? {
+                        loop {
+                            let (before, at, ran) =
+                                (crate::counting::now(), Instant::now(), thread_cycles());
+                            let frame = encoder.drain()?;
+                            let (took, ran) = (at.elapsed(), thread_cycles() - ran);
+                            tally.encoder_calls(before);
+                            let Some(frame) = frame else {
+                                break;
+                            };
+                            tally.drain_us.push(took.as_secs_f64() * 1e6);
+                            tally.drain_kcycles.push(ran as f64 / 1e3);
                             ready.push(frame);
                         }
                         if tick {
-                            encoder.submit(force)?;
+                            let (before, at, ran) =
+                                (crate::counting::now(), Instant::now(), thread_cycles());
+                            let submitted = encoder.submit(force)?;
+                            let (took, ran) = (at.elapsed(), thread_cycles() - ran);
+                            tally.encoder_calls(before);
+                            if submitted {
+                                tally.submit_us.push(took.as_secs_f64() * 1e6);
+                                tally.submit_kcycles.push(ran as f64 / 1e3);
+                            }
                         }
                     }
                     Coder::Backend(backend) => {
@@ -567,6 +685,25 @@ mod bench {
             ..
         } = tally;
         println!("max_keyframe_bytes={max_keyframe} max_access_unit_bytes={max_unit}");
+        if !limits.backend {
+            let units = stats.encoded.max(1) as f64;
+            let (allocations, bytes) = tally.encoder_allocations;
+            println!(
+                "case=encoder units={} allocs_per_unit={:.3} alloc_bytes_per_unit={:.0} submits={} submit_p50_us={:.1} submit_mean_us={:.1} drain_p50_us={:.1} drain_mean_us={:.1} submit_p50_kcycles={:.1} submit_mean_kcycles={:.1} drain_p50_kcycles={:.1} drain_mean_kcycles={:.1}",
+                stats.encoded,
+                allocations as f64 / units,
+                bytes as f64 / units,
+                tally.submit_us.len(),
+                median(&tally.submit_us),
+                mean(&tally.submit_us),
+                median(&tally.drain_us),
+                mean(&tally.drain_us),
+                median(&tally.submit_kcycles),
+                mean(&tally.submit_kcycles),
+                median(&tally.drain_kcycles),
+                mean(&tally.drain_kcycles),
+            );
+        }
         if limits.backend {
             println!(
                 "seconds={elapsed:.3} keyframes={keyframes} forced={forced} gop={} encoded={} encoded_fps={:.2} unique_encoded_fps={:.2} bitrate_mbps={:.2} polls={} mean_context_ms={:.3} mean_capture_video_ms={:.3} (includes initial encoder startup)",

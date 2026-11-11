@@ -28,15 +28,17 @@ pub(crate) fn codec_name(kind: VideoCodec) -> &'static str {
 /// so every one is in bounds.
 pub(crate) struct AccessUnit<'a> {
     bytes: &'a [u8],
-    units: Vec<(usize, usize)>,
+    units: &'a [(usize, usize)],
 }
 impl<'a> AccessUnit<'a> {
-    /// Find the NAL units. The scan is the same for H.264 and H.265.
-    pub(crate) fn parse(bytes: &'a [u8]) -> Result<Self> {
+    /// Find the NAL units, into `units`: an encoder that keeps it parses
+    /// every unit without allocating. The scan is the same for H.264 and
+    /// H.265.
+    pub(crate) fn parse(bytes: &'a [u8], units: &'a mut Vec<(usize, usize)>) -> Result<Self> {
+        units.clear();
         if !bytes.starts_with(&[0, 0, 0, 1]) && !bytes.starts_with(&[0, 0, 1]) {
             return Err(error("hardware encoder did not produce Annex B"));
         }
-        let mut units = Vec::new();
         let mut position = 0;
         while position + 3 < bytes.len() {
             let prefix = if bytes[position..].starts_with(&[0, 0, 0, 1]) {
@@ -63,7 +65,10 @@ impl<'a> AccessUnit<'a> {
         if units.is_empty() {
             return Err(error("hardware encoder did not produce Annex B"));
         }
-        Ok(Self { bytes, units })
+        Ok(Self {
+            bytes,
+            units: units.as_slice(),
+        })
     }
 
     /// Each NAL unit's kind, in order.
@@ -187,7 +192,7 @@ impl ParameterSets {
     }
     /// Keep the sets the unit carries.
     pub(crate) fn observe(&mut self, unit: &AccessUnit) -> Result<()> {
-        for &(start, end) in &unit.units {
+        for &(start, end) in unit.units {
             let Some(set) = ParamSet::of(nal(self.kind, unit.bytes[start])) else {
                 continue;
             };
@@ -238,17 +243,21 @@ mod tests {
     use super::*;
     #[test]
     fn parameter_sets_survive_partial_updates_and_emulation_prevention() -> Result<()> {
+        let mut units = Vec::new();
         let mut sets = ParameterSets::new(VideoCodec::H264);
         let initial = [0, 0, 0, 1, 0x67, 1, 0, 0, 3, 1, 0, 0, 1, 0x68, 2];
-        sets.observe(&AccessUnit::parse(&initial)?)?;
+        sets.observe(&AccessUnit::parse(&initial, &mut units)?)?;
         assert!(sets.complete());
         assert_eq!(sets.sps, &[0x67, 1, 0, 0, 3, 1]);
         let partial = [0, 0, 1, 0x68, 3];
-        sets.observe(&AccessUnit::parse(&partial)?)?;
+        sets.observe(&AccessUnit::parse(&partial, &mut units)?)?;
         assert!(sets.complete());
         assert_eq!(sets.pps, &[0x68, 3]);
-        assert!(AccessUnit::parse(&[0, 0, 0, 1]).is_err());
-        assert!(AccessUnit::parse(&[0, 0, 0, 8, 0x65]).is_err());
+        // A kept buffer finds what a fresh one does.
+        let fresh = AccessUnit::parse(&initial, &mut Vec::new())?.units.to_vec();
+        assert_eq!(AccessUnit::parse(&initial, &mut units)?.units, fresh);
+        assert!(AccessUnit::parse(&[0, 0, 0, 1], &mut units).is_err());
+        assert!(AccessUnit::parse(&[0, 0, 0, 8, 0x65], &mut units).is_err());
         Ok(())
     }
     #[test]
@@ -272,15 +281,16 @@ mod tests {
         let sets_only = [
             0, 0, 0, 1, 0x40, 1, 0xa, 0, 0, 0, 1, 0x42, 1, 0xb, 0, 0, 1, 0x44, 1, 0xc,
         ];
+        let (mut units, mut idr_units) = (Vec::new(), Vec::new());
         let mut sets = ParameterSets::new(VideoCodec::H265);
-        sets.observe(&AccessUnit::parse(&sets_only)?)?;
+        sets.observe(&AccessUnit::parse(&sets_only, &mut units)?)?;
         assert!(sets.complete());
         // An IDR without them gets the VPS, SPS and PPS in front, in order,
         // after its delimiter ...
         let idr = [0, 0, 0, 1, 0x46, 1, 0x50, 0, 0, 0, 1, 0x28, 1, 0xd];
-        let idr_unit = AccessUnit::parse(&idr)?;
+        let idr_unit = AccessUnit::parse(&idr, &mut idr_units)?;
         assert!(idr_unit.keyframe(VideoCodec::H265));
-        assert!(!AccessUnit::parse(&sets_only)?.keyframe(VideoCodec::H265));
+        assert!(!AccessUnit::parse(&sets_only, &mut units)?.keyframe(VideoCodec::H265));
         assert!(!sets.carried(&idr_unit));
         assert_eq!(
             sets.prepend(&idr_unit)?,
@@ -291,10 +301,10 @@ mod tests {
         );
         // ... one that carries them goes as it is ...
         let whole = [&sets_only[..], &idr].concat();
-        assert!(sets.carried(&AccessUnit::parse(&whole)?));
+        assert!(sets.carried(&AccessUnit::parse(&whole, &mut units)?));
         // ... and without a VPS there is no decoder configuration.
         let mut partial = ParameterSets::new(VideoCodec::H265);
-        partial.observe(&AccessUnit::parse(&sets_only[7..])?)?;
+        partial.observe(&AccessUnit::parse(&sets_only[7..], &mut units)?)?;
         assert!(!partial.complete() && partial.prepend(&idr_unit).is_err());
         Ok(())
     }
