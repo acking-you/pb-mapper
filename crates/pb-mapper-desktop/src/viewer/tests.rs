@@ -239,6 +239,19 @@ async fn scripted_host_session_acknowledges_first_and_authorises_input_by_presen
     send(&mut host, state(1, true), None).await;
     eventually(|| viewer.status().controlling).await;
     assert!(matches!(viewer.input(2, &shift), Err(InputError::NotFresh)));
+    // A physical key goes only to a host that listed `physical_keys`, as a
+    // 0.11 host did not: the whole batch stays here.
+    let physical = [
+        shift[0].clone(),
+        Input::PhysicalKey {
+            usage: 0x04,
+            down: true,
+        },
+    ];
+    assert!(matches!(
+        viewer.input(1, &physical),
+        Err(InputError::NotOffered)
+    ));
     viewer.input(1, &shift).unwrap();
     let ViewerMessage::Input { event } = receive(&mut host).await else {
         panic!("expected the input");

@@ -20,11 +20,13 @@ pub struct DoubleClickGuard {
 }
 
 /// Deliberately small, platform-independent input vocabulary. Text is Unicode
-/// insertion, not an IME session; key events are for navigation and shortcuts.
+/// insertion, not an IME session; key events are for navigation and shortcuts;
+/// physical keys let the host's own layout and input method compose.
 /// Every variant is a struct variant: serde ignores extra fields on internally
 /// tagged unit variants, which would undo `deny_unknown_fields`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
 pub enum Input {
     Move {
         x: u32,
@@ -46,12 +48,22 @@ pub enum Input {
         key: Key,
         down: bool,
     },
+    /// Typed as it is: a `\n` or `\t` is one Enter or Tab key, and the `\r`
+    /// of a `\r\n` pair adds nothing.
     Text {
         text: String,
     },
     /// Lock the workstation in the interactive session. Control-gated
     /// exactly like every other input.
     Lock {},
+    /// A key by its place on the keyboard: `usage` is its USB HID usage on
+    /// the keyboard page (0x07), 0x04..=0xE7. The host's layout and input
+    /// method decide what it types. Only to a host that listed
+    /// `physical_keys`.
+    PhysicalKey {
+        usage: u16,
+        down: bool,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +78,7 @@ pub enum Button {
 /// Ctrl+Alt+Del is deliberately unrepresentable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Key {
     Shift,
     Control,
@@ -145,6 +158,18 @@ pub struct InputEvent {
     pub input: Input,
 }
 
+/// The keyboard page's key usages: below are error codes, above reserved.
+pub(crate) const PHYSICAL_KEY_USAGES: std::ops::RangeInclusive<u16> = 0x04..=0xE7;
+
+/// One stretch of `Input::Text` as the host types it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Typed<'a> {
+    /// Characters with no line break or tab among them.
+    Chars(&'a str),
+    /// Enter for a line break, Tab for a tab: one tap.
+    Key(Key),
+}
+
 impl Input {
     pub(crate) fn validate(&self, display: &Display) -> Result<()> {
         let refused = match self {
@@ -158,14 +183,48 @@ impl Input {
                 vertical,
             } => (horizontal.unsigned_abs() > 100 || vertical.unsigned_abs() > 100)
                 .then_some("scroll input too large"),
+            Self::PhysicalKey { usage, .. } => (!PHYSICAL_KEY_USAGES.contains(usage))
+                .then_some("physical key outside the keyboard page"),
             Self::Button { .. } | Self::Key { .. } | Self::Lock {} => None,
         };
         refused.map_or(Ok(()), |reason| Err(error(reason)))
+    }
+
+    /// `text` as the host types it, in order: runs of characters, and one
+    /// Enter for each `\n`, `\r` or `\r\n`, one Tab for each `\t`. Every
+    /// platform types text this way, so none sees a control character twice,
+    /// as a key and as a character.
+    pub(crate) fn typed(text: &str, mut each: impl FnMut(Typed<'_>) -> Result<()>) -> Result<()> {
+        let (mut run, mut after_cr) = (0, false);
+        for (at, c) in text.char_indices() {
+            let key = match c {
+                '\t' => Key::Tab,
+                '\r' | '\n' => Key::Enter,
+                _ => {
+                    after_cr = false;
+                    continue;
+                }
+            };
+            if let Some(chars) = text.get(run..at).filter(|chars| !chars.is_empty()) {
+                each(Typed::Chars(chars))?;
+            }
+            run = at + c.len_utf8();
+            // The `\n` of a `\r\n` is the line break already typed.
+            if !(c == '\n' && after_cr) {
+                each(Typed::Key(key))?;
+            }
+            after_cr = c == '\r';
+        }
+        match text.get(run..).filter(|chars| !chars.is_empty()) {
+            Some(chars) => each(Typed::Chars(chars)),
+            None => Ok(()),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::Typed;
     use crate::{Button, Display, Input, Key};
 
     /// The injection boundary refuses a pointer off the display, text too
@@ -214,5 +273,29 @@ mod tests {
             down: true
         }));
         assert!(valid(Input::Lock {}));
+        let physical = |usage| Input::PhysicalKey { usage, down: true };
+        assert!(valid(physical(0x04)) && valid(physical(0xE7)));
+        assert!(!valid(physical(0x03)) && !valid(physical(0xE8)));
+    }
+
+    /// A line break or tab is one key and never also a character; the `\r`
+    /// of a `\r\n` adds nothing.
+    #[test]
+    fn text_types_each_line_break_and_tab_once() {
+        let typed = |text: &str| {
+            let mut out = Vec::new();
+            Input::typed(text, |piece| {
+                out.push(match piece {
+                    Typed::Chars(chars) => chars.to_owned(),
+                    Typed::Key(key) => format!("<{key:?}>"),
+                });
+                Ok(())
+            })
+            .unwrap();
+            out.concat()
+        };
+        assert_eq!(typed("a\nb\tc"), "a<Enter>b<Tab>c");
+        assert_eq!(typed("x\r\ny\r\rz\n"), "x<Enter>y<Enter><Enter>z<Enter>");
+        assert_eq!(typed("远控 ✓"), "远控 ✓");
     }
 }

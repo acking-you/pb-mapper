@@ -150,6 +150,9 @@ pub(crate) trait VideoSource: Sized {
 pub(crate) trait Injector: Sized {
     /// The compile-time default; the runtime truth is `can_lock`.
     const LOCK: bool;
+    /// Whether [`Injector::physical_key`] presses keys: a host lists
+    /// `physical_keys` only then.
+    const PHYSICAL_KEYS: bool = false;
     fn can_lock(&self) -> bool {
         Self::LOCK
     }
@@ -158,7 +161,23 @@ pub(crate) trait Injector: Sized {
     fn button(&mut self, button: Button, down: bool) -> Result<()>;
     fn wheel(&mut self, horizontal: i32, vertical: i32) -> Result<()>;
     fn key(&mut self, key: Key, down: bool) -> Result<()>;
+    /// Unicode insertion. `text` holds no `\n`, `\r` or `\t`: those reach
+    /// the platform as Enter and Tab through [`Injector::key`].
     fn text(&mut self, text: &str) -> Result<()>;
+    /// Press or release the key at a place on the keyboard, as the hardware
+    /// would: `usage` is its USB HID usage on the keyboard page (0x07),
+    /// within 0x04..=0xE7, already validated. The layout and input method
+    /// active on the host decide what it types, so the host's own input
+    /// method composes; modifiers are physical keys too (0xE0..=0xE7, left
+    /// and right apart). A usage this platform has no key for is ignored:
+    /// `Ok`, nothing pressed, and so nothing to release. The release
+    /// obligation lives in `PlatformBackend`, which releases a held usage
+    /// through [`Injector::release`]. Called only when
+    /// [`Injector::PHYSICAL_KEYS`]; the default refuses.
+    fn physical_key(&mut self, usage: u16, down: bool) -> Result<()> {
+        let _ = (usage, down);
+        Err(BackendError::new(FailureKind::Unsupported, "physical keys").into())
+    }
     /// Called only when `can_lock`.
     fn lock(&mut self) -> Result<()>;
     fn double_click(&mut self) -> Option<DoubleClickGuard> {
@@ -170,6 +189,7 @@ pub(crate) trait Injector: Sized {
         match pressed {
             Pressed::Button(button) => self.button(button, false),
             Pressed::Key(key) => self.key(key, false),
+            Pressed::Physical(usage) => self.physical_key(usage, false),
         }
     }
 }
@@ -297,6 +317,7 @@ pub fn displays() -> Result<Vec<Display>> {
 pub(crate) fn fallback_caps<P: Platform>() -> BackendCaps {
     BackendCaps {
         lock: <P::Input as Injector>::LOCK,
+        physical_keys: <P::Input as Injector>::PHYSICAL_KEYS,
         os: Some(P::OS),
         cursor: <P::Cursor as CursorSource>::MODE,
         ..BackendCaps::default()

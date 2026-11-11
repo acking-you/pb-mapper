@@ -25,6 +25,14 @@ use std::{
 
 pub(crate) enum Synthetic<const PUSH: bool> {}
 
+/// One keyboard injection, as the synthetic injector saw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Typed {
+    Key(Key, bool),
+    Physical(u16, bool),
+    Text(String),
+}
+
 /// What every part of a session shares, and the test reads and steers.
 #[derive(Clone, Default)]
 pub(crate) struct Probe(Arc<Mutex<State>>);
@@ -34,6 +42,8 @@ struct State {
     pointer: Option<(i32, i32)>,
     down: Vec<Key>,
     released: Vec<Pressed>,
+    /// Every key, physical key and text injected, in order.
+    typed: Vec<Typed>,
     /// Submit to drain, per unit.
     latencies: Vec<Duration>,
     /// The display's size now, once a mode changed it.
@@ -89,6 +99,13 @@ impl Probe {
     }
     pub(crate) fn lose(&self, lost: bool) {
         self.0.lock().lost = lost;
+    }
+    /// The keyboard injections so far, in order.
+    pub(crate) fn typed(&self) -> Vec<Typed> {
+        self.0.lock().typed.clone()
+    }
+    pub(crate) fn released(&self) -> Vec<Pressed> {
+        self.0.lock().released.clone()
     }
 }
 
@@ -284,6 +301,7 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
 pub(crate) struct SynInput(Probe);
 impl Injector for SynInput {
     const LOCK: bool = false;
+    const PHYSICAL_KEYS: bool = true;
     fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
         self.0.0.lock().pointer = Some((x, y));
         Ok(())
@@ -301,9 +319,15 @@ impl Injector for SynInput {
         } else {
             state.down.retain(|held| *held != key);
         }
+        state.typed.push(Typed::Key(key, down));
         Ok(())
     }
-    fn text(&mut self, _: &str) -> Result<()> {
+    fn text(&mut self, text: &str) -> Result<()> {
+        self.0.0.lock().typed.push(Typed::Text(text.to_owned()));
+        Ok(())
+    }
+    fn physical_key(&mut self, usage: u16, down: bool) -> Result<()> {
+        self.0.0.lock().typed.push(Typed::Physical(usage, down));
         Ok(())
     }
     fn lock(&mut self) -> Result<()> {
@@ -346,9 +370,10 @@ mod tests {
     use pb_mapper_testkit::{Relay, admin_credential};
 
     /// One session streams, applies input at the display's own offset and
-    /// releases the key it holds when it ends; the next reports its display
-    /// lost as the viewer's reason. A pushing source is drained as it wakes
-    /// thread C, never polled.
+    /// releases the keys it holds when it ends, physical ones too; text is
+    /// typed with one Enter per line break; the next session reports its
+    /// display lost as the viewer's reason. A pushing source is drained as it
+    /// wakes thread C, never polled.
     async fn session<const PUSH: bool>(name: &str) {
         let relay = Relay::start(name).await;
         let client =
@@ -384,20 +409,55 @@ mod tests {
 
         let watching = Presenting::connect(&client, &host).await;
         let controlled = watching.control().await;
+        assert!(
+            controlled
+                .capabilities
+                .iter()
+                .any(|listed| listed == "physical_keys")
+        );
         let shift = Input::Key {
             key: Key::Shift,
             down: true,
         };
         let point = Input::Move { x: 3, y: 4 };
+        let (shift_left, a) = (0xE1, 0x04);
+        let physical = |usage, down| Input::PhysicalKey { usage, down };
+        let text = Input::Text {
+            text: "a\r\nb".into(),
+        };
         watching
             .viewer
-            .input(controlled.generation, &[shift, point])
+            .input(
+                controlled.generation,
+                &[
+                    shift,
+                    point,
+                    physical(shift_left, true),
+                    physical(a, true),
+                    physical(a, false),
+                    text,
+                ],
+            )
             .unwrap();
         until(|| {
             let state = probe.0.lock();
             state.down == [Key::Shift] && state.pointer == Some((-1917, 4))
         })
         .await;
+        until(|| probe.typed().len() == 8).await;
+        assert_eq!(
+            probe.typed(),
+            [
+                Typed::Key(Key::Shift, true),
+                Typed::Physical(shift_left, true),
+                Typed::Physical(a, true),
+                Typed::Physical(a, false),
+                Typed::Text("a".into()),
+                Typed::Key(Key::Enter, true),
+                Typed::Key(Key::Enter, false),
+                Typed::Text("b".into()),
+            ]
+        );
         if PUSH {
             // Drained when the source woke thread C, not at the next tick.
             let latencies = probe.0.lock().latencies.clone();
@@ -408,7 +468,12 @@ mod tests {
             assert!(prompt * 2 >= latencies.len(), "{latencies:?}");
         }
         watching.stop().await;
-        until(|| probe.0.lock().released.contains(&Pressed::Key(Key::Shift))).await;
+        until(|| probe.released().len() == 2).await;
+        let released = probe.released();
+        assert!(
+            released.contains(&Pressed::Key(Key::Shift))
+                && released.contains(&Pressed::Physical(shift_left))
+        );
 
         let watching = Presenting::connect(&client, &host).await;
         watching.until(|status| status.fresh).await;

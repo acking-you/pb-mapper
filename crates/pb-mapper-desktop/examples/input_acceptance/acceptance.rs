@@ -1,6 +1,6 @@
 //! The SDK script: a host of the guarded backend, a viewer that presents
 //! what it receives, and the input it sends.
-use crate::fixture::{Fixture, State, TEXT, failure};
+use crate::fixture::{Fixture, LINES, State, TEXT, failure, modifier_held};
 use crate::guarded::Guarded;
 use crate::probe_support::{RelayConfig, option, relay_client};
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy, RelayTransport};
@@ -42,10 +42,76 @@ async fn wait_for(state: &State, what: &str, predicate: impl Fn() -> bool) -> Re
 /// presented recently and control is granted, and stamps that frame and
 /// the sequence itself.
 fn send(viewer: &Viewer, state: &State, input: Input) -> Result<()> {
+    send_all(viewer, state, &[input])
+}
+fn send_all(viewer: &Viewer, state: &State, inputs: &[Input]) -> Result<()> {
     state.check()?;
     viewer
-        .input(viewer.view().generation, &[input])
+        .input(viewer.view().generation, inputs)
         .map_err(failure)
+}
+fn physical(usage: u16, down: bool) -> Input {
+    Input::PhysicalKey { usage, down }
+}
+/// A whole tap of the key at keyboard-page `usage`.
+fn tap(usage: u16) -> [Input; 2] {
+    [physical(usage, true), physical(usage, false)]
+}
+const SHIFT_LEFT: u16 = 0xE1;
+/// Text with a line break and a tab, then physical keys: what this window's
+/// layout types with its input method off, and what an input method on it
+/// composes from them, which is only reported.
+async fn keyboard(viewer: &Viewer, state: &State) -> Result<String> {
+    state.clear()?;
+    send(viewer, state, Input::Text { text: LINES.into() })?;
+    wait_for(state, "one Enter and one Tab in the owned EDIT", || {
+        state.text() == "a\r\nb\tc"
+    })
+    .await?;
+
+    // h, i and Shift+1, by place: set-1 scancodes 0x23, 0x17 and 0x02.
+    state.clear()?;
+    state.ime(false)?;
+    let keys = [
+        tap(0x0B).as_slice(),
+        &tap(0x0C),
+        &[physical(SHIFT_LEFT, true)],
+        &tap(0x1E),
+        &[physical(SHIFT_LEFT, false)],
+    ]
+    .concat();
+    send_all(viewer, state, &keys)?;
+    let expected = [(0x23, false), (0x17, false), (0x02, true)]
+        .map(|(scan, shift)| state.typed_by_layout(scan, shift))
+        .concat();
+    wait_for(state, "physical keys typed by the layout", || {
+        state.text() == expected
+    })
+    .await?;
+    wait_for(state, "physical Shift released", || !left_shift_down()).await?;
+
+    // n, i with this window's input method open: reported, then cancelled.
+    state.clear()?;
+    state.ime(true)?;
+    let mut composed = String::new();
+    if state.ime_open() {
+        let keys = [tap(0x11), tap(0x0C)].concat();
+        let sent = send_all(viewer, state, &keys);
+        let start = Instant::now();
+        while sent.is_ok() && start.elapsed() < Duration::from_secs(1) {
+            composed = state.composing();
+            if composed.chars().count() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        state.ime_restore();
+        sent?;
+    }
+    Ok(format!(
+        "lines_verified=true physical_typed={expected:?} ime_composition={composed:?} ime_edit_text={:?}",
+        state.text()
+    ))
 }
 /// The view's input gate: control, and a fresh presented frame.
 fn live(viewer: &Viewer) -> bool {
@@ -101,6 +167,7 @@ async fn exercise(
         );
         return Err(e);
     }
+    let keyboard = keyboard(viewer, state).await?;
     let point = state.client_point(320, 220)?;
     if point.x < display.x
         || point.y < display.y
@@ -149,17 +216,33 @@ async fn exercise(
             "the drag-start press merged into a double click: press_gap_ms={press_gap_ms} double_click_ms={double_click_ms}"
         )));
     }
+    // A physical key held too: the host releases it with the press.
+    send(viewer, state, physical(SHIFT_LEFT, true))?;
+    wait_for(
+        state,
+        "physical Shift held before disconnect",
+        left_shift_down,
+    )
+    .await?;
     let at = Instant::now();
     viewer.stop().await?;
-    wait_for(state, "disconnect release", || {
-        state.ups.load(Ordering::Acquire) == 2 && !state.held.load(Ordering::Acquire)
+    let released = wait_for(state, "disconnect release", || {
+        state.ups.load(Ordering::Acquire) == 2
+            && !state.held.load(Ordering::Acquire)
+            && !left_shift_down()
     })
-    .await?;
+    .await;
+    if left_shift_down() {
+        // Never leave this computer's Shift down, whatever failed.
+        release_left_shift();
+        return Err(failure("physical Shift remains held after disconnect"));
+    }
+    released?;
     if unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON.0)) } < 0 {
         return Err(failure("native left button remains held after disconnect"));
     }
     println!(
-        "native_input_acceptance path={topology} unicode_verified=true button_down={} button_up={} drag_press_gap_ms={press_gap_ms} double_click_ms={double_click_ms} double_clicks={double_clicks} disconnect_release_ms={:.3} physical_display={}x{}",
+        "native_input_acceptance path={topology} unicode_verified=true {keyboard} button_down={} button_up={} drag_press_gap_ms={press_gap_ms} double_click_ms={double_click_ms} double_clicks={double_clicks} disconnect_release_ms={:.3} physical_display={}x{}",
         state.downs.load(Ordering::Acquire),
         state.ups.load(Ordering::Acquire),
         at.elapsed().as_secs_f64() * 1000.0,
@@ -168,6 +251,23 @@ async fn exercise(
     );
     Ok(())
 }
+fn left_shift_down() -> bool {
+    unsafe { GetAsyncKeyState(i32::from(VK_LSHIFT.0)) < 0 }
+}
+/// The left Shift up, by scancode, as the cleanup of a failed release.
+fn release_left_shift() {
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wScan: 0x2a,
+                dwFlags: KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP,
+                ..Default::default()
+            },
+        },
+    };
+    unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
+}
 pub fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let display = pb_mapper_desktop::displays()?
         .into_iter()
@@ -175,6 +275,9 @@ pub fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .ok_or_else(|| failure("no ordinary display"))?;
     if unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON.0)) } < 0 {
         return Err(failure("physical left button already held; refusing test").into());
+    }
+    if modifier_held() {
+        return Err(failure("a modifier key is held; refusing test").into());
     }
     let fixture = Fixture::open(&display)?;
     let state = fixture.state.clone();

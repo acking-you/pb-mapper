@@ -95,7 +95,8 @@ impl DragHold {
             | Input::Wheel { .. }
             | Input::Key { .. }
             | Input::Text { .. }
-            | Input::Lock {} => {}
+            | Input::Lock {}
+            | Input::PhysicalKey { .. } => {}
         }
     }
 }

@@ -387,7 +387,9 @@ fn input_error(failure: InputError) -> CtlError {
         InputError::NotFresh => ErrorCode::NotFresh,
         InputError::NotControlling => ErrorCode::NotControlling,
         InputError::Congestion => ErrorCode::InputCongestion,
-        InputError::Invalid(_) => ErrorCode::InvalidArgument,
+        // Dart sends a physical key only to a host that listed
+        // `physical_keys`: a refusal is a sender's bug, like an invalid one.
+        InputError::Invalid(_) | InputError::NotOffered => ErrorCode::InvalidArgument,
         InputError::Closed => ErrorCode::Io,
     };
     CtlError::new(code, failure.to_string())

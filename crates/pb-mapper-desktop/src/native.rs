@@ -11,7 +11,7 @@ use crate::{
     VideoFormat, VideoLimits, VideoRate, Waker,
     backend::capture_checked,
     error,
-    input::{cursor::confine, held::Held},
+    input::{Typed, cursor::confine, held::Held},
     modes::{self, Guard, Journal, Mode, ModeList},
     platform::{
         self, CursorSource, Desktop, DisplayModes, Injector, Parts, Platform, StillCapture,
@@ -121,6 +121,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
                     && modes.available(&display.name),
                 os: Some(P::OS),
                 cursor: self.parts.cursor.mode(),
+                physical_keys: <P::Input as Injector>::PHYSICAL_KEYS,
             },
             display,
         })
@@ -263,7 +264,22 @@ impl<P: Platform> Backend for PlatformBackend<P> {
                 vertical,
             } => input.wheel(*horizontal, *vertical),
             Input::Key { key, down } => self.held.key(*key, *down, |down| input.key(*key, down)),
-            Input::Text { text } => input.text(text),
+            Input::Text { text } => {
+                let held = &mut self.held;
+                Input::typed(text, |typed| match typed {
+                    Typed::Chars(chars) => input.text(chars),
+                    Typed::Key(key) => {
+                        held.key(key, true, |down| input.key(key, down))?;
+                        held.key(key, false, |down| input.key(key, down))
+                    }
+                })
+            }
+            Input::PhysicalKey { usage, down } if <P::Input as Injector>::PHYSICAL_KEYS => self
+                .held
+                .physical(*usage, *down, |down| input.physical_key(*usage, down)),
+            Input::PhysicalKey { .. } => {
+                Err(BackendError::new(FailureKind::Unsupported, "physical keys").into())
+            }
             // The interactive session's own lock; the desktop switch that
             // follows invalidates the generation through the context check.
             Input::Lock {} if input.can_lock() => input.lock(),

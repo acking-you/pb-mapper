@@ -192,6 +192,8 @@ pub(crate) struct StartCaps {
     pub display_modes: bool,
     pub os: Option<HostOs>,
     pub cursor: CursorMode,
+    /// The worker injects `Input::PhysicalKey`.
+    pub physical_keys: bool,
 }
 impl From<&BackendCaps> for StartCaps {
     fn from(caps: &BackendCaps) -> Self {
@@ -201,12 +203,14 @@ impl From<&BackendCaps> for StartCaps {
             display_modes,
             os,
             cursor,
+            physical_keys,
         } = *caps;
         Self {
             lock,
             display_modes,
             os,
             cursor,
+            physical_keys,
         }
     }
 }
@@ -217,6 +221,7 @@ impl From<StartCaps> for BackendCaps {
             display_modes,
             os,
             cursor,
+            physical_keys,
         } = caps;
         Self {
             h265: false,
@@ -224,6 +229,7 @@ impl From<StartCaps> for BackendCaps {
             display_modes,
             os,
             cursor,
+            physical_keys,
         }
     }
 }

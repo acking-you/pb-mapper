@@ -277,6 +277,9 @@ pub struct BackendCaps {
     pub display_modes: bool,
     pub os: Option<HostOs>,
     pub cursor: CursorMode,
+    /// It injects `Input::PhysicalKey`: keys by their place on the
+    /// keyboard, which the host's layout and input method type.
+    pub physical_keys: bool,
 }
 impl BackendCaps {
     /// The values a host lists in `Accepted.capabilities` for these.
@@ -288,7 +291,14 @@ impl BackendCaps {
             .display_modes
             .then(|| crate::protocol::CAPABILITY_DISPLAY_MODE.to_string());
         let os = self.os.map(|os| os.capability().to_string());
-        lock.into_iter().chain(modes).chain(os).collect()
+        let physical_keys = self
+            .physical_keys
+            .then(|| crate::protocol::CAPABILITY_PHYSICAL_KEYS.to_string());
+        lock.into_iter()
+            .chain(modes)
+            .chain(os)
+            .chain(physical_keys)
+            .collect()
     }
 }
 

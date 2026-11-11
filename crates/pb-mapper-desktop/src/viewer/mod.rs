@@ -40,8 +40,8 @@ use crate::{
     HostOs, Input, Invitation, KeyframeReason, QualityPreset, Result, VideoCodec, error,
     modes::{DisplayModeError, Mode, ModeList, ModeTarget},
     protocol::{
-        CAPABILITY_DISPLAY_MODE, DesktopKind, NoticeCode, Route, SessionState, StateRecord,
-        VideoSize,
+        CAPABILITY_DISPLAY_MODE, CAPABILITY_PHYSICAL_KEYS, DesktopKind, NoticeCode, Route,
+        SessionState, StateRecord, VideoSize,
     },
     security, valid_service,
 };
@@ -154,11 +154,12 @@ impl ViewerStateSlot {
     fn video_size(&self) -> Option<VideoSize> {
         self.host.as_ref()?.video
     }
+    fn listed(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|listed| listed == capability)
+    }
     /// The host display's modes, from a host that offers them.
     fn modes(&self) -> Option<&ModeList> {
-        self.capabilities
-            .iter()
-            .any(|capability| capability == CAPABILITY_DISPLAY_MODE)
+        self.listed(CAPABILITY_DISPLAY_MODE)
             .then(|| self.host.as_ref()?.modes.as_ref())
             .flatten()
     }
@@ -606,12 +607,21 @@ impl Viewer {
     /// Queue one atomic batch of 1..=16 inputs. It needs a fresh presented
     /// frame of `generation` and control; Rust stamps the presented frame and
     /// consecutive sequences. A single move replaces a queued move; a full
-    /// queue revokes control and fails with `Congestion`.
+    /// queue revokes control and fails with `Congestion`. A physical key
+    /// goes only to a host that listed `physical_keys`: else the batch
+    /// fails with `NotOffered` and nothing is sent.
     pub fn input(&self, generation: u64, inputs: &[Input]) -> std::result::Result<(), InputError> {
         {
             let state = self.shared.state.lock();
             if self.cancel.is_cancelled() || state.stopped.is_some() {
                 return Err(InputError::Closed);
+            }
+            if !state.listed(CAPABILITY_PHYSICAL_KEYS)
+                && inputs
+                    .iter()
+                    .any(|input| matches!(input, Input::PhysicalKey { .. }))
+            {
+                return Err(InputError::NotOffered);
             }
             if let Some(display) = state.host.as_ref().and_then(|host| host.display.as_ref()) {
                 for input in inputs {

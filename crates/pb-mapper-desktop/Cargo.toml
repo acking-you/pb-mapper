@@ -66,5 +66,9 @@ pb-mapper-client = { workspace = true, features = ["relay-quic"] }
 pb-mapper-testkit.workspace = true
 pb-mapper-server = { workspace = true, features = ["p2p"] }
 
+# The input acceptance turns the input method of its own window on and off.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = ["Win32_UI_Input_Ime"] }
+
 [lints]
 workspace = true

@@ -30,6 +30,9 @@ pub(crate) const CAPABILITY_FPS_OVERRIDE: &str = "fps_override";
 /// `StateRecord::modes`, `DisplayModeFailed` and `DisplayChanging`, and
 /// sends `DisplayMode` and `RestoreDisplayMode` only to a host that did.
 pub(crate) const CAPABILITY_DISPLAY_MODE: &str = "display_mode";
+/// From a host: it injects `Input::PhysicalKey`. A viewer sends that input
+/// to no other host.
+pub(crate) const CAPABILITY_PHYSICAL_KEYS: &str = "physical_keys";
 const MAX_CAPABILITIES: usize = 16;
 
 /// Capability lists hold at most 16 values of `[a-z0-9_]{1,32}`. A receiver
@@ -403,6 +406,12 @@ mod tests {
             },
             ViewerMessage::Input {
                 event: event(Input::Lock {}),
+            },
+            ViewerMessage::Input {
+                event: event(Input::PhysicalKey {
+                    usage: 0xE1,
+                    down: true,
+                }),
             },
             ViewerMessage::Ping {},
             ViewerMessage::DisplayMode {
