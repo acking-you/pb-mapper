@@ -606,6 +606,9 @@ void main() {
       final keyboard = DesktopKeyboard(input: h.input, picture: node, ime: ime)
         ..sync();
       expect((keyboard.text.attached.value, ime.enabled), (true, true));
+      // The client names its view: the Windows embedder refuses one that
+      // does not ("view ID is null"), and typed text is then lost.
+      expect(tester.testTextInput.setClientArgs?['viewId'], tester.view.viewId);
 
       h.input.keyboard = const KeyboardSettings(mode: KeyboardMode.remote);
       keyboard.sync();

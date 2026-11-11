@@ -159,6 +159,7 @@ class _TouchViewerState extends State<TouchViewer> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _textInput.viewId = View.of(context).viewId;
     // Phones turn the picture landscape; tablets rotate freely.
     if (!_oriented) {
       _oriented = true;

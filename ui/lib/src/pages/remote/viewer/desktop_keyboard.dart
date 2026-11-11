@@ -40,6 +40,8 @@ final class DesktopKeyboard {
     final focused = _picture.hasFocus;
     final local = _input.keyboard.mode == KeyboardMode.local;
     if (focused && local && _input.ready.value) {
+      final context = _picture.context;
+      text.viewId = context == null ? null : View.maybeOf(context)?.viewId;
       text.show();
     } else {
       text.hide();

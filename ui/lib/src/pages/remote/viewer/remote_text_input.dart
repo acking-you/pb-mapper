@@ -57,12 +57,20 @@ final class RemoteTextInput with TextInputClient, DeltaTextInputClient {
   /// Text the IME is composing, not sent yet.
   ValueListenable<String> get composing => _composing;
 
+  /// The view whose input method this client serves, as `EditableText`
+  /// names it: the Windows embedder refuses a client without one, and
+  /// then no typed text ever comes back.
+  int? viewId;
+
   /// Attaches if needed and always shows the keyboard, so it comes back
   /// after Android's Back hid it.
   void show() {
     var connection = _connection;
     if (connection == null || !connection.attached) {
-      connection = TextInput.attach(this, _configuration);
+      connection = TextInput.attach(
+        this,
+        _configuration.copyWith(viewId: viewId),
+      );
       _connection = connection;
       _value = sentinel;
       connection.setEditingState(_value);
