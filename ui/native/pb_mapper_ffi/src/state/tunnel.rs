@@ -370,6 +370,9 @@ pub async fn register_service(
     let (_claim, server_address, credential, relay_transport, lan_first) = {
         let state = state.lock().await;
         let claim = state.claim_registering(&spec.service_key)?;
+        // A list that cannot be read cannot take this share: refused here,
+        // with why, before the relay ever hears of it.
+        state.load_service_configs()?;
         let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
         (
             claim,
@@ -437,6 +440,10 @@ pub async fn connect_service(
     let (_claim, server_address, credential, relay_transport, lan_first, lan_transport) = {
         let state = state.lock().await;
         let claim = state.claim_connecting(&spec.service_key)?;
+        // A list that cannot be read cannot take this connection, which the
+        // window, listing what is saved, could then neither show nor stop:
+        // refused here, with why, before it binds anything.
+        state.load_client_configs()?;
         let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
         (
             claim,

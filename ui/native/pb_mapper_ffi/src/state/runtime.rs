@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! start relay: bind listener -> initialize app-local auth -> spawn -> mark running
-//! register:    claim key -> resolve -> preflight -> SDK registration -> commit
-//! connect:     claim key -> resolve -> bind check -> SDK connection -> commit
+//! register:    claim key -> read list -> resolve -> preflight -> SDK registration -> commit
+//! connect:     claim key -> read list -> resolve -> bind check -> SDK connection -> commit
 //! stop:        cancel the relay; drop the tunnels' handles, which stops them
 //! ```
 //!
@@ -415,6 +415,26 @@ impl PbMapperState {
         );
 
         let service_key = &spec.service_key;
+        // Persist here rather than at the FFI boundary, so a connection made
+        // from a terminal is remembered exactly like one made from the window.
+        // `finish_register` has always done this; leaving it out here meant a
+        // CLI `connect` started a client that never appeared in the list.
+        if let Err(e) = self.save_client_config(&spec) {
+            // The window lists what is saved, so a connection the list does
+            // not hold could be neither shown nor stopped there: refused, and
+            // stopped as `handle` drops. One saved before keeps its entry, so
+            // it runs, as it always did, with a warning.
+            let listed = self
+                .load_client_configs()
+                .is_ok_and(|store| store.clients.contains_key(service_key));
+            if !listed {
+                return Err(CtlError::io(format!(
+                    "Failed to save client configuration: {e}"
+                )));
+            }
+            tracing::warn!("Failed to save client config for '{service_key}': {e}");
+        }
+
         let handle = Arc::new(TunnelHandle::Connect(handle));
         watch_tunnel(&handle, events::ChangeKind::Clients, service_key);
         if self
@@ -423,16 +443,6 @@ impl PbMapperState {
             .is_some()
         {
             tracing::warn!("Client for service '{service_key}' was already running; replaced it");
-        }
-
-        // Persist here rather than at the FFI boundary, so a connection made
-        // from a terminal is remembered exactly like one made from the window.
-        // `finish_register` has always done this; leaving it out here meant a
-        // CLI `connect` started a client that never appeared in the list.
-        if let Err(e) = self.save_client_config(&spec) {
-            // The client is up either way, so this is a warning and not a
-            // failure: losing the config costs the entry after a restart.
-            tracing::warn!("Failed to save client config for '{service_key}': {e}");
         }
 
         tracing::info!("Connected to service '{}' successfully", service_key);

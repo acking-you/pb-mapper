@@ -425,7 +425,7 @@ fn linked_file(path: &Path) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::TempRoot;
+    use crate::test_support::{TempRoot, read_only};
 
     /// A save replaces the file whole and leaves nothing beside it.
     #[test]
@@ -545,22 +545,6 @@ mod tests {
         saved.unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"new");
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
-    }
-
-    /// Makes `path` read-only, or writable again.
-    #[cfg(unix)]
-    fn read_only(path: &Path, on: bool) {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = if on { 0o444 } else { 0o644 };
-        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
-    }
-
-    /// Makes `path` read-only, or writable again.
-    #[cfg(windows)]
-    fn read_only(path: &Path, on: bool) {
-        let mut permissions = fs::metadata(path).unwrap().permissions();
-        permissions.set_readonly(on);
-        fs::set_permissions(path, permissions).unwrap();
     }
 
     /// Makes `directory` take no new file, or take them again; its files stay

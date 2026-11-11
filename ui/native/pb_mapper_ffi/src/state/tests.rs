@@ -19,7 +19,7 @@ use super::{
     register_service,
 };
 use crate::error::ErrorCode;
-use crate::test_support::TempRoot;
+use crate::test_support::{TempRoot, read_only};
 
 type ProcessCredentialGuard = tokio::sync::MutexGuard<'static, ()>;
 
@@ -755,40 +755,67 @@ async fn a_state_reads_nothing_until_its_directory_arrives() {
     set_process_msg_header_key(None).unwrap();
 }
 
+/// A connection asked for under `key`, listening on `port`, through
+/// whatever relay the state names.
+fn connection(key: &str, port: std::net::SocketAddr) -> ConnectSpec {
+    ConnectSpec {
+        service_key: key.into(),
+        local_address: port.to_string(),
+        protocol: "TCP".into(),
+        enable_keep_alive: false,
+        namespace: None,
+        direct: DirectOptions {
+            allow_direct: true,
+            port_mapping: PortMapping::Auto,
+        },
+    }
+}
+
 /// A tunnel list that does not parse is refused, not taken for an empty
 /// one: a save would write it over with the one tunnel it saves, and every
-/// other one in the file would be gone.
+/// other one in the file would be gone. Nor does a tunnel start while it is
+/// refused: the window lists what is saved, so it could neither show nor
+/// stop the tunnel, and says why instead.
 #[tokio::test]
 async fn a_tunnel_list_that_does_not_parse_is_kept() {
     let (_guard, state, _root) = temp_state("unparsed-lists").await;
-    let state = state.lock().await;
-    let services = state.config_dir.join("services.json");
-    let clients = state.config_dir.join("clients.json");
+    set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
+    let (services, clients) = {
+        let mut state = state.lock().await;
+        // Nothing answers there: only the list may refuse these tunnels.
+        state.config.server_address = "127.0.0.1:1".into();
+        (
+            state.config_dir.join("services.json"),
+            state.config_dir.join("clients.json"),
+        )
+    };
     let broken = br#"{"services": {"web": {"service_key": "web","#;
     std::fs::write(&services, broken).unwrap();
     std::fs::write(&clients, broken).unwrap();
-    let direct = DirectOptions {
-        allow_direct: true,
-        port_mapping: PortMapping::Auto,
-    };
-
-    let saved = state.save_service_config(&ShareSpec {
+    let share = || ShareSpec {
         service_key: "cam".into(),
         local_address: "127.0.0.1:8080".into(),
         protocol: "TCP".into(),
         enable_encryption: true,
         enable_keep_alive: false,
-        direct,
-    });
+        direct: DirectOptions {
+            allow_direct: true,
+            port_mapping: PortMapping::Auto,
+        },
+    };
+    let port = pb_mapper_testkit::reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+
+    let shared = register_service(&state, share()).await;
+    let connected = connect_service(&state, connection("cam", port)).await;
+    let _ = set_process_msg_header_key(None);
+    assert_eq!(connected.err().map(|e| e.code()), Some(ErrorCode::Io));
+    assert_eq!(shared.err().map(|e| e.code()), Some(ErrorCode::Io));
+    let state = state.lock().await;
+    assert!(state.service_runtime.is_empty() && state.client_runtime.is_empty());
+
+    let saved = state.save_service_config(&share());
     assert_eq!(saved.unwrap_err().code(), ErrorCode::Io);
-    let saved = state.save_client_config(&ConnectSpec {
-        service_key: "cam".into(),
-        local_address: "127.0.0.1:9090".into(),
-        protocol: "TCP".into(),
-        enable_keep_alive: false,
-        namespace: None,
-        direct,
-    });
+    let saved = state.save_client_config(&connection("cam", port));
     assert_eq!(saved.unwrap_err().code(), ErrorCode::Io);
     assert_eq!(
         state.delete_service_config("web").unwrap_err().code(),
@@ -805,6 +832,48 @@ async fn a_tunnel_list_that_does_not_parse_is_kept() {
         state.get_client_configs().err().map(|e| e.code()),
         Some(ErrorCode::Io)
     );
+}
+
+/// A connection that cannot be saved is refused, and stopped, unless the
+/// list holds it already: the window lists what is saved, so it could
+/// neither show nor stop one the list does not hold. One saved before
+/// still starts, as it always did.
+#[tokio::test]
+async fn a_connection_the_list_cannot_hold_is_not_left_running() {
+    let (_guard, state, _root) = temp_state("unsaved-connection").await;
+    set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
+    let saved_port = pb_mapper_testkit::reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+    let new_port = pb_mapper_testkit::reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+    let clients = {
+        let mut state = state.lock().await;
+        // Nothing answers there: a connection waits for its relay.
+        state.config.server_address = "127.0.0.1:1".into();
+        state
+            .save_client_config(&connection("saved", saved_port))
+            .unwrap();
+        state.config_dir.join("clients.json")
+    };
+    read_only(&clients, true);
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(&clients)
+        .is_ok()
+    {
+        // Root writes it anyway: nothing here fails to save.
+        read_only(&clients, false);
+        let _ = set_process_msg_header_key(None);
+        return;
+    }
+
+    let new = connect_service(&state, connection("new", new_port)).await;
+    let saved = connect_service(&state, connection("saved", saved_port)).await;
+    read_only(&clients, false);
+    let _ = set_process_msg_header_key(None);
+    assert_eq!(new.err().map(|e| e.code()), Some(ErrorCode::Io));
+    saved.unwrap();
+    let state = state.lock().await;
+    assert!(state.running_tunnel(false, "new").is_err());
+    assert!(state.running_tunnel(false, "saved").is_ok());
 }
 
 /// Settings whose directory cannot be made are not saved at all, rather

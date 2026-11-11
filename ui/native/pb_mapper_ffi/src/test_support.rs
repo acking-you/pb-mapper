@@ -27,6 +27,22 @@ impl TempRoot {
     }
 }
 
+/// Makes `path` read-only, or writable again.
+#[cfg(unix)]
+pub(crate) fn read_only(path: &Path, on: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if on { 0o444 } else { 0o644 };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Makes `path` read-only, or writable again.
+#[cfg(windows)]
+pub(crate) fn read_only(path: &Path, on: bool) {
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    permissions.set_readonly(on);
+    std::fs::set_permissions(path, permissions).unwrap();
+}
+
 /// A handle as `pb_mapper_create` and `pb_mapper_set_app_dir(root)` leave
 /// it. Building its state writes the process credential, so the caller
 /// holds `PROCESS_CREDENTIAL_TEST_LOCK`.
