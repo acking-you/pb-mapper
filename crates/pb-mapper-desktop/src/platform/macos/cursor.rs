@@ -10,12 +10,17 @@
 //! named by the standard cursor it equals pixel for pixel, else `Custom`.
 //! AppKit is called from thread C: `NSCursor`'s class methods and `NSImage`
 //! are documented thread-safe for reading, and each read runs in its own
-//! autorelease pool.
+//! autorelease pool. Without a window-server connection AppKit hands out no
+//! cursor at all: every cursor and image is read as possibly nil (objc2's
+//! accessors assert one), and then there is no shape, or it is `Custom`.
 
 use super::{cf, desktop::Shared, pixels};
 use crate::{CursorKind, CursorMode, CursorShape, Result, error, platform::CursorSource};
-use objc2::rc::autoreleasepool;
-use objc2_app_kit::NSCursor;
+use objc2::{
+    ClassType, msg_send,
+    rc::{Retained, autoreleasepool},
+};
+use objc2_app_kit::{NSCursor, NSImage};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGEvent, CGImageAlphaInfo,
@@ -43,7 +48,8 @@ pub(crate) struct MacCursor {
     seed: Option<Seed>,
     /// The identity last shaped, or tried: one that failed is not retried.
     seen: Option<Identity>,
-    /// The standard cursors rendered at a scale, to name a shape.
+    /// The standard cursors rendered at a scale, to name a shape; none
+    /// rendered (AppKit had none to give) are asked for again.
     standards: Option<(u64, Vec<(CursorKind, CursorShape)>)>,
 }
 
@@ -81,7 +87,11 @@ impl MacCursor {
     /// The kind of `shape`: the standard cursor it equals at `scale`.
     fn kind(&mut self, shape: &CursorShape, scale: f64) -> CursorKind {
         let key = scale.to_bits();
-        if self.standards.as_ref().is_none_or(|(at, _)| *at != key) {
+        if self
+            .standards
+            .as_ref()
+            .is_none_or(|(at, standards)| *at != key || standards.is_empty())
+        {
             self.standards = Some((key, standards(scale)));
         }
         self.standards
@@ -97,24 +107,32 @@ impl MacCursor {
     }
 }
 
-/// The standard cursors that have a kind, rendered at `scale`.
-#[expect(deprecated, reason = "the resize cursors are still the ones apps show")]
+/// The standard cursors that have a kind and that AppKit gives, rendered
+/// at `scale`.
 fn standards(scale: f64) -> Vec<(CursorKind, CursorShape)> {
+    /// The class's cursor of that name, or `None`.
+    macro_rules! standard {
+        ($name:ident) => {{
+            // SAFETY: an `NSCursor` class method that takes nothing and
+            // returns an autoreleased cursor, or nil.
+            let cursor: Option<Retained<NSCursor>> = unsafe { msg_send![NSCursor::class(), $name] };
+            cursor
+        }};
+    }
     let cursors = [
-        (CursorKind::Arrow, NSCursor::arrowCursor()),
-        (CursorKind::Ibeam, NSCursor::IBeamCursor()),
-        (CursorKind::Hand, NSCursor::pointingHandCursor()),
-        (CursorKind::Crosshair, NSCursor::crosshairCursor()),
-        (
-            CursorKind::NotAllowed,
-            NSCursor::operationNotAllowedCursor(),
-        ),
-        (CursorKind::ResizeEw, NSCursor::resizeLeftRightCursor()),
-        (CursorKind::ResizeNs, NSCursor::resizeUpDownCursor()),
+        (CursorKind::Arrow, standard!(arrowCursor)),
+        (CursorKind::Ibeam, standard!(IBeamCursor)),
+        (CursorKind::Hand, standard!(pointingHandCursor)),
+        (CursorKind::Crosshair, standard!(crosshairCursor)),
+        (CursorKind::NotAllowed, standard!(operationNotAllowedCursor)),
+        // Deprecated, and still the ones apps show.
+        (CursorKind::ResizeEw, standard!(resizeLeftRightCursor)),
+        (CursorKind::ResizeNs, standard!(resizeUpDownCursor)),
     ];
     cursors
         .into_iter()
         .filter_map(|(kind, cursor)| {
+            let cursor = cursor?;
             render(&cursor, scale, kind)
                 .ok()
                 .flatten()
@@ -124,9 +142,13 @@ fn standards(scale: f64) -> Vec<(CursorKind, CursorShape)> {
 }
 
 /// `cursor`'s image and hotspot at `scale` pixels a point, straight RGBA,
-/// scaled down to the largest shape; `None` for an empty image.
+/// scaled down to the largest shape; `None` for no image or an empty one.
 fn render(cursor: &NSCursor, scale: f64, kind: CursorKind) -> Result<Option<CursorShape>> {
-    let image = cursor.image();
+    // SAFETY: takes nothing, returns the cursor's image or nil.
+    let image: Option<Retained<NSImage>> = unsafe { msg_send![cursor, image] };
+    let Some(image) = image else {
+        return Ok(None);
+    };
     let size: NSSize = image.size();
     if !(size.width > 0.0 && size.height > 0.0) {
         return Ok(None);
@@ -226,14 +248,34 @@ impl CursorSource for MacCursor {
 mod tests {
     use super::*;
     use crate::platform::macos::geometry::Geometry;
-    use std::{cell::Cell, rc::Rc};
+    use objc2_app_kit::NSApplication;
+    use objc2_core_graphics::CGSessionCopyCurrentDictionary;
+    use std::{cell::Cell, io::Write, rc::Rc};
 
-    /// The standard pointers render at 2x into straight RGBA within a
-    /// shape's bounds, off the main thread as thread C reads them; each is
-    /// named by its own image, and one with another hotspot is custom.
+    /// In a window-server session, with AppKit's application loaded as the
+    /// app has it, the pointer the system shows and the standard pointers
+    /// render at 2x into straight RGBA within a shape's bounds, off the main
+    /// thread as thread C reads them; each standard one is named by its own
+    /// image, and one with another hotspot is custom. Without a session there
+    /// is no shape, and no panic.
     #[test]
     fn standard_pointers_render_and_are_named_by_their_image() {
+        NSApplication::load();
+        let geometry = Geometry::new((0.0, 0.0, 100.0, 100.0), 200, 100);
+        let mut cursor = MacCursor::new(Rc::new(Cell::new(geometry)));
         let rendered = autoreleasepool(|_| standards(2.0));
+        if rendered.is_empty() && CGSessionCopyCurrentDictionary().is_none() {
+            assert!(cursor.shape().unwrap().is_none());
+            // Past the harness's capture, so that the log says so.
+            let _ = writeln!(
+                std::io::stderr(),
+                "skipped {}: no window-server session, so AppKit has no cursor",
+                module_path!()
+            );
+            return;
+        }
+        let shown = cursor.shape().unwrap().expect("the system shows a pointer");
+        assert!(shown.rgba().chunks(4).any(|pixel| pixel[3] == 255));
         assert!(rendered.len() >= 5, "{} rendered", rendered.len());
         for (kind, shape) in &rendered {
             assert!(shape.width().max(shape.height()) <= CursorShape::MAX_SIDE);
@@ -242,8 +284,6 @@ mod tests {
                 "{kind:?} has no opaque pixel"
             );
         }
-        let geometry = Geometry::new((0.0, 0.0, 100.0, 100.0), 200, 100);
-        let mut cursor = MacCursor::new(Rc::new(Cell::new(geometry)));
         let (kind, arrow) = &rendered[0];
         assert_eq!(autoreleasepool(|_| cursor.kind(arrow, 2.0)), *kind);
         let corner = (arrow.width() - 1, arrow.height() - 1);

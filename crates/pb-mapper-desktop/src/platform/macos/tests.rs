@@ -16,6 +16,7 @@ use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferCreate, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 };
 use std::{
+    io::Write,
     ptr::NonNull,
     time::{Duration, Instant},
 };
@@ -86,7 +87,12 @@ fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
 fn displays_are_named_by_uuid_and_measured_in_pixels() {
     let displays = desktop::displays().unwrap();
     if displays.is_empty() {
-        eprintln!("skipped: this Mac has no active display");
+        // Past the harness's capture, so that the log says so.
+        let _ = writeln!(
+            std::io::stderr(),
+            "skipped {}: this Mac has no active display",
+            module_path!()
+        );
         return;
     }
     for display in displays {

@@ -81,6 +81,10 @@ pb-mapper-client = { workspace = true, features = ["relay-quic"] }
 pb-mapper-testkit.workspace = true
 pb-mapper-server = { workspace = true, features = ["p2p"] }
 
+# The cursor test loads AppKit's application, as the app has one.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder"] }
+
 # The input acceptance turns the input method of its own window on and off.
 [target.'cfg(windows)'.dev-dependencies]
 windows = { workspace = true, features = ["Win32_UI_Input_Ime"] }
