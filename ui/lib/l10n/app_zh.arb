@@ -304,7 +304,7 @@
   "remoteListTitle": "远程电脑",
   "remoteEmptyTitle": "还没有远程电脑",
   "remoteEmptyBody": "在另一台电脑的 pb-mapper 里开启远程控制，复制它的私密邀请，粘贴到这里。",
-  "remoteEmptyBodyMobile": "在 Windows 电脑的 pb-mapper 里开启远程控制，然后扫描它的二维码或粘贴它的私密邀请。",
+  "remoteEmptyBodyMobile": "在电脑的 pb-mapper 里开启远程控制，然后扫描它的二维码或粘贴它的私密邀请。",
   "remoteAddHint": "粘贴另一台电脑的私密邀请",
   "remoteRememberNote": "只有选择“记住此电脑”的邀请会保存在本机，并由系统加密。",
   "remoteViewing": "正在查看",
