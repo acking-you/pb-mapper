@@ -418,21 +418,13 @@ impl PbMapperState {
         // from a terminal is remembered exactly like one made from the window.
         // `finish_register` has always done this; leaving it out here meant a
         // CLI `connect` started a client that never appeared in the list.
-        if let Err(e) = self.save_client_config(&spec) {
-            // The window lists what is saved, so a connection the list does
-            // not hold could be neither shown nor stopped there: refused, and
-            // stopped as `handle` drops. One saved before keeps its entry, so
-            // it runs, as it always did, with a warning.
-            let listed = self
-                .load_client_configs()
-                .is_ok_and(|store| store.clients.contains_key(service_key));
-            if !listed {
-                return Err(CtlError::io(format!(
-                    "Failed to save client configuration: {e}"
-                )));
-            }
-            tracing::warn!("Failed to save client config for '{service_key}': {e}");
-        }
+        // The window lists what is saved, so a connection whose save fails
+        // would be listed as it was saved before, or not at all: refused, as
+        // a share is, and stopped as `handle` drops. One started as it was
+        // saved needs no write, so it still starts on a list that cannot be
+        // written.
+        self.save_client_config(&spec)
+            .map_err(|e| CtlError::io(format!("Failed to save client configuration: {e}")))?;
 
         let handle = Arc::new(TunnelHandle::Connect(handle));
         watch_tunnel(&handle, events::ChangeKind::Clients, service_key);

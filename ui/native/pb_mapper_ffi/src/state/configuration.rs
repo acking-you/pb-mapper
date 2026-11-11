@@ -193,10 +193,12 @@ impl PbMapperState {
                 },
         } = spec;
         let mut store = self.load_service_configs()?;
+        let saved = store.services.remove(service_key);
         // What the entry saved before holds besides its settings is its own.
-        let (created_at, unknown) = store.services.remove(service_key).map_or_else(
-            || (SystemTime::now(), Unknown::new()),
-            |saved| (saved.created_at, saved.unknown),
+        let (created_at, unknown) = kept(
+            saved
+                .as_ref()
+                .map(|saved| (saved.created_at, &saved.unknown)),
         );
 
         let config = ServiceConfigData {
@@ -210,6 +212,9 @@ impl PbMapperState {
             port_mapping: *port_mapping,
             unknown,
         };
+        if saved.as_ref() == Some(&config) {
+            return Ok(());
+        }
 
         store.services.insert(service_key.to_string(), config);
         self.save_service_configs(&store)
@@ -243,10 +248,11 @@ impl PbMapperState {
                 },
         } = spec;
         let mut store = self.load_client_configs()?;
-        // As a share's: what it holds besides its settings is kept.
-        let (created_at, unknown) = store.clients.remove(service_key).map_or_else(
-            || (SystemTime::now(), Unknown::new()),
-            |saved| (saved.created_at, saved.unknown),
+        let saved = store.clients.remove(service_key);
+        let (created_at, unknown) = kept(
+            saved
+                .as_ref()
+                .map(|saved| (saved.created_at, &saved.unknown)),
         );
 
         let config = ClientConfigData {
@@ -260,6 +266,9 @@ impl PbMapperState {
             port_mapping: *port_mapping,
             unknown,
         };
+        if saved.as_ref() == Some(&config) {
+            return Ok(());
+        }
 
         store.clients.insert(service_key.to_string(), config);
         self.save_client_configs(&store)
@@ -270,6 +279,19 @@ impl PbMapperState {
         store.clients.remove(service_key);
         self.save_client_configs(&store)
     }
+}
+
+/// What a tunnel's entry keeps from the one `saved` before it, besides the
+/// settings: when it was created, and the keys a later build wrote; or, for
+/// a tunnel saved for the first time, now and none. An entry that comes out
+/// as it was saved is not written again, so a tunnel started as it was
+/// saved, as the window resumes one, starts on a list that cannot be
+/// written.
+fn kept(saved: Option<(SystemTime, &Unknown)>) -> (SystemTime, Unknown) {
+    saved.map_or_else(
+        || (SystemTime::now(), Unknown::new()),
+        |(created_at, unknown)| (created_at, unknown.clone()),
+    )
 }
 
 /// The store saved at `path`, or an empty one when there is none or the file

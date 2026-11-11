@@ -851,46 +851,80 @@ async fn a_tunnel_list_that_holds_nothing_is_empty() {
     assert_eq!(state.get_client_configs().unwrap()[0].service_key, "cam");
 }
 
-/// A connection that cannot be saved is refused, and stopped, unless the
-/// list holds it already: the window lists what is saved, so it could
-/// neither show nor stop one the list does not hold. One saved before
-/// still starts, as it always did.
+/// A tunnel is saved only when it changed, and one whose change cannot be
+/// saved is refused, and stopped: the window lists what is saved, so it
+/// would show a connection as it was before, or not at all. One that
+/// changes nothing needs no write, so it starts on a list that cannot be
+/// written: a saved connection resumed, as it always did, and now a share.
 #[tokio::test]
-async fn a_connection_the_list_cannot_hold_is_not_left_running() {
-    let (_guard, state, _root) = temp_state("unsaved-connection").await;
+async fn a_tunnel_the_list_cannot_hold_as_it_runs_is_refused() {
+    let (_guard, state, _root) = temp_state("unsaved-tunnels").await;
     set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
-    let saved_port = pb_mapper_testkit::reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let new_port = pb_mapper_testkit::reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let clients = {
+    let mut ports = Vec::new();
+    for _ in 0..4 {
+        ports.push(pb_mapper_testkit::reserve_addr(pb_mapper_testkit::Transport::Tcp).await);
+    }
+    let [same, moved, elsewhere, new] = ports[..] else {
+        unreachable!("four ports were reserved")
+    };
+    let share = |local: &str| ShareSpec {
+        service_key: "web".into(),
+        local_address: local.into(),
+        protocol: "TCP".into(),
+        enable_encryption: true,
+        enable_keep_alive: false,
+        direct: DirectOptions {
+            allow_direct: true,
+            port_mapping: PortMapping::Auto,
+        },
+    };
+    let lists = {
         let mut state = state.lock().await;
         // Nothing answers there: a connection waits for its relay.
         state.config.server_address = "127.0.0.1:1".into();
+        state.save_client_config(&connection("same", same)).unwrap();
         state
-            .save_client_config(&connection("saved", saved_port))
+            .save_client_config(&connection("moved", moved))
             .unwrap();
-        state.config_dir.join("clients.json")
+        state.save_service_config(&share("127.0.0.1:8080")).unwrap();
+        [
+            state.config_dir.join("clients.json"),
+            state.config_dir.join("services.json"),
+        ]
     };
-    read_only(&clients, true);
-    if std::fs::OpenOptions::new()
-        .write(true)
-        .open(&clients)
-        .is_ok()
+    let lock = |on| lists.iter().for_each(|list| read_only(list, on));
+    lock(true);
+    if lists
+        .iter()
+        .any(|list| std::fs::OpenOptions::new().write(true).open(list).is_ok())
     {
-        // Root writes it anyway: nothing here fails to save.
-        read_only(&clients, false);
+        // Root writes them anyway: nothing here fails to save.
+        lock(false);
         let _ = set_process_msg_header_key(None);
         return;
     }
 
-    let new = connect_service(&state, connection("new", new_port)).await;
-    let saved = connect_service(&state, connection("saved", saved_port)).await;
-    read_only(&clients, false);
+    let resumed = connect_service(&state, connection("same", same)).await;
+    let changed = connect_service(&state, connection("moved", elsewhere)).await;
+    let added = connect_service(&state, connection("new", new)).await;
+    let (share_resumed, share_changed) = {
+        let state = state.lock().await;
+        (
+            state.save_service_config(&share("127.0.0.1:8080")),
+            state.save_service_config(&share("127.0.0.1:8081")),
+        )
+    };
+    lock(false);
     let _ = set_process_msg_header_key(None);
-    assert_eq!(new.err().map(|e| e.code()), Some(ErrorCode::Io));
-    saved.unwrap();
+    resumed.unwrap();
+    assert_eq!(changed.err().map(|e| e.code()), Some(ErrorCode::Io));
+    assert_eq!(added.err().map(|e| e.code()), Some(ErrorCode::Io));
+    share_resumed.unwrap();
+    assert_eq!(share_changed.err().map(|e| e.code()), Some(ErrorCode::Io));
     let state = state.lock().await;
+    assert!(state.running_tunnel(false, "same").is_ok());
+    assert!(state.running_tunnel(false, "moved").is_err());
     assert!(state.running_tunnel(false, "new").is_err());
-    assert!(state.running_tunnel(false, "saved").is_ok());
 }
 
 /// Settings whose directory cannot be made are not saved at all, rather

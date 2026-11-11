@@ -29,7 +29,7 @@ pub(super) fn normalize_msg_header_key(msg_header_key: String) -> Result<String,
     Ok(normalized)
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct ServiceConfigData {
     pub service_key: String,
     pub local_address: String,
@@ -92,7 +92,7 @@ pub struct ServiceConfigStore {
     pub unknown: Unknown,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct ClientConfigData {
     pub service_key: String,
     pub local_address: String,
