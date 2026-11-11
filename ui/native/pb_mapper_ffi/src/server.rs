@@ -45,7 +45,8 @@ pub unsafe extern "C" fn pb_mapper_start_server(
     })
 }
 
-/// Stop pb-mapper server.
+/// Stop pb-mapper server, and the tunnels through it; a tunnel through
+/// another relay keeps running.
 ///
 /// # Safety
 /// `handle` must be null or come from `pb_mapper_create` and not yet be

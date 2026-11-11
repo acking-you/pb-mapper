@@ -4,7 +4,7 @@
 //! start relay: bind listener -> initialize app-local auth -> spawn -> mark running
 //! register:    claim key -> read list -> resolve -> preflight -> SDK registration -> commit
 //! connect:     claim key -> read list -> resolve -> bind check -> SDK connection -> commit
-//! stop:        cancel the relay; drop the tunnels' handles, which stops them
+//! stop:        cancel the relay; drop the handles of the tunnels through it
 //! ```
 //!
 //! Readiness is published only after both listener binding and authentication
@@ -100,6 +100,9 @@ impl PbMapperState {
         let listener = pb_mapper_core::listener::bind(bind_addr).map_err(|e| {
             CtlError::address_in_use(format!("Failed to bind server on {bind_addr}: {e}"))
         })?;
+        // The port it took, which a tunnel through it dials: `port` itself,
+        // unless that was 0.
+        let port = listener.local_addr().map_or(port, |bound| bound.port());
         let auth_config = AuthConfig {
             state_dir: self.auth_state_dir(),
             ..AuthConfig::default()
@@ -198,6 +201,9 @@ impl PbMapperState {
         self.local_server_status.lock().status = LocalServerStatus::default();
     }
 
+    /// Stop the relay this computer runs, and the tunnels through it: those
+    /// dialling its port on this computer. A tunnel through another relay,
+    /// this computer's own `pb-mapper server` among them, keeps running.
     pub async fn stop_server(&mut self) -> Result<(), CtlError> {
         let Some(EmbeddedRelay {
             mut task,
@@ -205,7 +211,7 @@ impl PbMapperState {
             shutdown,
             status_requests,
             started_at: _,
-            port: _,
+            port,
             quic_port: _,
         }) = self.embedded_relay.take()
         else {
@@ -236,10 +242,13 @@ impl PbMapperState {
             .lock()
             .record(LocalServerStatus::default());
 
-        self.service_runtime.clear();
-        self.client_runtime.clear();
+        let through_it = |runtime: &TunnelRuntime| runtime.pin.dials_this_computer(port);
+        self.service_runtime
+            .retain(|_, runtime| !through_it(runtime));
+        self.client_runtime
+            .retain(|_, runtime| !through_it(runtime));
 
-        tracing::info!("pb-mapper server stopped, all services and connections terminated");
+        tracing::info!("pb-mapper server stopped, and the tunnels through it");
         Ok(())
     }
 

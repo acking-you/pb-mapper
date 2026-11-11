@@ -122,6 +122,17 @@ impl PinnedTunnel {
         self.namespace.unwrap_or_else(|| self.credential.key_id())
     }
 
+    /// Whether it dials `port` at an address of this computer's: one this
+    /// computer can bind, as it can its loopback and its interfaces'
+    /// addresses and no other computer's.
+    pub(super) fn dials_this_computer(&self, port: u16) -> bool {
+        self.endpoint.as_slice().iter().any(|relay| {
+            let mut here = *relay;
+            here.set_port(0);
+            relay.port() == port && std::net::UdpSocket::bind(here).is_ok()
+        })
+    }
+
     /// Whether it runs on `relay`: started under that address, or dialling
     /// any address `endpoint` resolves to, since the same relay may have been
     /// written another way (a hostname, its IP) when it started.

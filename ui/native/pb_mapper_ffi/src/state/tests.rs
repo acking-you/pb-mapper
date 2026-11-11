@@ -266,6 +266,64 @@ async fn a_change_restarts_only_the_relays_tunnels_on_its_key() {
     drop(state);
 }
 
+/// Stopping the relay this computer runs stops the tunnels on it, and only
+/// those: one through another relay, or another relay on this computer,
+/// keeps running.
+#[tokio::test]
+async fn stopping_the_relay_here_stops_only_its_tunnels() {
+    let (_process_credential_guard, state, _root) = temp_state("stop-relay-here").await;
+    let credential = parse_credential(TEST_ADMIN_KEY).unwrap();
+    // A real handle, on a relay that is not there: only the pin matters.
+    let idle = Client::from_credential("127.0.0.1:1", credential, false, None)
+        .register_with_options(
+            RegisterRequest {
+                key: "idle".into(),
+                local_addr: "127.0.0.1:1".into(),
+                transport: Transport::Tcp,
+                codec: false,
+                force_namespace: false,
+            },
+            RegisterOptions::default(),
+        )
+        .await
+        .unwrap();
+    let handle = Arc::new(TunnelHandle::Share(idle));
+    let pinned = |relay: std::net::SocketAddr| TunnelRuntime {
+        handle: handle.clone(),
+        pin: PinnedTunnel {
+            credential,
+            endpoint: ResolvedAddrs::from(relay),
+            relay: relay.to_string(),
+            namespace: None,
+            allow_direct: true,
+        },
+    };
+    let mut state = state.lock().await;
+    state.start_server(0, false, None).await.unwrap();
+    let port = state.get_local_server_status().port.unwrap();
+    let here = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    for (key, relay) in [
+        ("here", here),
+        ("elsewhere", "192.0.2.1:7666".parse().unwrap()),
+    ] {
+        state.service_runtime.insert(key.into(), pinned(relay));
+    }
+    for (key, relay) in [
+        ("here", here),
+        ("next-door", "127.0.0.1:1".parse().unwrap()),
+    ] {
+        state.client_runtime.insert(key.into(), pinned(relay));
+    }
+
+    state.stop_server().await.unwrap();
+    let mut shares: Vec<_> = state.service_runtime.keys().collect();
+    let mut connections: Vec<_> = state.client_runtime.keys().collect();
+    shares.sort();
+    connections.sort();
+    assert_eq!(shares, ["elsewhere"]);
+    assert_eq!(connections, ["next-door"]);
+}
+
 /// Each session of a tunnel goes direct when both ends allow it, and the
 /// list says so; a share that keeps to the relay sends its connections
 /// there, and the list says at which stage direct gave way.
