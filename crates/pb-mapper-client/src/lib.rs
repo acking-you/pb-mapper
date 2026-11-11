@@ -19,6 +19,7 @@ pub mod server;
 
 mod addr;
 mod diagnostics;
+mod direct_policy;
 mod endpoint;
 mod network;
 mod recovery;
@@ -27,3 +28,10 @@ mod recovery;
 mod direct;
 
 mod relay;
+mod udp_timeout;
+mod worker_status;
+
+#[cfg(test)]
+mod status_text_tests;
+#[cfg(test)]
+mod test_relay;

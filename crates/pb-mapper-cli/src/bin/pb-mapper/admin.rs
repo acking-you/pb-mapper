@@ -10,7 +10,24 @@
 //! while NDJSON deliberately streams one item at a time. Root-key rotation stages
 //! a recovery copy before contacting the relay, then verifies the new credential.
 
-use super::*;
+use std::error::Error;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use clap::{Args, Subcommand, ValueEnum};
+use pb_mapper_auth::{
+    KeyPage, discard_staged_admin_key, generate_admin_key, stage_admin_key_candidate,
+    write_admin_key_file,
+};
+use pb_mapper_core::checksum::set_process_msg_header_key;
+use pb_mapper_core::config::pb_mapper_server_addr;
+use pb_mapper_protocol::command::{
+    ACTION_ADMINISTRATOR_KEY_ROTATED, AdminConnectionPage, AdminRequest, AdminResponse,
+    AdminServicePage,
+};
+
+use crate::parse_duration;
+use crate::server::LegacyProtocolArg;
 
 #[derive(Debug, Args)]
 pub(super) struct AdminArgs {
@@ -218,14 +235,13 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
     // address it names rather than the first.
     let remote_addr = pb_mapper_server_addr(args.server.as_deref())?;
     let remote_addr = remote_addr.as_str();
-    match args.command {
-        AdminCommand::Namespace(AdminNamespaceArgs { command }) => match command {
-            AdminNamespaceCommand::Allocate => {
-                let response =
-                    send_admin_request(remote_addr, AdminRequest::NamespaceAllocate).await?;
-                print_admin_response(args.output, &response)?;
-            }
-        },
+    let output = args.output;
+    // Listings and the root-key rotation run their own exchanges; every other
+    // command is one request whose response is printed as it comes.
+    let request = match args.command {
+        AdminCommand::Namespace(AdminNamespaceArgs {
+            command: AdminNamespaceCommand::Allocate,
+        }) => AdminRequest::NamespaceAllocate,
         AdminCommand::Key(AdminKeyArgs { command }) => match command {
             AdminKeyCommand::Issue {
                 ttl,
@@ -233,57 +249,33 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                 namespace,
             } => {
                 let ttl_seconds = ttl.as_secs();
-                let request = match namespace {
+                match namespace {
                     Some(namespace) => AdminRequest::KeyIssueScoped {
                         namespace,
                         ttl_seconds,
                         label,
                     },
                     None => AdminRequest::KeyIssue { ttl_seconds, label },
-                };
-                let response = send_admin_request(remote_addr, request).await?;
-                print_admin_response(args.output, &response)?;
+                }
             }
             AdminKeyCommand::List {
                 page,
                 page_size,
                 all,
             } => {
-                stream_pages::<KeyPage, _>(remote_addr, args.output, page, all, |page| {
+                return stream_pages::<KeyPage, _>(remote_addr, output, page, all, |page| {
                     AdminRequest::KeyList { page, page_size }
                 })
-                .await?;
+                .await;
             }
-            AdminKeyCommand::Show { key_id } => {
-                let response =
-                    send_admin_request(remote_addr, AdminRequest::KeyShow { key_id }).await?;
-                print_admin_response(args.output, &response)?;
-            }
-            AdminKeyCommand::Reveal { key_id } => {
-                let response =
-                    send_admin_request(remote_addr, AdminRequest::KeyReveal { key_id }).await?;
-                print_admin_response(args.output, &response)?;
-            }
-            AdminKeyCommand::Renew { key_id, ttl } => {
-                let response = send_admin_request(
-                    remote_addr,
-                    AdminRequest::KeyRenew {
-                        key_id,
-                        ttl_seconds: ttl.as_secs(),
-                    },
-                )
-                .await?;
-                print_admin_response(args.output, &response)?;
-            }
-            AdminKeyCommand::Revoke { key_id } => {
-                let response =
-                    send_admin_request(remote_addr, AdminRequest::KeyRevoke { key_id }).await?;
-                print_admin_response(args.output, &response)?;
-            }
-            AdminKeyCommand::Gc => {
-                let response = send_admin_request(remote_addr, AdminRequest::KeyGc).await?;
-                print_admin_response(args.output, &response)?;
-            }
+            AdminKeyCommand::Show { key_id } => AdminRequest::KeyShow { key_id },
+            AdminKeyCommand::Reveal { key_id } => AdminRequest::KeyReveal { key_id },
+            AdminKeyCommand::Renew { key_id, ttl } => AdminRequest::KeyRenew {
+                key_id,
+                ttl_seconds: ttl.as_secs(),
+            },
+            AdminKeyCommand::Revoke { key_id } => AdminRequest::KeyRevoke { key_id },
+            AdminKeyCommand::Gc => AdminRequest::KeyGc,
         },
         AdminCommand::Connection(AdminConnectionArgs { command }) => match command {
             AdminConnectionCommand::List(AdminListArgs {
@@ -292,9 +284,9 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                 page_size,
                 all,
             }) => {
-                stream_pages::<AdminConnectionPage, _>(
+                return stream_pages::<AdminConnectionPage, _>(
                     remote_addr,
-                    args.output,
+                    output,
                     page,
                     all,
                     |page| AdminRequest::ConnectionList {
@@ -303,7 +295,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                         page_size,
                     },
                 )
-                .await?;
+                .await;
             }
             AdminConnectionCommand::Retire {
                 service_name,
@@ -314,16 +306,11 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                 // `--all` is the absence of a target, not a separate field on the
                 // wire: clap has already ensured exactly one of the two was given.
                 let conn_id = if all { None } else { conn_id };
-                let response = send_admin_request(
-                    remote_addr,
-                    AdminRequest::ConnectionRetire {
-                        key_id: namespace,
-                        service_name,
-                        conn_id,
-                    },
-                )
-                .await?;
-                print_admin_response(args.output, &response)?;
+                AdminRequest::ConnectionRetire {
+                    key_id: namespace,
+                    service_name,
+                    conn_id,
+                }
             }
         },
         AdminCommand::Service(AdminServiceArgs {
@@ -335,82 +322,84 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                     all,
                 }),
         }) => {
-            stream_pages::<AdminServicePage, _>(remote_addr, args.output, page, all, |page| {
+            return stream_pages::<AdminServicePage, _>(remote_addr, output, page, all, |page| {
                 AdminRequest::ServiceList {
                     key_id: namespace,
                     page,
                     page_size,
                 }
             })
-            .await?;
+            .await;
         }
-        AdminCommand::Status => {
-            let response = send_admin_request(remote_addr, AdminRequest::AuthStatus).await?;
-            print_admin_response(args.output, &response)?;
-        }
+        AdminCommand::Status => AdminRequest::AuthStatus,
         AdminCommand::AuthState(AdminAuthStateArgs {
             command: AdminAuthStateCommand::Reset { confirm },
-        }) => {
-            let response =
-                send_admin_request(remote_addr, AdminRequest::AuthStateReset { confirm }).await?;
-            print_admin_response(args.output, &response)?;
-        }
+        }) => AdminRequest::AuthStateReset { confirm },
         AdminCommand::RootKey(AdminRootKeyArgs {
             command: AdminRootKeyCommand::Rotate { new_key, key_file },
-        }) => {
-            let key_file = key_file.unwrap_or_else(default_admin_recovery_key_file);
-            let new_key = new_key.unwrap_or_else(generate_admin_key);
-            // Staged before the relay is contacted, and never over an unresolved
-            // candidate from an earlier attempt: that file may hold the only copy
-            // of a key the relay already installed.
-            let staged_key_file = stage_admin_key_candidate(&key_file, &new_key)?;
-            let client = admin_client(remote_addr)?;
-            let response = match client.admin()?.rotate_root_key(Some(new_key.clone())).await {
-                Ok(_) => AdminResponse::Ok {
-                    action: "administrator_key_rotated".to_string(),
-                },
-                Err(error) => {
-                    return Err(std::io::Error::other(format!(
-                        "root rotation request failed; the candidate key remains at `{}`: {error}",
-                        staged_key_file.display()
-                    ))
-                    .into());
-                }
-            };
-            set_process_msg_header_key(Some(&new_key))?;
-            client.admin()?.auth_status().await.map_err(|error| {
-                std::io::Error::other(format!(
-                    "new administrator key did not pass the post-rotation status check: {error}"
-                ))
-            })?;
-            write_admin_key_file(&key_file, &new_key, true).map_err(|error| {
-                std::io::Error::other(format!(
-                    "administrator key rotated and verified, but `{}` could not be updated; recover the key from `{}`: {error}",
-                    key_file.display(),
-                    staged_key_file.display()
-                ))
-            })?;
-            discard_staged_admin_key(&staged_key_file);
-            if args.output == OutputFormat::Human {
-                println!("administrator key rotated and verified");
-                println!("all temporary credentials are now invalid (temporary_key_rotated)");
-                println!("key file: {}", key_file.display());
-            } else {
-                print_admin_response(args.output, &response)?;
-            }
-        }
+        }) => return rotate_root_key(remote_addr, output, new_key, key_file).await,
         AdminCommand::LegacyProtocol(AdminLegacyProtocolArgs {
             command: AdminLegacyProtocolCommand::Set { policy },
-        }) => {
-            let response = send_admin_request(
-                remote_addr,
-                AdminRequest::LegacyProtocolSet {
-                    policy: policy.into(),
-                },
-            )
-            .await?;
-            print_admin_response(args.output, &response)?;
+        }) => AdminRequest::LegacyProtocolSet {
+            policy: policy.into(),
+        },
+    };
+    let response = send_admin_request(remote_addr, request).await?;
+    print_admin_response(output, &response)
+}
+
+/// Rotate the sole administrator key, in an order that never leaves the new
+/// key without a copy on disk: stage it, ask the relay, switch this process
+/// to it, verify it, write the key file, and only then discard the staged
+/// copy.
+async fn rotate_root_key(
+    remote_addr: &str,
+    output: OutputFormat,
+    new_key: Option<String>,
+    key_file: Option<PathBuf>,
+) -> Result<(), Box<dyn Error>> {
+    let key_file = match key_file {
+        Some(key_file) => key_file,
+        None => default_admin_recovery_key_file()?,
+    };
+    let new_key = new_key.unwrap_or_else(generate_admin_key);
+    // Staged before the relay is contacted, and never over an unresolved
+    // candidate from an earlier attempt: that file may hold the only copy
+    // of a key the relay already installed.
+    let staged_key_file = stage_admin_key_candidate(&key_file, &new_key)?;
+    let client = admin_client(remote_addr)?;
+    let response = match client.admin()?.rotate_root_key(Some(new_key.clone())).await {
+        Ok(_) => AdminResponse::Ok {
+            action: ACTION_ADMINISTRATOR_KEY_ROTATED.to_string(),
+        },
+        Err(error) => {
+            return Err(std::io::Error::other(format!(
+                "root rotation request failed; the candidate key remains at `{}`: {error}",
+                staged_key_file.display()
+            ))
+            .into());
         }
+    };
+    set_process_msg_header_key(Some(&new_key))?;
+    client.admin()?.auth_status().await.map_err(|error| {
+        std::io::Error::other(format!(
+            "new administrator key did not pass the post-rotation status check: {error}"
+        ))
+    })?;
+    write_admin_key_file(&key_file, &new_key, true).map_err(|error| {
+        std::io::Error::other(format!(
+            "administrator key rotated and verified, but `{}` could not be updated; recover the key from `{}`: {error}",
+            key_file.display(),
+            staged_key_file.display()
+        ))
+    })?;
+    discard_staged_admin_key(&staged_key_file);
+    if output == OutputFormat::Human {
+        println!("administrator key rotated and verified");
+        println!("all temporary credentials are now invalid (temporary_key_rotated)");
+        println!("key file: {}", key_file.display());
+    } else {
+        print_admin_response(output, &response)?;
     }
     Ok(())
 }
@@ -443,7 +432,7 @@ async fn send_admin_request(
 /// The item type stays out of the trait: the per-page methods below are all the
 /// loop needs, and keeping them concrete means this crate never has to name the
 /// three item types or carry a `serde` dependency for the bound.
-trait AdminPage: Clone {
+trait AdminPage {
     /// Names this listing in the error raised when the relay answers with some
     /// other response variant.
     const LABEL: &'static str;
@@ -470,6 +459,9 @@ trait AdminPage: Clone {
 }
 
 /// Declares [`AdminPage`] for one wire page type.
+///
+/// `empty_clone` and `absorb` name every field of the page, so a field it
+/// gains needs a decision here before `--all` compiles.
 macro_rules! impl_admin_page {
     ($page:ty, variant = $variant:ident, label = $label:literal) => {
         impl AdminPage for $page {
@@ -498,15 +490,25 @@ macro_rules! impl_admin_page {
             }
 
             fn empty_clone(&self) -> Self {
+                let Self {
+                    schema_version,
+                    items: _,
+                    next_page: _,
+                } = self;
                 Self {
+                    schema_version: *schema_version,
                     items: Vec::new(),
                     next_page: None,
-                    ..self.clone()
                 }
             }
 
             fn absorb(&mut self, page: &Self) {
-                self.items.extend_from_slice(&page.items);
+                let Self {
+                    schema_version: _,
+                    items,
+                    next_page: _,
+                } = page;
+                self.items.extend_from_slice(items);
             }
         }
     };
@@ -691,46 +693,88 @@ fn print_human_admin_response(response: &AdminResponse) {
     }
 }
 
-fn default_admin_recovery_key_file() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("pb-mapper")
-        .join("admin.key")
+/// Where `root-key rotate` keeps the new key when `--key-file` does not say.
+fn default_admin_recovery_key_file() -> std::io::Result<PathBuf> {
+    recovery_key_file_in(|name| std::env::var_os(name))
+}
+
+/// `pb-mapper/admin.key` in `$XDG_CONFIG_HOME`, or else in `.config` in the
+/// home: `$HOME`, or on Windows `%USERPROFILE%`. Each must be a whole path,
+/// as XDG asks. With none, the caller names the file: the directory the
+/// command runs in may be anything, a shared checkout included, and is no
+/// place for the relay's administrator key.
+fn recovery_key_file_in(
+    var: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> std::io::Result<PathBuf> {
+    let whole = |name| {
+        var(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let home = || {
+        whole("HOME")
+            .or_else(|| cfg!(windows).then(|| whole("USERPROFILE")).flatten())
+            .map(|home| home.join(".config"))
+    };
+    let config = whole("XDG_CONFIG_HOME").or_else(home).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no home directory to keep the new administrator key in; pass --key-file",
+        )
+    })?;
+    Ok(config.join("pb-mapper").join("admin.key"))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use super::*;
 
-    #[tokio::test]
-    async fn administrator_request_times_out_when_peer_stalls() {
-        set_process_msg_header_key(Some("0123456789abcdefghijklmnopqrstuv"))
-            .expect("test administrator credential should be valid");
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("test listener should bind");
-        let remote_addr = listener
-            .local_addr()
-            .expect("listener should have an address");
-        let stalled_peer = tokio::spawn(async move {
-            let (_stream, _) = listener.accept().await.expect("test peer should connect");
-            std::future::pending::<()>().await;
-        });
+    /// The environment `vars` names, and nothing else.
+    fn only(vars: Vec<(&'static str, OsString)>) -> impl Fn(&str) -> Option<OsString> {
+        move |name| {
+            vars.iter()
+                .find(|(var, _)| *var == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
 
-        let error = admin_client(&remote_addr.to_string())
-            .expect("test client")
-            .admin()
-            .expect("administrator credential")
-            .request_with_timeout(AdminRequest::AuthStatus, Duration::from_millis(50))
-            .await
-            .expect_err("a stalled administrator request should time out");
-
-        assert!(
-            matches!(error, pb_mapper_client::sdk::Error::TimedOut { .. }),
-            "timeout should be reported as TimedOut, got {error}"
+    /// The recovery copy of a new administrator key goes to the user's
+    /// configuration directory, and never into whatever directory the
+    /// command happened to run in.
+    #[test]
+    fn the_recovery_key_lands_in_the_users_config_or_nowhere() {
+        let home = std::env::temp_dir();
+        let config = home.join("config");
+        assert_eq!(
+            recovery_key_file_in(only(vec![
+                ("XDG_CONFIG_HOME", config.clone().into()),
+                ("HOME", home.clone().into()),
+            ]))
+            .unwrap(),
+            config.join("pb-mapper").join("admin.key")
         );
-        stalled_peer.abort();
+        let in_home = home.join(".config").join("pb-mapper").join("admin.key");
+        assert_eq!(
+            recovery_key_file_in(only(vec![("HOME", home.clone().into())])).unwrap(),
+            in_home
+        );
+        // Windows keeps the home in USERPROFILE.
+        let from_profile = recovery_key_file_in(only(vec![("USERPROFILE", home.into())]));
+        if cfg!(windows) {
+            assert_eq!(from_profile.unwrap(), in_home);
+        } else {
+            assert!(from_profile.is_err());
+        }
+        // No home, or one that is not a whole path, leaves nowhere to put it.
+        assert!(recovery_key_file_in(only(Vec::new())).is_err());
+        assert!(
+            recovery_key_file_in(only(vec![
+                ("XDG_CONFIG_HOME", "".into()),
+                ("HOME", "home".into()),
+            ]))
+            .is_err()
+        );
     }
 }

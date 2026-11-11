@@ -375,7 +375,7 @@ fn privileged_launch(_: &DisplaySelection) -> Result<Arc<dyn Launch>> {
 /// Whether this machine offers privileged access now, and if not why.
 #[cfg(windows)]
 pub(crate) fn privileged_support() -> crate::privileged::PrivilegedSupport {
-    let ready = windows::helper::status().ensure_ready();
+    let ready = windows::helper::ensure_ready();
     crate::privileged::PrivilegedSupport {
         available: ready.is_ok(),
         reason: ready.err().map(|failure| failure.to_string()),

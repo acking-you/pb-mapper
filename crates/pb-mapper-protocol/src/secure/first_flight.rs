@@ -1,5 +1,14 @@
 //! First-flight authentication, replay admission, and stale-root classification.
-use super::*;
+
+use pb_mapper_auth::{AuthContext, AuthFailure, AuthRuntime, KeyId};
+use pb_mapper_core::checksum::AesKeyType;
+
+use super::frame::{Direction, V2Material, derive_material, open_v2_payload};
+use super::replay::{FirstFlightAdmit, ReplayGuard};
+use super::{
+    CONNECTION_SALT_LEN, CONNECTION_SALT_REPLAYED, ServerHeaderSession, ServerInitialError,
+    SessionKeys, unix_seconds,
+};
 
 pub(super) enum FirstFlightWork {
     Live {
@@ -10,68 +19,71 @@ pub(super) enum FirstFlightWork {
     Stale(ServerInitialError),
 }
 
-pub(super) fn first_flight_error(
-    code: &'static str,
-    message: impl Into<String>,
-    retryable: bool,
-    key_id: KeyId,
-) -> ServerInitialError {
-    ServerInitialError::fail_key(code, message, retryable, key_id)
-}
-
-fn reserved_error_session(
-    replay: &mut ReplayGuard,
+/// `session`, if this first flight's claim on an answer is the first: a copy
+/// gets none, since a second answer would reuse the session's first nonce.
+async fn reserved_error_session(
+    replay: &ReplayGuard,
     fingerprint: &[u8; 32],
     session: ServerHeaderSession,
 ) -> Option<ServerHeaderSession> {
     matches!(
-        replay.claim(fingerprint, unix_seconds()),
+        replay.claim(fingerprint, unix_seconds()).answer().await,
         FirstFlightAdmit::Fresh
     )
     .then_some(session)
 }
 
-#[allow(clippy::result_large_err)]
-pub(super) fn evaluate_first_flight(
+#[expect(
+    clippy::result_large_err,
+    reason = "the Ok variant is as large, so boxing the error saves nothing"
+)]
+pub(super) async fn evaluate_first_flight(
     auth: &AuthRuntime,
-    replay: &parking_lot::Mutex<ReplayGuard>,
+    replay: &ReplayGuard,
     key_id: KeyId,
     fingerprint: [u8; 32],
     work: FirstFlightWork,
 ) -> std::result::Result<(Vec<u8>, AuthContext), ServerInitialError> {
-    let mut replay = replay.lock();
     match work {
         FirstFlightWork::Live {
             key,
             payload,
             error_session,
         } => {
-            let context = auth
-                .authenticate_presented(key_id, &key)
-                .map_err(|failure| ServerInitialError {
-                    failure,
-                    response_session: reserved_error_session(
-                        &mut replay,
-                        &fingerprint,
-                        error_session,
-                    ),
-                    presented_key_id: Some(key_id),
-                })?;
-            match replay.admit(key_id, &fingerprint, unix_seconds()) {
+            let context = match auth.authenticate_presented(key_id, &key) {
+                Ok(context) => context,
+                Err(failure) => {
+                    return Err(ServerInitialError {
+                        failure,
+                        response_session: reserved_error_session(
+                            replay,
+                            &fingerprint,
+                            error_session,
+                        )
+                        .await,
+                        presented_key_id: Some(key_id),
+                    });
+                }
+            };
+            match replay
+                .admit(key_id, &fingerprint, unix_seconds())
+                .answer()
+                .await
+            {
                 FirstFlightAdmit::Fresh => Ok((payload, context)),
-                FirstFlightAdmit::Replayed => Err(first_flight_error(
-                    "connection_salt_replayed",
+                FirstFlightAdmit::Replayed => Err(ServerInitialError::fail_key(
+                    CONNECTION_SALT_REPLAYED,
                     "protocol-v2 connection salt was already accepted",
                     true,
                     key_id,
                 )),
-                FirstFlightAdmit::Limited => Err(first_flight_error(
+                FirstFlightAdmit::Limited => Err(ServerInitialError::fail_key(
                     "connection_admission_limited",
                     "this credential has opened too many new connections in the current window",
                     true,
                     key_id,
                 )),
-                FirstFlightAdmit::Unavailable => Err(first_flight_error(
+                FirstFlightAdmit::Unavailable => Err(ServerInitialError::fail_key(
                     "connection_replay_store_unavailable",
                     "failed to persist first-flight replay admission",
                     true,
@@ -81,7 +93,8 @@ pub(super) fn evaluate_first_flight(
         }
         FirstFlightWork::Stale(mut error) => {
             if let Some(session) = error.response_session.take() {
-                error.response_session = reserved_error_session(&mut replay, &fingerprint, session);
+                error.response_session =
+                    reserved_error_session(replay, &fingerprint, session).await;
             }
             Err(error)
         }
@@ -100,7 +113,7 @@ pub(super) fn stale_root_first_flight(
     let mut previous_ciphertext = ciphertext.to_vec();
     open_v2_payload(
         &previous_material,
-        DIRECTION_CLIENT_TO_SERVER,
+        Direction::ClientToServer,
         counter,
         &mut previous_ciphertext,
     )
@@ -123,21 +136,11 @@ pub(super) fn stale_root_first_flight(
     })
 }
 
+/// An unauthenticated v2 session: enough to answer the presenter.
 pub(super) fn v2_session(key: AesKeyType, material: V2Material) -> ServerHeaderSession {
     ServerHeaderSession {
-        protocol: HeaderProtocol::V2,
-        legacy_key: key,
-        v2: Some(material),
-        context: None,
-        _legacy_guard: None,
-    }
-}
-
-pub(super) fn session_without_context(session: &ServerHeaderSession) -> ServerHeaderSession {
-    ServerHeaderSession {
-        protocol: session.protocol,
-        legacy_key: session.legacy_key,
-        v2: session.v2.clone(),
+        framing_key: key,
+        keys: SessionKeys::V2(material),
         context: None,
         _legacy_guard: None,
     }

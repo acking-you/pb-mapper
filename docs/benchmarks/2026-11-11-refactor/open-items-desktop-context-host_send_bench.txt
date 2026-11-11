@@ -1,0 +1,61 @@
+### ctx-host
+=== before round 0 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1341 allocs_per_unit=22.35 alloc_bytes_per_unit=40234
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=4348 allocs_per_unit=72.48 alloc_bytes_per_unit=47273
+=== after round 0 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1150 allocs_per_unit=19.17 alloc_bytes_per_unit=40196
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=3657 allocs_per_unit=60.97 alloc_bytes_per_unit=47123
+=== after round 1 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1148 allocs_per_unit=19.14 alloc_bytes_per_unit=40192
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3660 allocs_per_unit=61.02 alloc_bytes_per_unit=47124
+=== before round 1 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1343 allocs_per_unit=22.38 alloc_bytes_per_unit=40235
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=4351 allocs_per_unit=72.54 alloc_bytes_per_unit=47287
+=== before round 2 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1342 allocs_per_unit=22.37 alloc_bytes_per_unit=40235
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=4347 allocs_per_unit=72.46 alloc_bytes_per_unit=47272
+=== after round 2 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1147 allocs_per_unit=19.13 alloc_bytes_per_unit=40192
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3660 allocs_per_unit=61.03 alloc_bytes_per_unit=47138
+=== after round 3 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1147 allocs_per_unit=19.13 alloc_bytes_per_unit=40192
+case=video+pointer units_per_s=60.0 inputs_per_s=249.8 allocs_per_s=3653 allocs_per_unit=60.88 alloc_bytes_per_unit=47102
+=== before round 3 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1342 allocs_per_unit=22.38 alloc_bytes_per_unit=40234
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=4345 allocs_per_unit=72.42 alloc_bytes_per_unit=47271
+=== before round 4 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1342 allocs_per_unit=22.37 alloc_bytes_per_unit=40234
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=4342 allocs_per_unit=72.38 alloc_bytes_per_unit=47270
+=== after round 4 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1148 allocs_per_unit=19.13 alloc_bytes_per_unit=40192
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=3653 allocs_per_unit=60.89 alloc_bytes_per_unit=47121
+=== after round 5 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1148 allocs_per_unit=19.13 alloc_bytes_per_unit=40193
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3656 allocs_per_unit=60.94 alloc_bytes_per_unit=47122
+=== before round 5 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1342 allocs_per_unit=22.38 alloc_bytes_per_unit=40235
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=4342 allocs_per_unit=72.37 alloc_bytes_per_unit=47270
+=== before round 6 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1342 allocs_per_unit=22.38 alloc_bytes_per_unit=40248
+case=video+pointer units_per_s=60.2 inputs_per_s=249.9 allocs_per_s=4347 allocs_per_unit=72.24 alloc_bytes_per_unit=47218
+=== after round 6 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1148 allocs_per_unit=19.14 alloc_bytes_per_unit=40193
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3652 allocs_per_unit=60.87 alloc_bytes_per_unit=47121
+=== after round 7 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1149 allocs_per_unit=19.15 alloc_bytes_per_unit=40192
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3653 allocs_per_unit=60.91 alloc_bytes_per_unit=47136
+=== before round 7 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1341 allocs_per_unit=22.35 alloc_bytes_per_unit=40234
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=4347 allocs_per_unit=72.48 alloc_bytes_per_unit=47272
+=== before round 8 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1341 allocs_per_unit=22.36 alloc_bytes_per_unit=40234
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=4350 allocs_per_unit=72.50 alloc_bytes_per_unit=47273
+=== after round 8 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1147 allocs_per_unit=19.13 alloc_bytes_per_unit=40192
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3653 allocs_per_unit=60.91 alloc_bytes_per_unit=47135
+=== after round 9 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1148 allocs_per_unit=19.13 alloc_bytes_per_unit=40192
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3657 allocs_per_unit=60.97 alloc_bytes_per_unit=47137
+=== before round 9 ===
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1342 allocs_per_unit=22.37 alloc_bytes_per_unit=40234
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=4348 allocs_per_unit=72.47 alloc_bytes_per_unit=47272

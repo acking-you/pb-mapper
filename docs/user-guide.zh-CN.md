@@ -281,6 +281,11 @@ pb-mapper admin --server "your-server:7666" connection retire my-service --all
 `--conn-id` 只断开 `connection list` 中列出的某一条。服务器本身会定期回收过期租约，
 所以这条命令属于手动兜底，而非常规操作。
 
+一条注册结束后，服务器会把它的连接 ID 保留 10 秒，期间不交给别的连接，所以服务替换
+上来的新连接不会拿到它所替换那条连接的 ID，`--conn-id` 指向一条已经不在的连接时什么
+也不会断开。过了这 10 秒，同一个 ID 可能已指向一条更新的连接：按 ID 断开之前，先用
+`connection list --output json` 确认它的 `generation` 仍是你看到的那个。
+
 ## 运行（GUI）
 
 Flutter UI 无需命令行即可共享与连接服务。启动方式：

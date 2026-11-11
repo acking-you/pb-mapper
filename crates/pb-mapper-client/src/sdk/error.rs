@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use snafu::Snafu;
 
+use crate::client::error::with_causes;
 use pb_mapper_protocol::command::PbErrorResponse;
 
 /// Errors returned by the client SDK.
@@ -43,7 +44,9 @@ pub enum Error {
     TunnelFailed { reason: String },
     #[snafu(display("tunnel stopped before becoming ready"))]
     Stopped,
-    #[snafu(display("{source}"))]
+    /// Its text carries the source's causes: a status error names the step
+    /// that failed, and a Node or app caller gets only the text.
+    #[snafu(display("{}", with_causes(source)))]
     Status { source: crate::client::error::Error },
     #[snafu(display("{source}"))]
     Io { source: std::io::Error },
@@ -85,6 +88,11 @@ impl Error {
         }
     }
 
+    /// The relay answered with something other than the `expected` response.
+    pub(crate) fn unexpected(expected: &str, actual: &impl std::fmt::Debug) -> Self {
+        Self::protocol(format!("expected {expected}, got {actual:?}"))
+    }
+
     pub(crate) fn from_remote(error: PbErrorResponse) -> Self {
         Self::Remote {
             code: error.code,
@@ -92,6 +100,87 @@ impl Error {
             retryable: error.retryable,
         }
     }
+
+    /// Whether this says the carrier failed, rather than that the relay
+    /// answered with a refusal.
+    pub(crate) fn is_carrier_failure(&self) -> bool {
+        match self {
+            Self::Remote { .. } => false,
+            Self::Status { source } => source.remote_retryable().is_none(),
+            Self::InvalidConfig { .. }
+            | Self::NotAdministrator
+            | Self::Address { .. }
+            | Self::Connect { .. }
+            | Self::Protocol { .. }
+            | Self::ReadyTimeout { .. }
+            | Self::TimedOut { .. }
+            | Self::TunnelFailed { .. }
+            | Self::Stopped
+            | Self::Io { .. }
+            | Self::AuthFile { .. }
+            | Self::RootRotationUncertain { .. } => true,
+        }
+    }
+
+    /// Whether a request that failed before any of it left this process may
+    /// be sent again: anything but the relay refusing it for good.
+    pub(crate) fn may_resend_unsent(&self) -> bool {
+        match self {
+            Self::Remote { retryable, .. } => *retryable,
+            Self::InvalidConfig { .. }
+            | Self::NotAdministrator
+            | Self::Address { .. }
+            | Self::Connect { .. }
+            | Self::Protocol { .. }
+            | Self::ReadyTimeout { .. }
+            | Self::TimedOut { .. }
+            | Self::TunnelFailed { .. }
+            | Self::Stopped
+            | Self::Status { .. }
+            | Self::Io { .. }
+            | Self::AuthFile { .. }
+            | Self::RootRotationUncertain { .. } => true,
+        }
+    }
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refusal proves the carrier works, and only one the relay calls final
+    /// stops a request that never left this process from being sent again.
+    #[test]
+    fn a_refusal_is_no_carrier_failure_and_only_a_final_one_stops_a_resend() {
+        let refusal = |retryable| Error::Remote {
+            code: "refused".into(),
+            message: String::new(),
+            retryable,
+        };
+        assert!(!refusal(true).is_carrier_failure());
+        assert!(refusal(true).may_resend_unsent());
+        assert!(!refusal(false).may_resend_unsent());
+        let unreachable = Error::Connect {
+            addr: "127.0.0.1:1".into(),
+            source: std::io::ErrorKind::ConnectionRefused.into(),
+        };
+        assert!(unreachable.is_carrier_failure());
+        assert!(unreachable.may_resend_unsent());
+    }
+
+    /// A status query that failed in transport says why in its text, which
+    /// is all a Node or app caller gets of it, and keeps its source.
+    #[test]
+    fn a_failed_status_query_names_its_cause() {
+        let cause = || std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset mid-reply");
+        let error = Error::Status {
+            source: crate::client::error::Error::WriteStatusReq {
+                source: pb_mapper_core::error::Error::MsgNetworkReadBody { source: cause() },
+            },
+        };
+        assert!(error.to_string().contains(&cause().to_string()), "{error}");
+        assert!(std::error::Error::source(&error).is_some());
+    }
+}

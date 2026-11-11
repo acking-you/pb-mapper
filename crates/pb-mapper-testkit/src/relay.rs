@@ -1,11 +1,12 @@
 //! A `pb-mapper server` on a reserved loopback port, with its own auth state.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use pb_mapper_auth::codes::AUTH_STATE_LOCKED;
 use pb_mapper_auth::{
-    ADMIN_KEY_ID, AuthContext, AuthRuntime, IssuedTemporaryKey, KeyId, TemporaryKeyMetadata,
+    ADMIN_KEY_ID, AuthConfig, AuthContext, AuthRuntime, IssuedTemporaryKey, KeyId,
+    TemporaryKeyMetadata,
 };
 use pb_mapper_client::client::status::get_status_with_credential;
 use pb_mapper_core::checksum::{Credential, parse_credential};
@@ -18,6 +19,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 
+use crate::poll::poll_until;
 use crate::tunnel::{Tunnel, TunnelSpec};
 use crate::{READY_TIMEOUT, admin_key_bytes, auth_config, init_test_env};
 
@@ -34,7 +36,8 @@ pub struct Relay {
     admin: AuthContext,
     shutdown: CancellationToken,
     task: JoinHandle<()>,
-    state_dir: PathBuf,
+    /// Kept whole, so a restart reopens the same state under the same limits.
+    config: AuthConfig,
 }
 
 impl Relay {
@@ -52,10 +55,7 @@ impl Relay {
             label,
             RelayServerOptions {
                 direct: None,
-                quic: Some(QuicServerConfig {
-                    listen: "127.0.0.1:0".parse().unwrap(),
-                    advertise_port: 0,
-                }),
+                quic: Some(loopback_quic()),
             },
         )
         .await
@@ -65,36 +65,19 @@ impl Relay {
         init_test_env();
         let config = auth_config(label);
         let _ = std::fs::remove_dir_all(&config.state_dir);
-        let state_dir = config.state_dir.clone();
 
         // Pre-bound, so nothing can take the port between reserving it and the
         // relay's own bind.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let auth = AuthRuntime::start(admin_key_bytes(), config).await.unwrap();
-        let admin = auth
-            .authenticate_presented(ADMIN_KEY_ID, &admin_key_bytes())
-            .unwrap();
-
-        let shutdown = CancellationToken::new();
-        let server_auth = auth.clone();
-        let server_shutdown = shutdown.clone();
-        let quic = options.quic.clone();
-        let task = tokio::spawn(async move {
-            if let Err(error) = run_server_on_listener_with_options(
-                listener,
-                server_shutdown,
-                None,
-                false,
-                server_auth,
-                options,
-            )
+        let auth = AuthRuntime::start(admin_key_bytes(), config.clone())
             .await
-            {
-                tracing::error!("relay stopped: {error}");
-            }
-        });
+            .unwrap();
+        let admin = authenticate_admin(&auth);
+        let shutdown = CancellationToken::new();
+        let quic = options.quic.clone();
+        let task = spawn_server(listener, shutdown.clone(), auth.clone(), options);
 
         Self {
             addr,
@@ -103,7 +86,7 @@ impl Relay {
             admin,
             shutdown,
             task,
-            state_dir,
+            config,
         }
     }
 
@@ -134,37 +117,18 @@ impl Relay {
         // after it returns: wait for the lock, not for a fixed time.
         let deadline = Instant::now() + Duration::from_secs(5);
         let auth = loop {
-            match AuthRuntime::start(
-                admin_key_bytes(),
-                pb_mapper_auth::AuthConfig {
-                    state_dir: self.state_dir.clone(),
-                    ..pb_mapper_auth::AuthConfig::default()
-                },
-            )
-            .await
-            {
-                Err(failure)
-                    if failure.code == "auth_state_locked" && Instant::now() < deadline =>
-                {
+            match AuthRuntime::start(admin_key_bytes(), self.config.clone()).await {
+                Err(failure) if failure.code == AUTH_STATE_LOCKED && Instant::now() < deadline => {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
                 result => break result.unwrap(),
             }
         };
-        self.auth = Some(auth);
-        self.admin = self
-            .auth()
-            .authenticate_presented(ADMIN_KEY_ID, &admin_key_bytes())
-            .unwrap();
+        self.admin = authenticate_admin(&auth);
         let listener = TcpListener::bind(self.addr).await.unwrap();
         self.shutdown = CancellationToken::new();
-        let shutdown = self.shutdown.clone();
-        let auth = self.auth().clone();
-        self.task = tokio::spawn(async move {
-            run_server_on_listener_with_options(listener, shutdown, None, false, auth, options)
-                .await
-                .unwrap();
-        });
+        self.task = spawn_server(listener, self.shutdown.clone(), auth.clone(), options);
+        self.auth = Some(auth);
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -248,21 +212,22 @@ impl Relay {
         credential: Credential,
         namespace: Option<u64>,
     ) {
-        let deadline = Instant::now() + READY_TIMEOUT;
-        let mut last_error = String::from("no attempt completed");
-        while Instant::now() < deadline {
-            match self.registered_keys(credential, namespace).await {
-                Ok(keys) => {
-                    if keys.iter().any(|key| key == service_key) {
-                        return;
-                    }
-                    last_error = format!("relay reports keys {keys:?}");
+        let registered = poll_until(
+            READY_TIMEOUT,
+            Duration::from_millis(20),
+            move || async move {
+                let keys = self.registered_keys(credential, namespace).await?;
+                if keys.iter().any(|key| key == service_key) {
+                    Ok(())
+                } else {
+                    Err(format!("relay reports keys {keys:?}"))
                 }
-                Err(error) => last_error = error,
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            },
+        )
+        .await;
+        if let Err(last_error) = registered {
+            panic!("`{service_key}` was never registered: {last_error}");
         }
-        panic!("`{service_key}` was never registered: {last_error}");
     }
 
     /// The service names visible to `credential` in `namespace`.
@@ -296,6 +261,48 @@ impl Drop for Relay {
     fn drop(&mut self) {
         self.shutdown.cancel();
         self.task.abort();
-        let _ = std::fs::remove_dir_all(&self.state_dir);
+        let _ = std::fs::remove_dir_all(&self.config.state_dir);
     }
+}
+
+/// Direct coordination on an ephemeral loopback port, announcing the port it bound.
+pub fn loopback_direct() -> DirectServerConfig {
+    DirectServerConfig {
+        listen: LOOPBACK_ANY_PORT,
+        advertise: LOOPBACK_ANY_PORT,
+    }
+}
+
+/// The QUIC carrier on an ephemeral loopback port, announcing the port it bound.
+pub fn loopback_quic() -> QuicServerConfig {
+    QuicServerConfig {
+        listen: LOOPBACK_ANY_PORT,
+        advertise_port: 0,
+    }
+}
+
+const LOOPBACK_ANY_PORT: SocketAddr =
+    SocketAddr::V4(std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+
+/// The server loop over `listener`, logging the error it stops on, if any.
+fn spawn_server(
+    listener: TcpListener,
+    shutdown: CancellationToken,
+    auth: AuthRuntime,
+    options: RelayServerOptions,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(error) =
+            run_server_on_listener_with_options(listener, shutdown, None, false, auth, options)
+                .await
+        {
+            tracing::error!("relay stopped: {error}");
+        }
+    })
+}
+
+/// The administrator's context on `auth`, which a relay keeps for its helpers.
+fn authenticate_admin(auth: &AuthRuntime) -> AuthContext {
+    auth.authenticate_presented(ADMIN_KEY_ID, &admin_key_bytes())
+        .unwrap()
 }

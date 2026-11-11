@@ -15,15 +15,19 @@
 use std::time::Duration;
 
 use pb_mapper_protocol::transport::RelayStream;
+use snafu::ResultExt;
 use tokio_util::sync::CancellationToken;
 
-use super::error::Error;
+use super::error::AdminOperationSnafu;
 use super::{ManagerTask, ManagerTaskSender, Result, compose_service_key, validate_service_name};
-use pb_mapper_auth::{AuthContext, AuthFailure, AuthRuntime, KeyId};
+use pb_mapper_auth::{AuthContext, AuthFailure, AuthRuntime, KeyId, codes};
 use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::MessageWriter;
-use pb_mapper_protocol::command::{AdminRequest, AdminResponse, MessageSerializer, PbConnResponse};
+use pb_mapper_protocol::command::{
+    ACTION_ADMINISTRATOR_KEY_ROTATED, ACTION_AUTH_STATE_RESET, ACTION_LEGACY_PROTOCOL_UPDATED,
+    AdminRequest, AdminResponse, MessageSerializer, PbConnResponse,
+};
 use pb_mapper_protocol::secure::ServerHeaderSession;
 
 pub async fn handle_admin_request(
@@ -51,19 +55,19 @@ pub async fn handle_admin_request(
             PbConnResponse::error(failure.code, failure.message, failure.retryable)
         }
     };
-    let message = response.encode().map_err(|error| Error::AdminOperation {
-        detail: format!("failed to encode response: {error}"),
+    let message = response.encode().context(AdminOperationSnafu {
+        what: "failed to encode response",
     })?;
     let mut writer = session
         .response_writer(&mut conn)
-        .map_err(|error| Error::AdminOperation {
-            detail: format!("failed to create response writer: {error}"),
+        .context(AdminOperationSnafu {
+            what: "failed to create response writer",
         })?;
     writer
         .write_msg(&message)
         .await
-        .map_err(|error| Error::AdminOperation {
-            detail: format!("failed to write response: {error}"),
+        .context(AdminOperationSnafu {
+            what: "failed to write response",
         })
 }
 
@@ -151,28 +155,30 @@ async fn execute(
             }
             auth.reset(authorization).await?;
             Ok(AdminResponse::Ok {
-                action: "auth_state_reset".to_string(),
+                action: ACTION_AUTH_STATE_RESET.to_string(),
             })
         }
         AdminRequest::RootKeyRotate { new_admin_key } => {
-            let Credential::Admin(new_key) = parse_credential(new_admin_key.trim())
-                .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?
+            let Credential::Admin(new_key) =
+                parse_credential(new_admin_key.trim()).map_err(|error| {
+                    AuthFailure::new(codes::ADMINISTRATOR_KEY_INVALID, error, false)
+                })?
             else {
                 return Err(AuthFailure::new(
-                    "administrator_key_invalid",
+                    codes::ADMINISTRATOR_KEY_INVALID,
                     "root rotation requires a 32-byte administrator key",
                     false,
                 ));
             };
             auth.rotate_root(authorization, new_key).await?;
             Ok(AdminResponse::Ok {
-                action: "administrator_key_rotated".to_string(),
+                action: ACTION_ADMINISTRATOR_KEY_ROTATED.to_string(),
             })
         }
         AdminRequest::LegacyProtocolSet { policy } => {
             auth.set_legacy_protocol(authorization, policy).await?;
             Ok(AdminResponse::Ok {
-                action: "legacy_protocol_updated".to_string(),
+                action: ACTION_LEGACY_PROTOCOL_UPDATED.to_string(),
             })
         }
         AdminRequest::ServiceList {
@@ -360,7 +366,7 @@ fn cancelled_authorization(authorization: &AuthContext) -> AuthFailure {
     match authorization.ensure_active() {
         Err(error) => error,
         Ok(_) => AuthFailure::new(
-            "administrator_key_rotated",
+            codes::ADMINISTRATOR_KEY_ROTATED,
             "administrator credential lease was cancelled during the inventory query",
             false,
         ),
@@ -397,35 +403,23 @@ async fn audit_action(
 
 #[cfg(test)]
 mod tests {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
     use super::*;
     use pb_mapper_auth::ADMIN_KEY_ID;
-    use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
+    use pb_mapper_auth::{ADMIN_SCHEMA_VERSION, AuthConfig, LegacyProtocolPolicy};
+    use pb_mapper_core::test_support::{TEST_ADMIN_KEY_BYTES, TempPath};
 
-    fn temp_state_dir(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "pb-mapper-admin-{name}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default()
-        ))
-    }
-
-    async fn inventory_query_rejects_rotation(connection_query: bool) {
-        let _process_credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
-            .lock()
-            .await;
-        let state_dir = temp_state_dir(if connection_query {
-            "connections"
-        } else {
-            "services"
-        });
-        let old_key = *b"0123456789abcdefghijklmnopqrstuv";
-        let new_key = *b"abcdefghijklmnopqrstuvwxyz012345";
+    /// A runtime started on a fresh state directory with [`TEST_ADMIN_KEY_BYTES`], and its
+    /// administrator. Starting it this way syncs the process credential, so the
+    /// caller holds `PROCESS_CREDENTIAL_TEST_LOCK`.
+    async fn admin_runtime(name: &str) -> (AuthRuntime, AuthContext, TempPath) {
+        let state_dir = TempPath::new(&format!("admin-{name}"));
         let runtime = AuthRuntime::start(
-            old_key,
+            TEST_ADMIN_KEY_BYTES,
             AuthConfig {
-                state_dir: state_dir.clone(),
+                state_dir: state_dir.to_path_buf(),
                 max_temporary_keys: 4,
                 max_temporary_key_ttl: Duration::from_secs(3600),
                 legacy_protocol: LegacyProtocolPolicy::Allow,
@@ -434,8 +428,30 @@ mod tests {
         .await
         .expect("authentication runtime should start");
         let admin = runtime
-            .authenticate_presented(ADMIN_KEY_ID, &old_key)
-            .expect("old administrator key should authenticate");
+            .authenticate_presented(ADMIN_KEY_ID, &TEST_ADMIN_KEY_BYTES)
+            .expect("administrator key should authenticate");
+        (runtime, admin, state_dir)
+    }
+
+    /// Stop the runtime's actor, which releases the state directory, and
+    /// remove the directory.
+    async fn shut_down(runtime: AuthRuntime, state_dir: TempPath) {
+        runtime.shutdown_actor().await;
+        drop(runtime);
+        drop(state_dir);
+    }
+
+    async fn inventory_query_rejects_rotation(connection_query: bool) {
+        let _process_credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
+            .lock()
+            .await;
+        let (runtime, admin, state_dir) = admin_runtime(if connection_query {
+            "connections"
+        } else {
+            "services"
+        })
+        .await;
+        let new_key = *b"abcdefghijklmnopqrstuvwxyz012345";
         let request = if connection_query {
             AdminRequest::ConnectionList {
                 key_id: None,
@@ -469,7 +485,7 @@ mod tests {
                 response_sender, ..
             } => {
                 let _ = response_sender.send(pb_mapper_protocol::command::AdminServicePage {
-                    schema_version: 1,
+                    schema_version: ADMIN_SCHEMA_VERSION,
                     items: Vec::new(),
                     next_page: None,
                 });
@@ -478,7 +494,7 @@ mod tests {
                 response_sender, ..
             } => {
                 let _ = response_sender.send(pb_mapper_protocol::command::AdminConnectionPage {
-                    schema_version: 1,
+                    schema_version: ADMIN_SCHEMA_VERSION,
                     items: Vec::new(),
                     next_page: None,
                 });
@@ -490,11 +506,9 @@ mod tests {
             .await
             .expect("inventory task should not panic")
             .expect_err("rotated administrator must not receive inventory");
-        assert_eq!(failure.code, "administrator_key_rotated");
+        assert_eq!(failure.code, codes::ADMINISTRATOR_KEY_ROTATED);
 
-        drop(runtime);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let _ = std::fs::remove_dir_all(state_dir);
+        shut_down(runtime, state_dir).await;
     }
 
     #[tokio::test]
@@ -518,23 +532,8 @@ mod tests {
         let _process_credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
             .lock()
             .await;
-        let state_dir = temp_state_dir("retire-rotation");
-        let old_key = *b"0123456789abcdefghijklmnopqrstuv";
+        let (runtime, admin, state_dir) = admin_runtime("retire-rotation").await;
         let new_key = *b"abcdefghijklmnopqrstuvwxyz012345";
-        let runtime = AuthRuntime::start(
-            old_key,
-            AuthConfig {
-                state_dir: state_dir.clone(),
-                max_temporary_keys: 4,
-                max_temporary_key_ttl: Duration::from_secs(3600),
-                legacy_protocol: LegacyProtocolPolicy::Allow,
-            },
-        )
-        .await
-        .expect("authentication runtime should start");
-        let admin = runtime
-            .authenticate_presented(ADMIN_KEY_ID, &old_key)
-            .expect("old administrator key should authenticate");
         let (manager, mut receiver) = crate::manager::task_channel(1024);
         let request_admin = admin.clone();
         let request_runtime = runtime.clone();
@@ -577,9 +576,7 @@ mod tests {
             AdminResponse::ConnectionsRetired { retired: 3 }
         ));
 
-        drop(runtime);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let _ = std::fs::remove_dir_all(state_dir);
+        shut_down(runtime, state_dir).await;
     }
 
     /// A retire name carrying the scoped-key separator never reaches the manager.
@@ -592,22 +589,7 @@ mod tests {
         let _process_credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
             .lock()
             .await;
-        let state_dir = temp_state_dir("retire-nul");
-        let key = *b"0123456789abcdefghijklmnopqrstuv";
-        let runtime = AuthRuntime::start(
-            key,
-            AuthConfig {
-                state_dir: state_dir.clone(),
-                max_temporary_keys: 4,
-                max_temporary_key_ttl: Duration::from_secs(3600),
-                legacy_protocol: LegacyProtocolPolicy::Allow,
-            },
-        )
-        .await
-        .expect("authentication runtime should start");
-        let admin = runtime
-            .authenticate_presented(ADMIN_KEY_ID, &key)
-            .expect("administrator key should authenticate");
+        let (runtime, admin, state_dir) = admin_runtime("retire-nul").await;
         let (manager, receiver) = crate::manager::task_channel(1024);
 
         let failure = execute(
@@ -628,30 +610,19 @@ mod tests {
             "a refused retirement must not reach the manager"
         );
 
-        drop(runtime);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let _ = std::fs::remove_dir_all(state_dir);
+        shut_down(runtime, state_dir).await;
     }
-}
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod cancellation_audit {
-    use super::*;
-    use std::{
-        future::{Future, poll_fn},
-        task::Poll,
-    };
     #[tokio::test]
     async fn applied_mutation_must_not_be_reported_as_cancelled() {
-        let config = pb_mapper_auth::AuthConfig {
-            state_dir: std::env::temp_dir()
-                .join(format!("pb-audit-admin-{}", rand::random::<u64>())),
-            ..pb_mapper_auth::AuthConfig::default()
+        let state_dir = TempPath::new("audit-admin");
+        let config = AuthConfig {
+            state_dir: state_dir.to_path_buf(),
+            ..AuthConfig::default()
         };
         let auth = AuthRuntime::from_isolated_state(config).await.unwrap();
         let admin = auth
-            .authenticate_presented(pb_mapper_auth::ADMIN_KEY_ID, &auth.admin_key().unwrap())
+            .authenticate_presented(ADMIN_KEY_ID, &auth.admin_key().unwrap())
             .unwrap();
         let cancellation = admin.admin_cancellation_token().unwrap();
         let (sender, mut receiver) = crate::manager::task_channel(1);
@@ -689,7 +660,7 @@ mod cancellation_audit {
         }
         cancellation.cancel();
         let result = mutation.await;
-        auth.shutdown_actor().await;
+        shut_down(auth, state_dir).await;
         assert!(
             matches!(result, Ok(1)),
             "already-applied mutation reported {result:?}"

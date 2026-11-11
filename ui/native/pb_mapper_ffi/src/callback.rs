@@ -1,68 +1,47 @@
-//! A slot holding one C function pointer that Dart installs and Rust calls.
+//! A slot holding one C function pointer that Dart installs and Rust calls:
+//! the log callback and the change callback each have one.
 //!
-//! There is one of these per callback the UI registers — logging today, state
-//! changes next. Written once so the `transmute` is written once: a function
-//! pointer is not a sized target, so `AtomicPtr` has to hold it as `*mut ()`
-//! and cast it back on every call, and that cast is the part worth not
-//! repeating per callback.
+//! A call holds the slot's read lock until it returns, so clearing the slot
+//! waits for the calls in flight, including those from the log worker. Dart
+//! closes its `NativeCallable.listener` right after clearing, and a call that
+//! started before must not reach a closed one. Such a callable only posts to
+//! its isolate, so a call never blocks on Dart while it holds the lock.
 
-use std::marker::PhantomData;
-use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use parking_lot::RwLock;
 
 /// A nullable, thread-safe slot for a C function pointer of type `F`.
-///
-/// `F` is expected to be an `extern "C" fn(..)` type. Anything else with the
-/// same size would compile and then misbehave, which is why the constructor is
-/// only reachable inside this crate and every slot is a `static`.
-pub(crate) struct CallbackSlot<F: Copy> {
-    ptr: AtomicPtr<()>,
-    _marker: PhantomData<fn() -> F>,
-}
+pub(crate) struct CallbackSlot<F: Copy>(RwLock<Option<F>>);
 
 impl<F: Copy> CallbackSlot<F> {
     pub(crate) const fn empty() -> Self {
-        Self {
-            ptr: AtomicPtr::new(ptr::null_mut()),
-            _marker: PhantomData,
-        }
+        Self(RwLock::new(None))
     }
 
-    /// Installs `callback`, or clears the slot with `None`.
-    ///
-    /// # Safety
-    /// `callback` must be a valid function pointer for the lifetime of the
-    /// process, or until it is replaced. Dart's `NativeCallable.listener` gives
-    /// one that stays valid until `close()`, which is why the UI closes its
-    /// callables in `dispose` before the handle goes away.
+    /// Installs `callback`, or clears the slot with `None`, once no call
+    /// through the slot is in flight.
     pub(crate) fn store(&self, callback: Option<F>) {
-        debug_assert_eq!(
-            size_of::<F>(),
-            size_of::<*mut ()>(),
-            "CallbackSlot only holds pointer-sized function pointers"
-        );
-        let raw = match callback {
-            // `transmute_copy` rather than `transmute`: the latter needs both
-            // sizes known at compile time, which they are not through a generic.
-            Some(f) => unsafe { std::mem::transmute_copy::<F, *mut ()>(&f) },
-            None => ptr::null_mut(),
-        };
-        self.ptr.store(raw, Ordering::SeqCst);
+        *self.0.write() = callback;
     }
 
-    /// The installed callback, or `None` if nothing is listening.
-    pub(crate) fn load(&self) -> Option<F> {
-        let raw = self.ptr.load(Ordering::SeqCst);
-        if raw.is_null() {
-            return None;
-        }
-        Some(unsafe { std::mem::transmute_copy::<*mut (), F>(&raw) })
+    /// Whether a callback is installed, for a caller that can skip work when
+    /// none is.
+    pub(crate) fn is_set(&self) -> bool {
+        self.0.read().is_some()
+    }
+
+    /// Runs `invoke` with the installed callback, holding the slot until it
+    /// returns; `None` if nothing is listening.
+    pub(crate) fn with<R>(&self, invoke: impl FnOnce(F) -> R) -> Option<R> {
+        let installed = self.0.read();
+        (*installed).map(invoke)
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
     use super::*;
 
     extern "C" fn sample(value: i32) -> i32 {
@@ -72,13 +51,63 @@ mod tests {
     #[test]
     fn a_slot_round_trips_a_function_pointer() {
         let slot: CallbackSlot<extern "C" fn(i32) -> i32> = CallbackSlot::empty();
-        assert!(slot.load().is_none(), "an untouched slot is empty");
+        assert_eq!(
+            slot.with(|callback| callback(1)),
+            None,
+            "an untouched slot is empty"
+        );
 
         slot.store(Some(sample));
-        let loaded = slot.load().expect("the stored callback should come back");
-        assert_eq!(loaded(41), 42, "and it should still be callable");
+        assert_eq!(
+            slot.with(|callback| callback(41)),
+            Some(42),
+            "the stored callback should still be callable"
+        );
 
         slot.store(None);
-        assert!(slot.load().is_none(), "None clears the slot");
+        assert_eq!(
+            slot.with(|callback| callback(1)),
+            None,
+            "None clears the slot"
+        );
+    }
+
+    /// What lets Dart close a callable once it has cleared the slot.
+    #[test]
+    fn clearing_waits_for_a_call_in_flight() {
+        let slot: Arc<CallbackSlot<extern "C" fn(i32) -> i32>> = Arc::new(CallbackSlot::empty());
+        slot.store(Some(sample));
+        let (entered, call_entered) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let caller = std::thread::spawn({
+            let slot = slot.clone();
+            move || {
+                slot.with(|callback| {
+                    entered.send(()).unwrap();
+                    released.recv().unwrap();
+                    callback(1)
+                })
+            }
+        });
+        call_entered.recv().unwrap();
+        let (cleared, slot_cleared) = mpsc::channel();
+        let clearer = std::thread::spawn({
+            let slot = slot.clone();
+            move || {
+                slot.store(None);
+                cleared.send(()).unwrap();
+            }
+        });
+        assert!(
+            slot_cleared
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "the slot was cleared while a call was in flight"
+        );
+        release.send(()).unwrap();
+        slot_cleared.recv().unwrap();
+        assert_eq!(caller.join().unwrap(), Some(2));
+        clearer.join().unwrap();
+        assert_eq!(slot.with(|callback| callback(1)), None);
     }
 }

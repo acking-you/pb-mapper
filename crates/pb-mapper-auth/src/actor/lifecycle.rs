@@ -6,10 +6,14 @@ use super::{
 };
 use pb_mapper_core::paging::paginate;
 
-fn validate_ttl(config: &AuthConfig, ttl: Duration) -> Result<u64, AuthFailure> {
+/// The longest label a key may carry, after trimming.
+const MAX_LABEL_BYTES: usize = 64;
+
+/// The deadline a key given `ttl` at wall-clock second `now` gets.
+fn validate_ttl(config: &AuthConfig, ttl: Duration, now: u64) -> Result<u64, AuthFailure> {
     if ttl < MIN_TEMP_KEY_TTL {
         return Err(AuthFailure::new(
-            "temporary_key_ttl_too_short",
+            codes::TEMPORARY_KEY_TTL_TOO_SHORT,
             format!(
                 "temporary key TTL must be at least {} seconds",
                 MIN_TEMP_KEY_TTL.as_secs()
@@ -19,7 +23,7 @@ fn validate_ttl(config: &AuthConfig, ttl: Duration) -> Result<u64, AuthFailure> 
     }
     if ttl > config.max_temporary_key_ttl {
         return Err(AuthFailure::new(
-            "temporary_key_ttl_too_long",
+            codes::TEMPORARY_KEY_TTL_TOO_LONG,
             format!(
                 "temporary key TTL exceeds the configured maximum of {} seconds",
                 config.max_temporary_key_ttl.as_secs()
@@ -27,17 +31,20 @@ fn validate_ttl(config: &AuthConfig, ttl: Duration) -> Result<u64, AuthFailure> 
             false,
         ));
     }
-    Ok(unix_seconds().saturating_add(ttl.as_secs()))
+    Ok(now.saturating_add(ttl.as_secs()))
 }
 
 fn validate_label(label: Option<String>) -> Result<Option<String>, AuthFailure> {
     let label = label
         .map(|label| label.trim().to_string())
         .filter(|label| !label.is_empty());
-    if label.as_ref().is_some_and(|label| label.len() > 64) {
+    if label
+        .as_ref()
+        .is_some_and(|label| label.len() > MAX_LABEL_BYTES)
+    {
         return Err(AuthFailure::new(
-            "temporary_key_label_too_long",
-            "temporary key label must not exceed 64 UTF-8 bytes",
+            codes::TEMPORARY_KEY_LABEL_TOO_LONG,
+            format!("temporary key label must not exceed {MAX_LABEL_BYTES} UTF-8 bytes"),
             false,
         ));
     }
@@ -61,11 +68,8 @@ fn key_state(inner: &AuthStateInner, key_id: KeyId) -> Result<KeyState, AuthFail
     let slots = inner.slots();
     if let Some(slot) = slots.get(key_id.slot().as_index()) {
         validate_slot_identity(slot, key_id)?;
-        let metadata = inner
-            .cold()
-            .get(&key_id)
-            .cloned()
-            .ok_or_else(|| key_not_found(key_id))?;
+        let cold = inner.cold();
+        let metadata = cold.get(&key_id).ok_or_else(|| key_not_found(key_id))?;
         return Ok(KeyState {
             state: slot.state,
             expires_at: slot.expires_at,
@@ -105,7 +109,7 @@ pub(super) fn actor_allocate_namespace(
     let namespace = namespace_high_water(inner, config)?.saturating_add(1);
     if namespace > MAX_ALLOCATED_NAMESPACE {
         return Err(AuthFailure::new(
-            "namespace_space_exhausted",
+            codes::NAMESPACE_SPACE_EXHAUSTED,
             "every allocatable namespace has been handed out",
             false,
         ));
@@ -119,7 +123,7 @@ pub(super) fn actor_allocate_namespace(
         inner,
         AuditRecord {
             namespace: Some(namespace),
-            ..audit("namespace_allocate", None, None)
+            ..audit(audit_action::NAMESPACE_ALLOCATE, None, None)
         },
     )?;
     Ok(namespace)
@@ -134,7 +138,7 @@ fn ensure_namespace_allocated(
 ) -> Result<(), AuthFailure> {
     if namespace == 0 || namespace > namespace_high_water(inner, config)? {
         return Err(AuthFailure::new(
-            "namespace_not_allocated",
+            codes::NAMESPACE_NOT_ALLOCATED,
             format!("namespace {namespace} was not allocated by this relay"),
             false,
         ));
@@ -151,12 +155,13 @@ pub(super) fn actor_issue(
     label: Option<String>,
 ) -> Result<IssuedTemporaryKey, AuthFailure> {
     ensure_store_available(inner)?;
-    let expires_at = validate_ttl(config, ttl)?;
+    // One reading, so the schedule is told the second the deadline counts from.
+    let issued_at = unix_seconds();
+    let expires_at = validate_ttl(config, ttl, issued_at)?;
     let label = validate_label(label)?;
     if let Some(namespace) = namespace {
         ensure_namespace_allocated(inner, config, namespace)?;
     }
-    let issued_at = unix_seconds();
     let (index, generation, key_id, entry) = {
         let slots = inner.slots();
         // A row whose generation cannot advance is skipped rather than reused: it
@@ -168,7 +173,7 @@ pub(super) fn actor_issue(
                 .map(|generation| (SlotIndex::from_index(index), generation))
         }) else {
             return Err(AuthFailure::new(
-                "temporary_key_capacity_exhausted",
+                codes::TEMPORARY_KEY_CAPACITY_EXHAUSTED,
                 "temporary key slot table is full",
                 true,
             ));
@@ -195,7 +200,11 @@ pub(super) fn actor_issue(
         config,
         inner,
         StateMutation::Issue(entry),
-        audit("temporary_key_issue", Some(key_id), label.clone()),
+        audit(
+            audit_action::TEMPORARY_KEY_ISSUE,
+            Some(key_id),
+            label.clone(),
+        ),
     )?;
     let mut slots = inner.slots_mut();
     let slot = slots
@@ -247,7 +256,7 @@ pub(super) fn actor_list(
     all.sort_by_key(|item| std::cmp::Reverse(item.issued_at));
     let (items, next_page) = paginate(&all, page, page_size);
     Ok(KeyPage {
-        schema_version: 1,
+        schema_version: ADMIN_SCHEMA_VERSION,
         items,
         next_page,
     })
@@ -265,9 +274,9 @@ pub(super) fn actor_show(
         inner,
         audit(
             if reveal {
-                "temporary_key_reveal"
+                audit_action::TEMPORARY_KEY_REVEAL
             } else {
-                "temporary_key_show"
+                audit_action::TEMPORARY_KEY_SHOW
             },
             Some(key_id),
             result.metadata.label.clone(),
@@ -284,10 +293,11 @@ pub(super) fn actor_renew(
     ttl: Duration,
 ) -> Result<IssuedTemporaryKey, AuthFailure> {
     ensure_store_available(inner)?;
-    let expires_at = validate_ttl(config, ttl)?;
+    let now = unix_seconds();
+    let expires_at = validate_ttl(config, ttl, now)?;
     let index = key_id.slot().as_index();
     let current = key_state(inner, key_id)?;
-    if current.state != SlotState::Active || current.expires_at <= unix_seconds() {
+    if current.state != SlotState::Active || current.expires_at <= now {
         return Err(key_not_renewable());
     }
     let KeyState {
@@ -297,24 +307,24 @@ pub(super) fn actor_renew(
         config,
         inner,
         StateMutation::Renew { key_id, expires_at },
-        audit("temporary_key_renew", Some(key_id), label.clone()),
+        audit(
+            audit_action::TEMPORARY_KEY_RENEW,
+            Some(key_id),
+            label.clone(),
+        ),
     )?;
     let mut slots = inner.slots_mut();
     if let Some(slot) = slots.get_mut(index) {
         validate_slot_identity(slot, key_id)?;
         if slot.state != SlotState::Active {
-            return Err(AuthFailure::new(
-                "temporary_key_inactive",
-                "temporary key lease is no longer active",
-                true,
-            ));
+            return Err(AuthFailure::key_lease_inactive());
         }
         slot.expires_at = expires_at;
         match slot.lease.upgrade() {
-            Some(lease) if !lease.cancellation_token().is_cancelled() => {
-                lease.expires_at.store(expires_at, Ordering::Release);
+            Some(lease) if !lease.is_cancelled() => {
+                lease.set_expires_at(expires_at);
                 drop(slots);
-                leases.renew(key_id, expires_at);
+                leases.renew(key_id, expires_at, now);
             }
             // A cancelled lease cannot be revived, so the renewal installs a
             // replacement; that drops the handle on the lease it succeeds.
@@ -322,7 +332,7 @@ pub(super) fn actor_renew(
                 let lease = Arc::new(AuthLease::new(key_id, namespace, expires_at));
                 slot.lease = Arc::downgrade(&lease);
                 drop(slots);
-                leases.adopt(&lease);
+                leases.adopt(key_id, Some(lease), expires_at, now);
             }
         }
         return metadata_with_credential(inner, key_id, true);
@@ -332,15 +342,12 @@ pub(super) fn actor_renew(
         let mut high = inner.high_mut();
         let entry = high_slot_entry_mut(&mut high, key_id)?;
         if entry.state != SlotState::Active {
-            return Err(AuthFailure::new(
-                "temporary_key_inactive",
-                "temporary key lease is no longer active",
-                true,
-            ));
+            return Err(AuthFailure::key_lease_inactive());
         }
         entry.expires_at = expires_at;
         entry.tombstoned_at = None;
     }
+    leases.adopt(key_id, None, expires_at, now);
     metadata_with_credential(inner, key_id, true)
 }
 
@@ -368,7 +375,11 @@ pub(super) fn actor_revoke(
         config,
         inner,
         StateMutation::Revoke { key_id, at: now },
-        audit("temporary_key_revoke", Some(key_id), label.clone()),
+        audit(
+            audit_action::TEMPORARY_KEY_REVOKE,
+            Some(key_id),
+            label.clone(),
+        ),
     )?;
     let mut slots = inner.slots_mut();
     if let Some(slot) = slots.get_mut(index) {
@@ -380,22 +391,19 @@ pub(super) fn actor_revoke(
         let state = slot_state_name(slot.state).to_string();
         let expires_at = slot.expires_at;
         drop(slots);
-        // Retire only: the row stays until its retention elapses, because the
-        // slot table holds a `Weak` and a later request has to be able to read
-        // the revoked reason rather than find a recycled row.
-        leases.retire_now(key_id);
-        let metadata = inner
-            .cold()
-            .get(&key_id)
-            .cloned()
-            .ok_or_else(|| key_not_found(key_id))?;
+        // The row stays until its retention elapses, because the slot table
+        // holds a `Weak` and a later request has to be able to read the revoked
+        // reason rather than find a recycled row.
+        leases.revoke(key_id, now);
+        // Answered from what was read before the revoke, not from the row it
+        // schedules for recycling: the revoke has taken effect either way.
         return Ok(TemporaryKeyMetadata {
             key_id,
             state,
-            issued_at: metadata.issued_at,
+            issued_at,
             expires_at,
-            label: metadata.label.clone(),
-            namespace: metadata.namespace,
+            label,
+            namespace,
         });
     }
     drop(slots);
@@ -408,7 +416,7 @@ pub(super) fn actor_revoke(
     entry.tombstoned_at = Some(now);
     let state = slot_state_name(entry.state).to_string();
     drop(high);
-    leases.retire_now(key_id);
+    leases.revoke(key_id, now);
     Ok(TemporaryKeyMetadata {
         key_id,
         state,
@@ -427,7 +435,11 @@ pub(super) fn actor_gc(
 ) -> Result<u64, AuthFailure> {
     ensure_store_available(inner)?;
     let removed = leases.collect_garbage(unix_seconds());
-    let gc_audit = audit("temporary_key_gc", None, Some(format!("removed={removed}")));
+    let gc_audit = audit(
+        audit_action::TEMPORARY_KEY_GC,
+        None,
+        Some(format!("removed={removed}")),
+    );
     let mut snapshot = build_snapshot(inner, admin_replays);
     push_persisted_audit(&mut snapshot.audit_records, gc_audit.clone());
     let admin_key = inner.admin_key();
@@ -473,7 +485,7 @@ fn metadata_with_credential(
 ) -> Result<IssuedTemporaryKey, AuthFailure> {
     let slots = inner.slots();
     let credential = if reveal {
-        let key = derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)?;
+        let key = inner.derive_temporary_key(key_id)?;
         encode_temporary_credential(key_id.as_u64(), &key)
     } else {
         String::new()

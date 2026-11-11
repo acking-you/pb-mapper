@@ -72,43 +72,13 @@ pub async fn adopt(host: Host, options: Options, resumes_at_once: bool) -> Resul
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::{HostOptions, VideoCodec, Viewer, ViewerConfig, ViewerReason, ViewerState};
+    use crate::{
+        HostOptions, VideoCodec, Viewer, ViewerConfig, ViewerReason, ViewerState,
+        test_util::{Pixel, until},
+    };
     use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
-    use std::time::Duration;
-
-    struct Pixel;
-    impl crate::Backend for Pixel {
-        fn display(&mut self) -> Result<crate::Display> {
-            Ok(crate::Display {
-                id: 1,
-                name: "adopted".into(),
-                x: 0,
-                y: 0,
-                width: 10,
-                height: 10,
-            })
-        }
-        fn capture(&mut self) -> Result<Vec<u8>> {
-            Ok(vec![1])
-        }
-        fn input(&mut self, _: &crate::Input) -> Result<()> {
-            Ok(())
-        }
-        fn release(&mut self) {}
-    }
-
-    async fn until(mut condition: impl FnMut() -> bool) {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !condition() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
 
     /// The viewer of an adopted host reconnects by itself only when the
     /// service resumes its invitation at once; otherwise it ends, rather than

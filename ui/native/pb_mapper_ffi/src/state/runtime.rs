@@ -2,15 +2,56 @@
 //!
 //! ```text
 //! start relay: bind listener -> initialize app-local auth -> spawn -> mark running
-//! register:    resolved addresses -> spawn control pool -> retain JoinHandle
-//! connect:     preflight local bind -> spawn listener ----> retain JoinHandle
-//! stop:        cancel relay + abort owned tunnel tasks + clear runtime maps
+//! register:    claim key -> read list -> resolve -> preflight -> SDK registration -> commit
+//! connect:     claim key -> read list -> resolve -> bind check -> SDK connection -> commit
+//! stop:        cancel the relay; drop the handles of the tunnels through it
 //! ```
 //!
 //! Readiness is published only after both listener binding and authentication
 //! initialization succeed, preventing the UI from displaying a phantom running relay.
 
-use super::*;
+use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+use pb_mapper_auth::{AuthConfig, AuthRuntime};
+use pb_mapper_client::sdk::{LanTransport, RelayTransport};
+use pb_mapper_core::checksum::Credential;
+use pb_mapper_core::config::ResolvedAddrs;
+use pb_mapper_server::{
+    DirectServerConfig, QuicServerConfig, RelayServerOptions, ServerStatusInfo,
+    run_server_on_listener_with_options,
+};
+
+use super::tunnel::{
+    ConnectCommit, KeyClaim, RegisterCommit, TunnelHandle, TunnelRuntime, claim_key, stop_tunnel,
+    watch_tunnel,
+};
+use super::{LocalServerStatus, PbMapperState, RelayTunnels};
+use crate::error::CtlError;
+use crate::events;
+
+/// How long a stopping relay has to wind down before its task is aborted.
+const SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The relay this computer runs itself, while it runs: each part exists
+/// exactly as long as the others.
+pub(super) struct EmbeddedRelay {
+    pub(super) task: JoinHandle<()>,
+    auth: AuthRuntime,
+    shutdown: CancellationToken,
+    /// Where the status read asks the relay for its figures.
+    pub(super) status_requests: UnboundedSender<oneshot::Sender<ServerStatusInfo>>,
+    pub(super) started_at: SystemTime,
+    pub(super) port: u16,
+    pub(super) quic_port: Option<u16>,
+}
 
 impl PbMapperState {
     /// Run a relay on `port`. With `quic_port` it also takes QUIC there, on
@@ -22,9 +63,9 @@ impl PbMapperState {
         quic_port: Option<u16>,
     ) -> Result<(), CtlError> {
         if self
-            .server_handle
+            .embedded_relay
             .as_ref()
-            .is_some_and(|h| !h.is_finished())
+            .is_some_and(|relay| !relay.task.is_finished())
         {
             return Err(CtlError::already_exists("Server is already running"));
         }
@@ -56,11 +97,14 @@ impl PbMapperState {
             None => None,
         };
 
-        let listener = TcpListener::bind(bind_addr).await.map_err(|e| {
+        let listener = pb_mapper_core::listener::bind(bind_addr).map_err(|e| {
             CtlError::address_in_use(format!("Failed to bind server on {bind_addr}: {e}"))
         })?;
+        // The port it took, which a tunnel through it dials: `port` itself,
+        // unless that was 0.
+        let port = listener.local_addr().map_or(port, |bound| bound.port());
         let auth_config = AuthConfig {
-            state_dir: self.config_dir.join("auth"),
+            state_dir: self.auth_state_dir(),
             ..AuthConfig::default()
         };
         let auth = AuthRuntime::from_isolated_state(auth_config)
@@ -81,174 +125,148 @@ impl PbMapperState {
         // Direct sessions, on the same port over UDP, as `pb-mapper server`
         // offers them by default: tunnels through this relay may then go
         // direct. A UDP port someone else holds leaves it relaying only.
-        let direct_listen = std::net::SocketAddr::new(ip_addr, port);
-        let direct = match std::net::UdpSocket::bind(direct_listen) {
-            Ok(socket) => {
-                drop(socket);
-                Some(DirectServerConfig {
-                    listen: direct_listen,
-                    // Only the bound port is announced: each client pairs it
-                    // with the relay address it dialled, which is right
-                    // wherever the UDP port is reached like the TCP one.
-                    advertise: std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-                })
-            }
+        let direct = match DirectServerConfig::probe_relay_port(ip_addr, port) {
+            Ok(direct) => Some(direct),
             Err(error) => {
                 tracing::warn!("UDP port {port} unavailable, relaying only: {error}");
                 None
             }
         };
 
-        self.server_auth = Some(auth.clone());
-        let handle = tokio::spawn(async move {
-            if let Err(e) = run_server_on_listener_with_options(
-                listener,
-                shutdown_token_clone,
-                Some(status_receiver),
-                enable_keep_alive,
-                auth,
-                RelayServerOptions { direct, quic },
-            )
-            .await
-            {
-                tracing::error!("pb-mapper server stopped with error: {e}");
+        let task = tokio::spawn({
+            let auth = auth.clone();
+            async move {
+                if let Err(e) = run_server_on_listener_with_options(
+                    listener,
+                    shutdown_token_clone,
+                    Some(status_receiver),
+                    enable_keep_alive,
+                    auth,
+                    RelayServerOptions { direct, quic },
+                )
+                .await
+                {
+                    tracing::error!("pb-mapper server stopped with error: {e}");
+                }
             }
         });
 
-        self.server_handle = Some(handle);
-        self.server_shutdown_token = Some(shutdown_token);
-        self.server_status_sender = Some(status_sender);
-        self.server_start_time = Some(SystemTime::now());
-        self.server_port = Some(port);
-        self.server_quic_port = quic_port;
+        self.embedded_relay = Some(EmbeddedRelay {
+            task,
+            auth,
+            shutdown: shutdown_token,
+            status_requests: status_sender,
+            started_at: SystemTime::now(),
+            port,
+            quic_port,
+        });
 
-        {
-            let mut cache = self.local_server_status_cache.write().await;
-            *cache = LocalServerStatus {
-                is_running: true,
-                port: Some(port),
-                quic_port,
-                ..LocalServerStatus::default()
-            };
-        }
-        {
-            let mut last_update = self.local_server_status_last_update.write().await;
-            *last_update = Some(Instant::now());
-        }
+        self.local_server_status.lock().record(LocalServerStatus {
+            is_running: true,
+            port: Some(port),
+            quic_port,
+            ..LocalServerStatus::default()
+        });
 
         tracing::info!("pb-mapper server started successfully");
         Ok(())
     }
 
+    /// Where the embedded relay keeps its authentication state, its
+    /// administrator key among it.
+    pub(super) fn auth_state_dir(&self) -> PathBuf {
+        self.config_dir.join("auth")
+    }
+
     /// Clear what a relay that ended on its own left behind — a listener
     /// lost to another process, say — so that it can be started again.
     async fn reap_finished_server(&mut self) {
-        if !self.server_handle.as_ref().is_some_and(|h| h.is_finished()) {
+        let Some(relay) = self
+            .embedded_relay
+            .take_if(|relay| relay.task.is_finished())
+        else {
             return;
-        }
-        self.server_handle = None;
-        self.server_shutdown_token = None;
-        self.server_status_sender = None;
-        if let Some(auth) = self.server_auth.take() {
-            auth.shutdown_actor().await;
-        }
-        self.server_start_time = None;
-        self.server_port = None;
-        self.server_quic_port = None;
-        *self.local_server_status_cache.write().await = LocalServerStatus::default();
+        };
+        let EmbeddedRelay {
+            task,
+            auth,
+            shutdown,
+            status_requests,
+            started_at: _,
+            port: _,
+            quic_port: _,
+        } = relay;
+        drop((task, shutdown, status_requests));
+        auth.shutdown_actor().await;
+        self.local_server_status.lock().status = LocalServerStatus::default();
     }
 
+    /// Stop the relay this computer runs, and the tunnels through it: those
+    /// dialling its port on this computer. A tunnel through another relay,
+    /// this computer's own `pb-mapper server` among them, keeps running.
     pub async fn stop_server(&mut self) -> Result<(), CtlError> {
-        if let (Some(handle), Some(shutdown_token)) =
-            (self.server_handle.take(), self.server_shutdown_token.take())
-        {
-            self.server_status_sender = None;
+        let Some(EmbeddedRelay {
+            mut task,
+            auth,
+            shutdown,
+            status_requests,
+            started_at: _,
+            port,
+            quic_port: _,
+        }) = self.embedded_relay.take()
+        else {
+            return Err(CtlError::not_found("Server is not running"));
+        };
+        drop(status_requests);
 
-            shutdown_token.cancel();
+        shutdown.cancel();
 
-            let shutdown_timeout = tokio::time::Duration::from_secs(5);
-
-            let mut handle = handle;
-            match tokio::time::timeout(shutdown_timeout, &mut handle).await {
-                Ok(_) => {
-                    tracing::info!("Server shutdown gracefully");
+        match tokio::time::timeout(SERVER_STOP_TIMEOUT, &mut task).await {
+            Ok(_) => {
+                tracing::info!("Server shutdown gracefully");
+            }
+            Err(_) => {
+                if let Err(error) = auth.abort_actor().await {
+                    tracing::warn!(
+                        "timed out waiting for the authentication actor to drop: {error}"
+                    );
                 }
-                Err(_) => {
-                    if let Some(auth) = self.server_auth.as_ref()
-                        && let Err(error) = auth.abort_actor().await
-                    {
-                        tracing::warn!(
-                            "timed out waiting for the authentication actor to drop: {error}"
-                        );
-                    }
-                    handle.abort();
-                    let _ = handle.await;
-                    tracing::warn!("Server shutdown timed out; aborted the relay task");
-                }
+                task.abort();
+                let _ = task.await;
+                tracing::warn!("Server shutdown timed out; aborted the relay task");
             }
-            if let Some(auth) = self.server_auth.take() {
-                auth.shutdown_actor().await;
-            }
-
-            self.server_start_time = None;
-            self.server_port = None;
-            self.server_quic_port = None;
-
-            {
-                let mut cache = self.local_server_status_cache.write().await;
-                *cache = LocalServerStatus::default();
-            }
-            {
-                let mut last_update = self.local_server_status_last_update.write().await;
-                *last_update = Some(Instant::now());
-            }
-
-            self.service_runtime.clear();
-            self.client_runtime.clear();
-
-            self.registered_services.write().await.clear();
-            self.active_connections.write().await.clear();
-
-            tracing::info!("pb-mapper server stopped, all services and connections terminated");
-            Ok(())
-        } else {
-            Err(CtlError::not_found("Server is not running"))
         }
+        auth.shutdown_actor().await;
+
+        self.local_server_status
+            .lock()
+            .record(LocalServerStatus::default());
+
+        let through_it = |runtime: &TunnelRuntime| runtime.pin.dials_this_computer(port);
+        self.service_runtime
+            .retain(|_, runtime| !through_it(runtime));
+        self.client_runtime
+            .retain(|_, runtime| !through_it(runtime));
+
+        tracing::info!("pb-mapper server stopped, and the tunnels through it");
+        Ok(())
     }
 
-    pub(super) async fn finish_register(&mut self, commit: RegisterCommit) -> Result<(), CtlError> {
-        let RegisterCommit {
-            service_key,
-            local_address,
-            protocol,
-            enable_encryption,
-            enable_keep_alive,
-            port_mapping,
-            handle,
-            pin,
-        } = commit;
+    pub(super) fn finish_register(&mut self, commit: RegisterCommit) -> Result<(), CtlError> {
+        let RegisterCommit { spec, handle, pin } = commit;
 
         tracing::info!(
             "Registering service '{}' with protocol {}, local address {}, server address {}",
-            service_key,
-            protocol,
-            local_address,
+            spec.service_key,
+            spec.protocol,
+            spec.local_address,
             pin.relay
         );
 
-        self.save_service_config(
-            &service_key,
-            &local_address,
-            &protocol,
-            enable_encryption,
-            enable_keep_alive,
-            DirectOptions {
-                allow_direct: pin.allow_direct,
-                port_mapping,
-            },
-        )
-        .map_err(|e| CtlError::io(format!("Failed to save service configuration: {e}")))?;
+        self.save_service_config(&spec)
+            .map_err(|e| CtlError::io(format!("Failed to save service configuration: {e}")))?;
 
+        let service_key = spec.service_key;
         let handle = Arc::new(TunnelHandle::Share(handle));
         watch_tunnel(&handle, events::ChangeKind::Services, &service_key);
         if self
@@ -258,18 +276,6 @@ impl PbMapperState {
         {
             tracing::warn!("Service '{service_key}' was already registered; replaced it");
         }
-
-        let service_info = ServiceInfo {
-            service_key: service_key.clone(),
-            protocol,
-            local_address,
-            status: "Registering".to_string(),
-        };
-
-        self.registered_services
-            .write()
-            .await
-            .insert(service_key.clone(), service_info);
 
         tracing::info!("Service '{}' registration initiated", service_key);
         Ok(())
@@ -389,16 +395,8 @@ impl PbMapperState {
         found
     }
 
-    pub async fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
-        abort_runtime(&mut self.service_runtime, &service_key);
-
-        if self
-            .registered_services
-            .write()
-            .await
-            .remove(&service_key)
-            .is_some()
-        {
+    pub fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
+        if stop_tunnel(&mut self.service_runtime, &service_key) {
             tracing::info!("Service '{}' unregistered successfully", service_key);
             Ok(())
         } else {
@@ -408,77 +406,43 @@ impl PbMapperState {
         }
     }
 
-    pub async fn delete_service_config_and_stop(
-        &mut self,
-        service_key: String,
-    ) -> Result<(), CtlError> {
-        abort_runtime(&mut self.service_runtime, &service_key);
-
-        self.registered_services.write().await.remove(&service_key);
-
+    pub fn delete_service_config_and_stop(&mut self, service_key: String) -> Result<(), CtlError> {
+        stop_tunnel(&mut self.service_runtime, &service_key);
         self.delete_service_config(&service_key)
     }
 
-    pub(super) async fn finish_connect(&mut self, commit: ConnectCommit) -> Result<(), CtlError> {
-        let ConnectCommit {
-            service_key,
-            local_address,
-            protocol,
-            enable_keep_alive,
-            port_mapping,
-            handle,
-            pin,
-        } = commit;
+    pub(super) fn finish_connect(&mut self, commit: ConnectCommit) -> Result<(), CtlError> {
+        let ConnectCommit { spec, handle, pin } = commit;
 
         tracing::info!(
             "Connecting to service '{}' with protocol {}, local address {}, server address {}",
-            service_key,
-            protocol,
-            local_address,
+            spec.service_key,
+            spec.protocol,
+            spec.local_address,
             pin.relay
         );
 
-        let namespace = pin.namespace;
-        let allow_direct = pin.allow_direct;
+        let service_key = &spec.service_key;
+        // Persist here rather than at the FFI boundary, so a connection made
+        // from a terminal is remembered exactly like one made from the window.
+        // `finish_register` has always done this; leaving it out here meant a
+        // CLI `connect` started a client that never appeared in the list.
+        // The window lists what is saved, so a connection whose save fails
+        // would be listed as it was saved before, or not at all: refused, as
+        // a share is, and stopped as `handle` drops. One started as it was
+        // saved needs no write, so it still starts on a list that cannot be
+        // written.
+        self.save_client_config(&spec)
+            .map_err(|e| CtlError::io(format!("Failed to save client configuration: {e}")))?;
+
         let handle = Arc::new(TunnelHandle::Connect(handle));
-        watch_tunnel(&handle, events::ChangeKind::Clients, &service_key);
+        watch_tunnel(&handle, events::ChangeKind::Clients, service_key);
         if self
             .client_runtime
             .insert(service_key.clone(), TunnelRuntime { handle, pin })
             .is_some()
         {
             tracing::warn!("Client for service '{service_key}' was already running; replaced it");
-        }
-
-        let connection_info = ConnectionInfo {
-            service_key: service_key.clone(),
-            client_id: format!("client-{service_key}"),
-            status: "Connected".to_string(),
-        };
-
-        self.active_connections
-            .write()
-            .await
-            .insert(service_key.clone(), connection_info);
-
-        // Persist here rather than at the FFI boundary, so a connection made
-        // from a terminal is remembered exactly like one made from the window.
-        // `finish_register` has always done this; leaving it out here meant a
-        // CLI `connect` started a client that never appeared in the list.
-        if let Err(e) = self.save_client_config(
-            &service_key,
-            &local_address,
-            &protocol,
-            enable_keep_alive,
-            namespace,
-            DirectOptions {
-                allow_direct,
-                port_mapping,
-            },
-        ) {
-            // The client is up either way, so this is a warning and not a
-            // failure: losing the config costs the entry after a restart.
-            tracing::warn!("Failed to save client config for '{service_key}': {e}");
         }
 
         tracing::info!("Connected to service '{}' successfully", service_key);
@@ -495,23 +459,11 @@ impl PbMapperState {
         claim_key(&self.connecting, service_key, "being connected")
     }
 
-    pub async fn disconnect_service(&mut self, service_key: String) -> Result<(), CtlError> {
-        // Aborting the task is the part that matters: it is what stops the
-        // retry loop still dialling in the background.
-        let aborted = abort_runtime(&mut self.client_runtime, &service_key);
-
-        let was_listed = self
-            .active_connections
-            .write()
-            .await
-            .remove(&service_key)
-            .is_some();
-
-        // Reported failure only when there was nothing to stop. It used to key
-        // off the bookkeeping map alone, so a client whose task had been
-        // aborted could still be reported as "not connected" — an error for an
-        // operation that had in fact just done its job.
-        if aborted || was_listed {
+    /// Stops the connection under `service_key`, which also stops its retry
+    /// loop still dialling in the background; failing only when there was
+    /// nothing to stop.
+    pub fn disconnect_service(&mut self, service_key: String) -> Result<(), CtlError> {
+        if stop_tunnel(&mut self.client_runtime, &service_key) {
             tracing::info!("Disconnected from service '{}'", service_key);
             Ok(())
         } else {
@@ -521,53 +473,8 @@ impl PbMapperState {
         }
     }
 
-    pub async fn delete_client_config_and_stop(
-        &mut self,
-        service_key: String,
-    ) -> Result<(), CtlError> {
-        abort_runtime(&mut self.client_runtime, &service_key);
-
-        self.active_connections.write().await.remove(&service_key);
-
+    pub fn delete_client_config_and_stop(&mut self, service_key: String) -> Result<(), CtlError> {
+        stop_tunnel(&mut self.client_runtime, &service_key);
         self.delete_client_config(&service_key)
     }
-}
-
-/// Tell the window when `handle`'s state or path changes, until the tunnel
-/// ends. Both are read when its status or one of its events says something
-/// may have changed, and announced only when they did: which paths its
-/// sessions use, not how many, and not the message, which for a failing
-/// tunnel says when it tries again. Holds the handle weakly, so it never
-/// keeps a tunnel alive.
-fn watch_tunnel(handle: &Arc<TunnelHandle>, kind: events::ChangeKind, key: &str) {
-    let tunnel = Arc::downgrade(handle);
-    let mut status = handle.subscribe();
-    let mut events = handle.subscribe_events();
-    let key = key.to_string();
-    let shape = |view: TunnelView| (view.status, view.path.map(|path| path.shape()));
-    let mut seen = shape(handle.view());
-    tokio::spawn(async move {
-        let mut status_open = true;
-        loop {
-            let live = tokio::select! {
-                changed = status.changed(), if status_open => {
-                    status_open = changed.is_ok();
-                    true
-                },
-                // A missed event may have been a change too: read it all again.
-                event = events.recv() => event.is_some(),
-            };
-            let Some(handle) = tunnel.upgrade() else {
-                return;
-            };
-            let now = shape(handle.view());
-            drop(handle);
-            if std::mem::replace(&mut seen, now) != now {
-                events::emit(kind, Some(&key), Origin::Internal);
-            }
-            if !live {
-                return;
-            }
-        }
-    });
 }

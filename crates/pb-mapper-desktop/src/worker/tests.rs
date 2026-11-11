@@ -1,12 +1,18 @@
 use super::*;
 use crate::{
-    CursorPosition, Display, Input, KeyframeReason, VideoFormat,
+    CursorPosition, Display, EncodedFrame, Input, InputEvent, KeyframeReason, VideoFormat,
+    VideoRate, error,
+    idr::IdrReason,
     lane::LANE_CAPACITY,
+    modes::ModeCommand,
     outgoing::HostUnit,
     shared::{Policy, Targets},
 };
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+use std::{
+    collections::VecDeque,
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64},
+};
 use tokio_util::sync::CancellationToken;
 
 const LIMITS: VideoLimits = VideoLimits {
@@ -35,6 +41,10 @@ struct Log {
     captures: Vec<(Instant, Instant, bool, VideoRate)>,
     inputs: Vec<(Instant, Input)>,
     releases: u32,
+    /// Display mode restores asked for.
+    restores: u32,
+    /// Display mode changes asked for.
+    modes_set: Vec<crate::Mode>,
     /// Desktop reads, by context checks, the cursor and the injection boundary.
     contexts: u32,
 }
@@ -70,6 +80,8 @@ struct Fake {
     /// than return anything, as the Windows encoder discards a late output in
     /// the call that submits the next: the encoder holds as many as before.
     discard: Arc<AtomicBool>,
+    /// The display's modes; `None` offers none.
+    modes: Arc<Mutex<Option<crate::ModeList>>>,
 }
 impl Fake {
     fn new(clock: Time) -> Self {
@@ -89,6 +101,7 @@ impl Fake {
             latency: Arc::default(),
             encoding: Arc::default(),
             discard: Arc::default(),
+            modes: Arc::default(),
         }
     }
 
@@ -210,6 +223,17 @@ impl Backend for Fake {
     fn double_click_guard(&mut self) -> Option<crate::DoubleClickGuard> {
         *self.guard.lock()
     }
+    fn display_modes(&mut self, _: &DesktopContext) -> Result<Option<crate::ModeList>> {
+        Ok(self.modes.lock().clone())
+    }
+    fn set_display_mode(&mut self, _: &DesktopContext, mode: crate::Mode) -> Result<()> {
+        self.log.lock().modes_set.push(mode);
+        Ok(())
+    }
+    fn restore_display_mode(&mut self) -> Result<bool> {
+        self.log.lock().restores += 1;
+        Ok(false)
+    }
 }
 
 fn session(allowed: bool) -> Arc<SessionShared> {
@@ -224,7 +248,6 @@ fn config(admission: Option<Arc<dyn ControlAdmission>>) -> WorkerConfig {
     WorkerConfig {
         codec: VideoCodec::H264,
         limits: LIMITS,
-        nominal_fps: 60,
         admission,
     }
 }
@@ -786,7 +809,6 @@ fn native_input_failure_ends_control_and_survives_new_video() {
     let failed = h.state().record;
     assert!(!failed.controlling);
     assert_eq!(failed.reason, Some(StateReason::InputFailed));
-    assert!(failed.message.starts_with("input_failed"));
     // New video does not hide why control ended, and a queued input is
     // never replayed.
     h.input(MOVE);
@@ -1004,4 +1026,63 @@ fn a_display_mode_change_needs_control_but_the_owners_restore_does_not() {
     h.send(LaneCommand::DisplayMode(ModeCommand::HostRestore));
     h.step();
     assert_eq!(h.state().notice.map(|notice| notice.2), Some(serial));
+}
+
+/// A viewer's burst that overflows the lane drops its input, not the
+/// owner's restore queued among it, nor one asked for once the lane is full.
+#[test]
+fn an_overflowing_lane_still_runs_the_owners_restore() {
+    let mut h = Harness::new(true, None);
+    h.present();
+    h.send(LaneCommand::DisplayMode(ModeCommand::HostRestore));
+    while h.shared.lane.push(LaneCommand::Release) {}
+    h.shared
+        .lane
+        .push_owner(LaneCommand::DisplayMode(ModeCommand::HostRestore));
+    h.step();
+    assert_eq!(h.fake.log.lock().restores, 2);
+    assert_eq!(h.state().record.reason, Some(StateReason::InputCongestion));
+}
+
+/// An overflow drain checks a viewer's display mode change against control
+/// as the lane leaves it, as a drain does: one after the viewer's own
+/// release or pause is refused with a notice, never run.
+#[test]
+fn an_overflow_drain_refuses_a_mode_change_after_the_viewers_release() {
+    let shown = crate::Mode {
+        width: 10,
+        height: 10,
+    };
+    let asked = crate::Mode {
+        width: 8,
+        height: 8,
+    };
+    let mut h = Harness::new(true, None);
+    *h.fake.modes.lock() = Some(crate::ModeList {
+        current: shown,
+        original: shown,
+        supported: vec![shown, asked],
+    });
+    h.present();
+    for release in [
+        LaneCommand::Control { enabled: false },
+        LaneCommand::EndControl,
+    ] {
+        h.send(LaneCommand::Control { enabled: true });
+        h.step();
+        assert!(h.state().record.controlling);
+        let before = h.state().notice.map(|notice| notice.2);
+        // A drain ran what the overflowing lane held; the next overflow
+        // drain takes only what came since.
+        while h.shared.lane.push(LaneCommand::Release) {}
+        h.shared.lane.drain_into(&mut VecDeque::new());
+        h.send(release);
+        h.send(LaneCommand::DisplayMode(ModeCommand::Set(asked)));
+        h.step();
+        assert_eq!(h.fake.log.lock().modes_set, []);
+        let (code, _, serial) = h.state().notice.unwrap();
+        assert_eq!(code, NoticeCode::DisplayModeFailed);
+        assert_ne!(Some(serial), before);
+        assert_eq!(h.state().record.reason, Some(StateReason::InputCongestion));
+    }
 }

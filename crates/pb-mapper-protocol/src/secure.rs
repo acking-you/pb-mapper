@@ -17,20 +17,18 @@
 //! This root module coordinates client/server sessions. Frame mechanics, replay admission,
 //! log suppression, and protocol tests are isolated in focused child modules.
 
+mod first_flight;
+mod frame;
+mod limiter;
+mod replay;
+#[cfg(test)]
+mod tests;
+
+use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use rand::RngExt;
-use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
-use ring::digest::{SHA256, digest};
-use ring::hkdf::{HKDF_SHA256, Salt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-use super::{
-    CodecMessageReader, CodecMessageWriter, DataLenType, MAX_MSG_LEN, MessageReader, MessageWriter,
-};
 use pb_mapper_auth::{
     ADMIN_KEY_ID, AuthContext, AuthFailure, AuthRuntime, KeyId, LegacyConnectionGuard,
 };
@@ -39,22 +37,51 @@ use pb_mapper_core::checksum::{
 };
 use pb_mapper_core::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec, Decryptor};
 use pb_mapper_core::error::{Error, Result};
+use pb_mapper_core::time::unix_seconds;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::{CodecMessageReader, CodecMessageWriter, DataLenType, MessageReader, MessageWriter};
+use first_flight::{FirstFlightWork, evaluate_first_flight, stale_root_first_flight, v2_session};
+use frame::{
+    Direction, PREFIX_FLAGS, PREFIX_RESERVED, PrefixFields, V2Material, connection_salt,
+    derive_material, first_prefix, open_v2_payload, read_v2_frame, salt_timestamp,
+};
+pub use frame::{V2MessageReader, V2MessageWriter};
+pub use limiter::FailureLogDecision;
+use limiter::FailureLogLimiter;
+use replay::{ReplayGuard, replay_fingerprint};
 
 pub const PROTOCOL_V2_MAGIC: [u8; 4] = *b"PBM2";
 pub const PROTOCOL_V2_VERSION: u8 = 2;
+/// The failure code the relay answers a first flight with when it has already
+/// accepted that connection salt. Retryable: a fresh session draws a fresh salt.
+pub const CONNECTION_SALT_REPLAYED: &str = "connection_salt_replayed";
 const CONNECTION_SALT_LEN: usize = 16;
-const FIRST_PREFIX_REMAINDER_LEN: usize = 28;
-const FRAME_HEADER_LEN: usize = 12;
-const DIRECTION_CLIENT_TO_SERVER: u8 = 0;
-const DIRECTION_SERVER_TO_CLIENT: u8 = 1;
+/// What follows the magic in a first flight: version, flags, reserved, key id
+/// and connection salt.
+const FIRST_PREFIX_REMAINDER_LEN: usize =
+    size_of::<u8>() + size_of::<u8>() + size_of::<u16>() + size_of::<u64>() + CONNECTION_SALT_LEN;
+/// Counter, then ciphertext length.
+const FRAME_HEADER_LEN: usize = size_of::<u64>() + size_of::<DataLenType>();
 const MAX_CONNECTION_CLOCK_SKEW_SECONDS: u64 = 5 * 60;
 /// Each Bloom generation must outlive the accepted clock-skew interval. A
 /// salt inserted at the end of a window with `ts = now + skew` stays valid
 /// until `insert + 2*skew`, so one generation is `2 * skew`.
 const DEFAULT_REPLAY_WINDOW_SECONDS: u64 = MAX_CONNECTION_CLOCK_SKEW_SECONDS.saturating_mul(2);
 const DEFAULT_REPLAY_FILTER_BYTES: usize = 1024 * 1024;
+const _: () = assert!(
+    DEFAULT_REPLAY_FILTER_BYTES > 0,
+    "Bloom positions are taken modulo the filter's bit count"
+);
 const MAX_INITIAL_PLAINTEXT_LEN: u32 = 64 * 1024;
-const MAX_INITIAL_CIPHERTEXT_LEN: u32 = MAX_INITIAL_PLAINTEXT_LEN + 16;
+const MAX_INITIAL_CIPHERTEXT_LEN: u32 = MAX_INITIAL_PLAINTEXT_LEN + crate::CODEC_TAG_LEN;
+/// The most bytes a first flight takes on the wire: its prefix, one frame
+/// header and the largest initial ciphertext.
+#[cfg(feature = "relay-quic")]
+pub(crate) const MAX_FIRST_FLIGHT_LEN: usize = PROTOCOL_V2_MAGIC.len()
+    + FIRST_PREFIX_REMAINDER_LEN
+    + FRAME_HEADER_LEN
+    + MAX_INITIAL_CIPHERTEXT_LEN as usize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeaderProtocol {
@@ -62,23 +89,80 @@ pub enum HeaderProtocol {
     V2,
 }
 
+/// How a session protects its control messages: a legacy session frames them
+/// with its framing key alone; a v2 one with directional keys derived for the
+/// connection.
+enum SessionKeys {
+    Legacy,
+    V2(V2Material),
+}
+
+impl SessionKeys {
+    fn protocol(&self) -> HeaderProtocol {
+        match self {
+            Self::Legacy => HeaderProtocol::Legacy,
+            Self::V2(_) => HeaderProtocol::V2,
+        }
+    }
+
+    /// Reads what the peer sends in `direction`, from frame `counter` on.
+    fn reader<'a, T: AsyncReadExt + Unpin>(
+        &self,
+        framing_key: &AesKeyType,
+        reader: &'a mut T,
+        direction: Direction,
+        counter: u64,
+    ) -> Result<HeaderMessageReader<'a, T>> {
+        Ok(match self {
+            Self::Legacy => HeaderMessageReader::Legacy(CodecMessageReader::for_session_key(
+                reader,
+                Aes256GcmDeCodec::try_new(framing_key)
+                    .map_err(|_| protocol_error("failed to initialize legacy reader"))?,
+                *framing_key,
+            )),
+            Self::V2(material) => HeaderMessageReader::V2(V2MessageReader::new(
+                reader,
+                material.clone(),
+                direction,
+                counter,
+            )?),
+        })
+    }
+
+    /// Writes what this end sends in `direction`, from frame `counter` on.
+    /// `legacy_label` names a legacy writer in its setup error.
+    fn writer<'a, T: AsyncWriteExt + Unpin>(
+        &self,
+        framing_key: &AesKeyType,
+        writer: &'a mut T,
+        direction: Direction,
+        counter: u64,
+        legacy_label: &str,
+    ) -> Result<HeaderMessageWriter<'a, T>> {
+        Ok(match self {
+            Self::Legacy => HeaderMessageWriter::Legacy(CodecMessageWriter::for_session_key(
+                writer,
+                Aes256GcmEnCodec::try_new(framing_key)
+                    .map_err(|_| protocol_error(format!("failed to initialize {legacy_label}")))?,
+                *framing_key,
+            )),
+            Self::V2(material) => HeaderMessageWriter::V2(V2MessageWriter::new(
+                writer,
+                material.clone(),
+                direction,
+                counter,
+            )?),
+        })
+    }
+}
+
 pub struct ClientHeaderSession {
-    protocol: HeaderProtocol,
-    legacy_key: AesKeyType,
-    v2: Option<V2Material>,
+    /// The credential's key, which a legacy session frames with.
+    framing_key: AesKeyType,
+    keys: SessionKeys,
 }
 
 impl ClientHeaderSession {
-    /// The v2 material, which is `Some` exactly when `protocol` is `V2`.
-    ///
-    /// The type does not tie the two together, so this reports instead of
-    /// panicking on a state that construction never produces.
-    fn v2_material(&self) -> Result<&V2Material> {
-        self.v2
-            .as_ref()
-            .ok_or_else(|| protocol_error("v2 session is missing its key material"))
-    }
-
     /// New clients always use protocol v2, for both administrator and temporary credentials.
     pub fn from_process() -> Result<Self> {
         let credential = get_process_credential().map_err(protocol_error)?;
@@ -86,32 +170,25 @@ impl ClientHeaderSession {
     }
 
     pub fn new_v2(credential: &Credential) -> Result<Self> {
-        let mut salt = [0_u8; CONNECTION_SALT_LEN];
-        salt[..8].copy_from_slice(&unix_seconds().to_be_bytes());
-        let mut rng = rand::rng();
-        for byte in &mut salt[8..] {
-            *byte = rng.random();
-        }
+        let salt = connection_salt(unix_seconds());
         let material =
             derive_material(KeyId::from_u64(credential.key_id()), credential.key(), salt)?;
         Ok(Self {
-            protocol: HeaderProtocol::V2,
-            legacy_key: *credential.key(),
-            v2: Some(material),
+            framing_key: *credential.key(),
+            keys: SessionKeys::V2(material),
         })
     }
 
     #[cfg(test)]
     pub fn new_legacy(key: AesKeyType) -> Self {
         Self {
-            protocol: HeaderProtocol::Legacy,
-            legacy_key: key,
-            v2: None,
+            framing_key: key,
+            keys: SessionKeys::Legacy,
         }
     }
 
     pub fn protocol(&self) -> HeaderProtocol {
-        self.protocol
+        self.keys.protocol()
     }
 
     pub async fn write_initial<T: AsyncWriteExt + Unpin>(
@@ -119,44 +196,35 @@ impl ClientHeaderSession {
         writer: &mut T,
         message: &[u8],
     ) -> Result<()> {
-        match self.protocol {
-            HeaderProtocol::Legacy => {
-                legacy_message_writer(writer, &self.legacy_key, "legacy writer")?
-                    .write_msg(message)
-                    .await
-            }
-            HeaderProtocol::V2 => {
-                let material = self.v2_material()?;
+        match &self.keys {
+            SessionKeys::Legacy => {}
+            SessionKeys::V2(material) => {
                 writer
                     .write_all(&first_prefix(material))
                     .await
                     .map_err(|error| {
                         protocol_error(format!("failed to write v2 prefix: {error}"))
                     })?;
-                V2MessageWriter::new(writer, material.clone(), DIRECTION_CLIENT_TO_SERVER, 0)?
-                    .write_msg(message)
-                    .await
             }
         }
+        self.keys
+            .writer(
+                &self.framing_key,
+                writer,
+                Direction::ClientToServer,
+                0,
+                "legacy writer",
+            )?
+            .write_msg(message)
+            .await
     }
 
     pub fn response_reader<'a, T: AsyncReadExt + Unpin>(
         &self,
         reader: &'a mut T,
     ) -> Result<HeaderMessageReader<'a, T>> {
-        match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageReader::Legacy(legacy_message_reader(
-                reader,
-                &self.legacy_key,
-                "legacy reader",
-            )?)),
-            HeaderProtocol::V2 => Ok(HeaderMessageReader::V2(V2MessageReader::new(
-                reader,
-                self.v2_material()?.clone(),
-                DIRECTION_SERVER_TO_CLIENT,
-                0,
-            )?)),
-        }
+        self.keys
+            .reader(&self.framing_key, reader, Direction::ServerToClient, 0)
     }
 
     pub async fn exchange<T: AsyncReadExt + AsyncWriteExt + Unpin>(
@@ -189,26 +257,21 @@ impl ClientHeaderSession {
         &self,
         writer: &'a mut T,
     ) -> Result<HeaderMessageWriter<'a, T>> {
-        match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageWriter::Legacy(legacy_message_writer(
-                writer,
-                &self.legacy_key,
-                "legacy writer",
-            )?)),
-            HeaderProtocol::V2 => Ok(HeaderMessageWriter::V2(V2MessageWriter::new(
-                writer,
-                self.v2_material()?.clone(),
-                DIRECTION_CLIENT_TO_SERVER,
-                1,
-            )?)),
-        }
+        self.keys.writer(
+            &self.framing_key,
+            writer,
+            Direction::ClientToServer,
+            1,
+            "legacy writer",
+        )
     }
 }
 
 pub struct ServerHeaderSession {
-    protocol: HeaderProtocol,
-    legacy_key: AesKeyType,
-    v2: Option<V2Material>,
+    /// The administrator key for a legacy session, the presented credential's
+    /// key for a v2 one. Data frames on this connection are checksummed with it.
+    framing_key: AesKeyType,
+    keys: SessionKeys,
     context: Option<AuthContext>,
     _legacy_guard: Option<LegacyConnectionGuard>,
 }
@@ -217,7 +280,7 @@ impl fmt::Debug for ServerHeaderSession {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ServerHeaderSession")
-            .field("protocol", &self.protocol)
+            .field("protocol", &self.protocol())
             .field("key_id", &self.key_id())
             .field("authenticated", &self.context.is_some())
             .finish()
@@ -225,31 +288,21 @@ impl fmt::Debug for ServerHeaderSession {
 }
 
 impl ServerHeaderSession {
-    /// The v2 material, `Some` exactly when `protocol` is `V2` — see
-    /// [`ClientHeaderSession::v2_material`].
-    fn v2_material(&self) -> Result<&V2Material> {
-        self.v2
-            .as_ref()
-            .ok_or_else(|| protocol_error("v2 session is missing its key material"))
-    }
-
     pub fn protocol(&self) -> HeaderProtocol {
-        self.protocol
+        self.keys.protocol()
     }
 
     pub fn framing_key(&self) -> AesKeyType {
-        self.legacy_key
+        self.framing_key
     }
 
     pub fn key_id(&self) -> KeyId {
         self.context
             .as_ref()
             .map(|context| context.key_id)
-            .unwrap_or_else(|| {
-                self.v2
-                    .as_ref()
-                    .map(|material| material.key_id)
-                    .unwrap_or(ADMIN_KEY_ID)
+            .unwrap_or_else(|| match &self.keys {
+                SessionKeys::Legacy => ADMIN_KEY_ID,
+                SessionKeys::V2(material) => material.key_id,
             })
     }
 
@@ -263,46 +316,40 @@ impl ServerHeaderSession {
         &self,
         writer: &'a mut T,
     ) -> Result<HeaderMessageWriter<'a, T>> {
-        match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageWriter::Legacy(legacy_message_writer(
-                writer,
-                &self.legacy_key,
-                "legacy response writer",
-            )?)),
-            HeaderProtocol::V2 => Ok(HeaderMessageWriter::V2(V2MessageWriter::new(
-                writer,
-                self.v2_material()?.clone(),
-                DIRECTION_SERVER_TO_CLIENT,
-                0,
-            )?)),
-        }
+        self.keys.writer(
+            &self.framing_key,
+            writer,
+            Direction::ServerToClient,
+            0,
+            "legacy response writer",
+        )
     }
 
     pub fn continuation_reader<'a, T: AsyncReadExt + Unpin>(
         &self,
         reader: &'a mut T,
     ) -> Result<HeaderMessageReader<'a, T>> {
-        match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageReader::Legacy(legacy_message_reader(
-                reader,
-                &self.legacy_key,
-                "legacy reader",
-            )?)),
-            HeaderProtocol::V2 => Ok(HeaderMessageReader::V2(V2MessageReader::new(
-                reader,
-                self.v2_material()?.clone(),
-                DIRECTION_CLIENT_TO_SERVER,
-                1,
-            )?)),
-        }
+        self.keys
+            .reader(&self.framing_key, reader, Direction::ClientToServer, 1)
     }
 }
 
 pub struct ServerInitialMessage {
     pub payload: Vec<u8>,
     pub session: ServerHeaderSession,
-    pub replay_fingerprint: Option<[u8; 32]>,
-    pub client_timestamp: Option<u64>,
+    /// `Some` exactly when `session` speaks protocol v2: a legacy first
+    /// message proves nothing a replay record could hold.
+    pub first_flight: Option<FirstFlightProof>,
+}
+
+/// What an accepted protocol-v2 first flight carried, for an administrator
+/// mutation to claim against auth's replay record.
+#[derive(Clone, Copy, Debug)]
+pub struct FirstFlightProof {
+    /// The replay fingerprint of the first flight's key id and connection salt.
+    pub fingerprint: [u8; 32],
+    /// The client's Unix time in seconds, as its connection salt states it.
+    pub client_timestamp: u64,
 }
 
 pub struct ServerInitialError {
@@ -365,35 +412,41 @@ impl fmt::Display for ServerInitialError {
 
 impl std::error::Error for ServerInitialError {}
 
-use std::fmt;
-
 #[derive(Clone)]
 pub struct ServerSecurity {
     auth: AuthRuntime,
-    replay: Arc<Mutex<ReplayGuard>>,
+    replay: Arc<ReplayGuard>,
     failure_logs: Arc<Mutex<FailureLogLimiter>>,
 }
 
-// `ServerInitialError` is 256 bytes, but the success type it is paired with,
-// `ServerInitialMessage`, is 264 — so the `Result` is already sized by its `Ok`
-// variant and boxing the error would buy an allocation for no size reduction.
-#[allow(clippy::result_large_err)]
 impl ServerSecurity {
+    /// Reads and rewrites the relay's first-flight replay log, and starts the
+    /// thread that appends to it.
     pub fn new(auth: AuthRuntime) -> Self {
         let replay_path = auth.config().state_dir.join("connection.replay");
         Self {
             auth,
-            replay: Arc::new(Mutex::new(ReplayGuard::open(
+            replay: Arc::new(ReplayGuard::open(
                 Some(replay_path),
                 DEFAULT_REPLAY_FILTER_BYTES,
                 DEFAULT_REPLAY_WINDOW_SECONDS,
-            ))),
+            )),
             failure_logs: Arc::new(Mutex::new(FailureLogLimiter::default())),
         }
     }
 
     pub fn auth(&self) -> &AuthRuntime {
         &self.auth
+    }
+
+    /// Refuses protocol-v2 first flights from now on and waits for the replay
+    /// log's writer to end. A relay calls it as it stops, before it lets go
+    /// of its state directory, so that a relay started on that directory
+    /// after, in this process, has the log alone.
+    pub async fn close_replay_log(&self) {
+        let replay = self.replay.clone();
+        // The writer may be in a write or a sync.
+        let _ = tokio::task::spawn_blocking(move || replay.close()).await;
     }
 
     pub fn record_failure_log(
@@ -407,17 +460,21 @@ impl ServerSecurity {
             .record(peer_ip, key_id, reason, unix_seconds())
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "the Ok variant is as large, so boxing the error saves nothing"
+    )]
     pub async fn read_initial<T: AsyncReadExt + Unpin>(
         &self,
         reader: &mut T,
     ) -> std::result::Result<ServerInitialMessage, ServerInitialError> {
         let mut first = [0_u8; 4];
         reader.read_exact(&mut first).await.map_err(|error| {
-            ServerInitialError::new(AuthFailure::new(
+            ServerInitialError::fail(
                 "protocol_header_read_failed",
                 format!("failed to read initial protocol header: {error}"),
                 true,
-            ))
+            )
         })?;
         if first == PROTOCOL_V2_MAGIC {
             self.read_v2_initial(reader).await
@@ -426,6 +483,10 @@ impl ServerSecurity {
         }
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "the Ok variant is as large, so boxing the error saves nothing"
+    )]
     async fn read_legacy_initial<T: AsyncReadExt + Unpin>(
         &self,
         reader: &mut T,
@@ -488,17 +549,19 @@ impl ServerSecurity {
         Ok(ServerInitialMessage {
             payload: plain.to_vec(),
             session: ServerHeaderSession {
-                protocol: HeaderProtocol::Legacy,
-                legacy_key: key,
-                v2: None,
+                framing_key: key,
+                keys: SessionKeys::Legacy,
                 context: Some(context),
                 _legacy_guard: Some(legacy_guard),
             },
-            replay_fingerprint: None,
-            client_timestamp: None,
+            first_flight: None,
         })
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "the Ok variant is as large, so boxing the error saves nothing"
+    )]
     async fn read_v2_initial<T: AsyncReadExt + Unpin>(
         &self,
         reader: &mut T,
@@ -511,10 +574,14 @@ impl ServerSecurity {
                 true,
             )
         })?;
-        let version = remainder[0];
-        let flags = remainder[1];
-        let reserved = u16::from_be_bytes([remainder[2], remainder[3]]);
-        if version != PROTOCOL_V2_VERSION || flags != 0 || reserved != 0 {
+        let PrefixFields {
+            version,
+            flags,
+            reserved,
+            key_id,
+            salt,
+        } = PrefixFields::parse(remainder);
+        if version != PROTOCOL_V2_VERSION || flags != PREFIX_FLAGS || reserved != PREFIX_RESERVED {
             return Err(ServerInitialError::fail(
                 if version != PROTOCOL_V2_VERSION {
                     "protocol_version_unsupported"
@@ -527,17 +594,7 @@ impl ServerSecurity {
                 false,
             ));
         }
-        // The prefix-length check above fixes all three widths, so none of these
-        // can fail. Reported rather than asserted: this parses the first bytes an
-        // unauthenticated peer sends, and a panic there is a remote abort.
-        let malformed =
-            || ServerInitialError::fail("protocol_error", "v2 prefix is malformed", false);
-        let key_id = KeyId::from_u64(u64::from_be_bytes(
-            remainder[4..12].try_into().map_err(|_| malformed())?,
-        ));
-        let salt: [u8; CONNECTION_SALT_LEN] =
-            remainder[12..28].try_into().map_err(|_| malformed())?;
-        let client_timestamp = u64::from_be_bytes(salt[..8].try_into().map_err(|_| malformed())?);
+        let client_timestamp = salt_timestamp(&salt);
         let now = unix_seconds();
         if now.abs_diff(client_timestamp) > MAX_CONNECTION_CLOCK_SKEW_SECONDS {
             return Err(ServerInitialError::fail_key(
@@ -559,7 +616,6 @@ impl ServerSecurity {
                 key_id,
             )
         })?;
-        let mut session = v2_session(key, material.clone());
         let (counter, ciphertext) = read_v2_frame(reader, 0, MAX_INITIAL_PLAINTEXT_LEN)
             .await
             .map_err(|error| {
@@ -574,20 +630,20 @@ impl ServerSecurity {
         let fingerprint = replay_fingerprint(key_id, &salt);
         let work = match open_v2_payload(
             &material,
-            DIRECTION_CLIENT_TO_SERVER,
+            Direction::ClientToServer,
             counter,
             &mut current_ciphertext,
         ) {
             Ok(payload) => FirstFlightWork::Live {
                 key,
                 payload,
-                error_session: session_without_context(&session),
+                error_session: v2_session(key, material.clone()),
             },
             Err(error) => {
                 match stale_root_first_flight(&self.auth, key_id, salt, counter, &ciphertext) {
                     Some(stale) => FirstFlightWork::Stale(stale),
                     None => {
-                        return Err(first_flight_error(
+                        return Err(ServerInitialError::fail_key(
                             "protocol_v2_decrypt_failed",
                             error.to_string(),
                             false,
@@ -597,35 +653,23 @@ impl ServerSecurity {
                 }
             }
         };
-        let replay = self.replay.clone();
-        let auth = self.auth.clone();
-        let (payload, context) = tokio::task::spawn_blocking(move || {
-            evaluate_first_flight(&auth, &replay, key_id, fingerprint, work)
-        })
-        .await
-        .unwrap_or_else(|_| {
-            Err(first_flight_error(
-                "connection_replay_store_unavailable",
-                "failed to evaluate first-flight admission",
-                true,
-                key_id,
-            ))
-        })?;
-        session.context = Some(context);
+        let (payload, context) =
+            evaluate_first_flight(&self.auth, &self.replay, key_id, fingerprint, work).await?;
         Ok(ServerInitialMessage {
             payload,
-            session,
-            replay_fingerprint: Some(fingerprint),
-            client_timestamp: Some(client_timestamp),
+            session: ServerHeaderSession {
+                context: Some(context),
+                ..v2_session(key, material)
+            },
+            first_flight: Some(FirstFlightProof {
+                fingerprint,
+                client_timestamp,
+            }),
         })
     }
 }
 
-mod limiter;
-pub use limiter::FailureLogDecision;
-use limiter::FailureLogLimiter;
-
-pub enum HeaderMessageReader<'a, T: AsyncReadExt + Unpin> {
+pub enum HeaderMessageReader<'a, T> {
     Legacy(CodecMessageReader<'a, T, Aes256GcmDeCodec>),
     V2(V2MessageReader<'a, T>),
 }
@@ -639,7 +683,7 @@ impl<T: AsyncReadExt + Unpin> MessageReader for HeaderMessageReader<'_, T> {
     }
 }
 
-pub enum HeaderMessageWriter<'a, T: AsyncWriteExt + Unpin> {
+pub enum HeaderMessageWriter<'a, T> {
     Legacy(CodecMessageWriter<'a, T, Aes256GcmEnCodec>),
     V2(V2MessageWriter<'a, T>),
 }
@@ -653,55 +697,23 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for HeaderMessageWriter<'_, T> {
     }
 }
 
-mod frame;
-use frame::{V2Material, derive_material, first_prefix, open_v2_payload, read_v2_frame};
-pub use frame::{V2MessageReader, V2MessageWriter};
-mod replay;
-use replay::{FirstFlightAdmit, ReplayGuard, replay_fingerprint};
-#[cfg(test)]
-use replay::{
-    REPLAY_COMPACT_INTERVAL_SECONDS, REPLAY_RECORD_LEN, RotatingBloom, truncate_replay_log,
-};
-mod first_flight;
-use first_flight::*;
-fn legacy_message_reader<'a, T: AsyncReadExt + Unpin>(
-    reader: &'a mut T,
-    key: &AesKeyType,
-    action: &str,
-) -> Result<CodecMessageReader<'a, T, Aes256GcmDeCodec>> {
-    Ok(CodecMessageReader::for_session_key(
-        reader,
-        Aes256GcmDeCodec::try_new(key)
-            .map_err(|_| protocol_error(format!("failed to initialize {action}")))?,
-        *key,
-    ))
-}
-
-fn legacy_message_writer<'a, T: AsyncWriteExt + Unpin>(
-    writer: &'a mut T,
-    key: &AesKeyType,
-    action: &str,
-) -> Result<CodecMessageWriter<'a, T, Aes256GcmEnCodec>> {
-    Ok(CodecMessageWriter::for_session_key(
-        writer,
-        Aes256GcmEnCodec::try_new(key)
-            .map_err(|_| protocol_error(format!("failed to initialize {action}")))?,
-        *key,
-    ))
-}
-
 pub(crate) fn protocol_error(detail: impl Into<String>) -> Error {
     Error::MsgProtocol {
         detail: detail.into(),
     }
 }
 
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+/// `fields` back to back, for the fixed layouts on the wire and on disk. Every
+/// caller's field widths add up to `N`, and a test pins each layout's bytes.
+fn pack<const N: usize>(fields: &[&[u8]]) -> [u8; N] {
+    debug_assert_eq!(
+        fields.iter().map(|field| field.len()).sum::<usize>(),
+        N,
+        "the field widths add up to the packed length"
+    );
+    let mut packed = [0; N];
+    for (slot, byte) in packed.iter_mut().zip(fields.iter().copied().flatten()) {
+        *slot = *byte;
+    }
+    packed
 }
-
-#[cfg(test)]
-mod tests;

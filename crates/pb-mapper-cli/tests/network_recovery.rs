@@ -7,13 +7,16 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, PathPolicy, RegisterRequest, Registration, Transport,
+    Client, ConnectOptions, ConnectRequest, Connection, PathPolicy, RegisterRequest, Registration,
+    Transport,
 };
-use pb_mapper_testkit::{Relay, admin_credential, reserve_addr};
+use pb_mapper_core::config::control_conn_pool_size;
+use pb_mapper_testkit::{Relay, admin_client, admin_credential, tcp_echo};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, timeout};
+use tokio_util::task::AbortOnDropHandle;
 
 fn test_env() {
     static ENV: LazyLock<()> = LazyLock::new(|| {
@@ -26,64 +29,91 @@ fn test_env() {
     *ENV;
 }
 
+/// What a [`FaultProxy`] does with each socket it accepts from now on.
+///
+/// A socket keeps the route it was accepted under: a blackholed one stays
+/// wedged after the route recovers, as on a real network.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum Route {
+    /// Forward to the relay.
+    Healthy = 0,
+    /// Swallow every new socket: read what it sends and forward nothing.
+    Blackhole = 1,
+    /// Swallow the next new socket only, then route healthily again.
+    BlackholeNext = 2,
+}
+
+/// What a [`FaultProxy`] and the cases driving it share.
+#[derive(Default)]
+struct ProxyState {
+    /// A [`Route`], as its discriminant.
+    route: AtomicU8,
+    /// Sockets accepted so far; each is numbered by this count as it arrives.
+    accepted: AtomicUsize,
+    /// Sockets swallowed so far.
+    blackholed: AtomicUsize,
+    /// Swallowed sockets still open.
+    blackholed_active: AtomicUsize,
+    /// Added before every forwarded write, in milliseconds.
+    delay_ms: AtomicU64,
+    /// Forwarded sockets numbered at or below this drop what the client sends.
+    discard_requests_through: AtomicUsize,
+    /// Forwarded sockets numbered at or below this drop what the relay answers.
+    discard_responses_through: AtomicUsize,
+}
+
+/// A TCP hop in front of a relay whose faults a case switches at run time.
 struct FaultProxy {
     addr: SocketAddr,
-    // 0: healthy; 1: blackhole new sockets; 2: blackhole the next socket only.
-    mode: Arc<AtomicU8>,
-    blackholed: Arc<AtomicUsize>,
-    blackholed_active: Arc<AtomicUsize>,
-    accepted: Arc<AtomicUsize>,
-    delay_ms: Arc<AtomicU64>,
-    discard_requests_through: Arc<AtomicUsize>,
-    discard_responses_through: Arc<AtomicUsize>,
-    task: tokio::task::JoinHandle<()>,
+    state: Arc<ProxyState>,
+    _task: AbortOnDropHandle<()>,
 }
 
 impl FaultProxy {
-    async fn start(upstream: SocketAddr, mode: u8) -> Self {
+    async fn start(upstream: SocketAddr, route: Route) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let mode = Arc::new(AtomicU8::new(mode));
-        let blackholed = Arc::new(AtomicUsize::new(0));
-        let blackholed_active = Arc::new(AtomicUsize::new(0));
-        let accepted = Arc::new(AtomicUsize::new(0));
-        let delay_ms = Arc::new(AtomicU64::new(0));
-        let proxy_delay = delay_ms.clone();
-        let discard_requests_through = Arc::new(AtomicUsize::new(0));
-        let proxy_discard_requests = discard_requests_through.clone();
-        let discard_responses_through = Arc::new(AtomicUsize::new(0));
-        let proxy_discard = discard_responses_through.clone();
-        let proxy_mode = mode.clone();
-        let proxy_blackholed = blackholed.clone();
-        let proxy_blackholed_active = blackholed_active.clone();
-        let proxy_accepted = accepted.clone();
+        let state = Arc::new(ProxyState::default());
+        state.route.store(route as u8, Ordering::SeqCst);
+        let proxy = state.clone();
         let task = tokio::spawn(async move {
             let mut tasks = JoinSet::new();
             loop {
                 tokio::select! {
                     accepted = listener.accept() => {
                         let (mut downstream, _) = accepted.unwrap();
-                        let id = proxy_accepted.fetch_add(1, Ordering::SeqCst) + 1;
-                        let mode = proxy_mode.try_update(Ordering::SeqCst, Ordering::SeqCst, |m| Some(if m == 2 { 0 } else { m })).unwrap();
-                        if mode != 0 { proxy_blackholed.fetch_add(1, Ordering::SeqCst); }
-                        let delay = proxy_delay.clone();
-                        let discard_requests = proxy_discard_requests.clone();
-                        let discard = proxy_discard.clone();
-                        let blackholed_active = proxy_blackholed_active.clone();
+                        let id = proxy.accepted.fetch_add(1, Ordering::SeqCst) + 1;
+                        let route = proxy
+                            .route
+                            .try_update(Ordering::SeqCst, Ordering::SeqCst, |route| {
+                                Some(if route == Route::BlackholeNext as u8 {
+                                    Route::Healthy as u8
+                                } else {
+                                    route
+                                })
+                            })
+                            .unwrap();
+                        let healthy = route == Route::Healthy as u8;
+                        if !healthy {
+                            proxy.blackholed.fetch_add(1, Ordering::SeqCst);
+                        }
+                        let state = proxy.clone();
                         tasks.spawn(async move {
-                            if mode != 0 {
+                            if !healthy {
                                 // Existing sockets stay wedged after the route recovers.
-                                blackholed_active.fetch_add(1, Ordering::SeqCst);
+                                state.blackholed_active.fetch_add(1, Ordering::SeqCst);
                                 let _ = tokio::io::copy(&mut downstream, &mut tokio::io::sink()).await;
-                                blackholed_active.fetch_sub(1, Ordering::SeqCst);
+                                state.blackholed_active.fetch_sub(1, Ordering::SeqCst);
                             } else if let Ok(mut remote) = TcpStream::connect(upstream).await {
                                 downstream.set_nodelay(true).unwrap();
                                 remote.set_nodelay(true).unwrap();
                                 let (dr, dw) = downstream.split();
                                 let (rr, rw) = remote.split();
+                                let delay = &state.delay_ms;
                                 tokio::select! {
-                                    _ = delayed_copy(dr, rw, &delay, Some((id, &discard_requests))) => {}
-                                    _ = delayed_copy(rr, dw, &delay, Some((id, &discard))) => {}
+                                    _ = delayed_copy(dr, rw, delay, Some((id, &state.discard_requests_through))) => {}
+                                    _ = delayed_copy(rr, dw, delay, Some((id, &state.discard_responses_through))) => {}
                                 }
                             }
                         });
@@ -94,20 +124,18 @@ impl FaultProxy {
         });
         Self {
             addr,
-            mode,
-            blackholed,
-            blackholed_active,
-            accepted,
-            delay_ms,
-            discard_requests_through,
-            discard_responses_through,
-            task,
+            state,
+            _task: AbortOnDropHandle::new(task),
         }
+    }
+
+    fn set_route(&self, route: Route) {
+        self.state.route.store(route as u8, Ordering::SeqCst);
     }
 
     async fn wait_blackholed(&self, count: usize) {
         timeout(Duration::from_secs(3), async {
-            while self.blackholed.load(Ordering::SeqCst) < count {
+            while self.state.blackholed.load(Ordering::SeqCst) < count {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
@@ -148,18 +176,18 @@ async fn registered_but_one_way_control_socket_is_replaced_without_dropping_live
     let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-one-way").await;
-    let proxy = FaultProxy::start(relay.addr(), 0).await;
-    let host = Client::from_credential(proxy.addr.to_string(), admin_credential(), false, None);
-    let direct = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (echo, echo_task) = echo_server().await;
-    let registration = register(&host, echo).await;
+    let proxy = FaultProxy::start(relay.addr(), Route::Healthy).await;
+    let host = admin_client(proxy.addr);
+    let direct = admin_client(relay.addr());
+    let echo = tcp_echo(None).await;
+    let registration = register(&host, echo.addr()).await;
     registration
         .wait_ready_timeout(Duration::from_secs(3))
         .await
         .unwrap();
     let admin = direct.admin().unwrap();
     timeout(Duration::from_secs(3), async {
-        while admin.list_connections_all(None).await.unwrap().len() < 2 {
+        while admin.list_connections_all(None).await.unwrap().len() < control_conn_pool_size() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -172,25 +200,14 @@ async fn registered_but_one_way_control_socket_is_replaced_without_dropping_live
         .into_iter()
         .map(|c| (c.conn_id, c.generation))
         .collect();
-    let controls_through = proxy.accepted.load(Ordering::SeqCst);
-    let listen = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = direct
-        .connect(ConnectRequest {
-            key: "echo".into(),
-            local_addr: listen.to_string(),
-            transport: Transport::Tcp,
-        })
-        .await
-        .unwrap();
-    connection
-        .wait_ready_timeout(Duration::from_secs(3))
-        .await
-        .unwrap();
+    let controls_through = proxy.state.accepted.load(Ordering::SeqCst);
+    let (connection, listen) = connect_ready(&direct, "echo", ConnectOptions::default()).await;
     let mut live = TcpStream::connect(listen).await.unwrap();
     timeout(Duration::from_secs(2), round_trip(&mut live))
         .await
         .unwrap();
     proxy
+        .state
         .discard_responses_through
         .store(controls_through, Ordering::SeqCst);
     let started = Instant::now();
@@ -200,7 +217,7 @@ async fn registered_but_one_way_control_socket_is_replaced_without_dropping_live
                 .await
                 .unwrap();
             let ids = admin.list_connections_all(None).await.unwrap();
-            if ids.len() == 2
+            if ids.len() == control_conn_pool_size()
                 && ids
                     .iter()
                     .all(|c| !old_ids.contains(&(c.conn_id, c.generation)))
@@ -218,7 +235,6 @@ async fn registered_but_one_way_control_socket_is_replaced_without_dropping_live
     );
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
-    echo_task.abort();
     restored.expect("service inventory is not proof that the old control socket works");
 }
 
@@ -227,12 +243,12 @@ async fn delayed_control_ack_does_not_unregister_a_live_service() {
     let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-delayed-ack").await;
-    let proxy = FaultProxy::start(relay.addr(), 0).await;
-    proxy.delay_ms.store(220, Ordering::SeqCst);
-    let host = Client::from_credential(proxy.addr.to_string(), admin_credential(), false, None);
-    let direct = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (echo, echo_task) = echo_server().await;
-    let registration = register(&host, echo).await;
+    let proxy = FaultProxy::start(relay.addr(), Route::Healthy).await;
+    proxy.state.delay_ms.store(220, Ordering::SeqCst);
+    let host = admin_client(proxy.addr);
+    let direct = admin_client(relay.addr());
+    let echo = tcp_echo(None).await;
+    let registration = register(&host, echo.addr()).await;
     registration
         .wait_ready_timeout(Duration::from_secs(3))
         .await
@@ -243,19 +259,7 @@ async fn delayed_control_ack_does_not_unregister_a_live_service() {
         .list_connections_all(None)
         .await
         .unwrap();
-    let listen = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = direct
-        .connect(ConnectRequest {
-            key: "echo".into(),
-            local_addr: listen.to_string(),
-            transport: Transport::Tcp,
-        })
-        .await
-        .unwrap();
-    connection
-        .wait_ready_timeout(Duration::from_secs(3))
-        .await
-        .unwrap();
+    let (connection, listen) = connect_ready(&direct, "echo", ConnectOptions::default()).await;
     let started = Instant::now();
     for _ in 0..3 {
         timeout(
@@ -288,34 +292,6 @@ async fn delayed_control_ack_does_not_unregister_a_live_service() {
     );
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
-    echo_task.abort();
-}
-
-impl Drop for FaultProxy {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-async fn echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        let mut streams = JoinSet::new();
-        loop {
-            tokio::select! {
-                accepted = listener.accept() => {
-                    let (mut stream, _) = accepted.unwrap();
-                    streams.spawn(async move {
-                        let (mut reader, mut writer) = stream.split();
-                        let _ = tokio::io::copy(&mut reader, &mut writer).await;
-                    });
-                }
-                Some(_) = streams.join_next() => {}
-            }
-        }
-    });
-    (addr, task)
 }
 
 async fn register(client: &Client, addr: SocketAddr) -> Registration {
@@ -331,6 +307,32 @@ async fn register(client: &Client, addr: SocketAddr) -> Registration {
         .unwrap()
 }
 
+/// Subscribe to `key` on a port the system chooses and give it three seconds
+/// to be ready; answers the connection and where it listens.
+async fn connect_ready(
+    client: &Client,
+    key: &str,
+    options: ConnectOptions,
+) -> (Connection, SocketAddr) {
+    let connection = client
+        .connect_with_options(
+            ConnectRequest {
+                key: key.into(),
+                local_addr: "127.0.0.1:0".into(),
+                transport: Transport::Tcp,
+            },
+            options,
+        )
+        .await
+        .unwrap();
+    connection
+        .wait_ready_timeout(Duration::from_secs(3))
+        .await
+        .unwrap();
+    let listen = connection.local_addr().unwrap();
+    (connection, listen)
+}
+
 async fn round_trip(stream: &mut TcpStream) {
     stream.write_all(b"weak-network-echo").await.unwrap();
     let mut reply = [0; 17];
@@ -343,15 +345,13 @@ async fn registration_replaces_blackholed_handshake_after_network_recovers() {
     let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-blackhole").await;
-    let proxy = FaultProxy::start(relay.addr(), 1).await;
-    let client = Client::from_credential(proxy.addr.to_string(), admin_credential(), false, None);
-    let (echo, echo_task) = echo_server().await;
-    let registration = register(&client, echo).await;
-    proxy
-        .wait_blackholed(pb_mapper_core::config::control_conn_pool_size())
-        .await;
+    let proxy = FaultProxy::start(relay.addr(), Route::Blackhole).await;
+    let client = admin_client(proxy.addr);
+    let echo = tcp_echo(None).await;
+    let registration = register(&client, echo.addr()).await;
+    proxy.wait_blackholed(control_conn_pool_size()).await;
     let restored = Instant::now();
-    proxy.mode.store(0, Ordering::SeqCst);
+    proxy.set_route(Route::Healthy);
     registration
         .wait_ready_timeout(Duration::from_secs(35))
         .await
@@ -359,21 +359,9 @@ async fn registration_replaces_blackholed_handshake_after_network_recovers() {
     let recovered = restored.elapsed();
     eprintln!(
         "registration after route restoration: {recovered:?}, attempts={}",
-        proxy.accepted.load(Ordering::SeqCst)
+        proxy.state.accepted.load(Ordering::SeqCst)
     );
-    let listen = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = client
-        .connect(ConnectRequest {
-            key: "echo".into(),
-            local_addr: listen.to_string(),
-            transport: Transport::Tcp,
-        })
-        .await
-        .unwrap();
-    connection
-        .wait_ready_timeout(Duration::from_secs(3))
-        .await
-        .unwrap();
+    let (connection, listen) = connect_ready(&client, "echo", ConnectOptions::default()).await;
     timeout(
         Duration::from_secs(2),
         round_trip(&mut TcpStream::connect(listen).await.unwrap()),
@@ -382,7 +370,6 @@ async fn registration_replaces_blackholed_handshake_after_network_recovers() {
     .unwrap();
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
-    echo_task.abort();
     assert!(
         recovered < Duration::from_secs(6),
         "stale handshake delayed restored route by {recovered:?}"
@@ -394,34 +381,21 @@ async fn stalled_health_probe_does_not_block_new_or_existing_traffic() {
     let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-health-probe").await;
-    let register_client =
-        Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (echo, echo_task) = echo_server().await;
-    let registration = register(&register_client, echo).await;
+    let register_client = admin_client(relay.addr());
+    let echo = tcp_echo(None).await;
+    let registration = register(&register_client, echo.addr()).await;
     registration
         .wait_ready_timeout(Duration::from_secs(3))
         .await
         .unwrap();
-    let proxy = FaultProxy::start(relay.addr(), 0).await;
-    let client = Client::from_credential(proxy.addr.to_string(), admin_credential(), false, None);
-    let listen = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = client
-        .connect(ConnectRequest {
-            key: "echo".into(),
-            local_addr: listen.to_string(),
-            transport: Transport::Tcp,
-        })
-        .await
-        .unwrap();
-    connection
-        .wait_ready_timeout(Duration::from_secs(3))
-        .await
-        .unwrap();
+    let proxy = FaultProxy::start(relay.addr(), Route::Healthy).await;
+    let client = admin_client(proxy.addr);
+    let (connection, listen) = connect_ready(&client, "echo", ConnectOptions::default()).await;
     let mut existing = TcpStream::connect(listen).await.unwrap();
     timeout(Duration::from_secs(2), round_trip(&mut existing))
         .await
         .unwrap();
-    proxy.mode.store(2, Ordering::SeqCst);
+    proxy.set_route(Route::BlackholeNext);
     proxy.wait_blackholed(1).await;
     timeout(Duration::from_millis(500), round_trip(&mut existing))
         .await
@@ -439,7 +413,6 @@ async fn stalled_health_probe_does_not_block_new_or_existing_traffic() {
     );
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
-    echo_task.abort();
     result.expect("a background probe must not block accept/forwarding");
 }
 
@@ -448,12 +421,12 @@ async fn offline_registration_limits_attempts_and_stops_promptly() {
     let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-offline").await;
-    let proxy = FaultProxy::start(relay.addr(), 1).await;
-    let client = Client::from_credential(proxy.addr.to_string(), admin_credential(), false, None);
+    let proxy = FaultProxy::start(relay.addr(), Route::Blackhole).await;
+    let client = admin_client(proxy.addr);
     let registration = register(&client, relay.addr()).await;
     proxy.wait_blackholed(2).await;
     tokio::time::sleep(Duration::from_secs(10)).await;
-    let attempts = proxy.accepted.load(Ordering::SeqCst);
+    let attempts = proxy.state.accepted.load(Ordering::SeqCst);
     assert!(
         (4..=8).contains(&attempts),
         "offline attempt rate: {attempts} in 10s"
@@ -474,37 +447,27 @@ async fn connection_burst_has_bounded_setup_and_probe_concurrency() {
     let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-setup-capacity").await;
-    let host = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (echo, echo_task) = echo_server().await;
-    let registration = register(&host, echo).await;
+    let host = admin_client(relay.addr());
+    let echo = tcp_echo(None).await;
+    let registration = register(&host, echo.addr()).await;
     registration
         .wait_ready_timeout(Duration::from_secs(3))
         .await
         .unwrap();
-    let proxy = FaultProxy::start(relay.addr(), 0).await;
-    let client = Client::from_credential(proxy.addr.to_string(), admin_credential(), false, None);
-    let listen = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+    let proxy = FaultProxy::start(relay.addr(), Route::Healthy).await;
+    let client = admin_client(proxy.addr);
     // Relay setup is what is being counted: no direct capability query per caller.
-    let connection = client
-        .connect_with_options(
-            ConnectRequest {
-                key: "echo".into(),
-                local_addr: listen.to_string(),
-                transport: Transport::Tcp,
-            },
-            ConnectOptions {
-                path: PathPolicy::RelayOnly,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    connection
-        .wait_ready_timeout(Duration::from_secs(3))
-        .await
-        .unwrap();
-    proxy.mode.store(1, Ordering::SeqCst);
-    let before = proxy.accepted.load(Ordering::SeqCst);
+    let (connection, listen) = connect_ready(
+        &client,
+        "echo",
+        ConnectOptions {
+            path: PathPolicy::RelayOnly,
+            ..Default::default()
+        },
+    )
+    .await;
+    proxy.set_route(Route::Blackhole);
+    let before = proxy.state.accepted.load(Ordering::SeqCst);
     let mut callers = Vec::new();
     timeout(Duration::from_secs(1), async {
         for _ in 0..96 {
@@ -513,8 +476,17 @@ async fn connection_burst_has_bounded_setup_and_probe_concurrency() {
     })
     .await
     .unwrap();
+    // Every setup slot reaches the relay, however slowly the machine runs;
+    // then nothing more than one probe may join them.
+    timeout(Duration::from_secs(5), async {
+        while proxy.state.accepted.load(Ordering::SeqCst) - before < 64 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fewer than 64 setups reached the relay");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let setups = proxy.accepted.load(Ordering::SeqCst) - before;
+    let setups = proxy.state.accepted.load(Ordering::SeqCst) - before;
     assert!(
         (64..=65).contains(&setups),
         "expected 64 setup attempts plus at most one probe, got {setups}"
@@ -524,7 +496,6 @@ async fn connection_burst_has_bounded_setup_and_probe_concurrency() {
         .unwrap()
         .unwrap();
     registration.stop().await.unwrap();
-    echo_task.abort();
     eprintln!("96 callers while offline: {setups} relay sockets (64 setup slots + one probe)");
 }
 
@@ -533,12 +504,12 @@ async fn services_missing_from_relay_recover_together_without_blocking_another_h
     let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-multiple-services").await;
-    let proxy = FaultProxy::start(relay.addr(), 0).await;
-    let host = Client::from_credential(proxy.addr.to_string(), admin_credential(), false, None);
-    let direct = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let proxy = FaultProxy::start(relay.addr(), Route::Healthy).await;
+    let host = admin_client(proxy.addr);
+    let direct = admin_client(relay.addr());
     let admin = direct.admin().unwrap();
     let keys = ["staticflow", "pocket-app", "pocket-meta", "other-host"];
-    let (echo, echo_task) = echo_server().await;
+    let echo = tcp_echo(None).await;
     let mut registrations = Vec::new();
     let mut connections = Vec::new();
     let mut listeners = Vec::new();
@@ -547,7 +518,7 @@ async fn services_missing_from_relay_recover_together_without_blocking_another_h
         let registration = publisher
             .register(RegisterRequest {
                 key: key.into(),
-                local_addr: echo.to_string(),
+                local_addr: echo.addr().to_string(),
                 transport: Transport::Tcp,
                 codec: true,
                 force_namespace: false,
@@ -559,19 +530,7 @@ async fn services_missing_from_relay_recover_together_without_blocking_another_h
             .await
             .unwrap();
         registrations.push(registration);
-        let listen = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-        let connection = direct
-            .connect(ConnectRequest {
-                key: key.into(),
-                local_addr: listen.to_string(),
-                transport: Transport::Tcp,
-            })
-            .await
-            .unwrap();
-        connection
-            .wait_ready_timeout(Duration::from_secs(3))
-            .await
-            .unwrap();
+        let (connection, listen) = connect_ready(&direct, key, ConnectOptions::default()).await;
         timeout(
             Duration::from_secs(2),
             round_trip(&mut TcpStream::connect(listen).await.unwrap()),
@@ -595,7 +554,7 @@ async fn services_missing_from_relay_recover_together_without_blocking_another_h
                         .iter()
                         .filter(|c| c.service_name == *key && c.healthy)
                         .count()
-                        == pb_mapper_core::config::control_conn_pool_size()
+                        == control_conn_pool_size()
                 }) {
                     break;
                 }
@@ -615,12 +574,14 @@ async fn services_missing_from_relay_recover_together_without_blocking_another_h
 
         // Lose both directions of every old host socket; new attempts also
         // blackhole. Recovery must replace these sockets, not reuse them.
-        proxy.mode.store(1, Ordering::SeqCst);
-        let old_sockets = proxy.accepted.load(Ordering::SeqCst);
+        proxy.set_route(Route::Blackhole);
+        let old_sockets = proxy.state.accepted.load(Ordering::SeqCst);
         proxy
+            .state
             .discard_requests_through
             .store(old_sockets, Ordering::SeqCst);
         proxy
+            .state
             .discard_responses_through
             .store(old_sockets, Ordering::SeqCst);
         timeout(Duration::from_secs(20), async {
@@ -639,8 +600,8 @@ async fn services_missing_from_relay_recover_together_without_blocking_another_h
         .expect("all three disconnected services must actually leave relay inventory");
 
         timeout(Duration::from_secs(6), async {
-            while proxy.blackholed_active.load(Ordering::SeqCst)
-                < 3 * pb_mapper_core::config::control_conn_pool_size()
+            while proxy.state.blackholed_active.load(Ordering::SeqCst)
+                < 3 * control_conn_pool_size()
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -649,7 +610,7 @@ async fn services_missing_from_relay_recover_together_without_blocking_another_h
         .expect("all host workers must be stuck in outage attempts before restoring the route");
 
         let restored = Instant::now();
-        proxy.mode.store(0, Ordering::SeqCst);
+        proxy.set_route(Route::Healthy);
         let recovery = timeout(Duration::from_secs(8), async {
             loop {
                 timeout(Duration::from_secs(1), round_trip(&mut unaffected))
@@ -691,7 +652,6 @@ async fn services_missing_from_relay_recover_together_without_blocking_another_h
     for registration in registrations {
         registration.stop().await.unwrap();
     }
-    echo_task.abort();
 }
 
 #[tokio::test]
@@ -699,18 +659,18 @@ async fn repeated_brief_jitter_preserves_control_and_existing_streams() {
     let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-repeated-jitter").await;
-    let proxy = FaultProxy::start(relay.addr(), 0).await;
-    let host = Client::from_credential(proxy.addr.to_string(), admin_credential(), false, None);
-    let direct = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (echo, echo_task) = echo_server().await;
-    let registration = register(&host, echo).await;
+    let proxy = FaultProxy::start(relay.addr(), Route::Healthy).await;
+    let host = admin_client(proxy.addr);
+    let direct = admin_client(relay.addr());
+    let echo = tcp_echo(None).await;
+    let registration = register(&host, echo.addr()).await;
     registration
         .wait_ready_timeout(Duration::from_secs(3))
         .await
         .unwrap();
     let admin = direct.admin().unwrap();
     timeout(Duration::from_secs(3), async {
-        while admin.list_connections_all(None).await.unwrap().len() < 2 {
+        while admin.list_connections_all(None).await.unwrap().len() < control_conn_pool_size() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -723,29 +683,17 @@ async fn repeated_brief_jitter_preserves_control_and_existing_streams() {
         .into_iter()
         .map(|c| (c.conn_id, c.generation))
         .collect();
-    let listen = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = direct
-        .connect(ConnectRequest {
-            key: "echo".into(),
-            local_addr: listen.to_string(),
-            transport: Transport::Tcp,
-        })
-        .await
-        .unwrap();
-    connection
-        .wait_ready_timeout(Duration::from_secs(3))
-        .await
-        .unwrap();
+    let (connection, listen) = connect_ready(&direct, "echo", ConnectOptions::default()).await;
     let mut live = TcpStream::connect(listen).await.unwrap();
     timeout(Duration::from_secs(2), round_trip(&mut live))
         .await
         .unwrap();
     for cycle in 0..3 {
-        proxy.delay_ms.store(800, Ordering::SeqCst);
-        let delay = proxy.delay_ms.clone();
+        proxy.state.delay_ms.store(800, Ordering::SeqCst);
+        let state = proxy.state.clone();
         let restore = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            delay.store(0, Ordering::SeqCst);
+            state.delay_ms.store(0, Ordering::SeqCst);
         });
         let started = Instant::now();
         timeout(Duration::from_secs(6), async {
@@ -771,7 +719,6 @@ async fn repeated_brief_jitter_preserves_control_and_existing_streams() {
     }
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
-    echo_task.abort();
 }
 
 #[tokio::test]
@@ -779,42 +726,43 @@ async fn network_hint_replaces_stalled_setup_and_real_payload_recovers_promptly(
     let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-hint").await;
-    let proxy = FaultProxy::start(relay.addr(), 1).await;
+    let proxy = FaultProxy::start(relay.addr(), Route::Blackhole).await;
     let host = Client::from_credential(
         format!("localhost:{}", proxy.addr.port()),
         admin_credential(),
         false,
         None,
     );
-    let direct = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let (echo, echo_task) = echo_server().await;
-    let registration = register(&host, echo).await;
+    let direct = admin_client(relay.addr());
+    let echo = tcp_echo(None).await;
+    let registration = register(&host, echo.addr()).await;
     proxy.wait_blackholed(2).await;
-    let local = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
     let connection = direct
         .connect(ConnectRequest {
             key: "echo".into(),
-            local_addr: local.to_string(),
+            local_addr: "127.0.0.1:0".into(),
             transport: Transport::Tcp,
         })
         .await
         .unwrap();
     let restored = Instant::now();
-    proxy.mode.store(0, Ordering::SeqCst);
+    proxy.set_route(Route::Healthy);
     host.notify_network_change();
     timeout(Duration::from_secs(2), async {
         registration.wait_ready().await.unwrap();
         connection.wait_ready().await.unwrap();
+        let local = connection.local_addr().unwrap();
         round_trip(&mut TcpStream::connect(local).await.unwrap()).await;
     })
     .await
     .unwrap();
+    let local = connection.local_addr().unwrap();
     eprintln!(
         "network hint to encrypted payload: {:?}",
         restored.elapsed()
     );
     timeout(Duration::from_secs(2), async {
-        while direct.service_status("echo").await.unwrap().len() < 2 {
+        while direct.service_status("echo").await.unwrap().len() < control_conn_pool_size() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -849,7 +797,6 @@ async fn network_hint_replaces_stalled_setup_and_real_payload_recovers_promptly(
     registration.stop().await.unwrap();
     assert_eq!(registration.diagnostics().active_control_setups, 0);
     assert_eq!(registration.diagnostics().active_data_setups, 0);
-    echo_task.abort();
 }
 
 #[tokio::test]
@@ -857,15 +804,15 @@ async fn many_mappings_share_setup_budget_and_cancel_without_stranded_slots() {
     let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-shared-budget").await;
-    let proxy = FaultProxy::start(relay.addr(), 1).await;
-    let host = Client::from_credential(proxy.addr.to_string(), admin_credential(), false, None);
-    let (echo, echo_task) = echo_server().await;
+    let proxy = FaultProxy::start(relay.addr(), Route::Blackhole).await;
+    let host = admin_client(proxy.addr);
+    let echo = tcp_echo(None).await;
     let mut registrations = Vec::new();
     for i in 0..20 {
         registrations.push(
             host.register(RegisterRequest {
                 key: format!("mapping-{i}"),
-                local_addr: echo.to_string(),
+                local_addr: echo.addr().to_string(),
                 transport: Transport::Tcp,
                 codec: true,
                 force_namespace: false,
@@ -877,7 +824,7 @@ async fn many_mappings_share_setup_budget_and_cancel_without_stranded_slots() {
     proxy.wait_blackholed(8).await;
     assert_eq!(registrations[0].diagnostics().active_control_setups, 8);
     assert_eq!(
-        proxy.blackholed.load(Ordering::SeqCst),
+        proxy.state.blackholed.load(Ordering::SeqCst),
         8,
         "separate services must not each allocate eight sockets"
     );
@@ -885,12 +832,11 @@ async fn many_mappings_share_setup_budget_and_cancel_without_stranded_slots() {
         registration.stop().await.unwrap();
     }
     assert_eq!(registrations[0].diagnostics().active_control_setups, 0);
-    proxy.mode.store(0, Ordering::SeqCst);
-    let recovered = register(&host, echo).await;
+    proxy.set_route(Route::Healthy);
+    let recovered = register(&host, echo.addr()).await;
     recovered
         .wait_ready_timeout(Duration::from_secs(2))
         .await
         .unwrap();
     recovered.stop().await.unwrap();
-    echo_task.abort();
 }

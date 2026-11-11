@@ -13,6 +13,10 @@ use ring::signature::{ED25519, UnparsedPublicKey};
 const MAX_MESSAGE: u32 = 1 << 20;
 const SIGNATURE_LEN: u32 = 64;
 const PUBLIC_KEY_LEN: u32 = 32;
+const _: () = assert!(
+    PUBLIC_KEY_LEN as usize == ring::signature::ED25519_PUBLIC_KEY_LEN,
+    "the key length is the one ring takes"
+);
 
 /// Checks that `signature` is an Ed25519 signature of exactly `message` by
 /// `public_key` (its 32 raw bytes).

@@ -1,16 +1,17 @@
 //! AEAD wrap/unwrap for snapshot and WAL payloads.
-use super::super::*;
+use ring::aead::NONCE_LEN;
 
+use super::super::*;
+use super::random_bytes;
+
+/// `STATE_BLOB_MAGIC`, then a fresh nonce, then `plain` sealed under
+/// `admin_key` with `STATE_AAD`.
 pub(crate) fn seal_blob(admin_key: &AesKeyType, plain: &[u8]) -> Result<Vec<u8>, AuthFailure> {
     let key = LessSafeKey::new(
         UnboundKey::new(&AES_256_GCM, admin_key)
             .map_err(|_| AuthFailure::internal("failed to initialize state encryption key"))?,
     );
-    let mut nonce_bytes = [0_u8; 12];
-    let mut rng = rand::rng();
-    for byte in &mut nonce_bytes {
-        *byte = rng.random();
-    }
+    let nonce_bytes: [u8; NONCE_LEN] = random_bytes();
     let mut output = plain.to_vec();
     key.seal_in_place_append_tag(
         Nonce::assume_unique_for_key(nonce_bytes),
@@ -26,44 +27,45 @@ pub(crate) fn seal_blob(admin_key: &AesKeyType, plain: &[u8]) -> Result<Vec<u8>,
 }
 
 pub(crate) fn open_blob(admin_key: &AesKeyType, sealed: &[u8]) -> Result<Vec<u8>, AuthFailure> {
-    if sealed.len() < STATE_BLOB_MAGIC.len() + 12 + AES_256_GCM.tag_len()
-        || &sealed[..STATE_BLOB_MAGIC.len()] != STATE_BLOB_MAGIC
-    {
-        return Err(AuthFailure::new(
-            "temporary_key_store_unavailable",
+    let invalid_header = || {
+        AuthFailure::new(
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             "authentication state blob has an invalid header",
             false,
-        ));
+        )
+    };
+    if sealed.len() < STATE_BLOB_MAGIC.len() + NONCE_LEN + AES_256_GCM.tag_len() {
+        return Err(invalid_header());
     }
-    let nonce_start = STATE_BLOB_MAGIC.len();
-    let nonce_end = nonce_start + 12;
-    // Unreachable: the length check above guarantees these 12 bytes exist. This
-    // parses a file that may have been truncated or corrupted, so it reports
-    // rather than panics.
-    let nonce_bytes: [u8; 12] = sealed[nonce_start..nonce_end].try_into().map_err(|_| {
-        AuthFailure::new(
-            "temporary_key_store_unavailable",
+    let Some(rest) = sealed.strip_prefix(STATE_BLOB_MAGIC.as_slice()) else {
+        return Err(invalid_header());
+    };
+    // Cannot fail after the length check above, but this parses a file that may
+    // have been truncated or corrupted, so it reports rather than panics.
+    let Some((nonce_bytes, ciphertext)) = rest.split_first_chunk::<NONCE_LEN>() else {
+        return Err(AuthFailure::new(
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             "authentication state blob has an invalid nonce",
             false,
-        )
-    })?;
-    let mut plain = sealed[nonce_end..].to_vec();
+        ));
+    };
+    let mut plain = ciphertext.to_vec();
     let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, admin_key).map_err(|_| {
         AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             "failed to initialize state decryption key",
             false,
         )
     })?);
     let opened = key
         .open_in_place(
-            Nonce::assume_unique_for_key(nonce_bytes),
+            Nonce::assume_unique_for_key(*nonce_bytes),
             Aad::from(STATE_AAD),
             &mut plain,
         )
         .map_err(|_| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 "authentication state integrity check failed",
                 false,
             )

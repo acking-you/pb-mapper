@@ -2,7 +2,10 @@
 use pb_mapper_core::{checksum::Credential, config::ResolvedAddrs};
 pub use pb_mapper_protocol::transport::RelayTransport;
 use pb_mapper_protocol::{
-    command::{MessageSerializer, PbConnRequest, PbConnResponse, PbErrorResponse, QuicEndpoint},
+    command::{
+        MessageSerializer, PbConnRequest, PbConnResponse, PbErrorResponse, QuicEndpoint,
+        REQUEST_DECODE_FAILED,
+    },
     secure::ClientHeaderSession,
     transport::CONNECT_TIMEOUT,
 };
@@ -23,16 +26,10 @@ pub(crate) enum CarrierId {}
 /// registration, subscription or administrator request has been sent.
 #[derive(Debug, snafu::Snafu)]
 pub(crate) enum ConnectError {
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Transport { source: std::io::Error },
     #[snafu(display("{}: {}", response.code, response.message))]
     Rejected { response: PbErrorResponse },
-}
-
-impl From<std::io::Error> for ConnectError {
-    fn from(source: std::io::Error) -> Self {
-        Self::Transport { source }
-    }
 }
 
 impl From<ConnectError> for std::io::Error {
@@ -52,9 +49,9 @@ impl From<ConnectError> for std::io::Error {
 /// asked to use QUIC there fails rather than retrying forever.
 pub const QUIC_UNAVAILABLE: &str = "quic_unavailable";
 
-/// What an older relay answers a request it cannot decode, which is how it
-/// answers [`PbConnRequest::QuicEndpoint`].
-const REQUEST_DECODE_FAILED: &str = "request_decode_failed";
+/// The largest QUIC certificate discovery accepts from a relay: a bound on
+/// what it takes from the wire.
+const MAX_QUIC_CERTIFICATE: usize = 4096;
 
 fn quic_unavailable() -> ConnectError {
     ConnectError::Rejected {
@@ -95,7 +92,7 @@ pub(crate) async fn discover(
         PbConnResponse::QuicEndpoint(Some(endpoint))
             if endpoint.port != 0
                 && !endpoint.certificate.is_empty()
-                && endpoint.certificate.len() <= 4096 =>
+                && endpoint.certificate.len() <= MAX_QUIC_CERTIFICATE =>
         {
             Ok((relay_addr, endpoint))
         }
@@ -112,6 +109,7 @@ pub(crate) async fn discover(
         )
         .into()),
         PbConnResponse::QuicEndpoint(None) => Err(quic_unavailable()),
+        // How a relay from before QUIC answers the question.
         PbConnResponse::Error(error) if error.code == REQUEST_DECODE_FAILED => {
             Err(quic_unavailable())
         }

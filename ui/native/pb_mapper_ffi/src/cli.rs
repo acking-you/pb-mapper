@@ -16,7 +16,7 @@ use std::ffi::{CStr, c_char, c_int};
 use clap::{CommandFactory, Parser};
 
 use crate::ctl::proto::Response;
-use crate::ctl::{Command, endpoint, server};
+use crate::ctl::{Command, server};
 
 /// Returned when argv is not a command at all, so Dart knows to run the GUI.
 /// Chosen so it cannot collide with a real exit code.
@@ -102,7 +102,7 @@ fn run(args: Vec<String>) -> c_int {
     runtime.block_on(async move {
         let response = match server::request(cli.command).await {
             Ok(response) => response,
-            Err(e) if endpoint::is_not_listening(&e) => {
+            Err(e) if e.is_not_listening() => {
                 // Attached is all there is for now; headless arrives in phase 3.
                 // Say which it was rather than a bare connection error.
                 eprintln!("No running pb-mapper UI to attach to.");
@@ -163,7 +163,6 @@ pub unsafe extern "C" fn pb_mapper_cli_main(argc: c_int, argv: *const *const c_c
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -194,21 +193,5 @@ mod tests {
         // And with global flags in front, which is where a hand-written check
         // would usually go wrong.
         assert!(looks_like_command(&args(&["--json", "status"])));
-    }
-
-    /// The verb list is derived from `Command`, so this fails the moment a
-    /// variant is added without the CLI knowing about it.
-    #[test]
-    fn the_verb_list_comes_from_the_command_enum() {
-        let verbs: Vec<String> = Cli::command()
-            .get_subcommands()
-            .map(|s| s.get_name().to_string())
-            .collect();
-        assert!(verbs.contains(&"hello".to_string()));
-        assert!(verbs.contains(&"connections".to_string()));
-        assert!(
-            verbs.len() >= 10,
-            "expected the whole surface, got {verbs:?}"
-        );
     }
 }

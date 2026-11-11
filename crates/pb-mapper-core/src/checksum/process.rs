@@ -1,0 +1,162 @@
+//! The process credential: read once from `MSG_HEADER_KEY`, replaceable at
+//! runtime, and the frame checksum keyed by it.
+
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use parking_lot::RwLock;
+
+use super::{ChecksumType, Credential, gen_checksum_by_key, parse_credential};
+use crate::DataLenType;
+
+/// Environment variable used by server/client processes to carry the 32-byte header key.
+pub const ENV_MSG_HEADER_KEY: &str = "MSG_HEADER_KEY";
+
+/// Set in [`MsgHeaderKeyState::checksum`] while a credential keys checksums.
+const CHECKSUM_READY: u64 = 1 << 32;
+
+struct MsgHeaderKeyState {
+    /// The credential, if any, or why the one in `MSG_HEADER_KEY` was
+    /// refused. Only the start can refuse one: every update replaces it with
+    /// a credential or none.
+    credential: RwLock<Result<Option<Credential>, String>>,
+    /// `CHECKSUM_READY | hash` while a credential is set, else 0, so one load
+    /// gives both whether a frame can be checksummed and the hash to use.
+    /// Stored under the credential's write lock.
+    checksum: AtomicU64,
+}
+
+/// What [`MsgHeaderKeyState::checksum`] holds for `credential`.
+fn packed_checksum(credential: Option<&Credential>) -> u64 {
+    credential.map_or(0, |credential| {
+        CHECKSUM_READY | u64::from(gen_checksum_by_key(credential.key()))
+    })
+}
+
+/// The hash half of a [`packed_checksum`]: 0 when no credential is set.
+fn checksum_hash(packed: u64) -> ChecksumType {
+    packed as ChecksumType
+}
+
+fn load_credential_from_env() -> Result<Option<Credential>, String> {
+    let Some(raw) = std::env::var_os(ENV_MSG_HEADER_KEY) else {
+        return Ok(None);
+    };
+    let raw = raw
+        .into_string()
+        .map_err(|_| format!("`{ENV_MSG_HEADER_KEY}` must contain valid UTF-8 credential text"))?;
+    parse_credential(raw.trim()).map(Some)
+}
+
+fn update_runtime_credential(credential: Option<Credential>) {
+    let checksum = packed_checksum(credential.as_ref());
+    let mut guard = MSG_HEADER_KEY_STATE.credential.write();
+    *guard = Ok(credential);
+    MSG_HEADER_KEY_STATE
+        .checksum
+        .store(checksum, Ordering::Release);
+}
+
+/// Runtime key material and checksum hash.
+///
+/// This state is mutable so FFI/UI can update `MSG_HEADER_KEY` at runtime
+/// without restarting the process.
+static MSG_HEADER_KEY_STATE: LazyLock<MsgHeaderKeyState> = LazyLock::new(|| {
+    let credential = load_credential_from_env().inspect_err(|error| {
+        tracing::error!(reason = "credential_invalid", %error, "invalid MSG_HEADER_KEY");
+    });
+    MsgHeaderKeyState {
+        checksum: AtomicU64::new(packed_checksum(
+            credential.as_ref().ok().and_then(Option::as_ref),
+        )),
+        credential: RwLock::new(credential),
+    }
+});
+
+/// Return the configured process credential, failing closed when none exists.
+pub fn get_process_credential() -> Result<Credential, String> {
+    match &*MSG_HEADER_KEY_STATE.credential.read() {
+        Ok(Some(credential)) => Ok(*credential),
+        Ok(None) => Err(format!(
+            "`{ENV_MSG_HEADER_KEY}` is required; no insecure default credential is available"
+        )),
+        Err(error) => Err(error.clone()),
+    }
+}
+
+/// Get current message header key bytes.
+pub fn get_msg_header_key() -> Result<Vec<u8>, String> {
+    get_process_credential().map(|credential| credential.key().to_vec())
+}
+
+/// Replace the process credential and its checksum state.
+///
+/// - `Some(non-empty)` => validate an admin or temporary credential and apply it immediately.
+/// - `None` or empty => remove the credential. Subsequent network operations fail closed.
+///
+/// `MSG_HEADER_KEY` is read once, when the state is first used. This never
+/// writes the environment: callers include a running relay rotating its root
+/// key and the UI changing settings, and a `setenv` racing any other thread's
+/// `getenv` (DNS resolution reads the environment) is undefined behavior.
+pub fn set_process_msg_header_key(msg_header_key: Option<&str>) -> Result<(), String> {
+    let normalized = msg_header_key.map(str::trim).unwrap_or("");
+    let credential = if normalized.is_empty() {
+        None
+    } else {
+        Some(parse_credential(normalized)?)
+    };
+    update_runtime_credential(credential);
+    Ok(())
+}
+
+/// Whether a process credential was supplied, valid or not.
+pub fn process_credential_configured() -> bool {
+    !matches!(*MSG_HEADER_KEY_STATE.credential.read(), Ok(None))
+}
+
+/// `true` when the process credential can key a length checksum.
+pub fn process_checksum_is_ready() -> bool {
+    MSG_HEADER_KEY_STATE.checksum.load(Ordering::Acquire) & CHECKSUM_READY != 0
+}
+
+#[inline]
+/// Compute frame checksum from payload length and the current header key hash.
+pub fn get_checksum(datalen: DataLenType) -> ChecksumType {
+    datalen ^ checksum_hash(MSG_HEADER_KEY_STATE.checksum.load(Ordering::Acquire))
+}
+
+#[inline]
+/// Validate frame checksum generated by [`get_checksum`].
+///
+/// Missing or invalid process credentials fail closed instead of accepting
+/// an unkeyed `datalen` checksum (`hash == 0`).
+pub fn valid_checksum(datalen: DataLenType, checksum: ChecksumType) -> bool {
+    let packed = MSG_HEADER_KEY_STATE.checksum.load(Ordering::Acquire);
+    packed & CHECKSUM_READY != 0 && datalen == checksum ^ checksum_hash(packed)
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn clearing_the_process_credential_fails_closed_for_checksums() {
+        use super::*;
+        use crate::test_support::{PROCESS_CREDENTIAL_TEST_LOCK, TEST_ADMIN_KEY};
+
+        let _guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+        let environment = std::env::var_os(ENV_MSG_HEADER_KEY);
+        set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
+        let checksum = get_checksum(32);
+        assert!(valid_checksum(32, checksum));
+        assert!(process_credential_configured());
+        set_process_msg_header_key(None).unwrap();
+        assert!(!valid_checksum(32, checksum));
+        assert!(!valid_checksum(32, 32));
+        assert!(get_process_credential().is_err());
+        assert!(!process_credential_configured());
+        assert_eq!(
+            std::env::var_os(ENV_MSG_HEADER_KEY),
+            environment,
+            "runtime updates must not race environment readers"
+        );
+    }
+}

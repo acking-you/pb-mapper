@@ -11,13 +11,20 @@ use windows::{
     core::PCWSTR,
 };
 
+/// What a client may do with a helper pipe: read and write it, without
+/// `FILE_CREATE_PIPE_INSTANCE`. A generic-write ACE would let a user create
+/// another server instance and impersonate the helper.
+const CLIENT_ACCESS: u32 = 0x0012_019b;
+const _: () = assert!(
+    CLIENT_ACCESS == (FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0) & !FILE_CREATE_PIPE_INSTANCE.0,
+    "generic read and write, less creating a pipe instance"
+);
+
 #[cfg(feature = "windows-helper")]
 pub fn bind(name: &str, sid: Option<&str>, first: bool) -> Result<NamedPipeServer> {
-    // FILE_CREATE_PIPE_INSTANCE (0x4) is deliberately absent for the user.
-    // A generic-write ACE would let a user impersonate another server instance.
     let mut sddl = "D:P(A;;FA;;;SY)(A;;FA;;;BA)".to_string();
     if let Some(sid) = sid {
-        sddl.push_str(&format!("(A;;0x0012019b;;;{sid})"));
+        sddl.push_str(&format!("(A;;{CLIENT_ACCESS:#010x};;;{sid})"));
     }
     let descriptor = os::Descriptor::new(&sddl)?;
     let mut options = ServerOptions::new();
@@ -35,7 +42,7 @@ pub fn connect(name: &str) -> Result<NamedPipeClient> {
     let handle = unsafe {
         CreateFileW(
             PCWSTR(name.as_ptr()),
-            0x0012019b,
+            CLIENT_ACCESS,
             FILE_SHARE_MODE(0),
             None,
             OPEN_EXISTING,

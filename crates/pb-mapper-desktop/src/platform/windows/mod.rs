@@ -15,6 +15,7 @@ pub(crate) mod still;
 pub(crate) mod timer;
 pub mod video;
 pub(crate) mod waiter;
+pub(crate) mod win32;
 
 use super::{HostSupport, Parts, Platform, UnsupportedReason, VideoSource};
 use crate::{
@@ -59,14 +60,7 @@ impl Platform for Windows {
     }
     fn open(_: &(), display: &Display) -> Result<Parts<Self>> {
         desktop::available()?;
-        let desktop = desktop::WinDesktop::open(display)?;
-        Ok(Parts {
-            input: input::WinInput::new()?,
-            cursor: cursor::WinCursor,
-            modes: modes::WinModes,
-            still: still::XcapJpeg,
-            desktop,
-        })
+        parts(desktop::WinDesktop::open(display)?)
     }
     fn default_state_dir() -> Option<PathBuf> {
         std::env::var_os("LOCALAPPDATA")
@@ -89,20 +83,25 @@ pub(crate) fn open_bound(
     session: crate::oop::proto::SessionIdentity,
     journal: crate::modes::Journal,
 ) -> Result<crate::native::PlatformBackend<Windows>> {
-    let mut binding = helper::worker::DesktopBinding::new(session)?;
+    let mut binding = helper::binding::DesktopBinding::new(session)?;
     binding.enter(|| {})?;
     let desktop = desktop::WinDesktop::bound(display_id, display_device, binding)?;
     Ok(crate::native::PlatformBackend::from_parts(
         std::sync::Arc::new(()),
-        Parts {
-            input: input::WinInput::new()?,
-            cursor: cursor::WinCursor,
-            modes: modes::WinModes,
-            still: still::XcapJpeg,
-            desktop,
-        },
+        parts(desktop)?,
         journal,
     ))
+}
+
+/// A Windows host's parts on `desktop`, which is built first.
+fn parts(desktop: desktop::WinDesktop) -> Result<Parts<Windows>> {
+    Ok(Parts {
+        input: input::WinInput::new()?,
+        cursor: cursor::WinCursor,
+        modes: modes::WinModes,
+        still: still::XcapJpeg,
+        desktop,
+    })
 }
 
 /// The fused encoder, unchanged inside: each submit captures and encodes.

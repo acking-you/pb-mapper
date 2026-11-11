@@ -227,61 +227,69 @@ impl<S: Sealer, T: Serialize + DeserializeOwned> TrustFile<S, T> {
             identity: remembered.identity.encode_secret()?,
             display_device: remembered.display_device.clone(),
         })
-        .map_err(error)?;
+        .map_err(io::Error::other)?;
         if plain.len() as u64 > LIMIT {
             return Err(error("desktop trust exceeds its size limit"));
         }
         write_durably(&self.path(), &self.sealer.seal(&plain)?)
     }
-    /// Forget the grant; nothing remembered is no failure.
+    /// Forget the grant. Nothing remembered is no failure: only a grant that
+    /// cannot be removed fails. Its directory is then synced, so a crash
+    /// after this returns cannot bring the grant back; a directory that
+    /// cannot be synced, such as one that takes no new file, is logged, not
+    /// failed: the grant is gone either way, and what follows a revoke, such
+    /// as revoking a background service's copy, must still run.
     pub fn revoke(&self) -> Result<()> {
-        match std::fs::remove_file(self.path()) {
-            Err(failure) if failure.kind() != io::ErrorKind::NotFound => Err(failure),
-            _ => Ok(()),
-        }
+        forget(
+            &self.path(),
+            pb_mapper_core::durable_file::sync_parent_directory,
+        )
     }
+}
+
+/// Removes `path`, then syncs its directory with `sync`: only a failed
+/// removal fails.
+fn forget(path: &Path, sync: impl FnOnce(&Path) -> io::Result<()>) -> Result<()> {
+    let removed = match std::fs::remove_file(path) {
+        Ok(()) => true,
+        Err(failure) if failure.kind() == io::ErrorKind::NotFound => false,
+        Err(failure) => return Err(failure),
+    };
+    // Synced even when already gone, which a revoke whose sync failed
+    // leaves; no directory at all means nothing was ever saved.
+    if let Err(failure) = sync(path)
+        && removed
+        && failure.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            event = "desktop_trust_revoke_unsynced",
+            path = %path.display(),
+            detail = %failure,
+        );
+    }
+    Ok(())
 }
 
 /// Replaces `path` with `bytes` all at once: a new file beside it, readable
 /// by its owner alone where the platform has modes, synced, renamed over it
 /// and its directory synced, so a crash leaves the old file or the new one,
 /// never a torn one. The directory is created first.
+///
+/// The sequence is core's `durable_file::replace_contents`; its failures
+/// arrive as the I/O error of the step that failed.
 pub fn write_durably(path: &Path, bytes: &[u8]) -> Result<()> {
-    use pb_mapper_core::durable_file::{replace_file, sync_parent_directory};
-    use ring::rand::SecureRandom;
-    use std::io::Write;
-    let (Some(directory), Some(stem)) = (path.parent(), path.file_stem()) else {
+    use pb_mapper_core::durable_file::{NewFileMode, replace_contents};
+    let (Some(directory), Some(_)) = (path.parent(), path.file_stem()) else {
         return Err(error("invalid private file path"));
     };
     std::fs::create_dir_all(directory)?;
-    let mut nonce = [0u8; 16];
-    ring::rand::SystemRandom::new()
-        .fill(&mut nonce)
-        .map_err(error)?;
-    let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
-    let temporary = directory.join(format!("{}-{nonce}.tmp", stem.to_string_lossy()));
-    let written = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut file = options.open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        replace_file(&temporary, path)?;
-        sync_parent_directory(path)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    written
+    replace_contents(path, bytes, NewFileMode::Exactly(0o600)).map_err(io::Error::from)
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use pb_mapper_core::test_support::TempPath;
 
     /// XOR with a key byte and a tag: another key fails to open, as another
     /// user's DPAPI does.
@@ -320,9 +328,11 @@ mod tests {
 
     #[test]
     fn a_grant_round_trips_sealed_in_its_scope() {
-        let directory = std::env::temp_dir().join(format!("pb-trust-{}", std::process::id()));
-        let file = TrustFile::<_, Settings>::new(directory.clone(), Xor(0x5a));
+        let directory = TempPath::new("trust");
+        let file = TrustFile::<_, Settings>::new(directory.to_path_buf(), Xor(0x5a));
         assert!(file.load().unwrap().is_none());
+        // Nothing was ever saved, not even its directory: nothing to revoke.
+        file.revoke().unwrap();
         let scope = RelayScope {
             relay: "relay:7666".into(),
             namespace: 7,
@@ -362,7 +372,7 @@ mod tests {
         assert_eq!(loaded.display_id(&now[..1]), None);
 
         // Another key cannot open it: unreadable, not a passing failure.
-        let stranger = TrustFile::<_, Settings>::new(directory.clone(), Xor(0x33));
+        let stranger = TrustFile::<_, Settings>::new(directory.to_path_buf(), Xor(0x33));
         assert_eq!(
             stranger.load().err().map(|failure| failure.kind()),
             Some(io::ErrorKind::InvalidData)
@@ -370,13 +380,14 @@ mod tests {
         file.revoke().unwrap();
         file.revoke().unwrap();
         assert!(file.load().unwrap().is_none());
-        std::fs::remove_dir(directory).unwrap();
+        // Revoking leaves nothing behind.
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
     }
 
     /// The app has written trust files since before `display_device`.
     #[test]
     fn a_file_the_app_wrote_still_loads() {
-        let directory = std::env::temp_dir().join(format!("pb-trust-app-{}", std::process::id()));
+        let directory = TempPath::new("trust-app");
         // The app's record as it serialises it, field for field.
         #[derive(Serialize)]
         struct Saved {
@@ -398,7 +409,7 @@ mod tests {
         })
         .unwrap();
         write_durably(&directory.join(FILE), &Xor(1).seal(&written).unwrap()).unwrap();
-        let file = TrustFile::<_, Settings>::new(directory.clone(), Xor(1));
+        let file = TrustFile::<_, Settings>::new(directory.to_path_buf(), Xor(1));
         let loaded = file.load().unwrap().unwrap();
         assert_eq!(loaded.settings.service, "desktop:app");
         assert_eq!(loaded.display_device, None);
@@ -407,6 +418,31 @@ mod tests {
         let sealed = std::fs::read(directory.join(FILE)).unwrap();
         assert_eq!(Xor(1).open(&sealed).unwrap(), written);
         file.revoke().unwrap();
-        std::fs::remove_dir(directory).unwrap();
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+    }
+
+    /// A directory that cannot be synced, such as one that takes no new file,
+    /// fails no revoke: the grant is gone, and what follows the revoke, such
+    /// as revoking the background service's copy, must still run.
+    #[test]
+    fn a_directory_that_cannot_be_synced_fails_no_revoke() {
+        let directory = TempPath::new("trust-unsynced");
+        let path = directory.join(FILE);
+        let refused = |_: &Path| Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        // Nothing to forget.
+        forget(&path, refused).unwrap();
+        write_durably(&path, b"grant").unwrap();
+        forget(&path, refused).unwrap();
+        assert!(!path.exists());
+    }
+
+    /// A write that cannot replace its file fails and leaves nothing beside it.
+    #[test]
+    fn a_failed_durable_write_leaves_no_temporary() {
+        let directory = TempPath::new("trust-fails");
+        let path = directory.join(FILE);
+        std::fs::create_dir_all(path.join("kept")).unwrap();
+        assert!(write_durably(&path, b"new").is_err());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
     }
 }

@@ -10,15 +10,10 @@ use pb_mapper_protocol::MessageReader;
 use pb_mapper_protocol::command::{
     AdminRequest, AdminResponse, MessageSerializer, PbConnRequest, PbConnResponse,
 };
-use pb_mapper_protocol::secure::ClientHeaderSession;
+use pb_mapper_protocol::secure::{CONNECTION_SALT_REPLAYED, ClientHeaderSession};
 
 use super::super::Error;
 use super::super::error::Result;
-
-/// The relay refuses a first flight whose salt it has already seen, and answers
-/// with this code. It is retryable by construction: a fresh session gets a fresh
-/// salt, so one retry is enough.
-const REPLAYED_SALT_CODE: &str = "connection_salt_replayed";
 
 /// How many times a request may be sent. Two: one attempt, plus one retry for
 /// the two failures a retry can actually fix — a replayed salt, and a failure
@@ -65,19 +60,10 @@ pub(super) async fn send_admin_request(
             // Nothing reached the relay, so re-sending cannot duplicate an
             // effect. Anything past that point is reported as-is.
             Err(error) => {
-                if crate::sdk::client::is_carrier_failure(&error) {
+                if error.is_carrier_failure() {
                     endpoint.carrier_failed(exchange.carrier);
                 }
-                if exchange.sent
-                    || last_attempt
-                    || matches!(
-                        error,
-                        Error::Remote {
-                            retryable: false,
-                            ..
-                        }
-                    )
-                {
+                if exchange.sent || last_attempt || !error.may_resend_unsent() {
                     return Err(error);
                 }
                 continue;
@@ -86,8 +72,11 @@ pub(super) async fn send_admin_request(
 
         match response {
             PbConnResponse::Admin(response) => return Ok(response),
+            // The relay refused a first flight whose salt it had already
+            // seen, before looking at the request. The next attempt's fresh
+            // session draws a fresh salt, so one retry is enough.
             PbConnResponse::Error(error)
-                if error.code == REPLAYED_SALT_CODE && error.retryable && !last_attempt =>
+                if error.code == CONNECTION_SALT_REPLAYED && error.retryable && !last_attempt =>
             {
                 continue;
             }
@@ -158,15 +147,16 @@ impl Exchange {
     }
 }
 
-/// Flatten a framing or session failure into the SDK's protocol error.
-fn protocol(error: impl std::fmt::Display) -> Error {
-    Error::protocol(error.to_string())
+/// A framing or session failure as the SDK's protocol error, its causes
+/// written into its text.
+fn protocol(error: impl std::error::Error) -> Error {
+    Error::protocol(crate::client::error::with_causes(&error))
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use pb_mapper_core::test_support::TEST_ADMIN_KEY_BYTES;
     use tokio::io::AsyncReadExt;
 
     #[tokio::test]
@@ -174,7 +164,7 @@ mod tests {
         let endpoint = RelayEndpoint::shared("localhost:invalid-port");
         let result = send_admin_request(
             &endpoint,
-            Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv"),
+            Credential::Admin(TEST_ADMIN_KEY_BYTES),
             AdminRequest::AuthStatus,
             Duration::from_secs(1),
         )
@@ -182,9 +172,21 @@ mod tests {
         assert!(matches!(result, Err(Error::Address { .. })));
     }
 
+    /// A framing failure keeps what caused it in the text an administrator
+    /// request fails with, which is all a Node or app caller gets of it.
+    #[test]
+    fn a_framing_failure_keeps_its_cause() {
+        let cause = || std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset mid-reply");
+        let failure = pb_mapper_core::error::Error::MsgNetworkReadBody { source: cause() };
+        let Error::Protocol { message } = protocol(failure) else {
+            panic!("a framing failure is a protocol error");
+        };
+        assert!(message.contains(&cause().to_string()), "{message}");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn cancelled_partial_admin_write_must_not_be_retried() {
-        let credential = Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv");
+        let credential = Credential::Admin(TEST_ADMIN_KEY_BYTES);
         let session = ClientHeaderSession::new_v2(&credential).unwrap();
         let (mut writer, mut reader) = tokio::io::duplex(1);
         let mut exchange = Exchange::new();

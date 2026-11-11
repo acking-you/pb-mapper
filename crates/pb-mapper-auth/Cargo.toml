@@ -10,6 +10,10 @@ homepage.workspace = true
 description = "Credential lifecycle and persistence for pb-mapper"
 publish = ["crates-io"]
 
+[[test]]
+name = "process_environment"
+harness = false
+
 [dependencies]
 pb-mapper-core.workspace = true
 

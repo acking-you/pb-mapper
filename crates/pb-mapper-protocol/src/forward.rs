@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use snafu::ResultExt;
+use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,19 +13,27 @@ use super::{
     CodecMessageReader, CodecMessageWriter, MessageReader, MessageWriter, NormalMessageReader,
     NormalMessageWriter,
 };
-use crate::buffer::{BufferReader, BufferedReader};
+use crate::buffer::BufferReader;
 use crate::data::DataCodec;
 use pb_mapper_core::checksum::AesKeyType;
 use pb_mapper_core::codec::{Decryptor, Encryptor};
-use pb_mapper_core::config::duration_from_env;
+use pb_mapper_core::config;
 use pb_mapper_core::error::{FwdNetworkWriteWithNormalSnafu, Result};
 use uni_stream::stream::{StreamSplit, TcpStreamImpl, UdpStreamImpl};
 use uni_stream::udp::{UdpStreamReadHalf, UdpStreamWriteHalf};
 
+#[expect(
+    async_fn_in_trait,
+    reason = "awaited only on the connection task that owns the stream, never sent to another"
+)]
 pub trait ForwardReader {
     async fn read(&mut self) -> Result<&'_ [u8]>;
 }
 
+#[expect(
+    async_fn_in_trait,
+    reason = "awaited only on the connection task that owns the stream, never sent to another"
+)]
 pub trait ForwardWriter {
     async fn write(&mut self, src: &[u8]) -> Result<()>;
 
@@ -32,10 +41,18 @@ pub trait ForwardWriter {
     async fn shutdown(&mut self);
 }
 
+#[expect(
+    async_fn_in_trait,
+    reason = "awaited only on the connection task that owns the stream, never sent to another"
+)]
 pub trait DatagramReader {
     async fn recv(&mut self) -> Result<Bytes>;
 }
 
+#[expect(
+    async_fn_in_trait,
+    reason = "awaited only on the connection task that owns the stream, never sent to another"
+)]
 pub trait DatagramWriter {
     async fn send(&mut self, src: &[u8]) -> Result<()>;
 }
@@ -96,11 +113,6 @@ impl Tally<'_> {
     }
 }
 
-const DEFAULT_TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
-const DEFAULT_HALF_CLOSE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const PB_MAPPER_TUNNEL_IDLE_TIMEOUT: &str = "PB_MAPPER_TUNNEL_IDLE_TIMEOUT";
-const PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT: &str = "PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT";
-
 tokio::task_local! {
     static TUNNEL_IDLE_OVERRIDE: Duration;
 }
@@ -125,13 +137,8 @@ impl ForwardTimeoutConfig {
         Self {
             tunnel_idle_timeout: TUNNEL_IDLE_OVERRIDE
                 .try_with(|timeout| *timeout)
-                .unwrap_or_else(|_| {
-                    duration_from_env(PB_MAPPER_TUNNEL_IDLE_TIMEOUT, DEFAULT_TUNNEL_IDLE_TIMEOUT)
-                }),
-            half_close_idle_timeout: duration_from_env(
-                PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT,
-                DEFAULT_HALF_CLOSE_IDLE_TIMEOUT,
-            ),
+                .unwrap_or_else(|_| config::tunnel_idle_timeout()),
+            half_close_idle_timeout: config::half_close_idle_timeout(),
         }
     }
 }
@@ -140,7 +147,7 @@ pub struct NormalForwardReader<'a, T> {
     buffered_reader: BufferReader<'a, T>,
 }
 
-impl<'a, T: AsyncReadExt + Unpin + Send> NormalForwardReader<'a, T> {
+impl<'a, T: AsyncReadExt + Unpin> NormalForwardReader<'a, T> {
     pub fn new(reader: &'a mut T) -> Self {
         Self {
             buffered_reader: BufferReader::new(reader),
@@ -148,17 +155,17 @@ impl<'a, T: AsyncReadExt + Unpin + Send> NormalForwardReader<'a, T> {
     }
 }
 
-impl<'a, T: AsyncReadExt + Unpin + Send> ForwardReader for NormalForwardReader<'a, T> {
+impl<'a, T: AsyncReadExt + Unpin> ForwardReader for NormalForwardReader<'a, T> {
     async fn read(&mut self) -> Result<&'_ [u8]> {
         self.buffered_reader.read().await
     }
 }
 
-pub struct NormalDatagramReader<'a, T: AsyncReadExt + Unpin> {
+pub struct NormalDatagramReader<'a, T> {
     reader: NormalMessageReader<'a, T>,
 }
 
-impl<'a, T: AsyncReadExt + Unpin + Send> NormalDatagramReader<'a, T> {
+impl<'a, T: AsyncReadExt + Unpin> NormalDatagramReader<'a, T> {
     pub fn new(reader: &'a mut T) -> Self {
         Self {
             reader: NormalMessageReader::new(reader),
@@ -172,7 +179,7 @@ impl<'a, T: AsyncReadExt + Unpin + Send> NormalDatagramReader<'a, T> {
     }
 }
 
-impl<'a, T: AsyncReadExt + Unpin + Send> DatagramReader for NormalDatagramReader<'a, T> {
+impl<'a, T: AsyncReadExt + Unpin> DatagramReader for NormalDatagramReader<'a, T> {
     async fn recv(&mut self) -> Result<Bytes> {
         let msg = self.reader.read_msg().await?;
         Ok(Bytes::copy_from_slice(msg))
@@ -183,7 +190,7 @@ pub struct NormalForwardWriter<'a, T> {
     writer: &'a mut T,
 }
 
-impl<'a, T: AsyncWriteExt + Unpin + Send> NormalForwardWriter<'a, T> {
+impl<'a, T: AsyncWriteExt + Unpin> NormalForwardWriter<'a, T> {
     pub fn new(writer: &'a mut T) -> Self {
         Self { writer }
     }
@@ -196,7 +203,7 @@ impl<'a, T: AsyncWriteExt + Unpin + Send> NormalForwardWriter<'a, T> {
     }
 }
 
-impl<'a, T: AsyncWriteExt + Unpin + Send> ForwardWriter for NormalForwardWriter<'a, T> {
+impl<'a, T: AsyncWriteExt + Unpin> ForwardWriter for NormalForwardWriter<'a, T> {
     async fn write(&mut self, src: &[u8]) -> Result<()> {
         self.write_inner(src).await
     }
@@ -206,11 +213,11 @@ impl<'a, T: AsyncWriteExt + Unpin + Send> ForwardWriter for NormalForwardWriter<
     }
 }
 
-pub struct NormalDatagramWriter<'a, T: AsyncWriteExt + Unpin> {
+pub struct NormalDatagramWriter<'a, T> {
     writer: NormalMessageWriter<'a, T>,
 }
 
-impl<'a, T: AsyncWriteExt + Unpin + Send> NormalDatagramWriter<'a, T> {
+impl<'a, T: AsyncWriteExt + Unpin> NormalDatagramWriter<'a, T> {
     pub fn new(writer: &'a mut T) -> Self {
         Self {
             writer: NormalMessageWriter::new(writer),
@@ -224,17 +231,15 @@ impl<'a, T: AsyncWriteExt + Unpin + Send> NormalDatagramWriter<'a, T> {
     }
 }
 
-impl<'a, T: AsyncWriteExt + Unpin + Send> DatagramWriter for NormalDatagramWriter<'a, T> {
+impl<'a, T: AsyncWriteExt + Unpin> DatagramWriter for NormalDatagramWriter<'a, T> {
     async fn send(&mut self, src: &[u8]) -> Result<()> {
         self.writer.write_msg(src).await
     }
 }
 
-pub struct CodecForwardReader<'a, T: AsyncReadExt + Unpin + Send, D: Decryptor>(
-    CodecMessageReader<'a, T, D>,
-);
+pub struct CodecForwardReader<'a, T, D>(CodecMessageReader<'a, T, D>);
 
-impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> CodecForwardReader<'a, T, D> {
+impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> CodecForwardReader<'a, T, D> {
     pub fn new(reader: &'a mut T, decryptor: D) -> Self {
         Self(CodecMessageReader::new(reader, decryptor))
     }
@@ -244,19 +249,15 @@ impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> CodecForwardReader<'a, T,
     }
 }
 
-impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> ForwardReader
-    for CodecForwardReader<'a, T, D>
-{
+impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> ForwardReader for CodecForwardReader<'a, T, D> {
     async fn read(&mut self) -> Result<&'_ [u8]> {
         self.0.read_stream().await
     }
 }
 
-pub struct CodecDatagramReader<'a, T: AsyncReadExt + Unpin + Send, D: Decryptor>(
-    CodecMessageReader<'a, T, D>,
-);
+pub struct CodecDatagramReader<'a, T, D>(CodecMessageReader<'a, T, D>);
 
-impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> CodecDatagramReader<'a, T, D> {
+impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> CodecDatagramReader<'a, T, D> {
     pub fn new(reader: &'a mut T, decryptor: D) -> Self {
         Self(CodecMessageReader::new(reader, decryptor))
     }
@@ -266,20 +267,16 @@ impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> CodecDatagramReader<'a, T
     }
 }
 
-impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> DatagramReader
-    for CodecDatagramReader<'a, T, D>
-{
+impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> DatagramReader for CodecDatagramReader<'a, T, D> {
     async fn recv(&mut self) -> Result<Bytes> {
         let msg = self.0.read_msg().await?;
         Ok(Bytes::copy_from_slice(msg))
     }
 }
 
-pub struct CodecForwardWriter<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor>(
-    CodecMessageWriter<'a, T, E>,
-);
+pub struct CodecForwardWriter<'a, T, E>(CodecMessageWriter<'a, T, E>);
 
-impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> CodecForwardWriter<'a, T, E> {
+impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> CodecForwardWriter<'a, T, E> {
     pub fn new(writer: &'a mut T, encryptor: E) -> Self {
         Self(CodecMessageWriter::new(writer, encryptor))
     }
@@ -289,10 +286,7 @@ impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> CodecForwardWriter<'a, T
     }
 }
 
-impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> ForwardWriter
-    for CodecForwardWriter<'a, T, E>
-{
-    /// SAFETY: Same as [`CodecMessageWriter`]
+impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> ForwardWriter for CodecForwardWriter<'a, T, E> {
     async fn write(&mut self, src: &[u8]) -> Result<()> {
         self.0.write_msg(src).await
     }
@@ -302,11 +296,9 @@ impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> ForwardWriter
     }
 }
 
-pub struct CodecDatagramWriter<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor>(
-    CodecMessageWriter<'a, T, E>,
-);
+pub struct CodecDatagramWriter<'a, T, E>(CodecMessageWriter<'a, T, E>);
 
-impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> CodecDatagramWriter<'a, T, E> {
+impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> CodecDatagramWriter<'a, T, E> {
     pub fn new(writer: &'a mut T, encryptor: E) -> Self {
         Self(CodecMessageWriter::new(writer, encryptor))
     }
@@ -316,49 +308,10 @@ impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> CodecDatagramWriter<'a, 
     }
 }
 
-impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> DatagramWriter
-    for CodecDatagramWriter<'a, T, E>
-{
+impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> DatagramWriter for CodecDatagramWriter<'a, T, E> {
     async fn send(&mut self, src: &[u8]) -> Result<()> {
-        let buf = src.to_vec();
-        self.0.write_msg(&buf).await
+        self.0.write_msg(src).await
     }
-}
-
-pub async fn copy<R: ForwardReader, W: ForwardWriter>(
-    mut reader: R,
-    mut writer: W,
-) -> Result<usize> {
-    let mut length: usize = 0;
-    loop {
-        let src = reader.read().await?;
-        let n = src.len();
-        if n == 0 {
-            break;
-        }
-        writer.write(src).await?;
-        length += n;
-    }
-    writer.shutdown().await;
-    Ok(length)
-}
-
-pub async fn transfer_datagrams<R: DatagramReader, W: DatagramWriter>(
-    label: &'static str,
-    reader: R,
-    writer: W,
-) -> Result<usize> {
-    let own = AtomicU64::new(0);
-    transfer_counted(
-        label,
-        reader,
-        writer,
-        Tally {
-            own: &own,
-            meter: None,
-        },
-    )
-    .await
 }
 
 /// Relay datagrams until either side fails, counting each into `tally`.
@@ -367,7 +320,7 @@ async fn transfer_counted<R: DatagramReader, W: DatagramWriter>(
     mut reader: R,
     mut writer: W,
     tally: Tally<'_>,
-) -> Result<usize> {
+) -> Result<Infallible> {
     loop {
         let src = reader.recv().await?;
         let n = src.len();
@@ -583,11 +536,13 @@ async fn datagram_forward<
     let client_to_server = transfer_counted("udp->tcp", client_reader, server_writer, sending);
     let server_to_client = transfer_counted("tcp->udp", server_reader, client_writer, receiving);
     tokio::select! {
-        result = client_to_server =>{
-            handle_forward_result( result,"udp->tcp");
+        result = client_to_server => {
+            let Err(error) = result;
+            handle_forward_result(Err(error), "udp->tcp");
         },
-        result = server_to_client =>{
-            handle_forward_result( result,"tcp->udp");
+        result = server_to_client => {
+            let Err(error) = result;
+            handle_forward_result(Err(error), "tcp->udp");
         }
     }
     ForwardTotals {
@@ -686,7 +641,6 @@ pub trait StreamForward: StreamSplit + Sized {
     /// totals it returns once both directions are done. Sent is local to
     /// remote. A transport that does not implement it forwards as before and
     /// counts nothing.
-    #[allow(clippy::too_many_arguments)]
     fn forward_local_to_remote_metered<'a, R, W>(
         codec: Option<DataCodec>,
         framing_key: AesKeyType,
@@ -713,56 +667,66 @@ pub trait StreamForward: StreamSplit + Sized {
     }
 }
 
+/// The legacy and negotiated entry points of a transport that implements
+/// [`StreamForward::forward_local_to_remote_metered`] itself: both forward
+/// through it and count nothing. The trait's defaults run the other way, for
+/// transports that implement only the legacy entry point.
+macro_rules! forward_through_metered {
+    () => {
+        fn forward_local_to_remote<'a, R, W>(
+            codec_key: Option<AesKeyType>,
+            framing_key: AesKeyType,
+            local_reader: Self::ReaderRef<'a>,
+            local_writer: Self::WriterRef<'a>,
+            remote_reader: R,
+            remote_writer: W,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
+        where
+            R: AsyncReadExt + Unpin + Send + 'a,
+            W: AsyncWriteExt + Unpin + Send + 'a,
+        {
+            Self::forward_local_to_remote_with_codec(
+                codec_key.map(DataCodec::legacy),
+                framing_key,
+                local_reader,
+                local_writer,
+                remote_reader,
+                remote_writer,
+            )
+        }
+
+        fn forward_local_to_remote_with_codec<'a, R, W>(
+            codec_key: Option<DataCodec>,
+            framing_key: AesKeyType,
+            local_reader: Self::ReaderRef<'a>,
+            local_writer: Self::WriterRef<'a>,
+            remote_reader: R,
+            remote_writer: W,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
+        where
+            R: AsyncReadExt + Unpin + Send + 'a,
+            W: AsyncWriteExt + Unpin + Send + 'a,
+        {
+            let forward = Self::forward_local_to_remote_metered(
+                codec_key,
+                framing_key,
+                local_reader,
+                local_writer,
+                remote_reader,
+                remote_writer,
+                None,
+            );
+            Box::pin(async move { forward.await.map(|_| ()) })
+        }
+    };
+}
+
 impl StreamForward for TcpStreamImpl {
     fn supports_data_v2() -> bool {
         true
     }
 
-    fn forward_local_to_remote<'a, R, W>(
-        codec_key: Option<AesKeyType>,
-        framing_key: AesKeyType,
-        local_reader: Self::ReaderRef<'a>,
-        local_writer: Self::WriterRef<'a>,
-        remote_reader: R,
-        remote_writer: W,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
-    where
-        R: AsyncReadExt + Unpin + Send + 'a,
-        W: AsyncWriteExt + Unpin + Send + 'a,
-    {
-        Self::forward_local_to_remote_with_codec(
-            codec_key.map(DataCodec::legacy),
-            framing_key,
-            local_reader,
-            local_writer,
-            remote_reader,
-            remote_writer,
-        )
-    }
-
-    fn forward_local_to_remote_with_codec<'a, R, W>(
-        codec_key: Option<DataCodec>,
-        framing_key: AesKeyType,
-        local_reader: Self::ReaderRef<'a>,
-        local_writer: Self::WriterRef<'a>,
-        remote_reader: R,
-        remote_writer: W,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
-    where
-        R: AsyncReadExt + Unpin + Send + 'a,
-        W: AsyncWriteExt + Unpin + Send + 'a,
-    {
-        let forward = Self::forward_local_to_remote_metered(
-            codec_key,
-            framing_key,
-            local_reader,
-            local_writer,
-            remote_reader,
-            remote_writer,
-            None,
-        );
-        Box::pin(async move { forward.await.map(|_| ()) })
-    }
+    forward_through_metered!();
 
     fn forward_local_to_remote_metered<'a, R, W>(
         codec_key: Option<DataCodec>,
@@ -827,51 +791,7 @@ impl StreamForward for UdpStreamImpl {
         true
     }
 
-    fn forward_local_to_remote<'a, R, W>(
-        codec_key: Option<AesKeyType>,
-        framing_key: AesKeyType,
-        local_reader: Self::ReaderRef<'a>,
-        local_writer: Self::WriterRef<'a>,
-        remote_reader: R,
-        remote_writer: W,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
-    where
-        R: AsyncReadExt + Unpin + Send + 'a,
-        W: AsyncWriteExt + Unpin + Send + 'a,
-    {
-        Self::forward_local_to_remote_with_codec(
-            codec_key.map(DataCodec::legacy),
-            framing_key,
-            local_reader,
-            local_writer,
-            remote_reader,
-            remote_writer,
-        )
-    }
-
-    fn forward_local_to_remote_with_codec<'a, R, W>(
-        codec_key: Option<DataCodec>,
-        framing_key: AesKeyType,
-        local_reader: Self::ReaderRef<'a>,
-        local_writer: Self::WriterRef<'a>,
-        remote_reader: R,
-        remote_writer: W,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
-    where
-        R: AsyncReadExt + Unpin + Send + 'a,
-        W: AsyncWriteExt + Unpin + Send + 'a,
-    {
-        let forward = Self::forward_local_to_remote_metered(
-            codec_key,
-            framing_key,
-            local_reader,
-            local_writer,
-            remote_reader,
-            remote_writer,
-            None,
-        );
-        Box::pin(async move { forward.await.map(|_| ()) })
-    }
+    forward_through_metered!();
 
     fn forward_local_to_remote_metered<'a, R, W>(
         codec_key: Option<DataCodec>,
@@ -923,6 +843,17 @@ impl StreamForward for UdpStreamImpl {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::io;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use parking_lot::Mutex;
+    use pb_mapper_core::error::Error;
+    use tokio::sync::Notify;
+
+    use super::*;
+
     #[tokio::test]
     async fn encrypted_stream_fin_requires_complete_authenticated_frames() {
         use crate::{data::DATA_PROTOCOL_V2, secure::HeaderProtocol};
@@ -1019,18 +950,6 @@ mod tests {
         assert!(observer.nodelay().unwrap());
         forwarding.abort();
     }
-
-    use std::collections::VecDeque;
-    use std::io;
-    use std::sync::Arc;
-
-    use parking_lot::Mutex;
-    use std::time::Duration;
-
-    use super::*;
-    use pb_mapper_core::config::parse_duration;
-    use pb_mapper_core::error::Error;
-    use tokio::sync::Notify;
 
     enum ReadAction {
         Data(Vec<u8>),
@@ -1166,19 +1085,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_duration_accepts_suffixes_and_plain_seconds() {
-        assert_eq!(parse_duration("42"), Some(Duration::from_secs(42)));
-        assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
-        assert_eq!(parse_duration("2s"), Some(Duration::from_secs(2)));
-        assert_eq!(parse_duration("3m"), Some(Duration::from_secs(180)));
-        assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
-        assert_eq!(parse_duration(""), None);
-        assert_eq!(parse_duration("bad"), None);
-        assert_eq!(parse_duration("18446744073709551615h"), None);
-    }
-
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn half_close_idle_timeout_closes_stalled_peer() {
         let client_reader = ScriptedReader::new([ReadAction::Eof]);
         let client_writer = ScriptedWriter::default();
@@ -1206,7 +1113,7 @@ mod tests {
         assert_eq!(server_writer_state.shutdowns(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn expected_disconnect_stops_waiting_for_pending_peer() {
         let client_reader =
             ScriptedReader::new([ReadAction::Error(io::ErrorKind::ConnectionReset)]);
@@ -1232,7 +1139,7 @@ mod tests {
         .expect("expected disconnect did not stop the tunnel");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn half_closed_tunnel_drains_peer_before_timeout() {
         let client_reader = ScriptedReader::new([ReadAction::Eof]);
         let client_writer = ScriptedWriter::default();
@@ -1262,7 +1169,7 @@ mod tests {
         assert_eq!(client_writer_state.shutdowns(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn delayed_tail_write_survives_peer_half_close() {
         let write_started = Arc::new(Notify::new());
         let client_reader = EofAfterWriteStartsReader::new(write_started.clone());
@@ -1292,7 +1199,7 @@ mod tests {
         assert_eq!(client_writer_state.chunks(), vec![tail]);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn open_tunnel_idle_timeout_closes_inactive_tunnel() {
         let client_reader = ScriptedReader::new([ReadAction::Pending]);
         let client_writer = ScriptedWriter::default();
@@ -1344,7 +1251,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_metered_forward_counts_each_direction_into_its_totals_and_the_meter() {
         let meter = ByteMeter::default();
         let streamed = start_forward_with_config(

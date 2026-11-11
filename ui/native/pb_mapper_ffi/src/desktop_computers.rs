@@ -12,7 +12,7 @@
 use crate::{
     desktop::{
         Connected,
-        trust::{protect, write_private},
+        trust::{dpapi_open, dpapi_seal, write_private},
         valid_max_fps,
     },
     error::CtlError,
@@ -265,8 +265,7 @@ impl Vault {
 
     fn seal(&self, mut plain: Vec<u8>) -> Result<Vec<u8>, CtlError> {
         match &self.protection {
-            Protection::Dpapi => protect(&plain, true, ENTROPY, DESCRIPTION)
-                .map_err(|failure| CtlError::io(failure.to_string())),
+            Protection::Dpapi => dpapi_seal(&plain, ENTROPY, DESCRIPTION),
             Protection::Sealed(key) => {
                 let failed = || CtlError::io("the remembered computers could not be encrypted");
                 let mut nonce = [0; NONCE_LEN];
@@ -285,7 +284,7 @@ impl Vault {
     fn open(&self, mut sealed: Vec<u8>) -> Result<Vec<u8>, CtlError> {
         match &self.protection {
             Protection::Dpapi => {
-                protect(&sealed, false, ENTROPY, DESCRIPTION).map_err(|_| unreadable())
+                dpapi_open(&sealed, ENTROPY, DESCRIPTION).map_err(|_| unreadable())
             }
             Protection::Sealed(key) => {
                 if sealed.len() < NONCE_LEN + AES_256_GCM.tag_len() {
@@ -492,7 +491,7 @@ fn open<'a>(
         {
             *slot = Some(Vault::new(directory, Protection::Dpapi));
         }
-        _ => {}
+        Platform::Dpapi | Platform::Keystore => {}
     }
     slot.as_mut()
         .filter(|vault| vault.directory == directory)
@@ -638,11 +637,10 @@ pub(crate) async fn call(handle: &PbMapperHandle, request: Value) -> Result<Valu
         .map_err(|_| CtlError::invalid_argument("invalid remembered computers request"))?;
     let directory = handle.state.lock().await.desktop_config_dir();
     let current = handle.desktop.connected();
-    tokio::task::spawn_blocking(move || {
+    crate::desktop::blocking(move || {
         apply(&mut VAULT.lock(), &directory, PLATFORM, current, request)
     })
-    .await
-    .map_err(|failure| CtlError::internal(failure.to_string()))?
+    .await?
 }
 
 /// The invitation remembered under `id`, for `connect`. A locked or
@@ -653,9 +651,7 @@ pub(crate) async fn invitation_for(
 ) -> Result<Option<Invitation>, CtlError> {
     let directory = handle.state.lock().await.desktop_config_dir();
     let id = id.to_owned();
-    tokio::task::spawn_blocking(move || lookup(&mut VAULT.lock(), &directory, PLATFORM, &id))
-        .await
-        .map_err(|failure| CtlError::internal(failure.to_string()))?
+    crate::desktop::blocking(move || lookup(&mut VAULT.lock(), &directory, PLATFORM, &id)).await?
 }
 
 fn lookup(
@@ -670,10 +666,10 @@ fn lookup(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::error::ErrorCode;
+    use crate::test_support::TempRoot;
     use pb_mapper::desktop::HostIdentity;
 
     const KEY: [u8; 32] = [7; 32];
@@ -692,9 +688,8 @@ mod tests {
 
     #[test]
     fn vault_round_trip_hides_secrets_and_rejects_tampering() {
-        let directory =
-            std::env::temp_dir().join(format!("pb-desktop-computers-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
+        let temp = TempRoot::new("desktop-computers");
+        let directory = temp.path().join("profile");
         let unlock = || {
             request(
                 json!({"op": "computers_unlock", "key": STANDARD.encode(KEY),
@@ -869,16 +864,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(listed, json!([]));
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     /// DPAPI that can no longer open the file, as after a restored profile
     /// or a password reset, is a vault no op can read; only a reset leaves.
     #[test]
     fn an_unreadable_dpapi_vault_can_be_reset() {
-        let directory =
-            std::env::temp_dir().join(format!("pb-desktop-computers-reset-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
+        let temp = TempRoot::new("desktop-computers-reset");
+        let directory = temp.path().join("profile");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join(DPAPI_FILE), b"sealed for someone else").unwrap();
         let mut slot = None;
@@ -899,6 +892,5 @@ mod tests {
         run("computers_reset").unwrap();
         assert_eq!(run("computers_list").unwrap(), json!([]));
         assert!(!directory.join(DPAPI_FILE).exists());
-        std::fs::remove_dir_all(directory).unwrap();
     }
 }

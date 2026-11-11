@@ -3,19 +3,42 @@
 use quinn::rustls::{
     self, DigitallySignedStruct, DistinguishedName, SignatureScheme,
     client::danger::HandshakeSignatureValid,
+    crypto::CryptoProvider,
     pki_types::{CertificateDer, PrivateKeyDer, UnixTime},
     server::danger::{ClientCertVerified, ClientCertVerifier},
 };
 use std::{
     collections::HashMap,
     io,
-    sync::{Arc, Mutex},
+    sync::{Arc, LazyLock, Mutex},
+    time::Duration,
 };
 
 /// The protocol a direct connection speaks, by its carrier: a connection
 /// made for one is refused by the other.
 const QUIC_ALPN: &[u8] = b"pb-mapper/direct/1";
 const TCP_ALPN: &[u8] = b"pb-mapper/direct-tcp/1";
+
+/// The name every direct certificate carries, and every dial asks for.
+pub(super) const SERVER_NAME: &str = "pb-mapper.invalid";
+
+/// Keep-alive on both carriers: a peer gone without a word is noticed
+/// rather than waited for.
+pub(super) const KEEP_ALIVE: Duration = Duration::from_secs(15);
+/// How long a QUIC connection may go without hearing from its peer.
+const QUIC_IDLE: Duration = Duration::from_secs(60);
+const _: () = assert!(
+    QUIC_IDLE.as_secs() > KEEP_ALIVE.as_secs(),
+    "keep-alives arrive before the idle timeout"
+);
+
+/// Peer certificates with a live grant that a provider admits at once.
+const MAX_PERMITTED: usize = 1024;
+
+/// The ring provider behind every direct TLS config and client certificate
+/// check, built once rather than per config and per handshake.
+static PROVIDER: LazyLock<Arc<CryptoProvider>> =
+    LazyLock::new(|| Arc::new(rustls::crypto::ring::default_provider()));
 
 pub(super) struct Identity {
     pub certificate: Vec<u8>,
@@ -25,7 +48,7 @@ pub(super) struct Identity {
 impl Identity {
     pub fn new() -> io::Result<Self> {
         let (rcgen::CertifiedKey { cert, .. }, key) =
-            rcgen::generate_simple_self_signed(vec!["pb-mapper.invalid".into()])
+            rcgen::generate_simple_self_signed(vec![SERVER_NAME.into()])
                 .map_err(io::Error::other)?;
         Ok(Self {
             certificate: cert.der().to_vec(),
@@ -36,17 +59,15 @@ impl Identity {
     /// TLS 1.3 only, with this identity, admitting only a client certificate
     /// with a live grant, and no early data.
     fn tls_server(&self, alpn: &[u8]) -> io::Result<rustls::ServerConfig> {
-        let mut tls = rustls::ServerConfig::builder_with_provider(
-            rustls::crypto::ring::default_provider().into(),
-        )
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(io::Error::other)?
-        .with_client_cert_verifier(self.permissions.clone())
-        .with_single_cert(
-            vec![CertificateDer::from(self.certificate.clone())],
-            self.key.clone_key(),
-        )
-        .map_err(io::Error::other)?;
+        let mut tls = rustls::ServerConfig::builder_with_provider(PROVIDER.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(io::Error::other)?
+            .with_client_cert_verifier(self.permissions.clone())
+            .with_single_cert(
+                vec![CertificateDer::from(self.certificate.clone())],
+                self.key.clone_key(),
+            )
+            .map_err(io::Error::other)?;
         tls.alpn_protocols = vec![alpn.to_vec()];
         tls.max_early_data_size = 0;
         Ok(tls)
@@ -58,17 +79,15 @@ impl Identity {
         roots
             .add(CertificateDer::from(peer.to_vec()))
             .map_err(io::Error::other)?;
-        let mut tls = rustls::ClientConfig::builder_with_provider(
-            rustls::crypto::ring::default_provider().into(),
-        )
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(io::Error::other)?
-        .with_root_certificates(roots)
-        .with_client_auth_cert(
-            vec![CertificateDer::from(self.certificate.clone())],
-            self.key.clone_key(),
-        )
-        .map_err(io::Error::other)?;
+        let mut tls = rustls::ClientConfig::builder_with_provider(PROVIDER.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(io::Error::other)?
+            .with_root_certificates(roots)
+            .with_client_auth_cert(
+                vec![CertificateDer::from(self.certificate.clone())],
+                self.key.clone_key(),
+            )
+            .map_err(io::Error::other)?;
         tls.alpn_protocols = vec![alpn.to_vec()];
         tls.enable_early_data = false;
         Ok(tls)
@@ -118,12 +137,8 @@ fn transport() -> io::Result<quinn::TransportConfig> {
         .max_concurrent_uni_streams(0u32.into())
         .stream_receive_window(STREAM_WINDOW.into())
         .send_window(u64::from(STREAM_WINDOW));
-    config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
-    config.max_idle_timeout(Some(
-        std::time::Duration::from_secs(60)
-            .try_into()
-            .map_err(io::Error::other)?,
-    ));
+    config.keep_alive_interval(Some(KEEP_ALIVE));
+    config.max_idle_timeout(Some(QUIC_IDLE.try_into().map_err(io::Error::other)?));
     config.datagram_receive_buffer_size(None);
     Ok(config)
 }
@@ -138,7 +153,7 @@ impl Permissions {
     pub fn allow(&self, cert: Vec<u8>, expires: tokio::time::Instant) -> io::Result<()> {
         let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
         map.retain(|_, until| *until > tokio::time::Instant::now());
-        if map.len() >= 1024 && !map.contains_key(&cert) {
+        if map.len() >= MAX_PERMITTED && !map.contains_key(&cert) {
             return Err(io::Error::other("peer certificate capacity reached"));
         }
         map.entry(cert)
@@ -172,7 +187,7 @@ impl ClientCertVerifier for Permissions {
         roots.add(end_entity.clone().into_owned())?;
         rustls::server::WebPkiClientVerifier::builder_with_provider(
             Arc::new(roots),
-            rustls::crypto::ring::default_provider().into(),
+            PROVIDER.clone(),
         )
         .build()
         .map_err(|e| rustls::Error::General(e.to_string()))?
@@ -188,7 +203,7 @@ impl ClientCertVerifier for Permissions {
             message,
             cert,
             dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            &PROVIDER.signature_verification_algorithms,
         )
     }
     fn verify_tls13_signature(
@@ -201,11 +216,11 @@ impl ClientCertVerifier for Permissions {
             message,
             cert,
             dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            &PROVIDER.signature_verification_algorithms,
         )
     }
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        rustls::crypto::ring::default_provider()
+        PROVIDER
             .signature_verification_algorithms
             .supported_schemes()
     }

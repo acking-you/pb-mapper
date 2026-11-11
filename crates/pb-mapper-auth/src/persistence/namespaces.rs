@@ -28,7 +28,7 @@ use super::atomic_write;
 const NAMESPACE_ALLOCATOR_FILE: &str = "namespace-allocator";
 
 fn allocator_unavailable(detail: String) -> AuthFailure {
-    AuthFailure::new("namespace_allocator_unavailable", detail, false)
+    AuthFailure::new(codes::NAMESPACE_ALLOCATOR_UNAVAILABLE, detail, false)
 }
 
 /// The last namespace handed out, or 0 if none has been.

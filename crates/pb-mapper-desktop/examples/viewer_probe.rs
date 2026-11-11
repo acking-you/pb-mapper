@@ -7,10 +7,13 @@
 //! Run: viewer_probe CONTROLLER_JSON SECONDS DECODE_MS auto|relay [DUMP_PATH]
 //! [--codec h264|h265]. `h265` offers H.265 beside H.264, as the app does
 //! when it can decode it; the host picks, and the report says which.
-use pb_mapper_client::sdk::{Client, ClientConfig, ConnectOptions, PathPolicy, RelayTransport};
+mod probe_support;
+
+use pb_mapper_client::sdk::{ConnectOptions, PathPolicy, RelayTransport};
 use pb_mapper_desktop::{
     Invitation, Pull, QualityPreset, VideoCodec, VideoLimits, Viewer, ViewerConfig, ViewerState,
 };
+use probe_support::{option, relay_client};
 use serde::Deserialize;
 use std::{
     io::Write,
@@ -29,12 +32,8 @@ struct Setup {
     invitation: String,
     /// The host's LAN-first, which the viewer follows; one from an older
     /// `deployed` says nothing, which reads as on.
-    #[serde(default = "lan_first_by_default")]
+    #[serde(default = "probe_support::lan_first_by_default")]
     lan_first: bool,
-}
-
-fn lan_first_by_default() -> bool {
-    true
 }
 
 /// What the simulated decoder saw.
@@ -75,11 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("relay") => PathPolicy::RelayOnly,
         _ => return Err("path must be auto or relay".into()),
     };
-    let codecs = match args
-        .windows(2)
-        .find(|pair| pair[0] == "--codec")
-        .map(|pair| pair[1].as_str())
-    {
+    let codecs = match option(&args, "--codec") {
         None | Some("h264") => vec![VideoCodec::H264],
         Some("h265") => vec![VideoCodec::H265, VideoCodec::H264],
         Some(_) => return Err("--codec must be h264 or h265".into()),
@@ -90,13 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(std::fs::File::create)
         .transpose()?
         .map(std::io::BufWriter::new);
-    let client = Client::new(ClientConfig {
-        server: setup.server,
-        credential: setup.credential,
-        keep_alive: true,
-        namespace: None,
-    })?
-    .with_relay_transport(setup.transport)?;
+    let client = relay_client(setup.server, setup.credential, setup.transport)?;
     let viewer = Viewer::connect(
         &client,
         &Invitation::decode(&setup.invitation)?,
@@ -126,11 +115,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let decoder = std::thread::spawn(move || -> std::io::Result<Decoded> {
         let mut decoded = Decoded::default();
         let mut previous = None;
+        let mut capacity = 4 << 20;
         while !done.load(Ordering::Acquire) {
-            let unit = match consumer.next(Duration::from_millis(100), 4 << 20) {
+            let unit = match consumer.next(Duration::from_millis(100), capacity) {
                 Pull::Unit(unit) => unit,
+                Pull::NeedCapacity(needed) => {
+                    capacity = needed;
+                    continue;
+                }
+                Pull::Timeout | Pull::Paused => continue,
                 Pull::Closed => break,
-                _ => continue,
             };
             decoded.units += 1;
             decoded.keyframes += u64::from(unit.keyframe);

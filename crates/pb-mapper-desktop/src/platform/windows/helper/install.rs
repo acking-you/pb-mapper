@@ -1,8 +1,8 @@
 use super::*;
+use crate::platform::windows::win32::LocalAllocation;
 use std::{
     ffi::OsString,
     fs::File,
-    io::Write,
     os::windows::io::{AsRawHandle, FromRawHandle},
     path::Path,
     time::{Duration, Instant},
@@ -50,7 +50,8 @@ fn start(service: &Service) -> Result<()> {
     match service.start::<OsString>(&[]) {
         Ok(()) => {}
         // A queued SCM recovery may win the race with an explicit Enable.
-        Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1056) => {}
+        Err(windows_service::Error::Winapi(e))
+            if e.raw_os_error() == Some(ERROR_SERVICE_ALREADY_RUNNING.0 as i32) => {}
         Err(e) => return Err(error(e)),
     }
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -138,22 +139,11 @@ fn configure_recovery(service: &Service) -> Result<()> {
     .apply(service)
 }
 
-// Apply owner and DACL at creation: changing them afterwards leaves an owner
-// WRITE_DAC race even when the inherited file permissions are read-only.
+/// A new file of the installation, with its owner and DACL from the start:
+/// set afterwards, they would leave an owner a WRITE_DAC race even where the
+/// inherited permissions are read-only.
 fn create_file(path: &Path, descriptor: &os::Descriptor) -> Result<File> {
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(os::wide(path).as_ptr()),
-            GENERIC_WRITE.0,
-            FILE_SHARE_READ,
-            Some(descriptor.attributes()),
-            CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )
-    }
-    .map_err(error)?;
-    Ok(unsafe { File::from_raw_handle(handle.0) })
+    os::create_protected(path, descriptor, CREATE_NEW, FILE_ATTRIBUTE_NORMAL)
 }
 fn create_dir(path: &Path, descriptor: &os::Descriptor) -> Result<()> {
     unsafe {
@@ -184,7 +174,7 @@ impl Installation {
         let handle = unsafe {
             CreateFileW(
                 PCWSTR(os::wide(&path).as_ptr()),
-                GENERIC_READ.0 | GENERIC_WRITE.0 | 0x00010000,
+                GENERIC_READ.0 | GENERIC_WRITE.0 | DELETE.0,
                 FILE_SHARE_MODE(0),
                 Some(descriptor.attributes()),
                 OPEN_ALWAYS,
@@ -212,20 +202,13 @@ impl Installation {
         let temporary = self
             .root
             .join(format!("install-{}.tmp", crate::security::secret()?));
-        let result = (|| {
-            let mut file = create_file(&temporary, &self.descriptor)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            drop(file);
-            unsafe {
-                MoveFileExW(
-                    PCWSTR(os::wide(&temporary).as_ptr()),
-                    PCWSTR(os::wide(&destination).as_ptr()),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-                )
-            }
-            .map_err(error)
-        })();
+        let result = os::replace_protected(
+            &temporary,
+            &destination,
+            &self.descriptor,
+            FILE_ATTRIBUTE_NORMAL,
+            bytes,
+        );
         if result.is_err() && temporary.exists() {
             os::protected_file(&temporary)?;
             std::fs::remove_file(&temporary)?;
@@ -388,9 +371,18 @@ fn remove_tree(
         } else {
             std::fs::remove_file(path)
         };
+        // Still open, or not yet empty: removed at the next reboot instead.
+        const ACCESS_DENIED: i32 = ERROR_ACCESS_DENIED.0 as i32;
+        const SHARING_VIOLATION: i32 = ERROR_SHARING_VIOLATION.0 as i32;
+        const LOCK_VIOLATION: i32 = ERROR_LOCK_VIOLATION.0 as i32;
+        const DIR_NOT_EMPTY: i32 = ERROR_DIR_NOT_EMPTY.0 as i32;
         match result {
             Ok(()) => return Ok(()),
-            Err(e) if matches!(e.raw_os_error(), Some(5 | 32 | 33 | 145)) => {}
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(ACCESS_DENIED | SHARING_VIOLATION | LOCK_VIOLATION | DIR_NOT_EMPTY)
+                ) => {}
             Err(e) => return Err(e),
         }
     }
@@ -460,18 +452,18 @@ fn validate_service(service: &Service, config: &Configuration) -> Result<Service
     if arguments.is_null() {
         return Err(error("invalid helper service command line"));
     }
-    let command_matches = count == 2
-        && unsafe {
-            (*arguments)
-                .to_string()
-                .is_ok_and(|path| os::same_path(Path::new(&path), &config.helper_executable))
-                && (*arguments.add(1))
+    let command_matches = {
+        let _arguments = unsafe { LocalAllocation::own(arguments.cast()) };
+        count == 2
+            && unsafe {
+                (*arguments)
                     .to_string()
-                    .is_ok_and(|arg| arg == "service")
-        };
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(arguments.cast())));
-    }
+                    .is_ok_and(|path| os::same_path(Path::new(&path), &config.helper_executable))
+                    && (*arguments.add(1))
+                        .to_string()
+                        .is_ok_and(|arg| arg == "service")
+            }
+    };
     if !command_matches
         || actual.service_type != ServiceType::OWN_PROCESS
         || actual
@@ -580,13 +572,17 @@ fn install_bundle(
                 stop(&service)?;
                 (service, Some((start_type, running)), Some(recovery))
             }
-            Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1060) => (
-                manager
-                    .create_service(&info(&config, ServiceStartType::AutoStart), access)
-                    .map_err(error)?,
-                None,
-                None,
-            ),
+            Err(windows_service::Error::Winapi(e))
+                if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST.0 as i32) =>
+            {
+                (
+                    manager
+                        .create_service(&info(&config, ServiceStartType::AutoStart), access)
+                        .map_err(error)?,
+                    None,
+                    None,
+                )
+            }
             Err(e) => return Err(error(e)),
         };
         let update = (|| {
@@ -758,7 +754,8 @@ pub fn uninstall() -> Result<()> {
                 stop(&service)?;
                 service.delete().map_err(error)?;
             }
-            Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1060) => {}
+            Err(windows_service::Error::Winapi(e))
+                if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST.0 as i32) => {}
             Err(e) => return Err(error(e)),
         }
         let config = installation.root.join("installation.json");
@@ -778,16 +775,12 @@ pub fn uninstall() -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[test]
     fn installation_source_rejects_hard_linked_files() {
-        let directory = std::env::temp_dir().join(format!(
-            "pb-mapper-source-{}",
-            crate::security::secret().unwrap()
-        ));
+        let directory = pb_mapper_core::test_support::TempPath::new("source");
         std::fs::create_dir(&directory).unwrap();
         let source = directory.join("source");
         let alias = directory.join("alias");
@@ -799,8 +792,6 @@ mod tests {
         assert!(read_source(&alias, false).is_err());
         std::fs::remove_file(&alias).unwrap();
         assert!(read_source(&source, false).is_ok());
-        std::fs::remove_file(&source).unwrap();
-        std::fs::remove_dir(&directory).unwrap();
     }
 
     #[test]

@@ -12,7 +12,6 @@
 //!
 //! Decoding also accepts the v1 JSON invitation and pins the same certificate,
 //! and recognises a pb-mapper setup string pasted in the wrong place.
-use crate::valid_service;
 use base64::{
     Engine, alphabet,
     engine::{
@@ -23,13 +22,31 @@ use ring::digest::{SHA256, digest};
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
+/// What every desktop service name starts with.
+pub(crate) const SERVICE_PREFIX: &str = "desktop:";
+/// The longest service name, its prefix included.
+pub(crate) const MAX_SERVICE_LEN: usize = 128;
+/// Whether `service` names a desktop service: `desktop:`, then 1 to 120
+/// ASCII letters, digits, periods, underscores, colons or hyphens.
+pub fn valid_service(service: &str) -> bool {
+    service.starts_with(SERVICE_PREFIX)
+        && service.len() > SERVICE_PREFIX.len()
+        && service.len() <= MAX_SERVICE_LEN
+        && service
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c))
+}
+
 const PREFIX: &str = "pbd1.";
-/// A temporary relay credential (`pb_mapper_core::checksum::TEMP_CREDENTIAL_PREFIX`).
-const CREDENTIAL_PREFIX: &str = "pbmt1_";
 const VERSION: u8 = 0x02;
 const MAX_TEXT: usize = 8192;
 const MAX_PBD1_TEXT: usize = 512;
-const MAX_SUFFIX: usize = 120;
+/// The longest service name without its prefix: 120.
+const MAX_SUFFIX: usize = MAX_SERVICE_LEN - SERVICE_PREFIX.len();
+const _: () = assert!(
+    MAX_SUFFIX <= u8::MAX as usize,
+    "the suffix length is one byte"
+);
 const FIXED: usize = 3 + 32 + 32 + 4;
 
 /// Deliver privately to a specific trusted controller. Possession grants view
@@ -130,7 +147,7 @@ impl Invitation {
         token: [u8; 32],
     ) -> Result<Self, InvitationError> {
         let suffix = service
-            .strip_prefix("desktop:")
+            .strip_prefix(SERVICE_PREFIX)
             .ok_or(InvitationError::InvalidService)?;
         if !valid_service(&service) || suffix.len() > MAX_SUFFIX {
             return Err(InvitationError::InvalidService);
@@ -149,7 +166,7 @@ impl Invitation {
     pub fn encode(&self) -> String {
         let suffix = self
             .service
-            .strip_prefix("desktop:")
+            .strip_prefix(SERVICE_PREFIX)
             .unwrap_or(&self.service)
             .as_bytes();
         let n = u8::try_from(suffix.len()).unwrap_or(0);
@@ -207,7 +224,7 @@ impl Invitation {
         }
         let suffix =
             std::str::from_utf8(&body[3..3 + n]).map_err(|_| InvitationError::InvalidService)?;
-        let service = format!("desktop:{suffix}");
+        let service = format!("{SERVICE_PREFIX}{suffix}");
         if !valid_service(&service) {
             return Err(InvitationError::InvalidService);
         }
@@ -257,9 +274,10 @@ impl Invitation {
     /// The first 8 bytes of the fingerprint, as `AB12-CD34-EF56-7890`, for a
     /// person to compare.
     pub fn short_fingerprint(&self) -> String {
-        self.fingerprint[..8]
-            .chunks(2)
-            .map(|pair| format!("{:02X}{:02X}", pair[0], pair[1]))
+        let (pairs, _) = self.fingerprint[..8].as_chunks::<2>();
+        pairs
+            .iter()
+            .map(|[high, low]| format!("{high:02X}{low:02X}"))
             .collect::<Vec<_>>()
             .join("-")
     }
@@ -282,7 +300,7 @@ fn fingerprint(certificate: &[u8]) -> [u8; 32] {
 
 /// A temporary credential, or the base64 JSON setup string the app exports.
 fn is_setup_string(text: &str) -> bool {
-    if text.starts_with(CREDENTIAL_PREFIX) {
+    if text.starts_with(pb_mapper_core::checksum::TEMP_CREDENTIAL_PREFIX) {
         return true;
     }
     let lenient = GeneralPurposeConfig::new()
@@ -299,7 +317,6 @@ fn is_setup_string(text: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::HostIdentity;

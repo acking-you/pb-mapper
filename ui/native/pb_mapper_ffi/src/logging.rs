@@ -1,9 +1,9 @@
 //! Logging system for FFI interface.
 
 use std::ffi::{CString, c_char, c_int};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::fmt::Write as _;
 
-use parking_lot::RwLock;
+use crate::callback::CallbackSlot;
 
 /// Log callback function type.
 /// level: 0=trace, 1=debug, 2=info, 3=warn, 4=error
@@ -11,35 +11,27 @@ use parking_lot::RwLock;
 /// timestamp: unix timestamp (seconds)
 pub type LogCallback = extern "C" fn(level: c_int, message: *const c_char, timestamp: u64);
 
-/// Hold the read guard through the nonblocking NativeCallable.listener call.
-/// Clearing the callback then waits for in-flight native invocations before
-/// Dart closes the callable, including invocations from the log worker.
-static LOG_CALLBACK: RwLock<Option<LogCallback>> = RwLock::new(None);
+static LOG_CALLBACK: CallbackSlot<LogCallback> = CallbackSlot::empty();
 
 /// Internal function to send log to callback
 pub(crate) fn send_log(level: c_int, message: &str) {
-    let registered = LOG_CALLBACK.read();
-    let Some(callback) = *registered else {
-        return;
-    };
-
-    if let Ok(c_msg) = CString::new(message) {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let leaked = c_msg.into_raw();
-        callback(level, leaked, timestamp);
-    }
+    LOG_CALLBACK.with(|callback| {
+        if let Ok(c_msg) = CString::new(message) {
+            let timestamp = pb_mapper_core::time::unix_seconds();
+            let leaked = c_msg.into_raw();
+            callback(level, leaked, timestamp);
+        }
+    });
 }
 
 /// Set log callback function.
 ///
 /// # Safety
-/// `callback` must be a valid function pointer or null to disable logging.
+/// `callback` must be null to disable logging, or a function that stays
+/// callable until it is replaced or cleared.
 #[unsafe(no_mangle)]
-pub extern "C" fn pb_mapper_set_log_callback(callback: Option<LogCallback>) {
-    *LOG_CALLBACK.write() = callback;
+pub unsafe extern "C" fn pb_mapper_set_log_callback(callback: Option<LogCallback>) {
+    LOG_CALLBACK.store(callback);
 }
 
 /// Free a string allocated by the library (e.g., from log callback or JSON result).
@@ -65,6 +57,10 @@ where
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        // Nothing listens: nothing to format.
+        if !LOG_CALLBACK.is_set() {
+            return;
+        }
         let level = match *event.metadata().level() {
             tracing::Level::TRACE => 0,
             tracing::Level::DEBUG => 1,
@@ -93,28 +89,26 @@ impl tracing::field::Visit for MessageVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
             self.message = Some(format!("{value:?}"));
-        } else if self.message.is_none() {
+        } else if let Some(message) = &mut self.message {
+            let _ = write!(message, ", {}: {value:?}", field.name());
+        } else {
             self.message = Some(format!("{}: {value:?}", field.name()));
-        } else if let Some(msg) = self.message.take() {
-            self.message = Some(format!("{msg}, {}: {value:?}", field.name()));
         }
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if field.name() == "message" {
             self.message = Some(value.to_string());
-        } else if self.message.is_none() {
+        } else if let Some(message) = &mut self.message {
+            let _ = write!(message, ", {}: {value}", field.name());
+        } else {
             self.message = Some(format!("{}: {value}", field.name()));
-        } else if let Some(msg) = self.message.take() {
-            self.message = Some(format!("{msg}, {}: {value}", field.name()));
         }
     }
 }
 
-/// Initialize logging with FFI callback support.
-///
-/// # Safety
-/// Can be called multiple times safely.
+/// Initialize logging with FFI callback support. Can be called more than
+/// once: only the first call installs anything.
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_init_logging() {
     use tracing_subscriber::layer::SubscriberExt;
@@ -139,6 +133,6 @@ pub extern "C" fn pb_mapper_init_logging() {
 /// Idempotent; safe even if the application directory was never configured.
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_shutdown_logging() {
-    *LOG_CALLBACK.write() = None;
+    LOG_CALLBACK.store(None);
     crate::disk_log::shutdown();
 }

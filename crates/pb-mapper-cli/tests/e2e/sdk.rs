@@ -1,0 +1,810 @@
+//! End-to-end coverage of the client SDK: tunnels and administrator RPCs.
+
+use std::time::Duration;
+
+use pb_mapper_auth::MIN_TEMP_KEY_TTL;
+use pb_mapper_client::sdk::{
+    Admin, Client, ClientConfig, ConnectOptions, ConnectRequest, ConnectionInfo, PathPolicy,
+    RegisterOptions, RegisterRequest, Registration, Transport, TunnelMetrics, TunnelStatus,
+};
+use pb_mapper_testkit::{
+    Echo, READY_TIMEOUT, Relay, admin_client, admin_credential, publish, run_raw_tcp_echo,
+    run_udp_datagram_echo, subscribe, tcp_echo, udp_echo,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+
+use crate::bound_listener::{BoundListener, with_bound_listener};
+
+const LONG_TTL: Duration = Duration::from_secs(600);
+
+/// Wait until every worker in a registration's control-connection pool is
+/// visible in the relay inventory. `Registration::wait_ready` intentionally
+/// resolves after the first healthy worker, which is sufficient for traffic
+/// but too early for tests that operate on the whole pool.
+async fn wait_for_control_pool(admin: &Admin, service_name: &str) -> Vec<ConnectionInfo> {
+    let expected = pb_mapper_core::config::control_conn_pool_size();
+    let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
+    loop {
+        let connections: Vec<_> = admin
+            .list_connections_all(None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|connection| connection.service_name == service_name)
+            .collect();
+        if connections.len() >= expected {
+            return connections;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "expected {expected} control connections for {service_name}, got {connections:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// An echo backend published as `key` with the SDK's default options, ready.
+///
+/// The [`Echo`] is the backend: hold it for as long as the tunnel should work.
+async fn register_echo(
+    client: &Client,
+    key: &str,
+    transport: Transport,
+    codec: bool,
+) -> (Registration, Echo) {
+    let echo = match transport {
+        Transport::Tcp => tcp_echo(None).await,
+        Transport::Udp => udp_echo(None).await,
+    };
+    let registration = publish(
+        client,
+        key,
+        echo.addr(),
+        transport,
+        codec,
+        RegisterOptions::default(),
+    )
+    .await;
+    assert_eq!(registration.status(), TunnelStatus::Connected);
+    (registration, echo)
+}
+
+#[tokio::test]
+async fn sdk_tcp_tunnel_round_trips() {
+    #[cfg(feature = "relay-quic")]
+    let relay = Relay::start_with_quic("sdk-tcp-tunnel").await;
+    #[cfg(not(feature = "relay-quic"))]
+    let relay = Relay::start("sdk-tcp-tunnel").await;
+    // The pre-QUIC configuration/request literals must still compile, and a
+    // QUIC-capable relay must not change an existing client's default carrier.
+    let client = Client::new(ClientConfig {
+        server: relay.addr().to_string(),
+        credential: pb_mapper_testkit::TEST_ADMIN_KEY.into(),
+        keep_alive: false,
+        namespace: None,
+    })
+    .unwrap();
+    assert_eq!(
+        client.relay_transport(),
+        pb_mapper_client::sdk::RelayTransport::Tcp
+    );
+
+    let echo = tcp_echo(None).await;
+    let registration = client
+        .register(RegisterRequest {
+            key: "echo".into(),
+            local_addr: echo.addr().to_string(),
+            transport: Transport::Tcp,
+            codec: false,
+            force_namespace: false,
+        })
+        .await
+        .unwrap();
+    registration
+        .wait_ready_timeout(READY_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(registration.status(), TunnelStatus::Connected);
+
+    let keys = client.list_keys().await.unwrap();
+    assert!(keys.iter().any(|key| key == "echo"));
+
+    let connection = client
+        .connect(ConnectRequest {
+            key: "echo".into(),
+            local_addr: "127.0.0.1:0".into(),
+            transport: Transport::Tcp,
+        })
+        .await
+        .unwrap();
+    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let listen_addr = connection.local_addr().unwrap();
+
+    run_raw_tcp_echo(listen_addr, 8, None).await;
+
+    assert_eq!(
+        connection.diagnostics().relay_transport,
+        pb_mapper_client::sdk::RelayTransport::Tcp
+    );
+    let diagnostics = client.relay_diagnostics().await;
+    assert_eq!(diagnostics.connections_created, 0);
+    assert!(diagnostics.connections.is_empty());
+
+    connection.stop().await.unwrap();
+    registration.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sdk_admin_issue_list_revoke() {
+    let relay = Relay::start("sdk-admin").await;
+    let administrator = admin_client(relay.addr());
+    let admin = administrator.admin().unwrap();
+
+    let issued = admin
+        .issue_key(LONG_TTL.max(MIN_TEMP_KEY_TTL), Some("sdk-admin".into()))
+        .await
+        .unwrap();
+    assert!(!issued.credential.is_empty());
+
+    let page = admin.list_keys(0, 100).await.unwrap();
+    assert!(page.items.iter().any(|item| item.key_id == issued.key_id));
+
+    let temporary = Client::new(ClientConfig {
+        server: relay.addr().to_string(),
+        credential: issued.credential.clone(),
+        keep_alive: false,
+        namespace: None,
+    })
+    .unwrap();
+    assert!(temporary.admin().is_err());
+
+    let echo = tcp_echo(None).await;
+    let registration = publish(
+        &temporary,
+        "echo",
+        echo.addr(),
+        Transport::Tcp,
+        false,
+        RegisterOptions::default(),
+    )
+    .await;
+
+    admin.revoke_key(issued.key_id).await.unwrap();
+
+    let connection = temporary
+        .connect(ConnectRequest {
+            key: "echo".into(),
+            local_addr: "127.0.0.1:0".into(),
+            transport: Transport::Tcp,
+        })
+        .await
+        .unwrap();
+    let ready = connection.wait_ready_timeout(Duration::from_secs(3)).await;
+    assert!(ready.is_err(), "revoked credential should not stay ready");
+
+    let _ = connection.stop().await;
+    let _ = registration.stop().await;
+}
+
+#[tokio::test]
+async fn sdk_tcp_codec_tunnel_round_trips() {
+    let relay = Relay::start("sdk-tcp-codec").await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-codec", Transport::Tcp, true).await;
+
+    let (connection, listen_addr) = subscribe(
+        &client,
+        "echo-codec",
+        Transport::Tcp,
+        ConnectOptions::default(),
+    )
+    .await;
+    run_raw_tcp_echo(listen_addr, 4, None).await;
+    connection.stop().await.unwrap();
+    registration.stop().await.unwrap();
+}
+
+/// Both ends count every session with the bytes it carried: a relay-only
+/// connection, and the share it reaches, whose relayed sessions once counted
+/// nowhere. A share's metrics stream reports the session when it opens.
+#[tokio::test]
+async fn sdk_relay_sessions_count_with_their_bytes_on_both_ends() {
+    let relay = Relay::start("sdk-relay-metrics").await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "metered", Transport::Tcp, false).await;
+    let (connection, listen_addr) = subscribe(
+        &client,
+        "metered",
+        Transport::Tcp,
+        ConnectOptions {
+            path: PathPolicy::RelayOnly,
+            ..Default::default()
+        },
+    )
+    .await;
+    // An hour apart: only a change makes it sample.
+    let mut followed = registration.subscribe_metrics(Duration::from_secs(3600));
+    assert_eq!(followed.recv().await.unwrap().sessions.relay, 0);
+
+    let payload = vec![0x5a_u8; 1000];
+    let mut stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+    stream.write_all(&payload).await.unwrap();
+    let mut echoed = vec![0; payload.len()];
+    stream.read_exact(&mut echoed).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while followed.recv().await.unwrap().sessions.active_relay != 1 {}
+    })
+    .await
+    .expect("the share's stream reports the session it opened");
+    drop(stream);
+
+    // Each end also times its exchanges with the relay: the connection its
+    // status probe, the share its heartbeat (every 2 s) by the pong's seq.
+    let settled = |metrics: &TunnelMetrics| {
+        (metrics.sessions.relay, metrics.sessions.active_relay) == (1, 0)
+            && metrics.relay.rtt_ms.is_some()
+    };
+    let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
+    let (connected, shared) = loop {
+        let both = (connection.metrics(), registration.metrics());
+        if settled(&both.0) && settled(&both.1) {
+            break both;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{both:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    // An echo: each end sent what it received, the application's bytes alone.
+    for traffic in [connected.traffic, shared.traffic] {
+        assert_eq!((traffic.relay.sent, traffic.relay.received), (1000, 1000));
+        assert_eq!(traffic.direct.sent + traffic.direct.received, 0);
+    }
+    // Shared by every tunnel of this client's relay endpoint.
+    assert!(client.relay_diagnostics().await.control_rtt_ms.is_some());
+    connection.stop().await.unwrap();
+    registration.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sdk_udp_tunnel_round_trips() {
+    let relay = Relay::start("sdk-udp-tunnel").await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-udp", Transport::Udp, false).await;
+
+    let (connection, listen_addr) = subscribe(
+        &client,
+        "echo-udp",
+        Transport::Udp,
+        ConnectOptions::default(),
+    )
+    .await;
+    run_udp_datagram_echo(listen_addr, 4, 4, None).await;
+    connection.stop().await.unwrap();
+    registration.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sdk_status_and_admin_inventory() {
+    let relay = Relay::start("sdk-inventory").await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-inv", Transport::Tcp, false).await;
+
+    let keys = client.list_keys().await.unwrap();
+    assert!(keys.iter().any(|key| key == "echo-inv"));
+
+    let conns = client.service_status("echo-inv").await.unwrap();
+    assert!(
+        conns.iter().any(|conn| conn.healthy),
+        "registered service should have a healthy control connection"
+    );
+    client.remote_id().await.unwrap();
+
+    let admin = client.admin().unwrap();
+    let status = admin.auth_status().await.unwrap();
+    assert!(status.capacity > 0);
+    assert!(!status.server_instance_id.is_empty());
+
+    let services = admin.list_services_all(None).await.unwrap();
+    assert!(services.iter().any(|svc| svc.service_name == "echo-inv"));
+
+    let connections = admin.list_connections_all(None).await.unwrap();
+    assert!(
+        connections
+            .iter()
+            .any(|conn| conn.service_name == "echo-inv")
+    );
+
+    registration.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sdk_connect_stop_releases_local_port() {
+    let relay = Relay::start("sdk-stop").await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-stop", Transport::Tcp, false).await;
+
+    let (connection, listen_addr) = subscribe(
+        &client,
+        "echo-stop",
+        Transport::Tcp,
+        ConnectOptions::default(),
+    )
+    .await;
+    connection.stop().await.unwrap();
+
+    let mut last_error = None;
+    for _ in 0..20 {
+        match TcpListener::bind(listen_addr).await {
+            Ok(listener) => {
+                drop(listener);
+                last_error = None;
+                break;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+    assert!(
+        last_error.is_none(),
+        "connect stop should release {listen_addr}: {:?}",
+        last_error
+    );
+
+    registration.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sdk_admin_show_reveal_renew() {
+    let relay = Relay::start("sdk-admin-lifecycle").await;
+    let client = admin_client(relay.addr());
+    let admin = client.admin().unwrap();
+
+    let issued = admin
+        .issue_key(LONG_TTL.max(MIN_TEMP_KEY_TTL), Some("lifecycle".into()))
+        .await
+        .unwrap();
+    let shown = admin.show_key(issued.key_id).await.unwrap();
+    assert_eq!(shown.key_id, issued.key_id);
+    assert!(shown.credential.is_empty());
+
+    let revealed = admin.reveal_key(issued.key_id).await.unwrap();
+    assert_eq!(revealed.credential, issued.credential);
+
+    let renewed = admin
+        .renew_key(issued.key_id, LONG_TTL.max(MIN_TEMP_KEY_TTL))
+        .await
+        .unwrap();
+    assert_eq!(renewed.key_id, issued.key_id);
+    assert!(renewed.expires_at >= issued.expires_at);
+
+    admin.revoke_key(issued.key_id).await.unwrap();
+}
+
+/// A `connect` whose local address is already taken must not report itself ready:
+/// the status drives `wait_ready`, and a caller told the tunnel is up has to be
+/// able to reach the local endpoint.
+#[tokio::test]
+async fn sdk_connect_is_not_ready_while_local_port_is_occupied() {
+    let relay = Relay::start("sdk-occupied-port").await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-busy", Transport::Tcp, false).await;
+
+    // Held for the whole case, so the SDK's bind can never succeed.
+    let squatter = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let busy_addr = squatter.local_addr().unwrap();
+
+    let connection = client
+        .connect(ConnectRequest {
+            key: "echo-busy".into(),
+            local_addr: busy_addr.to_string(),
+            transport: Transport::Tcp,
+        })
+        .await
+        .unwrap();
+
+    let ready = connection.wait_ready_timeout(Duration::from_secs(2)).await;
+    assert!(
+        ready.is_err(),
+        "connect should not report ready while `{busy_addr}` is occupied"
+    );
+    assert_ne!(
+        connection.status(),
+        TunnelStatus::Connected,
+        "status must not claim Connected without a bound listener"
+    );
+
+    drop(squatter);
+    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    run_raw_tcp_echo(busy_addr, 4, None).await;
+
+    connection.stop().await.unwrap();
+    registration.stop().await.unwrap();
+}
+
+/// `stop()` must take the in-flight forwarded session with it, not leave it
+/// forwarding on a tunnel the caller believes is gone.
+#[tokio::test]
+async fn sdk_stop_closes_established_forwarded_stream() {
+    let relay = Relay::start("sdk-stop-stream").await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-live", Transport::Tcp, false).await;
+
+    let (connection, listen_addr) = subscribe(
+        &client,
+        "echo-live",
+        Transport::Tcp,
+        ConnectOptions::default(),
+    )
+    .await;
+
+    // An established session: the round trip proves the whole path is forwarding.
+    let mut stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+    stream.write_all(b"ping").await.unwrap();
+    let mut echoed = [0_u8; 4];
+    stream.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"ping");
+
+    connection.stop().await.unwrap();
+
+    // The forwarding task is cancelled, so the local half is torn down: the next
+    // read sees EOF or a reset rather than another echo.
+    stream.write_all(b"post").await.ok();
+    let mut buf = [0_u8; 4];
+    let after_stop = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
+    match after_stop {
+        Ok(Ok(0)) | Ok(Err(_)) => {}
+        Ok(Ok(n)) => panic!("stopped tunnel still forwarded {n} bytes: {:?}", &buf[..n]),
+        Err(_) => panic!("stopped tunnel left the forwarded stream open"),
+    }
+
+    registration.stop().await.unwrap();
+}
+
+/// A registration the relay rejects permanently must surface as `Failed`, not
+/// loop as `Retrying`: a caller awaiting `wait_ready()` with no timeout would
+/// otherwise wait forever on a tunnel that can never come up.
+#[tokio::test]
+async fn sdk_register_reports_permanent_rejection_as_failed() {
+    let relay = Relay::start("sdk-reject").await;
+    let client = admin_client(relay.addr());
+
+    // Holds the name as TCP, so the UDP registration below is a transport
+    // mismatch — one of the relay's non-retryable rejections.
+    let (registration, _echo) = register_echo(&client, "echo-clash", Transport::Tcp, false).await;
+
+    let udp_backend = udp_echo(None).await;
+    let clashing = client
+        .register(RegisterRequest {
+            key: "echo-clash".into(),
+            local_addr: udp_backend.addr().to_string(),
+            transport: Transport::Udp,
+            codec: false,
+            force_namespace: false,
+        })
+        .await
+        .unwrap();
+
+    let ready = clashing.wait_ready_timeout(READY_TIMEOUT).await;
+    let error = ready.expect_err("a transport mismatch can never become ready");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("service_transport_mismatch"),
+        "the rejection reason should reach the caller, got: {rendered}"
+    );
+    assert!(
+        matches!(clashing.status(), TunnelStatus::Failed(_)),
+        "a permanent rejection must be Failed, not Retrying: {:?}",
+        clashing.status()
+    );
+
+    let _ = clashing.stop().await;
+    registration.stop().await.unwrap();
+}
+
+/// The `connect` half of the same guarantee: a subscription the relay refuses
+/// permanently must surface as `Failed`, not loop as `Retrying`. A temporary
+/// credential asking for someone else's namespace is one of those refusals.
+#[tokio::test]
+async fn sdk_connect_reports_permanent_rejection_as_failed() {
+    let relay = Relay::start("sdk-connect-reject").await;
+    let (key_id, credential) = relay
+        .issue_credential(LONG_TTL.max(MIN_TEMP_KEY_TTL), "connect-reject")
+        .await;
+
+    // Any namespace but its own: a temporary credential is confined to the one
+    // its key id names, and the relay says so with `retryable: false`.
+    let foreign_namespace = key_id.as_u64() + 1;
+    let client = Client::from_credential(
+        relay.addr().to_string(),
+        credential,
+        false,
+        Some(foreign_namespace),
+    );
+
+    let connection = client
+        .connect(ConnectRequest {
+            key: "echo-denied".into(),
+            local_addr: "127.0.0.1:0".into(),
+            transport: Transport::Tcp,
+        })
+        .await
+        .unwrap();
+
+    let ready = connection.wait_ready_timeout(READY_TIMEOUT).await;
+    let error = ready.expect_err("a foreign namespace can never become ready");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("namespace_access_denied"),
+        "the rejection reason should reach the caller, got: {rendered}"
+    );
+    assert!(
+        matches!(connection.status(), TunnelStatus::Failed(_)),
+        "a permanent rejection must be Failed, not Retrying: {:?}",
+        connection.status()
+    );
+
+    let _ = connection.stop().await;
+}
+
+/// `admin connection retire` frees a service's registered connections, and the
+/// registration's own client notices and comes back.
+///
+/// The operator's escape hatch from the outage that motivated it: a service whose
+/// per-service connection quota was full of connections the relay could not tell
+/// were dead. Retiring them empties the quota without restarting the relay.
+#[tokio::test]
+async fn sdk_admin_retires_registered_connections() {
+    let relay = Relay::start("sdk-retire").await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) = register_echo(&client, "echo-retire", Transport::Tcp, false).await;
+    let admin = client.admin().unwrap();
+
+    let before = wait_for_control_pool(&admin, "echo-retire").await;
+    let registered = before.len();
+
+    let retired = admin
+        .retire_connections(None, "echo-retire".into(), None)
+        .await
+        .unwrap();
+    assert_eq!(retired as usize, registered, "every connection was named");
+
+    // Naming a service the relay no longer holds is not an error, it is zero.
+    assert_eq!(
+        admin
+            .retire_connections(None, "echo-no-such-service".into(), None)
+            .await
+            .unwrap(),
+        0
+    );
+
+    // The client treats retirement as a reconnect, so the service comes back on
+    // its own. That is the whole point: an operator clears the quota without
+    // taking the service down.
+    //
+    // Asserted on the relay's own view, not on `wait_ready_timeout`: the tunnel's
+    // status may still read Connected from the pool that was just retired, so
+    // waiting on it would return immediately and pass even if the service never
+    // came back. A registration the retired set does not hold is proof it did.
+    // The relay hands a returned conn_id out again, so the id alone proves
+    // nothing; a registration's generation only rises.
+    let retired: std::collections::HashSet<(u32, u64)> = before
+        .iter()
+        .map(|conn| (conn.conn_id, conn.generation))
+        .collect();
+    let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
+    loop {
+        let now = admin.list_connections_all(None).await.unwrap();
+        let replaced = now
+            .iter()
+            .filter(|conn| conn.service_name == "echo-retire")
+            .any(|conn| !retired.contains(&(conn.conn_id, conn.generation)));
+        if replaced {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the service never re-registered after retirement: {now:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !matches!(registration.status(), TunnelStatus::Failed(_)),
+        "retirement is a reconnect, not a permanent failure: {:?}",
+        registration.status()
+    );
+
+    // And the tunnel still carries traffic, which no connection count can show.
+    let (connection, listen_addr) = subscribe(
+        &client,
+        "echo-retire",
+        Transport::Tcp,
+        ConnectOptions::default(),
+    )
+    .await;
+    run_raw_tcp_echo(listen_addr, 2, None).await;
+
+    connection.stop().await.unwrap();
+    registration.stop().await.unwrap();
+}
+
+/// Retiring one connection by id leaves the service's other connections alone.
+#[tokio::test]
+async fn sdk_admin_retires_a_single_connection_by_id() {
+    let relay = Relay::start("sdk-retire-one").await;
+    let client = admin_client(relay.addr());
+    let (registration, _echo) =
+        register_echo(&client, "echo-retire-one", Transport::Tcp, false).await;
+    let admin = client.admin().unwrap();
+
+    let mut ours: Vec<(u32, u64)> = wait_for_control_pool(&admin, "echo-retire-one")
+        .await
+        .iter()
+        .map(|conn| (conn.conn_id, conn.generation))
+        .collect();
+    ours.sort_unstable();
+    // A register opens a pool of control connections, so this is the interesting
+    // case rather than a degenerate one.
+    assert!(
+        ours.len() > 1,
+        "expected a control-connection pool, got {ours:?}"
+    );
+    let (retired_id, retired_generation) = ours[0];
+
+    let retired = admin
+        .retire_connections(None, "echo-retire-one".into(), Some(retired_id))
+        .await
+        .unwrap();
+    assert_eq!(retired, 1);
+
+    // The pool's replacement does not take the retired id while it rests,
+    // but an id can serve again later: it is the registration of that
+    // generation that must be gone.
+    let after = admin.list_connections_all(None).await.unwrap();
+    assert!(
+        !after
+            .iter()
+            .any(|conn| conn.service_name == "echo-retire-one"
+                && conn.conn_id == retired_id
+                && conn.generation == retired_generation),
+        "the named connection should be gone"
+    );
+
+    registration.stop().await.unwrap();
+}
+
+/// An old subscriber can leave a probe socket open forever. Reclaim it on the
+/// publisher while preserving traffic, the registration and unrelated services.
+#[tokio::test]
+async fn publisher_idle_policy_reclaims_abandoned_encrypted_probes() {
+    let relay = Relay::start("sdk-idle-policy").await;
+    let client = admin_client(relay.addr());
+    assert!(
+        client
+            .register_with_idle_timeout(
+                RegisterRequest {
+                    key: "overflow".into(),
+                    local_addr: "127.0.0.1:1".into(),
+                    transport: Transport::Tcp,
+                    codec: true,
+                    force_namespace: false,
+                },
+                Duration::MAX
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .register_with_idle_timeout(
+                RegisterRequest {
+                    key: "unsupported-udp".into(),
+                    local_addr: "127.0.0.1:1".into(),
+                    transport: Transport::Udp,
+                    codec: true,
+                    force_namespace: false,
+                },
+                Duration::from_secs(1)
+            )
+            .await
+            .is_err()
+    );
+    let echo = tcp_echo(None).await;
+    let registration = client
+        .register_with_idle_timeout(
+            RegisterRequest {
+                key: "bounded".into(),
+                local_addr: echo.addr().to_string(),
+                transport: Transport::Tcp,
+                codec: true,
+                force_namespace: false,
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    registration
+        .wait_ready_timeout(READY_TIMEOUT)
+        .await
+        .unwrap();
+    let (unbounded, _unbounded_echo) =
+        register_echo(&client, "default", Transport::Tcp, true).await;
+    let disabled = client
+        .register_with_idle_timeout(
+            RegisterRequest {
+                key: "disabled".into(),
+                local_addr: echo.addr().to_string(),
+                transport: Transport::Tcp,
+                codec: true,
+                force_namespace: false,
+            },
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+    disabled.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let mut subscribers = tokio::task::JoinSet::new();
+    let mut addresses = Vec::new();
+    for key in ["bounded", "default", "disabled"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let relay_addr = relay.addr();
+        subscribers.spawn(with_bound_listener(
+            listener,
+            pb_mapper_client::client::run_client_side_cli_with_pinned_credential::<BoundListener, _>(
+                addr,
+                relay_addr,
+                key.into(),
+                false,
+                None,
+                admin_credential(),
+            ),
+        ));
+        addresses.push(addr);
+    }
+    async fn ping(stream: &mut tokio::net::TcpStream) {
+        stream.write_all(b"ping").await.unwrap();
+        let mut bytes = [0; 4];
+        tokio::time::timeout(READY_TIMEOUT, stream.read_exact(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&bytes, b"ping");
+    }
+    let mut idle = Vec::new();
+    for _ in 0..12 {
+        let mut stream = tokio::net::TcpStream::connect(addresses[0]).await.unwrap();
+        ping(&mut stream).await;
+        idle.push(stream);
+    }
+    let mut active = tokio::net::TcpStream::connect(addresses[0]).await.unwrap();
+    let mut unchanged = tokio::net::TcpStream::connect(addresses[1]).await.unwrap();
+    let mut no_deadline = tokio::net::TcpStream::connect(addresses[2]).await.unwrap();
+    ping(&mut unchanged).await;
+    ping(&mut no_deadline).await;
+    for _ in 0..12 {
+        ping(&mut active).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    for mut stream in idle {
+        let mut byte = [0];
+        let result = tokio::time::timeout(READY_TIMEOUT, stream.read(&mut byte))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Ok(0) | Err(_)),
+            "idle probe still forwarded: {result:?}"
+        );
+    }
+    ping(&mut unchanged).await;
+    ping(&mut no_deadline).await;
+    ping(&mut active).await;
+    assert_eq!(registration.status(), TunnelStatus::Connected);
+    let mut fresh = tokio::net::TcpStream::connect(addresses[0]).await.unwrap();
+    ping(&mut fresh).await;
+    subscribers.shutdown().await;
+    registration.stop().await.unwrap();
+    unbounded.stop().await.unwrap();
+    disabled.stop().await.unwrap();
+}

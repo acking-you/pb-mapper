@@ -1,58 +1,62 @@
 use std::time::Duration;
 
+use pb_mapper_core::error::Error as CoreError;
 use snafu::Snafu;
-
-// The `common::error::Error` spellings below are the source type on nearly every
-// variant; aliasing keeps them as they were.
-use pb_mapper_core as common;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(super)))]
 pub enum Error {
     #[snafu(display("send register request error"))]
-    SendRegisterReq { source: common::error::Error },
+    SendRegisterReq { source: CoreError },
     #[snafu(display("encode register request error"))]
-    EncodeRegisterReq { source: common::error::Error },
+    EncodeRegisterReq { source: CoreError },
     #[snafu(display("read register response error"))]
-    ReadRegisterResp { source: common::error::Error },
+    ReadRegisterResp { source: CoreError },
     #[snafu(display("decode register response error"))]
-    DecodeRegisterResp { source: common::error::Error },
+    DecodeRegisterResp { source: CoreError },
     #[snafu(display("register response not `PbConnResponse::Register`"))]
     RegisterRespNotMatch,
     #[snafu(display("read stream request error"))]
-    ReadStreamReq { source: common::error::Error },
+    ReadStreamReq { source: CoreError },
     #[snafu(display("decode stream request error"))]
-    DecodeStreamReq { source: common::error::Error },
+    DecodeStreamReq { source: CoreError },
     #[snafu(display("encode pb connect stream request error"))]
-    EncodePbConnStreamReq { source: common::error::Error },
+    EncodePbConnStreamReq { source: CoreError },
     #[snafu(display("connect local stream error"))]
     ConnectLocalStream { source: std::io::Error },
     #[snafu(display("connect remote stream error"))]
     ConnectRemoteStream { source: std::io::Error },
     #[snafu(display("write pb conn stream request error"))]
-    WritePbConnStreamReq { source: common::error::Error },
+    WritePbConnStreamReq { source: CoreError },
     #[snafu(display("decode pb conn stream response error"))]
-    DecodePbConnStreamResp { source: common::error::Error },
+    DecodePbConnStreamResp { source: CoreError },
     #[snafu(display("we expected `PbConnResponse::Stream`,but actual response is `{resp}`"))]
     PbConnStreamRespNotMatch {
         // Structured representation of response
         resp: String,
     },
+    /// The relay answered the data stream with a structured refusal.
+    #[snafu(display("relay refused the stream: {code}: {message}"))]
+    StreamRemoteError {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
     #[snafu(display("Failed to write ping message"))]
-    WritePingMsg { source: common::error::Error },
+    WritePingMsg { source: CoreError },
     #[snafu(display("Failed to encode ping message"))]
-    EncodePingMsg { source: common::error::Error },
+    EncodePingMsg { source: CoreError },
     #[snafu(display("Failed to write stream ack message"))]
-    WriteStreamAckMsg { source: common::error::Error },
+    WriteStreamAckMsg { source: CoreError },
     #[snafu(display("Failed to encode stream ack message"))]
-    EncodeStreamAckMsg { source: common::error::Error },
+    EncodeStreamAckMsg { source: CoreError },
     #[snafu(display("control writer closed while scheduling `{action}`"))]
     ControlWriterClosed { action: &'static str },
     #[snafu(display("header msg tool:`{action}` create failed!"))]
     CreateHeaderTool {
-        // Must be `reader/writer`
+        // What was being created: `session` or `data codec`.
         action: &'static str,
-        source: common::error::Error,
+        source: CoreError,
     },
     #[snafu(display("control io `{action}` timed out after {timeout:?}"))]
     ControlIoTimeout {

@@ -1,5 +1,4 @@
 //! Client connection and status FFI entrypoints.
-#![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{c_char, c_int};
 
@@ -8,8 +7,8 @@ use serde_json::json;
 use crate::ctl::Origin;
 use crate::events;
 use crate::handle::PbMapperHandle;
-use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
-use crate::state::{ClientConfigInfo, ClientStatusResponse};
+use crate::response::{Reply, json_or, parse_c_string, port_mapping_from_c, respond};
+use crate::state::{ConnectSpec, DirectOptions};
 
 /// Connect client to service. `namespace` is the temporary credential whose
 /// service it is, for the administrator key; negative for this credential's
@@ -17,6 +16,11 @@ use crate::state::{ClientConfigInfo, ClientStatusResponse};
 /// path before the relay; zero keeps them all on the relay. `port_mapping`
 /// says when to ask the router to map the direct UDP port, while direct is
 /// allowed: 0 never, 1 once punching through fails, 2 from the start.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed, and each string argument null or a NUL-terminated string
+/// that stays valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_connect_service(
     handle: *mut PbMapperHandle,
@@ -28,161 +32,123 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
     allow_direct: c_int,
     port_mapping: c_int,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let service_key = match parse_c_string(service_key, "service_key") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-    let local_address = match parse_c_string(local_address, "local_address") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-    let protocol = match parse_c_string(protocol, "protocol") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-    let port_mapping = match crate::state::port_mapping_from_c(port_mapping) {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    // See `pb_mapper_register_service`: the connect path releases the state lock
-    // for its slow phase, so the caller must not be holding it.
-    // Saving the config is `connect_service`'s job, not this layer's — that is
-    // what makes a connection from the window and one from a terminal end up
-    // in the same state.
-    let result = handle.runtime.block_on(async move {
-        crate::state::connect_service(
-            &state,
-            service_key,
-            local_address,
-            protocol,
-            enable_keep_alive != 0,
-            u64::try_from(namespace).ok(),
-            crate::state::DirectOptions {
-                allow_direct: allow_direct != 0,
-                port_mapping,
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let service_key = unsafe { parse_c_string(service_key, "service_key") }?;
+        let local_address = unsafe { parse_c_string(local_address, "local_address") }?;
+        let protocol = unsafe { parse_c_string(protocol, "protocol") }?;
+        let port_mapping = port_mapping_from_c(port_mapping)?;
+        // See `pb_mapper_register_service`: the connect path releases the
+        // state lock for its slow phase, so the caller must not be holding
+        // it. Saving the config is `connect_service`'s job, not this
+        // layer's — that is what makes a connection from the window and one
+        // from a terminal end up in the same state.
+        handle.runtime.block_on(crate::state::connect_service(
+            &handle.state,
+            ConnectSpec {
+                service_key,
+                local_address,
+                protocol,
+                enable_keep_alive: enable_keep_alive != 0,
+                namespace: u64::try_from(namespace).ok(),
+                direct: DirectOptions {
+                    allow_direct: allow_direct != 0,
+                    port_mapping,
+                },
             },
-        )
-        .await
-    });
-
-    match result {
-        Ok(_) => {
-            events::emit(events::ChangeKind::Clients, None, Origin::Ui);
-            ok_message("client connection started")
-        }
-        Err(e) => err_ctl(&e),
-    }
+        ))?;
+        events::emit(events::ChangeKind::Clients, None, Origin::Ui);
+        Ok(Reply::Message("client connection started".into()))
+    })
 }
 
 /// Disconnect client from service.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed, and each string argument null or a NUL-terminated string
+/// that stays valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_disconnect_service(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let service_key = match parse_c_string(service_key, "service_key") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let result = handle.runtime.block_on(async move {
-        let mut state = state.lock().await;
-        state.disconnect_service(service_key).await
-    });
-
-    match result {
-        Ok(_) => {
-            events::emit(events::ChangeKind::Clients, None, Origin::Ui);
-            ok_message("client disconnected")
-        }
-        Err(e) => err_ctl(&e),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let service_key = unsafe { parse_c_string(service_key, "service_key") }?;
+        handle
+            .runtime
+            .block_on(async { handle.state.lock().await.disconnect_service(service_key) })?;
+        events::emit(events::ChangeKind::Clients, None, Origin::Ui);
+        Ok(Reply::Message("client disconnected".into()))
+    })
 }
 
 /// Delete client config (also stops client if running).
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed, and each string argument null or a NUL-terminated string
+/// that stays valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_delete_client_config(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let service_key = match parse_c_string(service_key, "service_key") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let result = handle.runtime.block_on(async move {
-        let mut state = state.lock().await;
-        state.delete_client_config_and_stop(service_key).await
-    });
-
-    match result {
-        Ok(_) => {
-            events::emit(events::ChangeKind::Clients, None, Origin::Ui);
-            ok_message("client config deleted")
-        }
-        Err(e) => err_ctl(&e),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let service_key = unsafe { parse_c_string(service_key, "service_key") }?;
+        handle.runtime.block_on(async {
+            handle
+                .state
+                .lock()
+                .await
+                .delete_client_config_and_stop(service_key)
+        })?;
+        events::emit(events::ChangeKind::Clients, None, Origin::Ui);
+        Ok(Reply::Message("client config deleted".into()))
+    })
 }
 
 /// Get client configs list.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_client_configs_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let clients: Vec<ClientConfigInfo> = handle.runtime.block_on(async move {
-        let state = state.lock().await;
-        state.get_client_configs().await
-    });
-
-    ok_data(json!({"clients": clients}))
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        let clients = handle
+            .runtime
+            .block_on(async { handle.state.lock().await.get_client_configs() })?;
+        Ok(Reply::Data(json!({"clients": clients})))
+    })
 }
 
 /// Get client status for a specific key.
+///
+/// # Safety
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed, and each string argument null or a NUL-terminated string
+/// that stays valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_client_status_json(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let service_key = match parse_c_string(service_key, "service_key") {
-        Ok(v) => v,
-        Err(e) => return err_ctl(&e),
-    };
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let status: ClientStatusResponse = handle.runtime.block_on(async move {
-        let state = state.lock().await;
-        state.get_client_status(service_key).await
-    });
-
-    ok_data(serde_json::to_value(status).unwrap_or_else(|_| json!({})))
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let service_key = unsafe { parse_c_string(service_key, "service_key") }?;
+        let status = handle
+            .runtime
+            .block_on(async { handle.state.lock().await.get_client_status(service_key) });
+        Ok(Reply::Data(json_or(status, json!({}))))
+    })
 }

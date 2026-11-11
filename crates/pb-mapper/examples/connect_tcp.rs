@@ -44,9 +44,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A sample a second, and one as each connection opens or closes.
     let mut metrics = connection.subscribe_metrics(Duration::from_secs(1));
     let mut last = None;
+    // One Ctrl-C listener for the whole loop, so a Ctrl-C that arrives while
+    // a sample prints is not missed.
+    let interrupt = tokio::signal::ctrl_c();
+    tokio::pin!(interrupt);
     loop {
         tokio::select! {
-            result = tokio::signal::ctrl_c() => { result?; break; }
+            biased;
+            result = &mut interrupt => { result?; break; }
             sample = metrics.recv() => {
                 let Some(sample) = sample else { break };
                 let (sessions, traffic) = (sample.sessions, sample.traffic);

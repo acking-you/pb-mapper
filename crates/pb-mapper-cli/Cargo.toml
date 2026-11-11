@@ -14,10 +14,15 @@ keywords = ["proxy", "tunnel", "relay", "tcp", "udp"]
 categories = ["command-line-utilities", "network-programming"]
 publish = ["crates-io"]
 
-# The binary keeps the name `pb-mapper`, discovered from
-# `src/bin/pb-mapper.rs`. Release workflows, both Dockerfiles, and the install
-# scripts all hardcode it, and `cargo build --bin pb-mapper` resolves it from
-# the workspace root regardless of which crate holds it.
+# The binary keeps the name `pb-mapper`. Release workflows, both Dockerfiles,
+# and the install scripts all hardcode it, and `cargo build --bin pb-mapper`
+# resolves it from the workspace root regardless of which crate holds it.
+# It is not documented: rustdoc would write it to `pb_mapper/`, where the
+# `pb-mapper` SDK's library documentation goes.
+[[bin]]
+name = "pb-mapper"
+path = "src/bin/pb-mapper.rs"
+doc = false
 
 [dependencies]
 pb-mapper-auth.workspace = true
@@ -32,25 +37,19 @@ serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-uni-stream.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 quinn.workspace = true
 pb-mapper-testkit.workspace = true
-
-rand.workspace = true
+uni-stream.workspace = true
 
 [features]
 port-mapping = ["p2p", "pb-mapper-client/port-mapping"]
 relay-quic = ["pb-mapper-client/relay-quic", "pb-mapper-server/relay-quic", "pb-mapper-protocol/relay-quic"]
 default = ["p2p", "relay-quic", "port-mapping"]
 p2p = ["pb-mapper-client/p2p", "pb-mapper-server/p2p"]
-udp-timeout = [
-    "uni-stream/udp-timeout",
-    "pb-mapper-protocol/udp-timeout",
-    "pb-mapper-client/udp-timeout",
-    "pb-mapper-server/udp-timeout",
-]
+udp-timeout = ["pb-mapper-client/udp-timeout", "pb-mapper-server/udp-timeout"]
 
 [lints]
 workspace = true

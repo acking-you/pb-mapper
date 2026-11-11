@@ -12,17 +12,15 @@
 //! meanwhile is never changed back.
 
 use crate::{FailureKind, Result, error, failure_kind, platform::DisplayModes};
+use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
-use std::{
-    path::PathBuf,
-    sync::{Mutex, MutexGuard, PoisonError},
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{path::PathBuf, time::Duration};
 
 /// The most modes a list carries.
 const MAX_MODES: usize = 64;
-/// The largest width or height of a mode.
-const MAX_SIDE: u32 = 32_768;
+/// The largest width or height of a mode, and so of a display or a picture
+/// the viewer accepts.
+pub(crate) const MAX_SIDE: u32 = 32_768;
 /// The most displays one journal names.
 const MAX_ENTRIES: usize = 16;
 /// The longest scope an entry keeps.
@@ -269,7 +267,7 @@ impl Journal {
     }
 
     /// Replace its entries, durably; none removes the file.
-    fn write(&self, entries: &[Entry]) -> Result<()> {
+    fn write(&self, entries: Vec<Entry>) -> Result<()> {
         let Some(path) = &self.path else {
             return Err(no_journal());
         };
@@ -280,34 +278,28 @@ impl Journal {
                 Err(failure) => Err(failure),
             };
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let stored = Stored {
             version: Stored::VERSION,
-            entries: entries.to_vec(),
+            entries,
         };
-        let bytes = serde_json::to_vec(&stored).map_err(error)?;
-        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&temporary)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-        }
-        pb_mapper_core::durable_file::replace_file(&temporary, path)?;
-        pb_mapper_core::durable_file::sync_parent_directory(path)
+        let bytes = serde_json::to_vec(&stored).map_err(std::io::Error::other)?;
+        crate::trust::write_durably(path, &bytes)
     }
 
     /// Its entries with `device`'s replaced by `entry`, or removed.
     fn put(&self, device: &str, entry: Option<Entry>) -> Result<()> {
-        let mut entries = self.read();
+        self.put_into(self.read(), device, entry)
+    }
+
+    /// `entries`, just read from it, with `device`'s replaced by `entry`, or
+    /// removed.
+    fn put_into(&self, mut entries: Vec<Entry>, device: &str, entry: Option<Entry>) -> Result<()> {
         entries.retain(|kept| kept.device != device);
         entries.extend(entry);
         if entries.len() > MAX_ENTRIES {
             return Err(error("too many displays are changed"));
         }
-        self.write(&entries)
+        self.write(entries)
     }
 }
 
@@ -334,7 +326,7 @@ struct Claim {
 static CLAIMS: Mutex<Vec<Claim>> = Mutex::new(Vec::new());
 
 fn claims() -> MutexGuard<'static, Vec<Claim>> {
-    CLAIMS.lock().unwrap_or_else(PoisonError::into_inner)
+    CLAIMS.lock()
 }
 
 fn unclaim(claims: &mut Vec<Claim>, device: &str) {
@@ -344,14 +336,6 @@ fn unclaim(claims: &mut Vec<Claim>, device: &str) {
             claims.swap_remove(at);
         }
     }
-}
-
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
 }
 
 /// What one backend changed of its display's mode, and the way back.
@@ -428,12 +412,10 @@ impl Guard {
             (None, Some(at)) => claims[at].original,
             (None, None) => modes.current(device)?,
         };
-        let before = self
-            .journal
-            .read()
-            .into_iter()
-            .find(|entry| entry.device == device);
-        self.journal.put(
+        let entries = self.journal.read();
+        let before = entries.iter().find(|entry| entry.device == device).cloned();
+        self.journal.put_into(
+            entries,
             device,
             Some(Entry {
                 device: device.to_owned(),
@@ -441,7 +423,7 @@ impl Guard {
                 original,
                 applied: target,
                 pid: std::process::id(),
-                at_unix_ms: now_unix_ms(),
+                at_unix_ms: pb_mapper_core::time::unix_millis(),
             }),
         )?;
         if let Err(failure) = modes.apply(device, &target) {
@@ -574,7 +556,7 @@ pub(crate) fn recover<M: DisplayModes>(modes: &mut M, journal: &Journal) -> Resu
         settled(&entry.device);
     }
     if kept != entries {
-        journal.write(&kept)?;
+        journal.write(kept)?;
     }
     Ok(restored)
 }
@@ -585,7 +567,7 @@ static WARNED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 fn not_restored(device: &str, failure: &std::io::Error) {
     let detail = failure.to_string();
-    let mut warned = WARNED.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut warned = WARNED.lock();
     let new = !warned
         .iter()
         .any(|(seen, said)| seen == device && *said == detail);
@@ -602,16 +584,13 @@ fn not_restored(device: &str, failure: &std::io::Error) {
 }
 
 fn settled(device: &str) {
-    WARNED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .retain(|(seen, _)| seen != device);
+    WARNED.lock().retain(|(seen, _)| seen != device);
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use pb_mapper_core::test_support::TempPath;
 
     fn mode(width: u32, height: u32) -> Mode {
         Mode { width, height }
@@ -716,11 +695,11 @@ mod tests {
         }
     }
 
-    fn journal(name: &str) -> Journal {
-        let dir =
-            std::env::temp_dir().join(format!("pb-desktop-modes-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        Journal::in_dir(Some(dir))
+    /// A journal in a directory of its own, which goes with the `TempPath`.
+    fn journal(name: &str) -> (TempPath, Journal) {
+        let dir = TempPath::new(&format!("desktop-modes-{name}"));
+        let journal = Journal::in_dir(Some(dir.to_path_buf()));
+        (dir, journal)
     }
 
     /// A crashed host's journal is replayed once: its display is reset and
@@ -729,7 +708,7 @@ mod tests {
     /// that fails validation is discarded unread.
     #[test]
     fn a_crashed_hosts_journal_resets_once_and_never_fights_the_owner() {
-        let journal = journal("recover");
+        let (_dir, journal) = journal("recover");
         let device = r"\\.\DISPLAY911";
         let mut display = steered();
         let mut crashed = Guard::new(journal.clone());
@@ -776,7 +755,6 @@ mod tests {
         assert_eq!(recover(&mut display, &journal).unwrap(), 0);
         assert!(!path.exists());
         assert_eq!(display.resets.len(), 1);
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// Two hosts of one process on one display: the first to end leaves it
@@ -784,7 +762,7 @@ mod tests {
     /// mode it shows.
     #[test]
     fn the_last_of_two_hosts_on_a_display_puts_its_original_back() {
-        let journal = journal("shared");
+        let (_dir, journal) = journal("shared");
         let device = r"\\.\DISPLAY912";
         let mut display = steered();
         let (mut first, mut second) = (Guard::new(journal.clone()), Guard::new(journal.clone()));
@@ -796,6 +774,5 @@ mod tests {
         assert!(first.restore(&mut display, || {}).unwrap());
         assert_eq!(display.resets, [setting(2560, 1440)]);
         assert!(!journal.pending());
-        let _ = std::fs::remove_dir_all(journal.path.unwrap().parent().unwrap());
     }
 }

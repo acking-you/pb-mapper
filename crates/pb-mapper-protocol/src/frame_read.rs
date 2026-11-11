@@ -85,8 +85,23 @@ async fn read_remaining(
     Ok(())
 }
 
+/// Starts a read and drops it once it is pending, as a heartbeat or select
+/// branch may at any byte boundary. The next read must resume that frame,
+/// including any authenticated counter.
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+pub(crate) async fn cancel_partial_read(reader: &mut impl crate::MessageReader) {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let mut read = std::pin::pin!(reader.read_msg());
+    poll_fn(|cx| {
+        assert!(read.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

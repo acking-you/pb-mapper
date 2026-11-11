@@ -2,7 +2,9 @@
 name = "pb-mapper-galaxy"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
+license.workspace = true
 publish = false
 
 # The galaxy view's per-frame geometry. `pb-mapper-ffi` exports it to the

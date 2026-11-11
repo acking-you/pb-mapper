@@ -115,11 +115,11 @@ Rust 已升级到官方 [1.99.1](https://doc.rust-lang.org/releases.html#version
 | 代码 | 职责 |
 |---|---|
 | `pb-mapper-protocol/src/direct.rs` | 能力、随机会话标识、短期许可、协调消息、只读观测；secret 的 Debug 隐去内容、比较使用 constant-time |
-| `pb-mapper-server/src/direct/{mod,stun}.rs` | 现有路由 manager 内串行处理许可和中继选择；独立、有界的 STUN Binding 服务 |
+| `pb-mapper-server/src/direct/{mod,state,control,stun}.rs`、`direct/state/observe.rs` | 现有路由 manager 内串行处理许可和中继选择（`state.rs`，会话观测在 `state/observe.rs`）；每条协调连接的读写循环（`control.rs`）；独立、有界的 STUN Binding 服务 |
 | `pb-mapper-client/src/direct/{control,provider}.rs` | 消费端持久 PBM2 控制连接；提供端复用注册通道，数据任务归注册句柄持有 |
-| `pb-mapper-client/src/direct/{socket,endpoint,identity}.rs` | 单 UDP 收包者、STUN/认证探测/QUIC 分流、候选、相互 TLS 认证和 exporter 绑定 |
+| `pb-mapper-client/src/direct/{socket,binding,identity}.rs`、`direct/endpoint/` | 单 UDP 收包者、STUN/认证探测/QUIC 分流、候选（STUN 发现在 `endpoint/discovery.rs`，拨号竞速在 `endpoint/dial.rs`）、相互 TLS 认证和 exporter 绑定（`binding.rs`） |
 | `pb-mapper-client/src/direct/{lan,candidates}.rs` | 网卡分级、同网证据、局域网先行的候选顺序 |
-| `pb-mapper-client/src/direct/{mod,reports}.rs` | 提交与回退边界、现有泛型转发器、状态合并和重连上报 |
+| `pb-mapper-client/src/direct/{consumer,conn,link,reports}.rs` | 提交与回退边界（`consumer.rs`）、提交后的连接与两端共用的转发（`conn.rs`）、路径描述（`link.rs`）、状态合并和重连上报 |
 | `pb-mapper-client/src/sdk/{client,types}.rs` | 保留旧入口，增加 `ConnectOptions` / `RegisterOptions` |
 
 所有路径均先使用原有凭据和 namespace 授权。默认 `relay-only` 不查询新能力，也不创建证书、UDP socket 或新的控制连接。`register` 默认不声明直连能力。新增字段均为省略 None 的可选字段，不提升 PBM2、注册 V2 或数据 codec 版本；原有 `Subcribe` 拼写与行为保持兼容。

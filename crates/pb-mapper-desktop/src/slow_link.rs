@@ -4,10 +4,9 @@
 //! the relay and reads the host's once-a-second `desktop_feedback_interval`
 //! trace. The cases run one at a time. Run with:
 //! cargo test -p pb-mapper-desktop -- --ignored --nocapture slow_link
-#![allow(clippy::unwrap_used)]
 use crate::*;
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
-use pb_mapper_testkit::{Relay, Shape, admin_credential, shaped_link};
+use pb_mapper_testkit::{Relay, Shape, ShapedLink, admin_credential, shaped_link};
 use std::{
     collections::{BTreeSet, VecDeque},
     future::Future,
@@ -323,6 +322,9 @@ struct Rig {
     viewer: Viewer,
     probe: Arc<Probe>,
     _clients: [Client; 2],
+    /// The shaped hop the viewer reaches the relay through, if any, held
+    /// while the rig lives. The testkit does not name its type.
+    _link: Option<ShapedLink>,
     _relay: Relay,
 }
 impl Rig {
@@ -359,10 +361,13 @@ impl Rig {
             .start(&local)
             .await
             .unwrap();
-        let remote = client(match shape {
-            Some(shape) => shaped_link(relay.addr(), shape).await,
-            None => relay.addr(),
-        });
+        let (remote, link) = match shape {
+            Some(shape) => {
+                let link = shaped_link(relay.addr(), shape).await;
+                (client(link.addr()), Some(link))
+            }
+            None => (client(relay.addr()), None),
+        };
         let viewer = Viewer::connect(
             &remote,
             host.invitation(),
@@ -385,6 +390,7 @@ impl Rig {
             viewer,
             probe,
             _clients: [local, remote],
+            _link: link,
             _relay: relay,
         }
     }

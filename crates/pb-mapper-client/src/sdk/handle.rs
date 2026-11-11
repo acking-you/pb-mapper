@@ -8,6 +8,7 @@ use crate::diagnostics::{
     Diagnostics, TunnelDiagnostics, TunnelEvents, TunnelMetrics, TunnelMetricsStream,
 };
 use crate::endpoint::RelayEndpoint;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::sync::{Mutex, watch};
@@ -20,6 +21,8 @@ pub(crate) struct LiveTunnel {
     shutdown: CancellationToken,
     join: Mutex<Option<JoinHandle<()>>>,
     status: watch::Receiver<TunnelStatus>,
+    /// Where its local listener is bound, once it is; a connect tunnel's.
+    bound: watch::Receiver<Option<SocketAddr>>,
     endpoint: RelayEndpoint,
     diagnostics: Diagnostics,
 }
@@ -29,6 +32,7 @@ impl LiveTunnel {
         shutdown: CancellationToken,
         join: JoinHandle<()>,
         status: watch::Receiver<TunnelStatus>,
+        bound: watch::Receiver<Option<SocketAddr>>,
         endpoint: RelayEndpoint,
         diagnostics: Diagnostics,
     ) -> Self {
@@ -36,6 +40,7 @@ impl LiveTunnel {
             shutdown,
             join: Mutex::new(Some(join)),
             status,
+            bound,
             endpoint,
             diagnostics,
         }
@@ -65,14 +70,13 @@ impl LiveTunnel {
         // Retain ownership while awaiting: cancellation of stop must not detach
         // the worker, and concurrent stop calls must observe the same cleanup.
         let mut slot = self.join.lock().await;
+        let mut result = Ok(());
         if let Some(handle) = slot.as_mut() {
             match tokio::time::timeout(Duration::from_secs(5), &mut *handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(join_error)) if join_error.is_cancelled() => {}
                 Ok(Err(join_error)) => {
-                    slot.take();
-                    self.diagnostics.stop();
-                    return Err(Error::protocol(format!("tunnel task failed: {join_error}")));
+                    result = Err(Error::protocol(format!("tunnel task failed: {join_error}")));
                 }
                 Err(_) => {
                     handle.abort();
@@ -82,7 +86,7 @@ impl LiveTunnel {
             slot.take();
         }
         self.diagnostics.stop();
-        Ok(())
+        result
     }
 }
 
@@ -200,8 +204,18 @@ tunnel_handle!(
     Connection
 );
 
+impl Connection {
+    /// Where its local listener is bound, once it is: the port the system
+    /// chose when the request asked for port 0, which the listener keeps if
+    /// it is ever bound again. `None` before that, and for
+    /// [`Client::connect_tcp`](super::Client::connect_tcp), which listens
+    /// nowhere.
+    pub fn local_addr(&self) -> Option<SocketAddr> {
+        *self.inner.bound.borrow()
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::{future::Future, task::Poll};
@@ -227,6 +241,7 @@ mod tests {
             CancellationToken::new(),
             worker,
             rx.clone(),
+            watch::channel(None).1,
             RelayEndpoint::shared("127.0.0.1:1"),
             Diagnostics::default(),
         );
@@ -255,6 +270,7 @@ mod tests {
             CancellationToken::new(),
             worker,
             rx,
+            watch::channel(None).1,
             RelayEndpoint::shared("127.0.0.1:1"),
             Diagnostics::default(),
         );

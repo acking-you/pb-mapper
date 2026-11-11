@@ -35,24 +35,36 @@ pub const RECEIVE_WINDOW: u32 = 16 * STREAM_RECEIVE_WINDOW;
 /// and some slack. Raised to [`RECEIVE_WINDOW`] on admission, so a flood of
 /// handshakes that never authenticate cannot pin a stream window each.
 const PRE_ADMISSION_WINDOW: u32 = 256 << 10;
+const _: () = assert!(
+    PRE_ADMISSION_WINDOW as usize >= crate::secure::MAX_FIRST_FLIGHT_LEN,
+    "an unauthenticated peer must be able to send one whole first flight"
+);
 
-fn transport(streams: u32, client: bool) -> Arc<quinn::TransportConfig> {
-    let mut config = quinn::TransportConfig::default();
-    config
-        .max_concurrent_bidi_streams(streams.into())
-        .max_concurrent_uni_streams(0u32.into())
-        .stream_receive_window(STREAM_RECEIVE_WINDOW.into())
+/// Which end of a relay connection a transport configuration is for.
+#[derive(Clone, Copy)]
+enum Side {
+    Relay,
+    Client,
+}
+
+fn transport(side: Side) -> Arc<quinn::TransportConfig> {
+    let (peer_streams, receive_window, keep_alive) = match side {
+        Side::Relay => (1_u32, PRE_ADMISSION_WINDOW.into(), None),
         // A client buffers only for streams it opened itself, a stream
         // window each, so it does not cap the sum: a relay stream that the
-        // local application stops reading never stalls the others.
-        .receive_window(if client {
-            quinn::VarInt::MAX
-        } else {
-            PRE_ADMISSION_WINDOW.into()
-        })
+        // local application stops reading never stalls the others. The
+        // relay opens none.
+        Side::Client => (0, quinn::VarInt::MAX, Some(Duration::from_secs(15))),
+    };
+    let mut config = quinn::TransportConfig::default();
+    config
+        .max_concurrent_bidi_streams(peer_streams.into())
+        .max_concurrent_uni_streams(0u32.into())
+        .stream_receive_window(STREAM_RECEIVE_WINDOW.into())
+        .receive_window(receive_window)
         .send_window(32u64 << 20)
         .max_idle_timeout(Some(quinn::VarInt::from_u32(60_000).into()))
-        .keep_alive_interval(client.then_some(Duration::from_secs(15)))
+        .keep_alive_interval(keep_alive)
         .datagram_receive_buffer_size(None);
     Arc::new(config)
 }
@@ -74,7 +86,7 @@ pub fn server_config() -> io::Result<(quinn::ServerConfig, Vec<u8>)> {
     let crypto =
         quinn::crypto::rustls::QuicServerConfig::try_from(tls).map_err(io::Error::other)?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-    config.transport_config(transport(1, false));
+    config.transport_config(transport(Side::Relay));
     config.max_incoming(64).incoming_buffer_size_total(4 << 20);
     Ok((config, certificate))
 }
@@ -106,7 +118,7 @@ pub fn client_config(certificate: &[u8]) -> io::Result<quinn::ClientConfig> {
     let crypto =
         quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(io::Error::other)?;
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
-    config.transport_config(transport(0, true));
+    config.transport_config(transport(Side::Client));
     Ok(config)
 }
 

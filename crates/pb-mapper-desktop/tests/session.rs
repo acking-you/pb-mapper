@@ -217,8 +217,9 @@ impl Renderer {
         let stop = Arc::new(AtomicBool::new(false));
         let (present, log, done) = (presenting.clone(), pulled.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
+            let mut capacity = 4 << 20;
             while !done.load(Ordering::Acquire) {
-                match consumer.next(Duration::from_millis(50), 4 << 20) {
+                match consumer.next(Duration::from_millis(50), capacity) {
                     Pull::Unit(unit) => {
                         log.lock().unwrap().push(Pulled {
                             keyframe: unit.keyframe,
@@ -228,8 +229,9 @@ impl Renderer {
                             consumer.presented(unit.generation, unit.frame_id);
                         }
                     }
+                    Pull::NeedCapacity(needed) => capacity = needed,
+                    Pull::Timeout | Pull::Paused => {}
                     Pull::Closed => break,
-                    _ => {}
                 }
             }
         });
@@ -248,16 +250,10 @@ impl Renderer {
     }
     /// The `index`th unit pulled, waiting for it.
     async fn unit(&self, index: usize) -> Pulled {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if let Some(unit) = self.pulled.lock().unwrap().get(index) {
-                    return *unit;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+        poll(Duration::from_secs(10), || {
+            self.pulled.lock().unwrap().get(index).copied()
         })
         .await
-        .unwrap()
     }
 }
 impl Drop for Renderer {
@@ -269,12 +265,12 @@ impl Drop for Renderer {
     }
 }
 
-async fn wait(viewer: &Viewer, condition: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
-    tokio::time::timeout(Duration::from_secs(10), async {
+/// What `probe` first returns, checking every 10 ms for up to `limit`.
+async fn poll<T>(limit: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
+    tokio::time::timeout(limit, async {
         loop {
-            let status = viewer.status();
-            if condition(&status) {
-                return status;
+            if let Some(value) = probe() {
+                return value;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -283,15 +279,18 @@ async fn wait(viewer: &Viewer, condition: impl Fn(&ViewerStatus) -> bool) -> Vie
     .unwrap()
 }
 
-/// Poll `condition` for up to `limit`.
-async fn until(limit: Duration, mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(limit, async {
-        while !condition() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+/// The viewer's status once `condition` holds, within 10 s.
+async fn wait(viewer: &Viewer, condition: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
+    poll(Duration::from_secs(10), || {
+        let status = viewer.status();
+        condition(&status).then_some(status)
     })
     .await
-    .unwrap();
+}
+
+/// Poll `condition` for up to `limit`.
+async fn until(limit: Duration, mut condition: impl FnMut() -> bool) {
+    poll(limit, || condition().then_some(())).await;
 }
 
 const SHIFT: [Input; 1] = [Input::Key {
@@ -537,7 +536,7 @@ async fn pause_stops_video_and_resume_starts_with_an_idr() {
     let host = encoded_host(&client, "desktop:pause", &observed, &cursor, 4096).await;
     let shape = Arc::new(Shape::default());
     let link = shaped_link(relay.addr(), shape.clone()).await;
-    let remote = Client::from_credential(link.to_string(), admin_credential(), true, None);
+    let remote = Client::from_credential(link.addr().to_string(), admin_credential(), true, None);
     let viewer = relay_viewer(&remote, &host, VideoCodec::H264).await;
     let renderer = Renderer::start(&viewer);
     viewer.request_control(true).unwrap();
@@ -588,7 +587,7 @@ async fn control_grant_with_queued_video_keeps_the_session() {
     let shape = Arc::new(Shape::default());
     shape.delay_ms.store(50, Ordering::Relaxed);
     let link = shaped_link(relay.addr(), shape).await;
-    let remote = Client::from_credential(link.to_string(), admin_credential(), true, None);
+    let remote = Client::from_credential(link.addr().to_string(), admin_credential(), true, None);
     let viewer = relay_viewer(&remote, &host, VideoCodec::H264).await;
     let renderer = Renderer::start(&viewer);
     let start = wait(&viewer, |status| status.fresh).await;

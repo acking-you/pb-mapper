@@ -42,9 +42,9 @@ Rules for changing this repository. `CLAUDE.md` is a symlink to this file.
 - Every entry point defaults to LAN first, then direct, then the relay. That
   default is written separately, and changes together, in the SDK option
   structs (pinned by `crates/pb-mapper/tests/default_path.rs`), the CLI flags
-  (pinned by the tests in `pb-mapper.rs`), the Node addon, and the app: the
-  FFI's `AppConfig` for LAN first, the Dart tunnel and desktop forms for
-  direct.
+  (pinned by the tests in `src/bin/pb-mapper/tunnel.rs`), the Node addon, and
+  the app: the FFI's `AppConfig` for LAN first, the Dart tunnel and desktop
+  forms for direct.
 - The relay serves direct coordination on its TCP port number over UDP and
   announces only that port (clients pair it with the relay address they
   dialed); given no direct flag it still starts, relay-only, when that UDP port
@@ -174,7 +174,6 @@ run.
   once, before anything starts, in its own `tests/*.rs` binary; code that
   reads the environment is tested in a single-threaded `harness = false`
   binary such as `crates/pb-mapper-core/tests/process_environment.rs`.
-  `regression.rs`'s per-test `EnvOverrides` predates this; do not extend it.
 - The testkit's `Relay` sets the process credential to `TEST_ADMIN_KEY` once
   per binary; a case that needs another credential passes it to
   `TunnelSpec::credential`. A test that sets or clears the process credential

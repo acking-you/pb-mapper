@@ -1,4 +1,4 @@
-//! Define the buffer interface for reading data in different situations
+//! Buffers for reading frames of a known length and raw chunks of an unknown one.
 
 use snafu::ResultExt;
 use tokio::io::AsyncReadExt;
@@ -6,35 +6,18 @@ use tokio::io::AsyncReadExt;
 use pb_mapper_core::error::MsgNetworkReadBufferdRawDataSnafu;
 
 const INIT_BUF_SIZE: usize = 8 * 1024;
-const MAX_BUF_SIZE: usize = 8 * 1024 * 1024;
-/// Buffer for situations where the length of the data to be read is not known
-pub trait DynamicSizeBuffer {
-    fn need_resize(&self) -> bool;
-
-    /// Dynamic capacity adjustment based on `need_size`
-    fn dyn_resize(&mut self);
-
-    /// If the `buffer` is filled, it is expanded; if the `buffer` is not filled and the filled
-    /// content is less than `INIT_BUF_SIZE` bytes and the `need_size` is greater than
-    /// `INIT_BUF_SIZE`, it is shrunk.
-    ///
-    /// # Arguments `n` : how many bytes were read into the
-    /// buffer this time
-    fn update_need_size(&mut self, n: usize);
-}
-
-/// Buffer for situations where the length of the data to be read is already known
-pub trait FixedSizeBuffer {
-    /// The length of the buffer must reach `size` after resize, as opposed to
-    /// [`DynamicSizeBuffer`]'s internal state-based resize.
-    fn fixed_resize(&mut self, size: usize);
-}
-
-pub trait BufferGetter {
-    fn buffer(&self) -> &'_ [u8];
-
-    fn buffer_mut(&mut self) -> &'_ mut [u8];
-}
+/// The largest read handed on in one piece, and so the largest frame an
+/// encrypting forwarder sends; frames a peer sends are read up to
+/// `MAX_PLAINTEXT_LEN` whatever this is. A reader keeps the buffer of its
+/// largest read, and of its largest frame, until its stream ends: between
+/// peers of this version, this is the most a direction of an idle tunnel holds
+/// after a burst. 64 KiB cost QUIC throughput; see
+/// `docs/benchmarks/2026-11-11-refactor/open-items-relay.md`.
+const MAX_BUF_SIZE: usize = 1024 * 1024;
+const _: () = assert!(
+    MAX_BUF_SIZE <= crate::MAX_PLAINTEXT_LEN as usize,
+    "a forwarder's frame is one its peer reads"
+);
 
 pub struct CommonBuffer {
     buffer: Vec<u8>,
@@ -54,24 +37,30 @@ impl CommonBuffer {
             need_size: INIT_BUF_SIZE,
         }
     }
-}
 
-impl DynamicSizeBuffer for CommonBuffer {
+    /// Whether the next unknown-length read wants a different buffer length.
     #[inline]
-    fn need_resize(&self) -> bool {
+    pub fn need_resize(&self) -> bool {
         self.buffer.len() != self.need_size
     }
 
+    /// Dynamic capacity adjustment based on `need_size`
     #[inline]
-    fn dyn_resize(&mut self) {
+    pub fn dyn_resize(&mut self) {
         if self.need_size >= MAX_BUF_SIZE {
             self.need_size = MAX_BUF_SIZE;
         }
         self.buffer.resize(self.need_size, 0);
     }
 
+    /// If the `buffer` is filled, it is expanded; if the `buffer` is not filled and the filled
+    /// content is less than `INIT_BUF_SIZE` bytes and the `need_size` is greater than
+    /// `INIT_BUF_SIZE`, it is shrunk.
+    ///
+    /// # Arguments `n` : how many bytes were read into the
+    /// buffer this time
     #[inline]
-    fn update_need_size(&mut self, n: usize) {
+    pub fn update_need_size(&mut self, n: usize) {
         // update `need_size` for expand
         if n == self.buffer.len() {
             self.need_size = n * 2;
@@ -81,36 +70,30 @@ impl DynamicSizeBuffer for CommonBuffer {
             self.need_size = INIT_BUF_SIZE;
         }
     }
-}
 
-impl FixedSizeBuffer for CommonBuffer {
+    /// Sets the length to exactly `size`, for a read whose length is known.
     #[inline]
-    fn fixed_resize(&mut self, size: usize) {
+    pub fn fixed_resize(&mut self, size: usize) {
         self.buffer.resize(size, 0)
     }
-}
 
-impl BufferGetter for CommonBuffer {
     #[inline]
-    fn buffer(&self) -> &'_ [u8] {
+    pub fn buffer(&self) -> &'_ [u8] {
         &self.buffer
     }
 
     #[inline]
-    fn buffer_mut(&mut self) -> &'_ mut [u8] {
+    pub fn buffer_mut(&mut self) -> &'_ mut [u8] {
         &mut self.buffer
     }
 }
 
-/// This trait is used for buffered reads where the packet length is not known
-pub trait BufferedReader {
-    async fn read(&mut self) -> pb_mapper_core::error::Result<&'_ [u8]>;
-}
-
+/// Reads whatever has arrived, into a buffer that grows and shrinks with it.
 pub struct BufferReader<'a, T> {
     reader: &'a mut T,
     buffer: CommonBuffer,
 }
+
 impl<'reader, T: AsyncReadExt + Unpin> BufferReader<'reader, T> {
     pub fn new(reader: &'reader mut T) -> Self {
         Self {
@@ -119,7 +102,7 @@ impl<'reader, T: AsyncReadExt + Unpin> BufferReader<'reader, T> {
         }
     }
 
-    async fn read_inner(&mut self) -> pb_mapper_core::error::Result<&[u8]> {
+    pub async fn read(&mut self) -> pb_mapper_core::error::Result<&[u8]> {
         if self.buffer.need_resize() {
             self.buffer.dyn_resize()
         }
@@ -130,11 +113,5 @@ impl<'reader, T: AsyncReadExt + Unpin> BufferReader<'reader, T> {
             .context(MsgNetworkReadBufferdRawDataSnafu)?;
         self.buffer.update_need_size(n);
         Ok(&self.buffer.buffer()[0..n])
-    }
-}
-
-impl<'reader, T: AsyncReadExt + Unpin> BufferedReader for BufferReader<'reader, T> {
-    async fn read(&mut self) -> pb_mapper_core::error::Result<&'_ [u8]> {
-        self.read_inner().await
     }
 }

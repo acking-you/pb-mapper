@@ -29,9 +29,6 @@ tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 uni-stream.workspace = true
 
-[dev-dependencies]
-rand.workspace = true
-
 [features]
 relay-quic = ["dep:quinn", "pb-mapper-protocol/relay-quic"]
 p2p = ["dep:stun-proto"]

@@ -117,11 +117,11 @@ TCP 返回空连接列表和零 QUIC 计数，避免给默认路径添加计数�
 ## 复现验证
 
 ```sh
-cargo test -p pb-mapper-cli --all-features --test quic_relay --test direct_e2e
+cargo test -p pb-mapper-cli --all-features --test quic_relay --test e2e
 cargo run -p pb-mapper-cli --release --example relay_transport_bench
 ```
 
-`quic_relay` 覆盖 20 个同凭据服务逐个断开控制流后复用原连接重新注册、并行多流复用、单流关闭不影响同连接其他流、停住的下载不拖住同连接其他隧道、混合传输加密转发、UDP 数据报、明确拒绝降级、证书与 exporter 校验、凭据撤销、管理员密钥轮换、中继重启、旧 UDP 路径永久黑洞后的恢复，以及发现握手停滞时诊断仍能返回。`quic_retired_carrier`（独立进程，因为网络变化是进程级的）验证退役连接上最后一个流的响应尾部完整送达。`direct_e2e` 包含经 QUIC 中继协调的直连建立和协调器丢失测试。`sdk_e2e` 使用原有配置/请求字面量，验证启用 QUIC 的服务端不会改变 SDK 默认 TCP 行为；CLI 与 Node 测试也验证默认值。
+`quic_relay` 覆盖 20 个同凭据服务逐个断开控制流后复用原连接重新注册、并行多流复用、单流关闭不影响同连接其他流、停住的下载不拖住同连接其他隧道、混合传输加密转发、UDP 数据报、明确拒绝降级、证书与 exporter 校验、凭据撤销、管理员密钥轮换、中继重启、旧 UDP 路径永久黑洞后的恢复，以及发现握手停滞时诊断仍能返回。`quic_retired_carrier`（独立进程，因为网络变化是进程级的）验证退役连接上最后一个流的响应尾部完整送达。`e2e` 的 `direct` 模块包含经 QUIC 中继协调的直连建立和协调器丢失测试。`e2e` 的 `sdk` 模块使用原有配置/请求字面量，验证启用 QUIC 的服务端不会改变 SDK 默认 TCP 行为；CLI 与 Node 测试也验证默认值。
 
 基准使用两个独立客户端、一个内嵌中继及 echo 后端，先预热，再校验 64 MiB 回传和 200 次分段写入的 8 字节 RPC；不计入建连耗时。回环结果不能预测公网丢包和多流并发下的性能。
 
@@ -131,7 +131,7 @@ cargo run -p pb-mapper-cli --release --example relay_transport_bench
 
 环境：Windows 11 Enterprise 10.0.26300，AMD Ryzen 9 9950X（16 核 / 32 线程），rustc 1.99.1 / LLVM 23.1.1，x86_64-pc-windows-msvc，仓库 `release` profile，本地回环、同进程、无模拟网络损伤。基线为拉取后的 `6f7281f`，对比此次改动的构建。
 
-原有 `test_delay::large_history_then_repeated_small_exchanges` 使用单线程 Tokio test runtime，校验 20 MiB 回传后测量 200 次小 RPC。最初单次基线 p50 为未加密 145.2 µs / 加密 262.6 µs，改动后单次为 200.4 µs / 392.5 µs；为排查这次差异，随后交替运行保留的旧、新可执行文件各三次，并重复一次固定到同一逻辑 CPU（affinity `0x100`）的三组测量：
+原有 `test_delay::large_history_then_repeated_small_exchanges`（现为 `e2e` 的 `tunnel_matrix::large_history_then_repeated_small_exchanges`）使用单线程 Tokio test runtime，校验 20 MiB 回传后测量 200 次小 RPC。最初单次基线 p50 为未加密 145.2 µs / 加密 262.6 µs，改动后单次为 200.4 µs / 392.5 µs；为排查这次差异，随后交替运行保留的旧、新可执行文件各三次，并重复一次固定到同一逻辑 CPU（affinity `0x100`）的三组测量：
 
 | 条件 | codec | 基线 p50 范围（µs） | 改动后 p50 范围（µs） | 基线 p95 范围（µs） | 改动后 p95 范围（µs） |
 | --- | --- | --- | --- | --- | --- |

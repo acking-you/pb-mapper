@@ -37,7 +37,7 @@ must not hold the only copy of partial-frame state in a discarded future.
    [RFC 6298](https://www.rfc-editor.org/rfc/rfc6298.html); it does not change TCP's
    retransmission timer. Transport retry sleeps grow from 100 ms to 2 seconds,
    with 75–100% jitter. Explicit relay rejections keep their separate 5–80 second
-   backoff and permanent refusals remain terminal.
+   backoff, jittered the same way, and permanent refusals remain terminal.
 3. **A control socket must receive authenticated traffic.** With the defaults,
    suspicion begins at six seconds; eight seconds without a complete inbound
    control frame closes that socket. A separate status lookup can establish that
@@ -55,9 +55,14 @@ must not hold the only copy of partial-frame state in a discarded future.
 5. **A subscription has a five-second total setup deadline.** The client may retry
    transient failures within that window, using fresh TCP and authenticated
    sessions. The relay's whole selection/setup loop is also bounded to five
-   seconds, even if new failing candidates continually register. No application
-   byte is read before subscribe succeeds, so these retries do not replay HTTP,
-   SSH, or other application payloads. Permanent structured refusals are not retried.
+   seconds, even if new failing candidates continually register. That wait also
+   ends as soon as its subscriber gives up: a client that abandons an attempt
+   closes its connection, and the relay stops taking a publisher's stream on its
+   behalf; it holds the subscriber's place only until the publisher's
+   acknowledgement it asked for is due, so a publisher that never acknowledges
+   is still suspected. No application byte is read before
+   subscribe succeeds, so these retries do not replay HTTP, SSH, or other
+   application payloads. Permanent structured refusals are not retried.
 6. **Forwarding belongs to the tunnel, not its control socket.** Replacing a
    control connection leaves healthy data streams alive. Explicit tunnel stop
    cancels all owned streams, probes, and control writer tasks. A data socket that
@@ -70,7 +75,11 @@ must not hold the only copy of partial-frame state in a discarded future.
   register worker. Stream failure notifications coalesce in a one-element queue.
 - At most 64 concurrent setups per connect listener and per register worker.
   Completed setups release their slots before forwarding, so this is not a
-  64-session limit. Excess local connects wait in the OS listener backlog;
+  64-session limit. Excess local connects wait in the listener's accept queue,
+  which pb-mapper sizes itself: the system's maximum on Linux
+  (`net.core.somaxconn`, 4096 on current kernels), macOS and the BSDs, 128 on
+  Windows and Android. A connect that finds it full is retried by the
+  connecting application's TCP after a second or more;
   register workers can decline excess setup work so the relay tries another worker.
 - Control writer queues hold at most 64 messages. Saturation fails the control
   path rather than growing an unbounded queue. Register pool size, namespace
@@ -135,12 +144,13 @@ cause or duration of an unobserved production outage.
 
 - `crates/pb-mapper-protocol/src/frame_read.rs`: persistent frame progress.
 - `crates/pb-mapper-protocol/src/secure/frame.rs`: V2 framing/authentication.
-- `crates/pb-mapper-client/src/recovery.rs`: setup latency estimation and jitter.
-- `crates/pb-mapper-client/src/client/mod.rs`: independent listener/probe lifecycle.
+- `crates/pb-mapper-client/src/recovery.rs`: setup latency estimation; the jitter is
+  `RetryBackoff::with_jitter` in `crates/pb-mapper-core/src/timeout.rs`.
+- `crates/pb-mapper-client/src/client/mod.rs` and `client/health.rs`: independent listener/probe lifecycle.
 - `crates/pb-mapper-client/src/client/stream.rs`: bounded, pre-payload setup retries.
-- `crates/pb-mapper-client/src/server/mod.rs`: register deadlines and control watchdog.
+- `crates/pb-mapper-client/src/server/attempt.rs`: register deadlines and control watchdog.
 - `crates/pb-mapper-server/src/client.rs`: candidate fallback and whole-setup deadline.
-- `crates/pb-mapper-server/src/runtime.rs`: suspicion confirmation and ACK budgets.
+- `crates/pb-mapper-server/src/runtime/lease.rs` and `runtime/subscribe.rs`: suspicion confirmation and ACK budgets.
 - `crates/pb-mapper-cli/tests/network_recovery.rs`: fault proxy and end-to-end cases.
 
 ## Additional SDK review for 0.5.1

@@ -2,11 +2,11 @@ use crate::diagnostics::{Diagnostics, RecoveryFailure};
 use crate::endpoint::RelayEndpoint;
 use std::sync::Arc;
 
-use crate::recovery::RecoveryTiming;
+use crate::recovery::{MIN_SUBSCRIBE_ATTEMPT, SharedTiming};
 use crate::relay::CarrierId;
 use pb_mapper_protocol::transport::RelayStream;
 use snafu::ResultExt;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::time::Instant;
 use tracing::{Instrument, info_span, instrument};
 
@@ -25,8 +25,10 @@ use pb_mapper_protocol::secure::ClientHeaderSession;
 use uni_stream::stream::NetworkStream;
 
 pub(crate) struct StreamSetup {
-    pub permit: OwnedSemaphorePermit,
-    pub timing: Arc<Mutex<RecoveryTiming>>,
+    /// The listener's setup slot, given back once the stream forwards. A
+    /// stream the caller handed in has none.
+    pub permit: Option<OwnedSemaphorePermit>,
+    pub timing: Arc<SharedTiming>,
     pub events: mpsc::Sender<bool>,
     pub diagnostics: Diagnostics,
     #[cfg(feature = "p2p")]
@@ -70,88 +72,40 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
                 action: "direct setup",
                 timeout: budget,
             })?
-            .map_err(|error| super::error::Error::DirectSetup {
-                detail: error.to_string(),
-            })?;
+            .map_err(direct_failed)?;
         if let Some(prepared) = prepared {
             drop(global_permit);
             setup.diagnostics.succeeded(started.elapsed());
-            setup.timing.lock().await.record(started.elapsed());
+            setup.timing.record(started.elapsed());
             let _ = setup.events.try_send(true);
             drop(setup.permit);
             return prepared
                 .forward(local_stream, credential)
                 .await
-                .map_err(|error| super::error::Error::DirectSetup {
-                    detail: error.to_string(),
-                });
+                .map_err(direct_failed);
         }
     }
-    let mut wake = remote_addr.wake();
-    let mut retry = pb_mapper_core::timeout::RetryBackoff::default();
-    let ((mut remote_stream, codec_key, client_id, server_id), setup_latency) = loop {
-        let attempt_started = Instant::now();
-        let attempt_budget = setup
-            .timing
-            .lock()
-            .await
-            .timeout()
-            .max(std::time::Duration::from_secs(3));
-        let attempt_deadline = (Instant::now() + attempt_budget).min(deadline);
-        wake.acknowledge();
-        let mut carrier = None;
-        let result = tokio::select! {
-            () = wake.network_changed(), if Instant::now() < deadline => continue,
-            result = tokio::time::timeout_at(
-            attempt_deadline,
-            subscribe(&key, remote_addr.clone(), keep_alive, namespace, credential, LocalStream::supports_data_v2(), &mut carrier),
-        ) => result,
-        };
-        match result {
-            Ok(Ok(ready)) => break (ready, attempt_started.elapsed()),
-            Ok(Err(error)) => {
-                let retryable = matches!(
-                    &error,
-                    super::error::Error::ConnectRemoteStream { .. }
-                        | super::error::Error::WriteSubcribeReq { .. }
-                        | super::error::Error::SubscribeRemoteError {
-                            retryable: true,
-                            ..
-                        }
-                );
-                if error.remote_retryable().is_some() {
-                    remote_addr.protocol_succeeded();
-                } else {
-                    remote_addr.transport_failed(carrier);
-                }
-                if !retryable || Instant::now() >= deadline {
-                    return Err(error);
-                }
-            }
-            Err(_) => {
-                remote_addr.transport_failed(carrier);
-                setup
-                    .diagnostics
-                    .failed(RecoveryFailure::Timeout, std::time::Duration::ZERO);
-                setup.timing.lock().await.timed_out();
-                if Instant::now() >= deadline {
-                    return super::error::ControlIoTimeoutSnafu {
-                        action: "subscribe",
-                        timeout: budget,
-                    }
-                    .fail();
-                }
-            }
-        }
-        tokio::select! {
-            () = tokio::time::sleep_until((Instant::now() + crate::recovery::jitter(retry.next_delay())).min(deadline)) => {},
-            _ = wake.changed() => retry.reset(),
-        }
+    let subscription = Subscription {
+        key: &key,
+        remote_addr: &remote_addr,
+        keep_alive,
+        namespace,
+        credential,
+        offered_v2: LocalStream::supports_data_v2(),
     };
+    let (
+        Subscribed {
+            stream: mut remote_stream,
+            codec: codec_key,
+            client_id,
+            server_id,
+        },
+        setup_latency,
+    ) = subscription.with_retry(&setup, deadline, budget).await?;
     drop(global_permit);
     remote_addr.protocol_succeeded();
     setup.diagnostics.succeeded(setup_latency);
-    setup.timing.lock().await.record(setup_latency);
+    setup.timing.record(setup_latency);
     let _ = setup.events.try_send(true);
     drop(setup.permit);
     let session = setup
@@ -178,35 +132,121 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
     Ok(())
 }
 
-async fn subscribe(
-    key: &str,
-    remote_addr: RelayEndpoint,
+/// The error a stream ends with when its direct path failed.
+#[cfg(feature = "p2p")]
+fn direct_failed(source: std::io::Error) -> super::error::Error {
+    super::error::Error::DirectSetup { source }
+}
+
+/// A subscribed relay stream, with what the relay answered about it.
+pub(crate) struct Subscribed {
+    pub(crate) stream: RelayStream,
+    /// The data codec, when the subscription asked for one.
+    pub(crate) codec: Option<DataCodec>,
+    /// The ids the relay gave this end and the serving one.
+    pub(crate) client_id: u32,
+    pub(crate) server_id: u32,
+}
+
+/// What a local stream subscribes to over the relay, and how. Not generic:
+/// the local stream type contributes only whether it offers data protocol v2.
+struct Subscription<'a> {
+    key: &'a str,
+    remote_addr: &'a RelayEndpoint,
     keep_alive: bool,
     namespace: Option<u64>,
     credential: Credential,
     offered_v2: bool,
-    carrier: &mut Option<CarrierId>,
-) -> Result<(RelayStream, Option<DataCodec>, u32, u32)> {
-    let request = match namespace {
-        Some(namespace) => PbConnRequest::SubcribeScoped {
-            data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
-            key: key.to_string(),
-            namespace,
-        },
-        None => PbConnRequest::Subcribe {
-            data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
-            key: key.to_string(),
-        },
-    };
-    subscribe_request(
-        request,
-        remote_addr,
-        keep_alive,
-        credential,
-        offered_v2,
-        carrier,
-    )
-    .await
+}
+
+impl Subscription<'_> {
+    /// Subscribe, retrying the failures a fresh attempt can fix until
+    /// `deadline`, which is `budget` after the stream's setup began. Answers
+    /// the subscription and how long its successful attempt took. Past the
+    /// deadline it fails with the last attempt's own failure as the cause, if
+    /// one failed by itself rather than by running out of time.
+    async fn with_retry(
+        &self,
+        setup: &StreamSetup,
+        deadline: Instant,
+        budget: std::time::Duration,
+    ) -> Result<(Subscribed, std::time::Duration)> {
+        let mut wake = self.remote_addr.wake();
+        let mut retry = pb_mapper_core::timeout::RetryBackoff::default().with_jitter();
+        let mut last_failure = None;
+        loop {
+            let attempt_started = Instant::now();
+            let attempt_budget = setup.timing.timeout().max(MIN_SUBSCRIBE_ATTEMPT);
+            let attempt_deadline = (Instant::now() + attempt_budget).min(deadline);
+            wake.acknowledge();
+            let mut carrier = None;
+            let result = tokio::select! {
+                () = wake.network_changed(), if Instant::now() < deadline => continue,
+                result = tokio::time::timeout_at(attempt_deadline, self.attempt(&mut carrier)) => result,
+            };
+            match result {
+                Ok(Ok(ready)) => return Ok((ready, attempt_started.elapsed())),
+                Ok(Err(error)) => {
+                    if error.remote_retryable().is_some() {
+                        self.remote_addr.protocol_succeeded();
+                    } else {
+                        self.remote_addr.transport_failed(carrier);
+                    }
+                    if !error.subscribe_retryable() || Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    last_failure = Some(error);
+                }
+                Err(_) => {
+                    self.remote_addr.transport_failed(carrier);
+                    setup
+                        .diagnostics
+                        .failed(RecoveryFailure::Timeout, std::time::Duration::ZERO);
+                    setup.timing.timed_out();
+                    if Instant::now() >= deadline {
+                        return Err(match last_failure {
+                            Some(source) => super::error::Error::SubscribeTimedOut {
+                                timeout: budget,
+                                source: Box::new(source),
+                            },
+                            None => super::error::Error::ControlIoTimeout {
+                                action: "subscribe",
+                                timeout: budget,
+                            },
+                        });
+                    }
+                }
+            }
+            tokio::select! {
+                () = tokio::time::sleep_until((Instant::now() + retry.next_delay()).min(deadline)) => {},
+                _ = wake.changed() => retry.reset(),
+            }
+        }
+    }
+
+    /// One subscription attempt, over the carrier it reports in `carrier`.
+    async fn attempt(&self, carrier: &mut Option<CarrierId>) -> Result<Subscribed> {
+        let request = match self.namespace {
+            Some(namespace) => PbConnRequest::SubcribeScoped {
+                data_protocol: self.offered_v2.then_some(DATA_PROTOCOL_V2),
+                key: self.key.to_string(),
+                namespace,
+            },
+            None => PbConnRequest::Subcribe {
+                data_protocol: self.offered_v2.then_some(DATA_PROTOCOL_V2),
+                key: self.key.to_string(),
+            },
+        };
+        subscribe_request(
+            request,
+            self.remote_addr.clone(),
+            self.keep_alive,
+            self.credential,
+            self.offered_v2,
+            carrier,
+        )
+        .await
+    }
 }
 
 pub(crate) async fn subscribe_request(
@@ -216,7 +256,7 @@ pub(crate) async fn subscribe_request(
     credential: Credential,
     offered_v2: bool,
     carrier: &mut Option<CarrierId>,
-) -> Result<(RelayStream, Option<DataCodec>, u32, u32)> {
+) -> Result<Subscribed> {
     let mut remote_stream = remote_addr
         .connect(credential, carrier)
         .await
@@ -274,5 +314,33 @@ pub(crate) async fn subscribe_request(
             .fail()?,
         }
     };
-    Ok((remote_stream, codec_key, client_id, server_id))
+    Ok(Subscribed {
+        stream: remote_stream,
+        codec: codec_key,
+        client_id,
+        server_id,
+    })
+}
+
+#[cfg(all(test, feature = "p2p"))]
+mod tests {
+    use super::*;
+
+    /// A direct path that failed on a lost connection keeps why it was lost
+    /// in the chain its stream's failure is logged with, not only the io
+    /// error's own text, "connection lost".
+    #[test]
+    fn a_failed_direct_path_keeps_its_cause() {
+        let lost = std::io::Error::from(quinn::ReadError::ConnectionLost(
+            quinn::ConnectionError::TimedOut,
+        ));
+        let error = direct_failed(lost);
+        let mut causes =
+            std::iter::successors(std::error::Error::source(&error), |cause| cause.source());
+        assert!(
+            causes.any(|cause| cause.downcast_ref::<quinn::ConnectionError>().is_some()),
+            "{}",
+            snafu::Report::from_error(error)
+        );
+    }
 }

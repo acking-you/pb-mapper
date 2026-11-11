@@ -1,8 +1,8 @@
 //! The TCP half of a direct path within a local network: the provider's
 //! acceptor, the consumer's dialer, and the stream both ends forward over.
-//! QUIC stays in `endpoint.rs`. What the two share is everything that makes a
-//! path trustworthy: the per-session identity, the binding to the grant, and
-//! the commit bytes.
+//! QUIC stays in the `endpoint` module. What the two share is everything that
+//! makes a path trustworthy: the per-session identity, the binding to the
+//! grant, and the commit bytes.
 //!
 //! TCP is offered only on a network both ends share, so a path across the
 //! internet never takes it. Unlike QUIC, whose probes open the provider's
@@ -11,8 +11,9 @@
 //! head start when it does not get through.
 
 use super::{
-    endpoint::{Arrival, Exporter},
-    identity::Identity,
+    binding::Exporter,
+    endpoint::{Arrival, HANDSHAKE_TIMEOUT, MAX_HANDSHAKES},
+    identity::{Identity, KEEP_ALIVE, SERVER_NAME},
     lan::Interfaces,
 };
 use crate::diagnostics::LanTcpMiss;
@@ -44,19 +45,10 @@ pub(super) type TlsTcp = TlsStream<TcpStream>;
 /// are dialed too. A LAN connect and a TLS 1.3 handshake take a few
 /// milliseconds; a SYN a firewall drops is not retried for about a second,
 /// so waiting longer would only delay the QUIC fallback.
-pub(super) const TCP_HEAD_START: Duration = Duration::from_millis(300);
+const TCP_HEAD_START: Duration = Duration::from_millis(300);
 
-/// Handshakes an acceptor runs at once, and how long each may take: as the
-/// QUIC endpoint's.
-const MAX_HANDSHAKES: usize = 64;
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Keep-alive on both ends, as QUIC's 15 s: a peer gone without a word is
-/// noticed rather than waited for.
-const KEEP_ALIVE: Duration = Duration::from_secs(15);
-
-/// The name both ends' certificates carry.
-const SERVER_NAME: &str = "pb-mapper.invalid";
+/// How long the acceptor waits before accepting again after accept failed.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
 impl Exporter for TlsTcp {
     const BINDING: &'static [u8] = b"pb-mapper/direct-tcp/1";
@@ -293,21 +285,16 @@ impl Drop for Offered {
     }
 }
 
+/// A listener on `addr` set up as pb-mapper's others are, whose accept queue
+/// holds no more connections than the acceptor takes into TLS at once.
 fn listen(addr: SocketAddr) -> io::Result<TcpListener> {
-    use socket2::{Domain, Protocol, Socket, Type};
-    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    let socket = pb_mapper_core::listener::socket(addr)?;
     if addr.is_ipv6() {
         // The IPv4 listener has its own socket on the same port.
-        socket.set_only_v6(true)?;
+        socket2::SockRef::from(&socket).set_only_v6(true)?;
     }
-    // As Tokio's own listeners: a restart need not wait out TIME_WAIT. Not on
-    // Windows, where it would let another socket take the port over.
-    #[cfg(unix)]
-    socket.set_reuse_address(true)?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&addr.into())?;
-    socket.listen(MAX_HANDSHAKES as i32)?;
-    TcpListener::from_std(socket.into())
+    socket.bind(addr)?;
+    socket.listen(MAX_HANDSHAKES as u32)
 }
 
 /// Accept on one listener for as long as it lives.
@@ -327,7 +314,7 @@ async fn accept(
                     Err(error) => {
                         // Out of descriptors, say: let some close before the next.
                         tracing::debug!(%error, "direct TCP accept failed");
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        tokio::time::sleep(ACCEPT_BACKOFF).await;
                         continue;
                     }
                 };
@@ -530,10 +517,10 @@ impl Race {
     /// should not try again at once: a provider that refuses TCP, or whose
     /// firewall drops it, does so for every session.
     pub fn costly(miss: LanTcpMiss) -> bool {
-        matches!(
-            miss,
-            LanTcpMiss::Refused | LanTcpMiss::TimedOut | LanTcpMiss::Handshake
-        )
+        match miss {
+            LanTcpMiss::Refused | LanTcpMiss::TimedOut | LanTcpMiss::Handshake => true,
+            LanTcpMiss::NotOffered | LanTcpMiss::NoSharedLan => false,
+        }
     }
 }
 

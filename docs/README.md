@@ -39,7 +39,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [QUIC relay](relay-quic.zh-CN.md) | 中文; the optional QUIC carrier to the relay |
 | [Weak-network recovery](weak-network-recovery.md) | how register, connect and the relay recover when a route returns |
 | [UDP datagram forwarding](udp-datagram-forwarding.md) | why UDP is framed, and how to validate it |
-| [Benchmarks](benchmarks/) | the QUIC measurements, raw and summarised |
+| [Benchmarks](benchmarks/) | the QUIC measurements, the [refactor's performance pass](benchmarks/2026-11-11-refactor/README.md) its [build times](benchmarks/2026-11-11-refactor/compile-time.md) and the open-items passes ([credential store](benchmarks/2026-11-11-refactor/open-items-auth.md), [relay](benchmarks/2026-11-11-refactor/open-items-relay.md), [desktop](benchmarks/2026-11-11-refactor/open-items-desktop.md)), raw and summarised |
 
 ## Security
 
@@ -63,6 +63,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | --- | --- |
 | [Architecture](architecture.md) | the code map: every crate and module, the layering, the app's pages and FFI, building and testing |
 | [Rust engineering guide](rust-engineering-guide.md) | how Rust is written here: crates, types, errors, async, processes, wire formats, tests and lints |
+| [Refactor open items](refactor-2026-11-open-items.md) | what the 2026-11 refactor and its fixes left on purpose: compatibility breaks, large changes, upstream dependencies, trade-offs kept |
 | [Bugfix notes](bugfixes.md) · [中文](bugfixes.zh-CN.md) | how recurring problems were found and fixed |
 | [Claude code review](claude-code-review.md) | the pull-request review workflow |
 | [Introduction](pb-mapper-intro.zh-CN.md) | 中文; why the project exists and how it grew |

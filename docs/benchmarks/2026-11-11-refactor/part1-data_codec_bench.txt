@@ -1,0 +1,49 @@
+### p1-codec
+=== base round 0 ===
+{"payload_bytes":0,"iterations":200000,"samples":9,"legacy_median_ns":194.03,"v2_median_ns":198.56,"change_percent":2.33}
+{"payload_bytes":256,"iterations":500000,"samples":9,"legacy_median_ns":128.38,"v2_median_ns":128.15,"change_percent":-0.18}
+{"payload_bytes":16384,"iterations":20000,"samples":9,"legacy_median_ns":2474.11,"v2_median_ns":2463.16,"change_percent":-0.44}
+=== refactored round 0 ===
+{"payload_bytes":0,"iterations":200000,"samples":9,"legacy_median_ns":209.89,"v2_median_ns":203.21,"change_percent":-3.19}
+{"payload_bytes":256,"iterations":500000,"samples":9,"legacy_median_ns":127.45,"v2_median_ns":126.39,"change_percent":-0.83}
+{"payload_bytes":16384,"iterations":20000,"samples":9,"legacy_median_ns":2482.59,"v2_median_ns":2480.80,"change_percent":-0.07}
+=== refactored round 1 ===
+{"payload_bytes":0,"iterations":200000,"samples":9,"legacy_median_ns":197.28,"v2_median_ns":199.73,"change_percent":1.24}
+{"payload_bytes":256,"iterations":500000,"samples":9,"legacy_median_ns":129.80,"v2_median_ns":129.80,"change_percent":-0.00}
+{"payload_bytes":16384,"iterations":20000,"samples":9,"legacy_median_ns":2485.57,"v2_median_ns":2484.89,"change_percent":-0.03}
+=== base round 1 ===
+{"payload_bytes":0,"iterations":200000,"samples":9,"legacy_median_ns":192.50,"v2_median_ns":201.43,"change_percent":4.64}
+{"payload_bytes":256,"iterations":500000,"samples":9,"legacy_median_ns":127.82,"v2_median_ns":127.72,"change_percent":-0.08}
+{"payload_bytes":16384,"iterations":20000,"samples":9,"legacy_median_ns":2473.72,"v2_median_ns":2476.27,"change_percent":0.10}
+=== base round 2 ===
+{"payload_bytes":0,"iterations":200000,"samples":9,"legacy_median_ns":192.73,"v2_median_ns":203.34,"change_percent":5.50}
+{"payload_bytes":256,"iterations":500000,"samples":9,"legacy_median_ns":127.73,"v2_median_ns":127.79,"change_percent":0.05}
+{"payload_bytes":16384,"iterations":20000,"samples":9,"legacy_median_ns":2443.91,"v2_median_ns":2444.22,"change_percent":0.01}
+=== refactored round 2 ===
+{"payload_bytes":0,"iterations":200000,"samples":9,"legacy_median_ns":195.79,"v2_median_ns":198.18,"change_percent":1.22}
+{"payload_bytes":256,"iterations":500000,"samples":9,"legacy_median_ns":128.53,"v2_median_ns":128.68,"change_percent":0.11}
+{"payload_bytes":16384,"iterations":20000,"samples":9,"legacy_median_ns":2459.71,"v2_median_ns":2455.14,"change_percent":-0.19}
+=== refactored round 3 ===
+{"payload_bytes":0,"iterations":200000,"samples":9,"legacy_median_ns":192.07,"v2_median_ns":202.49,"change_percent":5.43}
+{"payload_bytes":256,"iterations":500000,"samples":9,"legacy_median_ns":127.25,"v2_median_ns":127.00,"change_percent":-0.20}
+{"payload_bytes":16384,"iterations":20000,"samples":9,"legacy_median_ns":2461.66,"v2_median_ns":2443.05,"change_percent":-0.76}
+=== base round 3 ===
+{"payload_bytes":0,"iterations":200000,"samples":9,"legacy_median_ns":192.22,"v2_median_ns":195.94,"change_percent":1.93}
+{"payload_bytes":256,"iterations":500000,"samples":9,"legacy_median_ns":127.33,"v2_median_ns":127.87,"change_percent":0.42}
+{"payload_bytes":16384,"iterations":20000,"samples":9,"legacy_median_ns":2524.74,"v2_median_ns":2491.97,"change_percent":-1.30}
+=== base round 4 ===
+{"payload_bytes":0,"iterations":200000,"samples":9,"legacy_median_ns":196.82,"v2_median_ns":199.01,"change_percent":1.11}
+{"payload_bytes":256,"iterations":500000,"samples":9,"legacy_median_ns":128.58,"v2_median_ns":128.49,"change_percent":-0.07}
+{"payload_bytes":16384,"iterations":20000,"samples":9,"legacy_median_ns":2506.82,"v2_median_ns":2490.51,"change_percent":-0.65}
+=== refactored round 4 ===
+{"payload_bytes":0,"iterations":200000,"samples":9,"legacy_median_ns":193.74,"v2_median_ns":204.16,"change_percent":5.38}
+{"payload_bytes":256,"iterations":500000,"samples":9,"legacy_median_ns":127.89,"v2_median_ns":127.79,"change_percent":-0.08}
+{"payload_bytes":16384,"iterations":20000,"samples":9,"legacy_median_ns":2449.77,"v2_median_ns":2453.07,"change_percent":0.13}
+=== refactored round 5 ===
+{"payload_bytes":0,"iterations":200000,"samples":9,"legacy_median_ns":196.26,"v2_median_ns":198.75,"change_percent":1.27}
+{"payload_bytes":256,"iterations":500000,"samples":9,"legacy_median_ns":128.92,"v2_median_ns":128.78,"change_percent":-0.11}
+{"payload_bytes":16384,"iterations":20000,"samples":9,"legacy_median_ns":2448.97,"v2_median_ns":2447.91,"change_percent":-0.04}
+=== base round 5 ===
+{"payload_bytes":0,"iterations":200000,"samples":9,"legacy_median_ns":198.13,"v2_median_ns":195.61,"change_percent":-1.27}
+{"payload_bytes":256,"iterations":500000,"samples":9,"legacy_median_ns":125.91,"v2_median_ns":125.85,"change_percent":-0.06}
+{"payload_bytes":16384,"iterations":20000,"samples":9,"legacy_median_ns":2466.16,"v2_median_ns":2464.62,"change_percent":-0.06}

@@ -10,7 +10,10 @@
 //! with the login, and a monitor plugged in later under the same
 //! `\\.\DISPLAYn` starts at its own registry mode.
 
-use super::desktop::{DpiScope, display_lost};
+use super::{
+    desktop::{DpiScope, display_lost},
+    win32::{from_wide_nul, session_info, wide},
+};
 use crate::{
     Result, error,
     modes::{Mode, Setting},
@@ -24,17 +27,11 @@ use windows::{
             DM_PELSHEIGHT, DM_PELSWIDTH, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
             ENUM_DISPLAY_SETTINGS_MODE, EnumDisplayDevicesW, EnumDisplaySettingsExW,
         },
-        System::RemoteDesktop::{
-            ProcessIdToSessionId, WTSFreeMemory, WTSINFOEXW, WTSQuerySessionInformationW,
-            WTSSessionInfoEx,
-        },
+        System::RemoteDesktop::ProcessIdToSessionId,
+        UI::WindowsAndMessaging::EDD_GET_DEVICE_INTERFACE_NAME,
     },
-    core::{PCWSTR, PWSTR},
+    core::PCWSTR,
 };
-
-/// `EnumDisplayDevicesW`'s flag for a monitor's device interface name
-/// (`WindowsAndMessaging`, a feature this crate does not otherwise need).
-const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 1;
 
 /// No mode is offered below this.
 const MIN_SIZE: (u32, u32) = (800, 600);
@@ -93,11 +90,6 @@ pub(crate) fn filter_modes(all: &[Raw], current: &Raw) -> Vec<Raw> {
     kept.sort_by(|a, b| area(b).cmp(&area(a)).then(b.width.cmp(&a.width)));
     kept.truncate(MAX_MODES);
     kept
-}
-
-/// `text` as a NUL-terminated wide string.
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
 }
 
 /// The modes of the display a device name names.
@@ -248,8 +240,7 @@ fn monitor(device: &str) -> Result<String> {
             EDD_GET_DEVICE_INTERFACE_NAME,
         )
     };
-    let id = &found.DeviceID;
-    let id = String::from_utf16_lossy(&id[..id.iter().position(|c| *c == 0).unwrap_or(id.len())]);
+    let id = from_wide_nul(&found.DeviceID);
     if !attached.as_bool() || id.is_empty() {
         return Err(display_lost("no monitor is attached to the display"));
     }
@@ -261,19 +252,8 @@ fn monitor(device: &str) -> Result<String> {
 fn logon_time() -> Result<i64> {
     let mut session = 0;
     unsafe { ProcessIdToSessionId(std::process::id(), &mut session) }.map_err(error)?;
-    let mut buffer = PWSTR::null();
-    let mut len = 0;
-    unsafe { WTSQuerySessionInformationW(None, session, WTSSessionInfoEx, &mut buffer, &mut len) }
-        .map_err(error)?;
-    let logon = (len as usize >= size_of::<WTSINFOEXW>()).then(|| {
-        // SAFETY: WTS answered at least a WTSINFOEXW; level 1 is the only
-        // level it defines.
-        let info = unsafe { &*buffer.0.cast::<WTSINFOEXW>() };
-        (info.Level == 1).then_some(unsafe { info.Data.WTSInfoExLevel1.LogonTime })
-    });
-    unsafe { WTSFreeMemory(buffer.0.cast()) };
-    logon
-        .flatten()
+    session_info(session)?
+        .map(|info| info.LogonTime)
         .ok_or_else(|| error("the login's start cannot be read"))
 }
 

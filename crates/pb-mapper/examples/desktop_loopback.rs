@@ -222,7 +222,7 @@ async fn main() -> Outcome {
     let presented = renderer.join().map_err(|_| "the renderer panicked")?;
     host.stop().await?;
     host_log.await?;
-    relay.stop();
+    drop(relay);
     println!("desktop_loopback: ok, {presented} frames presented");
     Ok(())
 }
@@ -296,9 +296,14 @@ async fn serve_until_ctrl_c(relay: LocalRelay, host: Host, panel: &Panel) -> Out
     println!("run desktop_viewer, desktop_control or desktop_display_mode. Ctrl+C stops.");
     let (mut seen, mut mode) = (0, panel.mode());
     let mut ticks = tokio::time::interval(Duration::from_millis(200));
+    // One Ctrl-C listener for the whole loop, so a Ctrl-C that arrives while
+    // input prints is not missed.
+    let interrupt = tokio::signal::ctrl_c();
+    tokio::pin!(interrupt);
     loop {
         tokio::select! {
-            result = tokio::signal::ctrl_c() => { result?; break; }
+            biased;
+            result = &mut interrupt => { result?; break; }
             _ = ticks.tick() => {
                 let inputs = panel.inputs();
                 for input in &inputs[seen..] {
@@ -313,6 +318,6 @@ async fn serve_until_ctrl_c(relay: LocalRelay, host: Host, panel: &Panel) -> Out
         }
     }
     host.stop().await?;
-    relay.stop();
+    drop(relay);
     Ok(())
 }

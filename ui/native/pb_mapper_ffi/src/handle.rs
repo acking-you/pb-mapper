@@ -1,5 +1,4 @@
 //! FFI handle lifecycle and app directory configuration.
-#![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{CStr, c_char};
 use std::ptr;
@@ -10,7 +9,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::CtlError;
-use crate::response::{err_ctl, err_null_handle, ok_message};
+use crate::response::{Reply, respond};
 use crate::state::PbMapperState;
 
 /// Opaque handle for the pb-mapper runtime and shared state.
@@ -30,10 +29,8 @@ impl Drop for PbMapperHandle {
     }
 }
 
-/// Create a new pb-mapper handle.
-///
-/// # Safety
-/// Returns a pointer that must be freed with `pb_mapper_destroy`.
+/// Create a new pb-mapper handle, to be freed with `pb_mapper_destroy`; null
+/// when no runtime could be started.
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_create() -> *mut PbMapperHandle {
     let runtime = match Runtime::new() {
@@ -62,26 +59,27 @@ pub extern "C" fn pb_mapper_create() -> *mut PbMapperHandle {
 /// be a poor trade.
 ///
 /// # Safety
-/// `handle` must be a valid pointer returned by `pb_mapper_create`.
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_start_control_server(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let shutdown = handle.control_shutdown.clone();
-
-    // `start` spawns onto this runtime, so it has to be entered first.
-    let _guard = handle.runtime.enter();
-    match crate::ctl::server::start(state, shutdown) {
-        Ok(endpoint) => ok_message(&format!("control server listening on {endpoint}")),
-        Err(e) => err_ctl(&CtlError::io(format!(
-            "control server not started: {e}. The UI still works as a window."
-        ))),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        // `start` spawns onto this runtime, so it has to be entered first.
+        let _guard = handle.runtime.enter();
+        let endpoint =
+            crate::ctl::server::start(handle.state.clone(), handle.control_shutdown.clone())
+                .map_err(|e| {
+                    CtlError::io(format!(
+                        "control server not started: {e}. The UI still works as a window."
+                    ))
+                })?;
+        Ok(Reply::Message(
+            format!("control server listening on {endpoint}").into(),
+        ))
+    })
 }
 
 /// Destroy handle and free resources.
@@ -98,41 +96,36 @@ pub unsafe extern "C" fn pb_mapper_destroy(handle: *mut PbMapperHandle) {
 }
 
 /// Set the app directory and load the configuration in it; empty or null
-/// means the platform's default directory. A new handle has read nothing, so
-/// every client calls this first.
+/// means the platform's default directory, and so does a path that is not
+/// UTF-8. A new handle has read nothing, so every client calls this first.
 ///
 /// # Safety
-/// `handle` must be valid. `path` must be valid C string or null.
+/// `handle` must be null or come from `pb_mapper_create` and not yet be
+/// destroyed, and `path` null or a NUL-terminated string that stays valid
+/// for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_set_app_dir(
     handle: *mut PbMapperHandle,
     path: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-
-    let path_opt = if path.is_null() {
-        None
-    } else {
-        match unsafe { CStr::from_ptr(path) }.to_str() {
-            Ok(s) if !s.is_empty() => Some(s.to_string()),
-            _ => None,
-        }
-    };
-
-    let handle = unsafe { &*handle };
-    // Configure before loading the saved state so configuration errors and all
-    // subsequent native diagnostics reach the same directory as its files.
-    crate::disk_log::configure(&PbMapperState::get_config_dir(&path_opt));
-    let state = handle.state.clone();
-    let result = handle.runtime.block_on(async move {
-        let mut state = state.lock().await;
-        state.set_app_directory_path(path_opt)
-    });
-
-    match result {
-        Ok(_) => ok_message("app directory updated"),
-        Err(e) => err_ctl(&e),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        let path = if path.is_null() {
+            None
+        } else {
+            // SAFETY: non-null, and NUL-terminated as the caller guarantees.
+            match unsafe { CStr::from_ptr(path) }.to_str() {
+                Ok(s) if !s.is_empty() => Some(s.to_string()),
+                _ => None,
+            }
+        };
+        // Configure before loading the saved state so configuration errors
+        // and all subsequent native diagnostics reach the same directory as
+        // its files.
+        crate::disk_log::configure(&PbMapperState::get_config_dir(&path));
+        handle
+            .runtime
+            .block_on(async { handle.state.lock().await.set_app_directory_path(path) })?;
+        Ok(Reply::Message("app directory updated".into()))
+    })
 }

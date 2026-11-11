@@ -6,16 +6,17 @@ use std::time::Duration;
 use pb_mapper_client::client::run_client_side_cli_with_callback_scoped;
 use pb_mapper_client::server::{ServerTunnelOptions, run_server_side_cli_with_pinned_credential};
 use pb_mapper_core::checksum::Credential;
-use tokio::net::{TcpListener, UdpSocket};
-use tokio::task::JoinHandle;
+use tokio::net::UdpSocket;
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 use uni_stream::stream::{
     TcpListenerProvider, TcpStreamProvider, UdpListenerProvider, UdpStreamProvider,
 };
 
-use crate::echo::{tcp_echo_server, udp_echo_server};
+use crate::echo::{Echo, tcp_echo, udp_echo};
+use crate::poll::poll_until;
 use crate::relay::Relay;
-use crate::traffic::{connected_udp_socket, probe_udp_socket, raw_tcp_probe};
+use crate::traffic::{connected_udp_socket, probe_udp_socket, raw_tcp_probe, tagged_echo};
 use crate::{PROBE, READY_TIMEOUT, Transport, admin_credential, reserve_addr};
 
 /// What kind of tunnel to build. Everything but the transport has a default that
@@ -123,8 +124,8 @@ impl TunnelSpec {
     }
 }
 
-/// A running tunnel. `Drop` aborts its tasks; the echo server, `register`, and
-/// `connect` all stop with it.
+/// A running tunnel. Its echo server and the [`JoinSet`] holding `register` and
+/// `connect` stop when it is dropped.
 pub struct Tunnel {
     tunnel_addr: SocketAddr,
     transport: Transport,
@@ -139,7 +140,9 @@ pub struct Tunnel {
     /// [`Self::wait_until_not_forwarding`] observe the established stream going
     /// away instead of a new stream failing to start.
     udp_probe_socket: Option<UdpSocket>,
-    tasks: Vec<JoinHandle<()>>,
+    /// `register` and `connect`, aborted when the set drops.
+    _tasks: JoinSet<()>,
+    _echo: Echo,
 }
 
 impl Tunnel {
@@ -152,24 +155,15 @@ impl Tunnel {
         let label = spec.label();
         let service_key = spec.service_key.clone().unwrap_or(format!("echo-{label}"));
         let echo_tag = spec.echo_tag;
-        let mut tasks = Vec::new();
+        let mut tasks = JoinSet::new();
 
         // The echo server owns its socket from the start, so its address is known
         // without a reservation window.
-        let echo_addr = match transport {
-            Transport::Tcp => {
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let addr = listener.local_addr().unwrap();
-                tasks.push(tokio::spawn(tcp_echo_server(listener, echo_tag)));
-                addr
-            }
-            Transport::Udp => {
-                let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-                let addr = socket.local_addr().unwrap();
-                tasks.push(tokio::spawn(udp_echo_server(socket, echo_tag)));
-                addr
-            }
+        let echo = match transport {
+            Transport::Tcp => tcp_echo(echo_tag).await,
+            Transport::Udp => udp_echo(echo_tag).await,
         };
+        let echo_addr = echo.addr();
 
         let options = ServerTunnelOptions {
             need_codec: spec.need_codec,
@@ -179,7 +173,7 @@ impl Tunnel {
             force_namespace: spec.force_namespace,
         };
         let register_key = service_key.clone();
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             match transport {
                 Transport::Tcp => {
                     run_server_side_cli_with_pinned_credential::<TcpStreamProvider, _>(
@@ -204,7 +198,7 @@ impl Tunnel {
                     .await
                 }
             }
-        }));
+        });
 
         // `register` must have published the key before `connect` probes for it;
         // otherwise `connect` burns its backoff waiting.
@@ -216,7 +210,7 @@ impl Tunnel {
         let connect_key = service_key.clone();
         let keep_alive = spec.keep_alive;
         let namespace = spec.namespace;
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             match transport {
                 Transport::Tcp => {
                     run_client_side_cli_with_callback_scoped::<TcpListenerProvider, _>(
@@ -243,7 +237,7 @@ impl Tunnel {
                     .await
                 }
             }
-        }));
+        });
 
         let udp_probe_socket = match transport {
             Transport::Tcp => None,
@@ -256,7 +250,8 @@ impl Tunnel {
             service_key,
             echo_tag,
             udp_probe_socket,
-            tasks,
+            _tasks: tasks,
+            _echo: echo,
         };
         tunnel.wait_until_forwarding().await;
         tunnel
@@ -286,10 +281,7 @@ impl Tunnel {
     /// and only exchange on a fresh connection — which is exactly where a TCP
     /// tag sits.
     fn expected_echo(&self, payload: &[u8]) -> Vec<u8> {
-        let mut expected = Vec::with_capacity(payload.len() + 1);
-        expected.extend(self.echo_tag);
-        expected.extend_from_slice(payload);
-        expected
+        tagged_echo(self.echo_tag, payload)
     }
 
     /// Poll until a payload round-trips, or fail the test.
@@ -298,20 +290,17 @@ impl Tunnel {
     /// connection, `connect`'s local listener, and the echo server at once — which
     /// is why no case here needs a sleep.
     pub async fn wait_until_forwarding(&self) {
-        let deadline = Instant::now() + READY_TIMEOUT;
-        let mut last_error = String::from("no attempt completed");
-        while Instant::now() < deadline {
-            match self.probe_once().await {
-                Ok(()) => return,
-                Err(error) => last_error = error,
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        let forwarding = poll_until(READY_TIMEOUT, Duration::from_millis(50), move || {
+            self.probe_once()
+        })
+        .await;
+        if let Err(last_error) = forwarding {
+            panic!(
+                "{} tunnel at {} never forwarded traffic: {last_error}",
+                self.transport.name(),
+                self.tunnel_addr
+            );
         }
-        panic!(
-            "{} tunnel at {} never forwarded traffic: {last_error}",
-            self.transport.name(),
-            self.tunnel_addr
-        );
     }
 
     /// Poll until a probe stops round-tripping, or fail the test.
@@ -352,14 +341,6 @@ impl Tunnel {
             .as_ref()
             .ok_or_else(|| "no udp probe socket on a tcp tunnel".to_string())?;
         probe_udp_socket(socket, &self.expected_echo(PROBE)).await
-    }
-}
-
-impl Drop for Tunnel {
-    fn drop(&mut self) {
-        for task in &self.tasks {
-            task.abort();
-        }
     }
 }
 

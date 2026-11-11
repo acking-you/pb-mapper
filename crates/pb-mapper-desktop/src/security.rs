@@ -40,7 +40,7 @@ impl std::fmt::Debug for HostIdentity {
 impl HostIdentity {
     pub fn generate() -> Result<Self> {
         let (rcgen::CertifiedKey { cert, .. }, key) =
-            rcgen::generate_simple_self_signed(vec![NAME.into()]).map_err(error)?;
+            rcgen::generate_simple_self_signed(vec![NAME.into()]).map_err(io::Error::other)?;
         Ok(Self {
             certificate: URL_SAFE_NO_PAD.encode(cert.der()),
             private_key: URL_SAFE_NO_PAD.encode(key.secret_der()),
@@ -50,7 +50,7 @@ impl HostIdentity {
     /// Contains the private key and bearer capability. Store only in an OS
     /// credential vault or equivalent encrypted application-owned storage.
     pub fn encode_secret(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(error)
+        serde_json::to_vec(self).map_err(io::Error::other)
     }
     pub fn decode_secret(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > 16384 {
@@ -73,7 +73,7 @@ impl HostIdentity {
             .ok()
             .and_then(|token| <[u8; 32]>::try_from(token).ok())
             .ok_or_else(|| error("invalid stored desktop grant"))?;
-        Invitation::new(service, &certificate, token).map_err(error)
+        Invitation::new(service, &certificate, token).map_err(io::Error::other)
     }
     pub(crate) fn acceptor(&self) -> Result<tokio_rustls::TlsAcceptor> {
         Ok(tokio_rustls::TlsAcceptor::from(Arc::new(
@@ -109,10 +109,10 @@ impl HostIdentity {
             rustls::crypto::ring::default_provider().into(),
         )
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(error)?
+        .map_err(io::Error::other)?
         .with_no_client_auth()
         .with_single_cert(chain, key)
-        .map_err(error)?;
+        .map_err(io::Error::other)?;
         config.alpn_protocols = vec![ALPN.to_vec()];
         config.max_early_data_size = 0;
         Ok(config)
@@ -132,7 +132,7 @@ fn client_config(fingerprint: [u8; 32]) -> Result<rustls::ClientConfig> {
     let algorithms = provider.signature_verification_algorithms;
     let mut config = rustls::ClientConfig::builder_with_provider(provider.into())
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(error)?
+        .map_err(io::Error::other)?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(Pinned {
             fingerprint,
@@ -233,8 +233,7 @@ pub(crate) fn server() -> Result<(tokio_rustls::TlsAcceptor, [u8; 32])> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use tokio::io::DuplexStream;
 
@@ -259,23 +258,31 @@ pub(crate) mod tests {
         connected.err()
     }
 
-    /// A viewer and host of different desktop protocol versions: the old side
-    /// offers the PR #51 ALPN. Returns the viewer's handshake error.
-    pub(crate) async fn alpn_handshake(old_host: bool) -> io::Error {
-        let identity = HostIdentity::generate().unwrap();
-        let fingerprint = identity
-            .invitation("desktop:test".into())
-            .unwrap()
-            .fingerprint;
-        let mut client = client_config(fingerprint).unwrap();
-        let mut server = identity.server_config(vec![]).unwrap();
-        let old = b"pb-mapper/desktop/1".to_vec();
-        if old_host {
-            server.alpn_protocols = vec![old];
-        } else {
-            client.alpn_protocols = vec![old];
+    /// A v1 peer, which offers the PR #51 ALPN, fails the TLS handshake with
+    /// a typed version mismatch, whichever side is the old one.
+    #[tokio::test]
+    async fn another_protocol_version_fails_the_handshake_typed() {
+        for old_host in [true, false] {
+            let identity = HostIdentity::generate().unwrap();
+            let fingerprint = identity
+                .invitation("desktop:test".into())
+                .unwrap()
+                .fingerprint;
+            let mut client = client_config(fingerprint).unwrap();
+            let mut server = identity.server_config(vec![]).unwrap();
+            let old = b"pb-mapper/desktop/1".to_vec();
+            if old_host {
+                server.alpn_protocols = vec![old];
+            } else {
+                client.alpn_protocols = vec![old];
+            }
+            let failure = connect(client, server).await.unwrap();
+            assert_eq!(
+                handshake_failure(&failure),
+                Some(HandshakeFailure::VersionMismatch),
+                "{failure}"
+            );
         }
-        connect(client, server).await.unwrap()
     }
 
     #[tokio::test]

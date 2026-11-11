@@ -16,7 +16,6 @@ harness = false
 
 [dependencies]
 base64.workspace = true
-clap.workspace = true
 hickory-resolver.workspace = true
 parking_lot.workspace = true
 rand.workspace = true
@@ -25,7 +24,6 @@ serde_json.workspace = true
 snafu.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

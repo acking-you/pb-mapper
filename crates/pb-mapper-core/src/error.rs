@@ -14,8 +14,6 @@ pub enum Error {
     /// Error handling for message
     #[snafu(display("read `checksum` from network error"))]
     MsgNetworkReadCheckSum { source: std::io::Error },
-    #[snafu(display("read `datalen` from network error"))]
-    MsgNetworkReadDatalen { source: std::io::Error },
     #[snafu(display("read `buffered_raw_data` from network error"))]
     MsgNetworkReadBufferdRawData { source: std::io::Error },
     #[snafu(display("read `msg_body` from network error"))]
@@ -50,7 +48,7 @@ pub enum Error {
         action: &'static str,
         // must be the name of the structure to be serialized,such as `PbConnRequest`
         struct_name: &'static str,
-        // must be structures that need to be serialized or messages that need to be deserialized
+        // a redacted description of the payload, never its bytes
         content: String,
         source: serde_json::Error,
     },
@@ -78,6 +76,13 @@ pub enum Error {
         string: String,
         source: AddrParseError,
     },
+    /// A well-formed `host:port` whose host did not resolve. The reason is in
+    /// the message too: the CLI and the app show this one only by its message.
+    #[snafu(display("failed to resolve `{string}`: {source}"))]
+    CfgResolveSockAddr {
+        string: String,
+        source: std::io::Error,
+    },
     #[snafu(display("`PB_MAPPER_SERVER` env not set"))]
     CfgPbServerEnvNotExist { source: VarError },
 }
@@ -102,7 +107,6 @@ impl Error {
 
         match self {
             Error::MsgNetworkReadCheckSum { source }
-            | Error::MsgNetworkReadDatalen { source }
             | Error::MsgNetworkReadBufferdRawData { source }
             | Error::MsgNetworkReadBody { source }
             | Error::MsgNetworkWriteCheckSum { source }
@@ -112,7 +116,14 @@ impl Error {
             | Error::MsgNetworkWriteCodecTag { source }
             | Error::FwdNetworkWriteWithNormal { source }
             | Error::MsgForward { source, .. } => is_expected(source.kind()),
-            _ => false,
+            Error::MsgDatalenExceeded { .. }
+            | Error::MsgDatalenValidate { .. }
+            | Error::MsgSerialize { .. }
+            | Error::MsgCodec { .. }
+            | Error::MsgProtocol { .. }
+            | Error::CfgParseSockAddr { .. }
+            | Error::CfgResolveSockAddr { .. }
+            | Error::CfgPbServerEnvNotExist { .. } => false,
         }
     }
 }

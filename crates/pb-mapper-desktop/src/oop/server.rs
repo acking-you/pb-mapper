@@ -48,13 +48,13 @@ where
         let close = matches!(request, Request::Close {});
         let (response, image) = tokio::time::timeout(request.timeout(), serve(request))
             .await
-            .map_err(error)??;
+            .map_err(std::io::Error::other)??;
         tokio::time::timeout(TIMEOUT, async {
             ipc::write_json(pipe, &response).await?;
             ipc::write_bytes(pipe, &image, ipc::MAX_FRAME).await
         })
         .await
-        .map_err(error)??;
+        .map_err(std::io::Error::other)??;
         if close {
             return Ok(());
         }
@@ -69,7 +69,7 @@ impl Response {
             error: Some(failure.to_string()),
             failure: failure_kind(failure),
             pending,
-            ..Self::empty()
+            ..Self::default()
         }
     }
 }
@@ -82,7 +82,7 @@ pub(crate) fn serve<B: Backend>(
     request: Request,
     state: &mut ServeState,
 ) -> Result<(Response, Vec<u8>)> {
-    let mut response = Response::empty();
+    let mut response = Response::default();
     if matches!(request, Request::Release {} | Request::Close {}) {
         backend.release();
         return Ok((response, vec![]));
@@ -119,10 +119,7 @@ pub(crate) fn serve<B: Backend>(
     // Context checks observe the pointer too, so it follows while capture is
     // idle. The backend checks this desktop identity; observing it never
     // renews last_input or acknowledges video.
-    let observe_cursor = matches!(
-        request,
-        Request::Context {} | Request::Capture {} | Request::Video { .. }
-    );
+    let observe_cursor = request.observes_cursor();
     let image = match request {
         Request::Start { .. } => {
             // This worker runs in the interactive session: its settings are
@@ -132,8 +129,9 @@ pub(crate) fn serve<B: Backend>(
             response.caps = Some((&backend.describe(false)?.caps).into());
             vec![]
         }
-        Request::Context {}
-        | Request::Release {}
+        Request::Context {} => vec![],
+        // Answered above, before the context read.
+        Request::Release {}
         | Request::Close {}
         | Request::Input { .. }
         | Request::RestoreDisplayMode {} => vec![],
@@ -162,7 +160,7 @@ pub(crate) fn serve<B: Backend>(
             limits,
             nominal_fps,
         } => {
-            if !(1..=120).contains(&nominal_fps) {
+            if !(1..=crate::video::MAX_FPS).contains(&nominal_fps) {
                 return Err(error("invalid video configuration"));
             }
             backend.configure_video(limits, nominal_fps)?;
@@ -182,7 +180,7 @@ pub(crate) fn serve<B: Backend>(
                 || submit
                     && (!(crate::qos::ENCODER_BITRATE_MIN..=crate::qos::ENCODER_BITRATE_MAX)
                         .contains(&rate.bitrate)
-                        || !(1..=120).contains(&rate.pace_fps))
+                        || !(1..=crate::video::MAX_FPS).contains(&rate.pace_fps))
             {
                 return Err(error("invalid or stale video request"));
             }
@@ -238,7 +236,6 @@ fn drain<B: Backend>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::Input;
@@ -311,7 +308,7 @@ mod tests {
         let (mut host, mut worker) = tokio::io::duplex(1 << 16);
         let exchange = tokio::spawn(async move {
             exchange(&mut worker, 1, None, |_| async {
-                Ok((Response::empty(), vec![]))
+                Ok((Response::default(), vec![]))
             })
             .await
         });

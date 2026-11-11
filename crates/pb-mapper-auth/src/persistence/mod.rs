@@ -3,7 +3,7 @@
 //! ```text
 //! startup:   lock -> admin.key -> recover instance id -> decrypt snapshot -> replay WAL
 //! mutation:  command   -> fsync encrypted WAL -> publish hot-state change
-//! compact:   hot state + audit + replay set -> snapshot -> truncate WAL
+//! compact:   hot state + audit + replay set -> snapshot -> truncate WAL, when changed
 //! ```
 //!
 //! Snapshot replacement and administrator-key files use atomic rename. Bounded audit
@@ -14,45 +14,67 @@ use super::*;
 
 mod admin_key;
 mod blob;
+mod format;
 mod fs;
+mod instance_id;
 mod namespaces;
 mod snapshot;
 mod wal;
 
-#[cfg(test)]
-pub(crate) use admin_key::read_instance_id_file;
 pub use admin_key::{
     discard_staged_admin_key, generate_admin_key, initialize_admin_key, stage_admin_key_candidate,
     staged_admin_key_path, write_admin_key_file,
 };
 pub(crate) use admin_key::{
-    key_matches_existing_state, load_or_create_instance_id, random_instance_id,
-    recover_instance_id_after_reset, reset_already_installed, rotation_already_installed,
-    write_admin_key,
+    persist_recovery_admin_key, read_admin_key, recover_admin_key_after_rotation,
+    rotation_already_installed, validate_admin_key, write_admin_key,
 };
 pub(crate) use blob::{open_blob, seal_blob};
+pub(crate) use format::{
+    AdminReplayRecord, AuditRecord, PersistedEntry, PersistedSnapshot, StateMutation, WalRecord,
+    audit_action,
+};
 pub use fs::acquire_state_dir_lock;
 #[cfg(test)]
 pub(crate) use fs::prepare_state_dir;
 pub(crate) use fs::sync_parent_directory;
 pub(crate) use fs::{atomic_write, create_new_write, prepare_state_dir_and_lock};
+#[cfg(test)]
+pub(crate) use instance_id::read_instance_id_file;
+pub(crate) use instance_id::{
+    load_or_create_instance_id, random_instance_id, recover_instance_id_after_reset,
+    reset_already_installed,
+};
 pub(crate) use namespaces::{
     read_namespace_high_water, restore_namespace_high_water, write_namespace_high_water,
 };
 #[cfg(test)]
 pub(crate) use snapshot::try_load_persisted_state;
 pub(crate) use snapshot::{
-    build_snapshot, cancel_all_temporary_leases, compaction_is_allowed, empty_snapshot,
-    load_persisted_state, normalize_tombstone_times, push_audit_record, push_persisted_audit,
-    split_high_slot_state,
+    build_snapshot, cancel_all_temporary_leases, empty_snapshot, load_persisted_state,
+    normalize_tombstone_times, push_audit_record, push_persisted_audit, split_high_slot_state,
 };
+#[cfg(test)]
+pub(crate) use wal::append_wal;
 pub(crate) use wal::{
-    append_audit, append_mutation, append_wal, fail_closed_on_uncertain_wal, read_wal,
-    truncate_auth_wal, write_snapshot_and_truncate_wal,
+    append_audit, append_mutation, append_record, read_wal, truncate_auth_wal,
+    write_snapshot_and_truncate_wal,
 };
 
-pub(crate) const AUTH_SNAPSHOT_FILE: &str = "auth.snapshot";
-pub(crate) const AUTH_WAL_FILE: &str = "auth.wal";
+// The files of a state directory. Renaming one orphans the state an older
+// relay left there.
+const AUTH_SNAPSHOT_FILE: &str = "auth.snapshot";
+const AUTH_WAL_FILE: &str = "auth.wal";
+const LOCK_FILE: &str = "auth.lock";
+/// The live administrator key's file name in a state directory.
+pub const ADMIN_KEY_FILE: &str = "admin.key";
+/// The new key a root rotation stages while it installs it. Not the candidate
+/// [`staged_admin_key_path`] names for the CLI and SDK (`.admin.key.next`):
+/// those are two different files.
+const ROTATION_KEY_FILE: &str = "admin.key.next";
+const INSTANCE_ID_FILE: &str = "server-instance-id";
+/// The new instance id a reset stages until its snapshot is in place.
+const STAGED_INSTANCE_ID_FILE: &str = "server-instance-id.next";
 
 pub(crate) fn auth_snapshot_path(state_dir: &Path) -> PathBuf {
     state_dir.join(AUTH_SNAPSHOT_FILE)
@@ -62,15 +84,36 @@ pub(crate) fn auth_wal_path(state_dir: &Path) -> PathBuf {
     state_dir.join(AUTH_WAL_FILE)
 }
 
+fn lock_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(LOCK_FILE)
+}
+
+/// Where the live administrator key of `state_dir` is kept.
+pub fn admin_key_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(ADMIN_KEY_FILE)
+}
+
+pub(crate) fn rotation_key_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(ROTATION_KEY_FILE)
+}
+
+pub(crate) fn instance_id_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(INSTANCE_ID_FILE)
+}
+
+pub(crate) fn staged_instance_id_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(STAGED_INSTANCE_ID_FILE)
+}
+
 pub fn encrypted_auth_state_exists(state_dir: &Path) -> bool {
     auth_snapshot_path(state_dir).exists() || auth_wal_path(state_dir).exists()
 }
 
-pub(crate) fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+/// `N` bytes from the thread's cryptographically secure generator.
+pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0; N];
+    rand::fill(&mut bytes);
+    bytes
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {

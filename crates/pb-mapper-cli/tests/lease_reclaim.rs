@@ -2,7 +2,7 @@
 //!
 //! A dedicated test binary, because the cases here shorten
 //! `PB_MAPPER_SERVER_LEASE_TIMEOUT` — which every relay in the process reads on
-//! every sweep. Setting it inside `regression.rs` would retire the registrations
+//! every sweep. Setting it inside `regression` would retire the registrations
 //! of whatever case happened to be running alongside.
 
 // An integration test: a failed `unwrap` is a failed test, which is the report
@@ -13,7 +13,6 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use pb_mapper_client::sdk::Client;
 use pb_mapper_core::codec::Aes256GcmEnCodec;
 use pb_mapper_core::config::{
     PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL, PB_MAPPER_SERVER_LEASE_TIMEOUT,
@@ -22,7 +21,9 @@ use pb_mapper_protocol::command::{MessageSerializer, PbServerRequest};
 use pb_mapper_protocol::{
     CodecMessageWriter, MessageReader, MessageWriter, get_header_msg_reader, get_header_msg_writer,
 };
-use pb_mapper_testkit::{Relay, V2ControlSpec, admin_credential, register_v2_control};
+use pb_mapper_testkit::{
+    Relay, V2ControlSpec, admin_client, admin_credential, register_v2_control,
+};
 use tokio::net::TcpStream;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::time::{Instant, timeout};
@@ -251,8 +252,7 @@ async fn admin_retire_unwinds_a_registration_that_never_reads() {
         .wait_for_registration(key, admin_credential(), None)
         .await;
 
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
-    let admin = client.admin().unwrap();
+    let admin = admin_client(relay.addr()).admin().unwrap();
     assert!(
         admin
             .list_connections_all(None)

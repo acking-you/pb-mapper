@@ -1,7 +1,8 @@
 [package]
 name = "pb-mapper-ffi"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
 publish = false
 
 [lib]
@@ -17,8 +18,8 @@ workspace = true
 desktop-test-source = ["dep:bytes"]
 
 [dependencies]
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0"
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
@@ -37,7 +38,6 @@ pb-mapper = { workspace = true, features = ["desktop"] }
 pb-mapper-client = { workspace = true, features = ["p2p", "relay-quic", "port-mapping"] }
 pb-mapper-core.workspace = true
 pb-mapper-galaxy.workspace = true
-pb-mapper-protocol.workspace = true
 pb-mapper-server = { workspace = true, features = ["p2p", "relay-quic"] }
 uni-stream.workspace = true
 parking_lot.workspace = true

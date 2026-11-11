@@ -1,16 +1,15 @@
 use std::time::Duration;
 
+use pb_mapper_core::error::Error as CoreError;
 use snafu::Snafu;
-
-// The `common::error::Error` spellings below are the source type on nearly every
-// variant; aliasing keeps them as they were.
-use pb_mapper_core as common;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(super)))]
 pub enum Error {
-    #[snafu(display("direct setup failed: {detail}"))]
-    DirectSetup { detail: String },
+    // The text names its source: a tunnel that fails on it reports this
+    // Display as its failure reason.
+    #[snafu(display("direct setup failed: {source}"))]
+    DirectSetup { source: std::io::Error },
     #[snafu(display("bind local listener error"))]
     BindLocalListener { source: std::io::Error },
     #[snafu(display("accept local listener error"))]
@@ -18,13 +17,13 @@ pub enum Error {
     #[snafu(display("connect remote stream error"))]
     ConnectRemoteStream { source: std::io::Error },
     #[snafu(display("encode subcribe request error"))]
-    EncodeSubcribeReq { source: common::error::Error },
+    EncodeSubcribeReq { source: CoreError },
     #[snafu(display("encode status request error"))]
-    EncodeStatusReq { source: common::error::Error },
+    EncodeStatusReq { source: CoreError },
     #[snafu(display("write status request error"))]
-    WriteStatusReq { source: common::error::Error },
+    WriteStatusReq { source: CoreError },
     #[snafu(display("decode status response error"))]
-    DecodeStatusResp { source: common::error::Error },
+    DecodeStatusResp { source: CoreError },
     #[snafu(display("we expected `PbConnResponse::Status`,but actual response is `{resp}`"))]
     StatusRespNotMatch {
         // Structured representation of response
@@ -43,9 +42,9 @@ pub enum Error {
         retryable: bool,
     },
     #[snafu(display("write subcribe request error"))]
-    WriteSubcribeReq { source: common::error::Error },
+    WriteSubcribeReq { source: CoreError },
     #[snafu(display("decode subcribe response error"))]
-    DecodeSubcribeResp { source: common::error::Error },
+    DecodeSubcribeResp { source: CoreError },
     #[snafu(display("we expected `PbConnResponse::Subcribe`,but actual response is `{resp}`"))]
     SubcribeRespNotMatch {
         // Structured representation of response
@@ -59,14 +58,22 @@ pub enum Error {
     },
     #[snafu(display("header msg tool:`{action}` create failed!"))]
     CreateHeaderTool {
-        // Must be `reader/writer`
+        // What was being created: `session` or `data codec`.
         action: &'static str,
-        source: common::error::Error,
+        source: CoreError,
     },
     #[snafu(display("control io `{action}` timed out after {timeout:?}"))]
     ControlIoTimeout {
         action: &'static str,
         timeout: Duration,
+    },
+    /// A stream's setup deadline passed while its subscription was still
+    /// being retried: `source` is why the last attempt that failed by itself
+    /// failed, such as the relay refusing the connection.
+    #[snafu(display("control io `subscribe` timed out after {timeout:?}"))]
+    SubscribeTimedOut {
+        timeout: Duration,
+        source: Box<Error>,
     },
 }
 
@@ -80,9 +87,85 @@ impl Error {
         match self {
             Self::StatusRemoteError { retryable, .. }
             | Self::SubscribeRemoteError { retryable, .. } => Some(*retryable),
-            _ => None,
+            Self::DirectSetup { .. }
+            | Self::BindLocalListener { .. }
+            | Self::AcceptLocalStream { .. }
+            | Self::ConnectRemoteStream { .. }
+            | Self::EncodeSubcribeReq { .. }
+            | Self::EncodeStatusReq { .. }
+            | Self::WriteStatusReq { .. }
+            | Self::DecodeStatusResp { .. }
+            | Self::StatusRespNotMatch { .. }
+            | Self::WriteSubcribeReq { .. }
+            | Self::DecodeSubcribeResp { .. }
+            | Self::SubcribeRespNotMatch { .. }
+            | Self::CreateHeaderTool { .. }
+            | Self::ControlIoTimeout { .. }
+            | Self::SubscribeTimedOut { .. } => None,
+        }
+    }
+
+    /// Whether a failed subscription attempt is worth another before the
+    /// stream's setup deadline: the relay could not be reached or the request
+    /// not delivered, or the relay itself called its refusal retryable.
+    /// Anything else would fail the same way again.
+    pub(crate) fn subscribe_retryable(&self) -> bool {
+        match self {
+            Self::ConnectRemoteStream { .. } | Self::WriteSubcribeReq { .. } => true,
+            Self::SubscribeRemoteError { retryable, .. } => *retryable,
+            Self::DirectSetup { .. }
+            | Self::BindLocalListener { .. }
+            | Self::AcceptLocalStream { .. }
+            | Self::EncodeSubcribeReq { .. }
+            | Self::EncodeStatusReq { .. }
+            | Self::WriteStatusReq { .. }
+            | Self::DecodeStatusResp { .. }
+            | Self::StatusRespNotMatch { .. }
+            | Self::StatusRemoteError { .. }
+            | Self::DecodeSubcribeResp { .. }
+            | Self::SubcribeRespNotMatch { .. }
+            | Self::CreateHeaderTool { .. }
+            | Self::ControlIoTimeout { .. }
+            | Self::SubscribeTimedOut { .. } => false,
         }
     }
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// Why [`fetch_status_scoped`](super::fetch_status_scoped) got no status.
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(super)))]
+pub enum FetchStatusError {
+    /// The relay address named no address.
+    #[snafu(display("{source}"))]
+    Resolve { source: std::io::Error },
+    /// No stream to the relay could be opened.
+    #[snafu(display("get status stream: {source}"))]
+    Connect { source: std::io::Error },
+    /// The relay was reached, but the exchange failed or the relay refused it.
+    ///
+    /// Its text carries the source's causes, as the other variants' do: the
+    /// source names only the step that failed, and the `status` command
+    /// prints the text alone.
+    #[snafu(display("{}", with_causes(source)))]
+    Status { source: Error },
+}
+
+/// `error`'s text, then each of its causes', as `error: cause: …`, leaving
+/// out a cause whose text the one before already ends with: for an error
+/// that reaches its caller only as text, which would otherwise name the step
+/// that failed and not why.
+pub(crate) fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(current) = cause {
+        let more = current.to_string();
+        if !text.ends_with(&more) {
+            text.push_str(": ");
+            text.push_str(&more);
+        }
+        cause = current.source();
+    }
+    text
+}

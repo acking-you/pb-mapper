@@ -2233,9 +2233,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.1.1"
+version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a69bcab0ad47271a0234d9422b131806bf3968021e5dc9328caf2d4cd58557fc"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
 dependencies = [
  "libc",
  "wasi",
@@ -3067,11 +3067,11 @@ dependencies = [
  "pb-mapper-server",
  "pb-mapper-testkit",
  "quinn-plus",
- "rand 0.10.2",
  "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uni-stream",
 ]
 
@@ -3088,7 +3088,6 @@ dependencies = [
  "pb-mapper-server",
  "portmapper-plus",
  "quinn-plus",
- "rand 0.10.2",
  "rcgen-plus",
  "ring",
  "serde",
@@ -3108,7 +3107,6 @@ name = "pb-mapper-core"
 version = "0.11.0"
 dependencies = [
  "base64 0.23.1",
- "clap",
  "hickory-resolver",
  "parking_lot",
  "rand 0.10.2",
@@ -3117,7 +3115,6 @@ dependencies = [
  "snafu",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -3166,7 +3163,6 @@ dependencies = [
  "pb-mapper-client",
  "pb-mapper-core",
  "pb-mapper-galaxy",
- "pb-mapper-protocol",
  "pb-mapper-server",
  "pb-mapper-testkit",
  "ring",
@@ -3229,7 +3225,6 @@ dependencies = [
  "pb-mapper-core",
  "pb-mapper-protocol",
  "quinn-plus",
- "rand 0.10.2",
  "snafu",
  "stun-proto",
  "tokio",
@@ -3251,6 +3246,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uni-stream",
 ]
 

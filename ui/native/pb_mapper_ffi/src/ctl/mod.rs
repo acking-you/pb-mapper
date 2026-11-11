@@ -20,12 +20,13 @@ use pb_mapper_client::sdk::PortMapping;
 
 use crate::error::CtlError;
 use crate::events::ChangeKind;
+use crate::response::json_or;
 use crate::state::{self, PbMapperState};
 
 /// Who asked. Not part of the wire format: the control server stamps `Cli` on
 /// whatever arrives over the socket, the FFI stamps `Ui`, and the background
 /// status refreshers stamp `Internal`. `PbMapperState` never has to know.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Origin {
     Ui,
@@ -63,7 +64,7 @@ pub struct RegisterArgs {
         num_args = 0..=1,
         default_missing_value = "always"
     )]
-    #[serde(default = "map_when_needed")]
+    #[serde(default = "crate::state::map_when_needed")]
     pub port_mapping: PortMapping,
 }
 
@@ -99,7 +100,7 @@ pub struct ConnectArgs {
         num_args = 0..=1,
         default_missing_value = "always"
     )]
-    #[serde(default = "map_when_needed")]
+    #[serde(default = "crate::state::map_when_needed")]
     pub port_mapping: PortMapping,
 }
 
@@ -166,17 +167,10 @@ impl Command {
     }
 }
 
-fn map_when_needed() -> PortMapping {
-    PortMapping::Auto
-}
-
+/// The SDK's own labels, exact and case-sensitive.
 fn parse_port_mapping(raw: &str) -> Result<PortMapping, String> {
-    match raw {
-        "off" => Ok(PortMapping::Off),
-        "auto" => Ok(PortMapping::Auto),
-        "always" => Ok(PortMapping::Always),
-        _ => Err(format!("expected off, auto or always, got {raw}")),
-    }
+    raw.parse()
+        .map_err(|_| format!("expected off, auto or always, got {raw}"))
 }
 
 fn protocol(udp: bool) -> String {
@@ -194,7 +188,7 @@ pub async fn dispatch(
     origin: Origin,
 ) -> proto::Response {
     let affected = command.affects();
-    match run(state, command, origin).await {
+    match run(state, command).await {
         Ok(response) => {
             // Announce only what succeeded, and only from here — the boundary
             // is where the origin is known, so `PbMapperState` never has to
@@ -211,28 +205,26 @@ pub async fn dispatch(
 async fn run(
     state: &Arc<Mutex<PbMapperState>>,
     command: Command,
-    _origin: Origin,
 ) -> Result<proto::Response, CtlError> {
     match command {
+        // The workspace's version, which the app is released as; this
+        // library's own package version never changes.
         Command::Hello => Ok(proto::Response::ok(
             Some(json!({
                 "protocolVersion": proto::PROTOCOL_VERSION,
-                "appVersion": env!("CARGO_PKG_VERSION"),
+                "appVersion": pb_mapper_client::sdk::SDK_VERSION,
                 "pid": std::process::id(),
             })),
             None,
         )),
 
         Command::Status => {
-            let detail = state::get_server_status_detail(state).await?;
-            Ok(proto::Response::ok(
-                Some(serde_json::to_value(detail).unwrap_or_else(|_| json!({}))),
-                None,
-            ))
+            let detail = state::get_server_status_detail(state).await;
+            Ok(proto::Response::ok(Some(json_or(detail, json!({}))), None))
         }
 
         Command::Services => {
-            let services = state.lock().await.get_service_configs().await;
+            let services = state.lock().await.get_service_configs()?;
             Ok(proto::Response::ok(
                 Some(json!({ "services": services })),
                 None,
@@ -240,7 +232,7 @@ async fn run(
         }
 
         Command::Clients => {
-            let clients = state.lock().await.get_client_configs().await;
+            let clients = state.lock().await.get_client_configs()?;
             Ok(proto::Response::ok(
                 Some(json!({ "clients": clients })),
                 None,
@@ -257,7 +249,7 @@ async fn run(
 
         Command::ConfigGet => {
             let guard = state.lock().await;
-            let config = guard.get_config_status().await;
+            let config = guard.get_config_status();
             let isolated_admin_key = guard.isolated_admin_key();
             Ok(proto::Response::ok(
                 Some(json!({
@@ -265,6 +257,7 @@ async fn run(
                     "keepAliveEnabled": config.keep_alive_enabled,
                     "relayTransport": config.relay_transport,
                     "lanFirst": config.lan_first,
+                    "lanTransport": config.lan_transport,
                     "msgHeaderKeySet": !config.msg_header_key.is_empty(),
                     "isolatedRelayAdminKeySet": isolated_admin_key.is_some(),
                 })),
@@ -275,14 +268,16 @@ async fn run(
         Command::Register(args) => {
             state::register_service(
                 state,
-                args.key.clone(),
-                args.addr,
-                protocol(args.udp),
-                !args.no_encrypt,
-                args.keep_alive,
-                state::DirectOptions {
-                    allow_direct: !args.relay_only,
-                    port_mapping: args.port_mapping,
+                state::ShareSpec {
+                    service_key: args.key.clone(),
+                    local_address: args.addr,
+                    protocol: protocol(args.udp),
+                    enable_encryption: !args.no_encrypt,
+                    enable_keep_alive: args.keep_alive,
+                    direct: state::DirectOptions {
+                        allow_direct: !args.relay_only,
+                        port_mapping: args.port_mapping,
+                    },
                 },
             )
             .await?;
@@ -293,21 +288,23 @@ async fn run(
         }
 
         Command::Unregister { key } => {
-            state.lock().await.unregister_service(key.clone()).await?;
+            state.lock().await.unregister_service(key.clone())?;
             Ok(proto::Response::ok(None, Some(format!("stopped '{key}'"))))
         }
 
         Command::Connect(args) => {
             state::connect_service(
                 state,
-                args.key.clone(),
-                args.addr,
-                protocol(args.udp),
-                args.keep_alive,
-                args.namespace,
-                state::DirectOptions {
-                    allow_direct: !args.relay_only,
-                    port_mapping: args.port_mapping,
+                state::ConnectSpec {
+                    service_key: args.key.clone(),
+                    local_address: args.addr,
+                    protocol: protocol(args.udp),
+                    enable_keep_alive: args.keep_alive,
+                    namespace: args.namespace,
+                    direct: state::DirectOptions {
+                        allow_direct: !args.relay_only,
+                        port_mapping: args.port_mapping,
+                    },
                 },
             )
             .await?;
@@ -318,11 +315,55 @@ async fn run(
         }
 
         Command::Disconnect { key } => {
-            state.lock().await.disconnect_service(key.clone()).await?;
+            state.lock().await.disconnect_service(key.clone())?;
             Ok(proto::Response::ok(
                 None,
                 Some(format!("disconnected '{key}'")),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `hello` names the version the app is released as, which a client
+    /// checks against its own.
+    #[tokio::test]
+    async fn hello_names_the_version_the_app_is_released_as() {
+        let pubspec = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pubspec.yaml");
+        let pubspec = std::fs::read_to_string(pubspec).unwrap();
+        let released = pubspec
+            .lines()
+            .find_map(|line| line.strip_prefix("version: "))
+            .and_then(|version| version.split('+').next())
+            .unwrap();
+        let state = Arc::new(Mutex::new(PbMapperState::unloaded()));
+        let hello = dispatch(&state, Command::Hello, Origin::Cli).await;
+        assert_eq!(hello.data.unwrap()["appVersion"], released);
+    }
+
+    /// `config-get` reads back every setting of this computer's that a
+    /// connection takes, the LAN transport among them.
+    #[tokio::test]
+    async fn config_get_reads_back_the_lan_transport() {
+        // A state's settings set the process credential (none, here).
+        let _guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
+            .lock()
+            .await;
+        let root = crate::test_support::TempRoot::new("config-get");
+        let mut state = PbMapperState::new(Some(root.path().to_string_lossy().into_owned()));
+        state
+            .update_config(state::AppConfig {
+                lan_transport: pb_mapper_client::sdk::LanTransport::Tcp,
+                ..state.get_config_status()
+            })
+            .unwrap();
+        let state = Arc::new(Mutex::new(state));
+        let config = dispatch(&state, Command::ConfigGet, Origin::Cli).await;
+        let data = config.data.unwrap();
+        assert_eq!(data["lanTransport"], "tcp", "{data}");
+        assert_eq!(data["lanFirst"], true, "{data}");
     }
 }

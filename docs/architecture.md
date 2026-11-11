@@ -49,7 +49,8 @@ except the FFI cdylib, which sits next to the Flutter code that loads it.
 pb-mapper/
 ├── crates/
 │   ├── pb-mapper-core/     # Bottom layer: checksum, config, conn_id, error,
-│   │                       # addr, codec, timeout, durable_file, DataLenType
+│   │                       # addr, codec, timeout, time, durable_file, listener,
+│   │                       # paging, DataLenType
 │   ├── pb-mapper-auth/     # Credential lifecycle, persistence, timing wheel
 │   ├── pb-mapper-protocol/ # Message framing, v2 secure sessions, forwarding
 │   ├── pb-mapper-server/   # Central relay server, plus the task manager
@@ -102,7 +103,9 @@ pb-mapper-ffi ─▶ pb-mapper (feature desktop) ─▶ pb-mapper-desktop ─▶
 `desktop` feature re-exports `pb-mapper-desktop` as `pb_mapper::desktop`, and
 only the FFI enables it, so no CLI, relay or plain SDK build links capture,
 codec or input code. `pb-mapper-desktop` also uses `pb-mapper-core` on every
-target, for the display-mode journal's `durable_file`.
+target, for `durable_file` (the trust file and the display-mode journal),
+`time`, `RetryBackoff` and `checksum`'s temporary-credential prefix, which
+`Invitation::decode` uses to recognise a pasted setup string.
 
 Note that the binary is still named `pb-mapper`, discovered from
 `src/bin/pb-mapper.rs` inside `pb-mapper-cli`. The release workflows, both
@@ -120,51 +123,147 @@ Nothing in the SDK crates knows it exists.
 
 #### Rust Backend (`crates/`)
 - **`pb-mapper-core/`**: The bottom layer; depends on no other crate here
-  - `checksum.rs`: The process credential, and the framing checksum over `datalen`
-  - `config.rs`: Environment configuration and address resolution entry points
+  - `checksum.rs` and `checksum/`: Credentials and the frame checksum they
+    key, all named as `checksum::…` — `credential.rs` parses and encodes an
+    administrator key or a temporary credential, `process.rs` holds the
+    process credential (read once from `MSG_HEADER_KEY`, replaceable at
+    runtime) and the checksum over `datalen`, `machine_key.rs` the legacy
+    machine-derived key
+  - `config.rs`: Environment configuration — each `PB_MAPPER_*` name and the
+    accessor that reads it — and address resolution entry points
   - `conn_id.rs`: Connection ID types
   - `error.rs`: The shared error type, plus the `snafu_error_*` macros
   - `addr.rs`: Address resolution; custom DNS servers on the async path
   - `codec.rs`: AES-256-GCM encrypt/decrypt
   - `timeout.rs`: `RetryBackoff`
-  - `durable_file.rs`: Atomic replace and parent-directory fsync
-  - `test_support.rs`: `PROCESS_CREDENTIAL_TEST_LOCK`, shared across crates' tests
+  - `time.rs`: Wall-clock time and durations in the whole units the wire,
+    state files and diagnostics carry, saturating rather than wrapping
+  - `durable_file.rs`: Atomic replace of a state file (`replace_contents`: a
+    temporary beside the target, its mode, write, sync, rename, directory
+    sync) and its last two steps; the auth state, the protocol's replay log,
+    the desktop's trust file and display-mode journal, and the app's config
+    files all write through it
+  - `listener.rs`: The TCP listeners every role binds for its peers (relay,
+    connect tunnel, direct LAN acceptor, desktop host): address reuse as
+    Tokio sets it, and `ACCEPT_BACKLOG`, the accept queue 0.11.0 had under
+    mio 1.1 rather than whatever the locked mio asks for
+  - `paging.rs`: One page out of a fully materialised listing, and the
+    page-size ceiling the relay, the credential actor and the SDK share
+  - `test_support.rs`: What the tests of this crate and the crates above it
+    share: `TEST_ADMIN_KEY`, `TempPath`, `PROCESS_CREDENTIAL_TEST_LOCK`
   - `lib.rs`: `DataLenType`, which lives here so `checksum` and `error` can name it
 
 - **`pb-mapper-auth/`**: The credential subsystem, and the largest one
-  - `lib.rs`: `AuthRuntime`, `AuthContext`, `AuthFailure`, `KeyId`
-  - `runtime.rs`: Key derivation and authentication of a presented key
-  - `actor/`: The lifecycle actor — `epoch.rs` for root rotation
-  - `persistence/`: `snapshot.rs`, `wal.rs`, `blob.rs`, `admin_key.rs`, `fs.rs`,
-    `namespaces.rs`
-  - `timing_wheel.rs`: Hierarchical wheel driving credential expiry
-  - `leases.rs`, `keys.rs`, `ids.rs`, `config.rs`: Leases, key material, platform dirs
+  - `lib.rs`: The constants and the module map; `codes.rs`: every
+    `AuthFailure::code`, each spelled once
+  - `types.rs`: `AuthConfig`, `AuthFailure` and the administrator wire types;
+    `lease.rs`: `AuthLease`, `AuthContext`; `ids.rs`: `KeyId`, its generation
+    and its slot
+  - `state.rs`: The shared state — the slot table and what hangs off it — and
+    its restore from persisted state
+  - `runtime.rs`: `AuthRuntime`, the facade: start-up, and the hot-path
+    authentication of a presented key
+  - `actor/`: The lifecycle actor, the one writer — `command.rs` its
+    requests, `lifecycle.rs` issue, renew, revoke and collect, `epoch.rs` root
+    rotation and reset, `replay.rs` the administrator replay window
+  - `persistence/`: `format.rs`, `snapshot.rs`, `wal.rs`, `blob.rs`,
+    `admin_key.rs`, `instance_id.rs`, `fs.rs`, `namespaces.rs`
+  - `leases.rs`, `timing_wheel.rs`: Temporary-key lifetimes, scheduled on a
+    hierarchical wheel that drives credential expiry
+  - `keys.rs`, `config.rs`: Which administrator credential a relay starts
+    with, and temporary-key derivation; configuration and platform dirs
+  - `examples/`: `auth_bench` (derivation, authentication, and how long each
+    administrator command, compaction and start takes and holds up the
+    runtime's other tasks) and `snapshot_bench` (what an idle store writes)
 
 - **`pb-mapper-protocol/`**: Framing and the authenticated session
-  - `lib.rs`: The checksum + length framing, and the reader/writer traits
-  - `command.rs`: Request/response types (`PbConnRequest`, `LocalServer`, `AdminRequest`, …)
+  - `lib.rs`: The module list, the crate-wide frame limits and the root re-exports
+  - `framing.rs`: The checksum + length framing, and the reader/writer traits
+  - `frame_read.rs`: Frame progress kept by the reader, not by a cancellable
+    read future
+  - `command.rs`: Request/response types (`PbConnRequest`, `LocalServer`,
+    `AdminRequest`, …), and the refusal codes and audit actions both ends name
   - `secure.rs`: Protocol-v2 single-flight sessions, client and server
-  - `secure/`: `frame.rs`, `first_flight.rs`, `replay.rs`, `limiter.rs`
+  - `secure/`: `frame.rs`, `first_flight.rs`, `replay.rs` (the first-flight
+    replay log, and the one writer thread per relay, `pb-mapper-replay-log`,
+    that appends to it), `limiter.rs`
+  - `data.rs`: Optional data encryption, negotiated on each relay leg
   - `forward.rs`: Stream and datagram forwarding
   - `buffer.rs`: Read buffers for the framing
+  - `transport.rs`, `quic.rs`: The relay carriers, TCP or QUIC, and the pinned
+    TLS QUIC primitives relay clients and servers share
+  - `direct.rs`: Direct coordination messages, and the control timings both
+    ends share
+  - `examples/`: `data_codec_bench`, `framing_bench` and `handshake_bench`
+    (first flights admitted against the replay log, one to 256 at once)
 
 - **`pb-mapper-server/`**: The central relay
-  - `lib.rs`: `ManagerTask` / `ConnTask`, and the routing domain model
-  - `runtime.rs`: Serialises the global routing maps and quotas (the largest file)
+  - `lib.rs`: Module wiring, the public configuration types and re-exports
+  - `task.rs`: `ManagerTask` / `ConnTask`, the work between the connections
+    and the routing manager
+  - `routing.rs`, `service_key.rs`: The routing domain model (registered
+    control connections by service, pending streams, namespace quotas and
+    rate limits, registration leases), and namespaced service keys
+  - `runtime/`: Relay orchestration (`mod.rs`) and the `Router` that
+    serialises the global routing maps and quotas, one method per task:
+    `router.rs` dispatch, `lease.rs` registration leases, `subscribe.rs`
+    subscriptions and their streams, `inventory.rs` the status and
+    administrator views
+  - `manager.rs`: The routing manager's work queue, and the registry of
+    connection IDs and the mailboxes they are reached through
   - `connection.rs`: Per-socket authentication and dispatch
   - `server.rs`, `client.rs`: The service-side and subscriber-side loops
+  - `guard.rs`: The one deregistration every connection kind owes the routing
+    manager, sent exactly once
+  - `direct/`: Direct coordination — `mod.rs` its configuration
+    (`DirectServerConfig`), its bind and `DirectTask`, `state.rs` the
+    setup state machine the manager drives (`state/observe.rs`: session
+    observations, never authorization), `control.rs` one coordination
+    connection's socket loop, `stun.rs` the STUN Binding service (`p2p`)
+  - `quic/` (feature `relay-quic`): The optional QUIC listener — `mod.rs` the
+    accept loop, `admission.rs` its handshake and connection limits
   - `admin.rs`: Administrator request handling
-  - `status.rs`, `error.rs`, `manager.rs`: Status replies, errors, the task manager
+  - `status.rs`, `error.rs`: Status replies, errors
 
 - **`pb-mapper-client/`**: Both ends of a tunnel
-  - `server/`: `register` — publishes a local service (`mod.rs`, `stream.rs`, `error.rs`)
-  - `client/`: `connect` — subscribes and listens locally, plus `status.rs`
+  - `sdk/`: The library API the `pb-mapper` facade re-exports — `client.rs`
+    (`Client`), `handle.rs` (`Registration`, `Connection`), `worker.rs` (the
+    lifecycle every tunnel worker shares), `types.rs`, `error.rs`, and
+    `admin/` (the administrator RPCs, their owned response types, and the
+    one-shot session each request runs over)
+  - `server/`: `register` — publishes a local service: `mod.rs` the entry
+    points, `worker.rs` the control pool and each worker's reconnect loop,
+    `attempt.rs` one registration attempt and holding it (its deadlines and
+    the control watchdog), `control.rs` a registered control connection's
+    messages and lease, `probe.rs`, `status.rs` the pool's one status,
+    `stream.rs` one forwarded session, `error.rs`
+  - `client/`: `connect` — subscribes and listens locally (`mod.rs`,
+    `health.rs` the remote probes, `stream.rs`, `listener.rs` the tunnel's
+    local listeners, TCP bound through core's `listener` and UDP, each able to
+    say where it is bound), plus `status.rs` and `fetch_status_scoped`
+  - `worker_status.rs`: What a tunnel worker reports about itself, and the
+    one place the text of the public status callbacks is written
+  - `relay.rs`, `relay/quic.rs`, `endpoint.rs`: The relay carrier and its
+    pooled QUIC connections; relay resolution and bounded setup admission.
+    `addr.rs` resolves a tunnel endpoint to every address it names,
+    `network.rs` holds the process-wide network hints, `udp_timeout.rs`
+    orders uni-stream's process-wide UDP session timeout before any UDP
+    stream reads it, and `recovery.rs` the short, bounded setup attempts
+  - `test_relay.rs`, `status_text_tests.rs`: This crate's own loopback relay
+    (it cannot use the testkit, which depends on it), and the pin on the
+    status callbacks' text
   - `direct/` (feature `p2p`): direct sessions. `lan.rs` ranks interfaces
     (netdev, read in the background) and judges from a peer's candidates
     whether it shares a LAN; `candidates.rs` orders what is offered, LAN
-    first; `socket.rs` and `endpoint.rs` probe and dial each path as it
-    answers; `provider.rs` is the publishing end. LAN-first (on by default,
-    `lan_first` in the options, carried as the crate-private `DirectPolicy`)
+    first; `socket.rs` and `endpoint/` (STUN discovery in `discovery.rs`,
+    the dialing race in `dial.rs`) probe and dial each path as it answers;
+    `consumer.rs` is the dialing end, up to the commit point or the relay
+    fallback, over `control.rs`'s control connection, and `provider.rs` is
+    the publishing end. `identity.rs` carries the exact certificates,
+    `mapping.rs` the gateway port mapping (feature `port-mapping`),
+    `reports.rs` the coalesced observations, and `link.rs` what a committed
+    session's path is. LAN-first (on by default, `lan_first` in the options,
+    carried as the crate-private `DirectPolicy` of `direct_policy.rs`)
     only orders probes and holds other paths back while a LAN is known to
     be there (`Assessment::holds`); off, the LAN is still detected and
     reported. A committed session's `DirectLink` lives in
@@ -178,21 +277,31 @@ Nothing in the SDK crates knows it exists.
     dialer and the head-start race (`TCP_HEAD_START`, 300 ms, while LAN-first
     is on), and `WriteThrough` (tokio-rustls leaves records buffered when the
     socket is full; the forward loop never flushes). `DirectConn` in
-    `mod.rs` is the committed connection on either carrier; `endpoint.rs`'s
-    `Exporter` gives each carrier its own binding label. A path across the
-    internet, punched or not, is always QUIC
-  - `diagnostics.rs`, `diagnostics/metrics.rs`: a tunnel's diagnostics, its
+    `conn.rs` is the committed connection on either carrier, and the
+    forwarding both ends run over it; `binding.rs`'s `Exporter` gives each
+    carrier its own binding label. A path across the internet, punched or
+    not, is always QUIC
+  - `diagnostics.rs` (the `Diagnostics` handle) and `diagnostics/` —
+    `events.rs` (event kinds, their history and stream), `report.rs`
+    (`TunnelDiagnostics`, `PathDiagnostics`), `state.rs` (the recording
+    state), `guards.rs` (`SessionGuard` and the other drop guards),
+    `metrics.rs`, `link.rs`, `port_mapping.rs`: a tunnel's diagnostics, its
     event stream and its `TunnelMetrics` (sessions and bytes per path, the
     relay round trip, the live link), all read from one state; each session
     holds a `SessionGuard` whose `ByteMeter` the forwarding fills
 
 - **`pb-mapper-desktop/`**: Endpoint-owned remote desktop, reached as
   `pb_mapper::desktop`; how it works is in `docs/remote-desktop.md`
-  - `host.rs`, `session.rs`, `shared.rs`: The host, and one session's network
-    side, B-recv and B-send over TLS; `shared.rs` states the lock discipline
-  - `worker.rs`, `pacer.rs`, `scheduler.rs`, `lane.rs`: Thread C, the one
-    desktop-bound thread (capture, encode, input), its pacing, its one wait,
-    and the input lane from B-recv
+  - `host.rs` (`host/builder.rs` its options and builder, `host/acceptor.rs`
+    each connection's handshake and session), `session.rs` (B-recv;
+    `session/sender.rs` B-send), `shared.rs`: The host, and one session's
+    network side, B-recv and B-send over TLS; `shared.rs` states the lock
+    discipline
+  - `worker.rs` (`worker/`: capture, the input lane and control grant, the
+    pointer reports, the drag-start hold, display modes, the one-second
+    statistics window), `pacer.rs`, `scheduler.rs`, `lane.rs`: Thread C, the
+    one desktop-bound thread (capture, encode, input), its pacing, its one
+    wait, and the input lane from B-recv
   - `timer.rs`: Fine process timers, held while a session captures; on
     Windows `platform/windows/timer.rs` (the power-throttling opt-out and
     `timeBeginPeriod`)
@@ -201,10 +310,17 @@ Nothing in the SDK crates knows it exists.
   - `protocol.rs`, `wire.rs`, `invite.rs`, `security.rs`, `auth.rs`: Protocol v2
     (ALPN `pb-mapper/desktop/2`), invitations, certificate pinning, and the
     input authorisation ledger
-  - `viewer/`, `video_sink.rs`: The viewer, and its one hand-off to a native
-    consumer, which is also where a presentation is validated. A direct
-    path's `ViewerLink` carries its `transport`; over TCP its round trips are
-    only the handshake's
+  - `video.rs`, `status.rs`: What a session's video is (`VideoCodec`,
+    `QualityPreset`, `VideoLimits`, `Resolution`, the encoded units) and the
+    bounds they share; `HostStatus` and what it holds. Both are re-exported
+    at the crate root
+  - `viewer/`: The viewer — `mod.rs` connects, `session.rs` runs its network
+    session, `config.rs` is what it offers, `outbound.rs` what it sends in
+    priority order, `recovery.rs` and `fps_cap.rs` its keyframe recovery and
+    frame-rate cap, `stats.rs` and `status.rs` what it reports — and in
+    `sink.rs` its one hand-off to a native consumer, which is also where a
+    presentation is validated. A direct path's `ViewerLink` carries its
+    `transport`; over TCP its round trips are only the handshake's
   - `backend.rs`: The public seam between thread C and what captures and
     injects for it: `Backend` (object-safe, not `Send`; `Box<B>` forwards
     every method under `#[deny(clippy::missing_trait_methods)]`, as every
@@ -229,15 +345,23 @@ Nothing in the SDK crates knows it exists.
     device name (`\\.\DISPLAYn`) as the stable key. `synthetic.rs` is the
     test platform (pulled or pushed encoder). How to add Linux, macOS or
     Android is "Platforms" in `docs/remote-desktop.md`
-  - `platform/windows/`: the ordinary desktop, `video.rs` (Desktop
+  - `platform/windows/`: the ordinary desktop, `video/` (Desktop
     Duplication → D3D11 → Media Foundation H.265 or H.264, the fused
-    `VideoSource`; H.265 only for a viewer that lists `h265`, on a GPU whose
-    hardware HEVC encoder passes a probe kept per adapter, and one encoder
-    failure turns it off for the process), `input`, `cursor`, `still`,
-    `waiter`, `timer`, `mf`, `dpapi` (the one DPAPI call every Windows store
-    uses), `modes.rs` and `helper/`
-  - `platform/windows/helper/`: The opt-in UAC/Winlogon service; the service
-    side and the `pb-mapper-desktop-helper` binary need `--features
+    `VideoSource`: the `Encoder` in `mod.rs`, the Media Foundation encoder in
+    `codec.rs`, the D3D11 scaler in `converter.rs`, the per-adapter H.265
+    probe in `probe.rs`; H.265 only for a viewer that lists `h265`, on a GPU
+    whose hardware HEVC encoder passes a probe kept per adapter, and one
+    encoder failure turns it off for the process), `input`, `cursor`,
+    `still`, `waiter`, `timer`, `mf`, `dpapi` (the one DPAPI call every
+    Windows store uses), `win32` (the Win32 glue the host and the helper
+    share), `modes.rs` and `helper/`
+  - `platform/windows/helper/`: The opt-in UAC/Winlogon service —
+    `service.rs`; the workers it starts (`worker.rs`, `child.rs`) and a
+    worker's binding to the input desktop (`binding.rs`); `pipe.rs`;
+    `install.rs` and `readiness.rs` (whether the installed helper can be used
+    or is offered Update); `background.rs` and `background/`, its own host
+    and that host's grant at rest; `os/`, its Win32 glue by concern. The
+    service side and the `pb-mapper-desktop-helper` binary need `--features
     windows-helper`. `HELPER_PROTOCOL` (now 7) and the `.v<n>` pipe names
     change together; an installed helper of another protocol, or of another
     build (its executable differs from the one bundled with the app), is
@@ -257,8 +381,11 @@ Nothing in the SDK crates knows it exists.
     `support()`, and on Windows `status`, `request_installation`,
     `background::{configure, adopt, Options::resume, …}` (the app's
     hand-off to the service)
-  - `codec/annexb.rs`, `input/{held,cursor}.rs`: neutral Annex B scanning
-    and keyframe detection; held-input release and cursor confinement
+  - `codec/annexb.rs`: neutral Annex B scanning and keyframe detection
+  - `input/`: the input vocabulary a controlling viewer sends (`Input`,
+    `Button`, `Key`, `InputEvent`, `DoubleClickGuard`) and the neutral rules
+    every platform's injector follows: held-input release (`held.rs`) and
+    cursor confinement (`cursor.rs`)
   - `modes.rs`: display modes, platform-neutral — `Mode`, `ModeList`
     (`fit_local`: the local size if listed, else the largest inside it
     within 2 % of its shape), `ModeTarget`, `DisplayModeError`; the journal
@@ -300,18 +427,28 @@ Nothing in the SDK crates knows it exists.
   - `trust.rs`: `Sealer`, `CurrentUser` (current-user DPAPI under the app's
     constants), `RelayScope`, `Remembered<T>`, `TrustFile<S, T>` — the app's
     `desktop-trust.dpapi` format plus `display_device` — and
-    `write_durably`; `F/desktop_trust.rs` is a thin wrapper over
-    `TrustFile<CurrentUser, Settings>`
+    `write_durably`, which the display-mode journal also writes through;
+    `F/desktop/trust.rs` is a thin wrapper over `TrustFile<CurrentUser,
+    Settings>`
   - `watch.rs`: `Host::watch`, `Viewer::watch` — status as a
-    `tokio::sync::watch`, sent when its JSON less per-frame fields changes,
+    `tokio::sync::watch`, sent when it changes, per-frame fields aside,
     ending with the host or viewer
   - `mapping.rs`: `DesktopView::display_point`, `Input::text_chunks`
   - `tests.rs`, `tests/session.rs`: Tests over a real relay and TLS, the second
-    end to end; `slow_link.rs`: the ignored acceptance cases
+    end to end; `slow_link.rs`: the ignored acceptance cases; `test_util.rs`:
+    what the crate's own tests share (`until`, `Presenting`, the `Pixel`
+    backend). `host/`, `session/`, `viewer/` and `worker/` keep their own
+    `tests.rs`
   - `examples/`: Capture, transport and viewer probes, `video_bench` (the
-    Windows capture and encode benchmark), `deployed` (the selftest, native
-    size by default) and `display_mode_probe`, the hardware acceptance of
-    display modes, which changes the display it runs on
+    Windows capture and encode benchmark, which also counts the encoder's
+    calls: allocations, time and thread cycles per unit), `host_send_bench`
+    (a relay, a host with a synthetic encoder and a viewer in one process,
+    counting allocations per video unit), `deployed` (the selftest, native
+    size by default), `input_acceptance/` (native input into a window of its
+    own, on Windows) and `display_mode_probe/`, the hardware acceptance of
+    display modes, which changes the display it runs on; `probe_support/`
+    holds what the probes share (their relay configuration, `--name value`
+    options and SDK clients)
 
 - **`pb-mapper/`**: The published SDK facade; `desktop` re-exports the
   remote desktop. `examples/desktop_{loopback,host,viewer,control,
@@ -321,27 +458,83 @@ Nothing in the SDK crates knows it exists.
   → relay as every entry point's default; `pb-mapper-client` alone is
   relay-only, as its crate docs say
 
+- **`pb-mapper-node/`**: The Node-API bindings over the client SDK, which
+  `js/` builds. `lib.rs` states the boundary's three rules (numbers narrow,
+  enums cross as strings, errors flatten); `client.rs`, `tunnel.rs` and
+  `admin.rs` are the `Client`, `Registration` / `Connection` and `Admin`
+  classes, `readers.rs` the events and metrics JS pulls one at a time,
+  `diagnostics.rs` the SDK's diagnostics as JS objects, and `convert.rs` the
+  conversions at the boundary
+
 - **`pb-mapper-testkit/`**: Test support only; nothing shipped depends on it
-  - `relay.rs`: `Relay` — a live server that retains its `AuthRuntime`, so a case
-    can issue, renew, and revoke credentials without the admin wire protocol
+  - `relay.rs`: `Relay` — a live server on a loopback port with its own auth
+    state, which retains its `AuthRuntime`, so a case can issue, renew, and
+    revoke credentials without the admin wire protocol; `loopback_direct` /
+    `loopback_quic` put direct coordination and the QUIC carrier on loopback
   - `tunnel.rs`: `TunnelSpec` / `Tunnel` / `TunnelHarness` — echo server plus
-    `register` plus `connect`, each on reserved loopback ports
-  - `echo.rs`, `traffic.rs`: Echo servers and the framed and raw traffic drivers
+    `register` plus `connect`, on loopback ports
+  - `sdk.rs`: `admin_client` / `publish` / `subscribe` — the SDK side of a
+    case, each ready before it is handed back
+  - `echo.rs`, `traffic.rs`: `tcp_echo` / `udp_echo`, each stopped by
+    dropping the `Echo` it returns, and the framed and raw traffic drivers
+  - `control.rs`: A protocol-v2 control connection registered by hand
   - `shaped.rs`: `Shape` / `shaped_link` — a TCP hop with delay and rate
-    adjustable while connections run, shared by the remote desktop's tests
+    adjustable while connections run, owned by the `ShapedLink` it returns,
+    shared by the remote desktop's tests
+  - `poll.rs`: The one readiness loop every probe polls with
+  - Tests log as the binary does: the crate includes the CLI's
+    `src/bin/pb-mapper/logging.rs` by path. `TEST_ADMIN_KEY` is
+    `pb_mapper_core::test_support`'s
   - A crate rather than `tests/common/mod.rs`: that module is compiled separately
     into every test binary, and whatever a binary does not use is reported as
     dead code — fatal under `-D warnings`
 
 - **`pb-mapper-cli/`**: The binary, integration tests, and examples
-  - `src/bin/pb-mapper.rs`: Argument parsing and the role commands
+  - `src/bin/pb-mapper.rs`: Argument parsing, dispatch, and `status`
+  - `src/bin/pb-mapper/server.rs`: The `server` role — its flags, its
+    authentication settings and where direct coordination listens
+  - `src/bin/pb-mapper/tunnel.rs`: The `register` and `connect` roles, and the
+    log kept of a running tunnel; its tests pin the flags' defaults
   - `src/bin/pb-mapper/admin.rs`: The `admin` subcommand
-  - `tests/test_delay.rs`: The transport/codec matrix over the whole tunnel
-  - `tests/temporary_credential_e2e.rs`: The credential lifecycle over the whole
-    tunnel — namespace isolation, renew, expiry, revoke
-  - `tests/key_namespaces.rs`: Several keys in one allocated namespace, over TCP,
-    QUIC and direct setup
-  - `tests/regression.rs`: Protocol-level cases against hand-rolled frames
+  - `src/bin/pb-mapper/logging.rs`: Where `tracing` goes (`RUST_LOG`,
+    `PB_MAPPER_LOG_FORMAT`); `pb-mapper-testkit` includes it by path, so it
+    names nothing else in this crate
+  - `tests/e2e/`: One binary for the cases that can share a process —
+    `tunnel_matrix.rs` (the transport/codec matrix over the whole tunnel),
+    `temporary_credential.rs` (the credential lifecycle over the whole
+    tunnel: namespace isolation, renew, expiry, revoke), `key_namespaces.rs`
+    (several keys in one allocated namespace, over TCP, QUIC and direct
+    setup), `sdk.rs` (the client SDK's tunnels and administrator RPCs),
+    `direct.rs` (direct sessions end to end), `data_compatibility.rs`
+    (mixed data formats on a real relay) and `bound_listener.rs` (hands a
+    `connect` tunnel a listener the case already bound, through the
+    listener-provider seam; `regression` and `regression_client` include
+    it by path)
+  - `tests/regression/`, `tests/regression_client/`, `tests/regression_cli/`:
+    Protocol-level cases in three binaries, each setting the process
+    credential once (`regression/credential.rs`, which the other two
+    include by path). `regression` is the relay against hand-rolled frames
+    (`relay.rs`; `regression_cli` shares its `fixtures.rs`), and one case
+    runs a real `connect` and `register` against it in process, through a
+    publisher's retire-and-replace; it writes no environment and starts no
+    process, so a relay closing a connection is seen to close it.
+    `regression_client` is `register` and
+    `connect` against fake relays (`fake.rs`), with client timings it sets
+    once before any case starts a tunnel. `regression_cli` runs the
+    `pb-mapper` binary, its child relays on port 0 announcing the port they
+    took. It is separate because a Windows child inherited every Tokio
+    socket of the test process under mio 1.1, which mio 1.2.4 no longer
+    allows
+  - `tests/lease_reclaim.rs`, `network_recovery.rs`, `quic_relay.rs`,
+    `quic_retired_carrier.rs`, `stream_before_ack.rs`: Binaries of their own,
+    each because it changes state the whole process shares;
+    `tests/e2e/main.rs` says which
+  - `examples/`: `compatibility_relay`, the loopback relay
+    `scripts/test_version_compatibility.py` builds at each revision;
+    `relay_transport_bench`, TCP against QUIC relay on loopback;
+    `resubscribe_bench`, what subscribes waiting for a publisher's
+    replacement cost the relay; and `buffer_retention_bench`, the memory
+    idle tunnels hold after a burst
 
 #### Flutter UI (`ui/`)
 
@@ -476,7 +669,10 @@ The design and its rules are in `docs/ui-design.md`.
     config's `lan_first` and `lan_transport`; `viewer_status{local}`
     answers `modes.fit_local`, the size Fit local would pick;
     `display_mode` takes `{target}`; `host_restore_display_mode` is the
-    host card's Restore
+    host card's Restore. `desktop.rs` dispatches; `desktop/viewer.rs` holds
+    `connect`, the viewer's state and the two hot exports, `desktop/host.rs`
+    this app's own host, `desktop/background.rs` the Windows service's host
+    as the app sees it, and `desktop/trust.rs` the remembered host grant
   - `desktop_video.rs`: Video goes from the viewer's `VideoSink` straight to
     its consumer. On Android, and on Windows where Media Foundation is
     installed, that is the native decoder (the runner's decoder thread in
@@ -492,8 +688,8 @@ The design and its rules are in `docs/ui-design.md`.
     closed. The return codes are one space (`PbVideo` in Dart). Only `next`
     blocks, never on a UI thread. `pb_mapper_desktop_instance_token_v1`
     proves a native consumer loaded the library Dart loaded. The
-    `desktop-test-source` feature adds a clip player for device runs; no
-    release enables it
+    `desktop-test-source` feature adds a clip player
+    (`desktop_video/test_source.rs`) for device runs; no release enables it
   - `desktop_jni.rs` (Android): The same exports as the static natives of
     `DesktopVideoNative.kt`, through which `VideoFeeder.kt` feeds
     `MediaCodec`. A JNI failure returns a code, never a throw
@@ -506,7 +702,7 @@ The design and its rules are in `docs/ui-design.md`.
     live, pinned session, and `connect` takes its `computer_id`. The vault
     is version 2: a resolution only when chosen (a version-1 `1080p`
     follows the native default), and `display_mode: "fit_local"`.
-    `desktop_trust.rs` keeps the sharing side's remembered identity
+    `desktop/trust.rs` keeps the sharing side's remembered identity
   - `relay.rs`: `pb_mapper_relay_call_json`, one export for every question
     and administrator request to the relay, dispatched on the request's
     `"op"` and answered with the SDK's `Client`/`Admin`. A new relay
@@ -519,7 +715,24 @@ The design and its rules are in `docs/ui-design.md`.
     stops its tunnel. `pb_mapper_register_service` and
     `pb_mapper_connect_service` take `allow_direct` and `port_mapping`
     (0 off, 1 auto: once a punch fails, the default, 2 always), saved with
-    the tunnel
+    the tunnel. By concern: `stored.rs` is what is saved (`config.json`,
+    `services.json`, `clients.json`, as the bytes on disk, keeping at each
+    level the keys a later build wrote), `configuration.rs` loads and saves
+    it (atomically through core's `durable_file` where the file can be
+    replaced; in place, as 0.11.0 did, for a file with other names, and on
+    unix another user's or one in a group a replacement would not be in, a
+    directory that takes no new file and a file the rename may not replace;
+    a tunnel's entry is written only when it changed; refusing a
+    file this user may not write; a store that cannot be read or parsed is
+    an error, never an empty list, and one that holds nothing, empty or
+    zero-filled, is an empty list), `tunnel.rs` is a tunnel's setup, SDK
+    handle and view (a share or connection whose list cannot be read is
+    refused before it starts), `views.rs` the JSON the window reads
+    (`PathInfo` among it), `runtime.rs` the embedded relay and committing
+    and stopping tunnels (a connection whose changed entry cannot be saved
+    is refused, as a share is; stopping the embedded relay stops only the
+    tunnels dialling its port at this computer's addresses), and
+    `status.rs` the window's reads and its questions to the relay
   - `tunnel_events.rs`: `pb_mapper_tunnel_events_call_json`, the window's
     readers of a running tunnel's events (`subscribe`/`next`/`close`), each
     event carrying the tunnel's diagnostics and metrics as they are by then;
@@ -534,7 +747,8 @@ The design and its rules are in `docs/ui-design.md`.
     those; a remote-desktop connection takes the new value when it next
     connects. Only
     a change of the relay settings
-    (`AppConfig::same_relay`) resets the relay caches or asks the relay again.
+    (`AppConfig::same_relay`) makes the relay client again or asks the relay
+    again about QUIC; the embedded relay's own status is kept.
     `pb_mapper_start_server` takes a `quic_port` (0: none). The window's
     own relay questions, and the remote desktop's connects and host starts,
     go through `relay_client()`, cached per config,
@@ -724,13 +938,15 @@ and in the tray.
 - **Toolchain**: rust-toolchain.toml for reproducible builds
 - **Testing**: Unit tests live beside the code; integration tests are in
   `crates/pb-mapper-cli/tests/`, which is the crate that depends on every layer
-  they exercise. Two crates keep their own: the CLI does not depend on
+  they exercise. A few crates keep their own: the CLI does not depend on
   `pb-mapper-desktop`, so the remote desktop's end to end test is that crate's
-  `tests/session.rs`; and `pb-mapper-core`'s `tests/process_environment.rs` is a
-  single-threaded, harness-free binary, because environment writes must not
-  share a process with reader threads. The e2e scaffolding is
-  `pb-mapper-testkit`, so a new test file stands up its own full `server` +
-  `register` + `connect` flow instead of everything accumulating in one file.
+  `tests/session.rs`; and `pb-mapper-core`'s and `pb-mapper-auth`'s
+  `tests/process_environment.rs` are single-threaded, harness-free binaries,
+  because environment writes must not share a process with reader threads.
+  The e2e scaffolding is `pb-mapper-testkit`, so each case stands up its own
+  full `server` + `register` + `connect` flow; a new case is a module of
+  `tests/e2e/` unless it changes state the whole process shares, which takes a
+  binary of its own.
 
 ### UI Development Guidelines
 - **Framework**: Flutter 3.44.9, Material 3. CI pins the same version.
@@ -765,9 +981,13 @@ The commonly used ones:
 Timeouts, intervals, and pool sizes are also configurable, and there are more
 than a dozen: the authoritative list is the `pub const PB_MAPPER_*` declarations
 at the top of `crates/pb-mapper-core/src/config.rs`, each read by the accessor
-named after it. Beyond those, `PB_MAPPER_AUTH_STATE_DIR`,
-`PB_MAPPER_LEGACY_PROTOCOL`, and `PB_MAPPER_NEW_STREAMS_PER_SECOND` are read by
-name where they are used; the first two are also settable as `server` flags.
+named after it. Beyond those, the relay's routing limits
+(`PB_MAPPER_MAX_*`, `PB_MAPPER_NEW_STREAMS_BURST`) are read by name in
+`crates/pb-mapper-server/src/routing.rs`, and the authentication settings
+(`PB_MAPPER_AUTH_STATE_DIR`, `PB_MAPPER_AUTH_MAX_TEMP_KEYS`,
+`PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS`, `PB_MAPPER_LEGACY_PROTOCOL`) in
+`crates/pb-mapper-auth/src/config.rs`; each of those four is also a `server`
+flag, which overrides it without writing the environment.
 
 ## Development Workflow
 
@@ -816,7 +1036,12 @@ docker-compose -f docker/docker-compose.yml up
   isolated Windows VM) — manual procedures. `cargo run -p pb-mapper-desktop
   --example display_mode_probe` changes the display it runs on and puts it
   back: run it only where that is allowed
-- **Examples**: `examples/` directory provides working usage examples
+- **Examples**: the SDK's in `crates/pb-mapper/examples/`, the remote
+  desktop's probes and benchmarks in `crates/pb-mapper-desktop/examples/`,
+  the protocol's and the auth store's benchmarks in
+  `crates/pb-mapper-protocol/examples/` and `crates/pb-mapper-auth/examples/`,
+  and the compatibility relay and the relay's benchmarks in
+  `crates/pb-mapper-cli/examples/`
 
 ### Service Deployment
 

@@ -1,0 +1,441 @@
+### before (7abb8cd2): snapshot_bench 7210 under strace -f -tt -e trace=fsync,fdatasync, Linux (WSL2)
+=== output ===
+# idle from unix_ms=1794382908072
+case=idle elapsed_s=300 rewrites=1 snapshot_bytes=151533 write_bytes=151583 write_calls=4
+case=idle elapsed_s=600 rewrites=2 snapshot_bytes=303066 write_bytes=303214 write_calls=7
+case=idle elapsed_s=900 rewrites=3 snapshot_bytes=454599 write_bytes=454845 write_calls=10
+case=idle elapsed_s=1200 rewrites=4 snapshot_bytes=606132 write_bytes=606477 write_calls=13
+case=idle elapsed_s=1500 rewrites=5 snapshot_bytes=757665 write_bytes=758110 write_calls=16
+case=idle elapsed_s=1800 rewrites=6 snapshot_bytes=909198 write_bytes=909743 write_calls=19
+case=idle elapsed_s=2100 rewrites=7 snapshot_bytes=1060731 write_bytes=1061376 write_calls=22
+case=idle elapsed_s=2400 rewrites=8 snapshot_bytes=1212264 write_bytes=1213011 write_calls=25
+case=idle elapsed_s=2700 rewrites=9 snapshot_bytes=1363797 write_bytes=1364646 write_calls=28
+case=idle elapsed_s=3000 rewrites=10 snapshot_bytes=1515330 write_bytes=1516281 write_calls=31
+case=idle elapsed_s=3300 rewrites=11 snapshot_bytes=1666863 write_bytes=1667917 write_calls=34
+case=idle elapsed_s=3600 rewrites=12 snapshot_bytes=1818396 write_bytes=1819553 write_calls=37
+case=idle elapsed_s=3900 rewrites=13 snapshot_bytes=1969929 write_bytes=1971189 write_calls=40
+case=idle elapsed_s=4200 rewrites=14 snapshot_bytes=2121462 write_bytes=2122825 write_calls=43
+case=idle elapsed_s=4500 rewrites=15 snapshot_bytes=2272995 write_bytes=2274461 write_calls=46
+case=idle elapsed_s=4800 rewrites=16 snapshot_bytes=2424528 write_bytes=2426097 write_calls=49
+case=idle elapsed_s=5100 rewrites=17 snapshot_bytes=2576061 write_bytes=2577733 write_calls=52
+case=idle elapsed_s=5400 rewrites=18 snapshot_bytes=2727594 write_bytes=2729369 write_calls=55
+case=idle elapsed_s=5700 rewrites=19 snapshot_bytes=2879127 write_bytes=2881005 write_calls=58
+case=idle elapsed_s=6000 rewrites=20 snapshot_bytes=3030660 write_bytes=3032641 write_calls=61
+case=idle elapsed_s=6300 rewrites=21 snapshot_bytes=3182193 write_bytes=3184277 write_calls=64
+case=idle elapsed_s=6600 rewrites=22 snapshot_bytes=3333726 write_bytes=3335913 write_calls=67
+case=idle elapsed_s=6900 rewrites=23 snapshot_bytes=3485259 write_bytes=3487549 write_calls=70
+case=idle elapsed_s=7200 rewrites=24 snapshot_bytes=3636792 write_bytes=3639185 write_calls=73
+case=idle elapsed_s=7210 rewrites=24 snapshot_bytes=3636792 write_bytes=3639280 write_calls=74
+=== syncs per idle hour (an hour with none is not listed) ===
+syncs before the idle start: 103
+idle hour 1: fsync=36 fdatasync=0
+idle hour 2: fsync=36 fdatasync=0
+=== strace ===
+3744915 15:41:47.417924 fsync(12)       = 0
+3744915 15:41:47.453594 fsync(12)       = 0
+3744915 15:41:47.461215 fdatasync(12)   = 0
+3744915 15:41:47.466283 fsync(13)       = 0
+3744915 15:41:47.472757 fdatasync(12)   = 0
+3744915 15:41:47.477567 fdatasync(12)   = 0
+3744915 15:41:47.483755 fdatasync(12)   = 0
+3744915 15:41:47.489746 fdatasync(12)   = 0
+3744915 15:41:47.495604 fdatasync(12)   = 0
+3744915 15:41:47.501492 fdatasync(12)   = 0
+3744915 15:41:47.507551 fdatasync(12)   = 0
+3744915 15:41:47.515133 fdatasync(12)   = 0
+3744915 15:41:47.521715 fdatasync(12)   = 0
+3744915 15:41:47.527534 fdatasync(12)   = 0
+3744915 15:41:47.533464 fdatasync(12)   = 0
+3744915 15:41:47.539648 fdatasync(12)   = 0
+3744915 15:41:47.545606 fdatasync(12)   = 0
+3744915 15:41:47.551430 fdatasync(12)   = 0
+3744915 15:41:47.557477 fdatasync(12)   = 0
+3744915 15:41:47.563440 fdatasync(12)   = 0
+3744915 15:41:47.569277 fdatasync(12)   = 0
+3744915 15:41:47.575503 fdatasync(12)   = 0
+3744915 15:41:47.581540 fdatasync(12)   = 0
+3744915 15:41:47.587389 fdatasync(12)   = 0
+3744915 15:41:47.593779 fdatasync(12)   = 0
+3744915 15:41:47.599467 fdatasync(12)   = 0
+3744915 15:41:47.605378 fdatasync(12)   = 0
+3744915 15:41:47.612443 fdatasync(12)   = 0
+3744915 15:41:47.618557 fdatasync(12)   = 0
+3744915 15:41:47.624446 fdatasync(12)   = 0
+3744915 15:41:47.630633 fdatasync(12)   = 0
+3744915 15:41:47.636542 fdatasync(12)   = 0
+3744915 15:41:47.642449 fdatasync(12)   = 0
+3744915 15:41:47.648648 fdatasync(12)   = 0
+3744915 15:41:47.654546 fdatasync(12)   = 0
+3744915 15:41:47.660652 fdatasync(12)   = 0
+3744915 15:41:47.666461 fdatasync(12)   = 0
+3744915 15:41:47.673062 fdatasync(12)   = 0
+3744915 15:41:47.679449 fdatasync(12)   = 0
+3744915 15:41:47.685440 fdatasync(12)   = 0
+3744915 15:41:47.691879 fdatasync(12)   = 0
+3744915 15:41:47.697555 fdatasync(12)   = 0
+3744915 15:41:47.704526 fdatasync(12)   = 0
+3744915 15:41:47.710860 fdatasync(12)   = 0
+3744915 15:41:47.716354 fdatasync(12)   = 0
+3744915 15:41:47.722496 fdatasync(12)   = 0
+3744915 15:41:47.728564 fdatasync(12)   = 0
+3744915 15:41:47.734557 fdatasync(12)   = 0
+3744915 15:41:47.740507 fdatasync(12)   = 0
+3744915 15:41:47.746334 fdatasync(12)   = 0
+3744915 15:41:47.752570 fdatasync(12)   = 0
+3744915 15:41:47.758521 fdatasync(12)   = 0
+3744915 15:41:47.764483 fdatasync(12)   = 0
+3744915 15:41:47.770520 fdatasync(12)   = 0
+3744915 15:41:47.776550 fdatasync(12)   = 0
+3744915 15:41:47.782460 fdatasync(12)   = 0
+3744915 15:41:47.788632 fdatasync(12)   = 0
+3744915 15:41:47.794702 fdatasync(12)   = 0
+3744915 15:41:47.800381 fdatasync(12)   = 0
+3744915 15:41:47.807674 fdatasync(12)   = 0
+3744915 15:41:47.813455 fdatasync(12)   = 0
+3744915 15:41:47.819518 fdatasync(12)   = 0
+3744915 15:41:47.825796 fdatasync(12)   = 0
+3744915 15:41:47.831576 fdatasync(12)   = 0
+3744915 15:41:47.837501 fdatasync(12)   = 0
+3744915 15:41:47.843436 fdatasync(12)   = 0
+3744915 15:41:47.849438 fdatasync(12)   = 0
+3744915 15:41:47.855398 fdatasync(12)   = 0
+3744915 15:41:47.861901 fdatasync(12)   = 0
+3744915 15:41:47.868521 fdatasync(12)   = 0
+3744915 15:41:47.874560 fdatasync(12)   = 0
+3744915 15:41:47.880494 fdatasync(12)   = 0
+3744915 15:41:47.886032 fdatasync(12)   = 0
+3744915 15:41:47.891923 fdatasync(12)   = 0
+3744915 15:41:47.897532 fdatasync(12)   = 0
+3744915 15:41:47.902588 fdatasync(12)   = 0
+3744915 15:41:47.906433 fdatasync(12)   = 0
+3744915 15:41:47.912544 fdatasync(12)   = 0
+3744915 15:41:47.919083 fdatasync(12)   = 0
+3744915 15:41:47.925455 fdatasync(12)   = 0
+3744915 15:41:47.931629 fdatasync(12)   = 0
+3744915 15:41:47.938627 fdatasync(12)   = 0
+3744915 15:41:47.944690 fdatasync(12)   = 0
+3744915 15:41:47.950712 fdatasync(12)   = 0
+3744915 15:41:47.956545 fdatasync(12)   = 0
+3744915 15:41:47.962510 fdatasync(12)   = 0
+3744915 15:41:47.969821 fdatasync(12)   = 0
+3744915 15:41:47.976495 fdatasync(12)   = 0
+3744915 15:41:47.982703 fdatasync(12)   = 0
+3744915 15:41:47.988645 fdatasync(12)   = 0
+3744915 15:41:47.994491 fdatasync(12)   = 0
+3744915 15:41:48.000688 fdatasync(12)   = 0
+3744915 15:41:48.006454 fdatasync(12)   = 0
+3744915 15:41:48.012494 fdatasync(12)   = 0
+3744915 15:41:48.018601 fdatasync(12)   = 0
+3744915 15:41:48.024388 fdatasync(12)   = 0
+3744915 15:41:48.030568 fdatasync(12)   = 0
+3744915 15:41:48.036480 fdatasync(12)   = 0
+3744915 15:41:48.042391 fdatasync(12)   = 0
+3744915 15:41:48.048463 fdatasync(12)   = 0
+3744915 15:41:48.054719 fdatasync(12)   = 0
+3744915 15:41:48.060404 fdatasync(12)   = 0
+3744915 15:41:48.066466 fdatasync(12)   = 0
+3744915 15:41:58.072376 +++ exited with 0 +++
+3746044 15:46:47.470533 fsync(12)       = 0
+3746044 15:46:47.479287 fsync(12)       = 0
+3746044 15:46:47.491210 fsync(12)       = 0
+3746044 15:46:57.499777 +++ exited with 0 +++
+3750170 15:51:47.469730 fsync(12)       = 0
+3750170 15:51:47.474499 fsync(12)       = 0
+3750170 15:51:47.479250 fsync(12)       = 0
+3750170 15:51:57.485428 +++ exited with 0 +++
+3751216 15:56:47.465258 fsync(12)       = 0
+3751216 15:56:47.470902 fsync(12)       = 0
+3751216 15:56:47.475985 fsync(12)       = 0
+3751216 15:56:57.481947 +++ exited with 0 +++
+3752154 16:01:47.475708 fsync(12)       = 0
+3752154 16:01:47.481031 fsync(12)       = 0
+3752154 16:01:47.488083 fsync(12)       = 0
+3752154 16:01:57.493955 +++ exited with 0 +++
+3753127 16:06:47.478731 fsync(12)       = 0
+3753127 16:06:47.485037 fsync(12)       = 0
+3753127 16:06:47.489942 fsync(12)       = 0
+3753127 16:06:57.495629 +++ exited with 0 +++
+3758875 16:11:47.489465 fsync(12)       = 0
+3758875 16:11:47.495760 fsync(12)       = 0
+3758875 16:11:47.500721 fsync(12)       = 0
+3758875 16:11:57.506635 +++ exited with 0 +++
+3760026 16:16:47.466352 fsync(12)       = 0
+3760026 16:16:47.491373 fsync(12)       = 0
+3760026 16:16:47.502425 fsync(12)       = 0
+3760026 16:16:57.514337 +++ exited with 0 +++
+3761020 16:21:47.473869 fsync(12)       = 0
+3761020 16:21:47.480294 fsync(12)       = 0
+3761020 16:21:47.485834 fsync(12)       = 0
+3761020 16:21:57.491799 +++ exited with 0 +++
+3762007 16:26:47.479632 fsync(12)       = 0
+3762007 16:26:47.486509 fsync(12)       = 0
+3762007 16:26:47.489826 fsync(12)       = 0
+3762007 16:26:57.495903 +++ exited with 0 +++
+3762924 16:31:47.479607 fsync(12)       = 0
+3762924 16:31:47.485843 fsync(12)       = 0
+3762924 16:31:47.490760 fsync(12)       = 0
+3762924 16:31:57.496638 +++ exited with 0 +++
+3763912 16:36:47.541411 fsync(12)       = 0
+3763912 16:36:47.548044 fsync(12)       = 0
+3763912 16:36:47.553061 fsync(12)       = 0
+3763912 16:36:57.558946 +++ exited with 0 +++
+3764938 16:41:47.530148 fsync(12)       = 0
+3764938 16:41:47.536894 fsync(12)       = 0
+3764938 16:41:47.541905 fsync(12)       = 0
+3764938 16:41:57.547722 +++ exited with 0 +++
+3765977 16:46:47.474978 fsync(12)       = 0
+3765977 16:46:47.480859 fsync(12)       = 0
+3765977 16:46:47.485495 fsync(12)       = 0
+3765977 16:46:57.491398 +++ exited with 0 +++
+3766974 16:51:47.487351 fsync(12)       = 0
+3766974 16:51:47.493759 fsync(12)       = 0
+3766974 16:51:47.498642 fsync(12)       = 0
+3766974 16:51:57.506526 +++ exited with 0 +++
+3768424 16:56:47.507012 fsync(12)       = 0
+3768424 16:56:47.513664 fsync(12)       = 0
+3768424 16:56:47.518468 fsync(12)       = 0
+3768424 16:56:57.524448 +++ exited with 0 +++
+3769583 17:01:47.464705 fsync(12)       = 0
+3769583 17:01:47.479556 fsync(12)       = 0
+3769583 17:01:47.484470 fsync(12)       = 0
+3769583 17:01:57.490416 +++ exited with 0 +++
+3770542 17:06:47.484670 fsync(12)       = 0
+3770542 17:06:47.490530 fsync(12)       = 0
+3770542 17:06:47.495584 fsync(12)       = 0
+3770542 17:06:57.501585 +++ exited with 0 +++
+3771533 17:11:47.534346 fsync(12)       = 0
+3771533 17:11:47.540943 fsync(12)       = 0
+3771533 17:11:47.545602 fsync(12)       = 0
+3771533 17:11:57.551671 +++ exited with 0 +++
+3772704 17:16:47.482986 fsync(12)       = 0
+3772704 17:16:47.488681 fsync(12)       = 0
+3772704 17:16:47.494825 fsync(12)       = 0
+3772704 17:16:57.500776 +++ exited with 0 +++
+3773666 17:21:47.517156 fsync(12)       = 0
+3773666 17:21:47.524476 fsync(12)       = 0
+3773666 17:21:47.530162 fsync(12)       = 0
+3773666 17:21:57.536314 +++ exited with 0 +++
+3774651 17:26:47.527462 fsync(12)       = 0
+3774651 17:26:47.534099 fsync(12)       = 0
+3774651 17:26:47.539104 fsync(12)       = 0
+3774651 17:26:57.545453 +++ exited with 0 +++
+3775606 17:31:47.480599 fsync(12)       = 0
+3775606 17:31:47.486407 fsync(12)       = 0
+3775606 17:31:47.491540 fsync(12)       = 0
+3775606 17:31:57.497556 +++ exited with 0 +++
+3776562 17:36:47.537643 fsync(12)       = 0
+3776562 17:36:47.543479 fsync(12)       = 0
+3776562 17:36:47.549473 fsync(12)       = 0
+3776562 17:36:57.558727 +++ exited with 0 +++
+3777526 17:41:47.525257 fsync(12)       = 0
+3777526 17:41:47.532854 fsync(12)       = 0
+3777526 17:41:47.537832 fsync(12)       = 0
+3777526 17:41:57.543913 +++ exited with 0 +++
+3777552 17:41:58.102100 +++ exited with 0 +++
+3744913 17:41:58.102799 +++ exited with 0 +++
+3744885 17:41:58.103040 +++ exited with 0 +++
+3744888 17:41:58.103478 +++ exited with 0 +++
+3744884 17:41:58.103505 +++ exited with 0 +++
+3744887 17:41:58.103634 +++ exited with 0 +++
+3744882 17:41:58.103933 +++ exited with 0 +++
+3744890 17:41:58.103943 +++ exited with 0 +++
+3744893 17:41:58.104170 +++ exited with 0 +++
+3744892 17:41:58.104536 +++ exited with 0 +++
+3744894 17:41:58.105027 +++ exited with 0 +++
+3744883 17:41:58.105037 +++ exited with 0 +++
+3744895 17:41:58.105143 +++ exited with 0 +++
+3744891 17:41:58.105153 +++ exited with 0 +++
+3744896 17:41:58.105718 +++ exited with 0 +++
+3744897 17:41:58.105862 +++ exited with 0 +++
+3744899 17:41:58.105965 +++ exited with 0 +++
+3744902 17:41:58.106045 +++ exited with 0 +++
+3744901 17:41:58.106295 +++ exited with 0 +++
+3744903 17:41:58.106700 +++ exited with 0 +++
+3744900 17:41:58.106825 +++ exited with 0 +++
+3744905 17:41:58.107516 +++ exited with 0 +++
+3744904 17:41:58.107542 +++ exited with 0 +++
+3744907 17:41:58.107796 +++ exited with 0 +++
+3744906 17:41:58.108040 +++ exited with 0 +++
+3744908 17:41:58.108152 +++ exited with 0 +++
+3744898 17:41:58.108162 +++ exited with 0 +++
+3744909 17:41:58.108361 +++ exited with 0 +++
+3744910 17:41:58.108537 +++ exited with 0 +++
+3744912 17:41:58.108549 +++ exited with 0 +++
+3744911 17:41:58.108729 +++ exited with 0 +++
+3744914 17:41:58.109501 +++ exited with 0 +++
+3744889 17:41:58.110230 +++ exited with 0 +++
+3744880 17:41:58.112514 +++ exited with 0 +++
+### after (fe6d4be5): snapshot_bench 7210 under strace -f -tt -e trace=fsync,fdatasync, Linux (WSL2)
+=== output ===
+# idle from unix_ms=1794383069917
+case=idle elapsed_s=300 rewrites=1 snapshot_bytes=151532 write_bytes=151582 write_calls=4
+case=idle elapsed_s=600 rewrites=1 snapshot_bytes=151532 write_bytes=151672 write_calls=5
+case=idle elapsed_s=900 rewrites=1 snapshot_bytes=151532 write_bytes=151762 write_calls=6
+case=idle elapsed_s=1200 rewrites=1 snapshot_bytes=151532 write_bytes=151852 write_calls=7
+case=idle elapsed_s=1500 rewrites=1 snapshot_bytes=151532 write_bytes=151943 write_calls=8
+case=idle elapsed_s=1800 rewrites=1 snapshot_bytes=151532 write_bytes=152034 write_calls=9
+case=idle elapsed_s=2100 rewrites=1 snapshot_bytes=151532 write_bytes=152125 write_calls=10
+case=idle elapsed_s=2400 rewrites=1 snapshot_bytes=151532 write_bytes=152217 write_calls=11
+case=idle elapsed_s=2700 rewrites=1 snapshot_bytes=151532 write_bytes=152309 write_calls=12
+case=idle elapsed_s=3000 rewrites=1 snapshot_bytes=151532 write_bytes=152401 write_calls=13
+case=idle elapsed_s=3300 rewrites=1 snapshot_bytes=151532 write_bytes=152493 write_calls=14
+case=idle elapsed_s=3600 rewrites=1 snapshot_bytes=151532 write_bytes=152585 write_calls=15
+case=idle elapsed_s=3900 rewrites=1 snapshot_bytes=151532 write_bytes=152677 write_calls=16
+case=idle elapsed_s=4200 rewrites=1 snapshot_bytes=151532 write_bytes=152769 write_calls=17
+case=idle elapsed_s=4500 rewrites=1 snapshot_bytes=151532 write_bytes=152861 write_calls=18
+case=idle elapsed_s=4800 rewrites=1 snapshot_bytes=151532 write_bytes=152953 write_calls=19
+case=idle elapsed_s=5100 rewrites=1 snapshot_bytes=151532 write_bytes=153045 write_calls=20
+case=idle elapsed_s=5400 rewrites=1 snapshot_bytes=151532 write_bytes=153137 write_calls=21
+case=idle elapsed_s=5700 rewrites=1 snapshot_bytes=151532 write_bytes=153229 write_calls=22
+case=idle elapsed_s=6000 rewrites=1 snapshot_bytes=151532 write_bytes=153321 write_calls=23
+case=idle elapsed_s=6300 rewrites=1 snapshot_bytes=151532 write_bytes=153413 write_calls=24
+case=idle elapsed_s=6600 rewrites=1 snapshot_bytes=151532 write_bytes=153505 write_calls=25
+case=idle elapsed_s=6900 rewrites=1 snapshot_bytes=151532 write_bytes=153597 write_calls=26
+case=idle elapsed_s=7200 rewrites=1 snapshot_bytes=151532 write_bytes=153689 write_calls=27
+case=idle elapsed_s=7210 rewrites=1 snapshot_bytes=151532 write_bytes=153781 write_calls=28
+=== syncs per idle hour (an hour with none is not listed) ===
+syncs before the idle start: 103
+idle hour 1: fsync=3 fdatasync=0
+=== strace ===
+3745634 15:44:29.315071 fsync(12)       = 0
+3745634 15:44:29.320737 fsync(12)       = 0
+3745634 15:44:29.328631 fdatasync(12)   = 0
+3745634 15:44:29.332615 fsync(13)       = 0
+3745634 15:44:29.338985 fdatasync(12)   = 0
+3745634 15:44:29.343169 fdatasync(12)   = 0
+3745634 15:44:29.349289 fdatasync(12)   = 0
+3745634 15:44:29.355878 fdatasync(12)   = 0
+3745634 15:44:29.361941 fdatasync(12)   = 0
+3745634 15:44:29.367709 fdatasync(12)   = 0
+3745634 15:44:29.374042 fdatasync(12)   = 0
+3745634 15:44:29.379859 fdatasync(12)   = 0
+3745634 15:44:29.385623 fdatasync(12)   = 0
+3745634 15:44:29.390804 fdatasync(12)   = 0
+3745634 15:44:29.396001 fdatasync(12)   = 0
+3745634 15:44:29.401813 fdatasync(12)   = 0
+3745634 15:44:29.407834 fdatasync(12)   = 0
+3745634 15:44:29.413720 fdatasync(12)   = 0
+3745634 15:44:29.419981 fdatasync(12)   = 0
+3745634 15:44:29.426415 fdatasync(12)   = 0
+3745634 15:44:29.432714 fdatasync(12)   = 0
+3745634 15:44:29.438768 fdatasync(12)   = 0
+3745634 15:44:29.444935 fdatasync(12)   = 0
+3745634 15:44:29.448689 fdatasync(12)   = 0
+3745634 15:44:29.454807 fdatasync(12)   = 0
+3745634 15:44:29.460823 fdatasync(12)   = 0
+3745634 15:44:29.466715 fdatasync(12)   = 0
+3745634 15:44:29.471900 fdatasync(12)   = 0
+3745634 15:44:29.477688 fdatasync(12)   = 0
+3745634 15:44:29.483799 fdatasync(12)   = 0
+3745634 15:44:29.489711 fdatasync(12)   = 0
+3745634 15:44:29.495621 fdatasync(12)   = 0
+3745634 15:44:29.500214 fdatasync(12)   = 0
+3745634 15:44:29.506708 fdatasync(12)   = 0
+3745634 15:44:29.512678 fdatasync(12)   = 0
+3745634 15:44:29.517984 fdatasync(12)   = 0
+3745634 15:44:29.523444 fdatasync(12)   = 0
+3745634 15:44:29.529883 fdatasync(12)   = 0
+3745634 15:44:29.536745 fdatasync(12)   = 0
+3745634 15:44:29.541807 fdatasync(12)   = 0
+3745634 15:44:29.547994 fdatasync(12)   = 0
+3745634 15:44:29.553828 fdatasync(12)   = 0
+3745634 15:44:29.558029 fdatasync(12)   = 0
+3745634 15:44:29.563681 fdatasync(12)   = 0
+3745634 15:44:29.569670 fdatasync(12)   = 0
+3745634 15:44:29.575823 fdatasync(12)   = 0
+3745634 15:44:29.581625 fdatasync(12)   = 0
+3745634 15:44:29.585731 fdatasync(12)   = 0
+3745634 15:44:29.593014 fdatasync(12)   = 0
+3745634 15:44:29.598731 fdatasync(12)   = 0
+3745634 15:44:29.604714 fdatasync(12)   = 0
+3745634 15:44:29.610652 fdatasync(12)   = 0
+3745634 15:44:29.616033 fdatasync(12)   = 0
+3745634 15:44:29.621882 fdatasync(12)   = 0
+3745634 15:44:29.628606 fdatasync(12)   = 0
+3745634 15:44:29.632478 fdatasync(12)   = 0
+3745634 15:44:29.639081 fdatasync(12)   = 0
+3745634 15:44:29.644734 fdatasync(12)   = 0
+3745634 15:44:29.651013 fdatasync(12)   = 0
+3745634 15:44:29.657477 fdatasync(12)   = 0
+3745634 15:44:29.664242 fdatasync(12)   = 0
+3745634 15:44:29.670298 fdatasync(12)   = 0
+3745634 15:44:29.675817 fdatasync(12)   = 0
+3745634 15:44:29.682048 fdatasync(12)   = 0
+3745634 15:44:29.687978 fdatasync(12)   = 0
+3745634 15:44:29.693607 fdatasync(12)   = 0
+3745634 15:44:29.699947 fdatasync(12)   = 0
+3745634 15:44:29.705599 fdatasync(12)   = 0
+3745634 15:44:29.712067 fdatasync(12)   = 0
+3745634 15:44:29.717937 fdatasync(12)   = 0
+3745634 15:44:29.724204 fdatasync(12)   = 0
+3745634 15:44:29.730942 fdatasync(12)   = 0
+3745634 15:44:29.736087 fdatasync(12)   = 0
+3745634 15:44:29.741931 fdatasync(12)   = 0
+3745634 15:44:29.747850 fdatasync(12)   = 0
+3745634 15:44:29.751827 fdatasync(12)   = 0
+3745634 15:44:29.757880 fdatasync(12)   = 0
+3745634 15:44:29.761912 fdatasync(12)   = 0
+3745634 15:44:29.767864 fdatasync(12)   = 0
+3745634 15:44:29.773950 fdatasync(12)   = 0
+3745634 15:44:29.780149 fdatasync(12)   = 0
+3745634 15:44:29.785659 fdatasync(12)   = 0
+3745634 15:44:29.791808 fdatasync(12)   = 0
+3745634 15:44:29.797827 fdatasync(12)   = 0
+3745634 15:44:29.802993 fdatasync(12)   = 0
+3745634 15:44:29.808386 fdatasync(12)   = 0
+3745634 15:44:29.813702 fdatasync(12)   = 0
+3745634 15:44:29.819383 fdatasync(12)   = 0
+3745634 15:44:29.824818 fdatasync(12)   = 0
+3745634 15:44:29.829709 fdatasync(12)   = 0
+3745634 15:44:29.835761 fdatasync(12)   = 0
+3745634 15:44:29.842297 fdatasync(12)   = 0
+3745634 15:44:29.848695 fdatasync(12)   = 0
+3745634 15:44:29.854936 fdatasync(12)   = 0
+3745634 15:44:29.861306 fdatasync(12)   = 0
+3745634 15:44:29.868090 fdatasync(12)   = 0
+3745634 15:44:29.875522 fdatasync(12)   = 0
+3745634 15:44:29.882048 fdatasync(12)   = 0
+3745634 15:44:29.888001 fdatasync(12)   = 0
+3745634 15:44:29.893773 fdatasync(12)   = 0
+3745634 15:44:29.899951 fdatasync(12)   = 0
+3745634 15:44:29.905785 fdatasync(12)   = 0
+3745634 15:44:29.911686 fdatasync(12)   = 0
+3745634 15:44:39.918170 +++ exited with 0 +++
+3746574 15:49:29.334329 fsync(12)       = 0
+3746574 15:49:29.342691 fsync(12)       = 0
+3746574 15:49:29.347589 fsync(12)       = 0
+3746574 15:49:39.353974 +++ exited with 0 +++
+3778073 17:44:40.022251 +++ exited with 0 +++
+3745633 17:44:40.022954 +++ exited with 0 +++
+3745605 17:44:40.023744 +++ exited with 0 +++
+3745607 17:44:40.023871 +++ exited with 0 +++
+3745606 17:44:40.023881 +++ exited with 0 +++
+3745608 17:44:40.024255 +++ exited with 0 +++
+3745609 17:44:40.024392 +++ exited with 0 +++
+3745601 17:44:40.024530 +++ exited with 0 +++
+3745612 17:44:40.024610 +++ exited with 0 +++
+3745603 17:44:40.024651 +++ exited with 0 +++
+3745613 17:44:40.024837 +++ exited with 0 +++
+3745611 17:44:40.025235 +++ exited with 0 +++
+3745614 17:44:40.025745 +++ exited with 0 +++
+3745615 17:44:40.025756 +++ exited with 0 +++
+3745610 17:44:40.025758 +++ exited with 0 +++
+3745616 17:44:40.026293 +++ exited with 0 +++
+3745617 17:44:40.026443 +++ exited with 0 +++
+3745618 17:44:40.026571 +++ exited with 0 +++
+3745619 17:44:40.026761 +++ exited with 0 +++
+3745620 17:44:40.027094 +++ exited with 0 +++
+3745621 17:44:40.027316 +++ exited with 0 +++
+3745623 17:44:40.027631 +++ exited with 0 +++
+3745622 17:44:40.027640 +++ exited with 0 +++
+3745625 17:44:40.027726 +++ exited with 0 +++
+3745628 17:44:40.028173 +++ exited with 0 +++
+3745624 17:44:40.028297 +++ exited with 0 +++
+3745627 17:44:40.028388 +++ exited with 0 +++
+3745629 17:44:40.028464 +++ exited with 0 +++
+3745631 17:44:40.028919 +++ exited with 0 +++
+3745630 17:44:40.028928 +++ exited with 0 +++
+3745632 17:44:40.028950 +++ exited with 0 +++
+3745626 17:44:40.028975 +++ exited with 0 +++
+3745602 17:44:40.030204 +++ exited with 0 +++
+3745599 17:44:40.031766 +++ exited with 0 +++

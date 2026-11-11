@@ -2,16 +2,8 @@
 use super::super::*;
 use super::{auth_snapshot_path, auth_wal_path, open_blob, read_wal};
 
-pub(crate) fn compaction_is_allowed(safe_mode: bool) -> bool {
-    !safe_mode
-}
-
 pub(crate) fn push_audit_record(inner: &AuthStateInner, record: AuditRecord) {
-    let mut records = inner.audit_records.write();
-    while records.len() >= AUDIT_RECORD_CAPACITY {
-        records.pop_front();
-    }
-    records.push_back(record);
+    push_persisted_audit(&mut inner.audit_records.write(), record);
 }
 
 pub(crate) fn cancel_all_temporary_leases(inner: &AuthStateInner) {
@@ -21,11 +13,13 @@ pub(crate) fn cancel_all_temporary_leases(inner: &AuthStateInner) {
     }
 }
 
-fn snapshot_generations(inner: &AuthStateInner) -> Vec<Generation> {
-    let slots = inner.slots();
-    let extra = inner.high_slot_generations.read();
-    let mut generations = slots.iter().map(|slot| slot.generation).collect::<Vec<_>>();
-    generations.extend_from_slice(&extra);
+/// Every row's generation, the indexable rows first. Takes the slot table the
+/// caller already holds: a second read lock taken on the same thread can
+/// deadlock behind a queued writer.
+fn snapshot_generations(slots: &[SlotHot], high: &[Generation]) -> Vec<Generation> {
+    let mut generations = Vec::with_capacity(slots.len() + high.len());
+    generations.extend(slots.iter().map(|slot| slot.generation));
+    generations.extend_from_slice(high);
     generations
 }
 
@@ -49,7 +43,7 @@ pub(crate) fn build_snapshot(
 ) -> PersistedSnapshot {
     let slots = inner.slots();
     let cold = inner.cold();
-    let generations = snapshot_generations(inner);
+    let generations = snapshot_generations(&slots, &inner.high_slot_generations);
     let mut entries = slots
         .iter()
         .enumerate()
@@ -93,7 +87,8 @@ pub(crate) fn normalize_tombstone_times(snapshot: &mut PersistedSnapshot, now: u
                 .iter()
                 .rev()
                 .find(|record| {
-                    record.action == "temporary_key_revoke" && record.key_id == Some(entry.key_id)
+                    record.action == audit_action::TEMPORARY_KEY_REVOKE
+                        && record.key_id == Some(entry.key_id)
                 })
                 .map(|record| record.at)
                 .or(Some(now)),
@@ -112,13 +107,8 @@ pub(crate) fn empty_snapshot(
     instance_id: [u8; INSTANCE_ID_LEN],
     admin_replays: &VecDeque<AdminReplayRecord>,
 ) -> PersistedSnapshot {
-    snapshot_with(
-        inner,
-        instance_id,
-        snapshot_generations(inner),
-        Vec::new(),
-        admin_replays,
-    )
+    let generations = snapshot_generations(&inner.slots(), &inner.high_slot_generations);
+    snapshot_with(inner, instance_id, generations, Vec::new(), admin_replays)
 }
 
 fn snapshot_with(
@@ -133,11 +123,7 @@ fn snapshot_with(
         instance_id,
         generations,
         entries,
-        legacy_protocol: if inner.legacy_protocol_allowed.load(Ordering::Acquire) {
-            LegacyProtocolPolicy::Allow
-        } else {
-            LegacyProtocolPolicy::Deny
-        },
+        legacy_protocol: inner.legacy_policy(),
         admin_replays: admin_replays.iter().cloned().collect(),
         audit_records: inner.audit_records.read().clone(),
         root_epoch: inner.root_epoch.load(Ordering::Acquire),
@@ -174,7 +160,7 @@ pub(crate) fn try_load_persisted_state(
     let mut snapshot = if snapshot_path.exists() {
         let bytes = std::fs::read(&snapshot_path).map_err(|error| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to read `{}`: {error}", snapshot_path.display()),
                 false,
             )
@@ -182,7 +168,7 @@ pub(crate) fn try_load_persisted_state(
         let plain = open_blob(admin_key, &bytes)?;
         serde_json::from_slice::<PersistedSnapshot>(&plain).map_err(|error| {
             AuthFailure::new(
-                "temporary_key_store_unavailable",
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 format!("failed to decode auth snapshot: {error}"),
                 false,
             )
@@ -202,7 +188,7 @@ pub(crate) fn try_load_persisted_state(
     };
     if snapshot.schema_version != SNAPSHOT_SCHEMA_VERSION || snapshot.instance_id != instance_id {
         return Err(AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             "auth snapshot schema or server instance id does not match",
             false,
         ));
@@ -234,7 +220,7 @@ pub(crate) fn try_load_persisted_state(
     Ok(snapshot)
 }
 
-pub(crate) fn apply_persisted_mutation(
+fn apply_persisted_mutation(
     snapshot: &mut PersistedSnapshot,
     mutation: StateMutation,
 ) -> Result<(), AuthFailure> {
@@ -294,7 +280,7 @@ fn replayed_entry_mut<'a>(
         Some(entry) => Ok(Some(entry)),
         None if issued => Ok(None),
         None => Err(AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             format!("WAL {operation} record references an unknown key"),
             false,
         )),

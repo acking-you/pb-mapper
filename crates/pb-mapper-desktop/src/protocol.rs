@@ -1,10 +1,10 @@
 //! Desktop protocol v2 (ALPN `pb-mapper/desktop/2`): one JSON record per
 //! message; only `HostMessage::Video` is followed by one payload record
 //! (`wire.rs`). Every message and struct rejects unknown fields, and every enum
-//! variant is a struct variant or wraps one strict struct (`State`), because
-//! serde ignores extra fields on an internally tagged unit variant. A v2.x
-//! peer sends a new message, field or value only after the other side listed
-//! the matching capability.
+//! variant is a struct variant or wraps one strict struct (`State`, `Stats`),
+//! because serde ignores extra fields on an internally tagged unit variant. A
+//! v2.x peer sends a new message, field or value only after the other side
+//! listed the matching capability.
 use crate::{
     Display, InputEvent, KeyframeReason, QualityPreset, VideoCodec, VideoLimits, modes::ModeList,
 };
@@ -175,38 +175,7 @@ pub(crate) enum HostMessage {
         nonce: u64,
     },
     /// Every `STATS_INTERVAL`; also the host-to-viewer liveness.
-    Stats {
-        capture_fps: f32,
-        pace_fps: u32,
-        target_fps: u32,
-        /// 0 = no viewer cap.
-        fps_cap: u32,
-        /// Expected: bits per frame × pace.
-        bitrate: u32,
-        encoder_bitrate: u32,
-        sent_bitrate: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rtt_ms: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        base_rtt_ms: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        queue_delay_ms: Option<u32>,
-        ack_queue_ms: u32,
-        /// The median time a unit stayed in the encoder, from submit to
-        /// output, over the last second. Only to a viewer that listed
-        /// `encoder_dwell`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        encoder_dwell_ms: Option<u32>,
-        dropped_frames: u64,
-        /// Ticks skipped for transport backpressure or a full encoder.
-        skipped_ticks: u64,
-        keyframes: u64,
-        frames: u64,
-        bytes: u64,
-        adaptation: Adaptation,
-        rate_model: RateModel,
-        gop: u32,
-    },
+    Stats(StatsRecord),
     Notice {
         code: NoticeCode,
         message: String,
@@ -216,6 +185,41 @@ pub(crate) enum HostMessage {
         reason: StopReason,
         message: String,
     },
+}
+
+/// What a `Stats` message carries.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StatsRecord {
+    pub capture_fps: f32,
+    pub pace_fps: u32,
+    pub target_fps: u32,
+    /// 0 = no viewer cap.
+    pub fps_cap: u32,
+    /// Expected: bits per frame × pace.
+    pub bitrate: u32,
+    pub encoder_bitrate: u32,
+    pub sent_bitrate: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_rtt_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_delay_ms: Option<u32>,
+    pub ack_queue_ms: u32,
+    /// The median time a unit stayed in the encoder, from submit to output,
+    /// over the last second. Only to a viewer that listed `encoder_dwell`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_dwell_ms: Option<u32>,
+    pub dropped_frames: u64,
+    /// Ticks skipped for transport backpressure or a full encoder.
+    pub skipped_ticks: u64,
+    pub keyframes: u64,
+    pub frames: u64,
+    pub bytes: u64,
+    pub adaptation: Adaptation,
+    pub rate_model: RateModel,
+    pub gop: u32,
 }
 
 /// What a `State` message carries.
@@ -285,9 +289,10 @@ pub struct VideoSize {
     pub width: u32,
     pub height: u32,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Adaptation {
+    #[default]
     Startup,
     Steady,
     Raising,
@@ -296,9 +301,10 @@ pub enum Adaptation {
     Unresponsive,
     Paused,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RateModel {
+    #[default]
     Nominal,
     Timestamp,
 }
@@ -323,10 +329,9 @@ pub enum StopReason {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::{Button, Input, Key, security};
+    use crate::{Button, Input, Key};
     use serde_json::{Value, json};
 
     /// Serialise, parse back and serialise again: the JSON must not change.
@@ -353,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_parsing_and_version_gate() {
+    fn strict_parsing() {
         let limits = VideoLimits::for_viewer(60.0);
         let viewer = [
             ViewerMessage::Authenticate {
@@ -474,7 +479,7 @@ mod tests {
                 input_sequence: Some(12),
             },
             HostMessage::Probe { nonce: 2 },
-            HostMessage::Stats {
+            HostMessage::Stats(StatsRecord {
                 capture_fps: 59.5,
                 pace_fps: 60,
                 target_fps: 60,
@@ -495,7 +500,7 @@ mod tests {
                 adaptation: Adaptation::Steady,
                 rate_model: RateModel::Nominal,
                 gop: u32::MAX,
-            },
+            }),
             HostMessage::Notice {
                 code: NoticeCode::LockFailed,
                 message: "access denied".into(),
@@ -558,22 +563,69 @@ mod tests {
         ]));
         assert!(!valid_capabilities(&["Lock".into()]));
         assert!(!valid_capabilities(&vec!["a".into(); MAX_CAPABILITIES + 1]));
+    }
 
-        // A v1 peer fails the TLS handshake with a typed version mismatch,
-        // whichever side is the old one.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            for old_host in [true, false] {
-                let failure = security::tests::alpn_handshake(old_host).await;
-                assert_eq!(
-                    security::handshake_failure(&failure),
-                    Some(security::HandshakeFailure::VersionMismatch),
-                    "{failure}"
-                );
-            }
+    /// `Stats` as peers of every v2 version read it: the tag first, the
+    /// fields in their order, and an absent optional figure left out.
+    #[test]
+    fn stats_keep_their_wire_bytes() {
+        let full = HostMessage::Stats(StatsRecord {
+            capture_fps: 59.5,
+            pace_fps: 60,
+            target_fps: 50,
+            fps_cap: 45,
+            bitrate: 4_000_000,
+            encoder_bitrate: 3_800_000,
+            sent_bitrate: 3_900_000,
+            rtt_ms: Some(40),
+            base_rtt_ms: Some(35),
+            queue_delay_ms: Some(2),
+            ack_queue_ms: 1,
+            encoder_dwell_ms: Some(3),
+            dropped_frames: 4,
+            skipped_ticks: 5,
+            keyframes: 6,
+            frames: 60,
+            bytes: 500_000,
+            adaptation: Adaptation::LoweringFps,
+            rate_model: RateModel::Timestamp,
+            gop: u32::MAX,
         });
+        let sparse = HostMessage::Stats(StatsRecord {
+            capture_fps: 0.0,
+            pace_fps: 1,
+            target_fps: 2,
+            fps_cap: 0,
+            bitrate: 3,
+            encoder_bitrate: 4,
+            sent_bitrate: 5,
+            rtt_ms: None,
+            base_rtt_ms: None,
+            queue_delay_ms: None,
+            ack_queue_ms: 6,
+            encoder_dwell_ms: None,
+            dropped_frames: 7,
+            skipped_ticks: 8,
+            keyframes: 9,
+            frames: 10,
+            bytes: 11,
+            adaptation: Adaptation::Startup,
+            rate_model: RateModel::Nominal,
+            gop: 0,
+        });
+        for (message, golden) in [
+            (
+                full,
+                r#"{"t":"stats","capture_fps":59.5,"pace_fps":60,"target_fps":50,"fps_cap":45,"bitrate":4000000,"encoder_bitrate":3800000,"sent_bitrate":3900000,"rtt_ms":40,"base_rtt_ms":35,"queue_delay_ms":2,"ack_queue_ms":1,"encoder_dwell_ms":3,"dropped_frames":4,"skipped_ticks":5,"keyframes":6,"frames":60,"bytes":500000,"adaptation":"lowering_fps","rate_model":"timestamp","gop":4294967295}"#,
+            ),
+            (
+                sparse,
+                r#"{"t":"stats","capture_fps":0.0,"pace_fps":1,"target_fps":2,"fps_cap":0,"bitrate":3,"encoder_bitrate":4,"sent_bitrate":5,"ack_queue_ms":6,"dropped_frames":7,"skipped_ticks":8,"keyframes":9,"frames":10,"bytes":11,"adaptation":"startup","rate_model":"nominal","gop":0}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&message).unwrap(), golden);
+            let read: HostMessage = serde_json::from_str(golden).unwrap();
+            assert_eq!(serde_json::to_string(&read).unwrap(), golden);
+        }
     }
 }

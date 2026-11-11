@@ -1,84 +1,64 @@
-//! The session object: [`Client`], its request types, and the tunnel spawner.
+//! The session object: [`Client`].
 //!
 //! Everything a caller starts goes through here. `register` and `connect` are
 //! the same shape — resolve the local endpoint, open a status channel, spawn the
-//! transport's worker — so that lifecycle lives in one place (`TunnelWorker`)
-//! and each call site is left with only the worker it invokes.
+//! transport's worker — so that lifecycle lives in one place (`TunnelWorker`,
+//! in `worker`) and each call site is left with only the worker it invokes.
 
-use crate::diagnostics::Diagnostics;
 use crate::endpoint::RelayEndpoint;
 use crate::relay::CarrierId;
 use std::sync::{Arc, RwLock};
 
 use pb_mapper_core::checksum::{Credential, parse_credential};
-use pb_mapper_core::config::{ResolvedAddrs, control_io_timeout, resolve_addrs_async};
+use pb_mapper_core::config::control_io_timeout;
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
-use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
-use uni_stream::stream::{
-    TcpListenerProvider, TcpStreamProvider, UdpListenerProvider, UdpStreamProvider,
-};
+use tokio::net::{TcpListener, TcpStream};
+use uni_stream::stream::{TcpStreamProvider, UdpStreamProvider};
 
 use snafu::ResultExt;
 
 use super::Error;
 use super::admin::Admin;
-use super::error::{AddressSnafu, Result, StatusSnafu};
-use super::handle::{Connection, LiveTunnel, Registration};
-use super::types::{RemoteId, ServiceConnection, Transport, TunnelStatus};
-use super::{ConnectOptions, DirectPolicy, LanTransport, PathPolicy, PortMapping, RegisterOptions};
-use crate::client::run_client_side_cli_recovering_with_path;
+use super::error::{IoSnafu, Result, StatusSnafu};
+use super::handle::{Connection, Registration};
+use super::types::{
+    ClientConfig, ConnectRequest, RegisterRequest, RemoteId, ServiceConnection, Transport,
+};
+use super::worker::TunnelWorker;
+use super::{ConnectOptions, LanTransport, PathPolicy, RegisterOptions};
 use crate::client::status::get_status_with_credential;
-use crate::server::{ServerTunnelOptions, StatusCallback, run_server_side_cli_recovering};
-
-/// Configuration for a [`Client`] session.
-#[derive(Clone)]
-pub struct ClientConfig {
-    /// Relay address (`host:port`).
-    pub server: String,
-    /// Administrator key (32 printable bytes) or a `pbmt1_` temporary credential.
-    pub credential: String,
-    pub keep_alive: bool,
-    /// Administrator-only target namespace. Temporary credentials always use
-    /// their own namespace when this is `None`.
-    pub namespace: Option<u64>,
-}
-
-impl std::fmt::Debug for ClientConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClientConfig")
-            .field("server", &self.server)
-            .field("credential", &"[redacted]")
-            .field("keep_alive", &self.keep_alive)
-            .field("namespace", &self.namespace)
-            .finish()
-    }
-}
-
-/// Register a local TCP/UDP service with the relay.
-#[derive(Clone, Debug)]
-pub struct RegisterRequest {
-    pub key: String,
-    pub local_addr: String,
-    pub transport: Transport,
-    pub codec: bool,
-    pub force_namespace: bool,
-}
-
-/// Subscribe to a registered service and listen locally.
-#[derive(Clone, Debug)]
-pub struct ConnectRequest {
-    pub key: String,
-    pub local_addr: String,
-    pub transport: Transport,
-}
+use crate::client::{
+    Bound, LocalTcpListener, LocalTcpListenerProvider, LocalUdpListener, LocalUdpListenerProvider,
+    run_client_side_cli_recovering_with_path, run_owned_stream,
+};
+use crate::server::{ServerTunnelOptions, run_server_side_cli_recovering};
 
 pub(crate) struct ClientInner {
     pub(crate) server: String,
     pub(crate) endpoint: RelayEndpoint,
-    pub(crate) credential: RwLock<Credential>,
+    /// Shared with the clients on the other carrier made from it: one
+    /// session, which a root rotation moves as a whole.
+    pub(crate) credential: Arc<RwLock<Credential>>,
     pub(crate) keep_alive: bool,
     pub(crate) namespace: Option<u64>,
+}
+
+impl ClientInner {
+    /// The credential this session authenticates with now.
+    pub(crate) fn credential(&self) -> Credential {
+        *self
+            .credential
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Authenticate this session's later requests with `credential`.
+    pub(crate) fn set_credential(&self, credential: Credential) {
+        *self
+            .credential
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = credential;
+    }
 }
 
 /// Session against one deployed relay.
@@ -121,7 +101,7 @@ impl Client {
             inner: Arc::new(ClientInner {
                 server,
                 endpoint,
-                credential: RwLock::new(credential),
+                credential: Arc::new(RwLock::new(credential)),
                 keep_alive,
                 namespace,
             }),
@@ -130,6 +110,10 @@ impl Client {
 
     /// Select the relay carrier for subsequent work. Existing handles retain their carrier.
     /// TCP remains the default. QUIC requires the relay-quic feature and a QUIC-enabled relay.
+    ///
+    /// The client returned is the same session on that carrier, as a clone
+    /// is: it shares this one's credential, so a root rotation through
+    /// either moves both.
     pub fn with_relay_transport(&self, transport: super::RelayTransport) -> Result<Self> {
         if transport == self.relay_transport() {
             return Ok(self.clone());
@@ -138,12 +122,12 @@ impl Client {
             .inner
             .endpoint
             .with_transport(transport)
-            .map_err(|error| Error::invalid_config(error.to_string()))?;
+            .ok_or_else(|| Error::invalid_config("SDK built without relay-quic"))?;
         Ok(Self {
             inner: Arc::new(ClientInner {
                 server: self.inner.server.clone(),
                 endpoint,
-                credential: RwLock::new(self.credential()),
+                credential: Arc::clone(&self.inner.credential),
                 keep_alive: self.inner.keep_alive,
                 namespace: self.inner.namespace,
             }),
@@ -163,10 +147,7 @@ impl Client {
     pub fn subscribe_relay_metrics(&self, every: std::time::Duration) -> RelayMetricsStream {
         RelayMetricsStream {
             client: Arc::downgrade(&self.inner),
-            every: every.clamp(
-                std::time::Duration::from_millis(100),
-                std::time::Duration::from_secs(60 * 60),
-            ),
+            every: crate::diagnostics::sample_period(every),
             due: None,
         }
     }
@@ -176,7 +157,7 @@ impl Client {
     /// over TCP whatever this client's carrier, so a TCP client can learn
     /// whether QUIC would work before switching to it.
     pub async fn relay_quic_port(&self) -> Result<Option<u16>> {
-        let timeout = control_io_timeout().min(std::time::Duration::from_secs(5));
+        let timeout = status_io_timeout();
         tokio::time::timeout(timeout, self.inner.endpoint.quic_port(self.credential()))
             .await
             .unwrap_or(Err(
@@ -208,11 +189,7 @@ impl Client {
     }
 
     pub(crate) fn credential(&self) -> Credential {
-        *self
-            .inner
-            .credential
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner.credential()
     }
 
     /// Administrator RPCs. Fails locally when the session is not an admin key.
@@ -278,7 +255,7 @@ impl Client {
         if options.allow_direct && !cfg!(feature = "p2p") {
             return Err(Error::invalid_config("built without p2p support"));
         }
-        check_port_mapping(options.port_mapping)?;
+        options.port_mapping.check_supported()?;
         if let Some(timeout) = options.idle_timeout
             && (request.transport.is_datagram()
                 || tokio::time::Instant::now().checked_add(timeout).is_none())
@@ -312,9 +289,8 @@ impl Client {
             namespace: self.inner.namespace,
             force_namespace: request.force_namespace,
         };
-        let worker = self
-            .prepare_worker(&request.key, &request.local_addr)
-            .await?;
+        let worker =
+            TunnelWorker::prepare(&self.inner.endpoint, &request.key, &request.local_addr).await?;
         let credential = self.credential();
         let direct = worker.direct_policy(
             allow_direct,
@@ -330,12 +306,11 @@ impl Client {
                     context.remote_addr,
                     context.key,
                     tunnel,
-                    Some(context.status_callback),
+                    Some(context.status),
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
                     idle_timeout,
-                    allow_direct,
                     direct,
                 )
             }),
@@ -345,12 +320,11 @@ impl Client {
                     context.remote_addr,
                     context.key,
                     tunnel,
-                    Some(context.status_callback),
+                    Some(context.status),
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
                     idle_timeout,
-                    allow_direct,
                     direct,
                 )
             }),
@@ -378,99 +352,39 @@ impl Client {
         &self,
         key: impl Into<String>,
         options: ConnectOptions,
-    ) -> Result<(tokio::net::TcpStream, Connection)> {
-        use crate::client::stream::{StreamSetup, handle_local_stream};
-        use tokio::{
-            net::{TcpListener, TcpStream},
-            sync::{Mutex, Semaphore, mpsc},
-        };
-        use uni_stream::stream::TcpStreamImpl;
-
+    ) -> Result<(TcpStream, Connection)> {
         let key = key.into();
         if key.trim().is_empty() || (options.path == PathPolicy::Auto && !cfg!(feature = "p2p")) {
             return Err(Error::invalid_config(
                 "invalid service key or unavailable direct support",
             ));
         }
-        check_port_mapping(options.port_mapping)?;
-        let io_error = |error: std::io::Error| Error::protocol(error.to_string());
-        // Retain the bound socket until our own connection has been accepted;
-        // there is no reserve/drop/rebind race or reusable external listener.
-        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_error)?;
-        let stream = TcpStream::connect(listener.local_addr().map_err(io_error)?)
-            .await
-            .map_err(io_error)?;
-        let peer = stream.local_addr().map_err(io_error)?;
-        let accepted = loop {
-            let (candidate, address) = listener.accept().await.map_err(io_error)?;
-            if address == peer {
-                break candidate;
-            }
-        };
-        drop(listener);
-        stream.set_nodelay(true).map_err(io_error)?;
-        accepted.set_nodelay(true).map_err(io_error)?;
-        let worker = self.prepare_worker(&key, "127.0.0.1:0").await?;
+        options.port_mapping.check_supported()?;
+        let (stream, accepted) = loopback_pair().await.context(IoSnafu)?;
+        let worker = TunnelWorker::prepare(&self.inner.endpoint, &key, "127.0.0.1:0").await?;
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
-        let policy = worker.direct_policy(
+        let direct = worker.direct_policy(
             options.path == PathPolicy::Auto,
             options.port_mapping,
             options.lan_first,
             options.lan_transport,
             false,
         );
-        let handle = worker.spawn(move |context| async move {
-            context.remote_addr.start();
-            #[cfg(feature = "p2p")]
-            let direct = (options.path == PathPolicy::Auto).then(|| {
-                crate::direct::Consumer::new(
-                    context.remote_addr.clone(),
-                    credential,
-                    namespace,
-                    false,
-                    keep_alive,
-                    context.diagnostics.clone(),
-                    policy,
-                )
-            });
-            #[cfg(not(feature = "p2p"))]
-            let _ = policy;
-            let (events, mut ready) = mpsc::channel(1);
-            let Ok(permit) = Arc::new(Semaphore::new(1)).acquire_owned().await else {
-                return;
-            };
-            let setup = StreamSetup {
-                permit,
-                events,
-                timing: Arc::new(Mutex::new(Default::default())),
-                diagnostics: context.diagnostics,
-                #[cfg(feature = "p2p")]
-                direct,
-            };
-            let forward = handle_local_stream(
-                TcpStreamImpl::new(accepted),
-                context.key,
+        let handle = worker.spawn(move |context| {
+            run_owned_stream(
+                accepted,
                 context.remote_addr,
+                context.key,
                 keep_alive,
                 namespace,
+                context.status,
                 credential,
-                setup,
-            );
-            tokio::pin!(forward);
-            loop {
-                tokio::select! {
-                    () = context.shutdown.cancelled() => break,
-                    Some(_) = ready.recv() => (context.status_callback)("connected"),
-                    result = &mut forward => {
-                        if let Err(error) = result {
-                            (context.status_callback)(&format!("failed: {error}"));
-                        }
-                        break;
-                    }
-                }
-            }
+                context.shutdown,
+                context.diagnostics,
+                direct,
+            )
         });
         Ok((stream, Connection::new(handle, key)))
     }
@@ -484,14 +398,13 @@ impl Client {
         if options.path == PathPolicy::Auto && !cfg!(feature = "p2p") {
             return Err(Error::invalid_config("built without p2p support"));
         }
-        check_port_mapping(options.port_mapping)?;
+        options.port_mapping.check_supported()?;
         let is_datagram = request.transport.is_datagram();
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
         }
-        let worker = self
-            .prepare_worker(&request.key, &request.local_addr)
-            .await?;
+        let worker =
+            TunnelWorker::prepare(&self.inner.endpoint, &request.key, &request.local_addr).await?;
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
@@ -504,35 +417,41 @@ impl Client {
         );
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
-                run_client_side_cli_recovering_with_path::<TcpListenerProvider>(
+                run_client_side_cli_recovering_with_path::<LocalTcpListenerProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
                     keep_alive,
                     namespace,
-                    Some(context.status_callback),
+                    Some(context.status),
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
-                    options.path,
                     is_datagram,
                     direct,
+                    Some(Bound {
+                        addr_of: LocalTcpListener::local_addr,
+                        to: context.bound,
+                    }),
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
-                run_client_side_cli_recovering_with_path::<UdpListenerProvider>(
+                run_client_side_cli_recovering_with_path::<LocalUdpListenerProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
                     keep_alive,
                     namespace,
-                    Some(context.status_callback),
+                    Some(context.status),
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
-                    options.path,
                     is_datagram,
                     direct,
+                    Some(Bound {
+                        addr_of: LocalUdpListener::local_addr,
+                        to: context.bound,
+                    }),
                 )
             }),
         };
@@ -543,9 +462,7 @@ impl Client {
     pub async fn list_keys(&self) -> Result<Vec<String>> {
         match self.status_request(PbConnStatusReq::Keys).await? {
             PbConnStatusResp::Keys(keys) => Ok(keys),
-            other => Err(Error::protocol(format!(
-                "expected keys status, got {other:?}"
-            ))),
+            other => Err(Error::unexpected("keys status", &other)),
         }
     }
 
@@ -553,9 +470,7 @@ impl Client {
     pub async fn sessions(&self) -> Result<Vec<pb_mapper_protocol::direct::SessionObservation>> {
         match self.status_request(PbConnStatusReq::Sessions).await? {
             PbConnStatusResp::Sessions(sessions) => Ok(sessions),
-            other => Err(Error::protocol(format!(
-                "expected sessions status, got {other:?}"
-            ))),
+            other => Err(Error::unexpected("sessions status", &other)),
         }
     }
 
@@ -572,9 +487,7 @@ impl Client {
                 .into_iter()
                 .map(ServiceConnection::from)
                 .collect()),
-            other => Err(Error::protocol(format!(
-                "expected service status, got {other:?}"
-            ))),
+            other => Err(Error::unexpected("service status", &other)),
         }
     }
 
@@ -582,35 +495,9 @@ impl Client {
         RemoteId::from_status(self.status_request(PbConnStatusReq::RemoteId).await?)
     }
 
-    /// Resolve the local endpoint and set up a recovering relay worker.
-    ///
-    /// Shared by `register` and `connect`: the two differ only in which worker
-    /// they hand the context to. Relay DNS remains retryable inside that worker.
-    async fn prepare_worker(&self, key: &str, local_addr: &str) -> Result<TunnelWorker> {
-        if !self.inner.endpoint.validate() {
-            return Err(Error::invalid_config(
-                "relay must be host:port or an IP socket address",
-            ));
-        }
-        let local_addr = resolve(local_addr).await?;
-        let remote_addr = self.inner.endpoint.clone();
-        let (status_tx, status_rx) = watch::channel(TunnelStatus::Starting);
-        Ok(TunnelWorker {
-            local_addr,
-            remote_addr,
-            key: Arc::from(key),
-            shutdown: CancellationToken::new(),
-            status_tx,
-            status_rx,
-            diagnostics: Diagnostics::default(),
-        })
-    }
-
     async fn status_request(&self, request: PbConnStatusReq) -> Result<PbConnStatusResp> {
         let credential = self.credential();
-        // Queries share admission with recovery. A stalled status consumer must
-        // not occupy that budget for the legacy 30-second control I/O timeout.
-        let io_timeout = control_io_timeout().min(std::time::Duration::from_secs(5));
+        let io_timeout = status_io_timeout();
         let endpoint = &self.inner.endpoint;
         let ask = async |carrier: &mut Option<CarrierId>| {
             let mut stream = endpoint
@@ -637,7 +524,7 @@ impl Client {
                 // arrives on it. A status query is a read: asked once more on
                 // a fresh connection, it gets the relay's verdict.
                 Err(error)
-                    if is_carrier_failure(&error)
+                    if error.is_carrier_failure()
                         && endpoint.transport() == super::RelayTransport::Quic =>
                 {
                     endpoint.carrier_failed(carrier);
@@ -652,8 +539,8 @@ impl Client {
         }));
         match &result {
             Ok(_) => endpoint.protocol_succeeded(),
+            Err(error) if error.is_carrier_failure() => endpoint.carrier_failed(carrier),
             // The relay answered: the carrier works, whatever it said.
-            Err(error) if is_carrier_failure(error) => endpoint.carrier_failed(carrier),
             Err(_) => {}
         }
         result
@@ -686,185 +573,43 @@ impl RelayMetricsStream {
     }
 }
 
-/// Whether `error` says the carrier failed, rather than that the relay
-/// answered with a refusal.
-pub(crate) fn is_carrier_failure(error: &Error) -> bool {
-    match error {
-        Error::Remote { .. } => false,
-        Error::Status { source } => source.remote_retryable().is_none(),
-        _ => true,
-    }
-}
-
-/// Refuse a mapping from the start that this build cannot make, rather than
-/// ignore it. One when needed is best effort, and the default: without the
-/// feature it never starts.
-fn check_port_mapping(requested: PortMapping) -> Result<()> {
-    if requested == PortMapping::Always && !cfg!(feature = "port-mapping") {
-        return Err(Error::invalid_config("built without port-mapping support"));
-    }
-    Ok(())
-}
-
-/// Resolve one endpoint to every address it names.
-///
-/// The list, not just its first entry: a worker handed the whole list dials each
-/// candidate in turn, so a relay hostname with several records survives one of
-/// them being unreachable.
-async fn resolve(addr: &str) -> Result<ResolvedAddrs> {
-    resolve_addrs_async(addr)
-        .await
-        .context(AddressSnafu { addr })
-}
-
-/// Mark a finished worker as `Stopped`, unless it already reported why it will
-/// never come up. The status is a watch channel, so it keeps only the newest
-/// value: overwriting a `Failed(reason)` that the worker set on its way out
-/// would replace the only description of a permanent rejection the caller ever
-/// gets, leaving `wait_ready` to report a bare stop instead.
-fn settle_stopped(tx: &watch::Sender<TunnelStatus>) {
-    tx.send_if_modified(|status| match status {
-        TunnelStatus::Failed(_) => false,
-        _ => {
-            *status = TunnelStatus::Stopped;
-            true
+/// Two connected loopback TCP sockets with Nagle off: the end
+/// [`Client::connect_tcp`] hands its caller, and the end its worker forwards.
+async fn loopback_pair() -> std::io::Result<(TcpStream, TcpStream)> {
+    // Retain the bound socket until our own connection has been accepted;
+    // there is no reserve/drop/rebind race or reusable external listener.
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let stream = TcpStream::connect(listener.local_addr()?).await?;
+    let peer = stream.local_addr()?;
+    let accepted = loop {
+        let (candidate, address) = listener.accept().await?;
+        if address == peer {
+            break candidate;
         }
-    });
+    };
+    drop(listener);
+    stream.set_nodelay(true)?;
+    accepted.set_nodelay(true)?;
+    Ok((stream, accepted))
 }
 
-/// Bridge the worker's string status callback onto the handle's watch channel.
-///
-/// `StatusCallback` and `ClientStatusCallback` are the same boxed closure type,
-/// so both tunnel directions share this.
-fn watch_callback(tx: watch::Sender<TunnelStatus>) -> StatusCallback {
-    Box::new(move |status: &str| {
-        let _ = tx.send(TunnelStatus::from_callback(status));
-    })
-}
-
-/// What a spawned tunnel worker is given: its resolved endpoints, its key, the
-/// callback that publishes its status, and the token that stops it.
-struct WorkerContext {
-    local_addr: ResolvedAddrs,
-    remote_addr: RelayEndpoint,
-    key: Arc<str>,
-    status_callback: StatusCallback,
-    shutdown: CancellationToken,
-    diagnostics: Diagnostics,
-}
-
-/// A tunnel resolved and wired up, waiting only for the transport-specific
-/// worker that will drive it.
-///
-/// Register and connect, over TCP and UDP, are four workers with four different
-/// signatures but one lifecycle: spawn, publish status, settle as `Stopped`.
-/// This owns that lifecycle so each call site is left with just its own call.
-struct TunnelWorker {
-    local_addr: ResolvedAddrs,
-    remote_addr: RelayEndpoint,
-    key: Arc<str>,
-    shutdown: CancellationToken,
-    status_tx: watch::Sender<TunnelStatus>,
-    status_rx: watch::Receiver<TunnelStatus>,
-    diagnostics: Diagnostics,
-}
-
-impl TunnelWorker {
-    /// How this tunnel's direct setups go, if it has any: how it maps its
-    /// direct endpoint's port and whether it tries a shared local network
-    /// first, both noted in its diagnostics from the start; and what that
-    /// network carries: what a consumer asks for, and whether a provider
-    /// serves TCP.
-    fn direct_policy(
-        &self,
-        direct: bool,
-        port_mapping: PortMapping,
-        lan_first: bool,
-        lan_transport: LanTransport,
-        lan_tcp: bool,
-    ) -> DirectPolicy {
-        let port_mapping = if direct && cfg!(feature = "port-mapping") {
-            port_mapping
-        } else {
-            PortMapping::Off
-        };
-        let lan_first = direct && lan_first;
-        if port_mapping != PortMapping::Off {
-            self.diagnostics.port_mapping_requested(
-                port_mapping,
-                crate::network::NetworkHints::shared().generation(),
-            );
-        }
-        let lan_transport = if direct {
-            lan_transport
-        } else {
-            LanTransport::Quic
-        };
-        self.diagnostics.prefer_lan(lan_first, lan_transport);
-        DirectPolicy {
-            port_mapping,
-            lan_first,
-            lan_transport,
-            lan_tcp: direct && lan_tcp,
-        }
-    }
-
-    fn spawn<F, Fut>(self, start: F) -> LiveTunnel
-    where
-        F: FnOnce(WorkerContext) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send,
-    {
-        let Self {
-            local_addr,
-            remote_addr,
-            key,
-            shutdown,
-            status_tx,
-            status_rx,
-            diagnostics,
-        } = self;
-        let worker_shutdown = shutdown.clone();
-        let worker_diagnostics = diagnostics.clone();
-        let endpoint = remote_addr.clone();
-        let join = tokio::spawn(async move {
-            start(WorkerContext {
-                local_addr,
-                remote_addr,
-                key,
-                status_callback: watch_callback(status_tx.clone()),
-                shutdown: worker_shutdown,
-                diagnostics: worker_diagnostics.clone(),
-            })
-            .await;
-            worker_diagnostics.stop();
-            settle_stopped(&status_tx);
-        });
-        LiveTunnel::new(shutdown, join, status_rx, endpoint, diagnostics)
-    }
+/// The I/O bound of a status query. Queries share admission with recovery: a
+/// stalled status consumer must not occupy that budget for the legacy
+/// 30-second control I/O timeout.
+fn status_io_timeout() -> std::time::Duration {
+    control_io_timeout().min(std::time::Duration::from_secs(5))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn config_debug_redacts_credentials() {
-        let config = ClientConfig {
-            server: "localhost:7666".into(),
-            credential: "0123456789abcdefghijklmnopqrstuv".into(),
-            keep_alive: false,
-            namespace: None,
-        };
-        let debug = format!("{config:?}");
-        assert!(!debug.contains(&config.credential));
-        assert!(debug.contains("[redacted]"));
-    }
+    use pb_mapper_core::test_support::TEST_ADMIN_KEY_BYTES;
 
     #[test]
     fn admin_requires_administrator_credential() {
         let admin = Client::from_credential(
             "127.0.0.1:7666",
-            Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv"),
+            Credential::Admin(TEST_ADMIN_KEY_BYTES),
             false,
             None,
         );
@@ -880,5 +625,110 @@ mod tests {
             None,
         );
         assert!(matches!(temporary.admin(), Err(Error::NotAdministrator)));
+    }
+
+    /// A relay address that refuses every connection: a socket bound there
+    /// and never listening, which the caller keeps so nothing else takes it.
+    fn refusing_relay() -> (tokio::net::TcpSocket, std::net::SocketAddr) {
+        let held = tokio::net::TcpSocket::new_v4().unwrap();
+        held.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let relay = held.local_addr().unwrap();
+        (held, relay)
+    }
+
+    /// A connection asked to listen on port 0 says which port it got, for
+    /// either transport, and listens there: the relay need not be up for it.
+    #[tokio::test]
+    async fn a_connection_on_port_zero_says_where_it_listens() {
+        let (_held, relay) = refusing_relay();
+        let client = Client::from_credential(
+            relay.to_string(),
+            Credential::Admin(TEST_ADMIN_KEY_BYTES),
+            false,
+            None,
+        );
+        for transport in [Transport::Tcp, Transport::Udp] {
+            let connection = client
+                .connect_with_options(
+                    ConnectRequest {
+                        key: "anywhere".into(),
+                        local_addr: "127.0.0.1:0".into(),
+                        transport,
+                    },
+                    ConnectOptions {
+                        path: PathPolicy::RelayOnly,
+                        ..ConnectOptions::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let bound = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Some(bound) = connection.local_addr() {
+                        return bound;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(bound.ip().is_loopback() && bound.port() != 0, "{bound}");
+            if transport == Transport::Tcp {
+                TcpStream::connect(bound).await.unwrap();
+            }
+            connection.stop().await.unwrap();
+        }
+    }
+
+    /// A client on the other carrier is the same session, as a clone is: a
+    /// root rotation through either moves both, the relay accepting only the
+    /// new key from then on.
+    #[cfg(feature = "relay-quic")]
+    #[test]
+    fn a_carrier_sibling_shares_its_clients_credential() {
+        let tcp = Client::from_credential(
+            "127.0.0.1:7666",
+            Credential::Admin(TEST_ADMIN_KEY_BYTES),
+            false,
+            None,
+        );
+        let quic = tcp
+            .with_relay_transport(super::super::RelayTransport::Quic)
+            .unwrap();
+        let rotated = Credential::Admin([7; 32]);
+        quic.inner.set_credential(rotated);
+        assert_eq!(tcp.credential(), rotated);
+    }
+
+    /// A stream whose relay refuses every connection until its setup
+    /// deadline fails with why, not only with the deadline: the reason a
+    /// `connect_tcp` caller gets names the refusal the operating system gave.
+    #[tokio::test]
+    async fn an_unreachable_relay_fails_connect_tcp_with_its_cause() {
+        let (_held, relay) = refusing_relay();
+        let refused = TcpStream::connect(relay).await.unwrap_err().to_string();
+        let client = Client::from_credential(
+            relay.to_string(),
+            Credential::Admin(TEST_ADMIN_KEY_BYTES),
+            false,
+            None,
+        );
+        let (_stream, connection) = client
+            .connect_tcp(
+                "unreachable",
+                ConnectOptions {
+                    path: PathPolicy::RelayOnly,
+                    ..ConnectOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        let ready = connection
+            .wait_ready_timeout(std::time::Duration::from_secs(30))
+            .await;
+        let Err(Error::TunnelFailed { reason }) = ready else {
+            panic!("expected a failed tunnel, got {ready:?}");
+        };
+        assert!(reason.contains(&refused), "{reason}");
     }
 }

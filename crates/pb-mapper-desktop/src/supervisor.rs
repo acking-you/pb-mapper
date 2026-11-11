@@ -150,7 +150,19 @@ impl Reconnect {
                     drop_h265: true,
                 })
             }
-            _ => None,
+            // H.264, or H.265 already dropped.
+            ViewerReason::DecoderFailed
+            | ViewerReason::HostStopped
+            | ViewerReason::HostEnded
+            | ViewerReason::Revoked
+            | ViewerReason::SecureDesktop
+            | ViewerReason::HelperUnavailable
+            | ViewerReason::DisplayLost
+            | ViewerReason::InputFailed
+            | ViewerReason::ControlDenied
+            | ViewerReason::InputCongestion
+            | ViewerReason::StalePresentation
+            | ViewerReason::DisplayChanging => None,
         }
     }
     /// After a connect failed at `now`: when to try again, or `None` to give
@@ -158,7 +170,12 @@ impl Reconnect {
     pub fn refused(&mut self, failure: &ConnectError, now: Instant) -> Option<Retry> {
         match failure {
             ConnectError::Transport(_) | ConnectError::Busy => self.backoff(now),
-            _ => None,
+            ConnectError::IdentityChanged
+            | ConnectError::VersionMismatch
+            | ConnectError::Denied
+            | ConnectError::InvalidRequest
+            | ConnectError::Cancelled
+            | ConnectError::Protocol(_) => None,
         }
     }
     fn backoff(&mut self, now: Instant) -> Option<Retry> {
@@ -186,6 +203,25 @@ enum Next {
     Now,
     After(Duration),
     Done,
+}
+
+/// What [`Supervisor::ended`] keeps from one poll of a viewer to the next.
+struct Following {
+    /// The remembered control choice went to this viewer, or was not needed.
+    handed: bool,
+    /// Control lost on the host's side is asked for again.
+    again: bool,
+    /// When control was last asked for.
+    asked: Option<Instant>,
+}
+impl Default for Following {
+    fn default() -> Self {
+        Self {
+            handed: false,
+            again: true,
+            asked: None,
+        }
+    }
 }
 
 /// A viewer kept connected by a [`Reconnect`] policy. It connects, waits for
@@ -257,59 +293,75 @@ impl Supervisor {
     /// Control is the app's to choose ([`ViewerStatus::control_wanted`]):
     /// the remembered choice goes to a viewer the app has not asked yet, once
     /// its picture is current, and the supervisor never asks against what the
-    /// app asked. Control the app wants but lost on the host's side (a pause,
-    /// input congestion, a refusal) is asked for again, at most once a second,
-    /// until the host's input fails or the host allows no control, as in the
-    /// app; holding control again resumes that. The next viewer starts with
-    /// the app's choice, unless those requests had stopped.
+    /// app asked, even between a poll and the request it led to. Control the
+    /// app wants but lost on the host's side (a pause, input congestion, a
+    /// refusal) is asked for again, at most once a second, until the host's
+    /// input fails or the host allows no control, as in the app; holding
+    /// control again resumes that. The next viewer starts with the app's
+    /// choice, unless those requests had stopped.
     pub async fn ended(&mut self, viewer: &Viewer) -> ViewerStatus {
         let mut ticks = tokio::time::interval(POLL);
-        let mut handed = false;
-        // Control lost on the host's side is asked for again.
-        let mut again = true;
-        let mut asked: Option<Instant> = None;
+        let mut following = Following::default();
         loop {
             ticks.tick().await;
             let status = viewer.status();
-            if status.controlling {
-                again = true;
-            } else if status.reason == Some(ViewerReason::InputFailed)
-                || (status.fresh && !status.control_allowed)
-            {
-                again = false;
+            let Some(stalled) = self.follow(viewer, &status, &mut following) else {
+                continue;
+            };
+            if stalled {
+                let _ = viewer.stop().await;
             }
-            if !handed && status.control_wanted.is_none() && status.fresh {
-                handed = true;
-                asked = Some(Instant::now());
-                if self.control && again && viewer.request_control(true).is_err() {
-                    // Stopped meanwhile: the choice is kept for the next one.
-                    handed = false;
-                }
-            }
-            self.control = status.control_wanted.unwrap_or(self.control) && again;
-            let stalled = self.reconnect.stalled(&status);
-            if stalled || status.state == ViewerState::Stopped {
-                if stalled {
-                    let _ = viewer.stop().await;
-                }
-                let retry = self.reconnect.after(&status, Instant::now());
-                self.schedule(retry);
-                return status;
-            }
-            self.config.quality = status.quality;
-            if status.state == ViewerState::Streaming && status.presented.is_some() {
-                self.reconnect.connected();
-            }
-            if again
-                && status.control_wanted == Some(true)
-                && status.fresh
-                && !status.controlling
-                && asked.is_none_or(|at| at.elapsed() >= CONTROL_RETRY)
-            {
-                asked = Some(Instant::now());
-                let _ = viewer.request_control(true);
+            let retry = self.reconnect.after(&status, Instant::now());
+            self.schedule(retry);
+            return status;
+        }
+    }
+    /// One poll of [`Self::ended`], on the `status` it just read of
+    /// `viewer`: `Some(stalled)` once the viewer stopped or stalled. A
+    /// request for control is made only if the app's choice is still the
+    /// one `status` read when the viewer takes it.
+    fn follow(
+        &mut self,
+        viewer: &Viewer,
+        status: &ViewerStatus,
+        following: &mut Following,
+    ) -> Option<bool> {
+        if status.controlling {
+            following.again = true;
+        } else if status.reason == Some(ViewerReason::InputFailed)
+            || (status.fresh && !status.control_allowed)
+        {
+            following.again = false;
+        }
+        if !following.handed && status.control_wanted.is_none() && status.fresh {
+            following.handed = true;
+            following.asked = Some(Instant::now());
+            if self.control && following.again && viewer.ask_control(None).is_err() {
+                // Stopped meanwhile: the choice is kept for the next one.
+                following.handed = false;
             }
         }
+        self.control = status.control_wanted.unwrap_or(self.control) && following.again;
+        let stalled = self.reconnect.stalled(status);
+        if stalled || status.state == ViewerState::Stopped {
+            return Some(stalled);
+        }
+        self.config.quality = status.quality;
+        if status.state == ViewerState::Streaming && status.presented.is_some() {
+            self.reconnect.connected();
+        }
+        if following.again
+            && status.control_wanted == Some(true)
+            && status.fresh
+            && !status.controlling
+            && following
+                .asked
+                .is_none_or(|at| at.elapsed() >= CONTROL_RETRY)
+        {
+            following.asked = Some(Instant::now());
+            let _ = viewer.ask_control(Some(true));
+        }
+        None
     }
     /// The control choice the next viewer starts with, asked for once its
     /// picture is current unless the app asked that viewer first. During
@@ -341,8 +393,11 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DecoderInfo, DesktopKind, ViewerStats};
-    use std::io;
+    use crate::{
+        DecoderInfo, DesktopKind, ViewerStats,
+        test_util::{present, status_until},
+    };
+    use std::{io, sync::Arc};
 
     /// What happened, at a time in seconds.
     enum Event {
@@ -597,7 +652,7 @@ mod tests {
             // Thread C takes its time over a grant, so the host's report of
             // the failure stays the viewer's for several polls after a
             // request: the window a supervisor must not act in.
-            builder = builder.admission(std::sync::Arc::new(Unhurried));
+            builder = builder.admission(Arc::new(Unhurried));
         }
         let host = builder
             .backend(move || Ok(Screen { failing }))
@@ -618,36 +673,6 @@ mod tests {
         (relay, host, supervisor, viewer)
     }
 
-    /// A renderer that shows every picture, until the session ends.
-    fn present(viewer: &Viewer) -> std::thread::JoinHandle<()> {
-        let consumer = viewer.video_sink().attach().unwrap();
-        std::thread::spawn(move || {
-            loop {
-                match consumer.next(Duration::from_millis(50), 1 << 20) {
-                    crate::Pull::Unit(unit) => {
-                        consumer.presented(unit.generation, unit.frame_id);
-                    }
-                    crate::Pull::Closed => break,
-                    _ => {}
-                }
-            }
-        })
-    }
-
-    async fn until(viewer: &Viewer, done: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let status = viewer.status();
-                if done(&status) {
-                    return status;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap()
-    }
-
     /// Longer than a poll and the pause between two requests together.
     const SETTLED: Duration = Duration::from_millis(250 + 2 * 1000);
 
@@ -657,9 +682,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn control_follows_what_the_viewer_last_asked() {
         let (_relay, host, mut supervisor, viewer) = supervised("desktop-supervisor", false).await;
-        let renderer = present(&viewer);
+        let renderer = present(&viewer, Arc::default());
         let script = async {
-            until(&viewer, |status| status.controlling).await;
+            status_until(&viewer, |status| status.controlling).await;
             viewer.request_control(false).unwrap();
             tokio::time::sleep(SETTLED).await;
             assert!(!viewer.status().controlling, "control was taken back");
@@ -679,9 +704,9 @@ mod tests {
         let (_relay, host, mut supervisor, viewer) =
             supervised("desktop-supervisor-early", false).await;
         viewer.request_control(false).unwrap();
-        let renderer = present(&viewer);
+        let renderer = present(&viewer, Arc::default());
         let script = async {
-            until(&viewer, |status| status.fresh).await;
+            status_until(&viewer, |status| status.fresh).await;
             tokio::time::sleep(SETTLED).await;
             let status = viewer.status();
             assert!(!status.controlling && status.control_wanted == Some(false));
@@ -692,6 +717,37 @@ mod tests {
         renderer.join().unwrap();
     }
 
+    /// The supervisor acts on the status it read a moment before, and a
+    /// choice the app made since stands: a view-only choice made in between
+    /// is overridden neither by handing the remembered choice to a viewer
+    /// the app had not asked yet, nor by asking again for control wanted
+    /// but not held.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_choice_made_after_the_supervisor_read_the_status_stands() {
+        let (_relay, host, mut supervisor, viewer) =
+            supervised("desktop-supervisor-stale", false).await;
+        let renderer = present(&viewer, Arc::default());
+        let read = status_until(&viewer, |status| status.fresh).await;
+        assert_eq!(read.control_wanted, None);
+        viewer.request_control(false).unwrap();
+        let mut following = Following::default();
+        assert_eq!(supervisor.follow(&viewer, &read, &mut following), None);
+        let wanted = viewer.status().control_wanted;
+        assert_eq!(wanted, Some(false), "handed the remembered choice");
+
+        viewer.request_control(true).unwrap();
+        // Not granted yet: the host has not even heard the request.
+        let read = viewer.status();
+        assert!(read.control_wanted == Some(true) && read.fresh && !read.controlling);
+        viewer.request_control(false).unwrap();
+        following.asked = None;
+        assert_eq!(supervisor.follow(&viewer, &read, &mut following), None);
+        let wanted = viewer.status().control_wanted;
+        assert_eq!(wanted, Some(false), "asked again for control given up");
+        host.stop().await.unwrap();
+        renderer.join().unwrap();
+    }
+
     /// After the host's input failed, the supervisor asks for control no
     /// more, as the app does, but never undoes the user's own request: one
     /// made while the host still reports the failure is granted and kept.
@@ -699,22 +755,22 @@ mod tests {
     async fn an_input_failure_stops_automatic_requests_not_the_users() {
         let (_relay, host, mut supervisor, viewer) =
             supervised("desktop-supervisor-input", true).await;
-        let renderer = present(&viewer);
+        let renderer = present(&viewer, Arc::default());
         let script = async {
-            let status = until(&viewer, |status| status.controlling && status.fresh).await;
+            let status = status_until(&viewer, |status| status.controlling && status.fresh).await;
             let scroll = crate::Input::Wheel {
                 horizontal: 0,
                 vertical: 1,
             };
             viewer.input(status.generation, &[scroll]).unwrap();
-            until(&viewer, |status| {
+            status_until(&viewer, |status| {
                 !status.controlling && status.reason == Some(ViewerReason::InputFailed)
             })
             .await;
             tokio::time::sleep(SETTLED).await;
             assert!(!viewer.status().controlling, "asked again by itself");
             viewer.request_control(true).unwrap();
-            until(&viewer, |status| status.controlling).await;
+            status_until(&viewer, |status| status.controlling).await;
             tokio::time::sleep(SETTLED).await;
             let status = viewer.status();
             assert!(status.controlling && status.control_wanted == Some(true));

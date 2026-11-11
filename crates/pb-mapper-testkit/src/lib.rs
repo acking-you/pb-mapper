@@ -9,7 +9,7 @@
 //!
 //! ```ignore
 //! let harness = TunnelHarness::start(Transport::Tcp, false).await;
-//! run_echo_delay::<TcpStreamProvider, _>(harness.tunnel_addr(), 10).await;
+//! run_framed_tcp_echo(harness.tunnel_addr(), 10).await;
 //! ```
 //!
 //! For anything the one-liner cannot express — a temporary credential, two
@@ -26,6 +26,10 @@
 //!
 //! A case that needs a slower network puts a [`shaped_link`] hop, with its
 //! delay and rate, in front of a [`Relay`] and connects through the hop.
+//!
+//! A case about the SDK rather than the CLI entry points builds its own
+//! backend with [`tcp_echo`] or [`udp_echo`], and its tunnel with
+//! [`admin_client`], [`publish`] and [`subscribe`].
 //!
 //! Everything here is a readiness probe rather than a sleep: [`Relay`] polls the
 //! `Keys` status to see a registration, and [`Tunnel::start`] returns only once a
@@ -48,22 +52,30 @@ use std::time::Duration;
 
 use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
 use pb_mapper_core::checksum::{Credential, set_process_msg_header_key};
-use pb_mapper_core::config::init_tracing;
+use pb_mapper_core::test_support::TEST_ADMIN_KEY_BYTES;
 
 mod control;
 mod echo;
+/// The `pb-mapper` binary's own log setup, so tests log as it does. Included
+/// by path rather than depended on, since the binary's crate ships and this
+/// one is test support; the file uses only `pb-mapper-core` and `tracing`.
+#[path = "../../pb-mapper-cli/src/bin/pb-mapper/logging.rs"]
+mod logging;
+mod poll;
 mod relay;
+mod sdk;
 mod shaped;
 mod traffic;
 mod tunnel;
 
 pub use control::{V2ControlSpec, register_v2_control};
-pub use relay::Relay;
-pub use shaped::{Shape, shaped_link};
+pub use echo::{Echo, tcp_echo, udp_echo};
+pub use relay::{Relay, loopback_direct, loopback_quic};
+pub use sdk::{admin_client, publish, subscribe};
+pub use shaped::{Shape, ShapedLink, shaped_link};
 pub use traffic::{
-    TimerTickGuard, connected_udp_socket, gen_random_msg, probe_udp_socket, raw_tcp_probe,
-    run_echo_delay, run_raw_tcp_echo, run_udp_datagram_echo, tagged_echo,
-    wait_until_udp_socket_forwards,
+    connected_udp_socket, gen_random_msg, probe_udp_socket, raw_tcp_probe, run_framed_tcp_echo,
+    run_raw_tcp_echo, run_udp_datagram_echo, tagged_echo, wait_until_udp_socket_forwards,
 };
 pub use tunnel::{Tunnel, TunnelHarness, TunnelSpec};
 
@@ -71,7 +83,8 @@ pub use tunnel::{Tunnel, TunnelHarness, TunnelSpec};
 ///
 /// A fixed key rather than a random one: it is also the process credential (see
 /// [`init_test_env`]), and one value keeps that a single write per process.
-pub const TEST_ADMIN_KEY: &str = "0123456789abcdefghijklmnopqrstuv";
+/// The crates below this one test with the same key.
+pub use pb_mapper_core::test_support::TEST_ADMIN_KEY;
 
 /// How long any readiness probe polls before failing the test.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -91,25 +104,24 @@ pub const RAW_TCP_PAYLOAD_MAX: usize = 20_000;
 
 /// Tracing plus the process credential, set up once per test process.
 ///
-/// The framing helpers in this crate ([`run_echo_delay`] and the TCP probe) write
-/// their own checksummed frames, and `checksum_for` fails closed without a
-/// process credential — so one has to exist before any case runs. It is
+/// The framing helper in this crate, [`run_framed_tcp_echo`], writes its own
+/// checksummed frames, and `checksum_for` fails closed without a process
+/// credential — so one has to exist before any case runs. It is
 /// unrelated to which credential a tunnel authenticates with: `pb-mapper`'s local
 /// side is byte-transparent, so these frames are only ever read back by the same
 /// process that wrote them.
 ///
-/// This establishes the baseline for the whole test binary rather than taking
-/// `PROCESS_CREDENTIAL_TEST_LOCK` around a write, which is why the `LazyLock` is
-/// the whole synchronisation: it runs once, before any case can observe the
-/// credential, and never writes again. **The consequence is a rule for test
-/// files: a target that uses this crate must not also set the process credential
-/// itself.** There is no lock to coordinate with — a case that wrote its own
-/// would corrupt the framing under every concurrent case in the binary. A case
-/// that needs a different credential should pass it to
+/// This establishes the baseline for the whole test binary: the `LazyLock` runs
+/// once, before any case can observe the credential, and never writes again.
+/// A case that needs a different credential for a tunnel passes it to
 /// [`TunnelSpec::credential`], which is per tunnel and touches nothing global.
+/// A case that sets or clears the process credential itself holds
+/// [`PROCESS_CREDENTIAL_TEST_LOCK`](pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK),
+/// and so does every case in its binary that relies on the credential: the
+/// framing in every concurrent case reads it.
 pub fn init_test_env() {
     static TEST_ENV: LazyLock<()> = LazyLock::new(|| {
-        init_tracing();
+        logging::init_tracing();
         set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
     });
     *TEST_ENV
@@ -117,12 +129,12 @@ pub fn init_test_env() {
 
 /// The administrator credential matching [`TEST_ADMIN_KEY`].
 pub fn admin_credential() -> Credential {
-    Credential::Admin(*TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap())
+    Credential::Admin(TEST_ADMIN_KEY_BYTES)
 }
 
 /// The 32 raw bytes of [`TEST_ADMIN_KEY`], as [`pb_mapper_auth::AuthRuntime`] wants them.
 pub fn admin_key_bytes() -> [u8; 32] {
-    *TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap()
+    TEST_ADMIN_KEY_BYTES
 }
 
 /// A private authentication state directory, unique per relay.
@@ -176,9 +188,10 @@ const RESERVED_PORTS_PER_PROCESS: u16 = 64;
 ///
 /// TCP and UDP have separate port spaces, so this has to use the same protocol the
 /// caller will bind. A relay and an echo server keep the socket they bound; this is
-/// for `connect`, whose bind happens inside the client and cannot be handed a
-/// pre-bound socket. A test that can own its socket outright should do that instead
-/// of calling this.
+/// for `connect`, whose bind happens inside the client — which binds the address
+/// again after a local listener failure — so it cannot be handed a pre-bound
+/// socket. A test that can own its socket outright should do that instead of
+/// calling this.
 ///
 /// The socket still has to be dropped before the client binds, so the port is not
 /// held for the caller — what this guarantees is that nothing else is going to pick

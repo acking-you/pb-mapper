@@ -4,9 +4,10 @@
 //! decoder or a display. Receipts are consumed here and by the QoS controller
 //! only: they grant, renew or prove nothing about input, and no authorisation
 //! method takes a seq.
-use crate::{Result, VideoCodec, error};
+use crate::VideoCodec;
 use std::{
     collections::VecDeque,
+    fmt,
     time::{Duration, Instant},
 };
 
@@ -32,6 +33,34 @@ pub(crate) const DELIVERY_FACTOR: f64 = 1.25;
 /// A JPEG session's fixed window: pictures are independent and few.
 pub(crate) const JPEG_WINDOW_FRAMES: usize = 4;
 pub(crate) const JPEG_WINDOW_BYTES: usize = 2 * 1024 * 1024;
+
+const _: () = assert!(
+    FRAME_WINDOW_MIN <= FRAME_WINDOW_MAX,
+    "window clamps the frame count between them"
+);
+const _: () = assert!(
+    BYTE_WINDOW_MIN <= BYTE_WINDOW_MAX,
+    "window clamps the normal byte window between them"
+);
+const _: () = assert!(
+    BYTE_WINDOW_CLAMP_MIN <= BYTE_WINDOW_MIN,
+    "the delivery clamp's upper bound is the normal window, which is at least BYTE_WINDOW_MIN"
+);
+const _: () = assert!(
+    ACK_SAMPLES_MIN >= 1,
+    "ack_queue takes the median of at least this many delays"
+);
+
+/// A receipt for a seq beyond the last one admitted: the viewer receipted
+/// video that was never sent, which breaks the protocol.
+#[derive(Debug)]
+pub(crate) struct ReceiptAhead;
+impl fmt::Display for ReceiptAhead {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("receipt for video that was never sent")
+    }
+}
+impl std::error::Error for ReceiptAhead {}
 
 /// A video message admitted and written, not yet receipted.
 struct Sent {
@@ -77,6 +106,8 @@ pub(crate) struct CreditLedger {
     /// When the delivery rate began to be measured.
     delivery_since: Option<Instant>,
     last_receipt: Instant,
+    /// Reused by `ack_queue` for the delays it takes the median of.
+    delays: Vec<Duration>,
 }
 impl CreditLedger {
     pub fn new(now: Instant) -> Self {
@@ -91,6 +122,7 @@ impl CreditLedger {
             delivered: VecDeque::new(),
             delivery_since: None,
             last_receipt: now,
+            delays: Vec::new(),
         }
     }
 
@@ -100,7 +132,7 @@ impl CreditLedger {
     /// the measured delivery rate instead: that bounds the queue between
     /// probes, while fps and bitrate decisions stay on the probe.
     pub fn window(
-        &self,
+        &mut self,
         codec: VideoCodec,
         pace_fps: u32,
         expected_bps: u64,
@@ -168,9 +200,9 @@ impl CreditLedger {
     }
 
     /// A cumulative receipt: every unit up to `seq` was read off the network.
-    pub fn on_receipt(&mut self, seq: u64, now: Instant) -> Result<()> {
+    pub fn on_receipt(&mut self, seq: u64, now: Instant) -> Result<(), ReceiptAhead> {
         if seq > self.last_admitted {
-            return Err(error("receipt for video that was never sent"));
+            return Err(ReceiptAhead);
         }
         if seq <= self.acked {
             return Ok(());
@@ -248,7 +280,7 @@ impl CreditLedger {
     /// `ACK_SAMPLE_WINDOW`, or over the newest three receipts when fewer came
     /// in it: a slow link receipts seldom, and its queue must not vanish
     /// between two receipts. Zero before three receipts.
-    pub fn ack_queue(&self, base_rtt: Duration, now: Instant) -> Duration {
+    pub fn ack_queue(&mut self, base_rtt: Duration, now: Instant) -> Duration {
         if self.ack_samples.len() < ACK_SAMPLES_MIN {
             return Duration::ZERO;
         }
@@ -258,15 +290,21 @@ impl CreditLedger {
             .filter(|(at, _)| now.saturating_duration_since(*at) <= ACK_SAMPLE_WINDOW)
             .count()
             .max(ACK_SAMPLES_MIN);
-        let mut delays: Vec<Duration> = self
-            .ack_samples
-            .iter()
-            .rev()
-            .take(recent)
-            .map(|(_, delay)| *delay)
-            .collect();
-        delays.sort_unstable();
-        delays[delays.len() / 2].saturating_sub(base_rtt)
+        self.delays.clear();
+        self.delays.extend(
+            self.ack_samples
+                .iter()
+                .rev()
+                .take(recent)
+                .map(|(_, delay)| *delay),
+        );
+        if self.delays.is_empty() {
+            return Duration::ZERO;
+        }
+        // The middle of a non-empty list; the value a sort would put there.
+        let middle = self.delays.len() / 2;
+        let (_, median, _) = self.delays.select_nth_unstable(middle);
+        median.saturating_sub(base_rtt)
     }
 
     /// Bits per second receipted over the last `DELIVERY_WINDOW`.

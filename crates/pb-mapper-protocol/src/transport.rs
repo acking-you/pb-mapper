@@ -1,9 +1,11 @@
 //! Relay carriers. Dispatch once before forwarding; control I/O may use the enum.
 use serde::{Deserialize, Serialize};
+use snafu::Snafu;
 use std::{
     io,
     net::SocketAddr,
     pin::Pin,
+    str::FromStr,
     task::{Context, Poll},
 };
 use tokio::{
@@ -21,6 +23,47 @@ pub enum RelayTransport {
     #[default]
     Tcp,
     Quic,
+}
+
+impl RelayTransport {
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Quic => "quic",
+        }
+    }
+}
+
+impl FromStr for RelayTransport {
+    type Err = UnknownLabel;
+
+    /// The carrier whose [`RelayTransport::as_str`] is `label`, case and all.
+    fn from_str(label: &str) -> Result<Self, UnknownLabel> {
+        [Self::Tcp, Self::Quic]
+            .into_iter()
+            .find(|transport| transport.as_str() == label)
+            .ok_or_else(|| UnknownLabel::new(label))
+    }
+}
+
+/// A label that names no value of the option it was parsed as.
+#[derive(Clone, Debug, Eq, PartialEq, Snafu)]
+#[snafu(display("unknown value `{label}`"))]
+pub struct UnknownLabel {
+    label: String,
+}
+
+impl UnknownLabel {
+    /// The failure to parse `label`, kept as it was given.
+    pub fn new(label: impl Into<String>) -> Self {
+        UnknownLabelSnafu { label }.build()
+    }
+
+    /// The label as it was given.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
 }
 
 #[derive(Debug)]

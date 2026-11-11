@@ -6,6 +6,10 @@ use pb_mapper_client::sdk::RelayTransport;
 use serde::{Deserialize, Serialize};
 
 const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v7";
+const _: () = assert!(
+    super::names_protocol(PIPE, super::HELPER_PROTOCOL),
+    "the background pipe's name ends in .v and HELPER_PROTOCOL"
+);
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const FILE_NAME: &str = "background-host.dpapi";
 const REVOKED_MARKER: &str = "background-host.revoked";
@@ -51,12 +55,19 @@ fn is_true(value: &bool) -> bool {
 }
 impl std::fmt::Debug for Options {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            server,
+            credential: _,
+            relay_transport,
+            settings,
+            lan_first,
+        } = self;
         f.debug_struct("Options")
-            .field("server", &self.server)
+            .field("server", server)
             .field("credential", &"[redacted]")
-            .field("relay_transport", &self.relay_transport)
-            .field("settings", &self.settings)
-            .field("lan_first", &self.lan_first)
+            .field("relay_transport", relay_transport)
+            .field("settings", settings)
+            .field("lan_first", lan_first)
             .finish()
     }
 }
@@ -110,7 +121,7 @@ struct Response {
 }
 
 async fn call(command: Command) -> Result<Snapshot> {
-    super::status().ensure_ready()?;
+    super::ensure_ready()?;
     let config = configuration()?;
     let mut pipe = pipe::connect(PIPE)?;
     os::verify_server(&pipe, &config.helper_executable, None)?;
@@ -165,7 +176,7 @@ pub async fn stop() -> Result<Snapshot> {
 /// handoff that its UI has not observed. The service checks the scope atomically.
 /// Older helpers reject this operation; never fall back to unscoped revocation.
 pub async fn revoke_scope(server: String, namespace: Option<u64>) -> Result<Snapshot> {
-    let helper = super::status();
+    let helper = super::readiness::status_with(false);
     if !helper.installed || helper.startup_disabled {
         let root = os::install_root()?;
         // An absent/stopped helper with no durable grant has nothing to revoke.
@@ -186,13 +197,13 @@ pub async fn restore_display_mode() -> Result<Snapshot> {
 }
 
 #[cfg(feature = "windows-helper")]
-#[path = "background_service.rs"]
 mod service;
 #[cfg(feature = "windows-helper")]
-pub(super) use service::{revoke_installation, run};
+mod storage;
+#[cfg(feature = "windows-helper")]
+pub(super) use {service::run, storage::revoke_installation};
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

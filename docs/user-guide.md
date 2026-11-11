@@ -377,6 +377,13 @@ connection, which also interrupts the healthy ones; `--conn-id` retires exactly
 one, as reported by `connection list`. The relay sweeps expired leases on its
 own, so this is the manual override, not the routine path.
 
+The relay holds an ended registration's ID back for 10 seconds before another
+connection may take it, so a publisher's replacement does not take the ID of
+the connection it replaces, and `--conn-id` aimed at a connection that has gone
+retires nothing. Past those 10 seconds the ID can name a newer connection:
+before retiring by ID, check that it still has the `generation` you saw
+(`connection list --output json`).
+
 ## Run (GUI)
 
 The Flutter UI shares and connects services without the command line. Start it from `ui/`:

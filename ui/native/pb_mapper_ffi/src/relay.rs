@@ -11,24 +11,24 @@
 //! holds up nothing else.
 
 use std::ffi::c_char;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use pb_mapper_auth::generate_admin_key;
 use pb_mapper_client::sdk::{
     Admin, AuthStatusInfo, Client, ConnectionInfo, Error as SdkError, IssuedKey, KeyMetadata,
-    LegacyProtocol, QUIC_UNAVAILABLE, RelayDiagnostics, RelayTransport, ServiceInfo,
-    SessionObservation,
+    LegacyProtocol, RelayDiagnostics, RelayTransport, ServiceInfo, SessionObservation,
 };
 use pb_mapper_core::checksum::{Credential, get_process_credential, parse_credential};
 use pb_mapper_core::config::resolve_pb_mapper_server_async;
 use serde_json::{Value, json};
 
 use crate::ctl::Origin;
-use crate::error::CtlError;
+use crate::error::{CtlError, sdk_error};
 use crate::events;
 use crate::handle::PbMapperHandle;
-use crate::response::{err_ctl, err_null_handle, ok_data, parse_c_string};
-use crate::state::AppConfig;
+use crate::response::{Reply, parse_c_string, respond};
+use crate::state::{AppConfig, relay_client_for};
 
 /// Long enough for an inventory paged across a large relay, short enough
 /// that a relay that stopped answering is reported rather than waited on.
@@ -49,99 +49,88 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
     handle: *mut PbMapperHandle,
     request: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-    let request = match parse_c_string(request, "request")
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).map_err(bad_request))
-    {
-        Ok(request) => request,
-        Err(error) => return err_ctl(&error),
-    };
-
-    let handle = unsafe { &*handle };
-    let state = handle.state.clone();
-    let result = handle.runtime.block_on(async move {
-        let config = state.lock().await.get_config_status().await;
-        let credential = get_process_credential();
-        // The key a rotation retires: the tunnels still holding it are the
-        // ones to start again on the new key.
-        let retired = credential.as_ref().ok().copied();
-        let relay = Target {
-            server: &config.server_address,
-            keep_alive: config.keep_alive_enabled,
-            transport: config.relay_transport,
-        };
-        let outcome = call(&relay, credential, &request).await?;
-        let mut data = outcome.data;
-        // A rotated administrator key is the only one that relay accepts
-        // now: this computer switches to it, or every later call would fail.
-        // Unless Settings moved it to another relay or credential while the
-        // rotation ran — then the key is not this computer's to save, and
-        // saving it would undo that change — or saving it fails. Either way
-        // the rotation happened, so it is answered as one: `"saved"` tells
-        // the page whether to keep the key for the person, and
-        // `"saveError"` why it could not be saved. Once saved, `"restart"`
-        // names this computer's tunnels on that relay: those still holding
-        // the retired key, for the page to start again on the new one, and
-        // those on a temporary credential the rotation erased, which only
-        // a newly issued one can bring back.
-        if let Some(key) = outcome.rotated_key {
-            // Where that relay is, to know its tunnels by address as well as
-            // by name. Resolved before the state is locked: it can be slow.
-            let endpoint = resolve_pb_mapper_server_async(Some(&config.server_address))
-                .await
-                .ok();
-            let mut state = state.lock().await;
-            let mut save_error = None;
-            // Only the relay settings matter: a preference of this
-            // computer's changed meanwhile is kept as it is now.
-            let current = state.get_config_status().await;
-            let saved = current.same_relay(&config)
-                && match state
-                    .update_config(AppConfig {
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let request = unsafe { parse_c_string(request, "request") }
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).map_err(bad_request))?;
+        let state = &handle.state;
+        let data = handle.runtime.block_on(async move {
+            let config = state.lock().await.get_config_status();
+            let credential = get_process_credential();
+            // The key a rotation retires: the tunnels still holding it are the
+            // ones to start again on the new key.
+            let retired = credential.as_ref().ok().copied();
+            let relay = Target {
+                server: &config.server_address,
+                keep_alive: config.keep_alive_enabled,
+                transport: config.relay_transport,
+            };
+            let outcome = call(&relay, credential, &request).await?;
+            let mut data = outcome.data;
+            // A rotated administrator key is the only one that relay accepts
+            // now: this computer switches to it, or every later call would fail.
+            // Unless Settings moved it to another relay or credential while the
+            // rotation ran — then the key is not this computer's to save, and
+            // saving it would undo that change — or saving it fails. Either way
+            // the rotation happened, so it is answered as one: `"saved"` tells
+            // the page whether to keep the key for the person, and
+            // `"saveError"` why it could not be saved. Once saved, `"restart"`
+            // names this computer's tunnels on that relay: those still holding
+            // the retired key, for the page to start again on the new one, and
+            // those on a temporary credential the rotation erased, which only
+            // a newly issued one can bring back.
+            if let Some(key) = outcome.rotated_key {
+                // Where that relay is, to know its tunnels by address as well as
+                // by name. Resolved before the state is locked: it can be slow.
+                let endpoint = resolve_pb_mapper_server_async(Some(&config.server_address))
+                    .await
+                    .ok();
+                let mut state = state.lock().await;
+                let mut save_error = None;
+                // Only the relay settings matter: a preference of this
+                // computer's changed meanwhile is kept as it is now.
+                let current = state.get_config_status();
+                let saved = current.same_relay(&config)
+                    && match state.update_config(AppConfig {
                         msg_header_key: key,
                         ..current
-                    })
-                    .await
-                {
-                    Ok(()) => true,
-                    Err(error) => {
-                        tracing::error!("Saving the rotated administrator key failed: {error}");
-                        save_error = Some(error.to_string());
-                        false
+                    }) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            tracing::error!("Saving the rotated administrator key failed: {error}");
+                            save_error = Some(error.to_string());
+                            false
+                        }
+                    };
+                let restart = retired.filter(|_| saved).map(|retired| {
+                    state.tunnels_on(&config.server_address, endpoint.as_ref(), retired)
+                });
+                drop(state);
+                if saved {
+                    events::emit(events::ChangeKind::Config, None, Origin::Ui);
+                }
+                if let Some(fields) = data.as_object_mut() {
+                    fields.insert("saved".to_owned(), saved.into());
+                    if let Some(error) = save_error {
+                        fields.insert("saveError".to_owned(), error.into());
                     }
-                };
-            let restart = retired.filter(|_| saved).map(|retired| {
-                state.tunnels_on(&config.server_address, endpoint.as_ref(), retired)
-            });
-            drop(state);
-            if saved {
-                events::emit(events::ChangeKind::Config, None, Origin::Ui);
-            }
-            if let Some(fields) = data.as_object_mut() {
-                fields.insert("saved".to_owned(), saved.into());
-                if let Some(error) = save_error {
-                    fields.insert("saveError".to_owned(), error.into());
-                }
-                if let Some(tunnels) = restart {
-                    fields.insert(
-                        "restart".to_owned(),
-                        json!({
-                            "shares": tunnels.shares,
-                            "connections": tunnels.connections,
-                            "stranded": tunnels.stranded,
-                        }),
-                    );
+                    if let Some(tunnels) = restart {
+                        fields.insert(
+                            "restart".to_owned(),
+                            json!({
+                                "shares": tunnels.shares,
+                                "connections": tunnels.connections,
+                                "stranded": tunnels.stranded,
+                            }),
+                        );
+                    }
                 }
             }
-        }
-        Ok::<_, CtlError>(data)
-    });
-    match result {
-        Ok(data) => ok_data(data),
-        Err(error) => err_ctl(&error),
-    }
+            Ok::<_, CtlError>(data)
+        })?;
+        Ok(Reply::Data(data))
+    })
 }
 
 /// What an operation answered, and the administrator key it rotated to, if
@@ -203,9 +192,13 @@ impl Target<'_> {
     /// A client of this relay as `credential`. Clients of one relay and
     /// carrier share the process's connections to it, the tunnels' too.
     fn client(&self, credential: Credential) -> Result<Client, CtlError> {
-        Client::from_credential(self.server, credential, self.keep_alive, None)
-            .with_relay_transport(self.transport)
-            .map_err(sdk_error)
+        relay_client_for(
+            self.server,
+            credential,
+            self.keep_alive,
+            None,
+            self.transport,
+        )
     }
 }
 
@@ -377,13 +370,7 @@ async fn rotate(relay: &Target<'_>, old: Credential, admin: &Admin) -> Result<Ou
             .await
         {
             Ok(Ok(key)) => return Ok(rotated(key)),
-            // Refused before the request left this computer: nothing changed.
-            Ok(Err(
-                error @ (SdkError::NotAdministrator
-                | SdkError::InvalidConfig { .. }
-                | SdkError::Address { .. }
-                | SdkError::Connect { .. }),
-            )) => return Err(sdk_error(error)),
+            Ok(Err(error)) if never_sent(&error) => return Err(sdk_error(error)),
             Ok(Err(error)) => error.to_string(),
             Err(_) => format!(
                 "{server} did not answer within {} seconds",
@@ -400,6 +387,27 @@ async fn rotate(relay: &Target<'_>, old: Credential, admin: &Admin) -> Result<Ou
         )));
     }
     Ok(json!({ "adminKey": candidate, "confirmed": false, "reason": reason }).into())
+}
+
+/// Whether `error` refused a rotation before the request left this computer,
+/// so the relay cannot have changed its key.
+fn never_sent(error: &SdkError) -> bool {
+    match error {
+        SdkError::NotAdministrator
+        | SdkError::InvalidConfig { .. }
+        | SdkError::Address { .. }
+        | SdkError::Connect { .. } => true,
+        SdkError::Remote { .. }
+        | SdkError::Protocol { .. }
+        | SdkError::ReadyTimeout { .. }
+        | SdkError::TimedOut { .. }
+        | SdkError::TunnelFailed { .. }
+        | SdkError::Stopped
+        | SdkError::Status { .. }
+        | SdkError::Io { .. }
+        | SdkError::AuthFile { .. }
+        | SdkError::RootRotationUncertain { .. } => false,
+    }
 }
 
 fn rotated(key: String) -> Outcome {
@@ -421,31 +429,6 @@ async fn accepts(relay: &Target<'_>, credential: Credential) -> bool {
         tokio::time::timeout(PROBE_TIMEOUT, admin.auth_status()).await,
         Ok(Ok(_))
     )
-}
-
-/// Why nothing can reach this relay over QUIC, in the words the window shows.
-pub(crate) fn no_quic() -> CtlError {
-    CtlError::server_unreachable(
-        "The relay does not offer QUIC. Choose TCP in Settings, or give the relay a QUIC port",
-    )
-}
-
-/// What an SDK refusal means to the window, as a coded sentence.
-pub(crate) fn sdk_error(error: SdkError) -> CtlError {
-    match error {
-        SdkError::NotAdministrator => CtlError::invalid_argument(
-            "This computer's credential is not the relay's administrator key",
-        ),
-        SdkError::InvalidConfig { message } => CtlError::invalid_argument(message),
-        SdkError::Address { .. } => CtlError::invalid_address(error.to_string()),
-        SdkError::Connect { .. } => CtlError::server_unreachable(error.to_string()),
-        SdkError::TimedOut { .. } => CtlError::timeout(error.to_string()),
-        SdkError::Remote { code, .. } if code == QUIC_UNAVAILABLE => no_quic(),
-        SdkError::Remote { code, message, .. } => {
-            CtlError::protocol(format!("The relay refused: {message} ({code})"))
-        }
-        other => CtlError::protocol(other.to_string()),
-    }
 }
 
 /// The relay carrier as the Relay page shows it.
@@ -486,7 +469,11 @@ fn session_json(session: &SessionObservation) -> Value {
         .iter()
         .filter_map(|report| report.as_ref())
         .min_by_key(|report| report.age_ms);
-    let id: String = session.id[..6].iter().map(|b| format!("{b:02x}")).collect();
+    let mut id = String::with_capacity(12);
+    for byte in session.id.iter().take(6) {
+        // Writing to a String cannot fail.
+        let _ = write!(id, "{byte:02x}");
+    }
     // What the ends said of a direct path, the latest first: absent where
     // both ends, or the relay, predate it.
     let link = latest.and_then(|report| report.report.link).or_else(|| {
@@ -498,10 +485,10 @@ fn session_json(session: &SessionObservation) -> Value {
         "id": id,
         "service": session.service,
         "transport": if session.is_datagram { "UDP" } else { "TCP" },
-        "path": latest.map(|report| format!("{:?}", report.report.path).to_lowercase()),
+        "path": latest.map(|report| report.report.path.as_str()),
         "pathKind": link.map(|link| link.kind.as_str()),
         "family": link.map(|link| link.family.as_str()),
-        "state": latest.map(|report| format!("{:?}", report.report.state).to_lowercase()),
+        "state": latest.map(|report| report.report.state.as_str()),
         "reason": latest.and_then(|report| report.report.reason.clone()),
         "ageMs": latest.map(|report| report.age_ms),
         "consumerSeen": session.consumer.is_some(),
@@ -581,6 +568,8 @@ mod tests {
     use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
     use pb_mapper_testkit::{Relay, TEST_ADMIN_KEY};
 
+    use crate::error::ErrorCode;
+
     async fn run_over(
         relay: &Relay,
         transport: RelayTransport,
@@ -645,10 +634,7 @@ mod tests {
         let temporary = run(&relay, &credential, json!({ "op": "keys" }))
             .await
             .unwrap_err();
-        assert!(
-            temporary.to_string().contains("administrator"),
-            "{temporary}"
-        );
+        assert_eq!(temporary.code(), ErrorCode::InvalidArgument, "{temporary}");
         let role = run(&relay, &credential, json!({ "op": "credential" }))
             .await
             .unwrap();
@@ -666,7 +652,7 @@ mod tests {
         }
 
         let unknown = admin(json!({ "op": "teleport" })).await.unwrap_err();
-        assert!(unknown.to_string().contains("teleport"), "{unknown}");
+        assert_eq!(unknown.code(), ErrorCode::InvalidArgument, "{unknown}");
 
         // Rotation hands back the key the relay now takes, to be saved; the
         // old one stops working.
@@ -689,6 +675,45 @@ mod tests {
             .unwrap_err();
     }
 
+    /// A session as the Relay page reads it: the first six bytes of its id
+    /// in hex, and the path and state of the newest report.
+    #[test]
+    fn a_session_reads_as_the_relay_page_expects() {
+        let id: Vec<u8> = (0..16).collect();
+        let report = |path: &str, state: &str, age_ms: u64| {
+            json!({
+                "report": { "id": id, "seq": 1, "path": path, "state": state, "reason": null },
+                "age_ms": age_ms,
+            })
+        };
+        let session: SessionObservation = serde_json::from_value(json!({
+            "server_instance": vec![0u8; 16],
+            "restored": false,
+            "id": id,
+            "service": "web",
+            "is_datagram": false,
+            "consumer": report("direct", "active", 5),
+            "provider": report("relay", "closed", 50),
+            "stale": false,
+            "conflicting": false,
+        }))
+        .unwrap();
+        let read = session_json(&session);
+        assert_eq!(read["id"], "000102030405");
+        assert_eq!(
+            (&read["path"], &read["state"]),
+            (&json!("direct"), &json!("active"))
+        );
+        let older = session_json(&SessionObservation {
+            consumer: None,
+            ..session
+        });
+        assert_eq!(
+            (&older["path"], &older["state"]),
+            (&json!("relay"), &json!("closed"))
+        );
+    }
+
     #[tokio::test]
     async fn a_relay_that_does_not_answer_is_reported() {
         let target = Target {
@@ -704,7 +729,7 @@ mod tests {
         .await
         .err()
         .unwrap();
-        assert_eq!(error.code(), crate::error::ErrorCode::ServerUnreachable);
+        assert_eq!(error.code(), ErrorCode::ServerUnreachable);
     }
 
     /// Over QUIC the administrator's questions share one connection, which
@@ -717,14 +742,9 @@ mod tests {
         let quic = |request| run_over(&relay, RelayTransport::Quic, TEST_ADMIN_KEY, request);
         // What the window's own client does: holds the process's pool for
         // this relay while each call makes and drops a client of its own.
-        let _held = Client::from_credential(
-            relay.addr().to_string(),
-            parse_credential(TEST_ADMIN_KEY).unwrap(),
-            false,
-            None,
-        )
-        .with_relay_transport(RelayTransport::Quic)
-        .unwrap();
+        let _held = pb_mapper_testkit::admin_client(relay.addr())
+            .with_relay_transport(RelayTransport::Quic)
+            .unwrap();
 
         quic(json!({ "op": "auth_status" })).await.unwrap();
         quic(json!({ "op": "keys" })).await.unwrap();
@@ -750,5 +770,6 @@ mod tests {
             refused.to_string().contains("does not offer QUIC"),
             "{refused}"
         );
+        assert_eq!(refused.code(), ErrorCode::QuicUnavailable, "{refused}");
     }
 }

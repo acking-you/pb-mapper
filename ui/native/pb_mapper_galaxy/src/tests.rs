@@ -1,6 +1,6 @@
 use super::{
-    Camera, DecodedScene, Frame, Link, Out, Planet, Scene, System, V3, VERSION, compute, links,
-    runs,
+    Camera, DecodedScene, Frame, Link, Out, Planet, SCRATCH_LIMIT_BYTES, Scene, System, V3,
+    VERSION, compute, links, runs,
 };
 
 /// This computer with two tunnels on one ring, the relay with one registered
@@ -176,6 +176,19 @@ fn a_malformed_scene_or_frame_is_refused() {
     assert_eq!(run(&good, &frame(1.0)[..12], 1 << 16).0, -1);
 }
 
+/// However far away a system sits, the plane's guides stop at a bound, so an
+/// enormous or infinite coordinate costs a bounded frame rather than a loop
+/// that runs for hours or never ends.
+#[test]
+fn a_system_however_far_away_draws_a_bounded_frame() {
+    for x in [1e6, f64::INFINITY] {
+        let mut far = scene();
+        far[5] = x;
+        let (needed, _) = run(&far, &frame(1.0), 0);
+        assert!(needed < 0 && -needed < 1 << 20, "x = {x}: {needed}");
+    }
+}
+
 #[test]
 fn decoding_reuses_buffers_and_recovers_after_a_malformed_scene() {
     let raw = scene();
@@ -202,7 +215,7 @@ fn decoding_reuses_buffers_and_recovers_after_a_malformed_scene() {
     // An exceptional scene must not retain more than the normal scratch cap.
     storage
         .systems
-        .reserve((1 << 20) / std::mem::size_of::<System>() + 1);
+        .reserve(SCRATCH_LIMIT_BYTES / std::mem::size_of::<System>() + 1);
     storage.trim();
     assert_eq!(storage.systems.capacity(), 0);
 }

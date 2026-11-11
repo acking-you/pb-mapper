@@ -1,75 +1,13 @@
-//! Administrator credential load, recovery, and temporary-key derivation.
+//! Which administrator credential a relay starts with, and temporary-key
+//! derivation.
 use super::*;
-
-fn read_admin_key(path: &Path) -> Result<Option<String>, AuthFailure> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    #[cfg(unix)]
-    {
-        let metadata = std::fs::metadata(path).map_err(|error| {
-            AuthFailure::new(
-                "administrator_key_required",
-                format!(
-                    "administrator key file `{}` metadata could not be read: {error}",
-                    path.display()
-                ),
-                false,
-            )
-        })?;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
-                |error| {
-                    AuthFailure::new(
-                        "administrator_key_required",
-                        format!(
-                            "administrator key file `{}` permissions could not be secured: {error}",
-                            path.display()
-                        ),
-                        false,
-                    )
-                },
-            )?;
-            tracing::warn!(
-                event = "administrator_key_permissions_repaired",
-                path = %path.display(),
-                "restricted administrator key file permissions to 0600"
-            );
-        }
-    }
-    std::fs::read_to_string(path).map(Some).map_err(|error| {
-        AuthFailure::new(
-            "administrator_key_required",
-            format!(
-                "administrator key file `{}` could not be read: {error}",
-                path.display()
-            ),
-            false,
-        )
-    })
-}
-
-fn persist_recovery_admin_key(
-    state_dir: &Path,
-    key: &str,
-    mismatch_message: &'static str,
-) -> Result<(), AuthFailure> {
-    if encrypted_auth_state_exists(state_dir) && !key_matches_existing_state(Some(state_dir), key) {
-        return Err(AuthFailure::new(
-            "administrator_key_invalid",
-            mismatch_message,
-            false,
-        ));
-    }
-    write_admin_key(state_dir, key)
-}
 
 fn validate_admin_credential(raw: &str) -> Result<Credential, AuthFailure> {
     let credential = parse_credential(raw.trim())
-        .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?;
+        .map_err(|error| AuthFailure::new(codes::ADMINISTRATOR_KEY_INVALID, error, false))?;
     if !credential.is_admin() {
         return Err(AuthFailure::new(
-            "administrator_key_required",
+            codes::ADMINISTRATOR_KEY_REQUIRED,
             "the server key file contains a temporary credential",
             false,
         ));
@@ -77,60 +15,23 @@ fn validate_admin_credential(raw: &str) -> Result<Credential, AuthFailure> {
     Ok(credential)
 }
 
-pub(super) fn recover_admin_key_after_rotation(
-    state_dir: &Path,
-    current: &str,
-) -> Result<String, AuthFailure> {
-    let snapshot_path = auth_snapshot_path(state_dir);
-    if !snapshot_path.exists() {
-        return Ok(current.to_string());
-    }
-    let bytes = std::fs::read(&snapshot_path).map_err(|error| {
-        AuthFailure::new(
-            "temporary_key_store_unavailable",
-            format!("failed to read `{}`: {error}", snapshot_path.display()),
-            false,
-        )
-    })?;
-    if let Ok(Credential::Admin(current_key)) = parse_credential(current.trim())
-        && open_blob(&current_key, &bytes).is_ok()
-    {
-        return Ok(current.to_string());
-    }
-    let Some(next) = read_admin_key(&state_dir.join("admin.key.next"))? else {
-        return Ok(current.to_string());
-    };
-    let Ok(Credential::Admin(next_key)) = parse_credential(next.trim()) else {
-        return Ok(current.to_string());
-    };
-    if open_blob(&next_key, &bytes).is_err() {
-        return Ok(current.to_string());
-    }
-    // The rotation snapshot is complete under the staged key. Leftover WAL
-    // records are still encrypted with the previous key.
-    truncate_auth_wal(state_dir)?;
-    write_admin_key(state_dir, next.trim())?;
-    let _ = std::fs::remove_file(state_dir.join("admin.key.next"));
-    Ok(next)
-}
-
 pub(super) fn load_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFailure> {
-    let path = state_dir.join("admin.key");
+    let path = admin_key_path(state_dir);
     let raw = if let Some(raw) = read_admin_key(&path)? {
         raw
     } else if process_credential_configured() {
         let credential = get_process_credential()
-            .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?;
+            .map_err(|error| AuthFailure::new(codes::ADMINISTRATOR_KEY_INVALID, error, false))?;
         let Credential::Admin(key) = credential else {
             return Err(AuthFailure::new(
-                "administrator_key_required",
+                codes::ADMINISTRATOR_KEY_REQUIRED,
                 "the relay server cannot start with a temporary credential",
                 false,
             ));
         };
         let key = String::from_utf8(key.to_vec()).map_err(|_| {
             AuthFailure::new(
-                "administrator_key_invalid",
+                codes::ADMINISTRATOR_KEY_INVALID,
                 "the relay administrator key must be printable UTF-8 so it can be persisted",
                 false,
             )
@@ -144,7 +45,7 @@ pub(super) fn load_server_admin_credential(state_dir: &Path) -> Result<Credentia
     } else if Path::new(MACHINE_MSG_HEADER_KEY_PATH).is_file() {
         let key = std::fs::read_to_string(MACHINE_MSG_HEADER_KEY_PATH).map_err(|error| {
             AuthFailure::new(
-                "administrator_key_required",
+                codes::ADMINISTRATOR_KEY_REQUIRED,
                 format!(
                     "legacy administrator key file `{MACHINE_MSG_HEADER_KEY_PATH}` could not be read: {error}"
                 ),
@@ -186,7 +87,7 @@ pub(super) fn load_server_admin_credential(state_dir: &Path) -> Result<Credentia
 pub(super) fn load_isolated_server_admin_credential(
     state_dir: &Path,
 ) -> Result<Credential, AuthFailure> {
-    let path = state_dir.join("admin.key");
+    let path = admin_key_path(state_dir);
     let raw = match read_admin_key(&path)? {
         Some(raw) => raw,
         None => {
@@ -208,11 +109,20 @@ pub fn derive_temporary_key(
     instance_id: &[u8; INSTANCE_ID_LEN],
     key_id: KeyId,
 ) -> Result<AesKeyType, AuthFailure> {
-    let salt = Salt::new(HKDF_SHA256, instance_id);
-    let pseudo_random_key = salt.extract(admin_key);
+    expand_temporary_key(&temporary_root(admin_key, instance_id), key_id)
+}
+
+/// What every temporary key of one root key and instance id is expanded
+/// from: the HKDF extraction, which depends on nothing else.
+pub(crate) fn temporary_root(admin_key: &AesKeyType, instance_id: &[u8; INSTANCE_ID_LEN]) -> Prk {
+    Salt::new(HKDF_SHA256, instance_id).extract(admin_key)
+}
+
+/// The temporary key `key_id` under `root`, a [`temporary_root`].
+pub(crate) fn expand_temporary_key(root: &Prk, key_id: KeyId) -> Result<AesKeyType, AuthFailure> {
     let key_id_bytes = key_id.to_be_bytes();
     let info = [b"pb-mapper-temp-key-v1".as_slice(), key_id_bytes.as_slice()];
-    let output = pseudo_random_key
+    let output = root
         .expand(&info, HkdfLen(32))
         .map_err(|_| AuthFailure::internal("failed to expand temporary key"))?;
     let mut key = [0_u8; 32];

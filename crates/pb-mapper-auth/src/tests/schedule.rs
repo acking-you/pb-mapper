@@ -1,0 +1,417 @@
+//! The lease schedule, driven by explicit seconds rather than the wall clock.
+//!
+//! Each test does what the actor does around a `Leases` call, then ticks the
+//! schedule to the second that matters.
+
+use super::*;
+
+/// The second every schedule here starts at.
+const T: u64 = 1_000_000;
+
+/// A state with four free slots and an empty schedule at second `T`.
+fn schedule() -> (Arc<AuthStateInner>, Leases) {
+    restore(None)
+}
+
+/// The state and schedule a start at second `T` rebuilds from `snapshot`.
+fn restore(snapshot: Option<&PersistedSnapshot>) -> (Arc<AuthStateInner>, Leases) {
+    let config = AuthConfig {
+        state_dir: PathBuf::new(),
+        max_temporary_keys: 4,
+        max_temporary_key_ttl: MAX_TEMP_KEY_TTL,
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let (restored, live) = RestoredState::from_snapshot(snapshot, false, &config, T);
+    let admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, None, u64::MAX));
+    let inner = Arc::new(AuthStateInner::new(
+        TEST_ADMIN_KEY_BYTES,
+        &admin_lease,
+        false,
+        [0; INSTANCE_ID_LEN],
+        false,
+        restored,
+    ));
+    let leases = Leases::restored(&inner, T, live);
+    (inner, leases)
+}
+
+/// Issues a key into `slot` as `actor_issue` does. Returns its id and the
+/// cancellation of its lease.
+fn issue(
+    inner: &AuthStateInner,
+    leases: &mut Leases,
+    slot: usize,
+    expires_at: u64,
+) -> (KeyId, CancellationToken) {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(slot));
+    let lease = Arc::new(AuthLease::new(key_id, None, expires_at));
+    inner.slots_mut()[slot] = SlotHot {
+        generation: key_id.generation(),
+        state: SlotState::Active,
+        expires_at,
+        lease: Arc::downgrade(&lease),
+    };
+    leases.issue(&lease, T, None, None);
+    (key_id, lease.cancellation_token())
+}
+
+fn state_of(inner: &AuthStateInner, key_id: KeyId) -> SlotState {
+    inner.slots()[key_id.slot().as_index()].state
+}
+
+/// A renewal can bring a deadline closer: the key ends at the new one, and its
+/// row is recycled a retention window later.
+#[test]
+fn a_renewed_key_ends_at_its_new_deadline() {
+    let (inner, mut leases) = schedule();
+    let (key_id, cancellation) = issue(&inner, &mut leases, 0, T + 3600);
+
+    // What `actor_renew` does for a live lease.
+    let lease = {
+        let mut slots = inner.slots_mut();
+        slots[0].expires_at = T + 10;
+        slots[0].lease.upgrade().unwrap()
+    };
+    lease.set_expires_at(T + 10);
+    drop(lease);
+    assert!(leases.renew(key_id, T + 10, T));
+
+    leases.tick(T + 9);
+    assert!(!cancellation.is_cancelled());
+    assert_eq!(state_of(&inner, key_id), SlotState::Active);
+    leases.tick(T + 10);
+    assert!(cancellation.is_cancelled());
+    assert_eq!(state_of(&inner, key_id), SlotState::Expired);
+
+    leases.tick(T + 10 + TOMBSTONE_RETENTION.as_secs());
+    assert_eq!(state_of(&inner, key_id), SlotState::Free);
+    assert!(!inner.cold().contains_key(&key_id));
+}
+
+/// A renewal that had to replace a cancelled lease disarms the old lease's
+/// stages: they name the key, so at the old deadline they would otherwise end
+/// the key the renewal just extended. The WAL says that key is active, so a row
+/// that said otherwise could not even be revoked. That the actor takes this path
+/// is `a_renewal_that_replaced_a_cancelled_lease_outlives_the_old_deadline`.
+#[test]
+fn a_lease_adopted_by_a_renewal_outlives_the_old_deadline() {
+    let (inner, mut leases) = schedule();
+    let (key_id, old) = issue(&inner, &mut leases, 0, T + 10);
+    old.cancel();
+
+    // What `actor_renew` does for a cancelled lease.
+    let replacement = Arc::new(AuthLease::new(key_id, None, T + 3600));
+    {
+        let mut slots = inner.slots_mut();
+        slots[0].expires_at = T + 3600;
+        slots[0].lease = Arc::downgrade(&replacement);
+    }
+    leases.adopt(key_id, Some(replacement.clone()), T + 3600, T);
+    let cancellation = replacement.cancellation_token();
+    drop(replacement);
+
+    leases.tick(T + 10 + TOMBSTONE_RETENTION.as_secs() + 1);
+    assert!(!cancellation.is_cancelled());
+    assert_eq!(state_of(&inner, key_id), SlotState::Active);
+    leases.tick(T + 3600);
+    assert!(cancellation.is_cancelled());
+}
+
+/// A restart schedules each live key at the deadline it was persisted with.
+#[test]
+fn a_restored_key_ends_at_its_persisted_deadline() {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(2));
+    let snapshot = PersistedSnapshot {
+        generations: vec![
+            Generation::FIRST,
+            Generation::FIRST,
+            key_id.generation(),
+            Generation::FIRST,
+        ],
+        entries: vec![PersistedEntry {
+            key_id,
+            state: SlotState::Active,
+            issued_at: T - 100,
+            expires_at: T + 30,
+            label: None,
+            tombstoned_at: None,
+            namespace: None,
+        }],
+        ..snapshot_for_test([0; INSTANCE_ID_LEN], 0, 0)
+    };
+    let (inner, mut leases) = restore(Some(&snapshot));
+    let cancellation = inner.slots()[2]
+        .lease
+        .upgrade()
+        .unwrap()
+        .cancellation_token();
+
+    leases.tick(T + 29);
+    assert!(!cancellation.is_cancelled());
+    assert_eq!(state_of(&inner, key_id), SlotState::Active);
+    leases.tick(T + 30);
+    assert!(cancellation.is_cancelled());
+    assert_eq!(state_of(&inner, key_id), SlotState::Expired);
+}
+
+/// How many `temporary_key_expired` events `run` logs on this thread.
+fn expiry_events(run: impl FnOnce()) -> usize {
+    use std::sync::atomic::AtomicUsize;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+
+    struct Count(Arc<AtomicUsize>);
+    struct IsExpiry(bool);
+    impl Visit for IsExpiry {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0 |= field.name() == "event" && value == "temporary_key_expired";
+        }
+        fn record_debug(&mut self, _: &Field, _: &dyn fmt::Debug) {}
+    }
+    impl tracing::Subscriber for Count {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visit = IsExpiry(false);
+            event.record(&mut visit);
+            if visit.0 {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    let count = Arc::new(AtomicUsize::new(0));
+    tracing::subscriber::with_default(Count(count.clone()), run);
+    count.load(Ordering::Relaxed)
+}
+
+/// A key is logged as expired only when it ran out: not when a rotation
+/// ended it, nor when the actor stopped.
+#[test]
+fn only_a_key_that_ran_out_is_logged_as_expired() {
+    let (inner, mut leases) = schedule();
+    issue(&inner, &mut leases, 0, T + 10);
+    let (_, rotated) = issue(&inner, &mut leases, 1, T + 3600);
+    assert_eq!(expiry_events(|| leases.tick(T + 10)), 1);
+
+    // What `actor_rotate_root` does to the keys of the old root.
+    assert_eq!(expiry_events(|| leases.wipe(T + 11)), 0);
+    assert!(rotated.is_cancelled());
+
+    // What the actor does when it stops: its `stop`, then its schedule drops.
+    let (_, stopped) = issue(&inner, &mut leases, 2, T + 3600);
+    cancel_all_temporary_leases(&inner);
+    assert_eq!(expiry_events(|| drop(leases)), 0);
+    assert!(stopped.is_cancelled());
+}
+
+/// A dead row above the configured capacity keeps its own tombstone time
+/// across a restart: one that died long before is recycled at once, not a
+/// retention window after the restart.
+#[test]
+fn a_restored_dead_row_above_capacity_keeps_its_tombstone_time() {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(5));
+    let mut generations = vec![Generation::FIRST; 6];
+    generations[5] = key_id.generation();
+    let snapshot = PersistedSnapshot {
+        generations,
+        entries: vec![PersistedEntry {
+            key_id,
+            state: SlotState::Revoked,
+            issued_at: T - 7200,
+            expires_at: T + 3600,
+            label: None,
+            tombstoned_at: Some(T - 3600),
+            namespace: None,
+        }],
+        ..snapshot_for_test([0; INSTANCE_ID_LEN], 0, 0)
+    };
+    let (inner, mut leases) = restore(Some(&snapshot));
+
+    leases.tick(T + 1);
+    assert!(inner.high().is_empty());
+}
+
+/// A key in a row above the configured capacity is on the schedule like any
+/// other, though it cannot authenticate: it shows expired from its deadline
+/// and goes a retention window later, a revoked one goes a retention window
+/// after the revoke, and a reset or a rotation takes a live one with the rest.
+#[test]
+fn keys_above_the_capacity_end_on_schedule() {
+    let high = |slot| KeyId::new(Generation::from_u32(1), SlotIndex::from_index(slot));
+    let (expiring, revoked, live) = (high(4), high(5), high(6));
+    let mut generations = vec![Generation::FIRST; 7];
+    let entry = |key_id: KeyId, expires_at| PersistedEntry {
+        key_id,
+        state: SlotState::Active,
+        issued_at: T - 100,
+        expires_at,
+        label: None,
+        tombstoned_at: None,
+        namespace: None,
+    };
+    for key_id in [expiring, revoked, live] {
+        generations[key_id.slot().as_index()] = key_id.generation();
+    }
+    let snapshot = PersistedSnapshot {
+        generations,
+        entries: vec![
+            entry(expiring, T + 30),
+            entry(revoked, T + 3600),
+            entry(live, T + 3600),
+        ],
+        ..snapshot_for_test([0; INSTANCE_ID_LEN], 0, 0)
+    };
+    let (inner, mut leases) = restore(Some(&snapshot));
+    let row = |key_id: KeyId| {
+        inner
+            .high()
+            .iter()
+            .find(|entry| entry.key_id == key_id)
+            .map(|entry| (entry.state, entry.tombstoned_at))
+    };
+
+    // What `actor_revoke` does for a row above the table.
+    if let Some(entry) = inner
+        .high_mut()
+        .iter_mut()
+        .find(|entry| entry.key_id == revoked)
+    {
+        entry.state = SlotState::Revoked;
+        entry.tombstoned_at = Some(T);
+    }
+    leases.revoke(revoked, T);
+
+    leases.tick(T + 29);
+    assert_eq!(row(expiring), Some((SlotState::Active, None)));
+    leases.tick(T + 30);
+    assert_eq!(row(expiring), Some((SlotState::Expired, Some(T + 30))));
+    leases.tick(T + TOMBSTONE_RETENTION.as_secs());
+    assert_eq!(row(revoked), None);
+    leases.tick(T + 30 + TOMBSTONE_RETENTION.as_secs());
+    assert_eq!(row(expiring), None);
+
+    // What a reset or a root rotation does to the schedule.
+    leases.wipe(T + 100);
+    assert_eq!(row(live), None);
+}
+
+/// A revoked key keeps its row for a retention window counted from the revoke,
+/// not from the deadline it no longer has, and records when that window began.
+#[test]
+fn a_revoked_key_is_recycled_a_retention_window_after_the_revoke() {
+    let (inner, mut leases) = schedule();
+    let (key_id, cancellation) = issue(&inner, &mut leases, 0, T + 3600);
+
+    // What `actor_revoke` does for a row in the table.
+    inner.slots_mut()[0].state = SlotState::Revoked;
+    leases.revoke(key_id, T);
+    assert!(cancellation.is_cancelled());
+    assert_eq!(inner.cold()[&key_id].tombstoned_at, T);
+
+    leases.tick(T + TOMBSTONE_RETENTION.as_secs() - 1);
+    assert_eq!(state_of(&inner, key_id), SlotState::Revoked);
+    leases.tick(T + TOMBSTONE_RETENTION.as_secs());
+    assert_eq!(state_of(&inner, key_id), SlotState::Free);
+    assert!(!inner.cold().contains_key(&key_id));
+}
+
+/// A revoke while the system clock reads earlier than the schedule's, as after
+/// a step back, still keeps the row for a retention window from the revoke by
+/// that clock. The schedule had already passed the window's end, so the row was
+/// once freed inside the call, and the revoke that had just taken effect
+/// answered that the key did not exist.
+#[test]
+fn a_revoke_behind_the_schedules_clock_keeps_the_row_for_its_retention() {
+    let (inner, mut leases) = schedule();
+    let (key_id, cancellation) = issue(&inner, &mut leases, 0, T + 3600);
+    // The clock reached T + 600, then stepped back to T.
+    leases.tick(T + 600);
+
+    // What `actor_revoke` does for a row in the table, at the stepped-back second.
+    inner.slots_mut()[0].state = SlotState::Revoked;
+    leases.revoke(key_id, T);
+    assert!(cancellation.is_cancelled());
+    assert_eq!(state_of(&inner, key_id), SlotState::Revoked);
+    assert_eq!(inner.cold()[&key_id].tombstoned_at, T);
+
+    leases.tick(T + TOMBSTONE_RETENTION.as_secs() - 1);
+    assert_eq!(state_of(&inner, key_id), SlotState::Revoked);
+    leases.tick(T + TOMBSTONE_RETENTION.as_secs());
+    assert_eq!(state_of(&inner, key_id), SlotState::Free);
+}
+
+/// After the system clock steps back, every key still ends at its own deadline
+/// by the wall clock: one issued or renewed for less than the step does not
+/// come back already retired, and one scheduled before the step does not end
+/// the step's length early.
+#[test]
+fn a_backward_clock_step_keeps_every_deadline_on_the_wall_clock() {
+    let (inner, mut leases) = schedule();
+    let (scheduled, scheduled_cancelled) = issue(&inner, &mut leases, 0, T + 900);
+    let (renewed, renewed_cancelled) = issue(&inner, &mut leases, 1, T + 3600);
+    // The clock reached T + 600, then stepped back to T.
+    leases.tick(T + 600);
+
+    // At the stepped-back second: an issue, and a renewal as `actor_renew`
+    // makes one, each for less than the step.
+    let (issued, issued_cancelled) = issue(&inner, &mut leases, 2, T + 60);
+    let lease = {
+        let mut slots = inner.slots_mut();
+        slots[1].expires_at = T + 120;
+        slots[1].lease.upgrade().unwrap()
+    };
+    lease.set_expires_at(T + 120);
+    drop(lease);
+    assert!(leases.renew(renewed, T + 120, T));
+    assert_eq!(state_of(&inner, issued), SlotState::Active);
+    assert_eq!(state_of(&inner, renewed), SlotState::Active);
+
+    leases.tick(T + 59);
+    assert!(!issued_cancelled.is_cancelled());
+    leases.tick(T + 60);
+    assert!(issued_cancelled.is_cancelled());
+    assert_eq!(state_of(&inner, issued), SlotState::Expired);
+    leases.tick(T + 119);
+    assert!(!renewed_cancelled.is_cancelled());
+    leases.tick(T + 120);
+    assert!(renewed_cancelled.is_cancelled());
+    leases.tick(T + 60 + TOMBSTONE_RETENTION.as_secs());
+    assert_eq!(state_of(&inner, issued), SlotState::Free);
+
+    leases.tick(T + 899);
+    assert!(!scheduled_cancelled.is_cancelled());
+    assert_eq!(state_of(&inner, scheduled), SlotState::Active);
+    leases.tick(T + 900);
+    assert!(scheduled_cancelled.is_cancelled());
+}
+
+/// No callback can reach the schedule's map, so a key that ended on schedule
+/// is swept out of it rather than kept for as long as the relay runs. A key
+/// whose reap is still to come stays, so collecting it can still end it early.
+#[test]
+fn keys_that_ended_on_schedule_are_forgotten() {
+    let (inner, mut leases) = schedule();
+    let (ended, _) = issue(&inner, &mut leases, 0, T + 10);
+    let (retired, _) = issue(&inner, &mut leases, 1, T + 3590);
+    let (live, _) = issue(&inner, &mut leases, 2, T + 7200);
+    assert_eq!(leases.tracked_keys(), 3);
+
+    leases.tick(T + 3600);
+    assert_eq!(state_of(&inner, ended), SlotState::Free);
+    assert_eq!(state_of(&inner, retired), SlotState::Expired);
+    assert_eq!(state_of(&inner, live), SlotState::Active);
+    assert_eq!(leases.tracked_keys(), 2);
+
+    leases.end(retired);
+    assert_eq!(state_of(&inner, retired), SlotState::Free);
+    assert_eq!(leases.tracked_keys(), 1);
+}

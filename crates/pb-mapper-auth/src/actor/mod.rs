@@ -16,297 +16,356 @@
 //! authenticated before root rotation from executing against the new administrator
 //! state. The actor is also the sole strong owner of temporary-key leases.
 
+use std::ops::ControlFlow;
+
 use super::*;
 
+mod command;
 mod epoch;
 mod lifecycle;
+mod replay;
+pub(super) use command::AuthCommand;
 use epoch::*;
 use lifecycle::*;
+pub(super) use replay::AdminReplays;
 
-pub(super) struct AuthActorState {
+/// Everything the actor owns. The runtime builds it and spawns [`Actor::run`].
+///
+/// Fields drop in declaration order, and `inner` must come last: dropping the
+/// schedule runs each live key's retire callback, which upgrades the state to
+/// cancel the key's lease. So an actor that ends without `stop()` (aborted,
+/// or unwinding from a panic) still cancels every live
+/// temporary-key session and logs `temporary_key_expired` for it.
+pub(super) struct Actor {
+    config: AuthConfig,
     leases: Leases,
-    admin_replays: HashSet<[u8; 32]>,
-    admin_replay_order: VecDeque<AdminReplayRecord>,
+    /// The current administrator lease. The actor holds its only strong
+    /// reference, so replacing it is what ends the previous one.
+    admin_lease: Arc<AuthLease>,
+    replays: AdminReplays,
+    /// The wall-clock second of the last compaction, whether or not it had
+    /// anything to write, or of the start.
+    last_snapshot_at: u64,
+    /// Keeps the state directory locked for as long as the actor runs.
+    _state_lock: Arc<File>,
+    /// The only strong reference to the state; see above for why it is last.
+    inner: Arc<AuthStateInner>,
 }
 
-impl AuthActorState {
+/// What the actor does next, off the runtime's workers.
+enum Step {
+    Command(AuthCommand),
+    /// Compact, at this wall-clock second.
+    Compact(u64),
+    /// Every handle is gone.
+    Stop,
+}
+
+impl Actor {
     pub(super) fn new(
+        inner: Arc<AuthStateInner>,
+        admin_lease: Arc<AuthLease>,
+        config: AuthConfig,
         leases: Leases,
-        admin_replays: HashSet<[u8; 32]>,
-        admin_replay_order: VecDeque<AdminReplayRecord>,
+        replays: AdminReplays,
+        state_lock: Arc<File>,
+        now: u64,
     ) -> Self {
         Self {
-            leases,
-            admin_replays,
-            admin_replay_order,
-        }
-    }
-}
-
-pub(super) async fn run_auth_actor(
-    inner: Arc<AuthStateInner>,
-    mut admin_lease: Arc<AuthLease>,
-    mut command_rx: mpsc::Receiver<AuthCommand>,
-    config: AuthConfig,
-    state: AuthActorState,
-    _state_lock: Arc<File>,
-) {
-    let AuthActorState {
-        mut leases,
-        mut admin_replays,
-        mut admin_replay_order,
-    } = state;
-    let mut last_snapshot_at = unix_seconds();
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            _ = tick.tick() => {
-                let now = unix_seconds();
-                leases.tick(now);
-                prune_expired_admin_replays(
-                    now,
-                    &mut admin_replays,
-                    &mut admin_replay_order,
-                );
-                // WHY: A failed load starts safe mode with empty in-memory
-                // generations. Compacting that reconstruction would replace the
-                // damaged snapshot, truncate the WAL, and let the next start
-                // exit safe mode without rotating the instance id.
-                if compaction_is_allowed(inner.safe_mode.load(Ordering::Acquire))
-                    && now.saturating_sub(last_snapshot_at)
-                        >= SNAPSHOT_COMPACTION_INTERVAL.as_secs()
-                {
-                    let snapshot = build_snapshot(&inner, &admin_replay_order);
-                    if let Err(error) = write_snapshot_and_truncate_wal(
-                        &config,
-                        &inner.admin_key(),
-                        &snapshot,
-                    ) {
-                        inner.safe_mode.store(true, Ordering::Release);
-                        cancel_all_temporary_leases(&inner);
-                        tracing::error!(
-                            event = "auth_state_safe_mode",
-                            auth_stage = "snapshot_compaction",
-                            reason = %error.code,
-                            error = %error,
-                            "authentication state compaction failed closed"
-                        );
-                    } else {
-                        last_snapshot_at = now;
-                    }
-                }
-            }
-            command = command_rx.recv() => {
-                let Some(command) = command else {
-                    admin_lease.cancel_rotated();
-                    cancel_all_temporary_leases(&inner);
-                    break;
-                };
-                match command {
-                    AuthCommand::ClaimAdminMutation {
-                        authority,
-                        fingerprint,
-                        client_timestamp,
-                        response,
-                    } => {
-                        let result = validate_admin_authority(&inner, &authority).and_then(|()| {
-                            actor_claim_admin_mutation(
-                                &inner,
-                                &config,
-                                &mut admin_replays,
-                                &mut admin_replay_order,
-                                fingerprint,
-                                client_timestamp,
-                            )
-                        });
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::AllocateNamespace { authority, response } => {
-                        let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_allocate_namespace(&inner, &config));
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::Issue { authority, namespace, ttl, label, response } => {
-                        let result = validate_admin_authority(&inner, &authority).and_then(|()| {
-                            actor_issue(&inner, &config, &mut leases, namespace, ttl, label)
-                        });
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::List { authority, page, page_size, response } => {
-                        let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_list(&inner, page, page_size));
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::Show { authority, key_id, reveal, response } => {
-                        let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_show(&inner, &config, key_id, reveal));
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::Renew { authority, key_id, ttl, response } => {
-                        let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_renew(&inner, &config, &mut leases, key_id, ttl));
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::Revoke { authority, key_id, response } => {
-                        let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_revoke(&inner, &config, &mut leases, key_id));
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::Gc { authority, response } => {
-                        let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_gc(&inner, &config, &mut leases, &admin_replay_order));
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::Reset { authority, response } => {
-                        let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_reset(&inner, &config, &mut leases, &admin_replay_order, "auth_state_reset"));
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::RotateRoot { authority, new_key, response } => {
-                        let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_rotate_root(&inner, &config, &mut leases, &mut admin_lease, new_key));
-                        if result.is_ok() {
-                            admin_replays.clear();
-                            admin_replay_order.clear();
-                        }
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::SetLegacyProtocol { authority, policy, response } => {
-                        let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_set_legacy_protocol(&inner, &config, policy));
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::Status { authority, response } => {
-                        let result = validate_admin_authority(&inner, &authority)
-                            .map(|()| actor_status(&inner));
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::Audit { authority, action, key_id, detail, response } => {
-                        let result = validate_admin_authority(&inner, &authority).and_then(|()| {
-                            append_audit(
-                                &config,
-                                &inner,
-                                audit(&action, key_id, detail),
-                            )
-                        });
-                        let _ = response.send(result);
-                    }
-                    AuthCommand::Shutdown { response } => {
-                        admin_lease.cancel_rotated();
-                        cancel_all_temporary_leases(&inner);
-                        let _ = response.send(());
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn actor_claim_admin_mutation(
-    inner: &AuthStateInner,
-    config: &AuthConfig,
-    admin_replays: &mut HashSet<[u8; 32]>,
-    admin_replay_order: &mut VecDeque<AdminReplayRecord>,
-    fingerprint: [u8; 32],
-    client_timestamp: u64,
-) -> Result<(), AuthFailure> {
-    let now = unix_seconds();
-    prune_expired_admin_replays(now, admin_replays, admin_replay_order);
-    if admin_replays.contains(&fingerprint) {
-        return Err(AuthFailure::new(
-            "admin_request_replayed",
-            "administrator mutation was already admitted",
-            false,
-        ));
-    }
-    if admin_replays.len() >= ADMIN_REPLAY_CAPACITY {
-        return Err(AuthFailure::new(
-            "admin_replay_capacity_exhausted",
-            "administrator mutation replay window is full; retry after older claims expire",
-            true,
-        ));
-    }
-    if now.abs_diff(client_timestamp) > ADMIN_REPLAY_RETENTION.as_secs() / 2 {
-        return Err(AuthFailure::new(
-            "admin_request_timestamp_invalid",
-            "administrator mutation timestamp is outside the accepted window",
-            false,
-        ));
-    }
-    let record = AdminReplayRecord {
-        fingerprint,
-        client_timestamp,
-        accepted_at: now,
-    };
-    fail_closed_on_uncertain_wal(
-        inner,
-        append_wal(
+            inner,
             config,
-            &inner.admin_key(),
-            &WalRecord::AdminReplay(record.clone()),
-        ),
-    )?;
-    admin_replays.insert(fingerprint);
-    admin_replay_order.push_back(record);
-    Ok(())
-}
-
-pub(super) fn prune_expired_admin_replays(
-    now: u64,
-    admin_replays: &mut HashSet<[u8; 32]>,
-    admin_replay_order: &mut VecDeque<AdminReplayRecord>,
-) {
-    admin_replay_order.retain(|record| {
-        let keep = record.within_retention(now);
-        if !keep {
-            admin_replays.remove(&record.fingerprint);
+            leases,
+            admin_lease,
+            replays,
+            last_snapshot_at: now,
+            _state_lock: state_lock,
         }
-        keep
-    });
+    }
+
+    /// Serves commands until a shutdown or until every runtime handle is gone,
+    /// advancing the schedule once a second in between.
+    ///
+    /// The schedule advances here. Every command and every compaction, which
+    /// write and sync the state's files, runs on the blocking pool instead,
+    /// with the actor moved there and back: one step at a time, in the order
+    /// they came, each finished before the next begins. So their file work
+    /// holds up no other task on the runtime, and each stays whole as if it
+    /// ran here: an abort or a runtime shutdown lets a step under way finish
+    /// and drops the actor after it, never inside one.
+    pub(super) async fn run(self, mut command_rx: mpsc::Receiver<AuthCommand>) {
+        let mut actor = self;
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let step = tokio::select! {
+                _ = tick.tick() => {
+                    let now = unix_seconds();
+                    actor.advance(now);
+                    if !actor.compaction_due(now) {
+                        continue;
+                    }
+                    Step::Compact(now)
+                }
+                command = command_rx.recv() => match command {
+                    Some(command) => Step::Command(command),
+                    None => Step::Stop,
+                },
+            };
+            match off_runtime(move || actor.step(step)).await {
+                Some(Some(next)) => actor = next,
+                // Stopped, or the runtime is shutting down: either way the
+                // actor has dropped.
+                Some(None) | None => break,
+            }
+        }
+    }
+
+    /// Takes one step. Returns the actor while it serves on; once it stops,
+    /// it drops here.
+    fn step(mut self, step: Step) -> Option<Self> {
+        match step {
+            Step::Command(command) => {
+                if self.handle(command).is_break() {
+                    return None;
+                }
+            }
+            Step::Compact(now) => self.compact(now),
+            Step::Stop => {
+                self.stop();
+                return None;
+            }
+        }
+        Some(self)
+    }
+
+    /// Runs the schedule and the replay window up to wall-clock second `now`.
+    pub(super) fn advance(&mut self, now: u64) {
+        self.leases.tick(now);
+        if self.replays.prune(now) {
+            self.inner.mark_snapshot_stale();
+        }
+    }
+
+    /// Whether to compact at wall-clock second `now`: once an interval, if
+    /// anything has changed since the last compaction. An interval with
+    /// nothing to write counts as compacted.
+    pub(super) fn compaction_due(&mut self, now: u64) -> bool {
+        // WHY: A failed load starts safe mode with empty in-memory
+        // generations. Compacting that reconstruction would replace the
+        // damaged snapshot, truncate the WAL, and let the next start
+        // exit safe mode without rotating the instance id.
+        if self.inner.safe_mode.load(Ordering::Acquire)
+            || now.saturating_sub(self.last_snapshot_at) < SNAPSHOT_COMPACTION_INTERVAL.as_secs()
+        {
+            return false;
+        }
+        if !self.inner.snapshot_stale.load(Ordering::Acquire) {
+            self.last_snapshot_at = now;
+            return false;
+        }
+        true
+    }
+
+    /// Replaces the snapshot with the state as of wall-clock second `now` and
+    /// empties the WAL, or fails the store closed.
+    pub(super) fn compact(&mut self, now: u64) {
+        let snapshot = build_snapshot(&self.inner, self.replays.records());
+        if let Err(error) =
+            write_snapshot_and_truncate_wal(&self.config, &self.inner.admin_key(), &snapshot)
+        {
+            self.inner.safe_mode.store(true, Ordering::Release);
+            cancel_all_temporary_leases(&self.inner);
+            tracing::error!(
+                event = "auth_state_safe_mode",
+                auth_stage = "snapshot_compaction",
+                reason = %error.code,
+                error = %error,
+                "authentication state compaction failed closed"
+            );
+        } else {
+            // Nothing else changes the state while this step runs.
+            self.inner.snapshot_stale.store(false, Ordering::Release);
+            self.last_snapshot_at = now;
+        }
+    }
+
+    /// Runs one command. Breaks once the actor should stop.
+    pub(super) fn handle(&mut self, command: AuthCommand) -> ControlFlow<()> {
+        match command {
+            AuthCommand::ClaimAdminMutation {
+                authority,
+                fingerprint,
+                client_timestamp,
+                response,
+            } => self.admin(&authority, response, |actor| {
+                actor
+                    .replays
+                    .claim(&actor.inner, &actor.config, fingerprint, client_timestamp)
+            }),
+            AuthCommand::AllocateNamespace {
+                authority,
+                response,
+            } => self.admin(&authority, response, |actor| {
+                actor_allocate_namespace(&actor.inner, &actor.config)
+            }),
+            AuthCommand::Issue {
+                authority,
+                namespace,
+                ttl,
+                label,
+                response,
+            } => self.admin(&authority, response, |actor| {
+                actor_issue(
+                    &actor.inner,
+                    &actor.config,
+                    &mut actor.leases,
+                    namespace,
+                    ttl,
+                    label,
+                )
+            }),
+            AuthCommand::List {
+                authority,
+                page,
+                page_size,
+                response,
+            } => self.admin(&authority, response, |actor| {
+                actor_list(&actor.inner, page, page_size)
+            }),
+            AuthCommand::Show {
+                authority,
+                key_id,
+                reveal,
+                response,
+            } => self.admin(&authority, response, |actor| {
+                actor_show(&actor.inner, &actor.config, key_id, reveal)
+            }),
+            AuthCommand::Renew {
+                authority,
+                key_id,
+                ttl,
+                response,
+            } => self.admin(&authority, response, |actor| {
+                actor_renew(&actor.inner, &actor.config, &mut actor.leases, key_id, ttl)
+            }),
+            AuthCommand::Revoke {
+                authority,
+                key_id,
+                response,
+            } => self.admin(&authority, response, |actor| {
+                actor_revoke(&actor.inner, &actor.config, &mut actor.leases, key_id)
+            }),
+            AuthCommand::Gc {
+                authority,
+                response,
+            } => self.admin(&authority, response, |actor| {
+                actor_gc(
+                    &actor.inner,
+                    &actor.config,
+                    &mut actor.leases,
+                    actor.replays.records(),
+                )
+            }),
+            AuthCommand::Reset {
+                authority,
+                response,
+            } => self.admin(&authority, response, |actor| {
+                actor_reset(
+                    &actor.inner,
+                    &actor.config,
+                    &mut actor.leases,
+                    actor.replays.records(),
+                )
+            }),
+            AuthCommand::RotateRoot {
+                authority,
+                new_key,
+                response,
+            } => self.admin(&authority, response, |actor| {
+                let result = actor_rotate_root(
+                    &actor.inner,
+                    &actor.config,
+                    &mut actor.leases,
+                    &mut actor.admin_lease,
+                    new_key,
+                );
+                if result.is_ok() {
+                    actor.replays.clear();
+                }
+                result
+            }),
+            AuthCommand::SetLegacyProtocol {
+                authority,
+                policy,
+                response,
+            } => self.admin(&authority, response, |actor| {
+                actor_set_legacy_protocol(&actor.inner, &actor.config, policy)
+            }),
+            AuthCommand::Status {
+                authority,
+                response,
+            } => self.admin(&authority, response, |actor| Ok(actor_status(&actor.inner))),
+            AuthCommand::Audit {
+                authority,
+                action,
+                key_id,
+                detail,
+                response,
+            } => self.admin(&authority, response, |actor| {
+                append_audit(&actor.config, &actor.inner, audit(&action, key_id, detail))
+            }),
+            AuthCommand::Shutdown { response } => {
+                self.stop();
+                let _ = response.send(());
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Runs an administrator command, checking the authority it was sent with
+    /// against the current administrator lease immediately beforehand, and
+    /// sends the outcome back.
+    fn admin<T>(
+        &mut self,
+        authority: &Weak<AuthLease>,
+        response: oneshot::Sender<Result<T, AuthFailure>>,
+        command: impl FnOnce(&mut Self) -> Result<T, AuthFailure>,
+    ) {
+        let result = validate_admin_authority(&self.inner, authority).and_then(|()| command(self));
+        let _ = response.send(result);
+    }
+
+    /// Ends the administrator lease and every temporary one, for either way
+    /// the actor stops.
+    fn stop(&mut self) {
+        self.admin_lease.cancel_rotated();
+        cancel_all_temporary_leases(&self.inner);
+    }
 }
 
 fn actor_status(inner: &Arc<AuthStateInner>) -> AuthStatus {
     let slots = inner.slots();
     let high = inner.high();
-    let active_keys = slots
-        .iter()
-        .filter(|slot| slot.state == SlotState::Active)
-        .count()
-        + high
-            .iter()
-            .filter(|entry| entry.state == SlotState::Active)
-            .count();
-    let expired_keys = slots
-        .iter()
-        .filter(|slot| slot.state == SlotState::Expired)
-        .count()
-        + high
-            .iter()
-            .filter(|entry| entry.state == SlotState::Expired)
-            .count();
-    let revoked_keys = slots
-        .iter()
-        .filter(|slot| slot.state == SlotState::Revoked)
-        .count()
-        + high
-            .iter()
-            .filter(|entry| entry.state == SlotState::Revoked)
-            .count();
+    let (mut active_keys, mut expired_keys, mut revoked_keys) = (0, 0, 0);
+    let states = slots.iter().map(|slot| slot.state);
+    for state in states.chain(high.iter().map(|entry| entry.state)) {
+        match state {
+            SlotState::Free => {}
+            SlotState::Active => active_keys += 1,
+            SlotState::Expired => expired_keys += 1,
+            SlotState::Revoked => revoked_keys += 1,
+        }
+    }
     let last_legacy_connection_at = inner.last_legacy_connection_at.load(Ordering::Acquire);
     AuthStatus {
-        schema_version: 1,
+        schema_version: ADMIN_SCHEMA_VERSION,
         safe_mode: inner.safe_mode.load(Ordering::Acquire),
         capacity: slots.len(),
         active_keys,
         expired_keys,
         revoked_keys,
-        legacy_protocol: if inner.legacy_protocol_allowed.load(Ordering::Acquire) {
-            LegacyProtocolPolicy::Allow
-        } else {
-            LegacyProtocolPolicy::Deny
-        },
+        legacy_protocol: inner.legacy_policy(),
         active_legacy_connections: inner.active_legacy_connections.load(Ordering::Acquire),
         last_legacy_connection_at: (last_legacy_connection_at != 0)
             .then_some(last_legacy_connection_at),
@@ -323,28 +382,28 @@ fn validate_admin_authority(
 ) -> Result<(), AuthFailure> {
     let presented = authority.upgrade().ok_or_else(|| {
         AuthFailure::new(
-            "administrator_key_rotated",
+            codes::ADMINISTRATOR_KEY_ROTATED,
             "administrator credential lease is no longer active",
             false,
         )
     })?;
-    if presented.cancellation.is_cancelled() {
+    if presented.is_cancelled() {
         return Err(AuthFailure::new(
-            "administrator_key_rotated",
+            codes::ADMINISTRATOR_KEY_ROTATED,
             "administrator credential lease has been cancelled",
             false,
         ));
     }
     let current = inner.admin.read().lease.upgrade().ok_or_else(|| {
         AuthFailure::new(
-            "administrator_key_rotated",
+            codes::ADMINISTRATOR_KEY_ROTATED,
             "active administrator credential lease is unavailable",
             false,
         )
     })?;
     if !Arc::ptr_eq(&presented, &current) {
         return Err(AuthFailure::new(
-            "administrator_key_rotated",
+            codes::ADMINISTRATOR_KEY_ROTATED,
             "administrator request was authenticated before the latest root-key rotation",
             false,
         ));
@@ -355,7 +414,7 @@ fn validate_admin_authority(
 fn ensure_store_available(inner: &AuthStateInner) -> Result<(), AuthFailure> {
     if inner.safe_mode.load(Ordering::Acquire) {
         Err(AuthFailure::new(
-            "temporary_key_store_unavailable",
+            codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
             "temporary key store is in administrator safe mode",
             false,
         ))
@@ -374,7 +433,7 @@ fn validate_slot_identity(slot: &SlotHot, key_id: KeyId) -> Result<(), AuthFailu
 
 fn key_not_found(key_id: KeyId) -> AuthFailure {
     AuthFailure::new(
-        "temporary_key_not_found",
+        codes::TEMPORARY_KEY_NOT_FOUND,
         format!("temporary key {key_id} does not exist"),
         false,
     )
@@ -382,7 +441,7 @@ fn key_not_found(key_id: KeyId) -> AuthFailure {
 
 fn key_not_renewable() -> AuthFailure {
     AuthFailure::new(
-        "temporary_key_not_renewable",
+        codes::TEMPORARY_KEY_NOT_RENEWABLE,
         "only an active, unexpired temporary key can be renewed",
         false,
     )
@@ -390,7 +449,7 @@ fn key_not_renewable() -> AuthFailure {
 
 fn key_not_active() -> AuthFailure {
     AuthFailure::new(
-        "temporary_key_not_active",
+        codes::TEMPORARY_KEY_NOT_ACTIVE,
         "temporary key is not active",
         false,
     )
@@ -405,12 +464,14 @@ fn slot_state_name(state: SlotState) -> &'static str {
     }
 }
 
-fn audit(action: &str, key_id: Option<KeyId>, label: Option<String>) -> AuditRecord {
+/// An audit record of `action`, stamped now. See [`AuditRecord::label`] for what
+/// the last argument holds.
+fn audit(action: &str, key_id: Option<KeyId>, label_or_detail: Option<String>) -> AuditRecord {
     AuditRecord {
         at: unix_seconds(),
         action: action.to_string(),
         key_id,
-        label,
+        label: label_or_detail,
         namespace: None,
     }
 }

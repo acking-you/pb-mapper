@@ -4,8 +4,38 @@
 //! Keeping owned mirrors here is what lets a caller depend on the SDK alone: the
 //! protocol crate stays an implementation detail.
 
+use crate::worker_status::WorkerStatus;
 use pb_mapper_auth::LegacyProtocolPolicy;
 use pb_mapper_protocol::command::{PbConnStatusResp, PbServiceConnStatus};
+// The type `RelayTransport::from_str` fails with too, so every option label the
+// SDK parses fails alike.
+pub use pb_mapper_protocol::transport::UnknownLabel;
+
+/// Give an option enum its one table of labels: `as_str`, and a `FromStr`
+/// that takes exactly those labels back, case and all.
+macro_rules! labels {
+    ($(#[$doc:meta])* $ty:ident { $($variant:ident => $label:literal),+ $(,)? }) => {
+        impl $ty {
+            $(#[$doc])*
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $label,)+
+                }
+            }
+        }
+
+        impl std::str::FromStr for $ty {
+            type Err = UnknownLabel;
+
+            fn from_str(label: &str) -> Result<Self, UnknownLabel> {
+                match label {
+                    $($label => Ok(Self::$variant),)+
+                    _ => Err(UnknownLabel::new(label)),
+                }
+            }
+        }
+    };
+}
 
 /// Transport used by a registered service or a local subscriber.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -14,10 +44,60 @@ pub enum Transport {
     Udp,
 }
 
+labels! {
+    /// Stable label, as the CLI and the Node addon spell it.
+    Transport { Tcp => "tcp", Udp => "udp" }
+}
+
 impl Transport {
     pub(crate) fn is_datagram(self) -> bool {
-        matches!(self, Self::Udp)
+        match self {
+            Self::Tcp => false,
+            Self::Udp => true,
+        }
     }
+}
+
+/// Configuration for a [`Client`](super::Client) session.
+#[derive(Clone)]
+pub struct ClientConfig {
+    /// Relay address (`host:port`).
+    pub server: String,
+    /// Administrator key (32 printable bytes) or a `pbmt1_` temporary credential.
+    pub credential: String,
+    pub keep_alive: bool,
+    /// Administrator-only target namespace. Temporary credentials always use
+    /// their own namespace when this is `None`.
+    pub namespace: Option<u64>,
+}
+
+impl std::fmt::Debug for ClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientConfig")
+            .field("server", &self.server)
+            .field("credential", &"[redacted]")
+            .field("keep_alive", &self.keep_alive)
+            .field("namespace", &self.namespace)
+            .finish()
+    }
+}
+
+/// Register a local TCP/UDP service with the relay.
+#[derive(Clone, Debug)]
+pub struct RegisterRequest {
+    pub key: String,
+    pub local_addr: String,
+    pub transport: Transport,
+    pub codec: bool,
+    pub force_namespace: bool,
+}
+
+/// Subscribe to a registered service and listen locally.
+#[derive(Clone, Debug)]
+pub struct ConnectRequest {
+    pub key: String,
+    pub local_addr: String,
+    pub transport: Transport,
 }
 
 /// Observed lifecycle of a [`super::Registration`] or [`super::Connection`].
@@ -31,19 +111,16 @@ pub enum TunnelStatus {
 }
 
 impl TunnelStatus {
-    pub(crate) fn from_callback(status: &str) -> Self {
+    /// What a worker's report means to a caller of the SDK.
+    pub(crate) fn from_worker(status: &WorkerStatus) -> Self {
         match status {
-            "connected" => return Self::Connected,
-            "retrying" => return Self::Retrying,
-            "failed" => return Self::Failed("failed".into()),
-            _ => {}
-        }
-        // A permanent rejection arrives as `failed: <reason>`; the reason is the
-        // only description of it the caller ever gets, so it has to survive here
-        // rather than collapsing into `Retrying` and hanging `wait_ready`.
-        match status.strip_prefix("failed:") {
-            Some(reason) => Self::Failed(reason.trim().to_string()),
-            None => Self::Retrying,
+            WorkerStatus::Connected => Self::Connected,
+            WorkerStatus::Retrying => Self::Retrying,
+            WorkerStatus::Failed(None) => Self::Failed("failed".into()),
+            // The reason is the only description of a permanent rejection
+            // the caller ever gets. Trimmed: one a `snafu::Report` rendered
+            // ends in a line break.
+            WorkerStatus::Failed(Some(reason)) => Self::Failed(reason.trim().to_owned()),
         }
     }
 }
@@ -68,9 +145,7 @@ impl RemoteId {
                 active,
                 idle,
             }),
-            other => Err(super::Error::protocol(format!(
-                "expected remote-id status, got {other:?}"
-            ))),
+            other => Err(super::Error::unexpected("remote-id status", &other)),
         }
     }
 }
@@ -87,12 +162,19 @@ pub struct ServiceConnection {
 
 impl From<PbServiceConnStatus> for ServiceConnection {
     fn from(value: PbServiceConnStatus) -> Self {
+        let PbServiceConnStatus {
+            conn_id,
+            generation,
+            protocol_version,
+            healthy,
+            last_rx_age_ms,
+        } = value;
         Self {
-            conn_id: value.conn_id,
-            generation: value.generation,
-            protocol_version: value.protocol_version,
-            healthy: value.healthy,
-            last_rx_age_ms: value.last_rx_age_ms,
+            conn_id,
+            generation,
+            protocol_version,
+            healthy,
+            last_rx_age_ms,
         }
     }
 }
@@ -102,6 +184,11 @@ impl From<PbServiceConnStatus> for ServiceConnection {
 pub enum LegacyProtocol {
     Allow,
     Deny,
+}
+
+labels! {
+    /// Stable label, as the CLI and the Node addon spell it.
+    LegacyProtocol { Allow => "allow", Deny => "deny" }
 }
 
 impl From<LegacyProtocol> for LegacyProtocolPolicy {
@@ -133,6 +220,11 @@ pub enum PathPolicy {
     /// Try a direct QUIC path first; fall back to the relay if it cannot be
     /// set up, before any application byte is sent.
     Auto,
+}
+
+labels! {
+    /// Stable label, as the CLI and the Node addon spell it.
+    PathPolicy { RelayOnly => "relay-only", Auto => "auto" }
 }
 
 impl Default for PathPolicy {
@@ -170,14 +262,22 @@ pub enum PortMapping {
     Always,
 }
 
-impl PortMapping {
+labels! {
     /// Stable label, matching the serialized representation.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Auto => "auto",
-            Self::Always => "always",
+    PortMapping { Off => "off", Auto => "auto", Always => "always" }
+}
+
+impl PortMapping {
+    /// Refuse a mapping from the start that this build cannot make, rather
+    /// than ignore it. One when needed is best effort, and the default:
+    /// without the feature it never starts.
+    pub(crate) fn check_supported(self) -> super::Result<()> {
+        if self == Self::Always && !cfg!(feature = "port-mapping") {
+            return Err(super::Error::invalid_config(
+                "built without port-mapping support",
+            ));
         }
+        Ok(())
     }
 }
 
@@ -200,14 +300,9 @@ pub enum LanTransport {
     Tcp,
 }
 
-impl LanTransport {
+labels! {
     /// Stable label, matching the serialized representation.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Quic => "quic",
-            Self::Tcp => "tcp",
-        }
-    }
+    LanTransport { Quic => "quic", Tcp => "tcp" }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -289,26 +384,53 @@ impl Default for RegisterOptions {
     }
 }
 
-/// How a tunnel's direct setups go, as its options say, carried from the SDK
-/// to the direct core. It exists without `p2p` as well, since the workers
-/// that carry it do, though only the direct core reads it.
-#[derive(Clone, Copy, Debug)]
-#[cfg_attr(not(feature = "p2p"), allow(dead_code))]
-pub(crate) struct DirectPolicy {
-    pub port_mapping: PortMapping,
-    pub lan_first: bool,
-    /// What a consumer asks a shared LAN to carry.
-    pub lan_transport: LanTransport,
-    /// Whether a provider serves TCP on a shared LAN to a consumer that asks.
-    pub lan_tcp: bool,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl DirectPolicy {
-    /// The relay-only workers', which never set up a direct path.
-    pub const RELAY: Self = Self {
-        port_mapping: PortMapping::Off,
-        lan_first: true,
-        lan_transport: LanTransport::Quic,
-        lan_tcp: false,
-    };
+    #[test]
+    fn config_debug_redacts_credentials() {
+        let config = ClientConfig {
+            server: "localhost:7666".into(),
+            credential: pb_mapper_core::test_support::TEST_ADMIN_KEY.into(),
+            keep_alive: false,
+            namespace: None,
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(&config.credential));
+        assert!(debug.contains("[redacted]"));
+    }
+
+    /// The labels the CLI, the Node addon and the app read and write: each
+    /// value's label parses back to it, exactly as spelled, and where a
+    /// value is serialized, it is serialized as its label.
+    #[test]
+    fn option_labels_are_the_ones_every_front_end_spells() {
+        macro_rules! assert_labels {
+            ($($value:expr => $label:literal),+ $(,)?) => {$(
+                assert_eq!($value.as_str(), $label);
+                assert_eq!($label.parse(), Ok($value));
+            )+};
+        }
+        assert_labels!(
+            Transport::Tcp => "tcp",
+            Transport::Udp => "udp",
+            LegacyProtocol::Allow => "allow",
+            LegacyProtocol::Deny => "deny",
+            PathPolicy::RelayOnly => "relay-only",
+            PathPolicy::Auto => "auto",
+            PortMapping::Off => "off",
+            PortMapping::Auto => "auto",
+            PortMapping::Always => "always",
+            LanTransport::Quic => "quic",
+            LanTransport::Tcp => "tcp",
+        );
+        assert_eq!("TCP".parse::<Transport>(), Err(UnknownLabel::new("TCP")));
+        for mapping in [PortMapping::Off, PortMapping::Auto, PortMapping::Always] {
+            assert_eq!(serde_json::to_value(mapping).unwrap(), mapping.as_str());
+        }
+        for transport in [LanTransport::Quic, LanTransport::Tcp] {
+            assert_eq!(serde_json::to_value(transport).unwrap(), transport.as_str());
+        }
+    }
 }

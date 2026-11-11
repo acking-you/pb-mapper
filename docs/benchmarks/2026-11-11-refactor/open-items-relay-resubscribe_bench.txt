@@ -1,0 +1,203 @@
+### rs3-windows
+=== before round 0 ===
+case=idle wait_ms=2502 cpu_ms=0 probe_p50_us=993.0 probe_p99_us=1485.5 probe_max_us=1604.4 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2605 cpu_ms=484 probe_p50_us=1103.0 probe_p99_us=4744.9 probe_max_us=9934.0 log_lines=33877 asks=3700 refused=100 waited=100
+case=wait400 wait_ms=2612 cpu_ms=1203 probe_p50_us=1431.8 probe_p99_us=12654.8 probe_max_us=18864.7 log_lines=130200 asks=14709 refused=400 waited=400
+case=wait1000 wait_ms=2748 cpu_ms=7375 probe_p50_us=2778.7 probe_p99_us=57481.1 probe_max_us=135103.9 log_lines=325152 asks=37000 refused=1000 waited=1000
+=== after round 0 ===
+case=idle wait_ms=2505 cpu_ms=0 probe_p50_us=1266.1 probe_p99_us=1943.8 probe_max_us=2420.8 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2543 cpu_ms=484 probe_p50_us=1302.2 probe_p99_us=4719.5 probe_max_us=15932.4 log_lines=6295 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2606 cpu_ms=3719 probe_p50_us=1270.3 probe_p99_us=8364.1 probe_max_us=67620.7 log_lines=20831 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2622 cpu_ms=1109 probe_p50_us=1043.6 probe_p99_us=31449.6 probe_max_us=67752.2 log_lines=50623 asks=2000 refused=1000 waited=1000
+=== after round 1 ===
+case=idle wait_ms=2514 cpu_ms=578 probe_p50_us=1070.3 probe_p99_us=1664.5 probe_max_us=1803.5 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2549 cpu_ms=203 probe_p50_us=973.5 probe_p99_us=4833.7 probe_max_us=7413.0 log_lines=6363 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2576 cpu_ms=766 probe_p50_us=1173.6 probe_p99_us=14866.5 probe_max_us=30092.2 log_lines=21150 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2690 cpu_ms=4125 probe_p50_us=1298.9 probe_p99_us=31793.2 probe_max_us=118994.5 log_lines=50351 asks=2000 refused=1000 waited=1000
+=== before round 1 ===
+case=idle wait_ms=2510 cpu_ms=62 probe_p50_us=1211.0 probe_p99_us=1812.9 probe_max_us=2141.1 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2588 cpu_ms=1875 probe_p50_us=1269.7 probe_p99_us=5479.4 probe_max_us=13767.5 log_lines=33577 asks=3700 refused=100 waited=100
+case=wait400 wait_ms=2646 cpu_ms=3047 probe_p50_us=1314.6 probe_p99_us=14167.1 probe_max_us=64937.8 log_lines=130814 asks=14800 refused=400 waited=400
+case=wait1000 wait_ms=2822 cpu_ms=9906 probe_p50_us=2360.3 probe_p99_us=70088.9 probe_max_us=197390.9 log_lines=325273 asks=36998 refused=1000 waited=1000
+=== before round 2 ===
+case=idle wait_ms=2506 cpu_ms=0 probe_p50_us=974.3 probe_p99_us=1454.1 probe_max_us=1543.0 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2580 cpu_ms=359 probe_p50_us=1078.9 probe_p99_us=3665.7 probe_max_us=9158.9 log_lines=33870 asks=3700 refused=100 waited=100
+case=wait400 wait_ms=2606 cpu_ms=2109 probe_p50_us=1585.0 probe_p99_us=12408.9 probe_max_us=27801.5 log_lines=130839 asks=14800 refused=400 waited=400
+case=wait1000 wait_ms=2713 cpu_ms=4609 probe_p50_us=2992.4 probe_p99_us=57880.8 probe_max_us=93113.5 log_lines=324444 asks=36916 refused=1000 waited=1000
+=== after round 2 ===
+case=idle wait_ms=2511 cpu_ms=1016 probe_p50_us=1747.0 probe_p99_us=3008.0 probe_max_us=16808.7 log_lines=1120 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2562 cpu_ms=2469 probe_p50_us=1579.0 probe_p99_us=4222.8 probe_max_us=27450.5 log_lines=6049 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2599 cpu_ms=2781 probe_p50_us=1311.8 probe_p99_us=15768.8 probe_max_us=48476.9 log_lines=20896 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2701 cpu_ms=6078 probe_p50_us=1335.2 probe_p99_us=19534.0 probe_max_us=106176.7 log_lines=50340 asks=2000 refused=1000 waited=1000
+=== after round 3 ===
+case=idle wait_ms=2508 cpu_ms=797 probe_p50_us=1349.9 probe_p99_us=2062.7 probe_max_us=2117.0 log_lines=1120 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2555 cpu_ms=453 probe_p50_us=1346.1 probe_p99_us=3996.6 probe_max_us=16297.1 log_lines=6356 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2562 cpu_ms=172 probe_p50_us=1012.5 probe_p99_us=14109.9 probe_max_us=25696.9 log_lines=20808 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2633 cpu_ms=1312 probe_p50_us=1033.6 probe_p99_us=32834.4 probe_max_us=70029.6 log_lines=50342 asks=2000 refused=1000 waited=1000
+=== before round 3 ===
+case=idle wait_ms=2504 cpu_ms=188 probe_p50_us=991.2 probe_p99_us=1637.2 probe_max_us=1743.4 log_lines=1120 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2594 cpu_ms=2766 probe_p50_us=1324.4 probe_p99_us=4396.1 probe_max_us=18011.9 log_lines=33870 asks=3700 refused=100 waited=100
+case=wait400 wait_ms=2653 cpu_ms=3891 probe_p50_us=1362.9 probe_p99_us=12665.1 probe_max_us=83343.1 log_lines=130829 asks=14800 refused=400 waited=400
+case=wait1000 wait_ms=2682 cpu_ms=2156 probe_p50_us=1384.7 probe_p99_us=45585.8 probe_max_us=84323.6 log_lines=325277 asks=36967 refused=1000 waited=1000
+=== before round 4 ===
+case=idle wait_ms=2502 cpu_ms=250 probe_p50_us=1361.8 probe_p99_us=2105.1 probe_max_us=2192.8 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2614 cpu_ms=1484 probe_p50_us=1761.1 probe_p99_us=4434.7 probe_max_us=34185.4 log_lines=33877 asks=3700 refused=100 waited=100
+case=wait400 wait_ms=2733 cpu_ms=8016 probe_p50_us=2366.0 probe_p99_us=7232.0 probe_max_us=153160.8 log_lines=130838 asks=14800 refused=400 waited=400
+case=wait1000 wait_ms=2653 cpu_ms=2188 probe_p50_us=2338.4 probe_p99_us=46410.5 probe_max_us=84766.3 log_lines=318718 asks=36160 refused=1000 waited=1000
+=== after round 4 ===
+case=idle wait_ms=2506 cpu_ms=47 probe_p50_us=1239.0 probe_p99_us=1892.4 probe_max_us=2077.4 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2570 cpu_ms=3547 probe_p50_us=1610.8 probe_p99_us=4551.9 probe_max_us=36279.1 log_lines=6157 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2722 cpu_ms=5781 probe_p50_us=1464.3 probe_p99_us=14327.9 probe_max_us=146465.3 log_lines=20885 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2812 cpu_ms=8688 probe_p50_us=1408.5 probe_p99_us=69237.3 probe_max_us=117193.0 log_lines=50385 asks=2000 refused=1000 waited=1000
+=== after round 5 ===
+case=idle wait_ms=2503 cpu_ms=1516 probe_p50_us=1284.7 probe_p99_us=2329.8 probe_max_us=3528.3 log_lines=1120 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2555 cpu_ms=1203 probe_p50_us=1254.5 probe_p99_us=4994.2 probe_max_us=22212.1 log_lines=6349 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2572 cpu_ms=297 probe_p50_us=921.9 probe_p99_us=12878.5 probe_max_us=24960.9 log_lines=20815 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2715 cpu_ms=5438 probe_p50_us=1234.5 probe_p99_us=28142.3 probe_max_us=123233.8 log_lines=50346 asks=2000 refused=1000 waited=1000
+=== before round 5 ===
+case=idle wait_ms=2516 cpu_ms=953 probe_p50_us=1204.3 probe_p99_us=1828.2 probe_max_us=1905.6 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2584 cpu_ms=891 probe_p50_us=1235.2 probe_p99_us=4051.9 probe_max_us=24891.5 log_lines=33863 asks=3700 refused=100 waited=100
+case=wait400 wait_ms=2628 cpu_ms=1047 probe_p50_us=1296.1 probe_p99_us=12551.7 probe_max_us=35666.3 log_lines=130801 asks=14800 refused=400 waited=400
+case=wait1000 wait_ms=2840 cpu_ms=12094 probe_p50_us=1787.2 probe_p99_us=95741.8 probe_max_us=232739.7 log_lines=320852 asks=36470 refused=1000 waited=1000
+=== before round 6 ===
+case=idle wait_ms=2510 cpu_ms=141 probe_p50_us=1189.3 probe_p99_us=2105.6 probe_max_us=2725.8 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2595 cpu_ms=1125 probe_p50_us=1565.0 probe_p99_us=4215.8 probe_max_us=24038.8 log_lines=33577 asks=3700 refused=100 waited=100
+case=wait400 wait_ms=2729 cpu_ms=6641 probe_p50_us=2198.9 probe_p99_us=56883.6 probe_max_us=79146.4 log_lines=130707 asks=14787 refused=400 waited=400
+case=wait1000 wait_ms=2667 cpu_ms=2922 probe_p50_us=1780.9 probe_p99_us=47292.6 probe_max_us=70309.3 log_lines=323614 asks=36781 refused=1000 waited=1000
+=== after round 6 ===
+case=idle wait_ms=2506 cpu_ms=953 probe_p50_us=1514.8 probe_p99_us=3283.3 probe_max_us=3834.5 log_lines=1113 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2563 cpu_ms=2875 probe_p50_us=1651.3 probe_p99_us=3888.5 probe_max_us=33009.0 log_lines=6056 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2813 cpu_ms=8438 probe_p50_us=1909.5 probe_p99_us=22302.5 probe_max_us=183009.1 log_lines=20824 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=3072 cpu_ms=16500 probe_p50_us=1825.7 probe_p99_us=60770.6 probe_max_us=243444.3 log_lines=50349 asks=2000 refused=1000 waited=1000
+=== after round 7 ===
+case=idle wait_ms=2501 cpu_ms=16 probe_p50_us=1525.5 probe_p99_us=2531.9 probe_max_us=15309.8 log_lines=1113 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2591 cpu_ms=1344 probe_p50_us=1604.8 probe_p99_us=10193.8 probe_max_us=30636.9 log_lines=6363 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2732 cpu_ms=7531 probe_p50_us=1684.0 probe_p99_us=12356.4 probe_max_us=144905.2 log_lines=20833 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=3079 cpu_ms=21703 probe_p50_us=1770.1 probe_p99_us=161498.8 probe_max_us=229411.2 log_lines=50361 asks=2000 refused=1000 waited=1000
+=== before round 7 ===
+case=idle wait_ms=2501 cpu_ms=734 probe_p50_us=1583.4 probe_p99_us=2451.0 probe_max_us=4021.9 log_lines=1120 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2638 cpu_ms=1078 probe_p50_us=1612.8 probe_p99_us=4394.2 probe_max_us=41085.5 log_lines=33877 asks=3700 refused=100 waited=100
+case=wait400 wait_ms=2732 cpu_ms=7547 probe_p50_us=2030.2 probe_p99_us=7282.6 probe_max_us=155776.3 log_lines=130840 asks=14800 refused=400 waited=400
+case=wait1000 wait_ms=2908 cpu_ms=13703 probe_p50_us=2021.0 probe_p99_us=112390.4 probe_max_us=293510.4 log_lines=324256 asks=36890 refused=1000 waited=1000
+=== before round 8 ===
+case=idle wait_ms=2514 cpu_ms=0 probe_p50_us=1465.2 probe_p99_us=2122.9 probe_max_us=2149.4 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2614 cpu_ms=2484 probe_p50_us=1596.8 probe_p99_us=4803.0 probe_max_us=32319.7 log_lines=33877 asks=3700 refused=100 waited=100
+case=wait400 wait_ms=2742 cpu_ms=6031 probe_p50_us=2009.3 probe_p99_us=9576.5 probe_max_us=158213.4 log_lines=130959 asks=14801 refused=400 waited=400
+case=wait1000 wait_ms=3080 cpu_ms=17906 probe_p50_us=2766.3 probe_p99_us=87997.1 probe_max_us=420084.4 log_lines=321400 asks=36554 refused=1000 waited=1000
+=== after round 8 ===
+case=idle wait_ms=2515 cpu_ms=0 probe_p50_us=1737.9 probe_p99_us=3092.5 probe_max_us=3377.0 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2572 cpu_ms=1328 probe_p50_us=1634.6 probe_p99_us=4862.5 probe_max_us=34707.4 log_lines=6166 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2708 cpu_ms=5781 probe_p50_us=1609.9 probe_p99_us=16122.0 probe_max_us=120314.3 log_lines=20818 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=3004 cpu_ms=18047 probe_p50_us=1627.3 probe_p99_us=80079.5 probe_max_us=214909.6 log_lines=50356 asks=2000 refused=1000 waited=1000
+=== after round 9 ===
+case=idle wait_ms=2505 cpu_ms=1734 probe_p50_us=1415.1 probe_p99_us=2047.0 probe_max_us=4845.8 log_lines=1120 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2555 cpu_ms=906 probe_p50_us=1426.9 probe_p99_us=5775.8 probe_max_us=15717.0 log_lines=6311 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2686 cpu_ms=4328 probe_p50_us=1479.7 probe_p99_us=15700.3 probe_max_us=84062.3 log_lines=20856 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2769 cpu_ms=6750 probe_p50_us=1184.8 probe_p99_us=29667.9 probe_max_us=190589.8 log_lines=50346 asks=2000 refused=1000 waited=1000
+=== before round 9 ===
+case=idle wait_ms=2514 cpu_ms=0 probe_p50_us=1055.5 probe_p99_us=1659.8 probe_max_us=1993.1 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2579 cpu_ms=875 probe_p50_us=1112.2 probe_p99_us=4837.3 probe_max_us=9376.3 log_lines=33877 asks=3700 refused=100 waited=100
+case=wait400 wait_ms=2639 cpu_ms=2734 probe_p50_us=1320.6 probe_p99_us=21404.1 probe_max_us=53854.0 log_lines=130884 asks=14800 refused=400 waited=400
+case=wait1000 wait_ms=2845 cpu_ms=9500 probe_p50_us=1932.3 probe_p99_us=112553.7 probe_max_us=137500.3 log_lines=321975 asks=36567 refused=1000 waited=1000
+=== before round 10 ===
+case=idle wait_ms=2513 cpu_ms=0 probe_p50_us=1073.1 probe_p99_us=1532.2 probe_max_us=1728.8 log_lines=1120 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2593 cpu_ms=484 probe_p50_us=1318.3 probe_p99_us=4331.0 probe_max_us=10150.8 log_lines=33829 asks=3694 refused=100 waited=100
+case=wait400 wait_ms=2720 cpu_ms=6875 probe_p50_us=1779.6 probe_p99_us=7102.1 probe_max_us=140780.0 log_lines=130838 asks=14800 refused=400 waited=400
+case=wait1000 wait_ms=2965 cpu_ms=15016 probe_p50_us=1993.4 probe_p99_us=110316.9 probe_max_us=254006.2 log_lines=324884 asks=36971 refused=1000 waited=1000
+=== after round 10 ===
+case=idle wait_ms=2515 cpu_ms=0 probe_p50_us=1582.2 probe_p99_us=2331.0 probe_max_us=2350.0 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2571 cpu_ms=1562 probe_p50_us=1457.0 probe_p99_us=4702.4 probe_max_us=33854.1 log_lines=6049 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2572 cpu_ms=938 probe_p50_us=1161.9 probe_p99_us=14995.4 probe_max_us=38320.5 log_lines=20913 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2918 cpu_ms=15375 probe_p50_us=1407.5 probe_p99_us=81588.3 probe_max_us=165599.0 log_lines=50341 asks=2000 refused=1000 waited=1000
+=== after round 11 ===
+case=idle wait_ms=2508 cpu_ms=1062 probe_p50_us=1031.7 probe_p99_us=1644.8 probe_max_us=1758.0 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2545 cpu_ms=1141 probe_p50_us=1474.7 probe_p99_us=3686.5 probe_max_us=20903.5 log_lines=6245 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2642 cpu_ms=3406 probe_p50_us=1212.4 probe_p99_us=12880.4 probe_max_us=91438.6 log_lines=20833 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2611 cpu_ms=1828 probe_p50_us=1041.2 probe_p99_us=25971.0 probe_max_us=67271.2 log_lines=50333 asks=2000 refused=1000 waited=1000
+=== before round 11 ===
+case=idle wait_ms=2508 cpu_ms=344 probe_p50_us=1074.5 probe_p99_us=1867.5 probe_max_us=2398.1 log_lines=1127 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2593 cpu_ms=531 probe_p50_us=1185.1 probe_p99_us=4744.8 probe_max_us=12029.9 log_lines=33877 asks=3700 refused=100 waited=100
+case=wait400 wait_ms=2628 cpu_ms=2328 probe_p50_us=1351.1 probe_p99_us=14703.2 probe_max_us=54242.1 log_lines=130716 asks=14800 refused=400 waited=400
+case=wait1000 wait_ms=2810 cpu_ms=9062 probe_p50_us=1833.1 probe_p99_us=79422.2 probe_max_us=195185.5 log_lines=324742 asks=36947 refused=1000 waited=1000
+
+### rs-wsl-linux
+=== before round 0 ===
+case=idle wait_ms=2505 cpu_ms=130 probe_p50_us=696.5 probe_p99_us=994.3 probe_max_us=1365.5 log_lines=2555 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2562 cpu_ms=300 probe_p50_us=711.2 probe_p99_us=1163.1 probe_max_us=3697.6 log_lines=40963 asks=4418 refused=100 waited=100
+case=wait400 wait_ms=2532 cpu_ms=870 probe_p50_us=700.9 probe_p99_us=2050.1 probe_max_us=9726.2 log_lines=155082 asks=17600 refused=400 waited=400
+case=wait1000 wait_ms=2771 cpu_ms=1870 probe_p50_us=708.3 probe_p99_us=2710.1 probe_max_us=1015914.8 log_lines=375690 asks=42970 refused=1000 waited=976
+=== after round 0 ===
+case=idle wait_ms=2500 cpu_ms=120 probe_p50_us=666.7 probe_p99_us=1013.6 probe_max_us=1091.1 log_lines=2569 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2509 cpu_ms=160 probe_p50_us=685.8 probe_p99_us=1063.6 probe_max_us=2251.2 log_lines=7784 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2530 cpu_ms=640 probe_p50_us=690.5 probe_p99_us=1074.6 probe_max_us=10420.8 log_lines=22575 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2740 cpu_ms=880 probe_p50_us=664.8 probe_p99_us=9364.6 probe_max_us=1008703.3 log_lines=44239 asks=1611 refused=1000 waited=611
+=== after round 1 ===
+case=idle wait_ms=2507 cpu_ms=110 probe_p50_us=658.8 probe_p99_us=989.1 probe_max_us=998.4 log_lines=2576 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2513 cpu_ms=200 probe_p50_us=670.0 probe_p99_us=1121.8 probe_max_us=2517.5 log_lines=7611 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2528 cpu_ms=600 probe_p50_us=671.3 probe_p99_us=2389.3 probe_max_us=9466.9 log_lines=22468 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2749 cpu_ms=1120 probe_p50_us=677.2 probe_p99_us=5365.3 probe_max_us=203728.7 log_lines=54309 asks=2000 refused=1000 waited=1000
+=== before round 1 ===
+case=idle wait_ms=2505 cpu_ms=120 probe_p50_us=666.7 probe_p99_us=1084.9 probe_max_us=4243.4 log_lines=2562 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2555 cpu_ms=330 probe_p50_us=708.8 probe_p99_us=1405.7 probe_max_us=2737.1 log_lines=40900 asks=4407 refused=100 waited=100
+case=wait400 wait_ms=2559 cpu_ms=950 probe_p50_us=710.1 probe_p99_us=1617.4 probe_max_us=9146.5 log_lines=155250 asks=17608 refused=400 waited=400
+case=wait1000 wait_ms=2745 cpu_ms=2120 probe_p50_us=723.0 probe_p99_us=2169.9 probe_max_us=20078.2 log_lines=384755 asks=44000 refused=1000 waited=1000
+=== before round 2 ===
+case=idle wait_ms=2502 cpu_ms=130 probe_p50_us=701.7 probe_p99_us=1055.7 probe_max_us=10585.6 log_lines=2548 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2561 cpu_ms=310 probe_p50_us=703.0 probe_p99_us=1482.9 probe_max_us=3806.2 log_lines=40841 asks=4402 refused=100 waited=100
+case=wait400 wait_ms=2566 cpu_ms=1070 probe_p50_us=702.2 probe_p99_us=2343.3 probe_max_us=9764.9 log_lines=154679 asks=17604 refused=400 waited=400
+case=wait1000 wait_ms=2755 cpu_ms=2060 probe_p50_us=724.9 probe_p99_us=5840.1 probe_max_us=210714.1 log_lines=367898 asks=42022 refused=1000 waited=954
+=== after round 2 ===
+case=idle wait_ms=2504 cpu_ms=130 probe_p50_us=694.0 probe_p99_us=1032.7 probe_max_us=1099.2 log_lines=2562 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2513 cpu_ms=200 probe_p50_us=676.8 probe_p99_us=1133.9 probe_max_us=2606.7 log_lines=7731 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2528 cpu_ms=600 probe_p50_us=722.9 probe_p99_us=1102.9 probe_max_us=9725.2 log_lines=22367 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2744 cpu_ms=1120 probe_p50_us=710.3 probe_p99_us=8747.4 probe_max_us=1015865.3 log_lines=50458 asks=1858 refused=1000 waited=858
+=== after round 3 ===
+case=idle wait_ms=2504 cpu_ms=130 probe_p50_us=685.8 probe_p99_us=1040.8 probe_max_us=5493.3 log_lines=2555 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2510 cpu_ms=160 probe_p50_us=686.7 probe_p99_us=1083.6 probe_max_us=2096.0 log_lines=7729 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2528 cpu_ms=670 probe_p50_us=685.0 probe_p99_us=1136.9 probe_max_us=13410.3 log_lines=22596 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2742 cpu_ms=1200 probe_p50_us=694.9 probe_p99_us=5693.9 probe_max_us=206521.0 log_lines=51602 asks=1894 refused=1000 waited=894
+=== before round 3 ===
+case=idle wait_ms=2505 cpu_ms=140 probe_p50_us=705.1 probe_p99_us=1155.3 probe_max_us=5642.5 log_lines=2548 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2556 cpu_ms=390 probe_p50_us=868.6 probe_p99_us=1436.1 probe_max_us=4930.2 log_lines=40603 asks=4401 refused=100 waited=100
+case=wait400 wait_ms=2538 cpu_ms=1040 probe_p50_us=843.6 probe_p99_us=1777.1 probe_max_us=8425.2 log_lines=154870 asks=17600 refused=400 waited=400
+case=wait1000 wait_ms=2759 cpu_ms=2070 probe_p50_us=862.5 probe_p99_us=6803.6 probe_max_us=1021185.6 log_lines=341699 asks=38883 refused=1000 waited=881
+=== before round 4 ===
+case=idle wait_ms=2504 cpu_ms=190 probe_p50_us=868.0 probe_p99_us=1256.9 probe_max_us=4709.9 log_lines=2492 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2514 cpu_ms=380 probe_p50_us=852.6 probe_p99_us=1309.7 probe_max_us=2322.3 log_lines=40753 asks=4400 refused=100 waited=100
+case=wait400 wait_ms=2549 cpu_ms=1140 probe_p50_us=793.2 probe_p99_us=2630.2 probe_max_us=13468.6 log_lines=154975 asks=17600 refused=400 waited=400
+case=wait1000 wait_ms=2755 cpu_ms=1960 probe_p50_us=804.3 probe_p99_us=4487.8 probe_max_us=203861.5 log_lines=343782 asks=38939 refused=1000 waited=882
+=== after round 4 ===
+case=idle wait_ms=2505 cpu_ms=160 probe_p50_us=787.4 probe_p99_us=1168.6 probe_max_us=1414.1 log_lines=2513 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2514 cpu_ms=270 probe_p50_us=805.1 probe_p99_us=1184.8 probe_max_us=3202.1 log_lines=7640 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2532 cpu_ms=820 probe_p50_us=782.0 probe_p99_us=1213.0 probe_max_us=15939.7 log_lines=22391 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2736 cpu_ms=1410 probe_p50_us=804.8 probe_p99_us=2414.5 probe_max_us=204361.6 log_lines=51108 asks=1898 refused=1000 waited=898
+=== after round 5 ===
+case=idle wait_ms=2505 cpu_ms=160 probe_p50_us=775.3 probe_p99_us=1141.7 probe_max_us=2630.3 log_lines=2527 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2515 cpu_ms=230 probe_p50_us=792.3 probe_p99_us=1185.8 probe_max_us=4673.1 log_lines=7746 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2533 cpu_ms=810 probe_p50_us=829.7 probe_p99_us=1214.0 probe_max_us=12564.4 log_lines=22339 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2739 cpu_ms=1060 probe_p50_us=825.8 probe_p99_us=7554.1 probe_max_us=204301.4 log_lines=47564 asks=1736 refused=1000 waited=736
+=== before round 5 ===
+case=idle wait_ms=2503 cpu_ms=160 probe_p50_us=810.9 probe_p99_us=1170.0 probe_max_us=8255.7 log_lines=2506 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2521 cpu_ms=350 probe_p50_us=790.3 probe_p99_us=1227.0 probe_max_us=2534.5 log_lines=40707 asks=4400 refused=100 waited=100
+case=wait400 wait_ms=2538 cpu_ms=1000 probe_p50_us=797.6 probe_p99_us=1446.2 probe_max_us=9595.5 log_lines=155061 asks=17600 refused=400 waited=400
+case=wait1000 wait_ms=2776 cpu_ms=2390 probe_p50_us=833.0 probe_p99_us=4651.0 probe_max_us=17298.3 log_lines=385919 asks=44007 refused=1000 waited=1000
+=== before round 6 ===
+case=idle wait_ms=2500 cpu_ms=150 probe_p50_us=798.3 probe_p99_us=1169.3 probe_max_us=7834.6 log_lines=2506 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2520 cpu_ms=340 probe_p50_us=799.7 probe_p99_us=1253.1 probe_max_us=3498.1 log_lines=40674 asks=4400 refused=100 waited=100
+case=wait400 wait_ms=2565 cpu_ms=1070 probe_p50_us=799.6 probe_p99_us=1943.3 probe_max_us=9980.3 log_lines=154864 asks=17602 refused=400 waited=400
+case=wait1000 wait_ms=2751 cpu_ms=1350 probe_p50_us=797.1 probe_p99_us=2177.6 probe_max_us=1011738.5 log_lines=221675 asks=24221 refused=1000 waited=552
+=== after round 6 ===
+case=idle wait_ms=2506 cpu_ms=170 probe_p50_us=815.3 probe_p99_us=1160.6 probe_max_us=1313.0 log_lines=2513 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2515 cpu_ms=220 probe_p50_us=803.8 probe_p99_us=1219.0 probe_max_us=8101.4 log_lines=7694 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2527 cpu_ms=620 probe_p50_us=807.9 probe_p99_us=1318.9 probe_max_us=12296.4 log_lines=22513 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2740 cpu_ms=1530 probe_p50_us=831.7 probe_p99_us=12572.9 probe_max_us=1020606.6 log_lines=51064 asks=1922 refused=1000 waited=922
+=== after round 7 ===
+case=idle wait_ms=2500 cpu_ms=160 probe_p50_us=794.7 probe_p99_us=1146.3 probe_max_us=1325.1 log_lines=2513 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2515 cpu_ms=270 probe_p50_us=809.2 probe_p99_us=1365.1 probe_max_us=4404.7 log_lines=7721 asks=200 refused=100 waited=100
+case=wait400 wait_ms=2531 cpu_ms=740 probe_p50_us=799.9 probe_p99_us=2206.6 probe_max_us=11128.1 log_lines=22433 asks=800 refused=400 waited=400
+case=wait1000 wait_ms=2757 cpu_ms=1220 probe_p50_us=833.3 probe_p99_us=6248.9 probe_max_us=1007257.0 log_lines=50214 asks=1851 refused=1000 waited=851
+=== before round 7 ===
+case=idle wait_ms=2502 cpu_ms=150 probe_p50_us=802.5 probe_p99_us=1187.5 probe_max_us=5889.0 log_lines=2506 asks=0 refused=0 waited=0
+case=wait100 wait_ms=2517 cpu_ms=340 probe_p50_us=794.3 probe_p99_us=1265.4 probe_max_us=2187.4 log_lines=40767 asks=4400 refused=100 waited=100
+case=wait400 wait_ms=2542 cpu_ms=1180 probe_p50_us=806.8 probe_p99_us=4046.0 probe_max_us=11237.6 log_lines=154924 asks=17600 refused=400 waited=400
+case=wait1000 wait_ms=2760 cpu_ms=1570 probe_p50_us=819.1 probe_p99_us=2148.0 probe_max_us=1023699.2 log_lines=302193 asks=33981 refused=1000 waited=767

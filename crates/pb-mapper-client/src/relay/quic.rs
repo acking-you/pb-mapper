@@ -12,6 +12,7 @@
 use super::{
     ConnectError, QUIC_UNAVAILABLE, QuicConnectionDiagnostics, RelayDiagnostics, RelayTransport,
 };
+use crate::diagnostics::LinkStats;
 use pb_mapper_core::{checksum::Credential, config::ResolvedAddrs};
 use pb_mapper_protocol::{command::PbErrorResponse, quic::*, secure::ClientHeaderSession};
 use std::{
@@ -32,6 +33,10 @@ const MAX_ENTRIES: usize = 16;
 /// retired one waits as long, so that its last streams finish delivering.
 const IDLE_CLOSE: Duration = Duration::from_secs(30);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+const _: () = assert!(
+    SWEEP_INTERVAL.as_millis() < IDLE_CLOSE.as_millis(),
+    "sweeps come round more often than a connection may sit idle"
+);
 
 /// References past which a connection is not handed out again, and another
 /// is dialled rather than waiting for stream credit. Each stream holds one,
@@ -40,9 +45,15 @@ const REFERENCES_PER_CONNECTION: usize = MAX_STREAMS as usize;
 
 /// How long the relay may be silent on a connection before a transport
 /// failure retires it: well past a round trip and an acknowledgement's
-/// delay on a slow path, and short of every setup budget (3 s or more), so
-/// a path that stopped delivering is caught by the failure it caused.
+/// delay on a slow path, and shorter than a data stream's subscribe
+/// attempt, so a path that stopped delivering is caught by the failure it
+/// caused. A registration attempt's own budget can be shorter, so its
+/// failure alone may not retire the connection.
 const SILENCE: Duration = Duration::from_secs(2);
+const _: () = assert!(
+    SILENCE.as_millis() < crate::recovery::MIN_SUBSCRIBE_ATTEMPT.as_millis(),
+    "a subscribe attempt that times out has outlasted the silence that retires its carrier"
+);
 
 /// Which of a pool's connections a relay stream went over: its place in
 /// the order the pool dialled them. Never reused, so a failure reported
@@ -129,34 +140,82 @@ struct FailedDial {
     at: Instant,
     credential: Credential,
     generation: u64,
-    rejected: Option<PbErrorResponse>,
-    transport: (io::ErrorKind, String),
+    failure: DialFailure,
 }
 
-impl FailedDial {
-    fn new(error: &ConnectError, credential: Credential, generation: u64) -> Self {
-        let (rejected, transport) = match error {
-            ConnectError::Rejected { response } => (
-                Some(response.clone()),
-                (io::ErrorKind::PermissionDenied, String::new()),
-            ),
-            ConnectError::Transport { source } => (None, (source.kind(), source.to_string())),
-        };
-        Self {
-            at: Instant::now(),
-            credential,
-            generation,
-            rejected,
-            transport,
+/// How a dial failed: the relay's refusal, or the transport error itself,
+/// shared so that every caller's error keeps its sources.
+enum DialFailure {
+    Rejected(PbErrorResponse),
+    Transport(Arc<io::Error>),
+}
+
+impl From<ConnectError> for DialFailure {
+    fn from(error: ConnectError) -> Self {
+        match error {
+            ConnectError::Rejected { response } => Self::Rejected(response),
+            ConnectError::Transport { source } => Self::Transport(Arc::new(source)),
+        }
+    }
+}
+
+impl DialFailure {
+    /// The error a caller of the failed dial gets, the dial's own one
+    /// included: its kind, text and sources are the dial's, and so is the
+    /// code of an operating-system error.
+    fn error(&self) -> ConnectError {
+        match self {
+            Self::Rejected(response) => ConnectError::Rejected {
+                response: response.clone(),
+            },
+            // An OS error carries nothing but its code, so a copy is exact.
+            Self::Transport(source) => match source.raw_os_error() {
+                Some(code) => io::Error::from_raw_os_error(code).into(),
+                None => io::Error::new(source.kind(), Arc::clone(source)).into(),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod dial_failure_tests {
+    use super::*;
+    use std::error::Error as _;
+
+    fn transport(failure: &DialFailure) -> io::Error {
+        match failure.error() {
+            ConnectError::Transport { source } => source,
+            ConnectError::Rejected { response } => panic!("not a transport failure: {response:?}"),
         }
     }
 
-    fn error(&self) -> ConnectError {
-        match &self.rejected {
-            Some(response) => ConnectError::Rejected {
-                response: response.clone(),
-            },
-            None => io::Error::new(self.transport.0, self.transport.1.clone()).into(),
+    /// Every caller of a failed dial, the dialling one included, gets the
+    /// dial's own error: an operating-system error with its code, which is
+    /// all such an error carries, and any other with its text and sources.
+    #[test]
+    fn a_failed_dial_hands_every_caller_its_own_error() {
+        let os = DialFailure::from(ConnectError::from(io::Error::from_raw_os_error(1)));
+        for _ in 0..2 {
+            let error = transport(&os);
+            assert_eq!(error.raw_os_error(), Some(1));
+            assert_eq!(error.kind(), io::Error::from_raw_os_error(1).kind());
+        }
+
+        #[derive(Debug, snafu::Snafu)]
+        #[snafu(display("handshake failed"))]
+        struct Handshake {
+            source: io::Error,
+        }
+        let cause = || io::Error::new(io::ErrorKind::ConnectionReset, "reset by the relay");
+        let payload = DialFailure::from(ConnectError::from(io::Error::other(Handshake {
+            source: cause(),
+        })));
+        for _ in 0..2 {
+            let error = transport(&payload);
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(error.to_string(), "handshake failed");
+            let source = error.source().expect("the payload's source is kept");
+            assert_eq!(source.to_string(), cause().to_string());
         }
     }
 }
@@ -254,7 +313,7 @@ impl Pool {
                                 && failed.credential == credential
                                 && failed.generation == generation
                         })
-                        .map(FailedDial::error);
+                        .map(|failed| failed.failure.error());
                     if let Some(error) = failed {
                         return Err(error);
                     }
@@ -310,7 +369,14 @@ impl Pool {
                     error => error,
                 };
                 state.error = Some(error.to_string());
-                state.failed = Some(FailedDial::new(&error, credential, generation));
+                let failure = DialFailure::from(error);
+                let error = failure.error();
+                state.failed = Some(FailedDial {
+                    at: Instant::now(),
+                    credential,
+                    generation,
+                    failure,
+                });
                 return Err(error);
             }
         };
@@ -367,23 +433,34 @@ impl Pool {
 
 fn describe(shared: &QuicConnection, pooled: bool) -> QuicConnectionDiagnostics {
     let connection = &shared.connection;
-    let stats = connection.stats();
-    let micros = |time: std::time::Duration| time.as_micros().min(u64::MAX.into()) as u64;
+    let LinkStats {
+        rtt_us,
+        min_rtt_us,
+        congestion_window,
+        mtu,
+        sent_packets,
+        lost_packets,
+        congestion_events,
+        sent_bytes,
+        received_bytes,
+        lost_bytes,
+        bandwidth_bps,
+    } = LinkStats::of_quic(connection);
     QuicConnectionDiagnostics {
         connection_id: connection.stable_id() as u64,
         peer_addr: connection.remote_address(),
         pooled,
-        rtt_us: micros(connection.rtt()),
-        min_rtt_us: micros(stats.path.min_rtt),
-        congestion_window: stats.path.cwnd,
-        mtu: stats.path.current_mtu,
-        sent_packets: stats.path.sent_packets,
-        lost_packets: stats.path.lost_packets,
-        congestion_events: stats.path.congestion_events,
-        sent_bytes: stats.udp_tx.bytes,
-        received_bytes: stats.udp_rx.bytes,
-        lost_bytes: stats.path.lost_bytes,
-        bandwidth_bps: stats.path.bandwidth_estimate,
+        rtt_us,
+        min_rtt_us,
+        congestion_window,
+        mtu,
+        sent_packets,
+        lost_packets,
+        congestion_events,
+        sent_bytes,
+        received_bytes,
+        lost_bytes,
+        bandwidth_bps,
     }
 }
 
@@ -499,11 +576,14 @@ async fn dial_inner(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
-    #[tokio::test(start_paused = true)]
+    /// Real sockets on the real clock: a paused one jumps ahead whenever every
+    /// task waits, which is whenever a loopback packet is in flight, and fires
+    /// QUIC's handshake timers before it lands. Nothing here waits on time;
+    /// the silence is written into the entries.
+    #[tokio::test]
     async fn a_failure_retires_only_its_own_silent_carrier() {
         let (mut config, certificate) = server_config().unwrap();
         let mut transport = quinn::TransportConfig::default();
@@ -537,15 +617,17 @@ mod tests {
         }
         let addresses = ResolvedAddrs::from_candidates(vec![address]).unwrap();
         let mut selected = None;
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(1),
-                pool.connect(&addresses, Credential::Admin([1; 32]), 0, &mut selected),
-            )
-            .await
-            .is_err(),
-            "the peer offered no stream credit"
-        );
+        {
+            // Polled once and dropped: the caller's deadline, cancelling the
+            // wait for stream credit the peer never offers.
+            let connect = pool.connect(&addresses, Credential::Admin([1; 32]), 0, &mut selected);
+            let mut connect = std::pin::pin!(connect);
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(
+                connect.as_mut().poll(&mut cx).is_pending(),
+                "the peer offered no stream credit"
+            );
+        }
         let selected = selected.expect("cancellation must retain the selected carrier");
         let pooled = || {
             lock(&pool.state)

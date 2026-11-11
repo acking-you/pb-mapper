@@ -7,28 +7,21 @@
 //! ```
 //!
 //! These tests intentionally exercise both administrator and derived temporary
-//! credentials, while lifecycle persistence remains covered by `common::auth::tests`.
+//! credentials, while lifecycle persistence remains covered by `pb-mapper-auth`'s own tests.
 
-use super::*;
 use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
 use pb_mapper_core::checksum::{
     encode_temporary_credential, parse_credential, set_process_msg_header_key,
 };
-use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
+use pb_mapper_core::test_support::{PROCESS_CREDENTIAL_TEST_LOCK, TEST_ADMIN_KEY_BYTES, TempPath};
+use ring::aead::AES_256_GCM;
 
-// A heartbeat/select branch may cancel a read at any byte boundary. The next
-// read must resume that frame, including its authenticated counter.
-async fn cancel_partial_read(reader: &mut impl MessageReader) {
-    use std::future::{Future, poll_fn};
-    use std::task::Poll;
-
-    let mut read = std::pin::pin!(reader.read_msg());
-    poll_fn(|cx| {
-        assert!(read.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
-}
+use super::replay::{
+    FirstFlightAdmit, REPLAY_COMPACT_INTERVAL_SECONDS, REPLAY_RECORD_LEN, RotatingBloom,
+    truncate_replay_log,
+};
+use super::*;
+use crate::frame_read::cancel_partial_read;
 
 #[tokio::test]
 async fn interrupted_v2_writer_cannot_reuse_a_nonce_or_restart_a_partial_frame() {
@@ -38,7 +31,7 @@ async fn interrupted_v2_writer_cannot_reuse_a_nonce_or_restart_a_partial_frame()
     let (mut tx, mut rx) = tokio::io::duplex(1);
     {
         let mut writer =
-            V2MessageWriter::new(&mut tx, material, DIRECTION_SERVER_TO_CLIENT, 0).unwrap();
+            V2MessageWriter::new(&mut tx, material, Direction::ServerToClient, 0).unwrap();
         {
             let mut pending = std::pin::pin!(writer.write_msg(b"cancelled frame"));
             poll_fn(|cx| {
@@ -55,12 +48,67 @@ async fn interrupted_v2_writer_cannot_reuse_a_nonce_or_restart_a_partial_frame()
     assert_eq!(wire.len(), 1);
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The bytes released peers write and read: the clear-text prefix, then for
+/// each direction its key, nonce and authenticated data, over two counters.
+#[tokio::test]
+async fn v2_control_frames_keep_their_wire_bytes() {
+    let material = derive_material(KeyId::from_u64(7), &[7; 32], [3; CONNECTION_SALT_LEN]).unwrap();
+    assert_eq!(
+        hex(&first_prefix(&material)),
+        concat!(
+            "50424d32",                         // magic
+            "02",                               // version
+            "00",                               // flags
+            "0000",                             // reserved
+            "0000000000000007",                 // key id
+            "03030303030303030303030303030303", // salt
+        )
+    );
+    for (direction, counter, expected) in [
+        (
+            Direction::ClientToServer,
+            1,
+            concat!(
+                "0000000000000001",
+                "00000016",
+                "81a928bec6e5537e35d6497bd3328d7a1538af1b0770",
+                "0000000000000002",
+                "00000010",
+                "38ce0080082c479293c605c62d245d2a",
+            ),
+        ),
+        (
+            Direction::ServerToClient,
+            0,
+            concat!(
+                "0000000000000000",
+                "00000016",
+                "f63a46e9c35c0b779a0dbab36b91e6a318fec749497f",
+                "0000000000000001",
+                "00000010",
+                "52b8a5d2df47834020e0d08728b0e894",
+            ),
+        ),
+    ] {
+        let mut wire = Vec::new();
+        let mut writer =
+            V2MessageWriter::new(&mut wire, material.clone(), direction, counter).unwrap();
+        writer.write_msg(b"golden").await.unwrap();
+        writer.write_msg(b"").await.unwrap();
+        assert_eq!(hex(&wire), expected, "direction {direction:?}");
+    }
+}
+
 #[tokio::test]
 async fn exhausted_v2_writer_fails_before_emitting_any_ciphertext() {
     let material = derive_material(ADMIN_KEY_ID, &[7; 32], [3; CONNECTION_SALT_LEN]).unwrap();
     let mut wire = Vec::new();
     let mut writer =
-        V2MessageWriter::new(&mut wire, material, DIRECTION_SERVER_TO_CLIENT, u64::MAX).unwrap();
+        V2MessageWriter::new(&mut wire, material, Direction::ServerToClient, u64::MAX).unwrap();
     assert!(writer.write_msg(b"overflow").await.is_err());
     assert!(writer.write_msg(b"retry").await.is_err());
     assert!(wire.is_empty());
@@ -71,14 +119,14 @@ async fn v2_fragmented_frame_survives_read_cancellation() {
     let material = derive_material(ADMIN_KEY_ID, &[7; 32], [3; CONNECTION_SALT_LEN]).unwrap();
     let mut wire = Vec::new();
     let mut writer =
-        V2MessageWriter::new(&mut wire, material.clone(), DIRECTION_SERVER_TO_CLIENT, 0).unwrap();
+        V2MessageWriter::new(&mut wire, material.clone(), Direction::ServerToClient, 0).unwrap();
     writer.write_msg(b"first fragmented message").await.unwrap();
     writer.write_msg(b"next message").await.unwrap();
     let first_len = FRAME_HEADER_LEN + b"first fragmented message".len() + AES_256_GCM.tag_len();
     for split in 1..first_len {
         let (mut tx, mut rx) = tokio::io::duplex(4096);
         let mut reader =
-            V2MessageReader::new(&mut rx, material.clone(), DIRECTION_SERVER_TO_CLIENT, 0).unwrap();
+            V2MessageReader::new(&mut rx, material.clone(), Direction::ServerToClient, 0).unwrap();
         tx.write_all(&wire[..split]).await.unwrap();
         cancel_partial_read(&mut reader).await;
         tx.write_all(&wire[split..]).await.unwrap();
@@ -96,52 +144,23 @@ async fn v2_fragmented_frame_survives_read_cancellation() {
     }
 }
 
-#[tokio::test]
-async fn legacy_fragmented_frame_survives_read_cancellation() {
-    let mut wire = Vec::new();
-    let mut writer = crate::NormalMessageWriter::new(&mut wire).with_checksum_key([7; 32]);
-    writer.write_msg(b"first fragmented message").await.unwrap();
-    writer.write_msg(b"next message").await.unwrap();
-    for split in 1..8 + b"first fragmented message".len() {
-        let (mut tx, mut rx) = tokio::io::duplex(4096);
-        let mut reader = crate::NormalMessageReader::new(&mut rx).with_checksum_key([7; 32]);
-        tx.write_all(&wire[..split]).await.unwrap();
-        cancel_partial_read(&mut reader).await;
-        tx.write_all(&wire[split..]).await.unwrap();
-        drop(tx);
-        assert_eq!(
-            reader.read_msg().await.unwrap(),
-            b"first fragmented message",
-            "split {split}"
-        );
-        assert_eq!(
-            reader.read_msg().await.unwrap(),
-            b"next message",
-            "split {split}"
-        );
-    }
-}
-
-fn temp_config() -> AuthConfig {
-    let mut random = [0_u8; 8];
-    let mut rng = rand::rng();
-    for byte in &mut random {
-        *byte = rng.random();
-    }
-    AuthConfig {
-        state_dir: std::env::temp_dir()
-            .join(format!("pb-mapper-v2-{}", u64::from_be_bytes(random))),
+/// A relay configuration whose state lives as long as the returned guard.
+fn temp_config() -> (AuthConfig, TempPath) {
+    let state = TempPath::new("v2");
+    let config = AuthConfig {
+        state_dir: state.to_path_buf(),
         max_temporary_keys: 8,
         max_temporary_key_ttl: std::time::Duration::from_secs(3600),
         legacy_protocol: LegacyProtocolPolicy::Allow,
-    }
+    };
+    (config, state)
 }
 
 #[tokio::test]
 async fn v2_round_trip_uses_directional_counters() {
-    let credential = Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv");
+    let credential = Credential::Admin(TEST_ADMIN_KEY_BYTES);
     let client = ClientHeaderSession::new_v2(&credential).unwrap();
-    let config = temp_config();
+    let (config, _state) = temp_config();
     let auth = AuthRuntime::start(*credential.key(), config.clone())
         .await
         .unwrap();
@@ -159,17 +178,17 @@ async fn v2_round_trip_uses_directional_counters() {
     let server_task = async {
         let initial = security.read_initial(&mut server_io).await.unwrap();
         assert_eq!(initial.payload, b"request");
+        assert!(initial.first_flight.is_some());
         let mut writer = initial.session.response_writer(&mut server_io).unwrap();
         writer.write_msg(b"response").await.unwrap();
     };
     tokio::join!(client_task, server_task);
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[tokio::test]
 async fn temporary_credential_authenticates_without_storing_secret() {
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
-    let config = temp_config();
+    let admin = TEST_ADMIN_KEY_BYTES;
+    let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
@@ -192,7 +211,6 @@ async fn temporary_credential_authenticates_without_storing_secret() {
     let initial = server_result.unwrap();
     assert_eq!(initial.payload, b"temporary");
     assert_eq!(initial.session.context().unwrap().namespace, key_id);
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 async fn encode_initial(session: &ClientHeaderSession, payload: &[u8]) -> Vec<u8> {
@@ -212,10 +230,10 @@ async fn encode_initial(session: &ClientHeaderSession, payload: &[u8]) -> Vec<u8
 
 #[tokio::test]
 async fn identical_initial_frames_are_admitted_only_once() {
-    let credential = Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv");
+    let credential = Credential::Admin(TEST_ADMIN_KEY_BYTES);
     let session = ClientHeaderSession::new_v2(&credential).unwrap();
     let bytes = encode_initial(&session, b"same-request").await;
-    let config = temp_config();
+    let (config, _state) = temp_config();
     let auth = AuthRuntime::start(*credential.key(), config.clone())
         .await
         .unwrap();
@@ -237,7 +255,7 @@ async fn identical_initial_frames_are_admitted_only_once() {
             .unwrap()
             .failure
             .code,
-        "connection_salt_replayed"
+        CONNECTION_SALT_REPLAYED
     );
     assert!(
         results
@@ -248,14 +266,12 @@ async fn identical_initial_frames_are_admitted_only_once() {
             .response_session
             .is_none()
     );
-
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[tokio::test]
 async fn revoked_first_flights_do_not_consume_the_replay_filter() {
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
-    let config = temp_config();
+    let admin = TEST_ADMIN_KEY_BYTES;
+    let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
@@ -294,14 +310,12 @@ async fn revoked_first_flights_do_not_consume_the_replay_filter() {
         second.response_session.is_none(),
         "a claimed revoked salt must not reuse nonce 0"
     );
-
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[tokio::test]
 async fn accepted_then_revoked_replay_does_not_reuse_the_session_nonce() {
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
-    let config = temp_config();
+    let admin = TEST_ADMIN_KEY_BYTES;
+    let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
@@ -336,16 +350,14 @@ async fn accepted_then_revoked_replay_does_not_reuse_the_session_nonce() {
         replayed.response_session.is_none(),
         "a previously accepted salt must not reuse nonce 0 for the revoke error"
     );
-
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[tokio::test]
 async fn rotated_temporary_first_flight_returns_a_readable_rotated_error() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let admin = TEST_ADMIN_KEY_BYTES;
     let new_admin = *b"abcdefghijklmnopqrstuvwxyz012345";
-    let config = temp_config();
+    let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
@@ -383,16 +395,14 @@ async fn rotated_temporary_first_flight_returns_a_readable_rotated_error() {
     let (plaintext, code) = tokio::join!(client_task, server_task);
     assert_eq!(code, "temporary_key_rotated");
     assert_eq!(plaintext, b"temporary_key_rotated");
-
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[tokio::test]
 async fn stale_root_replay_omits_the_rotated_error_session() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let admin = TEST_ADMIN_KEY_BYTES;
     let new_admin = *b"abcdefghijklmnopqrstuvwxyz012345";
-    let config = temp_config();
+    let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
@@ -428,15 +438,13 @@ async fn stale_root_replay_omits_the_rotated_error_session() {
         second.response_session.is_none(),
         "a claimed stale-root salt must not reuse nonce 0"
     );
-
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[tokio::test]
 async fn reset_temporary_first_flight_returns_a_readable_rotated_error() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
-    let config = temp_config();
+    let admin = TEST_ADMIN_KEY_BYTES;
+    let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
@@ -474,14 +482,12 @@ async fn reset_temporary_first_flight_returns_a_readable_rotated_error() {
     let (plaintext, code) = tokio::join!(client_task, server_task);
     assert_eq!(code, "temporary_key_rotated");
     assert_eq!(plaintext, b"temporary_key_rotated");
-
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[tokio::test]
 async fn mistyped_temporary_first_flight_does_not_send_an_unreadable_error() {
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
-    let config = temp_config();
+    let admin = TEST_ADMIN_KEY_BYTES;
+    let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
@@ -510,19 +516,19 @@ async fn mistyped_temporary_first_flight_does_not_send_an_unreadable_error() {
         "the presenter cannot open a session derived from the live key"
     );
     assert_eq!(error.presented_key_id, Some(KeyId::from_u64(key_id)));
-
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[tokio::test]
 async fn oversized_initial_frame_is_rejected_before_reading_its_body() {
-    let credential = Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv");
+    let credential = Credential::Admin(TEST_ADMIN_KEY_BYTES);
     let session = ClientHeaderSession::new_v2(&credential).unwrap();
-    let material = session.v2.as_ref().unwrap();
-    let mut bytes = first_prefix(material);
+    let SessionKeys::V2(material) = &session.keys else {
+        panic!("new clients speak protocol v2");
+    };
+    let mut bytes = first_prefix(material).to_vec();
     bytes.extend_from_slice(&0_u64.to_be_bytes());
     bytes.extend_from_slice(&(MAX_INITIAL_PLAINTEXT_LEN + 17).to_be_bytes());
-    let config = temp_config();
+    let (config, _state) = temp_config();
     let auth = AuthRuntime::start(*credential.key(), config.clone())
         .await
         .unwrap();
@@ -535,16 +541,14 @@ async fn oversized_initial_frame_is_rejected_before_reading_its_body() {
     };
     assert_eq!(error.failure.code, "protocol_v2_decrypt_failed");
     assert!(error.failure.message.contains("65536-byte limit"));
-
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[tokio::test]
 async fn oversized_legacy_initial_frame_is_rejected_before_reading_its_body() {
     use pb_mapper_core::checksum::get_checksum_for_key;
 
-    let admin = *b"0123456789abcdefghijklmnopqrstuv";
-    let config = temp_config();
+    let admin = TEST_ADMIN_KEY_BYTES;
+    let (config, _state) = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
     let datalen = MAX_INITIAL_CIPHERTEXT_LEN + 1;
     let checksum = get_checksum_for_key(datalen, &admin);
@@ -559,8 +563,6 @@ async fn oversized_legacy_initial_frame_is_rejected_before_reading_its_body() {
         Err(error) => error,
     };
     assert_eq!(error.failure.code, "legacy_frame_invalid");
-
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[test]
@@ -603,30 +605,29 @@ fn rotating_bloom_retains_a_max_future_timestamp_past_the_next_rotation() {
 #[test]
 fn per_credential_admission_limit_does_not_consume_other_keys() {
     let now = unix_seconds();
-    let mut guard =
-        ReplayGuard::open(None, 1024, DEFAULT_REPLAY_WINDOW_SECONDS).with_max_per_key(2);
+    let guard = ReplayGuard::open(None, 1024, DEFAULT_REPLAY_WINDOW_SECONDS).with_max_per_key(2);
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[2_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[2_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[3_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[3_u8; 32], now).wait(),
         FirstFlightAdmit::Limited
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[3_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[3_u8; 32], now).wait(),
         FirstFlightAdmit::Limited
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(2), &[4_u8; 32], now),
+        guard.admit(KeyId::from_u64(2), &[4_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
         FirstFlightAdmit::Replayed
     );
 }
@@ -634,195 +635,280 @@ fn per_credential_admission_limit_does_not_consume_other_keys() {
 #[test]
 fn aggregate_admission_limit_covers_all_keys() {
     let now = unix_seconds();
-    let mut guard = ReplayGuard::open(None, 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+    let guard = ReplayGuard::open(None, 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
         .with_max_per_key(100)
         .with_max_total(2);
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(2), &[2_u8; 32], now),
+        guard.admit(KeyId::from_u64(2), &[2_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(3), &[3_u8; 32], now),
+        guard.admit(KeyId::from_u64(3), &[3_u8; 32], now).wait(),
         FirstFlightAdmit::Limited
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(3), &[3_u8; 32], now),
+        guard.admit(KeyId::from_u64(3), &[3_u8; 32], now).wait(),
         FirstFlightAdmit::Limited
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(4), &[4_u8; 32], now),
+        guard.admit(KeyId::from_u64(4), &[4_u8; 32], now).wait(),
         FirstFlightAdmit::Limited
     );
 }
 
+/// A replay log record as a relay appends it, admitted at `at`.
+fn replay_record(fingerprint: [u8; 32], at: u64) -> Vec<u8> {
+    [&fingerprint[..], &at.to_be_bytes()].concat()
+}
+
+/// A closed guard has logged what it admitted and touches the log no more,
+/// though it still lives, as a stopped relay's does in a connection not yet
+/// gone: it refuses what comes after, and the guard opened on the log next
+/// has it alone.
 #[test]
-fn persisted_first_flights_survive_a_torn_trailing_record() {
-    let mut random = [0_u8; 8];
-    let mut rng = rand::rng();
-    for byte in &mut random {
-        *byte = rng.random();
-    }
-    let path = std::env::temp_dir().join(format!(
-        "pb-mapper-replay-torn-{}",
-        u64::from_be_bytes(random)
-    ));
+fn a_closed_replay_guard_leaves_the_log_to_the_next() {
+    let scratch = TempPath::new("replay-closed");
+    let path = scratch.to_path_buf();
     let now = unix_seconds();
-    let fingerprint = [17_u8; 32];
+    let (before, after) = ([21_u8; 32], [22_u8; 32]);
+    let closed = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    assert_eq!(
+        closed.admit(KeyId::from_u64(7), &before, now).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    closed.close();
+    assert_eq!(
+        closed.admit(KeyId::from_u64(7), &after, now).wait(),
+        FirstFlightAdmit::Unavailable
+    );
+
+    let next = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    assert_eq!(
+        next.admit(KeyId::from_u64(7), &before, now).wait(),
+        FirstFlightAdmit::Replayed
+    );
+    assert_eq!(
+        next.admit(KeyId::from_u64(7), &after, now).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    drop(closed);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        [replay_record(before, now), replay_record(after, now)].concat()
+    );
+}
+
+/// A crash in the middle of an append leaves the log's last record cut off.
+/// A relay that restarts on that log drops the cut-off record, whose
+/// admission was never acknowledged, and keeps the records before it: what it
+/// admitted is still refused as a replay, and it admits again, onto a log of
+/// whole records.
+#[test]
+fn a_restart_drops_the_record_a_crash_cut_off() {
+    let scratch = TempPath::new("replay-torn");
+    let path = scratch.to_path_buf();
+    let now = unix_seconds();
+    let admitted = [17_u8; 32];
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
         assert_eq!(
-            guard.admit(KeyId::from_u64(7), &fingerprint, now),
+            guard.admit(KeyId::from_u64(7), &admitted, now).wait(),
             FirstFlightAdmit::Fresh
         );
     }
-    let mut torn = std::fs::read(&path).unwrap();
-    torn.extend_from_slice(&[0_u8; 10]);
-    std::fs::write(&path, torn).unwrap();
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    // The next record's fingerprint and the first bytes of its time.
+    let cut_off = [18_u8; 32];
+    let mut log = std::fs::read(&path).unwrap();
+    log.extend_from_slice(&replay_record(cut_off, now)[..36]);
+    std::fs::write(&path, log).unwrap();
+
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(KeyId::from_u64(7), &fingerprint, now),
-        FirstFlightAdmit::Unavailable
+        restored.admit(KeyId::from_u64(7), &admitted, now).wait(),
+        FirstFlightAdmit::Replayed
     );
-    let _ = std::fs::remove_file(path);
+    assert_eq!(
+        restored.admit(KeyId::from_u64(7), &cut_off, now).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    drop(restored);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        [replay_record(admitted, now), replay_record(cut_off, now)].concat()
+    );
+}
+
+/// Only a log's last record is ever cut off by a crash. A log in which a
+/// record cut off is followed by others, or a file that is no replay log at
+/// all, still fails closed: every protocol-v2 first flight is refused, and the
+/// file is left as it is for the operator.
+#[test]
+fn a_damaged_replay_log_still_fails_closed() {
+    let scratch = TempPath::new("replay-damaged");
+    std::fs::create_dir(&scratch).unwrap();
+    let now = unix_seconds();
+    let damaged = [
+        replay_record([1; 32], now),
+        replay_record([2; 32], now)[..10].to_vec(),
+        replay_record([3; 32], now),
+    ]
+    .concat();
+    let not_a_log = b"pb-mapper state, but no first-flight replay log.\n".to_vec();
+    for (name, contents) in [("damaged", damaged), ("not-a-log", not_a_log)] {
+        let path = scratch.join(name);
+        std::fs::write(&path, &contents).unwrap();
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        assert_eq!(
+            guard.admit(KeyId::from_u64(9), &[9; 32], now).wait(),
+            FirstFlightAdmit::Unavailable,
+            "{name}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), contents, "{name}");
+    }
 }
 
 #[test]
 fn replay_rewrite_succeeds_when_a_pid_temporary_file_already_exists() {
-    let mut random = [0_u8; 8];
-    let mut rng = rand::rng();
-    for byte in &mut random {
-        *byte = rng.random();
-    }
-    let path = std::env::temp_dir().join(format!(
-        "pb-mapper-replay-tmp-{}",
-        u64::from_be_bytes(random)
-    ));
+    let scratch = TempPath::new("replay-tmp");
+    std::fs::create_dir(&scratch).unwrap();
+    let path = scratch.join("connection.replay");
     let now = unix_seconds();
     let fingerprint = [19_u8; 32];
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
         assert_eq!(
-            guard.admit(KeyId::from_u64(9), &fingerprint, now),
+            guard.admit(KeyId::from_u64(9), &fingerprint, now).wait(),
             FirstFlightAdmit::Fresh
         );
     }
-    let leftover = path.with_file_name(format!(
-        ".{}.tmp-{}",
-        path.file_name().unwrap().to_str().unwrap(),
-        std::process::id()
-    ));
+    let leftover = path.with_file_name(format!(".connection.replay.tmp-{}", std::process::id()));
     std::fs::write(&leftover, b"stale").unwrap();
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(KeyId::from_u64(9), &fingerprint, now),
+        restored.admit(KeyId::from_u64(9), &fingerprint, now).wait(),
         FirstFlightAdmit::Replayed
     );
-    let _ = std::fs::remove_file(leftover);
-    let _ = std::fs::remove_file(path);
+}
+
+/// What the replay log holds, which a relay reads back after an upgrade: per
+/// admission, the SHA-256 fingerprint of key id and salt, then the admission
+/// time big-endian.
+#[test]
+fn replay_log_records_keep_their_layout() {
+    let fingerprint = replay_fingerprint(KeyId::from_u64(7), &[3; CONNECTION_SALT_LEN]);
+    assert_eq!(
+        hex(&fingerprint),
+        "d771a0d52b7477ba0b9fa8e6d5319f353ba65029bdd6fffd5118ed0cebe80b1f"
+    );
+    let scratch = TempPath::new("replay-layout");
+    let path = scratch.to_path_buf();
+    let now = unix_seconds();
+    let mut written = fingerprint.to_vec();
+    written.extend_from_slice(&now.to_be_bytes());
+    {
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        assert_eq!(
+            guard.admit(KeyId::from_u64(7), &fingerprint, now).wait(),
+            FirstFlightAdmit::Fresh
+        );
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), written);
+
+    // A log written by hand, not by this code, reads back the same way.
+    let other = [0xcd_u8; 32];
+    let mut handmade = other.to_vec();
+    handmade.extend_from_slice(&now.to_be_bytes());
+    std::fs::write(&path, &handmade).unwrap();
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    assert_eq!(
+        restored.admit(KeyId::from_u64(8), &other, now).wait(),
+        FirstFlightAdmit::Replayed
+    );
+    drop(restored);
 }
 
 #[test]
 fn persisted_first_flights_survive_replay_guard_restart() {
-    let mut random = [0_u8; 8];
-    let mut rng = rand::rng();
-    for byte in &mut random {
-        *byte = rng.random();
-    }
-    let path =
-        std::env::temp_dir().join(format!("pb-mapper-replay-{}", u64::from_be_bytes(random)));
+    let scratch = TempPath::new("replay");
+    let path = scratch.to_path_buf();
     let now = unix_seconds();
     let fingerprint = [13_u8; 32];
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
         assert_eq!(
-            guard.admit(KeyId::from_u64(7), &fingerprint, now),
+            guard.admit(KeyId::from_u64(7), &fingerprint, now).wait(),
             FirstFlightAdmit::Fresh
         );
     }
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(KeyId::from_u64(7), &fingerprint, now),
+        restored.admit(KeyId::from_u64(7), &fingerprint, now).wait(),
         FirstFlightAdmit::Replayed
     );
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn restored_replay_log_consumes_the_aggregate_budget() {
-    let mut random = [0_u8; 8];
-    let mut rng = rand::rng();
-    for byte in &mut random {
-        *byte = rng.random();
-    }
-    let path = std::env::temp_dir().join(format!(
-        "pb-mapper-replay-total-{}",
-        u64::from_be_bytes(random)
-    ));
+    let scratch = TempPath::new("replay-total");
+    let path = scratch.to_path_buf();
     let now = unix_seconds();
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
             .with_max_per_key(100)
             .with_max_total(2);
         assert_eq!(
-            guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+            guard.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
             FirstFlightAdmit::Fresh
         );
         assert_eq!(
-            guard.admit(KeyId::from_u64(2), &[2_u8; 32], now),
+            guard.admit(KeyId::from_u64(2), &[2_u8; 32], now).wait(),
             FirstFlightAdmit::Fresh
         );
     }
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
         .with_max_per_key(100)
         .with_max_total(2);
     assert_eq!(
-        restored.admit(KeyId::from_u64(3), &[3_u8; 32], now),
+        restored.admit(KeyId::from_u64(3), &[3_u8; 32], now).wait(),
         FirstFlightAdmit::Limited
     );
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn restored_replay_generation_ages_with_loaded_records() {
-    let mut random = [0_u8; 8];
-    let mut rng = rand::rng();
-    for byte in &mut random {
-        *byte = rng.random();
-    }
-    let path = std::env::temp_dir().join(format!(
-        "pb-mapper-replay-age-{}",
-        u64::from_be_bytes(random)
-    ));
+    let scratch = TempPath::new("replay-age");
+    let path = scratch.to_path_buf();
     let start = unix_seconds().saturating_sub(DEFAULT_REPLAY_WINDOW_SECONDS / 2);
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
             .with_max_per_key(100)
             .with_max_total(2);
         assert_eq!(
-            guard.admit(KeyId::from_u64(1), &[1_u8; 32], start),
+            guard.admit(KeyId::from_u64(1), &[1_u8; 32], start).wait(),
             FirstFlightAdmit::Fresh
         );
         assert_eq!(
-            guard.admit(KeyId::from_u64(2), &[2_u8; 32], start),
+            guard.admit(KeyId::from_u64(2), &[2_u8; 32], start).wait(),
             FirstFlightAdmit::Fresh
         );
     }
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
         .with_max_per_key(100)
         .with_max_total(2);
     assert_eq!(
-        restored.admit(
-            KeyId::from_u64(3),
-            &[3_u8; 32],
-            start.saturating_add(DEFAULT_REPLAY_WINDOW_SECONDS)
-        ),
+        restored
+            .admit(
+                KeyId::from_u64(3),
+                &[3_u8; 32],
+                start.saturating_add(DEFAULT_REPLAY_WINDOW_SECONDS)
+            )
+            .wait(),
         FirstFlightAdmit::Fresh
     );
-    let _ = std::fs::remove_file(path);
 }
 
 // Compaction rewrites the log in place. On Windows that replace used to be
@@ -830,28 +916,21 @@ fn restored_replay_generation_ages_with_loaded_records() {
 // guard unavailable for every admission after the first minute.
 #[test]
 fn replay_log_accepts_admissions_after_compaction() {
-    let mut random = [0_u8; 8];
-    let mut rng = rand::rng();
-    for byte in &mut random {
-        *byte = rng.random();
-    }
-    let path = std::env::temp_dir().join(format!(
-        "pb-mapper-replay-compact-{}",
-        u64::from_be_bytes(random)
-    ));
+    let scratch = TempPath::new("replay-compact");
+    let path = scratch.to_path_buf();
     let now = unix_seconds();
     let later = now.saturating_add(REPLAY_COMPACT_INTERVAL_SECONDS);
-    let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(2), &[2_u8; 32], later),
+        guard.admit(KeyId::from_u64(2), &[2_u8; 32], later).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(3), &[3_u8; 32], later),
+        guard.admit(KeyId::from_u64(3), &[3_u8; 32], later).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
@@ -859,27 +938,19 @@ fn replay_log_accepts_admissions_after_compaction() {
         3 * REPLAY_RECORD_LEN as u64
     );
     drop(guard);
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn replay_log_rollback_removes_a_partial_record() {
     use std::io::Write;
 
-    let mut random = [0_u8; 8];
-    let mut rng = rand::rng();
-    for byte in &mut random {
-        *byte = rng.random();
-    }
-    let path = std::env::temp_dir().join(format!(
-        "pb-mapper-replay-rollback-{}",
-        u64::from_be_bytes(random)
-    ));
+    let scratch = TempPath::new("replay-rollback");
+    let path = scratch.to_path_buf();
     let now = unix_seconds();
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
         assert_eq!(
-            guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+            guard.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
             FirstFlightAdmit::Fresh
         );
     }
@@ -891,23 +962,420 @@ fn replay_log_rollback_removes_a_partial_record() {
         .write_all(&[0xaa; 7])
         .unwrap();
     truncate_replay_log(&path, REPLAY_RECORD_LEN as u64).unwrap();
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        restored.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
         FirstFlightAdmit::Replayed
     );
     assert_eq!(
-        restored.admit(KeyId::from_u64(2), &[2_u8; 32], now),
+        restored.admit(KeyId::from_u64(2), &[2_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     drop(restored);
-    let _ = std::fs::remove_file(path);
+}
+
+/// A replay guard that several connections admit through at once, as the
+/// relay's do.
+type SharedGuard = Arc<ReplayGuard>;
+
+fn shared(guard: ReplayGuard) -> SharedGuard {
+    Arc::new(guard)
+}
+
+/// What a connection asks of the replay guard: to admit its first flight, or
+/// to claim it for an error session, as one that failed authentication does.
+#[derive(Clone, Copy, Debug)]
+enum Ask {
+    Admit(KeyId),
+    Claim,
+}
+
+/// Each of `asks`, each from a thread of its own, all let go together at
+/// `now`; the answers in the order of `asks`. `answered` runs on a thread as
+/// soon as its answer comes, before that thread returns.
+fn ask_concurrently(
+    guard: &SharedGuard,
+    asks: &[(Ask, [u8; 32])],
+    now: u64,
+    answered: impl Fn([u8; 32], FirstFlightAdmit) + Sync,
+) -> Vec<FirstFlightAdmit> {
+    let start = std::sync::Barrier::new(asks.len());
+    std::thread::scope(|scope| {
+        let threads = asks
+            .iter()
+            .map(|&(ask, fingerprint)| {
+                let (start, answered) = (&start, &answered);
+                scope.spawn(move || {
+                    start.wait();
+                    let answer = match ask {
+                        Ask::Admit(key_id) => guard.admit(key_id, &fingerprint, now).wait(),
+                        Ask::Claim => guard.claim(&fingerprint, now).wait(),
+                    };
+                    answered(fingerprint, answer);
+                    answer
+                })
+            })
+            .collect::<Vec<_>>();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect()
+    })
+}
+
+/// Whether the log at `path` holds the admission of `fingerprint` at `at`.
+fn log_holds(path: &std::path::Path, fingerprint: [u8; 32], at: u64) -> bool {
+    let record = replay_record(fingerprint, at);
+    std::fs::read(path)
+        .unwrap()
+        .chunks(REPLAY_RECORD_LEN)
+        .any(|held| held == record.as_slice())
+}
+
+/// A fingerprint of its own for each `round` and `index`, spread over the
+/// filter as real ones are.
+fn fingerprint(round: u8, index: u8) -> [u8; 32] {
+    let mut salt = [0; CONNECTION_SALT_LEN];
+    salt[0] = round;
+    salt[1] = index;
+    replay_fingerprint(KeyId::from_u64(1), &salt)
+}
+
+/// First flights racing through one guard, some of them copies of one: each
+/// fingerprint is answered `Fresh` once however its copies race, whether
+/// admitted or claimed, and an admission is answered only once its record is
+/// in the log. A restart, after a crash cut off the record an append was
+/// writing, still refuses every one admitted.
+#[test]
+fn racing_first_flights_admit_each_fingerprint_once_and_durably() {
+    let scratch = TempPath::new("replay-race");
+    std::fs::create_dir(&scratch).unwrap();
+    let path = scratch.join("connection.replay");
+    let now = unix_seconds();
+    let guard = shared(ReplayGuard::open(
+        Some(path.clone()),
+        1 << 16,
+        DEFAULT_REPLAY_WINDOW_SECONDS,
+    ));
+    let mut admitted = Vec::new();
+    for round in 0..8 {
+        // Eight copies of one first flight, then 24 others, every other one
+        // claimed rather than admitted.
+        let asks = (0..32_u8)
+            .map(|index| {
+                let ask = if index % 2 == 0 {
+                    Ask::Admit(KeyId::from_u64(1))
+                } else {
+                    Ask::Claim
+                };
+                (ask, fingerprint(round, index.max(7)))
+            })
+            .collect::<Vec<_>>();
+        let answers = ask_concurrently(&guard, &asks, now, |fingerprint, answer| {
+            if answer == FirstFlightAdmit::Fresh {
+                assert!(log_holds(&path, fingerprint, now), "round {round}");
+            }
+        });
+        let (copies, others) = answers.split_at(8);
+        assert_eq!(
+            copies
+                .iter()
+                .filter(|answer| **answer == FirstFlightAdmit::Fresh)
+                .count(),
+            1,
+            "round {round}: {copies:?}"
+        );
+        assert!(
+            copies.iter().all(|answer| matches!(
+                answer,
+                FirstFlightAdmit::Fresh | FirstFlightAdmit::Replayed
+            )),
+            "round {round}: {copies:?}"
+        );
+        assert!(
+            others
+                .iter()
+                .all(|answer| *answer == FirstFlightAdmit::Fresh),
+            "round {round}: {others:?}"
+        );
+        admitted.extend((7..32).map(|index| fingerprint(round, index)));
+    }
+    drop(guard);
+
+    let cut_off = fingerprint(0xff, 0xff);
+    let mut log = std::fs::read(&path).unwrap();
+    log.extend_from_slice(&replay_record(cut_off, now)[..REPLAY_RECORD_LEN - 3]);
+    std::fs::write(&path, log).unwrap();
+    let restored = ReplayGuard::open(Some(path.clone()), 1 << 16, DEFAULT_REPLAY_WINDOW_SECONDS);
+    for fingerprint in admitted {
+        assert_eq!(
+            restored.admit(KeyId::from_u64(1), &fingerprint, now).wait(),
+            FirstFlightAdmit::Replayed
+        );
+    }
+    assert_eq!(
+        restored.admit(KeyId::from_u64(1), &cut_off, now).wait(),
+        FirstFlightAdmit::Fresh
+    );
+}
+
+/// The per-credential and total budgets hold however many first flights race
+/// for their last places: of 40 at once, exactly the budget's worth are
+/// admitted.
+#[test]
+fn racing_first_flights_never_pass_the_admission_limits() {
+    let scratch = TempPath::new("replay-race-limits");
+    std::fs::create_dir(&scratch).unwrap();
+    let now = unix_seconds();
+    let per_key = shared(
+        ReplayGuard::open(
+            Some(scratch.join("per-key")),
+            1 << 16,
+            DEFAULT_REPLAY_WINDOW_SECONDS,
+        )
+        .with_max_per_key(5),
+    );
+    let asks = (0..40)
+        .map(|index| (Ask::Admit(KeyId::from_u64(1)), fingerprint(1, index)))
+        .collect::<Vec<_>>();
+    let answers = ask_concurrently(&per_key, &asks, now, |_, _| {});
+    let fresh = |answers: &[FirstFlightAdmit]| {
+        answers
+            .iter()
+            .filter(|answer| **answer == FirstFlightAdmit::Fresh)
+            .count()
+    };
+    assert_eq!(fresh(&answers), 5, "{answers:?}");
+    assert!(
+        answers
+            .iter()
+            .all(|answer| matches!(answer, FirstFlightAdmit::Fresh | FirstFlightAdmit::Limited))
+    );
+
+    let total = shared(
+        ReplayGuard::open(
+            Some(scratch.join("total")),
+            1 << 16,
+            DEFAULT_REPLAY_WINDOW_SECONDS,
+        )
+        .with_max_per_key(100)
+        .with_max_total(7),
+    );
+    let asks = (0..40)
+        .map(|index| {
+            (
+                Ask::Admit(KeyId::from_u64(u64::from(index) + 1)),
+                fingerprint(2, index),
+            )
+        })
+        .collect::<Vec<_>>();
+    let answers = ask_concurrently(&total, &asks, now, |_, _| {});
+    assert_eq!(fresh(&answers), 7, "{answers:?}");
+}
+
+/// An append that fails answers every admission waiting on it `Unavailable`
+/// and takes back all that they reserved: once the log can be written again,
+/// the same first flights are admitted, with the whole budget there for them,
+/// and the log holds just those.
+#[test]
+fn a_failed_append_frees_what_its_admissions_reserved() {
+    let scratch = TempPath::new("replay-race-fail");
+    let path = scratch.join("connection.replay");
+    let now = unix_seconds();
+    let guard = shared(
+        ReplayGuard::open(Some(path.clone()), 1 << 16, DEFAULT_REPLAY_WINDOW_SECONDS)
+            .with_max_per_key(16)
+            .with_max_total(16),
+    );
+    let asks = (0..16)
+        .map(|index| (Ask::Admit(KeyId::from_u64(1)), fingerprint(3, index)))
+        .collect::<Vec<_>>();
+    // A file where the log's directory goes: every append fails, writing
+    // nothing.
+    std::fs::write(&scratch, b"a file where the log's directory goes").unwrap();
+    let answers = ask_concurrently(&guard, &asks, now, |_, _| {});
+    assert!(
+        answers
+            .iter()
+            .all(|answer| *answer == FirstFlightAdmit::Unavailable),
+        "{answers:?}"
+    );
+
+    std::fs::remove_file(&scratch).unwrap();
+    let answers = ask_concurrently(&guard, &asks, now, |_, _| {});
+    assert!(
+        answers
+            .iter()
+            .all(|answer| *answer == FirstFlightAdmit::Fresh),
+        "{answers:?}"
+    );
+    assert_eq!(
+        guard
+            .admit(KeyId::from_u64(1), &fingerprint(3, 16), now)
+            .wait(),
+        FirstFlightAdmit::Limited
+    );
+    let log = std::fs::read(&path).unwrap();
+    assert_eq!(log.len(), asks.len() * REPLAY_RECORD_LEN);
+    for (_, fingerprint) in asks {
+        assert!(log_holds(&path, fingerprint, now));
+    }
+}
+
+/// The minute's compaction runs between admissions: the admission that comes
+/// due for it is answered once the log holds exactly the live admissions, its
+/// own among them, and admissions after it go onto that log.
+#[test]
+fn a_compaction_leaves_the_live_admissions_and_admits_after_it() {
+    let scratch = TempPath::new("replay-compaction");
+    std::fs::create_dir(&scratch).unwrap();
+    let path = scratch.join("connection.replay");
+    let opened = unix_seconds();
+    let guard = ReplayGuard::open(Some(path.clone()), 1 << 16, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let key = KeyId::from_u64(1);
+    // Outside the window by the time the compaction runs.
+    let stale = opened - DEFAULT_REPLAY_WINDOW_SECONDS - 100;
+    // The open may have read the clock a second after `opened`.
+    let due = opened + REPLAY_COMPACT_INTERVAL_SECONDS + 2;
+    let (old, compacting, after) = (fingerprint(4, 0), fingerprint(4, 1), fingerprint(4, 2));
+    assert_eq!(
+        guard.admit(key, &old, stale).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        guard.admit(key, &compacting, due).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        replay_record(compacting, due)
+    );
+    assert_eq!(
+        guard.admit(key, &after, due + 1).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        [
+            replay_record(compacting, due),
+            replay_record(after, due + 1)
+        ]
+        .concat()
+    );
+    drop(guard);
+
+    let restored = ReplayGuard::open(Some(path.clone()), 1 << 16, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let now = unix_seconds();
+    assert_eq!(
+        restored.admit(key, &compacting, now).wait(),
+        FirstFlightAdmit::Replayed
+    );
+    assert_eq!(
+        restored.admit(key, &after, now).wait(),
+        FirstFlightAdmit::Replayed
+    );
+    assert_eq!(
+        restored.admit(key, &old, now).wait(),
+        FirstFlightAdmit::Fresh
+    );
+}
+
+/// The `path` of each error event logged to it, on whichever thread.
+#[derive(Clone, Default)]
+struct ErrorPaths(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl ErrorPaths {
+    /// What was logged since the last take.
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut self.0.lock().unwrap())
+    }
+}
+
+impl tracing::Subscriber for ErrorPaths {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        use tracing::field::{Field, Visit};
+
+        struct PathField(Option<String>);
+        impl Visit for PathField {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "path" {
+                    self.0 = Some(format!("{value:?}"));
+                }
+            }
+        }
+        if *event.metadata().level() != tracing::Level::ERROR {
+            return;
+        }
+        let mut path = PathField(None);
+        event.record(&mut path);
+        self.0.lock().unwrap().push(path.0.unwrap_or_default());
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// An append that fails and leaves the log as it was, as on a full disk or
+/// where its directory cannot be created, refuses its connection and says why
+/// in the relay's log, with the file: once for a run of such failures, not
+/// once per connection, and again for a run that follows a success.
+#[test]
+fn a_failing_append_is_logged_once_per_run_of_failures() {
+    let scratch = TempPath::new("replay-blocked");
+    let path = scratch.join("connection.replay");
+    let block = || std::fs::write(&scratch, b"a file where the log's directory goes").unwrap();
+    let now = unix_seconds();
+    // The log's writer logs where the code that opened the log does.
+    let errors = ErrorPaths::default();
+    // A second collector, kept as long as the first is read. With one alone,
+    // tracing asks whether anyone wants an event of whichever thread meets
+    // its call site first: another test's writer, which logs nowhere, would
+    // then turn this test's events away for the whole process.
+    let _second = tracing::Dispatch::new(ErrorPaths::default());
+    let guard = tracing::subscriber::with_default(errors.clone(), || {
+        ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+    });
+
+    block();
+    for key in 1..=3 {
+        assert_eq!(
+            guard
+                .admit(KeyId::from_u64(key), &[key as u8; 32], now)
+                .wait(),
+            FirstFlightAdmit::Unavailable
+        );
+    }
+    assert_eq!(errors.take(), [path.display().to_string()]);
+
+    std::fs::remove_file(&scratch).unwrap();
+    assert_eq!(
+        guard.admit(KeyId::from_u64(4), &[4_u8; 32], now).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    std::fs::remove_dir_all(&scratch).unwrap();
+    block();
+    for key in 5..=6 {
+        assert_eq!(
+            guard
+                .admit(KeyId::from_u64(key), &[key as u8; 32], now)
+                .wait(),
+            FirstFlightAdmit::Unavailable
+        );
+    }
+    assert_eq!(errors.take(), [path.display().to_string()]);
 }
 
 #[tokio::test]
 async fn legacy_initial_frame_validates_against_isolated_relay_key() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let config = temp_config();
+    let (config, _state) = temp_config();
     let isolated_admin = *b"isolated-admin-key-0123456789abc";
     std::fs::create_dir_all(&config.state_dir).unwrap();
     std::fs::write(config.state_dir.join("admin.key"), isolated_admin).unwrap();
@@ -938,6 +1406,7 @@ async fn legacy_initial_frame_validates_against_isolated_relay_key() {
         let initial = security.read_initial(&mut server_io).await.unwrap();
         assert_eq!(initial.payload, b"legacy-isolated");
         assert_eq!(initial.session.protocol(), HeaderProtocol::Legacy);
+        assert!(initial.first_flight.is_none());
         let mut writer = initial.session.response_writer(&mut server_io).unwrap();
         writer.write_msg(b"legacy-response").await.unwrap();
     };
@@ -945,7 +1414,6 @@ async fn legacy_initial_frame_validates_against_isolated_relay_key() {
     assert_eq!(response, b"legacy-response");
 
     set_process_msg_header_key(None).unwrap();
-    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[test]
@@ -955,6 +1423,6 @@ fn failure_log_limiter_has_a_hard_cardinality_bound() {
     for key_id in 0..10_000 {
         limiter.record(peer, KeyId::from_u64(key_id), "invalid", 1_000);
     }
-    assert_eq!(limiter.entries.len(), 4096);
+    assert_eq!(limiter.entries.len(), limiter::MAX_TRACKED);
     assert!(limiter.overflow.is_some());
 }

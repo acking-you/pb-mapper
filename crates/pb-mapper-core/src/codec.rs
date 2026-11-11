@@ -3,78 +3,83 @@ use ring::aead::{
     UnboundKey,
 };
 
-#[derive(Clone, Copy)]
-struct Counter(u64, u64);
+type RingResult<T> = Result<T, ring::error::Unspecified>;
 
-impl Default for Counter {
-    fn default() -> Self {
-        Self(0, u64::from(u32::MAX))
-    }
+/// A nonce is a direction prefix, then a big-endian message counter.
+const PREFIX_LEN: usize = 4;
+const COUNTER_LEN: usize = size_of::<u64>();
+const _: () = assert!(
+    PREFIX_LEN + COUNTER_LEN == NONCE_LEN,
+    "a nonce is a 4-byte direction prefix and a big-endian 64-bit counter"
+);
+
+/// How many messages a legacy codec seals or opens under one key: it predates
+/// the 64-bit counter of data v2, whose limit is `u64::MAX`.
+const LEGACY_LIMIT: u64 = u32::MAX as u64;
+
+/// The next message's counter, and the count at which the key is spent.
+struct Counter {
+    next: u64,
+    limit: u64,
 }
 
 impl Counter {
     fn advance(&mut self) -> RingResult<()> {
-        if self.0 >= self.1 {
+        if self.next >= self.limit {
             return Err(ring::error::Unspecified);
         }
-        self.0 += 1;
+        self.next += 1;
         Ok(())
     }
 
-    const fn size() -> usize {
-        8
-    }
-
-    fn to_bytes(self) -> [u8; 8] {
-        self.0.to_be_bytes()
+    fn to_bytes(&self) -> [u8; COUNTER_LEN] {
+        self.next.to_be_bytes()
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct CounterNonceSequence(Counter, [u8; NONCE_LEN]);
+/// The nonces of one key in one direction.
+///
+/// Neither `Clone` nor `Copy`: a copy would hand out the same nonces again
+/// under the same key.
+struct CounterNonceSequence {
+    counter: Counter,
+    nonce: [u8; NONCE_LEN],
+}
 
-type RingResult<T> = Result<T, ring::error::Unspecified>;
+impl Default for CounterNonceSequence {
+    /// The legacy sequence: no prefix, and [`LEGACY_LIMIT`] messages.
+    fn default() -> Self {
+        Self {
+            counter: Counter {
+                next: 0,
+                limit: LEGACY_LIMIT,
+            },
+            nonce: [0; NONCE_LEN],
+        }
+    }
+}
+
+impl CounterNonceSequence {
+    /// A data-v2 sequence: a direction prefix and a full 64-bit counter.
+    fn data_v2(prefix: [u8; PREFIX_LEN]) -> Self {
+        let mut nonce = [0; NONCE_LEN];
+        nonce[..PREFIX_LEN].copy_from_slice(&prefix);
+        Self {
+            counter: Counter {
+                next: 0,
+                limit: u64::MAX,
+            },
+            nonce,
+        }
+    }
+}
 
 impl NonceSequence for CounterNonceSequence {
     // called once for each seal operation
     fn advance(&mut self) -> RingResult<Nonce> {
-        let nonce_bytes = &mut self.1;
-
-        let bytes = self.0.to_bytes();
-        nonce_bytes[NONCE_LEN - Counter::size()..].copy_from_slice(&bytes);
-
-        self.0.advance()?;
-        Ok(Nonce::assume_unique_for_key(*nonce_bytes))
-    }
-}
-
-pub struct Aes256GcmCodec {
-    seal: Aes256GcmEnCodec,
-    open: Aes256GcmDeCodec,
-}
-
-impl Aes256GcmCodec {
-    pub fn try_new(key: &[u8]) -> RingResult<Self> {
-        Ok(Self {
-            seal: Aes256GcmEnCodec::try_new(key)?,
-            open: Aes256GcmDeCodec::try_new(key)?,
-        })
-    }
-
-    pub fn encrypt(&mut self, data: &mut [u8]) -> RingResult<Tag> {
-        self.seal.encrypt(data)
-    }
-
-    pub fn decrypt_with_tag(
-        &mut self,
-        decrypeted_data: &[u8],
-        tag: Tag,
-    ) -> RingResult<(Vec<u8>, usize)> {
-        self.open.decrypt_with_tag(decrypeted_data, tag)
-    }
-
-    pub fn decrypt<'a>(&mut self, data: &'a mut [u8]) -> RingResult<&'a mut [u8]> {
-        self.open.decrypt(data)
+        self.nonce[PREFIX_LEN..].copy_from_slice(&self.counter.to_bytes());
+        self.counter.advance()?;
+        Ok(Nonce::assume_unique_for_key(self.nonce))
     }
 }
 
@@ -88,28 +93,21 @@ impl Aes256GcmEnCodec {
     /// checked 64-bit counter. Legacy constructors retain their 32-bit limit.
     /// Peers sharing a key must use disjoint prefixes for opposite directions.
     pub fn try_new_data_v2(key: &[u8], prefix: [u8; 4]) -> RingResult<Self> {
-        let mut nonce = [0; NONCE_LEN];
-        nonce[..4].copy_from_slice(&prefix);
         Ok(Self {
             seal: SealingKey::new(
                 UnboundKey::new(&AES_256_GCM, key)?,
-                CounterNonceSequence(Counter(0, u64::MAX), nonce),
+                CounterNonceSequence::data_v2(prefix),
             ),
         })
     }
 
     pub fn try_new(key: &[u8]) -> RingResult<Self> {
-        let counter = CounterNonceSequence::default();
         Ok(Self {
-            seal: SealingKey::new(UnboundKey::new(&AES_256_GCM, key)?, counter),
+            seal: SealingKey::new(
+                UnboundKey::new(&AES_256_GCM, key)?,
+                CounterNonceSequence::default(),
+            ),
         })
-    }
-
-    pub fn new(key: UnboundKey) -> Self {
-        let counter = CounterNonceSequence::default();
-        Self {
-            seal: SealingKey::new(key, counter),
-        }
     }
 }
 
@@ -127,73 +125,55 @@ pub struct Aes256GcmDeCodec {
 impl Aes256GcmDeCodec {
     /// Construct the receiving half of a negotiated data-v2 codec.
     pub fn try_new_data_v2(key: &[u8], prefix: [u8; 4]) -> RingResult<Self> {
-        let mut nonce = [0; NONCE_LEN];
-        nonce[..4].copy_from_slice(&prefix);
         Ok(Self {
             open: OpeningKey::new(
                 UnboundKey::new(&AES_256_GCM, key)?,
-                CounterNonceSequence(Counter(0, u64::MAX), nonce),
+                CounterNonceSequence::data_v2(prefix),
             ),
         })
     }
 
     pub fn try_new(key: &[u8]) -> RingResult<Self> {
-        let counter = CounterNonceSequence::default();
         Ok(Self {
-            open: OpeningKey::new(UnboundKey::new(&AES_256_GCM, key)?, counter),
+            open: OpeningKey::new(
+                UnboundKey::new(&AES_256_GCM, key)?,
+                CounterNonceSequence::default(),
+            ),
         })
-    }
-
-    pub fn new(key: UnboundKey) -> Self {
-        let counter = CounterNonceSequence::default();
-        Self {
-            open: OpeningKey::new(key, counter),
-        }
     }
 }
 
 impl Decryptor for Aes256GcmDeCodec {
-    fn decrypt_with_tag(
-        &mut self,
-        decrypeted_data: &[u8],
-        tag: Tag,
-    ) -> RingResult<(Vec<u8>, usize)> {
-        let mut new_data = [decrypeted_data, tag.as_ref()].concat();
-        let new_data_len = self.decrypt(&mut new_data)?.len();
-        Ok((new_data, new_data_len))
-    }
-
     fn decrypt<'a>(&mut self, data: &'a mut [u8]) -> RingResult<&'a mut [u8]> {
         self.open.open_in_place(Aad::empty(), data)
     }
 }
 
+/// Seals each message in place under the next nonce, returning its tag.
 pub trait Encryptor: 'static {
     fn encrypt(&mut self, data: &mut [u8]) -> RingResult<Tag>;
 }
 
+/// Opens each message (ciphertext followed by its tag) in place under the
+/// next nonce, returning the plaintext.
 pub trait Decryptor {
-    fn decrypt_with_tag(
-        &mut self,
-        decrypeted_data: &[u8],
-        tag: Tag,
-    ) -> RingResult<(Vec<u8>, usize)>;
     fn decrypt<'a>(&mut self, data: &'a mut [u8]) -> RingResult<&'a mut [u8]>;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Counter, CounterNonceSequence};
-    use ring::aead::NonceSequence;
-    use std::slice::from_raw_parts_mut;
-    use std::time::Instant;
-
-    use crate::codec::Aes256GcmCodec;
+    use super::*;
 
     #[test]
     fn legacy_nonces_keep_their_bytes_and_both_counter_widths_fail_closed() {
         for limit in [u64::from(u32::MAX), u64::MAX] {
-            let mut seq = CounterNonceSequence(Counter(limit - 1, limit), [0; 12]);
+            let mut seq = CounterNonceSequence {
+                counter: Counter {
+                    next: limit - 1,
+                    limit,
+                },
+                nonce: [0; 12],
+            };
             let nonce = seq.advance().unwrap();
             assert_eq!(&nonce.as_ref()[..4], &[0; 4]);
             assert_eq!(&nonce.as_ref()[4..], &(limit - 1).to_be_bytes());
@@ -208,60 +188,31 @@ mod tests {
         );
     }
 
-    struct Timer {
-        ins: Instant,
-        hint: String,
-    }
-
-    impl Timer {
-        fn new_with_hint(hint: String) -> Self {
-            Self {
-                ins: Instant::now(),
-                hint,
-            }
-        }
-    }
-
-    impl Drop for Timer {
-        fn drop(&mut self) {
-            println!("{} consume time:{:?}", self.hint, self.ins.elapsed());
-        }
-    }
-
-    fn write_slice(slice: &[u8]) {
-        let ptr = slice.as_ptr() as *mut u8;
-        let mut_slice = unsafe { from_raw_parts_mut(ptr, slice.len()) };
-        mut_slice[1] = b'a';
-        println!("{mut_slice:?}")
-    }
-
+    /// Which limit each constructor picks, and where the data-v2 prefix goes.
     #[test]
-    fn test_write_mut_slice() {
-        let vec: Vec<u8> = "bbc".into();
-        write_slice(&vec);
-        assert_eq!(vec[1], b'a');
-    }
-
-    #[test]
-    fn test_codec() {
-        const TEST_KEY: [u8; 32] = [0x42; 32];
-        let data = String::from(
-            "fdafas反对fdasfasfasfsdafdasfsdfasd范德萨发顺🤣❤️😁😍👍👍丰十大大师傅士大夫大撒发射点发士大夫大师傅大师傅士大夫士大夫阿斯蒂芬大师傅阿斯顿法大师傅看叫阿三的发就可是大家发开始打客服开始大幅喀什的开发点卡收费就开始打客服就是的咖啡肯定撒法开始打客服就是的咖啡就开始大幅扣税的急啊看发叫阿三的发生的开发就是大家可是大家发看大数据开发大数据开发大家ask发就是的咖啡的萨芬就卡死的房价开始打家开发商的JFK上的飞机卡上的纠纷开始打飞机宽带技术开发就开始大家开发建设的卡JFK大数据风控静安寺的看法角度看萨芬卡上的纠纷看静安寺的看法角度思考积分可是大家发卡是大家看法就大肆砍伐尽快打算减肥肯定是积分开始大幅技术大咖积分开始打飞机扣税的急啊看发的技术开发就是JFK十大福克斯大家开发大撒发射点幅度萨芬撒旦发发收范德萨发顺丰士大夫十大阿斯蒂芬大师傅阿斯顿附件是的客服对接撒巨大石块积分的课时费阿斯蒂芬法大师傅大师傅十大法大师傅阿斯蒂芬阿斯顿法大师傅阿斯蒂芬大师傅阿斯顿法大师傅大师傅阿斯蒂芬阿斯蒂芬士大夫阿斯蒂芬大师傅的萨芬打算减肥上岛咖啡加快速度大数据开发就是打客服看大数据开发就开始减肥卡萨丁JFK是大家看法加快速度JFK技术大咖积分喀什的开发独守空房技术大咖积分空手道解放扣税的开发商的开发接口是大家看法角度看是否扣税的急啊看发生的开发的快速减肥开始大幅就是打客服卡上的纠纷啊撒旦解放扣税的急啊看发加快速度点卡JFK啥的但是法大师傅技术大咖积分卡萨丁就反馈是大家看法啊是大家看法卡上的纠纷可是大家发喀什的开发大卡司喀什的开发就是打客服法大师傅士大夫的式咖啡机上岛咖啡就是的咖啡艰苦大师傅看上雕刻技法喀什的开发上岛咖啡就喀什的开发就是打客服卡上的纠纷技术的咖啡机肯定撒开发啊十大科技开发速度加啊反馈就是的咖啡开始大幅大师傅似的十大放假啊上岛咖啡就可是大家发空间的是否撒旦士大夫的撒娇开发是大家看法大肆砍伐就喀什的开发氨基酸的考虑非军事对抗疗法金克拉撒旦发艰苦拉萨的飞机喀什打开发就可是大家发可是大家看附件卡上的纠纷卡刷点卡技术的咖啡机可是大家发卡是大家看法静安寺的看法就可是大家发卡萨丁就开发商的急啊看飞机迪斯科发技术的咖啡机可是大家发看电视剧开发商大开始打到发大水发大水",
-        );
-        let mut cryption = Aes256GcmCodec::try_new(&TEST_KEY).unwrap();
-        let mut out_buf = data.as_bytes().to_vec();
-        let tag = {
-            let _timer = Timer::new_with_hint("Encrypt".into());
-            cryption.encrypt(&mut out_buf).unwrap()
-        };
-        println!("tag:{:?}", tag.as_ref());
-        let (decrypeted_data, len) = {
-            let _timer = Timer::new_with_hint("Decrypt".into());
-            cryption.decrypt_with_tag(&out_buf, tag).unwrap()
-        };
+    fn legacy_and_data_v2_sequences_pick_their_prefix_and_limit() {
+        let legacy = CounterNonceSequence::default();
+        assert_eq!(legacy.counter.limit, u64::from(u32::MAX));
+        let mut v2 = CounterNonceSequence::data_v2([0, 0, 0, 1]);
+        assert_eq!(v2.counter.limit, u64::MAX);
         assert_eq!(
-            data,
-            String::from_utf8(decrypeted_data[..len].to_vec()).unwrap()
+            v2.advance().unwrap().as_ref(),
+            &[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]
         );
+    }
+
+    #[test]
+    fn a_sealed_message_opens_with_the_same_key() {
+        const KEY: [u8; 32] = [0x42; 32];
+        let plaintext = b"pb-mapper frame";
+        let mut seal = Aes256GcmEnCodec::try_new(&KEY).unwrap();
+        let mut open = Aes256GcmDeCodec::try_new(&KEY).unwrap();
+        for _ in 0..2 {
+            let mut message = plaintext.to_vec();
+            let tag = seal.encrypt(&mut message).unwrap();
+            assert_ne!(message, plaintext);
+            message.extend_from_slice(tag.as_ref());
+            assert_eq!(open.decrypt(&mut message).unwrap(), plaintext);
+        }
     }
 }

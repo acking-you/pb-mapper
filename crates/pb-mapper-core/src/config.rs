@@ -1,15 +1,13 @@
-use std::net::{AddrParseError, SocketAddr};
-use std::sync::{Arc, Once};
+use std::net::SocketAddr;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::Duration;
 
-use clap::ValueEnum;
 use snafu::ResultExt;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::{EnvFilter, Layer, fmt};
 
-use crate::error::{CfgPbServerEnvNotExistSnafu, Result};
+use crate::error::{CfgPbServerEnvNotExistSnafu, CfgResolveSockAddrSnafu, Result};
 
-#[derive(ValueEnum, Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum StatusOp {
     /// Get active remote connection IDs.
     RemoteId,
@@ -43,20 +41,16 @@ pub struct ResolvedAddrs {
 }
 
 impl ResolvedAddrs {
-    /// Build from resolver output, rejecting an empty result.
-    ///
-    /// `name` is what was resolved, and `parse_error` the failure from parsing it
-    /// as a literal `ip:port`, so an empty resolution reports the same error a
-    /// malformed address would.
-    fn new(name: &str, addrs: Vec<SocketAddr>, parse_error: AddrParseError) -> Result<Self> {
-        if addrs.is_empty() {
-            return Err(crate::error::Error::CfgParseSockAddr {
-                string: name.to_string(),
-                source: parse_error,
-            });
-        }
-        Ok(Self {
-            addrs: Arc::from(addrs),
+    /// Build from the outcome of looking `name` up, rejecting an empty result.
+    /// A failure keeps the resolver's reason.
+    fn looked_up(name: &str, lookup: std::io::Result<Vec<SocketAddr>>) -> Result<Self> {
+        let addrs = lookup.context(CfgResolveSockAddrSnafu { string: name })?;
+        Self::from_candidates(addrs).ok_or_else(|| crate::error::Error::CfgResolveSockAddr {
+            string: name.to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the resolver answered with no address",
+            ),
         })
     }
 
@@ -122,60 +116,72 @@ impl From<SocketAddr> for ResolvedAddrs {
     }
 }
 
+/// What an address to resolve names.
+enum Target<'a> {
+    /// A literal `ip:port`, which needs no resolver.
+    Literal(SocketAddr),
+    /// A host and port to look up.
+    Name(&'a str, u16),
+}
+
+impl<'a> Target<'a> {
+    /// Splits `addr` as the system resolver does, so that whatever it would
+    /// look up is looked up. Anything else is a malformed address, which fails
+    /// with its parse error: so does a host with a colon in it, which no name
+    /// has, and which is what the split leaves of an IPv6 address written
+    /// without its brackets and port.
+    fn of(addr: &'a str) -> Result<Self> {
+        let parse_error = match addr.parse::<SocketAddr>() {
+            Ok(socket_addr) => return Ok(Self::Literal(socket_addr)),
+            Err(error) => error,
+        };
+        match addr
+            .rsplit_once(':')
+            .filter(|(host, _)| !host.contains(':'))
+            .and_then(|(host, port)| Some((host, port.parse().ok()?)))
+        {
+            Some((host, port)) => Ok(Self::Name(host, port)),
+            None => Err(crate::error::Error::CfgParseSockAddr {
+                string: addr.to_string(),
+                source: parse_error,
+            }),
+        }
+    }
+}
+
 /// Resolve `addr` to every candidate it names.
 ///
-/// A literal `ip:port` short-circuits. Otherwise `localhost:` goes to the system
-/// resolver — the custom DNS path does not answer for it — and any other hostname
-/// tries the configured DNS servers first, falling back to the system resolver.
+/// A literal `ip:port` short-circuits; anything else goes to the system
+/// resolver, once. Only [`resolve_addrs_async`] asks the configured DNS
+/// servers first.
 #[inline]
 pub fn resolve_addrs(addr: &str) -> Result<ResolvedAddrs> {
-    // The literal case returns here; otherwise the parse error is kept as the
-    // failure reported below, so a caller sees what it asked for rather than a
-    // resolver's internal complaint.
-    let parse_error = match addr.parse::<SocketAddr>() {
-        Ok(socket_addr) => return Ok(ResolvedAddrs::from(socket_addr)),
-        Err(error) => error,
+    let (host, port) = match Target::of(addr)? {
+        Target::Literal(literal) => return Ok(ResolvedAddrs::from(literal)),
+        Target::Name(host, port) => (host, port),
     };
-
-    let system = || match std::net::ToSocketAddrs::to_socket_addrs(addr) {
-        Ok(addrs) => addrs.collect(),
-        Err(_) => Vec::new(),
-    };
-
-    let addrs = if addr.starts_with("localhost:") {
-        system()
-    } else {
-        match crate::addr::get_socket_addrs(addr) {
-            Ok(addrs) if !addrs.is_empty() => addrs,
-            _ => system(),
-        }
-    };
-    ResolvedAddrs::new(addr, addrs, parse_error)
+    let lookup = std::net::ToSocketAddrs::to_socket_addrs(&(host, port));
+    ResolvedAddrs::looked_up(addr, lookup.map(Iterator::collect))
 }
 
 /// Async counterpart of [`resolve_addrs`], for Tokio contexts.
 pub async fn resolve_addrs_async(addr: &str) -> Result<ResolvedAddrs> {
-    let parse_error = match addr.parse::<SocketAddr>() {
-        Ok(socket_addr) => return Ok(ResolvedAddrs::from(socket_addr)),
-        Err(error) => error,
+    let (host, port) = match Target::of(addr)? {
+        Target::Literal(literal) => return Ok(ResolvedAddrs::from(literal)),
+        Target::Name(host, port) => (host, port),
     };
-
-    async fn system(addr: &str) -> Vec<SocketAddr> {
-        match tokio::net::lookup_host(addr).await {
-            Ok(addrs) => addrs.collect(),
-            Err(_) => Vec::new(),
-        }
+    if host != "localhost"
+        && let Ok(ips) = crate::addr::get_ip_addrs_async(host).await
+        && let Some(addrs) = ResolvedAddrs::from_candidates(
+            ips.into_iter()
+                .map(|ip| SocketAddr::new(ip, port))
+                .collect(),
+        )
+    {
+        return Ok(addrs);
     }
-
-    let addrs = if addr.starts_with("localhost:") {
-        system(addr).await
-    } else {
-        match crate::addr::get_socket_addrs_async(addr).await {
-            Ok(addrs) if !addrs.is_empty() => addrs,
-            _ => system(addr).await,
-        }
-    };
-    ResolvedAddrs::new(addr, addrs, parse_error)
+    let lookup = tokio::net::lookup_host((host, port)).await;
+    ResolvedAddrs::looked_up(addr, lookup.map(Iterator::collect))
 }
 
 const PB_MAPPER_SERVER: &str = "PB_MAPPER_SERVER";
@@ -202,6 +208,12 @@ pub const PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT: &str = "PB_MAPPER_CLIENT_HEALTH
 pub const PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD: &str =
     "PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD";
 pub const PB_MAPPER_LOG_FORMAT: &str = "PB_MAPPER_LOG_FORMAT";
+pub const PB_MAPPER_TUNNEL_IDLE_TIMEOUT: &str = "PB_MAPPER_TUNNEL_IDLE_TIMEOUT";
+pub const PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT: &str = "PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT";
+pub const PB_MAPPER_NEW_STREAMS_PER_SECOND: &str = "PB_MAPPER_NEW_STREAMS_PER_SECOND";
+/// What [`new_streams_per_second`] is when the variable is unset or not a
+/// positive integer.
+pub const DEFAULT_NEW_STREAMS_PER_SECOND: u32 = 100;
 const DEFAULT_CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_STREAM_ACK_TIMEOUT: Duration = Duration::from_millis(300);
 const DEFAULT_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -218,6 +230,41 @@ const DEFAULT_SERVER_LEASE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_CLIENT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_CLIENT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD: usize = 3;
+const DEFAULT_TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const DEFAULT_HALF_CLOSE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_CONTROL_CONN_POOL_SIZE: usize = 16;
+const MAX_CLIENT_HEALTH_FAILURE_THRESHOLD: usize = 100;
+
+const _: () = assert!(
+    !DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN.is_zero()
+        && !DEFAULT_REGISTRATION_REJECT_BACKOFF_MAX.is_zero()
+        && !DEFAULT_SERVER_LEASE_SWEEP_INTERVAL.is_zero(),
+    "positive_duration_from_env falls back to these defaults, so they must be positive"
+);
+const _: () = assert!(
+    DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN.as_nanos()
+        <= DEFAULT_REGISTRATION_REJECT_BACKOFF_MAX.as_nanos(),
+    "the default registration reject backoff must be a valid RetryBackoff range"
+);
+const _: () = assert!(
+    DEFAULT_CONTROL_HEARTBEAT_INTERVAL.as_nanos() < DEFAULT_CONTROL_HEARTBEAT_TOLERANCE.as_nanos(),
+    "a control connection becomes suspect only after missing heartbeats"
+);
+const _: () = assert!(
+    DEFAULT_CONTROL_HEARTBEAT_INTERVAL.as_nanos() < DEFAULT_SERVER_LEASE_TIMEOUT.as_nanos(),
+    "a lease must outlast the heartbeat that renews it"
+);
+const _: () = assert!(
+    DEFAULT_SERVER_LEASE_SWEEP_INTERVAL.as_nanos() * 3 == DEFAULT_SERVER_LEASE_TIMEOUT.as_nanos(),
+    "server_lease_sweep_interval documents its default as a third of the lease"
+);
+const _: () = assert!(
+    0 < DEFAULT_CONTROL_CONN_POOL_SIZE
+        && DEFAULT_CONTROL_CONN_POOL_SIZE <= MAX_CONTROL_CONN_POOL_SIZE
+        && 0 < DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD
+        && DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD <= MAX_CLIENT_HEALTH_FAILURE_THRESHOLD,
+    "a default count must be one bounded_count_from_env could return"
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
@@ -232,19 +279,6 @@ pub fn parse_log_format(value: &str) -> LogFormat {
         "json" => LogFormat::Json,
         _ => LogFormat::Pretty,
     }
-}
-
-fn log_format_from_env() -> LogFormat {
-    std::env::var(PB_MAPPER_LOG_FORMAT)
-        .ok()
-        .map(|value| parse_log_format(&value))
-        .unwrap_or(LogFormat::Pretty)
-}
-
-fn default_env_filter() -> EnvFilter {
-    EnvFilter::builder()
-        .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-        .from_env_lossy()
 }
 
 pub fn parse_duration(value: &str) -> Option<Duration> {
@@ -328,13 +362,23 @@ pub fn stream_recovery_timeout() -> Duration {
     )
 }
 
-pub fn control_conn_pool_size() -> usize {
-    std::env::var(PB_MAPPER_CONTROL_CONN_POOL_SIZE)
+/// A positive count from `name`, capped at `max`, or `default` when it is
+/// unset, unparsable or zero.
+fn bounded_count_from_env(name: &str, max: usize, default: usize) -> usize {
+    std::env::var(name)
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|size| *size > 0)
-        .map(|size| size.min(16))
-        .unwrap_or(DEFAULT_CONTROL_CONN_POOL_SIZE)
+        .filter(|count| *count > 0)
+        .map(|count| count.min(max))
+        .unwrap_or(default)
+}
+
+pub fn control_conn_pool_size() -> usize {
+    bounded_count_from_env(
+        PB_MAPPER_CONTROL_CONN_POOL_SIZE,
+        MAX_CONTROL_CONN_POOL_SIZE,
+        DEFAULT_CONTROL_CONN_POOL_SIZE,
+    )
 }
 
 pub fn control_heartbeat_interval() -> Duration {
@@ -373,7 +417,9 @@ pub fn registration_probe_timeout() -> Duration {
 /// a per-service connection quota that is full, a namespace at its service limit.
 /// Reconnecting a few times a second adds load to the very condition that has to
 /// clear, and it produced thousands of identical reject lines a minute in
-/// production. So the ladder starts at 5s and settles at 80s.
+/// production. So the ladder starts at 5s and settles at 80s, each wait cut
+/// short by up to a quarter so that publishers refused together do not come
+/// back together.
 ///
 /// Both ends come back together because they are only valid as a pair: a zero
 /// falls back to its default, and the maximum is then raised to the minimum,
@@ -384,11 +430,13 @@ pub fn registration_probe_timeout() -> Duration {
 /// are different. An inverted range is a legible request — wait exactly this long
 /// — and collapsing it to a fixed delay honours it. A zero minimum is not: it
 /// asks for no wait at all, and since [`RetryBackoff`] caps its multiplier at
-/// 1024, a millisecond minimum would never climb past about a second no matter
-/// how high the maximum, hammering the very quota the ladder exists to let clear.
+/// 1024 ([`RetryBackoff::MAX_DOUBLINGS`]), a millisecond minimum would never
+/// climb past about a second no matter how high the maximum, hammering the very
+/// quota the ladder exists to let clear.
 ///
 /// [`RetryBackoff`]: crate::timeout::RetryBackoff
 /// [`RetryBackoff::new`]: crate::timeout::RetryBackoff::new
+/// [`RetryBackoff::MAX_DOUBLINGS`]: crate::timeout::RetryBackoff::MAX_DOUBLINGS
 pub fn registration_reject_backoff() -> (Duration, Duration) {
     let min = positive_duration_from_env(
         PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN,
@@ -439,12 +487,41 @@ pub fn client_health_check_timeout() -> Duration {
 }
 
 pub fn client_health_failure_threshold() -> usize {
-    std::env::var(PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD)
+    bounded_count_from_env(
+        PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD,
+        MAX_CLIENT_HEALTH_FAILURE_THRESHOLD,
+        DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD,
+    )
+}
+
+/// How long a TCP tunnel may carry nothing in either direction before it is
+/// closed. Zero never closes it for idling.
+pub fn tunnel_idle_timeout() -> Duration {
+    duration_from_env(PB_MAPPER_TUNNEL_IDLE_TIMEOUT, DEFAULT_TUNNEL_IDLE_TIMEOUT)
+}
+
+/// How long a TCP tunnel one side has finished sending on may carry nothing
+/// more before it is closed. Zero never closes it for idling.
+pub fn half_close_idle_timeout() -> Duration {
+    duration_from_env(
+        PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT,
+        DEFAULT_HALF_CLOSE_IDLE_TIMEOUT,
+    )
+}
+
+/// New streams a namespace may open per second, sustained: the relay's
+/// stream rate limit, and the basis of the first-flight replay budget. The
+/// variable as a positive integer, untrimmed, or
+/// [`DEFAULT_NEW_STREAMS_PER_SECOND`].
+pub fn new_streams_per_second() -> NonZeroUsize {
+    const DEFAULT: NonZeroUsize = match NonZeroUsize::new(DEFAULT_NEW_STREAMS_PER_SECOND as usize) {
+        Some(rate) => rate,
+        None => panic!("the default stream rate is positive"),
+    };
+    std::env::var(PB_MAPPER_NEW_STREAMS_PER_SECOND)
         .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|threshold| *threshold > 0)
-        .map(|threshold| threshold.min(100))
-        .unwrap_or(DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT)
 }
 
 /// Whether the environment asks for TCP keep-alive, from `PB_MAPPER_KEEP_ALIVE`.
@@ -503,46 +580,6 @@ pub async fn resolve_pb_mapper_server_async(addr: Option<&str>) -> Result<Resolv
     }
 }
 
-pub fn init_tracing() {
-    static INIT_TRACING: Once = Once::new();
-    INIT_TRACING.call_once(|| {
-        let result = match log_format_from_env() {
-            LogFormat::Pretty => {
-                let subscriber = tracing_subscriber::registry().with(
-                    fmt::layer()
-                        .pretty()
-                        .with_writer(std::io::stdout)
-                        .with_filter(default_env_filter()),
-                );
-                tracing::subscriber::set_global_default(subscriber)
-            }
-            LogFormat::Compact => {
-                let subscriber = tracing_subscriber::registry().with(
-                    fmt::layer()
-                        .compact()
-                        .with_writer(std::io::stdout)
-                        .with_filter(default_env_filter()),
-                );
-                tracing::subscriber::set_global_default(subscriber)
-            }
-            LogFormat::Json => {
-                let subscriber = tracing_subscriber::registry().with(
-                    fmt::layer()
-                        .json()
-                        .flatten_event(true)
-                        .with_writer(std::io::stdout)
-                        .with_filter(default_env_filter()),
-                );
-                tracing::subscriber::set_global_default(subscriber)
-            }
-        };
-
-        if let Err(e) = result {
-            eprintln!("failed to initialize tracing subscriber: {e}");
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,6 +591,18 @@ mod tests {
         assert_eq!(parse_log_format("json"), LogFormat::Json);
         assert_eq!(parse_log_format(" JSON "), LogFormat::Json);
         assert_eq!(parse_log_format("unknown"), LogFormat::Pretty);
+    }
+
+    #[test]
+    fn parse_duration_accepts_suffixes_and_plain_seconds() {
+        assert_eq!(parse_duration("42"), Some(Duration::from_secs(42)));
+        assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_duration("2s"), Some(Duration::from_secs(2)));
+        assert_eq!(parse_duration("3m"), Some(Duration::from_secs(180)));
+        assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_duration(""), None);
+        assert_eq!(parse_duration("bad"), None);
+        assert_eq!(parse_duration("18446744073709551615h"), None);
     }
 
     /// The point of [`ResolvedAddrs`]: a name with several records keeps them
@@ -621,6 +670,34 @@ mod tests {
     fn resolve_addrs_fails_when_nothing_can_be_resolved() {
         assert!(resolve_addrs("127.0.0.1").is_err(), "no port");
         assert!(resolve_addrs("localhost").is_err(), "no port");
+    }
+
+    /// A name that does not resolve reports the resolver's reason, not the
+    /// parse error a malformed address gets, which would send whoever has to
+    /// fix it to the address's syntax. A NUL byte fails every resolver before
+    /// a query is sent.
+    #[tokio::test]
+    async fn a_name_that_does_not_resolve_reports_the_resolvers_reason() {
+        let blocking = resolve_addrs("bad\0name:7666").expect_err("a NUL never resolves");
+        let asynchronous = resolve_addrs_async("bad\0name:7666")
+            .await
+            .expect_err("a NUL never resolves");
+        for error in [blocking, asynchronous] {
+            assert!(
+                matches!(error, crate::error::Error::CfgResolveSockAddr { .. }),
+                "{error:?}"
+            );
+        }
+        // No port, and an IPv6 address without one, are malformed, not names.
+        for malformed in ["localhost", "fe80::1", "::1"] {
+            assert!(
+                matches!(
+                    resolve_addrs_async(malformed).await,
+                    Err(crate::error::Error::CfgParseSockAddr { .. })
+                ),
+                "{malformed}"
+            );
+        }
     }
 
     /// The async path is the one the tunnels use, and has to agree with the

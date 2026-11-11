@@ -41,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     error::CtlError,
     handle::PbMapperHandle,
-    response::{err_ctl, err_null_handle, ok_data, parse_c_string},
+    response::{Reply, parse_c_string, respond},
     state::TunnelHandle,
 };
 
@@ -172,20 +172,15 @@ pub unsafe extern "C" fn pb_mapper_tunnel_events_call_json(
     handle: *mut PbMapperHandle,
     request: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return err_null_handle();
-    }
-    let request = match parse_c_string(request, "request").and_then(|raw| {
-        serde_json::from_str::<Request>(&raw).map_err(|e| CtlError::invalid_argument(e.to_string()))
-    }) {
-        Ok(request) => request,
-        Err(error) => return err_ctl(&error),
-    };
-    let handle = unsafe { &*handle };
-    match handle.runtime.block_on(call(handle, request)) {
-        Ok(value) => ok_data(value),
-        Err(error) => err_ctl(&error),
-    }
+    // SAFETY: null or live, as the caller guarantees.
+    respond(unsafe { handle.as_ref() }, |handle| {
+        // SAFETY: null or NUL-terminated, as the caller guarantees.
+        let request = unsafe { parse_c_string(request, "request") }.and_then(|raw| {
+            serde_json::from_str::<Request>(&raw)
+                .map_err(|e| CtlError::invalid_argument(e.to_string()))
+        })?;
+        Ok(Reply::Data(handle.runtime.block_on(call(handle, request))?))
+    })
 }
 
 async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlError> {
@@ -263,13 +258,12 @@ fn to_value(next: Next) -> Result<Value, CtlError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use pb_mapper_client::sdk::{
-        Client, ClientConfig, RegisterOptions, RegisterRequest, Transport,
-    };
+    use pb_mapper_client::sdk::{RegisterOptions, Transport};
     use std::{future::Future, task::Poll};
+
+    use crate::test_support::{TempRoot, test_handle};
 
     #[test]
     fn closing_a_reader_wakes_its_pending_read_and_leaves_the_tunnel_running() {
@@ -277,53 +271,24 @@ mod tests {
         // lock, in a directory of its own rather than the app's.
         let _credential_guard =
             pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK.blocking_lock();
-        let root = std::env::temp_dir().join(format!(
-            "pb-mapper-tunnel-events-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        let handle = PbMapperHandle {
-            tunnel_events: Default::default(),
-            desktop: Default::default(),
-            runtime: tokio::runtime::Runtime::new().unwrap(),
-            state: Arc::new(tokio::sync::Mutex::new(crate::state::PbMapperState::new(
-                Some(root.display().to_string()),
-            ))),
-            control_shutdown: CancellationToken::new(),
-        };
+        let root = TempRoot::new("tunnel-events");
+        let handle = test_handle(root.path());
         handle.runtime.block_on(async {
             let relay = pb_mapper_testkit::Relay::start("ffi-tunnel-events").await;
-            let client = Client::new(ClientConfig {
-                server: relay.addr().to_string(),
-                credential: pb_mapper_testkit::TEST_ADMIN_KEY.into(),
-                keep_alive: false,
-                namespace: None,
-            })
-            .unwrap();
+            let client = pb_mapper_testkit::admin_client(relay.addr());
             let backend = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let registration = client
-                .register_with_options(
-                    RegisterRequest {
-                        key: "idle".into(),
-                        local_addr: backend.local_addr().unwrap().to_string(),
-                        transport: Transport::Tcp,
-                        codec: false,
-                        force_namespace: false,
-                    },
-                    RegisterOptions {
-                        allow_direct: false,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            registration
-                .wait_ready_timeout(Duration::from_secs(5))
-                .await
-                .unwrap();
+            let registration = pb_mapper_testkit::publish(
+                &client,
+                "idle",
+                backend.local_addr().unwrap(),
+                Transport::Tcp,
+                false,
+                RegisterOptions {
+                    allow_direct: false,
+                    ..Default::default()
+                },
+            )
+            .await;
             let tunnel = Arc::new(TunnelHandle::Share(registration));
             let reader = |metrics: Option<u64>| {
                 Arc::new(Reader {
@@ -386,6 +351,5 @@ mod tests {
             registration.stop().await.unwrap();
         });
         drop(handle);
-        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -1,5 +1,4 @@
 //! FFI interface for pb-mapper UI.
-#![allow(clippy::missing_safety_doc)]
 
 mod callback;
 mod cli;
@@ -22,11 +21,15 @@ mod response;
 mod server;
 mod service;
 mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod tunnel_events;
 mod update;
 
-// Re-export public FFI functions and handle type.
 use better_mimalloc_rs::MiMalloc;
+
+// The C surface the app looks up, and the handle type. `no_mangle` exports
+// each symbol either way; listed here, every one is in one place.
 pub use cli::{NOT_A_COMMAND, pb_mapper_cli_main};
 pub use client::{
     pb_mapper_connect_service, pb_mapper_delete_client_config, pb_mapper_disconnect_service,
@@ -74,14 +77,15 @@ pub use logging::{
 pub use relay::pb_mapper_relay_call_json;
 pub use server::{
     pb_mapper_force_refresh_server_status_json, pb_mapper_get_local_server_status_json,
-    pb_mapper_get_server_status_detail_json, pb_mapper_start_server, pb_mapper_stop_server,
+    pb_mapper_get_server_status_detail_json, pb_mapper_get_service_conns_json,
+    pb_mapper_start_server, pb_mapper_stop_server,
 };
 pub use service::{
     pb_mapper_delete_service_config, pb_mapper_get_service_configs_json,
     pb_mapper_get_service_status_json, pb_mapper_register_service, pb_mapper_unregister_service,
 };
 pub use tunnel_events::pb_mapper_tunnel_events_call_json;
-pub use update::pb_mapper_ed25519_verify_v1;
+pub use update::{pb_mapper_ed25519_verify_v1, pb_mapper_spawn_hidden_powershell_v1};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: MiMalloc = MiMalloc;

@@ -25,7 +25,9 @@
 //! header is read, so neither an IDR slower to cross than the next request
 //! nor a renderer that takes frames but shows nothing brings another IDR
 //! every half second.
-use crate::{KeyframeReason, viewer::DecoderState};
+use super::DecoderState;
+use crate::KeyframeReason;
+use pb_mapper_core::timeout::RetryBackoff;
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -35,6 +37,11 @@ use std::{
 pub(crate) const KEYFRAME_MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// The backoff between requests for one awaited IDR doubles up to this.
 pub(crate) const KEYFRAME_BACKOFF_MAX: Duration = Duration::from_secs(4);
+const _: () = assert!(
+    !KEYFRAME_MIN_INTERVAL.is_zero()
+        && KEYFRAME_MIN_INTERVAL.as_nanos() <= KEYFRAME_BACKOFF_MAX.as_nanos(),
+    "RetryBackoff::new's preconditions"
+);
 /// The host sends an IDR by itself after a generation change or a resume; no
 /// request goes for this long.
 pub(crate) const HOLD_AFTER_DISCONTINUITY: Duration = Duration::from_secs(1);
@@ -51,8 +58,9 @@ pub(crate) const DECODER_FAILURE_WINDOW: Duration = Duration::from_secs(30);
 struct Awaiting {
     /// Why the episode started; the timer's requests carry it.
     reason: KeyframeReason,
-    /// Requests sent since the last IDR arrived.
-    attempt: u32,
+    /// The wait after each request since the last IDR arrived: 0.5, 1, 2,
+    /// then 4 s.
+    backoff: RetryBackoff,
     /// No request but a `User` one goes before this.
     not_before: Instant,
     /// An IDR began to arrive since the last request: the timer waits for it
@@ -66,7 +74,7 @@ impl Awaiting {
     fn new(reason: KeyframeReason, not_before: Instant) -> Self {
         Self {
             reason,
-            attempt: 0,
+            backoff: RetryBackoff::new(KEYFRAME_MIN_INTERVAL, KEYFRAME_BACKOFF_MAX),
             not_before,
             answered: false,
             idr: None,
@@ -143,7 +151,11 @@ impl Recovery {
             Phase::AwaitingIdr(awaiting) if !awaiting.answered => {
                 self.retry(now).then_some(awaiting.reason)
             }
-            _ => None,
+            Phase::Live
+            | Phase::AwaitingIdr(_)
+            | Phase::Paused
+            | Phase::HostUnavailable
+            | Phase::Failed => None,
         }
     }
 
@@ -160,7 +172,7 @@ impl Recovery {
     /// backoff starts over.
     pub fn on_idr_received(&mut self, now: Instant) {
         if let Phase::AwaitingIdr(awaiting) = &mut self.phase {
-            awaiting.attempt = 0;
+            awaiting.backoff.reset();
             awaiting.answered = true;
             awaiting.not_before = now;
         }
@@ -201,7 +213,7 @@ impl Recovery {
             Phase::Live | Phase::AwaitingIdr(_) if new_generation => {
                 Phase::AwaitingIdr(Awaiting::held(now))
             }
-            phase => phase,
+            phase @ (Phase::Live | Phase::AwaitingIdr(_)) => phase,
         };
     }
 
@@ -237,7 +249,9 @@ impl Recovery {
         match self.phase {
             Phase::Failed => DecoderState::Failed,
             Phase::AwaitingIdr(_) if presented_before => DecoderState::Recovering,
-            _ => DecoderState::Ok,
+            Phase::Live | Phase::AwaitingIdr(_) | Phase::Paused | Phase::HostUnavailable => {
+                DecoderState::Ok
+            }
         }
     }
 
@@ -276,9 +290,8 @@ impl Recovery {
         if !elapsed || now < awaiting.not_before {
             return false;
         }
-        awaiting.attempt += 1;
         awaiting.answered = false;
-        awaiting.not_before = now + backoff(awaiting.attempt);
+        awaiting.not_before = now + awaiting.backoff.next_delay();
         self.sent(now)
     }
 
@@ -292,12 +305,6 @@ impl Recovery {
         self.requested += 1;
         true
     }
-}
-
-/// The wait after the `attempt`-th request: 0.5, 1, 2, then 4 s.
-fn backoff(attempt: u32) -> Duration {
-    let doublings = attempt.saturating_sub(1).min(3);
-    (KEYFRAME_MIN_INTERVAL * (1 << doublings)).min(KEYFRAME_BACKOFF_MAX)
 }
 
 #[cfg(test)]

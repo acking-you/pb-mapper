@@ -15,18 +15,56 @@
 
 use super::*;
 
+/// A handle on a running authentication state. Clones share one handle, so
+/// cloning is cheap, and the actor stops once the last clone is dropped.
+#[derive(Clone)]
+pub struct AuthRuntime {
+    shared: Arc<RuntimeShared>,
+}
+
+struct RuntimeShared {
+    inner: Weak<AuthStateInner>,
+    /// The only sender: dropping the last handle closes the channel, which is
+    /// what stops an actor nobody shut down.
+    command_tx: mpsc::Sender<AuthCommand>,
+    config: AuthConfig,
+    _state_lock: Arc<File>,
+    actor: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    actor_abort: tokio::task::AbortHandle,
+    /// Fails `changed()` once the state is dropped, for `abort_actor`.
+    state_dropped: watch::Receiver<()>,
+}
+
+pub struct LegacyConnectionGuard {
+    inner: Weak<AuthStateInner>,
+}
+
+impl Drop for LegacyConnectionGuard {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner
+                .active_legacy_connections
+                .fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
 impl AuthRuntime {
     pub async fn from_process(config: AuthConfig) -> Result<Self, AuthFailure> {
-        let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
-        let credential = load_server_admin_credential(&config.state_dir)?;
-        let Credential::Admin(admin_key) = credential else {
-            return Err(AuthFailure::new(
-                "administrator_key_required",
-                "the relay server must start with the administrator credential",
-                false,
-            ));
-        };
-        Self::start_locked(admin_key, config, true, state_lock).await
+        Self::launch(move || {
+            config.check_limits()?;
+            let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
+            let credential = load_server_admin_credential(&config.state_dir)?;
+            let Credential::Admin(admin_key) = credential else {
+                return Err(AuthFailure::new(
+                    codes::ADMINISTRATOR_KEY_REQUIRED,
+                    "the relay server must start with the administrator credential",
+                    false,
+                ));
+            };
+            Loaded::restore(admin_key, config, true, state_lock)
+        })
+        .await
     }
 
     /// Start an embedded relay with an administrator key owned only by its state directory.
@@ -34,219 +72,73 @@ impl AuthRuntime {
     /// This deliberately leaves the process credential untouched because the containing UI uses
     /// that credential for its outbound register, connect, status, and stream connections.
     pub async fn from_isolated_state(config: AuthConfig) -> Result<Self, AuthFailure> {
-        let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
-        let credential = load_isolated_server_admin_credential(&config.state_dir)?;
-        let Credential::Admin(admin_key) = credential else {
-            return Err(AuthFailure::new(
-                "administrator_key_required",
-                "the embedded relay must start with an administrator credential",
-                false,
-            ));
-        };
-        Self::start_locked(admin_key, config, false, state_lock).await
+        Self::launch(move || {
+            config.check_limits()?;
+            let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
+            let credential = load_isolated_server_admin_credential(&config.state_dir)?;
+            let Credential::Admin(admin_key) = credential else {
+                return Err(AuthFailure::new(
+                    codes::ADMINISTRATOR_KEY_REQUIRED,
+                    "the embedded relay must start with an administrator credential",
+                    false,
+                ));
+            };
+            Loaded::restore(admin_key, config, false, state_lock)
+        })
+        .await
     }
 
     pub async fn start(admin_key: AesKeyType, config: AuthConfig) -> Result<Self, AuthFailure> {
-        let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
-        Self::start_locked(admin_key, config, true, state_lock).await
+        Self::launch(move || {
+            config.check_limits()?;
+            let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
+            Loaded::restore(admin_key, config, true, state_lock)
+        })
+        .await
     }
 
-    async fn start_locked(
-        admin_key: AesKeyType,
-        config: AuthConfig,
-        sync_process_credential: bool,
-        state_lock: Arc<File>,
+    /// Runs `load`, a start's file work and the tables it builds, off the
+    /// runtime's workers, then spawns the actor that owns what it loaded.
+    async fn launch(
+        load: impl FnOnce() -> Result<Loaded, AuthFailure> + Send + 'static,
     ) -> Result<Self, AuthFailure> {
-        let instance_id = load_or_create_instance_id(&config.state_dir)?;
-        let instance_id =
-            recover_instance_id_after_reset(&config.state_dir, &admin_key, instance_id)?;
-        let (mut loaded, safe_mode) = load_persisted_state(&config, &admin_key, instance_id);
-        let now = unix_seconds();
-        if let Some(state) = loaded.as_mut()
-            && normalize_tombstone_times(state, now)
-        {
-            write_snapshot_and_truncate_wal(&config, &admin_key, state)?;
-        }
-        let mut slots = (0..config.max_temporary_keys)
-            .map(|_| SlotHot::default())
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let mut cold = HashMap::new();
-        let mut restored_leases = Vec::new();
-
-        let admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, None, u64::MAX));
-        if let Some(state) = loaded.as_ref() {
-            for (index, generation) in state.generations.iter().copied().enumerate() {
-                if let Some(slot) = slots.get_mut(index) {
-                    slot.generation = generation;
-                }
-            }
-            for entry in &state.entries {
-                let index = entry.key_id.slot().as_index();
-                let Some(slot) = slots.get_mut(index) else {
-                    continue;
-                };
-                if slot.generation != entry.key_id.generation() {
-                    continue;
-                }
-                let state = if entry.state == SlotState::Active && entry.expires_at <= now {
-                    SlotState::Expired
-                } else {
-                    entry.state
-                };
-                slot.state = state;
-                slot.expires_at = entry.expires_at;
-                cold.insert(
-                    entry.key_id,
-                    ColdMetadata {
-                        issued_at: entry.issued_at,
-                        label: entry.label.clone(),
-                        namespace: entry.namespace,
-                        tombstoned_at: match state {
-                            SlotState::Expired => entry.tombstoned_at.unwrap_or(entry.expires_at),
-                            SlotState::Revoked => entry.tombstoned_at.unwrap_or(now),
-                            SlotState::Free | SlotState::Active => 0,
-                        },
-                    },
-                );
-                if state == SlotState::Active {
-                    let lease = Arc::new(AuthLease::new(
-                        entry.key_id,
-                        entry.namespace,
-                        entry.expires_at,
-                    ));
-                    slot.lease = Arc::downgrade(&lease);
-                    // Held only until the schedule below adopts them; the wheel
-                    // is the lasting owner.
-                    restored_leases.push(lease);
-                }
-            }
-        }
-
-        let legacy_protocol = if safe_mode {
-            LegacyProtocolPolicy::Deny
-        } else {
-            loaded
-                .as_ref()
-                .map(|state| state.legacy_protocol)
-                .unwrap_or(config.legacy_protocol)
-        };
-        let mut admin_replay_order = loaded
-            .as_ref()
-            .map(|state| {
-                state
-                    .admin_replays
-                    .iter()
-                    .filter(|record| record.within_retention(now))
-                    .cloned()
-                    .collect::<VecDeque<_>>()
-            })
-            .unwrap_or_default();
-        while admin_replay_order.len() > ADMIN_REPLAY_CAPACITY {
-            admin_replay_order.pop_front();
-        }
-        let admin_replays = admin_replay_order
-            .iter()
-            .map(|record| record.fingerprint)
-            .collect::<HashSet<_>>();
-        let mut audit_records: VecDeque<AuditRecord> = loaded
-            .as_ref()
-            .map(|state| state.audit_records.iter().cloned().collect())
-            .unwrap_or_default();
-        while audit_records.len() > AUDIT_RECORD_CAPACITY {
-            audit_records.pop_front();
-        }
-        let (high_slot_generations, mut high_slot_entries) = loaded
-            .as_ref()
-            .map(|state| split_high_slot_state(state, config.max_temporary_keys))
-            .unwrap_or_default();
-        for entry in &mut high_slot_entries {
-            if entry.state == SlotState::Active && entry.expires_at <= now {
-                entry.state = SlotState::Expired;
-                entry.tombstoned_at = Some(entry.tombstoned_at.unwrap_or(entry.expires_at));
-            }
-        }
-        let namespace_high_water = restore_namespace_high_water(
-            &config.state_dir,
-            loaded
-                .as_ref()
-                .map_or(0, |state| state.namespace_high_water),
-        );
-        let inner = Arc::new(AuthStateInner {
-            admin: RwLock::new(AdminState {
-                key: admin_key,
-                lease: Arc::downgrade(&admin_lease),
-            }),
-            sync_process_credential,
-            instance_id: RwLock::new(instance_id),
-            slots: RwLock::new(slots),
-            high_slot_generations: RwLock::new(high_slot_generations),
-            high_slot_entries: RwLock::new(high_slot_entries),
-            safe_mode: AtomicBool::new(safe_mode),
-            legacy_protocol_allowed: AtomicBool::new(legacy_protocol.is_allowed()),
-            active_legacy_connections: AtomicU64::new(0),
-            last_legacy_connection_at: AtomicU64::new(0),
-            auth_successes: AtomicU64::new(0),
-            auth_failures: AtomicU64::new(0),
-            root_epoch: AtomicU64::new(loaded.as_ref().map(|state| state.root_epoch).unwrap_or(0)),
-            namespace_high_water: AtomicU64::new(namespace_high_water),
-            previous_root: RwLock::new(None),
-            audit_records: RwLock::new(audit_records),
-            cold: RwLock::new(cold),
-        });
-        let (command_tx, command_rx) = mpsc::channel(256);
-        let actor = tokio::spawn(run_auth_actor(
-            inner.clone(),
-            admin_lease,
-            command_rx,
-            config.clone(),
-            AuthActorState::new(
-                Leases::restored(&inner, now),
-                admin_replays,
-                admin_replay_order,
-            ),
-            state_lock.clone(),
-        ));
-        let actor_abort = actor.abort_handle();
-        let runtime = Self {
-            inner: Arc::downgrade(&inner),
-            command_tx,
-            config: config.clone(),
-            _state_lock: state_lock.clone(),
-            actor: Arc::new(Mutex::new(Some(actor))),
-            actor_abort,
-        };
-        Ok(runtime)
+        let loaded = off_runtime(load)
+            .await
+            .ok_or_else(AuthFailure::state_manager_stopped)??;
+        Ok(loaded.spawn())
     }
 
     pub async fn shutdown_actor(&self) {
         let (response, receiver) = oneshot::channel();
         let _ = self
+            .shared
             .command_tx
             .send(AuthCommand::Shutdown { response })
             .await;
         let _ = receiver.await;
-        let handle = self.actor.lock().take();
+        let handle = self.shared.actor.lock().take();
         if let Some(handle) = handle {
             let _ = handle.await;
         }
     }
 
     pub async fn abort_actor(&self) -> Result<(), AuthFailure> {
-        self.actor_abort.abort();
-        let handle = self.actor.lock().take();
+        self.shared.actor_abort.abort();
+        let handle = self.shared.actor.lock().take();
         if let Some(handle) = handle {
             let _ = handle.await;
         }
+        // Whatever still holds the state, such as a request mid-authentication,
+        // lets go of it shortly after the actor has gone.
+        let mut state_dropped = self.shared.state_dropped.clone();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while self.inner.upgrade().is_some() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            // Nothing is ever sent, so this ends only when the state drops.
+            while state_dropped.changed().await.is_ok() {}
         })
         .await
         .map_err(|_| {
             AuthFailure::new(
-                "auth_state_unavailable",
+                codes::AUTH_STATE_UNAVAILABLE,
                 "authentication actor did not drop after abort",
                 true,
             )
@@ -254,17 +146,14 @@ impl AuthRuntime {
     }
 
     pub fn config(&self) -> &AuthConfig {
-        &self.config
+        &self.shared.config
     }
 
     fn inner(&self) -> Result<Arc<AuthStateInner>, AuthFailure> {
-        self.inner.upgrade().ok_or_else(|| {
-            AuthFailure::new(
-                "auth_state_unavailable",
-                "authentication state manager is not running",
-                true,
-            )
-        })
+        self.shared
+            .inner
+            .upgrade()
+            .ok_or_else(AuthFailure::state_manager_stopped)
     }
 
     pub fn admin_key(&self) -> Result<AesKeyType, AuthFailure> {
@@ -276,7 +165,7 @@ impl AuthRuntime {
         if key_id.is_admin() {
             return Ok(inner.admin_key());
         }
-        derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)
+        inner.derive_temporary_key(key_id)
     }
 
     #[cfg(test)]
@@ -300,19 +189,25 @@ impl AuthRuntime {
         presented_key: &AesKeyType,
     ) -> Result<AuthContext, AuthFailure> {
         let inner = self.inner()?;
+        // Counts a failure in `AuthStatus::auth_failures`. Three are left out: a
+        // stopped state manager, a rotated administrator lease, and a derivation
+        // error.
+        let counted = |failure: AuthFailure| {
+            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
+            failure
+        };
         if key_id.is_admin() {
             let admin = inner.admin.read();
             if !bool::from(presented_key.ct_eq(&admin.key)) {
-                inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-                return Err(AuthFailure::new(
-                    "administrator_key_invalid",
+                return Err(counted(AuthFailure::new(
+                    codes::ADMINISTRATOR_KEY_INVALID,
                     "administrator credential does not match the active root key",
                     false,
-                ));
+                )));
             }
             let lease = admin.lease.upgrade().ok_or_else(|| {
                 AuthFailure::new(
-                    "administrator_key_rotated",
+                    codes::ADMINISTRATOR_KEY_ROTATED,
                     "administrator credential was rotated",
                     false,
                 )
@@ -321,79 +216,58 @@ impl AuthRuntime {
             return Ok(AuthContext::from_lease(ADMIN_KEY_ID, true, &lease));
         }
         if inner.safe_mode.load(Ordering::Acquire) {
-            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(AuthFailure::new(
-                "temporary_key_store_unavailable",
+            return Err(counted(AuthFailure::new(
+                codes::TEMPORARY_KEY_STORE_UNAVAILABLE,
                 "temporary key state is unavailable; administrator reset is required",
                 false,
-            ));
+            )));
         }
 
-        let expected_key = derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)?;
+        let expected_key = inner.derive_temporary_key(key_id)?;
         if !bool::from(presented_key.ct_eq(&expected_key)) {
-            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(temporary_key_material_mismatch(&inner, key_id));
+            return Err(counted(temporary_key_material_mismatch(&inner, key_id)));
         }
 
         let index = key_id.slot().as_index();
         let generation = key_id.generation();
         let slots = inner.slots();
         let Some(slot) = slots.get(index) else {
-            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(AuthFailure::new(
-                "temporary_key_not_found",
+            return Err(counted(AuthFailure::new(
+                codes::TEMPORARY_KEY_NOT_FOUND,
                 "temporary key id is outside the configured slot table",
                 false,
-            ));
+            )));
         };
         if slot.generation != generation {
-            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(AuthFailure::new(
-                "temporary_key_generation_mismatch",
+            return Err(counted(AuthFailure::new(
+                codes::TEMPORARY_KEY_GENERATION_MISMATCH,
                 "temporary key generation does not match the current slot",
                 false,
-            ));
+            )));
         }
         let failure = match slot.state {
             SlotState::Free => Some(AuthFailure::new(
-                "temporary_key_not_found",
+                codes::TEMPORARY_KEY_NOT_FOUND,
                 "temporary key does not exist",
                 false,
             )),
-            SlotState::Expired => Some(AuthFailure::new(
-                "temporary_key_expired",
-                "temporary key has expired",
-                false,
-            )),
-            SlotState::Revoked => Some(AuthFailure::new(
-                "temporary_key_revoked",
-                "temporary key was revoked",
-                false,
-            )),
+            SlotState::Expired => Some(AuthFailure::key_expired()),
+            SlotState::Revoked => Some(AuthFailure::key_revoked()),
             SlotState::Active if slot.expires_at <= unix_seconds() => {
                 if let Some(lease) = slot.lease.upgrade() {
                     lease.cancel_expired();
                 }
-                Some(AuthFailure::new(
-                    "temporary_key_expired",
-                    "temporary key has expired",
-                    false,
-                ))
+                Some(AuthFailure::key_expired())
             }
             SlotState::Active => None,
         };
         if let Some(failure) = failure {
-            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(failure);
+            return Err(counted(failure));
         }
-        let lease = slot.lease.upgrade().ok_or_else(|| {
-            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            AuthFailure::new(
-                "temporary_key_inactive",
-                "temporary key lease is no longer active",
-                true,
-            )
-        })?;
+        let lease = slot
+            .lease
+            .upgrade()
+            .ok_or_else(|| counted(AuthFailure::key_lease_inactive()))?;
         inner.auth_successes.fetch_add(1, Ordering::Relaxed);
         Ok(AuthContext::from_lease(key_id, false, &lease))
     }
@@ -423,16 +297,14 @@ impl AuthRuntime {
         build: impl FnOnce(oneshot::Sender<Result<T, AuthFailure>>) -> AuthCommand,
     ) -> Result<T, AuthFailure> {
         let (response, receiver) = oneshot::channel();
-        self.command_tx.send(build(response)).await.map_err(|_| {
-            AuthFailure::new(
-                "auth_state_unavailable",
-                "authentication state manager is not running",
-                true,
-            )
-        })?;
+        self.shared
+            .command_tx
+            .send(build(response))
+            .await
+            .map_err(|_| AuthFailure::state_manager_stopped())?;
         receiver.await.map_err(|_| {
             AuthFailure::new(
-                "auth_state_unavailable",
+                codes::AUTH_STATE_UNAVAILABLE,
                 "authentication state manager dropped the response",
                 true,
             )
@@ -650,43 +522,137 @@ impl AuthRuntime {
     }
 }
 
+/// What a start loads from its state directory, off the runtime: the actor
+/// that will own the state, and what the handles keep of it.
+struct Loaded {
+    actor: Actor,
+    inner: Weak<AuthStateInner>,
+    state_dropped: watch::Receiver<()>,
+    config: AuthConfig,
+    state_lock: Arc<File>,
+}
+
+impl Loaded {
+    /// Restores the state under the directory lock already taken.
+    fn restore(
+        admin_key: AesKeyType,
+        config: AuthConfig,
+        sync_process_credential: bool,
+        state_lock: Arc<File>,
+    ) -> Result<Self, AuthFailure> {
+        let instance_id = load_or_create_instance_id(&config.state_dir)?;
+        let instance_id =
+            recover_instance_id_after_reset(&config.state_dir, &admin_key, instance_id)?;
+        let (mut loaded, safe_mode) = load_persisted_state(&config, &admin_key, instance_id);
+        let now = unix_seconds();
+        if let Some(state) = loaded.as_mut()
+            && normalize_tombstone_times(state, now)
+        {
+            write_snapshot_and_truncate_wal(&config, &admin_key, state)?;
+        }
+        let (mut restored, live) =
+            RestoredState::from_snapshot(loaded.as_ref(), safe_mode, &config, now);
+        let admin_replays = AdminReplays::restored(
+            loaded.as_ref().map_or(&[], |state| &state.admin_replays),
+            now,
+        );
+        restored.namespace_high_water =
+            restore_namespace_high_water(&config.state_dir, restored.namespace_high_water);
+        let admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, None, u64::MAX));
+        let inner = Arc::new(AuthStateInner::new(
+            admin_key,
+            &admin_lease,
+            sync_process_credential,
+            instance_id,
+            safe_mode,
+            restored,
+        ));
+        // Before the spawn: a reap already due runs while scheduling.
+        let leases = Leases::restored(&inner, now, live);
+        Ok(Self {
+            inner: Arc::downgrade(&inner),
+            state_dropped: inner.subscribe_dropped(),
+            actor: Actor::new(
+                inner,
+                admin_lease,
+                config.clone(),
+                leases,
+                admin_replays,
+                state_lock.clone(),
+                now,
+            ),
+            config,
+            state_lock,
+        })
+    }
+
+    /// Spawns the actor on the caller's runtime and hands back the first
+    /// handle on it.
+    fn spawn(self) -> AuthRuntime {
+        let Self {
+            actor,
+            inner,
+            state_dropped,
+            config,
+            state_lock,
+        } = self;
+        let (command_tx, command_rx) = mpsc::channel(256);
+        let actor = tokio::spawn(actor.run(command_rx));
+        let actor_abort = actor.abort_handle();
+        AuthRuntime {
+            shared: Arc::new(RuntimeShared {
+                inner,
+                command_tx,
+                config,
+                _state_lock: state_lock,
+                actor: Mutex::new(Some(actor)),
+                actor_abort,
+                state_dropped,
+            }),
+        }
+    }
+}
+
+/// Runs `work` on the blocking pool and returns its output, so that file work
+/// and long CPU work hold up no task on the caller's runtime. It logs to the
+/// caller's tracing dispatcher, and a panic in it resumes in the caller, as if
+/// it had run inline. `None` when the runtime shut down before it could start.
+pub(crate) async fn off_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let dispatch = tracing::dispatcher::get_default(tracing::Dispatch::clone);
+    let work = move || tracing::dispatcher::with_default(&dispatch, work);
+    match tokio::task::spawn_blocking(work).await {
+        Ok(output) => Some(output),
+        Err(error) => match error.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(_cancelled) => None,
+        },
+    }
+}
+
 fn temporary_key_material_mismatch(inner: &AuthStateInner, key_id: KeyId) -> AuthFailure {
     let index = key_id.slot().as_index();
     let generation = key_id.generation();
     let slots = inner.slots();
     let current_generation = match slots.get(index) {
         Some(slot) => Some(slot.generation),
-        None => {
-            let high = inner.high_slot_generations.read();
-            index
-                .checked_sub(slots.len())
-                .and_then(|offset| high.get(offset).copied())
-        }
+        None => index
+            .checked_sub(slots.len())
+            .and_then(|offset| inner.high_slot_generations.get(offset).copied()),
     };
     let slot_is_active = slots
         .get(index)
         .is_some_and(|slot| slot.state == SlotState::Active && slot.generation == generation);
     if slot_is_active {
-        return AuthFailure::new(
-            "temporary_key_invalid",
-            "temporary credential does not match the active relay key material",
-            false,
-        );
+        return AuthFailure::key_material_mismatch();
     }
     let current_epoch = inner.root_epoch.load(Ordering::Acquire);
     if current_epoch > 0
         && generation > Generation::FIRST
         && current_generation.is_some_and(|issued| generation <= issued)
     {
-        return AuthFailure::new(
-            "temporary_key_rotated",
-            "temporary credential was invalidated by administrator root rotation or auth-state reset",
-            false,
-        );
+        return AuthFailure::key_rotated();
     }
-    AuthFailure::new(
-        "temporary_key_invalid",
-        "temporary credential does not match the active relay key material",
-        false,
-    )
+    AuthFailure::key_material_mismatch()
 }

@@ -2,17 +2,14 @@
 //! of this process, checked before every use, or, in the privileged
 //! helper's worker, the input desktop it is bound to; and the selected
 //! display's geometry, under per-monitor DPI awareness.
-use super::helper::worker::DesktopBinding;
+use super::{helper::binding::DesktopBinding, win32};
 use crate::{
     BackendError, DesktopKind, Display, DisplaySelection, FailureKind, Result, error,
     platform::Desktop,
 };
 use windows::Win32::{
-    Foundation::HANDLE,
     Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFOEXW},
-    System::StationsAndDesktops::{
-        CloseDesktop, DESKTOP_READOBJECTS, GetUserObjectInformationW, OpenInputDesktop, UOI_NAME,
-    },
+    System::StationsAndDesktops::{CloseDesktop, DESKTOP_READOBJECTS, OpenInputDesktop},
     UI::HiDpi::{
         DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
         SetThreadDpiAwarenessContext,
@@ -36,23 +33,14 @@ impl Drop for DpiScope {
 pub(crate) fn available() -> Result<()> {
     // An ordinary process must never treat its cached Default desktop as live
     // while input belongs to Winlogon/UAC or another inaccessible desktop.
+    let desk = unsafe { OpenInputDesktop(Default::default(), false, DESKTOP_READOBJECTS) }
+        .map_err(|_| ordinary_desktop_unavailable())?;
+    let name = win32::desktop_name(desk);
     unsafe {
-        let desk = OpenInputDesktop(Default::default(), false, DESKTOP_READOBJECTS)
-            .map_err(|_| ordinary_desktop_unavailable())?;
-        let mut name = [0u16; 256];
-        let result = GetUserObjectInformationW(
-            HANDLE(desk.0),
-            UOI_NAME,
-            Some(name.as_mut_ptr().cast()),
-            std::mem::size_of_val(&name) as u32,
-            None,
-        );
         let _ = CloseDesktop(desk);
-        result.map_err(error)?;
-        let len = name.iter().position(|c| *c == 0).unwrap_or(name.len());
-        if !String::from_utf16_lossy(&name[..len]).eq_ignore_ascii_case("default") {
-            return Err(ordinary_desktop_unavailable());
-        }
+    }
+    if !name?.eq_ignore_ascii_case("default") {
+        return Err(ordinary_desktop_unavailable());
     }
     Ok(())
 }
@@ -95,14 +83,9 @@ fn current_display(id: u32, monitor: HMONITOR) -> Result<Display> {
     if width == 0 || height == 0 {
         return Err(display_lost("display is unavailable"));
     }
-    let length = info
-        .szDevice
-        .iter()
-        .position(|c| *c == 0)
-        .unwrap_or(info.szDevice.len());
     Ok(Display {
         id,
-        name: String::from_utf16_lossy(&info.szDevice[..length]),
+        name: win32::from_wide_nul(&info.szDevice),
         x: rect.left,
         y: rect.top,
         width,
@@ -162,7 +145,7 @@ fn by_name(name: &str) -> Option<(u32, HMONITOR)> {
 
 pub(crate) struct WinDesktop {
     id: u32,
-    /// The device name (`\.\DISPLAY1`), which finds the display again when
+    /// The device name (`\\.\DISPLAY1`), which finds the display again when
     /// its handle goes stale.
     name: String,
     monitor: HMONITOR,
@@ -242,7 +225,6 @@ impl Desktop for WinDesktop {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

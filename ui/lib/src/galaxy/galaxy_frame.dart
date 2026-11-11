@@ -27,6 +27,10 @@ const int galaxyFrameFields = 13;
 const int _systemFields = 9;
 const int _planetFields = 14;
 
+/// The most guide circles the plane draws, as in Rust: a scene with an
+/// enormous or infinite coordinate still costs a bounded frame.
+const int _maxGuides = 1024;
+
 typedef _FrameNative =
     Int64 Function(
       Pointer<Double>,
@@ -649,7 +653,7 @@ int computeFrameInDart(Float64List scene, Float64List frame, Float32List out) {
     }
     final guides = o.hole();
     var n = 0;
-    for (var r = 2.6; r < reach; r += 2.6) {
+    for (var r = 2.6; r < reach && n < _maxGuides; r += 2.6) {
       o.push(1 - r / (reach * 1.15));
       final guide = runs(96, (i) {
         final a = i / 96 * math.pi * 2;

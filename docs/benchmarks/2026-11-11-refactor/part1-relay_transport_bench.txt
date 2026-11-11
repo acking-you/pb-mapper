@@ -1,0 +1,803 @@
+### p1-relay
+=== base round 0 ===
+Tcp codec=false 64MiB echo=1.4493123s payload=44.2MiB/s p50=189.4µs p95=269.9µs p99=415.6µs
+Tcp codec=true 64MiB echo=1.5532051s payload=41.2MiB/s p50=400.7µs p95=523.9µs p99=734.7µs
+Quic codec=false 64MiB echo=1.2042961s payload=53.1MiB/s p50=249.3µs p95=342.5µs p99=471.4µs
+Quic codec=true 64MiB echo=1.4918037s payload=42.9MiB/s p50=297.7µs p95=435.4µs p99=518µs
+=== refactored round 0 ===
+Tcp codec=false 64MiB echo=1.0862887s payload=58.9MiB/s p50=153.9µs p95=304.9µs p99=1.3484ms
+Tcp codec=true 64MiB echo=1.1889282s payload=53.8MiB/s p50=406.1µs p95=492µs p99=680.8µs
+Quic codec=false 64MiB echo=1.0051902s payload=63.7MiB/s p50=238.8µs p95=329.5µs p99=473.7µs
+Quic codec=true 64MiB echo=1.2568121s payload=50.9MiB/s p50=311.8µs p95=441.5µs p99=509.7µs
+=== refactored round 1 ===
+Tcp codec=false 64MiB echo=960.7624ms payload=66.6MiB/s p50=158µs p95=278.8µs p99=354.3µs
+Tcp codec=true 64MiB echo=1.0713324s payload=59.7MiB/s p50=367µs p95=457.7µs p99=639.1µs
+Quic codec=false 64MiB echo=1.0080218s payload=63.5MiB/s p50=271.2µs p95=402.1µs p99=558.4µs
+Quic codec=true 64MiB echo=1.5061551s payload=42.5MiB/s p50=490.6µs p95=756.4µs p99=789.4µs
+=== base round 1 ===
+Tcp codec=false 64MiB echo=1.3068242s payload=49.0MiB/s p50=180µs p95=332.3µs p99=493µs
+Tcp codec=true 64MiB echo=1.3915325s payload=46.0MiB/s p50=655.1µs p95=781.6µs p99=1.003ms
+Quic codec=false 64MiB echo=1.2386239s payload=51.7MiB/s p50=319.6µs p95=423µs p99=834.1µs
+Quic codec=true 64MiB echo=1.4620677s payload=43.8MiB/s p50=316µs p95=482.7µs p99=615.7µs
+=== base round 2 ===
+Tcp codec=false 64MiB echo=1.2253442s payload=52.2MiB/s p50=176.7µs p95=317.5µs p99=473.4µs
+Tcp codec=true 64MiB echo=1.1970651s payload=53.5MiB/s p50=417.4µs p95=569.4µs p99=723.2µs
+Quic codec=false 64MiB echo=1.1084247s payload=57.7MiB/s p50=265.6µs p95=398.8µs p99=540.1µs
+Quic codec=true 64MiB echo=1.5205785s payload=42.1MiB/s p50=326.7µs p95=430.3µs p99=495.8µs
+=== refactored round 2 ===
+Tcp codec=false 64MiB echo=1.4228373s payload=45.0MiB/s p50=205.2µs p95=266.3µs p99=306.9µs
+Tcp codec=true 64MiB echo=1.4504941s payload=44.1MiB/s p50=456.3µs p95=769.5µs p99=974.7µs
+Quic codec=false 64MiB echo=1.3034529s payload=49.1MiB/s p50=263.6µs p95=324.9µs p99=526µs
+Quic codec=true 64MiB echo=1.2413734s payload=51.6MiB/s p50=309.9µs p95=444.2µs p99=952.4µs
+=== refactored round 3 ===
+Tcp codec=false 64MiB echo=1.3412836s payload=47.7MiB/s p50=233µs p95=394.8µs p99=507.2µs
+Tcp codec=true 64MiB echo=1.5151637s payload=42.2MiB/s p50=641.5µs p95=1.1602ms p99=1.4836ms
+Quic codec=false 64MiB echo=1.0539848s payload=60.7MiB/s p50=341.7µs p95=548.1µs p99=652.6µs
+Quic codec=true 64MiB echo=1.422438s payload=45.0MiB/s p50=441.9µs p95=656.2µs p99=909.4µs
+=== base round 3 ===
+Tcp codec=false 64MiB echo=1.166258s payload=54.9MiB/s p50=249.6µs p95=461.2µs p99=748.7µs
+Tcp codec=true 64MiB echo=1.3133305s payload=48.7MiB/s p50=435.5µs p95=563.8µs p99=817.4µs
+Quic codec=false 64MiB echo=1.1865961s payload=53.9MiB/s p50=431.5µs p95=634.3µs p99=705.3µs
+Quic codec=true 64MiB echo=1.3673059s payload=46.8MiB/s p50=316µs p95=454.4µs p99=533.8µs
+=== base round 4 ===
+Tcp codec=false 64MiB echo=1.2652904s payload=50.6MiB/s p50=255µs p95=365.8µs p99=429.8µs
+Tcp codec=true 64MiB echo=1.0857435s payload=58.9MiB/s p50=446.6µs p95=536.1µs p99=698µs
+Quic codec=false 64MiB echo=1.0974825s payload=58.3MiB/s p50=264.2µs p95=441.3µs p99=554.6µs
+Quic codec=true 64MiB echo=1.3701254s payload=46.7MiB/s p50=338.5µs p95=511.1µs p99=676.4µs
+=== refactored round 4 ===
+Tcp codec=false 64MiB echo=1.4349778s payload=44.6MiB/s p50=236.2µs p95=398.4µs p99=649µs
+Tcp codec=true 64MiB echo=1.5792881s payload=40.5MiB/s p50=468µs p95=641.4µs p99=922.6µs
+Quic codec=false 64MiB echo=1.3046521s payload=49.1MiB/s p50=393.4µs p95=619.1µs p99=848.5µs
+Quic codec=true 64MiB echo=1.3953606s payload=45.9MiB/s p50=495.5µs p95=752.6µs p99=919.2µs
+=== refactored round 5 ===
+Tcp codec=false 64MiB echo=1.5294547s payload=41.8MiB/s p50=305.3µs p95=466.4µs p99=700µs
+Tcp codec=true 64MiB echo=2.3346874s payload=27.4MiB/s p50=891.8µs p95=1.4531ms p99=1.6908ms
+Quic codec=false 64MiB echo=1.292615s payload=49.5MiB/s p50=343.7µs p95=521.3µs p99=718.8µs
+Quic codec=true 64MiB echo=1.7135098s payload=37.4MiB/s p50=428.4µs p95=681.2µs p99=911.2µs
+=== base round 5 ===
+Tcp codec=false 64MiB echo=1.3332096s payload=48.0MiB/s p50=253.8µs p95=410.4µs p99=575.5µs
+Tcp codec=true 64MiB echo=1.2344687s payload=51.8MiB/s p50=490.7µs p95=783.1µs p99=917.9µs
+Quic codec=false 64MiB echo=1.2068553s payload=53.0MiB/s p50=320.1µs p95=474.5µs p99=654.6µs
+Quic codec=true 64MiB echo=1.5586573s payload=41.1MiB/s p50=516.9µs p95=681.8µs p99=866.8µs
+=== base round 6 ===
+Tcp codec=false 64MiB echo=1.3588387s payload=47.1MiB/s p50=226.4µs p95=299µs p99=414.3µs
+Tcp codec=true 64MiB echo=1.4482906s payload=44.2MiB/s p50=709.3µs p95=979.6µs p99=1.1796ms
+Quic codec=false 64MiB echo=1.1098382s payload=57.7MiB/s p50=410.5µs p95=597.9µs p99=901.6µs
+Quic codec=true 64MiB echo=1.5847067s payload=40.4MiB/s p50=427.8µs p95=613.5µs p99=774.3µs
+=== refactored round 6 ===
+Tcp codec=false 64MiB echo=1.4149858s payload=45.2MiB/s p50=222.4µs p95=302.5µs p99=446.6µs
+Tcp codec=true 64MiB echo=1.729215s payload=37.0MiB/s p50=892.2µs p95=1.1046ms p99=1.41ms
+Quic codec=false 64MiB echo=1.223136s payload=52.3MiB/s p50=315.9µs p95=444.2µs p99=490.3µs
+Quic codec=true 64MiB echo=1.2913014s payload=49.6MiB/s p50=361.7µs p95=540.3µs p99=590.4µs
+=== refactored round 7 ===
+Tcp codec=false 64MiB echo=1.0068506s payload=63.6MiB/s p50=210.2µs p95=330.8µs p99=395.5µs
+Tcp codec=true 64MiB echo=1.4950413s payload=42.8MiB/s p50=460.3µs p95=549.4µs p99=697.2µs
+Quic codec=false 64MiB echo=1.0718615s payload=59.7MiB/s p50=228.8µs p95=308.2µs p99=449.5µs
+Quic codec=true 64MiB echo=1.2483209s payload=51.3MiB/s p50=345.2µs p95=466.3µs p99=553.8µs
+=== base round 7 ===
+Tcp codec=false 64MiB echo=1.1389865s payload=56.2MiB/s p50=251.7µs p95=319.5µs p99=512.3µs
+Tcp codec=true 64MiB echo=1.5713523s payload=40.7MiB/s p50=488.7µs p95=598.4µs p99=691.5µs
+Quic codec=false 64MiB echo=1.2278304s payload=52.1MiB/s p50=449µs p95=648.9µs p99=1.2968ms
+Quic codec=true 64MiB echo=1.8491823s payload=34.6MiB/s p50=355.6µs p95=534.2µs p99=654.7µs
+=== base round 8 ===
+Tcp codec=false 64MiB echo=1.3538703s payload=47.3MiB/s p50=247.5µs p95=368µs p99=616.3µs
+Tcp codec=true 64MiB echo=1.8013481s payload=35.5MiB/s p50=496.2µs p95=727.6µs p99=764.7µs
+Quic codec=false 64MiB echo=1.1744748s payload=54.5MiB/s p50=297µs p95=440.7µs p99=605.1µs
+Quic codec=true 64MiB echo=1.5162481s payload=42.2MiB/s p50=358.5µs p95=508.9µs p99=678.6µs
+=== refactored round 8 ===
+Tcp codec=false 64MiB echo=1.4732048s payload=43.4MiB/s p50=227.4µs p95=277.9µs p99=378µs
+Tcp codec=true 64MiB echo=1.1751142s payload=54.5MiB/s p50=467.6µs p95=506.3µs p99=586.6µs
+Quic codec=false 64MiB echo=1.4110864s payload=45.4MiB/s p50=301.1µs p95=423µs p99=556.3µs
+Quic codec=true 64MiB echo=1.7798152s payload=36.0MiB/s p50=336.4µs p95=473.8µs p99=521µs
+=== refactored round 9 ===
+Tcp codec=false 64MiB echo=1.3880217s payload=46.1MiB/s p50=219.9µs p95=278.7µs p99=435.8µs
+Tcp codec=true 64MiB echo=2.5219127s payload=25.4MiB/s p50=861.9µs p95=1.1118ms p99=1.3948ms
+Quic codec=false 64MiB echo=1.5512145s payload=41.3MiB/s p50=294.3µs p95=424.5µs p99=548.9µs
+Quic codec=true 64MiB echo=1.7264112s payload=37.1MiB/s p50=355.1µs p95=521.9µs p99=558.5µs
+=== base round 9 ===
+Tcp codec=false 64MiB echo=1.6076065s payload=39.8MiB/s p50=268.7µs p95=328µs p99=371.3µs
+Tcp codec=true 64MiB echo=2.1126823s payload=30.3MiB/s p50=442.7µs p95=645.8µs p99=759.6µs
+Quic codec=false 64MiB echo=1.0477813s payload=61.1MiB/s p50=301µs p95=442.1µs p99=486.6µs
+Quic codec=true 64MiB echo=1.1898059s payload=53.8MiB/s p50=366.4µs p95=539.5µs p99=697.7µs
+### p1-relay-b
+=== base round 0 ===
+Tcp codec=false 64MiB echo=1.4238113s payload=44.9MiB/s p50=352.1µs p95=476.6µs p99=578.7µs
+Tcp codec=true 64MiB echo=1.1656442s payload=54.9MiB/s p50=437µs p95=586.9µs p99=681.6µs
+Quic codec=false 64MiB echo=1.1799035s payload=54.2MiB/s p50=313.6µs p95=426.4µs p99=485.7µs
+Quic codec=true 64MiB echo=1.6145676s payload=39.6MiB/s p50=321.8µs p95=526.3µs p99=761.4µs
+=== refactored round 0 ===
+Tcp codec=false 64MiB echo=1.8894825s payload=33.9MiB/s p50=216.8µs p95=281.6µs p99=439.3µs
+Tcp codec=true 64MiB echo=2.2653974s payload=28.3MiB/s p50=451.8µs p95=679.3µs p99=922.9µs
+Quic codec=false 64MiB echo=1.2094555s payload=52.9MiB/s p50=335.5µs p95=468.7µs p99=600.1µs
+Quic codec=true 64MiB echo=1.3020235s payload=49.2MiB/s p50=347.1µs p95=513.8µs p99=583.8µs
+=== refactored round 1 ===
+Tcp codec=false 64MiB echo=1.332751s payload=48.0MiB/s p50=304.4µs p95=381.7µs p99=533.7µs
+Tcp codec=true 64MiB echo=6.5683772s payload=9.7MiB/s p50=420.4µs p95=718.5µs p99=955.6µs
+Quic codec=false 64MiB echo=1.1511645s payload=55.6MiB/s p50=299.5µs p95=431.2µs p99=535.7µs
+Quic codec=true 64MiB echo=1.3872252s payload=46.1MiB/s p50=363.1µs p95=502µs p99=645.1µs
+=== base round 1 ===
+Tcp codec=false 64MiB echo=1.159306s payload=55.2MiB/s p50=312.6µs p95=435.8µs p99=683.3µs
+Tcp codec=true 64MiB echo=1.7463728s payload=36.6MiB/s p50=452.5µs p95=533.1µs p99=738.8µs
+Quic codec=false 64MiB echo=1.1595592s payload=55.2MiB/s p50=242.5µs p95=349.7µs p99=616.5µs
+Quic codec=true 64MiB echo=1.3656764s payload=46.9MiB/s p50=297.9µs p95=511.4µs p99=751.6µs
+=== base round 2 ===
+Tcp codec=false 64MiB echo=1.5085352s payload=42.4MiB/s p50=214.1µs p95=252.9µs p99=507.6µs
+Tcp codec=true 64MiB echo=1.1515488s payload=55.6MiB/s p50=512.2µs p95=705µs p99=905.6µs
+Quic codec=false 64MiB echo=951.4579ms payload=67.3MiB/s p50=232.4µs p95=356.3µs p99=571.2µs
+Quic codec=true 64MiB echo=1.1257084s payload=56.9MiB/s p50=228.5µs p95=356.4µs p99=415.1µs
+=== refactored round 2 ===
+Tcp codec=false 64MiB echo=1.0902262s payload=58.7MiB/s p50=205.3µs p95=261.4µs p99=381.6µs
+Tcp codec=true 64MiB echo=1.6502873s payload=38.8MiB/s p50=485.1µs p95=581.9µs p99=690µs
+Quic codec=false 64MiB echo=1.0837916s payload=59.1MiB/s p50=307.4µs p95=464.6µs p99=570.1µs
+Quic codec=true 64MiB echo=1.3023222s payload=49.1MiB/s p50=322.3µs p95=495.8µs p99=615.4µs
+=== refactored round 3 ===
+Tcp codec=false 64MiB echo=1.2180076s payload=52.5MiB/s p50=222.1µs p95=349µs p99=517µs
+Tcp codec=true 64MiB echo=1.1000182s payload=58.2MiB/s p50=499.8µs p95=593µs p99=749.5µs
+Quic codec=false 64MiB echo=1.0254136s payload=62.4MiB/s p50=277.5µs p95=398.7µs p99=567.4µs
+Quic codec=true 64MiB echo=1.3018899s payload=49.2MiB/s p50=342.7µs p95=520.7µs p99=611.3µs
+=== base round 3 ===
+Tcp codec=false 64MiB echo=1.0341755s payload=61.9MiB/s p50=212.1µs p95=250.6µs p99=339.3µs
+Tcp codec=true 64MiB echo=1.3958113s payload=45.9MiB/s p50=699.5µs p95=849.2µs p99=1.1383ms
+Quic codec=false 64MiB echo=1.2186083s payload=52.5MiB/s p50=344.3µs p95=488.1µs p99=601.6µs
+Quic codec=true 64MiB echo=1.3153154s payload=48.7MiB/s p50=317.1µs p95=445.7µs p99=505.3µs
+=== base round 4 ===
+Tcp codec=false 64MiB echo=1.2458716s payload=51.4MiB/s p50=206.7µs p95=247µs p99=431.4µs
+Tcp codec=true 64MiB echo=1.6391274s payload=39.0MiB/s p50=410.1µs p95=548.3µs p99=620.5µs
+Quic codec=false 64MiB echo=1.1689076s payload=54.8MiB/s p50=276.9µs p95=414.5µs p99=489.5µs
+Quic codec=true 64MiB echo=1.2573634s payload=50.9MiB/s p50=326.9µs p95=474.3µs p99=590.3µs
+=== refactored round 4 ===
+Tcp codec=false 64MiB echo=2.1615585s payload=29.6MiB/s p50=226.8µs p95=399.2µs p99=644.8µs
+Tcp codec=true 64MiB echo=1.3151974s payload=48.7MiB/s p50=492.2µs p95=629.9µs p99=840.3µs
+Quic codec=false 64MiB echo=1.1738799s payload=54.5MiB/s p50=342.3µs p95=470.3µs p99=642.4µs
+Quic codec=true 64MiB echo=1.2456669s payload=51.4MiB/s p50=298.7µs p95=419.9µs p99=523.8µs
+=== refactored round 5 ===
+Tcp codec=false 64MiB echo=1.2305332s payload=52.0MiB/s p50=247µs p95=321.9µs p99=493.8µs
+Tcp codec=true 64MiB echo=1.6225123s payload=39.4MiB/s p50=525.1µs p95=665.3µs p99=849.9µs
+Quic codec=false 64MiB echo=1.0690133s payload=59.9MiB/s p50=317.1µs p95=469.2µs p99=634.7µs
+Quic codec=true 64MiB echo=1.2150941s payload=52.7MiB/s p50=255.2µs p95=393µs p99=510.9µs
+=== base round 5 ===
+Tcp codec=false 64MiB echo=1.2709652s payload=50.4MiB/s p50=227.7µs p95=284.8µs p99=347.4µs
+Tcp codec=true 64MiB echo=1.8590453s payload=34.4MiB/s p50=422.3µs p95=806.6µs p99=1.1404ms
+Quic codec=false 64MiB echo=1.205091s payload=53.1MiB/s p50=292.8µs p95=466.1µs p99=657.9µs
+Quic codec=true 64MiB echo=1.3678144s payload=46.8MiB/s p50=336.5µs p95=510.4µs p99=657.1µs
+=== base round 6 ===
+Tcp codec=false 64MiB echo=1.0663478s payload=60.0MiB/s p50=217.9µs p95=289.1µs p99=389.2µs
+Tcp codec=true 64MiB echo=1.1273882s payload=56.8MiB/s p50=425.6µs p95=521.4µs p99=837.3µs
+Quic codec=false 64MiB echo=956.5408ms payload=66.9MiB/s p50=276.5µs p95=392.4µs p99=479.6µs
+Quic codec=true 64MiB echo=1.1741636s payload=54.5MiB/s p50=306.2µs p95=412.3µs p99=572µs
+=== refactored round 6 ===
+Tcp codec=false 64MiB echo=1.6011349s payload=40.0MiB/s p50=224.1µs p95=289.1µs p99=405.6µs
+Tcp codec=true 64MiB echo=1.8829528s payload=34.0MiB/s p50=440.4µs p95=575µs p99=728.7µs
+Quic codec=false 64MiB echo=1.2110491s payload=52.8MiB/s p50=410.6µs p95=631.7µs p99=11.971ms
+Quic codec=true 64MiB echo=1.4520203s payload=44.1MiB/s p50=364.9µs p95=522.2µs p99=710µs
+=== refactored round 7 ===
+Tcp codec=false 64MiB echo=977.263ms payload=65.5MiB/s p50=225.7µs p95=318.4µs p99=500.3µs
+Tcp codec=true 64MiB echo=975.583ms payload=65.6MiB/s p50=461.1µs p95=548.5µs p99=754.8µs
+Quic codec=false 64MiB echo=5.9699767s payload=10.7MiB/s p50=332.6µs p95=467.2µs p99=534µs
+Quic codec=true 64MiB echo=1.3785587s payload=46.4MiB/s p50=407.9µs p95=578.9µs p99=785.6µs
+=== base round 7 ===
+Tcp codec=false 64MiB echo=1.0272564s payload=62.3MiB/s p50=208.7µs p95=251.1µs p99=299.2µs
+Tcp codec=true 64MiB echo=1.6185053s payload=39.5MiB/s p50=471.3µs p95=554.9µs p99=727.7µs
+Quic codec=false 64MiB echo=1.1915286s payload=53.7MiB/s p50=321.7µs p95=492.1µs p99=1.2106ms
+Quic codec=true 64MiB echo=1.9264688s payload=33.2MiB/s p50=626.1µs p95=887.3µs p99=1.1019ms
+=== base round 8 ===
+Tcp codec=false 64MiB echo=1.1847947s payload=54.0MiB/s p50=147.4µs p95=247.1µs p99=398.6µs
+Tcp codec=true 64MiB echo=1.2023004s payload=53.2MiB/s p50=495.4µs p95=605.7µs p99=779.8µs
+Quic codec=false 64MiB echo=1.3231048s payload=48.4MiB/s p50=350.7µs p95=586.9µs p99=738.7µs
+Quic codec=true 64MiB echo=1.562608s payload=41.0MiB/s p50=362.6µs p95=489.5µs p99=655.1µs
+=== refactored round 8 ===
+Tcp codec=false 64MiB echo=1.0459042s payload=61.2MiB/s p50=226.2µs p95=303.5µs p99=410.2µs
+Tcp codec=true 64MiB echo=1.6881572s payload=37.9MiB/s p50=501µs p95=613.8µs p99=877.5µs
+Quic codec=false 64MiB echo=1.0132327s payload=63.2MiB/s p50=233.7µs p95=341.7µs p99=404.4µs
+Quic codec=true 64MiB echo=1.1455004s payload=55.9MiB/s p50=271.1µs p95=450.7µs p99=549µs
+=== refactored round 9 ===
+Tcp codec=false 64MiB echo=1.4359368s payload=44.6MiB/s p50=269.9µs p95=320.2µs p99=510.2µs
+Tcp codec=true 64MiB echo=1.3734477s payload=46.6MiB/s p50=520.3µs p95=640.6µs p99=769µs
+Quic codec=false 64MiB echo=1.0037005s payload=63.8MiB/s p50=297.9µs p95=459.4µs p99=561.2µs
+Quic codec=true 64MiB echo=1.2880135s payload=49.7MiB/s p50=295.7µs p95=591.2µs p99=805.8µs
+=== base round 9 ===
+Tcp codec=false 64MiB echo=1.2063762s payload=53.1MiB/s p50=184.3µs p95=355µs p99=455.9µs
+Tcp codec=true 64MiB echo=1.0860162s payload=58.9MiB/s p50=449.6µs p95=521.7µs p99=725.2µs
+Quic codec=false 64MiB echo=1.0496237s payload=61.0MiB/s p50=235.8µs p95=342.8µs p99=583.5µs
+Quic codec=true 64MiB echo=1.3355673s payload=47.9MiB/s p50=276µs p95=453.7µs p99=656µs
+=== base round 10 ===
+Tcp codec=false 64MiB echo=1.7418813s payload=36.7MiB/s p50=334.2µs p95=457.2µs p99=813.3µs
+Tcp codec=true 64MiB echo=1.5148581s payload=42.2MiB/s p50=422.8µs p95=983.5µs p99=1.1958ms
+Quic codec=false 64MiB echo=1.1992981s payload=53.4MiB/s p50=284.1µs p95=453.8µs p99=541.2µs
+Quic codec=true 64MiB echo=1.3278412s payload=48.2MiB/s p50=335.1µs p95=487.3µs p99=645.6µs
+=== refactored round 10 ===
+Tcp codec=false 64MiB echo=1.0043819s payload=63.7MiB/s p50=171.8µs p95=295.9µs p99=399.9µs
+Tcp codec=true 64MiB echo=1.027176s payload=62.3MiB/s p50=411.7µs p95=529.9µs p99=839.8µs
+Quic codec=false 64MiB echo=930.0289ms payload=68.8MiB/s p50=258.6µs p95=363.1µs p99=445.5µs
+Quic codec=true 64MiB echo=1.1720752s payload=54.6MiB/s p50=234.6µs p95=358µs p99=470.3µs
+=== refactored round 11 ===
+Tcp codec=false 64MiB echo=1.0414185s payload=61.5MiB/s p50=158.6µs p95=240.6µs p99=389.9µs
+Tcp codec=true 64MiB echo=1.3330687s payload=48.0MiB/s p50=462.3µs p95=816.5µs p99=934.2µs
+Quic codec=false 64MiB echo=1.1214849s payload=57.1MiB/s p50=367.5µs p95=569.7µs p99=9.5549ms
+Quic codec=true 64MiB echo=1.4674975s payload=43.6MiB/s p50=363.7µs p95=573.3µs p99=838.4µs
+=== base round 11 ===
+Tcp codec=false 64MiB echo=1.7964683s payload=35.6MiB/s p50=192.6µs p95=362.1µs p99=493.7µs
+Tcp codec=true 64MiB echo=2.0646502s payload=31.0MiB/s p50=438.6µs p95=981µs p99=1.3756ms
+Quic codec=false 64MiB echo=1.4379639s payload=44.5MiB/s p50=349.5µs p95=499.6µs p99=560.2µs
+Quic codec=true 64MiB echo=1.6787722s payload=38.1MiB/s p50=402.1µs p95=588.8µs p99=723.8µs
+=== base round 12 ===
+Tcp codec=false 64MiB echo=1.0214042s payload=62.7MiB/s p50=150.9µs p95=251.1µs p99=339.3µs
+Tcp codec=true 64MiB echo=1.5855196s payload=40.4MiB/s p50=514.2µs p95=876.5µs p99=1.1944ms
+Quic codec=false 64MiB echo=1.0352206s payload=61.8MiB/s p50=259.9µs p95=364.6µs p99=561.9µs
+Quic codec=true 64MiB echo=1.6402423s payload=39.0MiB/s p50=280µs p95=441.5µs p99=495.3µs
+=== refactored round 12 ===
+Tcp codec=false 64MiB echo=1.437415s payload=44.5MiB/s p50=160.6µs p95=263.2µs p99=423.6µs
+Tcp codec=true 64MiB echo=2.034889s payload=31.5MiB/s p50=436.1µs p95=610µs p99=1.8427ms
+Quic codec=false 64MiB echo=1.2861246s payload=49.8MiB/s p50=253µs p95=411.8µs p99=489.7µs
+Quic codec=true 64MiB echo=1.4174898s payload=45.2MiB/s p50=306.1µs p95=472.9µs p99=576.8µs
+=== refactored round 13 ===
+Tcp codec=false 64MiB echo=1.459157s payload=43.9MiB/s p50=200.6µs p95=268.4µs p99=316.2µs
+Tcp codec=true 64MiB echo=1.68109s payload=38.1MiB/s p50=420.7µs p95=540.8µs p99=920.5µs
+Quic codec=false 64MiB echo=1.2009271s payload=53.3MiB/s p50=328.3µs p95=527.5µs p99=696.8µs
+Quic codec=true 64MiB echo=1.4461797s payload=44.3MiB/s p50=292.5µs p95=454µs p99=615.4µs
+=== base round 13 ===
+Tcp codec=false 64MiB echo=1.1657887s payload=54.9MiB/s p50=161.6µs p95=260.1µs p99=465.9µs
+Tcp codec=true 64MiB echo=1.3379342s payload=47.8MiB/s p50=409.4µs p95=799.4µs p99=1.234ms
+Quic codec=false 64MiB echo=1.114103s payload=57.4MiB/s p50=346.4µs p95=537.1µs p99=1.4301ms
+Quic codec=true 64MiB echo=1.3721267s payload=46.6MiB/s p50=370.1µs p95=528.7µs p99=743µs
+=== base round 14 ===
+Tcp codec=false 64MiB echo=1.5027679s payload=42.6MiB/s p50=158.3µs p95=244.6µs p99=381.9µs
+Tcp codec=true 64MiB echo=1.4430364s payload=44.4MiB/s p50=447.8µs p95=1.0021ms p99=1.3037ms
+Quic codec=false 64MiB echo=1.3312178s payload=48.1MiB/s p50=311.5µs p95=548.8µs p99=799.3µs
+Quic codec=true 64MiB echo=1.5569759s payload=41.1MiB/s p50=415.7µs p95=670.8µs p99=16.4585ms
+=== refactored round 14 ===
+Tcp codec=false 64MiB echo=1.8795989s payload=34.0MiB/s p50=161.5µs p95=255.9µs p99=374.3µs
+Tcp codec=true 64MiB echo=7.1344035s payload=9.0MiB/s p50=703.2µs p95=882.2µs p99=1.0719ms
+Quic codec=false 64MiB echo=1.3199568s payload=48.5MiB/s p50=443.9µs p95=698.7µs p99=912.2µs
+Quic codec=true 64MiB echo=1.4643094s payload=43.7MiB/s p50=309.5µs p95=490µs p99=617.3µs
+=== refactored round 15 ===
+Tcp codec=false 64MiB echo=1.6745121s payload=38.2MiB/s p50=201.5µs p95=381.3µs p99=468.6µs
+Tcp codec=true 64MiB echo=1.2800878s payload=50.0MiB/s p50=429µs p95=875.2µs p99=1.196ms
+Quic codec=false 64MiB echo=1.3108304s payload=48.8MiB/s p50=270.1µs p95=384.6µs p99=485.6µs
+Quic codec=true 64MiB echo=1.3902378s payload=46.0MiB/s p50=244µs p95=418.2µs p99=528.9µs
+=== base round 15 ===
+Tcp codec=false 64MiB echo=1.72529s payload=37.1MiB/s p50=164.1µs p95=237.5µs p99=411.3µs
+Tcp codec=true 64MiB echo=1.6632677s payload=38.5MiB/s p50=402.5µs p95=785.5µs p99=902.7µs
+Quic codec=false 64MiB echo=1.224115s payload=52.3MiB/s p50=294.4µs p95=437µs p99=580.7µs
+Quic codec=true 64MiB echo=1.2395187s payload=51.6MiB/s p50=274.5µs p95=415.4µs p99=539.2µs
+=== base round 16 ===
+Tcp codec=false 64MiB echo=1.02278s payload=62.6MiB/s p50=181.5µs p95=343.3µs p99=412.6µs
+Tcp codec=true 64MiB echo=1.3186156s payload=48.5MiB/s p50=458.2µs p95=613.7µs p99=788.5µs
+Quic codec=false 64MiB echo=990.9464ms payload=64.6MiB/s p50=301.1µs p95=483.6µs p99=636.1µs
+Quic codec=true 64MiB echo=1.7487774s payload=36.6MiB/s p50=371.2µs p95=556.3µs p99=723.4µs
+=== refactored round 16 ===
+Tcp codec=false 64MiB echo=1.3929816s payload=45.9MiB/s p50=159.7µs p95=259.3µs p99=373.3µs
+Tcp codec=true 64MiB echo=1.8186419s payload=35.2MiB/s p50=494.2µs p95=1.0484ms p99=1.529ms
+Quic codec=false 64MiB echo=1.2381641s payload=51.7MiB/s p50=332.1µs p95=596.6µs p99=711µs
+Quic codec=true 64MiB echo=1.302261s payload=49.1MiB/s p50=299µs p95=469.8µs p99=611.4µs
+=== refactored round 17 ===
+Tcp codec=false 64MiB echo=1.0500219s payload=61.0MiB/s p50=159.4µs p95=250.9µs p99=358.4µs
+Tcp codec=true 64MiB echo=1.0186099s payload=62.8MiB/s p50=412.5µs p95=572.6µs p99=752.1µs
+Quic codec=false 64MiB echo=1.0096643s payload=63.4MiB/s p50=296.3µs p95=459.1µs p99=612.7µs
+Quic codec=true 64MiB echo=1.6509768s payload=38.8MiB/s p50=374.3µs p95=562.8µs p99=702.3µs
+=== base round 17 ===
+Tcp codec=false 64MiB echo=1.315739s payload=48.6MiB/s p50=170.2µs p95=257.9µs p99=440.3µs
+Tcp codec=true 64MiB echo=2.2594666s payload=28.3MiB/s p50=471.5µs p95=911.5µs p99=1.039ms
+Quic codec=false 64MiB echo=1.2002358s payload=53.3MiB/s p50=345.5µs p95=529.5µs p99=681.4µs
+Quic codec=true 64MiB echo=1.4442085s payload=44.3MiB/s p50=345.3µs p95=493.2µs p99=578.9µs
+=== base round 18 ===
+Tcp codec=false 64MiB echo=1.3987431s payload=45.8MiB/s p50=158.3µs p95=263.1µs p99=371.5µs
+Tcp codec=true 64MiB echo=1.6131222s payload=39.7MiB/s p50=645.1µs p95=830.1µs p99=992.6µs
+Quic codec=false 64MiB echo=1.0938403s payload=58.5MiB/s p50=306.5µs p95=460.7µs p99=504.8µs
+Quic codec=true 64MiB echo=1.3231322s payload=48.4MiB/s p50=341.9µs p95=502.3µs p99=716.6µs
+=== refactored round 18 ===
+Tcp codec=false 64MiB echo=1.1300147s payload=56.6MiB/s p50=171µs p95=332µs p99=422.6µs
+Tcp codec=true 64MiB echo=1.0944324s payload=58.5MiB/s p50=443µs p95=546.9µs p99=611.8µs
+Quic codec=false 64MiB echo=1.4930395s payload=42.9MiB/s p50=333.3µs p95=481.1µs p99=645µs
+Quic codec=true 64MiB echo=1.745562s payload=36.7MiB/s p50=517.1µs p95=796.7µs p99=2.0861ms
+=== refactored round 19 ===
+Tcp codec=false 64MiB echo=1.2625945s payload=50.7MiB/s p50=162.3µs p95=253.5µs p99=395.3µs
+Tcp codec=true 64MiB echo=2.4466087s payload=26.2MiB/s p50=1.0326ms p95=1.2608ms p99=1.5058ms
+Quic codec=false 64MiB echo=1.65917s payload=38.6MiB/s p50=428.7µs p95=681.8µs p99=796.8µs
+Quic codec=true 64MiB echo=1.7573148s payload=36.4MiB/s p50=450.1µs p95=724.9µs p99=4.3128ms
+=== base round 19 ===
+Tcp codec=false 64MiB echo=934.4665ms payload=68.5MiB/s p50=145.4µs p95=237.3µs p99=1.1277ms
+Tcp codec=true 64MiB echo=1.0709754s payload=59.8MiB/s p50=429.4µs p95=627.7µs p99=743.6µs
+Quic codec=false 64MiB echo=983.5116ms payload=65.1MiB/s p50=344.7µs p95=484.8µs p99=545µs
+Quic codec=true 64MiB echo=1.2734917s payload=50.3MiB/s p50=324.5µs p95=558.9µs p99=688.6µs
+### p1-relay-c
+=== base round 0 ===
+Tcp codec=false 64MiB echo=1.168636s payload=54.8MiB/s p50=149.9µs p95=233µs p99=366.9µs
+Tcp codec=true 64MiB echo=1.1432778s payload=56.0MiB/s p50=492.5µs p95=681µs p99=1.0164ms
+Quic codec=false 64MiB echo=957.0268ms payload=66.9MiB/s p50=264.3µs p95=402.6µs p99=499.3µs
+Quic codec=true 64MiB echo=1.1241951s payload=56.9MiB/s p50=272.1µs p95=389.8µs p99=622.2µs
+=== refactored round 0 ===
+Tcp codec=false 64MiB echo=975.4602ms payload=65.6MiB/s p50=153.3µs p95=315.3µs p99=430.9µs
+Tcp codec=true 64MiB echo=1.3347243s payload=47.9MiB/s p50=368.2µs p95=570.6µs p99=707.5µs
+Quic codec=false 64MiB echo=965.8514ms payload=66.3MiB/s p50=269.1µs p95=349.2µs p99=437µs
+Quic codec=true 64MiB echo=1.2595916s payload=50.8MiB/s p50=235.7µs p95=337.1µs p99=408.8µs
+=== refactored round 1 ===
+Tcp codec=false 64MiB echo=1.2998826s payload=49.2MiB/s p50=163.8µs p95=236.3µs p99=376.3µs
+Tcp codec=true 64MiB echo=2.0561993s payload=31.1MiB/s p50=443.2µs p95=892.2µs p99=1.3904ms
+Quic codec=false 64MiB echo=1.0610331s payload=60.3MiB/s p50=236.1µs p95=389.8µs p99=1.5439ms
+Quic codec=true 64MiB echo=1.0767966s payload=59.4MiB/s p50=249.9µs p95=343.7µs p99=484.7µs
+=== base round 1 ===
+Tcp codec=false 64MiB echo=1.2531128s payload=51.1MiB/s p50=183µs p95=343.1µs p99=467.3µs
+Tcp codec=true 64MiB echo=1.3935521s payload=45.9MiB/s p50=468.2µs p95=679.6µs p99=838.2µs
+Quic codec=false 64MiB echo=1.0746336s payload=59.6MiB/s p50=262.1µs p95=370.2µs p99=541.6µs
+Quic codec=true 64MiB echo=1.4091518s payload=45.4MiB/s p50=348.2µs p95=444.8µs p99=732.7µs
+=== base round 2 ===
+Tcp codec=false 64MiB echo=1.3990715s payload=45.7MiB/s p50=312µs p95=414.4µs p99=625.8µs
+Tcp codec=true 64MiB echo=2.3698846s payload=27.0MiB/s p50=437.9µs p95=582.1µs p99=755.1µs
+Quic codec=false 64MiB echo=1.0537966s payload=60.7MiB/s p50=235.1µs p95=305.6µs p99=426.6µs
+Quic codec=true 64MiB echo=1.3030024s payload=49.1MiB/s p50=254.4µs p95=404µs p99=482.5µs
+=== refactored round 2 ===
+Tcp codec=false 64MiB echo=1.0498183s payload=61.0MiB/s p50=159µs p95=243.5µs p99=371.6µs
+Tcp codec=true 64MiB echo=1.0162291s payload=63.0MiB/s p50=359.3µs p95=442.9µs p99=567.2µs
+Quic codec=false 64MiB echo=1.2801221s payload=50.0MiB/s p50=371.3µs p95=551.6µs p99=622.6µs
+Quic codec=true 64MiB echo=1.3211674s payload=48.4MiB/s p50=250.3µs p95=325.5µs p99=436µs
+=== refactored round 3 ===
+Tcp codec=false 64MiB echo=1.3082751s payload=48.9MiB/s p50=161µs p95=235.9µs p99=365.3µs
+Tcp codec=true 64MiB echo=1.8657931s payload=34.3MiB/s p50=906.2µs p95=1.0202ms p99=1.1909ms
+Quic codec=false 64MiB echo=997.5597ms payload=64.2MiB/s p50=211µs p95=326.1µs p99=483.4µs
+Quic codec=true 64MiB echo=1.10404s payload=58.0MiB/s p50=256.5µs p95=431.1µs p99=546.1µs
+=== base round 3 ===
+Tcp codec=false 64MiB echo=1.0429436s payload=61.4MiB/s p50=162.2µs p95=244.5µs p99=444.4µs
+Tcp codec=true 64MiB echo=1.3720974s payload=46.6MiB/s p50=704.9µs p95=842.4µs p99=1.3357ms
+Quic codec=false 64MiB echo=979.56ms payload=65.3MiB/s p50=241.2µs p95=318µs p99=455.1µs
+Quic codec=true 64MiB echo=1.3302023s payload=48.1MiB/s p50=244.9µs p95=386.8µs p99=477.1µs
+=== base round 4 ===
+Tcp codec=false 64MiB echo=1.4581035s payload=43.9MiB/s p50=153.6µs p95=306.4µs p99=534.1µs
+Tcp codec=true 64MiB echo=1.4029142s payload=45.6MiB/s p50=454.8µs p95=910.6µs p99=1.249ms
+Quic codec=false 64MiB echo=1.2680218s payload=50.5MiB/s p50=277.8µs p95=370.9µs p99=539.3µs
+Quic codec=true 64MiB echo=1.3668834s payload=46.8MiB/s p50=252.8µs p95=376.3µs p99=468.5µs
+=== refactored round 4 ===
+Tcp codec=false 64MiB echo=1.6857761s payload=38.0MiB/s p50=157.5µs p95=244.2µs p99=392.1µs
+Tcp codec=true 64MiB echo=1.4860777s payload=43.1MiB/s p50=686.5µs p95=962.5µs p99=1.2767ms
+Quic codec=false 64MiB echo=1.0889713s payload=58.8MiB/s p50=268.5µs p95=344.3µs p99=526.2µs
+Quic codec=true 64MiB echo=1.1821396s payload=54.1MiB/s p50=279.9µs p95=410.4µs p99=637.6µs
+=== refactored round 5 ===
+Tcp codec=false 64MiB echo=1.2637584s payload=50.6MiB/s p50=151.5µs p95=324µs p99=432.6µs
+Tcp codec=true 64MiB echo=1.2476557s payload=51.3MiB/s p50=662.9µs p95=947.7µs p99=1.3008ms
+Quic codec=false 64MiB echo=1.2244539s payload=52.3MiB/s p50=330µs p95=428.8µs p99=546.1µs
+Quic codec=true 64MiB echo=1.4101622s payload=45.4MiB/s p50=295.4µs p95=439.1µs p99=547µs
+=== base round 5 ===
+Tcp codec=false 64MiB echo=1.301133s payload=49.2MiB/s p50=230.5µs p95=346.2µs p99=552.5µs
+Tcp codec=true 64MiB echo=1.40431s payload=45.6MiB/s p50=401.6µs p95=497.6µs p99=684.6µs
+Quic codec=false 64MiB echo=1.1736275s payload=54.5MiB/s p50=314.8µs p95=476.7µs p99=725.3µs
+Quic codec=true 64MiB echo=1.3434817s payload=47.6MiB/s p50=302.7µs p95=457.4µs p99=603.1µs
+=== base round 6 ===
+Tcp codec=false 64MiB echo=1.4918426s payload=42.9MiB/s p50=305µs p95=416.1µs p99=693.8µs
+Tcp codec=true 64MiB echo=1.1691706s payload=54.7MiB/s p50=381.1µs p95=479.7µs p99=608.9µs
+Quic codec=false 64MiB echo=1.0922149s payload=58.6MiB/s p50=261.6µs p95=355.7µs p99=507.6µs
+Quic codec=true 64MiB echo=1.275788s payload=50.2MiB/s p50=279.9µs p95=416.3µs p99=500.8µs
+=== refactored round 6 ===
+Tcp codec=false 64MiB echo=1.1531009s payload=55.5MiB/s p50=189.8µs p95=320.8µs p99=431.5µs
+Tcp codec=true 64MiB echo=1.0982708s payload=58.3MiB/s p50=460.6µs p95=557.8µs p99=977µs
+Quic codec=false 64MiB echo=1.011079s payload=63.3MiB/s p50=345.3µs p95=512.8µs p99=717µs
+Quic codec=true 64MiB echo=1.4585666s payload=43.9MiB/s p50=343.7µs p95=503.1µs p99=575.1µs
+=== refactored round 7 ===
+Tcp codec=false 64MiB echo=1.1472817s payload=55.8MiB/s p50=234.2µs p95=326.5µs p99=484µs
+Tcp codec=true 64MiB echo=6.8947806s payload=9.3MiB/s p50=445.3µs p95=581.4µs p99=869.2µs
+Quic codec=false 64MiB echo=1.2160472s payload=52.6MiB/s p50=236.4µs p95=364.5µs p99=515.7µs
+Quic codec=true 64MiB echo=1.2979264s payload=49.3MiB/s p50=288.4µs p95=414.7µs p99=543.7µs
+=== base round 7 ===
+Tcp codec=false 64MiB echo=1.3306663s payload=48.1MiB/s p50=156.9µs p95=289.9µs p99=471.7µs
+Tcp codec=true 64MiB echo=1.1326883s payload=56.5MiB/s p50=637.7µs p95=780.3µs p99=1.07ms
+Quic codec=false 64MiB echo=1.0181234s payload=62.9MiB/s p50=267.5µs p95=408.8µs p99=585.2µs
+Quic codec=true 64MiB echo=1.2054603s payload=53.1MiB/s p50=280.1µs p95=438.8µs p99=584.4µs
+=== base round 8 ===
+Tcp codec=false 64MiB echo=959.3088ms payload=66.7MiB/s p50=172.8µs p95=325.7µs p99=421.3µs
+Tcp codec=true 64MiB echo=1.2276781s payload=52.1MiB/s p50=359µs p95=469.2µs p99=669.3µs
+Quic codec=false 64MiB echo=946.0286ms payload=67.7MiB/s p50=321.7µs p95=476.2µs p99=557µs
+Quic codec=true 64MiB echo=1.4947597s payload=42.8MiB/s p50=302.6µs p95=470.9µs p99=803.5µs
+=== refactored round 8 ===
+Tcp codec=false 64MiB echo=1.1950977s payload=53.6MiB/s p50=151.1µs p95=250.2µs p99=422.2µs
+Tcp codec=true 64MiB echo=1.3329038s payload=48.0MiB/s p50=437.9µs p95=670.2µs p99=1.0042ms
+Quic codec=false 64MiB echo=1.2213967s payload=52.4MiB/s p50=362.4µs p95=493.7µs p99=618.6µs
+Quic codec=true 64MiB echo=1.3943603s payload=45.9MiB/s p50=362µs p95=522.6µs p99=635.4µs
+=== refactored round 9 ===
+Tcp codec=false 64MiB echo=1.296723s payload=49.4MiB/s p50=155.8µs p95=247.9µs p99=366.6µs
+Tcp codec=true 64MiB echo=1.5201022s payload=42.1MiB/s p50=433.1µs p95=756.7µs p99=958.8µs
+Quic codec=false 64MiB echo=1.2233809s payload=52.3MiB/s p50=268.8µs p95=412µs p99=554.2µs
+Quic codec=true 64MiB echo=1.4372855s payload=44.5MiB/s p50=329µs p95=492.3µs p99=608.8µs
+=== base round 9 ===
+Tcp codec=false 64MiB echo=1.1838589s payload=54.1MiB/s p50=159.9µs p95=288.4µs p99=454.4µs
+Tcp codec=true 64MiB echo=1.8090059s payload=35.4MiB/s p50=439.6µs p95=551.6µs p99=810.9µs
+Quic codec=false 64MiB echo=1.2132716s payload=52.7MiB/s p50=345.8µs p95=488.4µs p99=567.5µs
+Quic codec=true 64MiB echo=1.5451247s payload=41.4MiB/s p50=301.7µs p95=495.1µs p99=596.2µs
+=== base round 10 ===
+Tcp codec=false 64MiB echo=2.0105098s payload=31.8MiB/s p50=159.2µs p95=295.9µs p99=437.2µs
+Tcp codec=true 64MiB echo=1.5610884s payload=41.0MiB/s p50=478.4µs p95=586.8µs p99=801.3µs
+Quic codec=false 64MiB echo=1.1740573s payload=54.5MiB/s p50=294.7µs p95=501.9µs p99=736µs
+Quic codec=true 64MiB echo=1.274884s payload=50.2MiB/s p50=290µs p95=391.9µs p99=655.8µs
+=== refactored round 10 ===
+Tcp codec=false 64MiB echo=1.0440796s payload=61.3MiB/s p50=140.8µs p95=237.2µs p99=380.5µs
+Tcp codec=true 64MiB echo=1.5118688s payload=42.3MiB/s p50=437.2µs p95=669.5µs p99=832.6µs
+Quic codec=false 64MiB echo=1.1482194s payload=55.7MiB/s p50=293.6µs p95=397.2µs p99=430.2µs
+Quic codec=true 64MiB echo=1.3424189s payload=47.7MiB/s p50=281.6µs p95=398.5µs p99=528.3µs
+=== refactored round 11 ===
+Tcp codec=false 64MiB echo=1.5847087s payload=40.4MiB/s p50=279.5µs p95=378.5µs p99=560.9µs
+Tcp codec=true 64MiB echo=1.8609799s payload=34.4MiB/s p50=467.2µs p95=552.3µs p99=640.3µs
+Quic codec=false 64MiB echo=1.3258853s payload=48.3MiB/s p50=278.4µs p95=408µs p99=518.4µs
+Quic codec=true 64MiB echo=1.552523s payload=41.2MiB/s p50=349.2µs p95=511.4µs p99=712.3µs
+=== base round 11 ===
+Tcp codec=false 64MiB echo=1.6646261s payload=38.4MiB/s p50=160.7µs p95=247.3µs p99=392.7µs
+Tcp codec=true 64MiB echo=1.3353559s payload=47.9MiB/s p50=424.1µs p95=552.4µs p99=681.9µs
+Quic codec=false 64MiB echo=1.5414507s payload=41.5MiB/s p50=353.9µs p95=510.2µs p99=745.2µs
+Quic codec=true 64MiB echo=1.2668795s payload=50.5MiB/s p50=294.3µs p95=479.9µs p99=597.3µs
+=== base round 12 ===
+Tcp codec=false 64MiB echo=1.3897793s payload=46.1MiB/s p50=161.5µs p95=256.8µs p99=489.6µs
+Tcp codec=true 64MiB echo=1.3576449s payload=47.1MiB/s p50=411.1µs p95=520.4µs p99=775.8µs
+Quic codec=false 64MiB echo=1.2522902s payload=51.1MiB/s p50=344.4µs p95=522.1µs p99=21.6854ms
+Quic codec=true 64MiB echo=1.2225204s payload=52.4MiB/s p50=246µs p95=402.6µs p99=552µs
+=== refactored round 12 ===
+Tcp codec=false 64MiB echo=957.3101ms payload=66.9MiB/s p50=161µs p95=297µs p99=400.8µs
+Tcp codec=true 64MiB echo=1.3281626s payload=48.2MiB/s p50=452.4µs p95=561.8µs p99=971.6µs
+Quic codec=false 64MiB echo=987.7135ms payload=64.8MiB/s p50=275.8µs p95=424.1µs p99=567µs
+Quic codec=true 64MiB echo=1.2186748s payload=52.5MiB/s p50=263.3µs p95=419µs p99=507.8µs
+=== refactored round 13 ===
+Tcp codec=false 64MiB echo=6.272616s payload=10.2MiB/s p50=162.1µs p95=214.7µs p99=278.2µs
+Tcp codec=true 64MiB echo=2.3221111s payload=27.6MiB/s p50=443.4µs p95=674.1µs p99=819.9µs
+Quic codec=false 64MiB echo=1.17679s payload=54.4MiB/s p50=358.9µs p95=568µs p99=16.0168ms
+Quic codec=true 64MiB echo=1.2788595s payload=50.0MiB/s p50=288.3µs p95=413.2µs p99=519.2µs
+=== base round 13 ===
+Tcp codec=false 64MiB echo=1.1645374s payload=55.0MiB/s p50=166.2µs p95=249.2µs p99=347.7µs
+Tcp codec=true 64MiB echo=1.9173597s payload=33.4MiB/s p50=419.8µs p95=491.4µs p99=646.7µs
+Quic codec=false 64MiB echo=1.2363165s payload=51.8MiB/s p50=293.2µs p95=448.5µs p99=745.8µs
+Quic codec=true 64MiB echo=1.4436702s payload=44.3MiB/s p50=387.8µs p95=589.1µs p99=736.8µs
+=== base round 14 ===
+Tcp codec=false 64MiB echo=1.3845608s payload=46.2MiB/s p50=160.8µs p95=271.8µs p99=374.1µs
+Tcp codec=true 64MiB echo=1.1325525s payload=56.5MiB/s p50=408.2µs p95=494.8µs p99=749.7µs
+Quic codec=false 64MiB echo=1.1719375s payload=54.6MiB/s p50=303.2µs p95=441.5µs p99=494.3µs
+Quic codec=true 64MiB echo=1.2908595s payload=49.6MiB/s p50=294µs p95=423.3µs p99=546.3µs
+=== refactored round 14 ===
+Tcp codec=false 64MiB echo=901.3982ms payload=71.0MiB/s p50=148.2µs p95=249µs p99=384.2µs
+Tcp codec=true 64MiB echo=1.2600748s payload=50.8MiB/s p50=378.6µs p95=533.3µs p99=813.6µs
+Quic codec=false 64MiB echo=1.1454095s payload=55.9MiB/s p50=296.9µs p95=461.2µs p99=623.6µs
+Quic codec=true 64MiB echo=1.2643354s payload=50.6MiB/s p50=401.3µs p95=596.4µs p99=716.2µs
+=== refactored round 15 ===
+Tcp codec=false 64MiB echo=1.3946004s payload=45.9MiB/s p50=211.9µs p95=335.4µs p99=639.6µs
+Tcp codec=true 64MiB echo=1.5272808s payload=41.9MiB/s p50=530µs p95=650.6µs p99=788.1µs
+Quic codec=false 64MiB echo=1.7834597s payload=35.9MiB/s p50=377.9µs p95=573.8µs p99=680.4µs
+Quic codec=true 64MiB echo=1.4378863s payload=44.5MiB/s p50=373.1µs p95=527.3µs p99=575µs
+=== base round 15 ===
+Tcp codec=false 64MiB echo=6.2670918s payload=10.2MiB/s p50=162µs p95=217.1µs p99=280.1µs
+Tcp codec=true 64MiB echo=1.9739315s payload=32.4MiB/s p50=415.4µs p95=615.2µs p99=726.7µs
+Quic codec=false 64MiB echo=1.1486757s payload=55.7MiB/s p50=273.9µs p95=410.8µs p99=529.6µs
+Quic codec=true 64MiB echo=1.2575935s payload=50.9MiB/s p50=301.4µs p95=421.7µs p99=626.8µs
+=== base round 16 ===
+Tcp codec=false 64MiB echo=1.0605861s payload=60.3MiB/s p50=155.1µs p95=252.4µs p99=433.2µs
+Tcp codec=true 64MiB echo=1.2563463s payload=50.9MiB/s p50=383.1µs p95=486.5µs p99=683.3µs
+Quic codec=false 64MiB echo=997.5413ms payload=64.2MiB/s p50=280.5µs p95=413.6µs p99=491.1µs
+Quic codec=true 64MiB echo=1.4247252s payload=44.9MiB/s p50=286.5µs p95=423.1µs p99=475.4µs
+=== refactored round 16 ===
+Tcp codec=false 64MiB echo=1.5947377s payload=40.1MiB/s p50=224µs p95=378.5µs p99=489µs
+Tcp codec=true 64MiB echo=1.5957648s payload=40.1MiB/s p50=411.3µs p95=514.6µs p99=672.2µs
+Quic codec=false 64MiB echo=1.1913652s payload=53.7MiB/s p50=334.6µs p95=510.7µs p99=645.8µs
+Quic codec=true 64MiB echo=1.3982435s payload=45.8MiB/s p50=334.5µs p95=498.6µs p99=658.6µs
+=== refactored round 17 ===
+Tcp codec=false 64MiB echo=1.3808983s payload=46.3MiB/s p50=257.9µs p95=372.3µs p99=565.4µs
+Tcp codec=true 64MiB echo=1.3464341s payload=47.5MiB/s p50=707.4µs p95=813.6µs p99=944.5µs
+Quic codec=false 64MiB echo=1.0699236s payload=59.8MiB/s p50=263.2µs p95=433.4µs p99=557.1µs
+Quic codec=true 64MiB echo=1.2108151s payload=52.9MiB/s p50=280.4µs p95=476.3µs p99=556.1µs
+=== base round 17 ===
+Tcp codec=false 64MiB echo=1.0890208s payload=58.8MiB/s p50=148.9µs p95=225.5µs p99=351µs
+Tcp codec=true 64MiB echo=1.4128241s payload=45.3MiB/s p50=448.6µs p95=681.2µs p99=1.5757ms
+Quic codec=false 64MiB echo=1.05379s payload=60.7MiB/s p50=250.6µs p95=377.2µs p99=680.6µs
+Quic codec=true 64MiB echo=1.5559707s payload=41.1MiB/s p50=380.5µs p95=627.4µs p99=17.2081ms
+=== base round 18 ===
+Tcp codec=false 64MiB echo=1.2828286s payload=49.9MiB/s p50=160.2µs p95=240.2µs p99=359.7µs
+Tcp codec=true 64MiB echo=1.5478654s payload=41.3MiB/s p50=437.2µs p95=635.9µs p99=799.2µs
+Quic codec=false 64MiB echo=1.2062362s payload=53.1MiB/s p50=278.3µs p95=431µs p99=545.9µs
+Quic codec=true 64MiB echo=1.4225577s payload=45.0MiB/s p50=383.6µs p95=572.4µs p99=11.0391ms
+=== refactored round 18 ===
+Tcp codec=false 64MiB echo=1.6700738s payload=38.3MiB/s p50=202.7µs p95=338.5µs p99=537.9µs
+Tcp codec=true 64MiB echo=1.4980807s payload=42.7MiB/s p50=597.5µs p95=735.3µs p99=1.0215ms
+Quic codec=false 64MiB echo=1.2267929s payload=52.2MiB/s p50=294.3µs p95=442.5µs p99=1.3562ms
+Quic codec=true 64MiB echo=1.353003s payload=47.3MiB/s p50=301.5µs p95=443.3µs p99=509.8µs
+=== refactored round 19 ===
+Tcp codec=false 64MiB echo=1.4075908s payload=45.5MiB/s p50=167.5µs p95=252.9µs p99=477.7µs
+Tcp codec=true 64MiB echo=1.4258752s payload=44.9MiB/s p50=386.5µs p95=490µs p99=618.2µs
+Quic codec=false 64MiB echo=1.0730859s payload=59.6MiB/s p50=307.9µs p95=480.5µs p99=717.7µs
+Quic codec=true 64MiB echo=1.2074305s payload=53.0MiB/s p50=345.8µs p95=515.4µs p99=592.4µs
+=== base round 19 ===
+Tcp codec=false 64MiB echo=1.1358055s payload=56.3MiB/s p50=147.6µs p95=218.3µs p99=348µs
+Tcp codec=true 64MiB echo=2.1361464s payload=30.0MiB/s p50=474.5µs p95=621.1µs p99=948.2µs
+Quic codec=false 64MiB echo=1.3656399s payload=46.9MiB/s p50=285.1µs p95=409.7µs p99=518.9µs
+Quic codec=true 64MiB echo=1.4476161s payload=44.2MiB/s p50=331.3µs p95=543.2µs p99=689.4µs
+=== base round 20 ===
+Tcp codec=false 64MiB echo=1.9588982s payload=32.7MiB/s p50=165.2µs p95=334.1µs p99=1.8747ms
+Tcp codec=true 64MiB echo=1.9897878s payload=32.2MiB/s p50=434.9µs p95=587.7µs p99=795.5µs
+Quic codec=false 64MiB echo=1.2093421s payload=52.9MiB/s p50=293µs p95=424.3µs p99=468.1µs
+Quic codec=true 64MiB echo=1.5198319s payload=42.1MiB/s p50=307µs p95=458.6µs p99=577.1µs
+=== refactored round 20 ===
+Tcp codec=false 64MiB echo=1.1028843s payload=58.0MiB/s p50=149µs p95=233.4µs p99=405.2µs
+Tcp codec=true 64MiB echo=1.0900037s payload=58.7MiB/s p50=451.4µs p95=572.5µs p99=772.4µs
+Quic codec=false 64MiB echo=1.0523464s payload=60.8MiB/s p50=248µs p95=383.6µs p99=523.3µs
+Quic codec=true 64MiB echo=1.279151s payload=50.0MiB/s p50=288.1µs p95=417.9µs p99=544.3µs
+=== refactored round 21 ===
+Tcp codec=false 64MiB echo=919.1563ms payload=69.6MiB/s p50=147.4µs p95=238.8µs p99=338.5µs
+Tcp codec=true 64MiB echo=976.0835ms payload=65.6MiB/s p50=368.1µs p95=500.7µs p99=721.7µs
+Quic codec=false 64MiB echo=951.2006ms payload=67.3MiB/s p50=277.7µs p95=392.2µs p99=461.4µs
+Quic codec=true 64MiB echo=1.3635171s payload=46.9MiB/s p50=352µs p95=509µs p99=738µs
+=== base round 21 ===
+Tcp codec=false 64MiB echo=1.1562254s payload=55.4MiB/s p50=156.6µs p95=254µs p99=371.7µs
+Tcp codec=true 64MiB echo=1.4314336s payload=44.7MiB/s p50=395.2µs p95=562.6µs p99=782.2µs
+Quic codec=false 64MiB echo=1.0762382s payload=59.5MiB/s p50=289.6µs p95=493.5µs p99=605.4µs
+Quic codec=true 64MiB echo=1.3476079s payload=47.5MiB/s p50=322.8µs p95=456.4µs p99=496.5µs
+=== base round 22 ===
+Tcp codec=false 64MiB echo=1.1061353s payload=57.9MiB/s p50=153.3µs p95=233.5µs p99=345.5µs
+Tcp codec=true 64MiB echo=944.0573ms payload=67.8MiB/s p50=357.3µs p95=446.8µs p99=655.2µs
+Quic codec=false 64MiB echo=885.1308ms payload=72.3MiB/s p50=275.9µs p95=377.2µs p99=471.2µs
+Quic codec=true 64MiB echo=1.1678903s payload=54.8MiB/s p50=292.9µs p95=464.5µs p99=521.8µs
+=== refactored round 22 ===
+Tcp codec=false 64MiB echo=1.1315349s payload=56.6MiB/s p50=155.6µs p95=256.3µs p99=353.8µs
+Tcp codec=true 64MiB echo=1.9201251s payload=33.3MiB/s p50=472µs p95=647.7µs p99=965.8µs
+Quic codec=false 64MiB echo=1.2146475s payload=52.7MiB/s p50=386.9µs p95=547.3µs p99=747.7µs
+Quic codec=true 64MiB echo=1.4380086s payload=44.5MiB/s p50=302.3µs p95=455.4µs p99=570.5µs
+=== refactored round 23 ===
+Tcp codec=false 64MiB echo=1.8861379s payload=33.9MiB/s p50=165.5µs p95=307.1µs p99=447.8µs
+Tcp codec=true 64MiB echo=1.7293426s payload=37.0MiB/s p50=466.3µs p95=607.9µs p99=899.7µs
+Quic codec=false 64MiB echo=1.2925742s payload=49.5MiB/s p50=252.6µs p95=370.7µs p99=453.6µs
+Quic codec=true 64MiB echo=1.3550708s payload=47.2MiB/s p50=315.2µs p95=479.5µs p99=575.2µs
+=== base round 23 ===
+Tcp codec=false 64MiB echo=1.2821663s payload=49.9MiB/s p50=152.1µs p95=256.3µs p99=451.2µs
+Tcp codec=true 64MiB echo=1.2101567s payload=52.9MiB/s p50=444.5µs p95=627µs p99=964.1µs
+Quic codec=false 64MiB echo=1.0788879s payload=59.3MiB/s p50=304.5µs p95=434.1µs p99=631.2µs
+Quic codec=true 64MiB echo=1.1679784s payload=54.8MiB/s p50=299.4µs p95=429.3µs p99=569.9µs
+=== base round 24 ===
+Tcp codec=false 64MiB echo=6.1931574s payload=10.3MiB/s p50=154.6µs p95=304.6µs p99=375.3µs
+Tcp codec=true 64MiB echo=1.3252576s payload=48.3MiB/s p50=405.8µs p95=478.5µs p99=615.3µs
+Quic codec=false 64MiB echo=1.1697646s payload=54.7MiB/s p50=327.5µs p95=488.3µs p99=681.4µs
+Quic codec=true 64MiB echo=1.4459063s payload=44.3MiB/s p50=346.1µs p95=497.8µs p99=583.4µs
+=== refactored round 24 ===
+Tcp codec=false 64MiB echo=1.8936601s payload=33.8MiB/s p50=195.5µs p95=296.6µs p99=458.5µs
+Tcp codec=true 64MiB echo=1.6305397s payload=39.3MiB/s p50=446.7µs p95=590.4µs p99=836.7µs
+Quic codec=false 64MiB echo=1.3412604s payload=47.7MiB/s p50=279.3µs p95=426.3µs p99=1.2155ms
+Quic codec=true 64MiB echo=1.6141997s payload=39.6MiB/s p50=415.6µs p95=630.5µs p99=862.2µs
+=== refactored round 25 ===
+Tcp codec=false 64MiB echo=1.9171318s payload=33.4MiB/s p50=281.6µs p95=391.8µs p99=615.5µs
+Tcp codec=true 64MiB echo=1.9966698s payload=32.1MiB/s p50=446.3µs p95=547.8µs p99=773.2µs
+Quic codec=false 64MiB echo=1.3710695s payload=46.7MiB/s p50=315.5µs p95=452.1µs p99=614µs
+Quic codec=true 64MiB echo=1.322894s payload=48.4MiB/s p50=316µs p95=479.5µs p99=641µs
+=== base round 25 ===
+Tcp codec=false 64MiB echo=1.1447461s payload=55.9MiB/s p50=151.7µs p95=216.5µs p99=348.4µs
+Tcp codec=true 64MiB echo=1.7375802s payload=36.8MiB/s p50=413.5µs p95=550.5µs p99=622.5µs
+Quic codec=false 64MiB echo=1.1465531s payload=55.8MiB/s p50=258.3µs p95=399.3µs p99=488.9µs
+Quic codec=true 64MiB echo=1.2167269s payload=52.6MiB/s p50=290µs p95=442.2µs p99=540.4µs
+=== base round 26 ===
+Tcp codec=false 64MiB echo=889.8689ms payload=71.9MiB/s p50=141.9µs p95=232.8µs p99=368.9µs
+Tcp codec=true 64MiB echo=973.6762ms payload=65.7MiB/s p50=397.8µs p95=518.3µs p99=829.1µs
+Quic codec=false 64MiB echo=948.3079ms payload=67.5MiB/s p50=259µs p95=385.6µs p99=493.8µs
+Quic codec=true 64MiB echo=1.2029086s payload=53.2MiB/s p50=281.9µs p95=419.5µs p99=474.6µs
+=== refactored round 26 ===
+Tcp codec=false 64MiB echo=1.0975677s payload=58.3MiB/s p50=205.2µs p95=380.7µs p99=464.4µs
+Tcp codec=true 64MiB echo=1.6788497s payload=38.1MiB/s p50=412.1µs p95=629.5µs p99=921.1µs
+Quic codec=false 64MiB echo=1.1364891s payload=56.3MiB/s p50=300.4µs p95=442.4µs p99=558.3µs
+Quic codec=true 64MiB echo=1.2530556s payload=51.1MiB/s p50=312.9µs p95=516.7µs p99=716.3µs
+=== refactored round 27 ===
+Tcp codec=false 64MiB echo=915.7105ms payload=69.9MiB/s p50=142.9µs p95=238.4µs p99=359.4µs
+Tcp codec=true 64MiB echo=1.1778107s payload=54.3MiB/s p50=439.5µs p95=539.9µs p99=887.6µs
+Quic codec=false 64MiB echo=969.8797ms payload=66.0MiB/s p50=268.2µs p95=353.8µs p99=563.6µs
+Quic codec=true 64MiB echo=1.3321214s payload=48.0MiB/s p50=304µs p95=429.1µs p99=575.3µs
+=== base round 27 ===
+Tcp codec=false 64MiB echo=959.122ms payload=66.7MiB/s p50=149.8µs p95=221.7µs p99=380.4µs
+Tcp codec=true 64MiB echo=1.3771957s payload=46.5MiB/s p50=400.5µs p95=483µs p99=694.5µs
+Quic codec=false 64MiB echo=1.0448794s payload=61.3MiB/s p50=278.2µs p95=414.3µs p99=666.7µs
+Quic codec=true 64MiB echo=1.3905089s payload=46.0MiB/s p50=367.1µs p95=525.1µs p99=640µs
+=== base round 28 ===
+Tcp codec=false 64MiB echo=1.123402s payload=57.0MiB/s p50=217.3µs p95=310.4µs p99=511.8µs
+Tcp codec=true 64MiB echo=1.3261357s payload=48.3MiB/s p50=433µs p95=694.6µs p99=811.7µs
+Quic codec=false 64MiB echo=1.2253116s payload=52.2MiB/s p50=340.3µs p95=472.7µs p99=516µs
+Quic codec=true 64MiB echo=1.3530989s payload=47.3MiB/s p50=316.8µs p95=490.5µs p99=730.8µs
+=== refactored round 28 ===
+Tcp codec=false 64MiB echo=960.4606ms payload=66.6MiB/s p50=156µs p95=262.3µs p99=376.6µs
+Tcp codec=true 64MiB echo=1.0898595s payload=58.7MiB/s p50=394.1µs p95=573µs p99=902µs
+Quic codec=false 64MiB echo=982.2197ms payload=65.2MiB/s p50=276.1µs p95=400.3µs p99=544.6µs
+Quic codec=true 64MiB echo=1.3046374s payload=49.1MiB/s p50=342.3µs p95=479.3µs p99=553.8µs
+=== refactored round 29 ===
+Tcp codec=false 64MiB echo=1.5436664s payload=41.5MiB/s p50=163.6µs p95=315.1µs p99=398.2µs
+Tcp codec=true 64MiB echo=2.6495192s payload=24.2MiB/s p50=448.7µs p95=959.2µs p99=1.3144ms
+Quic codec=false 64MiB echo=1.1335795s payload=56.5MiB/s p50=364µs p95=524.1µs p99=754µs
+Quic codec=true 64MiB echo=1.2342905s payload=51.9MiB/s p50=315.2µs p95=463.2µs p99=539µs
+=== base round 29 ===
+Tcp codec=false 64MiB echo=1.0636431s payload=60.2MiB/s p50=206.2µs p95=322.7µs p99=526.7µs
+Tcp codec=true 64MiB echo=1.1977631s payload=53.4MiB/s p50=582.6µs p95=760.6µs p99=1.1293ms
+Quic codec=false 64MiB echo=1.2792635s payload=50.0MiB/s p50=391.6µs p95=540.8µs p99=660.4µs
+Quic codec=true 64MiB echo=1.3462051s payload=47.5MiB/s p50=305.3µs p95=438µs p99=962.3µs
+=== base round 30 ===
+Tcp codec=false 64MiB echo=1.0888032s payload=58.8MiB/s p50=188.2µs p95=321.7µs p99=505.8µs
+Tcp codec=true 64MiB echo=1.1133246s payload=57.5MiB/s p50=546.1µs p95=684.4µs p99=1.0336ms
+Quic codec=false 64MiB echo=1.3515508s payload=47.4MiB/s p50=313.9µs p95=449.4µs p99=650.3µs
+Quic codec=true 64MiB echo=1.1837812s payload=54.1MiB/s p50=291.9µs p95=423.9µs p99=550.1µs
+=== refactored round 30 ===
+Tcp codec=false 64MiB echo=1.3695033s payload=46.7MiB/s p50=180.4µs p95=262.6µs p99=442.4µs
+Tcp codec=true 64MiB echo=1.1649604s payload=54.9MiB/s p50=427.5µs p95=527.4µs p99=649.1µs
+Quic codec=false 64MiB echo=1.1351039s payload=56.4MiB/s p50=306.3µs p95=429.6µs p99=621µs
+Quic codec=true 64MiB echo=1.707847s payload=37.5MiB/s p50=276.5µs p95=426.1µs p99=721.6µs
+=== refactored round 31 ===
+Tcp codec=false 64MiB echo=2.2822738s payload=28.0MiB/s p50=294.4µs p95=469.1µs p99=707.4µs
+Tcp codec=true 64MiB echo=2.1189354s payload=30.2MiB/s p50=905.8µs p95=1.1565ms p99=1.3766ms
+Quic codec=false 64MiB echo=1.2158237s payload=52.6MiB/s p50=282.5µs p95=408.6µs p99=507.3µs
+Quic codec=true 64MiB echo=1.5505196s payload=41.3MiB/s p50=310.9µs p95=443.2µs p99=483.1µs
+=== base round 31 ===
+Tcp codec=false 64MiB echo=1.3937062s payload=45.9MiB/s p50=312µs p95=402.9µs p99=687.7µs
+Tcp codec=true 64MiB echo=1.5464549s payload=41.4MiB/s p50=448.4µs p95=555.1µs p99=956.2µs
+Quic codec=false 64MiB echo=1.0952325s payload=58.4MiB/s p50=293.2µs p95=426.4µs p99=522.2µs
+Quic codec=true 64MiB echo=1.3155693s payload=48.6MiB/s p50=336.6µs p95=558.3µs p99=703.4µs
+=== base round 32 ===
+Tcp codec=false 64MiB echo=1.1677261s payload=54.8MiB/s p50=170.5µs p95=245.9µs p99=375µs
+Tcp codec=true 64MiB echo=1.3068654s payload=49.0MiB/s p50=478.4µs p95=600.8µs p99=1.4814ms
+Quic codec=false 64MiB echo=1.1960185s payload=53.5MiB/s p50=296.9µs p95=428.9µs p99=483.7µs
+Quic codec=true 64MiB echo=1.3053451s payload=49.0MiB/s p50=311.4µs p95=456.9µs p99=550.5µs
+=== refactored round 32 ===
+Tcp codec=false 64MiB echo=1.3753207s payload=46.5MiB/s p50=212.5µs p95=287.1µs p99=384.3µs
+Tcp codec=true 64MiB echo=1.4300224s payload=44.8MiB/s p50=659µs p95=845.5µs p99=1.0291ms
+Quic codec=false 64MiB echo=1.2392995s payload=51.6MiB/s p50=423.3µs p95=572.7µs p99=653.3µs
+Quic codec=true 64MiB echo=1.3806873s payload=46.4MiB/s p50=310.6µs p95=426µs p99=496.3µs
+=== refactored round 33 ===
+Tcp codec=false 64MiB echo=1.787052s payload=35.8MiB/s p50=228.3µs p95=291.8µs p99=373.2µs
+Tcp codec=true 64MiB echo=1.4709114s payload=43.5MiB/s p50=848µs p95=1.2133ms p99=1.5467ms
+Quic codec=false 64MiB echo=1.1134277s payload=57.5MiB/s p50=346.7µs p95=495.7µs p99=774.4µs
+Quic codec=true 64MiB echo=1.595812s payload=40.1MiB/s p50=358.6µs p95=534.9µs p99=673.7µs
+=== base round 33 ===
+Tcp codec=false 64MiB echo=1.4861685s payload=43.1MiB/s p50=269.4µs p95=396.6µs p99=574.6µs
+Tcp codec=true 64MiB echo=2.2653664s payload=28.3MiB/s p50=725.1µs p95=1.0462ms p99=1.2073ms
+Quic codec=false 64MiB echo=1.1410853s payload=56.1MiB/s p50=312.1µs p95=444.6µs p99=551.5µs
+Quic codec=true 64MiB echo=1.5661282s payload=40.9MiB/s p50=472.2µs p95=624.8µs p99=2.2616ms
+=== base round 34 ===
+Tcp codec=false 64MiB echo=1.2169564s payload=52.6MiB/s p50=211.2µs p95=434.5µs p99=619.7µs
+Tcp codec=true 64MiB echo=1.8109444s payload=35.3MiB/s p50=476.6µs p95=658.3µs p99=810.5µs
+Quic codec=false 64MiB echo=1.1557628s payload=55.4MiB/s p50=268.2µs p95=415.7µs p99=573.5µs
+Quic codec=true 64MiB echo=1.1695567s payload=54.7MiB/s p50=312µs p95=457.9µs p99=531.9µs
+=== refactored round 34 ===
+Tcp codec=false 64MiB echo=975.9323ms payload=65.6MiB/s p50=152.6µs p95=237.2µs p99=393.1µs
+Tcp codec=true 64MiB echo=1.0017417s payload=63.9MiB/s p50=402.7µs p95=508.2µs p99=708.8µs
+Quic codec=false 64MiB echo=1.0760292s payload=59.5MiB/s p50=284.4µs p95=428.8µs p99=500.2µs
+Quic codec=true 64MiB echo=1.3755064s payload=46.5MiB/s p50=285.4µs p95=430.8µs p99=510.9µs
+=== refactored round 35 ===
+Tcp codec=false 64MiB echo=1.4660716s payload=43.7MiB/s p50=179.1µs p95=269.6µs p99=373.6µs
+Tcp codec=true 64MiB echo=1.5310176s payload=41.8MiB/s p50=444.8µs p95=578.2µs p99=852.8µs
+Quic codec=false 64MiB echo=1.1236778s payload=57.0MiB/s p50=244.9µs p95=396.4µs p99=493µs
+Quic codec=true 64MiB echo=1.3876505s payload=46.1MiB/s p50=287µs p95=409.2µs p99=576.3µs
+=== base round 35 ===
+Tcp codec=false 64MiB echo=1.3053965s payload=49.0MiB/s p50=162.3µs p95=250µs p99=351.5µs
+Tcp codec=true 64MiB echo=1.2836805s payload=49.9MiB/s p50=742.3µs p95=865.8µs p99=1.0529ms
+Quic codec=false 64MiB echo=1.3247517s payload=48.3MiB/s p50=390.3µs p95=597.3µs p99=8.4777ms
+Quic codec=true 64MiB echo=1.4078152s payload=45.5MiB/s p50=370.7µs p95=553.8µs p99=652.5µs
+=== base round 36 ===
+Tcp codec=false 64MiB echo=1.699488s payload=37.7MiB/s p50=272.3µs p95=386.4µs p99=520.7µs
+Tcp codec=true 64MiB echo=1.5803587s payload=40.5MiB/s p50=414.8µs p95=710.7µs p99=873.3µs
+Quic codec=false 64MiB echo=1.3252616s payload=48.3MiB/s p50=244.2µs p95=349.9µs p99=421.4µs
+Quic codec=true 64MiB echo=1.6682148s payload=38.4MiB/s p50=258.5µs p95=418.6µs p99=605.4µs
+=== refactored round 36 ===
+Tcp codec=false 64MiB echo=1.5118067s payload=42.3MiB/s p50=162.6µs p95=237.3µs p99=315.4µs
+Tcp codec=true 64MiB echo=833.0619ms payload=76.8MiB/s p50=353.2µs p95=454.7µs p99=569.4µs
+Quic codec=false 64MiB echo=954.2735ms payload=67.1MiB/s p50=280.3µs p95=427.8µs p99=601.4µs
+Quic codec=true 64MiB echo=1.1464942s payload=55.8MiB/s p50=268.3µs p95=364.4µs p99=460.6µs
+=== refactored round 37 ===
+Tcp codec=false 64MiB echo=840.5308ms payload=76.1MiB/s p50=181.2µs p95=287.8µs p99=430.5µs
+Tcp codec=true 64MiB echo=996.0141ms payload=64.3MiB/s p50=406µs p95=545.2µs p99=656µs
+Quic codec=false 64MiB echo=923.8521ms payload=69.3MiB/s p50=312.7µs p95=509.6µs p99=604.1µs
+Quic codec=true 64MiB echo=1.2562206s payload=50.9MiB/s p50=285.2µs p95=459.7µs p99=529.3µs
+=== base round 37 ===
+Tcp codec=false 64MiB echo=956.5104ms payload=66.9MiB/s p50=162.3µs p95=256.9µs p99=422.8µs
+Tcp codec=true 64MiB echo=1.1169109s payload=57.3MiB/s p50=355.5µs p95=513.8µs p99=844.2µs
+Quic codec=false 64MiB echo=927.7162ms payload=69.0MiB/s p50=275.2µs p95=411.2µs p99=493.7µs
+Quic codec=true 64MiB echo=1.353727s payload=47.3MiB/s p50=314.7µs p95=495.5µs p99=647µs
+=== base round 38 ===
+Tcp codec=false 64MiB echo=948.3267ms payload=67.5MiB/s p50=146µs p95=275.2µs p99=377.1µs
+Tcp codec=true 64MiB echo=1.2629844s payload=50.7MiB/s p50=374.4µs p95=505.5µs p99=674.4µs
+Quic codec=false 64MiB echo=976.0226ms payload=65.6MiB/s p50=297.2µs p95=455.1µs p99=560.4µs
+Quic codec=true 64MiB echo=1.4427812s payload=44.4MiB/s p50=292.1µs p95=488.1µs p99=562.9µs
+=== refactored round 38 ===
+Tcp codec=false 64MiB echo=1.4747738s payload=43.4MiB/s p50=263.8µs p95=382.8µs p99=535.3µs
+Tcp codec=true 64MiB echo=1.666209s payload=38.4MiB/s p50=599.1µs p95=938.6µs p99=1.0637ms
+Quic codec=false 64MiB echo=1.2233453s payload=52.3MiB/s p50=300.5µs p95=473.7µs p99=532.9µs
+Quic codec=true 64MiB echo=1.5231188s payload=42.0MiB/s p50=278.2µs p95=431.5µs p99=587.5µs
+=== refactored round 39 ===
+Tcp codec=false 64MiB echo=1.0065722s payload=63.6MiB/s p50=168.8µs p95=254.5µs p99=397.8µs
+Tcp codec=true 64MiB echo=1.1416003s payload=56.1MiB/s p50=387.9µs p95=466.4µs p99=651.7µs
+Quic codec=false 64MiB echo=1.0916863s payload=58.6MiB/s p50=317.1µs p95=469.3µs p99=640.2µs
+Quic codec=true 64MiB echo=1.6515327s payload=38.8MiB/s p50=338.6µs p95=539.9µs p99=840.3µs
+=== base round 39 ===
+Tcp codec=false 64MiB echo=1.956234s payload=32.7MiB/s p50=160.9µs p95=282.4µs p99=1.0707ms
+Tcp codec=true 64MiB echo=1.7188313s payload=37.2MiB/s p50=748.8µs p95=964.5µs p99=1.213ms
+Quic codec=false 64MiB echo=1.2079749s payload=53.0MiB/s p50=325.1µs p95=462.7µs p99=915.2µs
+Quic codec=true 64MiB echo=1.2072592s payload=53.0MiB/s p50=309.5µs p95=474.5µs p99=1.3651ms
+=== base round 40 ===
+Tcp codec=false 64MiB echo=928.1298ms payload=69.0MiB/s p50=189.3µs p95=330.2µs p99=445.3µs
+Tcp codec=true 64MiB echo=1.1313181s payload=56.6MiB/s p50=427.2µs p95=567.4µs p99=829.5µs
+Quic codec=false 64MiB echo=839.2678ms payload=76.3MiB/s p50=244.2µs p95=356.6µs p99=515.8µs
+Quic codec=true 64MiB echo=1.2370185s payload=51.7MiB/s p50=275.5µs p95=422.1µs p99=594.7µs
+=== refactored round 40 ===
+Tcp codec=false 64MiB echo=1.1391691s payload=56.2MiB/s p50=145.1µs p95=232.5µs p99=364.7µs
+Tcp codec=true 64MiB echo=1.3950507s payload=45.9MiB/s p50=392.7µs p95=568.9µs p99=716.3µs
+Quic codec=false 64MiB echo=1.2307849s payload=52.0MiB/s p50=274.3µs p95=375.1µs p99=558µs
+Quic codec=true 64MiB echo=1.3323824s payload=48.0MiB/s p50=355.7µs p95=538.3µs p99=608.1µs
+=== refactored round 41 ===
+Tcp codec=false 64MiB echo=1.3741683s payload=46.6MiB/s p50=150.6µs p95=289.9µs p99=358.2µs
+Tcp codec=true 64MiB echo=1.071456s payload=59.7MiB/s p50=487.2µs p95=632.1µs p99=894.1µs
+Quic codec=false 64MiB echo=1.2308391s payload=52.0MiB/s p50=411µs p95=580.8µs p99=655.5µs
+Quic codec=true 64MiB echo=1.3384549s payload=47.8MiB/s p50=301.7µs p95=455.5µs p99=642µs
+=== base round 41 ===
+Tcp codec=false 64MiB echo=1.8526959s payload=34.5MiB/s p50=169µs p95=287µs p99=374.3µs
+Tcp codec=true 64MiB echo=1.7956505s payload=35.6MiB/s p50=445.5µs p95=602.9µs p99=846.8µs
+Quic codec=false 64MiB echo=1.0735741s payload=59.6MiB/s p50=251.7µs p95=400.8µs p99=454.8µs
+Quic codec=true 64MiB echo=1.3163851s payload=48.6MiB/s p50=283.1µs p95=401.8µs p99=479.6µs
+=== base round 42 ===
+Tcp codec=false 64MiB echo=1.274812s payload=50.2MiB/s p50=175.7µs p95=352.1µs p99=543.7µs
+Tcp codec=true 64MiB echo=1.4623557s payload=43.8MiB/s p50=397.2µs p95=477.8µs p99=554.4µs
+Quic codec=false 64MiB echo=1.2156598s payload=52.6MiB/s p50=295.7µs p95=447.6µs p99=521.1µs
+Quic codec=true 64MiB echo=1.2950075s payload=49.4MiB/s p50=306.3µs p95=435.1µs p99=578.9µs
+=== refactored round 42 ===
+Tcp codec=false 64MiB echo=1.4446556s payload=44.3MiB/s p50=219.3µs p95=323.2µs p99=463.7µs
+Tcp codec=true 64MiB echo=2.073534s payload=30.9MiB/s p50=478.1µs p95=1.0677ms p99=1.9544ms
+Quic codec=false 64MiB echo=1.2056375s payload=53.1MiB/s p50=279.1µs p95=414.3µs p99=566.8µs
+Quic codec=true 64MiB echo=1.404716s payload=45.6MiB/s p50=379.1µs p95=521.6µs p99=678.5µs
+=== refactored round 43 ===
+Tcp codec=false 64MiB echo=1.3311412s payload=48.1MiB/s p50=265.9µs p95=356.5µs p99=578.6µs
+Tcp codec=true 64MiB echo=1.2843241s payload=49.8MiB/s p50=447.7µs p95=649.5µs p99=806.4µs
+Quic codec=false 64MiB echo=1.0162002s payload=63.0MiB/s p50=344.9µs p95=514.9µs p99=4.8052ms
+Quic codec=true 64MiB echo=1.2228322s payload=52.3MiB/s p50=310.8µs p95=451µs p99=574.5µs
+=== base round 43 ===
+Tcp codec=false 64MiB echo=1.1371529s payload=56.3MiB/s p50=204.8µs p95=260.7µs p99=354.5µs
+Tcp codec=true 64MiB echo=1.4025142s payload=45.6MiB/s p50=425.8µs p95=527.3µs p99=772.6µs
+Quic codec=false 64MiB echo=1.0261993s payload=62.4MiB/s p50=283.3µs p95=430.5µs p99=555.3µs
+Quic codec=true 64MiB echo=1.2764571s payload=50.1MiB/s p50=291.7µs p95=416.9µs p99=532.3µs
+=== base round 44 ===
+Tcp codec=false 64MiB echo=906.8687ms payload=70.6MiB/s p50=188.1µs p95=266.3µs p99=481.6µs
+Tcp codec=true 64MiB echo=1.1456279s payload=55.9MiB/s p50=417.7µs p95=478.1µs p99=737.4µs
+Quic codec=false 64MiB echo=908.126ms payload=70.5MiB/s p50=279.2µs p95=427.9µs p99=514.6µs
+Quic codec=true 64MiB echo=1.1804539s payload=54.2MiB/s p50=307.7µs p95=459.2µs p99=651.8µs
+=== refactored round 44 ===
+Tcp codec=false 64MiB echo=1.3865916s payload=46.2MiB/s p50=165.1µs p95=280.5µs p99=389.7µs
+Tcp codec=true 64MiB echo=1.1891991s payload=53.8MiB/s p50=453.2µs p95=712µs p99=899.3µs
+Quic codec=false 64MiB echo=979.5023ms payload=65.3MiB/s p50=241.9µs p95=358.9µs p99=466.4µs
+Quic codec=true 64MiB echo=1.1310185s payload=56.6MiB/s p50=284.2µs p95=441.6µs p99=655µs
+=== refactored round 45 ===
+Tcp codec=false 64MiB echo=988.3559ms payload=64.8MiB/s p50=146.7µs p95=275.4µs p99=356.6µs
+Tcp codec=true 64MiB echo=1.2058079s payload=53.1MiB/s p50=477.4µs p95=604.5µs p99=732.9µs
+Quic codec=false 64MiB echo=1.0102978s payload=63.3MiB/s p50=304.2µs p95=439.9µs p99=488.9µs
+Quic codec=true 64MiB echo=1.2587982s payload=50.8MiB/s p50=270.9µs p95=393µs p99=515.7µs
+=== base round 45 ===
+Tcp codec=false 64MiB echo=1.020415s payload=62.7MiB/s p50=144.7µs p95=241.3µs p99=340.8µs
+Tcp codec=true 64MiB echo=1.4408932s payload=44.4MiB/s p50=492.9µs p95=741.5µs p99=852.6µs
+Quic codec=false 64MiB echo=1.0697224s payload=59.8MiB/s p50=220.4µs p95=275.5µs p99=432.8µs
+Quic codec=true 64MiB echo=1.1926539s payload=53.7MiB/s p50=282.6µs p95=358.9µs p99=534.4µs
+=== base round 46 ===
+Tcp codec=false 64MiB echo=985.2168ms payload=65.0MiB/s p50=185.9µs p95=300µs p99=446.5µs
+Tcp codec=true 64MiB echo=1.3624665s payload=47.0MiB/s p50=384.4µs p95=485.4µs p99=743.7µs
+Quic codec=false 64MiB echo=1.1673594s payload=54.8MiB/s p50=282.7µs p95=347.3µs p99=443.3µs
+Quic codec=true 64MiB echo=1.2980691s payload=49.3MiB/s p50=273.4µs p95=397µs p99=517.2µs
+=== refactored round 46 ===
+Tcp codec=false 64MiB echo=1.1476159s payload=55.8MiB/s p50=262.9µs p95=440.4µs p99=602.1µs
+Tcp codec=true 64MiB echo=1.4520637s payload=44.1MiB/s p50=398.7µs p95=536µs p99=766.6µs
+Quic codec=false 64MiB echo=1.0976551s payload=58.3MiB/s p50=237.4µs p95=328.8µs p99=426.8µs
+Quic codec=true 64MiB echo=1.1899711s payload=53.8MiB/s p50=255.2µs p95=444.6µs p99=674.9µs
+=== refactored round 47 ===
+Tcp codec=false 64MiB echo=1.0068392s payload=63.6MiB/s p50=209µs p95=311.2µs p99=497.7µs
+Tcp codec=true 64MiB echo=1.2396252s payload=51.6MiB/s p50=356.7µs p95=440.9µs p99=562.8µs
+Quic codec=false 64MiB echo=1.0017674s payload=63.9MiB/s p50=237.9µs p95=336.6µs p99=477.2µs
+Quic codec=true 64MiB echo=1.2156587s payload=52.6MiB/s p50=245.7µs p95=411.1µs p99=535.2µs
+=== base round 47 ===
+Tcp codec=false 64MiB echo=1.2443824s payload=51.4MiB/s p50=178.8µs p95=283.3µs p99=387.8µs
+Tcp codec=true 64MiB echo=1.1972016s payload=53.5MiB/s p50=419.6µs p95=587µs p99=818.6µs
+Quic codec=false 64MiB echo=1.102318s payload=58.1MiB/s p50=239.2µs p95=366.9µs p99=1.101ms
+Quic codec=true 64MiB echo=1.2847352s payload=49.8MiB/s p50=243.1µs p95=318.3µs p99=472.3µs
+=== base round 48 ===
+Tcp codec=false 64MiB echo=1.2905042s payload=49.6MiB/s p50=159.7µs p95=225.2µs p99=368µs
+Tcp codec=true 64MiB echo=1.3120939s payload=48.8MiB/s p50=682.1µs p95=803.4µs p99=1.1467ms
+Quic codec=false 64MiB echo=1.2917749s payload=49.5MiB/s p50=236.4µs p95=321.1µs p99=460µs
+Quic codec=true 64MiB echo=1.7342481s payload=36.9MiB/s p50=357.2µs p95=444.9µs p99=803.3µs
+=== refactored round 48 ===
+Tcp codec=false 64MiB echo=1.5386573s payload=41.6MiB/s p50=282.3µs p95=492.3µs p99=626.1µs
+Tcp codec=true 64MiB echo=2.2874757s payload=28.0MiB/s p50=450.9µs p95=597.8µs p99=1.3102ms
+Quic codec=false 64MiB echo=1.0656598s payload=60.1MiB/s p50=261.8µs p95=402.9µs p99=664.3µs
+Quic codec=true 64MiB echo=1.1088871s payload=57.7MiB/s p50=236µs p95=283.3µs p99=492.7µs
+=== refactored round 49 ===
+Tcp codec=false 64MiB echo=1.0682902s payload=59.9MiB/s p50=170.4µs p95=251.1µs p99=393.3µs
+Tcp codec=true 64MiB echo=1.6356901s payload=39.1MiB/s p50=432.8µs p95=580µs p99=810.3µs
+Quic codec=false 64MiB echo=1.2247084s payload=52.3MiB/s p50=264.3µs p95=429.7µs p99=607.2µs
+Quic codec=true 64MiB echo=1.7003804s payload=37.6MiB/s p50=289.9µs p95=519.5µs p99=587.7µs
+=== base round 49 ===
+Tcp codec=false 64MiB echo=1.5363213s payload=41.7MiB/s p50=158µs p95=266.4µs p99=461µs
+Tcp codec=true 64MiB echo=966.8675ms payload=66.2MiB/s p50=438.5µs p95=666.9µs p99=834.8µs
+Quic codec=false 64MiB echo=1.0110892s payload=63.3MiB/s p50=252.4µs p95=359.9µs p99=501.7µs
+Quic codec=true 64MiB echo=1.1439048s payload=55.9MiB/s p50=235.9µs p95=296.8µs p99=402.1µs

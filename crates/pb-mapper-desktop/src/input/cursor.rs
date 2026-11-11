@@ -1,6 +1,16 @@
 //! Pointer metadata, confined to the selected display.
 
-use crate::{CursorPosition, Display};
+use crate::Display;
+use serde::{Deserialize, Serialize};
+
+/// Generic pointer hotspot in physical pixels relative to the selected display.
+/// This is position/visibility metadata, not the operating system's cursor image.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorPosition {
+    pub x: i32,
+    pub y: i32,
+    pub visible: bool,
+}
 
 /// The pointer at `(x, y)`, absolute physical virtual-desktop pixels, relative
 /// to `display`. A hidden pointer, or one on another display, reports nothing:

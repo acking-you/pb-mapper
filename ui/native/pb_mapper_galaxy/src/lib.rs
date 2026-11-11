@@ -301,11 +301,16 @@ impl DecodedScene {
                     layer.buckets.capacity() * std::mem::size_of::<(f64, std::ops::Range<usize>)>()
                 })
                 .sum::<usize>();
-        if bytes > 1 << 20 {
+        if bytes > SCRATCH_LIMIT_BYTES {
             *self = Self::default();
         }
     }
 }
+
+/// The most the decoding storage, and separately the frame's temporaries, keep
+/// between frames; past it they start afresh, so an unusually large scene does
+/// not stay that large.
+const SCRATCH_LIMIT_BYTES: usize = 1 << 20;
 
 /// A live tunnel: from a planet to a body.
 #[derive(Clone, Copy, Debug)]
@@ -337,6 +342,12 @@ impl<'a> Fields<'a> {
         self.at += n;
         Some(slice)
     }
+
+    /// The next `N` fields, for the caller to destructure: a pattern of the
+    /// wrong length does not compile.
+    fn take_array<const N: usize>(&mut self) -> Option<&'a [f64; N]> {
+        self.take(N)?.try_into().ok()
+    }
 }
 
 impl<'a> Scene<'a> {
@@ -351,55 +362,72 @@ impl<'a> Scene<'a> {
         systems.clear();
         planets.clear();
         links.clear();
-        if raw.len() < 5 || raw[0] != VERSION {
+        let mut fields = Fields { raw, at: 0 };
+        let &[version, n_systems, n_planets, n_links, n_layers] = fields.take_array()?;
+        if version != VERSION {
             return None;
         }
         let limit = raw.len();
-        let (n_systems, n_planets) = (count(raw[1], limit)?, count(raw[2], limit)?);
-        let (n_links, n_layers) = (count(raw[3], limit)?, count(raw[4], limit)?);
-        let mut fields = Fields { raw, at: 5 };
+        let (n_systems, n_planets) = (count(n_systems, limit)?, count(n_planets, limit)?);
+        let (n_links, n_layers) = (count(n_links, limit)?, count(n_layers, limit)?);
         for _ in 0..n_systems {
-            let f = fields.take(SYSTEM_FIELDS)?;
+            let &[x, y, z, home, online, first, len, label_width, label_height] =
+                fields.take_array::<SYSTEM_FIELDS>()?;
             systems.push(System {
-                position: V3::new(f[0], f[1], f[2]),
-                home: f[3] != 0.0,
-                online: f[4] != 0.0,
-                first: count(f[5], n_planets)?,
-                count: count(f[6], n_planets)?,
-                label: (f[7], f[8]),
+                position: V3::new(x, y, z),
+                home: home != 0.0,
+                online: online != 0.0,
+                first: count(first, n_planets)?,
+                count: count(len, n_planets)?,
+                label: (label_width, label_height),
             });
         }
         for _ in 0..n_planets {
-            let f = fields.take(PLANET_FIELDS)?;
+            let &[
+                system,
+                ring,
+                radius,
+                phase,
+                period,
+                size,
+                tilt_axis,
+                tilt,
+                appeared,
+                rippled,
+                label_width,
+                label_height,
+                strong_width,
+                strong_height,
+            ] = fields.take_array::<PLANET_FIELDS>()?;
             planets.push(Planet {
-                system: count(f[0], n_systems.checked_sub(1)?)?,
-                ring: f[1] as i64,
-                radius: f[2],
-                phase: f[3],
-                period: f[4],
-                size: f[5],
-                tilt_axis: f[6],
-                tilt: f[7],
-                appeared: f[8],
-                rippled: f[9],
-                label: (f[10], f[11]),
-                strong: (f[12], f[13]),
+                system: count(system, n_systems.checked_sub(1)?)?,
+                ring: ring as i64,
+                radius,
+                phase,
+                period,
+                size,
+                tilt_axis,
+                tilt,
+                appeared,
+                rippled,
+                label: (label_width, label_height),
+                strong: (strong_width, strong_height),
             });
         }
         if systems.iter().any(|s| s.first + s.count > n_planets) {
             return None;
         }
         for _ in 0..n_links {
-            let f = fields.take(3)?;
+            let &[from, to, direct] = fields.take_array()?;
             links.push(Link {
-                from: count(f[0], n_planets.checked_sub(1)?)?,
-                to: count(f[1], (n_systems + n_planets).checked_sub(1)?)?,
-                direct: f[2] != 0.0,
+                from: count(from, n_planets.checked_sub(1)?)?,
+                to: count(to, (n_systems + n_planets).checked_sub(1)?)?,
+                direct: direct != 0.0,
             });
         }
         for index in 0..n_layers {
-            let head = fields.take(2)?;
-            let (parallax, n_buckets) = (head[0], count(head[1], limit)?);
+            let &[parallax, n_buckets] = fields.take_array()?;
+            let n_buckets = count(n_buckets, limit)?;
             if index == layers.len() {
                 layers.push(StarLayer {
                     parallax,
@@ -410,11 +438,11 @@ impl<'a> Scene<'a> {
             layer.parallax = parallax;
             layer.buckets.clear();
             for _ in 0..n_buckets {
-                let bucket = fields.take(2)?;
-                let points = count(bucket[1], limit)?;
+                let &[phase, points] = fields.take_array()?;
+                let points = count(points, limit)?;
                 let start = fields.at;
                 fields.take(points.checked_mul(2)?)?;
-                layer.buckets.push((bucket[0], start..fields.at));
+                layer.buckets.push((phase, start..fields.at));
             }
         }
         Some(Self {
@@ -451,23 +479,36 @@ impl Frame {
     /// Decodes `raw`, or nothing when it is malformed.
     fn decode(raw: &[f64]) -> Option<Self> {
         let f: &[f64; FRAME_FIELDS] = raw.try_into().ok()?;
+        let &[
+            width,
+            height,
+            yaw,
+            tilt,
+            distance,
+            x,
+            y,
+            z,
+            time,
+            still,
+            selected,
+            hovered,
+            focused,
+        ] = f;
         let frame = Self {
-            width: f[0],
-            height: f[1],
-            yaw: f[2],
-            tilt: f[3],
-            distance: f[4],
-            target: V3::new(f[5], f[6], f[7]),
-            time: f[8],
-            still: f[9] != 0.0,
-            selected: f[10] as i64,
-            hovered: f[11] as i64,
-            focused: f[12] as i64,
+            width,
+            height,
+            yaw,
+            tilt,
+            distance,
+            target: V3::new(x, y, z),
+            time,
+            still: still != 0.0,
+            selected: selected as i64,
+            hovered: hovered as i64,
+            focused: focused as i64,
         };
-        let usable = frame.width > 0.0
-            && frame.height > 0.0
-            && f[..10].iter().all(|v| v.is_finite())
-            && frame.distance > 0.0;
+        let usable =
+            width > 0.0 && height > 0.0 && f[..10].iter().all(|v| v.is_finite()) && distance > 0.0;
         usable.then_some(frame)
     }
 
@@ -668,6 +709,11 @@ fn orbit_point(
     }
 }
 
+/// The most guide circles the plane draws. A scene the app lays out reaches a
+/// few hundred units at most, well inside it; past it, a scene with an
+/// enormous or infinite coordinate still costs a bounded frame.
+const MAX_GUIDES: usize = 1024;
+
 fn plane(scene: &Scene, camera: &Camera, out: &mut Out, circle: &[(f64, f64); 97]) {
     if scene.systems.is_empty() {
         for _ in 0..6 {
@@ -720,7 +766,7 @@ fn plane(scene: &Scene, camera: &Camera, out: &mut Out, circle: &[(f64, f64); 97
     let guides = out.hole();
     let mut n = 0;
     let mut r = 2.6;
-    while r < reach {
+    while r < reach && n < MAX_GUIDES {
         out.push(1.0 - r / (reach * 1.15));
         runs(
             camera,

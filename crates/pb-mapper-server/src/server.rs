@@ -6,144 +6,112 @@ use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use super::error::{
-    ServerConnCreateHeaderToolSnafu, ServerConnDecodeStreamRequestSnafu,
-    ServerConnEncodeRegisterRespSnafu, ServerConnRecvConnTaskSnafu,
+    ServerConnCreateHeaderToolSnafu, ServerConnEncodeRegisterRespSnafu,
+    ServerConnEncodeStreamRequestSnafu, ServerConnRecvConnTaskSnafu,
     ServerConnRecvServerRegisteredRespSnafu, ServerConnRegisteredRespNotMatchSnafu,
-    ServerConnSendRegisterSnafu, ServerConnSendStreamAckSnafu, ServerConnWritePongRespSnafu,
-    ServerConnWriteRegisteredOkSnafu, ServerConnWriteStreamRequestSnafu,
+    ServerConnSendControlTaskSnafu, ServerConnSendRegisterSnafu, ServerConnWritePongRespSnafu,
+    ServerConnWriteRegisterRespSnafu, ServerConnWriteStreamRequestSnafu,
 };
 use super::{ConnTask, ConnTaskReceiver, ImutableKey, ManagerTask, ManagerTaskSender, Result};
+use crate::guard::{ConnLease, Deregistration};
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::command::{
     CONTROL_PROTOCOL_V2, LocalServer, MessageSerializer, PbConnResponse, PbServerRequest,
 };
+use pb_mapper_protocol::direct::DirectCapability;
 use pb_mapper_protocol::secure::ServerHeaderSession;
 use pb_mapper_protocol::{MessageReader, MessageWriter};
 
-/// Ensure that server-side connections are properly deregistered before a normal connection is
-/// disconnected or an exception occurs
-struct ServerConnGuard {
+/// A registered control connection, returned to the manager when its socket
+/// task ends, however it ends.
+struct ServerDeregistration {
     key: ImutableKey,
     conn_id: RemoteConnId,
-    sender: ManagerTaskSender,
-    active: bool,
 }
 
-impl ServerConnGuard {
-    fn new(key: ImutableKey, conn_id: RemoteConnId, sender: ManagerTaskSender) -> Self {
-        Self {
-            key,
-            conn_id,
-            sender,
-            active: true,
-        }
-    }
-
-    fn deregister_task(&self) -> ManagerTask {
+impl Deregistration for ServerDeregistration {
+    fn task(&self) -> ManagerTask {
         ManagerTask::DeRegisterServerConn {
             key: self.key.clone(),
             conn_id: self.conn_id,
         }
     }
 
-    async fn deregister(&mut self) {
-        if !self.active {
-            return;
-        }
-        let task = self.deregister_task();
-        match self.sender.send(task).await {
-            Ok(()) => {
-                self.active = false;
-                tracing::info!(
-                    "Server conn deregistered! key:{} conn_id:{}",
-                    self.key,
-                    self.conn_id
-                );
-            }
-            Err(_) => {
-                self.active = false;
-                tracing::debug!(
-                    "skip async deregister because manager channel is closed: key:{} conn_id:{}",
-                    self.key,
-                    self.conn_id
-                );
-            }
-        }
+    fn sent(&self) {
+        tracing::info!(
+            "Server conn deregistered! key:{} conn_id:{}",
+            self.key,
+            self.conn_id
+        );
     }
 
-    fn spawn_deregister(sender: ManagerTaskSender, task: ManagerTask) {
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    if sender.send(task).await.is_err() {
-                        tracing::debug!(
-                            "skip deferred deregister because manager channel is closed"
-                        );
-                    }
-                });
-            }
-            Err(_) => {
-                tracing::warn!("cannot defer deregister because no Tokio runtime is available");
-            }
-        }
+    fn manager_closed(&self) {
+        tracing::debug!(
+            "skip async deregister because manager channel is closed: key:{} conn_id:{}",
+            self.key,
+            self.conn_id
+        );
     }
-}
 
-impl Drop for ServerConnGuard {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        let task = self.deregister_task();
-        match self.sender.try_send(task) {
-            Ok(()) => {
-                tracing::info!(
-                    "Server conn drop! key:{} conn_id:{}",
-                    self.key,
-                    self.conn_id
-                );
-            }
-            Err(kanal::SendTimeoutError::Closed(_)) => {
-                tracing::debug!(
-                    "skip deregister on drop because manager channel is closed: key:{} conn_id:{}",
-                    self.key,
-                    self.conn_id
-                );
-            }
-            Err(kanal::SendTimeoutError::Timeout(task)) => {
-                tracing::warn!(
-                    "manager queue is full; defer server deregister: key:{} conn_id:{}",
-                    self.key,
-                    self.conn_id
-                );
-                Self::spawn_deregister(self.sender.clone(), task);
-            }
-        }
+    fn dropped_sent(&self) {
+        tracing::info!(
+            "Server conn drop! key:{} conn_id:{}",
+            self.key,
+            self.conn_id
+        );
+    }
+
+    fn dropped_manager_closed(&self) {
+        tracing::debug!(
+            "skip deregister on drop because manager channel is closed: key:{} conn_id:{}",
+            self.key,
+            self.conn_id
+        );
+    }
+
+    fn dropped_queue_full(&self) {
+        tracing::warn!(
+            "manager queue is full; defer server deregister: key:{} conn_id:{}",
+            self.key,
+            self.conn_id
+        );
+    }
+
+    fn deferred_manager_closed() {
+        tracing::debug!("skip deferred deregister because manager channel is closed");
+    }
+
+    fn no_runtime() {
+        tracing::warn!("cannot defer deregister because no Tokio runtime is available");
     }
 }
 
 const DEFAULT_SERVER_CHAN_CAP: usize = 32 * 4;
 /// Idle threshold for a protocol-v1 registration, which has no lease to renew.
-///
-/// Must be greater than the local server ping interval (5 minutes). Equal values race
-/// under scheduler/network jitter and can drop a healthy registration.
 pub(super) const LEGACY_SERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 11);
+/// How often a protocol-v1 local server pings its registration.
+const LEGACY_PING_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-enum ServerControlWrite {
-    Pong(Vec<u8>),
-}
+const _: () = assert!(
+    LEGACY_SERVER_IDLE_TIMEOUT.as_secs() > LEGACY_PING_INTERVAL.as_secs(),
+    "equal values race under scheduler and network jitter and drop a healthy registration"
+);
+
+/// Pongs the reader may queue for the writer before a registration is dropped.
+const CONTROL_WRITE_QUEUE: usize = 64;
 
 pub struct ServerRegistration {
     pub key: ImutableKey,
     pub need_codec: bool,
     pub is_datagram: bool,
     pub protocol_version: u16,
-    pub conn_id: RemoteConnId,
+    pub lease: ConnLease,
     pub direct: Option<pb_mapper_auth::AuthContext>,
 }
 
-/// Maintaining a connection to the server.
-/// This connection is used to send channel request
+/// Serve one registered service's control connection: register it with the
+/// manager, answer with what the manager granted, then carry control frames
+/// both ways until the connection ends or is retired.
 #[instrument(skip(registration, task_sender, conn, session))]
 pub async fn handle_server_conn(
     registration: ServerRegistration,
@@ -156,9 +124,16 @@ pub async fn handle_server_conn(
         need_codec,
         is_datagram,
         protocol_version,
-        conn_id,
+        lease,
         direct,
     } = registration;
+    let conn_id = lease.conn_id();
+    // Taken over before the registration is sent, so that whichever way this
+    // ends, what it registered goes with its ID.
+    let mut guard = lease.hand_to(ServerDeregistration {
+        key: key.clone(),
+        conn_id,
+    });
     let (tx, rx) = kanal::bounded_async(DEFAULT_SERVER_CHAN_CAP);
     // Handed to the manager so a retirement can cancel this connection's socket
     // directly. Queuing `ConnTask::Retire` is not enough on its own: the writer
@@ -166,7 +141,7 @@ pub async fn handle_server_conn(
     // reading leaves it blocked inside one.
     let retire_token = CancellationToken::new();
 
-    // register metadate
+    // Tell the manager what this connection serves.
     task_sender
         .send(ManagerTask::Register {
             key: key.clone(),
@@ -179,7 +154,6 @@ pub async fn handle_server_conn(
             direct,
         })
         .await
-        .map_err(|_| kanal::SendError(()))
         .context(ServerConnSendRegisterSnafu {
             key: key.clone(),
             conn_id,
@@ -193,7 +167,6 @@ pub async fn handle_server_conn(
         "server register task sent to manager"
     );
 
-    let mut guard = ServerConnGuard::new(key.clone(), conn_id, task_sender.clone());
     let result = async {
         let response = rx
             .recv()
@@ -202,162 +175,39 @@ pub async fn handle_server_conn(
                 key: key.clone(),
                 conn_id,
             })?;
-
-        let ConnTask::RegisterResp {
-            generation,
-            protocol_version,
-            lease_ttl_ms,
-            direct,
-        } = response
-        else {
-            if let ConnTask::RegisterFailed {
+        let registered = match response {
+            ConnTask::RegisterResp {
+                generation,
+                protocol_version,
+                lease_ttl_ms,
+                direct,
+            } => Registered {
+                key: key.clone(),
+                conn_id,
+                need_codec,
+                is_datagram,
+                generation,
+                protocol_version,
+                lease_ttl_ms,
+                direct,
+            },
+            ConnTask::RegisterFailed {
                 code,
                 reason,
                 retryable,
-            } = response
-            {
-                let response = PbConnResponse::error(code, reason, retryable)
-                    .encode()
-                    .context(ServerConnEncodeRegisterRespSnafu {
-                        key: key.clone(),
-                        conn_id,
-                    })?;
-                let mut writer = session
-                    .response_writer(&mut conn)
-                    .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
-                writer
-                    .write_msg(&response)
-                    .await
-                    .context(ServerConnWriteRegisteredOkSnafu {
-                        key: key.clone(),
-                        conn_id,
-                    })?;
-                return Ok(());
+            } => {
+                let refusal = PbConnResponse::error(code, reason, retryable);
+                return write_register_refusal(&mut conn, &session, refusal, &key, conn_id).await;
             }
-            ServerConnRegisteredRespNotMatchSnafu {
-                key: key.clone(),
-                conn_id,
-            }
-            .fail()?
-        };
-        tracing::debug!(
-            event = "server_register_ack_received",
-            key = %key,
-            conn_id = %conn_id,
-            generation,
-            protocol_version,
-            "server register ack received from manager"
-        );
-
-        let (mut reader, mut writer) = conn.into_split();
-        let mut msg_reader = session
-            .continuation_reader(&mut reader)
-            .context(ServerConnCreateHeaderToolSnafu { tool: "reader" })?;
-        // Keep one header writer for the register response and all later control frames. The
-        // encrypted header codec is stateful; recreating it between frames breaks peer decoding.
-        let register_response = if protocol_version >= CONTROL_PROTOCOL_V2 {
-            PbConnResponse::RegisterV2 {
-                conn_id: conn_id.into(),
-                generation,
-                lease_ttl_ms,
-                direct,
-            }
-        } else {
-            PbConnResponse::Register(conn_id.into())
-        }
-        .encode()
-        .context(ServerConnEncodeRegisterRespSnafu {
-            key: key.clone(),
-            conn_id,
-        })?;
-        let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<ServerControlWrite>(64);
-        let writer_key = key.clone();
-        let writer_retire_token = retire_token.clone();
-        let mut writer_handle =
-            tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-                let mut msg_writer = session
-                    .response_writer(&mut writer)
-                    .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
-                msg_writer.write_msg(&register_response).await.context(
-                    ServerConnWriteRegisteredOkSnafu {
-                        key: writer_key.clone(),
-                        conn_id,
-                    },
-                )?;
-                tracing::info!(
-                    event = "server_register_response_written",
-                    key = %writer_key,
-                    conn_id = %conn_id,
-                    need_codec,
-                    is_datagram,
-                    generation,
-                    protocol_version,
-                    lease_ttl_ms,
-                    "server register response written to local server"
-                );
-                run_control_writer(
-                    &mut msg_writer,
-                    &rx,
-                    &mut write_rx,
-                    &writer_retire_token,
-                    writer_key,
+            _ => {
+                return ServerConnRegisteredRespNotMatchSnafu {
+                    key: key.clone(),
                     conn_id,
-                )
-                .await
-            }));
-
-        let reader_result = async {
-            loop {
-                let idle_timeout = crate::server_conn_idle_timeout(protocol_version);
-                let msg = match tokio::time::timeout(idle_timeout, msg_reader.read_msg()).await {
-                    Ok(Ok(msg)) => msg,
-                    Ok(Err(e)) => {
-                        tracing::error!(
-                            event = "server_conn_control_read_failed",
-                            key = %key,
-                            conn_id = %conn_id,
-                            error = %snafu::Report::from_error(e),
-                            "server connection control read failed"
-                        );
-                        break Ok(());
-                    }
-                    Err(_) => {
-                        tracing::error!(
-                            event = "server_conn_idle_timeout",
-                            key = %key,
-                            conn_id = %conn_id,
-                            timeout = ?idle_timeout,
-                            protocol_version,
-                            "server connection idle timeout triggered"
-                        );
-                        break Ok(());
-                    }
-                };
-                handle_control_message(msg, &write_tx, task_sender.clone(), key.clone(), conn_id)
-                    .await?;
+                }
+                .fail();
             }
         };
-
-        let result = tokio::select! {
-            result = reader_result => result,
-            result = &mut writer_handle => match result {
-                Ok(result) => result,
-                Err(e) => {
-                    tracing::warn!(
-                        event = "server_conn_writer_join_failed",
-                        key = %key,
-                        conn_id = %conn_id,
-                        error = %e,
-                        "server connection writer task failed"
-                    );
-                    Ok(())
-                }
-            },
-        };
-        if !writer_handle.is_finished() {
-            writer_handle.abort();
-        }
-        result
+        serve_registered(registered, conn, session, rx, retire_token, &task_sender).await
     }
     .await;
     match &result {
@@ -379,12 +229,186 @@ pub async fn handle_server_conn(
     result
 }
 
+/// Tell the local server why the manager refused its registration.
+async fn write_register_refusal(
+    conn: &mut RelayStream,
+    session: &ServerHeaderSession,
+    refusal: PbConnResponse,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+) -> Result<()> {
+    let refusal = refusal
+        .encode()
+        .context(ServerConnEncodeRegisterRespSnafu {
+            key: key.clone(),
+            conn_id,
+        })?;
+    let mut writer = session
+        .response_writer(conn)
+        .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
+    writer
+        .write_msg(&refusal)
+        .await
+        .context(ServerConnWriteRegisterRespSnafu {
+            key: key.clone(),
+            conn_id,
+        })
+}
+
+/// A registration as the manager accepted it: what the local server asked
+/// for, and what the manager granted.
+struct Registered {
+    key: ImutableKey,
+    conn_id: RemoteConnId,
+    need_codec: bool,
+    is_datagram: bool,
+    generation: u64,
+    protocol_version: u16,
+    lease_ttl_ms: u64,
+    direct: Option<DirectCapability>,
+}
+
+/// Answer an accepted registration, then read its control frames here while a
+/// task of its own writes to it, until either side ends.
+async fn serve_registered(
+    registered: Registered,
+    conn: RelayStream,
+    session: ServerHeaderSession,
+    rx: ConnTaskReceiver,
+    retire_token: CancellationToken,
+    task_sender: &ManagerTaskSender,
+) -> Result<()> {
+    let Registered {
+        key,
+        conn_id,
+        need_codec,
+        is_datagram,
+        generation,
+        protocol_version,
+        lease_ttl_ms,
+        direct,
+    } = registered;
+    tracing::debug!(
+        event = "server_register_ack_received",
+        key = %key,
+        conn_id = %conn_id,
+        generation,
+        protocol_version,
+        "server register ack received from manager"
+    );
+
+    let (mut reader, mut writer) = conn.into_split();
+    let mut msg_reader = session
+        .continuation_reader(&mut reader)
+        .context(ServerConnCreateHeaderToolSnafu { tool: "reader" })?;
+    // Keep one header writer for the register response and all later control frames. The
+    // encrypted header codec is stateful; recreating it between frames breaks peer decoding.
+    let register_response = if protocol_version >= CONTROL_PROTOCOL_V2 {
+        PbConnResponse::RegisterV2 {
+            conn_id: conn_id.into(),
+            generation,
+            lease_ttl_ms,
+            direct,
+        }
+    } else {
+        PbConnResponse::Register(conn_id.into())
+    }
+    .encode()
+    .context(ServerConnEncodeRegisterRespSnafu {
+        key: key.clone(),
+        conn_id,
+    })?;
+    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel(CONTROL_WRITE_QUEUE);
+    let writer_key = key.clone();
+    // Aborted when dropped, so the writer never outlives this function.
+    let mut writer_handle = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut msg_writer = session
+            .response_writer(&mut writer)
+            .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
+        msg_writer.write_msg(&register_response).await.context(
+            ServerConnWriteRegisterRespSnafu {
+                key: writer_key.clone(),
+                conn_id,
+            },
+        )?;
+        tracing::info!(
+            event = "server_register_response_written",
+            key = %writer_key,
+            conn_id = %conn_id,
+            need_codec,
+            is_datagram,
+            generation,
+            protocol_version,
+            lease_ttl_ms,
+            "server register response written to local server"
+        );
+        run_control_writer(
+            &mut msg_writer,
+            &rx,
+            &mut write_rx,
+            &retire_token,
+            writer_key,
+            conn_id,
+        )
+        .await
+    }));
+
+    // Read once: the environment it comes from is not written after startup.
+    let idle_timeout = crate::server_conn_idle_timeout(protocol_version);
+    let reader_result = async {
+        loop {
+            let msg = match tokio::time::timeout(idle_timeout, msg_reader.read_msg()).await {
+                Ok(Ok(msg)) => msg,
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        event = "server_conn_control_read_failed",
+                        key = %key,
+                        conn_id = %conn_id,
+                        error = %snafu::Report::from_error(e),
+                        "server connection control read failed"
+                    );
+                    break Ok(());
+                }
+                Err(_) => {
+                    tracing::error!(
+                        event = "server_conn_idle_timeout",
+                        key = %key,
+                        conn_id = %conn_id,
+                        timeout = ?idle_timeout,
+                        protocol_version,
+                        "server connection idle timeout triggered"
+                    );
+                    break Ok(());
+                }
+            };
+            handle_control_message(msg, &write_tx, task_sender, &key, conn_id).await?;
+        }
+    };
+
+    tokio::select! {
+        result = reader_result => result,
+        result = &mut writer_handle => match result {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::warn!(
+                    event = "server_conn_writer_join_failed",
+                    key = %key,
+                    conn_id = %conn_id,
+                    error = %e,
+                    "server connection writer task failed"
+                );
+                Ok(())
+            }
+        },
+    }
+}
+
 #[instrument(skip(msg, write_tx))]
 async fn handle_control_message(
     msg: &[u8],
-    write_tx: &tokio::sync::mpsc::Sender<ServerControlWrite>,
-    task_sender: ManagerTaskSender,
-    key: ImutableKey,
+    write_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    task_sender: &ManagerTaskSender,
+    key: &ImutableKey,
     conn_id: RemoteConnId,
 ) -> Result<()> {
     let req = match PbServerRequest::decode(msg) {
@@ -402,29 +426,21 @@ async fn handle_control_message(
     };
 
     match req {
-        PbServerRequest::Direct(message) => task_sender
-            .send(super::ManagerTask::Direct(
-                super::direct::DirectTask::Provider {
+        PbServerRequest::Direct(message) => {
+            send_control_task(
+                task_sender,
+                ManagerTask::Direct(super::direct::DirectTask::Provider {
                     connection: conn_id,
                     key: key.clone(),
                     message,
-                },
-            ))
+                }),
+                key,
+                conn_id,
+            )
             .await
-            .map_err(|_| kanal::SendError(()))
-            .context(ServerConnSendStreamAckSnafu { key, conn_id }),
+        }
         PbServerRequest::Ping => {
-            task_sender
-                .send(ManagerTask::ServerConnActivity {
-                    key: key.clone(),
-                    conn_id,
-                })
-                .await
-                .map_err(|_| kanal::SendError(()))
-                .context(ServerConnSendStreamAckSnafu {
-                    key: key.clone(),
-                    conn_id,
-                })?;
+            renew_lease(task_sender, key, conn_id).await?;
             let resp = match LocalServer::Pong.encode() {
                 Ok(v) => v,
                 Err(e) => {
@@ -445,22 +461,10 @@ async fn handle_control_message(
                 conn_id = %conn_id,
                 "received ping from local server"
             );
-            write_tx
-                .try_send(ServerControlWrite::Pong(resp))
-                .map_err(|_| super::error::Error::ServerConnControlWriterClosed { key, conn_id })
+            queue_pong(write_tx, resp, key, conn_id)
         }
         PbServerRequest::PingV2 { seq } => {
-            task_sender
-                .send(ManagerTask::ServerConnActivity {
-                    key: key.clone(),
-                    conn_id,
-                })
-                .await
-                .map_err(|_| kanal::SendError(()))
-                .context(ServerConnSendStreamAckSnafu {
-                    key: key.clone(),
-                    conn_id,
-                })?;
+            renew_lease(task_sender, key, conn_id).await?;
             let resp = match (LocalServer::PongV2 { seq }).encode() {
                 Ok(v) => v,
                 Err(e) => {
@@ -483,9 +487,7 @@ async fn handle_control_message(
                 seq,
                 "received ping v2 from local server"
             );
-            write_tx
-                .try_send(ServerControlWrite::Pong(resp))
-                .map_err(|_| super::error::Error::ServerConnControlWriterClosed { key, conn_id })
+            queue_pong(write_tx, resp, key, conn_id)
         }
         PbServerRequest::StreamAck {
             client_id,
@@ -499,17 +501,64 @@ async fn handle_control_message(
                 server_generation,
                 "received stream ack from local server"
             );
-            task_sender
-                .send(ManagerTask::StreamAck {
+            send_control_task(
+                task_sender,
+                ManagerTask::StreamAck {
                     server_id: conn_id,
                     client_id: client_id.into(),
                     server_generation,
-                })
-                .await
-                .map_err(|_| kanal::SendError(()))
-                .context(ServerConnSendStreamAckSnafu { key, conn_id })
+                },
+                key,
+                conn_id,
+            )
+            .await
         }
     }
+}
+
+/// Hand the manager a task a control message asked for.
+async fn send_control_task(
+    task_sender: &ManagerTaskSender,
+    task: ManagerTask,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+) -> Result<()> {
+    task_sender
+        .send(task)
+        .await
+        .with_context(|_| ServerConnSendControlTaskSnafu {
+            key: key.clone(),
+            conn_id,
+        })
+}
+
+/// Renew the registration's lease, as every ping does.
+async fn renew_lease(
+    task_sender: &ManagerTaskSender,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+) -> Result<()> {
+    let activity = ManagerTask::ServerConnActivity {
+        key: key.clone(),
+        conn_id,
+    };
+    send_control_task(task_sender, activity, key, conn_id).await
+}
+
+/// Queue a pong for the writer. A full queue ends the registration, as a
+/// closed one does.
+fn queue_pong(
+    write_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    pong: Vec<u8>,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+) -> Result<()> {
+    write_tx
+        .try_send(pong)
+        .map_err(|_| super::error::Error::ServerConnControlWriterClosed {
+            key: key.clone(),
+            conn_id,
+        })
 }
 
 /// Serve one registered control connection's writes until it is told to stop.
@@ -530,7 +579,7 @@ async fn handle_control_message(
 async fn run_control_writer<T: MessageWriter>(
     msg_writer: &mut T,
     task_rx: &ConnTaskReceiver,
-    write_rx: &mut tokio::sync::mpsc::Receiver<ServerControlWrite>,
+    write_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
     retire_token: &CancellationToken,
     key: ImutableKey,
     conn_id: RemoteConnId,
@@ -556,29 +605,28 @@ async fn run_control_writer<T: MessageWriter>(
                             break Ok(());
                         }
                         req => {
-                            handle_stream_req(req, msg_writer, key.clone(), conn_id).await?;
+                            handle_stream_req(req, msg_writer, &key, conn_id).await?;
                         }
                     }
                 }
-                cmd = write_rx.recv() => {
-                    let Some(cmd) = cmd else {
+                pong = write_rx.recv() => {
+                    let Some(pong) = pong else {
                         break Ok(());
                     };
-                    match cmd {
-                        ServerControlWrite::Pong(resp) => {
-                            msg_writer
-                                .write_msg(&resp)
-                                .await
-                                .context(ServerConnWritePongRespSnafu {
-                                    key: key.clone(),
-                                    conn_id,
-                                })?;
-                        }
-                    }
+                    msg_writer
+                        .write_msg(&pong)
+                        .await
+                        .with_context(|_| ServerConnWritePongRespSnafu {
+                            key: key.clone(),
+                            conn_id,
+                        })?;
                 }
             }
         }
     };
+    // Unbiased on purpose: the router queues `Retire` and cancels the token in
+    // one step, so both are ready together, and a responsive writer must get
+    // its turn to drain what is queued ahead of the `Retire`.
     tokio::select! {
         () = retire_token.cancelled() => {
             tracing::warn!(
@@ -597,76 +645,79 @@ async fn run_control_writer<T: MessageWriter>(
 async fn handle_stream_req<T: MessageWriter>(
     req: ConnTask,
     writer: &mut T,
-    key: ImutableKey,
+    key: &ImutableKey,
     conn_id: RemoteConnId,
 ) -> Result<()> {
-    if let ConnTask::Direct(event) = req {
-        let msg =
-            LocalServer::Direct(event)
-                .encode()
-                .context(ServerConnDecodeStreamRequestSnafu {
+    match req {
+        ConnTask::Direct(event) => {
+            let msg = LocalServer::Direct(event).encode().with_context(|_| {
+                ServerConnEncodeStreamRequestSnafu {
+                    key: key.clone(),
+                    conn_id,
+                }
+            })?;
+            writer
+                .write_msg(&msg)
+                .await
+                .with_context(|_| ServerConnWriteStreamRequestSnafu {
                     key: key.clone(),
                     conn_id,
                 })?;
-        writer
-            .write_msg(&msg)
-            .await
-            .context(ServerConnWriteStreamRequestSnafu { key, conn_id })?;
-    } else if let ConnTask::StreamReq {
-        client_id: client_conn_id,
-        server_generation,
-    } = req
-    {
-        let msg = LocalServer::Stream {
-            client_id: client_conn_id.into(),
-            server_generation,
         }
-        .encode()
-        .context(ServerConnDecodeStreamRequestSnafu {
-            key: key.clone(),
-            conn_id,
-        })?;
-        tracing::debug!(
-            event = "stream_request_written_to_local_server",
-            key = %key,
-            server_conn_id = %conn_id,
-            client_conn_id = %client_conn_id,
+        ConnTask::StreamReq {
+            client_id: client_conn_id,
             server_generation,
-            "writing stream request to local server"
-        );
-        writer
-            .write_msg(&msg)
-            .await
-            .context(ServerConnWriteStreamRequestSnafu {
+        } => {
+            let msg = LocalServer::Stream {
+                client_id: client_conn_id.into(),
+                server_generation,
+            }
+            .encode()
+            .with_context(|_| ServerConnEncodeStreamRequestSnafu {
                 key: key.clone(),
                 conn_id,
-            })?
-    } else {
-        tracing::error!(
-            event = "unexpected_server_conn_task",
-            key = %key,
-            server_conn_id = %conn_id,
-            task = ?req,
-            "expected stream request task"
-        );
+            })?;
+            tracing::debug!(
+                event = "stream_request_written_to_local_server",
+                key = %key,
+                server_conn_id = %conn_id,
+                client_conn_id = %client_conn_id,
+                server_generation,
+                "writing stream request to local server"
+            );
+            writer
+                .write_msg(&msg)
+                .await
+                .with_context(|_| ServerConnWriteStreamRequestSnafu {
+                    key: key.clone(),
+                    conn_id,
+                })?;
+        }
+        req => {
+            tracing::error!(
+                event = "unexpected_server_conn_task",
+                key = %key,
+                server_conn_id = %conn_id,
+                task = ?req,
+                "expected stream request task"
+            );
+        }
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::future::{Future, poll_fn};
+    use std::pin::Pin;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::task::Poll;
 
-    use crate::ManagerTask;
     use pb_mapper_core::conn_id::RemoteConnId;
     use pb_mapper_protocol::MessageWriter;
     use tokio_util::sync::CancellationToken;
 
-    use super::{
-        ConnTask, LEGACY_SERVER_IDLE_TIMEOUT, ServerConnGuard, ServerControlWrite,
-        run_control_writer,
-    };
+    use super::{ConnTask, run_control_writer};
 
     /// A writer whose every write blocks forever.
     ///
@@ -691,7 +742,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_the_retire_token_unwinds_a_writer_blocked_mid_write() {
         let (task_tx, task_rx) = kanal::bounded_async(4);
-        let (write_tx, mut write_rx) = tokio::sync::mpsc::channel(64);
+        let (write_tx, mut write_rx) = tokio::sync::mpsc::channel(super::CONTROL_WRITE_QUEUE);
         let retire_token = CancellationToken::new();
         let key: Arc<str> = Arc::from("wedged-service");
         let conn_id = RemoteConnId::from(3);
@@ -708,14 +759,11 @@ mod tests {
 
         // Wedge the writer first. Queuing the retirement alongside it would race:
         // `select!` polls its arms in a random order, and could take the retirement
-        // before the write ever started.
-        write_tx
-            .try_send(ServerControlWrite::Pong(b"pong".to_vec()))
-            .unwrap();
+        // before the write ever started. One poll takes the pong and parks the
+        // writer inside its write.
+        write_tx.try_send(b"pong".to_vec()).unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut control)
-                .await
-                .is_err(),
+            poll_once(&mut control).await.is_pending(),
             "the writer should still be inside its write"
         );
 
@@ -727,90 +775,23 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut control)
-                .await
-                .is_err(),
+            poll_once(&mut control).await.is_pending(),
             "a queued retirement was somehow observed during a blocked write"
         );
 
         retire_token.cancel();
-        tokio::time::timeout(Duration::from_millis(200), control)
-            .await
-            .expect("cancelling the retire token did not unwind the blocked writer")
-            .expect("an interrupted write should not surface as an error");
+        match poll_once(&mut control).await {
+            Poll::Ready(result) => {
+                result.expect("an interrupted write should not surface as an error")
+            }
+            Poll::Pending => {
+                panic!("cancelling the retire token did not unwind the blocked writer")
+            }
+        }
     }
 
-    #[test]
-    fn server_timeout_has_slack_over_local_server_ping_interval() {
-        assert!(LEGACY_SERVER_IDLE_TIMEOUT > Duration::from_secs(5 * 60));
-    }
-
-    #[tokio::test]
-    async fn server_conn_guard_does_not_drop_deregister_when_manager_queue_is_full() {
-        let (sender, mut receiver) = crate::manager::task_channel(1);
-        sender.send(ManagerTask::Shutdown).await.unwrap();
-        let key: Arc<str> = Arc::from("sf-backend");
-
-        drop(ServerConnGuard::new(
-            key,
-            RemoteConnId::from(7),
-            sender.clone(),
-        ));
-
-        assert!(matches!(
-            receiver.recv().await.unwrap(),
-            ManagerTask::Shutdown
-        ));
-        let task = tokio::time::timeout(Duration::from_millis(200), receiver.recv())
-            .await
-            .expect("deregister task was lost when manager queue was full")
-            .unwrap();
-        assert!(matches!(
-            task,
-            ManagerTask::DeRegisterServerConn { conn_id, .. } if conn_id == RemoteConnId::from(7)
-        ));
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod cancellation_audit {
-    use super::*;
-    use std::{
-        future::{Future, poll_fn},
-        task::Poll,
-    };
-    #[tokio::test]
-    async fn cancelled_pending_deregister_delivers_exactly_one_cleanup() {
-        let (sender, mut receiver) = crate::manager::task_channel(1);
-        sender.send(ManagerTask::SweepServerLeases).await.unwrap();
-        let mut guard = ServerConnGuard::new("audit".into(), 7_u32.into(), sender.clone());
-        let mut deregister = Box::pin(guard.deregister());
-        poll_fn(|cx| {
-            assert!(deregister.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        assert!(matches!(
-            receiver.recv().await.unwrap(),
-            ManagerTask::SweepServerLeases
-        ));
-        assert!(
-            receiver.is_empty(),
-            "a pending send must not deliver before it is polled"
-        );
-        drop(deregister);
-        drop(guard);
-        let delivered = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        drop(delivered);
-        let duplicate =
-            tokio::time::timeout(std::time::Duration::from_millis(20), receiver.recv()).await;
-        assert!(
-            duplicate.is_err(),
-            "cancelling cleanup after channel delivery emitted a second deregistration"
-        );
+    /// Poll `future` once, without waiting for it to be woken.
+    async fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+        poll_fn(|cx| Poll::Ready(Pin::new(&mut *future).poll(cx))).await
     }
 }

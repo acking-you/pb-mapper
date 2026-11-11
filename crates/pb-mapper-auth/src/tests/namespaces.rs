@@ -2,37 +2,15 @@
 
 use super::*;
 
-const ADMIN_KEY: [u8; 32] = *b"0123456789abcdefghijklmnopqrstuv";
-const HOUR: Duration = Duration::from_secs(3600);
-
+/// The configuration these tests run with.
 fn config_for(state_dir: &Path) -> AuthConfig {
-    AuthConfig {
-        state_dir: state_dir.to_path_buf(),
-        max_temporary_keys: 8,
-        max_temporary_key_ttl: HOUR,
-        legacy_protocol: LegacyProtocolPolicy::Allow,
-    }
-}
-
-async fn start(state_dir: &Path) -> (AuthRuntime, AuthContext) {
-    let runtime = AuthRuntime::start(ADMIN_KEY, config_for(state_dir))
-        .await
-        .unwrap();
-    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
-    (runtime, admin)
-}
-
-/// Stop a runtime and bring the same state directory back up.
-async fn restart(runtime: AuthRuntime, state_dir: &Path) -> (AuthRuntime, AuthContext) {
-    runtime.shutdown_actor().await;
-    drop(runtime);
-    start(state_dir).await
+    config(state_dir, 8)
 }
 
 #[tokio::test]
 async fn keys_in_a_namespace_share_it_and_are_revoked_one_at_a_time() {
-    let state_dir = temp_state_dir("namespace-shared");
-    let (runtime, admin) = start(&state_dir).await;
+    let state_dir = TempPath::new("namespace-shared");
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let namespace = runtime.allocate_namespace(&admin).await.unwrap();
     let first = runtime
         .issue_in_namespace(&admin, namespace, HOUR, Some("first".into()))
@@ -70,13 +48,12 @@ async fn keys_in_a_namespace_share_it_and_are_revoked_one_at_a_time() {
         .await
         .unwrap();
     assert_eq!(third.metadata.effective_namespace(), namespace);
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn a_key_keeps_its_namespace_through_wal_replay_compaction_and_lease_replacement() {
-    let state_dir = temp_state_dir("namespace-durable");
-    let (runtime, admin) = start(&state_dir).await;
+    let state_dir = TempPath::new("namespace-durable");
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let namespace = runtime.allocate_namespace(&admin).await.unwrap();
     let issued = runtime
         .issue_in_namespace(&admin, namespace, HOUR, None)
@@ -85,7 +62,7 @@ async fn a_key_keeps_its_namespace_through_wal_replay_compaction_and_lease_repla
     let key_id = issued.metadata.key_id;
 
     // Nothing compacted yet, so this reads the key back from the WAL.
-    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let (runtime, admin) = restart(runtime).await;
     assert_eq!(
         authenticate_for_test(&runtime, key_id).unwrap().namespace,
         namespace
@@ -95,7 +72,7 @@ async fn a_key_keeps_its_namespace_through_wal_replay_compaction_and_lease_repla
     runtime.gc(&admin).await.unwrap();
     let persisted = try_load_persisted_state(
         &config_for(&state_dir),
-        &ADMIN_KEY,
+        &TEST_ADMIN_KEY_BYTES,
         load_or_create_instance_id(&state_dir).unwrap(),
     )
     .unwrap();
@@ -108,7 +85,7 @@ async fn a_key_keeps_its_namespace_through_wal_replay_compaction_and_lease_repla
             .namespace,
         Some(namespace)
     );
-    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let (runtime, admin) = restart(runtime).await;
     let context = authenticate_for_test(&runtime, key_id).unwrap();
     assert_eq!(context.namespace, namespace);
 
@@ -121,7 +98,6 @@ async fn a_key_keeps_its_namespace_through_wal_replay_compaction_and_lease_repla
         authenticate_for_test(&runtime, key_id).unwrap().namespace,
         namespace
     );
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// Allocation outlives everything that replaces the encrypted state, including a
@@ -129,11 +105,11 @@ async fn a_key_keeps_its_namespace_through_wal_replay_compaction_and_lease_repla
 #[tokio::test]
 async fn an_allocated_namespace_is_never_handed_out_again() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-    let state_dir = temp_state_dir("namespace-never-reused");
-    let (runtime, admin) = start(&state_dir).await;
+    let state_dir = TempPath::new("namespace-never-reused");
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let mut allocated = vec![runtime.allocate_namespace(&admin).await.unwrap()];
 
-    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let (runtime, admin) = restart(runtime).await;
     allocated.push(runtime.allocate_namespace(&admin).await.unwrap());
 
     runtime.gc(&admin).await.unwrap();
@@ -148,8 +124,7 @@ async fn an_allocated_namespace_is_never_handed_out_again() {
         .authenticate_presented(ADMIN_KEY_ID, &rotated_key)
         .unwrap();
     allocated.push(runtime.allocate_namespace(&rotated_admin).await.unwrap());
-    runtime.shutdown_actor().await;
-    drop(runtime);
+    stop(runtime).await;
 
     std::fs::write(state_dir.join("auth.snapshot"), b"damaged").unwrap();
     let runtime = AuthRuntime::start(rotated_key, config_for(&state_dir))
@@ -178,13 +153,12 @@ async fn an_allocated_namespace_is_never_handed_out_again() {
         );
     }
     set_process_msg_header_key(None).unwrap();
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[tokio::test]
 async fn only_the_administrator_issues_and_only_into_an_allocated_namespace() {
-    let state_dir = temp_state_dir("namespace-refusals");
-    let (runtime, admin) = start(&state_dir).await;
+    let state_dir = TempPath::new("namespace-refusals");
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let own = runtime.issue(&admin, HOUR, None).await.unwrap();
     let allocated = runtime.allocate_namespace(&admin).await.unwrap();
 
@@ -213,15 +187,14 @@ async fn only_the_administrator_issues_and_only_into_an_allocated_namespace() {
             .code,
         "admin_permission_required"
     );
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// A damaged allocator stops namespace work and nothing else: guessing could
 /// repeat a number, and existing keys carry their namespace elsewhere.
 #[tokio::test]
 async fn an_unreadable_allocator_refuses_namespaces_and_leaves_keys_working() {
-    let state_dir = temp_state_dir("namespace-allocator-damaged");
-    let (runtime, admin) = start(&state_dir).await;
+    let state_dir = TempPath::new("namespace-allocator-damaged");
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let namespace = runtime.allocate_namespace(&admin).await.unwrap();
     let issued = runtime
         .issue_in_namespace(&admin, namespace, HOUR, None)
@@ -252,13 +225,12 @@ async fn an_unreadable_allocator_refuses_namespaces_and_leaves_keys_working() {
         .await
         .unwrap();
     runtime.issue(&admin, HOUR, None).await.unwrap();
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// State written before namespaces existed, exactly as an older relay wrote it.
 #[tokio::test]
 async fn keys_from_an_older_relay_stay_in_their_key_id_namespace() {
-    let state_dir = temp_state_dir("namespace-legacy");
+    let state_dir = TempPath::new("namespace-legacy");
     std::fs::create_dir_all(&state_dir).unwrap();
     let config = config_for(&state_dir);
     let instance_id = load_or_create_instance_id(&state_dir).unwrap();
@@ -278,7 +250,7 @@ async fn keys_from_an_older_relay_stay_in_their_key_id_namespace() {
     );
     atomic_write(
         &auth_snapshot_path(&state_dir),
-        &seal_blob(&ADMIN_KEY, snapshot.as_bytes()).unwrap(),
+        &seal_blob(&TEST_ADMIN_KEY_BYTES, snapshot.as_bytes()).unwrap(),
         0o600,
     )
     .unwrap();
@@ -288,12 +260,12 @@ async fn keys_from_an_older_relay_stay_in_their_key_id_namespace() {
     );
     append_wal(
         &config,
-        &ADMIN_KEY,
+        &TEST_ADMIN_KEY_BYTES,
         &serde_json::from_str::<WalRecord>(&wal).unwrap(),
     )
     .unwrap();
 
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     assert!(!runtime.status(&admin).await.unwrap().safe_mode);
     for key_id in [in_snapshot, in_wal] {
         let context = authenticate_for_test(&runtime, key_id).unwrap();
@@ -311,22 +283,21 @@ async fn keys_from_an_older_relay_stay_in_their_key_id_namespace() {
     );
     assert!(fresh.metadata.namespace.is_none());
     runtime.gc(&admin).await.unwrap();
-    let persisted = try_load_persisted_state(&config, &ADMIN_KEY, instance_id).unwrap();
+    let persisted = try_load_persisted_state(&config, &TEST_ADMIN_KEY_BYTES, instance_id).unwrap();
     let entry = persisted
         .entries
         .iter()
         .find(|entry| entry.key_id == fresh.metadata.key_id)
         .unwrap();
     assert!(!serde_json::to_string(entry).unwrap().contains("namespace"));
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// What a client reads to tell whether a relay can do this at all, and how an
 /// older relay's answers decode.
 #[tokio::test]
 async fn the_capability_is_reported_and_an_older_relay_reports_none() {
-    let state_dir = temp_state_dir("namespace-capability");
-    let (runtime, admin) = start(&state_dir).await;
+    let state_dir = TempPath::new("namespace-capability");
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let status = runtime.status(&admin).await.unwrap();
     assert!(
         status
@@ -345,15 +316,14 @@ async fn the_capability_is_reported_and_an_older_relay_reports_none() {
     )
     .unwrap();
     assert_eq!(older.effective_namespace(), 4_294_967_296);
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// `renew` is how a retiring key gets its deadline. Until that deadline it stays
 /// usable with the same text; at it, the key ends the way any expired key does.
 #[tokio::test]
 async fn renewing_shorter_ends_the_key_at_the_new_deadline() {
-    let state_dir = temp_state_dir("renew-shorter");
-    let (runtime, admin) = start(&state_dir).await;
+    let state_dir = TempPath::new("renew-shorter");
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let issued = runtime.issue(&admin, HOUR, None).await.unwrap();
     let key_id = issued.metadata.key_id;
     let context = authenticate_for_test(&runtime, key_id).unwrap();
@@ -380,13 +350,14 @@ async fn renewing_shorter_ends_the_key_at_the_new_deadline() {
     );
     let shown = runtime.show(&admin, key_id, false).await.unwrap();
     assert_eq!(shown.metadata.state, "expired");
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
+/// A restart must not bring the longer deadline back. The restored lease
+/// carries the shortened one, which `schedule.rs` shows a restart schedules.
 #[tokio::test]
 async fn a_shortened_deadline_holds_across_a_restart() {
-    let state_dir = temp_state_dir("renew-shorter-restart");
-    let (runtime, admin) = start(&state_dir).await;
+    let state_dir = TempPath::new("renew-shorter-restart");
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let issued = runtime.issue(&admin, HOUR, None).await.unwrap();
     let key_id = issued.metadata.key_id;
     let shortened = runtime
@@ -394,31 +365,22 @@ async fn a_shortened_deadline_holds_across_a_restart() {
         .await
         .unwrap();
 
-    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let (runtime, admin) = restart(runtime).await;
     let revealed = runtime.show(&admin, key_id, true).await.unwrap();
     assert_eq!(revealed.metadata.expires_at, shortened.metadata.expires_at);
     assert_eq!(revealed.credential, issued.credential);
-
     let context = authenticate_for_test(&runtime, key_id).unwrap();
-    let cancellation = context.cancellation_token().unwrap();
-    tokio::time::timeout(
-        MIN_TEMP_KEY_TTL + Duration::from_secs(10),
-        cancellation.cancelled(),
-    )
-    .await
-    .expect("a restart must not bring the longer deadline back");
     assert_eq!(
-        authenticate_for_test(&runtime, key_id).unwrap_err().code,
-        "temporary_key_expired"
+        context.ensure_active().unwrap().expires_at(),
+        shortened.metadata.expires_at
     );
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// The relay's floor on a TTL is what the design turns into a revoke.
 #[tokio::test]
 async fn a_shortening_below_the_minimum_is_refused_and_changes_nothing() {
-    let state_dir = temp_state_dir("renew-below-minimum");
-    let (runtime, admin) = start(&state_dir).await;
+    let state_dir = TempPath::new("renew-below-minimum");
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     let issued = runtime.issue(&admin, HOUR, None).await.unwrap();
     let key_id = issued.metadata.key_id;
     assert_eq!(
@@ -431,7 +393,48 @@ async fn a_shortening_below_the_minimum_is_refused_and_changes_nothing() {
     );
     let shown = runtime.show(&admin, key_id, false).await.unwrap();
     assert_eq!(shown.metadata.expires_at, issued.metadata.expires_at);
-    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+/// A key's old deadline passes after a renewal replaced its cancelled lease.
+/// The schedule of the lease it replaced must not end the key that was just
+/// extended: the WAL says it is active, so a row that said otherwise could not
+/// even be revoked.
+#[tokio::test]
+async fn a_renewal_that_replaced_a_cancelled_lease_outlives_the_old_deadline() {
+    let state_dir = TempPath::new("renew-replaced-lease");
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
+    let issued = runtime.issue(&admin, MIN_TEMP_KEY_TTL, None).await.unwrap();
+    let key_id = issued.metadata.key_id;
+    let context = authenticate_for_test(&runtime, key_id).unwrap();
+    context.ensure_active().unwrap().cancel_expired();
+
+    let renewed = runtime.renew(&admin, key_id, HOUR).await.unwrap();
+    assert!(renewed.metadata.expires_at > issued.metadata.expires_at);
+    let replacement = authenticate_for_test(&runtime, key_id)
+        .unwrap()
+        .cancellation_token()
+        .unwrap();
+
+    // A key issued now ends no earlier than the old deadline, so once it has
+    // ended, the schedule has passed that deadline too.
+    let marker = runtime.issue(&admin, MIN_TEMP_KEY_TTL, None).await.unwrap();
+    let marker = authenticate_for_test(&runtime, marker.metadata.key_id)
+        .unwrap()
+        .cancellation_token()
+        .unwrap();
+    tokio::time::timeout(
+        MIN_TEMP_KEY_TTL + Duration::from_secs(10),
+        marker.cancelled(),
+    )
+    .await
+    .expect("a key must end at its deadline");
+
+    assert!(!replacement.is_cancelled());
+    let shown = runtime.show(&admin, key_id, false).await.unwrap();
+    assert_eq!(shown.metadata.state, "active");
+    authenticate_for_test(&runtime, key_id).unwrap();
+    runtime.revoke(&admin, key_id).await.unwrap();
+    stop(runtime).await;
 }
 
 /// What the allocator's file alone cannot promise: losing it must not repeat a
@@ -439,14 +442,14 @@ async fn a_shortening_below_the_minimum_is_refused_and_changes_nothing() {
 /// tenant that has gone quiet.
 #[tokio::test]
 async fn losing_the_allocator_file_does_not_repeat_a_namespace() {
-    let state_dir = temp_state_dir("namespace-allocator-lost");
+    let state_dir = TempPath::new("namespace-allocator-lost");
     let allocator = state_dir.join("namespace-allocator");
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
 
     // The mark as the WAL has it: nothing has compacted yet.
     let in_wal = runtime.allocate_namespace(&admin).await.unwrap();
     std::fs::remove_file(&allocator).unwrap();
-    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let (runtime, admin) = restart(runtime).await;
     let after_wal = runtime.allocate_namespace(&admin).await.unwrap();
     assert!(after_wal > in_wal);
 
@@ -461,7 +464,7 @@ async fn losing_the_allocator_file_does_not_repeat_a_namespace() {
         .unwrap();
     runtime.gc(&admin).await.unwrap();
     std::fs::remove_file(&allocator).unwrap();
-    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let (runtime, admin) = restart(runtime).await;
     assert_eq!(
         std::fs::read_to_string(&allocator).unwrap(),
         after_wal.to_string(),
@@ -489,34 +492,6 @@ async fn losing_the_allocator_file_does_not_repeat_a_namespace() {
     );
     std::fs::remove_file(&allocator).unwrap();
     assert!(runtime.allocate_namespace(&admin).await.unwrap() > while_running);
-    let _ = std::fs::remove_dir_all(state_dir);
-}
-
-/// A key's old deadline passes after a renewal replaced its cancelled lease. The
-/// timers of the lease it replaced must not end the key that was just extended: the
-/// WAL says it is active, so a row that says otherwise could not even be revoked.
-#[tokio::test]
-async fn a_renewal_that_replaced_a_cancelled_lease_outlives_the_old_deadline() {
-    let state_dir = temp_state_dir("renew-replaced-lease");
-    let (runtime, admin) = start(&state_dir).await;
-    let issued = runtime.issue(&admin, MIN_TEMP_KEY_TTL, None).await.unwrap();
-    let key_id = issued.metadata.key_id;
-    let context = authenticate_for_test(&runtime, key_id).unwrap();
-    context.ensure_active().unwrap().cancel_expired();
-
-    let renewed = runtime.renew(&admin, key_id, HOUR).await.unwrap();
-    assert!(renewed.metadata.expires_at > issued.metadata.expires_at);
-    let replacement = authenticate_for_test(&runtime, key_id).unwrap();
-    let cancellation = replacement.cancellation_token().unwrap();
-
-    // Past the old deadline, by more than the actor's one-second tick.
-    tokio::time::sleep(MIN_TEMP_KEY_TTL + Duration::from_secs(3)).await;
-    assert!(!cancellation.is_cancelled());
-    let shown = runtime.show(&admin, key_id, false).await.unwrap();
-    assert_eq!(shown.metadata.state, "active");
-    authenticate_for_test(&runtime, key_id).unwrap();
-    runtime.revoke(&admin, key_id).await.unwrap();
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// Compaction replaces the snapshot and then truncates the WAL. A crash between the
@@ -524,7 +499,7 @@ async fn a_renewal_that_replaced_a_cancelled_lease_outlives_the_old_deadline() {
 /// take every other key down with safe mode.
 #[tokio::test]
 async fn a_crash_during_compaction_replays_records_for_finished_keys_harmlessly() {
-    let state_dir = temp_state_dir("wal-replay-finished-key");
+    let state_dir = TempPath::new("wal-replay-finished-key");
     std::fs::create_dir_all(&state_dir).unwrap();
     let config = config_for(&state_dir);
     let instance_id = load_or_create_instance_id(&state_dir).unwrap();
@@ -540,7 +515,7 @@ async fn a_crash_during_compaction_replays_records_for_finished_keys_harmlessly(
     );
     atomic_write(
         &auth_snapshot_path(&state_dir),
-        &seal_blob(&ADMIN_KEY, snapshot.as_bytes()).unwrap(),
+        &seal_blob(&TEST_ADMIN_KEY_BYTES, snapshot.as_bytes()).unwrap(),
         0o600,
     )
     .unwrap();
@@ -569,7 +544,7 @@ async fn a_crash_during_compaction_replays_records_for_finished_keys_harmlessly(
     ] {
         append_wal(
             &config,
-            &ADMIN_KEY,
+            &TEST_ADMIN_KEY_BYTES,
             &WalRecord::Mutation {
                 mutation: mutation.0,
                 audit: mutation.1,
@@ -578,7 +553,7 @@ async fn a_crash_during_compaction_replays_records_for_finished_keys_harmlessly(
         .unwrap();
     }
 
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     assert!(!runtime.status(&admin).await.unwrap().safe_mode);
     authenticate_for_test(&runtime, live).unwrap();
     // A dead key stays dead rather than coming back through its own old record.
@@ -586,20 +561,19 @@ async fn a_crash_during_compaction_replays_records_for_finished_keys_harmlessly(
         runtime.show(&admin, reaped, false).await.unwrap_err().code,
         "temporary_key_not_found"
     );
-    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 /// A record for a generation the snapshot never reached means the record that
 /// issued it is gone, which really is a damaged store.
 #[tokio::test]
 async fn a_record_for_a_key_the_snapshot_never_issued_still_fails_closed() {
-    let state_dir = temp_state_dir("wal-replay-unknown-key");
+    let state_dir = TempPath::new("wal-replay-unknown-key");
     std::fs::create_dir_all(&state_dir).unwrap();
     let now = unix_seconds();
     let unknown = KeyId::new(Generation::from_u32(2), SlotIndex::from_index(0));
     append_wal(
         &config_for(&state_dir),
-        &ADMIN_KEY,
+        &TEST_ADMIN_KEY_BYTES,
         &WalRecord::Mutation {
             mutation: StateMutation::Renew {
                 key_id: unknown,
@@ -616,7 +590,6 @@ async fn a_record_for_a_key_the_snapshot_never_issued_still_fails_closed() {
     )
     .unwrap();
 
-    let (runtime, admin) = start(&state_dir).await;
+    let (runtime, admin) = start(&config_for(&state_dir)).await;
     assert!(runtime.status(&admin).await.unwrap().safe_mode);
-    let _ = std::fs::remove_dir_all(state_dir);
 }

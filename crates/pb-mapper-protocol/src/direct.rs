@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 pub type SessionId = [u8; 16];
 pub fn random_session_id() -> SessionId {
@@ -14,6 +15,19 @@ pub const MAX_CANDIDATES: usize = 8;
 pub const MAX_LAN_TCP: usize = 4;
 pub const MAX_CERT_LEN: usize = 2048;
 pub const SETUP_TTL_MS: u64 = 8_000;
+
+/// A direct-control connection that reads nothing for this long is dropped,
+/// at either end.
+pub const CONTROL_IDLE: Duration = Duration::from_secs(45);
+/// How often a consumer pings the relay over its direct-control connection;
+/// the relay answers each ping.
+pub const CONTROL_PING: Duration = Duration::from_secs(15);
+/// The longest writing one direct-control message may take, at either end.
+pub const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const _: () = assert!(
+    CONTROL_PING.as_secs() * 3 <= CONTROL_IDLE.as_secs(),
+    "a live consumer pings three times within the idle window of either end"
+);
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct SessionSecret(pub [u8; 32]);
@@ -176,11 +190,31 @@ pub enum SessionPath {
     Relay,
 }
 
+impl SessionPath {
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Relay => "relay",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
     Active,
     Closed,
+}
+
+impl SessionState {
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Closed => "closed",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -365,53 +399,42 @@ wire_message!(
 
 #[cfg(test)]
 mod tests {
-    use crate::command::{
-        MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
-    };
+    /// Each label is its value's serialized form, so a front end printing
+    /// `as_str` agrees with the JSON that carries the value; a relay carrier
+    /// parses back from exactly its label, and from nothing else.
     #[test]
-    fn disabled_direct_fields_are_absent_from_existing_wire_messages() {
-        let request = PbConnRequest::Register {
-            direct: None,
-            key: "legacy".into(),
-            need_codec: false,
-            is_datagram: false,
-            protocol_version: None,
-            client_instance_id: None,
-            heartbeat_interval_ms: None,
-            heartbeat_tolerance_ms: None,
-        };
-        let expected = br#"{"Register":{"need_codec":false,"is_datagram":false,"key":"legacy"}}"#;
-        assert_eq!(request.encode().unwrap(), expected);
-        assert_eq!(
-            serde_json::to_vec(&PbConnStatusReq::Service {
-                key: "legacy".into(),
-                direct_query: None
-            })
-            .unwrap(),
-            br#"{"Service":{"key":"legacy"}}"#
-        );
-        let response = PbConnResponse::RegisterV2 {
-            conn_id: 1,
-            generation: 2,
-            lease_ttl_ms: 3000,
-            direct: None,
-        };
-        assert_eq!(
-            response.encode().unwrap(),
-            br#"{"RegisterV2":{"conn_id":1,"generation":2,"lease_ttl_ms":3000}}"#
-        );
-        let response = PbConnStatusResp::Service {
-            key: "legacy".into(),
-            connections: vec![],
-            direct: None,
-        };
-        assert_eq!(
-            serde_json::to_vec(&response).unwrap(),
-            br#"{"Service":{"key":"legacy","connections":[]}}"#
-        );
+    fn labels_are_the_wire_names_and_parse_back_exactly() {
+        use super::{SessionPath, SessionState};
+        use crate::transport::RelayTransport;
+        fn wire(value: impl serde::Serialize) -> String {
+            serde_json::to_value(value)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .into()
+        }
+        for path in [SessionPath::Direct, SessionPath::Relay] {
+            assert_eq!(wire(path), path.as_str());
+        }
+        for state in [SessionState::Active, SessionState::Closed] {
+            assert_eq!(wire(state), state.as_str());
+        }
+        for transport in [RelayTransport::Tcp, RelayTransport::Quic] {
+            assert_eq!(wire(transport), transport.as_str());
+            assert_eq!(transport.as_str().parse(), Ok(transport));
+        }
+        for label in ["TCP", " tcp", ""] {
+            let error = label.parse::<RelayTransport>().unwrap_err();
+            assert_eq!(error.label(), label);
+        }
+    }
 
-        // LAN TCP: a peer that neither asks nor serves writes what it always
-        // has, and what it always wrote reads as neither.
+    /// LAN TCP: a peer that neither asks nor serves writes what it always
+    /// has, and what it always wrote reads as neither. The command messages'
+    /// unset direct fields are pinned with the rest of their wire form in
+    /// `command.rs`.
+    #[test]
+    fn a_peer_without_lan_tcp_keeps_its_wire_form() {
         let quic = br#"{"certificate":[1],"candidates":["192.168.1.5:41234"]}"#;
         let mut peer = super::PeerInfo {
             certificate: vec![1],

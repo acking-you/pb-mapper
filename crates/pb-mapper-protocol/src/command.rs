@@ -217,20 +217,28 @@ pub enum AdminRequest {
 }
 
 impl AdminRequest {
+    /// Whether the request changes relay state, and so must pass the durable
+    /// administrator-mutation replay check. Every variant is named: a new one
+    /// does not compile until someone decides.
     pub fn is_mutating(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::KeyIssue { .. }
-                | Self::NamespaceAllocate
-                | Self::KeyIssueScoped { .. }
-                | Self::KeyRenew { .. }
-                | Self::KeyRevoke { .. }
-                | Self::KeyGc
-                | Self::AuthStateReset { .. }
-                | Self::RootKeyRotate { .. }
-                | Self::LegacyProtocolSet { .. }
-                | Self::ConnectionRetire { .. }
-        )
+            | Self::NamespaceAllocate
+            | Self::KeyIssueScoped { .. }
+            | Self::KeyRenew { .. }
+            | Self::KeyRevoke { .. }
+            | Self::KeyGc
+            | Self::AuthStateReset { .. }
+            | Self::RootKeyRotate { .. }
+            | Self::LegacyProtocolSet { .. }
+            | Self::ConnectionRetire { .. } => true,
+            Self::KeyList { .. }
+            | Self::KeyShow { .. }
+            | Self::KeyReveal { .. }
+            | Self::AuthStatus
+            | Self::ConnectionList { .. }
+            | Self::ServiceList { .. } => false,
+        }
     }
 }
 
@@ -245,6 +253,11 @@ pub struct PbErrorResponse {
     pub retryable: bool,
     pub server_time: u64,
 }
+
+/// The [`PbErrorResponse::code`] a relay answers an authenticated request it
+/// cannot decode with, which is also how a relay that predates a request kind
+/// answers that kind.
+pub const REQUEST_DECODE_FAILED: &str = "request_decode_failed";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AdminServiceInfo {
@@ -305,10 +318,19 @@ pub enum AdminResponse {
     ConnectionsRetired {
         retired: u32,
     },
+    /// A change acknowledged by name: `action` is one of the `ACTION_*`
+    /// constants.
     Ok {
         action: String,
     },
 }
+
+/// The [`AdminResponse::Ok`] action after the auth state was reset.
+pub const ACTION_AUTH_STATE_RESET: &str = "auth_state_reset";
+/// The [`AdminResponse::Ok`] action after the root key was rotated.
+pub const ACTION_ADMINISTRATOR_KEY_ROTATED: &str = "administrator_key_rotated";
+/// The [`AdminResponse::Ok`] action after the legacy-protocol policy was set.
+pub const ACTION_LEGACY_PROTOCOL_UPDATED: &str = "legacy_protocol_updated";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum PbConnResponse {
@@ -345,10 +367,7 @@ impl PbConnResponse {
             code: code.into(),
             message: message.into(),
             retryable,
-            server_time: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            server_time: pb_mapper_core::time::unix_seconds(),
         })
     }
 }
@@ -416,18 +435,25 @@ gen_impl_msg_serializer!(PbConnResponse);
 gen_impl_msg_serializer!(PbServerRequest);
 gen_impl_msg_serializer!(LocalServer);
 
+/// Only a UDP port is advertised; use the IP of the authenticated TCP peer.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct QuicEndpoint {
+    pub port: u16,
+    pub certificate: Vec<u8>,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::PbConnRequest;
+    use super::*;
 
-    /// The wire form of `Register` is load-bearing: a running peer on the other
-    /// side of an upgrade has to keep parsing it. The `None` fields must stay
-    /// absent from the JSON rather than serialise as null.
+    /// The wire form a running peer on the other side of an upgrade has to
+    /// keep parsing: optional fields left `None` stay absent from the JSON
+    /// rather than serialise as null.
     #[test]
-    fn test_serde_mapper_header() {
-        let mapper = PbConnRequest::Register {
+    fn unset_optional_fields_are_absent_from_the_wire() {
+        let register = PbConnRequest::Register {
             direct: None,
-            key: "test".into(),
+            key: "legacy".into(),
             need_codec: false,
             is_datagram: false,
             protocol_version: None,
@@ -435,19 +461,35 @@ mod tests {
             heartbeat_interval_ms: None,
             heartbeat_tolerance_ms: None,
         };
-        let json_value = serde_json::to_string(&mapper).unwrap();
-        let raw_json_str =
-            r##"{"Register":{"need_codec":false,"is_datagram":false,"key":"test"}}"##;
-        assert_eq!(raw_json_str, json_value);
-
-        let value: PbConnRequest = serde_json::from_str(raw_json_str).unwrap();
-        assert_eq!(mapper, value)
+        let wire = br#"{"Register":{"need_codec":false,"is_datagram":false,"key":"legacy"}}"#;
+        assert_eq!(register.encode().unwrap(), wire);
+        assert_eq!(PbConnRequest::decode(wire).unwrap(), register);
+        assert_eq!(
+            serde_json::to_vec(&PbConnStatusReq::Service {
+                key: "legacy".into(),
+                direct_query: None
+            })
+            .unwrap(),
+            br#"{"Service":{"key":"legacy"}}"#
+        );
+        let response = PbConnResponse::RegisterV2 {
+            conn_id: 1,
+            generation: 2,
+            lease_ttl_ms: 3000,
+            direct: None,
+        };
+        assert_eq!(
+            response.encode().unwrap(),
+            br#"{"RegisterV2":{"conn_id":1,"generation":2,"lease_ttl_ms":3000}}"#
+        );
+        let response = PbConnStatusResp::Service {
+            key: "legacy".into(),
+            connections: vec![],
+            direct: None,
+        };
+        assert_eq!(
+            serde_json::to_vec(&response).unwrap(),
+            br#"{"Service":{"key":"legacy","connections":[]}}"#
+        );
     }
-}
-
-/// Only a UDP port is advertised; use the IP of the authenticated TCP peer.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct QuicEndpoint {
-    pub port: u16,
-    pub certificate: Vec<u8>,
 }

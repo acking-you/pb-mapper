@@ -67,16 +67,7 @@ pub trait Backend: 'static {
         Err(BackendError::new(FailureKind::Unsupported, "still capture").into())
     }
     fn capture_consistent(&mut self, expected: &DesktopContext) -> Result<Vec<u8>> {
-        if &self.context()? != expected {
-            return Err(error("desktop changed before capture"));
-        }
-        let frame = self.capture()?;
-        if &self.context()? != expected {
-            return Err(error(
-                "desktop changed during capture; waiting for a current frame",
-            ));
-        }
-        Ok(frame)
+        capture_checked(self, expected, Self::capture)
     }
     /// Drain finished output, then (encoder backends) submit at most one
     /// capture. The default captures one JPEG picture. A `keyframe` is asked
@@ -171,6 +162,25 @@ pub trait Backend: 'static {
     fn restore_display_mode(&mut self) -> Result<bool> {
         Ok(false)
     }
+}
+
+/// `capture` on `backend`, kept only while its desktop is `expected` both
+/// before and after.
+pub(crate) fn capture_checked<B: Backend + ?Sized>(
+    backend: &mut B,
+    expected: &DesktopContext,
+    capture: impl FnOnce(&mut B) -> Result<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    if &backend.context()? != expected {
+        return Err(error("desktop changed before capture"));
+    }
+    let frame = capture(backend)?;
+    if &backend.context()? != expected {
+        return Err(error(
+            "desktop changed during capture; waiting for a current frame",
+        ));
+    }
+    Ok(frame)
 }
 
 /// Every method forwards, provided ones included, so a boxed backend behaves

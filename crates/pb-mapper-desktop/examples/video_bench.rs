@@ -26,18 +26,96 @@
 //!   `--pause-ms` (encoder recovery probe), `--poll-us` (backend polling).
 //!
 //! It prints the largest keyframe and access unit, which `wire::MAX_PAYLOAD`
-//! must hold.
+//! must hold. Driving the encoder, it also prints a `case=encoder` line: the
+//! heap allocations and bytes the encoder's own calls ask for, and the time
+//! and the cycles its thread ran in them, per access unit; and the median and
+//! mean of each of a submit that converted a capture and of a drain that
+//! returned a unit.
+#[cfg(windows)]
+mod probe_support;
+
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    bench::run()
+}
+#[cfg(not(windows))]
+fn main() {}
+
+/// The system allocator, counting each allocation and reallocation and the
+/// bytes each asks for.
+#[cfg(windows)]
+mod counting {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub struct Counting;
+
+    static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+    static ALLOCATED: AtomicU64 = AtomicU64::new(0);
+
+    fn count(bytes: usize) {
+        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Allocations and bytes asked for so far, process-wide.
+    pub fn now() -> (u64, u64) {
+        (
+            ALLOCATIONS.load(Ordering::Relaxed),
+            ALLOCATED.load(Ordering::Relaxed),
+        )
+    }
+
+    // SAFETY: every method forwards its arguments unchanged to `System`, which
+    // upholds the `GlobalAlloc` contract; counting touches no memory it returns.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            count(layout.size());
+            // SAFETY: the caller's `layout` meets `alloc`'s requirements.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            count(layout.size());
+            // SAFETY: as for `alloc`.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            count(new_size);
+            // SAFETY: `ptr` came from this allocator with `layout`, as the caller
+            // guarantees, and this allocator is `System`.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: as for `realloc`.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: Counting = Counting;
+}
+
+/// The benchmark: its options, the paced loop and the report.
+#[cfg(windows)]
+mod bench {
+    use crate::{pattern::Pattern, probe_support::option};
     use pb_mapper_desktop::{
-        Backend, DisplaySelection, VideoCodec, VideoRate, displays,
-        windows::video::{Encoded, Encoder, Statistics},
+        Backend, Display, DisplaySelection, NativeBackend, VideoCodec, VideoLimits, VideoRate,
+        displays, native_backend,
+        windows::video::{Encoded, Encoder, Statistics, h265_available},
     };
     use std::{
-        io::Write,
+        fs::File,
+        io::{BufWriter, Write},
         time::{Duration, Instant},
     };
 
+    type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    /// The options that take a value, which is then no positional argument.
     const VALUED: [&str; 10] = [
         "--max-width",
         "--max-height",
@@ -50,402 +128,662 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "--frames",
         "--codec",
     ];
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let flag = |name: &str| args.iter().any(|arg| arg == name);
-    let value = |name: &str| {
-        args.windows(2)
-            .find(|pair| pair[0] == name)
-            .map(|pair| pair[1].as_str())
-    };
-    let mut positional = Vec::new();
-    let mut operand = false;
-    for arg in &args {
-        if std::mem::take(&mut operand) {
-            continue;
+    /// A step's bitrate is measured after this long, once the rate controller
+    /// has settled.
+    const SETTLE: Duration = Duration::from_secs(2);
+
+    pub fn run() -> Result {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let rates = Rates::parse(&args)?;
+        let display = displays()?.into_iter().next().ok_or("no display")?;
+        let pattern_only = flag(&args, "--pattern-only");
+        let noise = flag(&args, "--noise");
+        let _animation = if option(&args, "--dump").is_some() || noise {
+            Some(Pattern::new(
+                display.x,
+                display.y,
+                display.width,
+                display.height,
+                noise,
+            )?)
+        } else if pattern_only || flag(&args, "--animate") || rates.paces.is_some() {
+            Some(Pattern::new(
+                display.x + 32,
+                display.y + 32,
+                960,
+                540,
+                false,
+            )?)
+        } else {
+            None
+        };
+        if pattern_only {
+            println!(
+                "Animating benchmark window for {}s; no encoder is running in this process",
+                rates.seconds
+            );
+            std::thread::sleep(Duration::from_secs(rates.seconds));
+            return Ok(());
         }
-        operand = VALUED.contains(&arg.as_str());
-        if !arg.starts_with("--") {
-            positional.push(arg.as_str());
+        let (limits, mut sinks) = Limits::parse(&args, &rates, &display)?;
+        let (codec, fps) = (rates.codec, rates.fps);
+        let Limits {
+            max_width,
+            max_height,
+            bitrate,
+            exact,
+            ..
+        } = limits;
+        if codec == VideoCodec::H265 {
+            // What a host asks before it offers H.265: probed once per adapter.
+            for _ in 0..2 {
+                let asked = Instant::now();
+                let usable = h265_available(display.id);
+                println!(
+                    "h265_available={usable} probe_ms={:.1}",
+                    asked.elapsed().as_secs_f64() * 1000.0
+                );
+            }
         }
-    }
-    let seconds: u64 = positional.first().copied().unwrap_or("10").parse()?;
-    if !(1..=300).contains(&seconds) {
-        return Err("benchmark duration must be 1..300 seconds".into());
-    }
-    let paces: Option<Vec<u32>> = value("--pace")
-        .map(|list| list.split(',').map(str::parse).collect())
-        .transpose()?;
-    let fps: u32 = positional
-        .get(1)
-        .copied()
-        .unwrap_or(if paces.is_some() { "60" } else { "120" })
-        .parse()?;
-    if !(1..=120).contains(&fps) {
-        return Err("nominal fps must be 1..120".into());
-    }
-    if let Some(paces) = &paces
-        && (seconds < 3 || paces.is_empty() || paces.iter().any(|pace| !(1..=fps).contains(pace)))
-    {
-        return Err("--pace needs 3 s or more per step, and paces of 1..fps".into());
-    }
-    let codec = match value("--codec").unwrap_or("h264") {
-        "h264" => VideoCodec::H264,
-        "h265" => VideoCodec::H265,
-        other => return Err(format!("unknown codec {other}: h264 or h265").into()),
-    };
-    let display = displays()?.into_iter().next().ok_or("no display")?;
-    let pattern_only = flag("--pattern-only");
-    let noise = flag("--noise");
-    let _animation = if value("--dump").is_some() || noise {
-        Some(pattern::Pattern::new(
-            display.x,
-            display.y,
+        let building = Instant::now();
+        let encoder = if limits.backend {
+            None
+        } else if exact {
+            Some(Encoder::new_exact(
+                &display, codec, fps, bitrate, max_width, max_height,
+            )?)
+        } else {
+            Some(Encoder::new_with_size(
+                &display, codec, fps, bitrate, max_width, max_height,
+            )?)
+        };
+        let build_ms = building.elapsed().as_secs_f64() * 1000.0;
+        let mut coder = match encoder {
+            Some(encoder) => Coder::Encoder(encoder),
+            None => {
+                let mut backend = native_backend(&DisplaySelection::Id(display.id))?;
+                backend.configure_video(
+                    VideoLimits {
+                        max_width,
+                        max_height,
+                        max_fps: fps,
+                    },
+                    fps,
+                )?;
+                Coder::Backend(backend)
+            }
+        };
+        println!(
+            "encoder={} codec={codec:?} build_ms={build_ms:.1} display={}x{} nominal_fps={fps} max_size={max_width}x{max_height}{} target_bitrate={bitrate}",
+            coder.name(),
             display.width,
             display.height,
-            noise,
-        )?)
-    } else if pattern_only || flag("--animate") || paces.is_some() {
-        Some(pattern::Pattern::new(
-            display.x + 32,
-            display.y + 32,
-            960,
-            540,
-            false,
-        )?)
-    } else {
-        None
-    };
-    if pattern_only {
-        println!(
-            "Animating benchmark window for {seconds}s; no encoder is running in this process"
+            if exact { " exact" } else { "" },
         );
-        std::thread::sleep(Duration::from_secs(seconds));
-        return Ok(());
+
+        let steps = rates.steps();
+        let mut tally = Tally {
+            measured: vec![0; steps.len()],
+            ..Tally::default()
+        };
+        let start = Instant::now();
+        paced(
+            &rates, &limits, &steps, &mut coder, &mut sinks, &mut tally, start,
+        )?;
+        if let Some(file) = &mut sinks.dump {
+            file.flush()?;
+            println!("dumped_units={}", tally.written);
+        }
+        let stats = match &coder {
+            Coder::Encoder(encoder) => encoder.statistics(),
+            Coder::Backend(_) => tally.backend_stats.clone(),
+        };
+        if tally.pending_idr.is_some() {
+            return Err("hardware encoder did not honor requested keyframe".into());
+        }
+        if limits.pause_ms != 0 && (!tally.paused || tally.awaiting_recovery) {
+            return Err("pause probe did not observe independent recovery".into());
+        }
+        // 0: the encoder reports none. A finite GOP under 5 s fails.
+        if stats.gop != 0 && u64::from(stats.gop) < 5 * u64::from(fps) {
+            return Err(format!("encoder GOP is {} frames, under 5 s", stats.gop).into());
+        }
+        let elapsed = start.elapsed().as_secs_f64();
+        report(&tally, &stats, &rates, &limits, elapsed)
     }
-    let backend_mode = flag("--backend");
-    let max_width = value("--max-width")
-        .map(str::parse)
-        .transpose()?
-        .unwrap_or(display.width);
-    let max_height = value("--max-height")
-        .map(str::parse)
-        .transpose()?
-        .unwrap_or(display.height);
-    let bitrate: u32 =
-        value("--bitrate")
-            .map(str::parse)
-            .transpose()?
-            .unwrap_or(if paces.is_some() {
-                4_000_000
-            } else {
-                24_000_000
-            });
-    let frames: Option<u64> = value("--frames").map(str::parse).transpose()?;
-    let poll = Duration::from_micros(
-        value("--poll-us")
-            .map(str::parse)
-            .transpose()?
-            .unwrap_or(8_333),
-    );
-    if !(Duration::from_micros(500)..=Duration::from_millis(100)).contains(&poll) {
-        return Err("poll interval must be 500..100000 microseconds".into());
+
+    /// The cycles this thread has run, counted only while it runs, so a
+    /// preemption does not count.
+    fn thread_cycles() -> u64 {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThread() -> *mut std::ffi::c_void;
+            fn QueryThreadCycleTime(thread: *mut std::ffi::c_void, cycles: *mut u64) -> i32;
+        }
+        let mut cycles = 0;
+        // SAFETY: the current thread's pseudo-handle is always valid, and
+        // `cycles` outlives the call.
+        unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) };
+        cycles
     }
-    let pause_ms: u64 = value("--pause-ms")
-        .map(str::parse)
-        .transpose()?
-        .unwrap_or(0);
-    if pause_ms != 0 && (!(300..=1000).contains(&pause_ms) || backend_mode) {
-        return Err("pause probe requires the encoder mode and 300..1000 ms".into());
+
+    fn median(samples: &[f64]) -> f64 {
+        let mut sorted = samples.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        sorted.get(sorted.len() / 2).copied().unwrap_or(0.0)
     }
-    let mut output = value("--output").map(std::fs::File::create).transpose()?;
-    let mut dump = value("--dump")
-        .map(std::fs::File::create)
-        .transpose()?
-        .map(std::io::BufWriter::new);
-    let exact = flag("--exact");
-    if exact && backend_mode {
-        return Err("--exact drives the encoder; a backend never upscales".into());
+
+    fn mean(samples: &[f64]) -> f64 {
+        samples.iter().sum::<f64>() / samples.len().max(1) as f64
     }
-    if codec == VideoCodec::H265 {
-        // What a host asks before it offers H.265: probed once per adapter.
-        for _ in 0..2 {
-            let asked = Instant::now();
-            let usable = pb_mapper_desktop::windows::video::h265_available(display.id);
-            println!(
-                "h265_available={usable} probe_ms={:.1}",
-                asked.elapsed().as_secs_f64() * 1000.0
-            );
+
+    fn flag(args: &[String], name: &str) -> bool {
+        args.iter().any(|arg| arg == name)
+    }
+
+    /// What the run asks for that needs no display: how long, at which paces
+    /// and nominal rate, in which codec.
+    struct Rates {
+        seconds: u64,
+        paces: Option<Vec<u32>>,
+        fps: u32,
+        codec: VideoCodec,
+    }
+    impl Rates {
+        fn parse(args: &[String]) -> Result<Self> {
+            let mut positional = Vec::new();
+            let mut operand = false;
+            for arg in args {
+                if std::mem::take(&mut operand) {
+                    continue;
+                }
+                operand = VALUED.contains(&arg.as_str());
+                if !arg.starts_with("--") {
+                    positional.push(arg.as_str());
+                }
+            }
+            let seconds: u64 = positional.first().copied().unwrap_or("10").parse()?;
+            if !(1..=300).contains(&seconds) {
+                return Err("benchmark duration must be 1..300 seconds".into());
+            }
+            let paces: Option<Vec<u32>> = option(args, "--pace")
+                .map(|list| list.split(',').map(str::parse).collect())
+                .transpose()?;
+            let fps: u32 = positional
+                .get(1)
+                .copied()
+                .unwrap_or(if paces.is_some() { "60" } else { "120" })
+                .parse()?;
+            if !(1..=120).contains(&fps) {
+                return Err("nominal fps must be 1..120".into());
+            }
+            if let Some(paces) = &paces
+                && (seconds < 3
+                    || paces.is_empty()
+                    || paces.iter().any(|pace| !(1..=fps).contains(pace)))
+            {
+                return Err("--pace needs 3 s or more per step, and paces of 1..fps".into());
+            }
+            let codec = match option(args, "--codec").unwrap_or("h264") {
+                "h264" => VideoCodec::H264,
+                "h265" => VideoCodec::H265,
+                other => return Err(format!("unknown codec {other}: h264 or h265").into()),
+            };
+            Ok(Self {
+                seconds,
+                paces,
+                fps,
+                codec,
+            })
+        }
+
+        /// Each step's pace: the `--pace` list, else the nominal rate alone.
+        fn steps(&self) -> Vec<u32> {
+            self.paces.clone().unwrap_or_else(|| vec![self.fps])
         }
     }
-    let building = Instant::now();
-    let mut encoder = if backend_mode {
-        None
-    } else if exact {
-        Some(Encoder::new_exact(
-            &display, codec, fps, bitrate, max_width, max_height,
-        )?)
-    } else {
-        Some(Encoder::new_with_size(
-            &display, codec, fps, bitrate, max_width, max_height,
-        )?)
-    };
-    let build_ms = building.elapsed().as_secs_f64() * 1000.0;
-    let mut backend = if backend_mode {
-        let mut backend = pb_mapper_desktop::native_backend(&DisplaySelection::Id(display.id))?;
-        backend.configure_video(
-            pb_mapper_desktop::VideoLimits {
+
+    /// What the run asks of the encoder or backend, read once the display is
+    /// known.
+    struct Limits {
+        /// Drive the SDK backend instead of the encoder.
+        backend: bool,
+        max_width: u32,
+        max_height: u32,
+        bitrate: u32,
+        frames: Option<u64>,
+        poll: Duration,
+        pause_ms: u64,
+        exact: bool,
+    }
+    impl Limits {
+        /// The limits, and the files they name, created as they are read.
+        fn parse(args: &[String], rates: &Rates, display: &Display) -> Result<(Self, Sinks)> {
+            let backend = flag(args, "--backend");
+            let max_width = option(args, "--max-width")
+                .map(str::parse)
+                .transpose()?
+                .unwrap_or(display.width);
+            let max_height = option(args, "--max-height")
+                .map(str::parse)
+                .transpose()?
+                .unwrap_or(display.height);
+            let bitrate: u32 = option(args, "--bitrate")
+                .map(str::parse)
+                .transpose()?
+                .unwrap_or(if rates.paces.is_some() {
+                    4_000_000
+                } else {
+                    24_000_000
+                });
+            let frames: Option<u64> = option(args, "--frames").map(str::parse).transpose()?;
+            let poll = Duration::from_micros(
+                option(args, "--poll-us")
+                    .map(str::parse)
+                    .transpose()?
+                    .unwrap_or(8_333),
+            );
+            if !(Duration::from_micros(500)..=Duration::from_millis(100)).contains(&poll) {
+                return Err("poll interval must be 500..100000 microseconds".into());
+            }
+            let pause_ms: u64 = option(args, "--pause-ms")
+                .map(str::parse)
+                .transpose()?
+                .unwrap_or(0);
+            if pause_ms != 0 && (!(300..=1000).contains(&pause_ms) || backend) {
+                return Err("pause probe requires the encoder mode and 300..1000 ms".into());
+            }
+            let output = option(args, "--output").map(File::create).transpose()?;
+            let dump = option(args, "--dump")
+                .map(File::create)
+                .transpose()?
+                .map(BufWriter::new);
+            let exact = flag(args, "--exact");
+            if exact && backend {
+                return Err("--exact drives the encoder; a backend never upscales".into());
+            }
+            let limits = Self {
+                backend,
                 max_width,
                 max_height,
-                max_fps: fps,
-            },
-            fps,
-        )?;
-        Some(backend)
-    } else {
-        None
-    };
-    println!(
-        "encoder={} codec={codec:?} build_ms={build_ms:.1} display={}x{} nominal_fps={fps} max_size={max_width}x{max_height}{} target_bitrate={bitrate}",
-        encoder.as_ref().map_or("full SDK backend", Encoder::name),
-        display.width,
-        display.height,
-        if exact { " exact" } else { "" },
-    );
+                bitrate,
+                frames,
+                poll,
+                pause_ms,
+                exact,
+            };
+            Ok((limits, Sinks { output, dump }))
+        }
+    }
 
-    // Each step runs `seconds` at its pace; its bitrate is measured after the
-    // first 2 s, once the rate controller has settled.
-    let steps = paces.clone().unwrap_or_else(|| vec![fps]);
-    let settle = Duration::from_secs(2);
-    let mut measured = vec![0u64; steps.len()];
-    let start = Instant::now();
-    let mut first = true;
-    let mut written = 0u64;
-    let mut forced = 0u32;
-    let mut pending_idr = None;
-    let mut keyframes = 0;
-    let (mut max_keyframe, mut max_unit) = (0, 0);
-    let mut current_bitrate = bitrate;
-    let mut backend_stats = Statistics::default();
-    let mut context_us = 0u128;
-    let mut capture_us = 0u128;
-    let mut calls = 0u64;
-    let mut paused = false;
-    let mut awaiting_recovery = false;
-    for (step, &pace) in steps.iter().enumerate() {
-        let step_start = Instant::now();
-        let period = Duration::from_secs(1) / pace;
-        let mut next_tick = step_start;
-        while step_start.elapsed() < Duration::from_secs(seconds)
-            && frames.is_none_or(|frames| written < frames)
-        {
-            if pause_ms != 0
-                && !paused
-                && start.elapsed() > Duration::from_secs(1)
-                && encoder.as_ref().is_some_and(|encoder| {
+    /// The files the access units are written to: raw Annex B, and the
+    /// length-prefixed clip.
+    struct Sinks {
+        output: Option<File>,
+        dump: Option<BufWriter<File>>,
+    }
+
+    /// What makes the access units: the encoder alone, or the whole SDK
+    /// backend around it.
+    #[expect(
+        clippy::large_enum_variant,
+        reason = "one per run, built once and held in place"
+    )]
+    enum Coder {
+        Encoder(Encoder),
+        Backend(NativeBackend),
+    }
+    impl Coder {
+        fn name(&self) -> &str {
+            match self {
+                Self::Encoder(encoder) => encoder.name(),
+                Self::Backend(_) => "full SDK backend",
+            }
+        }
+
+        /// The encoder holds a submitted capture it has not output yet.
+        fn in_flight(&self) -> bool {
+            match self {
+                Self::Encoder(encoder) => {
                     let stats = encoder.statistics();
                     stats.submitted > stats.encoded
-                })
-            {
-                // Deliberately expire an outstanding GPU output, as a long
-                // stall can do. The next exported frame must be independent.
-                std::thread::sleep(Duration::from_millis(pause_ms));
-                paused = true;
-                awaiting_recovery = true;
+                }
+                Self::Backend(_) => false,
             }
-            if paces.is_none() && start.elapsed() > Duration::from_secs(2) {
-                current_bitrate = bitrate.min(12_000_000);
+        }
+    }
+
+    /// What the run counted, access unit by access unit.
+    #[derive(Default)]
+    struct Tally {
+        /// The bytes each step produced once it settled.
+        measured: Vec<u64>,
+        written: u64,
+        /// 1 once a keyframe was asked for, at `pending_idr`, until it came.
+        forced: u32,
+        pending_idr: Option<Instant>,
+        keyframes: u32,
+        max_keyframe: usize,
+        max_unit: usize,
+        /// The backend's figures, counted here; an encoder keeps its own.
+        backend_stats: Statistics,
+        context_us: u128,
+        capture_us: u128,
+        calls: u64,
+        /// What the encoder's own calls allocated, and bytes asked for.
+        encoder_allocations: (u64, u64),
+        /// Every encoder call, an empty drain or a submit that took nothing
+        /// included: microseconds, and thousands of cycles this thread ran.
+        encoder_us: f64,
+        encoder_kcycles: f64,
+        /// Each submit that converted a capture, and each drain that returned
+        /// a unit: microseconds, and thousands of cycles this thread ran.
+        submit_us: Vec<f64>,
+        drain_us: Vec<f64>,
+        submit_kcycles: Vec<f64>,
+        drain_kcycles: Vec<f64>,
+        /// The pause probe stalled the encoder, and its next unit must be a
+        /// keyframe.
+        paused: bool,
+        awaiting_recovery: bool,
+        first_reported: bool,
+    }
+    impl Tally {
+        /// Count what an encoder call allocated since `before`, and the
+        /// time and cycles it took.
+        fn encoder_calls(&mut self, before: (u64, u64), took: Duration, ran: u64) {
+            let after = crate::counting::now();
+            self.encoder_allocations.0 += after.0 - before.0;
+            self.encoder_allocations.1 += after.1 - before.1;
+            self.encoder_us += took.as_secs_f64() * 1e6;
+            self.encoder_kcycles += ran as f64 / 1e3;
+        }
+
+        /// One access unit of `step`: the recovery check, the statistics, the
+        /// files, and the first unit's line.
+        fn record(
+            &mut self,
+            frame: &Encoded,
+            step: usize,
+            step_start: Instant,
+            sinks: &mut Sinks,
+            pause_ms: u64,
+        ) -> Result {
+            if self.awaiting_recovery {
+                if !frame.keyframe {
+                    return Err("expired GPU output leaked dependent video".into());
+                }
+                println!("pause_recovery_keyframe=true pause_ms={pause_ms}");
+                self.awaiting_recovery = false;
             }
-            let rate = VideoRate {
-                bitrate: current_bitrate,
-                pace_fps: pace,
-            };
-            let now = Instant::now();
-            let tick = now >= next_tick;
-            if tick {
-                next_tick = (next_tick + period).max(now + period * 3 / 4);
+            self.backend_stats.encoded += 1;
+            self.backend_stats.unique_encoded += u64::from(!frame.duplicate);
+            self.backend_stats.bytes += frame.bytes.len() as u64;
+            self.backend_stats.gop = frame.gop;
+            if step_start.elapsed() >= SETTLE {
+                self.measured[step] += frame.bytes.len() as u64;
             }
-            let force = tick && forced == 0 && start.elapsed() > Duration::from_millis(1500);
-            if force {
-                forced = 1;
-                pending_idr = Some(now);
-            }
-            let mut ready = Vec::new();
-            if let Some(encoder) = &mut encoder {
-                encoder.set_rate(rate)?;
-                while let Some(frame) = encoder.drain()? {
-                    ready.push(frame);
-                }
-                if tick {
-                    encoder.submit(force)?;
-                }
-            } else if let Some(backend) = &mut backend {
-                let before = Instant::now();
-                let context = backend.context()?;
-                context_us += before.elapsed().as_micros();
-                let before = Instant::now();
-                let frame = if tick {
-                    backend.capture_video(&context, codec, force, rate)?
-                } else {
-                    backend.drain_video(&context, Duration::ZERO)?
-                };
-                capture_us += before.elapsed().as_micros();
-                calls += 1;
-                ready.extend(frame.map(|frame| Encoded {
-                    codec: frame.format.codec,
-                    bytes: frame.bytes,
-                    width: frame.format.width,
-                    height: frame.format.height,
-                    keyframe: frame.format.keyframe,
-                    duplicate: frame.format.duplicate,
-                    pts_us: frame.format.pts_us,
-                    encode_us: frame.format.encode_us,
-                    gop: frame.format.gop,
-                }));
-            }
-            for frame in ready {
-                if awaiting_recovery {
-                    if !frame.keyframe {
-                        return Err("expired GPU output leaked dependent video".into());
-                    }
-                    println!("pause_recovery_keyframe=true pause_ms={pause_ms}");
-                    awaiting_recovery = false;
-                }
-                backend_stats.encoded += 1;
-                backend_stats.unique_encoded += u64::from(!frame.duplicate);
-                backend_stats.bytes += frame.bytes.len() as u64;
-                backend_stats.gop = frame.gop;
-                if step_start.elapsed() >= settle {
-                    measured[step] += frame.bytes.len() as u64;
-                }
-                max_unit = max_unit.max(frame.bytes.len());
-                if frame.keyframe {
-                    keyframes += 1;
-                    max_keyframe = max_keyframe.max(frame.bytes.len());
-                    if let Some(request) = pending_idr.take() {
-                        println!(
-                            "forced_keyframe_ms={:.3}",
-                            request.elapsed().as_secs_f64() * 1000.0
-                        );
-                    }
-                }
-                if let Some(file) = &mut output {
-                    file.write_all(&frame.bytes)?;
-                }
-                if let Some(file) = &mut dump {
-                    file.write_all(&u32::try_from(frame.bytes.len())?.to_be_bytes())?;
-                    file.write_all(&frame.bytes)?;
-                }
-                if first {
+            self.max_unit = self.max_unit.max(frame.bytes.len());
+            if frame.keyframe {
+                self.keyframes += 1;
+                self.max_keyframe = self.max_keyframe.max(frame.bytes.len());
+                if let Some(request) = self.pending_idr.take() {
                     println!(
-                        "first_access_unit={} keyframe={} size={}x{}",
-                        frame.bytes.len(),
-                        frame.keyframe,
-                        frame.width,
-                        frame.height
+                        "forced_keyframe_ms={:.3}",
+                        request.elapsed().as_secs_f64() * 1000.0
                     );
-                    first = false;
                 }
-                written += 1;
             }
-            let idle = if backend_mode {
-                poll
-            } else {
-                Duration::from_millis(1)
-            };
-            std::thread::sleep(
-                next_tick
-                    .saturating_duration_since(Instant::now())
-                    .min(idle),
+            if let Some(file) = &mut sinks.output {
+                file.write_all(&frame.bytes)?;
+            }
+            if let Some(file) = &mut sinks.dump {
+                file.write_all(&u32::try_from(frame.bytes.len())?.to_be_bytes())?;
+                file.write_all(&frame.bytes)?;
+            }
+            if !self.first_reported {
+                println!(
+                    "first_access_unit={} keyframe={} size={}x{}",
+                    frame.bytes.len(),
+                    frame.keyframe,
+                    frame.width,
+                    frame.height
+                );
+                self.first_reported = true;
+            }
+            self.written += 1;
+            Ok(())
+        }
+    }
+
+    /// Each step runs the run's seconds at its pace, as the host's capture
+    /// worker paces: a submission on each tick, every ready unit drained in
+    /// between, until `--frames` units are out.
+    fn paced(
+        rates: &Rates,
+        limits: &Limits,
+        steps: &[u32],
+        coder: &mut Coder,
+        sinks: &mut Sinks,
+        tally: &mut Tally,
+        start: Instant,
+    ) -> Result {
+        let mut current_bitrate = limits.bitrate;
+        for (step, &pace) in steps.iter().enumerate() {
+            let step_start = Instant::now();
+            let period = Duration::from_secs(1) / pace;
+            let mut next_tick = step_start;
+            while step_start.elapsed() < Duration::from_secs(rates.seconds)
+                && limits.frames.is_none_or(|frames| tally.written < frames)
+            {
+                if limits.pause_ms != 0
+                    && !tally.paused
+                    && start.elapsed() > Duration::from_secs(1)
+                    && coder.in_flight()
+                {
+                    // Deliberately expire an outstanding GPU output, as a long
+                    // stall can do. The next exported frame must be independent.
+                    std::thread::sleep(Duration::from_millis(limits.pause_ms));
+                    tally.paused = true;
+                    tally.awaiting_recovery = true;
+                }
+                if rates.paces.is_none() && start.elapsed() > Duration::from_secs(2) {
+                    current_bitrate = limits.bitrate.min(12_000_000);
+                }
+                let rate = VideoRate {
+                    bitrate: current_bitrate,
+                    pace_fps: pace,
+                };
+                let now = Instant::now();
+                let tick = now >= next_tick;
+                if tick {
+                    next_tick = (next_tick + period).max(now + period * 3 / 4);
+                }
+                let force =
+                    tick && tally.forced == 0 && start.elapsed() > Duration::from_millis(1500);
+                if force {
+                    tally.forced = 1;
+                    tally.pending_idr = Some(now);
+                }
+                let mut ready = Vec::new();
+                match coder {
+                    Coder::Encoder(encoder) => {
+                        encoder.set_rate(rate)?;
+                        loop {
+                            let (before, at, ran) =
+                                (crate::counting::now(), Instant::now(), thread_cycles());
+                            let frame = encoder.drain()?;
+                            let (took, ran) = (at.elapsed(), thread_cycles() - ran);
+                            tally.encoder_calls(before, took, ran);
+                            let Some(frame) = frame else {
+                                break;
+                            };
+                            tally.drain_us.push(took.as_secs_f64() * 1e6);
+                            tally.drain_kcycles.push(ran as f64 / 1e3);
+                            ready.push(frame);
+                        }
+                        if tick {
+                            let (before, at, ran) =
+                                (crate::counting::now(), Instant::now(), thread_cycles());
+                            let submitted = encoder.submit(force)?;
+                            let (took, ran) = (at.elapsed(), thread_cycles() - ran);
+                            tally.encoder_calls(before, took, ran);
+                            if submitted {
+                                tally.submit_us.push(took.as_secs_f64() * 1e6);
+                                tally.submit_kcycles.push(ran as f64 / 1e3);
+                            }
+                        }
+                    }
+                    Coder::Backend(backend) => {
+                        let before = Instant::now();
+                        let context = backend.context()?;
+                        tally.context_us += before.elapsed().as_micros();
+                        let before = Instant::now();
+                        let frame = if tick {
+                            backend.capture_video(&context, rates.codec, force, rate)?
+                        } else {
+                            backend.drain_video(&context, Duration::ZERO)?
+                        };
+                        tally.capture_us += before.elapsed().as_micros();
+                        tally.calls += 1;
+                        ready.extend(frame.map(|frame| Encoded {
+                            codec: frame.format.codec,
+                            bytes: frame.bytes,
+                            width: frame.format.width,
+                            height: frame.format.height,
+                            keyframe: frame.format.keyframe,
+                            duplicate: frame.format.duplicate,
+                            pts_us: frame.format.pts_us,
+                            encode_us: frame.format.encode_us,
+                            gop: frame.format.gop,
+                        }));
+                    }
+                }
+                for frame in ready {
+                    tally.record(&frame, step, step_start, sinks, limits.pause_ms)?;
+                }
+                let idle = if limits.backend {
+                    limits.poll
+                } else {
+                    Duration::from_millis(1)
+                };
+                std::thread::sleep(
+                    next_tick
+                        .saturating_duration_since(Instant::now())
+                        .min(idle),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The run's totals and, with `--pace`, the rate model each step fits.
+    fn report(
+        tally: &Tally,
+        stats: &Statistics,
+        rates: &Rates,
+        limits: &Limits,
+        elapsed: f64,
+    ) -> Result {
+        let Tally {
+            keyframes,
+            forced,
+            max_keyframe,
+            max_unit,
+            ..
+        } = tally;
+        println!("max_keyframe_bytes={max_keyframe} max_access_unit_bytes={max_unit}");
+        if !limits.backend {
+            let units = stats.encoded.max(1) as f64;
+            let (allocations, bytes) = tally.encoder_allocations;
+            println!(
+                "case=encoder units={} allocs_per_unit={:.3} alloc_bytes_per_unit={:.0} calls_us_per_unit={:.1} calls_kcycles_per_unit={:.1} submits={} submit_p50_us={:.1} submit_mean_us={:.1} drain_p50_us={:.1} drain_mean_us={:.1} submit_p50_kcycles={:.1} submit_mean_kcycles={:.1} drain_p50_kcycles={:.1} drain_mean_kcycles={:.1}",
+                stats.encoded,
+                allocations as f64 / units,
+                bytes as f64 / units,
+                tally.encoder_us / units,
+                tally.encoder_kcycles / units,
+                tally.submit_us.len(),
+                median(&tally.submit_us),
+                mean(&tally.submit_us),
+                median(&tally.drain_us),
+                mean(&tally.drain_us),
+                median(&tally.submit_kcycles),
+                mean(&tally.submit_kcycles),
+                median(&tally.drain_kcycles),
+                mean(&tally.drain_kcycles),
             );
         }
-    }
-    if let Some(file) = &mut dump {
-        file.flush()?;
-        println!("dumped_units={written}");
-    }
-    let stats = encoder.as_ref().map_or(backend_stats, Encoder::statistics);
-    if pending_idr.is_some() {
-        return Err("hardware encoder did not honor requested keyframe".into());
-    }
-    if pause_ms != 0 && (!paused || awaiting_recovery) {
-        return Err("pause probe did not observe independent recovery".into());
-    }
-    // 0: the encoder reports none. A finite GOP under 5 s fails.
-    if stats.gop != 0 && u64::from(stats.gop) < 5 * u64::from(fps) {
-        return Err(format!("encoder GOP is {} frames, under 5 s", stats.gop).into());
-    }
-    let elapsed = start.elapsed().as_secs_f64();
-    println!("max_keyframe_bytes={max_keyframe} max_access_unit_bytes={max_unit}");
-    if backend_mode {
-        println!(
-            "seconds={elapsed:.3} keyframes={keyframes} forced={forced} gop={} encoded={} encoded_fps={:.2} unique_encoded_fps={:.2} bitrate_mbps={:.2} polls={} mean_context_ms={:.3} mean_capture_video_ms={:.3} (includes initial encoder startup)",
-            stats.gop,
-            stats.encoded,
-            stats.encoded as f64 / elapsed,
-            stats.unique_encoded as f64 / elapsed,
-            stats.bytes as f64 * 8.0 / elapsed / 1_000_000.0,
-            calls,
-            context_us as f64 / calls.max(1) as f64 / 1000.0,
-            capture_us as f64 / calls.max(1) as f64 / 1000.0
-        );
-    } else {
-        println!(
-            "seconds={elapsed:.3} keyframes={keyframes} forced={forced} gop={} unique_captures={} unique_capture_fps={:.2} encoded={} encoded_fps={:.2} unique_encoded_fps={:.2} bitrate_mbps={:.2} mean_encode_ms={:.3} max_in_flight={}",
-            stats.gop,
-            stats.unique_captures,
-            stats.unique_captures as f64 / elapsed,
-            stats.encoded,
-            stats.encoded as f64 / elapsed,
-            stats.unique_encoded as f64 / elapsed,
-            stats.bytes as f64 * 8.0 / elapsed / 1_000_000.0,
-            stats.encode_time_us as f64 / stats.encoded.max(1) as f64 / 1000.0,
-            stats.max_in_flight
-        );
-    }
-    if let Some(paces) = &paces {
-        // `Nominal` encoders budget each frame from the nominal rate, so their
-        // bitrate falls with the pace; `Timestamp` encoders hold the target.
-        let window = (Duration::from_secs(seconds) - settle).as_secs_f64();
-        let ratios: Vec<(f64, f64)> = paces
-            .iter()
-            .zip(&measured)
-            .map(|(&pace, &bytes)| {
-                let produced = bytes as f64 * 8.0 / window;
-                let nominal = f64::from(bitrate) * f64::from(pace) / f64::from(fps);
-                println!(
-                    "pace={pace} produced_mbps={:.3} nominal_expected_mbps={:.3} nominal_ratio={:.3} timestamp_ratio={:.3}",
-                    produced / 1e6,
-                    nominal / 1e6,
-                    produced / nominal,
-                    produced / f64::from(bitrate)
-                );
-                (produced / nominal, produced / f64::from(bitrate))
-            })
-            .collect();
-        let score = |pick: fn(&(f64, f64)) -> f64| {
-            ratios
-                .iter()
-                .map(|ratio| pick(ratio).ln().abs())
-                .sum::<f64>()
-        };
-        let nominal = score(|ratio| ratio.0) <= score(|ratio| ratio.1);
-        let within = ratios
-            .iter()
-            .map(|ratio| if nominal { ratio.0 } else { ratio.1 })
-            .all(|ratio| (0.75..=1.25).contains(&ratio));
-        println!(
-            "rate_model={} within_25_percent={within} gop={}",
-            if nominal { "nominal" } else { "timestamp" },
-            stats.gop
-        );
-        if !within {
-            return Err("produced bitrate is not within 25% of the rate model".into());
+        if limits.backend {
+            println!(
+                "seconds={elapsed:.3} keyframes={keyframes} forced={forced} gop={} encoded={} encoded_fps={:.2} unique_encoded_fps={:.2} bitrate_mbps={:.2} polls={} mean_context_ms={:.3} mean_capture_video_ms={:.3} (includes initial encoder startup)",
+                stats.gop,
+                stats.encoded,
+                stats.encoded as f64 / elapsed,
+                stats.unique_encoded as f64 / elapsed,
+                stats.bytes as f64 * 8.0 / elapsed / 1_000_000.0,
+                tally.calls,
+                tally.context_us as f64 / tally.calls.max(1) as f64 / 1000.0,
+                tally.capture_us as f64 / tally.calls.max(1) as f64 / 1000.0
+            );
+        } else {
+            println!(
+                "seconds={elapsed:.3} keyframes={keyframes} forced={forced} gop={} unique_captures={} unique_capture_fps={:.2} encoded={} encoded_fps={:.2} unique_encoded_fps={:.2} bitrate_mbps={:.2} mean_encode_ms={:.3} max_in_flight={}",
+                stats.gop,
+                stats.unique_captures,
+                stats.unique_captures as f64 / elapsed,
+                stats.encoded,
+                stats.encoded as f64 / elapsed,
+                stats.unique_encoded as f64 / elapsed,
+                stats.bytes as f64 * 8.0 / elapsed / 1_000_000.0,
+                stats.encode_time_us as f64 / stats.encoded.max(1) as f64 / 1000.0,
+                stats.max_in_flight
+            );
         }
+        if let Some(paces) = &rates.paces {
+            // `Nominal` encoders budget each frame from the nominal rate, so their
+            // bitrate falls with the pace; `Timestamp` encoders hold the target.
+            let (bitrate, fps) = (limits.bitrate, rates.fps);
+            let window = (Duration::from_secs(rates.seconds) - SETTLE).as_secs_f64();
+            let ratios: Vec<(f64, f64)> = paces
+                .iter()
+                .zip(&tally.measured)
+                .map(|(&pace, &bytes)| {
+                    let produced = bytes as f64 * 8.0 / window;
+                    let nominal = f64::from(bitrate) * f64::from(pace) / f64::from(fps);
+                    println!(
+                        "pace={pace} produced_mbps={:.3} nominal_expected_mbps={:.3} nominal_ratio={:.3} timestamp_ratio={:.3}",
+                        produced / 1e6,
+                        nominal / 1e6,
+                        produced / nominal,
+                        produced / f64::from(bitrate)
+                    );
+                    (produced / nominal, produced / f64::from(bitrate))
+                })
+                .collect();
+            let score = |pick: fn(&(f64, f64)) -> f64| {
+                ratios
+                    .iter()
+                    .map(|ratio| pick(ratio).ln().abs())
+                    .sum::<f64>()
+            };
+            let nominal = score(|ratio| ratio.0) <= score(|ratio| ratio.1);
+            let within = ratios
+                .iter()
+                .map(|ratio| if nominal { ratio.0 } else { ratio.1 })
+                .all(|ratio| (0.75..=1.25).contains(&ratio));
+            println!(
+                "rate_model={} within_25_percent={within} gop={}",
+                if nominal { "nominal" } else { "timestamp" },
+                stats.gop
+            );
+            if !within {
+                return Err("produced bitrate is not within 25% of the rate model".into());
+            }
+        }
+        Ok(())
     }
-    Ok(())
 }
-#[cfg(not(windows))]
-fn main() {}
 
 #[cfg(windows)]
 mod pattern {

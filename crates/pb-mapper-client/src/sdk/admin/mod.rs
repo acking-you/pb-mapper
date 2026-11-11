@@ -53,6 +53,20 @@ const COLLECT_PAGE_SIZE: u16 = MAX_PAGE_SIZE;
 /// Ample at [`COLLECT_PAGE_SIZE`]: the relay's hard capacity needs 1,049 pages.
 const MAX_PAGES: u32 = 10_000;
 
+// The `*_all` helpers have to be able to drain a relay filled to its hard
+// capacity. At a smaller page size they cannot: 1,048,576 credentials over
+// pages of 100 is 10,486 pages, past the `MAX_PAGES` guard, so a full
+// inventory would come back as a pagination error instead of a listing.
+const _: () = assert!(
+    pb_mapper_auth::MAX_TEMP_KEY_CAPACITY.div_ceil(COLLECT_PAGE_SIZE as usize)
+        <= MAX_PAGES as usize,
+    "*_all must drain a relay filled to capacity within MAX_PAGES pages"
+);
+const _: () = assert!(
+    COLLECT_PAGE_SIZE == MAX_PAGE_SIZE,
+    "paging below the relay's maximum multiplies its per-page re-sort"
+);
+
 /// Administrator RPCs. Constructed via [`super::Client::admin`].
 #[derive(Clone)]
 pub struct Admin {
@@ -77,7 +91,7 @@ macro_rules! admin_rpc {
         pub async fn $name(&self, $($arg: $arg_ty),*) -> Result<$output> {
             match self.request($request).await? {
                 AdminResponse::$variant($binding) => Ok($value),
-                other => unexpected(stringify!($variant), &other),
+                other => Err(Error::unexpected(stringify!($variant), &other)),
             }
         }
     };
@@ -97,7 +111,7 @@ macro_rules! admin_rpc_struct {
         pub async fn $name(&self, $($arg: $arg_ty),*) -> Result<$output> {
             match self.request($request).await? {
                 AdminResponse::$variant { $($binding)* } => Ok($value),
-                other => unexpected(stringify!($variant), &other),
+                other => Err(Error::unexpected(stringify!($variant), &other)),
             }
         }
     };
@@ -117,7 +131,13 @@ impl Admin {
         request: AdminRequest,
         io_timeout: Duration,
     ) -> Result<AdminResponse> {
-        send_admin_request(&self.inner.endpoint, self.credential(), request, io_timeout).await
+        send_admin_request(
+            &self.inner.endpoint,
+            self.inner.credential(),
+            request,
+            io_timeout,
+        )
+        .await
     }
 
     admin_rpc!(
@@ -332,16 +352,12 @@ impl Admin {
             .map_err(preserve)?;
         match response {
             AdminResponse::Ok { .. } => {
-                *self
-                    .inner
-                    .credential
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = parsed;
+                self.inner.set_credential(parsed);
                 Ok(new_key)
             }
             // A response that is not `Ok` still came from the relay, but nothing
             // here proves the rotation did not take effect.
-            other => unexpected::<String>("Ok", &other).map_err(preserve),
+            other => Err(preserve(Error::unexpected("Ok", &other))),
         }
     }
 
@@ -393,14 +409,6 @@ impl Admin {
         discard_staged_admin_key(&staged_path);
         Ok(rotated)
     }
-
-    fn credential(&self) -> pb_mapper_core::checksum::Credential {
-        *self
-            .inner
-            .credential
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
 }
 
 /// Lift an administrator key-file failure into the SDK's error type.
@@ -421,12 +429,6 @@ fn validate_page_size(page_size: u16) -> Result<u16> {
         )));
     }
     Ok(page_size)
-}
-
-fn unexpected<T>(expected: &str, actual: &AdminResponse) -> Result<T> {
-    Err(Error::protocol(format!(
-        "expected {expected}, got {actual:?}"
-    )))
 }
 
 /// Drain a paginated listing into one vector.
@@ -458,10 +460,27 @@ where
 mod tests {
     use super::*;
     use crate::sdk::admin::types::KeyListPage;
+    use pb_mapper_core::test_support::TEST_ADMIN_KEY_BYTES;
+
+    #[test]
+    fn an_issued_keys_debug_output_leaves_the_credential_out() {
+        let key = crate::sdk::admin::types::IssuedKey {
+            key_id: 7,
+            namespace: 7,
+            state: "active".into(),
+            issued_at: 0,
+            expires_at: 60,
+            label: None,
+            credential: "pbmt1_not-for-a-log".into(),
+        };
+        let shown = format!("{key:?}");
+        assert!(!shown.contains("not-for-a-log"), "{shown}");
+        assert!(shown.contains("[redacted]"), "{shown}");
+    }
 
     fn page(next_page: Option<u32>, ids: &[u64]) -> KeyListPage {
         KeyListPage {
-            schema_version: 1,
+            schema_version: pb_mapper_auth::ADMIN_SCHEMA_VERSION,
             items: ids
                 .iter()
                 .map(|&key_id| KeyMetadata {
@@ -475,25 +494,6 @@ mod tests {
                 .collect(),
             next_page,
         }
-    }
-
-    /// The `*_all` helpers have to be able to drain a relay filled to its hard
-    /// capacity. At a smaller page size they cannot: 1,048,576 credentials over
-    /// pages of 100 is 10,486 pages, past the [`MAX_PAGES`] guard, so a full
-    /// inventory would come back as a pagination error instead of a listing.
-    #[test]
-    fn the_collect_page_size_can_drain_a_relay_at_capacity() {
-        assert_eq!(
-            COLLECT_PAGE_SIZE, MAX_PAGE_SIZE,
-            "paging below the relay's maximum multiplies its per-page re-sort \
-             and shrinks what `*_all` can drain"
-        );
-        let pages_at_capacity =
-            pb_mapper_auth::MAX_TEMP_KEY_CAPACITY.div_ceil(usize::from(COLLECT_PAGE_SIZE));
-        assert!(
-            pages_at_capacity <= MAX_PAGES as usize,
-            "a full inventory needs {pages_at_capacity} pages, over the {MAX_PAGES} cap"
-        );
     }
 
     /// `validate_page_size` rejects locally, so an oversized request never
@@ -545,11 +545,43 @@ mod tests {
         .await
         .expect_err("an endless cursor must fail rather than hang");
 
-        assert!(error.to_string().contains("pagination exceeded"));
+        assert!(matches!(error, Error::Protocol { .. }));
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::Relaxed),
             MAX_PAGES,
             "the cap is what stops it, and it stops exactly there"
         );
+    }
+
+    /// A relay that takes the request and never answers is reported as a
+    /// timeout, within the bound the caller gave.
+    #[tokio::test]
+    async fn administrator_request_times_out_when_peer_stalls() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let remote_addr = listener.local_addr().unwrap();
+        let stalled_peer = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let error = crate::sdk::Client::from_credential(
+            remote_addr.to_string(),
+            pb_mapper_core::checksum::Credential::Admin(TEST_ADMIN_KEY_BYTES),
+            false,
+            None,
+        )
+        .admin()
+        .unwrap()
+        .request_with_timeout(AdminRequest::AuthStatus, Duration::from_millis(50))
+        .await
+        .expect_err("a stalled administrator request should time out");
+
+        assert!(
+            matches!(error, Error::TimedOut { .. }),
+            "timeout should be reported as TimedOut, got {error}"
+        );
+        stalled_peer.abort();
     }
 }

@@ -5,33 +5,46 @@
 //! the window go through exactly the same code.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::ctl::endpoint;
-use crate::ctl::proto::{self, PROTOCOL_VERSION, Request, Response};
+use crate::ctl::proto::{self, FrameError, PROTOCOL_VERSION, Request, Response};
 use crate::ctl::{Origin, dispatch};
 use crate::error::CtlError;
 use crate::state::PbMapperState;
+
+/// How long a peer has to send its request once connected, and to take its
+/// answer once written. The command line does each at once, so one silent
+/// for this long never will, and its connection's task ends rather than
+/// waiting on it for as long as the app runs. The command itself takes as
+/// long as it takes.
+const PEER_WAIT: Duration = Duration::from_secs(10);
 
 /// Serve one connection: read a request, run it, write the answer, close.
 async fn serve_one<S>(state: Arc<Mutex<PbMapperState>>, mut stream: S)
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let request: Request = match proto::read_frame(&mut stream).await {
-        Ok(request) => request,
-        Err(e) => {
-            tracing::debug!("control: unreadable request: {e}");
-            let response = Response::err(&CtlError::invalid_argument(format!(
-                "could not read the request: {e}"
-            )));
-            let _ = proto::write_frame(&mut stream, &response).await;
-            return;
-        }
-    };
+    let request: Request =
+        match tokio::time::timeout(PEER_WAIT, proto::read_frame(&mut stream)).await {
+            Ok(Ok(request)) => request,
+            Ok(Err(e)) => {
+                tracing::debug!("control: unreadable request: {e}");
+                let response = Response::err(&CtlError::invalid_argument(format!(
+                    "could not read the request: {e}"
+                )));
+                answer(&mut stream, &response).await;
+                return;
+            }
+            Err(_) => {
+                tracing::debug!("control: no request within {PEER_WAIT:?}");
+                return;
+            }
+        };
 
     // Version before command, so a mismatch is reported as itself rather than
     // as an unknown field somewhere inside.
@@ -42,7 +55,7 @@ where
             request.v
         )))
         .with_id(request.id);
-        let _ = proto::write_frame(&mut stream, &response).await;
+        answer(&mut stream, &response).await;
         return;
     }
 
@@ -50,8 +63,15 @@ where
     let response = dispatch(&state, request.command, Origin::Cli)
         .await
         .with_id(id);
-    if let Err(e) = proto::write_frame(&mut stream, &response).await {
-        tracing::debug!("control: could not answer: {e}");
+    answer(&mut stream, &response).await;
+}
+
+/// Writes `response`, for at most [`PEER_WAIT`].
+async fn answer<S: AsyncWrite + Unpin>(stream: &mut S, response: &Response) {
+    match tokio::time::timeout(PEER_WAIT, proto::write_frame(stream, response)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::debug!("control: could not answer: {e}"),
+        Err(_) => tracing::debug!("control: the answer was not taken within {PEER_WAIT:?}"),
     }
 }
 
@@ -74,6 +94,7 @@ pub fn start(
         tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    biased;
                     _ = shutdown.cancelled() => break,
                     result = server.connect() => {
                         if let Err(e) = result {
@@ -104,6 +125,7 @@ pub fn start(
         tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    biased;
                     _ = shutdown.cancelled() => break,
                     result = listener.accept() => match result {
                         Ok((stream, _)) => {
@@ -125,7 +147,7 @@ pub fn start(
 }
 
 /// Send one command to a running UI and read its answer.
-pub async fn request(command: crate::ctl::Command) -> std::io::Result<Response> {
+pub async fn request(command: crate::ctl::Command) -> Result<Response, FrameError> {
     let name = endpoint::endpoint();
     let mut stream = endpoint::connect(&name).await?;
     let request = Request {
@@ -135,4 +157,44 @@ pub async fn request(command: crate::ctl::Command) -> std::io::Result<Response> 
     };
     proto::write_frame(&mut stream, &request).await?;
     proto::read_frame(&mut stream).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::ctl::Command;
+
+    /// A peer that connects and never sends a request, or never reads its
+    /// answer, holds the connection's task only for a bounded while: the
+    /// command line sends at once and reads at once, so nothing else is
+    /// waited for.
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_that_goes_quiet_is_let_go() {
+        let state = Arc::new(Mutex::new(PbMapperState::unloaded()));
+        let served = |stream| {
+            tokio::time::timeout(Duration::from_secs(600), serve_one(state.clone(), stream))
+        };
+
+        let (_silent, stream) = tokio::io::duplex(64);
+        served(stream)
+            .await
+            .expect("a request that never comes is not waited for");
+
+        // An answer larger than the channel holds, which is never read.
+        let (mut deaf, stream) = tokio::io::duplex(64);
+        let request = Request {
+            v: PROTOCOL_VERSION,
+            id: Some("x".repeat(256)),
+            command: Command::Hello,
+        };
+        let asking = async move {
+            let _ = proto::write_frame(&mut deaf, &request).await;
+            std::future::pending::<()>().await;
+        };
+        tokio::select! {
+            served = served(stream) => served.expect("an answer never read is not waited for"),
+            () = asking => unreachable!("the asking side never ends"),
+        }
+    }
 }

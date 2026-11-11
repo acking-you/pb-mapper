@@ -4,10 +4,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, PathPolicy, RegisterOptions, RegisterRequest,
-    RelayTransport, Transport, TunnelStatus,
+    Client, ConnectOptions, PathPolicy, RegisterOptions, RelayTransport, Transport, TunnelStatus,
 };
-use pb_mapper_testkit::{READY_TIMEOUT, Relay, admin_credential};
+use pb_mapper_testkit::{READY_TIMEOUT, Relay, admin_client, publish, subscribe};
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -16,7 +15,7 @@ use tokio::{
 use tokio_util::task::AbortOnDropHandle;
 
 fn client(relay: &Relay, transport: RelayTransport) -> Client {
-    Client::from_credential(relay.addr().to_string(), admin_credential(), false, None)
+    admin_client(relay.addr())
         .with_relay_transport(transport)
         .unwrap()
 }
@@ -39,42 +38,28 @@ async fn a_retired_connection_delivers_its_last_streams_tail() {
         stream.write_all(&vec![5; SIZE]).await.unwrap();
         stream.shutdown().await.unwrap();
     }));
-    let registration = publisher
-        .register_with_options(
-            RegisterRequest {
-                key: "download".into(),
-                local_addr: backend.to_string(),
-                transport: Transport::Tcp,
-                codec: false,
-                force_namespace: false,
-            },
-            RegisterOptions {
-                allow_direct: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    registration
-        .wait_ready_timeout(READY_TIMEOUT)
-        .await
-        .unwrap();
-    let addr = pb_mapper_testkit::reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
-    let connection = consumer
-        .connect_with_options(
-            ConnectRequest {
-                key: "download".into(),
-                local_addr: addr.to_string(),
-                transport: Transport::Tcp,
-            },
-            ConnectOptions {
-                path: PathPolicy::RelayOnly,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let registration = publish(
+        &publisher,
+        "download",
+        backend,
+        Transport::Tcp,
+        false,
+        RegisterOptions {
+            allow_direct: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let (connection, addr) = subscribe(
+        &consumer,
+        "download",
+        Transport::Tcp,
+        ConnectOptions {
+            path: PathPolicy::RelayOnly,
+            ..Default::default()
+        },
+    )
+    .await;
 
     // The requester is done talking: once the service finishes, nothing
     // else holds the publisher's stream open.
@@ -101,7 +86,10 @@ async fn a_retired_connection_delivers_its_last_streams_tail() {
     .expect("the registration moves to a new connection");
 
     let mut rest = Vec::new();
-    tokio::time::timeout(READY_TIMEOUT, socket.read_to_end(&mut rest))
+    // What is asserted is that the tail arrives, not how fast: a debug build
+    // moves the 64 MiB in about seven seconds alone and took eleven on a
+    // loaded machine, so the bound only stops a hang.
+    tokio::time::timeout(Duration::from_secs(60), socket.read_to_end(&mut rest))
         .await
         .unwrap()
         .unwrap();

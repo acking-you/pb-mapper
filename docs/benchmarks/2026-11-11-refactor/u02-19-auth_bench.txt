@@ -1,0 +1,81 @@
+### u0219-auth
+=== before round 0 ===
+case=derive_temporary_key ns=369.2
+case=authenticate_temporary ns=495.2
+case=authenticate_administrator ns=120.5
+=== after round 0 ===
+case=derive_temporary_key ns=122.0
+case=authenticate_temporary ns=270.8
+case=authenticate_administrator ns=124.9
+=== after round 1 ===
+case=derive_temporary_key ns=126.1
+case=authenticate_temporary ns=265.3
+case=authenticate_administrator ns=124.6
+=== before round 1 ===
+case=derive_temporary_key ns=360.1
+case=authenticate_temporary ns=497.0
+case=authenticate_administrator ns=120.3
+=== before round 2 ===
+case=derive_temporary_key ns=353.3
+case=authenticate_temporary ns=498.4
+case=authenticate_administrator ns=119.8
+=== after round 2 ===
+case=derive_temporary_key ns=126.2
+case=authenticate_temporary ns=265.4
+case=authenticate_administrator ns=125.5
+=== after round 3 ===
+case=derive_temporary_key ns=130.1
+case=authenticate_temporary ns=264.8
+case=authenticate_administrator ns=124.5
+=== before round 3 ===
+case=derive_temporary_key ns=352.1
+case=authenticate_temporary ns=498.7
+case=authenticate_administrator ns=120.1
+=== before round 4 ===
+case=derive_temporary_key ns=356.7
+case=authenticate_temporary ns=489.9
+case=authenticate_administrator ns=120.8
+=== after round 4 ===
+case=derive_temporary_key ns=120.9
+case=authenticate_temporary ns=266.3
+case=authenticate_administrator ns=124.7
+=== after round 5 ===
+case=derive_temporary_key ns=123.1
+case=authenticate_temporary ns=266.0
+case=authenticate_administrator ns=124.4
+=== before round 5 ===
+case=derive_temporary_key ns=356.9
+case=authenticate_temporary ns=504.4
+case=authenticate_administrator ns=120.4
+=== before round 6 ===
+case=derive_temporary_key ns=356.6
+case=authenticate_temporary ns=493.0
+case=authenticate_administrator ns=119.6
+=== after round 6 ===
+case=derive_temporary_key ns=126.6
+case=authenticate_temporary ns=264.2
+case=authenticate_administrator ns=124.6
+=== after round 7 ===
+case=derive_temporary_key ns=121.3
+case=authenticate_temporary ns=267.8
+case=authenticate_administrator ns=124.3
+=== before round 7 ===
+case=derive_temporary_key ns=356.0
+case=authenticate_temporary ns=506.7
+case=authenticate_administrator ns=119.9
+=== before round 8 ===
+case=derive_temporary_key ns=348.1
+case=authenticate_temporary ns=497.0
+case=authenticate_administrator ns=120.1
+=== after round 8 ===
+case=derive_temporary_key ns=122.3
+case=authenticate_temporary ns=271.6
+case=authenticate_administrator ns=125.6
+=== after round 9 ===
+case=derive_temporary_key ns=121.3
+case=authenticate_temporary ns=266.2
+case=authenticate_administrator ns=124.4
+=== before round 9 ===
+case=derive_temporary_key ns=364.5
+case=authenticate_temporary ns=497.3
+case=authenticate_administrator ns=119.7
