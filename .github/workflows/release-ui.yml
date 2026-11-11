@@ -211,9 +211,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
+      # libunwind-dev goes first, by name: the runner image ships LLVM's
+      # libunwind-14-dev, which apt will not swap out on its own for the one
+      # libgstreamer1.0-dev depends on.
       - name: Install dependencies
         run: |
           sudo apt-get update -y
+          sudo apt-get install -y libunwind-dev
           sudo apt-get install -y locate ninja-build libgtk-3-dev libayatana-appindicator3-dev libnotify-dev \
           binutils coreutils desktop-file-utils fakeroot fuse libgdk-pixbuf2.0-dev patchelf python3-pip python3-setuptools squashfs-tools strace util-linux zsync \
           libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
