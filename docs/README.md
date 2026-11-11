@@ -39,7 +39,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [QUIC relay](relay-quic.zh-CN.md) | 中文; the optional QUIC carrier to the relay |
 | [Weak-network recovery](weak-network-recovery.md) | how register, connect and the relay recover when a route returns |
 | [UDP datagram forwarding](udp-datagram-forwarding.md) | why UDP is framed, and how to validate it |
-| [Benchmarks](benchmarks/) | the QUIC measurements, the [refactor's performance pass](benchmarks/2026-11-11-refactor/README.md) and its [build times](benchmarks/2026-11-11-refactor/compile-time.md), raw and summarised |
+| [Benchmarks](benchmarks/) | the QUIC measurements, the [refactor's performance pass](benchmarks/2026-11-11-refactor/README.md) its [build times](benchmarks/2026-11-11-refactor/compile-time.md) and the open-items passes ([credential store](benchmarks/2026-11-11-refactor/open-items-auth.md), [relay](benchmarks/2026-11-11-refactor/open-items-relay.md), [desktop](benchmarks/2026-11-11-refactor/open-items-desktop.md)), raw and summarised |
 
 ## Security
 

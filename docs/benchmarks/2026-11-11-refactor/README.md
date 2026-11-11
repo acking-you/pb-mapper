@@ -14,6 +14,24 @@ Only measured figures are below. The raw runs are in the `*.txt` files next
 to this one (each run's result lines in run order; the tracing log the
 relay bench prints around them is left out).
 
+Two later passes over [the open items](../../refactor-2026-11-open-items.md)
+measured more changes, each in a record of its own beside this one:
+
+- [open-items-auth.md](open-items-auth.md): the credential store's disk work
+  taken off the runtime's threads, and the five-minute snapshot written only
+  after a change.
+- [open-items-relay.md](open-items-relay.md): first flights admitted through
+  one replay-log writer that syncs per batch, subscribes waiting for a
+  replacement woken instead of polling, and the forwarders' reads capped at
+  1 MiB.
+- [open-items-desktop.md](open-items-desktop.md): desktop messages written
+  without copying their payload, thread C's context lent instead of cloned,
+  and the Windows encoder's kept NAL ranges and converter views.
+
+The commits named in this directory are commits of pull request #53's branch
+(`acking-you/pb-mapper`), which master takes as one squashed commit: they
+stay reachable through the pull request, not from master's history.
+
 ## Machine
 
 | | |
@@ -641,6 +659,9 @@ Pinned runs spread as widely as the unpinned sessions above (TCP throughput
   `u09-12-host_send_bench.txt`, `u09-11-host_send_bench.txt`,
   `u09-13-host_send_bench.txt`: part 2, one per comparison.
 - `aa-check-relay_transport_bench.txt`: the A/A check.
+- `open-items-auth-*.txt`, `open-items-relay-*.txt` and
+  `open-items-desktop-*.txt`: the raw runs of the three open-items records,
+  each listed in its record.
 - `stall-final-relay_transport_bench.txt`: the final stall comparison, base
   3207797 against 5ab03df8, 200 rounds each (see "Stalls in
   relay_transport_bench").

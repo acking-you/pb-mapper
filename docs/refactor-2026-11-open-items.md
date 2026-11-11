@@ -109,9 +109,8 @@ Each needs more than a fix, or a test bed this repository's tests lack.
   `system-config`; turning that off needs a uni-stream release.
 - **uni-stream 0.3.5**: it reads a `static mut` UDP timeout inside a `Lazy`
   on the first UDP stream anywhere in the process. pb-mapper-client orders
-  its write before every UDP stream it makes (`udp_timeout.rs`: one `Once`
-  for a connect tunnel's start and a publisher's UDP dial, whichever comes
-  first deciding), so its own streams no longer race it; a UDP stream made
+  its write before every UDP stream it makes (`udp_timeout.rs`: a connect tunnel's start writes it while no
+  publisher's UDP dial is under way, and never once one has made a stream), so its own streams no longer race it; a UDP stream made
   elsewhere in the process can, such as the app's preflight bind of a UDP
   connection's port if a datagram reaches it in that moment. Which timeout a
   publisher's UDP sessions get, 20 s or 120 s, still depends on whether a
@@ -289,8 +288,8 @@ Each works as designed; the line says what the other choice would cost.
   Win32, for a file not this user's in the app's own `%APPDATA%` (left by a
   run as administrator, which the replacement hands back to the user) or
   one given an explicit ACL by hand. A hard-linked file, and on unix another
-  user's file or one in another group, is written in place, as 0.11.0 wrote
-  it.
+  user's file or one in a group a replacement would not be in, is written in
+  place, as 0.11.0 wrote it.
 - The control channel's command line waits for the app's answer without a
   bound; Ctrl-C ends it. No bound outlasts the slowest command: `register`
   runs DNS lookups whose time the resolvers decide and a preflight bounded

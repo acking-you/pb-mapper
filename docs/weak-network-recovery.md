@@ -37,7 +37,7 @@ must not hold the only copy of partial-frame state in a discarded future.
    [RFC 6298](https://www.rfc-editor.org/rfc/rfc6298.html); it does not change TCP's
    retransmission timer. Transport retry sleeps grow from 100 ms to 2 seconds,
    with 75–100% jitter. Explicit relay rejections keep their separate 5–80 second
-   backoff and permanent refusals remain terminal.
+   backoff, jittered the same way, and permanent refusals remain terminal.
 3. **A control socket must receive authenticated traffic.** With the defaults,
    suspicion begins at six seconds; eight seconds without a complete inbound
    control frame closes that socket. A separate status lookup can establish that
@@ -144,7 +144,8 @@ cause or duration of an unobserved production outage.
 
 - `crates/pb-mapper-protocol/src/frame_read.rs`: persistent frame progress.
 - `crates/pb-mapper-protocol/src/secure/frame.rs`: V2 framing/authentication.
-- `crates/pb-mapper-client/src/recovery.rs`: setup latency estimation and jitter.
+- `crates/pb-mapper-client/src/recovery.rs`: setup latency estimation; the jitter is
+  `RetryBackoff::with_jitter` in `crates/pb-mapper-core/src/timeout.rs`.
 - `crates/pb-mapper-client/src/client/mod.rs` and `client/health.rs`: independent listener/probe lifecycle.
 - `crates/pb-mapper-client/src/client/stream.rs`: bounded, pre-payload setup retries.
 - `crates/pb-mapper-client/src/server/attempt.rs`: register deadlines and control watchdog.

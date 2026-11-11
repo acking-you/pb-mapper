@@ -74,9 +74,13 @@ types show there as `alloc_sites_tmp::`). Per video unit, video only:
 ## Kept
 
 Each "before" build is the tree with the item's files as the commit before
-it has them; the bench changes are in both builds.
+it has them; the bench changes are in both builds. The pass ran in a checkout
+of its own on 634f158e, beside the pass that changed the credential store and
+the relay: each build here is 634f158e with this record's commits, which are
+named as they are on the pull request's branch, where that other pass's
+commits sit between 634f158e and them.
 
-### Desktop messages through kept buffers (e275e35e)
+### Desktop messages through kept buffers (8c4b7d44)
 
 `write_message` serialized the header into a new `Vec`, then copied header
 and payload into a `BufWriter` sized for both and flushed it: two to three
@@ -96,7 +100,7 @@ anything is written. A writer keeps the buffer of its largest header so far;
 a header is at most 8 KiB, and a larger one is refused once serialized, as
 before.
 
-`host_send_bench`, before = 634f158e, after = e275e35e, 10 rounds each:
+`host_send_bench`, before = 634f158e, after = 8c4b7d44, 10 rounds each:
 
 | metric | before (n=10) | after (n=10) | change | p |
 |---|---|---|---|---|
@@ -116,7 +120,7 @@ pointer moving. The counts include the one allocation the vectored write
 costs per video message: rustls collects the slices into a `Vec` before it
 encrypts them.
 
-### Thread C lends its desktop context (da68576c)
+### Thread C lends its desktop context (28dd0cba)
 
 Thread C cloned its `DesktopContext`, and with it the display's name, to
 hand the backend a reference: in each capture or drain step, pointer sample,
@@ -124,7 +128,7 @@ input and lease renewal. It now lends `&self.context` beside the backend,
 the same value. The display-mode paths still clone: they run per command,
 and `read_modes` takes the engine mutably.
 
-`host_send_bench`, before = e275e35e, after = da68576c, 10 rounds each:
+`host_send_bench`, before = 8c4b7d44, after = 28dd0cba, 10 rounds each:
 
 | metric | before (n=10) | after (n=10) | change | p |
 |---|---|---|---|---|
@@ -145,7 +149,7 @@ bytes; a real display's name is longer.
 With both, `host_send_bench` counts 19.13 allocations per unit where it
 counted 29.34, and 60.92 with the pointer moving where it counted 94.45.
 
-### The encoder keeps its NAL unit ranges (dc4ba14a)
+### The encoder keeps its NAL unit ranges (c15cbcf4)
 
 Every access unit out of the Windows encoder was parsed into a new `Vec` of
 its NAL unit ranges, to find its keyframes and parameter sets. The codec
@@ -154,8 +158,8 @@ found are the same (a test parses into a used buffer and into a fresh one),
 and so are the units sent. The sequence header read on a stream change, and
 on a keyframe without parameter sets, still parses into a `Vec` of its own.
 
-`video_bench 10 60 --animate`, before = da68576c, after = dc4ba14a, both with
-dc4ba14a's bench less its cycle counts (added after these runs), 10 rounds
+`video_bench 10 60 --animate`, before = 28dd0cba, after = c15cbcf4, both with
+c15cbcf4's bench less its cycle counts (added after these runs), 10 rounds
 each:
 
 | metric | before (n=10) | after (n=10) | change | p |
@@ -175,7 +179,7 @@ spread of each); what remains per unit is the unit's own copy out of the
 encoder's sample, which goes to the network. The drain times (-8%, p =
 0.03) are not claimed.
 
-### The video converter keeps its views (de4234ec)
+### The video converter keeps its views (0fcd0216)
 
 The D3D11 video processor that scales each capture into the encoder's NV12
 sample created an input view of the capture texture and an output view of
@@ -187,8 +191,8 @@ one, not a new one at a freed address), at most six. The blit is the same:
 a clip dumped through the change (`--dump`, pattern frames only) decodes
 with ffmpeg without an error, every frame in order.
 
-`video_bench 10 60 --animate`, before = dc4ba14a, after = de4234ec, both with
-d4302c0d's bench, 15 rounds each:
+`video_bench 10 60 --animate`, before = c15cbcf4, after = 0fcd0216, both with
+e67b39ad's bench, 15 rounds each:
 
 | metric | before (n=15) | after (n=15) | change | p |
 |---|---|---|---|---|

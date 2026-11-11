@@ -20,7 +20,7 @@ in the files listed at the end.
 - Each table gives `median [min..max]` over the runs of each side, the
   change of the median and a two-sided Mann-Whitney U p-value.
 
-## Persistence off the runtime's workers (kept, fcffc52a)
+## Persistence off the runtime's workers (kept, 7abb8cd2)
 
 ### What ran where
 
@@ -99,7 +99,7 @@ Before, the hold equals the operation's latency when the actor shares the
 probe's worker, and it grows from the default capacity to the largest: the
 measure responds to its input.
 
-Before = 634f158e with the bench, after = fcffc52a, two sessions of 20
+Before = 634f158e with the bench, after = 7abb8cd2, two sessions of 20
 rounds pooled (the first without the `status` case):
 
 | metric | before (n=40) | after (n=40) | change | p |
@@ -188,7 +188,7 @@ here: beyond this machine's noise, and a fixed cost beside the renewal's
 own fsync. An administrator command is an operator's request; no tunnel's
 traffic passes through the actor.
 
-## The snapshot rewritten when nothing changed (kept, 1e103878)
+## The snapshot rewritten when nothing changed (kept, fe6d4be5)
 
 ### The first pass's argument, checked
 
@@ -256,7 +256,7 @@ it fails at the expiry.
 that outlive the run, asks nothing more of it, and counts how often
 `auth.snapshot` is replaced and how many bytes that is; on Linux it also
 reports what the process passed to `write` (`/proc/self/io`), and strace
-counted the syncs. Before = fcffc52a, after = 1e103878, two hours each, on
+counted the syncs. Before = 7abb8cd2, after = fe6d4be5, two hours each, on
 Linux; the hours count from the end of the start and the 100 issues:
 
 | idle hour | build | snapshot rewrites | snapshot bytes written | fsync calls |
@@ -277,7 +277,7 @@ bench's own report line every five minutes.
 The auth_bench cases do not move: item-1 build against this one, 10 rounds
 each:
 
-| metric | fcffc52a (n=10) | 1e103878 (n=10) | change | p |
+| metric | 7abb8cd2 (n=10) | fe6d4be5 (n=10) | change | p |
 |---|---|---|---|---|
 | renew_current latency_p50_us | 767.7 [729.0..877.9] | 773.6 [743.3..825.1] | 0.8% | 0.762 |
 | renew_multi latency_p50_us | 797.0 [759.3..838.1] | 795.5 [760.0..853.5] | -0.2% | 1.000 |

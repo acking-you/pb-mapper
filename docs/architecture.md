@@ -720,8 +720,7 @@ The design and its rules are in `docs/ui-design.md`.
     level the keys a later build wrote), `configuration.rs` loads and saves
     it (atomically through core's `durable_file` where the file can be
     replaced; in place, as 0.11.0 did, for a file with other names, and on
-    unix another user's or one in a group other than this user's or its
-    directory's, a
+    unix another user's or one in a group a replacement would not be in, a
     directory that takes no new file and a file the rename may not replace;
     a tunnel's entry is written only when it changed; refusing a
     file this user may not write; a store that cannot be read or parsed is

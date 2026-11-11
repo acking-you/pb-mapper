@@ -1,4 +1,4 @@
-### before (fcffc52a): snapshot_bench 7210 under strace -f -tt -e trace=fsync,fdatasync, Linux (WSL2)
+### before (7abb8cd2): snapshot_bench 7210 under strace -f -tt -e trace=fsync,fdatasync, Linux (WSL2)
 === output ===
 # idle from unix_ms=1794382908072
 case=idle elapsed_s=300 rewrites=1 snapshot_bytes=151533 write_bytes=151583 write_calls=4
@@ -265,7 +265,7 @@ idle hour 2: fsync=36 fdatasync=0
 3744914 17:41:58.109501 +++ exited with 0 +++
 3744889 17:41:58.110230 +++ exited with 0 +++
 3744880 17:41:58.112514 +++ exited with 0 +++
-### after (1e103878): snapshot_bench 7210 under strace -f -tt -e trace=fsync,fdatasync, Linux (WSL2)
+### after (fe6d4be5): snapshot_bench 7210 under strace -f -tt -e trace=fsync,fdatasync, Linux (WSL2)
 === output ===
 # idle from unix_ms=1794383069917
 case=idle elapsed_s=300 rewrites=1 snapshot_bytes=151532 write_bytes=151582 write_calls=4

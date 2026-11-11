@@ -23,7 +23,7 @@ runs are in the files listed at the end.
 - Each table gives `median [min..max]` over the runs of each side, the change
   of the median and a two-sided Mann-Whitney U p-value.
 
-## Replay-log admission (kept, b00c2156)
+## Replay-log admission (kept, 0150fe72)
 
 ### What bounded it
 
@@ -117,8 +117,8 @@ logs where the guard was opened.
 
 ### Measured
 
-`handshake_bench`, before = b8529eee (the auth items) plus the bench, after =
-b00c2156, on each state directory. The C: and D: runs used an after build
+`handshake_bench`, before = 7cc6d145 (the auth items) plus the bench, after =
+0150fe72, on each state directory. The C: and D: runs used an after build
 from before two lines of `reserve` were reordered (the fingerprint goes into
 `pending` before, not after, the record is queued, under the same lock);
 three later rounds of the final build on C:, under "Compaction", agree.
@@ -251,7 +251,7 @@ What the tables say:
   ([open-items-auth.md](open-items-auth.md)), they no longer queue behind
   handshakes waiting for the log.
 
-## The re-subscribe poll (kept, 3272faf7)
+## The re-subscribe poll (kept, d33f98fa)
 
 ### What it cost
 
@@ -312,7 +312,7 @@ What a waiting subscribe observes:
 
 ### Measured
 
-Before = 3272faf7's parent (b00c2156) plus the bench, after = 3272faf7.
+Before = d33f98fa's parent (0150fe72) plus the bench, after = d33f98fa.
 Windows, 12 rounds each:
 
 | metric | before (n=12) | after (n=12) | change | p |
@@ -385,7 +385,7 @@ replacement at once. It adds to the routing manager a registry of the
 waiting subscribes, and a wake where a registration is added, put back in
 rotation or removed.
 
-## Buffer retention (kept, 2b6437b8)
+## Buffer retention (kept, c375992b)
 
 ### What holds memory
 
@@ -425,7 +425,7 @@ it now holds only 64 KiB per tunnel.
 
 ### Measured
 
-Base = 3272faf7, each option = the same with only `buffer.rs` changed; 8
+Base = d33f98fa, each option = the same with only `buffer.rs` changed; 8
 rounds each, every process idle at about 19 MiB resident (TCP) and 21 MiB
 (QUIC) before its burst.
 
