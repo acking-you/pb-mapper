@@ -661,27 +661,78 @@ fn aggregate_admission_limit_covers_all_keys() {
     );
 }
 
+/// A replay log record as a relay appends it, admitted at `at`.
+fn replay_record(fingerprint: [u8; 32], at: u64) -> Vec<u8> {
+    [&fingerprint[..], &at.to_be_bytes()].concat()
+}
+
+/// A crash in the middle of an append leaves the log's last record cut off.
+/// A relay that restarts on that log drops the cut-off record, whose
+/// admission was never acknowledged, and keeps the records before it: what it
+/// admitted is still refused as a replay, and it admits again, onto a log of
+/// whole records.
 #[test]
-fn persisted_first_flights_survive_a_torn_trailing_record() {
+fn a_restart_drops_the_record_a_crash_cut_off() {
     let scratch = TempPath::new("replay-torn");
     let path = scratch.to_path_buf();
     let now = unix_seconds();
-    let fingerprint = [17_u8; 32];
+    let admitted = [17_u8; 32];
     {
         let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
         assert_eq!(
-            guard.admit(KeyId::from_u64(7), &fingerprint, now),
+            guard.admit(KeyId::from_u64(7), &admitted, now),
             FirstFlightAdmit::Fresh
         );
     }
-    let mut torn = std::fs::read(&path).unwrap();
-    torn.extend_from_slice(&[0_u8; 10]);
-    std::fs::write(&path, torn).unwrap();
+    // The next record's fingerprint and the first bytes of its time.
+    let cut_off = [18_u8; 32];
+    let mut log = std::fs::read(&path).unwrap();
+    log.extend_from_slice(&replay_record(cut_off, now)[..36]);
+    std::fs::write(&path, log).unwrap();
+
     let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(KeyId::from_u64(7), &fingerprint, now),
-        FirstFlightAdmit::Unavailable
+        restored.admit(KeyId::from_u64(7), &admitted, now),
+        FirstFlightAdmit::Replayed
     );
+    assert_eq!(
+        restored.admit(KeyId::from_u64(7), &cut_off, now),
+        FirstFlightAdmit::Fresh
+    );
+    drop(restored);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        [replay_record(admitted, now), replay_record(cut_off, now)].concat()
+    );
+}
+
+/// Only a log's last record is ever cut off by a crash. A log in which a
+/// record cut off is followed by others, or a file that is no replay log at
+/// all, still fails closed: every protocol-v2 first flight is refused, and the
+/// file is left as it is for the operator.
+#[test]
+fn a_damaged_replay_log_still_fails_closed() {
+    let scratch = TempPath::new("replay-damaged");
+    std::fs::create_dir(&scratch).unwrap();
+    let now = unix_seconds();
+    let damaged = [
+        replay_record([1; 32], now),
+        replay_record([2; 32], now)[..10].to_vec(),
+        replay_record([3; 32], now),
+    ]
+    .concat();
+    let not_a_log = b"pb-mapper state, but no first-flight replay log.\n".to_vec();
+    for (name, contents) in [("damaged", damaged), ("not-a-log", not_a_log)] {
+        let path = scratch.join(name);
+        std::fs::write(&path, &contents).unwrap();
+        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        assert_eq!(
+            guard.admit(KeyId::from_u64(9), &[9; 32], now),
+            FirstFlightAdmit::Unavailable,
+            "{name}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), contents, "{name}");
+    }
 }
 
 #[test]

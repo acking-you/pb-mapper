@@ -16,8 +16,8 @@
 //! unique salts before the request payload is decoded.
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
+use std::fs::OpenOptions;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use pb_mapper_auth::KeyId;
@@ -297,14 +297,15 @@ impl ReplayGuard {
             return;
         }
         let now = unix_seconds();
-        let records = match read_complete_replay_records(&path) {
-            Ok(records) => records,
-            Err(error) => {
-                self.log_failed = true;
-                log_unavailable(&path, "read", &error, None);
-                return;
-            }
-        };
+        let records =
+            match read_replay_log(&path).and_then(|log| self.after_a_crash(&path, log, now)) {
+                Ok(records) => records,
+                Err(error) => {
+                    self.log_failed = true;
+                    log_unavailable(&path, "read", &error, None);
+                    return;
+                }
+            };
         let mut live = Vec::new();
         for record in records {
             if now.saturating_sub(record.timestamp) > self.window_seconds {
@@ -328,12 +329,63 @@ impl ReplayGuard {
         self.last_compact_at = now;
     }
 
+    /// The records of a log read at start, less the record a crash cut off,
+    /// if one did.
+    ///
+    /// A crash in the middle of an append leaves that append's record cut off
+    /// as the last thing in the log, and nothing else: each append adds one
+    /// record at the end, and one that fails is rolled back or stops every
+    /// append after it. Its admission was never acknowledged, which waits for
+    /// the record to be synced, so dropping it loses nothing replay protection
+    /// needs. A log cut off anywhere else reads out of step from there on, and
+    /// a file that is no replay log reads as records no relay wrote: either
+    /// way some record, or the cut-off one at the earliest it can be, names a
+    /// time past the replay window ahead of this relay's clock, and the log is
+    /// refused, as one is that a relay wrote before its clock was set back by
+    /// more than the window.
+    fn after_a_crash(
+        &self,
+        path: &Path,
+        ReplayLog { records, cut_off }: ReplayLog,
+        now: u64,
+    ) -> std::io::Result<Vec<ReplayRecord>> {
+        if cut_off.is_empty() {
+            return Ok(records);
+        }
+        // The earliest time the cut-off record can have had.
+        let mut completed = [0_u8; REPLAY_RECORD_LEN];
+        for (byte, kept) in completed.iter_mut().zip(&cut_off) {
+            *byte = *kept;
+        }
+        let latest = now.saturating_add(self.window_seconds);
+        if records
+            .iter()
+            .chain([&ReplayRecord::from_bytes(completed)])
+            .any(|record| record.timestamp > latest)
+        {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "the log ends in a cut-off record and names times past the replay window \
+                 ahead of this relay's clock: it is damaged, or no first-flight replay log",
+            ));
+        }
+        tracing::warn!(
+            event = "replay_log_cut_off_record_dropped",
+            path = %path.display(),
+            bytes = cut_off.len(),
+            "dropped the first-flight replay log's last record, cut off by a crash in the middle of its append"
+        );
+        Ok(records)
+    }
+
     fn compact(&mut self, now: u64) {
         let Some(path) = &self.log_path else {
             self.last_compact_at = now;
             return;
         };
-        let records = match read_complete_replay_records(path) {
+        // While the relay runs, an append either completes or is rolled back,
+        // so a cut-off record here was not left by this relay.
+        let records = match read_replay_log(path).and_then(ReplayLog::whole) {
             Ok(records) => records,
             Err(error) => {
                 self.log_failed = true;
@@ -455,29 +507,43 @@ fn log_append_failed(path: &Path, step: &'static str, error: &std::io::Error) {
     );
 }
 
-/// Reads every record in the log, and closes it before returning.
+/// The log as read: its whole records, then the bytes of one cut off.
+struct ReplayLog {
+    records: Vec<ReplayRecord>,
+    cut_off: Vec<u8>,
+}
+
+impl ReplayLog {
+    /// The records of a log that has none cut off.
+    fn whole(self) -> std::io::Result<Vec<ReplayRecord>> {
+        if self.cut_off.is_empty() {
+            Ok(self.records)
+        } else {
+            Err(std::io::Error::new(
+                ErrorKind::UnexpectedEof,
+                "truncated first-flight replay record",
+            ))
+        }
+    }
+}
+
+/// Reads the log whole, and closes it before returning.
 ///
 /// Both callers go on to replace this file. On Windows a handle still open on
 /// it makes `MoveFileExW` refuse that replace, leaving it to std's POSIX-rename
 /// retry, which older releases and some file systems lack; a failed rewrite
 /// latches `log_failed` for the life of the process.
-fn read_complete_replay_records(path: &Path) -> std::io::Result<Vec<ReplayRecord>> {
-    let mut file = File::open(path)?;
-    let mut records = Vec::new();
-    loop {
-        let mut record = [0_u8; REPLAY_RECORD_LEN];
-        let read = file.read(&mut record)?;
-        if read == 0 {
-            return Ok(records);
-        }
-        if read < REPLAY_RECORD_LEN {
-            return Err(std::io::Error::new(
-                ErrorKind::UnexpectedEof,
-                "truncated first-flight replay record",
-            ));
-        }
-        records.push(ReplayRecord::from_bytes(record));
-    }
+fn read_replay_log(path: &Path) -> std::io::Result<ReplayLog> {
+    let bytes = std::fs::read(path)?;
+    let (records, cut_off) = bytes.as_chunks::<REPLAY_RECORD_LEN>();
+    Ok(ReplayLog {
+        records: records
+            .iter()
+            .copied()
+            .map(ReplayRecord::from_bytes)
+            .collect(),
+        cut_off: cut_off.to_vec(),
+    })
 }
 
 /// Cuts the log back to `len`, removing a partly appended record.
