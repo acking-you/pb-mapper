@@ -490,7 +490,10 @@ fn stays_in_place(file: &fs::File, _: &Path) -> io::Result<bool> {
     // SAFETY: `file` owns the handle for the call, and the call writes one
     // `BY_HANDLE_FILE_INFORMATION`, which `information` has room for.
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) } == 0 {
-        return Err(io::Error::last_os_error());
+        // A file system that does not say has no links to keep: replaced,
+        // as before this was asked.
+        tracing::debug!("Cannot read the link count: {}", io::Error::last_os_error());
+        return Ok(false);
     }
     // SAFETY: the call succeeded, so it wrote every field.
     let information = unsafe { information.assume_init() };
