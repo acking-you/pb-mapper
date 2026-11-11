@@ -7,7 +7,8 @@
 //! from if-addrs, as they always have; what each interface is comes from
 //! netdev, which knows types and gateways but is slow to ask, so it is read
 //! in the background. Until it answers, and where it cannot tell, as on
-//! Android, names and address ranges decide.
+//! Android, names and address ranges decide; on iOS, where netdev does not
+//! build, they always do.
 //!
 //! Everything else is a pure function of an [`Interfaces`] table, which tests
 //! inject. Getting it wrong costs an order or a 150 ms head start; what is
@@ -370,6 +371,13 @@ fn same_prefix(a: IpAddr, b: IpAddr, len: u8) -> bool {
 
 /// What the system says an interface is.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    target_os = "ios",
+    expect(
+        dead_code,
+        reason = "only netdev tells wired from wireless, and not on iOS"
+    )
+)]
 enum Kind {
     Loopback,
     Ethernet,
@@ -542,6 +550,18 @@ impl Kinds {
             .map(|known| known.tier)
     }
 
+    /// Nothing on iOS, where netdev does not build: names and ranges rank
+    /// every interface.
+    #[cfg(target_os = "ios")]
+    fn read(generation: u64) -> Self {
+        Self {
+            generation,
+            known: Vec::new(),
+            temporary: Vec::new(),
+        }
+    }
+
+    #[cfg(not(target_os = "ios"))]
     fn read(generation: u64) -> Self {
         let mut kinds = Self {
             generation,
@@ -590,6 +610,7 @@ impl Kinds {
 
 /// Rank an interface netdev read. `android`, because apps there are shown
 /// neither routes nor MAC addresses.
+#[cfg(not(target_os = "ios"))]
 fn rank(interface: &netdev::Interface, addrs: &[(IpAddr, u8)], android: bool) -> InterfaceTier {
     use netdev::interface::types::InterfaceType as T;
     let kind = match interface.if_type {
@@ -734,6 +755,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "ios"))]
     fn android_wifi_and_hotspots_lead_to_a_lan_unseen_mac_and_routes() {
         use netdev::interface::types::InterfaceType as T;
         // As netdev reads them for an app: no MAC address, no gateway.

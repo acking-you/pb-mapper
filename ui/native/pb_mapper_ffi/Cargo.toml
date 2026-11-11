@@ -31,11 +31,12 @@ tokio-util.workspace = true
 dirs.workspace = true
 
 pb-mapper-auth.workspace = true
-pb-mapper = { workspace = true, features = ["desktop"] }
+pb-mapper = { workspace = true, features = ["desktop", "p2p", "relay-quic"] }
 # Direct sessions, as the CLI has them: a connection tries a direct path
 # first and falls back to the relay, and the embedded relay offers one. The
-# relay itself is reached over TCP or, when Settings says so, QUIC.
-pb-mapper-client = { workspace = true, features = ["p2p", "relay-quic", "port-mapping"] }
+# relay itself is reached over TCP or, when Settings says so, QUIC. Port
+# mapping comes per target, below.
+pb-mapper-client = { workspace = true, features = ["p2p", "relay-quic"] }
 pb-mapper-core.workspace = true
 pb-mapper-galaxy.workspace = true
 pb-mapper-server = { workspace = true, features = ["p2p", "relay-quic"] }
@@ -47,6 +48,14 @@ ring.workspace = true
 # The remembered computers' vault key, as Dart passes it.
 base64.workspace = true
 bytes = { workspace = true, optional = true }
+
+# Port mapping (PCP, NAT-PMP, UPnP) asks netwatch and netdev for the gateway,
+# and netdev does not build for iOS: an iOS app maps no port, as a build
+# without the feature does (`PortMapping::Auto` never asks, `Always` is
+# refused).
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+pb-mapper = { workspace = true, features = ["port-mapping"] }
+pb-mapper-client = { workspace = true, features = ["port-mapping"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni.workspace = true
@@ -62,3 +71,5 @@ better_mimalloc_rs = { workspace = true, features = ["local_dynamic_tls"] }
 # A live relay for the Relay page's calls; see src/relay.rs.
 pb-mapper-testkit.workspace = true
 bytes.workspace = true
+# Paused time for the tests; on iOS no dependency turns it on for them.
+tokio = { workspace = true, features = ["test-util"] }

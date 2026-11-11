@@ -24,7 +24,8 @@ expect_used = "deny"
 
 [workspace.dependencies]
 pb-mapper-auth = { path = "crates/pb-mapper-auth", version = "0.11.0" }
-pb-mapper = { path = "crates/pb-mapper", version = "0.11.0" }
+# Defaults off: the FFI turns port mapping on per target (not on iOS).
+pb-mapper = { path = "crates/pb-mapper", version = "0.11.0", default-features = false }
 pb-mapper-client = { path = "crates/pb-mapper-client", version = "0.11.0" }
 pb-mapper-desktop = { path = "crates/pb-mapper-desktop", version = "0.11.0" }
 pb-mapper-core = { path = "crates/pb-mapper-core", version = "0.11.0" }
