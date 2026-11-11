@@ -484,6 +484,19 @@ impl DirectState {
             }
         }
     }
+    /// `provider`'s registration has ended, and its ID is about to serve
+    /// whichever connection comes next, another tenant's as likely as not: none
+    /// of its setups may route there again. Their consumers give them up as
+    /// they would any provider that stopped answering.
+    pub fn provider_gone(&mut self, provider: RemoteConnId) {
+        for entry in self
+            .entries
+            .values_mut()
+            .filter(|e| e.provider == provider && e.pending())
+        {
+            entry.phase = Phase::Closed;
+        }
+    }
     pub fn sweep(&mut self, route: impl Fn(RemoteConnId) -> Option<ConnTaskSender>) {
         for entry in self.entries.values_mut() {
             if entry.pending() && Instant::now() >= entry.deadline {

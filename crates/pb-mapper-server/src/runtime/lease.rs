@@ -121,6 +121,9 @@ impl Router {
         let removed_from_service_map =
             remove_server_conn(&mut self.server_conn_map, &key, conn_id).is_some();
         let removed_from_active_map = self.manager.drop_conn_sender(conn_id);
+        // Direct setups reach their provider by this ID alone, and once it is
+        // recycled it may name another tenant's connection.
+        self.direct_state.provider_gone(conn_id);
         // Recycled here and only here, whether or not the sender was still
         // registered: this task comes from the socket's own guard, so its
         // arrival is the proof that nothing will speak for the ID again.

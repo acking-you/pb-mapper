@@ -518,6 +518,141 @@ mod tests {
         drop(auth);
     }
 
+    /// A direct setup reaches its provider by connection ID. Once the
+    /// provider's registration has ended, that ID can serve anyone's next
+    /// connection, another tenant's included, so the setup must stop routing
+    /// to it: the consumer's cancel reaches no one, not the subscriber of
+    /// another namespace that now holds the ID.
+    #[tokio::test]
+    async fn a_direct_setup_does_not_follow_its_providers_id_to_another_connection() {
+        use crate::ConnTask;
+        use pb_mapper_auth::ADMIN_KEY_ID;
+        use pb_mapper_protocol::direct::{
+            DIRECT_VERSION, DirectCapability, DirectClientMessage, DirectEvent, PeerInfo,
+        };
+
+        let admin_key = [23; 32];
+        let state_dir = TempPath::new("direct-provider-gone");
+        let auth = AuthRuntime::start(
+            admin_key,
+            AuthConfig {
+                state_dir: state_dir.to_path_buf(),
+                ..AuthConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let admin = auth
+            .authenticate_presented(ADMIN_KEY_ID, &admin_key)
+            .unwrap();
+        let mut router = Router::new(
+            TaskManager::new(),
+            direct::DirectState::new(Some(DirectCapability {
+                version: DIRECT_VERSION,
+                stun_addr: "127.0.0.1:10811".parse().unwrap(),
+            })),
+            ServerSecurity::new(auth.clone()),
+            None,
+            RoutingConfig::from_env(),
+            Instant::now(),
+        );
+        let register = |router: &mut Router, key: &ImutableKey, direct| {
+            let conn_id = router.manager.get_conn_id(std::iter::empty()).unwrap();
+            let (conn_sender, mailbox) = kanal::bounded_async(MAILBOX_CAPACITY);
+            assert!(
+                router
+                    .handle(ManagerTask::Register {
+                        key: key.clone(),
+                        conn_id,
+                        need_codec: false,
+                        is_datagram: false,
+                        protocol_version: CONTROL_PROTOCOL_V2,
+                        conn_sender,
+                        retire_token: CancellationToken::new(),
+                        direct,
+                    })
+                    .is_continue()
+            );
+            assert!(matches!(
+                mailbox.try_recv(),
+                Ok(Some(ConnTask::RegisterResp { .. }))
+            ));
+            (conn_id, mailbox)
+        };
+
+        // One tenant's direct-capable provider, and a consumer's setup with it.
+        let echo: ImutableKey = crate::compose_service_key(0, "echo");
+        let (provider, provider_mailbox) = register(&mut router, &echo, Some(admin.clone()));
+        let consumer = router.manager.get_conn_id(std::iter::empty()).unwrap();
+        let (consumer_sender, mut consumer_events) = tokio::sync::mpsc::channel(8);
+        let _ = router.handle(ManagerTask::Direct(direct::DirectTask::Connect {
+            connection: consumer,
+            namespace: 0,
+            auth: admin.clone(),
+            sender: consumer_sender,
+        }));
+        assert!(matches!(
+            consumer_events.try_recv(),
+            Ok(DirectEvent::Ready(_))
+        ));
+        let _ = router.handle(ManagerTask::Direct(direct::DirectTask::Client {
+            connection: consumer,
+            message: DirectClientMessage::Open {
+                request: 1,
+                key: "echo".into(),
+                is_datagram: false,
+                peer: PeerInfo {
+                    certificate: vec![1],
+                    candidates: vec![],
+                    lan_tcp: None,
+                },
+            },
+        }));
+        let Ok(Some(ConnTask::Direct(offer))) = provider_mailbox.try_recv() else {
+            panic!("the provider was not offered the setup");
+        };
+        let DirectEvent::Offer { grant, .. } = *offer else {
+            panic!("expected an offer");
+        };
+
+        // The provider's registration ends, and its ID serves a subscriber of
+        // another namespace, waiting on that namespace's provider.
+        let other: ImutableKey = crate::compose_service_key(7, "echo");
+        let (_other_provider, _other_mailbox) = register(&mut router, &other, None);
+        let _ = router.handle(ManagerTask::DeRegisterServerConn {
+            key: echo,
+            conn_id: provider,
+        });
+        let (subscriber_sender, subscriber_mailbox) = kanal::bounded_async(MAILBOX_CAPACITY);
+        let _ = router.handle(ManagerTask::Subcribe {
+            key: other,
+            conn_id: provider,
+            conn_sender: subscriber_sender,
+            excluded_server_conns: Vec::new(),
+            selected: None,
+        });
+        assert!(matches!(
+            subscriber_mailbox.try_recv(),
+            Ok(Some(ConnTask::SubcribeResp { .. }))
+        ));
+
+        // The consumer gives the setup up.
+        let _ = router.handle(ManagerTask::Direct(direct::DirectTask::Client {
+            connection: consumer,
+            message: DirectClientMessage::Cancel { id: grant.id },
+        }));
+        while let Ok(Some(task)) = subscriber_mailbox.try_recv() {
+            assert!(
+                !matches!(task, ConnTask::Direct(_)),
+                "another namespace's subscriber received a direct setup's message"
+            );
+        }
+
+        drop(router);
+        auth.shutdown_actor().await;
+        drop(auth);
+    }
+
     /// The capacity of a connection's `ConnTask` mailbox; the value does not
     /// matter here.
     const MAILBOX_CAPACITY: usize = 8;
