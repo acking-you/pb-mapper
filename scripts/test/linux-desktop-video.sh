@@ -14,6 +14,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+FFI="${CARGO_TARGET_DIR:-${ROOT_DIR}/target}/debug/libpb_mapper_ffi.so"
 OUT="${ROOT_DIR}/target/linux-desktop-video"
 CLIPS="${OUT}/clips"
 mkdir -p "${CLIPS}"
@@ -48,4 +49,4 @@ fi
 
 cmake -S "${ROOT_DIR}/ui/linux/test" -B "${OUT}/build" -DCMAKE_BUILD_TYPE=Release > /dev/null
 cmake --build "${OUT}/build"
-"${OUT}/build/desktop_video_test" "${ROOT_DIR}/target/debug/libpb_mapper_ffi.so" "${CLIPS}"
+"${OUT}/build/desktop_video_test" "${FFI}" "${CLIPS}"
