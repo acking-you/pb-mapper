@@ -187,6 +187,7 @@ use persistence::{
     split_high_slot_state, staged_instance_id_path, validate_admin_key, write_admin_key,
     write_namespace_high_water, write_snapshot_and_truncate_wal,
 };
+use runtime::off_runtime;
 use state::{
     AdminState, AuthStateInner, ColdMetadata, LiveLeases, PreviousRoot, RestoredState, SlotHot,
     SlotState,

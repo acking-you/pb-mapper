@@ -43,10 +43,21 @@ pub(super) struct Actor {
     /// reference, so replacing it is what ends the previous one.
     admin_lease: Arc<AuthLease>,
     replays: AdminReplays,
+    /// The wall-clock second of the last compaction, or of the actor's start.
+    last_snapshot_at: u64,
     /// Keeps the state directory locked for as long as the actor runs.
     _state_lock: Arc<File>,
     /// The only strong reference to the state; see above for why it is last.
     inner: Arc<AuthStateInner>,
+}
+
+/// What the actor does next, off the runtime's workers.
+enum Step {
+    Command(AuthCommand),
+    /// Compact, at this wall-clock second.
+    Compact(u64),
+    /// Every handle is gone.
+    Stop,
 }
 
 impl Actor {
@@ -64,59 +75,100 @@ impl Actor {
             leases,
             admin_lease,
             replays,
+            last_snapshot_at: unix_seconds(),
             _state_lock: state_lock,
         }
     }
 
     /// Serves commands until a shutdown or until every runtime handle is gone,
     /// advancing the schedule once a second in between.
-    pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<AuthCommand>) {
-        let mut last_snapshot_at = unix_seconds();
+    ///
+    /// The schedule advances here. Every command and every compaction, which
+    /// write and sync the state's files, runs on the blocking pool instead,
+    /// with the actor moved there and back: one step at a time, in the order
+    /// they came, each finished before the next begins. So their file work
+    /// holds up no other task on the runtime, and each stays whole as if it
+    /// ran here: an abort or a runtime shutdown lets a step under way finish
+    /// and drops the actor after it, never inside one.
+    pub(super) async fn run(self, mut command_rx: mpsc::Receiver<AuthCommand>) {
+        let mut actor = self;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::select! {
-                _ = tick.tick() => self.on_tick(&mut last_snapshot_at),
-                command = command_rx.recv() => {
-                    let Some(command) = command else {
-                        self.stop();
-                        break;
-                    };
-                    if self.handle(command).is_break() {
-                        break;
+            let step = tokio::select! {
+                _ = tick.tick() => {
+                    let now = unix_seconds();
+                    actor.advance(now);
+                    if !actor.compaction_due(now) {
+                        continue;
                     }
+                    Step::Compact(now)
                 }
+                command = command_rx.recv() => match command {
+                    Some(command) => Step::Command(command),
+                    None => Step::Stop,
+                },
+            };
+            match off_runtime(move || actor.step(step)).await {
+                Some(Some(next)) => actor = next,
+                // Stopped, or the runtime is shutting down: either way the
+                // actor has dropped.
+                Some(None) | None => break,
             }
         }
     }
 
-    fn on_tick(&mut self, last_snapshot_at: &mut u64) {
-        let now = unix_seconds();
+    /// Takes one step. Returns the actor while it serves on; once it stops,
+    /// it drops here.
+    fn step(mut self, step: Step) -> Option<Self> {
+        match step {
+            Step::Command(command) => {
+                if self.handle(command).is_break() {
+                    return None;
+                }
+            }
+            Step::Compact(now) => self.compact(now),
+            Step::Stop => {
+                self.stop();
+                return None;
+            }
+        }
+        Some(self)
+    }
+
+    /// Runs the schedule and the replay window up to wall-clock second `now`.
+    fn advance(&mut self, now: u64) {
         self.leases.tick(now);
         self.replays.prune(now);
+    }
+
+    fn compaction_due(&self, now: u64) -> bool {
         // WHY: A failed load starts safe mode with empty in-memory
         // generations. Compacting that reconstruction would replace the
         // damaged snapshot, truncate the WAL, and let the next start
         // exit safe mode without rotating the instance id.
-        if !self.inner.safe_mode.load(Ordering::Acquire)
-            && now.saturating_sub(*last_snapshot_at) >= SNAPSHOT_COMPACTION_INTERVAL.as_secs()
+        !self.inner.safe_mode.load(Ordering::Acquire)
+            && now.saturating_sub(self.last_snapshot_at) >= SNAPSHOT_COMPACTION_INTERVAL.as_secs()
+    }
+
+    /// Replaces the snapshot with the state as of wall-clock second `now` and
+    /// empties the WAL, or fails the store closed.
+    fn compact(&mut self, now: u64) {
+        let snapshot = build_snapshot(&self.inner, self.replays.records());
+        if let Err(error) =
+            write_snapshot_and_truncate_wal(&self.config, &self.inner.admin_key(), &snapshot)
         {
-            let snapshot = build_snapshot(&self.inner, self.replays.records());
-            if let Err(error) =
-                write_snapshot_and_truncate_wal(&self.config, &self.inner.admin_key(), &snapshot)
-            {
-                self.inner.safe_mode.store(true, Ordering::Release);
-                cancel_all_temporary_leases(&self.inner);
-                tracing::error!(
-                    event = "auth_state_safe_mode",
-                    auth_stage = "snapshot_compaction",
-                    reason = %error.code,
-                    error = %error,
-                    "authentication state compaction failed closed"
-                );
-            } else {
-                *last_snapshot_at = now;
-            }
+            self.inner.safe_mode.store(true, Ordering::Release);
+            cancel_all_temporary_leases(&self.inner);
+            tracing::error!(
+                event = "auth_state_safe_mode",
+                auth_stage = "snapshot_compaction",
+                reason = %error.code,
+                error = %error,
+                "authentication state compaction failed closed"
+            );
+        } else {
+            self.last_snapshot_at = now;
         }
     }
 

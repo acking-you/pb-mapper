@@ -991,6 +991,39 @@ async fn issue_renew_revoke_and_persist() {
     );
 }
 
+/// Mutations sent at once take effect one at a time, and each one's record
+/// reaches the WAL in the order the changes took effect, so a restart replays
+/// them to the state the relay held: of renewals of one key, the last applied
+/// sets its deadline in both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_mutations_persist_in_the_order_they_took_effect() {
+    let state_dir = TempPath::new("mutation-order");
+    let (runtime, admin) = start(&config(&state_dir, 4)).await;
+    let key_id = runtime
+        .issue(&admin, HOUR, None)
+        .await
+        .unwrap()
+        .metadata
+        .key_id;
+    let renewals = (0..32)
+        .map(|offset| {
+            let (runtime, admin) = (runtime.clone(), admin.clone());
+            tokio::spawn(async move {
+                let ttl = Duration::from_secs(600 + offset);
+                runtime.renew(&admin, key_id, ttl).await.unwrap();
+            })
+        })
+        .collect::<Vec<_>>();
+    for renewal in renewals {
+        renewal.await.unwrap();
+    }
+    let shown = runtime.show(&admin, key_id, false).await.unwrap();
+    let (restarted, admin) = restart(runtime).await;
+    let restored = restarted.show(&admin, key_id, false).await.unwrap();
+    assert_eq!(restored.metadata.expires_at, shown.metadata.expires_at);
+    stop(restarted).await;
+}
+
 #[tokio::test]
 async fn ensure_active_keeps_expiry_after_the_lease_is_cancelled() {
     let state_dir = TempPath::new("lease-expiry-reason");
