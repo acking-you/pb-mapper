@@ -139,6 +139,7 @@ impl<const PUSH: bool> Platform for Synthetic<PUSH> {
             secure_desktop: false,
             os: Some(Self::OS),
             reason: None,
+            permissions: None,
         }
     }
     fn displays() -> Result<Vec<Display>> {
@@ -224,6 +225,7 @@ fn setting(mode: Mode) -> Setting {
         height: mode.height,
         hz: 60,
         bpp: 32,
+        scale: 0,
     }
 }
 

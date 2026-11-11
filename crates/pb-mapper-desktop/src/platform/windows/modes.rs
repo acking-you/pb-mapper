@@ -58,6 +58,7 @@ impl Raw {
             height: self.height,
             hz: self.hz,
             bpp: self.bpp,
+            scale: 0,
         }
     }
 }

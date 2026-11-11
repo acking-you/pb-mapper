@@ -380,16 +380,30 @@ impl Waker {
 pub struct BackendError {
     kind: FailureKind,
     message: String,
+    permission: Option<Permission>,
 }
 impl BackendError {
     pub fn new(kind: FailureKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
+            permission: None,
+        }
+    }
+    /// `FailureKind::PermissionMissing`, for `permission`.
+    pub fn permission_missing(permission: Permission, message: impl Into<String>) -> Self {
+        Self {
+            permission: Some(permission),
+            ..Self::new(FailureKind::PermissionMissing, message)
         }
     }
     pub fn kind(&self) -> FailureKind {
         self.kind
+    }
+    /// The permission a `PermissionMissing` failure lacks, when the backend
+    /// said which.
+    pub fn permission(&self) -> Option<Permission> {
+        self.permission
     }
 }
 impl std::fmt::Display for BackendError {
@@ -416,6 +430,26 @@ pub fn failure_kind(error: &io::Error) -> Option<FailureKind> {
         .get_ref()?
         .downcast_ref::<BackendError>()
         .map(BackendError::kind)
+}
+
+/// The permission `error` lacks, if a backend said which.
+pub fn missing_permission(error: &io::Error) -> Option<Permission> {
+    error
+        .get_ref()?
+        .downcast_ref::<BackendError>()?
+        .permission()
+}
+
+/// A permission the operating system asks the computer's owner for before
+/// this process may host. Only macOS asks today.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Permission {
+    /// Recording the screen (macOS: Screen Recording): hosting at all.
+    ScreenCapture,
+    /// Posting input events (macOS: Accessibility): control.
+    Input,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

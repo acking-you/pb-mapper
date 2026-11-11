@@ -50,6 +50,7 @@ impl Platform for Windows {
             secure_desktop: false,
             os: Some(HostOs::Windows),
             reason: (!host).then_some(UnsupportedReason::MediaFoundationMissing),
+            permissions: None,
         }
     }
     fn displays() -> Result<Vec<Display>> {

@@ -65,6 +65,22 @@ napi-derive = "3.6.3"
 # Interface types and gateways, to put LAN candidates first. The same version
 # portmapper's netwatch already brings in.
 netdev = "0.46.3"
+# The macOS desktop host (pb-mapper-desktop's platform/macos): ScreenCaptureKit,
+# VideoToolbox, Core Graphics, ImageIO, the Keychain. Only the headers used;
+# already locked through xcap.
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSError", "NSObject", "NSProcessInfo", "NSString"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFCGTypes", "CFData", "CFDictionary", "CFNumber", "CFString", "CFUUID"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "objc2", "libc", "CGColorSpace", "CGDirectDisplay", "CGDisplayConfiguration", "CGDisplayStream", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGImage", "CGRemoteOperation", "CGSession", "CGWindow"] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "objc2", "objc2-core-video", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "dispatch2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "SCScreenshotManager", "SCShareableContent", "SCStream"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "objc2", "objc2-core-media", "objc2-core-video", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent"] }
+objc2-image-io = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-graphics", "CGImageDestination"] }
+objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecBase", "SecItem"] }
+block2 = "0.6.2"
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
 parking_lot = "0.12"
 portmapper = { package = "portmapper-plus", path = "deps/portmapper/portmapper", version = "0.20.0", default-features = false }
 rand = "0.10"

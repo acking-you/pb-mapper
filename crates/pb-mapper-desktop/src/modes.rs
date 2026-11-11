@@ -142,8 +142,8 @@ pub(crate) enum ModeCommand {
     HostRestore,
 }
 
-/// A display mode as the journal keeps it: its size, and the refresh rate
-/// and depth the platform set it at (0 where it has none).
+/// A display mode as the journal keeps it: its size, and the refresh rate,
+/// depth and backing scale the platform set it at (0 where it has none).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Setting {
@@ -151,6 +151,14 @@ pub(crate) struct Setting {
     pub height: u32,
     pub hz: u32,
     pub bpp: u32,
+    /// Pixels per point where a mode's points differ from its pixels
+    /// (macOS: a HiDPI mode is 2, its low-resolution twin of the same pixel
+    /// size 1); 0 elsewhere, and then never written.
+    #[serde(default, skip_serializing_if = "no_scale")]
+    pub scale: u32,
+}
+fn no_scale(scale: &u32) -> bool {
+    *scale == 0
 }
 impl Setting {
     pub(crate) fn size(self) -> Mode {
@@ -160,7 +168,7 @@ impl Setting {
         }
     }
     fn valid(self) -> bool {
-        self.size().valid() && self.hz <= 1000 && self.bpp <= 64
+        self.size().valid() && self.hz <= 1000 && self.bpp <= 64 && self.scale <= 8
     }
 }
 
@@ -198,12 +206,16 @@ impl Stored {
     }
 }
 
-/// A Windows display device, `\\.\DISPLAY` and one to three digits: the
-/// only displays any platform changes this round. A port widens it.
+/// A display device a platform changes: Windows' `\\.\DISPLAY` and one to
+/// three digits, or a macOS display's UUID (8-4-4-4-12 hexadecimal digits).
+/// A port widens it.
 fn valid_device(device: &str) -> bool {
-    device.strip_prefix(r"\\.\DISPLAY").is_some_and(|number| {
+    let windows = device.strip_prefix(r"\\.\DISPLAY").is_some_and(|number| {
         (1..=3).contains(&number.len()) && number.bytes().all(|b| b.is_ascii_digit())
-    })
+    });
+    let uuid = device.split('-').map(str::len).eq([8, 4, 4, 4, 12])
+        && device.bytes().all(|b| b == b'-' || b.is_ascii_hexdigit());
+    windows || uuid
 }
 
 /// Where a host records a display mode before it changes it, written
@@ -602,6 +614,7 @@ mod tests {
             height,
             hz: 60,
             bpp: 32,
+            scale: 0,
         }
     }
 
@@ -755,6 +768,16 @@ mod tests {
         assert_eq!(recover(&mut display, &journal).unwrap(), 0);
         assert!(!path.exists());
         assert_eq!(display.resets.len(), 1);
+    }
+
+    /// A journal names display devices only: Windows' and macOS' UUIDs,
+    /// never a path.
+    #[test]
+    fn a_journal_names_only_display_devices() {
+        let mac = "37D8832A-2D66-02CA-B9F7-8F30A301B230";
+        assert!(valid_device(r"\\.\DISPLAY1") && valid_device(mac));
+        assert!(!valid_device(r"C:\Windows") && !valid_device(&format!("../{mac}")));
+        assert!(!valid_device(&mac[..23]) && !valid_device("37D8832A-2D66-02CA-B9F7-8F30A301B23G"));
     }
 
     /// Two hosts of one process on one display: the first to end leaves it

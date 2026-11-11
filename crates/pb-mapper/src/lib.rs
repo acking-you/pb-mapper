@@ -65,7 +65,7 @@
 //! # Remote desktop
 //!
 //! The `desktop` feature adds the `desktop` module: sharing this computer's
-//! display over the same [`Client`] (`desktop::Host`, Windows today), and
+//! display over the same [`Client`] (`desktop::Host`, Windows and macOS), and
 //! viewing and controlling one from anywhere (`desktop::Viewer`), each by a
 //! `pbd1.` invitation. A viewer hands out encoded H.264 or H.265 access
 //! units, or JPEG pictures, for a decoder the integrator brings. Around them

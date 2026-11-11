@@ -2,14 +2,15 @@
 //! Hosts explicitly grant view access through a secret invitation. Control is
 //! separately enabled at the host and requested by the viewer. TLS 1.3 pins the
 //! host certificate from that invitation before sending its bearer capability.
-//! The native Windows backend captures the ordinary desktop. An explicitly
-//! installed, authorized helper handles UAC/Winlogon on its bound desktop.
+//! The native Windows and macOS backends capture the ordinary desktop. On
+//! Windows, an explicitly installed, authorized helper handles UAC/Winlogon
+//! on its bound desktop.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod auth;
 mod backend;
-// Neutral: only the Windows encoder and injector use them until another
-// platform lands.
+// Neutral: the Windows encoder uses all of it, macOS' the sample
+// conversion and the pipeline rules.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod codec;
 mod credit;
@@ -56,7 +57,7 @@ use std::io;
 
 pub use backend::{
     Backend, BackendCaps, BackendError, CursorMode, DRAIN_POLL, Description, FailureKind, HostOs,
-    Waker, failure_kind,
+    Permission, Waker, failure_kind, missing_permission,
 };
 pub use host::{Access, Custom, DisplaySelection, Host, HostBuilder, HostOptions, Native};
 pub use input::cursor::{CursorKind, CursorShape};
@@ -64,7 +65,10 @@ pub use input::{Button, DoubleClickGuard, Input, InputEvent, Key, cursor::Cursor
 pub use invite::{Invitation, InvitationError, InvitationFormat, valid_service};
 pub use modes::{DisplayModeError, Mode, ModeList, ModeTarget};
 pub use native::{NativeBackend, native_backend};
-pub use platform::{HostSupport, UnsupportedReason, displays, host_support, recover_display_modes};
+pub use platform::{
+    HostPermissions, HostSupport, UnsupportedReason, displays, host_support, recover_display_modes,
+    request_permission,
+};
 pub use protocol::{
     Adaptation, DesktopKind, NoticeCode, RateModel, RejectReason, Route, SessionState, StateReason,
     StopReason, VideoSize,

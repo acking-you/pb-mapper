@@ -6,9 +6,13 @@
 //! one adds `platform/<os>/` and an arm of [`Current`]. "Platforms" in
 //! `docs/remote-desktop.md` is the guide.
 
+// The OS parts build on macOS alone; its pure tables are tested on every
+// platform.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) mod macos;
 #[cfg(test)]
 pub(crate) mod synthetic;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) mod unsupported;
 // Every platform's, until one has a better wait; Windows tests it too.
 #[cfg(any(not(windows), test))]
@@ -19,7 +23,7 @@ pub(crate) mod windows;
 use crate::{
     Access, BackendCaps, BackendError, Button, CursorMode, CursorShape, DesktopKind, Display,
     DisplaySelection, DoubleClickGuard, EncodedFrame, FailureKind, HostOptions, HostOs, Key,
-    Result, VideoCodec, VideoLimits, VideoRate, Waker,
+    Permission, Result, VideoCodec, VideoLimits, VideoRate, Waker,
     input::held::Pressed,
     launch::{Launch, Launcher},
     modes::{Journal, Mode, Setting},
@@ -31,7 +35,9 @@ use std::{future::Future, path::Path, path::PathBuf, sync::Arc, time::Duration};
 /// This build's platform.
 #[cfg(windows)]
 pub(crate) type Current = windows::Windows;
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub(crate) type Current = macos::Macos;
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) type Current = unsupported::Unsupported;
 
 #[cfg(not(windows))]
@@ -39,11 +45,13 @@ pub(crate) use waiter::{Waiter, Wake};
 #[cfg(windows)]
 pub(crate) use windows::waiter::{Waiter, Wake};
 
+#[cfg(target_os = "macos")]
+pub(crate) use macos::timer as timers;
 /// Fine process timers, counted by `timer::TimerResolution`: on where the
 /// platform coarsens them, nothing elsewhere.
 #[cfg(windows)]
 pub(crate) use windows::timer as timers;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) mod timers {
     pub(crate) fn acquire() {}
     pub(crate) fn release() {}
@@ -64,6 +72,12 @@ pub(crate) trait Platform: Sized + 'static {
 
     /// Can this machine host now, and if not why. Cheap.
     fn support() -> HostSupport;
+    /// Ask the owner for `permission` where the operating system asks;
+    /// whether it is granted now. Elsewhere there is nothing to ask.
+    fn request(permission: Permission) -> bool {
+        let _ = permission;
+        true
+    }
     fn displays() -> Result<Vec<Display>>;
     /// Outside thread C, when a host starts and before it registers; it may
     /// wait on a person (a consent dialog). Resolves the selection. Windows:
@@ -258,7 +272,7 @@ pub(crate) trait DisplayModes: Sized {
 /// No mode changes: the unsupported platform's, and the first real platform
 /// without modes (Android, Wayland).
 #[cfg_attr(
-    windows,
+    any(windows, target_os = "macos"),
     expect(dead_code, reason = "only the platforms without modes use it")
 )]
 pub(crate) struct NoModes;
@@ -311,6 +325,21 @@ pub struct HostSupport {
     pub secure_desktop: bool,
     pub os: Option<HostOs>,
     pub reason: Option<UnsupportedReason>,
+    /// Whether each permission hosting needs is granted, where the operating
+    /// system asks the owner for them (macOS); `None` elsewhere. Screen
+    /// capture missing is `UnsupportedReason::PermissionMissing`; input
+    /// missing leaves hosting view-only.
+    pub permissions: Option<HostPermissions>,
+}
+
+/// The permissions hosting asks the owner for, and whether each is granted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct HostPermissions {
+    /// Recording the screen ([`Permission::ScreenCapture`]).
+    pub screen_capture: bool,
+    /// Posting input events ([`Permission::Input`]).
+    pub input: bool,
 }
 
 /// Why this machine cannot host.
@@ -335,6 +364,15 @@ pub fn host_support() -> HostSupport {
 /// The displays this machine could share.
 pub fn displays() -> Result<Vec<Display>> {
     Current::displays()
+}
+
+/// Ask the owner for `permission`, where the operating system asks for it:
+/// on macOS the first request shows the system's prompt and lists this app
+/// in System Settings, where the owner grants it. Whether it is granted now;
+/// macOS applies a new Screen Recording grant once the app starts again.
+/// Elsewhere nothing is asked: true.
+pub fn request_permission(permission: Permission) -> bool {
+    Current::request(permission)
 }
 
 /// What sessions on platform `P` can do when their backend does not describe
@@ -436,6 +474,9 @@ pub(crate) fn privileged_support() -> crate::privileged::PrivilegedSupport {
     }
 }
 
+/// Why a host refuses to start: a missing permission is screen capture,
+/// which hosting needs at all (input only gates control); any other reason
+/// is `Unsupported`.
 fn unsupported(reason: Option<UnsupportedReason>) -> std::io::Error {
     let message = match reason {
         Some(UnsupportedReason::MediaFoundationMissing) => {
@@ -443,9 +484,15 @@ fn unsupported(reason: Option<UnsupportedReason>) -> std::io::Error {
         }
         Some(UnsupportedReason::NoDisplay) => "No display is available to share",
         Some(UnsupportedReason::PermissionMissing) => {
-            "Desktop hosting needs a permission this computer has not granted"
+            return BackendError::permission_missing(
+                Permission::ScreenCapture,
+                "Desktop hosting needs the Screen Recording permission, which this computer has not granted",
+            )
+            .into();
         }
-        Some(UnsupportedReason::Platform) | None => "Desktop hosting currently requires Windows",
+        Some(UnsupportedReason::Platform) | None => {
+            "Desktop hosting requires Windows, or macOS 12.3 or later"
+        }
     };
     BackendError::new(FailureKind::Unsupported, message).into()
 }
