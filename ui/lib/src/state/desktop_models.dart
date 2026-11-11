@@ -1416,6 +1416,37 @@ class DesktopHostViewer {
   int get hashCode => Object.hash(controlling, paused, path, quality, since);
 }
 
+/// The permissions hosting asks this computer's owner for (macOS), and
+/// whether each is granted.
+@immutable
+class DesktopHostPermissions {
+  const DesktopHostPermissions({
+    this.screenCapture = false,
+    this.input = false,
+  });
+  factory DesktopHostPermissions.fromJson(Map<String, dynamic> json) =>
+      DesktopHostPermissions(
+        screenCapture: json['screen_capture'] == true,
+        input: json['input'] == true,
+      );
+
+  /// `screen_capture`, Screen Recording: hosting at all.
+  final bool screenCapture;
+
+  /// `input`, Accessibility: control.
+  final bool input;
+
+  bool get complete => screenCapture && input;
+
+  @override
+  bool operator ==(Object other) =>
+      other is DesktopHostPermissions &&
+      other.screenCapture == screenCapture &&
+      other.input == input;
+  @override
+  int get hashCode => Object.hash(screenCapture, input);
+}
+
 /// This computer as a host.
 ///
 /// Invariant: `sharing || configured` implies `invitation != null`.
@@ -1441,6 +1472,8 @@ class DesktopHostView {
     this.otherRelay,
     this.unsupportedReason,
     this.displayMode,
+    this.backgroundService = true,
+    this.permissions,
   });
 
   /// False until the first capabilities, host status and trust round trip.
@@ -1490,6 +1523,19 @@ class DesktopHostView {
   /// owner's Restore puts back.
   final DisplayModeList? displayMode;
 
+  /// This platform shares from the background service (Windows' helper),
+  /// whose setup is the card's first action. Elsewhere (macOS) the app
+  /// shares the desktop itself, and there is no service to set up.
+  final bool backgroundService;
+
+  /// The permissions hosting asks the owner for, where the platform asks
+  /// (macOS); null elsewhere.
+  final DesktopHostPermissions? permissions;
+
+  /// The platform hosts once the owner grants Screen Recording: the card
+  /// stays, to ask for it.
+  bool get needsPermission => unsupportedReason == 'permission_missing';
+
   @override
   bool operator ==(Object other) =>
       other is DesktopHostView &&
@@ -1511,9 +1557,11 @@ class DesktopHostView {
       other.viewer == viewer &&
       other.otherRelay == otherRelay &&
       other.unsupportedReason == unsupportedReason &&
-      other.displayMode == displayMode;
+      other.displayMode == displayMode &&
+      other.backgroundService == backgroundService &&
+      other.permissions == permissions;
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
     loaded,
     supported,
     sharing,
@@ -1533,7 +1581,9 @@ class DesktopHostView {
     otherRelay,
     unsupportedReason,
     displayMode,
-  );
+    backgroundService,
+    permissions,
+  ]);
 
   @override
   String toString() =>

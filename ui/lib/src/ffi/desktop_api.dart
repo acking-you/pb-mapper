@@ -64,6 +64,8 @@ class DesktopCapabilities {
     this.message = '',
     this.helper,
     this.reason,
+    this.backgroundService = true,
+    this.permissions,
   });
   final bool host;
   final List<DesktopDisplay> displays;
@@ -73,6 +75,13 @@ class DesktopCapabilities {
   /// Why this computer cannot host: `platform`, `media_foundation_missing`,
   /// `no_display` or `permission_missing`; null when it can.
   final String? reason;
+
+  /// Sharing goes through the background service (Windows' helper); false
+  /// where the app shares the desktop itself (macOS).
+  final bool backgroundService;
+
+  /// The permissions hosting asks the owner for (macOS); null elsewhere.
+  final DesktopHostPermissions? permissions;
 }
 
 /// A host's `HostStatus`. The local host's also carries its [service] and
@@ -495,6 +504,11 @@ class DesktopViewerStatus {
 abstract interface class DesktopApiClient {
   // ---- lifecycle export: async, on the service's worker isolate
   Future<DesktopCapabilities> capabilities();
+
+  /// Asks the owner for [permission], `screen_capture` or `input`, where
+  /// the platform asks (macOS: its prompt the first time, and the app listed
+  /// in System Settings); whether it is granted now.
+  Future<bool> requestHostPermission(String permission);
   Future<DesktopHostSnapshot> hostStatus();
   Future<DesktopHostEnable> enableHost(
     String service,
@@ -624,9 +638,17 @@ class DesktopApi implements DesktopApiClient {
   @override
   Future<DesktopCapabilities> capabilities() async {
     final data = await _call('capabilities');
+    final capabilities = data['capabilities'] as Map?;
+    final permissions = capabilities?['permissions'];
     return DesktopCapabilities(
-      host: (data['capabilities'] as Map?)?['host'] == true,
-      reason: (data['capabilities'] as Map?)?['reason'] as String?,
+      host: capabilities?['host'] == true,
+      reason: capabilities?['reason'] as String?,
+      backgroundService: capabilities?['background_service'] != false,
+      permissions: permissions is Map
+          ? DesktopHostPermissions.fromJson(
+              Map<String, dynamic>.from(permissions),
+            )
+          : null,
       displays: [
         for (final d in data['displays'] as List? ?? [])
           DesktopDisplay.fromJson(Map<String, dynamic>.from(d as Map)),
@@ -639,6 +661,13 @@ class DesktopApi implements DesktopApiClient {
           : null,
     );
   }
+
+  @override
+  Future<bool> requestHostPermission(String permission) async =>
+      (await _call('host_request_permission', {
+        'permission': permission,
+      }))['granted'] ==
+      true;
 
   @override
   Future<DesktopHostSnapshot> hostStatus() async {

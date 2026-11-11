@@ -497,8 +497,12 @@ class DesktopStore {
   bool _hostCurrent(int serial) => !_disposed && serial == _hostSerial;
 
   /// The page already says this device cannot host. The capability is
-  /// fixed at build time, so nothing about the host can change.
-  bool get _cannotHost => _hostView.value.loaded && !_hostView.value.supported;
+  /// fixed at build time, so nothing about the host can change; a missing
+  /// permission the owner can still grant.
+  bool get _cannotHost =>
+      _hostView.value.loaded &&
+      !_hostView.value.supported &&
+      !_hostView.value.needsPermission;
 
   Future<void> _onPageDemand() async {
     if (_cannotHost) return;
@@ -560,6 +564,16 @@ class DesktopStore {
 
   Future<void> _readHost() async {
     if (_disposed) return;
+    // While the owner grants a permission in System Settings the card
+    // follows: macOS tells no one, so it is asked again with each read.
+    if (_capabilities?.permissions case final permissions?
+        when !permissions.complete) {
+      try {
+        _capabilities = await _api.capabilities();
+      } catch (_) {
+        // Keep the last answer.
+      }
+    }
     final read = ++_hostReads;
     try {
       final snapshot = await _api.hostStatus();
@@ -637,6 +651,8 @@ class DesktopStore {
       viewer: host?.viewer ?? backgroundHost?.viewer,
       unsupportedReason: capabilities?.reason,
       displayMode: host?.displayMode ?? backgroundHost?.displayMode,
+      backgroundService: capabilities?.backgroundService ?? true,
+      permissions: capabilities?.permissions,
       // The running host's relay, else the background service's, when the
       // settings name another one. A remembered grant for another relay is
       // not configured at all.
@@ -679,9 +695,11 @@ class DesktopStore {
     } catch (e) {
       if (_disposed) return false;
       final failure = _hostError = _failureOf(e);
-      // A helper refusal means the service changed since the page read it:
-      // read it again, so the More menu offers what the card's hint names.
-      if (failure.code.startsWith('HELPER_')) {
+      // A helper refusal means the service changed since the page read it,
+      // and a missing permission that the owner withdrew it: read them
+      // again, so the card offers what the failure names.
+      if (failure.code.startsWith('HELPER_') ||
+          failure.code == 'PERMISSION_MISSING') {
         try {
           _capabilities = await _api.capabilities();
         } catch (_) {
@@ -806,8 +824,9 @@ class DesktopStore {
   }
 
   /// Shares this desktop. By default through the Windows helper, so UAC and
-  /// the lock screen work and sharing survives the app; [ordinaryOnly]
-  /// shares the ordinary desktop from this app alone.
+  /// the lock screen work and sharing survives the app; [ordinaryOnly], and
+  /// every platform without the helper (macOS), shares the ordinary desktop
+  /// from this app alone.
   Future<void> enableHost({
     required int displayId,
     required bool allowControl,
@@ -815,10 +834,11 @@ class DesktopStore {
     bool ordinaryOnly = false,
   }) async {
     final name = service ?? _hostView.value.service ?? 'desktop:computer';
+    final appOnly = ordinaryOnly || !_hostView.value.backgroundService;
     await _hostAction(enabling: true, () async {
       _cancelHostResume();
       final serial = _hostSerial;
-      if (ordinaryOnly) {
+      if (appOnly) {
         await _api.startHost(
           service: name,
           displayId: displayId,
@@ -943,6 +963,22 @@ class DesktopStore {
       if (!_hostCurrent(serial)) return;
       await _readTrustAndHost(serial);
     });
+  }
+
+  /// Asks the owner for [permission], `screen_capture` or `input` (macOS);
+  /// whether it is granted now. Not granted, the card opens System
+  /// Settings, where the owner grants it.
+  Future<bool> requestHostPermission(String permission) async {
+    if (_disposed) return false;
+    var granted = false;
+    try {
+      granted = await _api.requestHostPermission(permission);
+      _capabilities = await _api.capabilities();
+    } catch (e) {
+      if (!_disposed) _hostError = _failureOf(e);
+    }
+    _publishHost();
+    return granted;
   }
 
   /// Never waits for another host action: a local stop always works.

@@ -96,6 +96,10 @@ pub enum ErrorCode {
     /// The running Windows desktop service cannot be shown to be the
     /// protected helper.
     HelperUnverified,
+    /// The operating system has not granted a permission hosting needs
+    /// (macOS Screen Recording, or Accessibility for control): the
+    /// `capabilities` op says which.
+    PermissionMissing,
     /// Anything with no more specific answer.
     ///
     /// Also where a code this build does not recognise lands, so an older CLI

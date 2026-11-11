@@ -18,6 +18,7 @@ import 'package:pb_mapper_ui/src/theme/glass.dart';
 import 'package:pb_mapper_ui/src/theme/metrics.dart';
 import 'package:pb_mapper_ui/src/widgets/status.dart';
 import 'package:pb_mapper_ui/src/widgets/surfaces.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 /// Where this computer stands as a host, for its card.
 enum HostCardPhase {
@@ -31,10 +32,11 @@ enum HostCardPhase {
 }
 
 /// Pure: one host value in, one phase out. Resuming a configured host keeps
-/// its card; only a first enable shows the setup steps while it runs.
+/// its card; only a first enable shows the setup steps while it runs. A
+/// missing permission keeps the card, which asks for it.
 HostCardPhase hostCardPhase(DesktopHostView v) => switch (v) {
   _ when !v.loaded => HostCardPhase.loading,
-  _ when !v.supported => HostCardPhase.unsupported,
+  _ when !v.supported && !v.needsPermission => HostCardPhase.unsupported,
   _ when v.restarting => HostCardPhase.restarting,
   _ when v.enabling && !v.sharing && !v.configured => HostCardPhase.enabling,
   _ when v.sharing => HostCardPhase.sharing,
@@ -248,6 +250,7 @@ String _hostErrorText(
     'HELPER_MISSING' => reinstall(l10n.hostErrorHelperMissing(install)),
     'HELPER_UNVERIFIED' => reinstall(l10n.hostErrorHelperUnverified(install)),
     'HELPER_OTHER_OWNER' => l10n.hostErrorHelperOtherOwner,
+    'PERMISSION_MISSING' => l10n.hostPermissionMissing,
     'HELPER_STOPPED' => l10n.hostErrorHelperStopped(
       setup ? l10n.hostEnable : '${l10n.more} › ${l10n.hostHelperDisable}',
     ),
@@ -334,9 +337,14 @@ class _SetupCardState extends State<_SetupCard> {
     final v = widget.view;
     final phase = hostCardPhase(v);
     final busy = phase != HostCardPhase.notEnabled;
-    // Enabling reads the remembered grant too, and would fail the same way.
-    final canEnable = !busy && _display != null && !v.trustUnreadable;
+    // Enabling reads the remembered grant too, and would fail the same way;
+    // without Screen Recording it cannot share at all.
+    final canEnable =
+        !busy && _display != null && !v.trustUnreadable && v.supported;
     final hairline = BorderSide(color: scheme.outlineVariant);
+    // Without the background service (macOS) the app shares the desktop
+    // itself: no helper to set up, one action.
+    final service = v.backgroundService;
     return _Card(
       padding: 28,
       gap: 24,
@@ -355,10 +363,13 @@ class _SetupCardState extends State<_SetupCard> {
             height: 1.35,
           ),
         ),
-        SetupSteps(
-          active: phase == HostCardPhase.restarting ? 2 : 1,
-          helperReady: v.helper == DesktopHelperState.ready,
-        ),
+        if (service)
+          SetupSteps(
+            active: phase == HostCardPhase.restarting ? 2 : 1,
+            helperReady: v.helper == DesktopHelperState.ready,
+          ),
+        if (v.permissions case final permissions? when !permissions.complete)
+          HostPermissions(permissions: permissions),
         DecoratedBox(
           decoration: BoxDecoration(border: Border(top: hairline)),
           child: Column(
@@ -407,45 +418,177 @@ class _SetupCardState extends State<_SetupCard> {
                       dimension: 18,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
-                  : const Icon(AppIcons.helper, size: AppIconSize.button),
+                  : Icon(
+                      service ? AppIcons.helper : AppIcons.screenShare,
+                      size: AppIconSize.button,
+                    ),
               label: Text(switch (phase) {
                 HostCardPhase.enabling => l10n.hostEnabling,
                 HostCardPhase.restarting => l10n.hostRestarting,
-                _ => l10n.hostEnable,
+                _ => service ? l10n.hostEnable : l10n.hostShareNow,
               }),
             ),
-            const SizedBox(height: 8),
-            Wrap(
-              alignment: WrapAlignment.spaceBetween,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              spacing: 12,
-              children: [
-                TextButton(
-                  key: const Key('host-enable-ordinary'),
-                  style: TextButton.styleFrom(
-                    foregroundColor: signalColor(scheme),
-                    padding: EdgeInsets.zero,
-                    minimumSize: const Size(0, 36),
-                    textStyle: buttonLabel(
-                      context,
-                      13,
-                      weight: FontWeight.w400,
+            if (service) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 12,
+                children: [
+                  TextButton(
+                    key: const Key('host-enable-ordinary'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: signalColor(scheme),
+                      padding: EdgeInsets.zero,
+                      minimumSize: const Size(0, 36),
+                      textStyle: buttonLabel(
+                        context,
+                        13,
+                        weight: FontWeight.w400,
+                      ),
                     ),
+                    onPressed: canEnable
+                        ? () => _enable(ordinaryOnly: true)
+                        : null,
+                    child: Text(l10n.setupOrdinaryOnly),
                   ),
-                  onPressed: canEnable
-                      ? () => _enable(ordinaryOnly: true)
-                      : null,
-                  child: Text(l10n.setupOrdinaryOnly),
-                ),
-                Text(
-                  l10n.setupBackgroundNote,
-                  style: TextStyle(fontSize: 13, color: quietText(scheme)),
-                ),
-              ],
-            ),
+                  Text(
+                    l10n.setupBackgroundNote,
+                    style: TextStyle(fontSize: 13, color: quietText(scheme)),
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ],
+    );
+  }
+}
+
+/// The permissions macOS asks the owner for before this computer is shared
+/// and controlled, each one still missing with the way to grant it: the
+/// system's own prompt the first time, then System Settings, where the app
+/// is listed.
+class HostPermissions extends StatelessWidget {
+  const HostPermissions({super.key, required this.permissions});
+
+  final DesktopHostPermissions permissions;
+
+  /// The Privacy & Security pane of each permission.
+  static const _screenCapture =
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
+  static const _accessibility =
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility';
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    return Column(
+      key: const Key('host-permissions'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (!permissions.screenCapture)
+          _PermissionRow(
+            permission: 'screen_capture',
+            pane: _screenCapture,
+            icon: AppIcons.screenShare,
+            title: l10n.hostPermissionScreenTitle,
+            body: l10n.hostPermissionScreenBody,
+          ),
+        if (!permissions.screenCapture && !permissions.input)
+          const SizedBox(height: 12),
+        if (!permissions.input)
+          _PermissionRow(
+            permission: 'input',
+            pane: _accessibility,
+            icon: AppIcons.keyboard,
+            title: l10n.hostPermissionInputTitle,
+            body: l10n.hostPermissionInputBody,
+          ),
+      ],
+    );
+  }
+}
+
+class _PermissionRow extends StatelessWidget {
+  const _PermissionRow({
+    required this.permission,
+    required this.pane,
+    required this.icon,
+    required this.title,
+    required this.body,
+  });
+
+  final String permission, pane, title, body;
+  final IconData icon;
+
+  /// The system's prompt where it still shows one; System Settings when the
+  /// permission is still missing after it.
+  Future<void> _grant(BuildContext context) async {
+    final desktop = AppScope.of(context).store.desktop;
+    if (await desktop.requestHostPermission(permission)) return;
+    await launchUrl(Uri.parse(pane));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final caution = cautionColor(scheme);
+    return Container(
+      key: Key('host-permission-$permission'),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+      decoration: BoxDecoration(
+        color: caution.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(kRowRadius),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Icon(icon, size: AppIconSize.inline, color: caution),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      body,
+                      style: const TextStyle(fontSize: 13, height: 1.5),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: 28),
+            child: TextButton(
+              key: Key('host-permission-$permission-grant'),
+              style: TextButton.styleFrom(
+                padding: EdgeInsets.zero,
+                minimumSize: const Size(0, 36),
+                textStyle: buttonLabel(context, 13, weight: FontWeight.w600),
+              ),
+              onPressed: () => unawaited(_grant(context)),
+              child: Text(context.l10n.hostPermissionOpen),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -594,6 +737,8 @@ class _SharingCard extends StatelessWidget {
           ),
         if (v.displayMode case final mode?)
           _DisplayModeNotice(mode: mode, desktop: desktop),
+        if (v.permissions case final permissions? when !permissions.complete)
+          HostPermissions(permissions: permissions),
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -634,7 +779,7 @@ class _SharingCard extends StatelessWidget {
             children: [
               _SettingRow(
                 label: l10n.hostDisplay,
-                divider: true,
+                divider: v.backgroundService,
                 value: DisplayPicker(
                   displays: v.displays,
                   selected: v.displayId,
@@ -646,20 +791,24 @@ class _SharingCard extends StatelessWidget {
                       : null,
                 ),
               ),
-              _SettingRow(
-                label: l10n.hostBackground,
-                divider: true,
-                value: Text(
-                  v.background
-                      ? l10n.hostBackgroundService
-                      : l10n.hostBackgroundApp,
-                  textAlign: TextAlign.end,
+              // The service and its helper are Windows': elsewhere the app
+              // shares, and the lock screen is never shared.
+              if (v.backgroundService) ...[
+                _SettingRow(
+                  label: l10n.hostBackground,
+                  divider: true,
+                  value: Text(
+                    v.background
+                        ? l10n.hostBackgroundService
+                        : l10n.hostBackgroundApp,
+                    textAlign: TextAlign.end,
+                  ),
                 ),
-              ),
-              _SettingRow(
-                label: l10n.hostSecure,
-                value: _HelperValue(helper: v.helper, desktop: desktop),
-              ),
+                _SettingRow(
+                  label: l10n.hostSecure,
+                  value: _HelperValue(helper: v.helper, desktop: desktop),
+                ),
+              ],
             ],
           ),
         ),
@@ -1280,15 +1429,16 @@ class HostMoreMenu extends StatelessWidget {
     return MenuAnchor(
       menuChildren: [
         rename,
-        MenuItemButton(
-          key: const Key('host-helper-install'),
-          leadingIcon: const Icon(AppIcons.helper, size: AppIconSize.inline),
-          onPressed: helperBusy
-              ? null
-              : () => unawaited(desktop.helperAction('install')),
-          child: Text(l10n.hostHelperInstall),
-        ),
-        if (v.helper != DesktopHelperState.none) ...[
+        if (v.backgroundService)
+          MenuItemButton(
+            key: const Key('host-helper-install'),
+            leadingIcon: const Icon(AppIcons.helper, size: AppIconSize.inline),
+            onPressed: helperBusy
+                ? null
+                : () => unawaited(desktop.helperAction('install')),
+            child: Text(l10n.hostHelperInstall),
+          ),
+        if (v.backgroundService && v.helper != DesktopHelperState.none) ...[
           MenuItemButton(
             key: const Key('host-helper-disable'),
             leadingIcon: const Icon(AppIcons.stop, size: AppIconSize.inline),

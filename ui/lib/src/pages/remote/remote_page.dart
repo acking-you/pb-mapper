@@ -64,7 +64,8 @@ class _RemotePageState extends State<RemotePage> {
     final store = _store;
     if (store == null) return;
     final host = store.desktop.hostView.value;
-    final unsupported = host.loaded && !host.supported;
+    // A missing permission keeps the host card, which asks for it.
+    final unsupported = host.loaded && !host.supported && !host.needsPermission;
     final any = store.computers.computers.isNotEmpty;
     final reason = host.unsupportedReason;
     if (unsupported == _hostUnsupported &&
@@ -177,9 +178,9 @@ class _RemotePageState extends State<RemotePage> {
 }
 
 /// Why there is no host card, as Rust says it ([reason]): Windows shares
-/// only where Media Foundation is installed and a display is there; on
-/// another platform, phones view and control but are not controlled, and
-/// macOS and Linux cannot share yet.
+/// only where Media Foundation is installed and a display is there, macOS
+/// from 12.3; on another platform, phones view and control but are not
+/// controlled, and Linux cannot share yet.
 class _HostUnsupportedNote extends StatelessWidget {
   const _HostUnsupportedNote(this.reason);
 

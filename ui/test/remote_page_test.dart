@@ -70,6 +70,45 @@ class _UnreadableApi extends FakePbMapperApi {
   _UnreadableTrust get desktop => _host;
 }
 
+/// A Mac that has granted neither Screen Recording nor Accessibility: each
+/// request grants it, as the owner does in System Settings.
+class _MacDesktop extends FakeDesktopApi {
+  _MacDesktop() {
+    permissionGranted = true;
+    available = const DesktopCapabilities(
+      reason: 'permission_missing',
+      backgroundService: false,
+      permissions: DesktopHostPermissions(),
+      displays: [DesktopDisplay(1, 'Built-in Retina Display', 3024, 1964)],
+    );
+  }
+
+  @override
+  Future<bool> requestHostPermission(String permission) async {
+    final granted = await super.requestHostPermission(permission);
+    final before = available.permissions ?? const DesktopHostPermissions();
+    final screen = before.screenCapture || permission == 'screen_capture';
+    available = DesktopCapabilities(
+      host: screen,
+      reason: screen ? null : 'permission_missing',
+      backgroundService: false,
+      permissions: DesktopHostPermissions(
+        screenCapture: screen,
+        input: before.input || permission == 'input',
+      ),
+      displays: available.displays,
+    );
+    return granted;
+  }
+}
+
+class _MacApi extends FakePbMapperApi {
+  final _host = _MacDesktop();
+
+  @override
+  _MacDesktop get desktop => _host;
+}
+
 /// A host whose start and rename fail with [failure], as the FFI reports
 /// it; with none they work.
 class _Refusing extends FakeDesktopApi {
@@ -438,6 +477,43 @@ void main() {
       await settle(tester);
       expect(api.desktop.hostSnapshot.background?.enabled, isFalse);
       expect(sharingDot, findsNothing);
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
+    'a Mac asks for the permissions it lacks and shares from the app itself',
+    (tester) async {
+      final api = _MacApi();
+      final l10n = lookupAppLocalizations(const Locale('en'));
+      await pumpApp(tester, api, page: AppPage.remote);
+      expect(_key('host-permission-screen_capture'), findsOneWidget);
+      expect(_key('host-permission-input'), findsOneWidget);
+      // No helper to set up: one action, which needs Screen Recording.
+      expect(find.text(l10n.setupStep1Title), findsNothing);
+      expect(_key('host-enable-ordinary'), findsNothing);
+      FilledButton share() => tester.widget(_key('host-enable'));
+      expect(share().onPressed, isNull);
+
+      await _tapIn(tester, _key('host-permission-screen_capture-grant'));
+      await settle(tester);
+      expect(api.desktop.argsOf('host_request_permission'), [
+        {'permission': 'screen_capture'},
+      ]);
+      expect(_key('host-permission-screen_capture'), findsNothing);
+      expect(share().onPressed, isNotNull);
+
+      await _tapIn(tester, _key('host-enable'));
+      await settle(tester);
+      expect(api.desktop.ops, isNot(contains('host_enable')));
+      expect(api.desktop.argsOf('host_start').single['remember'], isTrue);
+      // Sharing without Accessibility: control still asks for it, and the
+      // Windows service is nowhere.
+      expect(_key('host-permission-input'), findsOneWidget);
+      expect(find.text(l10n.hostSecure), findsNothing);
+      await _tapIn(tester, _key('host-more'));
+      await settle(tester);
+      expect(_key('host-helper-install'), findsNothing);
       await finish(tester);
     },
   );

@@ -177,6 +177,15 @@ class FakeDesktopApi implements DesktopApiClient {
     return available;
   }
 
+  /// What `host_request_permission` answers.
+  bool permissionGranted = false;
+
+  @override
+  Future<bool> requestHostPermission(String permission) async {
+    _log('host_request_permission', {'permission': permission});
+    return permissionGranted;
+  }
+
   @override
   Future<DesktopHostSnapshot> hostStatus() async {
     _log('host_status');
