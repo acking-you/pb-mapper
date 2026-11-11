@@ -6,7 +6,7 @@
 
 use super::{cf, geometry::Geometry};
 use crate::{BackendError, Display, DisplaySelection, FailureKind, Result, platform::Desktop};
-use objc2_core_foundation::{CFBoolean, CFRetained, CFString, CFUUID};
+use objc2_core_foundation::{CFBoolean, CFNumber, CFRetained, CFString, CFUUID};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode,
     CGGetActiveDisplayList, CGMainDisplayID, CGSessionCopyCurrentDictionary,
@@ -121,8 +121,16 @@ fn available() -> Result<()> {
     let Some(session) = CGSessionCopyCurrentDictionary() else {
         return Err(secure("this process has no window server session"));
     };
+    // A boolean, or on some systems a number.
     let flag = |key: &'static str| {
-        cf::value::<CFBoolean>(&session, &CFString::from_static_str(key)).map(|flag| flag.as_bool())
+        let key = CFString::from_static_str(key);
+        cf::value::<CFBoolean>(&session, &key)
+            .map(|flag| flag.as_bool())
+            .or_else(|| {
+                cf::value::<CFNumber>(&session, &key)?
+                    .as_i64()
+                    .map(|n| n != 0)
+            })
     };
     if flag("kCGSSessionOnConsoleKey") == Some(false) {
         return Err(secure("another login is using the screen"));

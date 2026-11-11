@@ -516,6 +516,10 @@ fn sync(sample: &CMSampleBuffer) -> bool {
     !cf::value::<objc2_core_foundation::CFBoolean>(&first, key).is_some_and(|not| not.as_bool())
 }
 
+/// The most parameter sets read from a format: H.265's VPS, SPS and PPS,
+/// and the few SEI units an encoder may add.
+const MAX_PARAMETER_SETS: usize = 8;
+
 /// A format description's parameter sets, in order, and its NAL length
 /// size. They borrow from `format`.
 fn parameter_sets(codec: VideoCodec, format: &CMFormatDescription) -> Result<(Vec<&[u8]>, usize)> {
@@ -550,8 +554,9 @@ fn parameter_sets(codec: VideoCodec, format: &CMFormatDescription) -> Result<(Ve
             &mut length,
         ),
     )?;
+    let count = count.min(MAX_PARAMETER_SETS);
     let mut sets = Vec::with_capacity(count);
-    for index in 0..count.min(8) {
+    for index in 0..count {
         let (mut pointer, mut size): (*const u8, usize) = (std::ptr::null(), 0);
         cf::check(
             "reading a parameter set",
