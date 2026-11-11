@@ -492,14 +492,17 @@ Nothing in the SDK crates knows it exists.
     `direct.rs` (direct sessions end to end), `data_compatibility.rs`
     (mixed data formats on a real relay) and `bound_listener.rs` (hands a
     `connect` tunnel a listener the case already bound, through the
-    listener-provider seam; `regression_client` includes it by path)
+    listener-provider seam; `regression` and `regression_client` include
+    it by path)
   - `tests/regression/`, `tests/regression_client/`, `tests/regression_cli/`:
     Protocol-level cases in three binaries, each setting the process
     credential once (`regression/credential.rs`, which the other two
     include by path). `regression` is the relay against hand-rolled frames
-    (`relay.rs`; `regression_cli` shares its `fixtures.rs`); it writes no
-    environment and starts no process, so a relay closing a
-    connection is seen to close it. `regression_client` is `register` and
+    (`relay.rs`; `regression_cli` shares its `fixtures.rs`), and one case
+    runs a real `connect` and `register` against it in process, through a
+    publisher's retire-and-replace; it writes no environment and starts no
+    process, so a relay closing a connection is seen to close it.
+    `regression_client` is `register` and
     `connect` against fake relays (`fake.rs`), with client timings it sets
     once before any case starts a tunnel. `regression_cli` runs the
     `pb-mapper` binary, its child relays on port 0 announcing the port they
@@ -507,8 +510,9 @@ Nothing in the SDK crates knows it exists.
     socket of the test process under mio 1.1, which mio 1.2.4 no longer
     allows
   - `tests/lease_reclaim.rs`, `network_recovery.rs`, `quic_relay.rs`,
-    `quic_retired_carrier.rs`: Binaries of their own, each because it changes
-    state the whole process shares; `tests/e2e/main.rs` says which
+    `quic_retired_carrier.rs`, `stream_before_ack.rs`: Binaries of their own,
+    each because it changes state the whole process shares;
+    `tests/e2e/main.rs` says which
   - `examples/`: `compatibility_relay`, the loopback relay
     `scripts/test_version_compatibility.py` builds at each revision, and
     `relay_transport_bench`, TCP against QUIC relay on loopback
@@ -696,13 +700,17 @@ The design and its rules are in `docs/ui-design.md`.
     `services.json`, `clients.json`, as the bytes on disk),
     `configuration.rs` loads and saves it (atomically through core's
     `durable_file` where the file can be replaced; in place, as 0.11.0 did,
-    for a file with other names on unix, a directory that takes no new file
-    and a file the rename may not replace; refusing a file this user may
-    not write; a store that cannot be read or parsed is an error, never an
-    empty list), `tunnel.rs` is a tunnel's setup, SDK handle and view,
-    `views.rs` the JSON the window reads (`PathInfo` among it), `runtime.rs`
-    the embedded relay and committing and stopping tunnels, and `status.rs`
-    the window's reads and its questions to the relay
+    for a file with other names or another user's on unix, a directory that
+    takes no new file and a file the rename may not replace; refusing a
+    file this user may not write; a store that cannot be read or parsed is
+    an error, never an empty list, and one that holds nothing, empty or
+    zero-filled, is an empty list), `tunnel.rs` is a tunnel's setup, SDK
+    handle and view (a share or connection whose list cannot be read is
+    refused before it starts), `views.rs` the JSON the window reads
+    (`PathInfo` among it), `runtime.rs` the embedded relay and committing
+    and stopping tunnels (a connection whose save fails is refused unless
+    its list already holds it), and `status.rs` the window's reads and its
+    questions to the relay
   - `tunnel_events.rs`: `pb_mapper_tunnel_events_call_json`, the window's
     readers of a running tunnel's events (`subscribe`/`next`/`close`), each
     event carrying the tunnel's diagnostics and metrics as they are by then;

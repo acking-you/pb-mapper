@@ -104,8 +104,11 @@ HKDF-SHA256 使用 connection salt 作为 salt，凭据的 32 字节 secret 作�
 新建文件后无法同步目录、compact 失败时，中继会以
 `connection_replay_store_unavailable` 拒绝所有 protocol-v2 首帧，直到它带着一份
 可读的日志重启。原因只记一次，在 error 级别：事件 `replay_log_unavailable` 给出
-文件、失败的步骤和操作系统错误。删除截断的 `connection.replay` 后重启即可恢复接纳，
-代价是忘掉最近十分钟内的首帧。
+文件、失败的步骤和操作系统错误（回滚失败时，还给出它要撤销的那次追加错误）。删除截断的
+`connection.replay` 后重启即可恢复接纳，代价是忘掉最近十分钟内的首帧。追加失败但日志
+保持原样时（例如磁盘已满，或日志所在目录无法创建或打开），只拒绝这一个首帧，同样返回
+`connection_replay_store_unavailable`，下一个首帧会再试；追加持续失败期间，中继在 error 级别只记一次
+`replay_log_append_failed`，给出文件、步骤和错误，直到某次追加成功之后再次失败才会再记。
 
 根密钥轮换或认证状态重置之后，进程会在内存里保留上一份根密钥和 instance id。
 仍用旧临时凭据加密的首帧会用这份材料解密，从而把稳定的

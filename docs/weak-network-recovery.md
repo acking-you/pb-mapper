@@ -55,9 +55,12 @@ must not hold the only copy of partial-frame state in a discarded future.
 5. **A subscription has a five-second total setup deadline.** The client may retry
    transient failures within that window, using fresh TCP and authenticated
    sessions. The relay's whole selection/setup loop is also bounded to five
-   seconds, even if new failing candidates continually register. No application
-   byte is read before subscribe succeeds, so these retries do not replay HTTP,
-   SSH, or other application payloads. Permanent structured refusals are not retried.
+   seconds, even if new failing candidates continually register. That wait also
+   ends as soon as its subscriber gives up: a client that abandons an attempt
+   closes its connection, and the relay stops holding a place for it or taking a
+   publisher's stream on its behalf. No application byte is read before
+   subscribe succeeds, so these retries do not replay HTTP, SSH, or other
+   application payloads. Permanent structured refusals are not retried.
 6. **Forwarding belongs to the tunnel, not its control socket.** Replacing a
    control connection leaves healthy data streams alive. Explicit tunnel stop
    cancels all owned streams, probes, and control writer tasks. A data socket that

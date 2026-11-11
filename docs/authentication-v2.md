@@ -136,9 +136,16 @@ record), or a failed append cannot be rolled back, its new directory entry
 synced or the log compacted, the relay refuses every protocol-v2 first flight
 with `connection_replay_store_unavailable` until it restarts with a log it can
 read. It says why once, at error level: the event `replay_log_unavailable`
-names the file, the step that failed and the operating system's error.
-Removing a cut-off `connection.replay` and restarting lets the relay admit
-again, at the cost of forgetting the first flights of the last ten minutes.
+names the file, the step that failed and the operating system's error (for a
+failed rollback, also the append error it was undoing). Removing a cut-off
+`connection.replay` and restarting lets the relay admit again, at the cost of
+forgetting the first flights of the last ten minutes. An append that fails but
+leaves the log as it was, as on a full disk or where the log's directory cannot
+be created or opened, refuses that first flight only, also with
+`connection_replay_store_unavailable`, and the next one tries again; while
+appends keep failing the relay says so once, at error level, as
+`replay_log_append_failed`, with the file, the step and the error, and again
+only for a run of failures that follows a success.
 
 After a live root rotation or auth-state reset, the relay keeps the immediately
 previous root key and instance id in memory. A first flight still encrypted with
