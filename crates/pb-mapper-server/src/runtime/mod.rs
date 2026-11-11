@@ -454,10 +454,100 @@ mod tests {
             "the replacement kept its service-map entry"
         );
 
-        // And the ID is available again now that its task is gone.
+        // And the ID serves again now that its task is gone, once it has
+        // rested.
         assert_eq!(
-            router.manager.get_conn_id(std::iter::empty()),
+            router.manager.take_conn_id(
+                std::iter::empty(),
+                Instant::now() + crate::manager::REGISTRATION_ID_REST
+            ),
             Some(retired)
+        );
+
+        drop(router);
+        auth.shutdown_actor().await;
+        drop(auth);
+    }
+
+    /// An administrator retires a connection by the ID a listing showed. When
+    /// the relay has retired that connection meanwhile and its publisher has
+    /// replaced it, which takes the publisher a backoff of two seconds at
+    /// most, the ID must not name the replacement: the retire, aimed at the
+    /// connection that is gone, retires nothing.
+    #[tokio::test]
+    async fn a_retire_by_id_does_not_reach_the_replacement_of_the_connection_it_named() {
+        let state_dir = TempPath::new("retire-replaced");
+        let auth = AuthRuntime::from_isolated_state(AuthConfig {
+            state_dir: state_dir.to_path_buf(),
+            ..AuthConfig::default()
+        })
+        .await
+        .unwrap();
+        let mut router = Router::new(
+            TaskManager::new(),
+            direct::DirectState::new(None),
+            ServerSecurity::new(auth.clone()),
+            None,
+            RoutingConfig::from_env(),
+            Instant::now(),
+        );
+        let key: ImutableKey = Arc::from("echo");
+        let register = |router: &mut Router| {
+            let conn_id = router
+                .manager
+                .get_conn_id(
+                    router
+                        .server_conn_map
+                        .iter()
+                        .flat_map(|(_, infos)| infos.iter().map(|info| info.conn_id)),
+                )
+                .unwrap();
+            let (conn_sender, mailbox) = kanal::bounded_async(MAILBOX_CAPACITY);
+            let _ = router.handle(ManagerTask::Register {
+                key: key.clone(),
+                conn_id,
+                need_codec: false,
+                is_datagram: false,
+                protocol_version: CONTROL_PROTOCOL_V2,
+                conn_sender,
+                retire_token: CancellationToken::new(),
+                direct: None,
+            });
+            (conn_id, mailbox)
+        };
+
+        // What an administrator's listing showed, then the relay's own
+        // retirement of that connection, its socket's end, and the publisher's
+        // replacement.
+        let (listed, _listed_mailbox) = register(&mut router);
+        let _ = router.handle(ManagerTask::RetireServerConn {
+            key: key.clone(),
+            conn_id: listed,
+            reason: "lease expired".to_string(),
+        });
+        let _ = router.handle(ManagerTask::DeRegisterServerConn {
+            key: key.clone(),
+            conn_id: listed,
+        });
+        let (replacement, _replacement_mailbox) = register(&mut router);
+
+        let (response_sender, retired) = tokio::sync::oneshot::channel();
+        let _ = router.handle(ManagerTask::AdminConnectionRetire {
+            key: key.clone(),
+            conn_id: Some(listed),
+            response_sender,
+        });
+        assert_eq!(
+            retired.await.unwrap(),
+            0,
+            "a retire by the ID of a connection that was gone reached its replacement"
+        );
+        assert_eq!(
+            router.server_conn_map[&key]
+                .iter()
+                .map(|info| info.conn_id)
+                .collect::<Vec<_>>(),
+            [replacement]
         );
 
         drop(router);

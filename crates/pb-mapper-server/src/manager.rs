@@ -1,11 +1,13 @@
 //! The routing manager's work queue, and its registry of connection IDs and
 //! the mailboxes they are reached through.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use pb_mapper_core::conn_id::RemoteConnId;
 use tracing::instrument;
@@ -149,6 +151,15 @@ pub(crate) fn task_channel(capacity: usize) -> (TaskSender, TaskReceiver) {
 
 const MANAGER_QUEUE_CAPACITY: usize = 1024;
 
+/// How long a registration's ID rests, once the registration has ended, before
+/// another connection may take it.
+///
+/// Past the two seconds a publisher waits at most before it reconnects, so the
+/// registration that replaces one does not take its ID: an administrator who
+/// retires the old one by the ID a listing showed then retires nothing, rather
+/// than its healthy replacement.
+pub(crate) const REGISTRATION_ID_REST: Duration = Duration::from_secs(10);
+
 /// Hands out connection IDs, and routes each registered ID to its mailbox.
 pub struct TaskManager {
     /// The next ID never handed out; every ID below it has been. It stops at
@@ -161,12 +172,17 @@ pub struct TaskManager {
     /// IDs returned by connections that ended, the next accept's first.
     ///
     /// Each was handed to a connection and comes back once, when it ends, and
-    /// an accept takes one back out, so the pool holds at most as many IDs as
-    /// were ever open at once, connections that never authenticated included,
-    /// and keeps that size until the relay stops.
+    /// an accept takes one back out, so this pool and `resting_conn_ids`
+    /// together hold at most as many IDs as were ever open at once,
+    /// connections that never authenticated included, plus the registrations
+    /// that ended within one [`REGISTRATION_ID_REST`], and keep that size
+    /// until the relay stops.
     idle_conn_ids: Vec<RemoteConnId>,
-    /// The IDs in `idle_conn_ids`, so that a return is checked against them in
-    /// constant time on the routing loop, however large a flood made the pool.
+    /// IDs of ended registrations, oldest first, each with when its rest ends.
+    resting_conn_ids: VecDeque<(RemoteConnId, Instant)>,
+    /// The IDs in `idle_conn_ids` and `resting_conn_ids`, so that a return is
+    /// checked against them in constant time on the routing loop, however
+    /// large a flood made the pool.
     idle_conn_set: hashbrown::HashSet<RemoteConnId>,
     active_conn_map: hashbrown::HashMap<RemoteConnId, SenderChan<ConnTask>>,
 }
@@ -185,6 +201,7 @@ impl TaskManager {
             sender,
             receiver,
             idle_conn_ids: Vec::new(),
+            resting_conn_ids: VecDeque::new(),
             idle_conn_set: hashbrown::HashSet::new(),
             active_conn_map: hashbrown::HashMap::new(),
         }
@@ -218,9 +235,10 @@ impl TaskManager {
         self.active_conn_map.len()
     }
 
+    /// IDs returned and not yet handed out again, resting ones included.
     #[inline]
     pub fn idle_conn_count(&self) -> usize {
-        self.idle_conn_ids.len()
+        self.idle_conn_ids.len() + self.resting_conn_ids.len()
     }
 
     /// Stop routing to a connection, without returning its ID to the idle pool.
@@ -234,11 +252,11 @@ impl TaskManager {
     /// old task's deregistration, which matches on ID alone, would unwind the
     /// replacement instead.
     ///
-    /// So the ID stays out of circulation until [`Self::recycle_conn_id`], which
-    /// the manager calls when the guard's deregistration finally arrives — the one
-    /// point at which nothing will speak for that ID again. Every accepted
-    /// connection produces exactly one such task, however it ends, so no ID is
-    /// stranded.
+    /// So the ID stays out of circulation until [`Self::recycle_conn_id`] or
+    /// `rest_conn_id`, which the manager calls when the guard's deregistration
+    /// finally arrives — the one point at which nothing will speak for that ID
+    /// again. Every accepted connection produces exactly one such task, however
+    /// it ends, so no ID is stranded.
     #[inline]
     pub fn drop_conn_sender(&mut self, conn_id: RemoteConnId) -> bool {
         self.active_conn_map.remove(&conn_id).is_some()
@@ -253,9 +271,20 @@ impl TaskManager {
         }
     }
 
+    /// Return an ended registration's ID, to be handed out again only once it
+    /// has rested [`REGISTRATION_ID_REST`] from `now`, if it is not already
+    /// returned.
+    pub(crate) fn rest_conn_id(&mut self, conn_id: RemoteConnId, now: Instant) {
+        if self.idle_conn_set.insert(conn_id) {
+            self.resting_conn_ids
+                .push_back((conn_id, now + REGISTRATION_ID_REST));
+        }
+    }
+
     /// An ID for a newly accepted connection: an idle one when one is free,
     /// otherwise one never handed out. `registered` names the IDs the service
-    /// map still holds, which are never reused.
+    /// map still holds, which are never reused. An ended registration's ID is
+    /// idle only once it has rested; see [`REGISTRATION_ID_REST`].
     ///
     /// `None` once every ID is held, which takes four billion connections
     /// open at once: the caller refuses the connection, and an ID that comes
@@ -264,25 +293,60 @@ impl TaskManager {
         &mut self,
         registered: impl Iterator<Item = RemoteConnId> + Clone,
     ) -> Option<RemoteConnId> {
+        self.take_conn_id(registered, Instant::now())
+    }
+
+    /// [`Self::get_conn_id`] at `now`.
+    pub(crate) fn take_conn_id(
+        &mut self,
+        registered: impl Iterator<Item = RemoteConnId> + Clone,
+        now: Instant,
+    ) -> Option<RemoteConnId> {
+        while let Some(&(conn_id, rested)) = self.resting_conn_ids.front()
+            && rested <= now
+        {
+            self.resting_conn_ids.pop_front();
+            self.idle_conn_ids.push(conn_id);
+        }
         while let Some(conn_id) = self.idle_conn_ids.pop() {
-            self.idle_conn_set.remove(&conn_id);
-            if self.is_issued(&conn_id)
-                && !self.active_conn_map.contains_key(&conn_id)
-                && !registered.clone().any(|id| id == conn_id)
-            {
+            if let Some(conn_id) = self.reusable(conn_id, &registered) {
                 return Some(conn_id);
-            } else {
-                tracing::warn!(
-                    "You got invalid or active `conn_id` from `idle_list`!
-                That may nerver happen!
-                 We will generate a new connId by default"
-                );
             }
         }
+        if let Some(next) = u32::from(self.next_conn_id).checked_add(1) {
+            let conn_id = self.next_conn_id;
+            self.next_conn_id = next.into();
+            return Some(conn_id);
+        }
+        // Every ID has been handed out: one still resting serves rather than
+        // the connection being refused.
+        while let Some((conn_id, _)) = self.resting_conn_ids.pop_front() {
+            if let Some(conn_id) = self.reusable(conn_id, &registered) {
+                return Some(conn_id);
+            }
+        }
+        None
+    }
 
-        let conn_id = self.next_conn_id;
-        self.next_conn_id = u32::from(conn_id).checked_add(1)?.into();
-        Some(conn_id)
+    /// `conn_id`, just taken from the pool, if nothing holds it.
+    fn reusable(
+        &mut self,
+        conn_id: RemoteConnId,
+        registered: &(impl Iterator<Item = RemoteConnId> + Clone),
+    ) -> Option<RemoteConnId> {
+        self.idle_conn_set.remove(&conn_id);
+        if self.is_issued(&conn_id)
+            && !self.active_conn_map.contains_key(&conn_id)
+            && !registered.clone().any(|id| id == conn_id)
+        {
+            return Some(conn_id);
+        }
+        tracing::warn!(
+            "You got invalid or active `conn_id` from `idle_list`!
+                That may nerver happen!
+                 We will generate a new connId by default"
+        );
+        None
     }
 
     #[instrument(skip(self, sender))]
@@ -341,8 +405,11 @@ mod tests {
         assert_eq!(manager.get_conn_id(std::iter::empty()), None);
         assert_eq!(manager.get_conn_id(std::iter::empty()), None);
 
-        // An ID that comes back serves the next connection.
+        // An ID that comes back serves the next connection, even one that
+        // would otherwise rest first.
         manager.recycle_conn_id(last);
+        assert_eq!(manager.get_conn_id(std::iter::empty()), Some(last));
+        manager.rest_conn_id(last, Instant::now());
         assert_eq!(manager.get_conn_id(std::iter::empty()), Some(last));
         assert!(manager.get_conn_sender_chan(&live).is_some());
     }

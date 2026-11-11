@@ -124,12 +124,14 @@ impl Router {
         // Direct setups reach their provider by this ID alone, and once it is
         // recycled it may name another tenant's connection.
         self.direct_state.provider_gone(conn_id);
-        // Recycled here and only here, whether or not the sender was still
+        // Returned here and only here, whether or not the sender was still
         // registered: this task comes from the socket's own guard, so its
         // arrival is the proof that nothing will speak for the ID again.
         // A retired connection reaches this with its sender already gone,
-        // and its ID has been held out of circulation until now.
-        self.manager.recycle_conn_id(conn_id);
+        // and its ID has been held out of circulation until now. It rests
+        // before it serves again, so that the publisher's replacement does
+        // not take it.
+        self.manager.rest_conn_id(conn_id, Instant::now());
         self.release_namespace_rate_limit_if_idle(split_scoped_service_key(&key).0);
         tracing::info!(
             event = "server_conn_deregistered",
