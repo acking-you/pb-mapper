@@ -40,9 +40,11 @@ class ViewerHarness {
     _open();
   }
 
+  /// [capabilities] are the host's.
   static Future<ViewerHarness> live(
     WidgetTester tester, {
     TouchMode mode = TouchMode.trackpad,
+    List<String> capabilities = const [],
   }) async {
     final api = FakeDesktopApi();
     final store = DesktopStore(api);
@@ -50,7 +52,10 @@ class ViewerHarness {
     await store.connect(
       const DesktopTarget(invitation: 'pbd1.viewer', name: 'Viewer'),
     );
-    api.viewerStatusValue = liveStatus(controlling: true);
+    api.viewerStatusValue = liveStatus(
+      controlling: true,
+      capabilities: capabilities,
+    );
     await tester.pump(const Duration(milliseconds: 500));
     expect(store.session.value.inputLive, isTrue);
     final harness = ViewerHarness._(api, store, demand, mode: mode);
@@ -71,7 +76,8 @@ class ViewerHarness {
   int _seen = 0;
 
   /// The batches the store handed to Rust since the last call, each as
-  /// readable events: `control↓`, `left↑`, `move 960,540`, `text "hi"`.
+  /// readable events: `control↓`, `left↑`, `move 960,540`, `text "hi"`,
+  /// `#e1↓` (a physical key, by its USB HID usage).
   List<List<String>> sent() {
     final batches = api.argsOf('input');
     final fresh = batches.skip(_seen).toList();
@@ -90,6 +96,9 @@ class ViewerHarness {
     'move' => 'move ${e['x']},${e['y']}',
     'wheel' => 'wheel ${e['horizontal']},${e['vertical']}',
     'text' => 'text "${e['text']}"',
+    'physical_key' =>
+      '#${(e['usage'] as int).toRadixString(16)}'
+          '${e['down'] == true ? '↓' : '↑'}',
     final kind => '$kind',
   };
 

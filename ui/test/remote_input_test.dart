@@ -1,10 +1,14 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_keyboard.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/modifier_latch.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_cursor_layer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_keys.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_text_input.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
+import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
 
 import 'fake_desktop_api.dart';
 import 'remote_viewer_harness.dart';
@@ -304,39 +308,319 @@ void main() {
     },
   );
 
-  test('held Ctrl sends bare letter keys and AltGr characters stay text', () {
-    // Ctrl+B: the bare key, never a chord that would release the Ctrl the
-    // user still holds; its up follows even after Ctrl was let go.
-    final b = KeyRouting.route(
-      _down(LogicalKeyboardKey.keyB, PhysicalKeyboardKey.keyB),
-      latched: const {},
-      held: const {RemoteKey.control},
+  /// The picture as a viewer has it: focused, keys to [input].
+  Future<FocusNode> picture(WidgetTester tester, ViewerHarness h) async {
+    final node = FocusNode();
+    addTearDown(node.dispose);
+    await tester.pumpWidget(
+      Focus(
+        key: ObjectKey(h),
+        focusNode: node,
+        autofocus: true,
+        onKeyEvent: h.input.handleHardwareKey,
+        child: const SizedBox.expand(),
+      ),
     );
-    expect(b.inputs, [const DesktopInput.key(RemoteKey.b, true)]);
-    expect(b.holds, RemoteKey.b);
-    final bUp = KeyRouting.route(
-      _up(LogicalKeyboardKey.keyB, PhysicalKeyboardKey.keyB),
-      latched: const {},
-      held: const {},
-      holding: b.holds,
-    );
-    expect(bUp.inputs, [const DesktopInput.key(RemoteKey.b, false)]);
+    await tester.pump();
+    return node;
+  }
 
-    // AltGr arrives as Control + Alt and types its own character.
-    final at = KeyRouting.route(
-      _down(LogicalKeyboardKey.keyQ, PhysicalKeyboardKey.keyQ, '@'),
-      latched: const {},
-      held: const {RemoteKey.control, RemoteKey.alt},
-    );
-    expect(at.inputs, [DesktopInput.text('@')]);
-    expect(at.swallowUp, isTrue);
+  /// Pressed and released through the platform's key path, as the picture
+  /// gets them: whether the picture kept the down.
+  Future<bool> press(
+    WidgetTester tester,
+    LogicalKeyboardKey key, {
+    String? character,
+    String platform = 'windows',
+  }) => tester.sendKeyDownEvent(key, character: character, platform: platform);
+  Future<bool> lift(
+    WidgetTester tester,
+    LogicalKeyboardKey key, {
+    String platform = 'windows',
+  }) => tester.sendKeyUpEvent(key, platform: platform);
 
-    // Shift went as a real key; the character carries the case.
-    final capital = KeyRouting.route(
-      _down(LogicalKeyboardKey.keyA, PhysicalKeyboardKey.keyA, 'A'),
-      latched: const {},
-      held: const {RemoteKey.shift},
+  testWidgets(
+    'local mode: modifiers wait, chords and special keys take them along, '
+    'and printable keys and composing belong to the input method',
+    (tester) async {
+      final h = await ViewerHarness.live(tester);
+      final text = RemoteTextInput(input: h.input)..show();
+      h.input.textInput = text;
+      await picture(tester, h);
+      h.sent();
+
+      // A lone Shift, and Ctrl+Shift, switch this computer's input method:
+      // nothing reaches the host, and the input method sees them.
+      expect(await press(tester, LogicalKeyboardKey.shiftLeft), isFalse);
+      await lift(tester, LogicalKeyboardKey.shiftLeft);
+      await press(tester, LogicalKeyboardKey.controlLeft);
+      await press(tester, LogicalKeyboardKey.shiftLeft);
+      await lift(tester, LogicalKeyboardKey.shiftLeft);
+      await lift(tester, LogicalKeyboardKey.controlLeft);
+      expect(h.sent(), isEmpty);
+
+      // A capital goes to the input method with Shift, and its text comes
+      // back through the client; Shift never reached the host.
+      await press(tester, LogicalKeyboardKey.shiftLeft);
+      expect(
+        await press(tester, LogicalKeyboardKey.keyA, character: 'A'),
+        isFalse,
+      );
+      text.updateEditingValue(
+        TextEditingValue(
+          text: '${'1' * 64}A',
+          selection: const TextSelection.collapsed(offset: 65),
+        ),
+      );
+      await lift(tester, LogicalKeyboardKey.keyA);
+      await lift(tester, LogicalKeyboardKey.shiftLeft);
+      expect(h.sent(), [
+        ['text "A"'],
+      ]);
+
+      // Ctrl+C: Ctrl goes first, with the C, and both come up.
+      await press(tester, LogicalKeyboardKey.controlLeft);
+      expect(await press(tester, LogicalKeyboardKey.keyC), isTrue);
+      await lift(tester, LogicalKeyboardKey.keyC);
+      await lift(tester, LogicalKeyboardKey.controlLeft);
+      expect(h.sent(), [
+        ['control↓', 'c↓'],
+        ['c↑'],
+        ['control↑'],
+      ]);
+
+      // Ctrl+/ is not in an older host's vocabulary: it stays here.
+      await press(tester, LogicalKeyboardKey.controlLeft);
+      await press(tester, LogicalKeyboardKey.slash);
+      await lift(tester, LogicalKeyboardKey.slash);
+      await lift(tester, LogicalKeyboardKey.controlLeft);
+      expect(h.sent(), isEmpty);
+
+      // Shift and a click: Shift goes first, and comes up on its own.
+      await press(tester, LogicalKeyboardKey.shiftLeft);
+      h.input.click(RemoteButton.left, const Offset(0.5, 0.5));
+      await lift(tester, LogicalKeyboardKey.shiftLeft);
+      expect(h.sent(), [
+        ['move 960,540', 'shift↓', 'left↓', 'left↑'],
+        ['shift↑'],
+      ]);
+
+      // Shift+Enter: a special key takes the modifiers along.
+      await press(tester, LogicalKeyboardKey.shiftLeft);
+      expect(await press(tester, LogicalKeyboardKey.enter), isTrue);
+      await lift(tester, LogicalKeyboardKey.enter);
+      await lift(tester, LogicalKeyboardKey.shiftLeft);
+      expect(h.sent(), [
+        ['shift↓', 'enter↓'],
+        ['enter↑'],
+        ['shift↑'],
+      ]);
+
+      // While the input method composes, Enter, Backspace, the arrows and
+      // Escape are its own.
+      text.updateEditingValue(
+        TextEditingValue(
+          text: '${'1' * 64}Ani',
+          selection: const TextSelection.collapsed(offset: 67),
+          composing: const TextRange(start: 65, end: 67),
+        ),
+      );
+      for (final key in [
+        LogicalKeyboardKey.enter,
+        LogicalKeyboardKey.backspace,
+        LogicalKeyboardKey.arrowLeft,
+        LogicalKeyboardKey.escape,
+      ]) {
+        expect(await press(tester, key), isFalse);
+        await lift(tester, key);
+      }
+      expect(h.sent(), isEmpty);
+
+      text.dispose();
+      h.dispose();
+    },
+  );
+
+  testWidgets(
+    'a modifier waiting needs no release when focus goes; one sent does, '
+    'and one pressed while a button is held goes at once',
+    (tester) async {
+      final h = await ViewerHarness.live(tester);
+      await picture(tester, h);
+      h.sent();
+
+      await press(tester, LogicalKeyboardKey.shiftLeft);
+      h.input.releaseAll();
+      await lift(tester, LogicalKeyboardKey.shiftLeft);
+      expect(h.sent(), isEmpty);
+      expect(h.releases, 0);
+
+      h.input.press(RemoteButton.left, const Offset(0.5, 0.5));
+      await press(tester, LogicalKeyboardKey.shiftLeft);
+      expect(h.sent(), [
+        ['move 960,540', 'left↓'],
+        ['shift↓'],
+      ]);
+      h.input.releaseAll();
+      expect(h.releases, 1);
+      await lift(tester, LogicalKeyboardKey.shiftLeft);
+      expect(h.sent(), isEmpty);
+
+      h.dispose();
+    },
+  );
+
+  testWidgets(
+    'remote mode: keys go by place to a host that takes them, Shift at once '
+    'and Win with what it modifies; an older host gets keys and text',
+    (tester) async {
+      var h = await ViewerHarness.live(
+        tester,
+        capabilities: const ['os_windows', 'physical_keys'],
+      );
+      h.input.keyboard = const KeyboardSettings(mode: KeyboardMode.remote);
+      await picture(tester, h);
+      h.sent();
+
+      // Shift at once, for the host's input method; the A by its place.
+      expect(await press(tester, LogicalKeyboardKey.shiftLeft), isTrue);
+      await press(tester, LogicalKeyboardKey.keyA, character: 'A');
+      await lift(tester, LogicalKeyboardKey.keyA);
+      await lift(tester, LogicalKeyboardKey.shiftLeft);
+      expect(h.sent(), [
+        ['#e1↓'],
+        ['#4↓'],
+        ['#4↑'],
+        ['#e1↑'],
+      ]);
+
+      // A lone Win stays here; with a key it goes first.
+      await press(tester, LogicalKeyboardKey.metaLeft);
+      await lift(tester, LogicalKeyboardKey.metaLeft);
+      expect(h.sent(), isEmpty);
+      await press(tester, LogicalKeyboardKey.metaLeft);
+      await press(tester, LogicalKeyboardKey.keyE);
+      await lift(tester, LogicalKeyboardKey.keyE);
+      await lift(tester, LogicalKeyboardKey.metaLeft);
+      expect(h.sent(), [
+        ['#e3↓', '#8↓'],
+        ['#8↑'],
+        ['#e3↑'],
+      ]);
+      h.dispose();
+
+      // A host without physical keys: its vocabulary as keys, the rest as
+      // text, which no host input method composes.
+      h = await ViewerHarness.live(tester, capabilities: const ['os_windows']);
+      h.input.keyboard = const KeyboardSettings(mode: KeyboardMode.remote);
+      await picture(tester, h);
+      h.sent();
+      await press(tester, LogicalKeyboardKey.shiftLeft);
+      await press(tester, LogicalKeyboardKey.keyN, character: 'N');
+      await lift(tester, LogicalKeyboardKey.keyN);
+      await press(tester, LogicalKeyboardKey.digit1, character: '!');
+      await lift(tester, LogicalKeyboardKey.digit1);
+      await press(tester, LogicalKeyboardKey.slash, character: '?');
+      await lift(tester, LogicalKeyboardKey.slash);
+      await lift(tester, LogicalKeyboardKey.shiftLeft);
+      expect(h.sent(), [
+        ['shift↓'],
+        ['n↓'],
+        ['n↑'],
+        ['digit1↓'],
+        ['digit1↑'],
+        ['text "?"'],
+        ['shift↑'],
+      ]);
+      h.dispose();
+    },
+  );
+
+  testWidgets(
+    'Cmd on a Mac is the host’s Ctrl, and a menu chord names the host’s keys',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      try {
+        final h = await ViewerHarness.live(
+          tester,
+          capabilities: const ['os_windows'],
+        );
+        await picture(tester, h);
+        h.sent();
+        expect(h.input.swapsModifiers, isTrue);
+        await press(tester, LogicalKeyboardKey.metaLeft, platform: 'macos');
+        await press(
+          tester,
+          LogicalKeyboardKey.keyC,
+          character: 'c',
+          platform: 'macos',
+        );
+        await lift(tester, LogicalKeyboardKey.keyC, platform: 'macos');
+        await lift(tester, LogicalKeyboardKey.metaLeft, platform: 'macos');
+        h.input.shortcut(RemoteShortcut.switchInputMethod);
+        expect(h.sent(), [
+          ['control↓', 'c↓'],
+          ['c↑'],
+          ['control↑'],
+          ['meta↓', 'space↓', 'space↑', 'meta↑'],
+        ]);
+
+        // Turned off for this computer, Cmd is the Windows key again.
+        h.input.keyboard = const KeyboardSettings(swap: false);
+        expect(h.input.swapsModifiers, isFalse);
+        h.dispose();
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
+  test('AltGr arrives as Control + Alt and types a character of its own', () {
+    final altGr = KeyDownEvent(
+      physicalKey: PhysicalKeyboardKey.keyQ,
+      logicalKey: LogicalKeyboardKey.keyQ,
+      character: '@',
+      timeStamp: Duration.zero,
     );
-    expect(capital.inputs, [DesktopInput.text('A')]);
+    const held = {RemoteKey.control, RemoteKey.alt};
+    // To the input method while a client is attached, else as text.
+    expect(
+      KeyRouting.route(
+        altGr,
+        const KeyContext(textInput: true, held: held),
+      ).handled,
+      isFalse,
+    );
+    final typed = KeyRouting.route(altGr, const KeyContext(held: held));
+    expect(typed.inputs, [DesktopInput.text('@')]);
+    expect(typed.flush, isFalse);
   });
+
+  testWidgets(
+    "a desktop viewer's input method composes in local mode, and in remote "
+    'mode is off only while the picture has the keyboard',
+    (tester) async {
+      final h = await ViewerHarness.live(tester);
+      final node = await picture(tester, h);
+      final ime = LocalInputMethod();
+      final keyboard = DesktopKeyboard(input: h.input, picture: node, ime: ime)
+        ..sync();
+      expect((keyboard.text.attached.value, ime.enabled), (true, true));
+
+      h.input.keyboard = const KeyboardSettings(mode: KeyboardMode.remote);
+      keyboard.sync();
+      expect((keyboard.text.attached.value, ime.enabled), (false, false));
+      // A menu or a dialog takes the keyboard: the input method is back.
+      node.unfocus();
+      await tester.pump();
+      expect(ime.enabled, isTrue);
+      node.requestFocus();
+      await tester.pump();
+      expect(ime.enabled, isFalse);
+      // The viewer closes.
+      keyboard.dispose();
+      expect(ime.enabled, isTrue);
+      h.dispose();
+    },
+  );
 }

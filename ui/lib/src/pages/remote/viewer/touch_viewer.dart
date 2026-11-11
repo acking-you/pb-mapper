@@ -137,9 +137,12 @@ class _TouchViewerState extends State<TouchViewer> {
       haptic: viewerHaptic,
     );
     _textInput = RemoteTextInput(input: _input);
+    _input.textInput = _textInput;
     _textInput.attached.addListener(_attachedChanged);
     widget.prefs.addListener(_prefsChanged);
     _desktop.session.addListener(_sessionChanged);
+    _desktop.session.addListener(_keyboardSettingsChanged);
+    _keyboardSettingsChanged();
     // Local input only: what is on screen belongs to the viewer's host, and
     // pausing a hidden app to the store.
     _lifecycle = AppLifecycleListener(
@@ -198,6 +201,7 @@ class _TouchViewerState extends State<TouchViewer> {
   void dispose() {
     widget.prefs.removeListener(_prefsChanged);
     _desktop.session.removeListener(_sessionChanged);
+    _desktop.session.removeListener(_keyboardSettingsChanged);
     _textInput.attached.removeListener(_attachedChanged);
     _lifecycle.dispose();
     _settle?.cancel();
@@ -276,7 +280,19 @@ class _TouchViewerState extends State<TouchViewer> {
     if (target != null) unawaited(_desktop.connect(target));
   }
 
+  /// A hardware keyboard reaches this computer as its settings say.
+  void _keyboardSettingsChanged() {
+    final keyboard = widget.prefs.keyboardFor(
+      _desktop.session.value.target?.computerId,
+    );
+    if (keyboard == _input.keyboard) return;
+    _input
+      ..releaseAll()
+      ..keyboard = keyboard;
+  }
+
   void _prefsChanged() {
+    _keyboardSettingsChanged();
     final mode = widget.prefs.touchMode;
     if (mode != _touchMode.value) {
       _touchMode.value = mode;

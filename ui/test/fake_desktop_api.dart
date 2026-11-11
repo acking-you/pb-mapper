@@ -14,6 +14,7 @@ DesktopViewerStatus liveStatus({
   int lastVideoAgeMs = 16,
   DesktopStats stats = const DesktopStats(path: 'direct', codec: 'h264'),
   DisplayModeList? modes,
+  List<String> capabilities = const [],
 }) => DesktopViewerStatus(
   state: 'streaming',
   controlAllowed: controlAllowed,
@@ -27,6 +28,7 @@ DesktopViewerStatus liveStatus({
   presentedFrameId: 1,
   lastVideoAgeMs: lastVideoAgeMs,
   modes: modes,
+  capabilities: capabilities,
   stats: stats,
 );
 

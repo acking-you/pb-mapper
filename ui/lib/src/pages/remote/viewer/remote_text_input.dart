@@ -1,18 +1,23 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../../../state/desktop_input.dart';
 import 'remote_input.dart';
 
-/// The soft keyboard's client (ui §10.5.2): turns what the IME commits into
-/// keys and text for the host.
+/// This device's input method as the host's text source (ui §10.5.2): the
+/// soft keyboard's client on a phone, and on a desktop the client attached
+/// while the picture has the keyboard in local mode. It turns what the
+/// input method commits into keys and text for the host.
 ///
 /// It is not a widget and never takes focus: the picture keeps it, so a
-/// hardware keyboard goes through [RemoteInput.handleHardwareKey] and never
-/// edits this buffer. The buffer is a sentinel of 64 digits with the caret
-/// at the end, so Backspace always yields a deletion, and digits draw no
-/// autocorrection. Only committed text reaches the host; text being
-/// composed is shown in [composing] and sent when it is committed.
+/// hardware key reaches [RemoteInput.handleHardwareKey] first, which sends
+/// shortcuts and special keys itself and leaves printable ones to the input
+/// method, whose text comes back here. The buffer is a sentinel of 64
+/// digits with the caret at the end, so Backspace always yields a deletion,
+/// and digits draw no autocorrection. Only committed text reaches the host;
+/// text being composed is shown in [composing] and sent when it is
+/// committed.
 final class RemoteTextInput with TextInputClient, DeltaTextInputClient {
   RemoteTextInput({required RemoteInput input}) : _input = input;
 
@@ -69,6 +74,17 @@ final class RemoteTextInput with TextInputClient, DeltaTextInputClient {
   void hide() {
     _connection?.close();
     _detached();
+  }
+
+  /// Where the input method shows what it composes and its candidates:
+  /// [caret], in the coordinates of [box].
+  void placeAt(RenderBox box, Rect caret) {
+    final connection = _connection;
+    if (connection == null || !connection.attached || !box.hasSize) return;
+    connection
+      ..setEditableSizeAndTransform(box.size, box.getTransformTo(null))
+      ..setComposingRect(caret)
+      ..setCaretRect(caret);
   }
 
   void dispose() {

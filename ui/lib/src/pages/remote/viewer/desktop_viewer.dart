@@ -7,6 +7,7 @@ import '../../../shell/window_chrome.dart';
 import '../../../state/desktop_store.dart';
 import '../../../state/viewer_prefs.dart';
 import '../../../theme/viewer_palette.dart';
+import 'desktop_keyboard.dart';
 import 'modifier_latch.dart';
 import 'quality_panel.dart';
 import 'remote_input.dart';
@@ -77,6 +78,7 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
   final _touchMode = ValueNotifier(TouchMode.direct);
   final _picture = FocusNode(debugLabel: 'remote picture');
   late final RemoteInput _input;
+  late final DesktopKeyboard _keyboard;
   late final TouchGestureMachine _machine;
   late final ToolbarController _toolbar;
   late final AppLifecycleListener _lifecycle;
@@ -100,9 +102,11 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
       interactive: () => _input.ready.value,
       haptic: viewerHaptic,
     );
+    _keyboard = DesktopKeyboard(input: _input, picture: _picture);
     _toolbar = ToolbarController(pinned: widget.prefs.toolbarPinned)..start();
     _actions = _buildActions();
     widget.prefs.addListener(_prefsChanged);
+    _desktop.session.addListener(_keyboardSettingsChanged);
     _prefsChanged();
     // Local input only: what is on screen belongs to the viewer's host, and
     // pausing a hidden app to the store.
@@ -137,7 +141,9 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
       if (_fullscreen) unawaited(_setFullscreen(false));
     }
     widget.prefs.removeListener(_prefsChanged);
+    _desktop.session.removeListener(_keyboardSettingsChanged);
     _lifecycle.dispose();
+    _keyboard.dispose();
     // The input releases through the machine, so it goes first.
     _input.dispose();
     _machine.dispose();
@@ -149,8 +155,23 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
     super.dispose();
   }
 
+  /// The keyboard is this computer's: chosen in the Shortcuts menu, and
+  /// found again once the computer is remembered.
+  void _keyboardSettingsChanged() {
+    final keyboard = widget.prefs.keyboardFor(
+      _desktop.session.value.target?.computerId,
+    );
+    if (keyboard == _input.keyboard) return;
+    // The keys held or waiting went the old way.
+    _input
+      ..releaseAll()
+      ..keyboard = keyboard;
+    _keyboard.sync();
+  }
+
   /// The quality panel holds the toolbar out while it is open.
   void _prefsChanged() {
+    _keyboardSettingsChanged();
     final panel = widget.prefs.qualityPanel;
     if (panel != _panelHeld) {
       _panelHeld = panel;
@@ -256,6 +277,13 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
                       actions: _actions,
                       toolbarInset: _toolbar.inset,
                     ),
+                  ),
+                ),
+                Positioned.fill(
+                  child: RemoteComposition(
+                    text: _keyboard.text,
+                    input: _input,
+                    viewport: _viewport,
                   ),
                 ),
                 Positioned(

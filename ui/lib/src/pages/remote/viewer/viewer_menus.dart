@@ -382,8 +382,59 @@ List<ViewerMenuEntry> _qualityItems(AppLocalizations l10n, ViewerActions a) => [
     ),
 ];
 
+/// How this computer's keyboard reaches the remote one, chosen for that
+/// computer: whose input method types, and, where exactly one of the two
+/// is a Mac, whether Ctrl and Cmd trade places.
+List<ViewerMenuEntry> _keyboardItems(AppLocalizations l10n, ViewerActions a) {
+  final input = a.input;
+  final keyboard = input.keyboard;
+  final physical = a.desktop.session.value.capabilities.contains(
+    'physical_keys',
+  );
+  void choose(KeyboardSettings next) => unawaited(
+    a.prefs.setKeyboard(a.desktop.session.value.target?.computerId, next),
+  );
+  final local = keyboard.mode == KeyboardMode.local;
+  return [
+    ViewerMenuSubmenu(
+      key: const Key('keyboard-mode'),
+      label: l10n.keyboardInputMethod,
+      value: local ? l10n.keyboardLocal : l10n.keyboardRemote,
+      note: l10n.keyboardInputMethodNote,
+      entries: [
+        for (final (mode, label, detail) in [
+          (KeyboardMode.local, l10n.keyboardLocal, l10n.keyboardLocalHint),
+          (
+            KeyboardMode.remote,
+            l10n.keyboardRemote,
+            physical ? l10n.keyboardRemoteHint : l10n.keyboardRemoteOlderHost,
+          ),
+        ])
+          ViewerMenuItem(
+            key: Key('keyboard-${mode.name}'),
+            label: label,
+            detail: detail,
+            checked: keyboard.mode == mode,
+            onSelected: () => choose(keyboard.copyWith(mode: mode)),
+          ),
+      ],
+    ),
+    if (RemoteInput.appleViewer != input.appleHost)
+      ViewerMenuItem(
+        key: const Key('keyboard-swap'),
+        label: RemoteInput.appleViewer
+            ? l10n.keyboardSwapCmd
+            : l10n.keyboardSwapCtrl,
+        checked: input.swapsModifiers,
+        onSelected: () =>
+            choose(keyboard.copyWith(swap: !input.swapsModifiers)),
+      ),
+  ];
+}
+
 /// The chords go as one sequence each; they neither apply nor consume a
 /// latch. Ctrl+Alt+Del is shown and never enabled: it cannot be injected.
+/// The keyboard's own choices lead.
 List<ViewerMenuEntry> shortcutsMenu(AppLocalizations l10n, ViewerActions a) {
   final ready = a.input.ready.value;
   final lockable = a.desktop.session.value.capabilities.contains('lock');
@@ -403,6 +454,8 @@ List<ViewerMenuEntry> shortcutsMenu(AppLocalizations l10n, ViewerActions a) {
     onSelected: () => a.input.shortcut(s),
   );
   return [
+    ..._keyboardItems(l10n, a),
+    const ViewerMenuDivider(),
     chord(
       RemoteShortcut.showDesktop,
       'shortcut-show-desktop',
@@ -426,6 +479,12 @@ List<ViewerMenuEntry> shortcutsMenu(AppLocalizations l10n, ViewerActions a) {
       'shortcut-start',
       l10n.shortcutStart,
       'Win',
+    ),
+    chord(
+      RemoteShortcut.switchInputMethod,
+      'shortcut-input-method',
+      l10n.shortcutSwitchInputMethod,
+      a.input.appleHost ? 'Ctrl + Space' : 'Win + Space',
     ),
     chord(
       RemoteShortcut.lock,
