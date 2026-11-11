@@ -462,6 +462,22 @@ mod tests {
     use crate::sdk::admin::types::KeyListPage;
     use pb_mapper_core::test_support::TEST_ADMIN_KEY_BYTES;
 
+    #[test]
+    fn an_issued_keys_debug_output_leaves_the_credential_out() {
+        let key = crate::sdk::admin::types::IssuedKey {
+            key_id: 7,
+            namespace: 7,
+            state: "active".into(),
+            issued_at: 0,
+            expires_at: 60,
+            label: None,
+            credential: "pbmt1_not-for-a-log".into(),
+        };
+        let shown = format!("{key:?}");
+        assert!(!shown.contains("not-for-a-log"), "{shown}");
+        assert!(shown.contains("[redacted]"), "{shown}");
+    }
+
     fn page(next_page: Option<u32>, ids: &[u64]) -> KeyListPage {
         KeyListPage {
             schema_version: pb_mapper_auth::ADMIN_SCHEMA_VERSION,

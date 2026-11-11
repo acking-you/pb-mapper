@@ -6,6 +6,8 @@
 //! the public API would make every framing change a breaking one. These are
 //! plain data, with a `From` impl per type as the single translation point.
 
+use std::fmt;
+
 use pb_mapper_auth::{AuthStatus, IssuedTemporaryKey, KeyPage, TemporaryKeyMetadata};
 use pb_mapper_protocol::command::{
     AdminConnectionInfo, AdminConnectionPage, AdminServiceInfo, AdminServicePage,
@@ -17,7 +19,7 @@ use super::super::types::LegacyProtocol;
 ///
 /// `credential` is empty on every response but issue, renew, and reveal — the
 /// relay does not hand back key material it has already delivered once.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct IssuedKey {
     pub key_id: u64,
     /// The namespace this credential operates in: one it was issued into, or else
@@ -28,6 +30,38 @@ pub struct IssuedKey {
     pub expires_at: u64,
     pub label: Option<String>,
     pub credential: String,
+}
+
+/// Leaves the secret out, as [`IssuedTemporaryKey`]'s does: a caller that logs
+/// an answer must not log the key with it.
+impl fmt::Debug for IssuedKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            key_id,
+            namespace,
+            state,
+            issued_at,
+            expires_at,
+            label,
+            credential,
+        } = self;
+        // Whether there is one, which is all a log needs.
+        let credential = if credential.is_empty() {
+            ""
+        } else {
+            "[redacted]"
+        };
+        formatter
+            .debug_struct("IssuedKey")
+            .field("key_id", key_id)
+            .field("namespace", namespace)
+            .field("state", state)
+            .field("issued_at", issued_at)
+            .field("expires_at", expires_at)
+            .field("label", label)
+            .field("credential", &credential)
+            .finish()
+    }
 }
 
 /// A temporary credential without its secret.
