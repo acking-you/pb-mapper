@@ -309,7 +309,9 @@ Nothing in the SDK crates knows it exists.
     wait, and the input lane from B-recv
   - `timer.rs`: Fine process timers, held while a session captures; on
     Windows `platform/windows/timer.rs` (the power-throttling opt-out and
-    `timeBeginPeriod`)
+    `timeBeginPeriod`), on macOS `platform/macos/timer.rs` (App Nap held
+    off; the kernel still coalesces the process's timers, which thread C's
+    own waiter avoids)
   - `credit.rs`, `qos.rs`, `idr.rs`, `outgoing.rs`: Receipt credit, delay-based
     QoS, on-demand IDRs, and the hand-off from thread C to B-send
   - `protocol.rs`, `wire.rs`, `invite.rs`, `security.rs`, `auth.rs`: Protocol v2
@@ -379,7 +381,9 @@ Nothing in the SDK crates knows it exists.
     HID usages to `kVK_*`), `cursor.rs` (position, and the shape when the
     cursor seed moves), `pixels.rs`, `modes.rs` and `mode_list.rs`
     (app-only Core Graphics modes), `still.rs` (`SCScreenshotManager`),
-    `timer.rs` (App Nap held off), `keychain.rs`, `cf.rs` (Core Foundation
+    `timer.rs` (App Nap held off), `waiter.rs` (thread C's wait: a kqueue
+    timer marked `NOTE_CRITICAL`, which the kernel does not coalesce, and a
+    user event for the wake), `keychain.rs`, `cf.rs` (Core Foundation
     glue, symbols looked up at run time). Its pure modules build and are
     tested everywhere; `tests.rs` runs only on macOS
   - `platform/windows/helper/`: The opt-in UAC/Winlogon service —

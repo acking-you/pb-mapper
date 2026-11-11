@@ -131,8 +131,11 @@ runs, and resumes with the app when **Share this computer** was left on.
   desktop state and stops input; the picture returns after unlocking. The
   lock screen and the login window cannot be shared, and **Lock remote
   computer** is not offered for a Mac.
-- While a viewer watches, the app holds off App Nap and timer coalescing and
-  keeps the display awake; a viewer that only watches could not wake it.
+- While a viewer watches, the app holds off App Nap and keeps the display
+  awake; a viewer that only watches could not wake it. The thread that paces
+  capture waits on timers the kernel does not coalesce: on a CI runner whose
+  ordinary timers ran up to 134 ms late, that kept a 60 fps session at 60
+  frames a second ([Timers on a Mac host](#timers-on-a-mac-host)).
 
 None of this has run on a real Mac yet. CI compiles, links and unit-tests it
 on a macOS runner: the VideoToolbox encoder (keyframes only when asked, each
@@ -950,7 +953,7 @@ crates/pb-mapper-desktop/src/
   platform/windows/video/                        capture, scale and encode, fused
   platform/windows/helper/                       service, install, worker, pipes
   platform/macos/{mod,cf,capture,encoder,video,desktop,geometry,input,clicks,
-    keys,pixels,cursor,modes,mode_list,still,timer,keychain}.rs
+    keys,pixels,cursor,modes,mode_list,still,timer,waiter,keychain}.rs
   privileged/                                    public helper facade
 ```
 
@@ -1010,7 +1013,10 @@ trait Encoder { type Frame; type Device; const DRAIN: Option<Duration>;
   table needs no layout lookup, so no enigo. Its `HostSupport` carries
   `permissions`, and a missing one is `PermissionMissing`; the shared encoder
   rules (late output, first-submit and output waits, liveness, H.265 failure)
-  live in `codec/pipeline.rs` for both platforms.
+  live in `codec/pipeline.rs` for both platforms. Thread C waits on a kqueue
+  timer marked critical (`platform/macos/waiter.rs`), as it waits on a
+  high-resolution waitable timer on Windows: see
+  [Timers on a Mac host](#timers-on-a-mac-host).
 - **Android**: MediaProjection's VirtualDisplay writes into MediaCodec's input
   surface, so the platform implements `VideoSource` directly and has no
   still (`NoStill`) and no modes; input through an AccessibilityService;
@@ -1126,7 +1132,8 @@ sets in front of a keyframe, queues the unit and wakes thread C, so nothing
 polls. The late-output, stall, liveness and H.265-failure rules are the
 Windows encoder's (`codec/pipeline.rs`). No picture for 3 s is a capture
 failure. While a session captures, the process holds off App Nap and keeps
-the display awake.
+the display awake, and thread C waits on timers the kernel does not coalesce
+([Timers on a Mac host](#timers-on-a-mac-host)).
 
 The GOP is infinite. Before its media types are set, the encoder tries GOP
 lengths `u32::MAX`, `0x7FFF_FFFF`, 65 535 and 3 600 and keeps the first one it
@@ -1157,6 +1164,47 @@ the period, so a paused or idle host costs no power, and a failed call only
 leaves timers coarse. Measured here, a 2 ms tokio sleep took 15.7 ms, 3.5 ms
 under the guard and 15.6 ms after it. Thread C paces on its own
 high-resolution waitable timer either way.
+
+### Timers on a Mac host
+
+macOS coalesces timers: the kernel may fire one late by a share of its
+interval. For the test processes of a GitHub `macos-latest` runner (a
+virtual Mac, not a real Mac), which no app puts in front, that share was
+several times the interval, over four CI rounds:
+
+| Wait | Ended late, median | Ended late, worst seen |
+| --- | --- | --- |
+| 2 ms, condition variable or `thread::sleep` | 5.5–16 ms | 114 ms |
+| 16.7 ms (a 60 fps tick), condition variable | 7.8–107 ms | 134 ms |
+| 2 ms, tokio sleep | 8.6–17 ms | 35 ms |
+| 16.7 ms, tokio sleep | 18–96 ms | 136 ms |
+| 2 ms, kqueue timer marked critical | 0.04–1.1 ms | 1.8 ms |
+| 16.7 ms, kqueue timer marked critical | 0.06–0.42 ms | 3.6 ms |
+
+On the condition variable thread C paced a 60 fps session at 13–28 frames a
+second. An `NSProcessInfo` activity with `LatencyCritical`, an override of
+the task's latency QoS to tier 0 (accepted, with the task's base tiers
+unspecified) and the thread's QoS class up to user-interactive changed none
+of it. A kqueue timer marked `NOTE_CRITICAL` is exempt from coalescing, so
+thread C waits on one, with a user event for the wake
+(`platform/macos/waiter.rs`); on the runner the session then paced at
+60 frames a second, a capture every 16.7 ms at the median. The timer guard
+(`platform/macos/timer.rs`) holds the activity, which keeps App Nap off and
+the display awake; it does not stop coalescing.
+
+tokio's timers stay coalesced. On the relay path that costs no frames:
+B-send writes video when the hand-off notifies it, and probes and receipts
+are stamped with the time they are written and read, so a late timer never
+counts as network delay. What runs late is periodic: the QoS tick (250 ms),
+the statistics, the spacing of probes and the credit recheck, a fallback
+behind receipts. QUIC's pacing, ACK and loss timers, on a direct session or a
+relay reached over QUIC, can run late too, which would slow a large IDR or a
+retransmission. How late any of these run on a real Mac, with the app in
+front, behind other windows or hidden, is not measured.
+
+A Mac viewer that is not the frontmost app may see the same lateness in its
+presentation throttle, its Dart input timers and its decoder thread's waits;
+that is not measured either.
 
 ### H.265 and H.264
 
@@ -1980,9 +2028,12 @@ What each platform's new code has been through:
   VA-API, V4L2 and a real Linux desktop have not run.
 - **macOS host.** Compiled, linked, linted and unit-tested on a macOS
   runner in CI. The unit tests cover the VideoToolbox encoder, the display
-  list, and the system pointer read off the main thread in a window-server
-  session. Its pure parts are also tested on Windows and Linux. It has
-  never run on a real Mac.
+  list, the system pointer read off the main thread in a window-server
+  session, and thread C's waiter, whose 2 ms waits end less than 2 ms late
+  at the median. On the same runner the session tests pace a 60 fps session
+  at 60 frames a second ([Timers on a Mac host](#timers-on-a-mac-host)). Its
+  pure parts are also tested on Windows and Linux. It has never run on a
+  real Mac.
 - **macOS and iOS viewers.** CI builds the macOS app and the unsigned iOS
   app with the Swift decoder. The iOS app links the FFI static library and
   exports its entry points. Neither has run on a device.
@@ -2174,7 +2225,7 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | iOS viewer | Native VideoToolbox path; the app, linking the FFI static library (built without netdev, so no port mapping on iOS), is built unsigned in CI with its exports checked; device validation outstanding |
 | macOS viewer | Native VideoToolbox path; the app is built in CI; a Mac's validation outstanding |
 | Linux viewer | Native GStreamer path ran in WSL2 (WSLg) with NVDEC and gst-libav, against a host replaying recorded clips; CI builds the app and decodes clips with software decoders; VA-API, V4L2 and a real Linux desktop outstanding |
-| macOS host | Compiled, linked and unit-tested in CI on a macOS runner (the encoder, the display list, the pointer read in a window-server session); never run on a real Mac |
+| macOS host | Compiled, linked and unit-tested in CI on a macOS runner (the encoder, the display list, the pointer read in a window-server session, thread C's waiter, a 60 fps session paced at 60 frames a second); never run on a real Mac |
 | Pointer shapes | Windows host's shapes read over an owned window through a viewer, the custom one pixel for pixel; the Windows app and the Android emulator paint the host's shapes; the local pointer taking the shape in control not run on a real screen; macOS host's not run on a Mac |
 | Keyboard modes and physical keys | Windows host injection, line breaks and the active input method's (WeType) composition through physical keys checked in an owned window; in the Windows app, local-mode text, the remote mode's physical keys, the modifier rules and the Shortcuts menu checked with input posted to the app's view; real keystrokes through the input method, composition and candidate placement outstanding |
 | Elevated windows / secure-desktop UAC | Helper implemented; default-policy administrator and standard-user prompt acceptance outstanding |
