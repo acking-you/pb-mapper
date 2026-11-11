@@ -948,6 +948,73 @@ async fn settings_whose_directory_cannot_be_made_are_refused() {
     assert!(!std::path::Path::new("pb_mapper_config.json").exists());
 }
 
+/// A tunnel's `updatedAtMs` is when its settings last changed: its creation
+/// until they do, whenever the list is read, and not when it is started
+/// again as it was.
+#[tokio::test]
+async fn a_tunnel_reads_as_updated_when_its_settings_change() {
+    let (_guard, state, _root) = temp_state("updated-at").await;
+    let state = state.lock().await;
+    let created = r#""created_at":{"secs_since_epoch":1,"nanos_since_epoch":0}"#;
+    std::fs::write(
+        state.config_dir.join("services.json"),
+        format!(
+            r#"{{"services":{{"web":{{"service_key":"web","local_address":"127.0.0.1:8080",
+            "protocol":"TCP","enable_encryption":true,"enable_keep_alive":false,{created}}}}}}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        state.config_dir.join("clients.json"),
+        format!(
+            r#"{{"clients":{{"web":{{"service_key":"web","local_address":"127.0.0.1:9090",
+            "protocol":"TCP","enable_keep_alive":false,{created}}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let times = |state: &PbMapperState| {
+        let share = &state.get_service_configs().unwrap()[0];
+        let connection = &state.get_client_configs().unwrap()[0];
+        [
+            (share.created_at_ms, share.updated_at_ms),
+            (connection.created_at_ms, connection.updated_at_ms),
+        ]
+    };
+    assert_eq!(times(&state), [(1000, 1000); 2]);
+    let share = |local: &str| ShareSpec {
+        service_key: "web".into(),
+        local_address: local.into(),
+        protocol: "TCP".into(),
+        enable_encryption: true,
+        enable_keep_alive: false,
+        direct: DirectOptions {
+            allow_direct: true,
+            port_mapping: PortMapping::Auto,
+        },
+    };
+    let unchanged = |port: u16| ConnectSpec {
+        enable_keep_alive: false,
+        direct: DirectOptions {
+            allow_direct: true,
+            port_mapping: PortMapping::Auto,
+        },
+        ..connection("web", std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+    };
+    state.save_service_config(&share("127.0.0.1:8080")).unwrap();
+    state.save_client_config(&unchanged(9090)).unwrap();
+    assert_eq!(times(&state), [(1000, 1000); 2]);
+
+    let before = pb_mapper_core::time::unix_millis();
+    state.save_service_config(&share("127.0.0.1:8081")).unwrap();
+    state.save_client_config(&unchanged(9091)).unwrap();
+    let after = times(&state);
+    for (created, updated) in after {
+        assert_eq!(created, 1000);
+        assert!(updated >= before, "{updated} < {before}");
+    }
+    assert_eq!(times(&state), after, "a read changes nothing");
+}
+
 /// Keys a newer build wrote survive this build's saves, at every level it
 /// rewrites: the settings the window saves, both tunnel lists, and each
 /// share's and connection's entry, saved again or after another's delete.

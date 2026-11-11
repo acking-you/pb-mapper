@@ -37,6 +37,11 @@ pub struct ServiceConfigData {
     pub enable_encryption: bool,
     pub enable_keep_alive: bool,
     pub created_at: SystemTime,
+    /// When its settings last changed, once they have: a share or
+    /// connection saved again as it was keeps this, and one never changed
+    /// since it was created has none and is written as it always was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<SystemTime>,
     /// Whether a connection may reach it directly rather than through the
     /// relay. On unless turned off: a share saved before there was a choice
     /// allows it, as `register` does.
@@ -99,6 +104,9 @@ pub struct ClientConfigData {
     pub protocol: String,
     pub enable_keep_alive: bool,
     pub created_at: SystemTime,
+    /// As [`ServiceConfigData::updated_at`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<SystemTime>,
     /// The namespace the service is in, when it is not this credential's own:
     /// an administrator connecting to a temporary credential's service.
     #[serde(default, skip_serializing_if = "Option::is_none")]

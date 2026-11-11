@@ -25,6 +25,7 @@ pub struct ServiceConfigInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay_transport: Option<RelayTransport>,
     pub created_at_ms: u64,
+    /// When its settings last changed: when it was created, until they do.
     pub updated_at_ms: u64,
 }
 
@@ -53,6 +54,7 @@ pub struct ClientConfigInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay_transport: Option<RelayTransport>,
     pub created_at_ms: u64,
+    /// When its settings last changed: when it was created, until they do.
     pub updated_at_ms: u64,
 }
 

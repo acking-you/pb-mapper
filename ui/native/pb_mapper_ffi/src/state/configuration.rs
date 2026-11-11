@@ -195,25 +195,28 @@ impl PbMapperState {
         let mut store = self.load_service_configs()?;
         let saved = store.services.remove(service_key);
         // What the entry saved before holds besides its settings is its own.
-        let (created_at, unknown) = kept(
+        let (created_at, updated_at, unknown) = kept(
             saved
                 .as_ref()
-                .map(|saved| (saved.created_at, &saved.unknown)),
+                .map(|saved| (saved.created_at, saved.updated_at, &saved.unknown)),
         );
 
-        let config = ServiceConfigData {
+        let mut config = ServiceConfigData {
             service_key: service_key.to_string(),
             local_address: local_address.to_string(),
             protocol: protocol.to_string(),
             enable_encryption: *enable_encryption,
             enable_keep_alive: *enable_keep_alive,
             created_at,
+            updated_at,
             allow_direct: *allow_direct,
             port_mapping: *port_mapping,
             unknown,
         };
-        if saved.as_ref() == Some(&config) {
-            return Ok(());
+        match &saved {
+            Some(saved) if *saved == config => return Ok(()),
+            Some(_) => config.updated_at = Some(SystemTime::now()),
+            None => {}
         }
 
         store.services.insert(service_key.to_string(), config);
@@ -249,25 +252,28 @@ impl PbMapperState {
         } = spec;
         let mut store = self.load_client_configs()?;
         let saved = store.clients.remove(service_key);
-        let (created_at, unknown) = kept(
+        let (created_at, updated_at, unknown) = kept(
             saved
                 .as_ref()
-                .map(|saved| (saved.created_at, &saved.unknown)),
+                .map(|saved| (saved.created_at, saved.updated_at, &saved.unknown)),
         );
 
-        let config = ClientConfigData {
+        let mut config = ClientConfigData {
             service_key: service_key.to_string(),
             local_address: local_address.to_string(),
             protocol: protocol.to_string(),
             enable_keep_alive: *enable_keep_alive,
             created_at,
+            updated_at,
             namespace: *namespace,
             allow_direct: *allow_direct,
             port_mapping: *port_mapping,
             unknown,
         };
-        if saved.as_ref() == Some(&config) {
-            return Ok(());
+        match &saved {
+            Some(saved) if *saved == config => return Ok(()),
+            Some(_) => config.updated_at = Some(SystemTime::now()),
+            None => {}
         }
 
         store.clients.insert(service_key.to_string(), config);
@@ -282,15 +288,17 @@ impl PbMapperState {
 }
 
 /// What a tunnel's entry keeps from the one `saved` before it, besides the
-/// settings: when it was created, and the keys a later build wrote; or, for
-/// a tunnel saved for the first time, now and none. An entry that comes out
-/// as it was saved is not written again, so a tunnel started as it was
-/// saved, as the window resumes one, starts on a list that cannot be
-/// written.
-fn kept(saved: Option<(SystemTime, &Unknown)>) -> (SystemTime, Unknown) {
+/// settings: when it was created and last changed, and the keys a later
+/// build wrote; or, for a tunnel saved for the first time, now, never and
+/// none. An entry that comes out as it was saved is not written again, so a
+/// tunnel started as it was saved, as the window resumes one, starts on a
+/// list that cannot be written; one that changed is written as changed now.
+fn kept(
+    saved: Option<(SystemTime, Option<SystemTime>, &Unknown)>,
+) -> (SystemTime, Option<SystemTime>, Unknown) {
     saved.map_or_else(
-        || (SystemTime::now(), Unknown::new()),
-        |(created_at, unknown)| (created_at, unknown.clone()),
+        || (SystemTime::now(), None, Unknown::new()),
+        |(created_at, updated_at, unknown)| (created_at, updated_at, unknown.clone()),
     )
 }
 

@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use pb_mapper_client::sdk::{Client, RelayTransport, RemoteId};
-use pb_mapper_core::time::{saturating_millis, unix_millis};
+use pb_mapper_core::time::saturating_millis;
 
 use super::runtime::EmbeddedRelay;
 use super::stored::normalize_msg_header_key;
@@ -113,7 +113,8 @@ async fn fetch_real_status(
     tokio::join!(answer, quic)
 }
 
-/// `at` in whole milliseconds since the Unix epoch, as [`unix_millis`] reads
+/// `at` in whole milliseconds since the Unix epoch, as
+/// [`unix_millis`](pb_mapper_core::time::unix_millis) reads
 /// the clock now.
 fn unix_millis_at(at: SystemTime) -> u64 {
     saturating_millis(at.duration_since(UNIX_EPOCH).unwrap_or_default())
@@ -220,7 +221,7 @@ impl PbMapperState {
                 path: view.path,
                 relay_transport: view.transport,
                 created_at_ms: unix_millis_at(config.created_at),
-                updated_at_ms: unix_millis(),
+                updated_at_ms: unix_millis_at(config.updated_at.unwrap_or(config.created_at)),
             });
         }
 
@@ -260,7 +261,7 @@ impl PbMapperState {
                 path: view.path,
                 relay_transport: view.transport,
                 created_at_ms: unix_millis_at(config.created_at),
-                updated_at_ms: unix_millis_at(config.created_at),
+                updated_at_ms: unix_millis_at(config.updated_at.unwrap_or(config.created_at)),
             });
         }
 
