@@ -26,6 +26,7 @@ bool FlutterWindow::OnCreate() {
   }
   RegisterPlugins(flutter_controller_->engine());
   desktop_video_ = std::make_unique<DesktopVideo>(flutter_controller_->engine(), GetHandle());
+  desktop_ime_ = std::make_unique<DesktopIme>(flutter_controller_->engine(), flutter_controller_->view()->GetNativeWindow());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -41,6 +42,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  desktop_ime_.reset();
   desktop_video_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
