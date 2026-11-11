@@ -605,30 +605,29 @@ fn rotating_bloom_retains_a_max_future_timestamp_past_the_next_rotation() {
 #[test]
 fn per_credential_admission_limit_does_not_consume_other_keys() {
     let now = unix_seconds();
-    let mut guard =
-        ReplayGuard::open(None, 1024, DEFAULT_REPLAY_WINDOW_SECONDS).with_max_per_key(2);
+    let guard = ReplayGuard::open(None, 1024, DEFAULT_REPLAY_WINDOW_SECONDS).with_max_per_key(2);
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[2_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[2_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[3_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[3_u8; 32], now).wait(),
         FirstFlightAdmit::Limited
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[3_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[3_u8; 32], now).wait(),
         FirstFlightAdmit::Limited
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(2), &[4_u8; 32], now),
+        guard.admit(KeyId::from_u64(2), &[4_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
         FirstFlightAdmit::Replayed
     );
 }
@@ -636,27 +635,27 @@ fn per_credential_admission_limit_does_not_consume_other_keys() {
 #[test]
 fn aggregate_admission_limit_covers_all_keys() {
     let now = unix_seconds();
-    let mut guard = ReplayGuard::open(None, 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+    let guard = ReplayGuard::open(None, 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
         .with_max_per_key(100)
         .with_max_total(2);
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(2), &[2_u8; 32], now),
+        guard.admit(KeyId::from_u64(2), &[2_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(3), &[3_u8; 32], now),
+        guard.admit(KeyId::from_u64(3), &[3_u8; 32], now).wait(),
         FirstFlightAdmit::Limited
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(3), &[3_u8; 32], now),
+        guard.admit(KeyId::from_u64(3), &[3_u8; 32], now).wait(),
         FirstFlightAdmit::Limited
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(4), &[4_u8; 32], now),
+        guard.admit(KeyId::from_u64(4), &[4_u8; 32], now).wait(),
         FirstFlightAdmit::Limited
     );
 }
@@ -678,9 +677,9 @@ fn a_restart_drops_the_record_a_crash_cut_off() {
     let now = unix_seconds();
     let admitted = [17_u8; 32];
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
         assert_eq!(
-            guard.admit(KeyId::from_u64(7), &admitted, now),
+            guard.admit(KeyId::from_u64(7), &admitted, now).wait(),
             FirstFlightAdmit::Fresh
         );
     }
@@ -690,13 +689,13 @@ fn a_restart_drops_the_record_a_crash_cut_off() {
     log.extend_from_slice(&replay_record(cut_off, now)[..36]);
     std::fs::write(&path, log).unwrap();
 
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(KeyId::from_u64(7), &admitted, now),
+        restored.admit(KeyId::from_u64(7), &admitted, now).wait(),
         FirstFlightAdmit::Replayed
     );
     assert_eq!(
-        restored.admit(KeyId::from_u64(7), &cut_off, now),
+        restored.admit(KeyId::from_u64(7), &cut_off, now).wait(),
         FirstFlightAdmit::Fresh
     );
     drop(restored);
@@ -725,9 +724,9 @@ fn a_damaged_replay_log_still_fails_closed() {
     for (name, contents) in [("damaged", damaged), ("not-a-log", not_a_log)] {
         let path = scratch.join(name);
         std::fs::write(&path, &contents).unwrap();
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
         assert_eq!(
-            guard.admit(KeyId::from_u64(9), &[9; 32], now),
+            guard.admit(KeyId::from_u64(9), &[9; 32], now).wait(),
             FirstFlightAdmit::Unavailable,
             "{name}"
         );
@@ -743,17 +742,17 @@ fn replay_rewrite_succeeds_when_a_pid_temporary_file_already_exists() {
     let now = unix_seconds();
     let fingerprint = [19_u8; 32];
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
         assert_eq!(
-            guard.admit(KeyId::from_u64(9), &fingerprint, now),
+            guard.admit(KeyId::from_u64(9), &fingerprint, now).wait(),
             FirstFlightAdmit::Fresh
         );
     }
     let leftover = path.with_file_name(format!(".connection.replay.tmp-{}", std::process::id()));
     std::fs::write(&leftover, b"stale").unwrap();
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(KeyId::from_u64(9), &fingerprint, now),
+        restored.admit(KeyId::from_u64(9), &fingerprint, now).wait(),
         FirstFlightAdmit::Replayed
     );
 }
@@ -774,9 +773,9 @@ fn replay_log_records_keep_their_layout() {
     let mut written = fingerprint.to_vec();
     written.extend_from_slice(&now.to_be_bytes());
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
         assert_eq!(
-            guard.admit(KeyId::from_u64(7), &fingerprint, now),
+            guard.admit(KeyId::from_u64(7), &fingerprint, now).wait(),
             FirstFlightAdmit::Fresh
         );
     }
@@ -787,9 +786,9 @@ fn replay_log_records_keep_their_layout() {
     let mut handmade = other.to_vec();
     handmade.extend_from_slice(&now.to_be_bytes());
     std::fs::write(&path, &handmade).unwrap();
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(KeyId::from_u64(8), &other, now),
+        restored.admit(KeyId::from_u64(8), &other, now).wait(),
         FirstFlightAdmit::Replayed
     );
     drop(restored);
@@ -802,15 +801,15 @@ fn persisted_first_flights_survive_replay_guard_restart() {
     let now = unix_seconds();
     let fingerprint = [13_u8; 32];
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
         assert_eq!(
-            guard.admit(KeyId::from_u64(7), &fingerprint, now),
+            guard.admit(KeyId::from_u64(7), &fingerprint, now).wait(),
             FirstFlightAdmit::Fresh
         );
     }
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(KeyId::from_u64(7), &fingerprint, now),
+        restored.admit(KeyId::from_u64(7), &fingerprint, now).wait(),
         FirstFlightAdmit::Replayed
     );
 }
@@ -821,23 +820,23 @@ fn restored_replay_log_consumes_the_aggregate_budget() {
     let path = scratch.to_path_buf();
     let now = unix_seconds();
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
             .with_max_per_key(100)
             .with_max_total(2);
         assert_eq!(
-            guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+            guard.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
             FirstFlightAdmit::Fresh
         );
         assert_eq!(
-            guard.admit(KeyId::from_u64(2), &[2_u8; 32], now),
+            guard.admit(KeyId::from_u64(2), &[2_u8; 32], now).wait(),
             FirstFlightAdmit::Fresh
         );
     }
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
         .with_max_per_key(100)
         .with_max_total(2);
     assert_eq!(
-        restored.admit(KeyId::from_u64(3), &[3_u8; 32], now),
+        restored.admit(KeyId::from_u64(3), &[3_u8; 32], now).wait(),
         FirstFlightAdmit::Limited
     );
 }
@@ -848,27 +847,29 @@ fn restored_replay_generation_ages_with_loaded_records() {
     let path = scratch.to_path_buf();
     let start = unix_seconds().saturating_sub(DEFAULT_REPLAY_WINDOW_SECONDS / 2);
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
             .with_max_per_key(100)
             .with_max_total(2);
         assert_eq!(
-            guard.admit(KeyId::from_u64(1), &[1_u8; 32], start),
+            guard.admit(KeyId::from_u64(1), &[1_u8; 32], start).wait(),
             FirstFlightAdmit::Fresh
         );
         assert_eq!(
-            guard.admit(KeyId::from_u64(2), &[2_u8; 32], start),
+            guard.admit(KeyId::from_u64(2), &[2_u8; 32], start).wait(),
             FirstFlightAdmit::Fresh
         );
     }
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
         .with_max_per_key(100)
         .with_max_total(2);
     assert_eq!(
-        restored.admit(
-            KeyId::from_u64(3),
-            &[3_u8; 32],
-            start.saturating_add(DEFAULT_REPLAY_WINDOW_SECONDS)
-        ),
+        restored
+            .admit(
+                KeyId::from_u64(3),
+                &[3_u8; 32],
+                start.saturating_add(DEFAULT_REPLAY_WINDOW_SECONDS)
+            )
+            .wait(),
         FirstFlightAdmit::Fresh
     );
 }
@@ -882,17 +883,17 @@ fn replay_log_accepts_admissions_after_compaction() {
     let path = scratch.to_path_buf();
     let now = unix_seconds();
     let later = now.saturating_add(REPLAY_COMPACT_INTERVAL_SECONDS);
-    let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(2), &[2_u8; 32], later),
+        guard.admit(KeyId::from_u64(2), &[2_u8; 32], later).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
-        guard.admit(KeyId::from_u64(3), &[3_u8; 32], later),
+        guard.admit(KeyId::from_u64(3), &[3_u8; 32], later).wait(),
         FirstFlightAdmit::Fresh
     );
     assert_eq!(
@@ -910,9 +911,9 @@ fn replay_log_rollback_removes_a_partial_record() {
     let path = scratch.to_path_buf();
     let now = unix_seconds();
     {
-        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        let guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
         assert_eq!(
-            guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+            guard.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
             FirstFlightAdmit::Fresh
         );
     }
@@ -924,57 +925,364 @@ fn replay_log_rollback_removes_a_partial_record() {
         .write_all(&[0xaa; 7])
         .unwrap();
     truncate_replay_log(&path, REPLAY_RECORD_LEN as u64).unwrap();
-    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        restored.admit(KeyId::from_u64(1), &[1_u8; 32], now).wait(),
         FirstFlightAdmit::Replayed
     );
     assert_eq!(
-        restored.admit(KeyId::from_u64(2), &[2_u8; 32], now),
+        restored.admit(KeyId::from_u64(2), &[2_u8; 32], now).wait(),
         FirstFlightAdmit::Fresh
     );
     drop(restored);
 }
 
-/// The `path` of each error event `run` logs on this thread.
-fn logged_error_paths(run: impl FnOnce()) -> Vec<String> {
-    use std::sync::Mutex;
-    use tracing::field::{Field, Visit};
-    use tracing::span::{Attributes, Id, Record};
+/// A replay guard that several connections admit through at once, as the
+/// relay's do.
+type SharedGuard = Arc<ReplayGuard>;
 
-    struct Errors(Arc<Mutex<Vec<String>>>);
-    struct PathField(Option<String>);
-    impl Visit for PathField {
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "path" {
-                self.0 = Some(format!("{value:?}"));
+fn shared(guard: ReplayGuard) -> SharedGuard {
+    Arc::new(guard)
+}
+
+/// What a connection asks of the replay guard: to admit its first flight, or
+/// to claim it for an error session, as one that failed authentication does.
+#[derive(Clone, Copy, Debug)]
+enum Ask {
+    Admit(KeyId),
+    Claim,
+}
+
+/// Each of `asks`, each from a thread of its own, all let go together at
+/// `now`; the answers in the order of `asks`. `answered` runs on a thread as
+/// soon as its answer comes, before that thread returns.
+fn ask_concurrently(
+    guard: &SharedGuard,
+    asks: &[(Ask, [u8; 32])],
+    now: u64,
+    answered: impl Fn([u8; 32], FirstFlightAdmit) + Sync,
+) -> Vec<FirstFlightAdmit> {
+    let start = std::sync::Barrier::new(asks.len());
+    std::thread::scope(|scope| {
+        let threads = asks
+            .iter()
+            .map(|&(ask, fingerprint)| {
+                let (start, answered) = (&start, &answered);
+                scope.spawn(move || {
+                    start.wait();
+                    let answer = match ask {
+                        Ask::Admit(key_id) => guard.admit(key_id, &fingerprint, now).wait(),
+                        Ask::Claim => guard.claim(&fingerprint, now).wait(),
+                    };
+                    answered(fingerprint, answer);
+                    answer
+                })
+            })
+            .collect::<Vec<_>>();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect()
+    })
+}
+
+/// Whether the log at `path` holds the admission of `fingerprint` at `at`.
+fn log_holds(path: &std::path::Path, fingerprint: [u8; 32], at: u64) -> bool {
+    let record = replay_record(fingerprint, at);
+    std::fs::read(path)
+        .unwrap()
+        .chunks(REPLAY_RECORD_LEN)
+        .any(|held| held == record.as_slice())
+}
+
+/// A fingerprint of its own for each `round` and `index`, spread over the
+/// filter as real ones are.
+fn fingerprint(round: u8, index: u8) -> [u8; 32] {
+    let mut salt = [0; CONNECTION_SALT_LEN];
+    salt[0] = round;
+    salt[1] = index;
+    replay_fingerprint(KeyId::from_u64(1), &salt)
+}
+
+/// First flights racing through one guard, some of them copies of one: each
+/// fingerprint is answered `Fresh` once however its copies race, whether
+/// admitted or claimed, and an admission is answered only once its record is
+/// in the log. A restart, after a crash cut off the record an append was
+/// writing, still refuses every one admitted.
+#[test]
+fn racing_first_flights_admit_each_fingerprint_once_and_durably() {
+    let scratch = TempPath::new("replay-race");
+    std::fs::create_dir(&scratch).unwrap();
+    let path = scratch.join("connection.replay");
+    let now = unix_seconds();
+    let guard = shared(ReplayGuard::open(
+        Some(path.clone()),
+        1 << 16,
+        DEFAULT_REPLAY_WINDOW_SECONDS,
+    ));
+    let mut admitted = Vec::new();
+    for round in 0..8 {
+        // Eight copies of one first flight, then 24 others, every other one
+        // claimed rather than admitted.
+        let asks = (0..32_u8)
+            .map(|index| {
+                let ask = if index % 2 == 0 {
+                    Ask::Admit(KeyId::from_u64(1))
+                } else {
+                    Ask::Claim
+                };
+                (ask, fingerprint(round, index.max(7)))
+            })
+            .collect::<Vec<_>>();
+        let answers = ask_concurrently(&guard, &asks, now, |fingerprint, answer| {
+            if answer == FirstFlightAdmit::Fresh {
+                assert!(log_holds(&path, fingerprint, now), "round {round}");
+            }
+        });
+        let (copies, others) = answers.split_at(8);
+        assert_eq!(
+            copies
+                .iter()
+                .filter(|answer| **answer == FirstFlightAdmit::Fresh)
+                .count(),
+            1,
+            "round {round}: {copies:?}"
+        );
+        assert!(
+            copies.iter().all(|answer| matches!(
+                answer,
+                FirstFlightAdmit::Fresh | FirstFlightAdmit::Replayed
+            )),
+            "round {round}: {copies:?}"
+        );
+        assert!(
+            others
+                .iter()
+                .all(|answer| *answer == FirstFlightAdmit::Fresh),
+            "round {round}: {others:?}"
+        );
+        admitted.extend((7..32).map(|index| fingerprint(round, index)));
+    }
+    drop(guard);
+
+    let cut_off = fingerprint(0xff, 0xff);
+    let mut log = std::fs::read(&path).unwrap();
+    log.extend_from_slice(&replay_record(cut_off, now)[..REPLAY_RECORD_LEN - 3]);
+    std::fs::write(&path, log).unwrap();
+    let restored = ReplayGuard::open(Some(path.clone()), 1 << 16, DEFAULT_REPLAY_WINDOW_SECONDS);
+    for fingerprint in admitted {
+        assert_eq!(
+            restored.admit(KeyId::from_u64(1), &fingerprint, now).wait(),
+            FirstFlightAdmit::Replayed
+        );
+    }
+    assert_eq!(
+        restored.admit(KeyId::from_u64(1), &cut_off, now).wait(),
+        FirstFlightAdmit::Fresh
+    );
+}
+
+/// The per-credential and total budgets hold however many first flights race
+/// for their last places: of 40 at once, exactly the budget's worth are
+/// admitted.
+#[test]
+fn racing_first_flights_never_pass_the_admission_limits() {
+    let scratch = TempPath::new("replay-race-limits");
+    std::fs::create_dir(&scratch).unwrap();
+    let now = unix_seconds();
+    let per_key = shared(
+        ReplayGuard::open(
+            Some(scratch.join("per-key")),
+            1 << 16,
+            DEFAULT_REPLAY_WINDOW_SECONDS,
+        )
+        .with_max_per_key(5),
+    );
+    let asks = (0..40)
+        .map(|index| (Ask::Admit(KeyId::from_u64(1)), fingerprint(1, index)))
+        .collect::<Vec<_>>();
+    let answers = ask_concurrently(&per_key, &asks, now, |_, _| {});
+    let fresh = |answers: &[FirstFlightAdmit]| {
+        answers
+            .iter()
+            .filter(|answer| **answer == FirstFlightAdmit::Fresh)
+            .count()
+    };
+    assert_eq!(fresh(&answers), 5, "{answers:?}");
+    assert!(
+        answers
+            .iter()
+            .all(|answer| matches!(answer, FirstFlightAdmit::Fresh | FirstFlightAdmit::Limited))
+    );
+
+    let total = shared(
+        ReplayGuard::open(
+            Some(scratch.join("total")),
+            1 << 16,
+            DEFAULT_REPLAY_WINDOW_SECONDS,
+        )
+        .with_max_per_key(100)
+        .with_max_total(7),
+    );
+    let asks = (0..40)
+        .map(|index| {
+            (
+                Ask::Admit(KeyId::from_u64(u64::from(index) + 1)),
+                fingerprint(2, index),
+            )
+        })
+        .collect::<Vec<_>>();
+    let answers = ask_concurrently(&total, &asks, now, |_, _| {});
+    assert_eq!(fresh(&answers), 7, "{answers:?}");
+}
+
+/// An append that fails answers every admission waiting on it `Unavailable`
+/// and takes back all that they reserved: once the log can be written again,
+/// the same first flights are admitted, with the whole budget there for them,
+/// and the log holds just those.
+#[test]
+fn a_failed_append_frees_what_its_admissions_reserved() {
+    let scratch = TempPath::new("replay-race-fail");
+    let path = scratch.join("connection.replay");
+    let now = unix_seconds();
+    let guard = shared(
+        ReplayGuard::open(Some(path.clone()), 1 << 16, DEFAULT_REPLAY_WINDOW_SECONDS)
+            .with_max_per_key(16)
+            .with_max_total(16),
+    );
+    let asks = (0..16)
+        .map(|index| (Ask::Admit(KeyId::from_u64(1)), fingerprint(3, index)))
+        .collect::<Vec<_>>();
+    // A file where the log's directory goes: every append fails, writing
+    // nothing.
+    std::fs::write(&scratch, b"a file where the log's directory goes").unwrap();
+    let answers = ask_concurrently(&guard, &asks, now, |_, _| {});
+    assert!(
+        answers
+            .iter()
+            .all(|answer| *answer == FirstFlightAdmit::Unavailable),
+        "{answers:?}"
+    );
+
+    std::fs::remove_file(&scratch).unwrap();
+    let answers = ask_concurrently(&guard, &asks, now, |_, _| {});
+    assert!(
+        answers
+            .iter()
+            .all(|answer| *answer == FirstFlightAdmit::Fresh),
+        "{answers:?}"
+    );
+    assert_eq!(
+        guard
+            .admit(KeyId::from_u64(1), &fingerprint(3, 16), now)
+            .wait(),
+        FirstFlightAdmit::Limited
+    );
+    let log = std::fs::read(&path).unwrap();
+    assert_eq!(log.len(), asks.len() * REPLAY_RECORD_LEN);
+    for (_, fingerprint) in asks {
+        assert!(log_holds(&path, fingerprint, now));
+    }
+}
+
+/// The minute's compaction runs between admissions: the admission that comes
+/// due for it is answered once the log holds exactly the live admissions, its
+/// own among them, and admissions after it go onto that log.
+#[test]
+fn a_compaction_leaves_the_live_admissions_and_admits_after_it() {
+    let scratch = TempPath::new("replay-compaction");
+    std::fs::create_dir(&scratch).unwrap();
+    let path = scratch.join("connection.replay");
+    let opened = unix_seconds();
+    let guard = ReplayGuard::open(Some(path.clone()), 1 << 16, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let key = KeyId::from_u64(1);
+    // Outside the window by the time the compaction runs.
+    let stale = opened - DEFAULT_REPLAY_WINDOW_SECONDS - 100;
+    // The open may have read the clock a second after `opened`.
+    let due = opened + REPLAY_COMPACT_INTERVAL_SECONDS + 2;
+    let (old, compacting, after) = (fingerprint(4, 0), fingerprint(4, 1), fingerprint(4, 2));
+    assert_eq!(
+        guard.admit(key, &old, stale).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        guard.admit(key, &compacting, due).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        replay_record(compacting, due)
+    );
+    assert_eq!(
+        guard.admit(key, &after, due + 1).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        [
+            replay_record(compacting, due),
+            replay_record(after, due + 1)
+        ]
+        .concat()
+    );
+    drop(guard);
+
+    let restored = ReplayGuard::open(Some(path.clone()), 1 << 16, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let now = unix_seconds();
+    assert_eq!(
+        restored.admit(key, &compacting, now).wait(),
+        FirstFlightAdmit::Replayed
+    );
+    assert_eq!(
+        restored.admit(key, &after, now).wait(),
+        FirstFlightAdmit::Replayed
+    );
+    assert_eq!(
+        restored.admit(key, &old, now).wait(),
+        FirstFlightAdmit::Fresh
+    );
+}
+
+/// The `path` of each error event logged to it, on whichever thread.
+#[derive(Clone, Default)]
+struct ErrorPaths(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl ErrorPaths {
+    /// What was logged since the last take.
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut self.0.lock().unwrap())
+    }
+}
+
+impl tracing::Subscriber for ErrorPaths {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        use tracing::field::{Field, Visit};
+
+        struct PathField(Option<String>);
+        impl Visit for PathField {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "path" {
+                    self.0 = Some(format!("{value:?}"));
+                }
             }
         }
+        if *event.metadata().level() != tracing::Level::ERROR {
+            return;
+        }
+        let mut path = PathField(None);
+        event.record(&mut path);
+        self.0.lock().unwrap().push(path.0.unwrap_or_default());
     }
-    impl tracing::Subscriber for Errors {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _: &Attributes<'_>) -> Id {
-            Id::from_u64(1)
-        }
-        fn record(&self, _: &Id, _: &Record<'_>) {}
-        fn record_follows_from(&self, _: &Id, _: &Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            if *event.metadata().level() != tracing::Level::ERROR {
-                return;
-            }
-            let mut path = PathField(None);
-            event.record(&mut path);
-            self.0.lock().unwrap().push(path.0.unwrap_or_default());
-        }
-        fn enter(&self, _: &Id) {}
-        fn exit(&self, _: &Id) {}
-    }
-
-    let paths = Arc::new(Mutex::new(Vec::new()));
-    tracing::subscriber::with_default(Errors(paths.clone()), run);
-    paths.lock().unwrap().clone()
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
 }
 
 /// An append that fails and leaves the log as it was, as on a full disk or
@@ -987,35 +1295,39 @@ fn a_failing_append_is_logged_once_per_run_of_failures() {
     let path = scratch.join("connection.replay");
     let block = || std::fs::write(&scratch, b"a file where the log's directory goes").unwrap();
     let now = unix_seconds();
-    let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    // The log's writer logs where the code that opened the log does.
+    let errors = ErrorPaths::default();
+    let guard = tracing::subscriber::with_default(errors.clone(), || {
+        ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+    });
 
     block();
-    let logged = logged_error_paths(|| {
-        for key in 1..=3 {
-            assert_eq!(
-                guard.admit(KeyId::from_u64(key), &[key as u8; 32], now),
-                FirstFlightAdmit::Unavailable
-            );
-        }
-    });
-    assert_eq!(logged, [path.display().to_string()]);
+    for key in 1..=3 {
+        assert_eq!(
+            guard
+                .admit(KeyId::from_u64(key), &[key as u8; 32], now)
+                .wait(),
+            FirstFlightAdmit::Unavailable
+        );
+    }
+    assert_eq!(errors.take(), [path.display().to_string()]);
 
     std::fs::remove_file(&scratch).unwrap();
-    let logged = logged_error_paths(|| {
+    assert_eq!(
+        guard.admit(KeyId::from_u64(4), &[4_u8; 32], now).wait(),
+        FirstFlightAdmit::Fresh
+    );
+    std::fs::remove_dir_all(&scratch).unwrap();
+    block();
+    for key in 5..=6 {
         assert_eq!(
-            guard.admit(KeyId::from_u64(4), &[4_u8; 32], now),
-            FirstFlightAdmit::Fresh
+            guard
+                .admit(KeyId::from_u64(key), &[key as u8; 32], now)
+                .wait(),
+            FirstFlightAdmit::Unavailable
         );
-        std::fs::remove_dir_all(&scratch).unwrap();
-        block();
-        for key in 5..=6 {
-            assert_eq!(
-                guard.admit(KeyId::from_u64(key), &[key as u8; 32], now),
-                FirstFlightAdmit::Unavailable
-            );
-        }
-    });
-    assert_eq!(logged, [path.display().to_string()]);
+    }
+    assert_eq!(errors.take(), [path.display().to_string()]);
 }
 
 #[tokio::test]

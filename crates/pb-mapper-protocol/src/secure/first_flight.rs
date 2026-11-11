@@ -19,13 +19,15 @@ pub(super) enum FirstFlightWork {
     Stale(ServerInitialError),
 }
 
-fn reserved_error_session(
-    replay: &mut ReplayGuard,
+/// `session`, if this first flight's claim on an answer is the first: a copy
+/// gets none, since a second answer would reuse the session's first nonce.
+async fn reserved_error_session(
+    replay: &ReplayGuard,
     fingerprint: &[u8; 32],
     session: ServerHeaderSession,
 ) -> Option<ServerHeaderSession> {
     matches!(
-        replay.claim(fingerprint, unix_seconds()),
+        replay.claim(fingerprint, unix_seconds()).answer().await,
         FirstFlightAdmit::Fresh
     )
     .then_some(session)
@@ -35,32 +37,39 @@ fn reserved_error_session(
     clippy::result_large_err,
     reason = "the Ok variant is as large, so boxing the error saves nothing"
 )]
-pub(super) fn evaluate_first_flight(
+pub(super) async fn evaluate_first_flight(
     auth: &AuthRuntime,
-    replay: &parking_lot::Mutex<ReplayGuard>,
+    replay: &ReplayGuard,
     key_id: KeyId,
     fingerprint: [u8; 32],
     work: FirstFlightWork,
 ) -> std::result::Result<(Vec<u8>, AuthContext), ServerInitialError> {
-    let mut replay = replay.lock();
     match work {
         FirstFlightWork::Live {
             key,
             payload,
             error_session,
         } => {
-            let context = auth
-                .authenticate_presented(key_id, &key)
-                .map_err(|failure| ServerInitialError {
-                    failure,
-                    response_session: reserved_error_session(
-                        &mut replay,
-                        &fingerprint,
-                        error_session,
-                    ),
-                    presented_key_id: Some(key_id),
-                })?;
-            match replay.admit(key_id, &fingerprint, unix_seconds()) {
+            let context = match auth.authenticate_presented(key_id, &key) {
+                Ok(context) => context,
+                Err(failure) => {
+                    return Err(ServerInitialError {
+                        failure,
+                        response_session: reserved_error_session(
+                            replay,
+                            &fingerprint,
+                            error_session,
+                        )
+                        .await,
+                        presented_key_id: Some(key_id),
+                    });
+                }
+            };
+            match replay
+                .admit(key_id, &fingerprint, unix_seconds())
+                .answer()
+                .await
+            {
                 FirstFlightAdmit::Fresh => Ok((payload, context)),
                 FirstFlightAdmit::Replayed => Err(ServerInitialError::fail_key(
                     CONNECTION_SALT_REPLAYED,
@@ -84,7 +93,8 @@ pub(super) fn evaluate_first_flight(
         }
         FirstFlightWork::Stale(mut error) => {
             if let Some(session) = error.response_session.take() {
-                error.response_session = reserved_error_session(&mut replay, &fingerprint, session);
+                error.response_session =
+                    reserved_error_session(replay, &fingerprint, session).await;
             }
             Err(error)
         }

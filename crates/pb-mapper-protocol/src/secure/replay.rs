@@ -1,29 +1,41 @@
-//! Fast process-local duplicate admission guard for protocol-v2 first flights.
+//! Durable, process-local duplicate admission for protocol-v2 first flights.
 //!
 //! ```text
-//! key id + salt -> SHA-256 fingerprint -> current Bloom window
-//!                                      -> previous Bloom window
-//! key id ---------> per-credential first-flight count (before Bloom insert)
+//! key id + salt -> SHA-256 fingerprint -> current Bloom window --+
+//!                                      -> previous Bloom window -+-> seen: Replayed
+//!                                      -> pending (being logged) +
+//! key id ---------> per-credential first-flight count, reservations included
+//!
+//! connection: check and reserve, under one lock -> queue -> writer thread:
+//!   every reservation queued meanwhile, one append and one sync
+//!   -> Bloom insert, or the reservation given back -> the answers
 //! ```
 //!
-//! `admit` is called while one mutex is held, making concurrent admission
-//! atomic. This Bloom filter protects all connection types from immediate duplicates;
-//! administrator mutations additionally use the exact durable replay set in `auth`.
+//! A first flight is checked and reserved under one lock, so of two with one
+//! fingerprint the second is `Replayed` even while the first is being logged,
+//! and it is answered `Fresh` only once its record is synced. One writer
+//! appends whatever was reserved while it synced the batch before, so a burst
+//! of admissions costs a few syncs, not one each. This Bloom filter protects
+//! all connection types from immediate duplicates; administrator mutations
+//! additionally use the exact durable replay set in `auth`.
 //!
 //! Each generation lasts `2 *` the accepted clock-skew so a salt inserted at the
 //! end of a window with a max-future timestamp cannot be replayed after rotation.
 //! Per-credential counts stop one tenant from filling the shared filter with
 //! unique salts before the request payload is decoded.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
 
+use parking_lot::{Mutex, MutexGuard};
 use pb_mapper_auth::KeyId;
 use pb_mapper_core::config;
 use pb_mapper_core::durable_file::{self, NewFileMode};
 use ring::digest::{SHA256, SHA256_OUTPUT_LEN, digest};
+use tokio::sync::oneshot;
 
 use super::{CONNECTION_SALT_LEN, pack, unix_seconds};
 
@@ -32,6 +44,8 @@ const FINGERPRINT_LEN: usize = SHA256_OUTPUT_LEN;
 /// One admission in the log: its fingerprint, then the admission time.
 pub(super) const REPLAY_RECORD_LEN: usize = FINGERPRINT_LEN + size_of::<u64>();
 pub(super) const REPLAY_COMPACT_INTERVAL_SECONDS: u64 = 60;
+/// The most admissions one append carries; a longer queue takes more.
+const MAX_BATCH: usize = 4096;
 
 fn first_flight_budget(window_seconds: u64) -> u32 {
     // A rate past `u32` takes the default, as it did when this read the
@@ -139,112 +153,78 @@ impl RotatingBloom {
     }
 }
 
+/// An admission's answer: given at once, or by the writer once the admission
+/// is logged.
+pub(super) enum Admission {
+    Answered(FirstFlightAdmit),
+    Logging(oneshot::Receiver<FirstFlightAdmit>),
+}
+
+impl Admission {
+    pub(super) async fn answer(self) -> FirstFlightAdmit {
+        match self {
+            Self::Answered(answer) => answer,
+            // A writer that stopped without answering vouched for nothing.
+            Self::Logging(answer) => answer.await.unwrap_or(FirstFlightAdmit::Unavailable),
+        }
+    }
+
+    /// [`Self::answer`], blocking this thread: for tests outside a runtime.
+    #[cfg(test)]
+    pub(super) fn wait(self) -> FirstFlightAdmit {
+        match self {
+            Self::Answered(answer) => answer,
+            Self::Logging(answer) => answer
+                .blocking_recv()
+                .unwrap_or(FirstFlightAdmit::Unavailable),
+        }
+    }
+}
+
 pub(super) struct ReplayGuard {
+    admissions: Arc<Mutex<Admissions>>,
+    /// Takes reservations to the log's writer; `None` when nothing is logged.
+    writer: Option<mpsc::Sender<Reservation>>,
+}
+
+/// What admitting checks and reserves, all under one lock.
+struct Admissions {
     bloom: RotatingBloom,
+    /// The fingerprints reserved and not yet logged. They are checked with
+    /// the filter, so a copy is `Replayed` while the first is being logged,
+    /// and kept apart from it, because a Bloom insert cannot be undone when
+    /// the append fails.
+    pending: HashSet<[u8; FINGERPRINT_LEN]>,
+    /// First flights per credential since `counts_started_at`, reservations
+    /// included.
     counts: HashMap<KeyId, u32>,
     counts_started_at: u64,
     window_seconds: u64,
     max_per_key: u32,
+    /// First flights since `total_started_at`, reservations included.
     total: u32,
     total_started_at: u64,
     max_total: u32,
-    log_path: Option<PathBuf>,
-    last_compact_at: u64,
+    /// The log may hold what was never admitted, or lack what was: every
+    /// admission is refused from now on.
     log_failed: bool,
-    /// An append has failed, and been logged, since the last one that
-    /// succeeded.
-    append_failing: bool,
 }
 
-impl ReplayGuard {
-    pub(super) fn open(log_path: Option<PathBuf>, bytes: usize, window_seconds: u64) -> Self {
-        let now = unix_seconds();
-        let configured = first_flight_budget(window_seconds);
-        let mut guard = Self {
-            bloom: RotatingBloom::new(bytes, window_seconds),
-            counts: HashMap::new(),
-            counts_started_at: now,
-            window_seconds,
-            max_per_key: configured,
-            total: 0,
-            total_started_at: now,
-            max_total: configured.min(bloom_insert_capacity(bytes)),
-            log_path,
-            last_compact_at: now,
-            log_failed: false,
-            append_failing: false,
-        };
-        guard.load_persisted();
-        guard
-    }
+/// An admission on its way to the log, and what it took from the budgets.
+struct Reservation {
+    record: ReplayRecord,
+    /// The credential whose count it took and when that count began; `None`
+    /// for a claim, which counts against no credential.
+    count: Option<(KeyId, u64)>,
+    /// When the total it took began.
+    total_started_at: u64,
+    answer: oneshot::Sender<FirstFlightAdmit>,
+}
 
-    #[cfg(test)]
-    pub(super) fn with_max_per_key(mut self, max_per_key: u32) -> Self {
-        self.max_per_key = max_per_key;
-        self
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_max_total(mut self, max_total: u32) -> Self {
-        self.max_total = max_total;
-        self
-    }
-
-    pub(super) fn admit(
-        &mut self,
-        key_id: KeyId,
-        fingerprint: &[u8; FINGERPRINT_LEN],
-        now: u64,
-    ) -> FirstFlightAdmit {
-        self.rotate_counts(now);
-        if self.bloom.contains(fingerprint, now) {
-            return FirstFlightAdmit::Replayed;
-        }
-        self.reset_total_if_rotated();
-        if self.counts.get(&key_id).copied().unwrap_or(0) >= self.max_per_key
-            || self.total >= self.max_total
-        {
-            return FirstFlightAdmit::Limited;
-        }
-        let result = self.reserve(fingerprint, now);
-        if result == FirstFlightAdmit::Fresh {
-            *self.counts.entry(key_id).or_insert(0) += 1;
-            if now.saturating_sub(self.last_compact_at) >= REPLAY_COMPACT_INTERVAL_SECONDS {
-                self.compact(now);
-            }
-        }
-        result
-    }
-
-    pub(super) fn claim(
-        &mut self,
-        fingerprint: &[u8; FINGERPRINT_LEN],
-        now: u64,
-    ) -> FirstFlightAdmit {
-        if self.bloom.contains(fingerprint, now) {
-            return FirstFlightAdmit::Replayed;
-        }
-        self.reset_total_if_rotated();
-        if self.total >= self.max_total {
-            return FirstFlightAdmit::Unavailable;
-        }
-        self.reserve(fingerprint, now)
-    }
-
-    fn reset_total_if_rotated(&mut self) {
-        if self.bloom.current_started_at != self.total_started_at {
-            self.total = 0;
-            self.total_started_at = self.bloom.current_started_at;
-        }
-    }
-
-    fn reserve(&mut self, fingerprint: &[u8; FINGERPRINT_LEN], now: u64) -> FirstFlightAdmit {
-        if self.persist(fingerprint, now).is_err() {
-            return FirstFlightAdmit::Unavailable;
-        }
-        self.bloom.insert(fingerprint, now);
-        self.total = self.total.saturating_add(1);
-        FirstFlightAdmit::Fresh
+impl Admissions {
+    /// Whether `fingerprint` was admitted or claimed, or is being.
+    fn seen(&mut self, fingerprint: &[u8; FINGERPRINT_LEN], now: u64) -> bool {
+        self.bloom.contains(fingerprint, now) || self.pending.contains(fingerprint)
     }
 
     fn rotate_counts(&mut self, now: u64) {
@@ -255,170 +235,397 @@ impl ReplayGuard {
         self.counts_started_at = now;
     }
 
-    fn persist(&mut self, fingerprint: &[u8; FINGERPRINT_LEN], now: u64) -> std::io::Result<()> {
-        if self.log_failed {
-            return Err(std::io::Error::other(
-                "durable first-flight replay log is unavailable after a failed rollback",
-            ));
+    fn reset_total_if_rotated(&mut self) {
+        if self.bloom.current_started_at != self.total_started_at {
+            self.total = 0;
+            self.total_started_at = self.bloom.current_started_at;
         }
-        let Some(path) = &self.log_path else {
-            return Ok(());
+    }
+
+    /// Gives back what an admission that was not logged took: from the
+    /// windows it took it from, if they are still the current ones.
+    fn release(&mut self, count: Option<(KeyId, u64)>, total_started_at: u64) {
+        if let Some((key_id, started_at)) = count
+            && started_at == self.counts_started_at
+            && let Some(count) = self.counts.get_mut(&key_id)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.counts.remove(&key_id);
+            }
+        }
+        if total_started_at == self.total_started_at {
+            self.total = self.total.saturating_sub(1);
+        }
+    }
+}
+
+impl ReplayGuard {
+    pub(super) fn open(log_path: Option<PathBuf>, bytes: usize, window_seconds: u64) -> Self {
+        let now = unix_seconds();
+        let configured = first_flight_budget(window_seconds);
+        let mut admissions = Admissions {
+            bloom: RotatingBloom::new(bytes, window_seconds),
+            pending: HashSet::new(),
+            counts: HashMap::new(),
+            counts_started_at: now,
+            window_seconds,
+            max_per_key: configured,
+            total: 0,
+            total_started_at: now,
+            max_total: configured.min(bloom_insert_capacity(bytes)),
+            log_failed: false,
         };
-        let record = ReplayRecord {
-            fingerprint: *fingerprint,
-            timestamp: now,
+        let Some(path) = log_path else {
+            return Self {
+                admissions: Arc::new(Mutex::new(admissions)),
+                writer: None,
+            };
         };
-        match append_replay_record(path, &record) {
+        load_persisted(&path, &mut admissions);
+        let admissions = Arc::new(Mutex::new(admissions));
+        let (writer, queue) = mpsc::channel();
+        let log = LogWriter {
+            path: path.clone(),
+            admissions: admissions.clone(),
+            last_compact_at: unix_seconds(),
+            append_failing: false,
+            batch: Vec::new(),
+            bytes: Vec::new(),
+        };
+        // The writer logs where the code that opened the log does.
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        let started = std::thread::Builder::new()
+            .name("pb-mapper-replay-log".into())
+            .spawn(move || tracing::dispatcher::with_default(&dispatch, || log.run(queue)));
+        if let Err(error) = started {
+            admissions.lock().log_failed = true;
+            log_unavailable(&path, "start its writer", &error, None);
+        }
+        Self {
+            admissions,
+            writer: Some(writer),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_max_per_key(self, max_per_key: u32) -> Self {
+        self.admissions.lock().max_per_key = max_per_key;
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_max_total(self, max_total: u32) -> Self {
+        self.admissions.lock().max_total = max_total;
+        self
+    }
+
+    pub(super) fn admit(
+        &self,
+        key_id: KeyId,
+        fingerprint: &[u8; FINGERPRINT_LEN],
+        now: u64,
+    ) -> Admission {
+        let mut admissions = self.admissions.lock();
+        admissions.rotate_counts(now);
+        if admissions.seen(fingerprint, now) {
+            return Admission::Answered(FirstFlightAdmit::Replayed);
+        }
+        admissions.reset_total_if_rotated();
+        if admissions.counts.get(&key_id).copied().unwrap_or(0) >= admissions.max_per_key
+            || admissions.total >= admissions.max_total
+        {
+            return Admission::Answered(FirstFlightAdmit::Limited);
+        }
+        self.reserve(admissions, Some(key_id), fingerprint, now)
+    }
+
+    pub(super) fn claim(&self, fingerprint: &[u8; FINGERPRINT_LEN], now: u64) -> Admission {
+        let mut admissions = self.admissions.lock();
+        if admissions.seen(fingerprint, now) {
+            return Admission::Answered(FirstFlightAdmit::Replayed);
+        }
+        admissions.reset_total_if_rotated();
+        if admissions.total >= admissions.max_total {
+            return Admission::Answered(FirstFlightAdmit::Unavailable);
+        }
+        self.reserve(admissions, None, fingerprint, now)
+    }
+
+    /// Takes `fingerprint`'s place in the budgets, and in the log through the
+    /// writer, which answers once it is there.
+    fn reserve(
+        &self,
+        mut admissions: MutexGuard<'_, Admissions>,
+        key_id: Option<KeyId>,
+        fingerprint: &[u8; FINGERPRINT_LEN],
+        now: u64,
+    ) -> Admission {
+        if admissions.log_failed {
+            return Admission::Answered(FirstFlightAdmit::Unavailable);
+        }
+        if let Some(key_id) = key_id {
+            *admissions.counts.entry(key_id).or_insert(0) += 1;
+        }
+        admissions.total = admissions.total.saturating_add(1);
+        let Some(writer) = &self.writer else {
+            admissions.bloom.insert(fingerprint, now);
+            return Admission::Answered(FirstFlightAdmit::Fresh);
+        };
+        admissions.pending.insert(*fingerprint);
+        let (answer, answered) = oneshot::channel();
+        let reservation = Reservation {
+            record: ReplayRecord {
+                fingerprint: *fingerprint,
+                timestamp: now,
+            },
+            count: key_id.map(|key_id| (key_id, admissions.counts_started_at)),
+            total_started_at: admissions.total_started_at,
+            answer,
+        };
+        if let Err(mpsc::SendError(reservation)) = writer.send(reservation) {
+            // Only a panic stops the writer while this guard lives.
+            admissions.pending.remove(fingerprint);
+            admissions.release(reservation.count, reservation.total_started_at);
+            admissions.log_failed = true;
+            tracing::error!(
+                event = "replay_log_unavailable",
+                step = "hand a record to its writer",
+                "first-flight replay log failed; protocol-v2 connections are refused while it is unavailable"
+            );
+            return Admission::Answered(FirstFlightAdmit::Unavailable);
+        }
+        Admission::Logging(answered)
+    }
+}
+
+/// Loads the log at `path` into `admissions`, keeping the records still
+/// inside the window, and rewrites it to hold just those. A log that cannot
+/// be read or rewritten fails closed.
+fn load_persisted(path: &Path, admissions: &mut Admissions) {
+    if !path.exists() {
+        return;
+    }
+    let now = unix_seconds();
+    let window_seconds = admissions.window_seconds;
+    let records =
+        match read_replay_log(path).and_then(|log| after_a_crash(path, log, now, window_seconds)) {
+            Ok(records) => records,
+            Err(error) => {
+                admissions.log_failed = true;
+                log_unavailable(path, "read", &error, None);
+                return;
+            }
+        };
+    let mut live = Vec::new();
+    for record in records {
+        if now.saturating_sub(record.timestamp) > window_seconds {
+            continue;
+        }
+        admissions
+            .bloom
+            .insert(&record.fingerprint, record.timestamp);
+        live.push(record);
+    }
+    if let Some(oldest) = live.iter().map(|record| record.timestamp).min() {
+        admissions.bloom.current_started_at = oldest;
+    }
+    admissions.total = u32::try_from(live.len())
+        .unwrap_or(u32::MAX)
+        .min(admissions.max_total);
+    admissions.total_started_at = admissions.bloom.current_started_at;
+    if let Err(error) = rewrite_live(path, &live) {
+        admissions.log_failed = true;
+        log_unavailable(path, "rewrite", &error, None);
+    }
+}
+
+/// The records of a log read at start, less the record a crash cut off,
+/// if one did.
+///
+/// A crash in the middle of an append leaves that append's last record cut
+/// off as the last thing in the log, and nothing else: each append adds whole
+/// records at the end, and one that fails is rolled back or stops every
+/// append after it. Its admission was never acknowledged, which waits for the
+/// append to be synced, so dropping it loses nothing replay protection needs;
+/// the whole records before it in the same append were never acknowledged
+/// either, and are kept, which only refuses what no client was told it may
+/// use. A log cut off anywhere else reads out of step from there on, and a
+/// file that is no replay log reads as records no relay wrote: either way
+/// some record, or the cut-off one at the earliest it can be, names a time
+/// past the replay window ahead of this relay's clock, and the log is
+/// refused, as one is that a relay wrote before its clock was set back by
+/// more than the window.
+fn after_a_crash(
+    path: &Path,
+    ReplayLog { records, cut_off }: ReplayLog,
+    now: u64,
+    window_seconds: u64,
+) -> std::io::Result<Vec<ReplayRecord>> {
+    if cut_off.is_empty() {
+        return Ok(records);
+    }
+    // The earliest time the cut-off record can have had.
+    let mut completed = [0_u8; REPLAY_RECORD_LEN];
+    for (byte, kept) in completed.iter_mut().zip(&cut_off) {
+        *byte = *kept;
+    }
+    let latest = now.saturating_add(window_seconds);
+    if records
+        .iter()
+        .chain([&ReplayRecord::from_bytes(completed)])
+        .any(|record| record.timestamp > latest)
+    {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "the log ends in a cut-off record and names times past the replay window \
+             ahead of this relay's clock: it is damaged, or no first-flight replay log",
+        ));
+    }
+    tracing::warn!(
+        event = "replay_log_cut_off_record_dropped",
+        path = %path.display(),
+        bytes = cut_off.len(),
+        "dropped the first-flight replay log's last record, cut off by a crash in the middle of its append"
+    );
+    Ok(records)
+}
+
+fn rewrite_live(path: &Path, live: &[ReplayRecord]) -> std::io::Result<()> {
+    let records = live.iter().map(ReplayRecord::to_bytes).collect::<Vec<_>>();
+    durable_file::replace_contents(path, records.as_flattened(), NewFileMode::Default)
+        .map_err(std::io::Error::from)
+}
+
+/// The log's one writer, on a thread of its own: it appends every
+/// reservation queued while it wrote the last batch in one write and one
+/// sync, and compacts the log between batches.
+struct LogWriter {
+    path: PathBuf,
+    admissions: Arc<Mutex<Admissions>>,
+    last_compact_at: u64,
+    /// An append has failed, and been logged, since the last one that
+    /// succeeded.
+    append_failing: bool,
+    /// The batch being written, and its bytes, kept for the next.
+    batch: Vec<Reservation>,
+    bytes: Vec<u8>,
+}
+
+impl LogWriter {
+    /// Until the guard is dropped: wait for a reservation, then log it with
+    /// every other one queued by then.
+    fn run(mut self, queue: mpsc::Receiver<Reservation>) {
+        while let Ok(first) = queue.recv() {
+            self.batch.push(first);
+            self.batch.extend(queue.try_iter().take(MAX_BATCH - 1));
+            self.write_batch();
+        }
+    }
+
+    /// Logs the batch, settles each admission in it, compacts the log if
+    /// that is due, then answers them.
+    fn write_batch(&mut self) {
+        self.bytes.clear();
+        for reservation in &self.batch {
+            self.bytes.extend_from_slice(&reservation.record.to_bytes());
+        }
+        let latched = self.admissions.lock().log_failed;
+        let logged = !latched && self.append();
+        {
+            let mut admissions = self.admissions.lock();
+            for Reservation {
+                record,
+                count,
+                total_started_at,
+                answer: _,
+            } in &self.batch
+            {
+                // Out of `pending` and into the filter in one step, so no
+                // copy finds it in neither.
+                admissions.pending.remove(&record.fingerprint);
+                if logged {
+                    admissions
+                        .bloom
+                        .insert(&record.fingerprint, record.timestamp);
+                } else {
+                    admissions.release(*count, *total_started_at);
+                }
+            }
+        }
+        let newest = self
+            .batch
+            .iter()
+            .map(|reservation| reservation.record.timestamp)
+            .max()
+            .unwrap_or(self.last_compact_at);
+        if logged && newest.saturating_sub(self.last_compact_at) >= REPLAY_COMPACT_INTERVAL_SECONDS
+        {
+            self.compact(newest);
+        }
+        let answer = if logged {
+            FirstFlightAdmit::Fresh
+        } else {
+            FirstFlightAdmit::Unavailable
+        };
+        for reservation in self.batch.drain(..) {
+            // A connection that stopped waiting needs no answer.
+            let _ = reservation.answer.send(answer);
+        }
+    }
+
+    /// Appends the batch's bytes durably; `false`, said in the relay's log,
+    /// when it could not.
+    fn append(&mut self) -> bool {
+        match append_replay_records(&self.path, &self.bytes) {
             Ok(()) => {
                 self.append_failing = false;
-                Ok(())
+                true
             }
             Err(AppendFailure::Refused { step, error }) => {
                 // Said once for a run of failures, such as a full disk's, not
                 // once for every connection it refuses.
                 if !std::mem::replace(&mut self.append_failing, true) {
-                    log_append_failed(path, step, &error);
+                    log_append_failed(&self.path, step, &error);
                 }
-                Err(error)
+                false
             }
             Err(AppendFailure::Latched { step, error, cause }) => {
-                self.log_failed = true;
-                log_unavailable(path, step, &error, cause.as_ref());
-                Err(error)
+                self.admissions.lock().log_failed = true;
+                log_unavailable(&self.path, step, &error, cause.as_ref());
+                false
             }
         }
-    }
-
-    fn load_persisted(&mut self) {
-        let Some(path) = self.log_path.clone() else {
-            return;
-        };
-        if !path.exists() {
-            return;
-        }
-        let now = unix_seconds();
-        let records =
-            match read_replay_log(&path).and_then(|log| self.after_a_crash(&path, log, now)) {
-                Ok(records) => records,
-                Err(error) => {
-                    self.log_failed = true;
-                    log_unavailable(&path, "read", &error, None);
-                    return;
-                }
-            };
-        let mut live = Vec::new();
-        for record in records {
-            if now.saturating_sub(record.timestamp) > self.window_seconds {
-                continue;
-            }
-            self.bloom.insert(&record.fingerprint, record.timestamp);
-            live.push(record);
-        }
-        if let Some(oldest) = live.iter().map(|record| record.timestamp).min() {
-            self.bloom.current_started_at = oldest;
-        }
-        self.total = u32::try_from(live.len())
-            .unwrap_or(u32::MAX)
-            .min(self.max_total);
-        self.total_started_at = self.bloom.current_started_at;
-        if let Err(error) = self.rewrite_live(&live) {
-            self.log_failed = true;
-            log_unavailable(&path, "rewrite", &error, None);
-            return;
-        }
-        self.last_compact_at = now;
-    }
-
-    /// The records of a log read at start, less the record a crash cut off,
-    /// if one did.
-    ///
-    /// A crash in the middle of an append leaves that append's record cut off
-    /// as the last thing in the log, and nothing else: each append adds one
-    /// record at the end, and one that fails is rolled back or stops every
-    /// append after it. Its admission was never acknowledged, which waits for
-    /// the record to be synced, so dropping it loses nothing replay protection
-    /// needs. A log cut off anywhere else reads out of step from there on, and
-    /// a file that is no replay log reads as records no relay wrote: either
-    /// way some record, or the cut-off one at the earliest it can be, names a
-    /// time past the replay window ahead of this relay's clock, and the log is
-    /// refused, as one is that a relay wrote before its clock was set back by
-    /// more than the window.
-    fn after_a_crash(
-        &self,
-        path: &Path,
-        ReplayLog { records, cut_off }: ReplayLog,
-        now: u64,
-    ) -> std::io::Result<Vec<ReplayRecord>> {
-        if cut_off.is_empty() {
-            return Ok(records);
-        }
-        // The earliest time the cut-off record can have had.
-        let mut completed = [0_u8; REPLAY_RECORD_LEN];
-        for (byte, kept) in completed.iter_mut().zip(&cut_off) {
-            *byte = *kept;
-        }
-        let latest = now.saturating_add(self.window_seconds);
-        if records
-            .iter()
-            .chain([&ReplayRecord::from_bytes(completed)])
-            .any(|record| record.timestamp > latest)
-        {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidData,
-                "the log ends in a cut-off record and names times past the replay window \
-                 ahead of this relay's clock: it is damaged, or no first-flight replay log",
-            ));
-        }
-        tracing::warn!(
-            event = "replay_log_cut_off_record_dropped",
-            path = %path.display(),
-            bytes = cut_off.len(),
-            "dropped the first-flight replay log's last record, cut off by a crash in the middle of its append"
-        );
-        Ok(records)
     }
 
     fn compact(&mut self, now: u64) {
-        let Some(path) = &self.log_path else {
-            self.last_compact_at = now;
-            return;
-        };
         // While the relay runs, an append either completes or is rolled back,
         // so a cut-off record here was not left by this relay.
-        let records = match read_replay_log(path).and_then(ReplayLog::whole) {
-            Ok(records) => records,
-            Err(error) => {
-                self.log_failed = true;
-                log_unavailable(path, "read", &error, None);
-                return;
-            }
-        };
-        let live = records
-            .into_iter()
-            .filter(|record| now.saturating_sub(record.timestamp) <= self.window_seconds)
-            .collect::<Vec<_>>();
-        if let Err(error) = self.rewrite_live(&live) {
-            self.log_failed = true;
-            log_unavailable(path, "rewrite", &error, None);
+        let window_seconds = self.admissions.lock().window_seconds;
+        let compacted = read_replay_log(&self.path)
+            .and_then(ReplayLog::whole)
+            .map_err(|error| ("read", error))
+            .and_then(|records| {
+                let live = records
+                    .into_iter()
+                    .filter(|record| now.saturating_sub(record.timestamp) <= window_seconds)
+                    .collect::<Vec<_>>();
+                rewrite_live(&self.path, &live).map_err(|error| ("rewrite", error))
+            });
+        if let Err((step, error)) = compacted {
+            self.admissions.lock().log_failed = true;
+            log_unavailable(&self.path, step, &error, None);
             return;
         }
         self.last_compact_at = now;
     }
-
-    fn rewrite_live(&self, live: &[ReplayRecord]) -> std::io::Result<()> {
-        let Some(path) = &self.log_path else {
-            return Ok(());
-        };
-        let records = live.iter().map(ReplayRecord::to_bytes).collect::<Vec<_>>();
-        durable_file::replace_contents(path, records.as_flattened(), NewFileMode::Default)
-            .map_err(std::io::Error::from)
-    }
 }
 
-/// Why an admission could not be appended to the log.
+/// Why a batch of admissions could not be appended to the log.
 enum AppendFailure {
-    /// This admission is refused, and the next one tries again: the log is as
-    /// it was, as after a full disk's failed write that was rolled back.
+    /// The batch's admissions are refused, and the next batch tries again: the
+    /// log is as it was, as after a full disk's failed write that was rolled
+    /// back.
     Refused {
         step: &'static str,
         error: std::io::Error,
@@ -433,9 +640,9 @@ enum AppendFailure {
     },
 }
 
-/// Append `record` to the log at `path` and make it durable, or say which
-/// step failed.
-fn append_replay_record(path: &Path, record: &ReplayRecord) -> Result<(), AppendFailure> {
+/// Append `records`, whole records back to back, to the log at `path` and
+/// make them durable, or say which step failed.
+fn append_replay_records(path: &Path, records: &[u8]) -> Result<(), AppendFailure> {
     let refused = |step| move |error| AppendFailure::Refused { step, error };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(refused("create its directory"))?;
@@ -447,10 +654,7 @@ fn append_replay_record(path: &Path, record: &ReplayRecord) -> Result<(), Append
         .open(path)
         .map_err(refused("open"))?;
     let start_len = file.metadata().map_err(refused("read its length"))?.len();
-    if let Err(error) = file
-        .write_all(&record.to_bytes())
-        .and_then(|()| file.sync_data())
-    {
+    if let Err(error) = file.write_all(records).and_then(|()| file.sync_data()) {
         drop(file);
         return Err(match truncate_replay_log(path, start_len) {
             Ok(()) => AppendFailure::Refused {

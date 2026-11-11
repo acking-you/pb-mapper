@@ -415,20 +415,22 @@ impl std::error::Error for ServerInitialError {}
 #[derive(Clone)]
 pub struct ServerSecurity {
     auth: AuthRuntime,
-    replay: Arc<Mutex<ReplayGuard>>,
+    replay: Arc<ReplayGuard>,
     failure_logs: Arc<Mutex<FailureLogLimiter>>,
 }
 
 impl ServerSecurity {
+    /// Reads and rewrites the relay's first-flight replay log, and starts the
+    /// thread that appends to it.
     pub fn new(auth: AuthRuntime) -> Self {
         let replay_path = auth.config().state_dir.join("connection.replay");
         Self {
             auth,
-            replay: Arc::new(Mutex::new(ReplayGuard::open(
+            replay: Arc::new(ReplayGuard::open(
                 Some(replay_path),
                 DEFAULT_REPLAY_FILTER_BYTES,
                 DEFAULT_REPLAY_WINDOW_SECONDS,
-            ))),
+            )),
             failure_logs: Arc::new(Mutex::new(FailureLogLimiter::default())),
         }
     }
@@ -641,20 +643,8 @@ impl ServerSecurity {
                 }
             }
         };
-        let replay = self.replay.clone();
-        let auth = self.auth.clone();
-        let (payload, context) = tokio::task::spawn_blocking(move || {
-            evaluate_first_flight(&auth, &replay, key_id, fingerprint, work)
-        })
-        .await
-        .unwrap_or_else(|_| {
-            Err(ServerInitialError::fail_key(
-                "connection_replay_store_unavailable",
-                "failed to evaluate first-flight admission",
-                true,
-                key_id,
-            ))
-        })?;
+        let (payload, context) =
+            evaluate_first_flight(&self.auth, &self.replay, key_id, fingerprint, work).await?;
         Ok(ServerInitialMessage {
             payload,
             session: ServerHeaderSession {
