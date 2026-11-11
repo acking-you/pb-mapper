@@ -264,8 +264,10 @@ jobs:
           ps -o pid,ni,pri,comm -p $$ || true
           cargo test -p pb-mapper-desktop --all-features --test session -- --test-threads=1 frozen_renderer pacing_probe
 
+      # DIAGNOSTIC (temporary): the probe overrides the process's timer QoS,
+      # so it runs only alone, above.
       - name: Run tests
-        run: cargo test -p pb-mapper-desktop -p pb-mapper-ffi --all-features
+        run: cargo test -p pb-mapper-desktop -p pb-mapper-ffi --all-features -- --skip pacing_probe
 
       # The app runs from macOS 10.15, ScreenCaptureKit arrived in 12.3: the
       # FFI library must link it weakly, or it would not load before 12.3.
