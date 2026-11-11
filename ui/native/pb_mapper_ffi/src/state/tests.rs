@@ -834,6 +834,23 @@ async fn a_tunnel_list_that_does_not_parse_is_kept() {
     );
 }
 
+/// A tunnel list that holds nothing, as an earlier version's interrupted
+/// write could leave it (empty, or zero-filled after a crash), is an empty
+/// list, and a save writes over it: there is no tunnel in it to keep.
+#[tokio::test]
+async fn a_tunnel_list_that_holds_nothing_is_empty() {
+    let (_guard, state, _root) = temp_state("empty-lists").await;
+    let state = state.lock().await;
+    std::fs::write(state.config_dir.join("services.json"), b"").unwrap();
+    std::fs::write(state.config_dir.join("clients.json"), b"\0\0\0\0\n").unwrap();
+    assert!(state.get_service_configs().unwrap().is_empty());
+    assert!(state.get_client_configs().unwrap().is_empty());
+
+    let port = "127.0.0.1:9090".parse().unwrap();
+    state.save_client_config(&connection("cam", port)).unwrap();
+    assert_eq!(state.get_client_configs().unwrap()[0].service_key, "cam");
+}
+
 /// A connection that cannot be saved is refused, and stopped, unless the
 /// list holds it already: the window lists what is saved, so it could
 /// neither show nor stop one the list does not hold. One saved before

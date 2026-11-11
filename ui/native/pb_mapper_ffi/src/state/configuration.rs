@@ -268,10 +268,11 @@ impl PbMapperState {
     }
 }
 
-/// The store saved at `path`, or an empty one when there is none; `noun`
-/// names it in the errors. One that cannot be read or does not parse is an
-/// error, never an empty store: a save would then write over every tunnel in
-/// it.
+/// The store saved at `path`, or an empty one when there is none or the file
+/// holds nothing, as an interrupted in-place write can leave it (empty, or
+/// zero-filled after a crash); `noun` names it in the errors. One that
+/// cannot be read or does not parse is an error, never an empty store: a
+/// save would then write over every tunnel in it.
 fn read_store<T: DeserializeOwned + Default>(path: &Path, noun: &str) -> Result<T, CtlError> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
@@ -283,6 +284,12 @@ fn read_store<T: DeserializeOwned + Default>(path: &Path, noun: &str) -> Result<
             )));
         }
     };
+    if content
+        .trim_matches(|c: char| c.is_whitespace() || c == '\0')
+        .is_empty()
+    {
+        return Ok(T::default());
+    }
     serde_json::from_str(&content).map_err(|e| {
         CtlError::io(format!(
             "Failed to parse {noun} file {}: {e}; fix or remove it",
