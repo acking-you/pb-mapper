@@ -35,7 +35,9 @@ use crate::server::{ServerTunnelOptions, run_server_side_cli_recovering};
 pub(crate) struct ClientInner {
     pub(crate) server: String,
     pub(crate) endpoint: RelayEndpoint,
-    pub(crate) credential: RwLock<Credential>,
+    /// Shared with the clients on the other carrier made from it: one
+    /// session, which a root rotation moves as a whole.
+    pub(crate) credential: Arc<RwLock<Credential>>,
     pub(crate) keep_alive: bool,
     pub(crate) namespace: Option<u64>,
 }
@@ -98,7 +100,7 @@ impl Client {
             inner: Arc::new(ClientInner {
                 server,
                 endpoint,
-                credential: RwLock::new(credential),
+                credential: Arc::new(RwLock::new(credential)),
                 keep_alive,
                 namespace,
             }),
@@ -107,6 +109,10 @@ impl Client {
 
     /// Select the relay carrier for subsequent work. Existing handles retain their carrier.
     /// TCP remains the default. QUIC requires the relay-quic feature and a QUIC-enabled relay.
+    ///
+    /// The client returned is the same session on that carrier, as a clone
+    /// is: it shares this one's credential, so a root rotation through
+    /// either moves both.
     pub fn with_relay_transport(&self, transport: super::RelayTransport) -> Result<Self> {
         if transport == self.relay_transport() {
             return Ok(self.clone());
@@ -120,7 +126,7 @@ impl Client {
             inner: Arc::new(ClientInner {
                 server: self.inner.server.clone(),
                 endpoint,
-                credential: RwLock::new(self.credential()),
+                credential: Arc::clone(&self.inner.credential),
                 keep_alive: self.inner.keep_alive,
                 namespace: self.inner.namespace,
             }),
@@ -610,6 +616,26 @@ mod tests {
             None,
         );
         assert!(matches!(temporary.admin(), Err(Error::NotAdministrator)));
+    }
+
+    /// A client on the other carrier is the same session, as a clone is: a
+    /// root rotation through either moves both, the relay accepting only the
+    /// new key from then on.
+    #[cfg(feature = "relay-quic")]
+    #[test]
+    fn a_carrier_sibling_shares_its_clients_credential() {
+        let tcp = Client::from_credential(
+            "127.0.0.1:7666",
+            Credential::Admin(TEST_ADMIN_KEY_BYTES),
+            false,
+            None,
+        );
+        let quic = tcp
+            .with_relay_transport(super::super::RelayTransport::Quic)
+            .unwrap();
+        let rotated = Credential::Admin([7; 32]);
+        quic.inner.set_credential(rotated);
+        assert_eq!(tcp.credential(), rotated);
     }
 
     /// A stream whose relay refuses every connection until its setup
