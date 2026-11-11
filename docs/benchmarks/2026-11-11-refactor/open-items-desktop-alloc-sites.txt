@@ -1,0 +1,473 @@
+### video: sites: 5269 allocations over 180 units
+3.26/unit (586, avg 13 B)
+    alloc
+    [alloc::string::impl$6::clone]
+    pb_mapper_desktop::worker::Engine::iterate
+    pb_mapper_desktop::worker::run<alloc_sites_tmp::Encoded>
+2.31/unit (415, avg 1910 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    pb_mapper_protocol::framing::impl$8::write_msg::async_fn$0
+    pb_mapper_protocol::forward::impl$16::write::async_fn$0<tokio::net::tcp::split::WriteHalf,pb_mapper_core::codec::Aes256GcmEnCodec>
+2.05/unit (369, avg 778 B)
+    realloc
+    [alloc::vec::Vec::push]
+    serde::private::de::content::impl$24::visit_map<pb_mapper_desktop::protocol::_::impl$0::deserialize::__Field,serde_json::de::MapAccess<serde_json::rea...
+    serde_json::de::from_slice<enum2$<pb_mapper_desktop::protocol::HostMessage> >
+1.23/unit (221, avg 33 B)
+    alloc
+    [alloc::slice::impl$0::to_vec]
+    rustls::msgs::base::Payload::into_vec
+    rustls::common_state::CommonState::take_received_plaintext
+1.23/unit (221, avg 256 B)
+    alloc
+    [alloc::vec::Vec::push]
+    serde::private::de::content::impl$24::visit_map<pb_mapper_desktop::protocol::_::impl$0::deserialize::__Field,serde_json::de::MapAccess<serde_json::rea...
+    serde_json::de::from_slice<enum2$<pb_mapper_desktop::protocol::ViewerMessage> >
+1.23/unit (221, avg 55 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    rustls::msgs::message::outbound::PrefixedPayload::with_capacity
+    rustls::crypto::ring::tls13::impl$4::encrypt
+1.23/unit (221, avg 128 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    serde_json::ser::to_vec<enum2$<pb_mapper_desktop::protocol::ViewerMessage> >
+    core::future::poll_fn::impl$2::poll<enum2$<pb_mapper_desktop::viewer::session::run::async_fn$0::__tokio_select_util::Out<enum2$<pb_mapper_desktop::vie...
+1.23/unit (221, avg 33 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    tokio::io::util::buf_writer::BufWriter::with_capacity
+    pb_mapper_desktop::wire::write_records::async_fn$0::async_block$1
+1.23/unit (221, avg 79 B)
+    alloc
+    [alloc_sites_tmp::note]
+    pb_mapper_protocol::forward::impl$16::write::async_fn$0
+    pb_mapper_protocol::forward::copy_with_activity::async_fn$0
+1.23/unit (221, avg 29 B)
+    zeroed
+    [alloc::vec::from_elem]
+    pb_mapper_desktop::wire::read_record::async_fn$0::async_block$0
+    tokio::time::timeout::impl$1::poll<enum2$<pb_mapper_desktop::wire::read_record::async_fn$0::async_block_env$0<ref_mut$<tokio::io::split::ReadHalf<toki...
+1.08/unit (194, avg 3949 B)
+    alloc
+    [alloc::slice::impl$0::to_vec]
+    rustls::msgs::base::Payload::into_vec
+    rustls::common_state::CommonState::take_received_plaintext
+1.08/unit (194, avg 256 B)
+    alloc
+    [alloc::vec::Vec::push]
+    serde::private::de::content::impl$24::visit_map<pb_mapper_desktop::protocol::_::impl$0::deserialize::__Field,serde_json::de::MapAccess<serde_json::rea...
+    serde_json::de::from_slice<enum2$<pb_mapper_desktop::protocol::HostMessage> >
+1.08/unit (194, avg 3971 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    rustls::msgs::message::outbound::PrefixedPayload::with_capacity
+    rustls::crypto::ring::tls13::impl$4::encrypt
+1.08/unit (194, avg 3949 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    tokio::io::util::buf_writer::BufWriter::with_capacity
+    pb_mapper_desktop::wire::write_records::async_fn$0::async_block$1
+1.08/unit (194, avg 3995 B)
+    alloc
+    [alloc_sites_tmp::note]
+    pb_mapper_protocol::forward::impl$16::write::async_fn$0
+    pb_mapper_protocol::forward::copy_with_activity::async_fn$0
+1.08/unit (194, avg 141 B)
+    zeroed
+    [alloc::vec::from_elem]
+    pb_mapper_desktop::wire::read_record::async_fn$0::async_block$0
+    tokio::time::timeout::impl$1::poll<enum2$<pb_mapper_desktop::wire::read_record::async_fn$0::async_block_env$0<tokio::io::split::ReadHalf<tokio_rustls:...
+1.02/unit (183, avg 128 B)
+    alloc
+    [alloc_sites_tmp::note]
+    pb_mapper_desktop::wire::write_message::async_fn$0
+    core::future::future::impl$1::poll<ref_mut$<enum2$<pb_mapper_desktop::wire::write_message::async_fn_env$0<tokio::io::split::WriteHalf<tokio_rustls::se...
+1.00/unit (180, avg 4096 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    pb_mapper_desktop::wire::read_payload::async_fn$0::async_block$1
+    tokio::time::timeout::impl$1::poll<enum2$<pb_mapper_desktop::wire::read_payload::async_fn$0::async_block_env$1<tokio::io::split::ReadHalf<tokio_rustls...
+1.00/unit (180, avg 4096 B)
+    alloc
+    [alloc_sites_tmp::impl$1::capture_video]
+    pb_mapper_desktop::worker::Engine::iterate
+    pb_mapper_desktop::worker::run<alloc_sites_tmp::Encoded>
+1.00/unit (180, avg 8192 B)
+    realloc
+    [alloc::vec::Vec::resize]
+    rustls::msgs::deframer::buffers::DeframerVecBuffer::prepare_read
+    rustls::msgs::deframer::buffers::DeframerVecBuffer::read
+1.00/unit (180, avg 4096 B)
+    realloc
+    [alloc::vec::Vec::shrink_to]
+    rustls::msgs::deframer::buffers::DeframerVecBuffer::prepare_read
+    rustls::msgs::deframer::buffers::DeframerVecBuffer::read
+1.00/unit (180, avg 256 B)
+    realloc
+    [core::io::impls::impl$1::write_all]
+    serde_json::ser::Formatter::write_u64
+    serde_json::ser::impl$3::serialize_u64
+0.17/unit (30, avg 13 B)
+    alloc
+    [alloc_sites_tmp::impl$1::display]
+    pb_mapper_desktop::backend::Backend::context
+    pb_mapper_desktop::worker::Engine::geometry<alloc_sites_tmp::Encoded,pb_mapper_desktop::worker::Monotonic>
+0.06/unit (11, avg 128 B)
+    alloc
+    [alloc_sites_tmp::note]
+    pb_mapper_desktop::wire::write_message::async_fn$0
+    core::future::future::impl$1::poll<ref_mut$<enum2$<pb_mapper_desktop::wire::write_message::async_fn_env$0<tokio::io::split::WriteHalf<tokio_rustls::se...
+0.03/unit (6, avg 32 B)
+    alloc
+    [alloc_sites_tmp::_::__rust_alloc]
+    tracing_subscriber::registry::extensions::ExtensionsMut::insert<tracing_subscriber::fmt::fmt_layer::FormattedFields<tracing_subscriber::fmt::format::p...
+    tracing_subscriber::fmt::fmt_layer::impl$12::on_new_span<tracing_subscriber::registry::sharded::Registry,tracing_subscriber::fmt::format::pretty::Pret...
+0.03/unit (6, avg 8 B)
+    alloc
+    [core::fmt::impl$13::write_fmt]
+    nu_ansi_term::write::impl$0::write_fmt
+    nu_ansi_term::style::Style::write_prefix<dyn$<core::fmt::Write> >
+0.03/unit (6, avg 21 B)
+    realloc
+    [core::fmt::impl$13::write_fmt]
+    nu_ansi_term::ansi::impl$5::fmt
+    core::fmt::write
+0.03/unit (6, avg 26 B)
+    realloc
+    [core::fmt::write]
+    tracing_subscriber::fmt::format::Writer::write_fmt
+    tracing_subscriber::fmt::format::pretty::PrettyVisitor::write_padded
+0.03/unit (6, avg 384 B)
+    realloc
+    [core::io::impls::impl$1::write_all]
+    serde_json::ser::Formatter::write_string_fragment
+    serde_json::ser::format_escaped_str_contents
+0.02/unit (4, avg 192 B)
+    realloc
+    [core::fmt::Formatter::debug_struct_field4_finish]
+    pb_mapper_client::server::control::impl$5::fmt
+    core::fmt::impl$80::fmt<pb_mapper_client::server::control::ControlRegistration>
+0.02/unit (4, avg 96 B)
+    realloc
+    [core::fmt::impl$13::write_fmt]
+    nu_ansi_term::write::impl$0::write_fmt
+    nu_ansi_term::style::Style::write_prefix<dyn$<core::fmt::Write> >
+0.02/unit (3, avg 13 B)
+    alloc
+    [alloc::string::impl$6::clone]
+    pb_mapper_desktop::impl$1::clone
+    core::option::impl$6::clone
+0.01/unit (2, avg 20 B)
+    alloc
+    [alloc::slice::impl$0::to_vec<u8>]
+    pb_mapper_protocol::secure::impl$10::write_msg::async_fn$0
+    tokio::time::timeout::impl$1::poll<enum2$<pb_mapper_protocol::secure::impl$10::write_msg::async_fn_env$0<enum2$<pb_mapper_protocol::transport::RelayWr...
+0.01/unit (2, avg 20 B)
+    alloc
+    [alloc::slice::impl$0::to_vec<u8>]
+    pb_mapper_protocol::secure::impl$10::write_msg::async_fn$0<enum2$<pb_mapper_protocol::transport::RelayWriteHalf> >
+    core::future::poll_fn::impl$2::poll<enum2$<pb_mapper_server::server::run_control_writer::async_fn$0::__tokio_select_util::Out<tuple$<>,enum2$<core::re...
+0.01/unit (2, avg 13 B)
+    alloc
+    [alloc::string::impl$6::clone]
+    pb_mapper_desktop::impl$1::clone
+    core::option::impl$6::clone
+0.01/unit (2, avg 128 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    serde_json::ser::to_vec
+    pb_mapper_protocol::command::impl$44::encode
+0.01/unit (2, avg 128 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    serde_json::ser::to_vec
+    pb_mapper_protocol::command::impl$45::encode
+0.01/unit (2, avg 480 B)
+    alloc
+    [core::iter::traits::iterator::Iterator::collect]
+    pb_mapper_desktop::viewer::stats::windowed_median
+    pb_mapper_desktop::viewer::sink::VideoSink::snapshot
+0.01/unit (2, avg 480 B)
+    alloc
+    [core::iter::traits::iterator::Iterator::collect]
+    pb_mapper_desktop::viewer::stats::windowed_median
+    pb_mapper_desktop::viewer::stats::ViewerStatsAcc::host_ms
+0.01/unit (2, avg 58 B)
+    alloc
+    [std::env::var]
+    pb_mapper_core::config::duration_from_env
+    pb_mapper_client::server::control::handle_ping_interval::async_fn$0::async_block$0
+0.01/unit (2, avg 40 B)
+    realloc
+    [alloc::vec::impl$23::extend]
+    ring::aead::less_safe_key::impl$0::seal_in_place_append_tag::closure$0
+    core::result::Result::map
+0.01/unit (2, avg 40 B)
+    realloc
+    [alloc::vec::impl$23::extend]
+    ring::aead::less_safe_key::impl$0::seal_in_place_append_tag::closure$0
+    core::result::Result::map
+0.01/unit (2, avg 64 B)
+    realloc
+    [core::fmt::builders::DebugStruct::field]
+    pb_mapper_server::manager::impl$3::fmt
+    core::fmt::impl$80::fmt
+0.01/unit (1, avg 1024 B)
+    realloc
+    [alloc::collections::vec_deque::VecDeque::push_back]
+    pb_mapper_desktop::qos::Qos::on_probe_echo
+    pb_mapper_desktop::session::Session::handle
+
+### video+pointer: sites: 16961 allocations over 180 units
+7.35/unit (1323, avg 13 B)
+    alloc
+    [alloc::string::impl$6::clone]
+    pb_mapper_desktop::worker::Engine::iterate
+    pb_mapper_desktop::worker::run<alloc_sites_tmp::Encoded>
+7.28/unit (1310, avg 707 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    pb_mapper_protocol::framing::impl$8::write_msg::async_fn$0
+    pb_mapper_protocol::forward::impl$16::write::async_fn$0<tokio::net::tcp::split::WriteHalf,pb_mapper_core::codec::Aes256GcmEnCodec>
+7.28/unit (1310, avg 707 B)
+    alloc
+    [alloc_sites_tmp::note]
+    pb_mapper_protocol::forward::impl$16::write::async_fn$0
+    pb_mapper_protocol::forward::copy_with_activity::async_fn$0
+6.23/unit (1122, avg 89 B)
+    alloc
+    [alloc::slice::impl$0::to_vec]
+    rustls::msgs::base::Payload::into_vec
+    rustls::common_state::CommonState::take_received_plaintext
+6.23/unit (1122, avg 256 B)
+    alloc
+    [alloc::vec::Vec::push]
+    serde::private::de::content::impl$24::visit_map<pb_mapper_desktop::protocol::_::impl$0::deserialize::__Field,serde_json::de::MapAccess<serde_json::rea...
+    serde_json::de::from_slice<enum2$<pb_mapper_desktop::protocol::ViewerMessage> >
+6.23/unit (1122, avg 111 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    rustls::msgs::message::outbound::PrefixedPayload::with_capacity
+    rustls::crypto::ring::tls13::impl$4::encrypt
+6.23/unit (1122, avg 128 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    serde_json::ser::to_vec<enum2$<pb_mapper_desktop::protocol::ViewerMessage> >
+    core::future::poll_fn::impl$2::poll<enum2$<pb_mapper_desktop::viewer::session::run::async_fn$0::__tokio_select_util::Out<enum2$<pb_mapper_desktop::vie...
+6.23/unit (1122, avg 89 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    tokio::io::util::buf_writer::BufWriter::with_capacity
+    pb_mapper_desktop::wire::write_records::async_fn$0::async_block$1
+6.23/unit (1122, avg 85 B)
+    zeroed
+    [alloc::vec::from_elem]
+    pb_mapper_desktop::wire::read_record::async_fn$0::async_block$0
+    tokio::time::timeout::impl$1::poll<enum2$<pb_mapper_desktop::wire::read_record::async_fn$0::async_block_env$0<ref_mut$<tokio::io::split::ReadHalf<toki...
+4.17/unit (750, avg 13 B)
+    alloc
+    [alloc::string::impl$6::clone]
+    pb_mapper_desktop::impl$1::clone
+    pb_mapper_desktop::impl$6::clone
+4.17/unit (750, avg 256 B)
+    alloc
+    [alloc::vec::Vec::push]
+    serde::private::de::content::impl$21::visit_map<serde_json::de::MapAccess<serde_json::read::SliceRead> >
+    serde_core::de::Deserializer::__deserialize_content_v1<ref_mut$<serde_json::de::Deserializer<serde_json::read::SliceRead> >,serde::private::de::conten...
+4.17/unit (750, avg 256 B)
+    alloc
+    [alloc::vec::Vec::push]
+    serde::private::de::content::impl$21::visit_map<serde_json::de::MapAccess<serde_json::read::SliceRead> >
+    serde_core::de::Deserializer::__deserialize_content_v1<ref_mut$<serde_json::de::Deserializer<serde_json::read::SliceRead> >,serde::private::de::conten...
+4.17/unit (750, avg 13 B)
+    alloc
+    [alloc_sites_tmp::impl$1::display]
+    pb_mapper_desktop::backend::Backend::context
+    pb_mapper_desktop::backend::Backend::input_in_context<alloc_sites_tmp::Encoded>
+4.17/unit (750, avg 192 B)
+    alloc
+    [alloc_sites_tmp::note]
+    serde::private::de::content::impl$29::deserialize_any<serde_json::error::Error,serde::private::de::content::TaggedContentVisitor<pb_mapper_desktop::in...
+    pb_mapper_desktop::input::_::impl$0::deserialize<serde::private::de::content::ContentDeserializer<serde_json::error::Error> >
+2.05/unit (369, avg 778 B)
+    realloc
+    [alloc::vec::Vec::push]
+    serde::private::de::content::impl$24::visit_map<pb_mapper_desktop::protocol::_::impl$0::deserialize::__Field,serde_json::de::MapAccess<serde_json::rea...
+    serde_json::de::from_slice<enum2$<pb_mapper_desktop::protocol::HostMessage> >
+1.08/unit (194, avg 3949 B)
+    alloc
+    [alloc::slice::impl$0::to_vec]
+    rustls::msgs::base::Payload::into_vec
+    rustls::common_state::CommonState::take_received_plaintext
+1.08/unit (194, avg 256 B)
+    alloc
+    [alloc::vec::Vec::push]
+    serde::private::de::content::impl$24::visit_map<pb_mapper_desktop::protocol::_::impl$0::deserialize::__Field,serde_json::de::MapAccess<serde_json::rea...
+    serde_json::de::from_slice<enum2$<pb_mapper_desktop::protocol::HostMessage> >
+1.08/unit (194, avg 3971 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    rustls::msgs::message::outbound::PrefixedPayload::with_capacity
+    rustls::crypto::ring::tls13::impl$4::encrypt
+1.08/unit (194, avg 3949 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    tokio::io::util::buf_writer::BufWriter::with_capacity
+    pb_mapper_desktop::wire::write_records::async_fn$0::async_block$1
+1.08/unit (194, avg 128 B)
+    alloc
+    [alloc_sites_tmp::note]
+    pb_mapper_desktop::wire::write_message::async_fn$0
+    core::future::future::impl$1::poll<ref_mut$<enum2$<pb_mapper_desktop::wire::write_message::async_fn_env$0<tokio::io::split::WriteHalf<tokio_rustls::se...
+1.08/unit (194, avg 141 B)
+    zeroed
+    [alloc::vec::from_elem]
+    pb_mapper_desktop::wire::read_record::async_fn$0::async_block$0
+    tokio::time::timeout::impl$1::poll<enum2$<pb_mapper_desktop::wire::read_record::async_fn$0::async_block_env$0<tokio::io::split::ReadHalf<tokio_rustls:...
+1.00/unit (180, avg 4096 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    pb_mapper_desktop::wire::read_payload::async_fn$0::async_block$1
+    tokio::time::timeout::impl$1::poll<enum2$<pb_mapper_desktop::wire::read_payload::async_fn$0::async_block_env$1<tokio::io::split::ReadHalf<tokio_rustls...
+1.00/unit (180, avg 4096 B)
+    alloc
+    [alloc_sites_tmp::impl$1::capture_video]
+    pb_mapper_desktop::worker::Engine::iterate
+    pb_mapper_desktop::worker::run<alloc_sites_tmp::Encoded>
+1.00/unit (180, avg 8192 B)
+    realloc
+    [alloc::vec::Vec::resize]
+    rustls::msgs::deframer::buffers::DeframerVecBuffer::prepare_read
+    rustls::msgs::deframer::buffers::DeframerVecBuffer::read
+1.00/unit (180, avg 4096 B)
+    realloc
+    [alloc::vec::Vec::shrink_to]
+    rustls::msgs::deframer::buffers::DeframerVecBuffer::prepare_read
+    rustls::msgs::deframer::buffers::DeframerVecBuffer::read
+1.00/unit (180, avg 256 B)
+    realloc
+    [core::io::impls::impl$1::write_all]
+    serde_json::ser::Formatter::write_u64
+    serde_json::ser::impl$3::serialize_u64
+0.17/unit (30, avg 13 B)
+    alloc
+    [alloc_sites_tmp::impl$1::display]
+    pb_mapper_desktop::backend::Backend::context
+    pb_mapper_desktop::worker::Engine::geometry<alloc_sites_tmp::Encoded,pb_mapper_desktop::worker::Monotonic>
+0.03/unit (6, avg 32 B)
+    alloc
+    [alloc_sites_tmp::_::__rust_alloc]
+    tracing_subscriber::registry::extensions::ExtensionsMut::insert<tracing_subscriber::fmt::fmt_layer::FormattedFields<tracing_subscriber::fmt::format::p...
+    tracing_subscriber::fmt::fmt_layer::impl$12::on_new_span<tracing_subscriber::registry::sharded::Registry,tracing_subscriber::fmt::format::pretty::Pret...
+0.03/unit (6, avg 8 B)
+    alloc
+    [core::fmt::impl$13::write_fmt]
+    nu_ansi_term::write::impl$0::write_fmt
+    nu_ansi_term::style::Style::write_prefix<dyn$<core::fmt::Write> >
+0.03/unit (6, avg 336 B)
+    realloc
+    [alloc::raw_vec::RawVec::grow_one<pb_mapper_core::conn_id::RemoteConnId,alloc::alloc::Global>]
+    pb_mapper_desktop::worker::window::Window::wait
+    pb_mapper_desktop::worker::Engine::drain_lane<alloc_sites_tmp::Encoded,pb_mapper_desktop::worker::Monotonic>
+0.03/unit (6, avg 21 B)
+    realloc
+    [core::fmt::impl$13::write_fmt]
+    nu_ansi_term::ansi::impl$5::fmt
+    core::fmt::write
+0.03/unit (6, avg 26 B)
+    realloc
+    [core::fmt::write]
+    tracing_subscriber::fmt::format::Writer::write_fmt
+    tracing_subscriber::fmt::format::pretty::PrettyVisitor::write_padded
+0.03/unit (6, avg 384 B)
+    realloc
+    [core::io::impls::impl$1::write_all]
+    serde_json::ser::Formatter::write_string_fragment
+    serde_json::ser::format_escaped_str_contents
+0.02/unit (4, avg 192 B)
+    realloc
+    [core::fmt::Formatter::debug_struct_field4_finish]
+    pb_mapper_client::server::control::impl$5::fmt
+    core::fmt::impl$80::fmt<pb_mapper_client::server::control::ControlRegistration>
+0.02/unit (4, avg 96 B)
+    realloc
+    [core::fmt::impl$13::write_fmt]
+    nu_ansi_term::write::impl$0::write_fmt
+    nu_ansi_term::style::Style::write_prefix<dyn$<core::fmt::Write> >
+0.02/unit (3, avg 13 B)
+    alloc
+    [alloc::string::impl$6::clone]
+    pb_mapper_desktop::impl$1::clone
+    core::option::impl$6::clone
+0.02/unit (3, avg 13 B)
+    alloc
+    [alloc::string::impl$6::clone]
+    pb_mapper_desktop::impl$1::clone
+    core::option::impl$6::clone
+0.01/unit (2, avg 20 B)
+    alloc
+    [alloc::slice::impl$0::to_vec<u8>]
+    pb_mapper_protocol::secure::impl$10::write_msg::async_fn$0
+    tokio::time::timeout::impl$1::poll<enum2$<pb_mapper_protocol::secure::impl$10::write_msg::async_fn_env$0<enum2$<pb_mapper_protocol::transport::RelayWr...
+0.01/unit (2, avg 20 B)
+    alloc
+    [alloc::slice::impl$0::to_vec<u8>]
+    pb_mapper_protocol::secure::impl$10::write_msg::async_fn$0<enum2$<pb_mapper_protocol::transport::RelayWriteHalf> >
+    core::future::poll_fn::impl$2::poll<enum2$<pb_mapper_server::server::run_control_writer::async_fn$0::__tokio_select_util::Out<tuple$<>,enum2$<core::re...
+0.01/unit (2, avg 128 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    serde_json::ser::to_vec
+    pb_mapper_protocol::command::impl$44::encode
+0.01/unit (2, avg 128 B)
+    alloc
+    [alloc::vec::Vec::with_capacity]
+    serde_json::ser::to_vec
+    pb_mapper_protocol::command::impl$45::encode
+0.01/unit (2, avg 480 B)
+    alloc
+    [core::iter::traits::iterator::Iterator::collect]
+    pb_mapper_desktop::viewer::stats::windowed_median
+    pb_mapper_desktop::viewer::sink::VideoSink::snapshot
+0.01/unit (2, avg 480 B)
+    alloc
+    [core::iter::traits::iterator::Iterator::collect]
+    pb_mapper_desktop::viewer::stats::windowed_median
+    pb_mapper_desktop::viewer::stats::ViewerStatsAcc::host_ms
+0.01/unit (2, avg 58 B)
+    alloc
+    [std::env::var]
+    pb_mapper_core::config::duration_from_env
+    pb_mapper_client::server::control::handle_ping_interval::async_fn$0::async_block$0
+0.01/unit (2, avg 40 B)
+    realloc
+    [alloc::vec::impl$23::extend]
+    ring::aead::less_safe_key::impl$0::seal_in_place_append_tag::closure$0
+    core::result::Result::map
+0.01/unit (2, avg 40 B)
+    realloc
+    [alloc::vec::impl$23::extend]
+    ring::aead::less_safe_key::impl$0::seal_in_place_append_tag::closure$0
+    core::result::Result::map
+0.01/unit (2, avg 64 B)
+    realloc
+    [core::fmt::builders::DebugStruct::field]
+    pb_mapper_server::manager::impl$3::fmt
+    core::fmt::impl$80::fmt
+0.01/unit (1, avg 112 B)
+    alloc
+    [alloc::boxed::impl$0::pin]
+    tokio::time::interval::internal_interval_at
+    tokio::time::interval::interval
+0.01/unit (1, avg 224 B)
+    alloc
+    [alloc::collections::vec_deque::VecDeque::push_back]
+    pb_mapper_desktop::viewer::outbound::Outbound::submit<pb_mapper_desktop::viewer::impl$5::input::closure_env$2,pb_mapper_desktop::viewer::impl$5::input...
+    pb_mapper_desktop::viewer::Viewer::input
+0.01/unit (1, avg 1024 B)
+    realloc
+    [alloc::collections::vec_deque::VecDeque::push_back]
+    pb_mapper_desktop::qos::Qos::on_probe_echo
+    pb_mapper_desktop::session::Session::handle
