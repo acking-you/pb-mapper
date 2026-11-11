@@ -440,7 +440,7 @@ fn writes_in_place(failure: &durable_file::ReplaceError) -> bool {
 /// owns it, whose file a replacement, being this user's, would take away, or
 /// it is in a group a replacement would not take. A new file takes this
 /// user's group, or on BSD and macOS, and in a set-group-ID directory, its
-/// directory's: a file in both stays in its group either way.
+/// directory's.
 #[cfg(unix)]
 fn stays_in_place(file: &fs::File, path: &Path) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
@@ -451,15 +451,26 @@ fn stays_in_place(file: &fs::File, path: &Path) -> io::Result<bool> {
         /// unless its directory gives it its own.
         safe fn getegid() -> u32;
     }
+    /// Whether a new file takes its directory's group whatever the
+    /// directory's mode.
+    const TAKES_DIRECTORY_GROUP: bool = cfg!(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ));
+    /// The set-group-ID bit of a directory's mode.
+    const SET_GROUP_ID: u32 = 0o2000;
     let metadata = file.metadata()?;
-    let directory_group = match path.parent() {
-        Some(directory) => fs::metadata(directory)?.gid(),
-        None => getegid(),
+    let directory = path.parent().map(fs::metadata).transpose()?;
+    let replacement_group = match directory {
+        Some(directory) if TAKES_DIRECTORY_GROUP || directory.mode() & SET_GROUP_ID != 0 => {
+            directory.gid()
+        }
+        _ => getegid(),
     };
-    Ok(metadata.nlink() > 1
-        || metadata.uid() != geteuid()
-        || metadata.gid() != getegid()
-        || metadata.gid() != directory_group)
+    Ok(metadata.nlink() > 1 || metadata.uid() != geteuid() || metadata.gid() != replacement_group)
 }
 
 /// Whether only an in-place write keeps `file` the same file: on Windows,
@@ -665,6 +676,29 @@ mod tests {
         replace_contents(&path, b"new").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"new");
         assert_eq!(fs::metadata(&path).unwrap().gid(), other);
+
+        // In a directory that gives its files that group, a replacement
+        // keeps it too, so the file is replaced whole.
+        use std::os::unix::fs::PermissionsExt;
+        let shared = root.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        if std::os::unix::fs::chown(&shared, None, Some(other)).is_err()
+            || fs::set_permissions(&shared, fs::Permissions::from_mode(0o2700)).is_err()
+        {
+            return;
+        }
+        let path = shared.join("config.json");
+        fs::write(&path, b"old").unwrap();
+        let before = fs::metadata(&path).unwrap();
+        if before.gid() != other {
+            // A file system that ignores the bit.
+            return;
+        }
+        replace_contents(&path, b"new").unwrap();
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(after.gid(), other);
+        assert_ne!(after.ino(), before.ino());
     }
 
     /// A file this user may not write is refused, as an in-place write
