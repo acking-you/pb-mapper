@@ -554,7 +554,6 @@ async fn frozen_renderer_keeps_credit_and_cursor_but_never_input() {
         diag::spread(intervals),
         diag::stats(&viewer),
     ));
-    diag::say(format_args!("frozen-test while held: {}", diag::task_qos()));
     assert!(
         slowest < u32::MAX && arrived >= 4 * slowest as usize,
         "{arrived} units at pace {slowest}"
@@ -664,108 +663,68 @@ async fn control_grant_with_queued_video_keeps_the_session() {
     host.stop().await.unwrap();
 }
 
-/// DIAGNOSTIC (temporary): how late this runner's waits end, each row on a
-/// thread of its own as thread C waits: the portable `Waiter`'s condition
-/// variable for a 2 ms encoder poll and a 60 fps tick, and a 2 ms sleep; in
-/// the full rows also a kqueue timer marked critical and a tokio sleep. Plain,
-/// under the activity a capturing session holds, at the user-initiated and
-/// user-interactive QoS classes and at thread latency tier 0; then with the
-/// task's latency QoS overridden to tier 0 (what the macOS timer guard does),
-/// alone and with each thread setting; then plain again once the override
-/// is put back. Runs alone: the override is the whole process's.
+/// DIAGNOSTIC (temporary): how late this runner's waits end on a thread of
+/// their own: a condition variable (the portable `Waiter`'s) for a 2 ms
+/// poll and a 60 fps tick, a 2 ms sleep, and tokio sleeps as the session's
+/// tasks take them. Thread C's own waiter is probed in the unit tests.
 #[test]
 fn pacing_probe() {
-    fn row(label: &'static str, full: bool, setup: fn()) {
-        std::thread::spawn(move || {
-            setup();
-            let pair = (parking_lot::Mutex::new(false), parking_lot::Condvar::new());
-            let condvar = |period: Duration| {
-                let deadline = Instant::now() + period;
-                let mut flag = pair.0.lock();
-                while !*flag {
-                    if pair.1.wait_until(&mut flag, deadline).timed_out() {
-                        break;
-                    }
+    std::thread::spawn(|| {
+        let pair = (parking_lot::Mutex::new(false), parking_lot::Condvar::new());
+        let condvar = |period: Duration| {
+            let deadline = Instant::now() + period;
+            let mut flag = pair.0.lock();
+            while !*flag {
+                if pair.1.wait_until(&mut flag, deadline).timed_out() {
+                    break;
                 }
-                drop(flag);
-                Instant::now().saturating_duration_since(deadline)
-            };
-            let sleep = |period: Duration| {
-                let at = Instant::now();
-                std::thread::sleep(period);
-                at.elapsed().saturating_sub(period)
-            };
-            let (poll, tick) = (Duration::from_millis(2), Duration::from_micros(16_667));
-            let mut line = format!(
-                "probe {label}: qos {:#x} {} {} condvar 2ms late [{}] condvar 16.7ms late [{}] sleep 2ms late [{}]",
-                diag::qos(),
-                diag::background(),
-                diag::task_qos(),
-                diag::spread((0..30).map(|_| condvar(poll)).collect()),
-                diag::spread((0..15).map(|_| condvar(tick)).collect()),
-                diag::spread((0..30).map(|_| sleep(poll)).collect()),
-            );
-            if full {
-                line += &format!(
-                    " kqueue-critical 2ms late [{}] kqueue-critical 16.7ms late [{}]",
-                    diag::spread((0..30).map(|_| diag::critical(poll)).collect()),
-                    diag::spread((0..15).map(|_| diag::critical(tick)).collect()),
-                );
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .build()
-                    .unwrap();
-                let (short, long) = runtime.block_on(async {
-                    let mut short = Vec::new();
-                    for _ in 0..30 {
-                        let at = Instant::now();
-                        tokio::time::sleep(poll).await;
-                        short.push(at.elapsed().saturating_sub(poll));
-                    }
-                    let mut long = Vec::new();
-                    for _ in 0..15 {
-                        let at = Instant::now();
-                        tokio::time::sleep(tick).await;
-                        long.push(at.elapsed().saturating_sub(tick));
-                    }
-                    (short, long)
-                });
-                line += &format!(
-                    " tokio 2ms late [{}] tokio 16.7ms late [{}]",
-                    diag::spread(short),
-                    diag::spread(long),
-                );
             }
-            diag::say(format_args!("{line}"));
-        })
-        .join()
-        .unwrap();
-    }
-    row("plain", true, || {});
-    #[cfg(target_os = "macos")]
-    {
-        let activity = diag::Activity::begin();
-        row("activity", false, || {});
-        drop(activity);
-    }
-    row("user-initiated", false, || diag::set_qos(0x19));
-    row("user-interactive", false, || diag::set_qos(0x21));
-    row("thread latency tier 0", false, diag::thread_latency_tier_0);
-    #[cfg(target_os = "macos")]
-    {
-        let before = diag::override_latency(diag::LATENCY_TIER_0);
-        row("task override tier 0", true, || {});
-        row("task override + user-interactive", false, || {
-            diag::set_qos(0x21)
-        });
-        row(
-            "task override + thread latency tier 0",
-            false,
-            diag::thread_latency_tier_0,
+            drop(flag);
+            Instant::now().saturating_duration_since(deadline)
+        };
+        let (poll, tick) = (Duration::from_millis(2), Duration::from_micros(16_667));
+        let sleep: Vec<Duration> = (0..30)
+            .map(|_| {
+                let at = Instant::now();
+                std::thread::sleep(poll);
+                at.elapsed().saturating_sub(poll)
+            })
+            .collect();
+        let line = format!(
+            "probe plain: qos {:#x} condvar 2ms late [{}] condvar 16.7ms late [{}] sleep 2ms late [{}]",
+            diag::qos(),
+            diag::spread((0..30).map(|_| condvar(poll)).collect()),
+            diag::spread((0..15).map(|_| condvar(tick)).collect()),
+            diag::spread(sleep),
         );
-        diag::override_latency(before);
-        row("plain after restore", true, || {});
-    }
+        diag::say(format_args!("{line}"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let (short, long) = runtime.block_on(async {
+            let mut short = Vec::new();
+            for _ in 0..30 {
+                let at = Instant::now();
+                tokio::time::sleep(poll).await;
+                short.push(at.elapsed().saturating_sub(poll));
+            }
+            let mut long = Vec::new();
+            for _ in 0..15 {
+                let at = Instant::now();
+                tokio::time::sleep(tick).await;
+                long.push(at.elapsed().saturating_sub(tick));
+            }
+            (short, long)
+        });
+        diag::say(format_args!(
+            "probe tokio: 2ms late [{}] 16.7ms late [{}]",
+            diag::spread(short),
+            diag::spread(long),
+        ));
+    })
+    .join()
+    .unwrap();
 }
 
 /// DIAGNOSTIC (temporary): measurements printed past the harness's capture.
@@ -843,8 +802,6 @@ mod diag {
     #[cfg(target_os = "macos")]
     unsafe extern "C" {
         fn qos_class_self() -> u32;
-        fn pthread_set_qos_class_self_np(class: u32, relative: i32) -> i32;
-        fn getpriority(which: i32, who: u32) -> i32;
     }
 
     /// The calling thread's QoS class (0x21 user-interactive, 0x19
@@ -856,190 +813,5 @@ mod diag {
         return unsafe { qos_class_self() };
         #[cfg(not(target_os = "macos"))]
         0
-    }
-
-    pub fn set_qos(class: u32) {
-        #[cfg(target_os = "macos")]
-        // SAFETY: sets the calling thread's class.
-        unsafe {
-            pthread_set_qos_class_self_np(class, 0);
-        }
-        #[cfg(not(target_os = "macos"))]
-        let _ = class;
-    }
-
-    /// Whether the process and this thread run in Darwin's background state.
-    pub fn background() -> String {
-        #[cfg(target_os = "macos")]
-        {
-            // SAFETY: reads this process's and thread's state.
-            let (process, thread) =
-                unsafe { (getpriority(4, std::process::id()), getpriority(3, 0)) };
-            format!("darwin-bg process {process:#x} thread {thread:#x}")
-        }
-        #[cfg(not(target_os = "macos"))]
-        String::new()
-    }
-
-    /// The activity a capturing session holds on macOS.
-    #[cfg(target_os = "macos")]
-    pub struct Activity(
-        objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>,
-    );
-    #[cfg(target_os = "macos")]
-    impl Activity {
-        pub fn begin() -> Self {
-            use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-            let options = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep
-                | NSActivityOptions::IdleDisplaySleepDisabled
-                | NSActivityOptions::LatencyCritical;
-            let reason = NSString::from_str("pacing probe");
-            Self(NSProcessInfo::processInfo().beginActivityWithOptions_reason(options, &reason))
-        }
-    }
-    #[cfg(target_os = "macos")]
-    impl Drop for Activity {
-        fn drop(&mut self) {
-            // SAFETY: the token beginActivity returned, ended once.
-            unsafe { objc2_foundation::NSProcessInfo::processInfo().endActivity(&self.0) };
-        }
-    }
-    /// `LATENCY_QOS_TIER_0`.
-    #[cfg(target_os = "macos")]
-    pub const LATENCY_TIER_0: i32 = (0xFF << 16) | 1;
-
-    #[cfg(target_os = "macos")]
-    #[repr(C)]
-    struct Kevent {
-        ident: usize,
-        filter: i16,
-        flags: u16,
-        fflags: u32,
-        data: isize,
-        udata: *mut std::ffi::c_void,
-    }
-
-    #[cfg(target_os = "macos")]
-    unsafe extern "C" {
-        static mach_task_self_: u32;
-        fn mach_thread_self() -> u32;
-        fn task_policy_set(task: u32, flavor: u32, info: *mut i32, count: u32) -> i32;
-        fn task_policy_get(
-            task: u32,
-            flavor: u32,
-            info: *mut i32,
-            count: *mut u32,
-            get_default: *mut i32,
-        ) -> i32;
-        fn thread_policy_set(thread: u32, flavor: u32, info: *mut i32, count: u32) -> i32;
-        fn kqueue() -> i32;
-        fn kevent(
-            kq: i32,
-            changes: *const Kevent,
-            changed: i32,
-            events: *mut Kevent,
-            capacity: i32,
-            timeout: *const Timespec,
-        ) -> i32;
-        fn close(fd: i32) -> i32;
-    }
-
-    /// The task's QoS policy of `flavor` (8 base, 9 override): latency and
-    /// throughput tiers, or the Mach error.
-    #[cfg(target_os = "macos")]
-    fn task_policy(flavor: u32) -> Result<[i32; 2], i32> {
-        let mut info = [0i32; 2];
-        let (mut count, mut get_default) = (2u32, 0i32);
-        // SAFETY: `info` holds `count` integers; the port is this task's.
-        let kr = unsafe {
-            task_policy_get(
-                mach_task_self_,
-                flavor,
-                info.as_mut_ptr(),
-                &mut count,
-                &mut get_default,
-            )
-        };
-        if kr == 0 { Ok(info) } else { Err(kr) }
-    }
-
-    /// The task's base and override QoS tiers.
-    pub fn task_qos() -> String {
-        #[cfg(target_os = "macos")]
-        return format!(
-            "task base {:x?} override {:x?}",
-            task_policy(8),
-            task_policy(9)
-        );
-        #[cfg(not(target_os = "macos"))]
-        String::new()
-    }
-
-    /// Override the task's latency tier, keeping its throughput override;
-    /// the latency override before.
-    #[cfg(target_os = "macos")]
-    pub fn override_latency(latency: i32) -> i32 {
-        let before = task_policy(9).unwrap_or([0, 0]);
-        let mut info = [latency, before[1]];
-        // SAFETY: `info` holds two integers; the port is this task's.
-        let kr = unsafe { task_policy_set(mach_task_self_, 9, info.as_mut_ptr(), 2) };
-        say(format_args!(
-            "task override latency {latency:#x}: kr {kr} (was {:#x})",
-            before[0]
-        ));
-        before[0]
-    }
-
-    /// This thread's latency tier, set to 0 (`THREAD_LATENCY_QOS_POLICY`).
-    pub fn thread_latency_tier_0() {
-        #[cfg(target_os = "macos")]
-        {
-            let mut tier = [(0xFF << 16) | 1];
-            // SAFETY: one integer, for this thread.
-            let kr = unsafe { thread_policy_set(mach_thread_self(), 7, tier.as_mut_ptr(), 1) };
-            if kr != 0 {
-                say(format_args!("thread latency tier 0: kr {kr}"));
-            }
-        }
-    }
-
-    /// How late a one-shot kqueue timer marked `NOTE_CRITICAL` fires after
-    /// `period`; elsewhere, a sleep.
-    pub fn critical(period: Duration) -> Duration {
-        #[cfg(target_os = "macos")]
-        {
-            // SAFETY: a fresh queue, one change and one event slot, both
-            // locals, and the queue closed after.
-            unsafe {
-                let kq = kqueue();
-                let change = Kevent {
-                    ident: 1,
-                    filter: -7,                        // EVFILT_TIMER
-                    flags: 0x0001 | 0x0010,            // EV_ADD | EV_ONESHOT
-                    fflags: 0x0000_0004 | 0x0000_0020, // NOTE_NSECONDS | NOTE_CRITICAL
-                    data: period.as_nanos() as isize,
-                    udata: std::ptr::null_mut(),
-                };
-                let mut event = Kevent {
-                    ident: 0,
-                    filter: 0,
-                    flags: 0,
-                    fflags: 0,
-                    data: 0,
-                    udata: std::ptr::null_mut(),
-                };
-                let deadline = std::time::Instant::now() + period;
-                kevent(kq, &change, 1, &mut event, 1, std::ptr::null());
-                let late = std::time::Instant::now().saturating_duration_since(deadline);
-                close(kq);
-                late
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let at = std::time::Instant::now();
-            std::thread::sleep(period);
-            at.elapsed().saturating_sub(period)
-        }
     }
 }

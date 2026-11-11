@@ -132,6 +132,36 @@ fn a_2ms_wait_is_not_coalesced() {
     assert!(median < Duration::from_millis(2), "{late:?}");
 }
 
+/// DIAGNOSTIC (temporary): how late thread C's waiter ends 2 ms and 16.7 ms
+/// waits on this runner, printed past the harness's capture.
+#[test]
+fn waiter_lateness_probe() {
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    let spread = |period: Duration, count: usize| {
+        let mut late: Vec<Duration> = (0..count)
+            .map(|_| {
+                let deadline = Instant::now() + period;
+                while Instant::now() < deadline {
+                    waiter.wait(deadline).unwrap();
+                }
+                Instant::now().saturating_duration_since(deadline)
+            })
+            .collect();
+        late.sort_unstable();
+        let at = |q: f64| late[((late.len() - 1) as f64 * q).round() as usize];
+        format!("p50={:?} p90={:?} max={:?}", at(0.5), at(0.9), at(1.0))
+    };
+    let (poll, tick) = (
+        spread(Duration::from_millis(2), 30),
+        spread(Duration::from_micros(16_667), 15),
+    );
+    let _ = writeln!(
+        std::io::stderr(),
+        "pacing-diag probe thread C waiter: 2ms late [{poll}] 16.7ms late [{tick}]"
+    );
+}
+
 /// Every active display is named by its UUID and measured in its current
 /// mode's pixels, and its modes list. A runner without a display skips.
 #[test]
