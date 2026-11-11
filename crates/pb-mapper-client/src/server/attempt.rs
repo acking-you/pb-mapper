@@ -427,6 +427,7 @@ pub(super) async fn run_server_side_cli_inner(
     heartbeat.tick().await;
     let mut probes = JoinSet::new();
     let mut ping_seq = 0_u64;
+    let mut beats = Heartbeats::default();
     let mut control_deadline = tokio::time::Instant::now() + heartbeat_tolerance + suspect_grace;
 
     loop {
@@ -499,7 +500,7 @@ pub(super) async fn run_server_side_cli_inner(
             }
             _ = heartbeat.tick() => {
                 ping_seq = ping_seq.wrapping_add(1);
-                if write_tx.try_send(LocalControlWrite::Ping { seq: ping_seq }).is_err() {
+                if beats.queue(&write_tx, ping_seq).is_err() {
                     break Status::SendPing;
                 }
 
@@ -621,6 +622,45 @@ pub(super) async fn run_server_side_cli_inner(
     }
 }
 
+/// How a control loop's heartbeats get into its write queue.
+#[derive(Default)]
+struct Heartbeats {
+    /// Whether the last beat found the queue full and was skipped.
+    skipped: bool,
+}
+
+/// The writer is stalled or gone: the attempt is over.
+#[derive(Debug)]
+struct WriterLost;
+
+impl Heartbeats {
+    /// Queue heartbeat `seq`, or skip it when the queue is full: a burst,
+    /// such as the acknowledgements of many streams requested at once, can
+    /// fill it for a moment, more so while the writer waits for a busy
+    /// runtime. Fails when the writer is gone, or when the queue was full at
+    /// the last beat too: a writer that took nothing in a whole interval is
+    /// stalled on the relay, and ending the attempt re-registers.
+    fn queue(
+        &mut self,
+        write_tx: &mpsc::Sender<LocalControlWrite>,
+        seq: u64,
+    ) -> Result<(), WriterLost> {
+        match write_tx.try_send(LocalControlWrite::Ping { seq }) {
+            Ok(()) => {
+                self.skipped = false;
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Full(_)) if !self.skipped => {
+                self.skipped = true;
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_)) => {
+                Err(WriterLost)
+            }
+        }
+    }
+}
+
 /// Write what the control loop queues, in order, until the queue closes or a
 /// write fails. Either ends the attempt, with what the writer returns.
 async fn run_control_writer(
@@ -687,5 +727,35 @@ async fn run_control_writer(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A queue full at one beat holds a burst, such as the acknowledgements
+    /// of many streams requested at once, that the writer has not taken yet:
+    /// that beat is skipped and the attempt goes on. Full at the next beat
+    /// too, the writer took nothing in a whole interval and is stalled on the
+    /// relay; gone, it is over. Either ends the attempt.
+    #[test]
+    fn a_full_queue_skips_one_heartbeat_and_ends_the_attempt_at_the_next() {
+        let (write_tx, mut write_rx) = mpsc::channel(1);
+        let mut beats = Heartbeats::default();
+        beats.queue(&write_tx, 1).unwrap();
+        beats.queue(&write_tx, 2).unwrap();
+        assert!(beats.queue(&write_tx, 3).is_err());
+
+        let mut beats = Heartbeats::default();
+        beats.queue(&write_tx, 4).unwrap();
+        write_rx.try_recv().unwrap();
+        beats.queue(&write_tx, 5).unwrap();
+        beats.queue(&write_tx, 6).unwrap();
+        write_rx.try_recv().unwrap();
+        beats.queue(&write_tx, 7).unwrap();
+
+        drop(write_rx);
+        assert!(Heartbeats::default().queue(&write_tx, 8).is_err());
     }
 }
