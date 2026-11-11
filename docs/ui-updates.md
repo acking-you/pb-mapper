@@ -15,6 +15,25 @@ The system still asks for installation consent.
 | macOS Intel / Apple Silicon | Download the matching DMG, verify it, save it to Downloads and open the system disk-image installer. Drag the app into Applications. |
 | iOS | Use a properly signed development, TestFlight or App Store distribution. An unsigned IPA is not an installable consumer update. |
 
+### The Windows installer
+
+The installer's script is checked in as
+[`ui/windows/packaging/exe/inno_setup.iss`](../ui/windows/packaging/exe/inno_setup.iss),
+which fastforge renders from `make_config.yaml`. It is fastforge's default
+script, and it writes a log for every run (`%TEMP%\Setup Log <date> #<n>.txt`
+when started by hand). Its AppId, default folder and `PrivilegesRequired=none`
+decide which earlier installation an upgrade finds: an administrator's
+installs go to `C:\Program Files\pb_mapper_ui` for all users after a
+permission prompt, anyone else's to that user alone.
+
+The script names the app, `pb_mapper_ui.exe`, itself. fastforge would take the
+first `.exe` in the bundle, which since 0.11.0 is
+`pb-mapper-desktop-helper.exe`, and 0.11.0's installer did: its Start menu,
+desktop and startup shortcuts and its "Launch pb-mapper" box started the
+helper, which shows nothing and exits, so pb-mapper seemed not installed and
+never started. Installing 0.12.0 rewrites those shortcuts; one pinned to the
+taskbar from 0.11.0 has to be pinned again.
+
 Since 0.9.7 the macOS app and its DMG are signed with the project's Developer
 ID, notarized and stapled, and the mounted DMG passes Gatekeeper before it is
 uploaded ([macOS signing](macos-signing.zh-CN.md)). The app is sandboxed, so
