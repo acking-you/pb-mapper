@@ -207,12 +207,6 @@ Each works as designed; the line says what the other choice would cost.
   3 s attempt, is no longer waited for. The 5 s setup bound still ends the
   wait before the retirement for an acknowledgement budget above about
   1.6 s.
-- A pinned direct-relay fallback (a subscribe with `selected`) can take only
-  the registration it names, which its own suspicion has just excluded, yet
-  waits for a replacement as any subscribe does: it fails for certain, but
-  only when its client leaves or at the 5 s setup bound. Not extending a
-  pinned subscribe's wait would end it at the recovery deadline (2.5 s by
-  default).
 - The re-subscribe poll is a fixed 50 ms inside the recovery window; backoff
   or jitter would pick up a replacement later.
 

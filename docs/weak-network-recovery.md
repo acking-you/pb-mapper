@@ -73,7 +73,11 @@ must not hold the only copy of partial-frame state in a discarded future.
   register worker. Stream failure notifications coalesce in a one-element queue.
 - At most 64 concurrent setups per connect listener and per register worker.
   Completed setups release their slots before forwarding, so this is not a
-  64-session limit. Excess local connects wait in the OS listener backlog;
+  64-session limit. Excess local connects wait in the listener's accept queue,
+  which pb-mapper sizes itself: the system's maximum on Linux
+  (`net.core.somaxconn`, 4096 on current kernels), macOS and the BSDs, 128 on
+  Windows and Android. A connect that finds it full is retried by the
+  connecting application's TCP after a second or more;
   register workers can decline excess setup work so the relay tries another worker.
 - Control writer queues hold at most 64 messages. Saturation fails the control
   path rather than growing an unbounded queue. Register pool size, namespace

@@ -49,8 +49,8 @@ except the FFI cdylib, which sits next to the Flutter code that loads it.
 pb-mapper/
 ├── crates/
 │   ├── pb-mapper-core/     # Bottom layer: checksum, config, conn_id, error,
-│   │                       # addr, codec, timeout, time, durable_file, paging,
-│   │                       # DataLenType
+│   │                       # addr, codec, timeout, time, durable_file, listener,
+│   │                       # paging, DataLenType
 │   ├── pb-mapper-auth/     # Credential lifecycle, persistence, timing wheel
 │   ├── pb-mapper-protocol/ # Message framing, v2 secure sessions, forwarding
 │   ├── pb-mapper-server/   # Central relay server, plus the task manager
@@ -143,6 +143,10 @@ Nothing in the SDK crates knows it exists.
     sync) and its last two steps; the auth state, the protocol's replay log,
     the desktop's trust file and display-mode journal, and the app's config
     files all write through it
+  - `listener.rs`: The TCP listeners every role binds for its peers (relay,
+    connect tunnel, direct LAN acceptor, desktop host): address reuse as
+    Tokio sets it, and `ACCEPT_BACKLOG`, the accept queue 0.11.0 had under
+    mio 1.1 rather than whatever the locked mio asks for
   - `paging.rs`: One page out of a fully materialised listing, and the
     page-size ceiling the relay, the credential actor and the SDK share
   - `test_support.rs`: What the tests of this crate and the crates above it
@@ -227,7 +231,8 @@ Nothing in the SDK crates knows it exists.
     messages and lease, `probe.rs`, `status.rs` the pool's one status,
     `stream.rs` one forwarded session, `error.rs`
   - `client/`: `connect` — subscribes and listens locally (`mod.rs`,
-    `health.rs` the remote probes, `stream.rs`), plus `status.rs` and
+    `health.rs` the remote probes, `stream.rs`, `listener.rs` the tunnel's
+    local listener bound through core's `listener`), plus `status.rs` and
     `fetch_status_scoped`
   - `worker_status.rs`: What a tunnel worker reports about itself, and the
     one place the text of the public status callbacks is written
