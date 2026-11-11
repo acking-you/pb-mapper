@@ -24,9 +24,12 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     }
 
     /// The lane overflowed: its input is late beyond repair, only counted as
-    /// taken, and control ends. A display mode command is not input and runs
-    /// as a drain would have run it, the owner's restore above all, which the
-    /// host already said was queued. Nothing runs once cancelled.
+    /// taken, and control ends. A display mode command is not input and
+    /// runs, the owner's restore above all, which the host already said was
+    /// queued. A viewer's is checked against control as the lane leaves it:
+    /// after the viewer's own release or pause it is refused, as a drain
+    /// refuses it, and a grant queued in the lane is not taken, as control
+    /// ends anyway. Nothing runs once cancelled.
     pub(super) fn overflowed(&mut self) {
         let mut drained = std::mem::take(&mut self.drained);
         self.shared.lane.drain_into(&mut drained);
@@ -39,10 +42,13 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                     let now = self.clock.now();
                     self.display_mode(command, now);
                 }
+                // `congested` below releases control in full.
+                LaneCommand::Control { enabled: false } | LaneCommand::EndControl => {
+                    self.state.record.controlling = false;
+                }
                 LaneCommand::DisplayMode(_)
-                | LaneCommand::Control { .. }
-                | LaneCommand::Release
-                | LaneCommand::EndControl => {}
+                | LaneCommand::Control { enabled: true }
+                | LaneCommand::Release => {}
             }
         }
         self.drained = drained;
