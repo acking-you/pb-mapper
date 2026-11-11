@@ -58,7 +58,11 @@ impl AdminReplays {
         client_timestamp: u64,
     ) -> Result<(), AuthFailure> {
         let now = unix_seconds();
-        self.prune(now);
+        // A claim refused below appends nothing, so a record let go here has
+        // to mark the snapshot itself.
+        if self.prune(now) {
+            inner.mark_snapshot_stale();
+        }
         if self.admitted(&fingerprint) {
             return Err(AuthFailure::new(
                 codes::ADMIN_REQUEST_REPLAYED,

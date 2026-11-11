@@ -88,7 +88,9 @@ pub(crate) fn append_audit(
 }
 
 /// Appends `record` to the WAL and makes it durable. A failure the WAL is known
-/// to have survived is retryable for the client; any other fails the store closed.
+/// to have survived leaves the store serving, and is retryable for the client
+/// unless an operator has to mend the file first (its mode cannot be set); any
+/// other fails the store closed.
 pub(crate) fn append_wal(
     config: &AuthConfig,
     admin_key: &AesKeyType,
