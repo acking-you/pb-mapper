@@ -99,15 +99,20 @@ HKDF-SHA256 使用 connection salt 作为 salt，凭据的 32 字节 secret 作�
 旧操作。客户端首帧时间戳仍用于新鲜度检查，但不决定这条记录保留多久。
 
 中继还会把每个被接纳的首帧追加到认证状态目录下的 `connection.replay`，启动时重新
-载入其中最近十分钟的记录，所以重启不会让重放窗口重新打开。这份日志 fail closed：
-启动时读不出来（追加到一半时崩溃会留下截断的最后一条记录），或追加失败后无法回滚、
-新建文件后无法同步目录、compact 失败时，中继会以
-`connection_replay_store_unavailable` 拒绝所有 protocol-v2 首帧，直到它带着一份
-可读的日志重启。原因只记一次，在 error 级别：事件 `replay_log_unavailable` 给出
-文件、失败的步骤和操作系统错误（回滚失败时，还给出它要撤销的那次追加错误）。删除截断的
-`connection.replay` 后重启即可恢复接纳，代价是忘掉最近十分钟内的首帧。追加失败但日志
-保持原样时（例如磁盘已满，或日志所在目录无法创建或打开），只拒绝这一个首帧，同样返回
-`connection_replay_store_unavailable`，下一个首帧会再试；追加持续失败期间，中继在 error 级别只记一次
+载入其中最近十分钟的记录，所以重启不会让重放窗口重新打开。每个中继有一个写入线程，
+把同时到达的首帧用一次写入、一次同步追加进去，同步完成后才接纳其中每一个。追加到一半
+时崩溃会让日志的最后一条记录被截断。那次接纳从未被确认，所以中继启动时丢弃它，在 warn
+级别记 `replay_log_cut_off_record_dropped`，给出文件和丢弃的字节数，并把日志重写为
+完整记录。除此之外这份日志 fail closed：启动时读不出来；以截断记录结尾，而其中的记录
+给出的时间比中继时钟超前十分钟以上（最后一条之前就已损坏的日志、不是重放日志的文件，
+或时钟回拨超过十分钟之前写下的日志）；或追加失败后无法回滚、新建文件后无法同步目录、
+compact 失败、写入线程无法启动时，中继会以 `connection_replay_store_unavailable` 拒绝
+所有 protocol-v2 首帧，直到它带着一份可读的日志重启。原因只记一次，在 error 级别：
+事件 `replay_log_unavailable` 给出文件、失败的步骤和操作系统错误（回滚失败时，还给出
+它要撤销的那次追加错误）。删除这样的 `connection.replay` 后重启即可恢复接纳，代价是
+忘掉最近十分钟内的首帧。追加失败但日志保持原样时（例如磁盘已满，或日志所在目录无法
+创建或打开），拒绝这次追加携带的那些首帧，同样返回 `connection_replay_store_unavailable`，
+下一次追加会再试；追加持续失败期间，中继在 error 级别只记一次
 `replay_log_append_failed`，给出文件、步骤和错误，直到某次追加成功之后再次失败才会再记。
 
 根密钥轮换或认证状态重置之后，进程会在内存里保留上一份根密钥和 instance id。
@@ -133,7 +138,10 @@ pb-mapper admin --server relay.example.com:7666 \
   key renew 4294967296 --ttl 7d
 ```
 
-默认最短 TTL 为 10 秒，最长为 30 天，服务端可调整最大值。
+默认最短 TTL 为 10 秒，最长为 30 天，服务端可调整最大值。最大 TTL 不在 10 秒到 365 天
+之间，或 key 容量不在 1 到 1,048,576 之间时，中继拒绝启动，在动状态目录之前返回
+`auth_config_invalid`：CLI 参数和环境变量本就限定在这些范围内，SDK 程序自己构造的
+`AuthConfig` 也做同样的检查。
 
 ### 多个 key 共用的命名空间
 
@@ -239,10 +247,16 @@ Linux、macOS 与 Windows 桌面二进制默认写到用户可写的应用目录
 | `auth.snapshot` | AES-256-GCM 加密的紧凑槽位快照 |
 | `auth.wal` | 带长度前缀、逐条加密的 mutation 与 audit |
 
-变更只有在 WAL 同步成功后才对外确认。后台 actor 每五分钟原子替换 snapshot 并截断
-WAL；snapshot 同时保存有上限的审计历史和仍有效的管理员重放声明，compact 不会丢弃
-这些安全记录。无效文件头、完整性验证失败、WAL 截断、schema 不匹配或 compact 失败
+变更只有在 WAL 同步成功后才对外确认。每五分钟，如果自上次 compact 以来 snapshot
+所含内容有变化（一次 WAL 追加、key 到期或被移除、管理员重放声明离开窗口），或中继
+在此期间启动过，后台 actor 就原子替换 snapshot 并截断 WAL；空闲的状态不写任何东西。
+snapshot 同时保存有上限的审计历史和仍有效的管理员重放声明，compact 不会丢弃这些安全
+记录。actor 把每条命令和每次 compact 放到异步运行时的 blocking 线程池上，按到达顺序
+一次一个地执行，启动时的文件操作也在那里完成，所以它们的写入和同步不会拖住中继运行时
+上的其他任务。无效文件头、完整性验证失败、WAL 截断、schema 不匹配或 compact 失败
 都会进入 safe mode：临时凭据全部 fail closed，管理员仍可查看状态并执行显式 reset。
+在 Windows 以外，WAL 追加若无法把 `auth.wal` 的权限设为 `0600`，则什么也不写，以
+`temporary_key_store_unavailable` 拒绝，不进入 safe mode。
 `namespace-allocator` 损坏的影响范围更小：分配命名空间和向命名空间签发会以
 `namespace_allocator_unavailable` 失败，已有 key 和普通签发不受影响。删除该文件即可解除，这表示
 让中继继续使用加密状态中的那一份。如果中继同时处于 safe mode，那一份也已丢失：应从备份恢复该文件

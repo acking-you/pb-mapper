@@ -130,22 +130,30 @@ freshness, but it does not control how long the claim is retained.
 
 The relay also appends every admitted first flight to `connection.replay` in
 the auth state directory and reloads the last ten minutes of it at start, so a
-restart does not reopen the window. The log fails closed. If it cannot be
-read at start (a crash in the middle of an append leaves a cut-off last
-record), or a failed append cannot be rolled back, its new directory entry
-synced or the log compacted, the relay refuses every protocol-v2 first flight
-with `connection_replay_store_unavailable` until it restarts with a log it can
-read. It says why once, at error level: the event `replay_log_unavailable`
-names the file, the step that failed and the operating system's error (for a
-failed rollback, also the append error it was undoing). Removing a cut-off
-`connection.replay` and restarting lets the relay admit again, at the cost of
-forgetting the first flights of the last ten minutes. An append that fails but
-leaves the log as it was, as on a full disk or where the log's directory cannot
-be created or opened, refuses that first flight only, also with
-`connection_replay_store_unavailable`, and the next one tries again; while
-appends keep failing the relay says so once, at error level, as
-`replay_log_append_failed`, with the file, the step and the error, and again
-only for a run of failures that follows a success.
+restart does not reopen the window. One writer thread per relay appends the
+first flights that arrive together in one write and one sync, and admits each
+only once that sync has completed. A crash in the middle of an append leaves
+the log's last record cut off. Its admission was never acknowledged, so at
+start the relay drops it, logs `replay_log_cut_off_record_dropped` at warn
+level with the file and the bytes dropped, and rewrites the log whole.
+Otherwise the log fails closed. If it cannot be read at start, ends in a
+cut-off record but holds records naming times more than ten minutes ahead of
+the relay's clock (a log damaged before its last record, a file that is no
+replay log, or one written before the clock was set back by more than ten
+minutes), or a failed append cannot be rolled back, its new directory entry
+synced, the log compacted or its writer started, the relay refuses every
+protocol-v2 first flight with `connection_replay_store_unavailable` until it
+restarts with a log it can read. It says why once, at error level: the event
+`replay_log_unavailable` names the file, the step that failed and the
+operating system's error (for a failed rollback, also the append error it was
+undoing). Removing such a `connection.replay` and restarting lets the relay
+admit again, at the cost of forgetting the first flights of the last ten
+minutes. An append that fails but leaves the log as it was, as on a full disk
+or where the log's directory cannot be created or opened, refuses the first
+flights it carried, also with `connection_replay_store_unavailable`, and the
+next append tries again; while appends keep failing the relay says so once, at
+error level, as `replay_log_append_failed`, with the file, the step and the
+error, and again only for a run of failures that follows a success.
 
 After a live root rotation or auth-state reset, the relay keeps the immediately
 previous root key and instance id in memory. A first flight still encrypted with
@@ -177,7 +185,11 @@ pb-mapper admin --server relay.example.com:7666 \
 ```
 
 Temporary TTLs are at least 10 seconds and at most 30 days by default. The
-server maximum is configurable.
+server maximum is configurable. A relay refuses to start with a maximum TTL
+outside 10 seconds to 365 days, or a key capacity outside 1 to 1,048,576,
+with `auth_config_invalid` before it touches its state directory: the CLI's
+flags and the environment keep to those ranges, and an `AuthConfig` an SDK
+program builds is checked the same way.
 
 ### Namespaces shared by several keys
 
@@ -318,10 +330,16 @@ user-writable application directory instead of `/var/lib`:
 | `auth.wal` | Length-prefixed, individually encrypted mutations and audit records |
 
 The directory is mode `0700`. Mutating operations acknowledge only after the
-WAL record is synced. The actor compacts state every five minutes with an atomic
-snapshot replacement and WAL truncation. The snapshot carries the bounded
+WAL record is synced. Every five minutes, if anything the snapshot carries has
+changed since the last compaction (a WAL append, a key's expiry or removal, an
+administrator replay claim leaving its window) or the relay has started since,
+the actor compacts state with an atomic snapshot replacement and WAL
+truncation; an idle store writes nothing. The snapshot carries the bounded
 audit history and active administrator replay claims, so compaction does not
-discard either security record.
+discard either security record. The actor runs each command and each
+compaction on the async runtime's blocking pool, one at a time and in the
+order they came, and a start does its file work there too, so their writes and
+syncs hold up no other task on the relay's runtime.
 
 The Flutter server uses its application config directory's `auth/` child and
 does not report itself running until both the TCP listener and authentication
@@ -331,7 +349,9 @@ without pretending that a failed `/var/lib` initialization succeeded.
 Invalid authentication-state headers, failed integrity checks, truncated WAL
 records, schema mismatch, and failed compaction place temporary authentication
 in safe mode. Administrator authentication stays available for inspection and
-explicit reset; temporary authentication fails closed. A damaged
+explicit reset; temporary authentication fails closed. Outside Windows, a WAL
+append that cannot set `auth.wal`'s mode to `0600` writes nothing and is
+refused with `temporary_key_store_unavailable`, without safe mode. A damaged
 `namespace-allocator` is narrower: allocating and issuing into a namespace fail with
 `namespace_allocator_unavailable`, while existing keys and ordinary issuance keep
 working. Remove the file to clear it, which tells the relay to continue from the
