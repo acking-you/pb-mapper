@@ -41,7 +41,11 @@ fn picture(width: usize, height: usize) -> CFRetained<CVPixelBuffer> {
 
 /// The session encodes NV12 as Annex B: a keyframe exactly where one is
 /// asked for, each carrying its SPS and PPS, and nothing but P-frames
-/// between them (an unbounded GOP); the output wakes thread C.
+/// between them (an unbounded GOP); the output wakes thread C. A unit the
+/// encoder drops, or outputs later than `LATE_OUTPUT` and so discards (a
+/// cold software encoder on a busy runner can take that long for its
+/// first), leaves no output and a keyframe due: it is submitted again as
+/// thread C would, as a keyframe.
 #[test]
 fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
     let wake = Wake::new();
@@ -57,15 +61,41 @@ fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
     .expect("VideoToolbox makes an H.264 session on every Mac, in software if need be");
     let picture = picture(640, 360);
     let asked = [true, false, false, false, true, false];
-    for (frame, keyframe) in asked.into_iter().enumerate() {
+    for (frame, asked) in asked.into_iter().enumerate() {
+        let mut keyframe = asked;
+        let mut submitted = Instant::now();
         encoder.encode(&picture, keyframe, frame > 0).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = submitted + Duration::from_secs(3);
+        let mut retries = 0;
         let unit = loop {
+            // Read before the queue: an output leaves `pending` and joins the
+            // queue under one lock, so nothing pending and nothing queued is
+            // a unit that came to nothing.
+            let idle = encoder.pending() == 0;
             if let Some(unit) = encoder.drain().unwrap() {
                 break unit;
             }
+            if idle {
+                assert!(encoder.keyframe_due() || !keyframe, "frame {frame}");
+                retries += 1;
+                assert!(retries <= 3, "frame {frame} discarded {retries} times");
+                // Past the harness's capture, so that the log says so.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "{}: frame {frame} discarded {:?} after its submit; submitted again as a keyframe",
+                    module_path!(),
+                    submitted.elapsed()
+                );
+                keyframe = true;
+                submitted = Instant::now();
+                encoder.encode(&picture, keyframe, frame > 0).unwrap();
+                continue;
+            }
             assert!(Instant::now() < deadline, "no output for frame {frame}");
-            waiter.wait(deadline).unwrap();
+            // A discard wakes nothing: look again shortly.
+            waiter
+                .wait(deadline.min(Instant::now() + Duration::from_millis(10)))
+                .unwrap();
         };
         let mut ranges = Vec::new();
         let parsed = AccessUnit::parse(&unit.bytes, &mut ranges).unwrap();
