@@ -73,5 +73,9 @@ required-features = ["desktop"]
 name = "desktop_display_mode"
 required-features = ["desktop"]
 
+[[example]]
+name = "desktop_ui_host"
+required-features = ["desktop"]
+
 [lints]
 workspace = true
