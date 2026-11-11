@@ -118,12 +118,13 @@ pub(super) async fn handle_client_conn_selected(
     // Bounds the whole wait for a stream, every wait for the manager included,
     // and on its own the refusal, if one is written after it.
     let setup_timeout = pb_mapper_core::config::control_io_timeout().min(Duration::from_secs(5));
+    let setup_deadline = prev_time + setup_timeout;
     let mut subscriber = Subscriber {
         conn: &mut conn,
         left: None,
     };
-    let setup = timeout(
-        setup_timeout,
+    let setup = timeout_at(
+        setup_deadline,
         get_server_stream(
             key.clone(),
             conn_id,
@@ -133,18 +134,19 @@ pub(super) async fn handle_client_conn_selected(
         ),
     )
     .await;
+    let left = |source| super::error::Error::ClientConnLeft {
+        key: key.clone(),
+        conn_id,
+        source,
+    };
     let (setup_result, refusal) = match (subscriber.left, setup) {
         // A subscriber that gave up, as a client does when its own attempt
         // runs out, is answered nothing, whatever the wait came to: a stream
         // that came for it is dropped.
-        (Some(source), _) | (None, Ok(Ok(Setup::Abandoned(source)))) => (
-            Err(super::error::Error::ClientConnLeft {
-                key: key.clone(),
-                conn_id,
-                source,
-            }),
-            None,
-        ),
+        (Some(source), _) => (Err(left(source)), None),
+        (None, Ok(Ok(Setup::Abandoned(abandoned)))) => {
+            (Err(left(abandoned.settle(setup_deadline).await)), None)
+        }
         (None, Ok(Ok(Setup::Ready(ready)))) => (Ok(ready), None),
         (None, Ok(Ok(Setup::Refused { refusal, reason }))) => (
             ClientConnSubcribeFailedSnafu {
@@ -540,9 +542,58 @@ enum Setup {
         refusal: PbConnResponse,
         reason: String,
     },
-    /// The subscriber left, for this reason, and the relay has finished what
-    /// the registration it asked owed it.
-    Abandoned(std::io::Error),
+    /// The subscriber left, and nothing more is asked on its behalf.
+    Abandoned(Abandoned),
+}
+
+/// A subscribe whose subscriber has left, while the registration asked last
+/// still owes it an answer.
+///
+/// That registration still gets the verdict it would with the subscriber
+/// waiting: until `until`, the end of the subscribe's recovery, the subscribe
+/// keeps its place, so that the routing manager still takes that
+/// registration's late answer for it. An acknowledgement teaches the
+/// registration's budget, and either answer readmits it.
+struct Abandoned {
+    /// Why the subscriber left.
+    reason: std::io::Error,
+    /// The routing manager's answers to this subscribe.
+    receiver: ConnTaskReceiver,
+    /// The generation of the registration asked last, if any was.
+    asked: Option<u64>,
+    until: Instant,
+}
+
+impl Abandoned {
+    /// Keep the subscribe's place until the registration asked last answers,
+    /// `until` passes, or `deadline`, the end of the subscribe's setup, does.
+    /// A stream that comes is dropped. Answers why the subscriber left.
+    async fn settle(self, deadline: Instant) -> std::io::Error {
+        let Self {
+            reason,
+            receiver,
+            asked,
+            until,
+        } = self;
+        if let Some(generation) = asked {
+            let answered = async {
+                while let Ok(answer) = receiver.recv().await {
+                    if let ConnTask::StreamAck {
+                        server_generation, ..
+                    }
+                    | ConnTask::StreamResp {
+                        server_generation, ..
+                    } = answer
+                        && server_generation == generation
+                    {
+                        break;
+                    }
+                }
+            };
+            let _ = timeout_at(until.min(deadline), answered).await;
+        }
+        reason
+    }
 }
 
 /// The subscriber's connection while the relay finds it a stream, and why
@@ -633,10 +684,10 @@ fn replacement_deadline(ack_timeout: Duration) -> Instant {
 /// wait for its acknowledgement and then its stream, and move on to another
 /// registration, or wait for a replacement, when one falls silent.
 ///
-/// A subscriber that leaves is asked for no more: its subscribe ends with
-/// [`Setup::Abandoned`] once the registration already asked has given the
-/// relay what it owes, to the same deadlines and with the same verdicts as
-/// for a subscriber still waiting (see [`abandon`]).
+/// A subscriber that leaves is asked for no more. Each wait already under way
+/// still runs to its deadline, with the same verdict on its registration as
+/// for a subscriber still waiting, and then the subscribe ends with
+/// [`Setup::Abandoned`], or with the stream that came, which is dropped.
 async fn get_server_stream(
     key: ImutableKey,
     conn_id: RemoteConnId,
@@ -666,7 +717,14 @@ async fn get_server_stream(
         };
         let sent = match subscriber.unless_gone(task_sender.send(request)).await {
             Ok(sent) => sent,
-            Err(left) => return Ok(abandon(&receiver, asked, recovery_deadline, left).await),
+            Err(reason) => {
+                return Ok(Setup::Abandoned(Abandoned {
+                    reason,
+                    receiver,
+                    asked,
+                    until: recovery_deadline,
+                }));
+            }
         };
         sent.context(ClientConnSendSubcribeSnafu {
             key: key.clone(),
@@ -772,12 +830,9 @@ async fn get_server_stream(
                     recovery_timeout = ?recovery_timeout,
                     "waiting for replacement server control connection"
                 );
-                if let Err(left) = subscriber
-                    .unless_gone(tokio::time::sleep(Duration::from_millis(50)))
-                    .await
-                {
-                    return Ok(abandon(&receiver, asked, recovery_deadline, left).await);
-                }
+                subscriber
+                    .meanwhile(tokio::time::sleep(Duration::from_millis(50)))
+                    .await;
                 continue 'attempt;
             }
             _ => ClientConnSubcribeRespNotMatchSnafu {
@@ -922,41 +977,6 @@ async fn get_server_stream(
         }
         .fail()?
     }
-}
-
-/// End a subscribe whose subscriber has left, for the reason `left`.
-///
-/// Nothing is asked on its behalf any more, but the registration asked last,
-/// of generation `asked`, still gets the verdict it would with the subscriber
-/// waiting: until `until`, the end of the subscribe's recovery, the subscribe
-/// keeps its place, so that the routing manager still takes that
-/// registration's late answer for it. An acknowledgement teaches the
-/// registration's budget, and either answer readmits it. The answer ends the
-/// wait, and a stream is dropped.
-async fn abandon(
-    receiver: &ConnTaskReceiver,
-    asked: Option<u64>,
-    until: Instant,
-    left: std::io::Error,
-) -> Setup {
-    if let Some(generation) = asked {
-        let answered = async {
-            while let Ok(answer) = receiver.recv().await {
-                if let ConnTask::StreamAck {
-                    server_generation, ..
-                }
-                | ConnTask::StreamResp {
-                    server_generation, ..
-                } = answer
-                    && server_generation == generation
-                {
-                    break;
-                }
-            }
-        };
-        let _ = timeout_at(until, answered).await;
-    }
-    Setup::Abandoned(left)
 }
 
 async fn write_subscribe_error(
