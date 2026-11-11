@@ -1,12 +1,12 @@
 //! Cases that run the `pb-mapper` binary.
 //!
 //! A binary of its own, because they start processes. On Windows a child
-//! inherits every socket open in its parent when it starts (Tokio's sockets
-//! come from mio 1.1, which marks none non-inheritable) and keeps it until it
-//! exits, so a connection another case dropped stays open, then resets, and
-//! a listener it dropped keeps its port. No case here waits for a close, and
-//! no case here reserves a port: a child relay binds port 0 and says which
-//! port it took.
+//! inherits every inheritable socket open in its parent when it starts and
+//! keeps it until it exits, so a connection another case dropped stays open,
+//! then resets, and a listener it dropped keeps its port (Tokio's sockets
+//! were inheritable until mio 1.2.1). No case here waits for a close, and no
+//! case here reserves a port: a child relay binds port 0 and says which port
+//! it took.
 
 // An integration test: a failed `unwrap` is a failed test, which is the report
 // this target exists to produce. `allow-unwrap-in-tests` covers `#[cfg(test)]`

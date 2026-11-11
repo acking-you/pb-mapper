@@ -122,9 +122,9 @@ impl From<SocketAddr> for ResolvedAddrs {
 
 /// Resolve `addr` to every candidate it names.
 ///
-/// A literal `ip:port` short-circuits. Otherwise `localhost:` goes to the system
-/// resolver — the custom DNS path does not answer for it — and any other hostname
-/// tries the configured DNS servers first, falling back to the system resolver.
+/// A literal `ip:port` short-circuits; anything else goes to the system
+/// resolver. Only [`resolve_addrs_async`] asks the configured DNS servers
+/// first.
 #[inline]
 pub fn resolve_addrs(addr: &str) -> Result<ResolvedAddrs> {
     // The literal case returns here; otherwise the parse error is kept as the

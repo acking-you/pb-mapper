@@ -6,7 +6,7 @@
 //! - `regression`, `regression_client` and `regression_cli` set the process
 //!   credential themselves, the second sets client timings for its whole
 //!   process, and the third starts processes, which on Windows inherit every
-//!   socket open at the time (see `regression/main.rs`);
+//!   inheritable socket open at the time (see `regression/main.rs`);
 //! - `lease_reclaim` shortens the lease of every relay in its process;
 //! - `network_recovery` sets the health-check interval and announces network
 //!   changes;

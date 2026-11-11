@@ -484,7 +484,7 @@ const REPLACEMENT_MARGIN: Duration = Duration::from_millis(200);
 /// suspect grace or the connection's doubled acknowledgement budget (see
 /// `on_suspect`), and a replacement registers only after that. Counted from
 /// the subscribe's start instead, the wait ran out before the retirement for
-/// any provider the relay had learned to wait more than 300 ms for, and for
+/// any provider the relay had learned to wait more than 500 ms for, and for
 /// any whose acknowledgement timer fired late.
 fn replacement_deadline(ack_timeout: Duration) -> Instant {
     let grace = pb_mapper_core::config::control_suspect_grace().max(ack_timeout.saturating_mul(2));

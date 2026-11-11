@@ -10,12 +10,12 @@
 //!   case starts: `register` and `connect` against fake relays;
 //! - `regression_cli` runs the `pb-mapper` binary.
 //!
-//! On Windows a child process inherits every socket open in its parent when
-//! it starts (Tokio's sockets come from mio 1.1, which marks none
-//! non-inheritable), and holds it until it exits: a connection its owner
+//! On Windows a child process inherits every inheritable socket open in its
+//! parent when it starts, and holds it until it exits: a connection its owner
 //! dropped stays open, then resets, and a dropped listener keeps its port.
-//! A case here that waits for a close would see neither, so no case here
-//! starts a process.
+//! Tokio's sockets were inheritable until mio 1.2.1; the lock file now has a
+//! later mio, but a case here that waits for a close must not depend on what
+//! every dependency's sockets do, so no case here starts a process.
 //!
 //! The process credential is this binary's (`credential::auth_config`), and
 //! nothing here uses what in the testkit runs `init_test_env` (`Relay`,

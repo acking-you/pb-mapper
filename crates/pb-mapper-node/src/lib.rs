@@ -13,7 +13,7 @@
 //!   rendered message, since napi has no structured error channel.
 //!
 //! Beyond that this crate holds no logic: anything worth testing belongs in the
-//! SDK, which is exercised by `crates/pb-mapper-cli/tests/sdk_e2e.rs`.
+//! SDK, which is exercised by `crates/pb-mapper-cli/tests/e2e/sdk.rs`.
 
 mod admin;
 mod client;

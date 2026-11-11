@@ -2,7 +2,7 @@
 //!
 //! A dedicated test binary, because the cases here shorten
 //! `PB_MAPPER_SERVER_LEASE_TIMEOUT` — which every relay in the process reads on
-//! every sweep. Setting it inside `regression.rs` would retire the registrations
+//! every sweep. Setting it inside `regression` would retire the registrations
 //! of whatever case happened to be running alongside.
 
 // An integration test: a failed `unwrap` is a failed test, which is the report
