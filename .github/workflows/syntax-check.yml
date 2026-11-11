@@ -22,6 +22,7 @@ jobs:
       node: ${{ steps.filter.outputs.node }}
       android: ${{ steps.filter.outputs.android }}
       linux: ${{ steps.filter.outputs.linux }}
+      apple: ${{ steps.filter.outputs.apple }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,6 +53,7 @@ jobs:
             echo "node=true" >> "$GITHUB_OUTPUT"
             echo "android=true" >> "$GITHUB_OUTPUT"
             echo "linux=true" >> "$GITHUB_OUTPUT"
+            echo "apple=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -64,20 +66,24 @@ jobs:
           node=false
           android=false
           linux=false
+          apple=false
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             case "$file" in
               # pb-mapper-ffi lives under ui/ but is a workspace member, so it
               # belongs to the Rust side and must be matched before ui/*. Its
               # JNI layer compiles only for Android; the Linux runner loads
-              # its video exports.
-              ui/native/pb_mapper_ffi/*) rust=true; android=true; linux=true ;;
+              # its video exports and the Apple apps link it.
+              ui/native/pb_mapper_ffi/*) rust=true; android=true; linux=true; apple=true ;;
               ui/native/*) rust=true ;;
-              # The plugin set is part of the Gradle and the Linux builds.
-              ui/pubspec.yaml|ui/pubspec.lock) flutter=true; android=true; linux=true ;;
+              # The plugin set is part of the Gradle, the Linux and the Xcode
+              # builds.
+              ui/pubspec.yaml|ui/pubspec.lock) flutter=true; android=true; linux=true; apple=true ;;
               ui/android/*) flutter=true; android=true ;;
               # The Linux runner and its GStreamer video module.
               ui/linux/*|scripts/build/check-linux-bundle.sh|scripts/test/linux-desktop-video.sh) flutter=true; linux=true ;;
+              # The Apple runners and the video decoder they share.
+              ui/macos/*|ui/ios/*|ui/darwin/*) flutter=true; apple=true ;;
               ui/*) flutter=true ;;
               js/*) node=true ;;
               # The Node-API addon is a workspace crate; SDK changes must also
@@ -101,7 +107,7 @@ jobs:
               # the unanchored entry above only ever catches the root manifest.
               */Cargo.toml|*/Cargo.lock) rust=true ;;
               # A change to this workflow has to prove itself on every job.
-              .github/workflows/syntax-check.yml) rust=true; flutter=true; node=true; android=true; linux=true ;;
+              .github/workflows/syntax-check.yml) rust=true; flutter=true; node=true; android=true; linux=true; apple=true ;;
             esac
           done <<< "$changed"
 
@@ -110,11 +116,13 @@ jobs:
           echo "node=$node"
           echo "android=$android"
           echo "linux=$linux"
+          echo "apple=$apple"
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
           echo "flutter=$flutter" >> "$GITHUB_OUTPUT"
           echo "node=$node" >> "$GITHUB_OUTPUT"
           echo "android=$android" >> "$GITHUB_OUTPUT"
           echo "linux=$linux" >> "$GITHUB_OUTPUT"
+          echo "apple=$apple" >> "$GITHUB_OUTPUT"
 
   rust-syntax-check:
     needs: changes
@@ -463,6 +471,142 @@ jobs:
 
       - name: Decode clips through the video module
         run: bash scripts/test/linux-desktop-video.sh --software
+
+  # The Apple apps: the macOS and the iOS runner with the video decoder they
+  # share (ui/darwin/DesktopVideo.swift), linked against the FFI library each
+  # takes. release-ui builds the macOS app only at a tag and never builds iOS.
+  macos-app:
+    needs: changes
+    if: needs.changes.outputs.apple == 'true'
+    runs-on: macos-latest
+    env:
+      CARGO_INCREMENTAL: 0  # Incremental state only bloats the cached target/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-macos-app-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-macos-app-
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.9
+          channel: "stable"
+          cache: true
+
+      - name: Cache Flutter dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.pub-cache
+          key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-flutter-
+
+      # release-ui's recipe: the dylib for the runner's architecture, staged
+      # in ui/native/macos for the Xcode project to link and embed.
+      - name: Build the FFI library
+        run: bash scripts/build/pb-mapper-ffi-macos.sh
+
+      # The host architecture only, as the Makefile builds it: the dylib has
+      # no other slice.
+      - name: Build the macOS app
+        working-directory: ui
+        run: |
+          set -euo pipefail
+          flutter pub get
+          FLUTTER_XCODE_ARCHS="$(uname -m)" FLUTTER_XCODE_ONLY_ACTIVE_ARCH=YES \
+            flutter build macos --debug
+          test -f build/macos/Build/Products/Debug/pb-mapper.app/Contents/Frameworks/libpb_mapper_ffi.dylib
+
+  ios-app:
+    needs: changes
+    if: needs.changes.outputs.apple == 'true'
+    runs-on: macos-latest
+    env:
+      CARGO_INCREMENTAL: 0  # Incremental state only bloats the cached target/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          targets: aarch64-apple-ios
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-ios-app-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ios-app-
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.9
+          channel: "stable"
+          cache: true
+
+      - name: Cache Flutter dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.pub-cache
+          key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-flutter-
+
+      # The aarch64-apple-ios static library, staged in ui/native/ios for
+      # ui/ios/Flutter/PbMapperFfi.xcconfig to link.
+      - name: Build the FFI static library
+        run: bash scripts/build/pb-mapper-ffi-ios.sh
+
+      - name: Build the iOS app without signing
+        working-directory: ui
+        run: |
+          set -euo pipefail
+          flutter pub get
+          flutter build ios --debug --no-codesign
+
+      # Dart and the video decoder find the FFI by name at run time only, so a
+      # link that drops it still succeeds: check that the app kept it, exported.
+      - name: Check that the app exports the FFI
+        working-directory: ui/build/ios/iphoneos/Runner.app
+        run: |
+          set -euo pipefail
+          exports="$(for image in Runner Runner.debug.dylib; do
+            if [ -f "$image" ]; then nm -gU "$image"; fi
+          done)"
+          for symbol in _pb_mapper_create _pb_mapper_desktop_video_next_v1 _pb_mapper_desktop_instance_token_v1; do
+            if ! grep -q " T ${symbol}\$" <<< "$exports"; then
+              echo "::error::${symbol} is not exported by the iOS app"
+              exit 1
+            fi
+          done
 
   release-package-check:
     runs-on: ubuntu-latest
