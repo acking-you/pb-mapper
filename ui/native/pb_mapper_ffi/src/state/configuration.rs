@@ -358,17 +358,18 @@ fn write_store<T: Serialize>(path: &Path, store: &T, noun: &str) -> Result<(), C
 ///
 /// - **Atomic**, so a crash leaves the old file or the new one, never a torn
 ///   one: core's `replace_contents`, a new file renamed over the old. The new
-///   file keeps the old one's mode but is this user's, and on Windows takes
-///   its directory's inherited permissions. That is a new file, and an
-///   existing one this user may write that has a single name and, on unix,
-///   is this user's, in a directory that takes a new file and lets it
-///   replace the old.
+///   file keeps the old one's mode but is this user's, in this user's group
+///   (or its directory's, which is then the same), and on Windows takes its
+///   directory's inherited permissions. That is a new file, and an existing
+///   one this user may write that has a single name and, on unix, is this
+///   user's and in that group, in a directory that takes a new file and lets
+///   it replace the old.
 /// - **In place**, as 0.11.0 wrote, so a crash can cut the file short: a file
-///   with more than one name (a hard link) or another user's that this user
-///   may write, both on unix (Windows replaces them: a hard link's other
-///   names keep the old contents, and another user's file becomes this
-///   user's), a directory that takes no new file, and a file the rename may
-///   not replace (refused, a mount point, or on another device).
+///   with more than one name (a hard link); on unix another user's that this
+///   user may write, or one in another group (Windows replaces another
+///   user's file, which becomes this user's); a directory that takes no new
+///   file; and a file the rename may not replace (refused, a mount point, or
+///   on another device).
 /// - **Refused**: an existing file this user may not open for writing, such
 ///   as a read-only one or another user's.
 ///
@@ -386,7 +387,7 @@ fn replace_contents(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // Opened for writing first, so a file `fs::write` refuses is refused
     // here too rather than replaced by one this user owns.
     match fs::OpenOptions::new().write(true).open(&target) {
-        Ok(file) if stays_in_place(&file)? => {
+        Ok(file) if stays_in_place(&file, &target)? => {
             drop(file);
             tracing::debug!(
                 "Saving {} in place, a replacement would not be the same file",
@@ -434,24 +435,71 @@ fn writes_in_place(failure: &durable_file::ReplaceError) -> bool {
     }
 }
 
-/// Whether only an in-place write keeps `file` the same file: it has a name
-/// besides the one it was opened by (a hard link), or another user owns it,
-/// whose file a replacement, being this user's, would take away.
+/// Whether only an in-place write keeps `file`, at `path`, the same file: it
+/// has a name besides the one it was opened by (a hard link), another user
+/// owns it, whose file a replacement, being this user's, would take away, or
+/// it is in a group a replacement would not take. A new file takes this
+/// user's group, or on BSD and macOS, and in a set-group-ID directory, its
+/// directory's: a file in both stays in its group either way.
 #[cfg(unix)]
-fn stays_in_place(file: &fs::File) -> io::Result<bool> {
+fn stays_in_place(file: &fs::File, path: &Path) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
     unsafe extern "C" {
         /// The effective user, which owns a file this process creates.
         safe fn geteuid() -> u32;
+        /// The effective group, which a file this process creates takes
+        /// unless its directory gives it its own.
+        safe fn getegid() -> u32;
     }
     let metadata = file.metadata()?;
-    Ok(metadata.nlink() > 1 || metadata.uid() != geteuid())
+    let directory_group = match path.parent() {
+        Some(directory) => fs::metadata(directory)?.gid(),
+        None => getegid(),
+    };
+    Ok(metadata.nlink() > 1
+        || metadata.uid() != geteuid()
+        || metadata.gid() != getegid()
+        || metadata.gid() != directory_group)
 }
 
 /// Whether only an in-place write keeps `file` the same file: on Windows,
-/// where stable Rust can read neither its link count nor its owner, never.
-#[cfg(not(unix))]
-fn stays_in_place(_: &fs::File) -> io::Result<bool> {
+/// one with a name besides the one it was opened by (a hard link), as a
+/// dotfiles tree makes them. Its owner and permissions a replacement does not
+/// keep: stable Rust reads neither, and in the app's own directory a file
+/// that is not this user's comes from a run as administrator, which a
+/// replacement gives back to the user.
+#[cfg(windows)]
+fn stays_in_place(file: &fs::File, _: &Path) -> io::Result<bool> {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+
+    /// `BY_HANDLE_FILE_INFORMATION`: the attributes, three `FILETIME`s, the
+    /// volume serial number and two halves of the size, all `DWORD`s, then the
+    /// link count and two halves of the file index.
+    #[repr(C)]
+    struct FileInformation {
+        _before: [u32; 10],
+        links: u32,
+        _index: [u32; 2],
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(file: *mut c_void, information: *mut FileInformation) -> i32;
+    }
+    let mut information = std::mem::MaybeUninit::<FileInformation>::uninit();
+    // SAFETY: `file` owns the handle for the call, and the call writes one
+    // `BY_HANDLE_FILE_INFORMATION`, which `information` has room for.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call succeeded, so it wrote every field.
+    let information = unsafe { information.assume_init() };
+    Ok(information.links > 1)
+}
+
+/// Whether only an in-place write keeps `file` the same file: nowhere else.
+#[cfg(not(any(unix, windows)))]
+fn stays_in_place(_: &fs::File, _: &Path) -> io::Result<bool> {
     Ok(false)
 }
 
@@ -491,9 +539,17 @@ mod tests {
         let root = TempRoot::new("replace");
         let path = root.path().join("services.json");
         replace_contents(&path, b"first").unwrap();
+        #[cfg(unix)]
+        let first = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&path).unwrap());
         replace_contents(&path, b"second").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"second");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        // This user's file, in its group, with one name, is a new file now.
+        #[cfg(unix)]
+        assert_ne!(
+            std::os::unix::fs::MetadataExt::ino(&fs::metadata(&path).unwrap()),
+            first
+        );
     }
 
     /// A save that cannot replace the file fails and leaves nothing beside it.
@@ -548,8 +604,8 @@ mod tests {
     }
 
     /// A file with a second name, a hard link, is written in place, so both
-    /// names read what was saved.
-    #[cfg(unix)]
+    /// names read what was saved: on Windows too, where a dotfiles tree
+    /// takes hard links, which need no privilege as symbolic links do.
     #[test]
     fn a_save_reaches_every_hard_link_to_the_file() {
         let root = TempRoot::new("replace-hard-link");
@@ -582,6 +638,30 @@ mod tests {
         replace_contents(&path, b"new").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"new");
         assert_eq!(fs::metadata(&path).unwrap().uid(), OTHER);
+    }
+
+    /// A file in another group than a replacement would take, as one shared
+    /// through a group is, is written in place, so it keeps its group. Only
+    /// a member of a second group, or root, can give a file one; elsewhere
+    /// this checks nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_in_another_group_keeps_it() {
+        use std::os::unix::fs::MetadataExt;
+        let root = TempRoot::new("replace-group");
+        let path = root.path().join("config.json");
+        fs::write(&path, b"old").unwrap();
+        let own = fs::metadata(&path).unwrap().gid();
+        // `nogroup`, `users` and `adm` on Linux; `staff` and `admin` on macOS.
+        let Some(other) = [65534, 100, 4, 20, 80]
+            .into_iter()
+            .find(|&gid| gid != own && std::os::unix::fs::chown(&path, None, Some(gid)).is_ok())
+        else {
+            return;
+        };
+        replace_contents(&path, b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::metadata(&path).unwrap().gid(), other);
     }
 
     /// A file this user may not write is refused, as an in-place write
