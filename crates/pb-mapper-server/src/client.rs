@@ -18,6 +18,7 @@ use crate::error::{
     ClientConnWriteStreamRespSnafu,
 };
 use crate::guard::{ConnLease, Deregistration};
+use crate::routing::SERVICE_NOT_AVAILABLE;
 use crate::task::ConnTaskReceiver;
 use pb_mapper_core::checksum::{AesKeyType, gen_random_key};
 use pb_mapper_core::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec};
@@ -114,54 +115,83 @@ pub(super) async fn handle_client_conn_selected(
         },
     )?;
     let prev_time = Instant::now();
-    // Bounds the whole subscribe exchange, every wait for the manager included.
+    // Bounds the whole wait for a stream, every wait for the manager included,
+    // and on its own the refusal, if one is written after it.
     let setup_timeout = pb_mapper_core::config::control_io_timeout().min(Duration::from_secs(5));
-    let setup_result = timeout(setup_timeout, async {
-        let mut subscriber = Subscriber {
-            conn: &mut conn,
-            left: None,
-        };
-        let setup = get_server_stream(
+    let mut subscriber = Subscriber {
+        conn: &mut conn,
+        left: None,
+    };
+    let setup = timeout(
+        setup_timeout,
+        get_server_stream(
             key.clone(),
             conn_id,
             task_sender.clone(),
             selected,
             &mut subscriber,
-        )
-        .await;
+        ),
+    )
+    .await;
+    let (setup_result, refusal) = match (subscriber.left, setup) {
         // A subscriber that gave up, as a client does when its own attempt
         // runs out, is answered nothing, whatever the wait came to: a stream
         // that came for it is dropped.
-        let setup = match subscriber.left {
-            Some(source) => Setup::Abandoned(source),
-            None => setup?,
-        };
-        match setup {
-            Setup::Ready(ready) => Ok(ready),
-            Setup::Refused { refusal, reason } => {
-                write_subscribe_error(&mut conn, &session, refusal, &key, conn_id).await?;
-                ClientConnSubcribeFailedSnafu {
-                    key: key.clone(),
-                    conn_id,
-                    reason,
-                }
-                .fail()
-            }
-            Setup::Abandoned(source) => Err(super::error::Error::ClientConnLeft {
+        (Some(source), _) | (None, Ok(Ok(Setup::Abandoned(source)))) => (
+            Err(super::error::Error::ClientConnLeft {
                 key: key.clone(),
                 conn_id,
                 source,
             }),
+            None,
+        ),
+        (None, Ok(Ok(Setup::Ready(ready)))) => (Ok(ready), None),
+        (None, Ok(Ok(Setup::Refused { refusal, reason }))) => (
+            ClientConnSubcribeFailedSnafu {
+                key: key.clone(),
+                conn_id,
+                reason,
+            }
+            .fail(),
+            Some(refusal),
+        ),
+        (None, Ok(Err(error))) => (Err(error), None),
+        // One still waiting, as far as the relay knows, is told to try again,
+        // as one is that no registration can serve, rather than left to take
+        // a closed connection for a failed transport.
+        (None, Err(_)) => (
+            Err(super::error::Error::ClientConnSetupTimeout {
+                key: key.clone(),
+                conn_id,
+                timeout: setup_timeout,
+            }),
+            Some(PbConnResponse::error(
+                SERVICE_NOT_AVAILABLE,
+                format!("no registration of `{key}` served a stream within {setup_timeout:?}"),
+                true,
+            )),
+        ),
+    };
+    if let Some(refusal) = refusal {
+        // The subscriber's one answer, written once: a second would reuse its
+        // session's first response nonce. A small first frame waits on its
+        // peer only if the peer withholds even that much room.
+        let written = timeout(
+            setup_timeout,
+            write_subscribe_error(subscriber.conn, &session, refusal, &key, conn_id),
+        )
+        .await;
+        if !matches!(written, Ok(Ok(()))) {
+            tracing::debug!(
+                event = "subscribe_refusal_unsent",
+                key = %key,
+                client_conn_id = %conn_id,
+                timed_out = written.is_err(),
+                error = ?written.ok().and_then(std::result::Result::err),
+                "the subscriber's refusal could not be written"
+            );
         }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        Err(super::error::Error::ClientConnSetupTimeout {
-            key: key.clone(),
-            conn_id,
-            timeout: setup_timeout,
-        })
-    });
+    }
     let ReadyStream {
         mut server_stream,
         server_session,
@@ -728,12 +758,10 @@ async fn get_server_stream(
                         recovery_timeout = ?recovery_timeout,
                         "subscribe recovery timed out"
                     );
-                    ClientConnSubcribeFailedSnafu {
-                        key: key.clone(),
-                        conn_id,
-                        reason: reason.clone(),
-                    }
-                    .fail()?
+                    // What a subscribe that may not wait for a replacement
+                    // is told at once.
+                    let refusal = PbConnResponse::error(SERVICE_NOT_AVAILABLE, &reason, true);
+                    return Ok(Setup::Refused { refusal, reason });
                 }
                 tracing::info!(
                     event = "subscribe_waiting_for_replacement",

@@ -164,6 +164,18 @@ async fn read_service_health(server_addr: SocketAddr, key: &str) -> Vec<(u32, bo
         .collect()
 }
 
+/// Assert that `response` is the retryable refusal a subscribe gets when no
+/// registration can serve it: the client tries again, and counts it neither
+/// against the relay nor against the connection it came over.
+fn assert_unavailable(response: &[u8]) {
+    let response = PbConnResponse::decode(response).unwrap();
+    let PbConnResponse::Error(refusal) = response else {
+        panic!("expected a refusal, got {response:?}");
+    };
+    assert_eq!(refusal.code, "service_not_available");
+    assert!(refusal.retryable, "the refusal is not retryable");
+}
+
 /// Acknowledge a stream request on a control connection's `writer`.
 async fn acknowledge(writer: &mut impl MessageWriter, (client_id, server_generation): (u32, u64)) {
     let ack = PbServerRequest::StreamAck {
@@ -551,10 +563,11 @@ async fn subscribe_retires_unacked_control_connection() {
 
     let mut client = subscribe(relay.addr, key).await;
     let mut reader = get_header_msg_reader(&mut client).unwrap();
-    let result = timeout(Duration::from_secs(4), reader.read_msg())
+    let response = timeout(Duration::from_secs(4), reader.read_msg())
         .await
-        .expect("subscribe did not finish after stale control timed out");
-    assert!(result.is_err());
+        .expect("subscribe did not finish after stale control timed out")
+        .expect("the relay closed the subscriber's connection unanswered");
+    assert_unavailable(response);
 
     // Subscribe failure and the manager's suspect sweep complete independently.
     timeout(Duration::from_secs(3), async {
@@ -975,6 +988,56 @@ async fn a_subscriber_that_leaves_does_not_take_a_late_acknowledgement_with_it()
             PbConnResponse::Subcribe { .. }
         ),
         "the relay did not learn from an acknowledgement that came after its subscriber had left"
+    );
+
+    relay.stop().await;
+}
+
+/// A subscriber the relay has not served when its five-second setup bound
+/// runs out gets the retryable refusal it would get from a relay with no
+/// registration to serve it, not a closed connection, which its client counts
+/// as a failed transport. Here the only provider is one the relay has learned
+/// to wait about two seconds for, and it answers nothing: the wait for its
+/// replacement would run past the bound.
+#[tokio::test]
+async fn a_subscribe_that_runs_out_its_setup_bound_is_refused() {
+    let relay = InProcessRelay::start(auth_config()).await;
+    let key = "slowest-backend";
+
+    let control = TcpStream::connect(relay.addr).await.unwrap();
+    let (mut reader_stream, mut writer_stream) = control.into_split();
+    let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+        register_control_conn_parts(&mut reader, &mut writer, key).await;
+    }
+    let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+
+    // Acknowledged two seconds late, for a subscriber that has left: the
+    // relay learns to wait 1.95 s, and then for the suspected provider's
+    // replacement until twice that past it.
+    let mut first = subscribe(relay.addr, key).await;
+    let request = read_stream_request(&mut reader, "provider").await;
+    first.shutdown().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    acknowledge(&mut writer, request).await;
+    closed_by_relay(&mut first).await;
+
+    let mut second = subscribe(relay.addr, key).await;
+    let asked = tokio::time::Instant::now();
+    read_stream_request(&mut reader, "provider").await;
+    let mut second_reader = get_header_msg_reader(&mut second).unwrap();
+    let response = timeout(Duration::from_secs(8), second_reader.read_msg())
+        .await
+        .expect("the subscriber was neither served nor refused")
+        .expect("the relay closed the subscriber's connection unanswered");
+    assert_unavailable(response);
+    // Not the refusal that ends a shorter wait for a replacement, at about
+    // 2.8 s, which a relay that had not learned the budget would send.
+    assert!(
+        asked.elapsed() >= Duration::from_secs(4),
+        "refused after {:?}, before the setup bound",
+        asked.elapsed()
     );
 
     relay.stop().await;

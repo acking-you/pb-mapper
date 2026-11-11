@@ -17,6 +17,11 @@ use crate::service_key::split_scoped_service_key;
 
 pub type ImutableKey = Arc<str>;
 
+/// The retryable refusal code a subscribe gets when no registration of its
+/// service can serve it: none is registered, none answered in time, or none
+/// did before its setup bound.
+pub(crate) const SERVICE_NOT_AVAILABLE: &str = "service_not_available";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerConnHealth {
     Healthy,

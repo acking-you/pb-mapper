@@ -16,8 +16,9 @@ use crate::error::{
 };
 use crate::guard::ConnLease;
 use crate::routing::{
-    ImutableKey, PendingStream, ServerConnHealth, ServerConnInfo, cancel_and_remove_server_conn,
-    record_server_conn_activity_by_conn_id, registered_server_conn_count, service_conn_count,
+    ImutableKey, PendingStream, SERVICE_NOT_AVAILABLE, ServerConnHealth, ServerConnInfo,
+    cancel_and_remove_server_conn, record_server_conn_activity_by_conn_id,
+    registered_server_conn_count, service_conn_count,
 };
 use crate::service_key::split_scoped_service_key;
 use crate::task::{ConnTask, ConnTaskSender};
@@ -572,7 +573,7 @@ fn reject_subscribe(
         }
     } else if conn_sender
         .try_send(ConnTask::SubcribeFailed {
-            code: "service_not_available".to_string(),
+            code: SERVICE_NOT_AVAILABLE.to_string(),
             reason: reason.clone(),
             retryable: true,
         })
