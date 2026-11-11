@@ -257,6 +257,7 @@ async fn run(
                     "keepAliveEnabled": config.keep_alive_enabled,
                     "relayTransport": config.relay_transport,
                     "lanFirst": config.lan_first,
+                    "lanTransport": config.lan_transport,
                     "msgHeaderKeySet": !config.msg_header_key.is_empty(),
                     "isolatedRelayAdminKeySet": isolated_admin_key.is_some(),
                 })),
@@ -341,5 +342,28 @@ mod tests {
         let state = Arc::new(Mutex::new(PbMapperState::unloaded()));
         let hello = dispatch(&state, Command::Hello, Origin::Cli).await;
         assert_eq!(hello.data.unwrap()["appVersion"], released);
+    }
+
+    /// `config-get` reads back every setting of this computer's that a
+    /// connection takes, the LAN transport among them.
+    #[tokio::test]
+    async fn config_get_reads_back_the_lan_transport() {
+        // A state's settings set the process credential (none, here).
+        let _guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
+            .lock()
+            .await;
+        let root = crate::test_support::TempRoot::new("config-get");
+        let mut state = PbMapperState::new(Some(root.path().to_string_lossy().into_owned()));
+        state
+            .update_config(state::AppConfig {
+                lan_transport: pb_mapper_client::sdk::LanTransport::Tcp,
+                ..state.get_config_status()
+            })
+            .unwrap();
+        let state = Arc::new(Mutex::new(state));
+        let config = dispatch(&state, Command::ConfigGet, Origin::Cli).await;
+        let data = config.data.unwrap();
+        assert_eq!(data["lanTransport"], "tcp", "{data}");
+        assert_eq!(data["lanFirst"], true, "{data}");
     }
 }
