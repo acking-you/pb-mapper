@@ -273,9 +273,10 @@ class DesktopDecoders {
     );
   }
 
-  /// No answer (a probe that failed or has not answered yet): H.264 only,
-  /// at 1080p, what every session asked for before the probe. A device
-  /// that decodes more says so when it answers.
+  /// H.264 only, at 1080p, what every session asked for before the probe:
+  /// Android's answer when its probe failed or found no hardware AVC
+  /// decoder, which MediaCodec then decodes in software. A device that
+  /// decodes more says so when it answers.
   static const h264Only = DesktopDecoders(h264: DesktopDecoderLimit.p1080);
 
   final DesktopDecoderLimit? h264, h265;

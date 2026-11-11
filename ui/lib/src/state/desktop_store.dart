@@ -1326,7 +1326,7 @@ class DesktopStore {
   /// codec.
   bool _fallBackFromH265() {
     if (_media?.codec != 'h265') return false;
-    _decoders.value = (_decoders.value ?? DesktopDecoders.h264Only)
+    _decoders.value = (_decoders.value ?? unprobedDesktopDecoders)
         .withoutH265();
     _reconnectNow();
     return true;
@@ -1348,17 +1348,18 @@ class DesktopStore {
 
   /// The decoders the first connect probes; later ones reuse the answer
   /// ([decoders]) without waiting. Until a probe that has not answered
-  /// within [_decoderProbeBound] (a wedged driver) does, attempts are H.264
-  /// only and none waits again; the platform is asked once, and its answer,
-  /// however late, is kept.
+  /// within [_decoderProbeBound] (a wedged driver) does, attempts offer what
+  /// an unanswered probe stands for ([unprobedDesktopDecoders]: H.264 alone
+  /// on Android, no native decoder elsewhere) and none waits again; the
+  /// platform is asked once, and its answer, however late, is kept.
   Future<DesktopDecoders> _probeDecoders() => _probing ??= _api
       .decoders()
-      .catchError((Object _) => DesktopDecoders.h264Only)
+      .catchError((Object _) => unprobedDesktopDecoders)
       .then((probed) {
         if (_disposed) return probed;
         return _decoders.value ??= probed;
       })
-      .timeout(_decoderProbeBound, onTimeout: () => DesktopDecoders.h264Only);
+      .timeout(_decoderProbeBound, onTimeout: () => unprobedDesktopDecoders);
 
   /// D6, and what this computer answered: H.265 is offered when the device
   /// would offer it and the computer has not declined it.

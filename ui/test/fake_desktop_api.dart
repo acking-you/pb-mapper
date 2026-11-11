@@ -61,7 +61,8 @@ class FakeDesktopApi implements DesktopApiClient {
   /// What `cursor_shape` resolves, by [DesktopView.cursorShape].
   final cursorShapes = <int, DesktopCursorShape>{};
 
-  /// The codec a `connect` reports; `h264` needs a texture factory.
+  /// The codec a `connect` that offers a decoder reports; `h264` needs a
+  /// texture factory.
   String codec = 'jpeg';
 
   /// The host encodes H.265: a `connect` that offers it reports `h265`.
@@ -540,7 +541,12 @@ class FakeDesktopApi implements DesktopApiClient {
     viewValue = null;
     return DesktopSession(
       videoSource: ++_sources,
-      codec: h265 && hostH265 ? 'h265' : codec,
+      // As Rust's offer: JPEG wherever this device offers no decoder.
+      codec: decoders.h264 == null && !h265
+          ? 'jpeg'
+          : h265 && hostH265
+          ? 'h265'
+          : codec,
     );
   }
 

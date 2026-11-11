@@ -29,29 +29,61 @@ abstract interface class DesktopVideoTexture {
 typedef DesktopTextureFactory =
     Future<DesktopVideoTexture> Function({required int instanceToken});
 
-/// Android, Windows and Linux can decode H.264 natively; the session's codec
-/// decides (Windows without Media Foundation, and Linux without GStreamer,
-/// take JPEG).
+/// The runners that decode H.264 natively, and H.265 where they can: Android
+/// (MediaCodec), Windows (Media Foundation), macOS and iOS (VideoToolbox),
+/// Linux (GStreamer). The session's codec decides; a device whose probe
+/// offers nothing (Windows without Media Foundation, Linux without GStreamer
+/// or a decoder plugin) takes JPEG ([decodersFromProbe]).
 bool get nativeDesktopVideo =>
-    Platform.isAndroid || Platform.isWindows || Platform.isLinux;
+    Platform.isAndroid ||
+    Platform.isWindows ||
+    Platform.isMacOS ||
+    Platform.isIOS ||
+    Platform.isLinux;
 
 /// What this device decodes natively, from the channel's `decoders` (I4),
 /// which enumerates and never creates a decoder: a bad driver can hang
-/// there. Never throws: no answer, or no channel, is H.264 only.
+/// there. Never throws: no answer, or no channel, is
+/// [unprobedDesktopDecoders].
 Future<DesktopDecoders> probeDesktopDecoders() async {
-  if (!nativeDesktopVideo) return DesktopDecoders.h264Only;
+  if (!nativeDesktopVideo) return const DesktopDecoders();
+  Map<String, Object?>? reply;
   try {
-    final reply = await _ChannelVideoTexture._channel
+    reply = await _ChannelVideoTexture._channel
         .invokeMapMethod<String, Object?>(
           'decoders',
           const <String, Object?>{},
         );
-    return reply == null
-        ? DesktopDecoders.h264Only
-        : DesktopDecoders.fromJson(reply);
   } catch (_) {
-    return DesktopDecoders.h264Only;
+    reply = null;
   }
+  return decodersFromProbe(reply, android: Platform.isAndroid);
+}
+
+/// What a probe that failed, or has not answered yet, stands for on this
+/// device ([decodersFromProbe]).
+DesktopDecoders get unprobedDesktopDecoders =>
+    decodersFromProbe(null, android: Platform.isAndroid);
+
+/// The decoders a `decoders` [reply] reports; null is a probe that failed or
+/// never answered. Android requires an AVC decoder of every device, so where
+/// its probe found no hardware one, or failed, MediaCodec still decodes H.264
+/// in software, at 1080p, as before the probe. Anywhere else a failed probe
+/// offers no decoder and the picture is JPEG, which Dart decodes: a runner
+/// that cannot answer may have no decoder at all.
+DesktopDecoders decodersFromProbe(
+  Map<String, Object?>? reply, {
+  required bool android,
+}) {
+  final probed = reply == null
+      ? const DesktopDecoders()
+      : DesktopDecoders.fromJson(reply);
+  if (!android || probed.h264 != null) return probed;
+  return DesktopDecoders(
+    h264: DesktopDecoderLimit.p1080,
+    h265: probed.h265,
+    displayMaxHz: probed.displayMaxHz,
+  );
 }
 
 /// The channel-backed texture (`pb_mapper/desktop_video` v2). [decoderHints]
