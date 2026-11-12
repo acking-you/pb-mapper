@@ -826,6 +826,70 @@ mod tests {
         assert_eq!(display.resets.len(), 1);
     }
 
+    /// Displays the test steers one by one, one of which may refuse a reset.
+    #[derive(Default)]
+    struct Several {
+        current: std::collections::HashMap<String, Setting>,
+        refusing: Option<&'static str>,
+    }
+    impl DisplayModes for Several {
+        const SUPPORTED: bool = true;
+        fn list(&mut self, _: &str) -> Result<Vec<Mode>> {
+            Ok(vec![mode(2560, 1440), mode(1920, 1080), mode(1280, 720)])
+        }
+        fn current(&mut self, device: &str) -> Result<Setting> {
+            Ok(*self
+                .current
+                .entry(device.to_owned())
+                .or_insert(setting(2560, 1440)))
+        }
+        fn scope(&mut self, _: &str) -> Result<String> {
+            Ok("login 1".into())
+        }
+        fn target(&mut self, _: &str, mode: Mode) -> Result<Setting> {
+            Ok(setting(mode.width, mode.height))
+        }
+        fn apply(&mut self, device: &str, setting: &Setting) -> Result<()> {
+            self.current.insert(device.to_owned(), *setting);
+            Ok(())
+        }
+        fn reset(&mut self, device: &str, original: &Setting) -> Result<()> {
+            if self.refusing == Some(device) {
+                return Err(error("the display no longer offers that mode"));
+            }
+            self.apply(device, original)
+        }
+    }
+
+    /// Two hosts of one process on two displays, one whose restore fails:
+    /// that display stays changed and journalled, to be tried again, and the
+    /// other keeps the mode its host set, and its entry, until that host
+    /// restores it.
+    #[test]
+    fn a_failed_restore_leaves_every_other_display_alone() {
+        let (_dir, journal) = journal("several");
+        let (left, right) = (r"\\.\DISPLAY914", r"\\.\DISPLAY915");
+        let mut displays = Several::default();
+        let (mut first, mut second) = (Guard::new(journal.clone()), Guard::new(journal.clone()));
+        first.set(&mut displays, left, mode(1920, 1080)).unwrap();
+        second.set(&mut displays, right, mode(1280, 720)).unwrap();
+        displays.refusing = Some(left);
+        assert!(first.restore(&mut displays, || {}).is_err());
+        assert_eq!(displays.current(right).unwrap(), setting(1280, 720));
+        let named = |journal: &Journal| -> Vec<String> {
+            journal
+                .read()
+                .into_iter()
+                .map(|entry| entry.device)
+                .collect()
+        };
+        assert_eq!(named(&journal).len(), 2);
+        assert!(second.restore(&mut displays, || {}).unwrap());
+        assert_eq!(displays.current(right).unwrap(), setting(2560, 1440));
+        assert_eq!(displays.current(left).unwrap(), setting(1920, 1080));
+        assert_eq!(named(&journal), [left]);
+    }
+
     /// A journal names display devices only: Windows' and macOS' UUIDs,
     /// never a path.
     #[test]

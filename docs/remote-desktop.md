@@ -437,8 +437,13 @@ screen says nothing about the size a desktop should run at.
   `kCGConfigureForAppOnly`, so macOS itself puts the mode back when the app
   ends, a crash included; the journal entry's scope is the process, so a dead
   process's entry is dropped, never replayed. **Original** and the restores
-  above put back the exact mode found (pixels, scale and refresh). The mode
-  list is unit-tested in CI; changing a mode has not run on a Mac.
+  above put back the exact mode found (pixels, scale and refresh). Where the
+  display no longer offers it, that restore fails, as a failed restore does
+  on Windows: the display stays changed and journalled and is tried again
+  after the session, a viewer that asked hears `display_mode_failed`, and
+  while the session lasts the host card still offers **Restore**; no other
+  display is touched, and the app's end puts the mode back in any case. The mode list is unit-tested
+  in CI; changing a mode has not run on a Mac.
 
 The SDK side is `Viewer::set_display_mode(ModeTarget)`, which answers the mode
 it asked for or a `DisplayModeError` (`Closed`, `NotOffered`,

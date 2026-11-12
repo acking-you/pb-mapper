@@ -21,7 +21,7 @@ use objc2_core_graphics::{
     CGBeginDisplayConfiguration, CGCancelDisplayConfiguration, CGCompleteDisplayConfiguration,
     CGConfigureDisplayWithDisplayMode, CGConfigureOption, CGDirectDisplayID,
     CGDisplayCopyAllDisplayModes, CGDisplayCopyDisplayMode, CGDisplayMode, CGDisplayRotation,
-    CGRestorePermanentDisplayConfiguration, kCGDisplayShowDuplicateLowResolutionModes,
+    kCGDisplayShowDuplicateLowResolutionModes,
 };
 use std::sync::OnceLock;
 
@@ -160,14 +160,14 @@ impl DisplayModes for MacModes {
             .ok_or_else(|| error("the display does not offer that resolution"))?;
         configure(id, mode)
     }
-    /// The owner's mode exactly; where the display no longer lists it, the
-    /// configuration the owner keeps.
+    /// The owner's mode exactly. Where the display no longer offers it,
+    /// the restore fails, and the display stays changed and journalled, to
+    /// be tried again; this app's configuration ends with it in any case.
+    /// Never `CGRestorePermanentDisplayConfiguration`: that puts back every
+    /// display this app changed, another session's included, unasked and
+    /// unjournalled.
     fn reset(&mut self, device: &str, original: &Setting) -> Result<()> {
-        if self.apply(device, original).is_err() {
-            display(device)?;
-            CGRestorePermanentDisplayConfiguration();
-        }
-        Ok(())
+        self.apply(device, original)
     }
     fn scope(&mut self, device: &str) -> Result<String> {
         display(device)?;
