@@ -392,7 +392,10 @@ screen says nothing about the size a desktop should run at.
   the owner presses **Restore** on the host card, which says the remote
   resolution was changed; that needs no control. Releasing control, a paused
   viewer and a fresh grant keep it. If the owner changed the mode in the
-  meantime, the host leaves the owner's choice and forgets its entry.
+  meantime, the host leaves the owner's choice and forgets its entry. A mode
+  of the same size is the owner's too when its refresh rate (by more than
+  1 Hz), depth or, on a Mac, scale differs: a HiDPI mode and its
+  low-resolution twin are one pixel size.
 - A host that ended without putting it back (a crash, a killed app or worker)
   puts it back later from the journal: the app at its first desktop call, a
   host when it starts and after each session, retrying while the display

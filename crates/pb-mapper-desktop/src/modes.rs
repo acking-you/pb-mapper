@@ -170,6 +170,25 @@ impl Setting {
     fn valid(self) -> bool {
         self.size().valid() && self.hz <= 1000 && self.bpp <= 64 && self.scale <= 8
     }
+    /// Whether a display showing `self` shows the mode `other` names: the
+    /// same size, and the same depth, scale and refresh rate wherever both
+    /// say one. Two modes of one size are different modes to their owner (a
+    /// Mac's HiDPI mode and its low-resolution twin, two refresh rates), so a
+    /// host takes neither for the one it set. A field a platform does not
+    /// report (0, which an older journal's missing scale reads as too; a
+    /// refresh rate of 1, Windows' "the hardware's default") matches any, and
+    /// refresh rates 1 Hz apart are one rate (59.94 Hz listed as 60 and read
+    /// back as 59), so a mode read back a little differently is still the
+    /// host's and still put back.
+    pub(crate) fn shows(self, other: Self) -> bool {
+        let unknown = |value: u32, below: u32| value <= below;
+        let rate = unknown(self.hz, 1) || unknown(other.hz, 1) || self.hz.abs_diff(other.hz) <= 1;
+        let same = |a: u32, b: u32| unknown(a, 0) || unknown(b, 0) || a == b;
+        self.size() == other.size()
+            && rate
+            && same(self.bpp, other.bpp)
+            && same(self.scale, other.scale)
+    }
 }
 
 /// One display a host changed: what to put back, what it set, and the
@@ -490,8 +509,7 @@ impl Guard {
             self.applied = None;
             return Ok(false);
         }
-        let current = modes.current(&device)?;
-        let ours = current.size() == latest.size();
+        let ours = modes.current(&device)?.shows(latest);
         if ours {
             before();
             modes.reset(&device, &original)?;
@@ -549,7 +567,7 @@ pub(crate) fn recover<M: DisplayModes>(modes: &mut M, journal: &Journal) -> Resu
             if scope != entry.scope {
                 return Ok(false);
             }
-            let shows = modes.current(&entry.device)?.size() == entry.applied.size();
+            let shows = modes.current(&entry.device)?.shows(entry.applied);
             if shows {
                 modes.reset(&entry.device, &entry.original)?;
             }
@@ -667,6 +685,8 @@ mod tests {
     /// attached, and each reset.
     struct Steered {
         current: Setting,
+        /// The scale the modes it sets carry; 0, as on Windows, by default.
+        scale: u32,
         scope: &'static str,
         gone: bool,
         resets: Vec<Setting>,
@@ -674,6 +694,7 @@ mod tests {
     fn steered() -> Steered {
         Steered {
             current: setting(2560, 1440),
+            scale: 0,
             scope: "login 1, monitor A",
             gone: false,
             resets: Vec::new(),
@@ -695,7 +716,10 @@ mod tests {
             Ok(self.scope.to_owned())
         }
         fn target(&mut self, _: &str, mode: Mode) -> Result<Setting> {
-            Ok(setting(mode.width, mode.height))
+            Ok(Setting {
+                scale: self.scale,
+                ..setting(mode.width, mode.height)
+            })
         }
         fn apply(&mut self, _: &str, setting: &Setting) -> Result<()> {
             self.current = *setting;
@@ -767,6 +791,38 @@ mod tests {
         std::fs::write(&path, forged).unwrap();
         assert_eq!(recover(&mut display, &journal).unwrap(), 0);
         assert!(!path.exists());
+        assert_eq!(display.resets.len(), 1);
+    }
+
+    /// A mode of the host's size that its owner picked meanwhile, a Mac's
+    /// HiDPI twin or another refresh rate, is the owner's: a restore (session
+    /// end, revoke, the owner's Restore) and a replay after a crash leave it.
+    /// The host's own mode, read back a hertz off, is still put back.
+    #[test]
+    fn an_owners_twin_of_the_hosts_mode_is_never_overwritten() {
+        let (_dir, journal) = journal("twins");
+        let device = "37D8832A-2D66-02CA-B9F7-8F30A301B231";
+        let mut display = Steered {
+            scale: 1,
+            ..steered()
+        };
+        let mut host = Guard::new(journal.clone());
+        host.set(&mut display, device, mode(1920, 1080)).unwrap();
+        display.current.scale = 2;
+        assert!(!host.restore(&mut display, || {}).unwrap());
+        assert!(display.resets.is_empty() && !journal.pending());
+
+        let mut crashed = Guard::new(journal.clone());
+        crashed.set(&mut display, device, mode(1920, 1080)).unwrap();
+        drop(crashed);
+        display.current.hz = 144;
+        assert_eq!(recover(&mut display, &journal).unwrap(), 0);
+        assert!(display.resets.is_empty() && !journal.pending());
+
+        let mut host = Guard::new(journal.clone());
+        host.set(&mut display, device, mode(1920, 1080)).unwrap();
+        display.current.hz -= 1;
+        assert!(host.restore(&mut display, || {}).unwrap());
         assert_eq!(display.resets.len(), 1);
     }
 
