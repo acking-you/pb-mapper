@@ -893,6 +893,15 @@ class DesktopCursorShape {
   final DesktopCursorKind kind;
   final int width, height, hotX, hotY;
   final Uint8List rgba;
+
+  /// The same shape, pixel for pixel.
+  bool sameAs(DesktopCursorShape other) =>
+      kind == other.kind &&
+      width == other.width &&
+      height == other.height &&
+      hotX == other.hotX &&
+      hotY == other.hotY &&
+      listEquals(rgba, other.rgba);
 }
 
 /// Intervals between accepted presentations over the last 60 s.

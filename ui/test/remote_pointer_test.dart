@@ -131,9 +131,19 @@ void main() {
     expect(local(), SystemMouseCursors.none);
     expect(layer, arrowAt(const Offset(0.5, 0.5)));
 
-    // Each definition is fetched once, however often it comes back.
+    // A definition that comes back is the one decoded before.
     await report(shape: 1, x: 1440, seq: 2);
-    expect(h.api.argsOf('cursor_shape').length, 2);
+    final ibeam = h.store.cursor.shape;
+    expect(ibeam?.definition.kind, DesktopCursorKind.ibeam);
+    await report(shape: 2, x: 1440, seq: 2);
+    await report(shape: 1, x: 1440, seq: 2);
+    expect(h.store.cursor.shape, same(ibeam));
+
+    // Once the viewer's counter has gone round, a number names another
+    // definition: that one shows, not the one decoded for it before.
+    h.api.cursorShapes[2] = _shape(DesktopCursorKind.hand);
+    await report(shape: 2, x: 1440, seq: 2);
+    expect(h.store.cursor.shape?.definition.kind, DesktopCursorKind.hand);
 
     // Viewing only: the local pointer is its own, the host's is painted.
     h.store.control(false);

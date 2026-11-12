@@ -270,8 +270,9 @@ pub struct DesktopView {
     pub cursor_x: i32,
     pub cursor_y: i32,
     /// The pointer's shape, a number `Viewer::cursor_shape` resolves; a new
-    /// definition gets a new number. 0: none yet, or a host that sends none,
-    /// whose pointer is the generic arrow.
+    /// definition gets a number no other definition held now has, nor the
+    /// one last resolved. 0: none yet, or a host that sends none, whose
+    /// pointer is the generic arrow.
     pub cursor_shape: u16,
     /// One of the `STATE_*` values.
     pub state: u8,

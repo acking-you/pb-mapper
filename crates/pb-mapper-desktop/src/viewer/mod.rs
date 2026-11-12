@@ -228,24 +228,43 @@ impl CursorSlot {
 /// The pointer shapes the host defined, one per slot, each with the number
 /// this viewer gave its definition: what `DesktopView::cursor_shape` names.
 /// Exactly `CURSOR_SLOTS` slots, which the host overwrites as it chooses.
+///
+/// A number names one definition while anyone can still take it for that
+/// one: no two slots hold the same number, and the number last asked for is
+/// never given to a new definition, so the caller that keeps it as what it
+/// shows sees a new number whenever the shape changes. A number is reused
+/// only once the counter has gone round, so whatever else a caller keeps,
+/// it keeps by content.
 #[derive(Default)]
 struct ShapeTable {
     /// Empty until the first definition, then `CURSOR_SLOTS` long.
     slots: Vec<Option<(u16, CursorShape)>>,
-    /// The last definition's number: 1, 2, … 65535, then 1 again.
+    /// The last definition's number: 1, 2, … 65535, then round again.
     defined: u16,
+    /// The number `shape` was last asked for; 0 before.
+    asked: u16,
 }
 impl ShapeTable {
-    /// Hold `shape` in `slot`, in place of what it held; its number.
+    /// Hold `shape` in `slot`, in place of what it held; its number, the
+    /// next after the last that is not 0, held by a slot (that one
+    /// included) or the one last asked for. At most `CURSOR_SLOTS + 2` are
+    /// passed over, and only once the counter has gone round.
     fn define(&mut self, slot: ShapeSlot, shape: CursorShape) -> u16 {
         if self.slots.is_empty() {
             self.slots.resize(CURSOR_SLOTS, None);
         }
-        self.defined = self.defined.checked_add(1).unwrap_or(1);
-        if let Some(held) = self.slots.get_mut(slot.index()) {
-            *held = Some((self.defined, shape));
+        let mut number = self.defined.wrapping_add(1);
+        while number == 0 || number == self.asked || self.holds(number) {
+            number = number.wrapping_add(1);
         }
-        self.defined
+        self.defined = number;
+        if let Some(held) = self.slots.get_mut(slot.index()) {
+            *held = Some((number, shape));
+        }
+        number
+    }
+    fn holds(&self, number: u16) -> bool {
+        self.slots.iter().flatten().any(|(held, _)| *held == number)
     }
     /// The number of the definition `slot` holds; `None` before the host
     /// defined it.
@@ -254,7 +273,9 @@ impl ShapeTable {
             .get(slot.index())
             .and_then(|held| held.as_ref().map(|(number, _)| *number))
     }
-    fn shape(&self, number: u16) -> Option<CursorShape> {
+    /// The definition `number` names, if a slot still holds it.
+    fn shape(&mut self, number: u16) -> Option<CursorShape> {
+        self.asked = number;
         self.slots
             .iter()
             .flatten()
@@ -595,9 +616,12 @@ impl Viewer {
     }
 
     /// The pointer shape `DesktopView::cursor_shape` names, while this
-    /// viewer holds that definition: fetch it once per number. `None` for 0,
-    /// and for a definition the host has since replaced, whose successor a
-    /// later view names.
+    /// viewer holds that definition: fetch it when the number changes. Until
+    /// the next call, no new definition takes the number asked for, so a
+    /// view naming it names that definition still. A number can name another
+    /// definition once the counter has gone round, so keep anything else by
+    /// content. `None` for 0, and for a definition the host has since
+    /// replaced, whose successor a later view names.
     pub fn cursor_shape(&self, shape: u16) -> Option<CursorShape> {
         if shape == 0 {
             return None;

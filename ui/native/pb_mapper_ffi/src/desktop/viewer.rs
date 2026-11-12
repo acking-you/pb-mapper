@@ -346,9 +346,9 @@ enum ViewerRequest {
     Pause,
     Resume,
     /// The definition of the shape the view names (`cursor_shape`), fetched
-    /// once per number: `{kind, width, height, hot_x, hot_y, rgba}`, the
-    /// pixels straight RGBA8 in base64; `null` once the viewer no longer
-    /// holds it, or without a viewer.
+    /// when the number changes (`Viewer::cursor_shape`): `{kind, width,
+    /// height, hot_x, hot_y, rgba}`, the pixels straight RGBA8 in base64;
+    /// `null` once the viewer no longer holds it, or without a viewer.
     CursorShape {
         shape: u16,
     },

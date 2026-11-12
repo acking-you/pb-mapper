@@ -572,6 +572,41 @@ async fn the_shape_of_every_report_is_taken_and_follows_its_slot() {
     viewer.stop().await.unwrap();
 }
 
+/// Once the counter has gone round, a new definition passes over every
+/// number a slot holds and the one last asked for: no number resolves to a
+/// bitmap other than its own, and the one a caller shows keeps its own.
+#[test]
+fn a_shape_number_never_names_two_definitions_after_the_counter_wraps() {
+    use crate::{CursorKind, CursorShape, protocol::ShapeSlot};
+    let shape = |kind| CursorShape::new(kind, 1, 1, (0, 0), vec![kind as u8; 4]).unwrap();
+    let slot = |index| ShapeSlot::new(index).unwrap();
+    let mut table = ShapeTable::default();
+    let arrow = table.define(slot(0), shape(CursorKind::Arrow));
+    let ibeam = table.define(slot(1), shape(CursorKind::Ibeam));
+    // Shown, then overwritten in its slot: no slot holds it any more.
+    assert_eq!(table.shape(ibeam), Some(shape(CursorKind::Ibeam)));
+    let hand = table.define(slot(1), shape(CursorKind::Hand));
+    assert_eq!((arrow, ibeam, hand), (1, 2, 3));
+
+    // The next number would be 1, 2 and 3 again.
+    table.defined = u16::MAX - 1;
+    assert_eq!(table.define(slot(2), shape(CursorKind::Wait)), u16::MAX);
+    let custom = table.define(slot(3), shape(CursorKind::Custom));
+    assert_eq!(custom, 4);
+    for (number, kind) in [
+        (arrow, CursorKind::Arrow),
+        (hand, CursorKind::Hand),
+        (custom, CursorKind::Custom),
+    ] {
+        assert_eq!(table.shape(number), Some(shape(kind)));
+    }
+    // The number last asked for is free again once another is asked for.
+    assert_eq!(table.shape(ibeam), None);
+    table.shape(custom);
+    table.defined = 1;
+    assert_eq!(table.define(slot(4), shape(CursorKind::Move)), ibeam);
+}
+
 /// A shape from a host that did not list `cursor_shape`, or whose bitmap is
 /// not the size its header gives, breaks the protocol.
 #[tokio::test]

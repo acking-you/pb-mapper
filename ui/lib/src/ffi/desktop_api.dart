@@ -606,8 +606,11 @@ abstract interface class DesktopApiClient {
   void pause();
   void resume();
 
-  /// The definition [DesktopView.cursorShape] names, fetched once per
-  /// number; null once the viewer no longer holds it.
+  /// The definition [DesktopView.cursorShape] names, fetched when the
+  /// number changes: until the next call no new definition takes the number
+  /// asked for, but a number can name another definition once the viewer's
+  /// counter has gone round, so anything else is kept by content. Null once
+  /// the viewer no longer holds it.
   DesktopCursorShape? cursorShape(int shape);
   int instanceToken();
 

@@ -1716,16 +1716,18 @@ class DesktopStore {
     );
   }
 
-  /// The definitions of the shapes the view named, the latest last, at most
-  /// [_shapeCache]: a pointer that goes back and forth between shapes the
-  /// host defined fetches and decodes each once. The numbers are the Rust
-  /// viewer's, so a new one starts them over.
-  final _shapes = <int, DesktopPointerShape>{};
+  /// The shapes the view named, the latest last, at most [_shapeCache]: a
+  /// pointer that goes back and forth between shapes the host defined
+  /// decodes each once. They are kept by content, never by number: once the
+  /// Rust viewer's counter has gone round, a number names another
+  /// definition. Only [_shapeNumber], the number last asked for, keeps its
+  /// definition until the next is asked for.
+  final _shapes = <DesktopPointerShape>[];
   int _shapeNumber = 0;
   static const _shapeCache = 16;
 
-  /// Gives [cursor] the shape [view] names, fetching a definition not seen
-  /// before. True when [cursor]'s shape changed.
+  /// Gives [cursor] the shape [view] names, fetching its definition when
+  /// the number changes. True when [cursor]'s shape changed.
   bool _publishShape(DesktopView? view) {
     if (view == null || view.cursorShape == _shapeNumber) return false;
     final number = _shapeNumber = view.cursorShape;
@@ -1734,22 +1736,26 @@ class DesktopStore {
       _cursor._setShape(null);
       return changed;
     }
-    var shape = _shapes.remove(number);
-    if (shape == null) {
-      DesktopCursorShape? definition;
-      try {
-        definition = _api.cursorShape(number);
-      } catch (_) {
-        definition = null;
-      }
-      // Replaced since: a later view names its successor.
-      if (definition == null) return false;
+    DesktopCursorShape? fetched;
+    try {
+      fetched = _api.cursorShape(number);
+    } catch (_) {
+      fetched = null;
+    }
+    // Replaced since: a later view names its successor.
+    final definition = fetched;
+    if (definition == null) return false;
+    final at = _shapes.indexWhere((held) => held.definition.sameAs(definition));
+    final DesktopPointerShape shape;
+    if (at >= 0) {
+      shape = _shapes.removeAt(at);
+    } else {
       shape = DesktopPointerShape(definition);
       unawaited(_decodeShape(shape));
     }
-    _shapes[number] = shape;
+    _shapes.add(shape);
     while (_shapes.length > _shapeCache) {
-      _disposeImageLater(_shapes.remove(_shapes.keys.first)?._image);
+      _disposeImageLater(_shapes.removeAt(0)._image);
     }
     _cursor._setShape(shape);
     return true;
@@ -1757,7 +1763,7 @@ class DesktopStore {
 
   /// A new Rust viewer: its numbers name other definitions.
   void _forgetShapes() {
-    for (final shape in _shapes.values) {
+    for (final shape in _shapes) {
       _disposeImageLater(shape._image);
     }
     _shapes.clear();
@@ -1785,7 +1791,7 @@ class DesktopStore {
       decoded.complete,
     );
     final image = await decoded.future;
-    if (_disposed || !_shapes.values.any((held) => identical(held, shape))) {
+    if (_disposed || !_shapes.any((held) => identical(held, shape))) {
       image.dispose();
       return;
     }
@@ -2520,7 +2526,7 @@ class DesktopStore {
       unawaited(texture.dispose().catchError((Object _) {}));
     }
     _jpegImage.value?.dispose();
-    for (final shape in _shapes.values) {
+    for (final shape in _shapes) {
       shape._image?.dispose();
     }
     _shapes.clear();

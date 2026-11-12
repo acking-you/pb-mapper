@@ -667,9 +667,11 @@ The design and its rules are in `docs/ui-design.md`.
   its thumbnails) and `ViewerPrefs` (`viewer_prefs.dart`, which also keeps
   each computer's keyboard setting, `viewer_keyboard`: the input method and
   the Ctrl/Cmd swap, by remembered computer, at most 64). `DesktopStore`
-  fetches each pointer-shape definition once by its number and keeps the
-  last 16 decoded; on a Mac it shares from the app alone and re-reads the
-  capabilities while a permission is missing
+  fetches the pointer-shape definition each time the view's number changes
+  and keeps the last 16 decoded by content, since a number names another
+  definition once the viewer's counter has gone round; on a Mac it shares
+  from the app alone and re-reads the capabilities while a permission is
+  missing
 
 - **`lib/src/galaxy/`**: The galaxy view — scene model, camera, frame buffer
   over `pb_mapper_galaxy_frame_v1` with its Dart mirror, painter, details panel
@@ -740,8 +742,8 @@ The design and its rules are in `docs/ui-design.md`.
     takes the viewer's closed set of hot ops (`viewer_status`, `control`,
     `release`, `input`, `keyframe`, `quality`, `pause`, `resume`,
     `display_mode`, `cursor_shape`, which returns a shape's kind, hotspot,
-    size and base64 RGBA once per number): it never enters the runtime,
-    awaits or takes a tokio lock, so the UI isolate calls it, as it calls
+    size and base64 RGBA when the number changes): it never enters the
+    runtime, awaits or takes a tokio lock, so the UI isolate calls it, as it calls
     the view leaf. Errors are typed `ErrorCode`s (`error.rs`), never text to
     match; a physical key toward a host that does not take them is
     `INVALID_ARGUMENT`, and a host start without a macOS permission

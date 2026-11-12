@@ -1578,7 +1578,11 @@ when the session negotiated it, on the 16 ms tick, and compares content, so
 an equal image under a new OS handle sends nothing. A failed read is the
 debug event `desktop_cursor_shape_failed` and keeps the last shape. The
 viewer hands Dart a number per definition in the view (`cursor_shape`), and
-the FFI's hot op `cursor_shape` returns that definition once.
+the FFI's hot op `cursor_shape` returns that definition when the number
+changes. The number is a `u16` that goes round after 65 535 definitions; a
+new one passes over every number a slot holds and the one last asked for,
+so the number Dart shows keeps its definition, and Dart keeps decoded
+shapes by content, never by number.
 
 ### Constants
 
