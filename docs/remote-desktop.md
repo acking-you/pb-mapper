@@ -1980,35 +1980,43 @@ What each platform's new code has been through:
   that replays a recorded clip in five bands, one pointer shape each, and logs
   every input it applies (see
   [the acceptance procedure](../scripts/test/desktop-ui-acceptance.md)). It
-  ran over the relay on loopback.
+  ran on this machine over the relay on loopback, so the host was a replayed
+  clip, not a real remote desktop.
   - Passed:
     - the picture through the native texture at 60 FPS;
     - viewing without control, the host's shape (arrow, I-beam, resize, hand
       and the custom bitmap, pixel for pixel) painted at the host's pointer;
     - in control with the host's pointer elsewhere, the same;
     - a host without `cursor_shape` drew the generic arrow;
-    - in the local mode, typed letters reached the host as text, a lone
-      Shift sent nothing, and Enter and Backspace went as keys;
-    - in the remote mode, the same keys went as physical keys, Shift at once
-      and a lone Win not at all;
     - the Shortcuts menu for a Windows host and for a Mac host (the swap
       entry, and **Switch input method** as Win+Space or Ctrl+Space);
     - **Type text…**.
-  - The run found that the local mode lost every printable key on Windows:
-    the embedder refuses a text-input client that names no view. The client
-    now names its view, as `EditableText` does.
-  - Not run:
-    - the local pointer taking the host's shape over the picture, and one
-      pointer showing;
-    - real keystrokes through the input method (composition at the remote
-      pointer, the candidates, Enter and Backspace while composing, Chinese
-      punctuation);
-    - Ctrl+C from a real keyboard;
-    - the window's input method coming back after the remote mode.
-
-    Pending Windows Firewall prompts dimmed the screen, so neither the real
-    pointer nor real keys could reach the app. The input was posted to the
-    app's view instead, which bypasses the input method.
+  - Passed with the real pointer and real keystrokes, through the active
+    input method (WeType, in its Chinese mode):
+    - in control, the local pointer took the host's arrow, I-beam, resize and
+      hand, and hid over the custom shape with the bitmap painted at it, so
+      one pointer showed; outside the picture it was the arrow again;
+    - in the local mode, `nihao` composed with the candidates at the remote
+      pointer and sent nothing, and Space sent exactly `你好`;
+    - Enter and Backspace stayed with the input method while it composed,
+      and went as keys after;
+    - Chinese punctuation arrived as `，` and `。`, a lone Shift sent
+      nothing, Ctrl+C arrived as the chord, and Shift or Ctrl went before a
+      click;
+    - in the remote mode, letters went as physical keys and nothing composed
+      here: the window's input method was detached;
+    - the input method came back in **Type text…** opened from the remote
+      mode, on switching back to the local mode, and after the app was
+      closed in the remote mode and opened again.
+  - Passed with input posted to the app's view, which bypasses the input
+    method: in the remote mode, Shift went at once and a lone Win not at
+    all. An earlier run posted all its input this way while pending Windows
+    Firewall prompts dimmed the screen. It found that the local mode lost
+    every printable key on Windows: the embedder refuses a text-input client
+    that names no view. The client now names its view, as `EditableText`
+    does.
+  - Not run: a real second computer as the host, and Microsoft Pinyin or any
+    input method other than WeType.
 - **Android viewer.** The Android emulator ran the same entry against the
   same host.
   - Passed: the painted shapes, standard and custom; trackpad strokes moving
@@ -2016,6 +2024,7 @@ What each platform's new code has been through:
   - The emulator presented only 5 FPS at 640×360, and not at 720p.
   - Pinch zoom could not be injected, so the bitmap's growth with zoom was
     not seen; its 32-logical-pixel minimum was.
+  - Not run: composition by a Pinyin soft keyboard, which adb cannot drive.
 - **Helper.** The helper at protocol 8 is tested over an in-memory pipe
   with a synthetic worker, not installed.
 - **Linux viewer.** It ran in WSL2 (WSLg) on this machine, through the RTX
@@ -2226,8 +2235,8 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | macOS viewer | Native VideoToolbox path; the app is built in CI; a Mac's validation outstanding |
 | Linux viewer | Native GStreamer path ran in WSL2 (WSLg) with NVDEC and gst-libav, against a host replaying recorded clips; CI builds the app and decodes clips with software decoders; VA-API, V4L2 and a real Linux desktop outstanding |
 | macOS host | Compiled, linked and unit-tested in CI on a macOS runner (the encoder, the display list, the pointer read in a window-server session, thread C's waiter, a 60 fps session paced at 60 frames a second); never run on a real Mac |
-| Pointer shapes | Windows host's shapes read over an owned window through a viewer, the custom one pixel for pixel; the Windows app and the Android emulator paint the host's shapes; the local pointer taking the shape in control not run on a real screen; macOS host's not run on a Mac |
-| Keyboard modes and physical keys | Windows host injection, line breaks and the active input method's (WeType) composition through physical keys checked in an owned window; in the Windows app, local-mode text, the remote mode's physical keys, the modifier rules and the Shortcuts menu checked with input posted to the app's view; real keystrokes through the input method, composition and candidate placement outstanding |
+| Pointer shapes | Windows host's shapes read over an owned window through a viewer, the custom one pixel for pixel; the Windows app and the Android emulator paint the host's shapes; in the Windows app, against a host replaying a clip, the real local pointer took the host's shapes in control, one pointer showing; the bitmap's growth with Android pinch zoom not seen; macOS host's not run on a Mac |
+| Keyboard modes and physical keys | Windows host injection, line breaks and the active input method's (WeType) composition through physical keys checked in an owned window; in the Windows app, against a host replaying a clip, real keystrokes through WeType checked: composition at the remote pointer to exactly the committed text, Enter and Backspace while composing, punctuation, the modifier rules, the remote mode's physical keys with the local input method detached, and the input method coming back; the Shortcuts menu checked with input posted to the app's view; a real second computer, Microsoft Pinyin and other input methods, and a Pinyin soft keyboard on Android outstanding |
 | Elevated windows / secure-desktop UAC | Helper implemented; default-policy administrator and standard-user prompt acceptance outstanding |
 | Remembered app-owned host policy | Current-user DPAPI; requires signed-in user and running app |
 | Windows service-owned background host | Final build 922 passed upgrade restart, live direct/relay delivery with its UI exited, and persistent Stop/Enable with the same invitation; OS boot, standalone SCM restart and sleep/resume acceptance pending |

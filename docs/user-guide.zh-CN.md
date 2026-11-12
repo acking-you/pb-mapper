@@ -322,7 +322,7 @@ flutter run
 | AMD 显卡 | `mesa-va-drivers` | RPM Fusion 的 `mesa-va-drivers-freeworld` | `mesa` |
 | NVIDIA 显卡 | 专有驱动 | RPM Fusion 的 `akmod-nvidia` 与 `xorg-x11-drv-nvidia-cuda-libs` | `nvidia-utils` |
 
-**打字。** **快捷键 → 输入法** 按电脑选择键盘怎么输入。**本机**（默认）由你自己的输入法组字，中文、日文、韩文都可以，候选窗出现在远程指针旁边，上屏的文字发给对方；单独按一下 Shift 或 Ctrl+Space 仍在本机切换输入法。**远程电脑** 按键位发送按键，由对方的键盘布局和输入法打字；快捷键里的 **切换输入法** 向 Windows 发送 Win+Space，向 Mac 发送 Ctrl+Space。Mac 与其他电脑之间默认互换 Cmd 和 Ctrl（同一菜单里的 **Cmd 键用作 Ctrl** 或 **Ctrl 键用作 Cmd**）。对方的 pb-mapper 版本较旧时，字母、数字和空格作为按键发送，其余作为文字发送。
+**打字。** **快捷键 → 输入法** 按电脑选择键盘怎么输入。**本机**（默认）由你自己的输入法组字，中文、日文、韩文都可以，候选窗出现在远程指针旁边，上屏的文字发给对方；单独按一下 Shift 或 Ctrl+Space 仍在本机切换输入法。有些输入法（例如 Windows 上的微信输入法）把按住 Shift 点鼠标也当作这一切换，所以 Shift+点击之后本机输入法可能变成英文，在其他程序里也一样；再单独按一下 Shift 即可切回。**远程电脑** 按键位发送按键，由对方的键盘布局和输入法打字；快捷键里的 **切换输入法** 向 Windows 发送 Win+Space，向 Mac 发送 Ctrl+Space。Mac 与其他电脑之间默认互换 Cmd 和 Ctrl（同一菜单里的 **Cmd 键用作 Ctrl** 或 **Ctrl 键用作 Cmd**）。对方的 pb-mapper 版本较旧时，字母、数字和空格作为按键发送，其余作为文字发送。
 
 **指针** 会显示对方的形状（文字上是 I 形光标，链接上是手形，窗口边缘是缩放箭头）。在桌面端操控时，你自己的指针移到画面上就会变成这个形状；手机上则把它画出来。对方的 pb-mapper 版本较旧时显示普通箭头。
 
