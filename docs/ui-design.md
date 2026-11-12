@@ -351,7 +351,8 @@ offers Reconnect where that can help.
   under a strip is dimmed, readable controls stay over a white page, and
   every edge of the picture can be panned clear. Overlays keep to the fitted
   picture between the gutters. The keyboard brings a modifier bar (Ctrl,
-  Alt, Shift, Win, Esc, Tab, the F keys, arrows and paging) and, while the
+  Alt, Shift, Win, or ⌃ ⌥ ⇧ ⌘ toward a Mac; Esc, Tab, the F keys, arrows
+  and paging) and, while the
   picture is zoomed or covered, a minimap. A long press turns the finger
   into a joystick, a ring and a ball, which scrolls the way it is pushed;
   lifted in place it right-clicks. The quality button opens the full

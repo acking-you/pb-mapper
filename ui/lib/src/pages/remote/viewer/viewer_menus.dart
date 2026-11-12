@@ -433,75 +433,66 @@ List<ViewerMenuEntry> _keyboardItems(AppLocalizations l10n, ViewerActions a) {
 }
 
 /// The chords go as one sequence each; they neither apply nor consume a
-/// latch. Ctrl+Alt+Del is shown and never enabled: it cannot be injected.
-/// The keyboard's own choices lead.
+/// latch. Each is the host's own, named as its keyboard names it, and one
+/// the host has none for is left out. Ctrl+Alt+Del is shown on Windows and
+/// never enabled: it cannot be injected. The keyboard's own choices lead.
 List<ViewerMenuEntry> shortcutsMenu(AppLocalizations l10n, ViewerActions a) {
   final ready = a.input.ready.value;
+  final apple = a.input.appleHost;
   final lockable = a.desktop.session.value.capabilities.contains('lock');
-  ViewerMenuItem chord(
-    RemoteShortcut s,
-    String key,
-    String label,
-    String hint, {
-    bool enabled = true,
-    String? disabledHint,
-  }) => ViewerMenuItem(
-    key: Key(key),
-    label: label,
-    hint: hint,
-    enabled: ready && enabled,
-    disabledHint: disabledHint,
-    onSelected: () => a.input.shortcut(s),
-  );
+  final cad = RemoteShortcut.ctrlAltDel.keys(appleHost: apple);
   return [
     ..._keyboardItems(l10n, a),
     const ViewerMenuDivider(),
-    chord(
-      RemoteShortcut.showDesktop,
-      'shortcut-show-desktop',
-      l10n.shortcutShowDesktop,
-      'Win + D',
-    ),
-    chord(
-      RemoteShortcut.switchWindow,
-      'shortcut-switch-window',
-      l10n.shortcutSwitchWindow,
-      'Alt + Tab',
-    ),
-    chord(
-      RemoteShortcut.taskManager,
-      'shortcut-task-manager',
-      l10n.shortcutTaskManager,
-      'Ctrl + Shift + Esc',
-    ),
-    chord(
-      RemoteShortcut.startMenu,
-      'shortcut-start',
-      l10n.shortcutStart,
-      'Win',
-    ),
-    chord(
-      RemoteShortcut.switchInputMethod,
-      'shortcut-input-method',
-      l10n.shortcutSwitchInputMethod,
-      a.input.appleHost ? 'Ctrl + Space' : 'Win + Space',
-    ),
-    chord(
-      RemoteShortcut.lock,
-      'shortcut-lock',
-      l10n.shortcutLock,
-      'Win + L',
-      enabled: lockable,
-      disabledHint: lockable ? null : l10n.shortcutUnsupported,
-    ),
-    const ViewerMenuDivider(),
-    ViewerMenuItem(
-      key: const Key('shortcut-cad'),
-      label: 'Ctrl + Alt + Del',
-      enabled: false,
-      disabledHint: l10n.shortcutUnsupported,
-      onSelected: () {},
-    ),
+    for (final (s, key, label) in [
+      (
+        RemoteShortcut.showDesktop,
+        'shortcut-show-desktop',
+        l10n.shortcutShowDesktop,
+      ),
+      (
+        RemoteShortcut.switchWindow,
+        'shortcut-switch-window',
+        apple ? l10n.shortcutSwitchApp : l10n.shortcutSwitchWindow,
+      ),
+      (
+        RemoteShortcut.taskManager,
+        'shortcut-task-manager',
+        apple ? l10n.shortcutForceQuit : l10n.shortcutTaskManager,
+      ),
+      (
+        RemoteShortcut.startMenu,
+        'shortcut-start',
+        apple ? l10n.shortcutSpotlight : l10n.shortcutStart,
+      ),
+      (
+        RemoteShortcut.switchInputMethod,
+        'shortcut-input-method',
+        l10n.shortcutSwitchInputMethod,
+      ),
+      (RemoteShortcut.lock, 'shortcut-lock', l10n.shortcutLock),
+    ])
+      if (s.keys(appleHost: apple) case final keys when keys.isNotEmpty)
+        ViewerMenuItem(
+          key: Key(key),
+          label: label,
+          hint: hostChordName(keys, appleHost: apple),
+          enabled: ready && (s != RemoteShortcut.lock || lockable),
+          disabledHint: s == RemoteShortcut.lock && !lockable
+              ? l10n.shortcutUnsupported
+              : null,
+          onSelected: () => a.input.shortcut(s),
+        ),
+    if (cad.isNotEmpty) ...[
+      const ViewerMenuDivider(),
+      ViewerMenuItem(
+        key: const Key('shortcut-cad'),
+        label: hostChordName(cad),
+        enabled: false,
+        disabledHint: l10n.shortcutUnsupported,
+        onSelected: () {},
+      ),
+    ],
     const ViewerMenuDivider(),
     ..._refreshAndRelease(l10n, a),
   ];

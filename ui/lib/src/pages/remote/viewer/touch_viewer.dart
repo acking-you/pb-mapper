@@ -480,7 +480,7 @@ class _TouchViewerState extends State<TouchViewer> {
         Positioned(
           left: content.left + 12,
           bottom: size.height - content.bottom + 10,
-          child: ModifierPill(latch: _latch),
+          child: ModifierPill(latch: _latch, appleHost: _input.appleHost),
         ),
         if (_keyboard) ...[
           Positioned(

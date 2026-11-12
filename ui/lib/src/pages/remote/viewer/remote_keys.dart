@@ -5,30 +5,34 @@ import '../../../state/desktop_input.dart';
 import '../../../state/viewer_prefs.dart';
 import 'modifier_latch.dart';
 
-/// The chords of the Shortcuts menu. Each goes in one atomic sequence, and
-/// none of them consumes or applies a latch.
+/// The chords of the Shortcuts menu, each as the host's system has it: a
+/// host that names no system is taken for Windows. Each goes in one atomic
+/// sequence, and none of them consumes or applies a latch.
 enum RemoteShortcut {
-  /// Win + D.
+  /// Win + D. None on a Mac: its Show Desktop is a function key in its
+  /// keyboard settings, which laptops send as a media key and owners rebind.
   showDesktop,
 
-  /// Alt + Tab.
+  /// Alt + Tab; on a Mac, Cmd + Tab, its app switcher.
   switchWindow,
 
-  /// Ctrl + Shift + Esc.
+  /// Ctrl + Shift + Esc, Task Manager; on a Mac, Option + Cmd + Esc, Force
+  /// Quit.
   taskManager,
 
-  /// Win.
+  /// Win, the Start menu; on a Mac, Cmd + Space, Spotlight.
   startMenu,
 
   /// The host's next input method: Win + Space on Windows, Ctrl + Space on
   /// a Mac, where this computer's system would take that chord itself.
   switchInputMethod,
 
-  /// Win + L, which is the host's own `lock` command (D17), not keys.
+  /// Win + L, or Ctrl + Cmd + Q on a Mac, which is the host's own `lock`
+  /// command (D17), not keys.
   lock,
 
   /// Never enabled: the secure attention sequence cannot be injected, and
-  /// the menu says so.
+  /// the menu says so. None on a Mac.
   ctrlAltDel,
 
   /// Asks the host for a fresh picture.
@@ -37,20 +41,76 @@ enum RemoteShortcut {
   /// Releases every key and button this viewer holds on the host.
   releaseKeys;
 
+  /// The keys that name it on the host's keyboard, in the order they go
+  /// down. Empty where the host has no such shortcut, which the menu then
+  /// leaves out, and for the entries that are not keys.
+  List<RemoteKey> keys({bool appleHost = false}) => appleHost
+      ? switch (this) {
+          switchWindow => const [RemoteKey.meta, RemoteKey.tab],
+          taskManager => const [
+            RemoteKey.alt,
+            RemoteKey.meta,
+            RemoteKey.escape,
+          ],
+          startMenu => const [RemoteKey.meta, RemoteKey.space],
+          switchInputMethod => const [RemoteKey.control, RemoteKey.space],
+          lock => const [RemoteKey.control, RemoteKey.meta, RemoteKey.q],
+          showDesktop || ctrlAltDel || refresh || releaseKeys => const [],
+        }
+      : switch (this) {
+          showDesktop => const [RemoteKey.meta, RemoteKey.d],
+          switchWindow => const [RemoteKey.alt, RemoteKey.tab],
+          taskManager => const [
+            RemoteKey.control,
+            RemoteKey.shift,
+            RemoteKey.escape,
+          ],
+          startMenu => const [RemoteKey.meta],
+          switchInputMethod => const [RemoteKey.meta, RemoteKey.space],
+          lock => const [RemoteKey.meta, RemoteKey.l],
+          ctrlAltDel => const [
+            RemoteKey.control,
+            RemoteKey.alt,
+            RemoteKey.delete,
+          ],
+          refresh || releaseKeys => const [],
+        };
+
   /// The keys a chord presses on the host, in order; released in reverse.
   /// Empty for the entries that are not chords. They name the host's keys,
   /// so no modifier swap applies.
   List<RemoteKey> chord({bool appleHost = false}) => switch (this) {
-    showDesktop => const [RemoteKey.meta, RemoteKey.d],
-    switchWindow => const [RemoteKey.alt, RemoteKey.tab],
-    taskManager => const [RemoteKey.control, RemoteKey.shift, RemoteKey.escape],
-    startMenu => const [RemoteKey.meta],
-    switchInputMethod =>
-      appleHost
-          ? const [RemoteKey.control, RemoteKey.space]
-          : const [RemoteKey.meta, RemoteKey.space],
     lock || ctrlAltDel || refresh || releaseKeys => const [],
+    _ => keys(appleHost: appleHost),
   };
+}
+
+/// [key] as the host's keyboard names it: Win, Alt and Ctrl on Windows, ⌘,
+/// ⌥ and ⌃ on a Mac. The same in every language.
+String hostKeyName(RemoteKey key, {bool appleHost = false}) => switch (key) {
+  RemoteKey.control => appleHost ? '⌃' : 'Ctrl',
+  RemoteKey.alt => appleHost ? '⌥' : 'Alt',
+  RemoteKey.shift => appleHost ? '⇧' : 'Shift',
+  RemoteKey.meta => appleHost ? '⌘' : 'Win',
+  RemoteKey.escape => 'Esc',
+  RemoteKey.delete => 'Del',
+  RemoteKey.space => 'Space',
+  RemoteKey.tab => 'Tab',
+  _ => key.name.length == 1 ? key.name.toUpperCase() : key.name,
+};
+
+/// [keys] as the host writes a chord: "Ctrl + Shift + Esc" on Windows, in
+/// the order given; "⌥⌘Esc" on a Mac, its modifiers in the Mac's order.
+String hostChordName(Iterable<RemoteKey> keys, {bool appleHost = false}) {
+  if (!appleHost) {
+    return keys.map(hostKeyName).join(' + ');
+  }
+  return [
+    for (final m in ModifierLatch.order)
+      if (keys.contains(m)) m,
+    for (final k in keys)
+      if (!ModifierLatch.order.contains(k)) k,
+  ].map((k) => hostKeyName(k, appleHost: true)).join();
 }
 
 /// What one hardware key event does ([KeyRouting.route]).

@@ -219,7 +219,8 @@ direct touch.
 
 ### Modifiers
 
-The modifier bar above a phone's keyboard latches Ctrl, Alt, Shift and Win:
+The modifier bar above a phone's keyboard latches Ctrl, Alt, Shift and Win
+(⌃, ⌥, ⇧ and ⌘ toward a Mac, whose copy and paste keys read ⌘C and ⌘V):
 tap once to arm one for the next key, click, drag or scroll, tap again to
 lock it, and tap a locked one to release it. Every key or click sent with
 modifiers goes as one sequence — the modifiers down, the action, the
@@ -287,6 +288,12 @@ In either mode:
   host and Ctrl+Space to a Mac. Ctrl+Alt+Del is unsupported, since
   `SendInput` cannot produce it. **Lock remote computer** is the host's own
   command: it needs control, and says so when locking fails.
+- Toward a Mac (`os_macos`) the menu offers the Mac's own chords, named as
+  a Mac names them: **Switch app** ⌘Tab, **Force Quit** ⌥⌘Esc, **Spotlight**
+  ⌘Space and **Switch input method** ⌃Space. It leaves out Show desktop,
+  whose Mac shortcut is a function key that laptops send as a media key and
+  owners rebind, and Ctrl+Alt+Del, which a Mac does not have. A host that
+  names no system gets the Windows chords.
 - Everything held is released when the picture loses the keyboard; a
   modifier still waiting was never sent and needs no release.
 

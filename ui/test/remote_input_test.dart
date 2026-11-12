@@ -2,11 +2,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pb_mapper_ui/l10n/app_localizations_en.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_keyboard.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/modifier_latch.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_cursor_layer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_keys.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_text_input.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_menus.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
 
@@ -572,6 +574,91 @@ void main() {
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }
+    },
+  );
+
+  testWidgets(
+    'the Shortcuts menu gives a Mac host its own chords and leaves out the '
+    'ones it has none for',
+    (tester) async {
+      final l10n = AppLocalizationsEn();
+      final prefs = ViewerPrefs(persist: false);
+      Map<String, ViewerMenuItem> menu(ViewerHarness h) => {
+        for (final item in shortcutsMenu(
+          l10n,
+          ViewerActions(
+            desktop: h.store,
+            input: h.input,
+            prefs: prefs,
+            viewport: h.viewport,
+            onDisconnect: () async {},
+            onQuality: (_) {},
+            onResolution: (_) {},
+            onMaxFps: (_) {},
+            onTypeText: () {},
+            onDisplayMode: (_) {},
+          ),
+        ).whereType<ViewerMenuItem>())
+          (item.key as ValueKey<String>).value: item,
+      };
+      const chords = [
+        'shortcut-show-desktop',
+        'shortcut-switch-window',
+        'shortcut-task-manager',
+        'shortcut-start',
+        'shortcut-input-method',
+      ];
+
+      // A host that names no system keeps the Windows chords.
+      final windows = await ViewerHarness.live(tester);
+      var items = menu(windows);
+      for (final key in chords) {
+        items[key]!.onSelected();
+      }
+      expect(windows.sent(), [
+        ['meta↓', 'd↓', 'd↑', 'meta↑'],
+        ['alt↓', 'tab↓', 'tab↑', 'alt↑'],
+        ['control↓', 'shift↓', 'escape↓', 'escape↑', 'shift↑', 'control↑'],
+        ['meta↓', 'meta↑'],
+        ['meta↓', 'space↓', 'space↑', 'meta↑'],
+      ]);
+      expect(
+        [for (final key in chords) items[key]!.hint],
+        ['Win + D', 'Alt + Tab', 'Ctrl + Shift + Esc', 'Win', 'Win + Space'],
+      );
+      expect(items['shortcut-cad']!.label, 'Ctrl + Alt + Del');
+      windows.dispose();
+
+      final mac = await ViewerHarness.live(
+        tester,
+        capabilities: const ['os_macos'],
+      );
+      items = menu(mac);
+      expect(items.keys, isNot(contains('shortcut-show-desktop')));
+      expect(items.keys, isNot(contains('shortcut-cad')));
+      for (final key in chords.skip(1)) {
+        items[key]!.onSelected();
+      }
+      expect(mac.sent(), [
+        ['meta↓', 'tab↓', 'tab↑', 'meta↑'],
+        ['alt↓', 'meta↓', 'escape↓', 'escape↑', 'meta↑', 'alt↑'],
+        ['meta↓', 'space↓', 'space↑', 'meta↑'],
+        ['control↓', 'space↓', 'space↑', 'control↑'],
+      ]);
+      expect(
+        [
+          for (final key in [...chords.skip(1), 'shortcut-lock'])
+            '${items[key]!.label} ${items[key]!.hint}',
+        ],
+        [
+          'Switch app ⌘Tab',
+          'Force Quit ⌥⌘Esc',
+          'Spotlight ⌘Space',
+          'Switch input method ⌃Space',
+          'Lock remote computer ⌃⌘Q',
+        ],
+      );
+      mac.dispose();
     },
   );
 
