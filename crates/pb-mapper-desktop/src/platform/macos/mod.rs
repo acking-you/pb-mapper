@@ -42,6 +42,8 @@ mod input;
 #[cfg(target_os = "macos")]
 pub(crate) mod keychain;
 #[cfg(target_os = "macos")]
+mod layout;
+#[cfg(target_os = "macos")]
 mod modes;
 #[cfg(target_os = "macos")]
 mod still;

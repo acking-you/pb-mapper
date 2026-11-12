@@ -1,17 +1,19 @@
 //! Injection on macOS: `CGEvent`s posted to the HID event tap. The pointer
 //! goes to the global point of a pixel of the bound display; a press carries
 //! its click count and the modifiers held, which posted events otherwise
-//! lack; a move with a button down is a drag; keys are virtual key codes,
-//! the vocabulary's and a viewer's physical keys alike, so the Mac's own
+//! lack; a move with a button down is a drag; keys are virtual key codes: a
+//! named letter or digit the key that types it in the Mac's layout, read on
+//! the main thread (`layout.rs`), and goes up where it went down; every
+//! other key, and a viewer's physical keys, by place, so the Mac's own
 //! layout and input source decide what they type; text is a Unicode string
-//! per event. No main thread and no keyboard layout are needed. macOS posts
-//! nothing without the owner's Accessibility grant, and says nothing either,
-//! so the grant is checked first.
+//! per event. macOS posts nothing without the owner's Accessibility grant,
+//! and says nothing either, so the grant is checked first.
 
 use super::{
     clicks::{Clicks, SLOP},
     desktop::Shared,
-    keys::{self, Modifiers},
+    keys::{self, Layout, Modifiers},
+    layout,
 };
 use crate::{
     BackendError, Button, DoubleClickGuard, FailureKind, Key, Permission, Result, error,
@@ -43,12 +45,17 @@ pub(crate) struct MacInput {
     clicks: Clicks,
     /// The last Accessibility answer, and when it was asked.
     access: Option<(Instant, bool)>,
+    /// The layout named keys go through, and the read it came from.
+    layout: (u64, Layout),
+    /// Named keys down, each with the virtual key it went down at.
+    named: Vec<(Key, u16)>,
 }
 
 impl MacInput {
     pub(crate) fn new(geometry: Shared) -> Result<Self> {
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .ok_or_else(|| error("macOS refused an input event source"))?;
+        layout::request(layout::FIRST_READ);
         Ok(Self {
             geometry,
             source,
@@ -57,7 +64,31 @@ impl MacInput {
             position: None,
             clicks: Clicks::default(),
             access: None,
+            layout: (layout::generation(), layout::current()),
+            named: Vec::new(),
         })
+    }
+
+    /// The virtual key `key` goes `down` or up at: where it went down, if
+    /// it is down, whatever the layout did meanwhile; else through the
+    /// layout read last.
+    fn code(&mut self, key: Key, down: bool) -> u16 {
+        if let Some(at) = self.named.iter().position(|(held, _)| *held == key) {
+            let code = self.named[at].1;
+            if !down {
+                self.named.swap_remove(at);
+            }
+            return code;
+        }
+        let generation = layout::generation();
+        if generation != self.layout.0 {
+            self.layout = (generation, layout::current());
+        }
+        let code = self.layout.1.code(key);
+        if down && keys::named(key) {
+            self.named.push((key, code));
+        }
+        code
     }
 
     /// Fails while the owner has not granted Accessibility.
@@ -258,7 +289,8 @@ impl Injector for MacInput {
     /// relies on it.
     fn key(&mut self, key: Key, down: bool) -> Result<()> {
         self.allowed()?;
-        self.press(keys::key_code(key), down)
+        let code = self.code(key, down);
+        self.press(code, down)
     }
     /// Text is typed with no modifier, whatever is held: a held Command
     /// must not turn it into shortcuts. It holds no line break or tab.

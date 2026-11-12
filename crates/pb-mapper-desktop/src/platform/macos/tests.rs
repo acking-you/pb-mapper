@@ -4,9 +4,9 @@
 //! has; the manual checklist covers them.
 #![cfg(target_os = "macos")]
 
-use super::{desktop, encoder::Encoder, modes::MacModes};
+use super::{desktop, encoder::Encoder, layout, modes::MacModes};
 use crate::{
-    VideoCodec, Waker,
+    Key, VideoCodec, Waker,
     codec::annexb::{AccessUnit, ParameterSets},
     platform::DisplayModes,
     scheduler::{Waiter, Wake},
@@ -130,6 +130,24 @@ fn a_2ms_wait_is_not_coalesced() {
     late.sort_unstable();
     let median = late[late.len() / 2];
     assert!(median < Duration::from_millis(2), "{late:?}");
+}
+
+/// A test process's main thread waits on the tests and runs no main queue,
+/// as a command-line host's may not: the layout read asked of it waits at
+/// most `FIRST_READ`, a second ask waits not at all, and named keys keep
+/// their ANSI places (the runner's US layout has them there too). Never a
+/// hang, never a panic.
+#[test]
+fn the_layout_read_never_waits_on_an_absent_main_loop() {
+    let started = Instant::now();
+    layout::request(layout::FIRST_READ);
+    layout::request(layout::FIRST_READ);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(layout::current().code(Key::A), 0x00);
 }
 
 /// Every active display is named by its UUID and measured in its current

@@ -268,7 +268,12 @@ In either mode:
   Page Down and the arrows go as keys; with a modifier latched, as one
   wrapped tap. Tab never moves focus out of the picture.
 - A letter, digit or space typed while Ctrl, Alt or Win is held is a
-  shortcut: Ctrl+S, Alt+F and Win+E reach the host as such. On layouts where
+  shortcut: Ctrl+S, Alt+F and Win+E reach the host as such. The letter or
+  digit names the host's key that types it, not a place: a Windows virtual
+  key, and on a Mac the key its layout types that character with (behind a
+  layout of another script, the ASCII-capable one macOS matches shortcuts
+  on), so Cmd+A selects all on a French AZERTY Mac instead of pressing the
+  place of Q there, which would be Cmd+Q. On layouts where
   AltGr (Ctrl+Alt) types a character, such as German, French or Polish, that
   character is typed, with no Ctrl or Alt sent; on an Apple keyboard Option
   with a printable key types its character and makes no chord.
@@ -971,7 +976,7 @@ crates/pb-mapper-desktop/src/
 | --- | --- | --- |
 | `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope | `CGDirectDisplayID` from `CGGetActiveDisplayList`, named by its UUID, which finds it again; `CGDisplayBounds` × the current mode's pixels per point; a session that is not on the console, or a locked screen, is the secure desktop |
 | `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`), drained every 2 ms | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
-| `Input` | enigo; `SendInput` with `KEYEVENTF_SCANCODE` for physical keys (a HID usage to its set-1 scancode); `SetCursorPos` for absolute moves; `LockWorkStation` | `CGEvent` at the HID tap: pointer and wheel in the bound display's points, click counts for double clicks, keys by `kVK_*` code (physical keys too), modifiers as flag changes with left and right apart, text as Unicode string events of at most 20 UTF-16 units; no lock (`LOCK = false`) |
+| `Input` | enigo; `SendInput` with `KEYEVENTF_SCANCODE` for physical keys (a HID usage to its set-1 scancode); `SetCursorPos` for absolute moves; `LockWorkStation` | `CGEvent` at the HID tap: pointer and wheel in the bound display's points, click counts for double clicks, named letters and digits at the key the Mac's layout types them with, other keys and physical keys by `kVK_*` place, modifiers as flag changes with left and right apart, text as Unicode string events of at most 20 UTF-16 units; no lock (`LOCK = false`) |
 | `Cursor` | `GetCursorInfo`; the shape once per new `HCURSOR`: its kind from the `LoadCursorW` standard handles, its bitmap from `GetIconInfo` and `GetDIBits` (colour, alpha or AND mask; monochrome AND/XOR, an inverting pixel drawn black outlined in white) | `CGEventGetLocation`, separate; the shape when the window server's cursor seed moves (a private `CGSCurrentCursorSeed`, looked up with `dlsym`; without it at most every 500 ms): `NSCursor.currentSystemCursor` drawn at the display's scale, a kind only where it equals a standard cursor pixel for pixel, else `custom` |
 | `Modes` / `Still` | `WinModes` (dynamic changes only; see [Remote resolution](#remote-resolution)) / xcap JPEG | Core Graphics modes for this app only (`kCGConfigureForAppOnly`) / `SCScreenshotManager` and ImageIO JPEG, macOS 14 and later |
 | `Grant` | none | the Screen Recording grant; Accessibility is checked at each input |
@@ -1019,8 +1024,15 @@ trait Encoder { type Frame; type Device; const DRAIN: Option<Duration>;
   portal or libei; the cursor embedded or separate as the portal grants;
   `NoModes`; the portal picks the display.
 - **macOS** is implemented (the table above), as planned here except that
-  keys are posted from thread C rather than on the main queue: the `kVK_*`
-  table needs no layout lookup, so no enigo. Its `HostSupport` carries
+  keys are posted from thread C rather than on the main queue, so no enigo.
+  Named letters and digits go through a table of the Mac's layout
+  (`platform/macos/layout.rs`): the Text Input Sources calls run on the main
+  thread only, so the main queue reads it at each session's start, which
+  waits for it at most 200 ms, and again at each input-source switch, which
+  a distributed notification on the main run loop says; thread C only loads
+  the table. A key goes up where it went down. Without a main run loop (a
+  command-line SDK host), or until the read arrives, named keys keep their
+  ANSI places. Its `HostSupport` carries
   `permissions`, and a missing one is `PermissionMissing`; the shared encoder
   rules (late output, first-submit and output waits, liveness, H.265 failure)
   live in `codec/pipeline.rs` for both platforms. Thread C waits on a kqueue

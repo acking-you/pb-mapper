@@ -71,7 +71,7 @@ netdev = "0.46.3"
 # already locked through xcap.
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSGeometry", "NSObject", "NSProcessInfo", "NSString"] }
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFCGTypes", "CFData", "CFDictionary", "CFNumber", "CFString", "CFUUID"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFCGTypes", "CFData", "CFDictionary", "CFNotificationCenter", "CFNumber", "CFString", "CFUUID"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "objc2", "libc", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDirectDisplay", "CGDisplayConfiguration", "CGDisplayStream", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGImage", "CGRemoteOperation", "CGSession", "CGWindow"] }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "objc2", "objc2-core-video", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
