@@ -945,9 +945,13 @@ dispatch.
   a `FailureKind`, never a text to parse. `Injector::text` never sees `\n`,
   `\r` or `\t`: the neutral `Input::typed` cuts text into runs and taps Enter
   and Tab through the held-key obligation, so no platform can type a line
-  break twice. `CursorSource::shape` is asked only when the session
-  negotiated `cursor_shape`, on thread C's 16 ms pointer tick, and reads a
-  bitmap only when the OS says the pointer's image changed; it returns
+  break twice. `CursorShape::readable` bounds every pointer image before a
+  pixel of it is read (1024 a side); a larger one is not read, and the
+  viewer keeps the last shape. `CursorSource::shape` is asked only when the
+  session negotiated `cursor_shape`, on thread C's 16 ms pointer tick (the
+  helper's worker likewise), and only while the pointer shows on the shared
+  display. It reads a bitmap only when the OS says the pointer's image
+  changed, or 250 ms after a read that failed (`ShapeReads`), and returns
   physical pixels, straight RGBA8, at most 256 a side (`CursorShape::fitted`
   scales a larger one down).
 
@@ -1617,7 +1621,7 @@ shapes by content, never by number.
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued; IDR grace 500 ms; stall watchdog 700 ms |
 | fps cap | tick 250 ms; × 0.9 direct, × 0.8 relay; minimum 5; +5 after 3 s; ≥ 1 s between changes |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
-| Cursor | sampled every 16 ms; the controller's own move never reported; a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated and the OS pointer changed, 1 to 256 px a side, 64 slots on each end |
+| Cursor | sampled every 16 ms; the controller's own move never reported; a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
 | Codec | `Accepted` waits at most 3 s for the backend's display and H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3 |
 
 ### Diagnostics
