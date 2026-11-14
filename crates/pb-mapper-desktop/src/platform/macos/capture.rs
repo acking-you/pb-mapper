@@ -279,13 +279,24 @@ pub(crate) struct Stream {
     shared: Arc<Shared>,
 }
 
-/// Held, never read: the output receives the stream's pictures on the
-/// queue for as long as they live.
+/// The output receives the stream's pictures on the queue for as long as
+/// they live.
 struct Running {
     stream: Retained<SCStream>,
-    _output: Retained<Output>,
+    output: Retained<Output>,
     _queue: DispatchRetained<DispatchQueue>,
 }
+
+/// A stream's parts, handed to ScreenCaptureKit's completion queue to be
+/// dropped there once the stream stopped.
+struct Released {
+    _running: Running,
+}
+// SAFETY: the stream, its output and their queue are Objective-C and
+// dispatch objects, retained and released atomically from any thread; once
+// handed over, nothing but the completion handler touches them, and it only
+// drops them.
+unsafe impl Send for Released {}
 
 impl Stream {
     /// Display `id`'s stream at `width` x `height`, at most `fps` pictures a
@@ -347,7 +358,7 @@ impl Stream {
         let this = Self {
             running: Some(Running {
                 stream,
-                _output: output,
+                output,
                 _queue: queue,
             }),
             shared,
@@ -382,17 +393,26 @@ impl Stream {
 }
 
 impl Drop for Stream {
-    /// Stops without waiting. The stream, its output and their queue live
-    /// until the stop is done, so no picture arrives at an object gone.
+    /// Detaches the output, so that no picture arrives after this, then
+    /// stops without waiting. The stream, its output and their queue live
+    /// until the stop is done, on ScreenCaptureKit's completion queue.
     fn drop(&mut self) {
         let Some(running) = self.running.take() else {
             return;
         };
+        let receiver = ProtocolObject::<dyn SCStreamOutput>::from_ref(&*running.output);
+        // SAFETY: the output this stream was given, removed once. A stream
+        // that never started may refuse; then nothing is delivered anyway.
+        let _ = unsafe {
+            running
+                .stream
+                .removeStreamOutput_type_error(receiver, SCStreamOutputType::Screen)
+        };
         let stream = running.stream.clone();
-        let held = std::cell::Cell::new(Some(running));
-        let stopped = RcBlock::new(move |_: *mut NSError| drop(held.take()));
-        // SAFETY: stopping a stream is allowed at any time; the handler
-        // outlives the call.
+        let held = Mutex::new(Some(Released { _running: running }));
+        let stopped = RcBlock::new(move |_: *mut NSError| drop(held.lock().take()));
+        // SAFETY: stopping a stream is allowed at any time; the handler,
+        // which only drops what it holds under a lock, outlives the call.
         unsafe { stream.stopCaptureWithCompletionHandler(Some(&stopped)) };
     }
 }
