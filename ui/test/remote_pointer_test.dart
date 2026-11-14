@@ -1,11 +1,16 @@
 import 'dart:typed_data';
 
 import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_cursor_layer.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_menus.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_stage.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
+import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
+import 'package:pb_mapper_ui/src/theme/viewer_palette.dart';
 
 import 'remote_viewer_harness.dart';
 
@@ -152,6 +157,93 @@ void main() {
     expect(layer, paints..path());
 
     pointer.dispose();
+    h.dispose();
+  });
+
+  testWidgets('the local pointer takes the host shape only over the picture '
+      'itself, never over the bars beside it', (tester) async {
+    // A 16:9 picture in a wider stage: 800 wide, between bars 200 wide.
+    tester.view
+      ..physicalSize = const Size(1200, 450)
+      ..devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final h = await ViewerHarness.live(tester);
+    h.api.cursorShapes[1] = _shape(DesktopCursorKind.custom);
+    h.api.viewValue = const DesktopView(
+      generation: 1,
+      presentedFrameId: 1,
+      cursorSeq: 1,
+      displayWidth: 1920,
+      displayHeight: 1080,
+      videoWidth: 1920,
+      videoHeight: 1080,
+      cursorX: 960,
+      cursorY: 540,
+      cursorShape: 1,
+      state: 2,
+      cursorVisible: true,
+      controlling: true,
+      controlAllowed: true,
+      fresh: true,
+    );
+    final prefs = ViewerPrefs(persist: false);
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) => Theme(
+            data: viewerTheme(context),
+            child: ViewerStage.of(
+              h.store,
+              viewport: h.viewport,
+              input: h.input,
+              machine: h.machine,
+              touchMode: h.touchMode,
+              title: 'Office',
+              actions: ViewerActions(
+                desktop: h.store,
+                input: h.input,
+                prefs: prefs,
+                viewport: h.viewport,
+                onDisconnect: () async {},
+                onQuality: (_) {},
+                onResolution: (_) {},
+                onMaxFps: (_) {},
+                onDisplayMode: (_) {},
+                onTypeText: () {},
+              ),
+              localPointer: true,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 16));
+    MouseCursor? local() =>
+        RendererBinding.instance.mouseTracker.debugDeviceActiveCursor(1);
+    final mouse = await tester.createGesture(
+      kind: PointerDeviceKind.mouse,
+      pointer: 1,
+    );
+    await mouse.addPointer(location: const Offset(600, 225));
+    addTearDown(mouse.removePointer);
+    await mouse.moveTo(const Offset(610, 225));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(h.store.cursor.shape?.definition.kind, DesktopCursorKind.custom);
+    expect(local(), SystemMouseCursors.none);
+
+    // Over the bar beside the picture: the local pointer is its own again.
+    await mouse.moveTo(const Offset(100, 225));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(local(), SystemMouseCursors.basic);
+
+    await mouse.moveTo(const Offset(610, 225));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(local(), SystemMouseCursors.none);
+
+    await tester.pumpWidget(const SizedBox());
+    prefs.dispose();
     h.dispose();
   });
 }
