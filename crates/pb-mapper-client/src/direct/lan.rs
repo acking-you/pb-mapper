@@ -425,6 +425,8 @@ fn tier(
         })
     };
     let typed_physical = matches!(kind, Kind::Ethernet | Kind::Wireless);
+    let looks_physical =
+        typed_physical || named(&["wlan", "swlan", "eth", "en", "wl", "ap"], &["wi-fi"]);
     // A Hyper-V switch is internal, unless the host's own LAN and its gateway
     // were moved onto it: an external switch. That alone judges it, since
     // "vEthernet" also starts like a Linux veth.
@@ -452,12 +454,14 @@ fn tier(
         // Ethernet or Wi-Fi only on the system's word: virtual hardware and
         // no gateway. A MAC address or route it could not read says neither.
         || (typed_physical && physical == Some(false) && gateway == Some(false))
-        || (kind == Kind::Unknown && vpn_range())
+        // An untyped tunnel numbered from a VPN range. Not a Wi-Fi or
+        // Ethernet name: carrier-grade NAT hands 100.64/10 to Wi-Fi too
+        // (hotels, campuses, Starlink), and iOS, where nothing types an
+        // interface, flags its tunnels point-to-point instead.
+        || (kind == Kind::Unknown && !looks_physical && vpn_range())
     {
         return InterfaceTier::Virtual;
     }
-    let looks_physical =
-        typed_physical || named(&["wlan", "swlan", "eth", "en", "wl", "ap"], &["wi-fi"]);
     let site_local = addrs.iter().any(|&(ip, _)| match ip {
         IpAddr::V4(v4) => v4.is_private(),
         IpAddr::V6(v6) => is_global(ip) || v6.is_unique_local(),
@@ -791,6 +795,27 @@ mod tests {
         assert_eq!(
             tier(Kind::Unknown, &["lo"], None, None, &lo),
             InterfaceTier::Loopback
+        );
+    }
+
+    /// What an untyped interface holding a carrier-grade NAT address is
+    /// depends on its name: iOS's Wi-Fi on a hotel or Starlink network stays
+    /// a local network, a tunnel no name gives away stays virtual.
+    #[test]
+    fn a_shared_address_makes_only_an_unnamed_untyped_interface_virtual() {
+        let cgnat = [(ip("100.72.1.20"), 10)];
+        assert_eq!(
+            tier(Kind::Unknown, &["en0"], None, None, &cgnat),
+            InterfaceTier::Physical
+        );
+        let with_global_v6 = [cgnat[0], (ip("2409:8a00::5"), 64)];
+        assert_eq!(
+            tier(Kind::Unknown, &["en0"], None, None, &with_global_v6),
+            InterfaceTier::Lan
+        );
+        assert_eq!(
+            tier(Kind::Unknown, &["nordlynx"], None, None, &cgnat),
+            InterfaceTier::Virtual
         );
     }
 
