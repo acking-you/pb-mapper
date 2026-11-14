@@ -600,7 +600,11 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     thread.start()
   }
 
-  /// Detaching wakes a blocked pull, so the wait is short.
+  /// Detaching wakes a blocked pull, so the wait is short. Then, with no Feed
+  /// thread left to publish, a new revision: a picture of this source the
+  /// compositor has not taken yet stays on screen until the next source's
+  /// first one, but earns no receipt from any consumer (Android's
+  /// FeedQueue.reset). Attach detaches first, so it starts one too.
   func detach() {
     lock.lock()
     stopping = true
@@ -612,6 +616,7 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     worker = nil
     lock.lock()
     stopping = false
+    revision += 1
     lock.unlock()
   }
 

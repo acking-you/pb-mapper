@@ -148,6 +148,16 @@ class Raster {
     if (shown_) module_->release(shown_);
     shown_ = nullptr;
   }
+  // While held, the compositor takes nothing, so a published picture waits
+  // untaken; released, it takes the newest at once.
+  void Hold(bool held) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      held_ = held;
+      if (!held) ready_ = true;
+    }
+    wake_.notify_one();
+  }
   int pictures() const { return pictures_; }
   // The size of the picture shown last, and whether it has content.
   void Last(uint32_t* width, uint32_t* height, bool* content) {
@@ -162,7 +172,7 @@ class Raster {
     while (true) {
       {
         std::unique_lock<std::mutex> lock(mutex_);
-        wake_.wait(lock, [this] { return ready_ || stopping_; });
+        wake_.wait(lock, [this] { return (ready_ && !held_) || stopping_; });
         if (stopping_) return;
         ready_ = false;
       }
@@ -189,7 +199,7 @@ class Raster {
   std::thread thread_;
   std::mutex mutex_;
   std::condition_variable wake_;
-  bool ready_ = false, stopping_ = false, content_ = false;
+  bool ready_ = false, stopping_ = false, content_ = false, held_ = false;
   std::vector<Clock::time_point> ready_at_;
   uint32_t width_ = 0, height_ = 0;
   std::atomic<int> pictures_{0};
@@ -368,6 +378,28 @@ int main(int argc, char** argv) {
   Check(WaitFor([&] { return g_accepted >= resumed + 60; }, milliseconds(3000)), "decoding resumes after the pause");
   Check(stats().configurations == configured && g_failures == 0 && g_stalls == 0,
         "the resume's discontinuity keeps the pipeline");
+
+  printf("a picture still untaken when the next source attaches\n");
+  raster.Hold(true);
+  const uint64_t held = stats().decoded;
+  Check(WaitFor([&] { return stats().decoded > held; }, milliseconds(1000)), "a picture waits untaken");
+  // The next source sends nothing yet, so its decoder thread starts no
+  // revision of its own before the compositor takes the waiting picture.
+  const uint64_t next = g_ffi.source(h264.c_str(), 60);
+  g_ffi.pause(next, 1);
+  const int receipts = g_receipts;
+  const uint64_t presented = stats().presented;
+  const int taken = raster.pictures();
+  Check(attach(next), "the decoder attaches to the next source");
+  g_ffi.stop(source);
+  source = next;
+  raster.Hold(false);
+  Check(WaitFor([&] { return raster.pictures() > taken; }, milliseconds(1000)), "the compositor takes it");
+  Check(g_receipts == receipts && stats().presented == presented,
+        "the previous source's picture earns no receipt from the next one");
+  const int next_start = g_accepted;
+  g_ffi.pause(source, 0);
+  Check(WaitFor([&] { return g_accepted >= next_start + 30; }, milliseconds(3000)), "the next source's pictures do");
   g_ffi.stop(source);
 
   printf("one source changing 1280x720 -> 1920x1080 at keyframes\n");

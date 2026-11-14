@@ -678,12 +678,19 @@ struct PbVideoDecoder {
     return consumer;
   }
 
-  // Detaching wakes a blocked pull, so the join is prompt.
+  // Detaching wakes a blocked pull, so the join is prompt. Then, with no
+  // decoder thread left to publish, a new revision: a picture of this
+  // source that the compositor has not taken yet stays on screen until the
+  // next source's first one, but earns no receipt from any consumer
+  // (Android's FeedQueue.reset). Attach detaches first, so it starts one
+  // too.
   void Detach() {
     stopping_ = true;
     if (const uint64_t consumer = consumer_.exchange(0)) api_.detach(consumer);
     if (worker_.joinable()) worker_.join();
     stopping_ = false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++revision_;
   }
 
   // Raster thread. A picture of an older revision stays on screen until a
@@ -691,6 +698,9 @@ struct PbVideoDecoder {
   PbVideoPicture* Acquire() {
     PbVideoPicture* picture = nullptr;
     bool acknowledge = false;
+    // Read with the revision, under the lock that Detach starts a new one
+    // under: a picture is only ever receipted to the source it came from.
+    uint64_t consumer = 0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!latest_) return nullptr;
@@ -701,13 +711,14 @@ struct PbVideoDecoder {
         consumed_revision_ = picture->revision;
         consumed_frame_ = picture->frame_id;
         acknowledge = true;
+        consumer = consumer_.load();
       }
     }
     if (acknowledge) {
       ++presented_;
       // Taken by the compositor: the receipt Rust validates and forwards
       // for input authorisation. Non-blocking.
-      if (const uint64_t consumer = consumer_.load()) {
+      if (consumer) {
         api_.presented(consumer, static_cast<uint64_t>(picture->generation), static_cast<uint64_t>(picture->frame_id));
       }
     }
