@@ -16,17 +16,32 @@ mod tests {
     use std::time::{Duration, Instant};
 
     /// A wake sent before a wait ends it at once, and only once; a wake from
-    /// another thread ends a 1 s wait.
+    /// another thread ends a 1 s wait. A wake once consumed ends no later
+    /// wait early, whether it came before its wait or after a wait's timer
+    /// fired.
     macro_rules! wake_ends_a_wait {
         ($implementation:path) => {{
             use $implementation::{Waiter, Wake};
+            /// A 20 ms wait that no stale wake ends early.
+            macro_rules! lasts {
+                ($waiter:expr) => {{
+                    let started = Instant::now();
+                    assert!(!$waiter.wait(started + Duration::from_millis(20))?);
+                    assert!(started.elapsed() >= Duration::from_millis(15));
+                }};
+            }
             let wake = Wake::new();
             let waiter = Waiter::new(&wake)?;
             wake.notify();
             let started = Instant::now();
             assert!(waiter.wait(started + Duration::from_secs(1))?);
             assert!(started.elapsed() < Duration::from_millis(50));
-            assert!(!waiter.wait(Instant::now() + Duration::from_millis(5))?);
+            lasts!(waiter);
+
+            assert!(!waiter.wait(Instant::now() + Duration::from_millis(2))?);
+            wake.notify();
+            assert!(waiter.wait(Instant::now() + Duration::from_secs(1))?);
+            lasts!(waiter);
 
             let remote = wake.clone();
             let (sent, notified) = std::sync::mpsc::sync_channel(1);

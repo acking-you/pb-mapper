@@ -139,13 +139,16 @@ impl Waiter {
         }
         let woken = self.signal.pending.swap(false, Ordering::AcqRel);
         if woken {
-            // Collect the user event the wake triggered and drop the timer,
-            // fired or not, so the next wait does not end early. A newer
-            // wake stays pending in the flag. A timer that is already gone
-            // comes back as an error event, which is ignored.
+            // So that the next wait does not end early: drop the timer,
+            // armed or fired, then collect the user event the wake
+            // triggered. In two calls: a change that fails (the timer is
+            // gone already) makes the kernel report it and scan nothing
+            // else, which would leave the user event behind. A newer wake
+            // stays pending in the flag.
             let timer = event(TIMER, libc::EVFILT_TIMER, libc::EV_DELETE, 0, 0);
+            let _ = kevent(queue, &[timer], &mut [], Some(&NOW));
             let mut ready = [event(0, 0, 0, 0, 0); 2];
-            let _ = kevent(queue, &[timer], &mut ready, Some(&NOW));
+            let _ = kevent(queue, &[], &mut ready, Some(&NOW));
         }
         Ok(woken)
     }
