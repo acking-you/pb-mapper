@@ -327,6 +327,11 @@ private func withBt709(_ format: CMVideoFormatDescription) throws -> CMVideoForm
     return format
   }
   var extensions = (CMFormatDescriptionGetExtensions(format) as? [String: Any]) ?? [:]
+  // CMFormatDescription.h: a modified clone must drop the verbatim sample
+  // description and ISO sample entry, or the modification can be lost to
+  // the original they carry.
+  extensions.removeValue(forKey: kCMFormatDescriptionExtension_VerbatimSampleDescription as String)
+  extensions.removeValue(forKey: kCMFormatDescriptionExtension_VerbatimISOSampleEntry as String)
   let tags: [(CFString, CFString)] = [
     (kCMFormatDescriptionExtension_YCbCrMatrix, kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2),
     (kCMFormatDescriptionExtension_ColorPrimaries, kCMFormatDescriptionColorPrimaries_ITU_R_709_2),
