@@ -123,8 +123,17 @@ runs, and resumes with the app when **Share this computer** was left on.
   `PERMISSION_MISSING`; an input without Accessibility ends control
   (`input_failed`, naming Accessibility), because macOS would drop the events
   silently, and viewing goes on.
-- The app stays sandboxed: neither permission needs an entitlement or a usage
-  key, and no entitlement or `Info.plist` key was added for hosting.
+- The app is not sandboxed since 0.12.0. The App Sandbox denies posting input
+  to other apps, and an app that controls others cannot be sandboxed; it
+  ships outside the App Store, signed with Developer ID and the Hardened
+  Runtime, with no entitlement in release. Neither permission needs an
+  entitlement or a usage key, and no `Info.plist` key was added for hosting.
+  Leaving the sandbox moves where the app keeps its data, from
+  `~/Library/Containers/com.pb-mapper.ui/Data/Library/` to `~/Library/`: at
+  its first launch outside the sandbox the app copies its configuration
+  directory (tunnels, the relay credential, settings), its support directory
+  and its preferences out of the container, once, and leaves the container
+  as it was, for a downgrade.
 - A remembered grant is sealed with a key kept in the login Keychain (see
   [Remembered authorization](#remembered-authorization-and-unattended-use)).
 - Locking the Mac, or switching to another user, shows the viewer the secure

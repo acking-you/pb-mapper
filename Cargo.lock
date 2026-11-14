@@ -3200,6 +3200,7 @@ dependencies = [
  "clap",
  "dirs",
  "jni 0.21.1",
+ "objc2-core-foundation",
  "parking_lot",
  "pb-mapper",
  "pb-mapper-auth",

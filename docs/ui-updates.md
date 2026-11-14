@@ -60,10 +60,10 @@ invitation, which the page shows again once the app has restarted into it.
 
 Since 0.9.7 the macOS app and its DMG are signed with the project's Developer
 ID, notarized and stapled, and the mounted DMG passes Gatekeeper before it is
-uploaded ([macOS signing](macos-signing.zh-CN.md)). The app is sandboxed, so
-unlike CipherRelay it cannot replace its own bundle in Applications: it opens
-the verified DMG for installation instead, and never removes quarantine or
-disables Gatekeeper. An opener failure is reported as failure, rather than
+uploaded ([macOS signing](macos-signing.zh-CN.md)). Unlike CipherRelay it does
+not replace its own bundle in Applications (it was sandboxed until 0.12.0 and
+could not): it opens the verified DMG for installation instead, and never
+removes quarantine or disables Gatekeeper. An opener failure is reported as failure, rather than
 saying the installation opened successfully.
 
 ## Android signing baseline

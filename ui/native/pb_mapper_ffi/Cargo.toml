@@ -60,6 +60,10 @@ pb-mapper-client = { workspace = true, features = ["port-mapping"] }
 [target.'cfg(target_os = "android")'.dependencies]
 jni.workspace = true
 
+# The preferences a sandboxed 0.11.0 kept in its container, copied out once.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { workspace = true, features = ["CFError", "CFPreferences", "CFPropertyList"] }
+
 # Dart opens this library with dlopen after startup. mimalloc's default
 # initial-exec TLS must then fit the little static TLS glibc keeps for late
 # libraries, and with this library's thread locals it does not: the load
