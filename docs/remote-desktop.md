@@ -243,7 +243,11 @@ of two input methods, chosen per computer under **Shortcuts → Input method**
   arrows and Esc belong to it.
 - **The remote computer's.** Keys go by their place on the keyboard (a USB
   HID usage, `Input::PhysicalKey`), so the host's layout and input method
-  type them: a German host's layout makes Z of a US key's Y. This needs a
+  type them: a German host's layout makes Z of a US key's Y. On a Windows
+  host Lang1 and Lang2 (the Korean Hangul and Hanja keys, a Mac's かな and
+  英数) land where Windows' layouts put them, E0 F2 and E0 F1: Hangul and
+  Hanja under a Korean layout, the input method on and off under a Japanese
+  one. This needs a
   host that lists `physical_keys` (0.12 on Windows and macOS); toward an older
   one the menu says so, and letters, digits and Space go as keys and the rest
   as text. On Windows the viewer window's own input method is turned off
@@ -282,7 +286,9 @@ In either mode:
   with a printable key types its character and makes no chord.
 - To a host that lists `physical_keys`, keys the vocabulary cannot name go by
   place in the local mode too: Ctrl or Alt with punctuation (Ctrl+/, Ctrl+-,
-  Ctrl+[), PrintScreen, Pause, the Menu key and F13–F24. Caps Lock, Num Lock,
+  Ctrl+[), PrintScreen, Pause, the Menu key and F13–F24. A Windows host
+  presses Pause under a Ctrl it holds as Break, as a keyboard does, which a
+  console takes as Ctrl+Break. Caps Lock, Num Lock,
   Scroll Lock, the numpad's digits and the input-method keys stay this
   computer's in the local mode; a 0.11.0 host gets none of them.
 - Cmd and Ctrl swap places when exactly one side is an Apple device, on by
