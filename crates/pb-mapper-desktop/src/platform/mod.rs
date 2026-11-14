@@ -225,23 +225,87 @@ pub(crate) trait CursorSource: Sized {
     /// returns the shape now.
     ///
     /// - When: on thread C, only in a session whose viewer reads shapes,
-    ///   right after a `read` that found a pointer, every 16 ms while
-    ///   capturing, inside the desktop's scope. `PlatformBackend` checked
-    ///   the desktop around that `read`.
+    ///   right after a `read` that found the pointer showing on the shared
+    ///   display, every 16 ms while capturing, inside the desktop's scope.
+    ///   `PlatformBackend` checked the desktop around that `read`. Never
+    ///   while the pointer is hidden or on another display: nothing of it
+    ///   reaches the viewer then, which keeps the last shape.
     /// - Unchanged: decide it by the cheapest identity the OS gives the
-    ///   pointer (Windows: the `HCURSOR` the `read` saw; macOS: the
-    ///   `NSCursor`), never by reading pixels each call, and return `None`.
-    ///   Thread C compares content, so a new identity with an equal image
-    ///   costs one extraction and nothing on the wire. `None` also when the
-    ///   pointer has no shape now (hidden): the last one stays.
-    /// - Units and bounds: the bitmap in the host's physical pixels, straight
-    ///   RGBA8, at most `CursorShape::MAX_SIDE` a side; build it with
-    ///   `CursorShape::fitted`, which scales a larger one down. `kind` names a
-    ///   standard shape the OS identifies as such, else `Custom`.
-    /// - Failure: thread C keeps the last shape and goes on capturing; a
-    ///   source that failed on one identity does not retry it every call.
+    ///   pointer (Windows: the `HCURSOR` the `read` saw; macOS: the window
+    ///   server's cursor seed), never by reading pixels each call, and
+    ///   return `None`. Thread C compares content, so a new identity with an
+    ///   equal image costs one extraction and nothing on the wire. `None`
+    ///   also when the pointer has no shape now: the last one stays.
+    ///   [`ShapeReads`] keeps the identities.
+    /// - Units and bounds: the bitmap in the host's physical pixels,
+    ///   straight RGBA8. Check the image's size with `CursorShape::readable`
+    ///   before allocating or copying a pixel of it, then build the shape
+    ///   with `CursorShape::fitted`, which scales anything larger than
+    ///   `CursorShape::MAX_SIDE` down. `kind` names a standard shape the OS
+    ///   identifies as such, else `Custom`.
+    /// - Failure: thread C keeps the last shape and goes on capturing. A
+    ///   refusal (`InvalidData`: too large, or not a bitmap of its size) is
+    ///   not read again for that identity; any other failure is, after
+    ///   `SHAPE_RETRY` ([`ShapeReads`]).
     fn shape(&mut self) -> Result<Option<CursorShape>> {
         Ok(None)
+    }
+}
+
+/// How soon a pointer shape whose read failed is read again.
+#[cfg_attr(
+    not(any(windows, target_os = "macos", test)),
+    expect(dead_code, reason = "for the platforms that read pointer bitmaps")
+)]
+pub(crate) const SHAPE_RETRY: Duration = Duration::from_millis(250);
+
+/// Which pointer identity a [`CursorSource`] last read the shape of: one is
+/// read once, a failed read of it again after [`SHAPE_RETRY`], and one the
+/// size rule refused (`InvalidData`) never again, so a broken or huge cursor
+/// costs one read, not one per tick.
+#[cfg_attr(
+    not(any(windows, target_os = "macos", test)),
+    expect(dead_code, reason = "for the platforms that read pointer bitmaps")
+)]
+pub(crate) struct ShapeReads<I> {
+    /// The identity read last, and, after a failure that may pass, when it
+    /// is due again.
+    tried: Option<(I, Option<std::time::Instant>)>,
+}
+impl<I> Default for ShapeReads<I> {
+    fn default() -> Self {
+        Self { tried: None }
+    }
+}
+#[cfg_attr(
+    not(any(windows, target_os = "macos", test)),
+    expect(dead_code, reason = "for the platforms that read pointer bitmaps")
+)]
+impl<I: Copy + PartialEq> ShapeReads<I> {
+    /// The identity read last, whatever the read gave.
+    #[cfg_attr(
+        not(any(target_os = "macos", test)),
+        expect(dead_code, reason = "macOS paces reads without a cursor seed by it")
+    )]
+    pub(crate) fn last(&self) -> Option<I> {
+        self.tried.map(|(identity, _)| identity)
+    }
+    /// Whether to read the shape of `identity` at `now`.
+    pub(crate) fn due(&self, identity: I, now: std::time::Instant) -> bool {
+        match self.tried {
+            Some((tried, retry)) if tried == identity => retry.is_some_and(|at| now >= at),
+            _ => true,
+        }
+    }
+    /// What the read of `identity` at `now` gave.
+    pub(crate) fn record<T>(&mut self, identity: I, read: &Result<T>, now: std::time::Instant) {
+        let retry = match read {
+            Err(failure) if failure.kind() != std::io::ErrorKind::InvalidData => {
+                Some(now + SHAPE_RETRY)
+            }
+            Ok(_) | Err(_) => None,
+        };
+        self.tried = Some((identity, retry));
     }
 }
 
@@ -497,4 +561,33 @@ fn unsupported(reason: Option<UnsupportedReason>) -> std::io::Error {
         }
     };
     BackendError::new(FailureKind::Unsupported, message).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{io, time::Instant};
+
+    /// An identity is read once; a read that failed for a reason that may
+    /// pass is read again after `SHAPE_RETRY`, never on the next tick, and
+    /// one refused as too large is not read again; a new identity always is.
+    #[test]
+    fn a_failed_shape_read_is_retried_and_a_refused_one_is_not() {
+        let at = Instant::now();
+        let mut reads = ShapeReads::default();
+        assert!(reads.due(1, at));
+        reads.record(1, &Ok(()), at);
+        assert!(!reads.due(1, at + SHAPE_RETRY));
+        assert!(reads.due(2, at));
+
+        let failed: Result<()> = Err(io::Error::other("GetDIBits failed"));
+        reads.record(2, &failed, at);
+        assert!(!reads.due(2, at));
+        assert!(reads.due(2, at + SHAPE_RETRY));
+
+        let refused: Result<()> = Err(io::Error::from(io::ErrorKind::InvalidData));
+        reads.record(3, &refused, at);
+        assert!(!reads.due(3, at + SHAPE_RETRY * 10));
+        assert_eq!(reads.last(), Some(3));
+    }
 }

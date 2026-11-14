@@ -5,7 +5,9 @@
 //!
 //! The shape is `NSCursor.currentSystemCursor`, the pointer every app shows,
 //! read again only when the window server's cursor seed moved (a private
-//! counter, looked up at run time; without it, at most twice a second).
+//! counter, looked up at run time; without it, at most twice a second), or
+//! when a read failed, as `ShapeReads` says. An image larger than
+//! `CursorShape::readable` takes is not drawn at all.
 //! Its image is rendered at the display's scale into straight RGBA, and
 //! named by the standard cursor it equals pixel for pixel, else `Custom`.
 //! AppKit is called from thread C: `NSCursor`'s class methods and `NSImage`
@@ -15,7 +17,10 @@
 //! accessors assert one), and then there is no shape, or it is `Custom`.
 
 use super::{cf, desktop::Shared, pixels};
-use crate::{CursorKind, CursorMode, CursorShape, Result, error, platform::CursorSource};
+use crate::{
+    CursorKind, CursorMode, CursorShape, Result, error,
+    platform::{CursorSource, ShapeReads},
+};
 use objc2::{
     ClassType, msg_send,
     rc::{Retained, autoreleasepool},
@@ -46,8 +51,8 @@ enum Identity {
 pub(crate) struct MacCursor {
     geometry: Shared,
     seed: Option<Seed>,
-    /// The identity last shaped, or tried: one that failed is not retried.
-    seen: Option<Identity>,
+    /// The identities whose shape was read, or failed to be.
+    reads: ShapeReads<Identity>,
     /// The standard cursors rendered at a scale, to name a shape; none
     /// rendered (AppKit had none to give) are asked for again.
     standards: Option<(u64, Vec<(CursorKind, CursorShape)>)>,
@@ -62,26 +67,25 @@ impl MacCursor {
         Self {
             geometry,
             seed,
-            seen: None,
+            reads: ShapeReads::default(),
             standards: None,
         }
     }
 
-    /// Whether the pointer may have changed since the last shape.
-    fn changed(&mut self) -> bool {
+    /// The identity whose shape to read at `now`, when the pointer may
+    /// have changed since the last read, or that one failed.
+    fn due(&self, now: Instant) -> Option<Identity> {
         let identity = match self.seed {
             // SAFETY: takes nothing, reads a counter.
             Some(seed) => Identity::Seed(unsafe { seed() }),
-            None => match self.seen {
-                Some(Identity::Read(at)) if at.elapsed() < UNSEEDED => return false,
-                _ => Identity::Read(Instant::now()),
+            None => match self.reads.last() {
+                Some(Identity::Read(at)) if now.saturating_duration_since(at) < UNSEEDED => {
+                    return None;
+                }
+                _ => Identity::Read(now),
             },
         };
-        if self.seen == Some(identity) {
-            return false;
-        }
-        self.seen = Some(identity);
-        true
+        self.reads.due(identity, now).then_some(identity)
     }
 
     /// The kind of `shape`: the standard cursor it equals at `scale`.
@@ -156,11 +160,8 @@ fn render(cursor: &NSCursor, scale: f64, kind: CursorKind) -> Result<Option<Curs
     let hotspot: NSPoint = cursor.hotSpot();
     let ((width, height), hot) =
         pixels::in_pixels((size.width, size.height), (hotspot.x, hotspot.y), scale);
-    // Never more than four times the largest shape before scaling down.
-    let limit = CursorShape::MAX_SIDE * 4;
-    if width > limit || height > limit {
-        return Err(error("the pointer's image is too large"));
-    }
+    // Before a pixel is drawn: a huge pointer is not read.
+    CursorShape::readable(width, height)?;
     let pixel_size = CGSize {
         width: f64::from(width),
         height: f64::from(height),
@@ -212,14 +213,24 @@ impl CursorSource for MacCursor {
             None => (0, 0, false),
         }))
     }
+    fn shape(&mut self) -> Result<Option<CursorShape>> {
+        let now = Instant::now();
+        let Some(identity) = self.due(now) else {
+            return Ok(None);
+        };
+        let read = self.read_shape();
+        self.reads.record(identity, &read, now);
+        read
+    }
+}
+
+impl MacCursor {
+    /// The pointer every app shows now, rendered and named.
     #[expect(
         deprecated,
         reason = "currentSystemCursor is the only public way to the pointer other apps show; nil on a system without it"
     )]
-    fn shape(&mut self) -> Result<Option<CursorShape>> {
-        if !self.changed() {
-            return Ok(None);
-        }
+    fn read_shape(&mut self) -> Result<Option<CursorShape>> {
         let scale = self.geometry.get().scale;
         autoreleasepool(|_| {
             let Some(cursor) = NSCursor::currentSystemCursor() else {

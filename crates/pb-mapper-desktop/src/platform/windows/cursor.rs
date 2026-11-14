@@ -1,5 +1,8 @@
 //! The pointer on Windows: where it is, whether it shows, and its shape.
-use crate::{CursorKind, CursorMode, CursorShape, Result, error, platform::CursorSource};
+use crate::{
+    CursorKind, CursorMode, CursorShape, Result, error,
+    platform::{CursorSource, ShapeReads},
+};
 use windows::Win32::{
     Graphics::Gdi::{
         BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
@@ -36,8 +39,8 @@ const STANDARD: [(PCWSTR, CursorKind); 14] = [
 pub(crate) struct WinCursor {
     /// The cursor the last `read` saw; null when none shows.
     seen: HCURSOR,
-    /// The cursor whose shape `shape` last reported, or failed to read.
-    shaped: HCURSOR,
+    /// The cursors whose shape `shape` read, or failed to.
+    reads: ShapeReads<HCURSOR>,
     /// The system cursors' shared handles, loaded at the first shape read.
     standard: Vec<(HCURSOR, CursorKind)>,
 }
@@ -49,6 +52,8 @@ impl CursorSource for WinCursor {
             cbSize: size_of::<CURSORINFO>() as u32,
             ..Default::default()
         };
+        // SAFETY: an out struct whose `cbSize` says its size, as the call
+        // requires.
         unsafe {
             GetCursorInfo(&mut cursor).map_err(error)?;
         }
@@ -58,13 +63,13 @@ impl CursorSource for WinCursor {
         let point = cursor.ptScreenPos;
         Ok(Some((point.x, point.y, showing)))
     }
-    /// A new handle is read once: its kind by the system cursors' handles,
-    /// its bitmap through `GetIconInfo`.
+    /// A new handle is read once, as `ShapeReads` says: its kind by the
+    /// system cursors' handles, its bitmap through `GetIconInfo`.
     fn shape(&mut self) -> Result<Option<CursorShape>> {
-        if self.seen == self.shaped || self.seen.is_invalid() {
+        let now = std::time::Instant::now();
+        if self.seen.is_invalid() || !self.reads.due(self.seen, now) {
             return Ok(None);
         }
-        self.shaped = self.seen;
         if self.standard.is_empty() {
             self.standard = STANDARD
                 .iter()
@@ -77,7 +82,9 @@ impl CursorSource for WinCursor {
             .iter()
             .find(|(handle, _)| *handle == self.seen)
             .map_or(CursorKind::Custom, |(_, kind)| *kind);
-        read_shape(self.seen, kind).map(Some)
+        let read = read_shape(self.seen, kind);
+        self.reads.record(self.seen, &read, now);
+        read.map(Some)
     }
 }
 
@@ -117,8 +124,13 @@ fn read_shape(cursor: HCURSOR, kind: CursorKind) -> Result<CursorShape> {
     } else {
         mask_height
     };
-    if width == 0 || height == 0 {
-        return Err(error("an empty cursor"));
+    // Before a pixel is copied: a huge cursor is not read.
+    CursorShape::readable(width, height)?;
+    if !color.is_invalid() && size(color)? != (width, height) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the cursor's colour and mask differ in size",
+        ));
     }
     // SAFETY: a DC compatible with the screen, deleted by `MemoryDc`.
     let dc = MemoryDc(unsafe { CreateCompatibleDC(None) });
@@ -323,7 +335,8 @@ mod tests {
     };
 
     /// Reading a colour cursor (the system arrow) and a monochrome one
-    /// releases every GDI object it makes.
+    /// releases every GDI object it makes, and so does refusing one too
+    /// large to read, before any of its pixels is copied.
     #[test]
     fn reading_a_cursor_leaks_no_gdi_object() {
         let (and, xor) = ([0xFF_u8; 128], [0_u8; 128]);
@@ -331,11 +344,29 @@ mod tests {
             unsafe { CreateCursor(None, 1, 1, 32, 32, and.as_ptr().cast(), xor.as_ptr().cast()) }
                 .unwrap();
         let arrow = unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap();
+        // Wider than a pointer is read: 1040 pixels, rows of 130 bytes.
+        let wide = CursorShape::MAX_READ_SIDE + 16;
+        let planes = vec![0xFF_u8; wide as usize / 8 * 2];
+        let huge = unsafe {
+            CreateCursor(
+                None,
+                0,
+                0,
+                wide as i32,
+                2,
+                planes.as_ptr().cast(),
+                planes.as_ptr().cast(),
+            )
+        }
+        .unwrap();
+        let refused = read_shape(huge, CursorKind::Custom).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
         let objects = || unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
         let read = || {
             for cursor in [arrow, mono] {
                 read_shape(cursor, CursorKind::Custom).unwrap();
             }
+            assert!(read_shape(huge, CursorKind::Custom).is_err());
         };
         read();
         let before = objects();
@@ -346,6 +377,7 @@ mod tests {
         // here would be hundreds.
         assert!(objects() < before + 20, "{before} -> {}", objects());
         unsafe { DestroyCursor(mono) }.unwrap();
+        unsafe { DestroyCursor(huge) }.unwrap();
     }
 
     /// A monochrome cursor: black, white, clear and an inverting pixel,

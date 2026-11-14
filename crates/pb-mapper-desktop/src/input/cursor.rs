@@ -107,9 +107,34 @@ impl CursorShape {
         width as usize * height as usize * 4
     }
 
-    /// A shape of a pointer the platform read, any size: one larger than
-    /// `MAX_SIDE` a side is scaled down to fit, its hotspot with it, and a
-    /// hotspot outside the image is moved to its nearest edge.
+    /// The longest side of a pointer image a platform reads at all: four
+    /// times `MAX_SIDE`, which covers the largest pointer an OS draws at any
+    /// accessibility size and scale. A larger one is not read, so a program
+    /// that sets a huge cursor costs the host nothing per tick, and the
+    /// viewer keeps the last shape.
+    pub(crate) const MAX_READ_SIDE: u32 = Self::MAX_SIDE * 4;
+
+    /// Whether a platform may read a pointer image of that size: before it
+    /// allocates or copies a pixel. `InvalidData` for an empty or too large
+    /// one, a refusal that reading again does not change.
+    #[cfg_attr(
+        not(any(windows, target_os = "macos", test)),
+        expect(dead_code, reason = "for the platforms that read pointer bitmaps")
+    )]
+    pub(crate) fn readable(width: u32, height: u32) -> io::Result<()> {
+        let side = 1..=Self::MAX_READ_SIDE;
+        if side.contains(&width) && side.contains(&height) {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the pointer's image is empty or too large to read",
+        ))
+    }
+
+    /// A shape of a pointer the platform read, as `readable` bounds it: one
+    /// larger than `MAX_SIDE` a side is scaled down to fit, its hotspot with
+    /// it, and a hotspot outside the image is moved to its nearest edge.
     #[cfg_attr(
         not(any(windows, target_os = "macos", test)),
         expect(dead_code, reason = "for the platforms that read pointer bitmaps")
@@ -121,18 +146,12 @@ impl CursorShape {
         hotspot: (u32, u32),
         rgba: Vec<u8>,
     ) -> io::Result<Self> {
+        Self::readable(width, height)?;
         let longest = width.max(height);
-        if longest <= Self::MAX_SIDE
-            || width == 0
-            || height == 0
-            || rgba.len() != Self::bytes(width, height)
-        {
+        if longest <= Self::MAX_SIDE || rgba.len() != Self::bytes(width, height) {
             // Within bounds already, or no bitmap of that size, which `new`
             // refuses.
-            let hotspot = (
-                hotspot.0.min(width.saturating_sub(1)),
-                hotspot.1.min(height.saturating_sub(1)),
-            );
+            let hotspot = (hotspot.0.min(width - 1), hotspot.1.min(height - 1));
             return Self::new(kind, width, height, hotspot, rgba);
         }
         let scale = |value: u32| {
@@ -262,7 +281,8 @@ mod tests {
     }
 
     /// A pointer larger than a shape may be is scaled down to fit, its
-    /// hotspot with it; a bitmap of another size is refused.
+    /// hotspot with it; a bitmap of another size is refused, and so is a
+    /// pointer too large to read, before a platform reads a pixel of it.
     #[test]
     fn a_large_pointer_is_scaled_down_to_the_largest_shape() {
         // Opaque white on the left half, clear on the right.
@@ -280,5 +300,14 @@ mod tests {
         };
         assert_eq!((pixel(0), pixel(255)), (vec![255; 4], vec![0; 4]));
         assert!(CursorShape::fitted(CursorKind::Arrow, 2, 2, (0, 0), vec![0; 4]).is_err());
+        let max = CursorShape::MAX_READ_SIDE;
+        assert!(CursorShape::readable(max, max).is_ok());
+        for refused in [
+            CursorShape::readable(max + 1, 1),
+            CursorShape::readable(0, 1),
+            CursorShape::fitted(CursorKind::Custom, 1, max + 1, (0, 0), vec![]).map(drop),
+        ] {
+            assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        }
     }
 }
