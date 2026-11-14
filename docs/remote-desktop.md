@@ -261,9 +261,12 @@ In either mode:
   Shift, Ctrl+Shift, Alt+Shift, Ctrl+Space, Win+Space and Caps Lock stay this
   computer's input-method and layout switches. With the remote computer's,
   Shift, Ctrl and Alt go at once, since its input method needs their taps,
-  and Win still waits, so a lone Win tap opens neither Start menu. Modifiers
-  held down are real presses and releases, never wrapped around another key,
-  because the host does not count presses.
+  and the host's Win still waits (a Mac's Ctrl, where Ctrl and Cmd swap), so
+  a lone Win tap opens neither Start menu; a modifier that goes at once
+  takes one still waiting ahead of it, so Win+Shift+S arrives in order.
+  Modifiers held down are real presses and releases, never wrapped around
+  another key, latched ones included, because the host does not count
+  presses.
 - F1–F12, Enter, Esc, Tab, Backspace, Delete, Insert, Home, End, Page Up,
   Page Down and the arrows go as keys; with a modifier latched, as one
   wrapped tap. Tab never moves focus out of the picture.

@@ -155,7 +155,7 @@ final class RemoteInput implements RemotePointerSink {
     final g = _live;
     if (g == null) return;
     cursor = n;
-    final mods = _latch.active.difference(_buttonMods);
+    final mods = _latchedToWrap().difference(_buttonMods);
     final sent = _sequence(g, [
       _moveInput(g, n),
       ..._waitingDowns,
@@ -202,7 +202,7 @@ final class RemoteInput implements RemotePointerSink {
   @override
   void wheelStart() {
     final g = _live;
-    final mods = _latch.active;
+    final mods = _latchedToWrap();
     if (g == null || mods.isEmpty) return;
     if (_sequence(g, [..._waitingDowns, ..._downs(mods)])) {
       _sentWaiting();
@@ -249,7 +249,7 @@ final class RemoteInput implements RemotePointerSink {
       swap: swapsModifiers,
       optionTypes: appleViewer,
       latched: _latch.active,
-      held: _physicalModifiers(),
+      heldHere: _physicalModifiers(),
       othersDown:
           _heldButtons.isNotEmpty ||
           _heldKeys.keys.any((k) => !KeyRouting.modifierKeys.contains(k)),
@@ -298,23 +298,37 @@ final class RemoteInput implements RemotePointerSink {
     return result;
   }
 
-  /// One tap of [key], wrapped in the latched modifiers and [extra].
+  /// One tap of [key], after the modifiers waiting here and wrapped in the
+  /// latched modifiers and [extra].
   void tapKey(RemoteKey key, {Set<RemoteKey> extra = const {}}) {
     final g = _live;
     if (g == null) return;
-    _wrapped(g, extra, (mods) => KeyRouting.tap(key, mods));
+    final waiting = _waitingDowns;
+    _wrapped(
+      g,
+      extra,
+      (mods) => [...waiting, ...KeyRouting.tap(key, mods)],
+      sent: _sentWaiting,
+    );
   }
 
-  /// Holds [key] down, wrapped in the latched modifiers, repeating its
-  /// down after [delay] every [kKeyRepeatInterval] until [releaseKey]. A
-  /// key held past [kKeyRepeatDelay] before it was pressed repeats at once
-  /// (the modifier bar, which sends a tap on release).
+  /// Holds [key] down, after the modifiers waiting here and wrapped in the
+  /// latched modifiers, repeating its down after [delay] every
+  /// [kKeyRepeatInterval] until [releaseKey]. A key held past
+  /// [kKeyRepeatDelay] before it was pressed repeats at once (the modifier
+  /// bar, which sends a tap on release).
   void pressKey(RemoteKey key, {Duration delay = kKeyRepeatDelay}) {
     final g = _live;
     if (g == null) return;
     releaseKey();
-    final mods = _latch.active;
-    if (!_sequence(g, [..._downs(mods), DesktopInput.key(key, true)])) return;
+    final mods = _latchedToWrap();
+    final sent = _sequence(g, [
+      ..._waitingDowns,
+      ..._downs(mods),
+      DesktopInput.key(key, true),
+    ]);
+    if (!sent) return;
+    _sentWaiting();
     _latch.take();
     _repeatKey = key;
     _repeatMods = mods;
@@ -523,11 +537,19 @@ final class RemoteInput implements RemotePointerSink {
     List<DesktopInput> Function(Set<RemoteKey> mods) build, {
     VoidCallback? sent,
   }) {
-    if (_sequence(g, build({..._latch.active, ...extra}))) {
+    if (_sequence(g, build(_latchedToWrap(extra)))) {
       sent?.call();
       _latch.take();
     }
   }
+
+  /// The latched modifiers and [extra] that wrap an action, as the host
+  /// names them: not those a key held here holds on the host, whose wrapped
+  /// up would release the key still held (KeyRouting.route).
+  Set<RemoteKey> _latchedToWrap([Set<RemoteKey> extra = const {}]) =>
+      {..._latch.active, ...extra}.difference(
+        KeyRouting.hostModifiers(_physicalModifiers(), swap: swapsModifiers),
+      );
 
   void _sendText(DesktopGeometry g, StringBuffer pending) {
     if (pending.isEmpty) return;

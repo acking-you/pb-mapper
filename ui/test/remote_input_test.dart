@@ -674,14 +674,97 @@ void main() {
     expect(
       KeyRouting.route(
         altGr,
-        const KeyContext(textInput: true, held: held),
+        const KeyContext(textInput: true, heldHere: held),
       ).handled,
       isFalse,
     );
-    final typed = KeyRouting.route(altGr, const KeyContext(held: held));
+    final typed = KeyRouting.route(altGr, const KeyContext(heldHere: held));
     expect(typed.inputs, [DesktopInput.text('@')]);
     expect(typed.flush, isFalse);
   });
+
+  test('with Ctrl and Cmd swapped, the host’s Win waits, and a latch is '
+      'compared with what the host holds', () {
+    // From a Mac in remote mode: its Ctrl is the host's Win, which waits;
+    // its Cmd the host's Ctrl, which goes at once.
+    const remote = KeyContext(
+      mode: KeyboardMode.remote,
+      physicalKeys: true,
+      swap: true,
+    );
+    final ctrl = KeyRouting.route(
+      _down(LogicalKeyboardKey.controlLeft, PhysicalKeyboardKey.controlLeft),
+      remote,
+    );
+    expect(ctrl.inputs, isEmpty);
+    expect(ctrl.defers, const DesktopPhysicalKey(0xE3, true));
+    final cmd = KeyRouting.route(
+      _down(LogicalKeyboardKey.metaLeft, PhysicalKeyboardKey.metaLeft),
+      remote,
+    );
+    expect(cmd.inputs, [const DesktopPhysicalKey(0xE0, true)]);
+    expect(cmd.defers, isNull);
+
+    // Cmd held here is the host's Ctrl: a latched Ctrl is not wrapped
+    // around the key again, and a latched Win is.
+    final tab = _down(LogicalKeyboardKey.tab, PhysicalKeyboardKey.tab);
+    List<DesktopInput> withLatched(RemoteKey latched) => KeyRouting.route(
+      tab,
+      KeyContext(
+        swap: true,
+        latched: {latched},
+        heldHere: const {RemoteKey.meta},
+      ),
+    ).inputs;
+    expect(withLatched(RemoteKey.control), [
+      const DesktopKey(RemoteKey.tab, true),
+    ]);
+    expect(
+      withLatched(RemoteKey.meta),
+      KeyRouting.tap(RemoteKey.tab, const {RemoteKey.meta}),
+    );
+  });
+
+  testWidgets(
+    'a modifier that goes at once takes the one waiting ahead of it, and an '
+    'on-screen key takes the modifiers held here',
+    (tester) async {
+      final h = await ViewerHarness.live(
+        tester,
+        capabilities: const ['os_windows', 'physical_keys'],
+      );
+      h.input.keyboard = const KeyboardSettings(mode: KeyboardMode.remote);
+      await picture(tester, h);
+      h.sent();
+
+      // Win+Shift+S: Win waits, then goes ahead of the Shift that goes at
+      // once.
+      await press(tester, LogicalKeyboardKey.metaLeft);
+      await press(tester, LogicalKeyboardKey.shiftLeft);
+      await press(tester, LogicalKeyboardKey.keyS, character: 'S');
+      await lift(tester, LogicalKeyboardKey.keyS);
+      await lift(tester, LogicalKeyboardKey.shiftLeft);
+      await lift(tester, LogicalKeyboardKey.metaLeft);
+      expect(h.sent(), [
+        ['#e3↓', '#e1↓'],
+        ['#16↓'],
+        ['#16↑'],
+        ['#e1↑'],
+        ['#e3↑'],
+      ]);
+
+      // Shift held here and Tab from the modifier bar: Shift+Tab.
+      h.input.keyboard = const KeyboardSettings();
+      await press(tester, LogicalKeyboardKey.shiftLeft);
+      h.input.tapKey(RemoteKey.tab);
+      await lift(tester, LogicalKeyboardKey.shiftLeft);
+      expect(h.sent(), [
+        ['shift↓', 'tab↓', 'tab↑'],
+        ['shift↑'],
+      ]);
+      h.dispose();
+    },
+  );
 
   testWidgets(
     "a desktop viewer's input method composes in local mode, and in remote "

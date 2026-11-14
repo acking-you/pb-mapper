@@ -164,7 +164,7 @@ class KeyContext {
     this.swap = false,
     this.optionTypes = false,
     this.latched = const {},
-    this.held = const {},
+    this.heldHere = const {},
     this.othersDown = false,
   });
 
@@ -187,11 +187,16 @@ class KeyContext {
   /// here (an Apple keyboard): it makes no chord.
   final bool optionTypes;
 
-  /// The modifier bar's active set.
+  /// The modifier bar's active set, as the host names them: the bar's caps
+  /// are the host's keys.
   final Set<RemoteKey> latched;
 
   /// The modifiers physically down here, as this keyboard names them.
-  final Set<RemoteKey> held;
+  final Set<RemoteKey> heldHere;
+
+  /// [heldHere] as the host names them: what [latched] is compared with.
+  Set<RemoteKey> get heldOnHost =>
+      KeyRouting.hostModifiers(heldHere, swap: swap);
 
   /// A button or a key other than a modifier is held on the host: a
   /// modifier pressed now goes at once.
@@ -213,8 +218,12 @@ class KeyContext {
 /// In remote mode keys go by their place to a host that listed
 /// `physical_keys`, so its layout and input method type them; Shift, Ctrl
 /// and Alt go at once, since the host's input method needs their taps, and
-/// only Win waits. An older host gets its vocabulary as keys and the rest
-/// as text.
+/// only the host's Win waits. An older host gets its vocabulary as keys and
+/// the rest as text.
+///
+/// Modifiers come in two namings, which never meet unconverted: this
+/// keyboard's ([KeyContext.heldHere]) and the host's ([KeyContext.latched],
+/// and everything sent). [hostModifier] alone crosses from one to the other.
 abstract final class KeyRouting {
   static final _modifiers = <LogicalKeyboardKey, RemoteKey>{
     LogicalKeyboardKey.shift: RemoteKey.shift,
@@ -313,6 +322,23 @@ abstract final class KeyRouting {
   /// Shift, Control, Alt or Meta, left or right.
   static RemoteKey? modifier(LogicalKeyboardKey k) => _modifiers[k];
 
+  /// Which of the host's modifiers this keyboard's [m] is: Control and Meta
+  /// traded when [swap]. The one place a modifier crosses from this
+  /// keyboard's names to the host's.
+  static RemoteKey hostModifier(RemoteKey m, {required bool swap}) => !swap
+      ? m
+      : switch (m) {
+          RemoteKey.control => RemoteKey.meta,
+          RemoteKey.meta => RemoteKey.control,
+          _ => m,
+        };
+
+  /// [here], this keyboard's modifiers, as the host names them.
+  static Set<RemoteKey> hostModifiers(
+    Iterable<RemoteKey> here, {
+    required bool swap,
+  }) => {for (final m in here) hostModifier(m, swap: swap)};
+
   /// F1–F12, Enter, Escape, Tab, Backspace, Delete, Insert, Home, End,
   /// PageUp, PageDown and the arrows.
   static RemoteKey? special(LogicalKeyboardKey k) => _specials[k];
@@ -401,13 +427,15 @@ abstract final class KeyRouting {
     }
 
     // 1. A modifier waits for what it modifies, Shift, Ctrl and Alt in
-    // remote mode excepted; repeats add nothing.
+    // remote mode excepted: there only the host's Win waits, whichever key
+    // here it is. Repeats add nothing. One that goes at once takes those
+    // waiting ahead of it, so a chord reaches the host whole and in order.
     if (m != null) {
       if (up || e is KeyRepeatEvent) return KeyRoute(handled: !ime);
-      final key = _hostModifier(e.physicalKey, m, c);
-      final waits = !remote || m == RemoteKey.meta;
+      final (host, key) = _hostModifier(e.physicalKey, m, c);
+      final waits = !remote || host == RemoteKey.meta;
       if (waits && !c.othersDown) return KeyRoute(defers: key, handled: !ime);
-      return KeyRoute(inputs: [key], holds: key, handled: !ime);
+      return KeyRoute(inputs: [key], holds: key, flush: true, handled: !ime);
     }
 
     // Its down went as a whole tap, or the host never had it.
@@ -421,14 +449,15 @@ abstract final class KeyRouting {
     // 2. A chord: a letter, digit or space under a held Ctrl, Alt or Meta
     // is a shortcut, and so is any other key the host takes by place,
     // unless it typed something else: AltGr arrives as Control + Alt, and
-    // Option on a Mac, and each types a character of its own.
-    final wrap = c.latched.difference(c.held);
+    // Option on a Mac, and each types a character of its own. A latched
+    // modifier the host already holds from here is not wrapped again.
+    final wrap = c.latched.difference(c.heldOnHost);
     final logical = e.logicalKey;
     final s = special(logical);
     final chord =
-        c.held.contains(RemoteKey.control) ||
-        c.held.contains(RemoteKey.meta) ||
-        (c.held.contains(RemoteKey.alt) && !c.optionTypes);
+        c.heldHere.contains(RemoteKey.control) ||
+        c.heldHere.contains(RemoteKey.meta) ||
+        (c.heldHere.contains(RemoteKey.alt) && !c.optionTypes);
     if (chord && s == null && !_typesOwn(e)) {
       final b = _bases[logical];
       final usage = KeyRouting.usage(e.physicalKey);
@@ -475,7 +504,7 @@ abstract final class KeyRouting {
     return KeyRoute(
       inputs: tap(
         key.$1,
-        {...wrap, if (key.$2) RemoteKey.shift}.difference(c.held),
+        {...wrap, if (key.$2) RemoteKey.shift}.difference(c.heldOnHost),
       ),
       consumesLatch: true,
       swallowUp: true,
@@ -485,7 +514,7 @@ abstract final class KeyRouting {
 
   /// Remote mode, past the modifiers.
   static KeyRoute _remote(KeyEvent e, KeyContext c) {
-    final wrap = c.latched.difference(c.held);
+    final wrap = c.latched.difference(c.heldOnHost);
     if (c.physicalKeys) {
       final usage = KeyRouting.usage(e.physicalKey);
       if (usage == null) return const KeyRoute.ignored();
@@ -511,18 +540,19 @@ abstract final class KeyRouting {
           flush: true,
         );
 
-  /// The host's name for modifier [m]: by place to a host that takes
-  /// physical keys in remote mode, else in its vocabulary; Control and Meta
-  /// traded when [KeyContext.swap].
-  static DesktopKeyInput _hostModifier(
+  /// Which host modifier this keyboard's [m] is ([hostModifier]), and its
+  /// down: by place, on the same side, to a host that takes physical keys
+  /// in remote mode, else in its vocabulary.
+  static (RemoteKey, DesktopKeyInput) _hostModifier(
     PhysicalKeyboardKey physical,
     RemoteKey m,
     KeyContext c,
   ) {
+    final host = hostModifier(m, swap: c.swap);
     final usage = KeyRouting.usage(physical);
     if (c.mode == KeyboardMode.remote && c.physicalKeys && usage != null) {
       // ControlLeft 0xE0 ↔ MetaLeft 0xE3, ControlRight 0xE4 ↔ MetaRight 0xE7.
-      final swapped = !c.swap
+      final placed = host == m
           ? usage
           : switch (usage) {
               0xE0 => 0xE3,
@@ -531,16 +561,9 @@ abstract final class KeyRouting {
               0xE7 => 0xE4,
               _ => usage,
             };
-      return DesktopPhysicalKey(swapped, true);
+      return (host, DesktopPhysicalKey(placed, true));
     }
-    final swapped = !c.swap
-        ? m
-        : switch (m) {
-            RemoteKey.control => RemoteKey.meta,
-            RemoteKey.meta => RemoteKey.control,
-            _ => m,
-          };
-    return DesktopKey(swapped, true);
+    return (host, DesktopKey(host, true));
   }
 
   /// The key typed a character of its own under its modifiers (AltGr,
