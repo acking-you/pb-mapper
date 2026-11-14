@@ -195,6 +195,7 @@ class DesktopBackground {
     this.host,
     this.message = '',
     this.matchesRelay = true,
+    this.held = false,
   });
   factory DesktopBackground.fromJson(Map<String, dynamic> data) {
     final settings = data['settings'] is Map
@@ -216,9 +217,17 @@ class DesktopBackground {
           : null,
       message: data['message'] as String? ?? '',
       matchesRelay: data['matches_relay'] != false,
+      held: data['held'] == true,
     );
   }
   final bool configured, enabled, autoStart, allowControl;
+
+  /// The service holds this grant, but this app cannot ask it: an older
+  /// build, as right after an upgrade from 0.11, or one installed from
+  /// another copy of the app. [configured] and [enabled] are seen from
+  /// outside, and its settings, invitation and relay are unknown. Updating
+  /// the helper from this app hands the service over and keeps the grant.
+  final bool held;
 
   /// [server] is the relay its host is published on.
   final String? service, server, invitation;

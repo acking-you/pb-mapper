@@ -727,6 +727,7 @@ class _SharingCard extends StatelessWidget {
               : notSharingPill(context),
         ),
         if (v.error != null) _HostError(v),
+        if (v.held) _HeldNotice(desktop: desktop),
         if (v.otherRelay case final relay?)
           _OtherRelayNotice(relay: relay, busy: v.enabling, desktop: desktop),
         if (sharing && viewer != null)
@@ -760,12 +761,12 @@ class _SharingCard extends StatelessWidget {
                 GlassSegment(
                   value: false,
                   label: l10n.hostPermissionView,
-                  enabled: sharing,
+                  enabled: sharing && !v.held,
                 ),
                 GlassSegment(
                   value: true,
                   label: l10n.hostPermissionControl,
-                  enabled: sharing,
+                  enabled: sharing && !v.held,
                 ),
               ],
             ),
@@ -806,7 +807,11 @@ class _SharingCard extends StatelessWidget {
                 ),
                 _SettingRow(
                   label: l10n.hostSecure,
-                  value: _HelperValue(helper: v.helper, desktop: desktop),
+                  value: _HelperValue(
+                    helper: v.helper,
+                    desktop: desktop,
+                    offerUpdate: !v.held,
+                  ),
                 ),
               ],
             ],
@@ -817,7 +822,9 @@ class _SharingCard extends StatelessWidget {
           runSpacing: 8,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            if (sharing)
+            // A held grant is managed once its helper is updated, never
+            // started, stopped or set up over from here (the notice).
+            if (sharing && !v.held)
               OutlinedButton(
                 key: const Key('host-stop'),
                 style: OutlinedButton.styleFrom(
@@ -830,7 +837,7 @@ class _SharingCard extends StatelessWidget {
                 child: Text(l10n.hostStop),
               )
             // On another relay, starting again moves it: the notice asks.
-            else if (v.otherRelay == null)
+            else if (v.otherRelay == null && !v.held)
               FilledButton.icon(
                 key: const Key('host-start'),
                 style: FilledButton.styleFrom(
@@ -851,7 +858,7 @@ class _SharingCard extends StatelessWidget {
                 label: Text(v.enabling ? l10n.hostEnabling : l10n.hostStart),
               ),
             HostMoreMenu(view: v),
-            if (sharing)
+            if (sharing && !v.held)
               Text(
                 l10n.hostStopNote,
                 style: TextStyle(fontSize: 12.5, color: quietText(scheme)),
@@ -921,6 +928,70 @@ class _DisplayModeNotice extends StatelessWidget {
           child: Text(l10n.hostDisplayModeRestore),
         ),
       ],
+    );
+  }
+}
+
+/// The background service shares this computer, or holds it paused, but
+/// this app cannot ask it: an older build, as right after an upgrade from
+/// 0.11, or one installed from another copy of the app. Its settings and
+/// invitation stay the service's; updating the helper from here hands the
+/// service over with them, and the card then shows them.
+class _HeldNotice extends StatelessWidget {
+  const _HeldNotice({required this.desktop});
+
+  final DesktopStore desktop;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final caution = cautionColor(Theme.of(context).colorScheme);
+    return Container(
+      key: const Key('host-held'),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+      decoration: BoxDecoration(
+        color: caution.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(kRowRadius),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Icon(
+                  AppIcons.update,
+                  size: AppIconSize.inline,
+                  color: caution,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  l10n.hostHeld,
+                  style: const TextStyle(fontSize: 13, height: 1.5),
+                ),
+              ),
+            ],
+          ),
+          // Under the words, past the icon.
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: 28),
+            child: TextButton(
+              key: const Key('host-held-update'),
+              style: TextButton.styleFrom(
+                padding: EdgeInsets.zero,
+                minimumSize: const Size(0, 36),
+                textStyle: buttonLabel(context, 13, weight: FontWeight.w600),
+              ),
+              onPressed: () => unawaited(desktop.helperAction('install')),
+              child: Text(l10n.hostHelperUpdateAction),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1056,10 +1127,17 @@ class _SettingRow extends StatelessWidget {
 /// The helper service's state on the card, with Update when it is too old
 /// for this app (D2).
 class _HelperValue extends StatelessWidget {
-  const _HelperValue({required this.helper, required this.desktop});
+  const _HelperValue({
+    required this.helper,
+    required this.desktop,
+    this.offerUpdate = true,
+  });
 
   final DesktopHelperState helper;
   final DesktopStore desktop;
+
+  /// Off where the card offers the update already, beside why.
+  final bool offerUpdate;
 
   @override
   Widget build(BuildContext context) {
@@ -1084,7 +1162,7 @@ class _HelperValue extends StatelessWidget {
           const SizedBox(width: 6),
         ],
         Flexible(child: Text(text, textAlign: TextAlign.end)),
-        if (helper == DesktopHelperState.outdated) ...[
+        if (helper == DesktopHelperState.outdated && offerUpdate) ...[
           const SizedBox(width: 4),
           TextButton(
             key: const Key('host-helper-update'),

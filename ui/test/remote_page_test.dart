@@ -363,6 +363,60 @@ void main() {
   );
 
   testWidgets(
+    'after an upgrade the older service is shown sharing, offering only its '
+    'update, which keeps its grant',
+    (tester) async {
+      // Upgraded from 0.11: the service is an older build, which this app
+      // cannot ask, still sharing the grant it saved, whose settings and
+      // invitation are unknown here. Setting up again would replace them.
+      for (final enabled in [true, false]) {
+        final api = _Api();
+        api.desktop
+          ..available = const DesktopCapabilities(
+            host: true,
+            displays: [DesktopDisplay(1, 'Display 1', 1920, 1080)],
+            helper: DesktopHelper(
+              installed: true,
+              running: true,
+              protocol: 7,
+              updateRequired: true,
+              updateAvailable: true,
+            ),
+          )
+          ..hostSnapshot = DesktopHostSnapshot(
+            background: DesktopBackground(
+              configured: true,
+              enabled: enabled,
+              held: true,
+            ),
+          );
+        await pumpApp(tester, api, page: AppPage.remote);
+        expect(_key('host-held'), findsOneWidget);
+        expect(find.text('Sharing'), enabled ? findsOneWidget : findsNothing);
+        for (final setUp in [
+          'host-enable',
+          'host-start',
+          'host-stop',
+          'host-helper-update',
+        ]) {
+          expect(_key(setUp), findsNothing, reason: setUp);
+        }
+        await _tapIn(tester, _key('host-held-update'));
+        await settle(tester);
+        expect(api.desktop.argsOf('helper_action'), [
+          {'action': 'install'},
+        ]);
+        expect(api.desktop.argsOf('host_enable'), isEmpty);
+        expect(
+          api.desktop.argsOf('background_action'),
+          isNot(contains({'action': 'start', 'move_relay': false})),
+        );
+        await finish(tester);
+      }
+    },
+  );
+
+  testWidgets(
     'enabling shares view-only or with control, Stop works while busy, and '
     'helper maintenance stays reachable',
     (tester) async {

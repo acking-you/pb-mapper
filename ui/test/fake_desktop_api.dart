@@ -142,6 +142,19 @@ class FakeDesktopApi implements DesktopApiClient {
   DesktopBackground get _background =>
       hostSnapshot.background ?? const DesktopBackground();
 
+  /// As the FFI (`refuse_held_grant`): nothing is set up or resumed over a
+  /// grant the service holds but this app cannot read.
+  void _refuseHeld() {
+    final b = _background;
+    if (!b.held || !b.configured) return;
+    throw DesktopCallException(
+      available.helper?.updateRequired == true
+          ? 'HELPER_OUTDATED'
+          : 'HELPER_FOREIGN_APP',
+      'the service holds a grant this app cannot read',
+    );
+  }
+
   void _set({
     DesktopHostStatus? Function()? host,
     DesktopBackground? Function()? background,
@@ -203,6 +216,7 @@ class FakeDesktopApi implements DesktopApiClient {
       'display_id': displayId,
       'allow_control': allowControl,
     });
+    _refuseHeld();
     _configureBackground(service, displayId, allowControl, autoStart: true);
     return DesktopHostEnable(
       invitation: backgroundInvitation,
@@ -439,6 +453,7 @@ class FakeDesktopApi implements DesktopApiClient {
   @override
   Future<DesktopHostEnable> resumeBackground({bool moveRelay = false}) async {
     _log('background_action', {'action': 'start', 'move_relay': moveRelay});
+    _refuseHeld();
     final b = _background;
     if (!b.matchesRelay && !moveRelay) {
       throw const DesktopCallException('RELAY_CHANGED', 'on another relay');

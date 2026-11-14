@@ -97,6 +97,10 @@ pub struct Status {
     /// The installed helper is another build of this protocol: it still
     /// works, and installing again puts this build's host in the service.
     pub update_available: bool,
+    /// The service keeps a background grant, seen without asking it: it may
+    /// be sharing even while this application cannot ask it how. True when
+    /// that cannot be told, so nothing is set up over a grant unseen.
+    pub background_saved: bool,
     pub message: String,
 }
 /// Why the helper cannot be used now, in the order [`Status::not_ready`]
@@ -219,6 +223,9 @@ pub(super) fn status_with(update_check: bool) -> Status {
                 protocol,
                 update_required: update_required(protocol, running, || pipe::exists(PIPE)),
                 update_available: update_check && update_available(&config.helper_executable),
+                background_saved: os::install_root()
+                    .and_then(|root| super::background::saved_in(&root))
+                    .unwrap_or(true),
                 message: identity.err().map_or_else(
                     || {
                         "Helper requires the installed application; the UI stays unprivileged"

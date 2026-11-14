@@ -416,6 +416,7 @@
   "hostHelperUnverified": "辅助服务未验证",
   "hostHelperUpdate": "需要更新辅助服务",
   "hostHelperUpdateAction": "更新",
+  "hostHeld": "桌面辅助服务仍按原先的设置共享这台电脑，但在从这里更新辅助服务之前，这个 pb-mapper 无法查看或更改它。更新会保留它的设置和邀请。",
   "hostHelperInstall": "安装／更新并重启应用",
   "hostHelperDisable": "停用辅助服务",
   "hostHelperUninstall": "卸载辅助服务",

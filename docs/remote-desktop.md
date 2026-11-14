@@ -723,6 +723,21 @@ setup as **Turn on remote control** does: one consent prompt installs, updates
 or enables it, the app restarts into the installed copy when it installed one,
 and the host resumes there. The app's startup restore never installs or asks.
 
+A helper this app cannot ask still hosts the grant it saved: one of another
+protocol, whose pipes are not this app's, or one installed from another copy
+of the app, which serves only that copy. Both follow every upgrade, since the
+installer reopens the app from where it is installed, never from the
+service's protected copy. The app then sees the grant without reading it (its
+file exists in the protected installation; only SYSTEM and administrators may
+read it), and the card shows it as the service's: sharing while the service
+runs, with its settings and invitation unknown, and the helper's update as
+the one action. The update keeps the grant, policy, identity and invitation
+alike, and the service answers the app with it once the app has restarted
+into the new copy. **Turn on remote control** and **Start sharing** are
+refused over such a grant (`HELPER_OUTDATED`, `HELPER_FOREIGN_APP`), since
+configuring it from here would replace its view-only, relay-only or paused
+policy, and under another service name its invitation.
+
 Protocol 8 is the current one, with the pipes
 `pb-mapper.desktop-helper.v8` and `pb-mapper.desktop-background.v8`. It adds
 the pointer's shape and keys by place. The first `Request::CursorShape` turns

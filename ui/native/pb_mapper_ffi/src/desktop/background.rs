@@ -42,6 +42,13 @@ pub(super) struct Background {
     /// observed it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) service_disabled: Option<bool>,
+    /// This user's service, which this app cannot ask (`unaskable`): what
+    /// it hosts is only seen from outside, `configured` by its saved grant and
+    /// `enabled` while it runs, with no settings, invitation or relay. The
+    /// helper's update from this app hands the service over and keeps the
+    /// grant; nothing here may configure over it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) held: bool,
 }
 
 /// What the service hosts with.
@@ -76,6 +83,7 @@ impl From<desktop::privileged::background::Snapshot> for Background {
             message,
             supported: None,
             service_disabled: None,
+            held: false,
         }
     }
 }
@@ -202,7 +210,8 @@ pub(super) fn with_relay_match(snapshot: &Background, current: Option<&RelayScop
         snapshot: &'a Background,
         matches_relay: Option<bool>,
     }
-    let matches_relay = current.map(|current| {
+    // A held grant's relay is unknown until the service can be asked.
+    let matches_relay = current.filter(|_| !snapshot.held).map(|current| {
         !snapshot.configured
             || snapshot
                 .server
@@ -275,22 +284,77 @@ pub(super) async fn query_background_for_helper(
     if !helper.authorized_application && !helper.owned_by_user {
         return Err(helper_not_ready(desktop::privileged::NotReady::OtherOwner));
     }
+    // Then whether it can be asked at all: an older build, or one serving
+    // another copy of the app, still hosts what it saved, as after an upgrade
+    // from 0.11. Said as far as it is seen, not as an error that reads as
+    // "not configured".
+    if unaskable(&helper) {
+        return Ok(held_background(&helper));
+    }
     if !helper.running {
         return Err(CtlError::new(
             ErrorCode::HelperStopped,
             "background service is unavailable and may restart; disable it before starting local sharing",
         ));
     }
-    if !helper.authorized_application {
-        return Err(CtlError::new(
-            ErrorCode::HelperForeignApp,
-            "open the installed application to check background sharing, or disable its service before starting local sharing",
-        ));
-    }
     if let Some(reason) = helper.not_ready() {
         return Err(helper_not_ready(reason));
     }
     query.await
+}
+
+/// This user's installed helper, which this app cannot ask: another build's
+/// speaks its own protocol on its own pipes, and any build serves only the
+/// copy of the app it was installed from. Installing it from this app (the
+/// helper card's update) is what makes it answer here.
+#[cfg(windows)]
+fn unaskable(helper: &desktop::privileged::Status) -> bool {
+    helper.installed
+        && helper.owned_by_user
+        && (helper.update_required || !helper.authorized_application)
+}
+
+/// An unaskable helper's background host, as far as it is seen: configured
+/// while its grant is saved, and enabled while the service runs, which then
+/// shares unless that grant was paused. Local sharing stays refused while it
+/// is configured, as for any service that holds a grant.
+#[cfg(windows)]
+fn held_background(helper: &desktop::privileged::Status) -> Background {
+    Background {
+        configured: helper.background_saved,
+        enabled: helper.background_saved && helper.running,
+        service_disabled: Some(false),
+        held: true,
+        ..unavailable_background(if helper.update_required {
+            "an older desktop service keeps this computer's background sharing; update it from this app to manage it here"
+        } else {
+            "the desktop service serves another copy of pb-mapper; update it from this app to manage its background sharing here"
+        })
+    }
+}
+
+/// Setup, or a resume, refused before anything changes when it would
+/// configure a service holding a grant this app cannot read: its policy
+/// (view only, relay only, paused) would give way to this app's choices, and
+/// under another service name its identity, and so its invitation, too. The
+/// helper's update from this app keeps both, and the service then answers
+/// here with them.
+#[cfg(windows)]
+pub(super) fn refuse_held_grant(helper: &desktop::privileged::Status) -> Result<(), CtlError> {
+    if !(helper.background_saved && unaskable(helper)) {
+        return Ok(());
+    }
+    Err(if helper.update_required {
+        CtlError::new(
+            ErrorCode::HelperOutdated,
+            "an older desktop service keeps this computer's background sharing; update it from this app first, which keeps how it shares",
+        )
+    } else {
+        CtlError::new(
+            ErrorCode::HelperForeignApp,
+            "the desktop service shares this computer for another copy of pb-mapper; update it from this app first, which keeps how it shares",
+        )
+    })
 }
 
 /// A helper that cannot be used, with the code the window explains it by.
@@ -384,6 +448,7 @@ async fn resume_background(handle: &PbMapperHandle, move_relay: bool) -> Result<
     let namespace = credential.key_id();
     let credential = credential_text(credential)?;
     let helper = super::blocking(desktop::privileged::status).await?;
+    refuse_held_grant(&helper)?;
     // A helper that cannot be asked resumes the host the card showed.
     let saved = if helper.ensure_ready().is_ok() {
         handle.desktop.cache_background(query_background().await?)
@@ -713,8 +778,9 @@ async fn enable(
     let identity = pending.identity().clone();
     // Fails before anything changes, never after the running host has gone.
     let credential = credential_text(credential)?;
-    save_trust(directory.clone(), pending).await?;
     let helper = super::blocking(desktop::privileged::status).await?;
+    refuse_held_grant(&helper)?;
+    save_trust(directory.clone(), pending).await?;
     let setup = helper_setup(&helper, allow_install);
     // No two owners may publish the same desktop: the local host stops before
     // a service that could already hold an automatic grant is enabled. It

@@ -622,6 +622,7 @@ class DesktopStore {
       enabling: _enabling,
       restarting: _restarting,
       background: configuredBackground,
+      held: configuredBackground && background!.held,
       controlAllowed:
           host?.controlAllowed ??
           backgroundHost?.controlAllowed ??

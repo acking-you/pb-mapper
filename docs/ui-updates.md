@@ -52,9 +52,11 @@ path.
 
 Setup neither closes nor replaces that protected copy: an app running from it
 during an upgrade by hand stays the old version until it is quit. pb-mapper
-opened from the Start menu afterwards is the new one, and its Remote desktop
-page offers to update the desktop service, which installs a new protected
-copy.
+opened from the Start menu afterwards, or reopened by the installer, is the
+new one. Its Remote desktop page shows the sharing as the older service's,
+which keeps sharing as it was set up, and offers to update the service: that
+installs a new protected copy and keeps the service's settings and
+invitation, which the page shows again once the app has restarted into it.
 
 Since 0.9.7 the macOS app and its DMG are signed with the project's Developer
 ID, notarized and stapled, and the mounted DMG passes Gatekeeper before it is

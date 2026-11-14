@@ -482,6 +482,7 @@
   "hostHelperUnverified": "Helper service not verified",
   "hostHelperUpdate": "Helper service needs an update",
   "hostHelperUpdateAction": "Update",
+  "hostHeld": "The desktop service keeps sharing this computer as it was set up, but this copy of pb-mapper cannot see or change it until the service is updated from here. Updating keeps its settings and invitation.",
   "hostHelperInstall": "Install / update and restart app",
   "hostHelperDisable": "Disable helper",
   "hostHelperUninstall": "Uninstall helper",

@@ -1458,7 +1458,8 @@ class DesktopHostPermissions {
 
 /// This computer as a host.
 ///
-/// Invariant: `sharing || configured` implies `invitation != null`.
+/// Invariant: `sharing || configured` implies `invitation != null`, except
+/// while [held], when the service cannot be asked for it.
 @immutable
 class DesktopHostView {
   const DesktopHostView({
@@ -1483,6 +1484,7 @@ class DesktopHostView {
     this.displayMode,
     this.backgroundService = true,
     this.permissions,
+    this.held = false,
   });
 
   /// False until the first capabilities, host status and trust round trip.
@@ -1504,6 +1506,12 @@ class DesktopHostView {
 
   /// The background service owns hosting; display and name are fixed.
   final bool background;
+
+  /// The background service holds this computer's grant, but this app
+  /// cannot ask it (`DesktopBackground.held`): it is seen sharing, or
+  /// paused, from outside, and only updating its helper from here manages
+  /// it, keeping the grant.
+  final bool held;
   final bool controlAllowed;
 
   /// A grant is remembered but cannot be read: Windows cannot unlock it, or
@@ -1568,7 +1576,8 @@ class DesktopHostView {
       other.unsupportedReason == unsupportedReason &&
       other.displayMode == displayMode &&
       other.backgroundService == backgroundService &&
-      other.permissions == permissions;
+      other.permissions == permissions &&
+      other.held == held;
   @override
   int get hashCode => Object.hashAll([
     loaded,
@@ -1592,6 +1601,7 @@ class DesktopHostView {
     displayMode,
     backgroundService,
     permissions,
+    held,
   ]);
 
   @override
