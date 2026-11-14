@@ -1,8 +1,10 @@
+# The installer's script is inno_setup.iss beside this file; these values fill
+# its placeholders. app_id identifies every earlier installation to an upgrade:
+# never change it.
+script_template: inno_setup.iss
 app_id: 6L913538-42B1-4596-G479-BJ779F21A65D
-publisher: lb7666
+publisher_name: lb7666
 publisher_url: https://github.com/acking-you/pb-mapper
 display_name: pb-mapper
 create_desktop_icon: true
 setup_icon_file: windows\runner\resources\app_icon.ico
-locales:
-  - en

@@ -11,7 +11,7 @@ use crate::{
     VideoFormat, VideoLimits, VideoRate, Waker,
     backend::capture_checked,
     error,
-    input::{cursor::confine, held::Held},
+    input::{Typed, cursor::confine, held::Held},
     modes::{self, Guard, Journal, Mode, ModeList},
     platform::{
         self, CursorSource, Desktop, DisplayModes, Injector, Parts, Platform, StillCapture,
@@ -121,6 +121,8 @@ impl<P: Platform> Backend for PlatformBackend<P> {
                     && modes.available(&display.name),
                 os: Some(P::OS),
                 cursor: self.parts.cursor.mode(),
+                physical_keys: <P::Input as Injector>::PHYSICAL_KEYS,
+                cursor_shapes: <P::Cursor as CursorSource>::SHAPES,
             },
             display,
         })
@@ -236,6 +238,12 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         }
         Ok(read.map(|(x, y, showing)| confine(&expected.display, (x, y), showing)))
     }
+    /// The shape of the pointer `cursor` just read, on the desktop it
+    /// checked around that read.
+    fn cursor_shape(&mut self, _expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
+        let _scope = self.parts.desktop.scope();
+        self.parts.cursor.shape()
+    }
     fn input(&mut self, event: &Input) -> Result<()> {
         let context = self.context()?;
         self.input_in_context(&context, event)
@@ -263,7 +271,22 @@ impl<P: Platform> Backend for PlatformBackend<P> {
                 vertical,
             } => input.wheel(*horizontal, *vertical),
             Input::Key { key, down } => self.held.key(*key, *down, |down| input.key(*key, down)),
-            Input::Text { text } => input.text(text),
+            Input::Text { text } => {
+                let held = &mut self.held;
+                Input::typed(text, |typed| match typed {
+                    Typed::Chars(chars) => input.text(chars),
+                    Typed::Key(key) => {
+                        held.key(key, true, |down| input.key(key, down))?;
+                        held.key(key, false, |down| input.key(key, down))
+                    }
+                })
+            }
+            Input::PhysicalKey { usage, down } if <P::Input as Injector>::PHYSICAL_KEYS => self
+                .held
+                .physical(*usage, *down, |down| input.physical_key(*usage, down)),
+            Input::PhysicalKey { .. } => {
+                Err(BackendError::new(FailureKind::Unsupported, "physical keys").into())
+            }
             // The interactive session's own lock; the desktop switch that
             // follows invalidates the generation through the context check.
             Input::Lock {} if input.can_lock() => input.lock(),
@@ -421,6 +444,9 @@ impl Backend for NativeBackend {
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         self.0.cursor(expected)
+    }
+    fn cursor_shape(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
+        self.0.cursor_shape(expected)
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         self.0.input(event)

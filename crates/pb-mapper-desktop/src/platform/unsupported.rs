@@ -23,7 +23,7 @@ pub(crate) enum Never {}
 fn unsupported() -> std::io::Error {
     BackendError::new(
         FailureKind::Unsupported,
-        "Desktop hosting currently requires Windows",
+        "Desktop hosting requires Windows, or macOS 12.3 or later",
     )
     .into()
 }
@@ -32,8 +32,6 @@ impl Platform for Unsupported {
     /// This build's operating system, though it does not host.
     const OS: HostOs = if cfg!(target_os = "android") {
         HostOs::Android
-    } else if cfg!(target_os = "macos") {
-        HostOs::Macos
     } else {
         HostOs::Linux
     };
@@ -52,6 +50,7 @@ impl Platform for Unsupported {
             secure_desktop: false,
             os: None,
             reason: Some(UnsupportedReason::Platform),
+            permissions: None,
         }
     }
     fn displays() -> Result<Vec<Display>> {

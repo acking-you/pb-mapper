@@ -5,7 +5,7 @@ use crate::{HostStatus, Result, error};
 use pb_mapper_client::sdk::RelayTransport;
 use serde::{Deserialize, Serialize};
 
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v7";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v8";
 const _: () = assert!(
     super::names_protocol(PIPE, super::HELPER_PROTOCOL),
     "the background pipe's name ends in .v and HELPER_PROTOCOL"
@@ -164,6 +164,14 @@ pub async fn configure_with_identity(
 pub async fn status() -> Result<Snapshot> {
     call(Command::Status {}).await
 }
+/// Whether the service under `root` keeps a background grant: its file
+/// exists, with no revocation pending. What the grant holds is private to
+/// SYSTEM and administrators, but that it exists is not, so the app can tell
+/// without asking a service it cannot ask: another build's, on another
+/// protocol's pipes, or one serving another copy of the app.
+pub(super) fn saved_in(root: &std::path::Path) -> std::io::Result<bool> {
+    Ok(root.join(FILE_NAME).try_exists()? && !root.join(REVOKED_MARKER).try_exists()?)
+}
 /// Disconnect the viewer; the background host keeps sharing.
 pub async fn end_session() -> Result<Snapshot> {
     call(Command::EndSession {}).await
@@ -206,6 +214,19 @@ pub(super) use {service::run, storage::revoke_installation};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A grant counts as kept from the moment its file exists until a
+    /// revocation is pending, which the service completes instead of hosting.
+    #[test]
+    fn a_saved_grant_is_seen_without_reading_it() {
+        let root = pb_mapper_core::test_support::TempPath::new("background-root");
+        std::fs::create_dir(&root).unwrap();
+        assert!(!saved_in(&root).unwrap());
+        std::fs::write(root.join(FILE_NAME), b"sealed").unwrap();
+        assert!(saved_in(&root).unwrap());
+        std::fs::write(root.join(REVOKED_MARKER), b"revoked").unwrap();
+        assert!(!saved_in(&root).unwrap());
+    }
 
     /// A grant saved with LAN-first on, the default, stays readable by a
     /// protocol 4 helper, whose `Options` refuse unknown fields; one saved

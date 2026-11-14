@@ -1,11 +1,13 @@
 //! B-send: everything the host writes to its viewer.
 
-use super::{STATS_INTERVAL, STOP_WRITE_TIMEOUT, Session};
+use super::{STATS_INTERVAL, STOP_WRITE_TIMEOUT, Session, shapes::ShapeSlots};
 use crate::{
     VideoCodec,
     idr::IdrReason,
     outgoing::OUTGOING_MAX_AGE,
-    protocol::{HostMessage, NoticeCode, StateReason, StateRecord, StatsRecord, StopReason},
+    protocol::{
+        HostMessage, NoticeCode, ShapeRecord, StateReason, StateRecord, StatsRecord, StopReason,
+    },
     qos::QOS_TICK,
     shared::{CursorReport, EngineState},
     wire::{self, MAX_PAYLOAD},
@@ -83,6 +85,8 @@ pub(super) struct Sender<'a, W> {
     notice_serial: u64,
     /// The last cursor report written, or dropped as stale.
     cursor_serial: u64,
+    /// The shapes the viewer's slots hold.
+    shapes: ShapeSlots,
     next_tick: Instant,
     next_stats: Instant,
     stats_since: Instant,
@@ -104,6 +108,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             written: None,
             notice_serial: 0,
             cursor_serial: 0,
+            shapes: ShapeSlots::default(),
             next_tick: now + QOS_TICK,
             next_stats: now + STATS_INTERVAL,
             stats_since: now,
@@ -272,24 +277,41 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     /// Write C's newest cursor report, once. It waits for its generation's
     /// `State`, and one of an older generation is stale. C never reports the
     /// controller's own move coming back, so nothing here holds one back. Its
-    /// input watermark goes only to a viewer that reads it: an older one
-    /// rejects a field it does not know.
+    /// input watermark and its shape go only to a viewer that reads them: an
+    /// older one rejects a field it does not know. A shape no slot of the
+    /// viewer holds is defined first.
     async fn cursor(&mut self) -> Result<(), Abandoned> {
-        let Some(report) = *self.cursor.borrow_and_update() else {
-            return Ok(());
-        };
         let stated = self
             .written
             .as_ref()
             .map_or(0, |written| written.generation);
+        let report = {
+            let latest = self.cursor.borrow_and_update();
+            match &*latest {
+                Some(report)
+                    if report.serial > self.cursor_serial && report.cursor.generation <= stated =>
+                {
+                    report.clone()
+                }
+                _ => return Ok(()),
+            }
+        };
         let cursor = report.cursor;
-        if report.serial <= self.cursor_serial || cursor.generation > stated {
-            return Ok(());
-        }
         self.cursor_serial = report.serial;
         if cursor.generation < stated {
             return Ok(());
         }
+        let shape = match &report.shape {
+            Some(shape) if self.session.cursor_shape => {
+                let (slot, define) = self.shapes.slot(shape);
+                if define {
+                    let record = HostMessage::CursorShape(ShapeRecord::new(slot, shape));
+                    self.send(&record, Some(shape.rgba())).await?;
+                }
+                Some(slot)
+            }
+            _ => None,
+        };
         let message = HostMessage::Cursor {
             generation: cursor.generation,
             x: cursor.x,
@@ -299,6 +321,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
                 .session
                 .cursor_sequence
                 .then_some(report.input_sequence),
+            shape,
         };
         self.send(&message, None).await
     }

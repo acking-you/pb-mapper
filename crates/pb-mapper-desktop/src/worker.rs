@@ -81,6 +81,8 @@ pub(crate) struct WorkerConfig {
     /// whole session.
     pub limits: VideoLimits,
     pub admission: Option<Arc<dyn ControlAdmission>>,
+    /// Both ends listed `cursor_shape`: C asks the backend for the shape.
+    pub cursor_shapes: bool,
 }
 
 /// How thread C ended.
@@ -274,6 +276,8 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     context_due: Instant,
     cursor_due: Instant,
     cursor: CursorEcho,
+    /// The viewer reads shapes, and the backend reports them.
+    cursor_shapes: bool,
     /// When to poll the encoder again while it holds units.
     drain_due: Instant,
     /// Held while this session captures.
@@ -331,6 +335,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             context_due: now,
             cursor_due: now,
             cursor: CursorEcho::default(),
+            cursor_shapes: config.cursor_shapes,
             drain_due: now,
             timer: None,
             last_lease: None,

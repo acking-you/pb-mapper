@@ -37,11 +37,12 @@ pub use status::{
 };
 
 use crate::{
-    HostOs, Input, Invitation, KeyframeReason, QualityPreset, Result, VideoCodec, error,
+    CursorShape, HostOs, Input, Invitation, KeyframeReason, QualityPreset, Result, VideoCodec,
+    error,
     modes::{DisplayModeError, Mode, ModeList, ModeTarget},
     protocol::{
-        CAPABILITY_DISPLAY_MODE, DesktopKind, NoticeCode, Route, SessionState, StateRecord,
-        VideoSize,
+        CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE, CAPABILITY_PHYSICAL_KEYS, CURSOR_SLOTS,
+        DesktopKind, NoticeCode, Route, SessionState, ShapeSlot, StateRecord, VideoSize,
     },
     security, valid_service,
 };
@@ -154,11 +155,12 @@ impl ViewerStateSlot {
     fn video_size(&self) -> Option<VideoSize> {
         self.host.as_ref()?.video
     }
+    fn listed(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|listed| listed == capability)
+    }
     /// The host display's modes, from a host that offers them.
     fn modes(&self) -> Option<&ModeList> {
-        self.capabilities
-            .iter()
-            .any(|capability| capability == CAPABILITY_DISPLAY_MODE)
+        self.listed(CAPABILITY_DISPLAY_MODE)
             .then(|| self.host.as_ref()?.modes.as_ref())
             .flatten()
     }
@@ -175,6 +177,8 @@ struct ViewerShared {
     state: Mutex<ViewerStateSlot>,
     stats: Mutex<ViewerStatsAcc>,
     cursor: Mutex<CursorSlot>,
+    /// Taken apart from the others, never while one is held.
+    shapes: Mutex<ShapeTable>,
     outbound: Outbound,
 }
 impl ViewerShared {
@@ -199,6 +203,10 @@ struct CursorSlot {
     seq: u64,
     /// The generation and sequence of the last move written to the host.
     moved: Option<(u64, u64)>,
+    /// The slot of the pointer's shape, from the host's last report that
+    /// named one, and the number of the definition it holds (0: none).
+    slot: Option<ShapeSlot>,
+    shape: u16,
 }
 impl CursorSlot {
     /// A report of `generation` the host sampled before it took the last move
@@ -214,6 +222,65 @@ impl CursorSlot {
             && input_sequence
                 .zip(self.moved)
                 .is_some_and(|(taken, moved)| moved.0 == generation && taken < moved.1)
+    }
+}
+
+/// The pointer shapes the host defined, one per slot, each with the number
+/// this viewer gave its definition: what `DesktopView::cursor_shape` names.
+/// Exactly `CURSOR_SLOTS` slots, which the host overwrites as it chooses.
+///
+/// A number names one definition while anyone can still take it for that
+/// one: no two slots hold the same number, and the number last asked for is
+/// never given to a new definition, so the caller that keeps it as what it
+/// shows sees a new number whenever the shape changes. A number is reused
+/// only once the counter has gone round, so whatever else a caller keeps,
+/// it keeps by content.
+#[derive(Default)]
+struct ShapeTable {
+    /// Empty until the first definition, then `CURSOR_SLOTS` long.
+    slots: Vec<Option<(u16, CursorShape)>>,
+    /// The last definition's number: 1, 2, … 65535, then round again.
+    defined: u16,
+    /// The number `shape` was last asked for; 0 before.
+    asked: u16,
+}
+impl ShapeTable {
+    /// Hold `shape` in `slot`, in place of what it held; its number, the
+    /// next after the last that is not 0, held by a slot (that one
+    /// included) or the one last asked for. At most `CURSOR_SLOTS + 2` are
+    /// passed over, and only once the counter has gone round.
+    fn define(&mut self, slot: ShapeSlot, shape: CursorShape) -> u16 {
+        if self.slots.is_empty() {
+            self.slots.resize(CURSOR_SLOTS, None);
+        }
+        let mut number = self.defined.wrapping_add(1);
+        while number == 0 || number == self.asked || self.holds(number) {
+            number = number.wrapping_add(1);
+        }
+        self.defined = number;
+        if let Some(held) = self.slots.get_mut(slot.index()) {
+            *held = Some((number, shape));
+        }
+        number
+    }
+    fn holds(&self, number: u16) -> bool {
+        self.slots.iter().flatten().any(|(held, _)| *held == number)
+    }
+    /// The number of the definition `slot` holds; `None` before the host
+    /// defined it.
+    fn number(&self, slot: ShapeSlot) -> Option<u16> {
+        self.slots
+            .get(slot.index())
+            .and_then(|held| held.as_ref().map(|(number, _)| *number))
+    }
+    /// The definition `number` names, if a slot still holds it.
+    fn shape(&mut self, number: u16) -> Option<CursorShape> {
+        self.asked = number;
+        self.slots
+            .iter()
+            .flatten()
+            .find(|(held, _)| *held == number)
+            .map(|(_, shape)| shape.clone())
     }
 }
 
@@ -319,6 +386,11 @@ impl Viewer {
             quality = ?accepted.quality,
         );
         let now = Instant::now();
+        // This viewer always lists `cursor_shape`.
+        let cursor_shapes = accepted
+            .capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_CURSOR_SHAPE);
         let shared = Arc::new(ViewerShared {
             state: Mutex::new(ViewerStateSlot {
                 codec: accepted.codec,
@@ -337,6 +409,7 @@ impl Viewer {
             }),
             stats: Mutex::new(ViewerStatsAcc::new(now, config.limits.max_fps)),
             cursor: Mutex::new(CursorSlot::default()),
+            shapes: Mutex::new(ShapeTable::default()),
             outbound: Outbound::new(),
         });
         let sink = VideoSink::for_session(
@@ -354,6 +427,7 @@ impl Viewer {
                 cancel: cancel.clone(),
                 codec: accepted.codec,
                 limits: config.limits,
+                cursor_shapes,
             },
         ));
         Ok(Self {
@@ -527,6 +601,7 @@ impl Viewer {
             video_height: video.map_or(0, |video| video.height),
             cursor_x: if cursor_visible { cursor.x } else { 0 },
             cursor_y: if cursor_visible { cursor.y } else { 0 },
+            cursor_shape: cursor.shape,
             state: DesktopView::state_code(state.viewer_state()),
             flags: flag(cursor_visible, DesktopView::FLAG_CURSOR_VISIBLE)
                 | flag(state.controlling(), DesktopView::FLAG_CONTROLLING)
@@ -538,6 +613,20 @@ impl Viewer {
                 | flag(fresh, DesktopView::FLAG_FRESH)
                 | flag(state.paused, DesktopView::FLAG_PAUSED),
         }
+    }
+
+    /// The pointer shape `DesktopView::cursor_shape` names, while this
+    /// viewer holds that definition: fetch it when the number changes. Until
+    /// the next call, no new definition takes the number asked for, so a
+    /// view naming it names that definition still. A number can name another
+    /// definition once the counter has gone round, so keep anything else by
+    /// content. `None` for 0, and for a definition the host has since
+    /// replaced, whose successor a later view names.
+    pub fn cursor_shape(&self, shape: u16) -> Option<CursorShape> {
+        if shape == 0 {
+            return None;
+        }
+        self.shared.shapes.lock().shape(shape)
     }
 
     /// The session's single video sink, for its one native consumer.
@@ -606,12 +695,21 @@ impl Viewer {
     /// Queue one atomic batch of 1..=16 inputs. It needs a fresh presented
     /// frame of `generation` and control; Rust stamps the presented frame and
     /// consecutive sequences. A single move replaces a queued move; a full
-    /// queue revokes control and fails with `Congestion`.
+    /// queue revokes control and fails with `Congestion`. A physical key
+    /// goes only to a host that listed `physical_keys`: else the batch
+    /// fails with `NotOffered` and nothing is sent.
     pub fn input(&self, generation: u64, inputs: &[Input]) -> std::result::Result<(), InputError> {
         {
             let state = self.shared.state.lock();
             if self.cancel.is_cancelled() || state.stopped.is_some() {
                 return Err(InputError::Closed);
+            }
+            if !state.listed(CAPABILITY_PHYSICAL_KEYS)
+                && inputs
+                    .iter()
+                    .any(|input| matches!(input, Input::PhysicalKey { .. }))
+            {
+                return Err(InputError::NotOffered);
             }
             if let Some(display) = state.host.as_ref().and_then(|host| host.display.as_ref()) {
                 for input in inputs {

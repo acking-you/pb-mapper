@@ -89,9 +89,9 @@ class _FakeInstaller implements UpdateInstaller {
   Object? androidError;
 
   @override
-  Future<void> runInstallerAfterExit(File installer) async {
-    if (installerError case final error?) throw error;
+  Future<void> startInstaller(File installer) async {
     calls.add('installer ${installer.uri.pathSegments.last}');
+    if (installerError case final error?) throw error;
   }
 
   @override
@@ -395,13 +395,17 @@ void main() {
       ]);
       expect(world.quits, 1);
       expect(updates.stage, UpdateStage.installing);
+      final installer = File(world.record.pending!.installer!);
+      File('${installer.parent.path}/setup.log').writeAsStringSync('log');
 
       // The app that opens next says what happened, once: the installer
-      // reopens it out of sight, and a failed install looks the same.
+      // reopens it out of sight, and a failed install looks the same. It
+      // also removes what the installer ran from, which it could not.
       final updated = world.controller(installed: '0.9.1');
       final outcome = await updated.takeOutcome();
       expect('${outcome?.to}', '0.9.1');
       expect(outcome?.installed, isTrue);
+      expect(installer.parent.existsSync(), isFalse);
       expect(await updated.takeOutcome(), isNull);
     });
 
@@ -410,9 +414,15 @@ void main() {
       final updates = world.controller();
       await updates.check();
       await updates.start();
+      final installer = File(world.record.pending!.installer!);
+      final log = File('${installer.parent.path}/setup.log')
+        ..writeAsStringSync('log');
       final unchanged = world.controller(installed: '0.9.0');
       final outcome = await unchanged.takeOutcome();
       expect(outcome?.installed, isFalse);
+      // Setup's log stays, for whoever asks why.
+      expect(installer.existsSync(), isFalse);
+      expect(log.existsSync(), isTrue);
 
       // A note from long ago is not news.
       world.record.pending = PendingUpdate(
@@ -423,24 +433,28 @@ void main() {
       expect(await unchanged.takeOutcome(), isNull);
     });
 
-    test(
-      'a hand-off that cannot start fails with the app still open',
-      () async {
-        final world = _World()
-          ..installer.installerError = const UpdateException(
-            UpdateFailure.install,
-            'Could not start the installer',
-          );
-        final updates = world.controller();
-        await updates.check();
-        await updates.start();
-        expect(updates.stage, UpdateStage.failed);
-        expect(updates.failure?.kind, UpdateFailure.install);
-        expect(world.quits, 0);
-        // Nothing is waiting to install it, so the next launch hears nothing.
-        expect(world.record.pending, isNull);
-      },
-    );
+    test('an installer that ends before installing leaves the app open, and '
+        'Retry runs it again without downloading', () async {
+      final world = _World()
+        ..installer.installerError = const UpdateException(
+          UpdateFailure.install,
+          'The installer ended with exit code 2 before installing anything',
+        );
+      final updates = world.controller();
+      await updates.check();
+      await updates.start();
+      expect(updates.stage, UpdateStage.failed);
+      expect(updates.failure?.kind, UpdateFailure.install);
+      expect(world.quits, 0);
+      // Nothing is waiting to install it, so the next launch hears nothing.
+      expect(world.record.pending, isNull);
+
+      world.installer.installerError = null;
+      await updates.start();
+      expect(world.http.downloaded, hasLength(1));
+      expect(world.installer.calls, hasLength(2));
+      expect(world.quits, 1);
+    });
 
     test(
       'a debug build verifies and stops short of replacing itself',
@@ -616,23 +630,6 @@ void main() {
     });
   });
 
-  test("the Windows hand-off quotes paths PowerShell's way", () {
-    final script = WindowsInstallerUpdate.script(
-      r"C:\Users\o'neil smith\Temp\pb-mapper-windows-x86_64-setup.exe",
-      42,
-      r'C:\Program Files\pb-mapper\pb_mapper_ui.exe',
-    );
-    expect(script, contains(r"'C:\Users\o''neil smith\Temp\"));
-    expect(script, contains('Wait-Process -Id 42'));
-    expect(script, contains('/SILENT'));
-    // Setup's log path, with its space, quoted for setup itself.
-    expect(
-      script,
-      contains(r"""'/LOG="C:\Users\o''neil smith\Temp\setup.log"'"""),
-    );
-    expect(script, contains(r"Start-Process -FilePath 'C:\Program Files\"));
-  });
-
   final library = () {
     final name = Platform.isWindows
         ? 'pb_mapper_ffi.dll'
@@ -740,75 +737,68 @@ void main() {
     await finish(tester);
   });
 
-  test(
-    'the Windows hand-off waits for the app, installs, and reopens it',
-    () async {
-      final dir = Directory.systemTemp.createTempSync('pb-mapper-test-');
-      addTearDown(() async {
-        // The reopened stand-in may still be closing.
-        await Future<void>.delayed(const Duration(milliseconds: 500));
+  group('starting the Windows installer', () {
+    /// A process that does what [script] says: `sh` here, PowerShell on
+    /// Windows, with the ready file as `$0` or `$ready`.
+    (String, List<String>) shell(String sh, String powershell, File ready) =>
+        Platform.isWindows
+        ? (
+            'powershell.exe',
+            [
+              '-NoProfile',
+              '-Command',
+              "\$ready = '${ready.path.replaceAll("'", "''")}'; $powershell",
+            ],
+          )
+        : ('sh', ['-c', sh, ready.path]);
+
+    late Directory dir;
+    setUp(() => dir = Directory.systemTemp.createTempSync('pb-mapper-test-'));
+    tearDown(() async {
+      // The still-running stand-in may hold the folder for a moment.
+      for (var attempt = 0; attempt < 20; attempt++) {
         try {
-          dir.deleteSync(recursive: true);
-        } on FileSystemException catch (_) {}
-      });
-      final native = DynamicLibrary.open(library!);
-      final installed = File('${dir.path}\\installed.txt');
-
-      /// One update whose setup exits with [exitCode]: its download folder,
-      /// once the app has been reopened.
-      Future<Directory> update(int exitCode, {bool shared = false}) async {
-        final name = '$exitCode${shared ? '-shared' : ''}';
-        final download = Directory('${dir.path}\\download-$name')..createSync();
-        if (shared) File('${download.path}\\other.txt').writeAsStringSync('');
-        final reopened = File('${dir.path}\\reopened-$name.txt');
-        final installer = File('${download.path}\\setup.cmd')
-          ..writeAsStringSync(
-            '@echo %*> "${installed.path}"\r\n@exit /b $exitCode\r\n',
-          );
-        final app = File('${dir.path}\\app-$name.cmd')
-          ..writeAsStringSync('@echo reopened> "${reopened.path}"\r\n');
-        // The app: a process that ends a moment after the hand-off begins.
-        final running = await Process.start('powershell.exe', [
-          '-NoProfile',
-          '-Command',
-          'Start-Sleep -Seconds 2',
-        ]);
-        await WindowsInstallerUpdate.handOff(
-          installer,
-          running.pid,
-          app.path,
-          native,
-        );
-        expect(installed.existsSync(), isFalse, reason: 'the app still runs');
-        final deadline = DateTime.now().add(const Duration(seconds: 30));
-        while (!reopened.existsSync()) {
-          if (DateTime.now().isAfter(deadline)) {
-            fail('the app was not reopened');
-          }
-          await Future<void>.delayed(const Duration(milliseconds: 100));
+          return dir.deleteSync(recursive: true);
+        } on FileSystemException {
+          await Future<void>.delayed(const Duration(milliseconds: 250));
         }
-        expect(installed.readAsStringSync(), contains('/SILENT'));
-        expect(installed.readAsStringSync(), contains('/LOG='));
-        installed.deleteSync();
-        return download;
       }
+    });
 
-      // Installed: nothing of the download is left.
-      expect((await update(0)).existsSync(), isFalse);
-      // Only what the update made is removed: anything else in its folder,
-      // and so the folder, stays.
-      final shared = await update(0, shared: true);
-      expect(File('${shared.path}\\setup.cmd').existsSync(), isFalse);
-      expect(File('${shared.path}\\other.txt').existsSync(), isTrue);
-      // Not installed: the installer goes, its folder (and setup's log) stay.
-      final failed = await update(1);
-      expect(failed.existsSync(), isTrue);
-      expect(File('${failed.path}\\setup.cmd').existsSync(), isFalse);
-    },
-    skip: !Platform.isWindows
-        ? 'the hand-off is Windows-only'
-        : library == null
-        ? 'no built pb_mapper_ffi library'
-        : false,
-  );
+    test('it has started once its log exists, while it still runs', () async {
+      final ready = File('${dir.path}${Platform.pathSeparator}setup.log');
+      final (executable, arguments) = shell(
+        r'sleep 0.3; : > "$0"; sleep 2',
+        r"Start-Sleep -Milliseconds 300; Set-Content -LiteralPath $ready -Value ''; Start-Sleep 2",
+        ready,
+      );
+      final started = DateTime.now();
+      await WindowsInstallerUpdate.run(executable, arguments, ready);
+      expect(ready.existsSync(), isTrue);
+      expect(
+        DateTime.now().difference(started),
+        greaterThanOrEqualTo(const Duration(milliseconds: 250)),
+      );
+    });
+
+    test(
+      'one that ends first fails the update, whatever log a past attempt left',
+      () async {
+        final ready = File('${dir.path}${Platform.pathSeparator}setup.log')
+          ..writeAsStringSync('an earlier attempt');
+        final (executable, arguments) = shell('exit 2', 'exit 2', ready);
+        await expectLater(
+          WindowsInstallerUpdate.run(executable, arguments, ready),
+          throwsA(
+            isA<UpdateException>().having(
+              (e) => e.kind,
+              'kind',
+              UpdateFailure.install,
+            ),
+          ),
+        );
+        expect(ready.existsSync(), isFalse);
+      },
+    );
+  });
 }

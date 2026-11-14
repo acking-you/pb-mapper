@@ -6,8 +6,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../../../state/desktop_store.dart';
+import '../../../state/viewer_prefs.dart';
 import 'modifier_latch.dart';
 import 'remote_keys.dart';
+import 'remote_text_input.dart';
 import 'touch_gestures.dart';
 
 /// Wheel notches per event, each way.
@@ -82,8 +84,35 @@ final class RemoteInput implements RemotePointerSink {
 
   /// Physical keys whose down is held on the host, and those whose down
   /// went as a whole tap, so their up sends nothing.
-  final _heldKeys = <PhysicalKeyboardKey, RemoteKey>{};
+  final _heldKeys = <PhysicalKeyboardKey, DesktopKeyInput>{};
   final _swallowUps = <PhysicalKeyboardKey>{};
+
+  /// Modifiers down here whose down waits for the next key, button or
+  /// wheel, in the order they went down.
+  final _waiting = <PhysicalKeyboardKey, DesktopKeyInput>{};
+
+  /// How keys reach this computer; the viewer keeps it current.
+  KeyboardSettings keyboard = const KeyboardSettings();
+
+  /// The text-input client this viewer attaches, if any: while it is
+  /// attached in local mode, printable keys go to this device's input
+  /// method, and its text comes back through the client.
+  RemoteTextInput? textInput;
+
+  /// Whether this device's keyboard is an Apple one: Cmd, and Option that
+  /// types characters.
+  static bool get appleViewer => const {
+    TargetPlatform.macOS,
+    TargetPlatform.iOS,
+  }.contains(defaultTargetPlatform);
+
+  /// The host is a Mac.
+  bool get appleHost =>
+      _desktop.session.value.capabilities.contains('os_macos');
+
+  /// Ctrl and Cmd trade places on their way to the host.
+  bool get swapsModifiers =>
+      keyboard.swaps(appleViewer: appleViewer, appleHost: appleHost);
 
   final _heldButtons = <RemoteButton>{};
 
@@ -126,13 +155,15 @@ final class RemoteInput implements RemotePointerSink {
     final g = _live;
     if (g == null) return;
     cursor = n;
-    final mods = _latch.active.difference(_buttonMods);
+    final mods = _latchedToWrap().difference(_buttonMods);
     final sent = _sequence(g, [
       _moveInput(g, n),
+      ..._waitingDowns,
       ..._downs(mods),
       DesktopInput.button(b, true, dragStart: dragStart),
     ]);
     if (!sent) return;
+    _sentWaiting();
     _latch.take();
     _heldButtons.add(b);
     _buttonMods.addAll(mods);
@@ -152,25 +183,29 @@ final class RemoteInput implements RemotePointerSink {
     final g = _live;
     if (g == null) return;
     cursor = n;
+    final waiting = _waitingDowns;
     _wrapped(
       g,
       const {},
       (mods) => [
         _moveInput(g, n),
+        ...waiting,
         ..._downs(mods),
         DesktopInput.button(b, true),
         DesktopInput.button(b, false),
         ..._ups(mods),
       ],
+      sent: _sentWaiting,
     );
   }
 
   @override
   void wheelStart() {
     final g = _live;
-    final mods = _latch.active;
+    final mods = _latchedToWrap();
     if (g == null || mods.isEmpty) return;
-    if (_sequence(g, _downs(mods))) {
+    if (_sequence(g, [..._waitingDowns, ..._downs(mods)])) {
+      _sentWaiting();
       _latch.take();
       _wheelMods.addAll(mods);
     }
@@ -180,13 +215,15 @@ final class RemoteInput implements RemotePointerSink {
   void wheel(int horizontal, int vertical) {
     final g = _live;
     if (g == null || (horizontal == 0 && vertical == 0)) return;
-    _desktop.send(
-      DesktopInput.wheel(
-        horizontal.clamp(-kWheelClamp, kWheelClamp),
-        vertical.clamp(-kWheelClamp, kWheelClamp),
-      ),
-      geometryEpoch: g.epoch,
+    final wheel = DesktopInput.wheel(
+      horizontal.clamp(-kWheelClamp, kWheelClamp),
+      vertical.clamp(-kWheelClamp, kWheelClamp),
     );
+    if (_waiting.isEmpty) {
+      _desktop.send(wheel, geometryEpoch: g.epoch);
+    } else if (_sequence(g, [..._waitingDowns, wheel])) {
+      _sentWaiting();
+    }
   }
 
   @override
@@ -200,6 +237,25 @@ final class RemoteInput implements RemotePointerSink {
 
   // ----------------------------------------------------------------- keys
 
+  /// The keyboard as [KeyRouting.route] sees it now.
+  KeyContext get _keyContext {
+    final text = textInput;
+    final caps = _desktop.session.value.capabilities;
+    return KeyContext(
+      mode: keyboard.mode,
+      textInput: text != null && text.attached.value,
+      composing: text != null && text.composing.value.isNotEmpty,
+      physicalKeys: caps.contains('physical_keys'),
+      swap: swapsModifiers,
+      optionTypes: appleViewer,
+      latched: _latch.active,
+      heldHere: _physicalModifiers(),
+      othersDown:
+          _heldButtons.isNotEmpty ||
+          _heldKeys.keys.any((k) => !KeyRouting.modifierKeys.contains(k)),
+    );
+  }
+
   /// Hardware keys, bound to the picture's `Focus.onKeyEvent`; the rules
   /// are [KeyRouting.route]'s.
   KeyEventResult handleHardwareKey(FocusNode node, KeyEvent event) {
@@ -208,51 +264,71 @@ final class RemoteInput implements RemotePointerSink {
     final physical = event.physicalKey;
     final route = KeyRouting.route(
       event,
-      latched: _latch.active,
-      held: _physicalModifiers(),
+      _keyContext,
       holding: _heldKeys[physical],
       upIsSwallowed: _swallowUps.contains(physical),
     );
-    if (!route.handled) return KeyEventResult.ignored;
+    final result = route.handled
+        ? KeyEventResult.handled
+        : KeyEventResult.ignored;
     final up = event is KeyUpEvent;
     if (up) {
       _swallowUps.remove(physical);
       _heldKeys.remove(physical);
+      _waiting.remove(physical);
     } else if (route.swallowUp) {
       _swallowUps.add(physical);
     } else {
       // A key that sends its own up must never have it swallowed.
       _swallowUps.remove(physical);
     }
-    final sent = switch (route.inputs.length) {
+    if (route.defers case final defers?) _waiting[physical] = defers;
+    final waiting = route.flush ? _waitingDowns : const <DesktopInput>[];
+    final inputs = [...waiting, ...route.inputs];
+    final sent = switch (inputs.length) {
       0 => true,
-      1 => _desktop.send(route.inputs.single, geometryEpoch: g.epoch),
-      _ => _sequence(g, route.inputs),
+      1 => _desktop.send(inputs.single, geometryEpoch: g.epoch),
+      _ => _sequence(g, inputs),
     };
-    if (!sent) return KeyEventResult.handled;
+    if (!sent) return result;
+    if (waiting.isNotEmpty) _sentWaiting();
     if (route.consumesLatch) _latch.take();
     final holds = route.holds;
     if (!up && holds != null) _heldKeys[physical] = holds;
-    return KeyEventResult.handled;
+    return result;
   }
 
-  /// One tap of [key], wrapped in the latched modifiers and [extra].
+  /// One tap of [key], after the modifiers waiting here and wrapped in the
+  /// latched modifiers and [extra].
   void tapKey(RemoteKey key, {Set<RemoteKey> extra = const {}}) {
     final g = _live;
     if (g == null) return;
-    _wrapped(g, extra, (mods) => KeyRouting.tap(key, mods));
+    final waiting = _waitingDowns;
+    _wrapped(
+      g,
+      extra,
+      (mods) => [...waiting, ...KeyRouting.tap(key, mods)],
+      sent: _sentWaiting,
+    );
   }
 
-  /// Holds [key] down, wrapped in the latched modifiers, repeating its
-  /// down after [delay] every [kKeyRepeatInterval] until [releaseKey]. A
-  /// key held past [kKeyRepeatDelay] before it was pressed repeats at once
-  /// (the modifier bar, which sends a tap on release).
+  /// Holds [key] down, after the modifiers waiting here and wrapped in the
+  /// latched modifiers, repeating its down after [delay] every
+  /// [kKeyRepeatInterval] until [releaseKey]. A key held past
+  /// [kKeyRepeatDelay] before it was pressed repeats at once (the modifier
+  /// bar, which sends a tap on release).
   void pressKey(RemoteKey key, {Duration delay = kKeyRepeatDelay}) {
     final g = _live;
     if (g == null) return;
     releaseKey();
-    final mods = _latch.active;
-    if (!_sequence(g, [..._downs(mods), DesktopInput.key(key, true)])) return;
+    final mods = _latchedToWrap();
+    final sent = _sequence(g, [
+      ..._waitingDowns,
+      ..._downs(mods),
+      DesktopInput.key(key, true),
+    ]);
+    if (!sent) return;
+    _sentWaiting();
     _latch.take();
     _repeatKey = key;
     _repeatMods = mods;
@@ -290,12 +366,14 @@ final class RemoteInput implements RemotePointerSink {
       case RemoteShortcut.showDesktop ||
           RemoteShortcut.switchWindow ||
           RemoteShortcut.taskManager ||
-          RemoteShortcut.startMenu:
+          RemoteShortcut.startMenu ||
+          RemoteShortcut.switchInputMethod:
         final g = _live;
         if (g == null) return;
+        final chord = s.chord(appleHost: appleHost);
         _sequence(g, [
-          for (final k in s.chord) DesktopInput.key(k, true),
-          for (final k in s.chord.reversed) DesktopInput.key(k, false),
+          for (final k in chord) DesktopInput.key(k, true),
+          for (final k in chord.reversed) DesktopInput.key(k, false),
         ]);
     }
   }
@@ -370,6 +448,8 @@ final class RemoteInput implements RemotePointerSink {
         _wheelMods.isNotEmpty ||
         _repeatKey != null;
     _clearHeld();
+    // A modifier still waiting was never sent: nothing to release.
+    _waiting.clear();
     _onLocalCancel();
     _latch.clear();
     if (held) _desktop.release();
@@ -402,9 +482,20 @@ final class RemoteInput implements RemotePointerSink {
     _ready.value = live;
     if (lost || newEpoch) {
       _clearHeld();
+      _waiting.clear();
       _onLocalCancel();
       _latch.clear();
     }
+  }
+
+  /// The downs of the modifiers waiting, in the order they went down.
+  List<DesktopInput> get _waitingDowns => [..._waiting.values];
+
+  /// The modifiers waiting went to the host: held there now, until their
+  /// keys go up.
+  void _sentWaiting() {
+    _heldKeys.addAll(_waiting);
+    _waiting.clear();
   }
 
   void _clearHeld() {
@@ -439,14 +530,26 @@ final class RemoteInput implements RemotePointerSink {
   }
 
   /// Sends what [build] makes of the latched modifiers and [extra]; the
-  /// latch is taken only once it was sent.
+  /// latch is taken, and [sent] runs, only once it was sent.
   void _wrapped(
     DesktopGeometry g,
     Set<RemoteKey> extra,
-    List<DesktopInput> Function(Set<RemoteKey> mods) build,
-  ) {
-    if (_sequence(g, build({..._latch.active, ...extra}))) _latch.take();
+    List<DesktopInput> Function(Set<RemoteKey> mods) build, {
+    VoidCallback? sent,
+  }) {
+    if (_sequence(g, build(_latchedToWrap(extra)))) {
+      sent?.call();
+      _latch.take();
+    }
   }
+
+  /// The latched modifiers and [extra] that wrap an action, as the host
+  /// names them: not those a key held here holds on the host, whose wrapped
+  /// up would release the key still held (KeyRouting.route).
+  Set<RemoteKey> _latchedToWrap([Set<RemoteKey> extra = const {}]) =>
+      {..._latch.active, ...extra}.difference(
+        KeyRouting.hostModifiers(_physicalModifiers(), swap: swapsModifiers),
+      );
 
   void _sendText(DesktopGeometry g, StringBuffer pending) {
     if (pending.isEmpty) return;

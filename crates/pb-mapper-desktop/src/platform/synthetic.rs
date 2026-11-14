@@ -9,8 +9,9 @@ use super::{
     VideoSource,
 };
 use crate::{
-    BackendError, Button, CursorMode, DRAIN_POLL, Display, DisplaySelection, EncodedFrame,
-    FailureKind, HostOs, Key, Result, VideoCodec, VideoFormat, VideoLimits, VideoRate, Waker,
+    BackendError, Button, CursorMode, CursorShape, DRAIN_POLL, Display, DisplaySelection,
+    EncodedFrame, FailureKind, HostOs, Key, Result, VideoCodec, VideoFormat, VideoLimits,
+    VideoRate, Waker,
     input::held::Pressed,
     modes::{Mode, Setting},
 };
@@ -25,6 +26,14 @@ use std::{
 
 pub(crate) enum Synthetic<const PUSH: bool> {}
 
+/// One keyboard injection, as the synthetic injector saw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Typed {
+    Key(Key, bool),
+    Physical(u16, bool),
+    Text(String),
+}
+
 /// What every part of a session shares, and the test reads and steers.
 #[derive(Clone, Default)]
 pub(crate) struct Probe(Arc<Mutex<State>>);
@@ -34,7 +43,9 @@ struct State {
     pointer: Option<(i32, i32)>,
     down: Vec<Key>,
     released: Vec<Pressed>,
-    /// Submit to drain, per unit.
+    /// Every key, physical key and text injected, in order.
+    typed: Vec<Typed>,
+    /// Ready to drained, per unit.
     latencies: Vec<Duration>,
     /// The display's size now, once a mode changed it.
     size: Option<Mode>,
@@ -43,8 +54,20 @@ struct State {
     /// Every mode set, and how often one was reset.
     applied: Vec<Mode>,
     resets: usize,
+    /// The pointer's shape under a handle: 1, 2, … as the test sets them.
+    shape: Option<(u64, CursorShape)>,
 }
 impl Probe {
+    /// The pointer takes `shape`, under a new handle, as an OS sets a cursor.
+    pub(crate) fn set_shape(&self, shape: CursorShape) {
+        let mut state = self.0.lock();
+        let handle = state.shape.as_ref().map_or(1, |(handle, _)| handle + 1);
+        state.shape = Some((handle, shape));
+    }
+    /// Where the pointer is.
+    pub(crate) fn point(&self, x: i32, y: i32) {
+        self.0.lock().pointer = Some((x, y));
+    }
     /// A display device no real computer has, so that nothing here ever
     /// reaches a real one's modes.
     pub(crate) fn display() -> Display {
@@ -90,6 +113,13 @@ impl Probe {
     pub(crate) fn lose(&self, lost: bool) {
         self.0.lock().lost = lost;
     }
+    /// The keyboard injections so far, in order.
+    pub(crate) fn typed(&self) -> Vec<Typed> {
+        self.0.lock().typed.clone()
+    }
+    pub(crate) fn released(&self) -> Vec<Pressed> {
+        self.0.lock().released.clone()
+    }
 }
 
 impl<const PUSH: bool> Platform for Synthetic<PUSH> {
@@ -109,6 +139,7 @@ impl<const PUSH: bool> Platform for Synthetic<PUSH> {
             secure_desktop: false,
             os: Some(Self::OS),
             reason: None,
+            permissions: None,
         }
     }
     fn displays() -> Result<Vec<Display>> {
@@ -120,7 +151,10 @@ impl<const PUSH: bool> Platform for Synthetic<PUSH> {
     fn open(probe: &Probe, _: &Display) -> Result<Parts<Self>> {
         Ok(Parts {
             input: SynInput(probe.clone()),
-            cursor: SynCursor(probe.clone()),
+            cursor: SynCursor {
+                probe: probe.clone(),
+                shaped: 0,
+            },
             modes: SynModes(probe.clone()),
             still: SynStill,
             desktop: SynDesktop(probe.clone()),
@@ -191,11 +225,13 @@ fn setting(mode: Mode) -> Setting {
         height: mode.height,
         hz: 60,
         bpp: 32,
+        scale: 0,
     }
 }
 
-/// Units in flight, each with its submit time and when it is ready.
-type Flight = Arc<Mutex<VecDeque<(Instant, Option<EncodedFrame>)>>>;
+/// Units in flight, in submit order, each with the time it became ready
+/// once it is.
+type Flight = Arc<Mutex<VecDeque<Option<(Instant, EncodedFrame)>>>>;
 
 pub(crate) struct SynVideo<const PUSH: bool> {
     probe: Probe,
@@ -233,7 +269,9 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
         Ok(())
     }
     /// Pulled, a unit is ready at the next poll; pushed, a millisecond later
-    /// on the encoder's own thread, which wakes thread C.
+    /// on the encoder's own thread, while thread C waits, which it wakes. The
+    /// millisecond is waited as thread C waits, on a timer the platform does
+    /// not coalesce.
     fn submit(&mut self, keyframe: bool) -> Result<()> {
         self.frames += 1;
         let display = self.probe.current();
@@ -250,16 +288,23 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
         };
         let mut flight = self.flight.lock();
         if !PUSH {
-            flight.push_back((Instant::now(), Some(frame)));
+            flight.push_back(Some((Instant::now(), frame)));
             return Ok(());
         }
-        flight.push_back((Instant::now(), None));
+        flight.push_back(None);
         drop(flight);
         let (flight, waker) = (self.flight.clone(), self.waker.clone());
+        let wake = crate::scheduler::Wake::new();
+        let encoder = crate::scheduler::Waiter::new(&wake)?;
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1));
-            if let Some(slot) = flight.lock().iter_mut().find(|(_, unit)| unit.is_none()) {
-                slot.1 = Some(frame);
+            let ready = Instant::now() + Duration::from_millis(1);
+            while Instant::now() < ready {
+                if encoder.wait(ready).is_err() {
+                    break;
+                }
+            }
+            if let Some(slot) = flight.lock().iter_mut().find(|unit| unit.is_none()) {
+                *slot = Some((Instant::now(), frame));
             }
             waker.wake();
         });
@@ -267,14 +312,14 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
     }
     fn drain(&mut self) -> Result<Option<EncodedFrame>> {
         let mut flight = self.flight.lock();
-        if flight.front().is_none_or(|(_, unit)| unit.is_none()) {
+        if flight.front().is_none_or(Option::is_none) {
             return Ok(None);
         }
-        let Some((submitted, frame)) = flight.pop_front() else {
+        let Some(Some((ready, frame))) = flight.pop_front() else {
             return Ok(None);
         };
-        self.probe.0.lock().latencies.push(submitted.elapsed());
-        Ok(frame)
+        self.probe.0.lock().latencies.push(ready.elapsed());
+        Ok(Some(frame))
     }
     fn pending(&self) -> usize {
         self.flight.lock().len()
@@ -284,6 +329,7 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
 pub(crate) struct SynInput(Probe);
 impl Injector for SynInput {
     const LOCK: bool = false;
+    const PHYSICAL_KEYS: bool = true;
     fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
         self.0.0.lock().pointer = Some((x, y));
         Ok(())
@@ -301,9 +347,15 @@ impl Injector for SynInput {
         } else {
             state.down.retain(|held| *held != key);
         }
+        state.typed.push(Typed::Key(key, down));
         Ok(())
     }
-    fn text(&mut self, _: &str) -> Result<()> {
+    fn text(&mut self, text: &str) -> Result<()> {
+        self.0.0.lock().typed.push(Typed::Text(text.to_owned()));
+        Ok(())
+    }
+    fn physical_key(&mut self, usage: u16, down: bool) -> Result<()> {
+        self.0.0.lock().typed.push(Typed::Physical(usage, down));
         Ok(())
     }
     fn lock(&mut self) -> Result<()> {
@@ -315,11 +367,28 @@ impl Injector for SynInput {
     }
 }
 
-pub(crate) struct SynCursor(Probe);
+/// The pointer the test steers, and its shape, which it sets as an OS sets
+/// a new cursor handle.
+pub(crate) struct SynCursor {
+    probe: Probe,
+    /// The handle whose shape `shape` last reported.
+    shaped: u64,
+}
 impl CursorSource for SynCursor {
     const MODE: CursorMode = CursorMode::Separate;
+    const SHAPES: bool = true;
     fn read(&mut self) -> Result<Option<(i32, i32, bool)>> {
-        Ok(self.0.0.lock().pointer.map(|(x, y)| (x, y, true)))
+        Ok(self.probe.0.lock().pointer.map(|(x, y)| (x, y, true)))
+    }
+    fn shape(&mut self) -> Result<Option<CursorShape>> {
+        let state = self.probe.0.lock();
+        match &state.shape {
+            Some((handle, shape)) if *handle != self.shaped => {
+                self.shaped = *handle;
+                Ok(Some(shape.clone()))
+            }
+            _ => Ok(None),
+        }
     }
 }
 
@@ -346,9 +415,10 @@ mod tests {
     use pb_mapper_testkit::{Relay, admin_credential};
 
     /// One session streams, applies input at the display's own offset and
-    /// releases the key it holds when it ends; the next reports its display
-    /// lost as the viewer's reason. A pushing source is drained as it wakes
-    /// thread C, never polled.
+    /// releases the keys it holds when it ends, physical ones too; text is
+    /// typed with one Enter per line break; the next session reports its
+    /// display lost as the viewer's reason. A pushing source is drained as it
+    /// wakes thread C, never polled.
     async fn session<const PUSH: bool>(name: &str) {
         let relay = Relay::start(name).await;
         let client =
@@ -384,31 +454,90 @@ mod tests {
 
         let watching = Presenting::connect(&client, &host).await;
         let controlled = watching.control().await;
+        assert!(
+            controlled
+                .capabilities
+                .iter()
+                .any(|listed| listed == "physical_keys")
+        );
         let shift = Input::Key {
             key: Key::Shift,
             down: true,
         };
         let point = Input::Move { x: 3, y: 4 };
+        let (shift_left, a) = (0xE1, 0x04);
+        let physical = |usage, down| Input::PhysicalKey { usage, down };
+        let text = Input::Text {
+            text: "a\r\nb".into(),
+        };
         watching
             .viewer
-            .input(controlled.generation, &[shift, point])
+            .input(
+                controlled.generation,
+                &[
+                    shift,
+                    point,
+                    physical(shift_left, true),
+                    physical(a, true),
+                    physical(a, false),
+                    text,
+                ],
+            )
             .unwrap();
         until(|| {
             let state = probe.0.lock();
             state.down == [Key::Shift] && state.pointer == Some((-1917, 4))
         })
         .await;
+        until(|| probe.typed().len() == 8).await;
+        assert_eq!(
+            probe.typed(),
+            [
+                Typed::Key(Key::Shift, true),
+                Typed::Physical(shift_left, true),
+                Typed::Physical(a, true),
+                Typed::Physical(a, false),
+                Typed::Text("a".into()),
+                Typed::Key(Key::Enter, true),
+                Typed::Key(Key::Enter, false),
+                Typed::Text("b".into()),
+            ]
+        );
+        if !PUSH {
+            // The pointer takes another shape where the controller's own
+            // move left it: the shape reaches the viewer all the same, and
+            // the next one under a number of its own.
+            let shown = |viewer: &crate::Viewer| {
+                let view = viewer.view();
+                viewer.cursor_shape(view.cursor_shape)
+            };
+            for kind in [crate::CursorKind::Ibeam, crate::CursorKind::Custom] {
+                let shape = CursorShape::new(kind, 2, 2, (1, 0), vec![9; 16]).unwrap();
+                probe.set_shape(shape.clone());
+                until(|| shown(&watching.viewer).as_ref() == Some(&shape)).await;
+            }
+        }
         if PUSH {
-            // Drained when the source woke thread C, not at the next tick.
+            // Drained because the source woke thread C. Without the wake a
+            // ready unit would wait for thread C's next deadline, its 16 ms
+            // pointer sample at the latest: as often more than 8 ms after it
+            // was ready as less. Woken, nine units in ten go within 8 ms of
+            // being ready, room for a busy machine's scheduling.
+            until(|| probe.0.lock().latencies.len() >= 20).await;
             let latencies = probe.0.lock().latencies.clone();
             let prompt = latencies
                 .iter()
                 .filter(|latency| **latency < Duration::from_millis(8))
                 .count();
-            assert!(prompt * 2 >= latencies.len(), "{latencies:?}");
+            assert!(prompt * 10 >= latencies.len() * 9, "{latencies:?}");
         }
         watching.stop().await;
-        until(|| probe.0.lock().released.contains(&Pressed::Key(Key::Shift))).await;
+        until(|| probe.released().len() == 2).await;
+        let released = probe.released();
+        assert!(
+            released.contains(&Pressed::Key(Key::Shift))
+                && released.contains(&Pressed::Physical(shift_left))
+        );
 
         let watching = Presenting::connect(&client, &host).await;
         watching.until(|status| status.fresh).await;

@@ -168,6 +168,9 @@ async fn send(viewer: &Viewer, batch: impl Fn(&DesktopView) -> Option<Vec<Input>
             // Outside the display, more than 1024 bytes of text, a wheel
             // beyond ±100: a bug of the sender's.
             Err(InputError::Invalid(why)) => return Err(why.into()),
+            // A physical key to a host that did not list `physical_keys`:
+            // this example sends none.
+            Err(InputError::NotOffered) => return Err("the host does not take that input".into()),
         }
     }
     Err("input was not accepted within 10 s".into())

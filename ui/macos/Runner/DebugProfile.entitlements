@@ -1,18 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!-- No App Sandbox, as in Release.entitlements. -->
 <dict>
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
+	<!-- The debug build runs Dart in its JIT. -->
 	<key>com.apple.security.cs.allow-jit</key>
-	<true/>
-	<!-- Outbound connections to pb-mapper-server, and DNS resolution. -->
-	<key>com.apple.security.network.client</key>
-	<true/>
-	<key>com.apple.security.network.server</key>
-	<true/>
-	<!-- An update's disk image is saved to the user's Downloads. -->
-	<key>com.apple.security.files.downloads.read-write</key>
 	<true/>
 </dict>
 </plist>

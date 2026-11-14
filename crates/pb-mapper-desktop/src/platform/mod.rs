@@ -6,20 +6,24 @@
 //! one adds `platform/<os>/` and an arm of [`Current`]. "Platforms" in
 //! `docs/remote-desktop.md` is the guide.
 
+// The OS parts build on macOS alone; its pure tables are tested on every
+// platform.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) mod macos;
 #[cfg(test)]
 pub(crate) mod synthetic;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) mod unsupported;
-// Every platform's, until one has a better wait; Windows tests it too.
-#[cfg(any(not(windows), test))]
+// Every platform's without a better wait; Windows and macOS test it too.
+#[cfg(any(not(any(windows, target_os = "macos")), test))]
 pub(crate) mod waiter;
 #[cfg(windows)]
 pub(crate) mod windows;
 
 use crate::{
-    Access, BackendCaps, BackendError, Button, CursorMode, DesktopKind, Display, DisplaySelection,
-    DoubleClickGuard, EncodedFrame, FailureKind, HostOptions, HostOs, Key, Result, VideoCodec,
-    VideoLimits, VideoRate, Waker,
+    Access, BackendCaps, BackendError, Button, CursorMode, CursorShape, DesktopKind, Display,
+    DisplaySelection, DoubleClickGuard, EncodedFrame, FailureKind, HostOptions, HostOs, Key,
+    Permission, Result, VideoCodec, VideoLimits, VideoRate, Waker,
     input::held::Pressed,
     launch::{Launch, Launcher},
     modes::{Journal, Mode, Setting},
@@ -31,19 +35,25 @@ use std::{future::Future, path::Path, path::PathBuf, sync::Arc, time::Duration};
 /// This build's platform.
 #[cfg(windows)]
 pub(crate) type Current = windows::Windows;
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub(crate) type Current = macos::Macos;
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) type Current = unsupported::Unsupported;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub(crate) use macos::waiter::{Waiter, Wake};
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) use waiter::{Waiter, Wake};
 #[cfg(windows)]
 pub(crate) use windows::waiter::{Waiter, Wake};
 
+#[cfg(target_os = "macos")]
+pub(crate) use macos::timer as timers;
 /// Fine process timers, counted by `timer::TimerResolution`: on where the
 /// platform coarsens them, nothing elsewhere.
 #[cfg(windows)]
 pub(crate) use windows::timer as timers;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) mod timers {
     pub(crate) fn acquire() {}
     pub(crate) fn release() {}
@@ -64,6 +74,12 @@ pub(crate) trait Platform: Sized + 'static {
 
     /// Can this machine host now, and if not why. Cheap.
     fn support() -> HostSupport;
+    /// Ask the owner for `permission` where the operating system asks;
+    /// whether it is granted now. Elsewhere there is nothing to ask.
+    fn request(permission: Permission) -> bool {
+        let _ = permission;
+        true
+    }
     fn displays() -> Result<Vec<Display>>;
     /// Outside thread C, when a host starts and before it registers; it may
     /// wait on a person (a consent dialog). Resolves the selection. Windows:
@@ -150,6 +166,9 @@ pub(crate) trait VideoSource: Sized {
 pub(crate) trait Injector: Sized {
     /// The compile-time default; the runtime truth is `can_lock`.
     const LOCK: bool;
+    /// Whether [`Injector::physical_key`] presses keys: a host lists
+    /// `physical_keys` only then.
+    const PHYSICAL_KEYS: bool = false;
     fn can_lock(&self) -> bool {
         Self::LOCK
     }
@@ -158,7 +177,23 @@ pub(crate) trait Injector: Sized {
     fn button(&mut self, button: Button, down: bool) -> Result<()>;
     fn wheel(&mut self, horizontal: i32, vertical: i32) -> Result<()>;
     fn key(&mut self, key: Key, down: bool) -> Result<()>;
+    /// Unicode insertion. `text` holds no `\n`, `\r` or `\t`: those reach
+    /// the platform as Enter and Tab through [`Injector::key`].
     fn text(&mut self, text: &str) -> Result<()>;
+    /// Press or release the key at a place on the keyboard, as the hardware
+    /// would: `usage` is its USB HID usage on the keyboard page (0x07),
+    /// within 0x04..=0xE7, already validated. The layout and input method
+    /// active on the host decide what it types, so the host's own input
+    /// method composes; modifiers are physical keys too (0xE0..=0xE7, left
+    /// and right apart). A usage this platform has no key for is ignored:
+    /// `Ok`, nothing pressed, and so nothing to release. The release
+    /// obligation lives in `PlatformBackend`, which releases a held usage
+    /// through [`Injector::release`]. Called only when
+    /// [`Injector::PHYSICAL_KEYS`]; the default refuses.
+    fn physical_key(&mut self, usage: u16, down: bool) -> Result<()> {
+        let _ = (usage, down);
+        Err(BackendError::new(FailureKind::Unsupported, "physical keys").into())
+    }
     /// Called only when `can_lock`.
     fn lock(&mut self) -> Result<()>;
     fn double_click(&mut self) -> Option<DoubleClickGuard> {
@@ -170,18 +205,108 @@ pub(crate) trait Injector: Sized {
         match pressed {
             Pressed::Button(button) => self.button(button, false),
             Pressed::Key(key) => self.key(key, false),
+            Pressed::Physical(usage) => self.physical_key(usage, false),
         }
     }
 }
 
 pub(crate) trait CursorSource: Sized {
     const MODE: CursorMode;
+    /// `shape` reports the pointer's shape: the host lists `cursor_shape`.
+    const SHAPES: bool = false;
     fn mode(&self) -> CursorMode {
         Self::MODE
     }
     /// The absolute pointer and whether it shows; `None` where the platform
     /// has none.
     fn read(&mut self) -> Result<Option<(i32, i32, bool)>>;
+    /// The shape of the pointer the last `read` saw, when it may have
+    /// changed since the last `Some` this source returned; the first call
+    /// returns the shape now.
+    ///
+    /// - When: on thread C, only in a session whose viewer reads shapes,
+    ///   right after a `read` that found the pointer showing on the shared
+    ///   display, every 16 ms while capturing, inside the desktop's scope.
+    ///   `PlatformBackend` checked the desktop around that `read`. Never
+    ///   while the pointer is hidden or on another display: nothing of it
+    ///   reaches the viewer then, which keeps the last shape.
+    /// - Unchanged: decide it by the cheapest identity the OS gives the
+    ///   pointer (Windows: the `HCURSOR` the `read` saw; macOS: the window
+    ///   server's cursor seed), never by reading pixels each call, and
+    ///   return `None`. Thread C compares content, so a new identity with an
+    ///   equal image costs one extraction and nothing on the wire. `None`
+    ///   also when the pointer has no shape now: the last one stays.
+    ///   [`ShapeReads`] keeps the identities.
+    /// - Units and bounds: the bitmap in the host's physical pixels,
+    ///   straight RGBA8. Check the image's size with `CursorShape::readable`
+    ///   before allocating or copying a pixel of it, then build the shape
+    ///   with `CursorShape::fitted`, which scales anything larger than
+    ///   `CursorShape::MAX_SIDE` down. `kind` names a standard shape the OS
+    ///   identifies as such, else `Custom`.
+    /// - Failure: thread C keeps the last shape and goes on capturing. A
+    ///   refusal (`InvalidData`: too large, or not a bitmap of its size) is
+    ///   not read again for that identity; any other failure is, after
+    ///   `SHAPE_RETRY` ([`ShapeReads`]).
+    fn shape(&mut self) -> Result<Option<CursorShape>> {
+        Ok(None)
+    }
+}
+
+/// How soon a pointer shape whose read failed is read again.
+#[cfg_attr(
+    not(any(windows, target_os = "macos", test)),
+    expect(dead_code, reason = "for the platforms that read pointer bitmaps")
+)]
+pub(crate) const SHAPE_RETRY: Duration = Duration::from_millis(250);
+
+/// Which pointer identity a [`CursorSource`] last read the shape of: one is
+/// read once, a failed read of it again after [`SHAPE_RETRY`], and one the
+/// size rule refused (`InvalidData`) never again, so a broken or huge cursor
+/// costs one read, not one per tick.
+#[cfg_attr(
+    not(any(windows, target_os = "macos", test)),
+    expect(dead_code, reason = "for the platforms that read pointer bitmaps")
+)]
+pub(crate) struct ShapeReads<I> {
+    /// The identity read last, and, after a failure that may pass, when it
+    /// is due again.
+    tried: Option<(I, Option<std::time::Instant>)>,
+}
+impl<I> Default for ShapeReads<I> {
+    fn default() -> Self {
+        Self { tried: None }
+    }
+}
+#[cfg_attr(
+    not(any(windows, target_os = "macos", test)),
+    expect(dead_code, reason = "for the platforms that read pointer bitmaps")
+)]
+impl<I: Copy + PartialEq> ShapeReads<I> {
+    /// The identity read last, whatever the read gave.
+    #[cfg_attr(
+        not(any(target_os = "macos", test)),
+        expect(dead_code, reason = "macOS paces reads without a cursor seed by it")
+    )]
+    pub(crate) fn last(&self) -> Option<I> {
+        self.tried.map(|(identity, _)| identity)
+    }
+    /// Whether to read the shape of `identity` at `now`.
+    pub(crate) fn due(&self, identity: I, now: std::time::Instant) -> bool {
+        match self.tried {
+            Some((tried, retry)) if tried == identity => retry.is_some_and(|at| now >= at),
+            _ => true,
+        }
+    }
+    /// What the read of `identity` at `now` gave.
+    pub(crate) fn record<T>(&mut self, identity: I, read: &Result<T>, now: std::time::Instant) {
+        let retry = match read {
+            Err(failure) if failure.kind() != std::io::ErrorKind::InvalidData => {
+                Some(now + SHAPE_RETRY)
+            }
+            Ok(_) | Err(_) => None,
+        };
+        self.tried = Some((identity, retry));
+    }
 }
 
 /// A display's modes, by its device name (`Display::name`), the key that
@@ -213,7 +338,7 @@ pub(crate) trait DisplayModes: Sized {
 /// No mode changes: the unsupported platform's, and the first real platform
 /// without modes (Android, Wayland).
 #[cfg_attr(
-    windows,
+    any(windows, target_os = "macos"),
     expect(dead_code, reason = "only the platforms without modes use it")
 )]
 pub(crate) struct NoModes;
@@ -266,6 +391,21 @@ pub struct HostSupport {
     pub secure_desktop: bool,
     pub os: Option<HostOs>,
     pub reason: Option<UnsupportedReason>,
+    /// Whether each permission hosting needs is granted, where the operating
+    /// system asks the owner for them (macOS); `None` elsewhere. Screen
+    /// capture missing is `UnsupportedReason::PermissionMissing`; input
+    /// missing leaves hosting view-only.
+    pub permissions: Option<HostPermissions>,
+}
+
+/// The permissions hosting asks the owner for, and whether each is granted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct HostPermissions {
+    /// Recording the screen ([`Permission::ScreenCapture`]).
+    pub screen_capture: bool,
+    /// Posting input events ([`Permission::Input`]).
+    pub input: bool,
 }
 
 /// Why this machine cannot host.
@@ -292,13 +432,24 @@ pub fn displays() -> Result<Vec<Display>> {
     Current::displays()
 }
 
+/// Ask the owner for `permission`, where the operating system asks for it:
+/// on macOS the first request shows the system's prompt and lists this app
+/// in System Settings, where the owner grants it. Whether it is granted now;
+/// macOS applies a new Screen Recording grant once the app starts again.
+/// Elsewhere nothing is asked: true.
+pub fn request_permission(permission: Permission) -> bool {
+    Current::request(permission)
+}
+
 /// What sessions on platform `P` can do when their backend does not describe
 /// itself in time: its compile-time facts.
 pub(crate) fn fallback_caps<P: Platform>() -> BackendCaps {
     BackendCaps {
         lock: <P::Input as Injector>::LOCK,
+        physical_keys: <P::Input as Injector>::PHYSICAL_KEYS,
         os: Some(P::OS),
         cursor: <P::Cursor as CursorSource>::MODE,
+        cursor_shapes: <P::Cursor as CursorSource>::SHAPES,
         ..BackendCaps::default()
     }
 }
@@ -389,6 +540,9 @@ pub(crate) fn privileged_support() -> crate::privileged::PrivilegedSupport {
     }
 }
 
+/// Why a host refuses to start: a missing permission is screen capture,
+/// which hosting needs at all (input only gates control); any other reason
+/// is `Unsupported`.
 fn unsupported(reason: Option<UnsupportedReason>) -> std::io::Error {
     let message = match reason {
         Some(UnsupportedReason::MediaFoundationMissing) => {
@@ -396,9 +550,44 @@ fn unsupported(reason: Option<UnsupportedReason>) -> std::io::Error {
         }
         Some(UnsupportedReason::NoDisplay) => "No display is available to share",
         Some(UnsupportedReason::PermissionMissing) => {
-            "Desktop hosting needs a permission this computer has not granted"
+            return BackendError::permission_missing(
+                Permission::ScreenCapture,
+                "Desktop hosting needs the Screen Recording permission, which this computer has not granted",
+            )
+            .into();
         }
-        Some(UnsupportedReason::Platform) | None => "Desktop hosting currently requires Windows",
+        Some(UnsupportedReason::Platform) | None => {
+            "Desktop hosting requires Windows, or macOS 12.3 or later"
+        }
     };
     BackendError::new(FailureKind::Unsupported, message).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{io, time::Instant};
+
+    /// An identity is read once; a read that failed for a reason that may
+    /// pass is read again after `SHAPE_RETRY`, never on the next tick, and
+    /// one refused as too large is not read again; a new identity always is.
+    #[test]
+    fn a_failed_shape_read_is_retried_and_a_refused_one_is_not() {
+        let at = Instant::now();
+        let mut reads = ShapeReads::default();
+        assert!(reads.due(1, at));
+        reads.record(1, &Ok(()), at);
+        assert!(!reads.due(1, at + SHAPE_RETRY));
+        assert!(reads.due(2, at));
+
+        let failed: Result<()> = Err(io::Error::other("GetDIBits failed"));
+        reads.record(2, &failed, at);
+        assert!(!reads.due(2, at));
+        assert!(reads.due(2, at + SHAPE_RETRY));
+
+        let refused: Result<()> = Err(io::Error::from(io::ErrorKind::InvalidData));
+        reads.record(3, &refused, at);
+        assert!(!reads.due(3, at + SHAPE_RETRY * 10));
+        assert_eq!(reads.last(), Some(3));
+    }
 }

@@ -1,6 +1,7 @@
 // The values the desktop store publishes, and the ones the FFI returns that
 // the store passes on unchanged. Every one is immutable with value equality,
 // so a `ValueNotifier` holding it notifies only on a real change (D14).
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -272,9 +273,10 @@ class DesktopDecoders {
     );
   }
 
-  /// No answer (a probe that failed or has not answered yet): H.264 only,
-  /// at 1080p, what every session asked for before the probe. A device
-  /// that decodes more says so when it answers.
+  /// H.264 only, at 1080p, what every session asked for before the probe:
+  /// Android's answer when its probe failed or found no hardware AVC
+  /// decoder, which MediaCodec then decodes in software. A device that
+  /// decodes more says so when it answers.
   static const h264Only = DesktopDecoders(h264: DesktopDecoderLimit.p1080);
 
   final DesktopDecoderLimit? h264, h265;
@@ -730,6 +732,7 @@ class DesktopView {
     this.videoHeight = 0,
     this.cursorX = 0,
     this.cursorY = 0,
+    this.cursorShape = 0,
     this.state = 0,
     this.cursorVisible = false,
     this.controlling = false,
@@ -747,6 +750,11 @@ class DesktopView {
   final int generation, presentedFrameId, presentedAgeMs, cursorSeq;
   final int displayWidth, displayHeight, videoWidth, videoHeight;
   final int cursorX, cursorY;
+
+  /// The pointer's shape, by the number of its definition, which
+  /// [DesktopApiClient.cursorShape] resolves; 0 none: a host that sends no
+  /// shapes, whose pointer is the generic arrow.
+  final int cursorShape;
   final int state;
   final bool cursorVisible, controlling, controlAllowed, secureDesktop;
   final bool fresh, paused;
@@ -764,6 +772,7 @@ class DesktopView {
       other.videoHeight == videoHeight &&
       other.cursorX == cursorX &&
       other.cursorY == cursorY &&
+      other.cursorShape == cursorShape &&
       other.state == state &&
       other.cursorVisible == cursorVisible &&
       other.controlling == controlling &&
@@ -783,6 +792,7 @@ class DesktopView {
     videoHeight,
     cursorX,
     cursorY,
+    cursorShape,
     state,
     cursorVisible,
     controlling,
@@ -791,6 +801,107 @@ class DesktopView {
     fresh,
     paused,
   );
+}
+
+/// What the host's pointer looks like: a shape the viewer's own OS has
+/// too, or [custom], which only the bitmap shows. Mirrors Rust's
+/// `CursorKind`.
+enum DesktopCursorKind {
+  arrow,
+  ibeam,
+  hand,
+  wait,
+  progress,
+  crosshair,
+  help,
+  notAllowed,
+  move,
+  resizeNs,
+  resizeEw,
+  resizeNwse,
+  resizeNesw,
+  upArrow,
+  custom;
+
+  /// A value this build does not know is a shape only the bitmap shows.
+  static DesktopCursorKind parse(Object? wire) => switch (wire) {
+    'arrow' => arrow,
+    'ibeam' => ibeam,
+    'hand' => hand,
+    'wait' => wait,
+    'progress' => progress,
+    'crosshair' => crosshair,
+    'help' => help,
+    'not_allowed' => notAllowed,
+    'move' => move,
+    'resize_ns' => resizeNs,
+    'resize_ew' => resizeEw,
+    'resize_nwse' => resizeNwse,
+    'resize_nesw' => resizeNesw,
+    'up_arrow' => upArrow,
+    _ => custom,
+  };
+}
+
+/// One definition of the host's pointer shape: its kind, and its bitmap,
+/// straight RGBA8 in the host's physical pixels, with the hotspot in it.
+@immutable
+class DesktopCursorShape {
+  const DesktopCursorShape({
+    required this.kind,
+    required this.width,
+    required this.height,
+    required this.hotX,
+    required this.hotY,
+    required this.rgba,
+  });
+
+  /// The hot op's answer; null for one that is not a shape of that size.
+  static DesktopCursorShape? fromJson(Map<String, dynamic> json) {
+    final width = json['width'], height = json['height'];
+    final hotX = json['hot_x'], hotY = json['hot_y'], rgba = json['rgba'];
+    if (width is! int ||
+        height is! int ||
+        hotX is! int ||
+        hotY is! int ||
+        rgba is! String) {
+      return null;
+    }
+    final Uint8List pixels;
+    try {
+      pixels = base64Decode(rgba);
+    } on FormatException {
+      return null;
+    }
+    if (width <= 0 ||
+        height <= 0 ||
+        hotX >= width ||
+        hotY >= height ||
+        pixels.length != width * height * 4) {
+      return null;
+    }
+    return DesktopCursorShape(
+      kind: DesktopCursorKind.parse(json['kind']),
+      width: width,
+      height: height,
+      hotX: hotX,
+      hotY: hotY,
+      rgba: pixels,
+    );
+  }
+
+  final DesktopCursorKind kind;
+  final int width, height, hotX, hotY;
+  final Uint8List rgba;
+
+  /// The same shape, pixel for pixel.
+  bool sameAs(DesktopCursorShape other) =>
+      kind == other.kind &&
+      width == other.width &&
+      height == other.height &&
+      hotX == other.hotX &&
+      hotY == other.hotY &&
+      listEquals(rgba, other.rgba);
 }
 
 /// Intervals between accepted presentations over the last 60 s.
@@ -1314,9 +1425,41 @@ class DesktopHostViewer {
   int get hashCode => Object.hash(controlling, paused, path, quality, since);
 }
 
+/// The permissions hosting asks this computer's owner for (macOS), and
+/// whether each is granted.
+@immutable
+class DesktopHostPermissions {
+  const DesktopHostPermissions({
+    this.screenCapture = false,
+    this.input = false,
+  });
+  factory DesktopHostPermissions.fromJson(Map<String, dynamic> json) =>
+      DesktopHostPermissions(
+        screenCapture: json['screen_capture'] == true,
+        input: json['input'] == true,
+      );
+
+  /// `screen_capture`, Screen Recording: hosting at all.
+  final bool screenCapture;
+
+  /// `input`, Accessibility: control.
+  final bool input;
+
+  bool get complete => screenCapture && input;
+
+  @override
+  bool operator ==(Object other) =>
+      other is DesktopHostPermissions &&
+      other.screenCapture == screenCapture &&
+      other.input == input;
+  @override
+  int get hashCode => Object.hash(screenCapture, input);
+}
+
 /// This computer as a host.
 ///
-/// Invariant: `sharing || configured` implies `invitation != null`.
+/// Invariant: `sharing || configured` implies `invitation != null`, except
+/// while [held], when the service cannot be asked for it.
 @immutable
 class DesktopHostView {
   const DesktopHostView({
@@ -1339,6 +1482,9 @@ class DesktopHostView {
     this.otherRelay,
     this.unsupportedReason,
     this.displayMode,
+    this.backgroundService = true,
+    this.permissions,
+    this.held = false,
   });
 
   /// False until the first capabilities, host status and trust round trip.
@@ -1360,6 +1506,12 @@ class DesktopHostView {
 
   /// The background service owns hosting; display and name are fixed.
   final bool background;
+
+  /// The background service holds this computer's grant, but this app
+  /// cannot ask it (`DesktopBackground.held`): it is seen sharing, or
+  /// paused, from outside, and only updating its helper from here manages
+  /// it, keeping the grant.
+  final bool held;
   final bool controlAllowed;
 
   /// A grant is remembered but cannot be read: Windows cannot unlock it, or
@@ -1388,6 +1540,19 @@ class DesktopHostView {
   /// owner's Restore puts back.
   final DisplayModeList? displayMode;
 
+  /// This platform shares from the background service (Windows' helper),
+  /// whose setup is the card's first action. Elsewhere (macOS) the app
+  /// shares the desktop itself, and there is no service to set up.
+  final bool backgroundService;
+
+  /// The permissions hosting asks the owner for, where the platform asks
+  /// (macOS); null elsewhere.
+  final DesktopHostPermissions? permissions;
+
+  /// The platform hosts once the owner grants Screen Recording: the card
+  /// stays, to ask for it.
+  bool get needsPermission => unsupportedReason == 'permission_missing';
+
   @override
   bool operator ==(Object other) =>
       other is DesktopHostView &&
@@ -1409,9 +1574,12 @@ class DesktopHostView {
       other.viewer == viewer &&
       other.otherRelay == otherRelay &&
       other.unsupportedReason == unsupportedReason &&
-      other.displayMode == displayMode;
+      other.displayMode == displayMode &&
+      other.backgroundService == backgroundService &&
+      other.permissions == permissions &&
+      other.held == held;
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
     loaded,
     supported,
     sharing,
@@ -1431,7 +1599,10 @@ class DesktopHostView {
     otherRelay,
     unsupportedReason,
     displayMode,
-  );
+    backgroundService,
+    permissions,
+    held,
+  ]);
 
   @override
   String toString() =>

@@ -1,12 +1,14 @@
 //! Desktop protocol v2 (ALPN `pb-mapper/desktop/2`): one JSON record per
-//! message; only `HostMessage::Video` is followed by one payload record
-//! (`wire.rs`). Every message and struct rejects unknown fields, and every enum
-//! variant is a struct variant or wraps one strict struct (`State`, `Stats`),
-//! because serde ignores extra fields on an internally tagged unit variant. A
-//! v2.x peer sends a new message, field or value only after the other side
-//! listed the matching capability.
+//! message; only `HostMessage::Video` and `HostMessage::CursorShape` are
+//! followed by one payload record (`wire.rs`). Every message and struct
+//! rejects unknown fields, and every enum variant is a struct variant or wraps
+//! one strict struct (`State`, `Stats`, `CursorShape`), because serde ignores
+//! extra fields on an internally tagged unit variant. A v2.x peer sends a new
+//! message, field or value only after the other side listed the matching
+//! capability.
 use crate::{
-    Display, InputEvent, KeyframeReason, QualityPreset, VideoCodec, VideoLimits, modes::ModeList,
+    CursorKind, CursorShape, Display, InputEvent, KeyframeReason, QualityPreset, VideoCodec,
+    VideoLimits, modes::ModeList,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +32,46 @@ pub(crate) const CAPABILITY_FPS_OVERRIDE: &str = "fps_override";
 /// `StateRecord::modes`, `DisplayModeFailed` and `DisplayChanging`, and
 /// sends `DisplayMode` and `RestoreDisplayMode` only to a host that did.
 pub(crate) const CAPABILITY_DISPLAY_MODE: &str = "display_mode";
+/// From a host: it injects `Input::PhysicalKey`. A viewer sends that input
+/// to no other host.
+pub(crate) const CAPABILITY_PHYSICAL_KEYS: &str = "physical_keys";
+/// Both ways: this end speaks pointer shapes. A host lists it when its
+/// backend reports them; only when both listed it does the host write
+/// `CursorShape` and `Cursor::shape`.
+pub(crate) const CAPABILITY_CURSOR_SHAPE: &str = "cursor_shape";
 const MAX_CAPABILITIES: usize = 16;
+
+/// The shape slots of a session. A `CursorShape` defines or overwrites one;
+/// the host chooses which, and a viewer keeps exactly this many, so neither
+/// table grows and nothing is ever evicted by message.
+pub(crate) const CURSOR_SLOTS: usize = 64;
+
+/// A shape slot: a number below `CURSOR_SLOTS`, any other a protocol error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub(crate) struct ShapeSlot(u8);
+impl ShapeSlot {
+    pub(crate) fn new(index: usize) -> Option<Self> {
+        u8::try_from(index)
+            .ok()
+            .filter(|index| usize::from(*index) < CURSOR_SLOTS)
+            .map(Self)
+    }
+    pub(crate) fn index(self) -> usize {
+        self.0.into()
+    }
+}
+impl TryFrom<u8> for ShapeSlot {
+    type Error = &'static str;
+    fn try_from(index: u8) -> Result<Self, Self::Error> {
+        Self::new(index.into()).ok_or("cursor shape slot out of bounds")
+    }
+}
+impl From<ShapeSlot> for u8 {
+    fn from(slot: ShapeSlot) -> Self {
+        slot.0
+    }
+}
 
 /// Capability lists hold at most 16 values of `[a-z0-9_]{1,32}`. A receiver
 /// ignores values it does not know, but a malformed list is a protocol error.
@@ -169,7 +210,16 @@ pub(crate) enum HostMessage {
         /// listed `cursor_sequence`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_sequence: Option<u64>,
+        /// The pointer's shape: a slot a `CursorShape` defined earlier in
+        /// the session. Only when both ends listed `cursor_shape`. A viewer
+        /// takes it from every report, whether or not it takes the position.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape: Option<ShapeSlot>,
     },
+    /// Defines a pointer shape in its slot, followed by exactly one payload
+    /// record: its straight RGBA8 bitmap. Only when both ends listed
+    /// `cursor_shape`, and before the first `Cursor` naming that slot.
+    CursorShape(ShapeRecord),
     /// 1, 2, 3 …; one outstanding at a time, in stream order.
     Probe {
         nonce: u64,
@@ -245,6 +295,90 @@ pub(crate) struct StateRecord {
     /// viewer that listed `display_mode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<ModeList>,
+}
+
+/// What a `CursorShape` message carries: the slot it defines and the shape
+/// but its bitmap, which the payload record holds. Each side is
+/// 1..=`CursorShape::MAX_SIDE` and the hotspot lies inside; decoding refuses
+/// anything else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "UncheckedShapeRecord")]
+pub(crate) struct ShapeRecord {
+    pub id: ShapeSlot,
+    pub kind: CursorKind,
+    pub hot_x: u16,
+    pub hot_y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+impl ShapeRecord {
+    /// The record that defines `shape` in `id`.
+    pub(crate) fn new(id: ShapeSlot, shape: &CursorShape) -> Self {
+        let side = |value: u32| u16::try_from(value).unwrap_or(u16::MAX);
+        let (hot_x, hot_y) = shape.hotspot();
+        Self {
+            id,
+            kind: shape.kind(),
+            hot_x: side(hot_x),
+            hot_y: side(hot_y),
+            width: side(shape.width()),
+            height: side(shape.height()),
+        }
+    }
+    /// The length its payload must have.
+    pub(crate) fn payload_len(&self) -> usize {
+        CursorShape::bytes(self.width.into(), self.height.into())
+    }
+    /// The shape it defines, with its payload.
+    pub(crate) fn shape(&self, rgba: &[u8]) -> std::io::Result<CursorShape> {
+        CursorShape::new(
+            self.kind,
+            self.width.into(),
+            self.height.into(),
+            (self.hot_x.into(), self.hot_y.into()),
+            rgba,
+        )
+    }
+}
+/// A `ShapeRecord` as it arrives, before its bounds are checked.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UncheckedShapeRecord {
+    id: ShapeSlot,
+    kind: CursorKind,
+    hot_x: u16,
+    hot_y: u16,
+    width: u16,
+    height: u16,
+}
+impl TryFrom<UncheckedShapeRecord> for ShapeRecord {
+    type Error = &'static str;
+    fn try_from(record: UncheckedShapeRecord) -> Result<Self, Self::Error> {
+        let UncheckedShapeRecord {
+            id,
+            kind,
+            hot_x,
+            hot_y,
+            width,
+            height,
+        } = record;
+        let side = 1..=CursorShape::MAX_SIDE;
+        if !side.contains(&width.into())
+            || !side.contains(&height.into())
+            || hot_x >= width
+            || hot_y >= height
+        {
+            return Err("cursor shape out of bounds");
+        }
+        Ok(Self {
+            id,
+            kind,
+            hot_x,
+            hot_y,
+            width,
+            height,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,6 +538,12 @@ mod tests {
             ViewerMessage::Input {
                 event: event(Input::Lock {}),
             },
+            ViewerMessage::Input {
+                event: event(Input::PhysicalKey {
+                    usage: 0xE1,
+                    down: true,
+                }),
+            },
             ViewerMessage::Ping {},
             ViewerMessage::DisplayMode {
                 width: 1920,
@@ -477,7 +617,16 @@ mod tests {
                 y: 8,
                 visible: true,
                 input_sequence: Some(12),
+                shape: ShapeSlot::new(CURSOR_SLOTS - 1),
             },
+            HostMessage::CursorShape(ShapeRecord {
+                id: ShapeSlot::new(3).unwrap(),
+                kind: CursorKind::ResizeNwse,
+                hot_x: 0,
+                hot_y: 255,
+                width: 1,
+                height: 256,
+            }),
             HostMessage::Probe { nonce: 2 },
             HostMessage::Stats(StatsRecord {
                 capture_fps: 59.5,
@@ -557,6 +706,26 @@ mod tests {
             )
             .is_err()
         );
+        // A shape slot, a side or a hotspot out of bounds is no message.
+        let shape = serde_json::to_value(&host[5]).unwrap();
+        assert_eq!(shape["t"], "cursor_shape");
+        for (field, value) in [
+            ("id", json!(CURSOR_SLOTS)),
+            ("height", json!(CursorShape::MAX_SIDE + 1)),
+            ("hot_y", json!(256)),
+            ("kind", json!("spinner")),
+        ] {
+            let mut broken = shape.clone();
+            broken[field] = value;
+            assert!(
+                serde_json::from_value::<HostMessage>(broken).is_err(),
+                "{field}"
+            );
+        }
+        let mut cursor = serde_json::to_value(&host[4]).unwrap();
+        cursor["shape"] = json!(CURSOR_SLOTS);
+        assert!(serde_json::from_value::<HostMessage>(cursor).is_err());
+
         assert!(valid_capabilities(&[
             "lock".into(),
             "secure_desktop".into()

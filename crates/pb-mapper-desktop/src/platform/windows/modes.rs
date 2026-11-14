@@ -58,6 +58,7 @@ impl Raw {
             height: self.height,
             hz: self.hz,
             bpp: self.bpp,
+            scale: 0,
         }
     }
 }
@@ -209,7 +210,7 @@ impl DisplayModes for WinModes {
         let _dpi = DpiScope::enter();
         Self::change(device, None, DYNAMIC)?;
         let now = Self::current_raw(device)?.setting();
-        if (now.width, now.height, now.hz) != (original.width, original.height, original.hz) {
+        if !now.shows(*original) {
             // The registry held another mode than the one this host found.
             Self::change(device, Some(original), DYNAMIC)?;
         }

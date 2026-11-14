@@ -7,6 +7,7 @@
 //! viewer should hear.
 
 mod sender;
+mod shapes;
 #[cfg(test)]
 mod tests;
 
@@ -18,8 +19,9 @@ use crate::{
     lane::LaneCommand,
     modes::{Mode, ModeCommand},
     protocol::{
-        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_DISPLAY_MODE, CAPABILITY_ENCODER_DWELL,
-        CAPABILITY_FPS_OVERRIDE, StateReason, StateRecord, StopReason, ViewerMessage,
+        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE,
+        CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, StateReason, StateRecord, StopReason,
+        ViewerMessage,
     },
     qos::{Qos, TargetValues},
     shared::{Policy, SessionShared, Targets},
@@ -111,6 +113,8 @@ pub(crate) struct Session {
     /// Both ends listed `display_mode`: the viewer reads the modes and may
     /// change them.
     display_mode: bool,
+    /// Both ends listed `cursor_shape`: the viewer reads the pointer's shape.
+    pub cursor_shape: bool,
     /// When the session was accepted, for display only.
     pub started_unix_ms: u64,
     /// Send credit and QoS, shared by B-recv and B-send only.
@@ -123,8 +127,8 @@ pub(crate) struct Session {
     ending: Mutex<Option<End>>,
 }
 impl Session {
-    /// `capabilities` are the viewer's; `display_modes`, whether the host
-    /// listed `display_mode` in `Accepted`.
+    /// `capabilities` are the viewer's; `offered`, what the host listed in
+    /// `Accepted`.
     pub fn new(
         policy: Arc<Policy>,
         cancel: CancellationToken,
@@ -132,10 +136,11 @@ impl Session {
         limits: VideoLimits,
         quality: QualityPreset,
         capabilities: &[String],
-        display_modes: bool,
+        offered: &[String],
     ) -> Arc<Self> {
         let now = Instant::now();
         let listed = |wanted: &str| capabilities.iter().any(|capability| capability == wanted);
+        let both = |wanted: &str| listed(wanted) && offered.iter().any(|value| value == wanted);
         let qos = Qos::new(limits, codec, quality, listed(CAPABILITY_FPS_OVERRIDE), now);
         let targets = qos.targets(now);
         Arc::new(Self {
@@ -147,7 +152,8 @@ impl Session {
             codec,
             encoder_dwell: listed(CAPABILITY_ENCODER_DWELL),
             cursor_sequence: listed(CAPABILITY_CURSOR_SEQUENCE),
-            display_mode: display_modes && listed(CAPABILITY_DISPLAY_MODE),
+            display_mode: both(CAPABILITY_DISPLAY_MODE),
+            cursor_shape: both(CAPABILITY_CURSOR_SHAPE),
             started_unix_ms: pb_mapper_core::time::unix_millis(),
             credit: Mutex::new(CreditLedger::new(now)),
             qos: Mutex::new(qos),

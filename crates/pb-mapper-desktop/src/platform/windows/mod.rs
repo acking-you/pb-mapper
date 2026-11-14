@@ -50,6 +50,7 @@ impl Platform for Windows {
             secure_desktop: false,
             os: Some(HostOs::Windows),
             reason: (!host).then_some(UnsupportedReason::MediaFoundationMissing),
+            permissions: None,
         }
     }
     fn displays() -> Result<Vec<Display>> {
@@ -97,7 +98,7 @@ pub(crate) fn open_bound(
 fn parts(desktop: desktop::WinDesktop) -> Result<Parts<Windows>> {
     Ok(Parts {
         input: input::WinInput::new()?,
-        cursor: cursor::WinCursor,
+        cursor: cursor::WinCursor::default(),
         modes: modes::WinModes,
         still: still::XcapJpeg,
         desktop,

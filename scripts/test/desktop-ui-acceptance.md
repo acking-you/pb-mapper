@@ -129,6 +129,38 @@ Launch it from its build directory. The report reaches the bootstrap directly
 over loopback. Restore the normal entry before producing any product artifact:
 `flutter build windows --release --target lib/main.dart`.
 
+## Pointer shapes and keyboard against a safe host
+
+To check pointer shapes and the keyboard on a real screen, the host must not
+be the viewer's own desktop: a viewer controlling the computer it runs on feeds
+back into itself. `desktop_ui_host` hosts a recorded clip instead, on a relay in
+its own process, and prints every input it applies (`host_input …`, physical
+keys as `usage=0x…`) and every pointer shape it reports (`host_shape …`). The
+shape follows five vertical bands, left to right: arrow, I-beam, resize
+(top-left to bottom-right), hand and a custom checkered disc. Make an all-IDR
+clip whose picture labels the bands, start the host, and serve its
+`controller.json` with the bootstrap:
+
+```powershell
+ffmpeg -f lavfi -i "color=c=0x202020:s=1280x720:r=30:d=4" -c:v libx264 -profile:v baseline `
+  -pix_fmt yuv420p -bf 0 -x264-params keyint=1:min-keyint=1:scenecut=0:repeat-headers=1:aud=1 `
+  -f h264 target/desktop-ui/clip.h264
+cargo run -p pb-mapper --features desktop --example desktop_ui_host -- `
+  --clip target/desktop-ui/clip.h264 --dir target/desktop-ui --relay-only
+node scripts/test/desktop-bootstrap.cjs target/desktop-ui
+```
+
+- `--relay-only` keeps the host and the viewer on the relay, which listens on
+  loopback only, so no firewall prompt appears.
+- `--no-shapes` hosts without `cursor_shape`, as a 0.11 host does.
+- `--macos` lists `os_macos`, so a Windows viewer offers "Ctrl acts as Cmd".
+- On the Android emulator, `adb reverse` both the bootstrap port and the relay
+  port that `host_ready` prints. The tool shows the touch viewer there, as the
+  product does on a phone.
+- The tool requests control itself; pointer and keys come from the person (or
+  a driver) at the viewer, never from the tool.
+- Create `target/desktop-ui/stop` to end the host.
+
 ## After a run
 
 Create `target/desktop-acceptance/stop` and let the host exit normally. It

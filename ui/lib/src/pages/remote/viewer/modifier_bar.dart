@@ -11,6 +11,7 @@ import '../../../theme/fonts.dart';
 import '../../../theme/viewer_palette.dart';
 import 'modifier_latch.dart';
 import 'remote_input.dart';
+import 'remote_keys.dart';
 import 'viewer_overlays.dart';
 
 /// The bar's height, directly above the soft keyboard.
@@ -19,20 +20,19 @@ const kModifierBarHeight = 44.0;
 /// The ink of an armed or locked cap, on its light fill.
 const _activeInk = Color(0xFF1D1D1F);
 
-/// The modifier caps' faces, the same in every language.
-String modifierCap(RemoteKey modifier) => switch (modifier) {
-  RemoteKey.control => 'Ctrl',
-  RemoteKey.alt => 'Alt',
-  RemoteKey.shift => 'Shift',
-  RemoteKey.meta => 'Win',
-  _ => modifier.name,
+const _macModifiers = {
+  RemoteKey.control: 'Control',
+  RemoteKey.alt: 'Option',
+  RemoteKey.shift: 'Shift',
+  RemoteKey.meta: 'Command',
 };
 
 /// What a soft keyboard lacks (ui §9.4): latched modifiers, fixed at the
-/// leading edge; Esc, Tab, Fn, arrows, Delete, Ctrl+C and Ctrl+V, then
+/// leading edge; Esc, Tab, Fn, arrows, Delete, Copy and Paste, then
 /// navigation and Insert, in a strip that scrolls; and the key that hides
 /// the keyboard, fixed at the trailing edge. With Fn on, the strip offers
-/// F1 to F12 instead.
+/// F1 to F12 instead. The caps name the host's keys: ⌃ ⌥ ⇧ ⌘ and ⌘C toward a
+/// Mac, Ctrl Alt Shift Win and Ctrl+C toward anything else.
 class ModifierBar extends StatefulWidget {
   const ModifierBar({
     super.key = const Key('modifier-bar'),
@@ -83,9 +83,19 @@ class _ModifierBarState extends State<ModifierBar> {
     onRelease: _input.releaseKey,
   );
 
+  /// Ctrl+C or ⌘C: the host's copy or paste.
+  KeyCap _command(RemoteKey key, {required bool apple}) => KeyCap(
+    label: apple
+        ? hostChordName([RemoteKey.meta, key], appleHost: true)
+        : 'Ctrl+${key.name.toUpperCase()}',
+    onTap: () =>
+        _input.tapKey(key, extra: {apple ? RemoteKey.meta : RemoteKey.control}),
+  );
+
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
+    final apple = _input.appleHost;
     final keys = [
       _tap('Esc', RemoteKey.escape, minWidth: 40),
       _tap('Tab', RemoteKey.tab, minWidth: 40),
@@ -123,20 +133,8 @@ class _ModifierBarState extends State<ModifierBar> {
             ],
             [
               _tap('Del', RemoteKey.delete),
-              KeyCap(
-                label: 'Ctrl+C',
-                onTap: () => _input.tapKey(
-                  RemoteKey.c,
-                  extra: const {RemoteKey.control},
-                ),
-              ),
-              KeyCap(
-                label: 'Ctrl+V',
-                onTap: () => _input.tapKey(
-                  RemoteKey.v,
-                  extra: const {RemoteKey.control},
-                ),
-              ),
+              _command(RemoteKey.c, apple: apple),
+              _command(RemoteKey.v, apple: apple),
             ],
             [
               _repeat('Home', RemoteKey.home),
@@ -169,7 +167,9 @@ class _ModifierBarState extends State<ModifierBar> {
                   for (final m in ModifierLatch.order)
                     KeyCap(
                       key: Key('modifier-${m.name}'),
-                      label: modifierCap(m),
+                      label: hostKeyName(m, appleHost: apple),
+                      // A Mac's glyphs, read out by their keys' names.
+                      semanticLabel: apple ? _macModifiers[m] : null,
                       minWidth: m == RemoteKey.control ? 46 : 42,
                       latch: widget.latch.stateOf(m),
                       onTap: () => _latch(m),
@@ -405,9 +405,13 @@ class ModifierPill extends StatelessWidget {
   const ModifierPill({
     super.key = const Key('modifier-pill'),
     required this.latch,
+    this.appleHost = false,
   });
 
   final ModifierLatch latch;
+
+  /// The host is a Mac: its modifiers' names.
+  final bool appleHost;
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
@@ -415,10 +419,10 @@ class ModifierPill extends StatelessWidget {
     builder: (context, _) {
       if (latch.isEmpty) return const SizedBox.shrink();
       final l10n = context.l10n;
-      String names(LatchState state) => [
-        for (final m in ModifierLatch.order)
-          if (latch.stateOf(m) == state) modifierCap(m),
-      ].join(' + ');
+      String names(LatchState state) => hostChordName(
+        ModifierLatch.order.where((m) => latch.stateOf(m) == state),
+        appleHost: appleHost,
+      );
       final locked = names(LatchState.locked), armed = names(LatchState.armed);
       return IgnorePointer(
         child: ViewerPill(

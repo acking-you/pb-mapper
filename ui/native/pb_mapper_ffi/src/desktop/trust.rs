@@ -1,8 +1,8 @@
 //! One explicitly remembered host grant per application profile: the SDK's
-//! `trust::TrustFile`, sealed with current-user Windows DPAPI, holding the
-//! app's `Settings`. Relay credentials are never copied into it. The
-//! remembered computers (`desktop_computers.rs`) share its DPAPI call and its
-//! private file writes.
+//! `trust::TrustFile`, sealed with current-user Windows DPAPI, or on macOS
+//! with a key in the login Keychain, holding the app's `Settings`. Relay
+//! credentials are never copied into it. The remembered computers
+//! (`desktop_computers.rs`) share its DPAPI call and its private file writes.
 use super::err;
 use crate::error::CtlError;
 use pb_mapper::desktop::{
@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 pub(super) fn supported() -> bool {
-    cfg!(windows)
+    cfg!(any(windows, target_os = "macos"))
 }
 #[derive(Clone)]
 pub(super) struct Scope {
@@ -133,12 +133,23 @@ impl From<Remembered<Settings>> for Saved {
 #[cfg(windows)]
 type Dpapi = desktop::trust::CurrentUser;
 #[cfg(windows)]
-const TRUST: Dpapi = Dpapi::TRUST;
-/// Where there is no DPAPI, nothing is remembered: a file found is unreadable.
+type TrustSealer = Dpapi;
+#[cfg(windows)]
+const TRUST: TrustSealer = Dpapi::TRUST;
+/// macOS: the login Keychain's key.
+#[cfg(target_os = "macos")]
+type TrustSealer = desktop::trust::Keychain;
+#[cfg(target_os = "macos")]
+const TRUST: TrustSealer = desktop::trust::Keychain::TRUST;
+/// Where there is no DPAPI, nothing is sealed with it: a file found is
+/// unreadable.
 #[cfg(not(windows))]
 struct Dpapi;
-#[cfg(not(windows))]
-const TRUST: Dpapi = Dpapi;
+/// Where there is no sealer, nothing is remembered.
+#[cfg(not(any(windows, target_os = "macos")))]
+type TrustSealer = Dpapi;
+#[cfg(not(any(windows, target_os = "macos")))]
+const TRUST: TrustSealer = Dpapi;
 #[cfg(not(windows))]
 impl Sealer for Dpapi {
     fn seal(&self, _: &[u8]) -> desktop::Result<Vec<u8>> {
@@ -151,7 +162,7 @@ impl Sealer for Dpapi {
     }
 }
 
-fn file(directory: &Path) -> TrustFile<Dpapi, Settings> {
+fn file(directory: &Path) -> TrustFile<TrustSealer, Settings> {
     TrustFile::new(directory.to_path_buf(), TRUST)
 }
 /// An unreadable grant is `PROTOCOL`: reading it again does not mend it,

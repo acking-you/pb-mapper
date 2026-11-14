@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
+import 'package:pb_mapper_ui/src/ffi/desktop_video.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 
@@ -585,7 +586,8 @@ void main() {
   });
 
   test("the probe's answer decides what is offered and what fits; the "
-      'limits fit the decoder offered first; no answer is H.264 alone', () {
+      'limits fit the decoder offered first; no answer is H.264 alone on '
+      'Android and no native decoder elsewhere', () {
     final decoders = DesktopDecoders.fromJson({
       'h264': {'max_width': 3840, 'max_height': 2160},
       'h265': {'max_width': 1080, 'max_height': 1920},
@@ -630,17 +632,27 @@ void main() {
       isFalse,
     );
 
-    // Garbage offers no H.265; no answer is H.264 at 1080p, as before the
-    // probe.
+    // Garbage offers no H.265. A probe that failed offers nothing but on
+    // Android, which always decodes H.264, at 1080p as before the probe;
+    // there a probe without a hardware AVC decoder keeps its H.265.
     final none = DesktopDecoders.fromJson({'h265': 'yes'});
     expect(none.h265, isNull);
+    expect(decodersFromProbe(null, android: false), const DesktopDecoders());
+    final failed = decodersFromProbe(null, android: true);
+    expect(failed, DesktopDecoders.h264Only);
+    expect(failed.decodes(DesktopResolution.p1080, auto), isTrue);
+    expect(failed.decodes(DesktopResolution.p1440, auto), isFalse);
     expect(
-      DesktopDecoders.h264Only.decodes(DesktopResolution.p1080, auto),
-      isTrue,
-    );
-    expect(
-      DesktopDecoders.h264Only.decodes(DesktopResolution.p1440, auto),
-      isFalse,
+      decodersFromProbe({
+        'h264': null,
+        'h265': {'max_width': 3840, 'max_height': 2160},
+        'display_max_hz': 120.0,
+      }, android: true),
+      const DesktopDecoders(
+        h264: DesktopDecoderLimit.p1080,
+        h265: DesktopDecoderLimit.largest,
+        displayMaxHz: 120,
+      ),
     );
   });
 
@@ -845,8 +857,8 @@ void main() {
 
   testWidgets(
     'a decoder probe that does not answer holds the first connect only so '
-    'long, as H.264 alone at 1080p, and none after it; its late answer is '
-    'kept',
+    'long, with no native decoder off Android (JPEG), and none after it; '
+    'its late answer is kept',
     (tester) async {
       final api = FakeDesktopApi()
         ..codec = 'h264'
@@ -856,7 +868,8 @@ void main() {
           h264: DesktopDecoderLimit.largest,
           h265: DesktopDecoderLimit.largest,
         );
-      final store = DesktopStore(api, textures: FakeTextures().create);
+      final textures = FakeTextures();
+      final store = DesktopStore(api, textures: textures.create);
       final viewer = store.demand(DesktopDemand.viewer);
 
       unawaited(store.connect(_target));
@@ -867,9 +880,10 @@ void main() {
         api.argsOf('connect').single,
         allOf(
           containsPair('h265', false),
-          containsPair('limits', (1920, 1080)),
+          containsPair('limits', (3840, 2160)),
         ),
       );
+      expect(api.argsOf('jpeg_frames'), hasLength(1));
       store.setMaxFps(60);
       await tester.pump();
       expect(api.argsOf('connect'), hasLength(2));
@@ -880,6 +894,8 @@ void main() {
       await tester.pump();
       expect(api.argsOf('connect').last, containsPair('h265', true));
       expect(api.decodersProbed, 1);
+      // The late answer decodes natively.
+      expect(textures.created, hasLength(1));
 
       viewer.dispose();
       store.dispose();

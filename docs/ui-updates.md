@@ -8,19 +8,62 @@ The system still asks for installation consent.
 | Platform / installation | Update action |
 | --- | --- |
 | Android | Download to private cache, check package ID, certificate and increasing effective versionCode, request permission to install packages, then open Android's installer using a read-only content URI. Returning from permission settings continues automatically. Retry reuses and rechecks the downloaded APK. |
-| Windows installer | Download and verify, then quit: a hidden PowerShell waits for the app to exit, runs the Inno Setup installer with `/SILENT` (it elevates itself for a machine-wide install, so Windows asks for permission), writes `setup.log` beside the download and reopens the app. The FFI's `pb_mapper_spawn_hidden_powershell_v1` starts it with a windowless console of its own; as a detached Dart process it had no console and exited without running a line, so no update installed before 0.9.5. The next launch checks whether the requested version actually installed. |
+| Windows installer | Download and verify, then start the Inno Setup installer with `/SILENT /UPDATEPID=<the app's process>` while the app is still open and in front. For a machine-wide install Setup starts itself again elevated, so Windows asks for permission in front of the app; the app quits once Setup's log (`setup.log` beside the download) exists, which Setup starts only after that permission. Setup waits up to a minute for the app to close before it replaces a file, and when it ends, installed or not, opens the installed app again (`{app}`, as the user who started it). If Setup ends before that point (permission refused), the app stays open and Retry reuses the verified download. The next launch checks whether the requested version actually installed and removes the installer, and the log too when it did. |
 | Windows portable | Download and verify the ZIP, select it in Explorer for replacement by the user. |
 | Linux x64 AppImage | Download and verify, replace the AppImage, reopen; save to Downloads if its location cannot be written. |
 | Linux x64 portable | Download and verify the ZIP, open Downloads. Other architectures report no package. |
 | macOS Intel / Apple Silicon | Download the matching DMG, verify it, save it to Downloads and open the system disk-image installer. Drag the app into Applications. |
 | iOS | Use a properly signed development, TestFlight or App Store distribution. An unsigned IPA is not an installable consumer update. |
 
+### The Windows installer and the update
+
+The installer's script is checked in as
+[`ui/windows/packaging/exe/inno_setup.iss`](../ui/windows/packaging/exe/inno_setup.iss),
+which fastforge renders from `make_config.yaml`. It is fastforge's default
+script plus the update contract above in its `[Code]` section, and it writes a
+log for every run (`%TEMP%\Setup Log <date> #<n>.txt` when started by hand).
+Its AppId, default folder and `PrivilegesRequired=none` decide which earlier
+installation an upgrade finds: an administrator's installs go to
+`C:\Program Files\pb_mapper_ui` for all users after a permission prompt,
+anyone else's to that user alone.
+
+The script names the app, `pb_mapper_ui.exe`, itself. fastforge would take the
+first `.exe` in the bundle, which since 0.11.0 is
+`pb-mapper-desktop-helper.exe`, and 0.11.0's installer did: its Start menu,
+desktop and startup shortcuts and its "Launch pb-mapper" box started the
+helper, which shows nothing and exits, so pb-mapper seemed not installed and
+never started. Installing 0.12.0 rewrites those shortcuts; one pinned to the
+taskbar from 0.11.0 has to be pinned again.
+
+The release workflow installs the built installer on its runner the way the
+app runs it, and uploads it only if Setup waited for the app, installed the
+bundle, opened the installed app again and left shortcuts that open it.
+
+Before 0.12.0 the app quit first and left a hidden PowerShell to run Setup.
+Setup's permission prompt then came from a process with no window after the
+app had gone, which Windows may leave behind other windows as a flashing
+taskbar button; PowerShell waited for Setup without a limit, so while the
+prompt went unseen nothing was installed or opened again. That PowerShell
+also reopened the executable the app ran from, which since 0.11.0 can be the
+desktop helper's protected copy of the older release under
+`C:\Program Files\pb-mapper-desktop`. A copy of 0.11.0 or older still updates
+that way: install 0.12.0 by hand once, and updates from it on take the new
+path.
+
+Setup neither closes nor replaces that protected copy: an app running from it
+during an upgrade by hand stays the old version until it is quit. pb-mapper
+opened from the Start menu afterwards, or reopened by the installer, is the
+new one. Its Remote desktop page shows the sharing as the older service's,
+which keeps sharing as it was set up, and offers to update the service: that
+installs a new protected copy and keeps the service's settings and
+invitation, which the page shows again once the app has restarted into it.
+
 Since 0.9.7 the macOS app and its DMG are signed with the project's Developer
 ID, notarized and stapled, and the mounted DMG passes Gatekeeper before it is
-uploaded ([macOS signing](macos-signing.zh-CN.md)). The app is sandboxed, so
-unlike CipherRelay it cannot replace its own bundle in Applications: it opens
-the verified DMG for installation instead, and never removes quarantine or
-disables Gatekeeper. An opener failure is reported as failure, rather than
+uploaded ([macOS signing](macos-signing.zh-CN.md)). Unlike CipherRelay it does
+not replace its own bundle in Applications (it was sandboxed until 0.12.0 and
+could not): it opens the verified DMG for installation instead, and never
+removes quarantine or disables Gatekeeper. An opener failure is reported as failure, rather than
 saying the installation opened successfully.
 
 ## Android signing baseline
@@ -126,8 +169,10 @@ before attaching the manifest and its signature together.
 `python -m unittest discover -s scripts/release -p 'test_*.py' -v` covers release
 composition, signing continuity and increasing APK versionCodes.
 `flutter test test/update_test.dart test/update_io_test.dart test/version_test.dart`
-covers download, integrity, cancellation, retry and platform selection; with a
-built Windows FFI it also runs the actual hidden process handoff.
+covers download, integrity, cancellation, retry, platform selection, and when
+the app counts the Windows installer as started. The installer's own side
+(waiting for the app, installing, opening it again) is checked by the release
+workflow on a real install.
 
 On Android, verify both a clean install and an upgrade from the preceding
 **same-certificate** APK, first with install permission disabled and then

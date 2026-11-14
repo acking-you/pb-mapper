@@ -1,0 +1,20 @@
+// How the Runner links pb_mapper_ffi, the app's Rust core, built as a static
+// library by scripts/build/pb-mapper-ffi-ios.sh. Nothing the linker sees
+// refers to it: Dart reaches it through DynamicLibrary.process() and the
+// desktop video plugin (ui/darwin/DesktopVideo.swift) through dlsym, so a
+// plain -l would take none of it.
+// - -force_load links every member of the library.
+// - -export_dynamic keeps its global entry points (pb_mapper_*) exported, and
+//   alive should dead stripping be turned on.
+// - STRIP_STYLE = non-global keeps them through an archive's strip.
+// - A static library does not carry its system dependencies. These are the
+//   frameworks and libraries its crates link for aarch64-apple-ios
+//   (#[link] attributes and build scripts of core-foundation-sys, objc2,
+//   objc2-security, system-configuration and libc); libSystem comes by
+//   default.
+// The script builds the library for devices only (aarch64-apple-ios), so it
+// is linked for the iphoneos SDK alone. A Simulator build links without it,
+// as it did before the library was force-loaded, and so has no Rust core.
+PB_MAPPER_FFI_LDFLAGS = -force_load "$(PROJECT_DIR)/../native/ios/libpb_mapper_ffi.a" -Wl,-export_dynamic -framework CoreFoundation -framework Foundation -framework Network -framework Security -framework SystemConfiguration -lobjc -liconv
+OTHER_LDFLAGS[sdk=iphoneos*] = $(inherited) $(PB_MAPPER_FFI_LDFLAGS)
+STRIP_STYLE = non-global

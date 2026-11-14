@@ -2,8 +2,9 @@ use super::{session::VIEWER_TICK, *};
 use crate::{
     Display, Key, VideoLimits,
     protocol::{
-        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE,
-        CAPABILITY_H265, HostMessage, RejectReason, StopReason, ViewerMessage,
+        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE, CAPABILITY_ENCODER_DWELL,
+        CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265, HostMessage, RejectReason, StopReason,
+        ViewerMessage,
     },
     wire,
 };
@@ -189,7 +190,8 @@ async fn scripted_host_session_acknowledges_first_and_authorises_input_by_presen
         [
             CAPABILITY_ENCODER_DWELL,
             CAPABILITY_CURSOR_SEQUENCE,
-            CAPABILITY_DISPLAY_MODE
+            CAPABILITY_DISPLAY_MODE,
+            CAPABILITY_CURSOR_SHAPE
         ]
     );
 
@@ -239,6 +241,19 @@ async fn scripted_host_session_acknowledges_first_and_authorises_input_by_presen
     send(&mut host, state(1, true), None).await;
     eventually(|| viewer.status().controlling).await;
     assert!(matches!(viewer.input(2, &shift), Err(InputError::NotFresh)));
+    // A physical key goes only to a host that listed `physical_keys`, as a
+    // 0.11 host did not: the whole batch stays here.
+    let physical = [
+        shift[0].clone(),
+        Input::PhysicalKey {
+            usage: 0x04,
+            down: true,
+        },
+    ];
+    assert!(matches!(
+        viewer.input(1, &physical),
+        Err(InputError::NotOffered)
+    ));
     viewer.input(1, &shift).unwrap();
     let ViewerMessage::Input { event } = receive(&mut host).await else {
         panic!("expected the input");
@@ -311,6 +326,7 @@ async fn h265_is_offered_as_a_capability_and_accepted_only_when_offered() {
             CAPABILITY_ENCODER_DWELL,
             CAPABILITY_CURSOR_SEQUENCE,
             CAPABILITY_DISPLAY_MODE,
+            CAPABILITY_CURSOR_SHAPE,
             CAPABILITY_H265,
             CAPABILITY_FPS_OVERRIDE
         ]
@@ -452,6 +468,7 @@ async fn a_cursor_report_older_than_the_last_move_is_set_aside_while_controlling
         y: 0,
         visible: true,
         input_sequence: Some(input_sequence),
+        shape: None,
     };
     let seen = || {
         let view = viewer.view();
@@ -477,6 +494,148 @@ async fn a_cursor_report_older_than_the_last_move_is_set_aside_while_controlling
     eventually(|| seen().1 == 50).await;
     drop(host);
     viewer.stop().await.unwrap();
+}
+
+/// What a host that listed `cursor_shape` defines in `slot`.
+fn shape_record(slot: usize, kind: crate::CursorKind) -> (HostMessage, crate::CursorShape) {
+    let shape = crate::CursorShape::new(kind, 2, 1, (1, 0), vec![kind as u8; 8]).unwrap();
+    let id = crate::protocol::ShapeSlot::new(slot).unwrap();
+    (
+        HostMessage::CursorShape(crate::protocol::ShapeRecord::new(id, &shape)),
+        shape,
+    )
+}
+
+/// A host that listed `cursor_shape` defines shapes in slots and names one
+/// in each report: the viewer takes the shape of a report whose position
+/// its own move overtook, follows a slot the host overwrites, and treats a
+/// slot never defined as a broken protocol.
+#[tokio::test]
+async fn the_shape_of_every_report_is_taken_and_follows_its_slot() {
+    let (viewer, mut host, _) = connect(HostMessage::Accepted {
+        codec: VideoCodec::H264,
+        limits: VideoLimits::for_viewer(60.0),
+        nominal_fps: 60,
+        quality: QualityPreset::Balanced,
+        capabilities: vec![CAPABILITY_CURSOR_SHAPE.into()],
+    })
+    .await;
+    let viewer = viewer.unwrap();
+    send(&mut host, state(1, false), None).await;
+    send(&mut host, video(1, 1, 1, true), Some(&[1; 64])).await;
+    let consumer = viewer.video_sink().attach().unwrap();
+    pull(&consumer).await;
+    assert!(consumer.presented(1, 1));
+    viewer.request_control(true).unwrap();
+    send(&mut host, state(1, true), None).await;
+    eventually(|| viewer.status().controlling).await;
+    let cursor = |x, input_sequence, slot: Option<usize>| HostMessage::Cursor {
+        generation: 1,
+        x,
+        y: 0,
+        visible: true,
+        input_sequence: Some(input_sequence),
+        shape: slot.and_then(crate::protocol::ShapeSlot::new),
+    };
+    // The generation's first report, taken as every first one is.
+    send(&mut host, cursor(10, 0, None), None).await;
+    eventually(|| viewer.view().cursor_x == 10).await;
+    viewer.input(1, &[Input::Move { x: 20, y: 0 }]).unwrap();
+    let ViewerMessage::Input { event } =
+        until(&mut host, |m| matches!(m, ViewerMessage::Input { .. })).await
+    else {
+        unreachable!()
+    };
+    // Sampled before the move: its position is set aside.
+    let cursor = |slot| cursor(5, event.sequence - 1, Some(slot));
+    let shown = || {
+        let view = viewer.view();
+        (view.cursor_shape, viewer.cursor_shape(view.cursor_shape))
+    };
+
+    let (define, ibeam) = shape_record(0, crate::CursorKind::Ibeam);
+    send(&mut host, define, Some(ibeam.rgba())).await;
+    assert_eq!(shown().0, 0, "defined, not yet named");
+    send(&mut host, cursor(0), None).await;
+    eventually(|| shown().1.as_ref() == Some(&ibeam)).await;
+    let (first, _) = shown();
+    assert_eq!(viewer.view().cursor_x, 10);
+    // The host overwrites the slot in use: a new number, the old one gone.
+    let (define, custom) = shape_record(0, crate::CursorKind::Custom);
+    send(&mut host, define, Some(custom.rgba())).await;
+    eventually(|| shown().1.as_ref() == Some(&custom)).await;
+    assert_ne!(shown().0, first);
+    assert_eq!(viewer.cursor_shape(first), None);
+
+    send(&mut host, cursor(1), None).await;
+    eventually(|| viewer.status().reason == Some(ViewerReason::Protocol)).await;
+    viewer.stop().await.unwrap();
+}
+
+/// Once the counter has gone round, a new definition passes over every
+/// number a slot holds and the one last asked for: no number resolves to a
+/// bitmap other than its own, and the one a caller shows keeps its own.
+#[test]
+fn a_shape_number_never_names_two_definitions_after_the_counter_wraps() {
+    use crate::{CursorKind, CursorShape, protocol::ShapeSlot};
+    let shape = |kind| CursorShape::new(kind, 1, 1, (0, 0), vec![kind as u8; 4]).unwrap();
+    let slot = |index| ShapeSlot::new(index).unwrap();
+    let mut table = ShapeTable::default();
+    let arrow = table.define(slot(0), shape(CursorKind::Arrow));
+    let ibeam = table.define(slot(1), shape(CursorKind::Ibeam));
+    // Shown, then overwritten in its slot: no slot holds it any more.
+    assert_eq!(table.shape(ibeam), Some(shape(CursorKind::Ibeam)));
+    let hand = table.define(slot(1), shape(CursorKind::Hand));
+    assert_eq!((arrow, ibeam, hand), (1, 2, 3));
+
+    // The next number would be 1, 2 and 3 again.
+    table.defined = u16::MAX - 1;
+    assert_eq!(table.define(slot(2), shape(CursorKind::Wait)), u16::MAX);
+    let custom = table.define(slot(3), shape(CursorKind::Custom));
+    assert_eq!(custom, 4);
+    for (number, kind) in [
+        (arrow, CursorKind::Arrow),
+        (hand, CursorKind::Hand),
+        (custom, CursorKind::Custom),
+    ] {
+        assert_eq!(table.shape(number), Some(shape(kind)));
+    }
+    // The number last asked for is free again once another is asked for.
+    assert_eq!(table.shape(ibeam), None);
+    table.shape(custom);
+    table.defined = 1;
+    assert_eq!(table.define(slot(4), shape(CursorKind::Move)), ibeam);
+}
+
+/// A shape from a host that did not list `cursor_shape`, or whose bitmap is
+/// not the size its header gives, breaks the protocol.
+#[tokio::test]
+async fn an_unasked_or_misfit_shape_breaks_the_protocol() {
+    for listed in [false, true] {
+        let capabilities = if listed {
+            vec![CAPABILITY_CURSOR_SHAPE.into()]
+        } else {
+            vec![]
+        };
+        let (viewer, mut host, _) = connect(HostMessage::Accepted {
+            codec: VideoCodec::H264,
+            limits: VideoLimits::for_viewer(60.0),
+            nominal_fps: 60,
+            quality: QualityPreset::Balanced,
+            capabilities,
+        })
+        .await;
+        let viewer = viewer.unwrap();
+        let (define, shape) = shape_record(0, crate::CursorKind::Arrow);
+        let rgba = if listed {
+            &shape.rgba()[1..]
+        } else {
+            shape.rgba()
+        };
+        send(&mut host, define, Some(rgba)).await;
+        eventually(|| viewer.status().reason == Some(ViewerReason::Protocol)).await;
+        viewer.stop().await.unwrap();
+    }
 }
 
 /// Dart reconnects after 5 s without video while streaming: neither

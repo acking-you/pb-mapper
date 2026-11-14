@@ -124,6 +124,61 @@ jobs:
               throw "Native component hash mismatch: $name"
             }
           }
+      # The installer as the in-app update runs it (ui/windows/packaging/exe/
+      # inno_setup.iss), into a folder of its own: it must wait for the app
+      # it updates to close, install the bundle, then open the installed app
+      # again. A broken installer is never uploaded.
+      - name: Verify the Windows installer updates the app
+        run: |
+          $setup = @(Get-ChildItem ui/dist -Recurse -Filter "pb-mapper-windows-x86_64-setup.exe")[0].FullName
+          $dir = Join-Path $env:RUNNER_TEMP "pb-mapper install"
+          $log = Join-Path $env:RUNNER_TEMP "pb-mapper update\setup.log"
+          New-Item -ItemType Directory -Force (Split-Path $log) | Out-Null
+          # The app being updated, which Setup is named and must wait for.
+          $app = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 5' -WindowStyle Hidden -PassThru
+          $run = Start-Process -FilePath $setup -PassThru -ArgumentList @(
+            '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-',
+            "/DIR=`"$dir`"", "/LOG=`"$log`"", "/UPDATEPID=$($app.Id)")
+          $null = $run.Handle  # keeps the exit code readable once it exits
+          if (!$run.WaitForExit(300000)) { throw "Setup did not finish within 5 minutes" }
+          $lines = @(Get-Content $log)
+          $lines
+          if ($run.ExitCode -ne 0) { throw "Setup exited with $($run.ExitCode)" }
+          function At($text) { ($lines | Select-String -SimpleMatch $text | Select-Object -First 1).LineNumber }
+          $order = @(
+            (At 'Waiting for pb-mapper to close'),
+            (At 'pb-mapper has closed'),
+            (At 'Starting the installation process.'),
+            (At "Opened $dir\pb_mapper_ui.exe again"))
+          for ($i = 0; $i -lt $order.Count; $i++) {
+            if (!$order[$i] -or ($i -gt 0 -and $order[$i] -le $order[$i - 1])) {
+              throw "Setup did not wait for the app, install, then open it again (log lines: $order)"
+            }
+          }
+          $bundle = "ui/build/windows/x64/runner/Release"
+          foreach ($name in @("pb_mapper_ui.exe", "pb_mapper_ffi.dll", "pb-mapper-desktop-helper.exe", "flutter_windows.dll", "data/app.so")) {
+            $installed = Join-Path $dir $name
+            if (!(Test-Path $installed)) { throw "Not installed: $name" }
+            if ((Get-FileHash -Algorithm SHA256 (Join-Path $bundle $name)).Hash -ne (Get-FileHash -Algorithm SHA256 $installed).Hash) {
+              throw "Installed $name differs from the bundle"
+            }
+          }
+          # How the app knows it was installed, and so updates through Setup.
+          if (!(Test-Path (Join-Path $dir "unins000.exe"))) { throw "No uninstaller beside the installed app" }
+          # Every shortcut opens the app, not the desktop helper beside it,
+          # as 0.11.0's did.
+          $shell = New-Object -ComObject WScript.Shell
+          $links = @(@(
+            "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\pb-mapper.lnk",
+            "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\pb-mapper.lnk",
+            "$env:PUBLIC\Desktop\pb-mapper.lnk",
+            "$env:USERPROFILE\Desktop\pb-mapper.lnk") | Where-Object { Test-Path -LiteralPath $_ })
+          if ($links.Count -eq 0) { throw "Setup created no pb-mapper shortcut" }
+          foreach ($link in $links) {
+            $target = $shell.CreateShortcut($link).TargetPath
+            if ($target -ne (Join-Path $dir "pb_mapper_ui.exe")) { throw "$link opens $target" }
+          }
+          Get-Process pb_mapper_ui -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$dir\*" } | Stop-Process -Force
       - name: Upload Windows artifacts
         uses: softprops/action-gh-release@v2
         with:
@@ -156,11 +211,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
+      # libunwind-dev goes first, by name: the runner image ships LLVM's
+      # libunwind-14-dev, which apt will not swap out on its own for the one
+      # libgstreamer1.0-dev depends on.
       - name: Install dependencies
         run: |
           sudo apt-get update -y
+          sudo apt-get install -y libunwind-dev
           sudo apt-get install -y locate ninja-build libgtk-3-dev libayatana-appindicator3-dev libnotify-dev \
-          binutils coreutils desktop-file-utils fakeroot fuse libgdk-pixbuf2.0-dev patchelf python3-pip python3-setuptools squashfs-tools strace util-linux zsync
+          binutils coreutils desktop-file-utils fakeroot fuse libgdk-pixbuf2.0-dev patchelf python3-pip python3-setuptools squashfs-tools strace util-linux zsync \
+          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - name: Build latest Linux FFI
         run: |
           make build-pb-mapper-ffi-linux
@@ -179,6 +239,10 @@ jobs:
             echo "FFI hash mismatch: src=${SRC_HASH} dst=${DST_HASH}"
             exit 1
           fi
+      # The GStreamer decoder module is in, the system's GStreamer is not, and
+      # both native libraries load as the app loads them.
+      - name: Check the Linux bundle's native libraries
+        run: bash scripts/build/check-linux-bundle.sh ui/build/linux/x64/release/bundle
       - name: Package Linux artifacts
         run: |
           cd ui
@@ -196,7 +260,10 @@ jobs:
           mkdir -p AppDir/usr/share/applications
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
 
-          # Copy binary and dependencies
+          # The bundle only: the binary, Flutter, the plugins, the FFI and the
+          # video decoder module. GTK, GStreamer and its decoder plugins are
+          # the user's system's; nothing collects system libraries into the
+          # AppImage or the ZIP.
           cp -r build/linux/x64/release/bundle/* AppDir/usr/bin/
 
           # Copy icon

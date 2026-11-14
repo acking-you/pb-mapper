@@ -38,12 +38,18 @@ import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_video.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_viewer.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_viewer.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
 import 'package:pb_mapper_ui/src/theme/viewer_palette.dart';
 
 /// Samples before this are startup, not steady state.
 const _warmup = Duration(seconds: 5);
+
+/// A phone or a tablet, where the product shows the touch viewer.
+bool get _touch =>
+    defaultTargetPlatform == TargetPlatform.android ||
+    defaultTargetPlatform == TargetPlatform.iOS;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -130,14 +136,24 @@ Future<void> main() async {
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
+        // The viewer the product shows on this device: the touch viewer on
+        // a phone or a tablet, as `RemoteViewerScreen` picks it.
         home: Builder(
           builder: (context) => Theme(
             data: viewerTheme(context),
-            child: DesktopViewer(
-              desktop: store,
-              prefs: prefs,
-              title: 'acceptance',
-            ),
+            child: _touch
+                ? TouchViewer(
+                    desktop: store,
+                    prefs: prefs,
+                    title: 'acceptance',
+                    // There is no list to go back to.
+                    onBack: () {},
+                  )
+                : DesktopViewer(
+                    desktop: store,
+                    prefs: prefs,
+                    title: 'acceptance',
+                  ),
           ),
         ),
       ),

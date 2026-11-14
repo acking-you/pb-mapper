@@ -60,6 +60,16 @@ impl Player {
     }
 }
 
+/// When the unit after one due at `due` is due, `now` being when that one
+/// went out: an interval later, but never sooner than three quarters of an
+/// interval after `now`, as the host's pacer has it. A late wake (a
+/// suspended device, or timers the kernel coalesces) shifts the schedule
+/// instead of making up for it with a unit at once, which would supersede
+/// the one before it while a consumer was still to pull it.
+fn next_due(due: Instant, interval: Duration, now: Instant) -> Instant {
+    (due + interval).max(now + interval * 3 / 4)
+}
+
 /// Plays like a host: nothing while the viewer is paused, then the clip
 /// again from its first IDR.
 fn play(
@@ -97,10 +107,8 @@ fn play(
             });
             position = (position + 1) % clip.units.len();
         }
-        deadline += interval;
         let now = Instant::now();
-        // Behind schedule (a suspended device), carry on without a burst.
-        deadline = deadline.max(now);
+        deadline = next_due(deadline, interval, now);
         if !matches!(
             stopped.recv_timeout(deadline - now),
             Err(mpsc::RecvTimeoutError::Timeout)
@@ -414,6 +422,18 @@ mod tests {
     use crate::desktop_video::*;
     use crate::test_support::TempRoot;
 
+    /// On time, units keep the interval; a wake later than a quarter of
+    /// one shifts the schedule, and the next unit never comes at once.
+    #[test]
+    fn a_late_wake_shifts_the_schedule_without_a_burst() {
+        use std::time::{Duration, Instant};
+        let interval = Duration::from_millis(100);
+        let due = Instant::now();
+        let at = |ms| due + Duration::from_millis(ms);
+        assert_eq!(test_source::next_due(due, interval, at(10)), at(100));
+        assert_eq!(test_source::next_due(due, interval, at(150)), at(225));
+    }
+
     #[test]
     fn test_source_loops_a_dumped_clip() {
         // Baseline 1920x1088 macroblocks, cropped by 8 rows to 1080.
@@ -443,7 +463,9 @@ mod tests {
         );
 
         // An IDR supersedes whatever is still queued, so the pace leaves the
-        // consumer a wide margin to pull each unit before the next arrives.
+        // consumer a wide margin to pull each unit before the next arrives:
+        // at least three quarters of an interval, however late the source
+        // wakes.
         let source = start("clip.h264", &[keyframe, predicted].concat(), 10);
         assert!(source > 0);
         let consumer = pb_mapper_desktop_video_attach_v1(source) as u64;

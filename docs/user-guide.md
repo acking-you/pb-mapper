@@ -106,7 +106,9 @@ proxy.
   `connect` request.
 - App: **Port mapping** under **Allow direct connections** (or **Try direct
   first**) in a tunnel's **More options**: Off, Auto or Always. It is saved
-  with the tunnel and kept while direct is off.
+  with the tunnel and kept while direct is off. The iOS app maps no port:
+  there Auto never asks the router and Always is refused, because the library
+  that finds the gateway does not build for iOS.
 
 When both computers are on one Wi-Fi or LAN, a direct connection tries that
 network first: the other end's addresses on it are probed first, and again 20
@@ -397,7 +399,7 @@ On first launch it asks where your relay is and for this computer's credential. 
 
 - **Overview**: a galaxy of your tunnels. This computer and the relay are two stars; each tunnel and each service on the relay is a planet, green when running. A running tunnel is an arc of light: into the relay's star when its traffic goes through the relay, or, lit end to end, past the relay to the service's own planet when it goes direct. Click a planet to start, stop, edit or connect it; its panel draws the route and says why it is the relay when direct did not work.
 - **Tunnels**: what this computer shares and what it connects to. Each running tunnel says which way its traffic goes: **Direct**, **Relay**, both with their counts, **Going direct…** while a path is being set up, or **Relay only**. **New tunnel** opens one form with a Share/Connect switch: a service key, a local address, and TCP or UDP.
-- **Remote desktop**: share this computer (a Windows PC today) and view or control the computers you remember, each added by pasting or scanning its invitation; see [remote desktop](remote-desktop.md).
+- **Remote desktop**: share this computer (a Windows PC, or a Mac on macOS 12.3 or later) and view or control the computers you remember, each added by pasting or scanning its invitation; see [Remote desktop in the app](#remote-desktop-in-the-app) and [remote desktop](remote-desktop.md).
 - **Relay**: whether the relay answers, its services and connections, and with the administrator key its credentials and security.
 - **Logs**: the Rust log, filtered by level and keyword.
 - **Settings**: the relay address and credential, a setup string to paste on another computer, theme and language.
@@ -405,6 +407,28 @@ On first launch it asks where your relay is and for this computer's credential. 
 The app goes direct the way the CLI does: each connection tries a direct path first and uses the relay when that fails, and each share lets connections reach it directly. **More options** in the tunnel form turns that off for one tunnel, as `--relay-only` does.
 
 Closing the window keeps it in the tray; quit from the tray menu.
+
+### Remote desktop in the app
+
+**Sharing.** On Windows, **Turn on remote control** installs the desktop service once, with Windows' consent, so UAC prompts and your lock screen can be shared too; **Share the ordinary desktop only** skips it. When the Remote desktop page offers **Update** for the desktop service, take it: this version needs helper protocol 8. On a Mac (macOS 12.3 or later), the card has one **Share this computer** button and lists the permissions macOS still lacks: **Allow in System Settings** for Screen Recording, then reopen the app, and for Accessibility, which control needs. A Mac shares only while the app runs; it cannot share its lock screen, and its display stays awake while someone watches.
+
+**Viewing.** The app shows the picture as hardware-decoded H.265 or H.264 on Windows, macOS, Linux, Android and iOS, and falls back to JPEG at up to 8 FPS where the device has no decoder. Linux decodes with GStreamer, which the app does not bundle; without these packages it uses JPEG (the names come from each distribution's packaging and have not all been tried):
+
+| | Debian / Ubuntu | Fedora | Arch |
+| --- | --- | --- | --- |
+| Always | `gstreamer1.0-plugins-base gstreamer1.0-plugins-bad` | `gstreamer1-plugins-base gstreamer1-plugins-bad-free` | `gst-plugins-base gst-plugins-bad` |
+| Software decoding | `gstreamer1.0-libav` | `gstreamer1-plugin-openh264` (H.264 only) or RPM Fusion's `gstreamer1-libav` | `gst-libav` |
+| Intel GPU | `intel-media-va-driver` | `intel-media-driver` | `intel-media-driver` |
+| AMD GPU | `mesa-va-drivers` | RPM Fusion's `mesa-va-drivers-freeworld` | `mesa` |
+| NVIDIA GPU | the proprietary driver | RPM Fusion's `akmod-nvidia` and `xorg-x11-drv-nvidia-cuda-libs` | `nvidia-utils` |
+
+**Typing.** **Shortcuts → Input method** chooses, per computer, how your keyboard types. **This computer's** (the default) lets your own input method compose, Chinese, Japanese or Korean included, with its candidates next to the remote pointer, and sends the text it commits; a Shift or Ctrl+Space tap on its own stays here to switch your input method. Some input methods (WeType on Windows, for one) also take Shift held through a mouse click as that switch, so after a Shift+click yours may type English, as in any other app; a Shift tap switches it back. **The remote computer's** sends keys by their place on the keyboard, so the remote computer's layout and input method type them; **Switch input method** in Shortcuts sends Win+Space to Windows or Ctrl+Space to a Mac. Toward a Mac, Shortcuts offers the Mac's own **Switch app** (⌘Tab), **Force Quit** (⌥⌘Esc) and **Spotlight** (⌘Space) in place of the Windows entries, and the phone's modifier bar reads ⌃ ⌥ ⇧ ⌘. Between a Mac and another computer, Cmd and Ctrl swap places by default (**Cmd acts as Ctrl** or **Ctrl acts as Cmd** in the same menu). A remote computer on an older pb-mapper takes letters, digits and Space as keys and the rest as text.
+
+**The pointer** takes the remote computer's shape (a text beam over text, a hand over links, resize arrows at window edges). While you control from a desktop, your own pointer changes shape over the picture; a phone draws it. A remote computer on an older pb-mapper shows a plain arrow.
+
+**Not yet tried on the devices themselves:** sharing a Mac, and viewing on a Mac, an iPhone or an iPad. Their code is compiled, linked and unit-tested on Apple systems in CI, but has never run on a real Mac or iPhone. The Linux viewer has run only under WSL. See [remote desktop](remote-desktop.md#measurements-and-remaining-acceptance) for what was checked where.
+
+**Installing and updating on Windows.** The setup program installs pb-mapper, for every user when you allow its administrator prompt, and adds a "pb-mapper" Start menu entry. The setup of 0.11.0 made its shortcuts start the desktop helper, which shows nothing, so pb-mapper seemed missing and did not start at sign-in: install 0.12.0 by hand once (the in-app update of 0.11.0 still takes its old way), and pin it to the taskbar again if you had pinned it. From 0.12.0 on, **Update** in the app keeps the app open until Windows has allowed the installation, then reopens it. If you upgrade by hand while the desktop service shares this computer, quit the old window, open pb-mapper from the Start menu, and update the desktop service from the Remote desktop page.
 
 ## Environment variables
 
