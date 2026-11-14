@@ -175,14 +175,18 @@ impl Setting {
     /// say one. Two modes of one size are different modes to their owner (a
     /// Mac's HiDPI mode and its low-resolution twin, two refresh rates), so a
     /// host takes neither for the one it set. A field a platform does not
-    /// report (0, which an older journal's missing scale reads as too; a
-    /// refresh rate of 1, Windows' "the hardware's default") matches any, and
-    /// refresh rates 1 Hz apart are one rate (59.94 Hz listed as 60 and read
+    /// report matches any: a depth or scale of 0 (an older journal's missing
+    /// scale reads as 0 too), and on Windows, whose settings have no scale, a
+    /// refresh rate of 0 or 1, "the hardware's default". A Mac setting always
+    /// has its scale and knows its rate: 0 there is a mode that names none,
+    /// as a ProMotion display's variable mode, distinct from its fixed rates.
+    /// Refresh rates 1 Hz apart are one rate (59.94 Hz listed as 60 and read
     /// back as 59), so a mode read back a little differently is still the
     /// host's and still put back.
     pub(crate) fn shows(self, other: Self) -> bool {
         let unknown = |value: u32, below: u32| value <= below;
-        let rate = unknown(self.hz, 1) || unknown(other.hz, 1) || self.hz.abs_diff(other.hz) <= 1;
+        let default_rate = |setting: Self| setting.scale == 0 && unknown(setting.hz, 1);
+        let rate = default_rate(self) || default_rate(other) || self.hz.abs_diff(other.hz) <= 1;
         let same = |a: u32, b: u32| unknown(a, 0) || unknown(b, 0) || a == b;
         self.size() == other.size()
             && rate
@@ -888,6 +892,26 @@ mod tests {
         assert_eq!(displays.current(right).unwrap(), setting(2560, 1440));
         assert_eq!(displays.current(left).unwrap(), setting(1920, 1080));
         assert_eq!(named(&journal), [left]);
+    }
+
+    /// A Mac's variable-rate mode (rate 0) and its fixed 60 Hz twin are two
+    /// modes; on Windows a rate of 0 or 1 is the hardware's default, the same
+    /// as any.
+    #[test]
+    fn a_macs_variable_rate_is_its_own_mode() {
+        let mac = |hz| Setting {
+            hz,
+            bpp: 0,
+            scale: 2,
+            ..setting(3024, 1964)
+        };
+        assert!(!mac(0).shows(mac(60)) && !mac(60).shows(mac(0)));
+        assert!(mac(0).shows(mac(0)) && mac(60).shows(mac(59)));
+        let windows = |hz| Setting {
+            hz,
+            ..setting(1920, 1080)
+        };
+        assert!(windows(0).shows(windows(144)) && windows(1).shows(windows(60)));
     }
 
     /// A journal names display devices only: Windows' and macOS' UUIDs,

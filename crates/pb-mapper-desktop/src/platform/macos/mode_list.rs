@@ -63,11 +63,18 @@ impl Raw {
                 mode.scale() == current.scale(),
                 std::cmp::Reverse(mode.scale()),
                 mode.hz == current.hz,
-                mode.hz,
+                speed(mode.hz),
             )
         };
         rank(self) > rank(other)
     }
+}
+
+/// How fast a rate is, to choose between them: 0, which a display lists
+/// beside fixed rates for its variable mode (ProMotion, up to 120 Hz), is
+/// the fastest.
+fn speed(hz: u32) -> u32 {
+    if hz == 0 { u32::MAX } else { hz }
 }
 
 /// What a viewer is offered of `all`, a display showing `current`: usable
@@ -91,20 +98,22 @@ pub(crate) fn offered(all: &[Raw], current: &Raw) -> Vec<Raw> {
     kept
 }
 
-/// The listed mode `setting` names, at its rate where the display still
-/// has it, else at any rate.
+/// The usable listed mode `setting` names, at its rate where the display
+/// still has it, else at the fastest. A mode not for the desktop (stretched,
+/// interlaced, for mirroring) is never set, even where it is listed first
+/// at the same size, scale and rate.
 pub(crate) fn find(all: &[Raw], setting: &Setting) -> Option<Raw> {
-    all.iter()
+    let usable = || all.iter().filter(|mode| mode.usable);
+    usable()
         .find(|mode| mode.is(setting))
-        .copied()
         .or_else(|| {
-            all.iter()
+            usable()
                 .filter(|mode| {
                     mode.pixels == (setting.width, setting.height) && mode.scale() == setting.scale
                 })
-                .max_by_key(|mode| mode.hz)
-                .copied()
+                .max_by_key(|mode| speed(mode.hz))
         })
+        .copied()
 }
 
 #[cfg(test)]
@@ -156,6 +165,15 @@ mod tests {
         let gone = Setting { hz: 75, ..own };
         assert_eq!(find(&all, &gone), Some(current));
         assert_eq!(find(&all, &Setting { scale: 3, ..own }), None);
+        // An unusable twin listed first is passed over; a display's variable
+        // rate (0) is its fastest.
+        let unusable = Raw {
+            usable: false,
+            ..current
+        };
+        assert_eq!(find(&[unusable, current], &own), Some(current));
+        let variable = raw((3024, 1964), 2, 0);
+        assert_eq!(find(&[current, variable], &gone), Some(variable));
         let many: Vec<Raw> = (0..100).map(|i| raw((800 + 2 * i, 600), 1, 60)).collect();
         assert_eq!(super::offered(&many, &current).len(), MAX_MODES);
     }
