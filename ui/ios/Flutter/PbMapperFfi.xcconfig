@@ -10,7 +10,11 @@
 // - A static library does not carry its system dependencies. These are the
 //   frameworks and libraries its crates link for aarch64-apple-ios
 //   (#[link] attributes and build scripts of core-foundation-sys, objc2,
-//   netdev, objc2-security, system-configuration and libc); libSystem comes
-//   by default.
-OTHER_LDFLAGS = $(inherited) -force_load "$(PROJECT_DIR)/../native/ios/libpb_mapper_ffi.a" -Wl,-export_dynamic -framework CoreFoundation -framework Foundation -framework Network -framework Security -framework SystemConfiguration -lobjc -liconv
+//   objc2-security, system-configuration and libc); libSystem comes by
+//   default.
+// The script builds the library for devices only (aarch64-apple-ios), so it
+// is linked for the iphoneos SDK alone. A Simulator build links without it,
+// as it did before the library was force-loaded, and so has no Rust core.
+PB_MAPPER_FFI_LDFLAGS = -force_load "$(PROJECT_DIR)/../native/ios/libpb_mapper_ffi.a" -Wl,-export_dynamic -framework CoreFoundation -framework Foundation -framework Network -framework Security -framework SystemConfiguration -lobjc -liconv
+OTHER_LDFLAGS[sdk=iphoneos*] = $(inherited) $(PB_MAPPER_FFI_LDFLAGS)
 STRIP_STYLE = non-global
