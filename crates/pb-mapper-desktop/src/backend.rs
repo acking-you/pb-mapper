@@ -124,14 +124,15 @@ pub trait Backend: 'static {
     }
     /// The pointer's shape, for a backend whose caps say `cursor_shapes`.
     /// Thread C asks only in a session whose viewer reads shapes, right
-    /// after `cursor` reported a pointer for `expected`, every 16 ms while
-    /// it captures. `Some` when the shape may have changed since the last
-    /// `Some` this backend returned (the first call: the shape now); `None`
-    /// when it is unchanged or unknown, which keeps the last one. Tell a
-    /// change by the cheapest identity the OS offers, a cursor handle, never
-    /// by reading pixels each time: thread C compares the content itself. A
-    /// failure keeps the last shape and does not end capture, except a lost
-    /// link (`NotConnected`).
+    /// after `cursor` reported a visible pointer for `expected`, every 16 ms
+    /// while it captures; never while it is hidden or on another display,
+    /// when the viewer keeps the last shape. `Some` when the shape may have
+    /// changed since the last `Some` this backend returned (the first call:
+    /// the shape now); `None` when it is unchanged or unknown, which keeps
+    /// the last one. Tell a change by the cheapest identity the OS offers, a
+    /// cursor handle, never by reading pixels each time: thread C compares
+    /// the content itself. A failure keeps the last shape and does not end
+    /// capture, except a lost link (`NotConnected`).
     fn cursor_shape(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
         let _ = expected;
         Ok(None)

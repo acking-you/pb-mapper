@@ -844,6 +844,39 @@ fn a_new_shape_is_reported_even_at_the_controllers_own_move() {
     }
 }
 
+/// While the pointer is hidden, or on a display the viewer does not see
+/// (both read as `confine` gives them: hidden at 0, 0), its shape is not
+/// read: nothing of it reaches the viewer, which keeps the last shape. Back
+/// on the shared display, the shape it took meanwhile is reported.
+#[test]
+fn no_shape_is_read_while_the_pointer_is_away() {
+    let ibeam =
+        crate::CursorShape::new(crate::CursorKind::Ibeam, 1, 2, (0, 1), vec![1; 8]).unwrap();
+    let mut h = Harness::with(
+        true,
+        WorkerConfig {
+            cursor_shapes: true,
+            ..config(None)
+        },
+    );
+    let report = |h: &Harness| h.shared.cursor.borrow().clone().unwrap();
+    h.step();
+    h.present();
+    let reads = h.fake.shape_reads.load(Ordering::SeqCst);
+    assert!(reads > 0);
+    h.fake.hidden.store(true, Ordering::SeqCst);
+    *h.fake.shape.lock() = Some(ibeam.clone());
+    h.run(Duration::from_millis(100), true);
+    let away = report(&h);
+    assert!(!away.cursor.visible && away.shape.is_none());
+    assert_eq!(h.fake.shape_reads.load(Ordering::SeqCst), reads);
+    h.fake.hidden.store(false, Ordering::SeqCst);
+    h.run(Duration::from_millis(20), true);
+    let back = report(&h);
+    assert!(back.cursor.visible);
+    assert_eq!(back.shape.as_ref(), Some(&ibeam));
+}
+
 #[test]
 fn native_input_failure_ends_control_and_survives_new_video() {
     let mut h = Harness::new(true, None);

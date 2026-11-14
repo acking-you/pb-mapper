@@ -543,12 +543,16 @@ mod tests {
         assert!(described.caps.cursor_shapes);
 
         // The first ask turns the worker's shape reads on; after it, only a
-        // newer shape crosses again.
+        // newer shape crosses again. A pointer on another display is not
+        // read: its shape crosses once it is back on the shared one.
         let display = Probe::display();
-        probe.point(display.x + 1, 1);
+        probe.point(display.x - 1, 1);
         let shape = |kind| crate::CursorShape::new(kind, 2, 2, (1, 1), vec![3; 16]).unwrap();
         probe.set_shape(shape(crate::CursorKind::Ibeam));
         let context = backend.context().unwrap();
+        assert_eq!(backend.cursor_shape(&context).unwrap(), None);
+        probe.point(display.x + 1, 1);
+        backend.context().unwrap();
         assert_eq!(
             backend.cursor_shape(&context).unwrap(),
             Some(shape(crate::CursorKind::Ibeam))
@@ -561,7 +565,7 @@ mod tests {
             backend.cursor_shape(&context).unwrap(),
             Some(shape(crate::CursorKind::Custom))
         );
-        assert_eq!(asked_shape.load(Ordering::SeqCst), 2);
+        assert_eq!(asked_shape.load(Ordering::SeqCst), 3);
 
         let context = backend.context().unwrap();
         let listed = backend.display_modes(&context).unwrap().unwrap();

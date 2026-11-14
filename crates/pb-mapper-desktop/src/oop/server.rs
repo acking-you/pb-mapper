@@ -228,7 +228,9 @@ pub(crate) fn serve<B: Backend>(
     if observe_cursor {
         response.cursor = backend.cursor(&context)?;
         if state.shapes {
-            if response.cursor.is_some() {
+            // As thread C asks: only of a pointer showing on the display
+            // shared.
+            if response.cursor.is_some_and(|cursor| cursor.visible) {
                 observe_shape(backend, &context, state)?;
             }
             response.shape_serial = Some(state.shape_serial);

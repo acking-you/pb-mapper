@@ -29,8 +29,11 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             Ok(position) => position,
             Err(failure) => return self.fail(failure, now),
         };
-        let shape =
-            (self.cursor_shapes && position.is_some()).then(|| self.backend.cursor_shape(context));
+        // Only of a pointer showing on the shared display: one hidden, or on
+        // a display the viewer does not see, tells it nothing, not even its
+        // shape, and the viewer keeps the last.
+        let showing = position.is_some_and(|position| position.visible);
+        let shape = (self.cursor_shapes && showing).then(|| self.backend.cursor_shape(context));
         match shape {
             Some(Ok(Some(shape))) => {
                 let (kind, width, height) = (shape.kind(), shape.width(), shape.height());
