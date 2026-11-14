@@ -70,10 +70,11 @@ constexpr uint32_t kFirstCapacity = 1024 * 1024;
 // reaches a decoder.
 constexpr uint32_t kMaxWidth = 3840, kMaxHeight = 2160;
 // The bounds a viewer may ask for (Resolution::bounds in lib.rs), largest
-// first: the probe reports the largest a hardware decoder takes.
+// first: the probe reports the largest one a decoder may take.
 constexpr uint32_t kBounds[][2] = {{3840, 2160}, {2560, 1440}, {1920, 1080}, {1280, 720}};
-// What a software decoder is offered: decoding and converting on the CPU,
-// 1080p is the size every session asked for before decoders were probed.
+// The largest picture a software decoder may take: decoding and converting
+// on the CPU, 1080p is the size every session asked for before decoders
+// were probed.
 constexpr uint32_t kSoftwareWidth = 1920, kSoftwareHeight = 1080;
 // Units inside the pipeline and not yet decoded. The decoder thread pulls
 // the next one only below this, so a backlog builds in Rust's sink, which
@@ -236,33 +237,33 @@ void MarkFailed(const std::string& factory) {
   if (g_failed.insert(factory).second) g_warning("%s failed before its first picture; it is not used again", factory.c_str());
 }
 
-// The probe's answer for one codec: the first candidate the session would
-// configure. A hardware decoder takes the largest viewer bound inside its
-// sink template; a software one 1080p. H.265 is offered on hardware only,
-// as on Windows and Android: in software it only costs more than H.264.
-void ProbeCodec(Codec codec, bool software, PbVideoCodecProbe* out) {
+// Whether `candidate` may decode `codec` at `width` x `height`: the one rule
+// the probe advertises and every pipeline keeps, so a session never runs on
+// a decoder the probe would not have offered for it. A hardware decoder
+// takes what its sink template takes. A software one takes H.264 only, up
+// to 1080p in either orientation: H.265 in software only costs more than
+// H.264, as on Windows and Android, which offer it on hardware only.
+bool Allows(const Candidate& candidate, Codec codec, uint32_t width, uint32_t height) {
+  if (width > candidate.max_width || height > candidate.max_height) return false;
+  if (candidate.hardware) return true;
+  return codec == Codec::kH264 && std::max(width, height) <= kSoftwareWidth &&
+         std::min(width, height) <= kSoftwareHeight;
+}
+
+// The probe's answer for one codec: the first candidate that has not failed
+// and is allowed a viewer bound, with the largest bound it is allowed.
+void ProbeCodec(Codec codec, PbVideoCodecProbe* out) {
   if (!HasElement(Parser(codec))) return;
   for (const Candidate& candidate : Candidates(codec)) {
-    if (Failed(candidate.factory) || (!candidate.hardware && !software)) continue;
-    uint32_t width = 0, height = 0;
-    if (candidate.hardware) {
-      for (const auto& bounds : kBounds) {
-        if (bounds[0] <= candidate.max_width && bounds[1] <= candidate.max_height) {
-          width = bounds[0];
-          height = bounds[1];
-          break;
-        }
-      }
-    } else if (kSoftwareWidth <= candidate.max_width && kSoftwareHeight <= candidate.max_height) {
-      width = kSoftwareWidth;
-      height = kSoftwareHeight;
+    if (Failed(candidate.factory)) continue;
+    for (const auto& bounds : kBounds) {
+      if (!Allows(candidate, codec, bounds[0], bounds[1])) continue;
+      out->max_width = bounds[0];
+      out->max_height = bounds[1];
+      out->hardware = candidate.hardware ? 1 : 0;
+      CopyText(out->decoder, sizeof(out->decoder), candidate.name);
+      return;
     }
-    if (width == 0) continue;
-    out->max_width = width;
-    out->max_height = height;
-    out->hardware = candidate.hardware ? 1 : 0;
-    CopyText(out->decoder, sizeof(out->decoder), candidate.name);
-    return;
   }
 }
 
@@ -278,8 +279,8 @@ int32_t Probe(PbVideoProbe* out, char* error, size_t error_len) {
     CopyText(error, error_len, "GStreamer's base plugins (appsrc, appsink, videoconvert) are missing");
     return 0;
   }
-  ProbeCodec(Codec::kH264, true, &out->h264);
-  ProbeCodec(Codec::kH265, false, &out->h265);
+  ProbeCodec(Codec::kH264, &out->h264);
+  ProbeCodec(Codec::kH265, &out->h265);
   return 0;
 }
 
@@ -401,13 +402,15 @@ namespace {
 // One configuration: a codec at a size, on one decoder element.
 class Pipeline {
  public:
-  // The first candidate that starts, or throws.
+  // The first allowed candidate that starts, or throws: the caller reports
+  // the failure, and repeated failures end the session as decoder_failed,
+  // after which Dart connects again without H.265.
   static std::unique_ptr<Pipeline> Start(const Frame& frame, PbVideoDecoder* owner) {
     std::string last;
     bool any = false;
     if (!HasElement(Parser(frame.codec))) throw std::runtime_error(std::string("GStreamer has no ") + Parser(frame.codec));
     for (Candidate& candidate : Candidates(frame.codec)) {
-      if (Failed(candidate.factory) || frame.width > candidate.max_width || frame.height > candidate.max_height) continue;
+      if (Failed(candidate.factory) || !Allows(candidate, frame.codec, frame.width, frame.height)) continue;
       any = true;
       std::unique_ptr<Pipeline> pipeline(new Pipeline(frame, std::move(candidate), owner));
       if (pipeline->Build(&last)) return pipeline;

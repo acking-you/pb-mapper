@@ -248,8 +248,12 @@ PbVideoStats Stats(const PbVideoModule* module, PbVideoDecoder* decoder) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
-    fprintf(stderr, "usage: %s <libpb_mapper_ffi.so> <clip folder>\n", argv[0]);
+  // --broken-hardware: the registry lists hardware decoders whose device
+  // cannot open (the script hides it), as on a machine whose GPU or driver
+  // is gone; every check then expects what the rule leaves.
+  const bool broken = argc == 4 && strcmp(argv[3], "--broken-hardware") == 0;
+  if (argc != 3 && !broken) {
+    fprintf(stderr, "usage: %s <libpb_mapper_ffi.so> <clip folder> [--broken-hardware]\n", argv[0]);
     return 2;
   }
   void* ffi = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
@@ -303,6 +307,7 @@ int main(int argc, char** argv) {
          probe.h265.decoder, probe.h265.max_width, probe.h265.max_height, probe.h265.hardware ? " hardware" : "",
          error);
   Check(probed == 0 && probe.h264.max_width > 0, "the probe finds an H.264 decoder");
+  if (broken) Check(probe.h264.hardware != 0, "the registry offers a hardware H.264 decoder to break");
 
   Raster raster(module);
   PbVideoDecoder* decoder = module->create(&shims, Raster::Ready, &raster);
@@ -332,7 +337,11 @@ int main(int argc, char** argv) {
     Check(width == 1280 && height == 720 && content, "pictures are 1280x720 RGBA with content");
     std::lock_guard<std::mutex> lock(g_text_mutex);
     printf("  decoder: %s (%s)\n", g_decoder.c_str(), g_hardware ? "hardware" : "software");
-    Check(g_decoder == probe.h264.decoder, "the probed decoder is the one configured");
+    if (broken) {
+      Check(!g_hardware, "a hardware decoder that does not start gives way to a software one the rule allows");
+    } else {
+      Check(g_decoder == probe.h264.decoder, "the probed decoder is the one configured");
+    }
   }
   Check(stats().configurations == 1 && g_reports == 1 && g_failures == 0, "one configuration, reported, no failure");
 
@@ -388,7 +397,22 @@ int main(int argc, char** argv) {
     g_ffi.stop(source);
   }
 
-  if (!h265.empty()) {
+  // A session the rule leaves no decoder for: every keyframe is a failure
+  // Rust counts toward ending the session (then Dart drops H.265), and no
+  // decoder outside the rule is configured.
+  auto refused = [&](uint64_t source, const char* what) {
+    const int failures = g_failures, reports = g_reports, accepted = g_accepted;
+    Check(attach(source), "the decoder attaches");
+    Check(WaitFor([&] { return g_failures > failures; }, milliseconds(3000)), what);
+    std::this_thread::sleep_for(milliseconds(500));
+    Check(g_reports == reports && g_accepted == accepted, "no decoder is configured for it, nothing is shown");
+    g_ffi.stop(source);
+  };
+
+  if (!h265.empty() && (broken || probe.h265.max_width == 0)) {
+    printf("H.265 with no hardware decoder that works\n");
+    refused(g_ffi.source(h265.c_str(), 60), "it fails: no software H.265, reported with failed_v1");
+  } else if (!h265.empty()) {
     printf("H.265 1280x720 at 60 fps\n");
     source = g_ffi.source(h265.c_str(), 60);
     raster.Pacing();
@@ -404,7 +428,10 @@ int main(int argc, char** argv) {
     g_ffi.stop(source);
   }
 
-  if (!uhd.empty()) {
+  if (!uhd.empty() && (broken || probe.h264.max_width < 3840)) {
+    printf("3840x2160 H.264 with no hardware decoder that works\n");
+    refused(g_ffi.source(uhd.c_str(), 60), "it fails: software H.264 stops at 1080p, reported with failed_v1");
+  } else if (!uhd.empty()) {
     // A measurement, not a check: how many 3840x2160 pictures a second the
     // decoder and the conversion to RGBA keep up with, offered 120.
     source = g_ffi.source(uhd.c_str(), 120);
@@ -419,6 +446,13 @@ int main(int argc, char** argv) {
            (last.decoded - first.decoded) / seconds, (last.presented - first.presented) / seconds,
            (last.dropped - first.dropped) / seconds, last.decoder);
     g_ffi.stop(source);
+  }
+
+  if (broken) {
+    PbVideoProbe after{};
+    module->probe(&after, error, sizeof(error));
+    Check(after.h264.hardware == 0 && after.h264.max_width == 1920 && after.h265.max_width == 0,
+          "the probe stops offering what failed: software H.264 at 1080p, no H.265");
   }
 
   printf("the longest attach, stopping the previous decoder thread: %lld ms\n",

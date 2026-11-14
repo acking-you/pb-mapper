@@ -1828,8 +1828,9 @@ nothing is known.
 On Linux the module looks in GStreamer's registry and builds nothing: H.264
 is offered when any decoder factory for it exists, a hardware one (VA-API,
 NVDEC, V4L2) at the largest viewer bound its caps allow, a software one at
-1920×1080; H.265 only with a hardware decoder, as on Windows and Android
-(software H.265 remains a fallback at run time). The refresh is the fastest
+1920×1080; H.265 only with a hardware decoder, as on Windows and Android.
+A session's decoder obeys the same rule (`Allows` in `desktop_video_gst.cc`):
+none decodes H.265, or H.264 above 1080p, in software. The refresh is the fastest
 GDK monitor's. Without the module, without GStreamer, without decoder
 plugins, or under `FLUTTER_LINUX_RENDERER=software`, which has no external
 textures, `decoders` answers none and the session takes JPEG.
@@ -1971,7 +1972,10 @@ fewer than four are inside the pipeline, so a backlog stays in Rust's sink,
 which drops to an IDR. Decoders are chosen from the registry, hardware first
 (VA-API, NVDEC, V4L2) and then by rank; one that fails to start is skipped,
 and one that fails or stalls before its first picture is left out for the
-rest of the run, so the next keyframe falls back, to software if need be. A
+rest of the run (and from later probes), so the next keyframe falls back to
+the next decoder the probe's rule allows. When none is left, every keyframe
+is a decoder failure: the session ends as `decoder_failed`, and an H.265
+one connects again on H.264. A
 decoder with units inside and no picture for 2 s is rebuilt with a keyframe
 request, as on Android. `copy_pixels` on the raster thread takes the newest
 picture, which is the presentation receipt. Each picture is converted to RGBA

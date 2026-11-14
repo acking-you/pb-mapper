@@ -9,8 +9,10 @@
 # avdec_h264, or a hardware one), h264parse/h265parse (gst-plugins-bad),
 # ffmpeg with libx264 (libx265 adds the H.265 case), cmake.
 #
-#   scripts/test/linux-desktop-video.sh             hardware decoders first
-#   scripts/test/linux-desktop-video.sh --software  hardware decoders ranked out
+#   scripts/test/linux-desktop-video.sh                    hardware decoders first
+#   scripts/test/linux-desktop-video.sh --software         hardware decoders ranked out
+#   scripts/test/linux-desktop-video.sh --broken-hardware  hardware decoders listed, but
+#                                                          their device does not open
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -19,10 +21,21 @@ OUT="${ROOT_DIR}/target/linux-desktop-video"
 CLIPS="${OUT}/clips"
 mkdir -p "${CLIPS}"
 
-if [ "${1:-}" = "--software" ]; then
-  # GStreamer's own override: a decoder ranked NONE is never chosen.
-  export GST_PLUGIN_FEATURE_RANK="vah264dec:NONE,vah265dec:NONE,nvh264dec:NONE,nvh265dec:NONE,vaapih264dec:NONE,vaapih265dec:NONE,v4l2slh264dec:NONE,v4l2slh265dec:NONE,v4l2h264dec:NONE,v4l2h265dec:NONE"
-fi
+mode=()
+case "${1:-}" in
+  --software)
+    # GStreamer's own override: a decoder ranked NONE is never chosen.
+    export GST_PLUGIN_FEATURE_RANK="vah264dec:NONE,vah265dec:NONE,nvh264dec:NONE,nvh265dec:NONE,vaapih264dec:NONE,vaapih265dec:NONE,v4l2slh264dec:NONE,v4l2slh265dec:NONE,v4l2h264dec:NONE,v4l2h265dec:NONE"
+    ;;
+  --broken-hardware)
+    # The registry, scanned with the device visible, keeps listing the
+    # hardware decoders; then CUDA sees no device and VA-API loads no
+    # driver, as on a machine whose GPU or driver went away.
+    gst-inspect-1.0 > /dev/null
+    export CUDA_VISIBLE_DEVICES=-1 LIBVA_DRIVER_NAME=pb-mapper-none
+    mode=(--broken-hardware)
+    ;;
+esac
 
 cargo build --manifest-path "${ROOT_DIR}/Cargo.toml" -p pb-mapper-ffi --features desktop-test-source
 
@@ -49,4 +62,4 @@ fi
 
 cmake -S "${ROOT_DIR}/ui/linux/test" -B "${OUT}/build" -DCMAKE_BUILD_TYPE=Release > /dev/null
 cmake --build "${OUT}/build"
-"${OUT}/build/desktop_video_test" "${FFI}" "${CLIPS}"
+"${OUT}/build/desktop_video_test" "${FFI}" "${CLIPS}" "${mode[@]}"
