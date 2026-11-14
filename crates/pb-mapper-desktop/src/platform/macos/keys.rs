@@ -255,6 +255,18 @@ impl Modifiers {
     }
 }
 
+/// The flags a posted event's modifiers own: each modifier's, its side's
+/// device bit, and Caps Lock.
+const OWNED: u64 = SHIFT | CONTROL | OPTION | COMMAND | CAPS_LOCK | 0x207f;
+
+/// The flags of an event that Core Graphics made with `made`, its modifiers
+/// replaced by `held`: what the key itself carries stays (an arrow key's
+/// Fn and numeric-pad flags, which Mission Control's Control-arrow spaces
+/// and apps reading those flags look for).
+pub(crate) fn with_modifiers(made: u64, held: u64) -> u64 {
+    (made & !OWNED) | held
+}
+
 /// The virtual key of the physical key at USB HID keyboard-page `usage`
 /// (`0x07`), for a viewer's physical keys; `None` for a key a Mac keyboard
 /// lacks (Application, Power).
@@ -410,6 +422,20 @@ mod tests {
         let cyrillic = |code: u16, _| char::from_u32(0x0430 + u32::from(code));
         assert_eq!(Layout::of(cyrillic), Layout::ansi());
         assert_eq!(Layout::ansi().code(Key::C), 0x08);
+    }
+
+    /// An arrow key keeps the Fn and numeric-pad flags Core Graphics gives
+    /// it, while its modifiers are the ones held now, not those it was made
+    /// with.
+    #[test]
+    fn a_key_keeps_its_own_flags_and_takes_the_held_modifiers() {
+        let (function, numeric_pad) = (0x80_0000, 0x20_0000);
+        let made = function | numeric_pad | SHIFT | 0x02;
+        assert_eq!(
+            with_modifiers(made, CONTROL | 0x01),
+            function | numeric_pad | CONTROL | 0x01
+        );
+        assert_eq!(with_modifiers(made, 0), function | numeric_pad);
     }
 
     /// Every key of the vocabulary presses its own virtual key, and the four

@@ -131,11 +131,24 @@ impl MacInput {
         })
     }
 
-    fn mouse(&self, kind: CGEventType, button: CGMouseButton, clicks: Option<i64>) -> Result<()> {
+    /// A mouse event at the pointer: `moved` by how many points, a move
+    /// or a drag, which apps and the window server read as the gesture;
+    /// `clicks`, a press or release.
+    fn mouse(
+        &self,
+        kind: CGEventType,
+        button: CGMouseButton,
+        moved: Option<(i64, i64)>,
+        clicks: Option<i64>,
+    ) -> Result<()> {
         let (x, y) = self.position();
         let event = CGEvent::new_mouse_event(Some(&self.source), kind, CGPoint { x, y }, button);
         if let Some(event) = &event {
-            CGEvent::set_flags(Some(event), CGEventFlags(self.modifiers.flags()));
+            self.flag(event, self.modifiers.flags());
+            if let Some((dx, dy)) = moved {
+                CGEvent::set_integer_value_field(Some(event), CGEventField::MouseEventDeltaX, dx);
+                CGEvent::set_integer_value_field(Some(event), CGEventField::MouseEventDeltaY, dy);
+            }
             if let Some(count) = clicks {
                 CGEvent::set_integer_value_field(
                     Some(event),
@@ -174,9 +187,16 @@ impl MacInput {
             if modifier {
                 CGEvent::set_type(Some(event), CGEventType::FlagsChanged);
             }
-            CGEvent::set_flags(Some(event), CGEventFlags(flags));
+            self.flag(event, flags);
         }
         self.post(event)
+    }
+
+    /// Give `event` the modifier flags `held`, keeping those it carries of
+    /// its own.
+    fn flag(&self, event: &CGEvent, held: u64) {
+        let made = CGEvent::flags(Some(event)).0;
+        CGEvent::set_flags(Some(event), CGEventFlags(keys::with_modifiers(made, held)));
     }
 
     /// One keyboard event of each direction carrying `units`.
@@ -184,7 +204,7 @@ impl MacInput {
         for down in [true, false] {
             let event = CGEvent::new_keyboard_event(Some(&self.source), 0, down);
             if let Some(event) = &event {
-                CGEvent::set_flags(Some(event), CGEventFlags(0));
+                self.flag(event, 0);
                 // SAFETY: `units` holds `units.len()` UTF-16 code units.
                 unsafe {
                     CGEvent::keyboard_set_unicode_string(
@@ -240,6 +260,8 @@ impl Injector for MacInput {
     fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
         self.allowed()?;
         let (x, y) = self.geometry.get().point((x, y));
+        let (from_x, from_y) = self.position();
+        let moved = ((x - from_x).round() as i64, (y - from_y).round() as i64);
         self.position = Some((x, y));
         // With a button down, a move is that button's drag.
         let (kind, button) = [Button::Left, Button::Right, Button::Middle]
@@ -249,7 +271,7 @@ impl Injector for MacInput {
                 let (_, _, dragged, button) = kinds(button);
                 (dragged, button)
             });
-        self.mouse(kind, button, None)
+        self.mouse(kind, button, Some(moved), None)
     }
     fn button(&mut self, button: Button, down: bool) -> Result<()> {
         self.allowed()?;
@@ -264,7 +286,7 @@ impl Injector for MacInput {
         } else {
             self.clicks.release(button)
         };
-        self.mouse(if down { pressed } else { released }, cg, Some(count))?;
+        self.mouse(if down { pressed } else { released }, cg, None, Some(count))?;
         self.buttons[index(button)] = down;
         Ok(())
     }
@@ -281,7 +303,7 @@ impl Injector for MacInput {
             0,
         );
         if let Some(event) = &event {
-            CGEvent::set_flags(Some(event), CGEventFlags(self.modifiers.flags()));
+            self.flag(event, self.modifiers.flags());
         }
         self.post(event)
     }
