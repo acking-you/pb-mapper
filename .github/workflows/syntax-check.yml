@@ -84,6 +84,8 @@ jobs:
               ui/linux/*|scripts/build/check-linux-bundle.sh|scripts/test/linux-desktop-video.sh) flutter=true; linux=true ;;
               # The Apple runners and the video decoder they share.
               ui/macos/*|ui/ios/*|ui/darwin/*) flutter=true; apple=true ;;
+              # The scripts those apps' jobs build the FFI library with.
+              scripts/build/pb-mapper-ffi-macos.sh|scripts/build/pb-mapper-ffi-ios.sh) apple=true ;;
               ui/*) flutter=true ;;
               js/*) node=true ;;
               # The Node-API addon is a workspace crate; SDK changes must also
@@ -94,14 +96,19 @@ jobs:
               # while every Rust check still passes.
               crates/pb-mapper-node/*|crates/pb-mapper-client/*|crates/pb-mapper/*) rust=true; node=true ;;
               crates/pb-mapper-core/*|crates/pb-mapper-auth/*|crates/pb-mapper-protocol/*|crates/pb-mapper-server/*) rust=true; node=true ;;
-              # The JNI layer pulls its video units from this crate.
-              crates/pb-mapper-desktop/*) rust=true; android=true ;;
+              # The JNI layer and the Linux video module pull their video
+              # units from this crate.
+              crates/pb-mapper-desktop/*) rust=true; android=true; linux=true ;;
               crates/*|src/*|tests/*|examples/*) rust=true ;;
               # The addon is built from this workspace, and `bun run
               # build:release` consumes the root `release-node` profile — a
               # profile or lockfile change that pushes it past the size limit
-              # has to be caught here, not after release.
-              Cargo.toml|Cargo.lock|rust-toolchain.toml|deps/*|.gitmodules) rust=true; node=true; android=true ;;
+              # has to be caught here, not after release. A dependency can
+              # also stop the Linux library loading (static TLS) or need a
+              # system framework the iOS app's link does not list
+              # (ui/ios/Flutter/PbMapperFfi.xcconfig): only the app jobs see
+              # either.
+              Cargo.toml|Cargo.lock|rust-toolchain.toml|deps/*|.gitmodules) rust=true; node=true; android=true; linux=true; apple=true ;;
               rustfmt.toml) rust=true ;;
               # Per-crate manifests. `case` patterns match the whole path, so
               # the unanchored entry above only ever catches the root manifest.
@@ -243,6 +250,7 @@ jobs:
         with:
           toolchain: 1.99.1
           components: clippy
+          targets: aarch64-apple-ios
 
       - name: Cache Rust dependencies
         uses: actions/cache@v3
@@ -257,6 +265,13 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy -p pb-mapper-desktop -p pb-mapper-ffi --all-targets --all-features -- -D warnings
+
+      # The iOS app's library, every crate under it with its iOS cfgs. Here
+      # rather than only in ios-app, which builds the whole app and runs
+      # when the app or its link changes, not when a crate does.
+      - name: Run Clippy for iOS
+        if: ${{ !cancelled() }}
+        run: cargo clippy --target aarch64-apple-ios -p pb-mapper-ffi --all-targets --all-features -- -D warnings
 
       # The app runs from macOS 10.15, ScreenCaptureKit arrived in 12.3: the
       # FFI library must link it weakly, or it would not load before 12.3.
