@@ -205,7 +205,9 @@ asks for. Hosting is Windows, with GPU H.264 and H.265 and an opt-in
 privileged helper for UAC and the lock screen, and macOS 12.3 or later, with
 ScreenCaptureKit and VideoToolbox once the owner granted Screen Recording (and
 Accessibility for control; compiled and unit-tested in CI, never run on a real
-Mac); viewing runs anywhere. Both ends
+Mac); viewing runs anywhere. A Mac binary that should still start below macOS
+12.3 links ScreenCaptureKit weakly, as this crate's examples do:
+`-C link-arg=-Wl,-weak_framework,ScreenCaptureKit`. Both ends
 take the tunnel defaults: LAN first, then direct, then the relay. Nothing
 captures or injects until a host is started and an authorized viewer connects,
 and an SDK built without the feature carries none of it. The helper's real UAC

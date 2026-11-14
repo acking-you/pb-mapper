@@ -274,17 +274,21 @@ jobs:
         run: cargo clippy --target aarch64-apple-ios -p pb-mapper-ffi --all-targets --all-features -- -D warnings
 
       # The app runs from macOS 10.15, ScreenCaptureKit arrived in 12.3: the
-      # FFI library must link it weakly, or it would not load before 12.3.
+      # FFI library must link it weakly, or it would not load before 12.3,
+      # and so do the SDK's examples, through the build scripts.
       # Before the tests, and whatever the step above did, so that neither a
       # lint nor a test failure hides it.
       - name: Check ScreenCaptureKit is linked weakly
         if: ${{ !cancelled() }}
         run: |
           cargo build -p pb-mapper-ffi
-          kind="$(otool -l target/debug/libpb_mapper_ffi.dylib \
-            | awk '/^ *cmd LC_/ { cmd = $2 } /name .*ScreenCaptureKit/ { print cmd }')"
-          echo "ScreenCaptureKit load command: ${kind:-none}"
-          test "$kind" = "LC_LOAD_WEAK_DYLIB"
+          cargo build -p pb-mapper --features desktop --example desktop_host
+          for binary in target/debug/libpb_mapper_ffi.dylib target/debug/examples/desktop_host; do
+            kind="$(otool -l "$binary" \
+              | awk '/^ *cmd LC_/ { cmd = $2 } /name .*ScreenCaptureKit/ { print cmd }')"
+            echo "$binary: ScreenCaptureKit load command: ${kind:-none}"
+            test "$kind" = "LC_LOAD_WEAK_DYLIB"
+          done
 
       - name: Run tests
         if: ${{ !cancelled() }}

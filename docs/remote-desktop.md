@@ -2370,7 +2370,15 @@ plugins, which the app loads but never bundles; no FFmpeg executable or
 libraries are bundled (gst-libav, where the user installed it, is the
 system's). The macOS FFI library links ScreenCaptureKit weakly
 (`-weak_framework`, set by `ui/native/pb_mapper_ffi/build.rs`), so the app
-still starts on macOS 10.15 to 12.2, where it cannot share. The app and the
+still starts on macOS 10.15 to 12.2, where it cannot share. The desktop
+crate's and the SDK facade's own tests and examples link it weakly too, in
+their build scripts; a build script cannot link another crate's binary, so
+an SDK binary that should start below 12.3 passes
+`-C link-arg=-Wl,-weak_framework,ScreenCaptureKit` itself. objc2 looks a
+class up at run time, never through a static class reference, so no class
+newer than the running system stops a binary from starting either; the
+code checks the system or the class (`SCScreenshotManager`, macOS 14, for
+stills) before it calls one. The app and the
 FFI DLL delay-load `mfplat.dll`. Where it is missing (Windows N/KN without the Media
 Feature Pack, Windows Server without the feature), the app still starts, this
 computer cannot share (a host refuses to start, so a remembered grant is not
