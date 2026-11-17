@@ -377,7 +377,7 @@ impl Waker {
 
 /// A backend failure of a known kind. Its text is the message alone, so a
 /// failure reads as it did before it carried a kind.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BackendError {
     kind: FailureKind,
     message: String,

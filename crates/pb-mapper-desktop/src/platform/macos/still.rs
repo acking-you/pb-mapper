@@ -7,28 +7,22 @@ use crate::{
     BackendError, Display, FailureKind, Result, error, platform::StillCapture, qos::scaled_size,
 };
 use block2::RcBlock;
-use objc2::{Message, rc::Retained, runtime::AnyClass};
+use objc2::{rc::Retained, runtime::AnyClass};
 use objc2_core_foundation::{CFMutableData, CFRetained, CFString};
 use objc2_core_graphics::CGImage;
 use objc2_foundation::NSError;
 use objc2_image_io::{CGImageDestination, kCGImageDestinationLossyCompressionQuality};
 use objc2_screen_capture_kit::{SCContentFilter, SCScreenshotManager};
-use std::{sync::mpsc, time::Duration};
+use std::sync::mpsc;
 
 const MAX_SIZE: (u32, u32) = (1600, 1000);
 const QUALITY: f64 = 0.65;
-const WAIT: Duration = Duration::from_secs(5);
 
 /// The filter of the display last captured, kept between stills.
 #[derive(Default)]
 pub(crate) struct SckStill {
     filter: Option<(u32, Retained<SCContentFilter>)>,
 }
-
-/// An image the screenshot handler hands back.
-struct Handed(CFRetained<CGImage>);
-// SAFETY: a CGImage is immutable and thread-safe.
-unsafe impl Send for Handed {}
 
 impl SckStill {
     fn filter(&mut self, id: u32) -> Result<Retained<SCContentFilter>> {
@@ -66,15 +60,11 @@ impl SckStill {
         let handler = RcBlock::new(move |image: *mut CGImage, failure: *mut NSError| {
             let image = std::ptr::NonNull::new(image).map(|image| {
                 // SAFETY: valid during the call; retained to outlive it.
-                Handed(unsafe { CFRetained::retain(image) })
+                unsafe { CFRetained::retain(image) }
             });
-            let _ = sender.send(image.ok_or_else(|| {
-                // SAFETY: null or valid during the call.
-                let message = unsafe { failure.as_ref() }
-                    .map(|failure| failure.retain().localizedDescription().to_string())
-                    .unwrap_or_default();
-                format!("the screenshot failed: {message}")
-            }));
+            // SAFETY: the callback owns the optional error for this call.
+            let _ = sender
+                .send(image.ok_or_else(|| capture::failure(unsafe { failure.as_ref() }).into()));
         });
         // SAFETY: the handler outlives the call; ScreenCaptureKit copies it.
         unsafe {
@@ -84,14 +74,8 @@ impl SckStill {
                 Some(&handler),
             );
         }
-        let image = match receiver.recv_timeout(WAIT) {
-            Ok(Ok(Handed(image))) => image,
-            Ok(Err(message)) => {
-                self.filter = None;
-                return Err(BackendError::new(FailureKind::CaptureFailed, message).into());
-            }
-            Err(_) => return Err(error("the screenshot did not arrive in time")),
-        };
+        drop(handler);
+        let image = capture::answer(receiver, "screenshot").inspect_err(|_| self.filter = None)?;
         jpeg(&image)
     }
 }

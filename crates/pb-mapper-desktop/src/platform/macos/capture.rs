@@ -5,7 +5,7 @@
 //! it at its own pace. A stream the system stops says why at the next take.
 
 use super::cf;
-use crate::{BackendError, FailureKind, Result, error};
+use crate::{BackendError, FailureKind, Result};
 use block2::RcBlock;
 use dispatch2::{DispatchQoS, DispatchQueue, DispatchRetained, GlobalQueueIdentifier};
 use objc2::{
@@ -26,7 +26,8 @@ use objc2_foundation::{
 };
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCFrameStatus, SCShareableContent, SCStream, SCStreamConfiguration,
-    SCStreamDelegate, SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType, SCWindow,
+    SCStreamDelegate, SCStreamErrorCode, SCStreamErrorDomain, SCStreamFrameInfoStatus,
+    SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 use parking_lot::Mutex;
 use std::{
@@ -43,9 +44,6 @@ const _: () = assert!(
     QUEUE_DEPTH as usize >= crate::worker::ENCODER_DEPTH + 2,
     "the stream never runs out of surfaces while the encoder holds its share"
 );
-/// `SCStreamErrorUserDeclined`, `SCStreamErrorUserStopped`.
-const USER_DECLINED: isize = -3801;
-const USER_STOPPED: isize = -3817;
 
 /// macOS 12.3 or later, where ScreenCaptureKit is: the library links it
 /// weakly, so below that its classes are missing and nothing calls them.
@@ -68,13 +66,6 @@ pub(crate) struct Picture(pub CFRetained<CVPixelBuffer>);
 // it before delivering it and never writes it again while it is held.
 unsafe impl Send for Picture {}
 
-/// Why the system stopped a stream.
-#[derive(Clone, Debug)]
-struct Stopped {
-    code: isize,
-    message: String,
-}
-
 #[derive(Default)]
 pub(crate) struct Latest {
     pub picture: Option<Picture>,
@@ -82,7 +73,7 @@ pub(crate) struct Latest {
     pub fresh: bool,
     /// Pictures delivered.
     pub delivered: u64,
-    stopped: Option<Stopped>,
+    stopped: Option<BackendError>,
 }
 
 #[derive(Default)]
@@ -141,10 +132,7 @@ define_class!(
     unsafe impl SCStreamDelegate for Output {
         #[unsafe(method(stream:didStopWithError:))]
         fn stream_did_stop(&self, _stream: &SCStream, error: &NSError) {
-            self.ivars().latest.lock().stopped = Some(Stopped {
-                code: error.code(),
-                message: error.localizedDescription().to_string(),
-            });
+            self.ivars().latest.lock().stopped = Some(failure(Some(error)));
         }
     }
 );
@@ -157,52 +145,59 @@ impl Output {
     }
 }
 
-/// What a completion handler hands back across threads.
-struct Handed<T>(T);
-// SAFETY: ScreenCaptureKit's results are immutable once handed over, and
-// are only read on the thread that waits for them.
-unsafe impl<T> Send for Handed<T> {}
+/// An immutable snapshot retained by the shareable-content callback and
+/// read by the thread that requested it.
+struct ShareableContent(Retained<SCShareableContent>);
+// SAFETY: the retained snapshot is read-only on the receiving thread.
+unsafe impl Send for ShareableContent {}
 
-/// A ScreenCaptureKit error as a failure: the owner refusing or stopping
-/// the capture says so.
-fn failure(code: isize, message: &str) -> std::io::Error {
-    match code {
-        USER_DECLINED => super::platform::screen_capture_missing(),
-        USER_STOPPED => BackendError::new(
-            FailureKind::ConsentRevoked,
-            format!("the owner stopped screen sharing: {message}"),
-        )
-        .into(),
-        _ => BackendError::new(
+/// A numeric error code identifies a ScreenCaptureKit failure only in its domain.
+pub(super) fn failure(error: Option<&NSError>) -> BackendError {
+    let Some(error) = error else {
+        return BackendError::new(
             FailureKind::CaptureFailed,
-            format!("ScreenCaptureKit failed ({code}): {message}"),
-        )
-        .into(),
+            "ScreenCaptureKit returned no error",
+        );
+    };
+    let domain = error.domain();
+    // SAFETY: the framework's static error domain, used only after its availability check.
+    if domain.isEqualToString(unsafe { SCStreamErrorDomain }) {
+        match SCStreamErrorCode(error.code()) {
+            SCStreamErrorCode::UserDeclined => return super::platform::screen_capture_missing(),
+            SCStreamErrorCode::UserStopped => {
+                return BackendError::new(
+                    FailureKind::ConsentRevoked,
+                    format!(
+                        "the owner stopped screen sharing: {}",
+                        error.localizedDescription()
+                    ),
+                );
+            }
+            _ => {}
+        }
     }
+    BackendError::new(
+        FailureKind::CaptureFailed,
+        format!(
+            "ScreenCaptureKit failed ({domain}, {}): {}",
+            error.code(),
+            error.localizedDescription()
+        ),
+    )
 }
 
-fn ns_failure(error: *mut NSError) -> std::io::Error {
-    // SAFETY: a completion handler's error, null or valid during the call.
-    match unsafe { error.as_ref() } {
-        Some(error) => failure(error.code(), &error.localizedDescription().to_string()),
-        None => error_without_cause(),
-    }
-}
-
-fn error_without_cause() -> std::io::Error {
-    error("ScreenCaptureKit failed without an error")
-}
-
-/// Wait for a completion handler's answer.
-fn answer<T>(receiver: &mpsc::Receiver<Result<Handed<T>>>, what: &str) -> Result<T> {
-    match receiver.recv_timeout(WAIT) {
-        Ok(answer) => answer.map(|handed| handed.0),
-        Err(_) => Err(BackendError::new(
+/// Wait for one display, stream-start or screenshot completion.
+pub(super) fn answer<T>(receiver: mpsc::Receiver<Result<T>>, what: &str) -> Result<T> {
+    receiver.recv_timeout(WAIT).map_err(|reason| {
+        let detail = match reason {
+            mpsc::RecvTimeoutError::Timeout => "timed out",
+            mpsc::RecvTimeoutError::Disconnected => "ended without a result",
+        };
+        BackendError::new(
             FailureKind::CaptureFailed,
-            format!("ScreenCaptureKit did not answer {what} in time"),
+            format!("ScreenCaptureKit {what} {detail}"),
         )
-        .into()),
-    }
+    })?
 }
 
 /// ScreenCaptureKit's display of id `id`, which a filter needs.
@@ -211,16 +206,16 @@ pub(crate) fn display(id: u32) -> Result<Retained<SCDisplay>> {
     // Graphics call makes sure it is.
     CGMainDisplayID();
     let (sender, receiver) = mpsc::sync_channel(1);
-    let handler = RcBlock::new(
-        move |content: *mut SCShareableContent, failure: *mut NSError| {
-            // SAFETY: null or valid during the call.
-            let content = unsafe { content.as_ref() }.map(|content| Handed(content.retain()));
-            let _ = sender.send(content.ok_or_else(|| ns_failure(failure)));
-        },
-    );
+    let handler = RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
+        // SAFETY: null or valid during the call.
+        let content = unsafe { content.as_ref() }.map(|content| ShareableContent(content.retain()));
+        // SAFETY: the callback owns the optional error for this call.
+        let _ = sender.send(content.ok_or_else(|| failure(unsafe { err.as_ref() }).into()));
+    });
     // SAFETY: the handler outlives the call; ScreenCaptureKit copies it.
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
-    let content = answer(&receiver, "with the shareable displays")?;
+    drop(handler);
+    let ShareableContent(content) = answer(receiver, "display enumeration")?;
     // SAFETY: the content's displays, read on this thread.
     let displays = unsafe { content.displays() };
     displays
@@ -342,14 +337,12 @@ impl Stream {
                 Some(&queue),
             )
         }
-        .map_err(|failure| ns_failure(Retained::as_ptr(&failure).cast_mut()))?;
+        .map_err(|err| failure(Some(&err)))?;
         let (sender, started) = mpsc::sync_channel(1);
-        let handler = RcBlock::new(move |failure: *mut NSError| {
-            let result = if failure.is_null() {
-                Ok(Handed(()))
-            } else {
-                Err(ns_failure(failure))
-            };
+        let handler = RcBlock::new(move |err: *mut NSError| {
+            // SAFETY: the error is null on success or valid for this call.
+            let result =
+                unsafe { err.as_ref() }.map_or(Ok(()), |err| Err(failure(Some(err)).into()));
             let _ = sender.send(result);
         });
         // SAFETY: the handler outlives the call; ScreenCaptureKit copies it.
@@ -363,14 +356,15 @@ impl Stream {
             }),
             shared,
         };
-        answer(&started, "the start of capture")?;
+        drop(handler);
+        answer(started, "stream start")?;
         Ok(this)
     }
 
     /// Fails once the system stopped the stream.
     pub(crate) fn check(&self) -> Result<()> {
         match &self.shared.latest.lock().stopped {
-            Some(stopped) => Err(failure(stopped.code, &stopped.message)),
+            Some(stopped) => Err(stopped.clone().into()),
             None => Ok(()),
         }
     }

@@ -16,3 +16,16 @@ The acceptance tool discards its five-second warm-up and summarizes live samples
 A separate Release probe held the Remote page's host demand with no share active. It hid the app window with the product's window manager and counted calls through the real Desktop API during eight seconds of Flutter's hidden lifecycle state. Host status reads fell from eight to zero. Restoring the window resumed polling and returned both displays. The native capture probe also captured ten JPEGs from each display with the existing Screen Recording grant.
 
 The counters and lifecycle events are in [measurements.json](measurements.json). To repeat the window cycle, use the [macOS viewer acceptance entry](../../../scripts/test/desktop-ui-acceptance.md#macos-viewer). Input, first-time system permission dialogs, physical monitor removal, logging out, and performance across two computers or a WAN need separate runs.
+
+## Rust host send path
+
+On the same M3 Pro and macOS 27.0.1, Rust 1.99.1 built the arm64 Release `host_send_bench` example at `520ced0` and with the capture-consent and recovery changes in PR #55. Each binary ran three times, in the order before, after, after, before, before, after. Each run measured five seconds of video, then five seconds of video with pointer events. The synthetic host supplies 4 KiB H.264 units. The relay, host and viewer run in one process, whose allocator supplies the counts below.
+
+| Case | Build | Units/s | Inputs/s | Allocations/unit | Allocated bytes/unit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Video | Before | 60.0 | 0.0 | 19.07 | 40,213 |
+| Video | After | 60.0 | 0.0 | 19.07 | 40,213 |
+| Video with pointer | Before | 60.0 | 249.8 | 58.99 | 47,101 |
+| Video with pointer | After | 60.0 | 249.9 | 58.97 | 47,100 |
+
+The table shows the median of each metric. The benchmark measures the sender with a synthetic encoder. The [per-run output](host-send-rust-review.txt) includes all six runs.

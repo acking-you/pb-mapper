@@ -83,12 +83,11 @@ mod platform {
     pub(crate) struct ScreenAccess(());
 
     /// Screen Recording missing, as a failure.
-    pub(crate) fn screen_capture_missing() -> std::io::Error {
+    pub(crate) fn screen_capture_missing() -> BackendError {
         BackendError::permission_missing(
             Permission::ScreenCapture,
             "macOS has not granted pb-mapper Screen Recording: allow it in System Settings › Privacy & Security › Screen Recording, then open pb-mapper again",
         )
-        .into()
     }
 
     impl Platform for Macos {
@@ -146,7 +145,7 @@ mod platform {
             std::future::ready(if CGPreflightScreenCaptureAccess() {
                 desktop::resolve(selection).map(|display| (ScreenAccess(()), display))
             } else {
-                Err(screen_capture_missing())
+                Err(screen_capture_missing().into())
             })
         }
         fn open(_: &ScreenAccess, display: &Display) -> Result<Parts<Self>> {

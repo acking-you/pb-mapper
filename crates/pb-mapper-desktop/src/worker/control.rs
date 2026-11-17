@@ -256,15 +256,13 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             }
             Err(failure) => {
                 if link_lost(&failure) {
-                    self.fatal = Some(failure.to_string());
-                } else {
-                    // The boundary may have seen a desktop change this engine
-                    // has not checked yet: the new generation admits nothing
-                    // stale, so drop the event and keep control.
-                    let generation = self.state.record.generation;
-                    if !self.geometry(now) || self.state.record.generation != generation {
-                        return;
-                    }
+                    self.fatal = Some(failure);
+                    return;
+                }
+                // A desktop change invalidates the event while control stays granted.
+                let generation = self.state.record.generation;
+                if !self.geometry(now) || self.state.record.generation != generation {
+                    return;
                 }
                 if lock {
                     // Nothing was held down, so control stays.
@@ -309,7 +307,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             && let Err(failure) = self.backend.presented(context)
             && link_lost(&failure)
         {
-            self.fatal = Some(failure.to_string());
+            self.fatal = Some(failure);
         }
     }
 

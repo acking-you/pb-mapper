@@ -178,3 +178,39 @@ fn displays_are_named_by_uuid_and_measured_in_pixels() {
         modes.list(&display.name).unwrap();
     }
 }
+
+/// Only a ScreenCaptureKit refusal or user stop ends capture consent.
+#[test]
+fn screen_capture_consent_is_classified_by_domain_and_code() {
+    use super::capture::failure;
+    use crate::{FailureKind, Permission};
+    use objc2_foundation::{NSError, NSString};
+    use objc2_screen_capture_kit::{SCStreamErrorCode, SCStreamErrorDomain};
+
+    if !super::capture::available() {
+        return;
+    }
+    let classify = |domain: &NSString, code: SCStreamErrorCode| {
+        // SAFETY: the error has no userInfo dictionary.
+        let err = unsafe { NSError::errorWithDomain_code_userInfo(domain, code.0, None) };
+        failure(Some(&err))
+    };
+    // SAFETY: ScreenCaptureKit is available above.
+    let domain = unsafe { SCStreamErrorDomain };
+    assert_eq!(
+        classify(domain, SCStreamErrorCode::UserDeclined).permission(),
+        Some(Permission::ScreenCapture)
+    );
+    assert_eq!(
+        classify(domain, SCStreamErrorCode::UserStopped).kind(),
+        FailureKind::ConsentRevoked
+    );
+    assert_eq!(
+        classify(
+            &NSString::from_str("test.error"),
+            SCStreamErrorCode::UserStopped
+        )
+        .kind(),
+        FailureKind::CaptureFailed
+    );
+}

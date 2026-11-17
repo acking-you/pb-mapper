@@ -124,25 +124,44 @@ pub(crate) fn adopt() {
             return;
         };
         let sandboxed = std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some();
-        let plan = plan(&home, sandboxed, Path::exists);
-        for (from, to) in &plan.directories {
-            match copy_directory(from, to) {
-                Ok(()) => tracing::info!(
-                    event = "app_data_copied_from_container",
-                    from = %from.display(),
-                    to = %to.display(),
-                ),
-                Err(failure) => tracing::warn!(
-                    event = "app_data_not_copied_from_container",
-                    from = %from.display(),
-                    detail = %failure,
-                ),
-            }
-        }
-        if plan.preferences {
-            preferences::adopt(&container(&home));
+        if let Err(failure) = migrate(&home, sandboxed, preferences::adopt) {
+            tracing::warn!(event = "app_container_migration_failed", detail = %failure);
         }
     });
+}
+
+/// All instances share the legacy directory's inode. The OS releases this
+/// advisory lock even on a crash. Recheck destinations after acquiring it,
+/// before touching any staging directory that another instance could own.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn migrate(home: &Path, sandboxed: bool, adopt_preferences: impl FnOnce(&Path)) -> io::Result<()> {
+    if plan(home, sandboxed, Path::exists).directories.is_empty() {
+        return Ok(());
+    }
+    let source = container(home);
+    let lock = std::fs::File::open(&source)?;
+    lock.lock()?;
+    let plan = plan(home, false, Path::exists);
+    if plan.preferences {
+        // The configuration's rename marks migration complete. If interrupted
+        // before it, the next launch fills only the preferences still missing.
+        adopt_preferences(&source);
+    }
+    for (from, to) in &plan.directories {
+        match copy_directory(from, to) {
+            Ok(()) => tracing::info!(
+                event = "app_data_copied_from_container",
+                from = %from.display(),
+                to = %to.display(),
+            ),
+            Err(failure) => tracing::warn!(
+                event = "app_data_not_copied_from_container",
+                from = %from.display(),
+                detail = %failure,
+            ),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -236,6 +255,39 @@ mod tests {
             include_str!("../../../../macos/Runner/Configs/AppInfo.xcconfig")
                 .lines()
                 .any(|line| line.trim() == bundle)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_launches_adopt_preferences_and_publish_the_config_once() {
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let home = TempRoot::new("concurrent-container");
+        let home = home.path();
+        let config = container(home).join(KEPT[0]);
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("config.json"), b"original").unwrap();
+        let ready = Barrier::new(2);
+        let adoptions = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    ready.wait();
+                    migrate(home, false, |_| {
+                        assert!(!home.join(KEPT[0]).exists());
+                        adoptions.fetch_add(1, Ordering::Relaxed);
+                    })
+                    .unwrap();
+                });
+            }
+        });
+        assert_eq!(adoptions.into_inner(), 1);
+        assert_eq!(
+            std::fs::read(home.join(KEPT[0]).join("config.json")).unwrap(),
+            b"original"
         );
     }
 

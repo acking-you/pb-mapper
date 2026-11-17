@@ -93,6 +93,23 @@ pub(crate) enum WorkerExit {
     /// The backend failed for good (no backend, a lost helper or an
     /// unrecoverable encoder); the session ends with `Stopped{capture_failed}`.
     CaptureFailed(String),
+    /// The operating system withdrew capture consent. Ends this session without reconnecting.
+    CaptureEnded(String),
+}
+
+impl WorkerExit {
+    fn capture_error(failure: io::Error) -> Self {
+        if capture_consent_ended(&failure) {
+            Self::CaptureEnded(failure.to_string())
+        } else {
+            Self::CaptureFailed(failure.to_string())
+        }
+    }
+}
+
+fn capture_consent_ended(failure: &io::Error) -> bool {
+    crate::failure_kind(failure) == Some(crate::FailureKind::ConsentRevoked)
+        || crate::missing_permission(failure) == Some(crate::Permission::ScreenCapture)
 }
 
 /// Thread C of one session. It exits on `shared.cancel` or fatally; `exited`
@@ -216,14 +233,14 @@ fn run<B: Backend>(
                 state.record.reason = Some(unavailable_reason(&failure));
                 state.record.message = failure.to_string();
             });
-            return WorkerExit::CaptureFailed(failure.to_string());
+            return WorkerExit::capture_error(failure);
         }
     };
     loop {
         match engine.iterate() {
             Step::Wait(deadline) => {
                 if let Err(failure) = waiter.wait(deadline) {
-                    return WorkerExit::CaptureFailed(failure.to_string());
+                    return WorkerExit::capture_error(failure);
                 }
             }
             Step::Exit(exit) => return exit,
@@ -286,8 +303,8 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     /// Held input was released for a presentation gone stale; nothing new is
     /// admitted until a fresh one arrives.
     stale_released: bool,
-    /// A sticky backend link failure: the session ends.
-    fatal: Option<String>,
+    /// A terminal backend error, kept typed until the session chooses its stop reason.
+    fatal: Option<io::Error>,
     window: Window,
     /// The lane's commands while they run, reused by every drain.
     drained: VecDeque<(LaneCommand, Instant)>,
@@ -381,14 +398,16 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if !self.drain_lane() {
             return Step::Exit(WorkerExit::Cancelled);
         }
-        self.renew_lease(now);
-        self.capture_step(now);
-        // Input queued during the backend call runs right after it.
-        if !self.drain_lane() {
+        if self.fatal.is_none() {
+            self.renew_lease(now);
+            self.capture_step(now);
+        }
+        // Only a live capture may execute input queued during its backend call.
+        if self.fatal.is_none() && !self.drain_lane() {
             return Step::Exit(WorkerExit::Cancelled);
         }
         if let Some(failure) = self.fatal.take() {
-            return Step::Exit(WorkerExit::CaptureFailed(failure));
+            return Step::Exit(WorkerExit::capture_error(failure));
         }
         let now = self.clock.now();
         self.sample_cursor(now);

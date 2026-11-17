@@ -393,6 +393,7 @@ pub(crate) async fn run<S>(
             exit = &mut worker => {
                 exited = true;
                 match exit {
+                    WorkerExit::CaptureEnded(message) => session.end(StopReason::HostEnded, message),
                     WorkerExit::CaptureFailed(failure) => session.end(StopReason::CaptureFailed, failure),
                     WorkerExit::Cancelled => session.close(),
                 }

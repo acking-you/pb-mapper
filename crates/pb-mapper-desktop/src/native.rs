@@ -196,12 +196,13 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         let image = video
             .set_rate(rate)
             .and_then(|()| video.drain())
-            .and_then(|image| video.submit(keyframe).map(|()| image));
+            .and_then(|image| video.submit(keyframe).map(|()| image))
+            .inspect_err(|_| self.video = None)?;
         if &self.context()? != expected {
             self.video = None;
             return Err(error("desktop changed during video capture"));
         }
-        image.inspect_err(|_| self.video = None)
+        Ok(image)
     }
     /// Never blocks: the wait bounds only the helper's long-poll. A drain
     /// checks no desktop: it only collects output of submits `capture_video`

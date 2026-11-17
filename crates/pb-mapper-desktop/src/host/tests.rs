@@ -373,6 +373,66 @@ async fn a_late_description_falls_back_to_the_launcher() {
     host.stop().await.unwrap();
 }
 
+/// A JPEG capture that loses consent ends the session on the wire. The viewer
+/// treats HostEnded as a deliberate disconnect and does not reconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withdrawn_capture_consent_ends_the_viewer_session() {
+    struct Stopped;
+    impl crate::Backend for Stopped {
+        fn display(&mut self) -> Result<crate::Display> {
+            crate::Backend::display(&mut Pixel)
+        }
+        fn capture(&mut self) -> Result<Vec<u8>> {
+            Err(
+                crate::BackendError::new(crate::FailureKind::ConsentRevoked, "capture stopped")
+                    .into(),
+            )
+        }
+        fn input(&mut self, _: &crate::Input) -> Result<()> {
+            Err(error("read-only test backend"))
+        }
+        fn release(&mut self) {}
+    }
+
+    let relay = pb_mapper_testkit::Relay::start("desktop-capture-consent").await;
+    let client = Client::from_credential(
+        relay.addr().to_string(),
+        pb_mapper_testkit::admin_credential(),
+        true,
+        None,
+    );
+    let host = Host::builder(options())
+        .backend(|| Ok(Stopped))
+        .start(&client)
+        .await
+        .unwrap();
+    let invitation = host.invitation();
+    let (mut viewer, answer) = authenticate(
+        &client,
+        invitation,
+        invitation.token_text(),
+        vec![VideoCodec::Jpeg],
+    )
+    .await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match next(&mut viewer).await {
+                Some(HostMessage::Stopped { reason, .. }) => {
+                    assert_eq!(reason, StopReason::HostEnded);
+                    break;
+                }
+                Some(HostMessage::State(_)) => {}
+                other => panic!("unexpected message after capture stopped: {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(viewer);
+    host.stop().await.unwrap();
+}
+
 /// The only test that breaks an H.265 encoder: that turns H.265 off for
 /// the whole test process.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

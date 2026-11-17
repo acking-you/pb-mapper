@@ -14,7 +14,12 @@
 use crate::{FailureKind, Result, error, failure_kind, platform::DisplayModes};
 use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, time::Duration};
+use std::{
+    fs::File,
+    io::{self, Read},
+    path::PathBuf,
+    time::Duration,
+};
 
 /// The most modes a list carries.
 const MAX_MODES: usize = 64;
@@ -25,6 +30,8 @@ pub(crate) const MAX_SIDE: u32 = 32_768;
 const MAX_ENTRIES: usize = 16;
 /// The longest scope an entry keeps.
 const MAX_SCOPE: usize = 512;
+/// Fits all 16 entries even with every byte of their scope JSON-escaped.
+const MAX_JOURNAL_BYTES: u64 = 64 * 1024;
 /// The in-process journal's file in its state directory.
 pub(crate) const JOURNAL: &str = "display-modes.json";
 /// How long after a change a capture failure is the display still changing,
@@ -264,41 +271,47 @@ impl Journal {
         }
     }
 
-    /// Whether it still names a display to put back.
+    /// Whether recovery may have work. An unreadable journal still needs a retry.
     pub(crate) fn pending(&self) -> bool {
-        !self.read().is_empty()
+        self.path
+            .as_ref()
+            .is_some_and(|path| path.try_exists().unwrap_or(true))
     }
 
-    /// Its entries. A file that fails validation is discarded, never acted
-    /// on.
-    fn read(&self) -> Vec<Entry> {
+    /// Read under the claims lock. A transient I/O failure must never turn into
+    /// an empty journal that a subsequent mode change can overwrite.
+    fn read(&self) -> Result<Vec<Entry>> {
         let Some(path) = &self.path else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-            Err(failure) => {
-                tracing::warn!(
-                    target: "pb_mapper_desktop::session",
-                    event = "display_mode_journal_unreadable",
-                    detail = %failure,
-                );
-                return Vec::new();
-            }
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(failure) if failure.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(failure) => return Err(failure),
         };
-        match serde_json::from_slice::<Stored>(&bytes) {
-            Ok(stored) if stored.valid() => stored.entries,
-            _ => {
-                tracing::warn!(
-                    target: "pb_mapper_desktop::session",
-                    event = "display_mode_journal_discarded",
-                    path = %path.display(),
-                );
-                let _ = std::fs::remove_file(path);
-                Vec::new()
-            }
+        let mut bytes = Vec::new();
+        file.take(MAX_JOURNAL_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_JOURNAL_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "display mode journal exceeds size limit",
+            ));
         }
+        if let Ok(stored) = serde_json::from_slice::<Stored>(&bytes)
+            && stored.valid()
+        {
+            if stored.entries.is_empty() {
+                self.write(Vec::new())?;
+            }
+            return Ok(stored.entries);
+        }
+        tracing::warn!(
+            target: "pb_mapper_desktop::session",
+            event = "display_mode_journal_discarded",
+            path = %path.display(),
+        );
+        self.write(Vec::new())?;
+        Ok(Vec::new())
     }
 
     /// Replace its entries, durably; none removes the file.
@@ -317,13 +330,19 @@ impl Journal {
             version: Stored::VERSION,
             entries,
         };
+        if !stored.valid() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "display mode change cannot be journalled",
+            ));
+        }
         let bytes = serde_json::to_vec(&stored).map_err(std::io::Error::other)?;
         crate::trust::write_durably(path, &bytes)
     }
 
     /// Its entries with `device`'s replaced by `entry`, or removed.
     fn put(&self, device: &str, entry: Option<Entry>) -> Result<()> {
-        self.put_into(self.read(), device, entry)
+        self.put_into(self.read()?, device, entry)
     }
 
     /// `entries`, just read from it, with `device`'s replaced by `entry`, or
@@ -447,7 +466,7 @@ impl Guard {
             (None, Some(at)) => claims[at].original,
             (None, None) => modes.current(device)?,
         };
-        let entries = self.journal.read();
+        let entries = self.journal.read()?;
         let before = entries.iter().find(|entry| entry.device == device).cloned();
         self.journal.put_into(
             entries,
@@ -556,7 +575,7 @@ impl Drop for Guard {
 /// left to it. How many were restored.
 pub(crate) fn recover<M: DisplayModes>(modes: &mut M, journal: &Journal) -> Result<usize> {
     let claims = claims();
-    let entries = journal.read();
+    let entries = journal.read()?;
     if entries.is_empty() {
         return Ok(0);
     }
@@ -798,6 +817,34 @@ mod tests {
         assert_eq!(display.resets.len(), 1);
     }
 
+    #[test]
+    fn a_journal_read_failure_preserves_the_record_and_display() {
+        let (_dir, journal) = journal("read-failure");
+        let path = journal.path.as_ref().unwrap();
+        std::fs::create_dir_all(path).unwrap();
+        let mut display = steered();
+        assert!(recover(&mut display, &journal).is_err());
+        assert!(path.is_dir() && journal.pending());
+        std::fs::remove_dir(path).unwrap();
+
+        // A sparse file beyond the read budget is kept for inspection.
+        File::create(path)
+            .unwrap()
+            .set_len(MAX_JOURNAL_BYTES + 1)
+            .unwrap();
+        let before = display.current;
+        let mut host = Guard::new(journal.clone());
+        let failure = host
+            .set(&mut display, r"\\.\DISPLAY919", mode(1280, 720))
+            .unwrap_err();
+        assert_eq!(failure.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::metadata(path).unwrap().len(),
+            MAX_JOURNAL_BYTES + 1
+        );
+        assert_eq!(display.current, before);
+    }
+
     /// A mode of the host's size that its owner picked meanwhile, a Mac's
     /// HiDPI twin or another refresh rate, is the owner's: a restore (session
     /// end, revoke, the owner's Restore) and a replay after a crash leave it.
@@ -883,6 +930,7 @@ mod tests {
         let named = |journal: &Journal| -> Vec<String> {
             journal
                 .read()
+                .unwrap()
                 .into_iter()
                 .map(|entry| entry.device)
                 .collect()

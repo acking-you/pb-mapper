@@ -1,7 +1,8 @@
 //! Thread C's capture: the desktop context, the encoder and its output.
 
 use super::{
-    CONTEXT_CHECK_INTERVAL, Clock, ENCODER_DEPTH, Engine, H265_FAILED, TRANSPORT_GATE, link_lost,
+    CONTEXT_CHECK_INTERVAL, Clock, ENCODER_DEPTH, Engine, H265_FAILED, TRANSPORT_GATE,
+    capture_consent_ended, link_lost,
 };
 use crate::{
     Backend, EncodedFrame, FailureKind, Result, VideoCodec, VideoRate, error, failure_kind,
@@ -77,11 +78,13 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     /// capture pace. A sticky link failure ends the session instead, and so
     /// does an H.265 encoder that would not build or encode: H.265 is then
     /// off for the rest of the process, and the viewer reconnects to H.264.
+    /// Withdrawing capture consent ends the session without an automatic reconnect.
     pub(super) fn fail(&mut self, failure: io::Error, now: Instant) {
-        let message = failure.to_string();
-        if link_lost(&failure) {
-            self.fatal = Some(message.clone());
-        } else if self.codec == VideoCodec::H265
+        if link_lost(&failure) || capture_consent_ended(&failure) {
+            self.fatal = Some(failure);
+            return;
+        }
+        if self.codec == VideoCodec::H265
             && failure_kind(&failure)
                 == Some(FailureKind::EncoderFailed {
                     codec: VideoCodec::H265,
@@ -91,9 +94,10 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             tracing::warn!(
                 target: "pb_mapper_desktop::session",
                 event = "desktop_h265_failed",
-                detail = ?message,
+                detail = %failure,
             );
-            self.fatal = Some(message.clone());
+            self.fatal = Some(failure);
+            return;
         }
         self.context_due = if self.unavailable.is_none() && self.streaming {
             self.invalidate();
@@ -107,7 +111,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         } else {
             unavailable_reason(&failure)
         };
-        self.unavailable = Some((reason, message));
+        self.unavailable = Some((reason, failure.to_string()));
     }
 
     /// Capturing, not paused, with a frame produced in this generation.
