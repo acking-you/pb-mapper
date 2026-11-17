@@ -406,7 +406,7 @@ On first launch it asks where your relay is and for this computer's credential. 
 
 The app goes direct the way the CLI does: each connection tries a direct path first and uses the relay when that fails, and each share lets connections reach it directly. **More options** in the tunnel form turns that off for one tunnel, as `--relay-only` does.
 
-Closing the window keeps it in the tray; quit from the tray menu.
+Closing the window keeps the app in the tray. Quit from the tray menu, or on macOS use **Quit** in the Dock or application menu, or press **⌘Q**.
 
 ### Remote desktop in the app
 

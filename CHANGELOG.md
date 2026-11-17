@@ -3,6 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- On macOS, Quit from the Dock or application menu and Command-Q now end desktop sessions and quit the app. Closing the window keeps it in the menu bar.
 - Concurrent Mac app launches now serialize migration from the old sandbox container. Preferences are adopted before the migrated configuration is published, so an interrupted copy can resume on the next launch.
 - Stopping screen capture in macOS ends the current remote desktop session and stops automatic reconnection. Video and JPEG capture both report a missing Screen Recording grant. Display mode changes preserve the recovery journal and leave the current mode in place if the journal cannot be read or updated.
 - The Mac host starts a new share in view-only mode when Accessibility is missing. The Remote page refreshes permissions and displays when returning from System Settings, and stops polling an idle host while its window is hidden. The macOS build uses the selected Xcode SDK’s minimum deployment target when required.
