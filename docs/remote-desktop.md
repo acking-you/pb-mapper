@@ -125,6 +125,11 @@ runs, and resumes with the app when **Share this computer** was left on.
   `PERMISSION_MISSING`; an input without Accessibility ends control
   (`input_failed`, naming Accessibility), because macOS would drop the events
   silently, and viewing goes on.
+- For a local build alongside the installed release, use
+  `make build-ui-macos-local`. Open `pb-mapper-local.app` and grant Screen
+  Recording to that copy. **Show this app in Finder** selects the running
+  bundle so you can add it with **+** in System Settings. An ad-hoc signed
+  build may need a new grant after recompilation.
 - The app is not sandboxed since 0.12.0. The App Sandbox denies posting input
   to other apps, and an app that controls others cannot be sandboxed; it
   ships outside the App Store, signed with Developer ID and the Hardened

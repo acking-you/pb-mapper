@@ -355,6 +355,8 @@
   "hostPermissionInputTitle": "辅助功能",
   "hostPermissionInputBody": "远程控制鼠标和键盘需要“辅助功能”权限。未允许时，查看者只能观看。",
   "hostPermissionOpen": "在“系统设置”中允许",
+  "hostPermissionAppHint": "已经允许过 pb-mapper？在系统设置中点「+」，选择当前运行的这个应用。",
+  "hostPermissionRevealApp": "在访达中显示当前应用",
   "hostDisplayModeChanged": "查看端已将此显示器改为 {size}",
   "@hostDisplayModeChanged": {"placeholders": {"size": {"type": "String"}}},
   "hostDisplayModeRestore": "恢复",

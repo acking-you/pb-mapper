@@ -40,6 +40,8 @@ build-ui-linux-release: build-pb-mapper-ffi-linux build-ui-linux-release-no-ffi
 # Restricted to the host arch so the .app matches the host-only FFI dylib;
 # without this Flutter emits a universal binary whose x86_64 slice has no dylib.
 MACOS_HOST_ARCH := $(shell uname -m)
+build-ui-macos-local: export FLUTTER_XCODE_PB_MAPPER_LOCAL_SUFFIX = -local
+build-ui-macos-local: build-ui-macos-release
 build-ui-macos-release: build-pb-mapper-ffi-macos
 build-ui-macos-release build-ui-macos-release-no-ffi:
 	cd ui && flutter clean
@@ -96,6 +98,7 @@ release-pb-mapper-x86-64-musl-docker-image: build-pb-mapper-x86_64_musl
 	build-ui-linux-release-no-ffi \
 	build-ui-linux-release \
 	build-ui-macos-release-no-ffi \
+	build-ui-macos-local \
 	build-ui-macos-release \
 	build-ui-windows-release-no-ffi \
 	build-ui-windows-release \

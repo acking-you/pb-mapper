@@ -412,6 +412,8 @@
   "hostPermissionInputTitle": "Accessibility",
   "hostPermissionInputBody": "Remote control of the mouse and keyboard needs Accessibility. Without it, viewers can only watch.",
   "hostPermissionOpen": "Allow in System Settings",
+  "hostPermissionAppHint": "Already allowed pb-mapper? Use the + button in System Settings to choose the copy running now.",
+  "hostPermissionRevealApp": "Show this app in Finder",
   "hostDisplayModeChanged": "A viewer changed this display to {size}",
   "@hostDisplayModeChanged": {"placeholders": {"size": {"type": "String"}}},
   "hostDisplayModeRestore": "Restore",

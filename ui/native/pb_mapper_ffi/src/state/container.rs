@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(later.directories, [(container.join(KEPT[1]), support)]);
         assert!(!later.preferences);
         assert_eq!(plan(home, true, in_container).directories, []);
-        let bundle = format!("PRODUCT_BUNDLE_IDENTIFIER = {BUNDLE}");
+        let bundle = format!("PB_MAPPER_RELEASE_BUNDLE_ID = {BUNDLE}");
         assert!(
             include_str!("../../../../macos/Runner/Configs/AppInfo.xcconfig")
                 .lines()

@@ -19,6 +19,16 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    let appLocation = FlutterMethodChannel(
+      name: "pb_mapper/app_location", binaryMessenger: flutterViewController.engine.binaryMessenger)
+    appLocation.setMethodCallHandler { call, result in
+      guard call.method == "reveal" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+      result(nil)
+    }
     // The remote desktop's H.264/H.265 decoder (ui/darwin/DesktopVideo.swift).
     DesktopVideoPlugin.register(
       with: flutterViewController.registrar(forPlugin: "PbMapperDesktopVideo"))

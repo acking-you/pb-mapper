@@ -482,6 +482,7 @@ class HostPermissions extends StatelessWidget {
       'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
   static const _accessibility =
       'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility';
+  static const _appLocation = MethodChannel('pb_mapper/app_location');
 
   @override
   Widget build(BuildContext context) {
@@ -508,6 +509,17 @@ class HostPermissions extends StatelessWidget {
             title: l10n.hostPermissionInputTitle,
             body: l10n.hostPermissionInputBody,
           ),
+        if (Platform.isMacOS) ...[
+          const SizedBox(height: 12),
+          Text(l10n.hostPermissionAppHint),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: TextButton(
+              onPressed: () => _appLocation.invokeMethod<void>('reveal'),
+              child: Text(l10n.hostPermissionRevealApp),
+            ),
+          ),
+        ],
       ],
     );
   }

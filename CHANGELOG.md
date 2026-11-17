@@ -3,6 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- On macOS, the remote desktop permission card can reveal the running app in Finder. `make build-ui-macos-local` builds a separately named app with its own privacy settings for local testing.
 - On macOS, Quit from the Dock or application menu and Command-Q now end desktop sessions and quit the app. Closing the window keeps it in the menu bar.
 - Concurrent Mac app launches now serialize migration from the old sandbox container. Preferences are adopted before the migrated configuration is published, so an interrupted copy can resume on the next launch.
 - Stopping screen capture in macOS ends the current remote desktop session and stops automatic reconnection. Video and JPEG capture both report a missing Screen Recording grant. Display mode changes preserve the recovery journal and leave the current mode in place if the journal cannot be read or updated.
