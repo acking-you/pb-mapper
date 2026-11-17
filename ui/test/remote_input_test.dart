@@ -762,6 +762,17 @@ void main() {
         ['shift↓', 'tab↓', 'tab↑'],
         ['shift↑'],
       ]);
+
+      // Ctrl latched on the bar, Shift held here, and the input method
+      // commits "A": Ctrl+Shift+A, the waiting Shift ahead of the tap.
+      h.latch.tap(RemoteKey.control);
+      await press(tester, LogicalKeyboardKey.shiftLeft);
+      h.input.typeText('A');
+      await lift(tester, LogicalKeyboardKey.shiftLeft);
+      expect(h.sent(), [
+        ['shift↓', 'control↓', 'a↓', 'a↑', 'control↑'],
+        ['shift↑'],
+      ]);
       h.dispose();
     },
   );

@@ -399,9 +399,9 @@ final class RemoteInput implements RemotePointerSink {
       index++;
       if (key != null) {
         _sendText(g, pending);
-        _wrapped(g, {
-          if (key.$2) RemoteKey.shift,
-        }, (mods) => KeyRouting.tap(key.$1, mods));
+        // A tap like the bar's: a modifier held here but still waiting goes
+        // first, since the wrap leaves out what is held here.
+        tapKey(key.$1, extra: {if (key.$2) RemoteKey.shift});
       } else {
         pending.write(c);
         // A latch cannot apply to text, and must not linger.
