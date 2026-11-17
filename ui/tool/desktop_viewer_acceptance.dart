@@ -42,6 +42,7 @@ import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_viewer.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
 import 'package:pb_mapper_ui/src/theme/viewer_palette.dart';
+import 'package:window_manager/window_manager.dart';
 
 /// Samples before this are startup, not steady state.
 const _warmup = Duration(seconds: 5);
@@ -53,9 +54,15 @@ bool get _touch =>
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (!_touch) {
+    await windowManager.ensureInitialized();
+    await windowManager.show();
+    await windowManager.focus();
+  }
   final setup = Uri.parse(const String.fromEnvironment('setupUrl'));
   const defaultSeconds = int.fromEnvironment('seconds', defaultValue: 30);
   const defaultRelayOnly = bool.fromEnvironment('relayOnly');
+  const cycleWindow = bool.fromEnvironment('cycleWindow');
   const defaultLanFirst = bool.fromEnvironment('lanFirst', defaultValue: true);
   final quality =
       DesktopQuality.values.asNameMap()[const String.fromEnvironment(
@@ -173,6 +180,13 @@ Future<void> main() async {
     for (var i = 0; i < seconds; i++) {
       await Future<void>.delayed(const Duration(seconds: 1));
       run.samples.add(await run.sample(texture));
+      if (cycleWindow && !_touch) {
+        if (i == 7) await windowManager.hide();
+        if (i == 11) {
+          await windowManager.show();
+          await windowManager.focus();
+        }
+      }
     }
     final ending = await run.disconnect('$directory/acceptance.thumb');
     final report = {

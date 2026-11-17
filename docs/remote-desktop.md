@@ -13,8 +13,8 @@ policy. The development process is not elevated; it cannot approve its own UAC
 prompt. Android validation uses the Windows machine's Android VM, as requested
 by the user. This does not establish physical-phone or iOS support, independent
 cross-NAT operation, or the same presentation rate on every target device. The
-macOS host and the macOS and iOS viewers are compiled, linked and unit-tested
-in CI but have never run on a real Mac or iPhone, and the Linux viewer has run
+macOS host and viewer have streamed on an M3 Pro. iOS device testing remains
+outstanding, and the Linux viewer has run
 only in WSL2 (see
 [Measurements and remaining acceptance](#measurements-and-remaining-acceptance)).
 
@@ -119,7 +119,9 @@ runs, and resumes with the app when **Share this computer** was left on.
   which prompts the first time, and otherwise opens Privacy & Security on the
   right page. **Screen Recording** is needed to share at all and takes effect
   once the app is reopened; **Accessibility** is needed for control and takes
-  effect at once. A start without Screen Recording fails with
+  effect at once. When Accessibility is missing, the app offers view-only
+  sharing. Returning from System Settings refreshes the host card. A start
+  without Screen Recording fails with
   `PERMISSION_MISSING`; an input without Accessibility ends control
   (`input_failed`, naming Accessibility), because macOS would drop the events
   silently, and viewing goes on.
@@ -146,13 +148,12 @@ runs, and resumes with the app when **Share this computer** was left on.
   ordinary timers ran up to 134 ms late, that kept a 60 fps session at 60
   frames a second ([Timers on a Mac host](#timers-on-a-mac-host)).
 
-None of this has run on a real Mac yet. CI compiles, links and unit-tests it
+The M3 Pro hardware run covered screen capture and view-only streaming. CI also tests it
 on a macOS runner: the VideoToolbox encoder (keyframes only when asked, each
 with its parameter sets), the display list, and reading the system pointer
 off the main thread in a window-server session. The app with the FFI library
-that carries this host also builds there. What needs a Mac and its owner
-(the permissions and their prompts, capture, input, display modes, the
-sandbox, the Keychain) has not been checked.
+that carries this host also builds there. Permission prompts, input injection, mode changes and Keychain persistence
+still need separate hardware acceptance.
 
 ## Gestures, keys and modifiers
 
@@ -944,8 +945,8 @@ does not require Flutter or a POCOX runtime.
 
 The host is split by platform at compile time; the engine, the session,
 QoS, credit, the protocol, the viewer and the SDK name no operating system.
-Windows and macOS are implemented; macOS is compiled, linked and unit-tested
-in CI but has never run on a real Mac. This
+Windows and macOS are implemented. The macOS host is tested in CI, with
+capture and view-only streaming also exercised on an M3 Pro. This
 section is the guide for the next ones (Linux, Android), in the spirit of
 RustDesk's per-platform services but monomorphised: no per-frame dynamic
 dispatch.
@@ -1014,7 +1015,7 @@ crates/pb-mapper-desktop/src/
   privileged/                                    public helper facade
 ```
 
-| Part | Windows | macOS (unit-tested in CI, not run on a Mac) |
+| Part | Windows | macOS |
 | --- | --- | --- |
 | `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope | `CGDirectDisplayID` from `CGGetActiveDisplayList`, named by its UUID, which finds it again; `CGDisplayBounds` × the current mode's pixels per point; a session that is not on the console, or a locked screen, is the secure desktop |
 | `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`), drained every 2 ms | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
@@ -1180,7 +1181,7 @@ the bitrate is set live, and sample times follow the real capture interval.
 GPU scaling preserves aspect ratio and never upscales; input and cursor
 coordinates still use the physical `Display` geometry.
 
-macOS hosting (its encoder unit-tested in CI; not run on a real Mac) uses
+macOS hosting uses
 ScreenCaptureKit, which scales the
 display to the encoder's size and delivers NV12 (BT.709) without the cursor;
 its output queue keeps only the newest complete picture, and thread C's
@@ -1853,7 +1854,7 @@ alike. A process outside the console session, such as one in a remote
 session, cannot query the paths and reads the display modes' whole hertz
 instead; the app allows a hertz of slack, so 59 still offers 60.
 
-On macOS and iOS (not yet run on a device) VideoToolbox has no size query, so
+On macOS and iOS VideoToolbox has no size query, so
 the bounds are by device class: H.264 up to 3840×2160 on every Mac, where
 VideoToolbox decodes in software when the hardware cannot, and on iOS
 devices with HEVC hardware (A9 and later), else 1920×1080; H.265 up to
@@ -1972,8 +1973,8 @@ each failure unless the source is paused; at most two textures. A stream
 whose VUI names no colour matrix is read as BT.709, which every pb-mapper
 host encodes.
 
-**macOS and iOS** (`ui/darwin/DesktopVideo.swift`, compiled into both
-runners; CI builds both apps with it, but it has never run on a device). One
+**macOS and iOS** share `ui/darwin/DesktopVideo.swift`. An M3 Pro decoded
+H.264 and H.265 through this runner; iOS has build coverage in CI. One
 decoder thread per attached source pulls
 with a 50 ms timeout and decodes synchronously in real time, so nothing is
 reordered or held back. The runner turns Annex B into 4-byte length-prefixed
@@ -2113,11 +2114,13 @@ What each platform's new code has been through:
   session, and thread C's waiter, whose 2 ms waits end less than 2 ms late
   at the median. On the same runner the session tests pace a 60 fps session
   at 60 frames a second ([Timers on a Mac host](#timers-on-a-mac-host)). Its
-  pure parts are also tested on Windows and Linux. It has never run on a
-  real Mac.
+  pure parts are also tested on Windows and Linux. On an M3 Pro the native
+  host captured both a Retina panel and an external display, and streamed
+  the external display to the Mac viewer over a loopback relay.
 - **macOS and iOS viewers.** CI builds the macOS app and the unsigned iOS
   app with the Swift decoder. The iOS app links the FFI static library and
-  exports its entry points. Neither has run on a device.
+  exports its entry points. The M3 Pro viewer decoded H.264 and H.265 in
+  hardware and wrote a thumbnail on disconnect. iOS device testing is pending.
 - **Older peers.** A host and a viewer of this revision each ran against
   the other side built from the tree before it (`151ed8d7`, 0.11.0's desktop
   protocol), with the SDK's synthetic host (`desktop_loopback --serve`) and
@@ -2135,7 +2138,8 @@ What each platform's new code has been through:
   - This lasts until netwatch takes a netdev that gates the type (netdev
     0.47) or libc defines it for iOS.
 
-None of macOS or iOS has been measured. The data paths were measured before
+The [M3 Pro hardware record](benchmarks/2026-11-17-macos-desktop/README.md)
+covers the macOS viewer, host and window lifecycle. The data paths were measured before
 and after on Windows in
 [the 2026-11-12 record](benchmarks/2026-11-12-remote-desktop-platforms/README.md):
 - unchanged allocations per video unit, with and without pointer input;
@@ -2304,10 +2308,10 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Direct and forced relay | Android VM runtime baselines above and deployed TCP experiments recorded; independent cross-network UI acceptance outstanding |
 | Android viewer | Native MediaCodec/Flutter texture path exercised in an Android VM; physical phone validation outstanding |
 | iOS viewer | Native VideoToolbox path; the app, linking the FFI static library (built without netdev, so no port mapping on iOS), is built unsigned in CI with its exports checked; device validation outstanding |
-| macOS viewer | Native VideoToolbox path; the app is built in CI; a Mac's validation outstanding |
+| macOS viewer | VideoToolbox hardware decoding of H.264 and H.265 on an M3 Pro; thumbnail written on disconnect |
 | Linux viewer | Native GStreamer path ran in WSL2 (WSLg) with NVDEC and gst-libav, against a host replaying recorded clips; CI builds the app and decodes clips with software decoders; VA-API, V4L2 and a real Linux desktop outstanding |
-| macOS host | Compiled, linked and unit-tested in CI on a macOS runner (the encoder, the display list, the pointer read in a window-server session, thread C's waiter, a 60 fps session paced at 60 frames a second); never run on a real Mac |
-| Pointer shapes | Windows host's shapes read over an owned window through a viewer, the custom one pixel for pixel; the Windows app and the Android emulator paint the host's shapes; in the Windows app, against a host replaying a clip, the real local pointer took the host's shapes in control, one pointer showing; the bitmap's growth with Android pinch zoom not seen; macOS host's not run on a Mac |
+| macOS host | Compiled, linked and unit-tested in CI on a macOS runner (the encoder, the display list, the pointer read in a window-server session, thread C's waiter, a 60 fps session paced at 60 frames a second); view-only 1080p H.265 streaming on an M3 Pro |
+| Pointer shapes | Windows host's shapes read over an owned window through a viewer, the custom one pixel for pixel; the Windows app and the Android emulator paint the host's shapes; in the Windows app, against a host replaying a clip, the real local pointer took the host's shapes in control, one pointer showing; the bitmap's growth with Android pinch zoom not seen; macOS cursor shape fidelity awaits hardware comparison |
 | Keyboard modes and physical keys | Windows host injection, line breaks and the active input method's (WeType) composition through physical keys checked in an owned window; in the Windows app, against a host replaying a clip, real keystrokes through WeType checked: composition at the remote pointer to exactly the committed text, Enter and Backspace while composing, punctuation, the modifier rules, the remote mode's physical keys with the local input method detached, and the input method coming back; the Shortcuts menu checked with input posted to the app's view; a real second computer, Microsoft Pinyin and other input methods, and a Pinyin soft keyboard on Android outstanding |
 | Elevated windows / secure-desktop UAC | Helper implemented; default-policy administrator and standard-user prompt acceptance outstanding |
 | Remembered app-owned host policy | Current-user DPAPI; requires signed-in user and running app |

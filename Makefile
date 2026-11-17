@@ -40,15 +40,13 @@ build-ui-linux-release: build-pb-mapper-ffi-linux build-ui-linux-release-no-ffi
 # Restricted to the host arch so the .app matches the host-only FFI dylib;
 # without this Flutter emits a universal binary whose x86_64 slice has no dylib.
 MACOS_HOST_ARCH := $(shell uname -m)
-build-ui-macos-release-no-ffi:
+build-ui-macos-release: build-pb-mapper-ffi-macos
+build-ui-macos-release build-ui-macos-release-no-ffi:
 	cd ui && flutter clean
 	cd ui && flutter pub get
 	cd ui && FLUTTER_XCODE_ARCHS=$(MACOS_HOST_ARCH) \
 		FLUTTER_XCODE_ONLY_ACTIVE_ARCH=YES \
-		flutter build macos --release
-	# Ensure the .app bundle has the FFI library even if it already existed.
-	bash ./scripts/build/pb-mapper-ffi-macos.sh
-build-ui-macos-release: build-pb-mapper-ffi-macos build-ui-macos-release-no-ffi
+		bash ../scripts/build/flutter-macos.sh build macos --release
 
 # Build the Flutter Windows release app with the FFI library staged.
 build-ui-windows-release-no-ffi:

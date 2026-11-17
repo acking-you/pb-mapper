@@ -335,13 +335,13 @@ class DesktopStore {
   /// a frame, so the session's change is published after that frame.
   DesktopDemandHandle demand(DesktopDemand demand) {
     if (_disposed) return DesktopDemandHandle._(null);
+    _observeLifecycle();
     switch (demand) {
       case DesktopDemand.page:
         _pageDemand++;
-        unawaited(_onPageDemand());
+        if (_appVisible) unawaited(_onPageDemand());
       case DesktopDemand.viewer:
         _viewerDemand++;
-        _hookViewer();
     }
     scheduleMicrotask(_visibilityChanged);
     return DesktopDemandHandle._(() {
@@ -356,13 +356,24 @@ class DesktopStore {
     });
   }
 
-  void _hookViewer() {
+  void _observeLifecycle() {
     if (_lifecycle == null) {
       _lifecycleState = WidgetsBinding.instance.lifecycleState;
       _lifecycle = AppLifecycleListener(
         onStateChange: (state) {
+          final wasVisible = _appVisible;
           _lifecycleState = state;
           _visibilityChanged();
+          if (_hostPageVisible) {
+            if (!wasVisible && !_hostView.value.loaded) {
+              unawaited(_onPageDemand());
+            } else if (state == AppLifecycleState.resumed &&
+                _hostView.value.loaded &&
+                (_capabilities?.permissions != null ||
+                    _capabilities?.reason == 'no_display')) {
+              unawaited(_readHost(refreshCapabilities: true));
+            }
+          }
         },
       );
     }
@@ -374,12 +385,12 @@ class DesktopStore {
     }
   }
 
-  bool get _visible =>
-      _viewerDemand > 0 &&
-      switch (_lifecycleState) {
-        null || AppLifecycleState.resumed || AppLifecycleState.inactive => true,
-        _ => false,
-      };
+  bool get _appVisible => switch (_lifecycleState) {
+    null || AppLifecycleState.resumed || AppLifecycleState.inactive => true,
+    _ => false,
+  };
+  bool get _visible => _viewerDemand > 0 && _appVisible;
+  bool get _hostPageVisible => _pageDemand > 0 && _appVisible;
 
   void _visibilityChanged() {
     if (_disposed) return;
@@ -404,7 +415,7 @@ class DesktopStore {
   void _schedulePolling() {
     final hostEvery = _disposed || _restarting || _cannotHost
         ? null
-        : _pageDemand > 0
+        : _hostPageVisible
         ? _hostWithPage
         : _hostView.value.sharing
         ? _hostWhileSharing
@@ -414,7 +425,17 @@ class DesktopStore {
       _hostTimer?.cancel();
       _hostTimer = hostEvery == null
           ? null
-          : Timer.periodic(hostEvery, (_) => unawaited(_readHost()));
+          : Timer.periodic(hostEvery, (timer) {
+              final permissions = _capabilities?.permissions;
+              // Follow a grant or a reconnected display while the card is
+              // visible. Also notice a revoked grant or a second monitor.
+              final refresh =
+                  _hostPageVisible &&
+                  (_capabilities?.reason == 'no_display' ||
+                      (permissions != null &&
+                          (!permissions.complete || timer.tick % 5 == 0)));
+              unawaited(_readHost(refreshCapabilities: refresh));
+            });
     }
     final statusEvery = _disposed || !_sessionActive
         ? null
@@ -480,6 +501,18 @@ class DesktopStore {
   // ================================================================= host
 
   DesktopCapabilities? _capabilities;
+  int _capabilityReads = 0, _capabilityApplied = 0;
+
+  // A permission request can finish while an older monitor poll is in flight.
+  Future<void> _readCapabilities() async {
+    final read = ++_capabilityReads;
+    final capabilities = await _api.capabilities();
+    if (!_disposed && read > _capabilityApplied) {
+      _capabilityApplied = read;
+      _capabilities = capabilities;
+    }
+  }
+
   DesktopTrust? _trust;
 
   /// Why the remembered grant could not be read. It stays until a read
@@ -497,23 +530,19 @@ class DesktopStore {
   bool _hostCurrent(int serial) => !_disposed && serial == _hostSerial;
 
   /// The page already says this device cannot host. The capability is
-  /// fixed at build time, so nothing about the host can change; a missing
-  /// permission the owner can still grant.
+  /// fixed at build time. The owner can still grant permission or attach
+  /// a display.
   bool get _cannotHost =>
       _hostView.value.loaded &&
       !_hostView.value.supported &&
-      !_hostView.value.needsPermission;
+      !_hostView.value.needsPermission &&
+      _hostView.value.unsupportedReason != 'no_display';
 
   Future<void> _onPageDemand() async {
     if (_cannotHost) return;
     // An unreadable grant is read again on each visit, never on a timer.
     if (_hostView.value.loaded && _trustError == null) {
-      try {
-        _capabilities = await _api.capabilities();
-      } catch (_) {
-        // Keep the last answer; the helper row may lag one page visit.
-      }
-      await _readHost();
+      await _readHost(refreshCapabilities: true);
     } else {
       await _loadHost();
     }
@@ -521,7 +550,7 @@ class DesktopStore {
 
   Future<void> _loadHost() => _hostLoading ??= () async {
     try {
-      _capabilities = await _api.capabilities();
+      await _readCapabilities();
       await _readTrust(_hostSerial);
       await _discoverBackground();
       await _readHost();
@@ -562,18 +591,16 @@ class DesktopStore {
     _host = DesktopHostSnapshot(host: _host?.host, background: background);
   }
 
-  Future<void> _readHost() async {
+  Future<void> _readHost({bool refreshCapabilities = false}) async {
     if (_disposed) return;
-    // While the owner grants a permission in System Settings the card
-    // follows: macOS tells no one, so it is asked again with each read.
-    if (_capabilities?.permissions case final permissions?
-        when !permissions.complete) {
+    if (refreshCapabilities) {
       try {
-        _capabilities = await _api.capabilities();
+        await _readCapabilities();
       } catch (_) {
         // Keep the last answer.
       }
     }
+    if (_disposed) return;
     final read = ++_hostReads;
     try {
       final snapshot = await _api.hostStatus();
@@ -702,7 +729,7 @@ class DesktopStore {
       if (failure.code.startsWith('HELPER_') ||
           failure.code == 'PERMISSION_MISSING') {
         try {
-          _capabilities = await _api.capabilities();
+          await _readCapabilities();
         } catch (_) {
           // Keep the last answer.
         }
@@ -744,7 +771,7 @@ class DesktopStore {
       // A computer that cannot share (Windows without Media Foundation)
       // restores nothing and retries nothing: the grant stays for a start
       // where it can, and the Remote page says why. Local, no service IPC.
-      _capabilities = await _api.capabilities();
+      await _readCapabilities();
       if (!_hostCurrent(serial)) return;
       if (_capabilities?.host != true) {
         _publishHost();
@@ -792,7 +819,7 @@ class DesktopStore {
       if (!_hostCurrent(serial)) return;
       _hostResumeAttempt = 0;
       _hostError = null;
-      _capabilities = await _api.capabilities();
+      await _readCapabilities();
       await _discoverBackground();
       if (!_hostCurrent(serial)) return;
       await _readTrustAndHost(serial);
@@ -974,7 +1001,7 @@ class DesktopStore {
     var granted = false;
     try {
       granted = await _api.requestHostPermission(permission);
-      _capabilities = await _api.capabilities();
+      await _readCapabilities();
     } catch (e) {
       if (!_disposed) _hostError = _failureOf(e);
     }
@@ -1071,7 +1098,7 @@ class DesktopStore {
         _restart();
         return;
       }
-      _capabilities = await _api.capabilities();
+      await _readCapabilities();
       await _discoverBackground();
       await _readHost();
     });

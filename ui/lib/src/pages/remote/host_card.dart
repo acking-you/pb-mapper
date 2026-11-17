@@ -307,6 +307,8 @@ class _SetupCardState extends State<_SetupCard> {
   bool _allowControl = true;
   int? _displayId;
 
+  bool get _canControl => widget.view.permissions?.input ?? true;
+
   int? get _display {
     final v = widget.view;
     final ids = {for (final d in v.displays) d.id};
@@ -322,7 +324,7 @@ class _SetupCardState extends State<_SetupCard> {
     unawaited(
       AppScope.of(context).store.desktop.enableHost(
         displayId: display,
-        allowControl: _allowControl,
+        allowControl: _allowControl && _canControl,
         service: v.service ?? defaultServiceName(Platform.localHostname),
         ordinaryOnly: ordinaryOnly,
       ),
@@ -383,8 +385,8 @@ class _SetupCardState extends State<_SetupCard> {
                     l10n.hostAllowControl,
                     style: const TextStyle(fontSize: 13.5),
                   ),
-                  value: _allowControl,
-                  onChanged: busy
+                  value: _allowControl && _canControl,
+                  onChanged: busy || !_canControl
                       ? null
                       : (allow) => setState(() => _allowControl = allow),
                 ),
@@ -766,7 +768,7 @@ class _SharingCard extends StatelessWidget {
                 GlassSegment(
                   value: true,
                   label: l10n.hostPermissionControl,
-                  enabled: sharing && !v.held,
+                  enabled: sharing && !v.held && (v.permissions?.input ?? true),
                 ),
               ],
             ),

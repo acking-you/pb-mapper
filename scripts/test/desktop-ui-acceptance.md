@@ -111,6 +111,28 @@ Then start the installed app.
 Never install the tool as the product entry. Reinstall the product APK
 afterwards.
 
+## macOS viewer
+
+Run `make build-pb-mapper-ffi-macos` at the repository root. From `ui/`,
+build the acceptance entry in a separate checkout or build directory so its
+bundle stays separate from the product:
+
+```sh
+FLUTTER_XCODE_ARCHS="$(uname -m)" FLUTTER_XCODE_ONLY_ACTIVE_ARCH=YES \
+  ../scripts/build/flutter-macos.sh build macos --release \
+  --target tool/desktop_viewer_acceptance.dart \
+  --dart-define=setupUrl=http://127.0.0.1:18747/controller.json \
+  --dart-define=maxFps=60 --dart-define=cycleWindow=true
+open -n build/macos/Build/Products/Release/pb-mapper.app
+```
+
+For a view-only run on one Mac, serve the replay host below with
+`--relay-only --view-only`. A native `desktop_host` on a loopback relay
+can share a second display with Screen Recording permission. Leave control
+off. The optional `cycleWindow` switch hides the desktop viewer after eight
+samples and shows it again four samples later. Check `events` for pause and
+resume and `summary.resume_picture_ms` for the return of a fresh picture.
+
 ## Windows viewer
 
 Build the FFI library and helper with `scripts/build/pb-mapper-ffi-windows.ps1`,

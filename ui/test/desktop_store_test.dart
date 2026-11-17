@@ -203,6 +203,13 @@ void main() {
     api.calls.clear();
     await tester.pump(const Duration(seconds: 3));
     expect(api.ops, ['host_status', 'host_status', 'host_status']);
+    _lifecycle(tester, [AppLifecycleState.inactive, AppLifecycleState.hidden]);
+    api.calls.clear();
+    await tester.pump(const Duration(seconds: 8));
+    expect(api.calls, isEmpty);
+    _lifecycle(tester, [AppLifecycleState.inactive, AppLifecycleState.resumed]);
+    await tester.pump(const Duration(seconds: 1));
+    expect(count('host_status'), 1);
     page.dispose();
     await tester.pump();
     api.calls.clear();
@@ -271,6 +278,24 @@ void main() {
     expect(phoneApi.calls, isEmpty);
     phonePage.dispose();
     phone.dispose();
+  });
+
+  testWidgets('a display attached after a headless start can be shared', (
+    tester,
+  ) async {
+    final api = FakeDesktopApi();
+    final withDisplay = api.available;
+    api.available = const DesktopCapabilities(reason: 'no_display');
+    final store = DesktopStore(api);
+    final page = store.demand(DesktopDemand.page);
+    await tester.pump();
+    expect(store.hostView.value.supported, isFalse);
+    api.available = withDisplay;
+    await tester.pump(const Duration(seconds: 1));
+    expect(store.hostView.value.supported, isTrue);
+    expect(store.hostView.value.displays, withDisplay.displays);
+    page.dispose();
+    store.dispose();
   });
 
   testWidgets('a sharing or configured host always has its invitation', (

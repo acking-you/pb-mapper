@@ -179,8 +179,8 @@ Windows was the first and macOS the second; this is what runs where today:
 
 | Role | Where it runs today |
 | --- | --- |
-| Host | Windows with Media Foundation: GPU H.265 or H.264; the ordinary desktop, or also UAC prompts and the owner's lock screen through the opt-in helper. macOS 12.3 or later, from the app: ScreenCaptureKit into VideoToolbox, after the owner grants Screen Recording and Accessibility (compiled, linked and unit-tested in CI; never run on a real Mac) |
-| Viewer in the app | Every platform decodes H.265/H.264 natively: Windows and Android (run on hardware and in an Android VM), Linux through GStreamer (run in WSL2 only), macOS and iOS through VideoToolbox (both apps built in CI; never run on a real Mac or iPhone); without a decoder the picture is JPEG, up to 8 FPS |
+| Host | Windows with Media Foundation: GPU H.265 or H.264; the ordinary desktop, or also UAC prompts and the owner's lock screen through the opt-in helper. macOS 12.3 or later, from the app: ScreenCaptureKit into VideoToolbox, with Screen Recording for sharing and Accessibility for control. Capture and view-only streaming tested on an M3 Pro |
+| Viewer in the app | Every platform decodes H.265/H.264 natively: Windows and Android (run on hardware and in an Android VM), Linux through GStreamer (run in WSL2 only), macOS and iOS through VideoToolbox (hardware decoding tested on an M3 Pro; iOS device testing pending); without a decoder the picture is JPEG, up to 8 FPS |
 | Viewer in the SDK | Any OS, with the decoder you bring |
 
 **In the app:** on the computer to share, open **Remote desktop** and choose

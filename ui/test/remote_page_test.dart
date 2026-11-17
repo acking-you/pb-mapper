@@ -556,14 +556,32 @@ void main() {
       ]);
       expect(_key('host-permission-screen_capture'), findsNothing);
       expect(share().onPressed, isNotNull);
+      final control = tester.widget<SwitchListTile>(_key('host-allow-control'));
+      expect(control.value, isFalse);
+      expect(control.onChanged, isNull);
 
       await _tapIn(tester, _key('host-enable'));
       await settle(tester);
       expect(api.desktop.ops, isNot(contains('host_enable')));
       expect(api.desktop.argsOf('host_start').single['remember'], isTrue);
+      expect(api.desktop.argsOf('host_start').single['allow_control'], isFalse);
       // Sharing without Accessibility: control still asks for it, and the
       // Windows service is nowhere.
       expect(_key('host-permission-input'), findsOneWidget);
+      await _tapIn(tester, _key('host-permission-input-grant'));
+      await settle(tester);
+      await _tapIn(
+        tester,
+        find.descendant(
+          of: _key('host-permission'),
+          matching: find.text(l10n.hostPermissionControl),
+        ),
+      );
+      await settle(tester);
+      expect(
+        api.desktop.argsOf('host_permission').last['allow_control'],
+        isTrue,
+      );
       expect(find.text(l10n.hostSecure), findsNothing);
       await _tapIn(tester, _key('host-more'));
       await settle(tester);

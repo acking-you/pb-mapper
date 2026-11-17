@@ -84,8 +84,8 @@ jobs:
               ui/linux/*|scripts/build/check-linux-bundle.sh|scripts/test/linux-desktop-video.sh) flutter=true; linux=true ;;
               # The Apple runners and the video decoder they share.
               ui/macos/*|ui/ios/*|ui/darwin/*) flutter=true; apple=true ;;
-              # The scripts those apps' jobs build the FFI library with.
-              scripts/build/pb-mapper-ffi-macos.sh|scripts/build/pb-mapper-ffi-ios.sh) apple=true ;;
+              # The build scripts used by the Apple jobs.
+              scripts/build/pb-mapper-ffi-macos.sh|scripts/build/pb-mapper-ffi-ios.sh|scripts/build/flutter-macos.sh) apple=true ;;
               ui/*) flutter=true ;;
               js/*) node=true ;;
               # The Node-API addon is a workspace crate; SDK changes must also
@@ -614,7 +614,7 @@ jobs:
           set -euo pipefail
           flutter pub get
           FLUTTER_XCODE_ARCHS="$(uname -m)" FLUTTER_XCODE_ONLY_ACTIVE_ARCH=YES \
-            flutter build macos --debug
+            bash ../scripts/build/flutter-macos.sh build macos --debug
           test -f build/macos/Build/Products/Debug/pb-mapper.app/Contents/Frameworks/libpb_mapper_ffi.dylib
 
   ios-app:

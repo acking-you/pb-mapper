@@ -372,7 +372,7 @@ Nothing in the SDK crates knows it exists.
     (the one DPAPI call every Windows store uses), `win32` (the Win32 glue
     the host and the helper share), `modes.rs` and `helper/`
   - `platform/macos/` (macOS 12.3 or later; compiled, linked and
-    unit-tested in CI, not run on a real Mac): `mod.rs`
+    unit-tested in CI, with capture and streaming verified on an M3 Pro): `mod.rs`
     (`Macos`, its `support()` and the Screen Recording and Accessibility
     permissions), `capture.rs` (ScreenCaptureKit) and `encoder.rs`
     (`VTCompressionSession`) fused in `video.rs`, which pushes; `desktop.rs`
