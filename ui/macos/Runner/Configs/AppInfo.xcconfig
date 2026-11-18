@@ -5,10 +5,14 @@
 // 'flutter create' template.
 
 // The application's name. By default this is also the title of the Flutter window.
-PRODUCT_NAME = pb-mapper
+// The local test target adds "-local" so Finder and Privacy & Security can
+// distinguish it from an installed release.
+PRODUCT_NAME = pb-mapper$(PB_MAPPER_LOCAL_SUFFIX)
+EXECUTABLE_NAME = pb-mapper
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.pb-mapper.ui
+PB_MAPPER_RELEASE_BUNDLE_ID = com.pb-mapper.ui
+PRODUCT_BUNDLE_IDENTIFIER = $(PB_MAPPER_RELEASE_BUNDLE_ID)$(PB_MAPPER_LOCAL_SUFFIX)
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2025 pb-mapper. All rights reserved.

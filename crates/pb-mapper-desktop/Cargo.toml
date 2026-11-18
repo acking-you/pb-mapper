@@ -47,6 +47,23 @@ windows-service = { workspace = true, optional = true }
 # The background service's own log.
 tracing-subscriber = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-graphics.workspace = true
+objc2-core-media.workspace = true
+objc2-core-video.workspace = true
+objc2-screen-capture-kit.workspace = true
+objc2-video-toolbox.workspace = true
+objc2-app-kit.workspace = true
+objc2-image-io.workspace = true
+block2.workspace = true
+dispatch2.workspace = true
+objc2-security.workspace = true
+# Thread C's kqueue wait.
+libc.workspace = true
+
 [features]
 windows-helper = [
     "dep:windows-service",
@@ -65,6 +82,14 @@ tracing-subscriber.workspace = true
 pb-mapper-client = { workspace = true, features = ["relay-quic"] }
 pb-mapper-testkit.workspace = true
 pb-mapper-server = { workspace = true, features = ["p2p"] }
+
+# The cursor test loads AppKit's application, as the app has one.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder"] }
+
+# The input acceptance turns the input method of its own window on and off.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = ["Win32_UI_Input_Ime"] }
 
 [lints]
 workspace = true

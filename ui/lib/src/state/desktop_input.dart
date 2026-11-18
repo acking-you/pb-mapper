@@ -169,10 +169,23 @@ final class DesktopWheel extends DesktopInput {
   int get hashCode => Object.hash(horizontal, vertical);
 }
 
-final class DesktopKey extends DesktopInput {
+/// A key going down or up on the host: [DesktopKey] or
+/// [DesktopPhysicalKey].
+sealed class DesktopKeyInput extends DesktopInput {
+  const DesktopKeyInput();
+  bool get down;
+
+  /// The same key, released.
+  DesktopKeyInput get up;
+}
+
+final class DesktopKey extends DesktopKeyInput {
   const DesktopKey(this.key, this.down);
   final RemoteKey key;
+  @override
   final bool down;
+  @override
+  DesktopKey get up => DesktopKey(key, false);
   @override
   Map<String, Object?> toJson() => {
     'kind': 'key',
@@ -184,6 +197,33 @@ final class DesktopKey extends DesktopInput {
       other is DesktopKey && other.key == key && other.down == down;
   @override
   int get hashCode => Object.hash(key, down);
+}
+
+/// A key by its place on the keyboard, only to a host that listed
+/// `physical_keys`: [usage] is its USB HID usage on the keyboard page, and
+/// the host's layout and input method decide what it types.
+final class DesktopPhysicalKey extends DesktopKeyInput {
+  const DesktopPhysicalKey(this.usage, this.down)
+    : assert(usage >= minUsage && usage <= maxUsage);
+
+  /// The keyboard page's keys: below are error codes, above reserved.
+  static const minUsage = 0x04, maxUsage = 0xE7;
+  final int usage;
+  @override
+  final bool down;
+  @override
+  DesktopPhysicalKey get up => DesktopPhysicalKey(usage, false);
+  @override
+  Map<String, Object?> toJson() => {
+    'kind': 'physical_key',
+    'usage': usage,
+    'down': down,
+  };
+  @override
+  bool operator ==(Object other) =>
+      other is DesktopPhysicalKey && other.usage == usage && other.down == down;
+  @override
+  int get hashCode => Object.hash(usage, down);
 }
 
 final class DesktopText extends DesktopInput {

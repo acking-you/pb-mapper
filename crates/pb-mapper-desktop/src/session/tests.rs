@@ -67,7 +67,7 @@ impl Viewer {
                 .unwrap();
             match message {
                 HostMessage::Probe { .. } | HostMessage::Stats { .. } => {}
-                HostMessage::Video { .. } => {
+                HostMessage::Video { .. } | HostMessage::CursorShape(_) => {
                     let payload = wire::read_payload(&mut self.read).await.unwrap();
                     return (message, Some(payload));
                 }
@@ -125,7 +125,7 @@ async fn stale_generation_units_are_dropped_before_admission() {
         VideoLimits::for_viewer(60.0),
         QualityPreset::Balanced,
         &[],
-        false,
+        &[],
     );
     let shared = session.shared.clone();
     shared.state.send_replace(streaming(1));
@@ -152,8 +152,10 @@ async fn stale_generation_units_are_dropped_before_admission() {
                 x: 5,
                 y: 6,
                 visible: true,
+                shape: 0,
             },
             input_sequence: 0,
+            shape: None,
         })
     };
     let cursor = |message: &HostMessage| {
@@ -230,7 +232,7 @@ async fn a_unit_follows_the_state_it_was_published_with() {
         VideoLimits::for_viewer(60.0),
         QualityPreset::Balanced,
         &[],
-        false,
+        &[],
     );
     let shared = session.shared.clone();
     shared.cursor.send_replace(Some(CursorReport {
@@ -240,8 +242,10 @@ async fn a_unit_follows_the_state_it_was_published_with() {
             x: 5,
             y: 6,
             visible: true,
+            shape: 0,
         },
         input_sequence: 0,
+        shape: None,
     }));
     let cancel = shared.cancel.clone();
     let running = tokio::spawn(run(session.clone(), host, async move {
@@ -268,16 +272,39 @@ async fn a_unit_follows_the_state_it_was_published_with() {
     running.await.unwrap();
 }
 
-/// A cursor report carries the input watermark only to a viewer that
-/// listed `cursor_sequence`: an older one rejects a field it does not know.
+/// A cursor report carries the input watermark only to a viewer that listed
+/// `cursor_sequence`, and its shape only when both ends listed
+/// `cursor_shape`: any other viewer reads the bytes a 0.11.0 host wrote,
+/// since an older one rejects a field or message it does not know. A shape
+/// is defined once, ahead of the first report that names its slot.
 #[tokio::test]
-async fn the_cursor_watermark_goes_only_to_a_viewer_that_reads_it() {
-    for listed in [false, true] {
+async fn cursor_extras_go_only_to_a_viewer_that_reads_them() {
+    use crate::{CursorKind, CursorShape, protocol::CAPABILITY_CURSOR_SHAPE};
+    use tokio::io::AsyncReadExt;
+    let ibeam = CursorShape::new(CursorKind::Ibeam, 2, 3, (1, 2), vec![7; 24]).unwrap();
+    let report = |serial| CursorReport {
+        serial,
+        cursor: CursorUpdate {
+            generation: 1,
+            x: 5,
+            y: 6,
+            visible: true,
+            shape: 1,
+        },
+        input_sequence: 9,
+        shape: Some(ibeam.clone()),
+    };
+    let shapes = [CAPABILITY_CURSOR_SHAPE.to_owned()];
+    // (viewer lists them, host lists `cursor_shape`)
+    for (listed, offered) in [(false, true), (true, false), (true, true)] {
         let (viewer, host) = tokio::io::duplex(1 << 20);
         let (read, write) = tokio::io::split(viewer);
         let mut viewer = Viewer { read, write };
         let capabilities = if listed {
-            vec![CAPABILITY_CURSOR_SEQUENCE.to_owned()]
+            vec![
+                CAPABILITY_CURSOR_SEQUENCE.to_owned(),
+                CAPABILITY_CURSOR_SHAPE.to_owned(),
+            ]
         } else {
             vec![]
         };
@@ -288,35 +315,67 @@ async fn the_cursor_watermark_goes_only_to_a_viewer_that_reads_it() {
             VideoLimits::for_viewer(60.0),
             QualityPreset::Balanced,
             &capabilities,
-            false,
+            if offered { &shapes } else { &[] },
         );
         let shared = session.shared.clone();
         shared.state.send_replace(streaming(1));
-        shared.cursor.send_replace(Some(CursorReport {
-            serial: 1,
-            cursor: CursorUpdate {
-                generation: 1,
-                x: 5,
-                y: 6,
-                visible: true,
-            },
-            input_sequence: 9,
-        }));
+        shared.cursor.send_replace(Some(report(1)));
         let cancel = shared.cancel.clone();
         let running = tokio::spawn(run(session, host, async move {
             cancel.cancelled().await;
             WorkerExit::Cancelled
         }));
         assert_eq!(state_generation(&viewer.next().await.0), 1);
-        let (cursor, _) = viewer.next().await;
-        assert!(
-            matches!(
-                cursor,
-                HostMessage::Cursor { input_sequence, .. }
-                    if input_sequence == listed.then_some(9)
-            ),
-            "{cursor:?}"
-        );
+        if !listed {
+            // The record itself, as an older viewer reads it.
+            let record = loop {
+                let len = viewer.read.read_u32().await.unwrap();
+                let mut record = vec![0; len as usize];
+                viewer.read.read_exact(&mut record).await.unwrap();
+                let record = String::from_utf8(record).unwrap();
+                if !record.starts_with(r#"{"t":"probe""#) && !record.starts_with(r#"{"t":"stats""#)
+                {
+                    break record;
+                }
+            };
+            assert_eq!(
+                record,
+                r#"{"t":"cursor","generation":1,"x":5,"y":6,"visible":true}"#
+            );
+        } else if !offered {
+            let (cursor, _) = viewer.next().await;
+            assert!(
+                matches!(
+                    cursor,
+                    HostMessage::Cursor {
+                        input_sequence: Some(9),
+                        shape: None,
+                        ..
+                    }
+                ),
+                "{cursor:?}"
+            );
+        } else {
+            let (defined, rgba) = viewer.next().await;
+            let HostMessage::CursorShape(record) = defined else {
+                panic!("expected a shape, got {defined:?}");
+            };
+            assert_eq!(record.shape(&rgba.unwrap()).unwrap(), ibeam);
+            for serial in [1, 2] {
+                if serial == 2 {
+                    shared.cursor.send_replace(Some(report(serial)));
+                }
+                let (cursor, _) = viewer.next().await;
+                assert!(
+                    matches!(
+                        cursor,
+                        HostMessage::Cursor { input_sequence: Some(9), shape: Some(slot), .. }
+                            if slot == record.id
+                    ),
+                    "{cursor:?}"
+                );
+            }
+        }
         drop(viewer);
         running.await.unwrap();
     }
@@ -379,7 +438,7 @@ async fn display_modes_reach_only_a_viewer_that_listed_them() {
             VideoLimits::for_viewer(60.0),
             QualityPreset::Balanced,
             &capabilities,
-            true,
+            &[CAPABILITY_DISPLAY_MODE.to_owned()],
         );
         let shared = session.shared.clone();
         let mut engine = streaming(1);
@@ -486,7 +545,7 @@ async fn stopped_survives_input_sent_after_the_stop() {
         VideoLimits::for_viewer(60.0),
         QualityPreset::Balanced,
         &[],
-        false,
+        &[],
     );
     let cancel = session.shared.cancel.clone();
     let running = tokio::spawn(run(session.clone(), host, async move {

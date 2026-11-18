@@ -4,8 +4,8 @@ use super::ConnectError;
 use crate::{
     QualityPreset, VideoCodec, VideoLimits,
     protocol::{
-        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_DISPLAY_MODE, CAPABILITY_ENCODER_DWELL,
-        CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265,
+        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE,
+        CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265,
     },
 };
 use serde::Serialize;
@@ -110,11 +110,13 @@ impl ViewerConfig {
             .collect()
     }
     /// What this viewer reads and asks for, as `Authenticate.capabilities`.
+    /// It always keeps the pointer's shapes (`Viewer::cursor_shape`).
     pub(super) fn capabilities(&self) -> Vec<String> {
         let mut capabilities = vec![
             CAPABILITY_ENCODER_DWELL.to_owned(),
             CAPABILITY_CURSOR_SEQUENCE.to_owned(),
             CAPABILITY_DISPLAY_MODE.to_owned(),
+            CAPABILITY_CURSOR_SHAPE.to_owned(),
         ];
         if self.codecs.contains(&VideoCodec::H265) {
             capabilities.push(CAPABILITY_H265.to_owned());

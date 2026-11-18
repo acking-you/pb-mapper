@@ -248,8 +248,10 @@ final class PbDesktopViewV1 extends Struct {
   @Uint8()
   external int flags;
 
-  @Array(2)
-  external Array<Uint8> reserved;
+  /// The pointer's shape, a number the `cursor_shape` hot op resolves;
+  /// 0 none, which is the generic arrow.
+  @Uint16()
+  external int cursorShape;
 }
 
 /// `PbDesktopVideoMetaV1`: what `pb_mapper_desktop_video_next_v1` says about

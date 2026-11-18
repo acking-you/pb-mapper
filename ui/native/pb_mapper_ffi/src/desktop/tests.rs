@@ -79,6 +79,11 @@ async fn send(host: &mut DuplexStream, message: Value) {
 /// generation. The host side stays open and silent, so `stop()` waits out
 /// the viewer's close grace, seconds long: a held stop.
 async fn scripted_viewer() -> (Viewer, DuplexStream) {
+    scripted_viewer_listing(json!([])).await
+}
+
+/// [`scripted_viewer`], whose host listed `capabilities`.
+async fn scripted_viewer_listing(capabilities: Value) -> (Viewer, DuplexStream) {
     let (stream, mut host) = tokio::io::duplex(1 << 20);
     let connecting = tokio::spawn(Viewer::over_stream_for_test(
         stream,
@@ -98,7 +103,8 @@ async fn scripted_viewer() -> (Viewer, DuplexStream) {
     send(
         &mut host,
         json!({"t": "accepted", "codec": "h264", "nominal_fps": 60, "quality": "balanced",
-            "limits": {"max_width": 1920, "max_height": 1080, "max_fps": 60}, "capabilities": []}),
+            "limits": {"max_width": 1920, "max_height": 1080, "max_fps": 60},
+            "capabilities": capabilities}),
     )
     .await;
     send(
@@ -173,6 +179,11 @@ fn hot_ops_never_wait_for_a_slow_disconnect() {
     let fit =
         json!({"op": "display_mode", "target": {"fit_local": {"width": 1280, "height": 720}}});
     assert_eq!(hot(handle, fit.clone())["code"], "DISPLAY_MODE_NOT_OFFERED");
+    // Nor physical keys: a batch holding one is refused before it waits for
+    // a picture.
+    let physical = json!({"op": "input", "generation": 1,
+        "inputs": [{"kind": "physical_key", "usage": 4, "down": true}]});
+    assert_eq!(hot(handle, physical)["code"], "INVALID_ARGUMENT");
     let local = json!({"op": "viewer_status", "local": {"width": 1280, "height": 720}});
     let status = &hot(handle, local)["data"];
     assert!(status.get("modes").is_none() && status["host_os"].is_null());
@@ -279,6 +290,50 @@ fn hot_ops_never_wait_for_a_slow_disconnect() {
         );
         assert_eq!(disconnecting.join().unwrap()["success"], true);
     });
+}
+
+/// The view names the pointer's shape by a number, which the hot op
+/// resolves to the definition the host sent; a number the viewer no longer
+/// holds resolves to nothing.
+#[test]
+fn the_view_names_a_shape_the_hot_op_resolves() {
+    let root = TempRoot::new("desktop-cursor-shape");
+    let handle = new_handle(&root);
+    let handle = &handle;
+    let host = handle.runtime.block_on(async {
+        let (viewer, mut host) = scripted_viewer_listing(json!(["cursor_shape"])).await;
+        handle
+            .desktop
+            .connect_viewer(|_| async { Ok((viewer, connected())) })
+            .await
+            .unwrap();
+        send(
+            &mut host,
+            json!({"t": "cursor_shape", "id": 3, "kind": "ibeam",
+                "hot_x": 1, "hot_y": 0, "width": 2, "height": 1}),
+        )
+        .await;
+        host.write_u32(8).await.unwrap();
+        host.write_all(&[1, 2, 3, 4, 5, 6, 7, 8]).await.unwrap();
+        send(
+            &mut host,
+            json!({"t": "cursor", "generation": 1, "x": 4, "y": 5, "visible": true, "shape": 3}),
+        )
+        .await;
+        host
+    });
+    eventually(|| view(handle).1.cursor_shape != 0);
+    let shape = view(handle).1.cursor_shape;
+    let resolved = hot(handle, json!({"op": "cursor_shape", "shape": shape}));
+    assert_eq!(
+        resolved["data"],
+        json!({"kind": "ibeam", "width": 2, "height": 1, "hot_x": 1, "hot_y": 0,
+            "rgba": base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4, 5, 6, 7, 8])})
+    );
+    let gone = hot(handle, json!({"op": "cursor_shape", "shape": shape + 1}));
+    assert_eq!(gone, json!({"success": true, "data": null}));
+    drop(host);
+    call_json(handle, json!({"op": "disconnect"}));
 }
 
 /// A lifecycle request names its op beside its fields, and nothing else.
@@ -701,22 +756,19 @@ async fn disabled_service_allows_local_host_but_unknown_background_stays_blocked
     );
     assert_eq!(disabled.service_disabled, Some(true));
 
-    // Stopped with automatic recovery pending, Running under another
-    // authorized application, and another user's (whose it is is said
-    // first, even while it is stopped) all leave a potentially active
-    // grant unknown.
-    for (running, startup_disabled, owned_by_user, code) in [
-        (false, false, true, ErrorCode::HelperStopped),
-        (true, true, true, ErrorCode::HelperForeignApp),
-        (false, false, false, ErrorCode::HelperOtherOwner),
+    // This app's service stopped with automatic recovery pending, and
+    // another user's (whose it is is said first, even while it is stopped),
+    // both leave a potentially active grant unknown.
+    for (authorized_application, owned_by_user, code) in [
+        (true, true, ErrorCode::HelperStopped),
+        (false, false, ErrorCode::HelperOtherOwner),
     ] {
         let result = tokio::time::timeout(
             Duration::from_secs(1),
             query_background_for_helper(
                 desktop::privileged::Status {
                     installed: true,
-                    running,
-                    startup_disabled,
+                    authorized_application,
                     owned_by_user,
                     ..Default::default()
                 },
@@ -770,6 +822,110 @@ async fn disabled_service_allows_local_host_but_unknown_background_stays_blocked
     let observed = discover_background(&state, async { disconnected }).await;
     assert!(observed.configured);
     assert!(observed.enabled);
+}
+
+/// After an upgrade from 0.11 the service is an older build, still sharing
+/// the grant it saved, that this app cannot ask: its pipes are another
+/// protocol's, and it serves only the copy of the app it was installed from.
+/// A cold start sees that grant as held (configured, enabled while the
+/// service runs) rather than as nothing, which offered setup; and setup or a
+/// resume refuse to configure over it, which would have replaced its policy.
+#[cfg(windows)]
+#[tokio::test]
+async fn an_older_service_keeps_its_grant_held_until_it_is_updated() {
+    let older = || desktop::privileged::Status {
+        installed: true,
+        running: true,
+        owned_by_user: true,
+        identity_verified: true,
+        protocol: desktop::privileged::HELPER_PROTOCOL - 1,
+        update_required: true,
+        update_available: true,
+        background_saved: true,
+        ..Default::default()
+    };
+    let state = DesktopState::default();
+    let held = query_background_for_helper(older(), async {
+        panic!("an older service's pipes are not this protocol's")
+    })
+    .await
+    .unwrap();
+    let held = discover_background(&state, async { Ok(held) }).await;
+    assert!(held.held && held.configured && held.enabled);
+    assert!(held.settings.is_none() && held.invitation.is_none());
+    // Its relay is unknown, not elsewhere: no notice offers to move it.
+    let current = RelayScope {
+        server: "relay:7666".into(),
+        namespace: Some(1),
+    };
+    assert_eq!(
+        with_relay_match(&held, Some(&current))["matches_relay"],
+        Value::Null
+    );
+    // Updating it is the way on, and says so in the code the card explains.
+    assert_eq!(
+        refuse_held_grant(&older()).map_err(|e| e.code()).err(),
+        Some(ErrorCode::HelperOutdated)
+    );
+
+    // Stopped or paused it shares nothing now, but its grant stays held.
+    let stopped = query_background_for_helper(
+        desktop::privileged::Status {
+            running: false,
+            ..older()
+        },
+        std::future::pending(),
+    )
+    .await
+    .unwrap();
+    assert!(stopped.held && stopped.configured && !stopped.enabled);
+
+    // With no grant saved there is nothing to keep: setup may run, and
+    // installs this build as part of it.
+    let empty = desktop::privileged::Status {
+        background_saved: false,
+        ..older()
+    };
+    assert!(refuse_held_grant(&empty).is_ok());
+    let empty = query_background_for_helper(empty, std::future::pending())
+        .await
+        .unwrap();
+    assert!(empty.held && !empty.configured && !empty.enabled);
+
+    // A service of this protocol installed from another copy of the app,
+    // where every later upgrade's installer reopens it, is held the same way.
+    let other_copy = desktop::privileged::Status {
+        protocol: desktop::privileged::HELPER_PROTOCOL,
+        update_required: false,
+        ..older()
+    };
+    assert_eq!(
+        refuse_held_grant(&other_copy).map_err(|e| e.code()).err(),
+        Some(ErrorCode::HelperForeignApp)
+    );
+    let other_copy = query_background_for_helper(other_copy, std::future::pending())
+        .await
+        .unwrap();
+    assert!(other_copy.held && other_copy.enabled);
+
+    // The service this app was installed for is asked as before.
+    let ready = desktop::privileged::Status {
+        authorized_application: true,
+        protocol: desktop::privileged::HELPER_PROTOCOL,
+        update_required: false,
+        update_available: false,
+        ..older()
+    };
+    assert!(refuse_held_grant(&ready).is_ok());
+    let asked = query_background_for_helper(ready, async {
+        Ok(Background {
+            configured: true,
+            ..unavailable_background("asked")
+        })
+    })
+    .await
+    .unwrap();
+    assert!(!asked.held && asked.message == "asked");
 }
 
 #[cfg(windows)]

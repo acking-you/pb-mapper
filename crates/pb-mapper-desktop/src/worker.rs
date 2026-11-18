@@ -81,6 +81,8 @@ pub(crate) struct WorkerConfig {
     /// whole session.
     pub limits: VideoLimits,
     pub admission: Option<Arc<dyn ControlAdmission>>,
+    /// Both ends listed `cursor_shape`: C asks the backend for the shape.
+    pub cursor_shapes: bool,
 }
 
 /// How thread C ended.
@@ -91,6 +93,23 @@ pub(crate) enum WorkerExit {
     /// The backend failed for good (no backend, a lost helper or an
     /// unrecoverable encoder); the session ends with `Stopped{capture_failed}`.
     CaptureFailed(String),
+    /// The operating system withdrew capture consent. Ends this session without reconnecting.
+    CaptureEnded(String),
+}
+
+impl WorkerExit {
+    fn capture_error(failure: io::Error) -> Self {
+        if capture_consent_ended(&failure) {
+            Self::CaptureEnded(failure.to_string())
+        } else {
+            Self::CaptureFailed(failure.to_string())
+        }
+    }
+}
+
+fn capture_consent_ended(failure: &io::Error) -> bool {
+    crate::failure_kind(failure) == Some(crate::FailureKind::ConsentRevoked)
+        || crate::missing_permission(failure) == Some(crate::Permission::ScreenCapture)
 }
 
 /// Thread C of one session. It exits on `shared.cancel` or fatally; `exited`
@@ -214,14 +233,14 @@ fn run<B: Backend>(
                 state.record.reason = Some(unavailable_reason(&failure));
                 state.record.message = failure.to_string();
             });
-            return WorkerExit::CaptureFailed(failure.to_string());
+            return WorkerExit::capture_error(failure);
         }
     };
     loop {
         match engine.iterate() {
             Step::Wait(deadline) => {
                 if let Err(failure) = waiter.wait(deadline) {
-                    return WorkerExit::CaptureFailed(failure.to_string());
+                    return WorkerExit::capture_error(failure);
                 }
             }
             Step::Exit(exit) => return exit,
@@ -274,6 +293,8 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     context_due: Instant,
     cursor_due: Instant,
     cursor: CursorEcho,
+    /// The viewer reads shapes, and the backend reports them.
+    cursor_shapes: bool,
     /// When to poll the encoder again while it holds units.
     drain_due: Instant,
     /// Held while this session captures.
@@ -282,8 +303,8 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     /// Held input was released for a presentation gone stale; nothing new is
     /// admitted until a fresh one arrives.
     stale_released: bool,
-    /// A sticky backend link failure: the session ends.
-    fatal: Option<String>,
+    /// A terminal backend error, kept typed until the session chooses its stop reason.
+    fatal: Option<io::Error>,
     window: Window,
     /// The lane's commands while they run, reused by every drain.
     drained: VecDeque<(LaneCommand, Instant)>,
@@ -331,6 +352,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             context_due: now,
             cursor_due: now,
             cursor: CursorEcho::default(),
+            cursor_shapes: config.cursor_shapes,
             drain_due: now,
             timer: None,
             last_lease: None,
@@ -376,14 +398,16 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if !self.drain_lane() {
             return Step::Exit(WorkerExit::Cancelled);
         }
-        self.renew_lease(now);
-        self.capture_step(now);
-        // Input queued during the backend call runs right after it.
-        if !self.drain_lane() {
+        if self.fatal.is_none() {
+            self.renew_lease(now);
+            self.capture_step(self.clock.now());
+        }
+        // Only a live capture may execute input queued during its backend call.
+        if self.fatal.is_none() && !self.drain_lane() {
             return Step::Exit(WorkerExit::Cancelled);
         }
         if let Some(failure) = self.fatal.take() {
-            return Step::Exit(WorkerExit::CaptureFailed(failure));
+            return Step::Exit(WorkerExit::capture_error(failure));
         }
         let now = self.clock.now();
         self.sample_cursor(now);
@@ -418,15 +442,15 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         } else {
             SessionState::Connecting
         };
-        let (reason, message) = self
-            .unavailable
-            .as_ref()
-            .or(self.control_note.as_ref())
-            .map_or((None, String::new()), |(reason, message)| {
-                (Some(*reason), message.clone())
-            });
+        let (reason, message) = match self.unavailable.as_ref().or(self.control_note.as_ref()) {
+            Some((reason, message)) => (Some(*reason), message.as_str()),
+            None => (None, ""),
+        };
         self.state.record.reason = reason;
-        self.state.record.message = message;
+        if self.state.record.message != message {
+            self.state.record.message.clear();
+            self.state.record.message.push_str(message);
+        }
         self.shared.state.send_if_modified(|published| {
             let changed = *published != self.state;
             if changed {
@@ -456,7 +480,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
         deadline
             .min(self.context_due)
-            .min(self.pacer.next())
+            .min(self.capture_at())
             .min(self.cursor_due)
     }
 }

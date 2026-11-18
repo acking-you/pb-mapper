@@ -30,10 +30,14 @@ tracing.workspace = true
 uni-stream.workspace = true
 serde.workspace = true
 if-addrs.workspace = true
-netdev = { workspace = true, optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 if-watch.workspace = true
+
+# What each interface is, for LAN-first ranking. It does not build for iOS,
+# where names and address ranges decide, as on Android where it cannot tell.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+netdev = { workspace = true, optional = true }
 
 [dev-dependencies]
 pb-mapper-server = { workspace = true, features = ["p2p"] }

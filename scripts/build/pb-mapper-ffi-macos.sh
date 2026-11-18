@@ -3,7 +3,6 @@ set -euo pipefail
 
 # Build the macOS FFI dynamic library and stage it for Flutter.
 # - Copies to ui/native/macos for Xcode embed step
-# - Copies into any existing .app bundle for quick local runs
 #
 # Builds for the host architecture only. Release artifacts are published per
 # arch (one native runner each), so no universal binary is needed anywhere.
@@ -37,13 +36,6 @@ install_name_tool -id "@rpath/${FFI_LIB_NAME}" "${FFI_TARGET_DIR}/${FFI_LIB_NAME
 # the app's CodeSign step on the unsigned nested dylib ("code object is not
 # signed at all"), so sign it here to make both architectures behave the same.
 codesign --force --sign - --timestamp=none "${FFI_TARGET_DIR}/${FFI_LIB_NAME}"
-
-for app in "${ROOT_DIR}/ui/build/macos/Build/Products"/*/*.app; do
-  if [ -d "${app}" ]; then
-    mkdir -p "${app}/Contents/Frameworks"
-    cp "${FFI_TARGET_DIR}/${FFI_LIB_NAME}" "${app}/Contents/Frameworks/${FFI_LIB_NAME}"
-  fi
-done
 
 printf "FFI ready (%s): %s\n" "$(lipo -archs "${FFI_TARGET_DIR}/${FFI_LIB_NAME}")" \
   "${FFI_TARGET_DIR}/${FFI_LIB_NAME}"

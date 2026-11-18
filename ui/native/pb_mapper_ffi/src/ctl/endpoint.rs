@@ -164,14 +164,13 @@ mod imp {
             return custom;
         }
         // XDG_RUNTIME_DIR is per-user and cleaned on logout, which is what a
-        // socket wants. TMPDIR is the macOS equivalent and matters more there
-        // than it looks: the app is sandboxed, so TMPDIR resolves inside the
-        // bundle's container. Both the window and a `pb_mapper_ui <verb>` are
-        // the same signed bundle and therefore land in the same container,
-        // which is what lets them find each other.
+        // socket wants. TMPDIR is the macOS equivalent, per user too, so the
+        // window and a `pb_mapper_ui <verb>` of one user find each other
+        // there. (A sandboxed app's TMPDIR is inside its container, which
+        // the same signed bundle shares as well.)
         //
         // Deliberately *not* the config directory, even though both sides
-        // agree on that too: under the macOS sandbox it is
+        // agree on that too: in a sandboxed app's container it is
         // `~/Library/Containers/<id>/Data/Library/Application Support/…`,
         // which overruns sun_path on its own.
         let base = std::env::var("XDG_RUNTIME_DIR")

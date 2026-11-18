@@ -49,6 +49,9 @@ pub enum InputError {
     Congestion,
     Closed,
     Invalid(String),
+    /// The batch holds an input the host did not list a capability for
+    /// (`Input::PhysicalKey` without `physical_keys`); nothing was sent.
+    NotOffered,
 }
 impl std::fmt::Display for InputError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -58,6 +61,7 @@ impl std::fmt::Display for InputError {
             Self::Congestion => {
                 f.write_str("input congestion; control released while video recovers")
             }
+            Self::NotOffered => f.write_str("the remote computer does not take this input"),
             Self::Closed => f.write_str("the desktop session is closed"),
             Self::Invalid(message) => f.write_str(message),
         }

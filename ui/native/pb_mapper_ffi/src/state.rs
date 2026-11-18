@@ -30,6 +30,8 @@ use pb_mapper_core::checksum::{Credential, get_process_credential};
 use crate::error::{CtlError, sdk_error};
 
 mod configuration;
+#[cfg(any(target_os = "macos", test))]
+mod container;
 mod runtime;
 mod status;
 mod stored;

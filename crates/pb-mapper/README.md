@@ -201,8 +201,13 @@ and a viewer watches it and, when allowed, controls it, over the `Client` both
 already have. A host grants viewing through a secret `pbd1.` invitation, which
 names its service, pins its certificate's fingerprint for TLS 1.3 and carries
 a bearer token; control is a separate permission the host allows and the viewer
-asks for. Hosting is Windows today, with GPU H.264 and H.265 and an opt-in
-privileged helper for UAC and the lock screen; viewing runs anywhere. Both ends
+asks for. Hosting is Windows, with GPU H.264 and H.265 and an opt-in
+privileged helper for UAC and the lock screen, and macOS 12.3 or later, with
+ScreenCaptureKit and VideoToolbox once the owner granted Screen Recording (and
+Accessibility for control; compiled and unit-tested in CI, never run on a real
+Mac); viewing runs anywhere. A Mac binary that should still start below macOS
+12.3 links ScreenCaptureKit weakly, as this crate's examples do:
+`-C link-arg=-Wl,-weak_framework,ScreenCaptureKit`. Both ends
 take the tunnel defaults: LAN first, then direct, then the relay. Nothing
 captures or injects until a host is started and an authorized viewer connects,
 and an SDK built without the feature carries none of it. The helper's real UAC
@@ -211,15 +216,15 @@ acceptance and the 60+ FPS end-to-end UI target are still unverified. See the
 
 | Need | API |
 | --- | --- |
-| Host this computer | `Host::builder(HostOptions::new("desktop:office")).start(&client)`; refused before registering where `host_support().host` is false (off Windows, or Windows without Media Foundation), `host_support().reason` saying why |
+| Host this computer | `Host::builder(HostOptions::new("desktop:office")).start(&client)`; refused before registering where `host_support().host` is false (on neither Windows nor macOS 12.3 or later, Windows without Media Foundation, or a Mac without Screen Recording), `host_support().reason` saying why; on macOS `host_support().permissions` and `request_permission(Permission)` |
 | Choose what is shared | `HostOptions { display: DisplaySelection::{Primary, Id, Device}, access: Access::{Ordinary, Privileged}, allow_control }`, `displays()` |
 | Capture with your own code | `HostBuilder::backend(\|\| Ok(backend))` with a `Backend`, built and used on its session's thread, so it need not be `Send` |
-| Keep an invitation valid across restarts | `Host::identity()` and `HostBuilder::identity`; `trust::TrustFile` seals one with a `trust::Sealer` (`trust::CurrentUser` DPAPI on Windows); `restart`, `switch_display` and `rename` keep it |
+| Keep an invitation valid across restarts | `Host::identity()` and `HostBuilder::identity`; `trust::TrustFile` seals one with a `trust::Sealer` (`trust::CurrentUser` DPAPI on Windows, `trust::Keychain` on macOS); `restart`, `switch_display` and `rename` keep it |
 | Run a host | `status()`, `watch(every)`, `end_session()`, `set_control_allowed()`, `stop()`, `stop_with(StopReason)`, `metrics()` |
 | View | `Viewer::connect(&client, &invitation, ConnectOptions::default(), config)`, a typed `ConnectError`; `config` from `ViewerConfig::for_decoders(decoders, resolution, refresh_hz, max_fps)`, the display's own size by default, or `ViewerConfig::new(codecs)` |
 | Take the picture | `viewer.video_sink().attach()` → `VideoConsumer`: see [Decoding](#decoding) |
-| Control | `request_control(true)`, then `input(generation, &[Input])` in the host display's pixels and a typed `InputError`; `view().display_point(nx, ny)`, `Input::text_chunks(text)`, `release_input()` |
-| Follow a viewer | `status()`, `watch(every)`, the allocation-free `view()` per frame, `metrics()`, `subscribe_metrics(every)` |
+| Control | `request_control(true)`, then `input(generation, &[Input])` in the host display's pixels and a typed `InputError`; `Input::PhysicalKey { usage, down }` (a USB HID usage) only to a host whose capabilities list `physical_keys`, else `InputError::NotOffered`; `view().display_point(nx, ny)`, `Input::text_chunks(text)`, `release_input()` |
+| Follow a viewer | `status()`, `watch(every)`, the allocation-free `view()` per frame, `metrics()`, `subscribe_metrics(every)`; `cursor_shape(view().cursor_shape)` for the pointer's `CursorShape` (kind, hotspot, straight RGBA) from a host that sends shapes; an own `Backend` reports them through `cursor_shape` and `BackendCaps::cursor_shapes` |
 | Change a session live | `set_quality(QualityPreset)`, `pause()`, `resume()`, `request_keyframe(reason)` |
 | Change the host display's mode | `Viewer::set_display_mode(ModeTarget::{FitLocal(Mode), Size(Mode), Original})` while controlling, a typed `DisplayModeError`; `ViewerStatus.modes` (`ModeList::fit_local`), `HostStatus.display_mode`, `Host::restore_display_mode()`. The host puts the mode back when its viewer leaves or loses control, and `recover_display_modes(state_dir)` after a crash; an own `Backend` implements `display_modes`, `set_display_mode` and `restore_display_mode` |
 | Stay connected | `supervisor::Supervisor`, the app's policy: backoff of 1 to 15 s within 120 s, a stall after 5 s without video, H.265 → H.264 after a decoder failure, keeping the preset and the app's control choice; or the pure `supervisor::Reconnect` under your own timers |
@@ -229,11 +234,12 @@ acceptance and the 60+ FPS end-to-end UI target are still unverified. See the
 | Example | Runs where | Shows |
 | --- | --- | --- |
 | `desktop_loopback` | any OS, no setup | A relay, a host of an example-defined `Backend` and a viewer in one process: control, a move, a click and chunked text the backend records, a preset change, pause and resume, a display fitted to the viewer and put back when it leaves, status and metrics. `--serve` hosts the synthetic desktop for the examples below |
-| `desktop_host` | Windows; elsewhere it prints `host_support().reason` | `HostOptions::new`, `--display`, `--allow-control`, `--relay-only`, `--privileged`, `--identity DIR` (a `TrustFile`); the invitation; a `watch()` loop; Ctrl+C stops |
+| `desktop_host` | Windows, and macOS 12.3 or later (never run on a real Mac); elsewhere it prints `host_support().reason` | `HostOptions::new`, `--display`, `--allow-control`, `--relay-only`, `--privileged`, `--identity DIR` (a `TrustFile`); the invitation; a `watch()` loop; Ctrl+C stops |
 | `desktop_viewer` | any OS | `ViewerConfig::for_decoders` for an H.264 decoder; every `ConnectError`; a thread recording Annex B to `remote.h264` for `ffplay`; status and metrics; `--resolution`, `--quality`, `--relay-only`, `--lan-transport` |
 | `desktop_control` | any OS, against a host you own | Taking control, `display_point`, batches, `text_chunks`, every `InputError`, `release_input` on the way out |
 | `desktop_supervised` | any OS, no setup | `Supervisor` through an H.265 decoder failure, a host restart, a stall and a stop |
 | `desktop_display_mode` | any OS, against a host you own; `desktop_loopback --serve` is the safe one | The host display's `ModeList`; `--fit WxH`, `--mode WxH`, `--original`; a `DisplayModeError` the viewer refuses with, and the host's refusal notice; the mode put back at the disconnect |
+| `desktop_ui_host` | any OS, with a recorded H.264 clip | A host whose desktop is the clip, never this computer's: a pointer shape per fifth of the display (arrow, I-beam, resize, hand, custom), every input and shape it applies logged, `--no-shapes`, `--macos`, `--view-only`, `--wander`, `--relay-only`; for checking the viewer apps on a real screen (`scripts/test/desktop-ui-acceptance.md`) |
 
 `cargo run -p pb-mapper --features desktop --example desktop_loopback` needs no
 relay of your own and runs in CI.

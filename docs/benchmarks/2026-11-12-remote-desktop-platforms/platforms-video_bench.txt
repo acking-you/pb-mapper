@@ -1,0 +1,81 @@
+### platforms-video_bench
+=== before round 0 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=976.0 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=599 allocs_per_unit=1.257 alloc_bytes_per_unit=15072 calls_us_per_unit=490.1 calls_kcycles_per_unit=1417.4 submits=599 submit_p50_us=422.7 submit_mean_us=442.7 drain_p50_us=23.4 drain_mean_us=25.9 submit_p50_kcycles=1195.4 submit_mean_kcycles=1237.6 drain_p50_kcycles=98.5 drain_mean_kcycles=107.8
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=599 unique_capture_fps=59.90 encoded=599 encoded_fps=59.90 unique_encoded_fps=59.90 bitrate_mbps=7.22 mean_encode_ms=3.058 max_in_flight=1
+=== after round 0 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=289.9 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=600 allocs_per_unit=1.230 alloc_bytes_per_unit=14295 calls_us_per_unit=460.9 calls_kcycles_per_unit=1339.2 submits=600 submit_p50_us=399.4 submit_mean_us=415.9 drain_p50_us=22.0 drain_mean_us=24.2 submit_p50_kcycles=1125.7 submit_mean_kcycles=1167.8 drain_p50_kcycles=92.9 drain_mean_kcycles=101.4
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=600 unique_capture_fps=60.00 encoded=600 encoded_fps=60.00 unique_encoded_fps=60.00 bitrate_mbps=6.86 mean_encode_ms=2.960 max_in_flight=1
+=== after round 1 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=281.2 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=595 allocs_per_unit=1.346 alloc_bytes_per_unit=14278 calls_us_per_unit=650.0 calls_kcycles_per_unit=1843.3 submits=595 submit_p50_us=566.5 submit_mean_us=584.4 drain_p50_us=30.8 drain_mean_us=32.7 submit_p50_kcycles=1587.1 submit_mean_kcycles=1597.6 drain_p50_kcycles=129.4 drain_mean_kcycles=135.3
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=595 unique_capture_fps=59.50 encoded=595 encoded_fps=59.50 unique_encoded_fps=59.50 bitrate_mbps=6.79 mean_encode_ms=3.110 max_in_flight=1
+=== before round 1 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=335.7 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=597 allocs_per_unit=1.461 alloc_bytes_per_unit=14352 calls_us_per_unit=620.2 calls_kcycles_per_unit=1767.8 submits=597 submit_p50_us=529.7 submit_mean_us=560.5 drain_p50_us=29.1 drain_mean_us=32.0 submit_p50_kcycles=1506.3 submit_mean_kcycles=1542.3 drain_p50_kcycles=123.4 drain_mean_kcycles=132.0
+seconds=10.001 keyframes=2 forced=1 gop=4294967295 unique_captures=597 unique_capture_fps=59.70 encoded=597 encoded_fps=59.70 unique_encoded_fps=59.70 bitrate_mbps=6.84 mean_encode_ms=3.135 max_in_flight=1
+=== before round 2 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=352.1 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=596 allocs_per_unit=1.371 alloc_bytes_per_unit=14240 calls_us_per_unit=675.8 calls_kcycles_per_unit=1944.0 submits=596 submit_p50_us=582.4 submit_mean_us=607.8 drain_p50_us=31.3 drain_mean_us=34.2 submit_p50_kcycles=1641.7 submit_mean_kcycles=1686.1 drain_p50_kcycles=132.0 drain_mean_kcycles=140.6
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=596 unique_capture_fps=59.60 encoded=596 encoded_fps=59.60 unique_encoded_fps=59.60 bitrate_mbps=6.78 mean_encode_ms=3.201 max_in_flight=1
+=== after round 2 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=321.8 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=595 allocs_per_unit=1.339 alloc_bytes_per_unit=14206 calls_us_per_unit=697.3 calls_kcycles_per_unit=1941.7 submits=595 submit_p50_us=580.4 submit_mean_us=621.7 drain_p50_us=32.2 drain_mean_us=38.2 submit_p50_kcycles=1623.7 submit_mean_kcycles=1682.7 drain_p50_kcycles=136.3 drain_mean_kcycles=145.5
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=595 unique_capture_fps=59.50 encoded=595 encoded_fps=59.50 unique_encoded_fps=59.50 bitrate_mbps=6.75 mean_encode_ms=3.212 max_in_flight=1
+=== after round 3 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=305.8 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=598 allocs_per_unit=1.465 alloc_bytes_per_unit=14263 calls_us_per_unit=598.0 calls_kcycles_per_unit=1713.0 submits=598 submit_p50_us=526.6 submit_mean_us=541.1 drain_p50_us=28.3 drain_mean_us=30.8 submit_p50_kcycles=1462.4 submit_mean_kcycles=1499.2 drain_p50_kcycles=120.4 drain_mean_kcycles=127.6
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=598 unique_capture_fps=59.80 encoded=598 encoded_fps=59.80 unique_encoded_fps=59.80 bitrate_mbps=6.81 mean_encode_ms=3.332 max_in_flight=1
+=== before round 3 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=336.0 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=596 allocs_per_unit=1.530 alloc_bytes_per_unit=14258 calls_us_per_unit=668.7 calls_kcycles_per_unit=1905.4 submits=596 submit_p50_us=564.3 submit_mean_us=601.1 drain_p50_us=30.5 drain_mean_us=34.5 submit_p50_kcycles=1588.8 submit_mean_kcycles=1654.3 drain_p50_kcycles=128.6 drain_mean_kcycles=139.0
+seconds=10.001 keyframes=2 forced=1 gop=4294967295 unique_captures=596 unique_capture_fps=59.60 encoded=596 encoded_fps=59.60 unique_encoded_fps=59.60 bitrate_mbps=6.78 mean_encode_ms=3.280 max_in_flight=1
+=== before round 4 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=306.1 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=595 allocs_per_unit=1.491 alloc_bytes_per_unit=14322 calls_us_per_unit=605.2 calls_kcycles_per_unit=1734.5 submits=595 submit_p50_us=520.6 submit_mean_us=547.3 drain_p50_us=28.3 drain_mean_us=30.5 submit_p50_kcycles=1478.3 submit_mean_kcycles=1516.7 drain_p50_kcycles=119.5 drain_mean_kcycles=126.4
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=595 unique_capture_fps=59.50 encoded=595 encoded_fps=59.50 unique_encoded_fps=59.50 bitrate_mbps=6.80 mean_encode_ms=3.175 max_in_flight=1
+=== after round 4 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=275.7 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=599 allocs_per_unit=1.289 alloc_bytes_per_unit=14315 calls_us_per_unit=399.4 calls_kcycles_per_unit=1188.1 submits=599 submit_p50_us=333.6 submit_mean_us=359.4 drain_p50_us=17.4 drain_mean_us=21.2 submit_p50_kcycles=984.7 submit_mean_kcycles=1036.8 drain_p50_kcycles=73.5 drain_mean_kcycles=87.7
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=599 unique_capture_fps=59.90 encoded=599 encoded_fps=59.90 unique_encoded_fps=59.90 bitrate_mbps=6.85 mean_encode_ms=3.427 max_in_flight=1
+=== after round 5 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=264.5 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=595 allocs_per_unit=1.281 alloc_bytes_per_unit=14410 calls_us_per_unit=413.2 calls_kcycles_per_unit=1210.4 submits=595 submit_p50_us=354.5 submit_mean_us=372.1 drain_p50_us=18.3 drain_mean_us=21.7 submit_p50_kcycles=1022.1 submit_mean_kcycles=1054.4 drain_p50_kcycles=77.0 drain_mean_kcycles=89.3
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=595 unique_capture_fps=59.50 encoded=595 encoded_fps=59.50 unique_encoded_fps=59.50 bitrate_mbps=6.85 mean_encode_ms=2.946 max_in_flight=1
+=== before round 5 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=281.5 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=594 allocs_per_unit=1.227 alloc_bytes_per_unit=14347 calls_us_per_unit=436.5 calls_kcycles_per_unit=1276.2 submits=594 submit_p50_us=374.4 submit_mean_us=392.5 drain_p50_us=19.9 drain_mean_us=23.3 submit_p50_kcycles=1069.4 submit_mean_kcycles=1108.8 drain_p50_kcycles=83.8 drain_mean_kcycles=97.3
+seconds=10.001 keyframes=2 forced=1 gop=4294967295 unique_captures=594 unique_capture_fps=59.40 encoded=594 encoded_fps=59.40 unique_encoded_fps=59.40 bitrate_mbps=6.81 mean_encode_ms=2.975 max_in_flight=1
+=== before round 6 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=278.8 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=598 allocs_per_unit=1.182 alloc_bytes_per_unit=14325 calls_us_per_unit=419.1 calls_kcycles_per_unit=1231.6 submits=598 submit_p50_us=353.6 submit_mean_us=376.7 drain_p50_us=19.6 drain_mean_us=23.1 submit_p50_kcycles=1008.4 submit_mean_kcycles=1071.7 drain_p50_kcycles=83.0 drain_mean_kcycles=95.5
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=598 unique_capture_fps=59.80 encoded=598 encoded_fps=59.80 unique_encoded_fps=59.80 bitrate_mbps=6.85 mean_encode_ms=2.992 max_in_flight=1
+=== after round 6 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=290.0 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=599 allocs_per_unit=1.214 alloc_bytes_per_unit=14372 calls_us_per_unit=449.7 calls_kcycles_per_unit=1321.2 submits=599 submit_p50_us=389.7 submit_mean_us=407.0 drain_p50_us=22.1 drain_mean_us=24.5 submit_p50_kcycles=1113.3 submit_mean_kcycles=1158.7 drain_p50_kcycles=93.3 drain_mean_kcycles=101.0
+seconds=10.001 keyframes=2 forced=1 gop=4294967295 unique_captures=599 unique_capture_fps=59.90 encoded=599 encoded_fps=59.90 unique_encoded_fps=59.90 bitrate_mbps=6.88 mean_encode_ms=3.133 max_in_flight=1
+=== after round 7 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=940.6 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=596 allocs_per_unit=1.290 alloc_bytes_per_unit=14319 calls_us_per_unit=472.4 calls_kcycles_per_unit=1363.0 submits=596 submit_p50_us=395.6 submit_mean_us=429.1 drain_p50_us=23.1 drain_mean_us=24.8 submit_p50_kcycles=1113.3 submit_mean_kcycles=1197.2 drain_p50_kcycles=97.6 drain_mean_kcycles=103.2
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=596 unique_capture_fps=59.60 encoded=596 encoded_fps=59.60 unique_encoded_fps=59.60 bitrate_mbps=6.82 mean_encode_ms=2.977 max_in_flight=1
+=== before round 7 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=282.4 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=596 allocs_per_unit=1.435 alloc_bytes_per_unit=14374 calls_us_per_unit=469.7 calls_kcycles_per_unit=1358.3 submits=596 submit_p50_us=401.5 submit_mean_us=425.9 drain_p50_us=21.9 drain_mean_us=24.4 submit_p50_kcycles=1120.6 submit_mean_kcycles=1192.3 drain_p50_kcycles=92.9 drain_mean_kcycles=100.4
+seconds=10.001 keyframes=2 forced=1 gop=4294967295 unique_captures=596 unique_capture_fps=59.60 encoded=596 encoded_fps=59.60 unique_encoded_fps=59.60 bitrate_mbps=6.84 mean_encode_ms=2.950 max_in_flight=1
+=== before round 8 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=294.5 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=599 allocs_per_unit=1.230 alloc_bytes_per_unit=14357 calls_us_per_unit=471.9 calls_kcycles_per_unit=1377.3 submits=599 submit_p50_us=402.5 submit_mean_us=427.3 drain_p50_us=22.3 drain_mean_us=25.0 submit_p50_kcycles=1141.2 submit_mean_kcycles=1206.8 drain_p50_kcycles=94.2 drain_mean_kcycles=104.4
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=599 unique_capture_fps=59.90 encoded=599 encoded_fps=59.90 unique_encoded_fps=59.90 bitrate_mbps=6.87 mean_encode_ms=2.949 max_in_flight=1
+=== after round 8 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=299.9 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=599 allocs_per_unit=1.205 alloc_bytes_per_unit=14373 calls_us_per_unit=477.1 calls_kcycles_per_unit=1379.0 submits=599 submit_p50_us=403.0 submit_mean_us=433.9 drain_p50_us=22.1 drain_mean_us=24.6 submit_p50_kcycles=1142.5 submit_mean_kcycles=1215.1 drain_p50_kcycles=93.7 drain_mean_kcycles=101.2
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=599 unique_capture_fps=59.90 encoded=599 encoded_fps=59.90 unique_encoded_fps=59.90 bitrate_mbps=6.88 mean_encode_ms=2.974 max_in_flight=1
+=== after round 9 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=295.5 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=598 allocs_per_unit=1.281 alloc_bytes_per_unit=14387 calls_us_per_unit=472.9 calls_kcycles_per_unit=1372.7 submits=598 submit_p50_us=387.0 submit_mean_us=429.9 drain_p50_us=21.7 drain_mean_us=24.3 submit_p50_kcycles=1109.0 submit_mean_kcycles=1206.7 drain_p50_kcycles=92.5 drain_mean_kcycles=101.9
+seconds=10.000 keyframes=2 forced=1 gop=4294967295 unique_captures=598 unique_capture_fps=59.80 encoded=598 encoded_fps=59.80 unique_encoded_fps=59.80 bitrate_mbps=6.88 mean_encode_ms=2.954 max_in_flight=1
+=== before round 9 ===
+encoder=NVIDIA H.264 Encoder MFT codec=H264 build_ms=290.6 display=2560x1440 nominal_fps=60 max_size=2560x1440 target_bitrate=24000000
+case=encoder units=597 allocs_per_unit=1.176 alloc_bytes_per_unit=14301 calls_us_per_unit=452.4 calls_kcycles_per_unit=1329.7 submits=597 submit_p50_us=379.9 submit_mean_us=409.3 drain_p50_us=21.8 drain_mean_us=24.1 submit_p50_kcycles=1092.6 submit_mean_kcycles=1164.6 drain_p50_kcycles=92.5 drain_mean_kcycles=100.0
+seconds=10.001 keyframes=2 forced=1 gop=4294967295 unique_captures=597 unique_capture_fps=59.70 encoded=597 encoded_fps=59.70 unique_encoded_fps=59.70 bitrate_mbps=6.83 mean_encode_ms=3.257 max_in_flight=1

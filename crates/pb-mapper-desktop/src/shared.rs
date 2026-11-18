@@ -5,6 +5,7 @@
 //! network task's credit and QoS locks at once; never hold any of them across
 //! an `.await` or a backend call; keep each critical section O(1) or O(256).
 use crate::{
+    CursorShape,
     auth::AuthLedger,
     idr::IdrPolicy,
     lane::InputLane,
@@ -162,14 +163,19 @@ pub(crate) struct CursorUpdate {
     pub x: i32,
     pub y: i32,
     pub visible: bool,
+    /// Which shape C knew then, counted per session: 0 none, and each new
+    /// one the next number. Only in a session whose viewer reads shapes.
+    pub shape: u64,
 }
 
 /// A sample C reports. The serial counts reports, so that B-send writes each
 /// one once, even one at a position it wrote before.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CursorReport {
     pub serial: u64,
     pub cursor: CursorUpdate,
     /// The last input sequence C had taken off the lane when it sampled.
     pub input_sequence: u64,
+    /// The shape `cursor.shape` counts, sharing its bitmap.
+    pub shape: Option<CursorShape>,
 }

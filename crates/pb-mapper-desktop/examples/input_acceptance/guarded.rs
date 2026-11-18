@@ -1,8 +1,8 @@
 //! The product's backend behind the owned window's guard.
 use crate::fixture::State;
 use pb_mapper_desktop::{
-    Backend, CursorPosition, Description, DesktopContext, Display, DoubleClickGuard, EncodedFrame,
-    Input, Mode, ModeList, Result, VideoCodec, VideoLimits, VideoRate, Waker,
+    Backend, CursorPosition, CursorShape, Description, DesktopContext, Display, DoubleClickGuard,
+    EncodedFrame, Input, Mode, ModeList, Result, VideoCodec, VideoLimits, VideoRate, Waker,
 };
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -50,6 +50,12 @@ impl Backend for Guarded {
     fn drain_poll(&self) -> Option<Duration> {
         self.inner.drain_poll()
     }
+    fn submitted_video(&self) -> bool {
+        self.inner.submitted_video()
+    }
+    fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        self.inner.capture_idle_until(keyframe_due)
+    }
     fn display_modes(&mut self, expected: &DesktopContext) -> Result<Option<ModeList>> {
         self.inner.display_modes(expected)
     }
@@ -72,6 +78,9 @@ impl Backend for Guarded {
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<CursorPosition>> {
         self.inner.cursor(expected)
+    }
+    fn cursor_shape(&mut self, expected: &DesktopContext) -> Result<Option<CursorShape>> {
+        self.inner.cursor_shape(expected)
     }
     fn capture_video(
         &mut self,

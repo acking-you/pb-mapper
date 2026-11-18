@@ -4,10 +4,7 @@ use super::{BACKEND_ANSWER_WAIT, Live, Shared};
 use crate::{
     Display, QualityPreset, Result, VideoCodec, VideoLimits, VideoSize,
     launch::Launch,
-    protocol::{
-        CAPABILITY_DISPLAY_MODE, CAPABILITY_H265, HostMessage, RejectReason, ViewerMessage,
-        valid_capabilities,
-    },
+    protocol::{CAPABILITY_H265, HostMessage, RejectReason, ViewerMessage, valid_capabilities},
     qos::scaled_size,
     session::{self, Session},
     wire,
@@ -172,9 +169,7 @@ impl Acceptor {
             request.limits,
             request.quality,
             &request.capabilities,
-            capabilities
-                .iter()
-                .any(|capability| capability == CAPABILITY_DISPLAY_MODE),
+            &capabilities,
         );
         session.expect_video_size(video);
         *self.shared.session.lock() = Some(Live {
@@ -191,6 +186,7 @@ impl Acceptor {
                 codec,
                 limits: request.limits,
                 admission: self.admission.clone(),
+                cursor_shapes: session.cursor_shape,
             },
         );
         session::run(

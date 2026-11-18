@@ -8,7 +8,7 @@
 //! configured background hosts belong to the Windows service.
 use crate::{
     desktop_video,
-    error::CtlError,
+    error::{CtlError, ErrorCode},
     handle::PbMapperHandle,
     response::{Reply, parse_c_string, respond},
 };
@@ -138,6 +138,11 @@ enum Request {
     HostSetDisplay {
         display_id: u32,
     },
+    /// Ask the owner for a permission hosting needs, where the operating
+    /// system asks (macOS): `granted` says whether it is now.
+    HostRequestPermission {
+        permission: desktop::Permission,
+    },
     HostRename {
         service: String,
     },
@@ -157,6 +162,16 @@ fn credential_namespace() -> Option<u64> {
 
 fn err(e: impl std::fmt::Display) -> CtlError {
     CtlError::io(e.to_string())
+}
+
+/// A host that would not start or restart: `PERMISSION_MISSING` where the
+/// operating system has not granted what it needs, else `IO`.
+fn host_err(failure: std::io::Error) -> CtlError {
+    if desktop::failure_kind(&failure) == Some(desktop::FailureKind::PermissionMissing) {
+        CtlError::new(ErrorCode::PermissionMissing, failure.to_string())
+    } else {
+        err(failure)
+    }
 }
 
 /// `work` run off the runtime, as file, service and OS-query work is. One
@@ -216,7 +231,10 @@ pub unsafe extern "C" fn pb_mapper_desktop_call_json(
 }
 
 /// The `capabilities` op's `capabilities`: the keys the app has always read,
-/// and why this computer cannot host, when it cannot.
+/// why this computer cannot host, when it cannot, whether it shares through
+/// the background service (Windows' helper) or from the app alone, and the
+/// permissions hosting needs where the operating system asks for them
+/// (macOS).
 fn capabilities_json(support: desktop::HostSupport) -> Value {
     json!({
         "host": support.host,
@@ -228,6 +246,8 @@ fn capabilities_json(support: desktop::HostSupport) -> Value {
             "native_viewer"
         },
         "reason": support.reason,
+        "background_service": cfg!(windows),
+        "permissions": support.permissions,
     })
 }
 
@@ -289,6 +309,9 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             restart_host(handle, HostChange::Display(display_id)).await
         }
         Request::HostRename { service } => restart_host(handle, HostChange::Service(service)).await,
+        Request::HostRequestPermission { permission } => {
+            blocking(move || json!({"granted": desktop::request_permission(permission)})).await
+        }
         Request::InspectInvitation { invitation } => Ok(inspection(
             &Invitation::decode(&invitation).map_err(invitation_error)?,
         )),

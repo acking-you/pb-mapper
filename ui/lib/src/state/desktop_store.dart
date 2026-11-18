@@ -129,10 +129,15 @@ final class DesktopCursor extends ChangeNotifier {
   /// it since the host last said it is hidden.
   bool _shown = false;
 
+  /// The position is this viewer's last move, not a host report's.
+  bool _local = false;
+
   /// The last host report seen, and the geometry epoch of the last one
   /// that was not hidden.
   Offset? _report;
   int? _reportEpoch;
+
+  DesktopPointerShape? _shape;
 
   /// Where taps click and strokes start, normalised to the display.
   Offset get position => _position;
@@ -141,12 +146,33 @@ final class DesktopCursor extends ChangeNotifier {
   /// this viewer has not moved it since.
   Offset? get shown => _shown ? _position : null;
 
+  /// The cursor is where this viewer's own move put it, so under the
+  /// local pointer while that hovers the picture: no host report moved it
+  /// since.
+  bool get followsLocal => _local;
+
+  /// The host's pointer shape; null from a host that sends none (before
+  /// 0.12), or before it named one, which is drawn as the generic arrow.
+  DesktopPointerShape? get shape => _shape;
+
   /// A local move: the arrow shows here.
   void moveTo(Offset normalized) {
-    if (normalized == _position && _shown) return;
+    if (normalized == _position && _shown && _local) return;
     _position = normalized;
     _shown = true;
+    _local = true;
     notifyListeners();
+  }
+
+  void _setShape(DesktopPointerShape? shape) {
+    if (identical(shape, _shape)) return;
+    _shape = shape;
+    notifyListeners();
+  }
+
+  /// [shape]'s bitmap was decoded.
+  void _decoded(DesktopPointerShape shape) {
+    if (identical(shape, _shape)) notifyListeners();
   }
 
   /// The host's cursor as the store last read it, null while hidden or
@@ -169,7 +195,10 @@ final class DesktopCursor extends ChangeNotifier {
     _reportEpoch = g?.epoch;
     final follow = first || !controlling || _apart(report, g);
     if (!follow && _shown) return false;
-    if (follow) _position = report;
+    if (follow) {
+      _position = report;
+      _local = false;
+    }
     _shown = true;
     notifyListeners();
     return true;
@@ -190,10 +219,23 @@ final class DesktopCursor extends ChangeNotifier {
     _position = const Offset(0.5, 0.5);
     _report = null;
     _reportEpoch = null;
+    _local = false;
     if (!_shown) return;
     _shown = false;
     notifyListeners();
   }
+}
+
+/// One definition of the host's pointer shape, and its bitmap as an image
+/// to paint once decoded.
+final class DesktopPointerShape {
+  DesktopPointerShape(this.definition);
+
+  final DesktopCursorShape definition;
+
+  /// Null until decoded: a painter draws the generic arrow meanwhile.
+  ui.Image? get image => _image;
+  ui.Image? _image;
 }
 
 /// Owns the desktop host and the viewer session, independently of
@@ -293,13 +335,13 @@ class DesktopStore {
   /// a frame, so the session's change is published after that frame.
   DesktopDemandHandle demand(DesktopDemand demand) {
     if (_disposed) return DesktopDemandHandle._(null);
+    _observeLifecycle();
     switch (demand) {
       case DesktopDemand.page:
         _pageDemand++;
-        unawaited(_onPageDemand());
+        if (_appVisible) unawaited(_onPageDemand());
       case DesktopDemand.viewer:
         _viewerDemand++;
-        _hookViewer();
     }
     scheduleMicrotask(_visibilityChanged);
     return DesktopDemandHandle._(() {
@@ -314,13 +356,24 @@ class DesktopStore {
     });
   }
 
-  void _hookViewer() {
+  void _observeLifecycle() {
     if (_lifecycle == null) {
       _lifecycleState = WidgetsBinding.instance.lifecycleState;
       _lifecycle = AppLifecycleListener(
         onStateChange: (state) {
+          final wasVisible = _appVisible;
           _lifecycleState = state;
           _visibilityChanged();
+          if (_hostPageVisible) {
+            if (!wasVisible && !_hostView.value.loaded) {
+              unawaited(_onPageDemand());
+            } else if (state == AppLifecycleState.resumed &&
+                _hostView.value.loaded &&
+                (_capabilities?.permissions != null ||
+                    _capabilities?.reason == 'no_display')) {
+              unawaited(_readHost(refreshCapabilities: true));
+            }
+          }
         },
       );
     }
@@ -332,12 +385,12 @@ class DesktopStore {
     }
   }
 
-  bool get _visible =>
-      _viewerDemand > 0 &&
-      switch (_lifecycleState) {
-        null || AppLifecycleState.resumed || AppLifecycleState.inactive => true,
-        _ => false,
-      };
+  bool get _appVisible => switch (_lifecycleState) {
+    null || AppLifecycleState.resumed || AppLifecycleState.inactive => true,
+    _ => false,
+  };
+  bool get _visible => _viewerDemand > 0 && _appVisible;
+  bool get _hostPageVisible => _pageDemand > 0 && _appVisible;
 
   void _visibilityChanged() {
     if (_disposed) return;
@@ -362,7 +415,7 @@ class DesktopStore {
   void _schedulePolling() {
     final hostEvery = _disposed || _restarting || _cannotHost
         ? null
-        : _pageDemand > 0
+        : _hostPageVisible
         ? _hostWithPage
         : _hostView.value.sharing
         ? _hostWhileSharing
@@ -372,7 +425,17 @@ class DesktopStore {
       _hostTimer?.cancel();
       _hostTimer = hostEvery == null
           ? null
-          : Timer.periodic(hostEvery, (_) => unawaited(_readHost()));
+          : Timer.periodic(hostEvery, (timer) {
+              final permissions = _capabilities?.permissions;
+              // Follow a grant or a reconnected display while the card is
+              // visible. Also notice a revoked grant or a second monitor.
+              final refresh =
+                  _hostPageVisible &&
+                  (_capabilities?.reason == 'no_display' ||
+                      (permissions != null &&
+                          (!permissions.complete || timer.tick % 5 == 0)));
+              unawaited(_readHost(refreshCapabilities: refresh));
+            });
     }
     final statusEvery = _disposed || !_sessionActive
         ? null
@@ -438,6 +501,18 @@ class DesktopStore {
   // ================================================================= host
 
   DesktopCapabilities? _capabilities;
+  int _capabilityReads = 0, _capabilityApplied = 0;
+
+  // A permission request can finish while an older monitor poll is in flight.
+  Future<void> _readCapabilities() async {
+    final read = ++_capabilityReads;
+    final capabilities = await _api.capabilities();
+    if (!_disposed && read > _capabilityApplied) {
+      _capabilityApplied = read;
+      _capabilities = capabilities;
+    }
+  }
+
   DesktopTrust? _trust;
 
   /// Why the remembered grant could not be read. It stays until a read
@@ -455,19 +530,19 @@ class DesktopStore {
   bool _hostCurrent(int serial) => !_disposed && serial == _hostSerial;
 
   /// The page already says this device cannot host. The capability is
-  /// fixed at build time, so nothing about the host can change.
-  bool get _cannotHost => _hostView.value.loaded && !_hostView.value.supported;
+  /// fixed at build time. The owner can still grant permission or attach
+  /// a display.
+  bool get _cannotHost =>
+      _hostView.value.loaded &&
+      !_hostView.value.supported &&
+      !_hostView.value.needsPermission &&
+      _hostView.value.unsupportedReason != 'no_display';
 
   Future<void> _onPageDemand() async {
     if (_cannotHost) return;
     // An unreadable grant is read again on each visit, never on a timer.
     if (_hostView.value.loaded && _trustError == null) {
-      try {
-        _capabilities = await _api.capabilities();
-      } catch (_) {
-        // Keep the last answer; the helper row may lag one page visit.
-      }
-      await _readHost();
+      await _readHost(refreshCapabilities: true);
     } else {
       await _loadHost();
     }
@@ -475,7 +550,7 @@ class DesktopStore {
 
   Future<void> _loadHost() => _hostLoading ??= () async {
     try {
-      _capabilities = await _api.capabilities();
+      await _readCapabilities();
       await _readTrust(_hostSerial);
       await _discoverBackground();
       await _readHost();
@@ -516,7 +591,15 @@ class DesktopStore {
     _host = DesktopHostSnapshot(host: _host?.host, background: background);
   }
 
-  Future<void> _readHost() async {
+  Future<void> _readHost({bool refreshCapabilities = false}) async {
+    if (_disposed) return;
+    if (refreshCapabilities) {
+      try {
+        await _readCapabilities();
+      } catch (_) {
+        // Keep the last answer.
+      }
+    }
     if (_disposed) return;
     final read = ++_hostReads;
     try {
@@ -566,6 +649,7 @@ class DesktopStore {
       enabling: _enabling,
       restarting: _restarting,
       background: configuredBackground,
+      held: configuredBackground && background!.held,
       controlAllowed:
           host?.controlAllowed ??
           backgroundHost?.controlAllowed ??
@@ -595,6 +679,8 @@ class DesktopStore {
       viewer: host?.viewer ?? backgroundHost?.viewer,
       unsupportedReason: capabilities?.reason,
       displayMode: host?.displayMode ?? backgroundHost?.displayMode,
+      backgroundService: capabilities?.backgroundService ?? true,
+      permissions: capabilities?.permissions,
       // The running host's relay, else the background service's, when the
       // settings name another one. A remembered grant for another relay is
       // not configured at all.
@@ -637,11 +723,13 @@ class DesktopStore {
     } catch (e) {
       if (_disposed) return false;
       final failure = _hostError = _failureOf(e);
-      // A helper refusal means the service changed since the page read it:
-      // read it again, so the More menu offers what the card's hint names.
-      if (failure.code.startsWith('HELPER_')) {
+      // A helper refusal means the service changed since the page read it,
+      // and a missing permission that the owner withdrew it: read them
+      // again, so the card offers what the failure names.
+      if (failure.code.startsWith('HELPER_') ||
+          failure.code == 'PERMISSION_MISSING') {
         try {
-          _capabilities = await _api.capabilities();
+          await _readCapabilities();
         } catch (_) {
           // Keep the last answer.
         }
@@ -683,7 +771,7 @@ class DesktopStore {
       // A computer that cannot share (Windows without Media Foundation)
       // restores nothing and retries nothing: the grant stays for a start
       // where it can, and the Remote page says why. Local, no service IPC.
-      _capabilities = await _api.capabilities();
+      await _readCapabilities();
       if (!_hostCurrent(serial)) return;
       if (_capabilities?.host != true) {
         _publishHost();
@@ -731,7 +819,7 @@ class DesktopStore {
       if (!_hostCurrent(serial)) return;
       _hostResumeAttempt = 0;
       _hostError = null;
-      _capabilities = await _api.capabilities();
+      await _readCapabilities();
       await _discoverBackground();
       if (!_hostCurrent(serial)) return;
       await _readTrustAndHost(serial);
@@ -764,8 +852,9 @@ class DesktopStore {
   }
 
   /// Shares this desktop. By default through the Windows helper, so UAC and
-  /// the lock screen work and sharing survives the app; [ordinaryOnly]
-  /// shares the ordinary desktop from this app alone.
+  /// the lock screen work and sharing survives the app; [ordinaryOnly], and
+  /// every platform without the helper (macOS), shares the ordinary desktop
+  /// from this app alone.
   Future<void> enableHost({
     required int displayId,
     required bool allowControl,
@@ -773,10 +862,11 @@ class DesktopStore {
     bool ordinaryOnly = false,
   }) async {
     final name = service ?? _hostView.value.service ?? 'desktop:computer';
+    final appOnly = ordinaryOnly || !_hostView.value.backgroundService;
     await _hostAction(enabling: true, () async {
       _cancelHostResume();
       final serial = _hostSerial;
-      if (ordinaryOnly) {
+      if (appOnly) {
         await _api.startHost(
           service: name,
           displayId: displayId,
@@ -903,6 +993,22 @@ class DesktopStore {
     });
   }
 
+  /// Asks the owner for [permission], `screen_capture` or `input` (macOS);
+  /// whether it is granted now. Not granted, the card opens System
+  /// Settings, where the owner grants it.
+  Future<bool> requestHostPermission(String permission) async {
+    if (_disposed) return false;
+    var granted = false;
+    try {
+      granted = await _api.requestHostPermission(permission);
+      await _readCapabilities();
+    } catch (e) {
+      if (!_disposed) _hostError = _failureOf(e);
+    }
+    _publishHost();
+    return granted;
+  }
+
   /// Never waits for another host action: a local stop always works.
   Future<void> stopHost() async {
     if (_disposed) return;
@@ -992,7 +1098,7 @@ class DesktopStore {
         _restart();
         return;
       }
-      _capabilities = await _api.capabilities();
+      await _readCapabilities();
       await _discoverBackground();
       await _readHost();
     });
@@ -1143,6 +1249,7 @@ class DesktopStore {
       _invalidateInput();
       _view = null;
       _publishCursor();
+      _forgetShapes();
       _bumpGeometry();
       if (!_visible) _pauseNative();
       try {
@@ -1283,7 +1390,7 @@ class DesktopStore {
   /// codec.
   bool _fallBackFromH265() {
     if (_media?.codec != 'h265') return false;
-    _decoders.value = (_decoders.value ?? DesktopDecoders.h264Only)
+    _decoders.value = (_decoders.value ?? unprobedDesktopDecoders)
         .withoutH265();
     _reconnectNow();
     return true;
@@ -1305,17 +1412,18 @@ class DesktopStore {
 
   /// The decoders the first connect probes; later ones reuse the answer
   /// ([decoders]) without waiting. Until a probe that has not answered
-  /// within [_decoderProbeBound] (a wedged driver) does, attempts are H.264
-  /// only and none waits again; the platform is asked once, and its answer,
-  /// however late, is kept.
+  /// within [_decoderProbeBound] (a wedged driver) does, attempts offer what
+  /// an unanswered probe stands for ([unprobedDesktopDecoders]: H.264 alone
+  /// on Android, no native decoder elsewhere) and none waits again; the
+  /// platform is asked once, and its answer, however late, is kept.
   Future<DesktopDecoders> _probeDecoders() => _probing ??= _api
       .decoders()
-      .catchError((Object _) => DesktopDecoders.h264Only)
+      .catchError((Object _) => unprobedDesktopDecoders)
       .then((probed) {
         if (_disposed) return probed;
         return _decoders.value ??= probed;
       })
-      .timeout(_decoderProbeBound, onTimeout: () => DesktopDecoders.h264Only);
+      .timeout(_decoderProbeBound, onTimeout: () => unprobedDesktopDecoders);
 
   /// D6, and what this computer answered: H.265 is offered when the device
   /// would offer it and the computer has not declined it.
@@ -1578,7 +1686,7 @@ class DesktopStore {
     _view = view;
     // After paint a repaint asks for no frame: ask for the one that draws
     // the new cursor.
-    if (_publishCursor() && inFrame) {
+    if ((_publishCursor() | _publishShape(view)) && inFrame) {
       SchedulerBinding.instance.scheduleFrame();
     }
     if (view == null) return;
@@ -1634,6 +1742,89 @@ class DesktopStore {
       g,
       controlling: _session.value.controlling,
     );
+  }
+
+  /// The shapes the view named, the latest last, at most [_shapeCache]: a
+  /// pointer that goes back and forth between shapes the host defined
+  /// decodes each once. They are kept by content, never by number: once the
+  /// Rust viewer's counter has gone round, a number names another
+  /// definition. Only [_shapeNumber], the number last asked for, keeps its
+  /// definition until the next is asked for.
+  final _shapes = <DesktopPointerShape>[];
+  int _shapeNumber = 0;
+  static const _shapeCache = 16;
+
+  /// Gives [cursor] the shape [view] names, fetching its definition when
+  /// the number changes. True when [cursor]'s shape changed.
+  bool _publishShape(DesktopView? view) {
+    if (view == null || view.cursorShape == _shapeNumber) return false;
+    final number = _shapeNumber = view.cursorShape;
+    if (number == 0) {
+      final changed = _cursor.shape != null;
+      _cursor._setShape(null);
+      return changed;
+    }
+    DesktopCursorShape? fetched;
+    try {
+      fetched = _api.cursorShape(number);
+    } catch (_) {
+      fetched = null;
+    }
+    // Replaced since: a later view names its successor.
+    final definition = fetched;
+    if (definition == null) return false;
+    final at = _shapes.indexWhere((held) => held.definition.sameAs(definition));
+    final DesktopPointerShape shape;
+    if (at >= 0) {
+      shape = _shapes.removeAt(at);
+    } else {
+      shape = DesktopPointerShape(definition);
+      unawaited(_decodeShape(shape));
+    }
+    _shapes.add(shape);
+    while (_shapes.length > _shapeCache) {
+      _disposeImageLater(_shapes.removeAt(0)._image);
+    }
+    _cursor._setShape(shape);
+    return true;
+  }
+
+  /// A new Rust viewer: its numbers name other definitions.
+  void _forgetShapes() {
+    for (final shape in _shapes) {
+      _disposeImageLater(shape._image);
+    }
+    _shapes.clear();
+    _shapeNumber = 0;
+    _cursor._setShape(null);
+  }
+
+  /// [shape]'s bitmap as an image: premultiplied, as the engine takes it.
+  Future<void> _decodeShape(DesktopPointerShape shape) async {
+    final d = shape.definition;
+    final pixels = Uint8List.fromList(d.rgba);
+    for (var i = 0; i + 3 < pixels.length; i += 4) {
+      final alpha = pixels[i + 3];
+      if (alpha == 255) continue;
+      for (var c = i; c < i + 3; c++) {
+        pixels[c] = pixels[c] * alpha ~/ 255;
+      }
+    }
+    final decoded = Completer<ui.Image>();
+    ui.decodeImageFromPixels(
+      pixels,
+      d.width,
+      d.height,
+      ui.PixelFormat.rgba8888,
+      decoded.complete,
+    );
+    final image = await decoded.future;
+    if (_disposed || !_shapes.any((held) => identical(held, shape))) {
+      image.dispose();
+      return;
+    }
+    shape._image = image;
+    _cursor._decoded(shape);
   }
 
   int _geometryEpoch = 0;
@@ -2363,6 +2554,10 @@ class DesktopStore {
       unawaited(texture.dispose().catchError((Object _) {}));
     }
     _jpegImage.value?.dispose();
+    for (final shape in _shapes) {
+      shape._image?.dispose();
+    }
+    _shapes.clear();
     unawaited(shutdown());
     _hostView.dispose();
     _session.dispose();

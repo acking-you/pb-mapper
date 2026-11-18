@@ -109,7 +109,8 @@ pub.dev for current versions on 2026-11-07.
   orientation keys, lines 31-38).
 - macOS deployment target **10.15** (`macos/Runner.xcodeproj/project.pbxproj:464,546,596`).
   Both entitlement files enable app-sandbox, network client/server and
-  Downloads read-write. There is **no `keychain-access-groups` and no
+  Downloads read-write (as surveyed; the sandbox is off since 0.12.0, see
+  `docs/remote-desktop.md`). There is **no `keychain-access-groups` and no
   `com.apple.security.device.camera`**.
 - macOS ships as a Developer ID–signed, notarised DMG outside the App Store
   (`docs/macos-signing.zh-CN.md`). This matters because

@@ -117,6 +117,9 @@ impl PbMapperState {
         }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
+            // A Mac app sandboxed up to 0.11.0 left its data in its container.
+            #[cfg(target_os = "macos")]
+            super::container::adopt();
             if let Some(config_dir) = dirs::config_dir() {
                 config_dir.join("pb-mapper-ui")
             } else if let Some(home_dir) = dirs::home_dir() {

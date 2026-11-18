@@ -1,0 +1,12 @@
+1 before case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1145 allocs_per_unit=19.09 alloc_bytes_per_unit=40220
+1 before case=video+pointer units_per_s=59.6 inputs_per_s=244.4 allocs_per_s=3501 allocs_per_unit=58.75 alloc_bytes_per_unit=47130
+2 after case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1144 allocs_per_unit=19.07 alloc_bytes_per_unit=40218
+2 after case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3537 allocs_per_unit=58.97 alloc_bytes_per_unit=47100
+3 after case=video units_per_s=59.8 inputs_per_s=0.0 allocs_per_s=1138 allocs_per_unit=19.03 alloc_bytes_per_unit=40211
+3 after case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3536 allocs_per_unit=58.94 alloc_bytes_per_unit=47103
+4 before case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1143 allocs_per_unit=19.05 alloc_bytes_per_unit=40213
+4 before case=video+pointer units_per_s=60.0 inputs_per_s=249.8 allocs_per_s=3539 allocs_per_unit=59.00 alloc_bytes_per_unit=47097
+5 before case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1143 allocs_per_unit=19.07 alloc_bytes_per_unit=40213
+5 before case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=3539 allocs_per_unit=58.99 alloc_bytes_per_unit=47101
+6 after case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1144 allocs_per_unit=19.07 alloc_bytes_per_unit=40213
+6 after case=video+pointer units_per_s=60.0 inputs_per_s=249.7 allocs_per_s=3540 allocs_per_unit=59.02 alloc_bytes_per_unit=47098

@@ -1,0 +1,565 @@
+{
+  "host": "Apple M3 Pro, macOS 27.0.1 (26A434)",
+  "runs": [
+    {
+      "build": {
+        "version": "0.11.0",
+        "number": "928",
+        "mode": "release"
+      },
+      "device": {
+        "os": "macos",
+        "os_version": "Version 27.0.1 (Build 26A434)",
+        "processors": 12,
+        "refresh_hz": 120.0
+      },
+      "max_fps": 60,
+      "seconds": 25,
+      "warmup_seconds": 5,
+      "quality": "balanced",
+      "transport": "tcp",
+      "relay_only": true,
+      "resolution": "1080p",
+      "decoder": {
+        "hardware": true,
+        "name": "VideoToolbox H.264",
+        "state": "ok"
+      },
+      "connect_ms": 756.299,
+      "disconnect": {
+        "fresh": true,
+        "disconnect_ms": 26.077,
+        "snapshot_written": true,
+        "snapshot_bytes": 9767
+      },
+      "summary": {
+        "steady_seconds": 21,
+        "live_seconds": 21,
+        "presented_fps": {
+          "p50": 38.0,
+          "min": 35.0,
+          "max": 42.0
+        },
+        "received_fps": {
+          "p50": 38.71149444580078,
+          "min": 35.72796630859375,
+          "max": 41.85184860229492
+        },
+        "present_interval_ms": {
+          "p50_ms": 34,
+          "p95_ms": 34,
+          "p99_ms": 66,
+          "max_ms": 66
+        },
+        "gaps_100": 0,
+        "gaps_100_per_minute": 0.0,
+        "gaps_250": 0,
+        "picture_latency_ms": {
+          "p50": 14,
+          "min": 14,
+          "max": 16
+        },
+        "rtt_ms": {
+          "p50": 10,
+          "min": 10,
+          "max": 10
+        },
+        "queue_delay_ms": {
+          "p50": 0,
+          "min": 0,
+          "max": 0
+        },
+        "keyframes": 12,
+        "keyframes_requested": 0,
+        "backlog_drops": 0,
+        "dropped_frames": 0,
+        "adaptation_seconds": {
+          "steady": 21
+        },
+        "degraded_seconds": 0,
+        "fps_cap": {
+          "0": 21
+        },
+        "resolutions": [
+          "1920x1080"
+        ],
+        "reconnects": 0,
+        "resume_picture_ms": [],
+        "flutter": {
+          "frames": 20,
+          "over_budget": 0,
+          "build_max_ms": 1.394,
+          "raster_max_ms": 6.481
+        }
+      },
+      "events": [
+        {
+          "elapsed_us": 6,
+          "phase": "idle"
+        },
+        {
+          "elapsed_us": 27,
+          "phase": "connecting"
+        },
+        {
+          "elapsed_us": 756300,
+          "phase": "live"
+        },
+        {
+          "elapsed_us": 25118087,
+          "phase": "idle"
+        }
+      ],
+      "source": "H.264 replay",
+      "native_at_end": {
+        "dropped": 22,
+        "recoveries": 0,
+        "lastRecovery": "",
+        "presented": 931,
+        "decoded": 954,
+        "submitted": 954,
+        "configurations": 1,
+        "lowLatency": true,
+        "refreshHz": 120.0,
+        "decoder": "VideoToolbox H.264",
+        "timings": {
+          "surface_consume": {
+            "mean_ms": 6.2222288698481565,
+            "samples": 922,
+            "max_ms": 9.091584
+          }
+        }
+      }
+    },
+    {
+      "build": {
+        "version": "0.11.0",
+        "number": "928",
+        "mode": "release"
+      },
+      "device": {
+        "os": "macos",
+        "os_version": "Version 27.0.1 (Build 26A434)",
+        "processors": 12,
+        "refresh_hz": 120.0
+      },
+      "max_fps": 60,
+      "seconds": 30,
+      "warmup_seconds": 5,
+      "quality": "balanced",
+      "transport": "tcp",
+      "relay_only": true,
+      "resolution": "1080p",
+      "decoder": {
+        "hardware": true,
+        "name": "VideoToolbox H.265",
+        "state": "ok"
+      },
+      "connect_ms": 755.076,
+      "disconnect": {
+        "fresh": true,
+        "disconnect_ms": 37.441,
+        "snapshot_written": true,
+        "snapshot_bytes": 10889
+      },
+      "summary": {
+        "steady_seconds": 26,
+        "live_seconds": 26,
+        "presented_fps": {
+          "p50": 56.0,
+          "min": 52.0,
+          "max": 58.0
+        },
+        "received_fps": {
+          "p50": 55.786964416503906,
+          "min": 52.63313293457031,
+          "max": 58.615177154541016
+        },
+        "present_interval_ms": {
+          "p50_ms": 17,
+          "p95_ms": 34,
+          "p99_ms": 50,
+          "max_ms": 108
+        },
+        "gaps_100": 1,
+        "gaps_100_per_minute": 2.3076923076923075,
+        "gaps_250": 0,
+        "picture_latency_ms": {
+          "p50": 22,
+          "min": 20,
+          "max": 23
+        },
+        "rtt_ms": {
+          "p50": 10,
+          "min": 10,
+          "max": 10
+        },
+        "queue_delay_ms": {
+          "p50": 0,
+          "min": 0,
+          "max": 0
+        },
+        "keyframes": 0,
+        "keyframes_requested": 0,
+        "backlog_drops": 0,
+        "dropped_frames": 0,
+        "adaptation_seconds": {
+          "steady": 26
+        },
+        "degraded_seconds": 0,
+        "fps_cap": {
+          "0": 26
+        },
+        "resolutions": [
+          "1920x1080"
+        ],
+        "reconnects": 0,
+        "resume_picture_ms": [],
+        "flutter": {
+          "frames": 26,
+          "over_budget": 0,
+          "build_max_ms": 3.898,
+          "raster_max_ms": 4.787
+        }
+      },
+      "events": [
+        {
+          "elapsed_us": 6,
+          "phase": "idle"
+        },
+        {
+          "elapsed_us": 13,
+          "phase": "connecting"
+        },
+        {
+          "elapsed_us": 755076,
+          "phase": "live"
+        },
+        {
+          "elapsed_us": 30432718,
+          "phase": "idle"
+        }
+      ],
+      "source": "H.265 external display",
+      "native_at_end": {
+        "recoveries": 0,
+        "presented": 1647,
+        "lowLatency": true,
+        "lastRecovery": "",
+        "timings": {
+          "surface_consume": {
+            "mean_ms": 4.158031790540541,
+            "max_ms": 10.877917,
+            "samples": 1628
+          }
+        },
+        "refreshHz": 120.0,
+        "decoder": "VideoToolbox H.265",
+        "submitted": 1654,
+        "decoded": 1654,
+        "dropped": 7,
+        "configurations": 1
+      }
+    },
+    {
+      "build": {
+        "version": "0.11.0",
+        "number": "928",
+        "mode": "release"
+      },
+      "device": {
+        "os": "macos",
+        "os_version": "Version 27.0.1 (Build 26A434)",
+        "processors": 12,
+        "refresh_hz": 120.0
+      },
+      "max_fps": 60,
+      "seconds": 30,
+      "warmup_seconds": 5,
+      "quality": "balanced",
+      "transport": "tcp",
+      "relay_only": true,
+      "resolution": "1080p",
+      "decoder": {
+        "hardware": true,
+        "name": "VideoToolbox H.265",
+        "state": "ok"
+      },
+      "connect_ms": 301.86,
+      "disconnect": {
+        "fresh": true,
+        "disconnect_ms": 26.959,
+        "snapshot_written": true,
+        "snapshot_bytes": 11051
+      },
+      "summary": {
+        "steady_seconds": 26,
+        "live_seconds": 26,
+        "presented_fps": {
+          "p50": 56.0,
+          "min": 53.0,
+          "max": 58.0
+        },
+        "received_fps": {
+          "p50": 55.71800994873047,
+          "min": 52.79252624511719,
+          "max": 57.75732421875
+        },
+        "present_interval_ms": {
+          "p50_ms": 17,
+          "p95_ms": 34,
+          "p99_ms": 42,
+          "max_ms": 42
+        },
+        "gaps_100": 0,
+        "gaps_100_per_minute": 0.0,
+        "gaps_250": 0,
+        "picture_latency_ms": {
+          "p50": 21,
+          "min": 20,
+          "max": 26
+        },
+        "rtt_ms": {
+          "p50": 10,
+          "min": 10,
+          "max": 10
+        },
+        "queue_delay_ms": {
+          "p50": 0,
+          "min": 0,
+          "max": 0
+        },
+        "keyframes": 0,
+        "keyframes_requested": 0,
+        "backlog_drops": 0,
+        "dropped_frames": 0,
+        "adaptation_seconds": {
+          "steady": 26
+        },
+        "degraded_seconds": 0,
+        "fps_cap": {
+          "0": 26
+        },
+        "resolutions": [
+          "1920x1080"
+        ],
+        "reconnects": 0,
+        "resume_picture_ms": [],
+        "flutter": {
+          "frames": 27,
+          "over_budget": 0,
+          "build_max_ms": 1.519,
+          "raster_max_ms": 1.598
+        }
+      },
+      "events": [
+        {
+          "elapsed_us": 6,
+          "phase": "idle"
+        },
+        {
+          "elapsed_us": 14,
+          "phase": "connecting"
+        },
+        {
+          "elapsed_us": 301860,
+          "phase": "live"
+        },
+        {
+          "elapsed_us": 30139305,
+          "phase": "idle"
+        }
+      ],
+      "source": "H.265 external display repeat",
+      "native_at_end": {
+        "presented": 1650,
+        "dropped": 1,
+        "decoded": 1651,
+        "lastRecovery": "",
+        "lowLatency": true,
+        "configurations": 1,
+        "recoveries": 0,
+        "timings": {
+          "surface_consume": {
+            "mean_ms": 4.404214838769231,
+            "samples": 1625,
+            "max_ms": 12.731791
+          }
+        },
+        "refreshHz": 120.0,
+        "submitted": 1651,
+        "decoder": "VideoToolbox H.265"
+      }
+    },
+    {
+      "build": {
+        "version": "0.11.0",
+        "number": "928",
+        "mode": "release"
+      },
+      "device": {
+        "os": "macos",
+        "os_version": "Version 27.0.1 (Build 26A434)",
+        "processors": 12,
+        "refresh_hz": 120.0
+      },
+      "max_fps": 60,
+      "seconds": 36,
+      "warmup_seconds": 5,
+      "quality": "balanced",
+      "transport": "tcp",
+      "relay_only": true,
+      "resolution": "1080p",
+      "decoder": {
+        "hardware": true,
+        "name": "VideoToolbox H.265",
+        "state": "ok"
+      },
+      "connect_ms": 816.417,
+      "disconnect": {
+        "fresh": true,
+        "disconnect_ms": 26.655,
+        "snapshot_written": true,
+        "snapshot_bytes": 10840
+      },
+      "summary": {
+        "steady_seconds": 32,
+        "live_seconds": 28,
+        "presented_fps": {
+          "p50": 57.0,
+          "min": 29.0,
+          "max": 59.0
+        },
+        "received_fps": {
+          "p50": 56.6298942565918,
+          "min": 0.0,
+          "max": 58.8841438293457
+        },
+        "present_interval_ms": {
+          "p50_ms": 17,
+          "p95_ms": 34,
+          "p99_ms": 50,
+          "max_ms": 4085
+        },
+        "gaps_100": 1,
+        "gaps_100_per_minute": 1.875,
+        "gaps_250": 1,
+        "picture_latency_ms": {
+          "p50": 23,
+          "min": 22,
+          "max": 24
+        },
+        "rtt_ms": {
+          "p50": 10,
+          "min": 10,
+          "max": 10
+        },
+        "queue_delay_ms": {
+          "p50": 0,
+          "min": 0,
+          "max": 0
+        },
+        "keyframes": 1,
+        "keyframes_requested": 0,
+        "backlog_drops": 0,
+        "dropped_frames": 1,
+        "adaptation_seconds": {
+          "steady": 27,
+          "paused": 4,
+          "startup": 1
+        },
+        "degraded_seconds": 0,
+        "fps_cap": {
+          "0": 32
+        },
+        "resolutions": [
+          "1920x1080"
+        ],
+        "reconnects": 0,
+        "resume_picture_ms": [
+          51.602
+        ],
+        "flutter": {
+          "frames": 36,
+          "over_budget": 0,
+          "build_max_ms": 1.646,
+          "raster_max_ms": 4.898
+        }
+      },
+      "events": [
+        {
+          "elapsed_us": 7,
+          "phase": "idle"
+        },
+        {
+          "elapsed_us": 35,
+          "phase": "connecting"
+        },
+        {
+          "elapsed_us": 816417,
+          "phase": "live"
+        },
+        {
+          "elapsed_us": 8477343,
+          "lifecycle": "inactive"
+        },
+        {
+          "elapsed_us": 8477409,
+          "phase": "paused"
+        },
+        {
+          "elapsed_us": 8477413,
+          "lifecycle": "hidden"
+        },
+        {
+          "elapsed_us": 12513574,
+          "lifecycle": "inactive"
+        },
+        {
+          "elapsed_us": 12513583,
+          "lifecycle": "resumed"
+        },
+        {
+          "elapsed_us": 12531436,
+          "phase": "recovering"
+        },
+        {
+          "elapsed_us": 12565182,
+          "phase": "live"
+        },
+        {
+          "elapsed_us": 12565187,
+          "resume_picture_ms": 51.602
+        },
+        {
+          "elapsed_us": 36557816,
+          "phase": "idle"
+        }
+      ],
+      "source": "H.265 external display with hide and restore",
+      "native_at_end": {
+        "dropped": 3,
+        "lowLatency": true,
+        "configurations": 1,
+        "decoded": 1754,
+        "recoveries": 0,
+        "presented": 1750,
+        "lastRecovery": "",
+        "submitted": 1754,
+        "decoder": "VideoToolbox H.265",
+        "timings": {
+          "surface_consume": {
+            "samples": 1730,
+            "max_ms": 10.088542,
+            "mean_ms": 4.942290237572255
+          }
+        },
+        "refreshHz": 120.0
+      }
+    }
+  ],
+  "idle_host_status_reads_in_8_seconds": {
+    "before": 8,
+    "after": 0
+  }
+}

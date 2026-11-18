@@ -2,29 +2,31 @@
 ///
 /// By the time anything here runs, the file's size and SHA-256 have been
 /// checked against a manifest signed by the release key. What is left is the
-/// platform's own way of replacing a running app: Windows runs the installer
-/// once the app has quit, Linux swaps the AppImage it runs from, and a disk
-/// image or a portable archive is handed to the user, who knows where the
-/// app lives.
+/// platform's own way of replacing a running app: Windows starts the
+/// installer, which waits for the app to quit, Linux swaps the AppImage it
+/// runs from, and a disk image or a portable archive is handed to the user,
+/// who knows where the app lives.
 library;
 
-import 'dart:ffi';
+import 'dart:async';
 import 'dart:io';
 
-import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:pb_mapper_ui/src/ffi/pb_mapper_ffi.dart';
 import 'package:pb_mapper_ui/src/updates/release.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 /// The platform effects of an update, behind an interface so the flow can be
 /// tested without replacing anything.
 abstract interface class UpdateInstaller {
-  /// Run [installer] quietly once this process has exited, then open the app
-  /// again. The caller quits right after; this throws an [UpdateException]
-  /// when nothing could be started to do it, so the caller stays.
-  Future<void> runInstallerAfterExit(File installer);
+  /// Start [installer], which waits for this process to quit before it
+  /// replaces anything and opens the app again when it ends. Completes once
+  /// the installer runs with the rights it installs with, which Windows may
+  /// first ask the user for, in front of this app: the caller then quits.
+  /// Throws an [UpdateException] when the installer could not start or ended
+  /// before that (permission refused, a failure), and the caller stays.
+  Future<void> startInstaller(File installer);
 
   /// Put [download] in place of the AppImage at [appImage] and open it once
   /// this process has exited. The caller quits right after.
@@ -43,12 +45,8 @@ class PlatformUpdateInstaller implements UpdateInstaller {
   const PlatformUpdateInstaller();
 
   @override
-  Future<void> runInstallerAfterExit(File installer) =>
-      WindowsInstallerUpdate.handOff(
-        installer,
-        pid,
-        Platform.resolvedExecutable,
-      );
+  Future<void> startInstaller(File installer) =>
+      WindowsInstallerUpdate.start(installer, pid);
 
   @override
   Future<void> replaceAppImage(File download, String appImage) =>
@@ -119,103 +117,105 @@ Future<void> _delete(File file) async {
   }
 }
 
-/// Windows, installed: the Inno Setup installer fastforge builds. It reuses
-/// the previous install's folder (by its AppId), and asks for elevation
-/// itself when the install is a machine-wide one.
+/// Windows, installed: the Inno Setup installer that
+/// `ui/windows/packaging/exe/inno_setup.iss` defines. It updates the
+/// installation it finds by its AppId, a machine-wide one after Windows asks
+/// for permission, waits for the app named by `/UPDATEPID` to quit before it
+/// replaces a file, and when it ends opens the installed app again as the
+/// user who started it.
 abstract final class WindowsInstallerUpdate {
   /// Whether this copy was set up by the installer rather than unpacked from
   /// the portable archive: Inno Setup leaves its uninstaller beside the
-  /// executable.
+  /// executable. A copy of an installation, such as the desktop helper's
+  /// protected one, counts too: the installer updates the installation and
+  /// opens that.
   static bool isInstalled([String? executable]) => File(
     '${File(executable ?? Platform.resolvedExecutable).parent.path}'
     '${Platform.pathSeparator}unins000.exe',
   ).existsSync();
 
-  /// Start a hidden PowerShell that waits for [processId] to exit, runs
-  /// [installer] quietly, and opens [app] again whether or not the install
-  /// succeeded, so the user is never left without the app. It gives up,
-  /// installing nothing, if the app has not exited within a minute.
+  /// Setup's log, beside the installer: the download's folder is its own.
+  static File log(File installer) =>
+      File('${installer.parent.path}${Platform.pathSeparator}setup.log');
+
+  /// Start [installer] to update the app running as [processId]; see
+  /// [UpdateInstaller.startInstaller].
+  static Future<void> start(File installer, int processId) =>
+      run(installer.path, [
+        '/SILENT',
+        '/SUPPRESSMSGBOXES',
+        '/NORESTART',
+        '/SP-',
+        '/LOG=${log(installer).path}',
+        '/UPDATEPID=$processId',
+      ], log(installer));
+
+  /// Start [executable] with [arguments], and complete once [ready] exists
+  /// while it still runs. Setup starts its log only in the process that
+  /// installs: for an installation for all users, the one Windows starts
+  /// elevated once the user allowed it. A [ready] left by an earlier attempt
+  /// is removed first, so that it cannot count.
   ///
-  /// Started by `pb_mapper_spawn_hidden_powershell_v1` in the app's FFI
-  /// library (or [library]), not by `Process.start`: a detached Dart child
-  /// has no console, and PowerShell exits at once without running a line.
-  /// Throws an [UpdateException] when it could not be started.
-  static Future<void> handOff(
-    File installer,
-    int processId,
-    String app, [
-    DynamicLibrary? library,
-  ]) async {
-    final spawn = (library ?? PbMapperFFI().lib)
-        .lookupFunction<_SpawnNative, _SpawnDart>(
-          'pb_mapper_spawn_hidden_powershell_v1',
-        );
-    final command = script(
-      installer.absolute.path,
-      processId,
-      app,
-    ).toNativeUtf8();
+  /// Started from here, while this app is open and in front, so that Windows
+  /// asks for that permission in front of it. Started after the app had quit,
+  /// by a process with no window, Setup asked from behind, where Windows may
+  /// leave the prompt as a flashing taskbar button: unseen, it left nothing
+  /// installed and no app open.
+  ///
+  /// Throws an [UpdateException] when [executable] cannot start, or ends
+  /// first.
+  @visibleForTesting
+  static Future<void> run(
+    String executable,
+    List<String> arguments,
+    File ready, {
+    Duration poll = const Duration(milliseconds: 100),
+  }) async {
+    if (await ready.exists()) await ready.delete();
+    final Process setup;
     try {
-      switch (spawn(command)) {
-        case 1:
-          return;
-        case -1:
-          throw const UpdateException(
-            UpdateFailure.install,
-            'The installer hand-off script was refused as malformed',
-          );
-        default:
-          throw const UpdateException(
-            UpdateFailure.install,
-            'Windows would not start the installer hand-off (see the log)',
-          );
-      }
-    } finally {
-      malloc.free(command);
+      setup = await Process.start(executable, arguments);
+    } on ProcessException catch (error) {
+      throw UpdateException(
+        UpdateFailure.install,
+        'Could not start the installer: ${error.message}',
+      );
+    }
+    // Setup writes nothing there; drained, the pipes can never fill.
+    unawaited(setup.stdout.drain<void>());
+    unawaited(setup.stderr.drain<void>());
+    int? ended;
+    unawaited(setup.exitCode.then((code) => ended = code));
+    while (ended == null && !await ready.exists()) {
+      await Future<void>.delayed(poll);
+    }
+    if (ended case final code?) {
+      throw UpdateException(
+        UpdateFailure.install,
+        'The installer ended with exit code $code before installing anything'
+        '${code == 2 ? ': Windows was not given permission, or it was cancelled' : ''}.',
+      );
     }
   }
 
-  /// The PowerShell [handOff] runs. Paths go in single quotes, where only a
-  /// single quote is special. Setup writes its log beside the installer
-  /// (`setup.log`). When setup succeeds the download's folder is removed;
-  /// when it fails only the installer is, and the log stays for whoever
-  /// asks why the update did not go in.
-  static String script(String installer, int processId, String app) {
-    String quote(String text) => "'${text.replaceAll("'", "''")}'";
-    // A Windows path, read as Windows reads it whatever runs this, so the
-    // script is the same when a test builds it elsewhere. The installer has
-    // its download folder to itself.
-    final cut = installer.lastIndexOf(RegExp(r'[\\/]'));
-    final folder = cut <= 0 ? null : installer.substring(0, cut);
-    final log = '${folder ?? '.'}\\setup.log';
-    final removeInstaller =
-        'Remove-Item -LiteralPath ${quote(installer)} -ErrorAction SilentlyContinue';
-    // Installed: nothing left to keep. Not installed: the log stays, for
-    // whoever asks why. Only what the update made is removed, then the
-    // folder if that left it empty: a folder holding anything else, or a
-    // path that is not the download's own folder, is never touched.
-    final cleanUp = folder == null
-        ? removeInstaller
-        : 'if (\$setup.ExitCode -eq 0) { Remove-Item -LiteralPath '
-              '${quote(installer)},${quote(log)} -ErrorAction SilentlyContinue; '
-              'try { [IO.Directory]::Delete(${quote(folder)}) } catch {} } '
-              'else { $removeInstaller }';
-    return [
-      'try { Wait-Process -Id $processId -Timeout 60 -ErrorAction Stop } catch {}',
-      'if (Get-Process -Id $processId -ErrorAction SilentlyContinue) { exit 1 }',
-      // Start-Process joins its arguments with spaces and quotes none of
-      // them, so a log path with a space is quoted for setup here.
-      '\$setup = Start-Process -FilePath ${quote(installer)} '
-          "-ArgumentList '/SILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"
-          '${quote('/LOG="$log"')} -Wait -PassThru',
-      cleanUp,
-      'Start-Process -FilePath ${quote(app)}',
-    ].join('; ');
+  /// What is left of an update's download once the app it installed has
+  /// opened: the installer goes, and Setup's log too when the update went in,
+  /// then the folder if that left it empty. The log of an update that did not
+  /// go in stays, for whoever asks why.
+  static Future<void> removeDownload(
+    String installer, {
+    required bool installed,
+  }) async {
+    final file = File(installer);
+    await _delete(file);
+    if (installed) await _delete(log(file));
+    try {
+      await file.parent.delete();
+    } on FileSystemException {
+      // Not empty, or already gone.
+    }
   }
 }
-
-typedef _SpawnNative = Int32 Function(Pointer<Utf8>);
-typedef _SpawnDart = int Function(Pointer<Utf8>);
 
 /// Linux, as an AppImage: the file the app runs from is replaced, which a
 /// running AppImage tolerates, since it keeps its own mount of the old file.

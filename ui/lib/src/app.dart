@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Directory, exit;
+import 'dart:io' show Directory, Platform, exit;
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
@@ -127,7 +127,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
 
   /// Null while deciding, so a returning user never sees setup flash by.
   bool? _setup;
-  bool _allowExit = false;
+  Future<void>? _quitCleanup;
 
   /// The viewer session the window was last brought back for.
   DateTime? _shownForViewer;
@@ -241,11 +241,13 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
   void _startDesktop() {
     _lifecycle = AppLifecycleListener(
       onExitRequested: () async {
-        if (!_allowExit) {
+        // AppKit sends Dock Quit and Command-Q here. Closing the window
+        // has its own callback below and keeps the app in the menu bar.
+        if (!Platform.isMacOS && _quitCleanup == null) {
           await TrayService.instance.hideToTray();
           return AppExitResponse.cancel;
         }
-        _shutdown();
+        await _prepareToQuit();
         return AppExitResponse.exit;
       },
     );
@@ -347,19 +349,18 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
   }
 
   void _quit() {
-    _allowExit = true;
     _shutdown();
     exit(0);
   }
 
-  /// Quit from the tray ends sharing and viewing first, so the other
-  /// computer is told why instead of losing the connection. An update's or
-  /// the helper hand-off's quit is a restart and keeps [_quit].
+  /// Dock, menu and tray quit requests can overlap. End the app's desktop
+  /// sessions and release the native services once before the process exits.
+  Future<void> _prepareToQuit() =>
+      _quitCleanup ??= _store.desktop.shutdown().whenComplete(_shutdown);
+
   Future<void> _quitFromTray() async {
-    if (_allowExit) return;
-    _allowExit = true;
-    await _store.desktop.shutdown();
-    _quit();
+    await _prepareToQuit();
+    exit(0);
   }
 
   @override

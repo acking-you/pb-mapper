@@ -37,7 +37,8 @@ enum UpdateStage {
   downloading,
   verifying,
 
-  /// Handed over: the app is quitting so the update can replace it.
+  /// Handed over: the app quits so the update can replace it, on Windows
+  /// once the installer runs (Windows may first ask for permission).
   installing,
 
   /// Saved to Downloads for the user to finish.
@@ -84,7 +85,7 @@ class UpdateController extends ChangeNotifier {
   final Future<UpdateHost> Function() loadHost;
 
   /// A fresh folder for one download. A Windows installer stays in it after
-  /// the app quits, until the hand-off has run it.
+  /// the app quits, until the launch after the update removes it.
   final Future<Directory> Function() workDir;
 
   /// How long after a hand-off its outcome is still news. The installer
@@ -272,7 +273,12 @@ class UpdateController extends ChangeNotifier {
         }
       }
       _ensureActive();
-      if (plan.method == UpdateMethod.systemInstaller) _verifiedFile = file;
+      // Kept for Retry when the installer does not go ahead: Android's
+      // confirmation was left, or Windows was not given permission.
+      if (plan.method == UpdateMethod.systemInstaller ||
+          plan.method == UpdateMethod.installer) {
+        _verifiedFile = file;
+      }
       await _apply(plan, file);
     } on UpdateCancelled {
       _verifiedFile = null;
@@ -306,17 +312,17 @@ class UpdateController extends ChangeNotifier {
     }
     switch (plan.method) {
       case UpdateMethod.installer:
-        // Noted before the hand-off starts, so a running hand-off always
-        // has its note; taken back when it could not start, which fails
-        // here with the app still open.
-        await _remember();
+        // Noted before the installer starts, so a running installer always
+        // has its note; taken back when it ended before installing, which
+        // fails here with the app still open and the download kept.
+        await _remember(installer: file);
+        _set(UpdateStage.installing);
         try {
-          await installer.runInstallerAfterExit(file);
+          await installer.startInstaller(file);
         } catch (_) {
           await _forget();
           rethrow;
         }
-        _set(UpdateStage.installing);
         await quit();
       case UpdateMethod.replaceAppImage:
         final appImage = _host?.appImage;
@@ -351,14 +357,22 @@ class UpdateController extends ChangeNotifier {
     }
   }
 
-  /// Write down where this update is going, for the launch after it to check.
-  /// Best effort: an update is not refused for want of a note.
-  Future<void> _remember() async {
+  /// Write down where this update is going, for the launch after it to check,
+  /// and the [installer] it runs, for that launch to remove. Best effort: an
+  /// update is not refused for want of a note.
+  Future<void> _remember({File? installer}) async {
     final from = _installed;
     final to = _published?.version;
     if (from == null || to == null) return;
     try {
-      await record.write(PendingUpdate(from: from, to: to, at: DateTime.now()));
+      await record.write(
+        PendingUpdate(
+          from: from,
+          to: to,
+          at: DateTime.now(),
+          installer: installer?.path,
+        ),
+      );
     } catch (error) {
       debugPrint('Could not record the update: $error');
     }
@@ -376,19 +390,26 @@ class UpdateController extends ChangeNotifier {
 
   /// What became of the update handed off before this app last quit: null
   /// when there was none, or when it is too old to be the one just made.
-  /// Read once; the next launch hears nothing.
+  /// Read once; the next launch hears nothing. The Windows installer it ran
+  /// is removed here, which it could not do itself.
   Future<UpdateOutcome?> takeOutcome() async {
     try {
       final pending = await record.take();
-      if (pending == null ||
-          DateTime.now().difference(pending.at) > outcomeWindow) {
-        return null;
-      }
+      if (pending == null) return null;
       final installed = _installed ??= await loadInstalled();
-      return UpdateOutcome(
+      final outcome = UpdateOutcome(
         to: pending.to,
         installed: !(pending.to > installed),
       );
+      if (pending.installer case final installer?) {
+        await WindowsInstallerUpdate.removeDownload(
+          installer,
+          installed: outcome.installed,
+        );
+      }
+      return DateTime.now().difference(pending.at) > outcomeWindow
+          ? null
+          : outcome;
     } catch (error) {
       debugPrint('Could not read the last update: $error');
       return null;
@@ -396,7 +417,7 @@ class UpdateController extends ChangeNotifier {
   }
 
   /// Remove the download's temporary folder. Not after handing it to the
-  /// Windows installer, which runs it once the app has quit.
+  /// Windows installer, which runs from it after the app has quit.
   static Future<void> _discard(File? file) async {
     if (file == null) return;
     try {

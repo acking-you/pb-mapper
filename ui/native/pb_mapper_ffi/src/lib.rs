@@ -85,7 +85,7 @@ pub use service::{
     pb_mapper_get_service_status_json, pb_mapper_register_service, pb_mapper_unregister_service,
 };
 pub use tunnel_events::pb_mapper_tunnel_events_call_json;
-pub use update::{pb_mapper_ed25519_verify_v1, pb_mapper_spawn_hidden_powershell_v1};
+pub use update::pb_mapper_ed25519_verify_v1;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: MiMalloc = MiMalloc;

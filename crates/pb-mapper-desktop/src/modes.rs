@@ -14,7 +14,12 @@
 use crate::{FailureKind, Result, error, failure_kind, platform::DisplayModes};
 use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, time::Duration};
+use std::{
+    fs::File,
+    io::{self, Read},
+    path::PathBuf,
+    time::Duration,
+};
 
 /// The most modes a list carries.
 const MAX_MODES: usize = 64;
@@ -25,6 +30,8 @@ pub(crate) const MAX_SIDE: u32 = 32_768;
 const MAX_ENTRIES: usize = 16;
 /// The longest scope an entry keeps.
 const MAX_SCOPE: usize = 512;
+/// Fits all 16 entries even with every byte of their scope JSON-escaped.
+const MAX_JOURNAL_BYTES: u64 = 64 * 1024;
 /// The in-process journal's file in its state directory.
 pub(crate) const JOURNAL: &str = "display-modes.json";
 /// How long after a change a capture failure is the display still changing,
@@ -142,8 +149,8 @@ pub(crate) enum ModeCommand {
     HostRestore,
 }
 
-/// A display mode as the journal keeps it: its size, and the refresh rate
-/// and depth the platform set it at (0 where it has none).
+/// A display mode as the journal keeps it: its size, and the refresh rate,
+/// depth and backing scale the platform set it at (0 where it has none).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Setting {
@@ -151,6 +158,14 @@ pub(crate) struct Setting {
     pub height: u32,
     pub hz: u32,
     pub bpp: u32,
+    /// Pixels per point where a mode's points differ from its pixels
+    /// (macOS: a HiDPI mode is 2, its low-resolution twin of the same pixel
+    /// size 1); 0 elsewhere, and then never written.
+    #[serde(default, skip_serializing_if = "no_scale")]
+    pub scale: u32,
+}
+fn no_scale(scale: &u32) -> bool {
+    *scale == 0
 }
 impl Setting {
     pub(crate) fn size(self) -> Mode {
@@ -160,7 +175,30 @@ impl Setting {
         }
     }
     fn valid(self) -> bool {
-        self.size().valid() && self.hz <= 1000 && self.bpp <= 64
+        self.size().valid() && self.hz <= 1000 && self.bpp <= 64 && self.scale <= 8
+    }
+    /// Whether a display showing `self` shows the mode `other` names: the
+    /// same size, and the same depth, scale and refresh rate wherever both
+    /// say one. Two modes of one size are different modes to their owner (a
+    /// Mac's HiDPI mode and its low-resolution twin, two refresh rates), so a
+    /// host takes neither for the one it set. A field a platform does not
+    /// report matches any: a depth or scale of 0 (an older journal's missing
+    /// scale reads as 0 too), and on Windows, whose settings have no scale, a
+    /// refresh rate of 0 or 1, "the hardware's default". A Mac setting always
+    /// has its scale and knows its rate: 0 there is a mode that names none,
+    /// as a ProMotion display's variable mode, distinct from its fixed rates.
+    /// Refresh rates 1 Hz apart are one rate (59.94 Hz listed as 60 and read
+    /// back as 59), so a mode read back a little differently is still the
+    /// host's and still put back.
+    pub(crate) fn shows(self, other: Self) -> bool {
+        let unknown = |value: u32, below: u32| value <= below;
+        let default_rate = |setting: Self| setting.scale == 0 && unknown(setting.hz, 1);
+        let rate = default_rate(self) || default_rate(other) || self.hz.abs_diff(other.hz) <= 1;
+        let same = |a: u32, b: u32| unknown(a, 0) || unknown(b, 0) || a == b;
+        self.size() == other.size()
+            && rate
+            && same(self.bpp, other.bpp)
+            && same(self.scale, other.scale)
     }
 }
 
@@ -198,12 +236,16 @@ impl Stored {
     }
 }
 
-/// A Windows display device, `\\.\DISPLAY` and one to three digits: the
-/// only displays any platform changes this round. A port widens it.
+/// A display device a platform changes: Windows' `\\.\DISPLAY` and one to
+/// three digits, or a macOS display's UUID (8-4-4-4-12 hexadecimal digits).
+/// A port widens it.
 fn valid_device(device: &str) -> bool {
-    device.strip_prefix(r"\\.\DISPLAY").is_some_and(|number| {
+    let windows = device.strip_prefix(r"\\.\DISPLAY").is_some_and(|number| {
         (1..=3).contains(&number.len()) && number.bytes().all(|b| b.is_ascii_digit())
-    })
+    });
+    let uuid = device.split('-').map(str::len).eq([8, 4, 4, 4, 12])
+        && device.bytes().all(|b| b == b'-' || b.is_ascii_hexdigit());
+    windows || uuid
 }
 
 /// Where a host records a display mode before it changes it, written
@@ -229,41 +271,47 @@ impl Journal {
         }
     }
 
-    /// Whether it still names a display to put back.
+    /// Whether recovery may have work. An unreadable journal still needs a retry.
     pub(crate) fn pending(&self) -> bool {
-        !self.read().is_empty()
+        self.path
+            .as_ref()
+            .is_some_and(|path| path.try_exists().unwrap_or(true))
     }
 
-    /// Its entries. A file that fails validation is discarded, never acted
-    /// on.
-    fn read(&self) -> Vec<Entry> {
+    /// Read under the claims lock. A transient I/O failure must never turn into
+    /// an empty journal that a subsequent mode change can overwrite.
+    fn read(&self) -> Result<Vec<Entry>> {
         let Some(path) = &self.path else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-            Err(failure) => {
-                tracing::warn!(
-                    target: "pb_mapper_desktop::session",
-                    event = "display_mode_journal_unreadable",
-                    detail = %failure,
-                );
-                return Vec::new();
-            }
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(failure) if failure.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(failure) => return Err(failure),
         };
-        match serde_json::from_slice::<Stored>(&bytes) {
-            Ok(stored) if stored.valid() => stored.entries,
-            _ => {
-                tracing::warn!(
-                    target: "pb_mapper_desktop::session",
-                    event = "display_mode_journal_discarded",
-                    path = %path.display(),
-                );
-                let _ = std::fs::remove_file(path);
-                Vec::new()
-            }
+        let mut bytes = Vec::new();
+        file.take(MAX_JOURNAL_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_JOURNAL_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "display mode journal exceeds size limit",
+            ));
         }
+        if let Ok(stored) = serde_json::from_slice::<Stored>(&bytes)
+            && stored.valid()
+        {
+            if stored.entries.is_empty() {
+                self.write(Vec::new())?;
+            }
+            return Ok(stored.entries);
+        }
+        tracing::warn!(
+            target: "pb_mapper_desktop::session",
+            event = "display_mode_journal_discarded",
+            path = %path.display(),
+        );
+        self.write(Vec::new())?;
+        Ok(Vec::new())
     }
 
     /// Replace its entries, durably; none removes the file.
@@ -282,13 +330,19 @@ impl Journal {
             version: Stored::VERSION,
             entries,
         };
+        if !stored.valid() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "display mode change cannot be journalled",
+            ));
+        }
         let bytes = serde_json::to_vec(&stored).map_err(std::io::Error::other)?;
         crate::trust::write_durably(path, &bytes)
     }
 
     /// Its entries with `device`'s replaced by `entry`, or removed.
     fn put(&self, device: &str, entry: Option<Entry>) -> Result<()> {
-        self.put_into(self.read(), device, entry)
+        self.put_into(self.read()?, device, entry)
     }
 
     /// `entries`, just read from it, with `device`'s replaced by `entry`, or
@@ -412,7 +466,7 @@ impl Guard {
             (None, Some(at)) => claims[at].original,
             (None, None) => modes.current(device)?,
         };
-        let entries = self.journal.read();
+        let entries = self.journal.read()?;
         let before = entries.iter().find(|entry| entry.device == device).cloned();
         self.journal.put_into(
             entries,
@@ -478,8 +532,7 @@ impl Guard {
             self.applied = None;
             return Ok(false);
         }
-        let current = modes.current(&device)?;
-        let ours = current.size() == latest.size();
+        let ours = modes.current(&device)?.shows(latest);
         if ours {
             before();
             modes.reset(&device, &original)?;
@@ -522,7 +575,7 @@ impl Drop for Guard {
 /// left to it. How many were restored.
 pub(crate) fn recover<M: DisplayModes>(modes: &mut M, journal: &Journal) -> Result<usize> {
     let claims = claims();
-    let entries = journal.read();
+    let entries = journal.read()?;
     if entries.is_empty() {
         return Ok(0);
     }
@@ -537,7 +590,7 @@ pub(crate) fn recover<M: DisplayModes>(modes: &mut M, journal: &Journal) -> Resu
             if scope != entry.scope {
                 return Ok(false);
             }
-            let shows = modes.current(&entry.device)?.size() == entry.applied.size();
+            let shows = modes.current(&entry.device)?.shows(entry.applied);
             if shows {
                 modes.reset(&entry.device, &entry.original)?;
             }
@@ -602,6 +655,7 @@ mod tests {
             height,
             hz: 60,
             bpp: 32,
+            scale: 0,
         }
     }
 
@@ -654,6 +708,8 @@ mod tests {
     /// attached, and each reset.
     struct Steered {
         current: Setting,
+        /// The scale the modes it sets carry; 0, as on Windows, by default.
+        scale: u32,
         scope: &'static str,
         gone: bool,
         resets: Vec<Setting>,
@@ -661,6 +717,7 @@ mod tests {
     fn steered() -> Steered {
         Steered {
             current: setting(2560, 1440),
+            scale: 0,
             scope: "login 1, monitor A",
             gone: false,
             resets: Vec::new(),
@@ -682,7 +739,10 @@ mod tests {
             Ok(self.scope.to_owned())
         }
         fn target(&mut self, _: &str, mode: Mode) -> Result<Setting> {
-            Ok(setting(mode.width, mode.height))
+            Ok(Setting {
+                scale: self.scale,
+                ..setting(mode.width, mode.height)
+            })
         }
         fn apply(&mut self, _: &str, setting: &Setting) -> Result<()> {
             self.current = *setting;
@@ -755,6 +815,161 @@ mod tests {
         assert_eq!(recover(&mut display, &journal).unwrap(), 0);
         assert!(!path.exists());
         assert_eq!(display.resets.len(), 1);
+    }
+
+    #[test]
+    fn a_journal_read_failure_preserves_the_record_and_display() {
+        let (_dir, journal) = journal("read-failure");
+        let path = journal.path.as_ref().unwrap();
+        std::fs::create_dir_all(path).unwrap();
+        let mut display = steered();
+        assert!(recover(&mut display, &journal).is_err());
+        assert!(path.is_dir() && journal.pending());
+        std::fs::remove_dir(path).unwrap();
+
+        // A sparse file beyond the read budget is kept for inspection.
+        File::create(path)
+            .unwrap()
+            .set_len(MAX_JOURNAL_BYTES + 1)
+            .unwrap();
+        let before = display.current;
+        let mut host = Guard::new(journal.clone());
+        let failure = host
+            .set(&mut display, r"\\.\DISPLAY919", mode(1280, 720))
+            .unwrap_err();
+        assert_eq!(failure.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::metadata(path).unwrap().len(),
+            MAX_JOURNAL_BYTES + 1
+        );
+        assert_eq!(display.current, before);
+    }
+
+    /// A mode of the host's size that its owner picked meanwhile, a Mac's
+    /// HiDPI twin or another refresh rate, is the owner's: a restore (session
+    /// end, revoke, the owner's Restore) and a replay after a crash leave it.
+    /// The host's own mode, read back a hertz off, is still put back.
+    #[test]
+    fn an_owners_twin_of_the_hosts_mode_is_never_overwritten() {
+        let (_dir, journal) = journal("twins");
+        let device = "37D8832A-2D66-02CA-B9F7-8F30A301B231";
+        let mut display = Steered {
+            scale: 1,
+            ..steered()
+        };
+        let mut host = Guard::new(journal.clone());
+        host.set(&mut display, device, mode(1920, 1080)).unwrap();
+        display.current.scale = 2;
+        assert!(!host.restore(&mut display, || {}).unwrap());
+        assert!(display.resets.is_empty() && !journal.pending());
+
+        let mut crashed = Guard::new(journal.clone());
+        crashed.set(&mut display, device, mode(1920, 1080)).unwrap();
+        drop(crashed);
+        display.current.hz = 144;
+        assert_eq!(recover(&mut display, &journal).unwrap(), 0);
+        assert!(display.resets.is_empty() && !journal.pending());
+
+        let mut host = Guard::new(journal.clone());
+        host.set(&mut display, device, mode(1920, 1080)).unwrap();
+        display.current.hz -= 1;
+        assert!(host.restore(&mut display, || {}).unwrap());
+        assert_eq!(display.resets.len(), 1);
+    }
+
+    /// Displays the test steers one by one, one of which may refuse a reset.
+    #[derive(Default)]
+    struct Several {
+        current: std::collections::HashMap<String, Setting>,
+        refusing: Option<&'static str>,
+    }
+    impl DisplayModes for Several {
+        const SUPPORTED: bool = true;
+        fn list(&mut self, _: &str) -> Result<Vec<Mode>> {
+            Ok(vec![mode(2560, 1440), mode(1920, 1080), mode(1280, 720)])
+        }
+        fn current(&mut self, device: &str) -> Result<Setting> {
+            Ok(*self
+                .current
+                .entry(device.to_owned())
+                .or_insert(setting(2560, 1440)))
+        }
+        fn scope(&mut self, _: &str) -> Result<String> {
+            Ok("login 1".into())
+        }
+        fn target(&mut self, _: &str, mode: Mode) -> Result<Setting> {
+            Ok(setting(mode.width, mode.height))
+        }
+        fn apply(&mut self, device: &str, setting: &Setting) -> Result<()> {
+            self.current.insert(device.to_owned(), *setting);
+            Ok(())
+        }
+        fn reset(&mut self, device: &str, original: &Setting) -> Result<()> {
+            if self.refusing == Some(device) {
+                return Err(error("the display no longer offers that mode"));
+            }
+            self.apply(device, original)
+        }
+    }
+
+    /// Two hosts of one process on two displays, one whose restore fails:
+    /// that display stays changed and journalled, to be tried again, and the
+    /// other keeps the mode its host set, and its entry, until that host
+    /// restores it.
+    #[test]
+    fn a_failed_restore_leaves_every_other_display_alone() {
+        let (_dir, journal) = journal("several");
+        let (left, right) = (r"\\.\DISPLAY914", r"\\.\DISPLAY915");
+        let mut displays = Several::default();
+        let (mut first, mut second) = (Guard::new(journal.clone()), Guard::new(journal.clone()));
+        first.set(&mut displays, left, mode(1920, 1080)).unwrap();
+        second.set(&mut displays, right, mode(1280, 720)).unwrap();
+        displays.refusing = Some(left);
+        assert!(first.restore(&mut displays, || {}).is_err());
+        assert_eq!(displays.current(right).unwrap(), setting(1280, 720));
+        let named = |journal: &Journal| -> Vec<String> {
+            journal
+                .read()
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.device)
+                .collect()
+        };
+        assert_eq!(named(&journal).len(), 2);
+        assert!(second.restore(&mut displays, || {}).unwrap());
+        assert_eq!(displays.current(right).unwrap(), setting(2560, 1440));
+        assert_eq!(displays.current(left).unwrap(), setting(1920, 1080));
+        assert_eq!(named(&journal), [left]);
+    }
+
+    /// A Mac's variable-rate mode (rate 0) and its fixed 60 Hz twin are two
+    /// modes; on Windows a rate of 0 or 1 is the hardware's default, the same
+    /// as any.
+    #[test]
+    fn a_macs_variable_rate_is_its_own_mode() {
+        let mac = |hz| Setting {
+            hz,
+            bpp: 0,
+            scale: 2,
+            ..setting(3024, 1964)
+        };
+        assert!(!mac(0).shows(mac(60)) && !mac(60).shows(mac(0)));
+        assert!(mac(0).shows(mac(0)) && mac(60).shows(mac(59)));
+        let windows = |hz| Setting {
+            hz,
+            ..setting(1920, 1080)
+        };
+        assert!(windows(0).shows(windows(144)) && windows(1).shows(windows(60)));
+    }
+
+    /// A journal names display devices only: Windows' and macOS' UUIDs,
+    /// never a path.
+    #[test]
+    fn a_journal_names_only_display_devices() {
+        let mac = "37D8832A-2D66-02CA-B9F7-8F30A301B230";
+        assert!(valid_device(r"\\.\DISPLAY1") && valid_device(mac));
+        assert!(!valid_device(r"C:\Windows") && !valid_device(&format!("../{mac}")));
+        assert!(!valid_device(&mac[..23]) && !valid_device("37D8832A-2D66-02CA-B9F7-8F30A301B23G"));
     }
 
     /// Two hosts of one process on one display: the first to end leaves it

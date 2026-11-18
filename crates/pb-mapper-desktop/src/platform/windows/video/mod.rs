@@ -13,7 +13,9 @@ mod probe;
 pub use probe::h265_available;
 
 use crate::{
-    BackendError, Display, FailureKind, Result, VideoCodec, error,
+    BackendError, Display, FailureKind, Result, VideoCodec,
+    codec::pipeline::{FIRST_SUBMIT_WAIT, LIVENESS_INTERVAL, OUTPUT_WAIT, codec_error, late},
+    error,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
 };
 use codec::{Codec, EncoderSettings, attributes, media_type, sample_bytes};
@@ -53,22 +55,6 @@ const _: () = assert!(
 );
 /// The largest capture, and the largest encoded size.
 const MAX_SIZE: (u32, u32) = (7680, 4320);
-/// An output that took longer than this is discarded, and output resumes at
-/// the next IDR. A unit's time counts from when the encoder could start it:
-/// see `late`.
-const LATE_OUTPUT: Duration = Duration::from_millis(250);
-/// A pipeline that has submitted nothing this long after it was built is
-/// stuck; `unsubmitted` says on what.
-const FIRST_SUBMIT_WAIT: Duration = Duration::from_secs(3);
-/// An encoder that has held a unit this long is stuck.
-const OUTPUT_WAIT: Duration = Duration::from_secs(2);
-const _: () = assert!(
-    LATE_OUTPUT.as_millis() < OUTPUT_WAIT.as_millis(),
-    "a late unit is discarded before the encoder counts as stalled"
-);
-/// A static desktop still submits a verified repeat this often, which keeps a
-/// presented frame fresh enough to authorise input.
-const LIVENESS_INTERVAL: Duration = Duration::from_millis(250);
 
 pub struct Encoded {
     pub codec: VideoCodec,
@@ -611,34 +597,6 @@ impl Encoder {
     }
 }
 
-/// Whether an output collected at `now`, of a unit submitted at `submitted`,
-/// is later than `LATE_OUTPUT`. The encoder serves units in order, so one
-/// queued behind others starts no earlier than the output before it, at
-/// `previous`. The wait behind them, which thread C's `ENCODER_DEPTH` sets, is
-/// not lateness: measured from the submit, a throughput-limited encoder at
-/// that depth would be late on every unit, its IDRs included, and its picture
-/// would freeze.
-fn late(submitted: Instant, previous: Option<Instant>, now: Instant) -> bool {
-    let started = previous.map_or(submitted, |previous| previous.max(submitted));
-    now.saturating_duration_since(started) > LATE_OUTPUT
-}
-
-/// An error of the hardware codec itself, rather than of the capture or the
-/// scaler around it. An H.265 one is `EncoderFailed`: thread C then ends the
-/// session, and this host offers H.265 no more. Its kind crosses the
-/// helper pipe as it is.
-fn codec_error(kind: VideoCodec, failure: std::io::Error) -> std::io::Error {
-    if kind == VideoCodec::H265 {
-        BackendError::new(
-            FailureKind::EncoderFailed { codec: kind },
-            failure.to_string(),
-        )
-        .into()
-    } else {
-        failure
-    }
-}
-
 /// Why an encoder took no input in its first `FIRST_SUBMIT_WAIT`. It asked
 /// for input and capture had no desktop image to give it: capture is stuck,
 /// and is retried. It never asked, or had an image and no free sample for it:
@@ -691,27 +649,5 @@ mod tests {
         // turned off and the viewer reconnects to H.264.
         assert!(h265_failed(false, false));
         assert!(h265_failed(true, true));
-    }
-    #[test]
-    fn a_unit_queued_behind_a_slow_encoder_is_not_late() {
-        let start = Instant::now();
-        let at = |ms: u64| start + Duration::from_millis(ms);
-        // A serial encoder takes 70 ms a unit. Thread C fills it at 60 fps,
-        // then submits one as each comes out: from its submit, every unit
-        // after the first four takes 280 ms.
-        let mut queued: VecDeque<u64> = [0, 17, 33, 50].into();
-        assert_eq!(queued.len(), crate::worker::ENCODER_DEPTH);
-        let mut previous = None;
-        for unit in 1..=20 {
-            let out = 70 * unit;
-            let submitted = queued.pop_front().unwrap();
-            assert!(!late(at(submitted), previous, at(out)), "unit {unit}");
-            previous = Some(at(out));
-            queued.push_back(out);
-        }
-        // A stuck encoder is still late, behind another unit or not.
-        let submitted = queued.pop_front().unwrap();
-        assert!(late(at(submitted), previous, at(70 * 20 + 251)));
-        assert!(late(at(5_000), previous, at(5_251)));
     }
 }

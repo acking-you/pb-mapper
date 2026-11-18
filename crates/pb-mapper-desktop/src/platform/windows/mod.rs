@@ -50,6 +50,7 @@ impl Platform for Windows {
             secure_desktop: false,
             os: Some(HostOs::Windows),
             reason: (!host).then_some(UnsupportedReason::MediaFoundationMissing),
+            permissions: None,
         }
     }
     fn displays() -> Result<Vec<Display>> {
@@ -97,7 +98,7 @@ pub(crate) fn open_bound(
 fn parts(desktop: desktop::WinDesktop) -> Result<Parts<Windows>> {
     Ok(Parts {
         input: input::WinInput::new()?,
-        cursor: cursor::WinCursor,
+        cursor: cursor::WinCursor::default(),
         modes: modes::WinModes,
         still: still::XcapJpeg,
         desktop,
@@ -138,8 +139,8 @@ impl VideoSource for video::Encoder {
     fn set_rate(&mut self, rate: VideoRate) -> Result<()> {
         video::Encoder::set_rate(self, rate)
     }
-    fn submit(&mut self, keyframe: bool) -> Result<()> {
-        video::Encoder::submit(self, keyframe).map(|_| ())
+    fn submit(&mut self, keyframe: bool) -> Result<bool> {
+        video::Encoder::submit(self, keyframe).map(|_| true)
     }
     fn drain(&mut self) -> Result<Option<EncodedFrame>> {
         video::Encoder::drain(self).map(|image| image.map(Into::into))

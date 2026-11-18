@@ -45,8 +45,8 @@ impl fmt::Display for WireError {
 }
 
 /// Protocol v2 records are `u32 BE len | bytes`: a JSON header of at most
-/// `MAX_HEADER`, and after `HostMessage::Video` only, one payload record of
-/// 1..=`MAX_PAYLOAD` bytes.
+/// `MAX_HEADER`, and after `HostMessage::Video` and `HostMessage::CursorShape`
+/// only, one payload record of 1..=`MAX_PAYLOAD` bytes.
 const MAX_HEADER: usize = 8192;
 pub(crate) const MAX_PAYLOAD: usize = 4 * 1024 * 1024;
 /// Writes and payload reads get `IO_TIMEOUT` plus the time this rate needs, so
@@ -74,7 +74,7 @@ pub(crate) async fn write_message<W: AsyncWrite + Unpin, T: Serialize>(
     write_message_with(w, &mut Vec::new(), header, payload).await
 }
 
-/// One message: the header record and, for video only, its payload record,
+/// One message: the header record and, for video and shapes, its payload record,
 /// written as one write of their bytes would write them and flushed once, all
 /// within `write_timeout`. `records` holds everything but the payload; a
 /// writer that keeps it across messages allocates nothing for them, and the
@@ -145,10 +145,13 @@ async fn read_record<R: AsyncRead + Unpin>(
 ) -> Result<bool, WireError> {
     tokio::time::timeout(timeout, async {
         let mut length = [0; 4];
-        if r.read(&mut length[..1]).await? == 0 {
+        let received = r.read(&mut length).await?;
+        if received == 0 {
             return Ok(false);
         }
-        r.read_exact(&mut length[1..]).await?;
+        if received < length.len() {
+            r.read_exact(&mut length[received..]).await?;
+        }
         let len = u32::from_be_bytes(length) as usize;
         if len > MAX_HEADER {
             return Err(WireError::Framing(TOO_LARGE));
@@ -166,19 +169,37 @@ async fn read_record<R: AsyncRead + Unpin>(
 pub(crate) async fn read_payload<R: AsyncRead + Unpin>(
     r: &mut R,
 ) -> Result<bytes::Bytes, WireError> {
+    read_payload_within(r, 1..=MAX_PAYLOAD).await
+}
+
+/// The payload record of a header that fixed its length, `len`: any other
+/// length breaks the framing, before a byte of it is read.
+pub(crate) async fn read_payload_of<R: AsyncRead + Unpin>(
+    r: &mut R,
+    len: usize,
+) -> Result<bytes::Bytes, WireError> {
+    read_payload_within(r, len.max(1)..=len.min(MAX_PAYLOAD)).await
+}
+
+async fn read_payload_within<R: AsyncRead + Unpin>(
+    r: &mut R,
+    bounds: std::ops::RangeInclusive<usize>,
+) -> Result<bytes::Bytes, WireError> {
     let len = tokio::time::timeout(IO_TIMEOUT, r.read_u32())
         .await
         .map_err(|_| WireError::TimedOut)?? as usize;
-    if !(1..=MAX_PAYLOAD).contains(&len) {
+    if !bounds.contains(&len) {
         return Err(WireError::Framing(PAYLOAD_SIZE));
     }
     tokio::time::timeout(write_timeout(len), async {
-        let mut bytes = Vec::with_capacity(len);
-        (&mut *r).take(len as u64).read_to_end(&mut bytes).await?;
-        if bytes.len() != len {
-            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        let mut bytes = bytes::BytesMut::with_capacity(len);
+        let mut limited = (&mut *r).take(len as u64);
+        while bytes.len() < len {
+            if limited.read_buf(&mut bytes).await? == 0 {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+            }
         }
-        Ok(bytes::Bytes::from(bytes))
+        Ok(bytes.freeze())
     })
     .await
     .map_err(|_| WireError::TimedOut)?
@@ -215,6 +236,13 @@ mod tests {
 
     fn eof(failure: Option<WireError>) -> bool {
         matches!(failure, Some(WireError::Io(failure)) if failure.kind() == io::ErrorKind::UnexpectedEof)
+    }
+
+    #[tokio::test]
+    async fn payload_reads_stop_at_the_record_boundary_and_detect_truncation() {
+        let mut records = &[0, 0, 0, 1, 7, 0, 0, 0, 2, 8][..];
+        assert_eq!(&read_payload(&mut records).await.unwrap()[..], &[7]);
+        assert!(eof(read_payload(&mut records).await.err()));
     }
 
     #[tokio::test]

@@ -1,18 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<dict>
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
-	<!-- Outbound connections to pb-mapper-server, and DNS resolution. -->
-	<key>com.apple.security.network.client</key>
-	<true/>
-	<!-- Local listening ports opened when subscribing to a service. -->
-	<key>com.apple.security.network.server</key>
-	<true/>
-	<!-- An update's disk image is saved to the user's Downloads; without
-	     this, a sandboxed app's Downloads is a folder inside its container. -->
-	<key>com.apple.security.files.downloads.read-write</key>
-	<true/>
-</dict>
+<!-- No App Sandbox: an app that posts input to other apps cannot be
+     sandboxed (the sandbox denies synthesizing events), and the app ships
+     outside the App Store, signed with Developer ID and the Hardened Runtime.
+     Network access and the user's Downloads need no entitlement outside it. -->
+<dict/>
 </plist>

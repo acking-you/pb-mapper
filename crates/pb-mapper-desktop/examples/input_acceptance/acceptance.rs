@@ -1,12 +1,12 @@
 //! The SDK script: a host of the guarded backend, a viewer that presents
 //! what it receives, and the input it sends.
-use crate::fixture::{Fixture, State, TEXT, failure};
+use crate::fixture::{CUSTOM_HOTSPOT, Fixture, LINES, State, TEXT, failure, modifier_held};
 use crate::guarded::Guarded;
 use crate::probe_support::{RelayConfig, option, relay_client};
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy, RelayTransport};
 use pb_mapper_desktop::{
-    Button, DesktopView, Display, DisplaySelection, Host, HostOptions, Input, Pull, QualityPreset,
-    Result, VideoCodec, VideoLimits, Viewer, ViewerConfig,
+    Button, CursorKind, CursorShape, DesktopView, Display, DisplaySelection, Host, HostOptions,
+    Input, Pull, QualityPreset, Result, VideoCodec, VideoLimits, Viewer, ViewerConfig,
 };
 use pb_mapper_testkit::Relay;
 use std::{
@@ -42,10 +42,76 @@ async fn wait_for(state: &State, what: &str, predicate: impl Fn() -> bool) -> Re
 /// presented recently and control is granted, and stamps that frame and
 /// the sequence itself.
 fn send(viewer: &Viewer, state: &State, input: Input) -> Result<()> {
+    send_all(viewer, state, &[input])
+}
+fn send_all(viewer: &Viewer, state: &State, inputs: &[Input]) -> Result<()> {
     state.check()?;
     viewer
-        .input(viewer.view().generation, &[input])
+        .input(viewer.view().generation, inputs)
         .map_err(failure)
+}
+fn physical(usage: u16, down: bool) -> Input {
+    Input::PhysicalKey { usage, down }
+}
+/// A whole tap of the key at keyboard-page `usage`.
+fn tap(usage: u16) -> [Input; 2] {
+    [physical(usage, true), physical(usage, false)]
+}
+const SHIFT_LEFT: u16 = 0xE1;
+/// Text with a line break and a tab, then physical keys: what this window's
+/// layout types with its input method off, and what an input method on it
+/// composes from them, which is only reported.
+async fn keyboard(viewer: &Viewer, state: &State) -> Result<String> {
+    state.clear()?;
+    send(viewer, state, Input::Text { text: LINES.into() })?;
+    wait_for(state, "one Enter and one Tab in the owned EDIT", || {
+        state.text() == "a\r\nb\tc"
+    })
+    .await?;
+
+    // h, i and Shift+1, by place: set-1 scancodes 0x23, 0x17 and 0x02.
+    state.clear()?;
+    state.ime(false)?;
+    let keys = [
+        tap(0x0B).as_slice(),
+        &tap(0x0C),
+        &[physical(SHIFT_LEFT, true)],
+        &tap(0x1E),
+        &[physical(SHIFT_LEFT, false)],
+    ]
+    .concat();
+    send_all(viewer, state, &keys)?;
+    let expected = [(0x23, false), (0x17, false), (0x02, true)]
+        .map(|(scan, shift)| state.typed_by_layout(scan, shift))
+        .concat();
+    wait_for(state, "physical keys typed by the layout", || {
+        state.text() == expected
+    })
+    .await?;
+    wait_for(state, "physical Shift released", || !left_shift_down()).await?;
+
+    // n, i with this window's input method open: reported, then cancelled.
+    state.clear()?;
+    state.ime(true)?;
+    let mut composed = String::new();
+    if state.ime_open() {
+        let keys = [tap(0x11), tap(0x0C)].concat();
+        let sent = send_all(viewer, state, &keys);
+        let start = Instant::now();
+        while sent.is_ok() && start.elapsed() < Duration::from_secs(1) {
+            composed = state.composing();
+            if composed.chars().count() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        state.ime_restore();
+        sent?;
+    }
+    Ok(format!(
+        "lines_verified=true physical_typed={expected:?} ime_composition={composed:?} ime_edit_text={:?}",
+        state.text()
+    ))
 }
 /// The view's input gate: control, and a fresh presented frame.
 fn live(viewer: &Viewer) -> bool {
@@ -71,6 +137,109 @@ fn present(viewer: &Viewer) -> Result<JoinHandle<()>> {
         }
     }))
 }
+/// The pointer's shape as the viewer sees it, over the owned window: the
+/// class arrow, the EDIT's text beam, a resize arrow and this test's own
+/// monochrome cursor, which must arrive pixel for pixel. One line per shape
+/// for the record; with `--dump-cursors DIR`, each as a JPEG over grey, 8×.
+async fn shapes(viewer: &Viewer, state: &State, display: &Display) -> Result<String> {
+    let mut lines = Vec::new();
+    for (name, (x, y), kind) in [
+        ("client", (320, 120), CursorKind::Arrow),
+        ("edit", (320, 66), CursorKind::Ibeam),
+        ("resize_box", (600, 270), CursorKind::ResizeNwse),
+        ("custom_box", (64, 270), CursorKind::Custom),
+    ] {
+        let point = state.client_point(x, y)?;
+        let (x, y) = ((point.x - display.x) as u32, (point.y - display.y) as u32);
+        send(viewer, state, Input::Move { x, y })?;
+        wait_for(
+            state,
+            &format!("the {name} pointer shape at the viewer"),
+            || shape_of(viewer).is_some_and(|shape| shape.kind() == kind),
+        )
+        .await?;
+        let shape = shape_of(viewer).ok_or_else(|| failure("the shape went away"))?;
+        if kind == CursorKind::Custom {
+            check_custom(&shape)?;
+        }
+        let pixels = shape.rgba().as_chunks::<4>().0;
+        let (opaque, clear) = (
+            pixels.iter().filter(|p| p[3] == 255).count(),
+            pixels.iter().filter(|p| p[3] == 0).count(),
+        );
+        // Straight alpha: a colour channel above its pixel's alpha.
+        let straight = pixels.iter().any(|p| p[..3].iter().any(|c| *c > p[3]));
+        lines.push(format!(
+            "cursor_shape over={name} kind={:?} size={}x{} hotspot={:?} opaque={opaque} clear={clear} partial={} straight_alpha_seen={straight}",
+            shape.kind(),
+            shape.width(),
+            shape.height(),
+            shape.hotspot(),
+            pixels.len() - opaque - clear,
+        ));
+        if let Some(dir) = option(&std::env::args().collect::<Vec<_>>(), "--dump-cursors") {
+            dump(
+                &shape,
+                &std::path::Path::new(dir).join(format!("{name}.jpg")),
+            )?;
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+fn shape_of(viewer: &Viewer) -> Option<CursorShape> {
+    viewer.cursor_shape(viewer.view().cursor_shape)
+}
+
+/// The custom cursor as `fixture::custom_planes` drew it, at its own size.
+fn check_custom(shape: &CursorShape) -> Result<()> {
+    let at = |x: u32, y: u32| {
+        let i = ((y * shape.width() + x) * 4) as usize;
+        shape.rgba().get(i..i + 4).map(|p| [p[0], p[1], p[2], p[3]])
+    };
+    let expected = [
+        ((2, 5), [0, 0, 0, 255]),
+        ((20, 5), [255; 4]),
+        ((12, 20), [0, 0, 0, 255]),
+        ((7, 20), [255; 4]),
+        ((12, 21), [255; 4]),
+        ((30, 30), [0; 4]),
+    ];
+    let size = (shape.width(), shape.height(), shape.hotspot());
+    if size != (32, 32, CUSTOM_HOTSPOT)
+        || expected
+            .iter()
+            .any(|((x, y), pixel)| at(*x, *y) != Some(*pixel))
+    {
+        return Err(failure(format!(
+            "the custom cursor arrived as {size:?} with {:?}",
+            expected.map(|((x, y), _)| at(x, y))
+        )));
+    }
+    Ok(())
+}
+
+/// `shape` over mid grey, eight times its size, as a JPEG at `path`.
+fn dump(shape: &CursorShape, path: &std::path::Path) -> Result<()> {
+    const SCALE: u32 = 8;
+    let (width, height) = (shape.width() * SCALE, shape.height() * SCALE);
+    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let i = (((y / SCALE) * shape.width() + x / SCALE) * 4) as usize;
+            let p = &shape.rgba()[i..i + 4];
+            let over = |c: u8| {
+                ((u32::from(c) * u32::from(p[3]) + 128 * (255 - u32::from(p[3]))) / 255) as u8
+            };
+            rgb.extend([over(p[0]), over(p[1]), over(p[2])]);
+        }
+    }
+    let file = std::fs::File::create(path)?;
+    image::codecs::jpeg::JpegEncoder::new_with_quality(file, 95)
+        .encode(&rgb, width, height, image::ExtendedColorType::Rgb8)
+        .map_err(failure)
+}
+
 /// Text, a click and a drag-start press on the owned window, then the
 /// release of that press when the viewer disconnects.
 async fn exercise(
@@ -101,6 +270,8 @@ async fn exercise(
         );
         return Err(e);
     }
+    let keyboard = keyboard(viewer, state).await?;
+    let shapes = shapes(viewer, state, display).await?;
     let point = state.client_point(320, 220)?;
     if point.x < display.x
         || point.y < display.y
@@ -149,17 +320,34 @@ async fn exercise(
             "the drag-start press merged into a double click: press_gap_ms={press_gap_ms} double_click_ms={double_click_ms}"
         )));
     }
+    // A physical key held too: the host releases it with the press.
+    send(viewer, state, physical(SHIFT_LEFT, true))?;
+    wait_for(
+        state,
+        "physical Shift held before disconnect",
+        left_shift_down,
+    )
+    .await?;
     let at = Instant::now();
     viewer.stop().await?;
-    wait_for(state, "disconnect release", || {
-        state.ups.load(Ordering::Acquire) == 2 && !state.held.load(Ordering::Acquire)
+    let released = wait_for(state, "disconnect release", || {
+        state.ups.load(Ordering::Acquire) == 2
+            && !state.held.load(Ordering::Acquire)
+            && !left_shift_down()
     })
-    .await?;
+    .await;
+    if left_shift_down() {
+        // Never leave this computer's Shift down, whatever failed.
+        release_left_shift();
+        return Err(failure("physical Shift remains held after disconnect"));
+    }
+    released?;
     if unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON.0)) } < 0 {
         return Err(failure("native left button remains held after disconnect"));
     }
+    println!("{shapes}");
     println!(
-        "native_input_acceptance path={topology} unicode_verified=true button_down={} button_up={} drag_press_gap_ms={press_gap_ms} double_click_ms={double_click_ms} double_clicks={double_clicks} disconnect_release_ms={:.3} physical_display={}x{}",
+        "native_input_acceptance path={topology} unicode_verified=true {keyboard} button_down={} button_up={} drag_press_gap_ms={press_gap_ms} double_click_ms={double_click_ms} double_clicks={double_clicks} disconnect_release_ms={:.3} physical_display={}x{}",
         state.downs.load(Ordering::Acquire),
         state.ups.load(Ordering::Acquire),
         at.elapsed().as_secs_f64() * 1000.0,
@@ -168,6 +356,23 @@ async fn exercise(
     );
     Ok(())
 }
+fn left_shift_down() -> bool {
+    unsafe { GetAsyncKeyState(i32::from(VK_LSHIFT.0)) < 0 }
+}
+/// The left Shift up, by scancode, as the cleanup of a failed release.
+fn release_left_shift() {
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wScan: 0x2a,
+                dwFlags: KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP,
+                ..Default::default()
+            },
+        },
+    };
+    unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
+}
 pub fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let display = pb_mapper_desktop::displays()?
         .into_iter()
@@ -175,6 +380,9 @@ pub fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .ok_or_else(|| failure("no ordinary display"))?;
     if unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON.0)) } < 0 {
         return Err(failure("physical left button already held; refusing test").into());
+    }
+    if modifier_held() {
+        return Err(failure("a modifier key is held; refusing test").into());
     }
     let fixture = Fixture::open(&display)?;
     let state = fixture.state.clone();

@@ -30,7 +30,8 @@ void main() {
         ..setInt32(48, 300, Endian.host)
         ..setUint8(52, 2)
         // cursor visible, controlling, fresh
-        ..setUint8(53, 0x13);
+        ..setUint8(53, 0x13)
+        ..setUint16(54, 0xBEEF, Endian.host);
       expect(
         desktopViewFromLeaf(leaf.ref),
         const DesktopView(
@@ -44,6 +45,7 @@ void main() {
           videoHeight: 1080,
           cursorX: -5,
           cursorY: 300,
+          cursorShape: 0xBEEF,
           state: 2,
           cursorVisible: true,
           controlling: true,

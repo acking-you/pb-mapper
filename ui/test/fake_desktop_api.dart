@@ -14,6 +14,7 @@ DesktopViewerStatus liveStatus({
   int lastVideoAgeMs = 16,
   DesktopStats stats = const DesktopStats(path: 'direct', codec: 'h264'),
   DisplayModeList? modes,
+  List<String> capabilities = const [],
 }) => DesktopViewerStatus(
   state: 'streaming',
   controlAllowed: controlAllowed,
@@ -27,6 +28,7 @@ DesktopViewerStatus liveStatus({
   presentedFrameId: 1,
   lastVideoAgeMs: lastVideoAgeMs,
   modes: modes,
+  capabilities: capabilities,
   stats: stats,
 );
 
@@ -56,7 +58,11 @@ class FakeDesktopApi implements DesktopApiClient {
   DesktopViewerStatus? viewerStatusValue;
   DesktopView? viewValue;
 
-  /// The codec a `connect` reports; `h264` needs a texture factory.
+  /// What `cursor_shape` resolves, by [DesktopView.cursorShape].
+  final cursorShapes = <int, DesktopCursorShape>{};
+
+  /// The codec a `connect` that offers a decoder reports; `h264` needs a
+  /// texture factory.
   String codec = 'jpeg';
 
   /// The host encodes H.265: a `connect` that offers it reports `h265`.
@@ -136,6 +142,19 @@ class FakeDesktopApi implements DesktopApiClient {
   DesktopBackground get _background =>
       hostSnapshot.background ?? const DesktopBackground();
 
+  /// As the FFI (`refuse_held_grant`): nothing is set up or resumed over a
+  /// grant the service holds but this app cannot read.
+  void _refuseHeld() {
+    final b = _background;
+    if (!b.held || !b.configured) return;
+    throw DesktopCallException(
+      available.helper?.updateRequired == true
+          ? 'HELPER_OUTDATED'
+          : 'HELPER_FOREIGN_APP',
+      'the service holds a grant this app cannot read',
+    );
+  }
+
   void _set({
     DesktopHostStatus? Function()? host,
     DesktopBackground? Function()? background,
@@ -171,6 +190,15 @@ class FakeDesktopApi implements DesktopApiClient {
     return available;
   }
 
+  /// What `host_request_permission` answers.
+  bool permissionGranted = false;
+
+  @override
+  Future<bool> requestHostPermission(String permission) async {
+    _log('host_request_permission', {'permission': permission});
+    return permissionGranted;
+  }
+
   @override
   Future<DesktopHostSnapshot> hostStatus() async {
     _log('host_status');
@@ -188,6 +216,7 @@ class FakeDesktopApi implements DesktopApiClient {
       'display_id': displayId,
       'allow_control': allowControl,
     });
+    _refuseHeld();
     _configureBackground(service, displayId, allowControl, autoStart: true);
     return DesktopHostEnable(
       invitation: backgroundInvitation,
@@ -424,6 +453,7 @@ class FakeDesktopApi implements DesktopApiClient {
   @override
   Future<DesktopHostEnable> resumeBackground({bool moveRelay = false}) async {
     _log('background_action', {'action': 'start', 'move_relay': moveRelay});
+    _refuseHeld();
     final b = _background;
     if (!b.matchesRelay && !moveRelay) {
       throw const DesktopCallException('RELAY_CHANGED', 'on another relay');
@@ -535,7 +565,12 @@ class FakeDesktopApi implements DesktopApiClient {
     viewValue = null;
     return DesktopSession(
       videoSource: ++_sources,
-      codec: h265 && hostH265 ? 'h265' : codec,
+      // As Rust's offer: JPEG wherever this device offers no decoder.
+      codec: decoders.h264 == null && !h265
+          ? 'jpeg'
+          : h265 && hostH265
+          ? 'h265'
+          : codec,
     );
   }
 
@@ -596,6 +631,7 @@ class FakeDesktopApi implements DesktopApiClient {
         videoHeight: view.videoHeight,
         cursorX: view.cursorX,
         cursorY: view.cursorY,
+        cursorShape: view.cursorShape,
         state: view.state,
         cursorVisible: view.cursorVisible,
         controlling: controlling,
@@ -658,6 +694,12 @@ class FakeDesktopApi implements DesktopApiClient {
   void resume() {
     _log('resume');
     viewerStatusValue = viewerStatusValue?.copyWith(paused: false);
+  }
+
+  @override
+  DesktopCursorShape? cursorShape(int shape) {
+    _log('cursor_shape', {'shape': shape});
+    return cursorShapes[shape];
   }
 
   @override

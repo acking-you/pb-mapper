@@ -3,7 +3,7 @@
 use super::background::{
     Background, enable_host, query_background, stop_background, with_relay_match,
 };
-use super::{blocking, credential_namespace, err, trust};
+use super::{blocking, credential_namespace, err, host_err, trust};
 use crate::{error::CtlError, handle::PbMapperHandle, state::process_credential};
 use pb_mapper::{
     Client,
@@ -430,7 +430,7 @@ pub(super) async fn start_local(handle: &PbMapperHandle, start: Start) -> Result
         }
     };
     if remember && !trust::supported() {
-        return Err(err("remembered hosting currently requires Windows"));
+        return Err(err("remembered hosting is not available on this platform"));
     }
     let identity = if remember
         && let Some(saved) = saved
@@ -474,7 +474,7 @@ async fn launch(
         .identity(identity)
         .start(client)
         .await
-        .map_err(err)
+        .map_err(host_err)
 }
 
 /// The SDK's options for the app's saved `settings`.
@@ -568,7 +568,7 @@ pub(super) async fn restart_host(
     let host = host
         .restart_on(&client, reason, |restarted| *restarted = options)
         .await
-        .map_err(err)?;
+        .map_err(host_err)?;
     let host = persist_or_stop(host, persisted, &local.scope.directory).await?;
     let invitation = host.invitation().encode();
     slot.host = Some(host);

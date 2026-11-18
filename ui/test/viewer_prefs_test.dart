@@ -34,4 +34,29 @@ void main() {
       expect(relaunched.qualityMonitor, isTrue);
     },
   );
+
+  test('the keyboard is chosen per computer, and one not remembered keeps it '
+      'only until the app closes', () async {
+    SharedPreferences.setMockInitialValues({});
+    final first = ViewerPrefs();
+    await first.load();
+    expect(first.keyboardFor('a' * 32), const KeyboardSettings());
+    const remote = KeyboardSettings(mode: KeyboardMode.remote, swap: false);
+    await first.setKeyboard('a' * 32, remote);
+    await first.setKeyboard(null, remote);
+    expect(first.keyboardFor('b' * 32), const KeyboardSettings());
+    expect(first.keyboardFor(null), remote);
+
+    final relaunched = ViewerPrefs();
+    await relaunched.load();
+    expect(relaunched.keyboardFor('a' * 32), remote);
+    expect(relaunched.keyboardFor(null), const KeyboardSettings());
+
+    // Bounded: the oldest choice goes first.
+    for (var i = 0; i < ViewerPrefs.keyboardsKept; i++) {
+      await relaunched.setKeyboard('$i', remote);
+    }
+    expect(relaunched.keyboardFor('a' * 32), const KeyboardSettings());
+    expect(relaunched.keyboardFor('0'), remote);
+  });
 }

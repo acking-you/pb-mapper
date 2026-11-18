@@ -10,12 +10,15 @@ use std::collections::HashSet;
 pub(crate) enum Pressed {
     Button(Button),
     Key(Key),
+    /// A physical key, by its USB HID usage (`Input::PhysicalKey`).
+    Physical(u16),
 }
 
 #[derive(Default)]
 pub(crate) struct Held {
     buttons: HashSet<Button>,
     keys: HashSet<Key>,
+    physical: HashSet<u16>,
 }
 impl Held {
     /// Press or release `button` through `inject`, which gets `down`.
@@ -38,12 +41,25 @@ impl Held {
         apply(&mut self.keys, key, down, inject)
     }
 
+    /// Press or release the physical key `usage` through `inject`, which
+    /// gets `down`.
+    pub(crate) fn physical(
+        &mut self,
+        usage: u16,
+        down: bool,
+        inject: impl FnOnce(bool) -> Result<()>,
+    ) -> Result<()> {
+        apply(&mut self.physical, usage, down, inject)
+    }
+
     /// Release everything held through `release`; whatever fails to release
     /// stays held, for the next release.
     pub(crate) fn release(&mut self, mut release: impl FnMut(Pressed) -> Result<()>) {
         self.buttons
             .retain(|button| release(Pressed::Button(*button)).is_err());
         self.keys.retain(|key| release(Pressed::Key(*key)).is_err());
+        self.physical
+            .retain(|usage| release(Pressed::Physical(*usage)).is_err());
     }
 }
 
@@ -95,5 +111,23 @@ mod tests {
             Ok(())
         });
         assert!(held.buttons.is_empty());
+    }
+
+    /// A physical key held down is released like any other; one let go of
+    /// is not released again.
+    #[test]
+    fn held_physical_keys_join_the_release_obligation() {
+        let mut held = Held::default();
+        let (shift, a) = (0xE1, 0x04);
+        assert!(held.physical(shift, true, |_| Ok(())).is_ok());
+        assert!(held.physical(a, true, |_| Ok(())).is_ok());
+        assert!(held.physical(a, false, |_| Ok(())).is_ok());
+        let mut released = Vec::new();
+        held.release(|pressed| {
+            released.push(pressed);
+            Ok(())
+        });
+        assert_eq!(released, [Pressed::Physical(shift)]);
+        assert!(held.physical.is_empty());
     }
 }

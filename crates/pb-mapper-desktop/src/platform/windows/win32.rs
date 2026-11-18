@@ -31,8 +31,32 @@ pub(crate) fn from_wide_nul(buffer: &[u16]) -> String {
     String::from_utf16_lossy(&buffer[..length])
 }
 
+fn wide_chars(buffer: &[u16]) -> impl Iterator<Item = char> + '_ {
+    char::decode_utf16(buffer.iter().copied().take_while(|unit| *unit != 0))
+        .map(|decoded| decoded.unwrap_or(char::REPLACEMENT_CHARACTER))
+}
+
+/// Whether `buffer` (up to its first NUL) equals `expected`, without
+/// allocating.
+pub(crate) fn wide_eq_str(buffer: &[u16], expected: &str) -> bool {
+    wide_chars(buffer).eq(expected.chars())
+}
+
+/// Whether `desktop` is named `Default` (ASCII case-insensitive), checked
+/// on the stack.
+pub(crate) fn is_default_desktop(desktop: HDESK) -> Result<bool> {
+    let name = desktop_name_buffer(desktop)?;
+    Ok(wide_chars(&name)
+        .map(|c| c.to_ascii_lowercase())
+        .eq("default".chars()))
+}
+
 /// The name of `desktop`: `Default`, `Winlogon`, ...
 pub(crate) fn desktop_name(desktop: HDESK) -> Result<String> {
+    Ok(from_wide_nul(&desktop_name_buffer(desktop)?))
+}
+
+fn desktop_name_buffer(desktop: HDESK) -> Result<[u16; 256]> {
     let mut name = [0u16; 256];
     unsafe {
         GetUserObjectInformationW(
@@ -44,7 +68,7 @@ pub(crate) fn desktop_name(desktop: HDESK) -> Result<String> {
         )
     }
     .map_err(error)?;
-    Ok(from_wide_nul(&name))
+    Ok(name)
 }
 
 /// What Windows reports of terminal session `session`: `None` when its
@@ -80,5 +104,17 @@ impl Drop for LocalAllocation {
         unsafe {
             let _ = LocalFree(Some(HLOCAL(self.0)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wide_comparison_matches_lossy_name_decoding() {
+        let device = [u16::from(b'D'), 0xd800, 0, u16::from(b'X')];
+        assert!(wide_eq_str(&device, &from_wide_nul(&device)));
+        assert!(!wide_eq_str(&device, "D"));
     }
 }

@@ -477,11 +477,17 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     worker_ = std::thread([this, consumer] { Run(static_cast<uint64_t>(consumer)); });
   }
   // Platform thread. Detaching wakes a blocked pull, so the join is prompt.
+  // Then, with no decoder thread left to publish, a new revision: a picture
+  // of this source the compositor has not acquired yet stays on screen until
+  // the next source's first one, but earns no receipt from any consumer
+  // (Android's FeedQueue.reset). Attach detaches first, so it starts one too.
   void Detach() {
     stopping_ = true;
     if (const uint64_t consumer = consumer_.exchange(0)) video_->detach(consumer);
     if (worker_.joinable()) worker_.join();
     stopping_ = false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++revision_;
   }
   void Close() {
     Detach();
@@ -526,6 +532,9 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
   const FlutterDesktopGpuSurfaceDescriptor* AcquireSurface() {
     std::shared_ptr<Surface> surface;
     bool acknowledge = false;
+    // Read with the revision, under the lock Detach starts a new one under:
+    // a picture is only ever receipted to the source it came from.
+    uint64_t consumer = 0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!latest_) return nullptr;
@@ -535,6 +544,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
         consumed_revision_ = surface->frame.revision;
         consumed_frame_ = surface->frame.frame;
         acknowledge = true;
+        consumer = consumer_.load();
       }
     }
     // The engine opens the D3D resource asynchronously. Retain the descriptor and
@@ -552,7 +562,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       ++presented_;
       // Acquired by the compositor: the receipt Rust validates and forwards
       // for input authorisation. Non-blocking.
-      if (const uint64_t consumer = consumer_.load()) {
+      if (consumer) {
         video_->presented(consumer, static_cast<uint64_t>(surface->frame.generation), static_cast<uint64_t>(surface->frame.frame));
       }
     }

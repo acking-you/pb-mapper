@@ -1,9 +1,9 @@
 # pb-mapper UI
 
 **Remote desktop:** the **Remote desktop** page (the **Remote** tab on a phone)
-shares a Windows desktop and views or controls other computers inside the app.
+shares a Windows or macOS desktop and views or controls other computers inside the app.
 It uses the existing relay configuration, separate desktop permission, endpoint
-encryption and native H.264 textures on Windows/Android. **Turn on remote
+encryption and native video textures, including VideoToolbox on macOS. **Turn on remote
 control** prepares the Windows helper, persistent service, input permission and
 reusable invitation in one flow. Stop pauses sharing while retaining the
 invitation; Revoke invalidates it. A viewer can remember the computers it
@@ -147,6 +147,12 @@ Note that all the Flutter subcomponents should be installed.
 rustc --version
 flutter doctor
 ```
+
+On a Mac, run `make build-ui-macos-release` from the repository root. Open
+`ui/build/macos/Build/Products/Release/pb-mapper.app`. For a development
+session, run `make build-pb-mapper-ffi-macos`, then from `ui/` run
+`../scripts/build/flutter-macos.sh run -d macos`. The wrapper applies the
+selected SDK's minimum target when Xcode requires a newer macOS version.
 
 Build the Rust FFI library for your target platform and place the output under
 `ui/native/<platform>/` (see platform build scripts and CI for the expected paths).

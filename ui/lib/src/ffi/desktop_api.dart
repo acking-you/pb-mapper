@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:ffi';
-import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
@@ -65,6 +64,8 @@ class DesktopCapabilities {
     this.message = '',
     this.helper,
     this.reason,
+    this.backgroundService = true,
+    this.permissions,
   });
   final bool host;
   final List<DesktopDisplay> displays;
@@ -74,6 +75,13 @@ class DesktopCapabilities {
   /// Why this computer cannot host: `platform`, `media_foundation_missing`,
   /// `no_display` or `permission_missing`; null when it can.
   final String? reason;
+
+  /// Sharing goes through the background service (Windows' helper); false
+  /// where the app shares the desktop itself (macOS).
+  final bool backgroundService;
+
+  /// The permissions hosting asks the owner for (macOS); null elsewhere.
+  final DesktopHostPermissions? permissions;
 }
 
 /// A host's `HostStatus`. The local host's also carries its [service] and
@@ -187,6 +195,7 @@ class DesktopBackground {
     this.host,
     this.message = '',
     this.matchesRelay = true,
+    this.held = false,
   });
   factory DesktopBackground.fromJson(Map<String, dynamic> data) {
     final settings = data['settings'] is Map
@@ -208,9 +217,17 @@ class DesktopBackground {
           : null,
       message: data['message'] as String? ?? '',
       matchesRelay: data['matches_relay'] != false,
+      held: data['held'] == true,
     );
   }
   final bool configured, enabled, autoStart, allowControl;
+
+  /// The service holds this grant, but this app cannot ask it: an older
+  /// build, as right after an upgrade from 0.11, or one installed from
+  /// another copy of the app. [configured] and [enabled] are seen from
+  /// outside, and its settings, invitation and relay are unknown. Updating
+  /// the helper from this app hands the service over and keeps the grant.
+  final bool held;
 
   /// [server] is the relay its host is published on.
   final String? service, server, invitation;
@@ -496,6 +513,11 @@ class DesktopViewerStatus {
 abstract interface class DesktopApiClient {
   // ---- lifecycle export: async, on the service's worker isolate
   Future<DesktopCapabilities> capabilities();
+
+  /// Asks the owner for [permission], `screen_capture` or `input`, where
+  /// the platform asks (macOS: its prompt the first time, and the app listed
+  /// in System Settings); whether it is granted now.
+  Future<bool> requestHostPermission(String permission);
   Future<DesktopHostSnapshot> hostStatus();
   Future<DesktopHostEnable> enableHost(
     String service,
@@ -592,6 +614,13 @@ abstract interface class DesktopApiClient {
   DisplayMode setDisplayMode(DisplayModeTarget target);
   void pause();
   void resume();
+
+  /// The definition [DesktopView.cursorShape] names, fetched when the
+  /// number changes: until the next call no new definition takes the number
+  /// asked for, but a number can name another definition once the viewer's
+  /// counter has gone round, so anything else is kept by content. Null once
+  /// the viewer no longer holds it.
+  DesktopCursorShape? cursorShape(int shape);
   int instanceToken();
 
   // ---- JPEG consumer (platforms without a native decoder)
@@ -621,9 +650,17 @@ class DesktopApi implements DesktopApiClient {
   @override
   Future<DesktopCapabilities> capabilities() async {
     final data = await _call('capabilities');
+    final capabilities = data['capabilities'] as Map?;
+    final permissions = capabilities?['permissions'];
     return DesktopCapabilities(
-      host: (data['capabilities'] as Map?)?['host'] == true,
-      reason: (data['capabilities'] as Map?)?['reason'] as String?,
+      host: capabilities?['host'] == true,
+      reason: capabilities?['reason'] as String?,
+      backgroundService: capabilities?['background_service'] != false,
+      permissions: permissions is Map
+          ? DesktopHostPermissions.fromJson(
+              Map<String, dynamic>.from(permissions),
+            )
+          : null,
       displays: [
         for (final d in data['displays'] as List? ?? [])
           DesktopDisplay.fromJson(Map<String, dynamic>.from(d as Map)),
@@ -636,6 +673,13 @@ class DesktopApi implements DesktopApiClient {
           : null,
     );
   }
+
+  @override
+  Future<bool> requestHostPermission(String permission) async =>
+      (await _call('host_request_permission', {
+        'permission': permission,
+      }))['granted'] ==
+      true;
 
   @override
   Future<DesktopHostSnapshot> hostStatus() async {
@@ -832,20 +876,10 @@ class DesktopApi implements DesktopApiClient {
   }
 
   /// A runner without native video has no decoder to offer: its picture is
-  /// JPEG, which Dart decodes. Android requires an AVC decoder of every
-  /// device, so where the probe finds no hardware one, MediaCodec still
-  /// decodes H.264 in software, at 1080p, as before the probe.
+  /// JPEG, which Dart decodes. What a failed probe offers is
+  /// [decodersFromProbe]'s rule.
   @override
-  Future<DesktopDecoders> decoders() async {
-    if (!nativeDesktopVideo) return const DesktopDecoders();
-    final probed = await probeDesktopDecoders();
-    if (!Platform.isAndroid || probed.h264 != null) return probed;
-    return DesktopDecoders(
-      h264: DesktopDecoderLimit.p1080,
-      h265: probed.h265,
-      displayMaxHz: probed.displayMaxHz,
-    );
-  }
+  Future<DesktopDecoders> decoders() => probeDesktopDecoders();
 
   // ---- the hot export, the view leaf and the video exports: synchronous
 
@@ -912,6 +946,14 @@ class DesktopApi implements DesktopApiClient {
   void resume() => _hot('resume');
 
   @override
+  DesktopCursorShape? cursorShape(int shape) {
+    final data = _hot('cursor_shape', {'shape': shape});
+    return data is Map
+        ? DesktopCursorShape.fromJson(Map<String, dynamic>.from(data))
+        : null;
+  }
+
+  @override
   int instanceToken() => PbMapperService().instanceToken();
 
   @override
@@ -946,6 +988,7 @@ DesktopView desktopViewFromLeaf(PbDesktopViewV1 leaf) {
     videoHeight: leaf.videoHeight,
     cursorX: leaf.cursorX,
     cursorY: leaf.cursorY,
+    cursorShape: leaf.cursorShape,
     state: leaf.state,
     cursorVisible: flag(0),
     controlling: flag(1),

@@ -52,7 +52,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         match changed {
             Ok(changed) => self.mode_changed(changed, now),
             Err(failure) if link_lost(&failure) => {
-                self.fatal = Some(failure.to_string());
+                self.fatal = Some(failure);
             }
             Err(failure) => self.notice(NoticeCode::DisplayModeFailed, failure.to_string(), now),
         }
@@ -64,7 +64,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         match self.backend.restore_display_mode() {
             Ok(changed) => self.mode_changed(changed, now),
             Err(failure) if link_lost(&failure) => {
-                self.fatal = Some(failure.to_string());
+                self.fatal = Some(failure);
             }
             Err(failure) => tracing::warn!(
                 target: "pb_mapper_desktop::session",

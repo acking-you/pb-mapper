@@ -4,7 +4,8 @@
 //!
 //! A [`HostIdentity`] is a private key and a bearer grant: whoever holds it
 //! can be the host its invitation names. [`TrustFile`] keeps one sealed by a
-//! [`Sealer`] (on Windows, `CurrentUser` DPAPI, as the app does), bound to
+//! [`Sealer`] (on Windows, `CurrentUser` DPAPI, as the app does; on macOS,
+//! `Keychain`, a key in the login Keychain), bound to
 //! the relay and namespace it was made for, beside the embedder's own
 //! settings. Restarting with it keeps every saved invitation valid; revoking
 //! it is deleting the file.
@@ -99,6 +100,123 @@ impl Sealer for CurrentUser {
     }
     fn open(&self, sealed: &[u8]) -> Result<Vec<u8>> {
         self.protect(sealed, false)
+    }
+}
+
+/// AES-256-GCM under a key the macOS login Keychain keeps for `service`
+/// and `account`, made on the first seal: only this macOS user, and without
+/// asking the owner only this app, opens what it seals. A sealed file is
+/// its version, nonce and ciphertext, bound to `service`.
+#[cfg(target_os = "macos")]
+#[cfg_attr(docsrs, doc(cfg(target_os = "macos")))]
+#[derive(Clone, Copy, Debug)]
+pub struct Keychain {
+    pub service: &'static str,
+    pub account: &'static str,
+}
+#[cfg(target_os = "macos")]
+impl Keychain {
+    /// The app's own trust file's.
+    pub const TRUST: Self = Self {
+        service: "pb-mapper desktop trust",
+        account: "v1",
+    };
+    fn key(&self, create: bool) -> Result<Option<[u8; 32]>> {
+        crate::platform::macos::keychain::key(self.service, self.account, create, || {
+            let mut key = [0; 32];
+            ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut key)
+                .map_err(|_| error("no random key for the Keychain"))?;
+            Ok(key)
+        })
+    }
+}
+#[cfg(target_os = "macos")]
+impl Sealer for Keychain {
+    fn seal(&self, plain: &[u8]) -> Result<Vec<u8>> {
+        let key = self
+            .key(true)?
+            .ok_or_else(|| error("the Keychain kept no key"))?;
+        sealed::seal(&key, self.service.as_bytes(), plain)
+    }
+    fn open(&self, sealed: &[u8]) -> Result<Vec<u8>> {
+        let key = self
+            .key(false)?
+            .ok_or_else(|| error("the Keychain has no key for this file"))?;
+        sealed::open(&key, self.service.as_bytes(), sealed)
+    }
+}
+
+/// AES-256-GCM with a random nonce: a version byte, the nonce, then the
+/// ciphertext and its tag, bound to `aad`.
+#[cfg(any(target_os = "macos", test))]
+mod sealed {
+    use crate::{Result, error};
+    use ring::{
+        aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey},
+        rand::{SecureRandom, SystemRandom},
+    };
+
+    const VERSION: u8 = 1;
+
+    fn key(key: &[u8; 32]) -> Result<LessSafeKey> {
+        UnboundKey::new(&AES_256_GCM, key)
+            .map(LessSafeKey::new)
+            .map_err(|_| error("invalid sealing key"))
+    }
+
+    pub(super) fn seal(secret: &[u8; 32], aad: &[u8], plain: &[u8]) -> Result<Vec<u8>> {
+        let mut nonce = [0; NONCE_LEN];
+        SystemRandom::new()
+            .fill(&mut nonce)
+            .map_err(|_| error("no random nonce"))?;
+        let mut sealed = Vec::with_capacity(1 + NONCE_LEN + plain.len() + AES_256_GCM.tag_len());
+        sealed.push(VERSION);
+        sealed.extend_from_slice(&nonce);
+        let mut body = plain.to_vec();
+        key(secret)?
+            .seal_in_place_append_tag(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from(aad),
+                &mut body,
+            )
+            .map_err(|_| error("sealing failed"))?;
+        sealed.extend_from_slice(&body);
+        Ok(sealed)
+    }
+
+    pub(super) fn open(secret: &[u8; 32], aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>> {
+        let refused = || error("sealed by another key, or changed since");
+        let Some((&VERSION, rest)) = sealed.split_first() else {
+            return Err(refused());
+        };
+        let (nonce, body) = rest.split_at_checked(NONCE_LEN).ok_or_else(refused)?;
+        let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| refused())?;
+        let mut body = body.to_vec();
+        let plain = key(secret)?
+            .open_in_place(nonce, Aad::from(aad), &mut body)
+            .map_err(|_| refused())?;
+        Ok(plain.to_vec())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// What one key seals for one purpose opens with that key and
+        /// purpose alone, and not once changed.
+        #[test]
+        fn only_the_same_key_and_purpose_open_it() {
+            let (key, other) = ([7; 32], [8; 32]);
+            let sealed = seal(&key, b"trust", b"grant").unwrap();
+            assert_eq!(open(&key, b"trust", &sealed).unwrap(), b"grant");
+            assert!(!sealed.windows(5).any(|bytes| bytes == b"grant"));
+            assert!(open(&other, b"trust", &sealed).is_err());
+            assert!(open(&key, b"computers", &sealed).is_err());
+            let mut changed = sealed.clone();
+            *changed.last_mut().unwrap() ^= 1;
+            assert!(open(&key, b"trust", &changed).is_err());
+            assert!(open(&key, b"trust", &sealed[..10]).is_err());
+        }
     }
 }
 
