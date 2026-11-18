@@ -3,7 +3,9 @@
 //! moves and `LockWorkStation`, with the token diagnostics a rejected
 //! injection records.
 use crate::{
-    Button, DoubleClickGuard, Key, Result, error, input::held::Pressed, platform::Injector,
+    Button, DoubleClickGuard, Key, Result, error,
+    input::held::{NativeKeys, Pressed},
+    platform::Injector,
 };
 use enigo::{Axis, Direction, Enigo, Keyboard, Mouse};
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
@@ -19,23 +21,29 @@ use windows::Win32::{
     },
     UI::{
         Input::KeyboardAndMouse::{
-            GetDoubleClickTime, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, SendInput, VIRTUAL_KEY,
+            GetDoubleClickTime, GetKeyboardLayout, INPUT, INPUT_0, INPUT_KEYBOARD,
+            KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+            KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC_EX, MapVirtualKeyExW, SendInput, VIRTUAL_KEY,
             VK_NUMLOCK, VK_PAUSE,
         },
-        WindowsAndMessaging::{GetSystemMetrics, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SetCursorPos},
+        WindowsAndMessaging::{
+            GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SM_CXDOUBLECLK,
+            SM_CYDOUBLECLK, SetCursorPos,
+        },
     },
 };
 
 pub(crate) struct WinInput {
     enigo: Enigo,
     keyboard: KeyboardState,
+    keys: NativeKeys,
 }
 impl WinInput {
     pub(crate) fn new() -> Result<Self> {
         Ok(Self {
             enigo: Enigo::new(&enigo::Settings::default()).map_err(error)?,
             keyboard: KeyboardState::default(),
+            keys: NativeKeys::default(),
         })
     }
 }
@@ -67,10 +75,7 @@ impl Injector for WinInput {
         Ok(())
     }
     fn key(&mut self, key: Key, down: bool) -> Result<()> {
-        self.keyboard.key(key, down);
-        self.enigo
-            .key(key_code(key), direction(down))
-            .map_err(native_input_error)
+        self.send_key(Pressed::Key(key), down)
     }
     /// enigo 0.6 types a `\n` or `\t` as a key and then again as a Unicode
     /// character; `text` holds none (`Input::typed`).
@@ -81,7 +86,7 @@ impl Injector for WinInput {
     /// the foreground turns into a virtual key and its input method may
     /// compose.
     fn physical_key(&mut self, usage: u16, down: bool) -> Result<()> {
-        self.send_physical(usage, down).map_err(native_input_error)
+        self.send_key(Pressed::Physical(usage), down)
     }
     fn lock(&mut self) -> Result<()> {
         unsafe { LockWorkStation() }
@@ -110,17 +115,34 @@ impl Injector for WinInput {
                 .enigo
                 .button(button_code(button), Direction::Release)
                 .map_err(error),
-            Pressed::Key(key) => {
-                self.keyboard.key(key, false);
-                self.enigo
-                    .key(key_code(key), Direction::Release)
-                    .map_err(error)
-            }
-            Pressed::Physical(usage) => self.send_physical(usage, false).map_err(error),
+            Pressed::Key(_) | Pressed::Physical(_) => self.send_key(pressed, false),
         }
     }
 }
 impl WinInput {
+    fn send_key(&mut self, source: Pressed, down: bool) -> Result<()> {
+        let Some((posted, _)) = self.keys.route(source, down, || native_key(source)) else {
+            return Ok(());
+        };
+        match posted {
+            Pressed::Key(key) => {
+                self.keyboard.key(key, down);
+                let vk = enigo::Key::Other(u32::from(key_code(key).0));
+                self.enigo
+                    .key(vk, direction(down))
+                    .map_err(native_input_error)?;
+            }
+            Pressed::Physical(usage) => self
+                .send_physical(usage, down)
+                .map_err(native_input_error)?,
+            Pressed::Button(_) => return Err(error("expected a keyboard event")),
+        }
+        if !down {
+            self.keys.released(source);
+        }
+        Ok(())
+    }
+
     /// One physical key event through `SendInput`; nothing for a usage
     /// with no key here.
     fn send_physical(&mut self, usage: u16, down: bool) -> std::result::Result<(), &'static str> {
@@ -386,79 +408,109 @@ fn button_code(button: Button) -> enigo::Button {
         Button::Middle => enigo::Button::Middle,
     }
 }
+/// The set-1 scan code in the foreground layout, with extended keys distinct.
+fn native_key(source: Pressed) -> Option<u16> {
+    // VK-only keys with no ordinary scan have a separate identity.
+    let virtual_id = |vk: VIRTUAL_KEY| 0xf000 | vk.0;
+    match source {
+        Pressed::Key(key) => {
+            let vk = key_code(key);
+            let scan = unsafe {
+                let thread = GetWindowThreadProcessId(GetForegroundWindow(), None);
+                MapVirtualKeyExW(
+                    u32::from(vk.0),
+                    MAPVK_VK_TO_VSC_EX,
+                    Some(GetKeyboardLayout(thread)),
+                )
+            };
+            Some(
+                u16::try_from(scan)
+                    .ok()
+                    .filter(|scan| *scan != 0)
+                    .unwrap_or_else(|| virtual_id(vk)),
+            )
+        }
+        Pressed::Physical(usage) => match press(usage)? {
+            Press::Scan(scan) => Some(scan),
+            Press::Virtual(vk, ..) => Some(virtual_id(vk)),
+        },
+        Pressed::Button(_) => None,
+    }
+}
+
 /// Letters and digits are virtual keys, never `enigo::Key::Unicode`: on a host
 /// layout that cannot produce the character, enigo falls back to Unicode text
 /// with its own down and up, so Ctrl+C or Win+E would type a stray letter.
-fn key_code(key: Key) -> enigo::Key {
-    use enigo::Key as K;
+fn key_code(key: Key) -> VIRTUAL_KEY {
+    use windows::Win32::UI::Input::KeyboardAndMouse as vk;
     match key {
-        Key::Shift => K::Shift,
-        Key::Control => K::Control,
-        Key::Alt => K::Alt,
-        Key::Meta => K::Meta,
-        Key::Enter => K::Return,
-        Key::Escape => K::Escape,
-        Key::Tab => K::Tab,
-        Key::Backspace => K::Backspace,
-        Key::Delete => K::Delete,
-        Key::Left => K::LeftArrow,
-        Key::Right => K::RightArrow,
-        Key::Up => K::UpArrow,
-        Key::Down => K::DownArrow,
-        Key::Home => K::Home,
-        Key::End => K::End,
-        Key::PageUp => K::PageUp,
-        Key::PageDown => K::PageDown,
-        Key::Insert => K::Insert,
-        Key::Space => K::Space,
-        Key::A => K::A,
-        Key::B => K::B,
-        Key::C => K::C,
-        Key::D => K::D,
-        Key::E => K::E,
-        Key::F => K::F,
-        Key::G => K::G,
-        Key::H => K::H,
-        Key::I => K::I,
-        Key::J => K::J,
-        Key::K => K::K,
-        Key::L => K::L,
-        Key::M => K::M,
-        Key::N => K::N,
-        Key::O => K::O,
-        Key::P => K::P,
-        Key::Q => K::Q,
-        Key::R => K::R,
-        Key::S => K::S,
-        Key::T => K::T,
-        Key::U => K::U,
-        Key::V => K::V,
-        Key::W => K::W,
-        Key::X => K::X,
-        Key::Y => K::Y,
-        Key::Z => K::Z,
-        Key::Digit0 => K::Num0,
-        Key::Digit1 => K::Num1,
-        Key::Digit2 => K::Num2,
-        Key::Digit3 => K::Num3,
-        Key::Digit4 => K::Num4,
-        Key::Digit5 => K::Num5,
-        Key::Digit6 => K::Num6,
-        Key::Digit7 => K::Num7,
-        Key::Digit8 => K::Num8,
-        Key::Digit9 => K::Num9,
-        Key::F1 => K::F1,
-        Key::F2 => K::F2,
-        Key::F3 => K::F3,
-        Key::F4 => K::F4,
-        Key::F5 => K::F5,
-        Key::F6 => K::F6,
-        Key::F7 => K::F7,
-        Key::F8 => K::F8,
-        Key::F9 => K::F9,
-        Key::F10 => K::F10,
-        Key::F11 => K::F11,
-        Key::F12 => K::F12,
+        Key::Shift => vk::VK_SHIFT,
+        Key::Control => vk::VK_CONTROL,
+        Key::Alt => vk::VK_MENU,
+        Key::Meta => vk::VK_LWIN,
+        Key::Enter => vk::VK_RETURN,
+        Key::Escape => vk::VK_ESCAPE,
+        Key::Tab => vk::VK_TAB,
+        Key::Backspace => vk::VK_BACK,
+        Key::Delete => vk::VK_DELETE,
+        Key::Left => vk::VK_LEFT,
+        Key::Right => vk::VK_RIGHT,
+        Key::Up => vk::VK_UP,
+        Key::Down => vk::VK_DOWN,
+        Key::Home => vk::VK_HOME,
+        Key::End => vk::VK_END,
+        Key::PageUp => vk::VK_PRIOR,
+        Key::PageDown => vk::VK_NEXT,
+        Key::Insert => vk::VK_INSERT,
+        Key::Space => vk::VK_SPACE,
+        Key::A => vk::VK_A,
+        Key::B => vk::VK_B,
+        Key::C => vk::VK_C,
+        Key::D => vk::VK_D,
+        Key::E => vk::VK_E,
+        Key::F => vk::VK_F,
+        Key::G => vk::VK_G,
+        Key::H => vk::VK_H,
+        Key::I => vk::VK_I,
+        Key::J => vk::VK_J,
+        Key::K => vk::VK_K,
+        Key::L => vk::VK_L,
+        Key::M => vk::VK_M,
+        Key::N => vk::VK_N,
+        Key::O => vk::VK_O,
+        Key::P => vk::VK_P,
+        Key::Q => vk::VK_Q,
+        Key::R => vk::VK_R,
+        Key::S => vk::VK_S,
+        Key::T => vk::VK_T,
+        Key::U => vk::VK_U,
+        Key::V => vk::VK_V,
+        Key::W => vk::VK_W,
+        Key::X => vk::VK_X,
+        Key::Y => vk::VK_Y,
+        Key::Z => vk::VK_Z,
+        Key::Digit0 => vk::VK_0,
+        Key::Digit1 => vk::VK_1,
+        Key::Digit2 => vk::VK_2,
+        Key::Digit3 => vk::VK_3,
+        Key::Digit4 => vk::VK_4,
+        Key::Digit5 => vk::VK_5,
+        Key::Digit6 => vk::VK_6,
+        Key::Digit7 => vk::VK_7,
+        Key::Digit8 => vk::VK_8,
+        Key::Digit9 => vk::VK_9,
+        Key::F1 => vk::VK_F1,
+        Key::F2 => vk::VK_F2,
+        Key::F3 => vk::VK_F3,
+        Key::F4 => vk::VK_F4,
+        Key::F5 => vk::VK_F5,
+        Key::F6 => vk::VK_F6,
+        Key::F7 => vk::VK_F7,
+        Key::F8 => vk::VK_F8,
+        Key::F9 => vk::VK_F9,
+        Key::F10 => vk::VK_F10,
+        Key::F11 => vk::VK_F11,
+        Key::F12 => vk::VK_F12,
     }
 }
 
@@ -501,11 +553,6 @@ mod key_tests {
             .map(|name| key_code(serde_json::from_value(serde_json::json!(name)).unwrap()))
             .collect();
         assert_eq!(codes.len(), 19 + 26 + 10 + 12);
-        assert!(
-            codes
-                .iter()
-                .all(|code| !matches!(code, enigo::Key::Unicode(_)))
-        );
         // Distinct: no two keys of the vocabulary press the same host key.
         assert!(
             codes
@@ -513,10 +560,10 @@ mod key_tests {
                 .enumerate()
                 .all(|(i, code)| !codes[..i].contains(code))
         );
-        assert_eq!(key_code(Key::A), enigo::Key::A);
-        assert_eq!(key_code(Key::Z), enigo::Key::Z);
-        assert_eq!(key_code(Key::Digit0), enigo::Key::Num0);
-        assert_eq!(key_code(Key::Digit9), enigo::Key::Num9);
+        assert_eq!(key_code(Key::A), VIRTUAL_KEY(u16::from(b'A')));
+        assert_eq!(key_code(Key::Z), VIRTUAL_KEY(u16::from(b'Z')));
+        assert_eq!(key_code(Key::Digit0), VIRTUAL_KEY(u16::from(b'0')));
+        assert_eq!(key_code(Key::Digit9), VIRTUAL_KEY(u16::from(b'9')));
     }
 
     /// The ends of each computed run, the extended keys and the two keys

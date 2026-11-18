@@ -8,7 +8,7 @@ use crate::{
     Backend, EncodedFrame, FailureKind, Result, VideoCodec, VideoLimits, VideoRate, error,
     failure_kind,
     idr::IdrReason,
-    outgoing::{FrameBytes, HostUnit, Push},
+    outgoing::{FrameBytes, HostUnit},
     protocol::{MAX_VIEWERS, StateReason, VideoSize},
 };
 use std::{
@@ -371,8 +371,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 ready_at: at,
                 bytes: unit_bytes,
             });
-            if let Push::Overflow { dropped } = pushed {
-                slot.state.dropped_frames += dropped as u64;
+            slot.state.dropped_frames += pushed.dropped as u64;
+            if pushed.request_idr {
                 slot.shared.idr.lock().request(IdrReason::HostResync);
             }
         }

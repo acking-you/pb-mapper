@@ -132,10 +132,8 @@ impl<P: Platform> Backend for PlatformBackend<P> {
     }
     fn configure_video(&mut self, limits: VideoLimits, _nominal_fps: u32) -> Result<()> {
         limits.validate()?;
-        if self.limits != limits {
-            self.video = None;
-            self.limits = limits;
-        }
+        self.video = None;
+        self.limits = limits;
         Ok(())
     }
     fn capture(&mut self) -> Result<Vec<u8>> {

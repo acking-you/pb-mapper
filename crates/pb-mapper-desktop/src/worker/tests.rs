@@ -126,6 +126,7 @@ impl Fake {
 }
 impl Backend for Fake {
     fn configure_video(&mut self, limits: VideoLimits, _: u32) -> Result<()> {
+        self.encoding.lock().clear();
         self.log.lock().configured += 1;
         limits.validate()
     }
@@ -606,6 +607,23 @@ fn fps_and_preset_changes_never_reconfigure_the_encoder() {
         h.state().record.display.map(|display| display.width),
         Some(20)
     );
+}
+
+#[test]
+fn switching_codec_discards_inflight_output_before_the_next_drain() {
+    let mut h = Harness::new(false, None);
+    *h.fake.latency.lock() = Duration::from_millis(5);
+    h.step();
+    assert_eq!(h.fake.pending_video(), 1);
+    h.engine.room.set_codec(VideoCodec::Jpeg);
+    *h.now.lock() += Duration::from_millis(6);
+    h.step();
+    assert_eq!(h.fake.pending_video(), 0);
+    assert!(h.sent().is_empty());
+    h.run(Duration::from_millis(40), false);
+    let frames = h.sent();
+    assert!(frames[0].keyframe);
+    assert!(frames.iter().all(|unit| unit.codec == VideoCodec::Jpeg));
 }
 
 #[test]

@@ -250,7 +250,7 @@ pub struct IntervalStats {
 }
 
 /// The per-vsync view: the Rust mirror of the FFI's 96-byte
-/// `PbDesktopViewV1`, filled without allocating.
+/// `PbDesktopViewV2`, filled without allocating.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DesktopView {
     pub generation: u64,

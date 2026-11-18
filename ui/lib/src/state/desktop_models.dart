@@ -719,7 +719,7 @@ class DesktopPicture {
 }
 
 /// Another controlling viewer's pointer in host display pixels, as
-/// `PbDesktopViewV1` carries it.
+/// `PbDesktopViewV2` carries it.
 @immutable
 class DesktopPeerCursor {
   const DesktopPeerCursor({
@@ -758,7 +758,7 @@ class PeerCursorPoint {
   int get hashCode => Object.hash(color, position);
 }
 
-/// The mirror of `PbDesktopViewV1`: read every rendered frame, never
+/// The mirror of `PbDesktopViewV2`: read every rendered frame, never
 /// published through a notifier.
 @immutable
 class DesktopView {

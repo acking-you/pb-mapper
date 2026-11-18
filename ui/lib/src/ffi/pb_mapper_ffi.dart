@@ -202,9 +202,9 @@ typedef _PbMapperInitLoggingDart = void Function();
 typedef _PbMapperFreeStringNative = Void Function(Pointer<Utf8> s);
 typedef _PbMapperFreeStringDart = void Function(Pointer<Utf8> s);
 
-/// `PbDesktopViewV1`: what the viewer shows this frame, filled by the
-/// per-frame leaf `pb_mapper_desktop_view_v1`. 96 bytes, native layout.
-final class PbDesktopViewV1 extends Struct {
+/// `PbDesktopViewV2`: what the viewer shows this frame, filled by the
+/// per-frame leaf `pb_mapper_desktop_view_v2`. 96 bytes, native layout.
+final class PbDesktopViewV2 extends Struct {
   @Uint64()
   external int generation;
 
@@ -350,9 +350,9 @@ class PbMapperFFI {
   /// leaf for every rendered frame; the UI isolate only.
   late final pbMapperDesktopView = lib
       .lookupFunction<
-        Int32 Function(Pointer<Void>, Pointer<PbDesktopViewV1>),
-        int Function(Pointer<Void>, Pointer<PbDesktopViewV1>)
-      >('pb_mapper_desktop_view_v1', isLeaf: true);
+        Int32 Function(Pointer<Void>, Pointer<PbDesktopViewV2>),
+        int Function(Pointer<Void>, Pointer<PbDesktopViewV2>)
+      >('pb_mapper_desktop_view_v2', isLeaf: true);
 
   /// `> 0` the consumer id; otherwise `CLOSED` or `ALREADY_ATTACHED`.
   late final pbMapperDesktopVideoAttach = lib

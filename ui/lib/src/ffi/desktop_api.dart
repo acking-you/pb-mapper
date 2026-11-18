@@ -922,7 +922,7 @@ class DesktopApi implements DesktopApiClient {
 
   /// The view leaf's one struct: it is read on the UI isolate only, and
   /// copied out before the call returns.
-  static final _view = calloc<PbDesktopViewV1>();
+  static final _view = calloc<PbDesktopViewV2>();
 
   @override
   DesktopViewerStatus? viewerStatus({DisplayMode? local}) {
@@ -999,7 +999,7 @@ class DesktopApi implements DesktopApiClient {
 }
 
 /// Copies the view leaf's struct into a [DesktopView].
-DesktopView desktopViewFromLeaf(PbDesktopViewV1 leaf) {
+DesktopView desktopViewFromLeaf(PbDesktopViewV2 leaf) {
   final flags = leaf.flags;
   bool flag(int bit) => flags & (1 << bit) != 0;
   final count = leaf.peerCount.clamp(0, 3);

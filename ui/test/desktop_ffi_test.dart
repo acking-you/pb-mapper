@@ -11,10 +11,10 @@ void main() {
   // pin the C offsets at compile time; this pins Dart's mirrors to the same
   // ones (perf 7.4, 7.5).
   test('the view leaf and video meta mirror the 96/56-byte C layouts', () {
-    expect(sizeOf<PbDesktopViewV1>(), 96);
+    expect(sizeOf<PbDesktopViewV2>(), 96);
     expect(sizeOf<PbDesktopVideoMetaV1>(), 56);
 
-    final leaf = calloc<PbDesktopViewV1>();
+    final leaf = calloc<PbDesktopViewV2>();
     final meta = calloc<PbDesktopVideoMetaV1>();
     try {
       final bytes = leaf.cast<Uint8>().asTypedList(96).buffer.asByteData()

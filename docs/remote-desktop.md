@@ -1618,9 +1618,11 @@ when it equals the last report, at the newer watermark: the clamp, or the
 pointer still hidden, reaches the viewer with the move behind it.
 
 **Concurrent controllers and peer pointers.** Up to four viewers (`MAX_VIEWERS`)
-share one capture and encode loop, paced to the slowest active viewer's credit
-and limits; a single viewer receives the owned frame buffer directly, and two
-or more share one `Bytes` allocation. Each viewer has its own input lane,
+share one capture and encode loop. A viewer can join with the current codec
+whenever it can decode it. Capture continues while any viewer has send capacity.
+A slow viewer can drain its queued pictures and resumes at a keyframe after a
+gap. A single viewer receives the owned frame buffer directly, and two or more
+share the same encoded bytes. Each viewer has its own input lane,
 presentation ledger, drag-start hold and held-input set: releasing or
 disconnecting one controller lifts only keys and mouse buttons no remaining
 controller still holds, and a button or wheel event re-aims the OS pointer to

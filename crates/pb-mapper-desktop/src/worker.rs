@@ -576,6 +576,12 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if codec != self.codec {
             self.codec = codec;
             self.keyframe = true;
+            if let Err(failure) = self
+                .backend
+                .configure_video(self.limits, self.limits.max_fps)
+            {
+                self.fail(failure, self.clock.now());
+            }
         }
         let allowed = self.room.policy.allowed();
         let mut added_peer_reader = false;

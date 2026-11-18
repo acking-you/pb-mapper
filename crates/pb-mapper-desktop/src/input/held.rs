@@ -27,6 +27,69 @@ impl Pressed {
     }
 }
 
+/// Collapse wire keys that press the same native key. Keep the first injection
+/// method and native code until the last alias releases, including across a
+/// keyboard layout change or a failed native key-up.
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Default)]
+pub(crate) struct NativeKeys(Vec<NativeHold>);
+
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Clone, Copy)]
+struct NativeHold {
+    source: Pressed,
+    posted: Pressed,
+    code: u16,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+impl NativeKeys {
+    pub(crate) fn route(
+        &mut self,
+        source: Pressed,
+        down: bool,
+        resolve: impl FnOnce() -> Option<u16>,
+    ) -> Option<(Pressed, u16)> {
+        let held = self.0.iter().find(|held| held.source == source).copied();
+        let code = match held {
+            Some(held) => held.code,
+            None => resolve()?,
+        };
+        let other = self
+            .0
+            .iter()
+            .find(|held| held.source != source && held.code == code);
+        if let Some(other) = other {
+            if !down {
+                self.released(source);
+                return None;
+            }
+            if held.is_none() {
+                let posted = other.posted;
+                self.0.push(NativeHold {
+                    source,
+                    posted,
+                    code,
+                });
+                return None;
+            }
+        }
+        let posted = held.map_or(source, |held| held.posted);
+        if down && held.is_none() {
+            self.0.push(NativeHold {
+                source,
+                posted,
+                code,
+            });
+        }
+        Some((posted, code))
+    }
+
+    pub(crate) fn released(&mut self, source: Pressed) {
+        self.0.retain(|held| held.source != source);
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Held {
     buttons: HashSet<Button>,
@@ -116,6 +179,26 @@ fn apply<T: Copy + Eq + std::hash::Hash>(
 mod tests {
     use super::*;
     use crate::error;
+
+    #[test]
+    fn mixed_key_representations_release_the_original_native_key_only_once() {
+        let mut keys = NativeKeys::default();
+        let logical = Pressed::Key(Key::Control);
+        let physical = Pressed::Physical(0xe0);
+        let native = || Some(0x3b);
+        assert_eq!(keys.route(logical, true, native), Some((logical, 0x3b)));
+        assert_eq!(keys.route(physical, true, native), None);
+        assert_eq!(keys.route(logical, false, || None), None);
+        // The native release fails and is retried after a layout change.
+        for _ in 0..2 {
+            assert_eq!(
+                keys.route(physical, false, || Some(1)),
+                Some((logical, 0x3b))
+            );
+        }
+        keys.released(physical);
+        assert!(keys.0.is_empty());
+    }
 
     #[test]
     fn failed_native_input_retains_the_release_obligation() {

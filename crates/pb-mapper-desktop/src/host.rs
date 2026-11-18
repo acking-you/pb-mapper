@@ -169,6 +169,14 @@ impl Room {
         if inner.closed || self.exit_rx.borrow().is_some() {
             return None;
         }
+        // A compatible join should preserve every existing session and grant.
+        let current_supported = match inner.codec {
+            VideoCodec::H265 => offered_h265 && !worker::h265_failed(),
+            codec => offered_codecs.contains(&codec),
+        };
+        if current_supported {
+            return Some((inner.codec, Vec::new()));
+        }
         let can_h265 = self.h265
             && !worker::h265_failed()
             && offered_h265

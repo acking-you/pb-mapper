@@ -577,6 +577,20 @@ async fn concurrent_controllers_exchange_colored_peer_cursors_and_isolate_held_i
             ],
         )
         .unwrap();
+    // The two sessions have independent input lanes. Observe A's batch at
+    // the host before asking B to become the last pointer owner.
+    until(Duration::from_secs(3), || {
+        observed.log.lock().unwrap().iter().any(|input| {
+            matches!(
+                input,
+                Input::Key {
+                    key: Key::Shift,
+                    down: true
+                }
+            )
+        })
+    })
+    .await;
     viewer_b
         .input(
             status_b.generation,

@@ -17,6 +17,7 @@ use super::{
 };
 use crate::{
     BackendError, Button, DoubleClickGuard, FailureKind, Key, Permission, Result, error,
+    input::held::{NativeKeys, Pressed},
     platform::Injector,
 };
 use objc2::rc::autoreleasepool;
@@ -47,8 +48,7 @@ pub(crate) struct MacInput {
     access: Option<(Instant, bool)>,
     /// The layout named keys go through, and the read it came from.
     layout: (u64, Layout),
-    /// Named keys down, each with the virtual key it went down at.
-    named: Vec<(Key, u16)>,
+    keys: NativeKeys,
 }
 
 impl MacInput {
@@ -65,30 +65,30 @@ impl MacInput {
             clicks: Clicks::default(),
             access: None,
             layout: (layout::generation(), layout::current()),
-            named: Vec::new(),
+            keys: NativeKeys::default(),
         })
     }
 
-    /// The virtual key `key` goes `down` or up at: where it went down, if
-    /// it is down, whatever the layout did meanwhile; else through the
-    /// layout read last.
-    fn code(&mut self, key: Key, down: bool) -> u16 {
-        if let Some(at) = self.named.iter().position(|(held, _)| *held == key) {
-            let code = self.named[at].1;
-            if !down {
-                self.named.swap_remove(at);
+    fn send_key(&mut self, source: Pressed, down: bool) -> Result<()> {
+        self.allowed()?;
+        let routed = self.keys.route(source, down, || match source {
+            Pressed::Physical(usage) => keys::usage_code(usage),
+            Pressed::Key(key) => {
+                let generation = layout::generation();
+                if generation != self.layout.0 {
+                    self.layout = (generation, layout::current());
+                }
+                Some(self.layout.1.code(key))
             }
-            return code;
+            Pressed::Button(_) => None,
+        });
+        if let Some((_, code)) = routed {
+            self.press(code, down)?;
+            if !down {
+                self.keys.released(source);
+            }
         }
-        let generation = layout::generation();
-        if generation != self.layout.0 {
-            self.layout = (generation, layout::current());
-        }
-        let code = self.layout.1.code(key);
-        if down && keys::named(key) {
-            self.named.push((key, code));
-        }
-        code
+        Ok(())
     }
 
     /// Fails while the owner has not granted Accessibility.
@@ -310,9 +310,7 @@ impl Injector for MacInput {
     /// `Meta` is Command and `Control` Control: the viewer's Apple swap
     /// relies on it.
     fn key(&mut self, key: Key, down: bool) -> Result<()> {
-        self.allowed()?;
-        let code = self.code(key, down);
-        self.press(code, down)
+        self.send_key(Pressed::Key(key), down)
     }
     /// Text is typed with no modifier, whatever is held: a held Command
     /// must not turn it into shortcuts. It holds no line break or tab.
@@ -327,11 +325,7 @@ impl Injector for MacInput {
     /// the host's layout and input source decide what it types. A usage a
     /// Mac keyboard has no key for presses nothing.
     fn physical_key(&mut self, usage: u16, down: bool) -> Result<()> {
-        let Some(code) = keys::usage_code(usage) else {
-            return Ok(());
-        };
-        self.allowed()?;
-        self.press(code, down)
+        self.send_key(Pressed::Physical(usage), down)
     }
     fn lock(&mut self) -> Result<()> {
         Err(BackendError::new(FailureKind::Unsupported, "lock the desktop").into())

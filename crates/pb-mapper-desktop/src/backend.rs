@@ -53,10 +53,9 @@ pub trait Backend: 'static {
     fn bind(&mut self, waker: Waker) {
         let _ = waker;
     }
-    /// Called once before a session captures frames, and again only for a new
-    /// context or display or an encoder recovery; never for an fps, bitrate or
-    /// preset change. Backends must keep input coordinates in physical desktop
-    /// pixels when scaling their video output.
+    /// Start a fresh encoder for the room's codec, capture limits, context or
+    /// recovery. Discard all pending output, even when the limits are identical.
+    /// Input coordinates stay in physical desktop pixels when scaling video.
     fn configure_video(&mut self, limits: VideoLimits, nominal_fps: u32) -> Result<()> {
         let _ = nominal_fps;
         limits.validate()

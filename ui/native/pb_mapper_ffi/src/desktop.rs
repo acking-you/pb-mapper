@@ -1,7 +1,7 @@
 //! The desktop over FFI. Lifecycle JSON (`pb_mapper_desktop_call_json`) runs
 //! on Dart worker isolates under `block_on`. The viewer's hot ops
 //! (`pb_mapper_desktop_viewer_call_json`) and its per-frame view leaf
-//! (`pb_mapper_desktop_view_v1`) are synchronous and safe on the UI isolate:
+//! (`pb_mapper_desktop_view_v2`) are synchronous and safe on the UI isolate:
 //! they never enter the runtime or take a tokio lock. Video reaches native
 //! consumers through `desktop_video.rs`, never through Dart. Temporary
 //! endpoints belong to the app runtime, never a page widget; explicitly
@@ -36,7 +36,10 @@ use host::{
 };
 pub(crate) use viewer::Connected;
 use viewer::{ConnectRequest, Live, PendingConnect, connect_request, inspection, invitation_error};
-pub use viewer::{PbDesktopViewV1, pb_mapper_desktop_view_v1, pb_mapper_desktop_viewer_call_json};
+pub use viewer::{
+    PbDesktopViewV1, PbDesktopViewV2, pb_mapper_desktop_view_v1, pb_mapper_desktop_view_v2,
+    pb_mapper_desktop_viewer_call_json,
+};
 
 /// The longest lifecycle request.
 const MAX_REQUEST: usize = 16 * 1024;

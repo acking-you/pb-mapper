@@ -329,11 +329,19 @@ fn the_view_names_a_shape_the_hot_op_resolves() {
         .await;
         host
     });
+    let peers = || {
+        let mut view = PbDesktopViewV2::default();
+        assert_eq!(
+            unsafe { pb_mapper_desktop_view_v2(std::ptr::from_ref(handle).cast_mut(), &mut view) },
+            1
+        );
+        view
+    };
     eventually(|| {
-        let snapshot = view(handle).1;
-        snapshot.cursor_shape != 0 && snapshot.peer_count == 1
+        let snapshot = peers();
+        snapshot.base.cursor_shape != 0 && snapshot.peer_count == 1
     });
-    let snapshot = view(handle).1;
+    let snapshot = peers();
     assert_eq!(
         (
             snapshot.peer_x[0],
@@ -342,7 +350,7 @@ fn the_view_names_a_shape_the_hot_op_resolves() {
         ),
         (120, 340, 2)
     );
-    let shape = snapshot.cursor_shape;
+    let shape = snapshot.base.cursor_shape;
     let resolved = hot(handle, json!({"op": "cursor_shape", "shape": shape}));
     assert_eq!(
         resolved["data"],

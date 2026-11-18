@@ -734,8 +734,8 @@ The design and its rules are in `docs/ui-design.md`.
       both leaf calls over caller-owned buffers (the Windows update's
       `pb_mapper_spawn_hidden_powershell_v1` is gone: the app now starts the
       installer itself, see `docs/ui-updates.md`);
-    - `pb_mapper_desktop_view_v1`, the remote desktop's per-frame view leaf:
-      it fills a caller-owned 96-byte `PbDesktopViewV1` (mirrored in
+    - `pb_mapper_desktop_view_v2`, the remote desktop's per-frame view leaf:
+      it fills a caller-owned 96-byte `PbDesktopViewV2` (mirrored in
       `pb_mapper_ffi.dart`; `size_of` and `offset_of` asserts guard it, as
       they guard `PbDesktopVideoMetaV1` on both sides; `cursor_shape`, a
       `u16` at offset 54, is the number of the pointer's shape, and offsets
