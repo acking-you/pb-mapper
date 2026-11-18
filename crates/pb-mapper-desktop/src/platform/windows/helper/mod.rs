@@ -122,8 +122,9 @@ fn connect_backend(
 /// the background host's `Settings` keep the device and it restores on
 /// request. 8: the pointer's shape (`CursorShape`, `shape_serial`);
 /// `Request::Input` may carry `Input::PhysicalKey`; and the `Start` caps say
-/// whether the worker reads shapes and injects physical keys.
-pub const HELPER_PROTOCOL: u32 = 8;
+/// whether the worker reads shapes and injects physical keys. 9: `HostStatus`
+/// carries `viewers` for concurrent sessions.
+pub const HELPER_PROTOCOL: u32 = 9;
 
 /// What a worker exits with when a display mode it changed is still
 /// journalled: the service then starts a `restore` worker.
@@ -131,7 +132,7 @@ pub const HELPER_PROTOCOL: u32 = 8;
 pub(crate) const RESTORE_PENDING: u32 = 3;
 
 const SERVICE: &str = "PbMapperDesktop";
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v8";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v9";
 const _: () = assert!(
     names_protocol(PIPE, HELPER_PROTOCOL),
     "the helper pipe's name ends in .v and HELPER_PROTOCOL"

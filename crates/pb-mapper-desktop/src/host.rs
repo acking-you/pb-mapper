@@ -9,15 +9,15 @@ use self::acceptor::Acceptor;
 use self::builder::Launched;
 pub use self::builder::{Access, Custom, DisplaySelection, HostBuilder, HostOptions, Native};
 use crate::{
-    DesktopKind, HostPath, HostState, HostStatus, HostViewer, Invitation, ModeList, Result, error,
-    lane::LaneCommand,
+    DesktopKind, Display, HostPath, HostState, HostStatus, HostViewer, Invitation, ModeList,
+    Result, VideoCodec, VideoLimits, error,
     launch::{Launch, Recovery},
-    modes::ModeCommand,
     platform,
-    protocol::{SessionState, StopReason},
+    protocol::{MAX_VIEWERS, PeerColor, PeerSlot, SessionState, StopReason},
     security::HostIdentity,
     session::{Session, stop_message},
     shared::Policy,
+    worker::{self, RoomShared, RoomSlotConfig, WorkerExit, WorkerHandle},
 };
 use parking_lot::Mutex;
 use pb_mapper_client::sdk::{
@@ -58,8 +58,8 @@ struct Shared {
     policy: Arc<Policy>,
     /// What sessions list when their backend did not describe itself.
     fallback: Vec<String>,
-    /// The session holding the single viewer slot, if any.
-    session: Mutex<Option<Live>>,
+    /// Active multi-viewer room, while at least one viewer is connected.
+    room: Mutex<Option<Arc<Room>>>,
     stopped: AtomicBool,
     registration: Registration,
     /// The display-mode journal may name a display to put back, which the
@@ -68,10 +68,250 @@ struct Shared {
     /// Wakes that retry at once.
     restore: tokio::sync::Notify,
 }
-/// The session in the viewer slot, with what its backend can do.
-struct Live {
-    session: Arc<Session>,
-    capabilities: Vec<String>,
+
+pub(super) struct RoomSlot {
+    pub conn_id: u64,
+    pub session: Arc<Session>,
+}
+
+struct RoomInner {
+    closed: bool,
+    codec: VideoCodec,
+    next_conn_id: u64,
+    slots: [Option<RoomSlot>; MAX_VIEWERS],
+}
+
+/// A live desktop room sharing one thread C across up to `MAX_VIEWERS` viewers.
+pub(super) struct Room {
+    pub shared: Arc<RoomShared>,
+    pub host_capabilities: Vec<String>,
+    pub display: Option<Display>,
+    pub h265: bool,
+    inner: Mutex<RoomInner>,
+    exit_rx: tokio::sync::watch::Receiver<Option<WorkerExit>>,
+    join: AsyncMutex<Option<tokio::task::JoinHandle<WorkerExit>>>,
+}
+impl Room {
+    pub(super) fn new_with_first_slot(
+        shared: Arc<RoomShared>,
+        mut worker: WorkerHandle,
+        host_capabilities: Vec<String>,
+        display: Option<Display>,
+        h265: bool,
+        codec: VideoCodec,
+        session: Arc<Session>,
+    ) -> Arc<Self> {
+        let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
+        let join = tokio::spawn(async move {
+            let exit = worker.exited().await;
+            let _ = exit_tx.send(Some(exit.clone()));
+            exit
+        });
+        let mut slots: [Option<RoomSlot>; MAX_VIEWERS] = std::array::from_fn(|_| None);
+        slots[PeerSlot::FIRST.index()] = Some(RoomSlot {
+            conn_id: 1,
+            session,
+        });
+        Arc::new(Self {
+            shared,
+            host_capabilities,
+            display,
+            h265,
+            inner: Mutex::new(RoomInner {
+                closed: false,
+                codec,
+                next_conn_id: 2,
+                slots,
+            }),
+            exit_rx,
+            join: AsyncMutex::new(Some(join)),
+        })
+    }
+
+    pub(super) fn is_closed(&self) -> bool {
+        self.inner.lock().closed || self.exit_rx.borrow().is_some()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.inner.lock().slots.iter().all(Option::is_none)
+    }
+
+    pub(super) fn current_codec(&self) -> VideoCodec {
+        self.inner.lock().codec
+    }
+
+    pub(super) fn live_sessions(&self) -> Vec<(u64, Arc<Session>)> {
+        self.inner
+            .lock()
+            .slots
+            .iter()
+            .flatten()
+            .map(|slot| (slot.conn_id, slot.session.clone()))
+            .collect()
+    }
+
+    pub(super) fn end_all(&self, reason: StopReason) {
+        let message = stop_message(reason);
+        for (_, session) in self.live_sessions() {
+            session.end(reason, message);
+        }
+    }
+
+    /// Pick a codec every live viewer in the room and the newcomer can decode,
+    /// returning any live sessions whose current codec differs.
+    pub(super) fn negotiate_codec(
+        &self,
+        offered_codecs: &[VideoCodec],
+        offered_h265: bool,
+    ) -> Option<(VideoCodec, Vec<Arc<Session>>)> {
+        let inner = self.inner.lock();
+        if inner.closed || self.exit_rx.borrow().is_some() {
+            return None;
+        }
+        // A compatible join should preserve every existing session and grant.
+        let current_supported = match inner.codec {
+            VideoCodec::H265 => offered_h265 && !worker::h265_failed(),
+            codec => offered_codecs.contains(&codec),
+        };
+        if current_supported {
+            return Some((inner.codec, Vec::new()));
+        }
+        let can_h265 = self.h265
+            && !worker::h265_failed()
+            && offered_h265
+            && inner
+                .slots
+                .iter()
+                .flatten()
+                .all(|slot| slot.session.offered_h265);
+        let can_h264 = offered_codecs.contains(&VideoCodec::H264)
+            && inner
+                .slots
+                .iter()
+                .flatten()
+                .all(|slot| slot.session.offered_codecs.contains(&VideoCodec::H264));
+        let can_jpeg = offered_codecs.contains(&VideoCodec::Jpeg)
+            && inner
+                .slots
+                .iter()
+                .flatten()
+                .all(|slot| slot.session.offered_codecs.contains(&VideoCodec::Jpeg));
+        let common = if can_h265 {
+            VideoCodec::H265
+        } else if can_h264 {
+            VideoCodec::H264
+        } else if can_jpeg {
+            VideoCodec::Jpeg
+        } else {
+            return None;
+        };
+        let incompatible = inner
+            .slots
+            .iter()
+            .flatten()
+            .filter(|slot| slot.session.codec != common)
+            .map(|slot| slot.session.clone())
+            .collect();
+        Some((common, incompatible))
+    }
+
+    pub(super) fn set_codec(&self, codec: VideoCodec) {
+        self.inner.lock().codec = codec;
+        self.shared.set_codec(codec);
+        self.shared.wake.notify();
+    }
+
+    pub(super) fn free_slot(&self) -> Option<PeerSlot> {
+        let inner = self.inner.lock();
+        if inner.closed || self.exit_rx.borrow().is_some() {
+            return None;
+        }
+        (0..MAX_VIEWERS)
+            .find(|&idx| inner.slots[idx].is_none())
+            .and_then(PeerSlot::new)
+    }
+
+    pub(super) fn attach(
+        &self,
+        slot: PeerSlot,
+        session: Arc<Session>,
+        limits: VideoLimits,
+    ) -> Option<u64> {
+        let conn_id = {
+            let mut inner = self.inner.lock();
+            if inner.closed || inner.slots[slot.index()].is_some() {
+                return None;
+            }
+            let conn_id = inner.next_conn_id;
+            inner.next_conn_id += 1;
+            inner.slots[slot.index()] = Some(RoomSlot {
+                conn_id,
+                session: session.clone(),
+            });
+            conn_id
+        };
+        let color = PeerColor::new(slot.index()).unwrap_or_default();
+        self.shared.set_slot(
+            slot,
+            conn_id,
+            RoomSlotConfig {
+                shared: session.shared.clone(),
+                color,
+                limits,
+                cursor_shapes: session.cursor_shape,
+                peer_cursors: session.peer_cursors,
+            },
+        );
+        self.shared.wake.notify();
+        Some(conn_id)
+    }
+
+    /// Detach `(slot, conn_id)`. Returns whether the room now holds zero slots.
+    pub(super) fn detach(&self, slot: PeerSlot, conn_id: u64) -> bool {
+        let empty = {
+            let mut inner = self.inner.lock();
+            if inner.slots[slot.index()]
+                .as_ref()
+                .is_some_and(|held| held.conn_id == conn_id)
+            {
+                inner.slots[slot.index()] = None;
+            }
+            let empty = inner.slots.iter().all(Option::is_none);
+            if empty {
+                inner.closed = true;
+            }
+            empty
+        };
+        self.shared.clear_slot(slot, conn_id);
+        self.shared.wake.notify();
+        empty
+    }
+
+    pub(super) async fn shutdown(&self) {
+        self.inner.lock().closed = true;
+        self.shared.cancel.cancel();
+        self.shared.wake.notify();
+        if let Some(join) = self.join.lock().await.take() {
+            let _ = join.await;
+        }
+    }
+
+    pub(super) async fn wait_for_session(&self, session_cancel: CancellationToken) -> WorkerExit {
+        let mut exit_rx = self.exit_rx.clone();
+        if let Some(exit) = exit_rx.borrow().clone() {
+            return exit;
+        }
+        tokio::select! {
+            biased;
+            found = exit_rx.wait_for(Option::is_some) => {
+                found
+                    .ok()
+                    .and_then(|guard| guard.clone())
+                    .unwrap_or(WorkerExit::Cancelled)
+            }
+            () = session_cancel.cancelled() => WorkerExit::Cancelled,
+        }
+    }
 }
 
 pub struct Host {
@@ -167,7 +407,7 @@ impl Host {
         let shared = Arc::new(Shared {
             policy: Arc::new(Policy::new(options.allow_control)),
             fallback: launch.fallback_caps().values(),
-            session: Mutex::new(None),
+            room: Mutex::new(None),
             stopped: AtomicBool::new(false),
             registration,
             // What a host of this process left changed, replayed at once:
@@ -185,7 +425,8 @@ impl Host {
             launch: launch.clone(),
             admission: admission.clone(),
             shared: shared.clone(),
-            slot: Arc::new(Semaphore::new(1)),
+            room: AsyncMutex::new(None),
+            slot: Arc::new(Semaphore::new(MAX_VIEWERS)),
             cancel: cancel.clone(),
         });
         let join = tokio::spawn(acceptor.accept(listener));
@@ -310,9 +551,8 @@ impl Host {
     /// `Stopped{host_ended}`. Hosting continues, and the viewer may connect
     /// again with the same invitation.
     pub fn end_session(&self) {
-        if let Some(live) = self.shared.session.lock().as_ref() {
-            live.session
-                .end(StopReason::HostEnded, stop_message(StopReason::HostEnded));
+        if let Some(room) = self.shared.room.lock().clone() {
+            room.end_all(StopReason::HostEnded);
         }
     }
     /// Put this computer's display back in its own mode, which a viewer
@@ -321,11 +561,10 @@ impl Host {
     /// the viewer hears), else by replaying the journal. False when there is
     /// nothing to ask: no session, and no journal this host replays.
     pub fn restore_display_mode(&self) -> bool {
-        if let Some(live) = self.shared.session.lock().as_ref() {
-            live.session
-                .shared
-                .lane
-                .push_owner(LaneCommand::DisplayMode(ModeCommand::HostRestore));
+        if let Some(room) = self.shared.room.lock().clone()
+            && !room.is_empty()
+        {
+            room.shared.request_restore();
             return true;
         }
         if self.launch.recovery().is_none() {
@@ -340,8 +579,8 @@ impl Host {
     /// also puts the display's own mode back, which a grant does not.
     pub fn set_control_allowed(&self, allowed: bool) {
         self.shared.policy.set(allowed);
-        if let Some(live) = self.shared.session.lock().as_ref() {
-            live.session.shared.wake.notify();
+        if let Some(room) = self.shared.room.lock().clone() {
+            room.shared.wake.notify();
         }
     }
     /// Stop hosting; a connected viewer hears `Stopped{host_stopped}`.
@@ -353,8 +592,8 @@ impl Host {
     /// reconnects; `Revoked` when its access was withdrawn.
     pub async fn stop_with(&self, reason: StopReason) -> Result<()> {
         self.shared.policy.set(false);
-        if let Some(live) = self.shared.session.lock().as_ref() {
-            live.session.end(reason, stop_message(reason));
+        if let Some(room) = self.shared.room.lock().clone() {
+            room.end_all(reason);
         }
         self.cancel.cancel();
         let mut join = self.join.lock().await;
@@ -405,14 +644,27 @@ impl HostStatusHandle {
 }
 
 impl Shared {
-    fn status(&self) -> HostStatus {
-        let control_allowed = self.policy.allowed();
-        let live = self
-            .session
+    pub(super) fn has_live_room(&self) -> bool {
+        self.room
             .lock()
             .as_ref()
-            .map(|live| (live.session.clone(), live.capabilities.clone()));
-        let Some((session, capabilities)) = live else {
+            .is_some_and(|room| !room.is_empty())
+    }
+
+    pub(super) fn clear_room(&self, target: &Arc<Room>) {
+        let mut held = self.room.lock();
+        if held.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, target)) {
+            held.take();
+        }
+    }
+
+    fn status(&self) -> HostStatus {
+        let control_allowed = self.policy.allowed();
+        let room = self.room.lock().clone();
+        let sessions = room
+            .as_ref()
+            .map_or_else(Vec::new, |room| room.live_sessions());
+        let (Some(room), false) = (room, sessions.is_empty()) else {
             return HostStatus {
                 state: if self.stopped.load(Ordering::Acquire) {
                     HostState::Stopped
@@ -423,37 +675,68 @@ impl Shared {
                 message: String::new(),
                 control_allowed,
                 viewer: None,
+                viewers: Vec::new(),
                 display: None,
                 desktop: DesktopKind::Ordinary,
                 capabilities: self.fallback.clone(),
                 display_mode: None,
             };
         };
-        let record = session.shared.state.borrow().record.clone();
-        let paused = session.paused();
+        let fallback_path = self.path();
+        let mut entries = Vec::with_capacity(sessions.len());
+        for (conn_id, session) in sessions {
+            let record = session.shared.state.borrow().record.clone();
+            let paused = session.paused();
+            let viewer = HostViewer {
+                since_ms: pb_mapper_core::time::saturating_millis(session.shared.epoch.elapsed()),
+                started_unix_ms: session.started_unix_ms,
+                path: session.reported_path().unwrap_or(fallback_path),
+                controlling: control_allowed && record.controlling,
+                paused,
+                quality: session.quality(),
+            };
+            entries.push((conn_id, record, viewer));
+        }
+        entries.sort_by_key(|(conn_id, _, viewer)| (!viewer.controlling, viewer.paused, *conn_id));
+        let display = entries
+            .iter()
+            .find_map(|(_, record, _)| record.display.clone())
+            .or_else(|| room.display.clone());
+        let display_mode = entries
+            .iter()
+            .find_map(|(_, record, _)| record.modes.clone().filter(ModeList::changed));
+        let Some((_, primary_record, primary_viewer)) = entries.first().cloned() else {
+            return HostStatus {
+                state: HostState::Waiting,
+                reason: None,
+                message: String::new(),
+                control_allowed,
+                viewer: None,
+                viewers: Vec::new(),
+                display: None,
+                desktop: DesktopKind::Ordinary,
+                capabilities: self.fallback.clone(),
+                display_mode: None,
+            };
+        };
+        let viewers: Vec<HostViewer> = entries.into_iter().map(|(_, _, viewer)| viewer).collect();
         HostStatus {
-            state: match record.state {
-                _ if paused => HostState::Paused,
+            state: match primary_record.state {
+                _ if primary_viewer.paused => HostState::Paused,
                 SessionState::Connecting => HostState::Connecting,
                 SessionState::Streaming => HostState::Streaming,
                 SessionState::Paused => HostState::Paused,
                 SessionState::CaptureUnavailable => HostState::CaptureUnavailable,
             },
-            reason: record.reason,
-            message: record.message,
+            reason: primary_record.reason,
+            message: primary_record.message,
             control_allowed,
-            viewer: Some(HostViewer {
-                since_ms: pb_mapper_core::time::saturating_millis(session.shared.epoch.elapsed()),
-                started_unix_ms: session.started_unix_ms,
-                path: self.path(),
-                controlling: control_allowed && record.controlling,
-                paused,
-                quality: session.quality(),
-            }),
-            display: record.display,
-            desktop: record.desktop,
-            capabilities,
-            display_mode: record.modes.filter(ModeList::changed),
+            viewer: Some(primary_viewer),
+            viewers,
+            display,
+            desktop: primary_record.desktop,
+            capabilities: room.host_capabilities.clone(),
+            display_mode,
         }
     }
     /// The one viewer's path, sampled from the registration's sessions,
@@ -481,7 +764,7 @@ async fn restore_retry(shared: Arc<Shared>, recovery: Recovery, cancel: Cancella
     let mut wait = backoff.next_delay();
     let mut warned = None;
     loop {
-        if shared.restore_pending.load(Ordering::Acquire) && shared.session.lock().is_none() {
+        if shared.restore_pending.load(Ordering::Acquire) && !shared.has_live_room() {
             let recovery = recovery.clone();
             match tokio::task::spawn_blocking(move || recovery()).await {
                 Ok(Ok(pending)) => {

@@ -139,7 +139,7 @@ async fn handshake_reports_denied_and_busy_before_close() {
     assert!(next(&mut denied).await.is_none());
     assert_eq!(backends.load(Ordering::Relaxed), 0);
 
-    // The first viewer holds the slot ...
+    // The first viewer establishes a JPEG-only room.
     let (mut first, answer) =
         authenticate(&client, &invitation, token.clone(), vec![VideoCodec::Jpeg]).await;
     assert!(
@@ -153,8 +153,8 @@ async fn handshake_reports_denied_and_busy_before_close() {
         ),
         "{answer:?}"
     );
-    // ... so a second viewer with the right token is busy, a malformed
-    // request is invalid, and a wrong token is still denied, never busy.
+    // A viewer without a common codec is busy. Authentication and request
+    // validation still happen before room admission.
     let (_, answer) =
         authenticate(&client, &invitation, token.clone(), vec![VideoCodec::H264]).await;
     assert_eq!(rejected(&answer), Some(RejectReason::Busy));
@@ -168,7 +168,29 @@ async fn handshake_reports_denied_and_busy_before_close() {
         next(&mut first).await,
         Some(HostMessage::State(_))
     ));
+    let both = || vec![VideoCodec::Jpeg, VideoCodec::H264];
+    let (second, answer) = authenticate(&client, &invitation, token.clone(), both()).await;
+    assert!(matches!(
+        answer,
+        HostMessage::Accepted {
+            codec: VideoCodec::Jpeg,
+            ..
+        }
+    ));
+    until(|| host.status().viewers.len() == 2).await;
     drop(first);
+    until(|| host.status().viewers.len() == 1).await;
+    // Both viewers now support H.264. Upgrading here would disconnect the
+    // second viewer even though the third can join its JPEG stream.
+    let (third, answer) = authenticate(&client, &invitation, token, both()).await;
+    assert!(matches!(
+        answer,
+        HostMessage::Accepted {
+            codec: VideoCodec::Jpeg,
+            ..
+        }
+    ));
+    drop((second, third));
     host.stop().await.unwrap();
 }
 

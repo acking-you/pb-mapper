@@ -16,15 +16,22 @@ mod modes;
 mod tests;
 mod window;
 
-use self::{capture::unavailable_reason, cursor::CursorEcho, hold::DragHold, window::Window};
+use self::{
+    capture::unavailable_reason,
+    cursor::CursorEcho,
+    hold::{DragHold, LeftPress},
+    window::{Window, WindowStats},
+};
 use crate::{
-    Backend, ControlAdmission, ControlLease, Description, DesktopContext, Result, VideoCodec,
-    VideoLimits, Waker,
+    Backend, ControlAdmission, ControlLease, CursorShape, Description, DesktopContext, ModeList,
+    Result, VideoCodec, VideoLimits, VideoSize, Waker,
+    input::held::Held,
     lane::LaneCommand,
+    modes::ModeCommand,
     pacer::Pacer,
-    protocol::{NoticeCode, SessionState, StateReason},
-    scheduler::Waiter,
-    shared::{EngineState, SessionShared},
+    protocol::{MAX_VIEWERS, NoticeCode, PeerColor, PeerSlot, SessionState, StateReason},
+    scheduler::{Waiter, Wake},
+    shared::{EngineState, PeerCursorSnapshot, Policy, SessionShared},
     timer::TimerResolution,
 };
 use std::{
@@ -32,11 +39,12 @@ use std::{
     io,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 /// Thread C's time. Sessions run on `Monotonic`; tests step their own.
 pub(crate) trait Clock: Send + 'static {
@@ -74,7 +82,110 @@ const CONTEXT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 /// How long a lock notice stays in the published state.
 const NOTICE_TTL: Duration = Duration::from_secs(5);
 
+/// One viewer slot's configuration inside a shared room.
+#[derive(Clone)]
+pub(crate) struct RoomSlotConfig {
+    pub shared: Arc<SessionShared>,
+    pub color: PeerColor,
+    pub limits: VideoLimits,
+    pub cursor_shapes: bool,
+    pub peer_cursors: bool,
+}
+
+/// Mutable slot membership and negotiated codec published from the acceptor to thread C.
+pub(crate) struct RoomWorkerState {
+    pub codec: VideoCodec,
+    /// `(conn_id, config)` per slot; monotonic `conn_id` ensures thread C
+    /// notices a slot replacement even between two iterations.
+    pub slots: [Option<(u64, RoomSlotConfig)>; MAX_VIEWERS],
+}
+
+/// State shared between the host's room coordinator and thread C.
+pub(crate) struct RoomShared {
+    pub cancel: CancellationToken,
+    pub wake: Wake,
+    pub policy: Arc<Policy>,
+    pub peer_cursors: Arc<tokio::sync::watch::Sender<PeerCursorSnapshot>>,
+    restore_requested: AtomicBool,
+    pub epoch: AtomicU64,
+    pub state: parking_lot::Mutex<RoomWorkerState>,
+}
+impl RoomShared {
+    pub fn new(policy: Arc<Policy>, codec: VideoCodec) -> Arc<Self> {
+        Arc::new(Self {
+            cancel: CancellationToken::new(),
+            wake: Wake::new(),
+            policy,
+            peer_cursors: Arc::new(tokio::sync::watch::Sender::new(
+                PeerCursorSnapshot::default(),
+            )),
+            restore_requested: AtomicBool::new(false),
+            epoch: AtomicU64::new(1),
+            state: parking_lot::Mutex::new(RoomWorkerState {
+                codec,
+                slots: std::array::from_fn(|_| None),
+            }),
+        })
+    }
+
+    pub fn request_restore(&self) {
+        self.restore_requested.store(true, Ordering::Release);
+        self.wake.notify();
+    }
+
+    pub fn set_codec(&self, codec: VideoCodec) {
+        let mut state = self.state.lock();
+        state.codec = codec;
+        self.epoch.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn set_slot(&self, slot: PeerSlot, conn_id: u64, config: RoomSlotConfig) {
+        let mut state = self.state.lock();
+        state.slots[slot.index()] = Some((conn_id, config));
+        self.epoch.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn clear_slot(&self, slot: PeerSlot, conn_id: u64) {
+        let mut state = self.state.lock();
+        if state.slots[slot.index()]
+            .as_ref()
+            .is_some_and(|(id, _)| *id == conn_id)
+        {
+            state.slots[slot.index()] = None;
+            self.epoch.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn single(shared: &Arc<SessionShared>, config: &WorkerConfig) -> Arc<Self> {
+        let mut slots: [Option<(u64, RoomSlotConfig)>; MAX_VIEWERS] = std::array::from_fn(|_| None);
+        slots[shared.slot.index()] = Some((
+            1,
+            RoomSlotConfig {
+                shared: shared.clone(),
+                color: PeerColor::default(),
+                limits: config.limits,
+                cursor_shapes: config.cursor_shapes,
+                peer_cursors: false,
+            },
+        ));
+        Arc::new(Self {
+            cancel: shared.cancel.clone(),
+            wake: shared.wake.clone(),
+            policy: shared.policy.clone(),
+            peer_cursors: shared.peer_cursors.clone(),
+            restore_requested: AtomicBool::new(false),
+            epoch: AtomicU64::new(1),
+            state: parking_lot::Mutex::new(RoomWorkerState {
+                codec: config.codec,
+                slots,
+            }),
+        })
+    }
+}
+
 /// What a session's thread C is started with.
+#[cfg(test)]
 pub(crate) struct WorkerConfig {
     pub codec: VideoCodec,
     /// The viewer's bounds; `max_fps` is the encoder's nominal rate for the
@@ -83,6 +194,11 @@ pub(crate) struct WorkerConfig {
     pub admission: Option<Arc<dyn ControlAdmission>>,
     /// Both ends listed `cursor_shape`: C asks the backend for the shape.
     pub cursor_shapes: bool,
+}
+
+pub(crate) struct RoomStart {
+    pub room: Arc<RoomShared>,
+    pub admission: Option<Arc<dyn ControlAdmission>>,
 }
 
 /// How thread C ended.
@@ -118,8 +234,8 @@ fn capture_consent_ended(failure: &io::Error) -> bool {
 pub(crate) struct WorkerHandle {
     join: Option<tokio::task::JoinHandle<WorkerExit>>,
     exit: Option<WorkerExit>,
-    cancel: tokio_util::sync::CancellationToken,
-    wake: crate::scheduler::Wake,
+    cancel: CancellationToken,
+    wake: Wake,
 }
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
@@ -153,7 +269,7 @@ pub(crate) struct Prepared {
     /// Whether it encodes H.265, when asked: probed after the description,
     /// so a slow probe never costs the display.
     pub h265: Option<oneshot::Receiver<bool>>,
-    pub start: oneshot::Sender<(Arc<SessionShared>, WorkerConfig)>,
+    pub start: oneshot::Sender<RoomStart>,
     pub thread: tokio::task::JoinHandle<WorkerExit>,
 }
 
@@ -166,7 +282,7 @@ where
 {
     let (described, description) = oneshot::channel();
     let (probed, h265) = oneshot::channel();
-    let (start, started) = oneshot::channel::<(Arc<SessionShared>, WorkerConfig)>();
+    let (start, started) = oneshot::channel::<RoomStart>();
     let thread = tokio::task::spawn_blocking(move || {
         let backend = factory().map(|mut backend| {
             let _ = described.send(backend.describe(false));
@@ -175,10 +291,10 @@ where
             }
             backend
         });
-        let Ok((shared, config)) = started.blocking_recv() else {
+        let Ok(RoomStart { room, admission }) = started.blocking_recv() else {
             return WorkerExit::Cancelled;
         };
-        run(&shared, backend, config)
+        run(&room, backend, admission)
     });
     Prepared {
         description,
@@ -189,13 +305,24 @@ where
 }
 
 impl Prepared {
-    /// Run the session. Whoever cancels `shared.cancel`, C is woken at once.
+    /// Run a single-viewer session. Whoever cancels `shared.cancel`, C is woken at once.
+    #[cfg(test)]
     pub fn start(self, shared: Arc<SessionShared>, config: WorkerConfig) -> WorkerHandle {
-        let (cancel, wake) = (shared.cancel.clone(), shared.wake.clone());
+        let room = RoomShared::single(&shared, &config);
+        self.start_room(room, config.admission)
+    }
+
+    /// Run a shared multi-viewer room. Whoever cancels `room.cancel`, C is woken at once.
+    pub fn start_room(
+        self,
+        room: Arc<RoomShared>,
+        admission: Option<Arc<dyn ControlAdmission>>,
+    ) -> WorkerHandle {
+        let (cancel, wake) = (room.cancel.clone(), room.wake.clone());
         let (cancelled, woken) = (cancel.clone(), wake.clone());
         // Only a thread that already ended misses this, and then it reports
         // how it ended.
-        let _ = self.start.send((shared, config));
+        let _ = self.start.send(RoomStart { room, admission });
         let mut thread = self.thread;
         let join = tokio::spawn(async move {
             let joined = tokio::select! {
@@ -217,22 +344,32 @@ impl Prepared {
 }
 
 fn run<B: Backend>(
-    shared: &Arc<SessionShared>,
+    room: &Arc<RoomShared>,
     backend: Result<B>,
-    config: WorkerConfig,
+    admission: Option<Arc<dyn ControlAdmission>>,
 ) -> WorkerExit {
-    let started = Waiter::new(&shared.wake)
-        .and_then(|waiter| Ok((waiter, Engine::start(shared, backend?, config, Monotonic)?)));
+    let started = Waiter::new(&room.wake).and_then(|waiter| {
+        Ok((
+            waiter,
+            Engine::start_room(room, backend?, admission, Monotonic)?,
+        ))
+    });
     let (waiter, mut engine) = match started {
         Ok(started) => started,
         Err(failure) => {
             // Without a backend this session can never capture. Report why;
             // the viewer reconnects with backoff, which retries the backend.
-            shared.state.send_modify(|state| {
-                state.record.state = SessionState::CaptureUnavailable;
-                state.record.reason = Some(unavailable_reason(&failure));
-                state.record.message = failure.to_string();
-            });
+            let reason = unavailable_reason(&failure);
+            let message = failure.to_string();
+            let state = room.state.lock();
+            for (_, cfg) in state.slots.iter().flatten() {
+                cfg.shared.state.send_modify(|published| {
+                    published.record.state = SessionState::CaptureUnavailable;
+                    published.record.reason = Some(reason);
+                    published.record.message = message.clone();
+                });
+            }
+            drop(state);
             return WorkerExit::capture_error(failure);
         }
     };
@@ -259,30 +396,61 @@ fn link_lost(failure: &io::Error) -> bool {
     failure.kind() == io::ErrorKind::NotConnected
 }
 
+/// Per-viewer state owned by thread C.
+struct ViewerSlot {
+    pub conn_id: u64,
+    pub slot: PeerSlot,
+    pub color: PeerColor,
+    pub shared: Arc<SessionShared>,
+    pub limits: VideoLimits,
+    pub cursor_shapes: bool,
+    pub peer_cursors: bool,
+    /// The copy published to `shared.state` after every iteration.
+    pub state: EngineState,
+    /// Why control last ended, kept until the viewer asks for control again.
+    pub control_note: Option<(StateReason, String)>,
+    /// A frame was produced for this slot since the last desktop change.
+    pub streaming: bool,
+    pub paused: bool,
+    /// The last input sequence taken off the lane, applied or not.
+    pub sequence: u64,
+    pub cursor: CursorEcho,
+    pub last_lease: Option<Instant>,
+    /// Held input was released for a presentation gone stale; nothing new is
+    /// admitted until a fresh one arrives.
+    pub stale_released: bool,
+    /// The lane's commands while they run, reused by every drain.
+    pub drained: VecDeque<(LaneCommand, Instant)>,
+    pub hold: DragHold,
+    pub held: Held,
+    /// Last pointer coordinates injected by this viewer in the current generation.
+    pub pointer: Option<(u32, u32)>,
+    pub notice_serial: u64,
+    pub notice_until: Option<Instant>,
+}
+
 /// The engine of thread C: its backend, the desktop generation and the
 /// control grant, the pacer and the published state.
 struct Engine<B: Backend, K: Clock = Monotonic> {
-    shared: Arc<SessionShared>,
+    room: Arc<RoomShared>,
+    slots: [Option<ViewerSlot>; MAX_VIEWERS],
     backend: B,
     clock: K,
     codec: VideoCodec,
     limits: VideoLimits,
     admission: Option<Arc<dyn ControlAdmission>>,
     lease: Option<Box<dyn ControlLease>>,
-    /// The copy published to `shared.state` after every iteration.
-    state: EngineState,
     /// The policy epoch control was last checked against.
     policy: u64,
     context: Option<DesktopContext>,
+    modes: Option<ModeList>,
+    video: Option<VideoSize>,
+    gop: u32,
     /// Why capture is unavailable, while it is.
     unavailable: Option<(StateReason, String)>,
-    /// Why control last ended, kept until the viewer asks for control again.
-    control_note: Option<(StateReason, String)>,
     /// A frame was produced since the last desktop change.
     streaming: bool,
     paused: bool,
-    /// The last input sequence taken off the lane, applied or not.
-    sequence: u64,
     frame_id: u64,
     /// The next submit must be an IDR (new encoder, pause); the submit that
     /// carries it clears it.
@@ -292,190 +460,502 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     /// The next context check, or the next retry while unavailable.
     context_due: Instant,
     cursor_due: Instant,
-    cursor: CursorEcho,
-    /// The viewer reads shapes, and the backend reports them.
+    /// At least one attached viewer reads shapes, and the backend reports them.
     cursor_shapes: bool,
+    cursor_shape: Option<CursorShape>,
     /// When to poll the encoder again while it holds units.
     drain_due: Instant,
     /// Held while this session captures.
     timer: Option<TimerResolution>,
-    last_lease: Option<Instant>,
-    /// Held input was released for a presentation gone stale; nothing new is
-    /// admitted until a fresh one arrives.
-    stale_released: bool,
     /// A terminal backend error, kept typed until the session chooses its stop reason.
     fatal: Option<io::Error>,
     window: Window,
-    /// The lane's commands while they run, reused by every drain.
-    drained: VecDeque<(LaneCommand, Instant)>,
-    hold: DragHold,
-    notice_serial: u64,
-    notice_until: Option<Instant>,
+    stats: WindowStats,
     /// Until when the display is still changing after a mode change: a
     /// capture failure is `DisplayChanging` then, and no other change is
     /// taken.
     settle_until: Option<Instant>,
+    last_left_press: Option<LeftPress>,
+    /// Which viewer's move last positioned the OS cursor, and where.
+    last_pointer_owner: Option<(PeerSlot, u32, u32)>,
+    mover_moved_since_sample: bool,
+    peer_cursors_local: PeerCursorSnapshot,
+    peer_cursor_seq: u64,
+    room_epoch: u64,
 }
 
 impl<B: Backend, K: Clock> Engine<B, K> {
+    #[cfg(test)]
     fn start(
         shared: &Arc<SessionShared>,
-        mut backend: B,
+        backend: B,
         config: WorkerConfig,
         clock: K,
     ) -> Result<Self> {
         config.limits.validate()?;
-        backend.bind(Waker(shared.wake.clone()));
-        backend.configure_video(config.limits, config.limits.max_fps)?;
+        let room = RoomShared::single(shared, &config);
+        Self::start_room(&room, backend, config.admission, clock)
+    }
+
+    fn start_room(
+        room: &Arc<RoomShared>,
+        mut backend: B,
+        admission: Option<Arc<dyn ControlAdmission>>,
+        clock: K,
+    ) -> Result<Self> {
+        let (codec, initial_limits, pace_fps) = {
+            let state = room.state.lock();
+            let mut limits: Option<VideoLimits> = None;
+            let mut pace_fps: Option<u32> = None;
+            for (_, cfg) in state.slots.iter().flatten() {
+                cfg.limits.validate()?;
+                limits = Some(match limits {
+                    None => cfg.limits,
+                    Some(cur) => VideoLimits {
+                        max_width: cur.max_width.min(cfg.limits.max_width),
+                        max_height: cur.max_height.min(cfg.limits.max_height),
+                        max_fps: cur.max_fps.max(cfg.limits.max_fps),
+                    },
+                });
+                let slot_pace = cfg.shared.targets.pace_fps.load(Ordering::Acquire).max(1);
+                pace_fps = Some(pace_fps.map_or(slot_pace, |cur| cur.max(slot_pace)));
+            }
+            let limits = limits.unwrap_or_else(|| VideoLimits::for_viewer(60.0));
+            let pace_fps = pace_fps.unwrap_or_else(|| limits.max_fps.max(1));
+            (state.codec, limits, pace_fps)
+        };
+        initial_limits.validate()?;
+        backend.bind(Waker(room.wake.clone()));
+        backend.configure_video(initial_limits, initial_limits.max_fps)?;
         let now = clock.now();
-        let pace_fps = shared.targets.pace_fps.load(Ordering::Acquire).max(1);
-        Ok(Self {
-            shared: shared.clone(),
+        let mut engine = Self {
+            room: room.clone(),
+            slots: std::array::from_fn(|_| None),
             backend,
             clock,
-            codec: config.codec,
-            limits: config.limits,
-            admission: config.admission,
+            codec,
+            limits: initial_limits,
+            admission,
             lease: None,
-            state: shared.state.borrow().clone(),
-            policy: shared.policy.get(),
+            policy: room.policy.get(),
             context: None,
+            modes: None,
+            video: None,
+            gop: 0,
             unavailable: None,
-            control_note: None,
             streaming: false,
             paused: false,
-            sequence: 0,
             frame_id: 0,
             keyframe: true,
             pacer: Pacer::new(pace_fps, now),
             pace_fps,
             context_due: now,
             cursor_due: now,
-            cursor: CursorEcho::default(),
-            cursor_shapes: config.cursor_shapes,
+            cursor_shapes: false,
+            cursor_shape: None,
             drain_due: now,
             timer: None,
-            last_lease: None,
-            stale_released: false,
             fatal: None,
             window: Window::new(now),
-            drained: VecDeque::new(),
-            hold: DragHold::default(),
-            notice_serial: 0,
-            notice_until: None,
+            stats: WindowStats::default(),
             settle_until: None,
-        })
+            last_pointer_owner: None,
+            last_left_press: None,
+            mover_moved_since_sample: false,
+            peer_cursors_local: PeerCursorSnapshot::default(),
+            peer_cursor_seq: 0,
+            room_epoch: 0,
+        };
+        engine.sync_slots();
+        Ok(engine)
+    }
+
+    /// Synchronize attached viewer slots and negotiated codec from `room.state`.
+    pub(super) fn sync_slots(&mut self) {
+        if self.room.epoch.load(Ordering::Acquire) == self.room_epoch {
+            return;
+        }
+        let (codec, incoming) = {
+            let state = self.room.state.lock();
+            self.room_epoch = self.room.epoch.load(Ordering::Acquire);
+            (state.codec, state.slots.clone())
+        };
+        if codec != self.codec {
+            self.codec = codec;
+            self.keyframe = true;
+            if let Err(failure) = self
+                .backend
+                .configure_video(self.limits, self.limits.max_fps)
+            {
+                self.fail(failure, self.clock.now());
+            }
+        }
+        let allowed = self.room.policy.allowed();
+        let mut added_peer_reader = false;
+        for (idx, next) in incoming.into_iter().enumerate() {
+            let detach_current = match (&self.slots[idx], &next) {
+                (Some(cur), Some((conn_id, cfg))) => {
+                    cur.conn_id != *conn_id || cfg.shared.cancel.is_cancelled()
+                }
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            if detach_current {
+                self.detach_slot(idx);
+            }
+            if self.slots[idx].is_none()
+                && let Some((conn_id, cfg)) = next
+                && !cfg.shared.cancel.is_cancelled()
+                && cfg.limits.validate().is_ok()
+            {
+                let mut state = cfg.shared.state.borrow().clone();
+                state.record.control_allowed = allowed;
+                if let Some(context) = &self.context {
+                    state.record.display = Some(context.display.clone());
+                    state.record.desktop = context.desktop;
+                }
+                state.record.modes = self.modes.clone();
+                state.record.video = self.video;
+                state.gop = self.gop;
+                state.capture_fps = self.stats.capture_fps;
+                state.encoder_dwell = self.stats.encoder_dwell;
+                state.input_wait = self.stats.input_wait;
+                let mut cursor = CursorEcho::default();
+                if cfg.cursor_shapes
+                    && let Some(shape) = &self.cursor_shape
+                {
+                    cursor.reshape(shape.clone());
+                }
+                if cfg.peer_cursors {
+                    added_peer_reader = true;
+                }
+                self.slots[idx] = Some(ViewerSlot {
+                    conn_id,
+                    slot: cfg.shared.slot,
+                    color: cfg.color,
+                    shared: cfg.shared,
+                    limits: cfg.limits,
+                    cursor_shapes: cfg.cursor_shapes,
+                    peer_cursors: cfg.peer_cursors,
+                    state,
+                    control_note: None,
+                    streaming: false,
+                    paused: false,
+                    sequence: 0,
+                    cursor,
+                    last_lease: None,
+                    stale_released: false,
+                    drained: VecDeque::new(),
+                    hold: DragHold::default(),
+                    held: Held::default(),
+                    pointer: None,
+                    notice_serial: 0,
+                    notice_until: None,
+                });
+                self.keyframe = true;
+            }
+        }
+        self.cursor_shapes = self
+            .slots
+            .iter()
+            .flatten()
+            .any(|slot| !slot.paused && slot.cursor_shapes);
+        if added_peer_reader {
+            let snapshot = self.peer_cursors_local;
+            self.room.peer_cursors.send_if_modified(|published| {
+                let changed = *published != snapshot;
+                if changed {
+                    *published = snapshot;
+                }
+                changed
+            });
+        }
+    }
+
+    pub(super) fn detach_slot(&mut self, idx: usize) {
+        if self.slots[idx].is_none() {
+            return;
+        }
+        self.release_slot_inputs(idx);
+        self.drop_slot_held(idx);
+        if let Some(slot) = &self.slots[idx]
+            && self
+                .last_pointer_owner
+                .is_some_and(|(owner, _, _)| owner == slot.slot)
+        {
+            self.last_pointer_owner = None;
+        }
+        self.hide_peer_cursor(idx);
+        self.slots[idx] = None;
+        self.sync_lease();
+        self.cursor_shapes = self
+            .slots
+            .iter()
+            .flatten()
+            .any(|slot| !slot.paused && slot.cursor_shapes);
+    }
+
+    pub(super) fn has_peer_cursor_observer(&self, mover_idx: usize) -> bool {
+        self.slots
+            .iter()
+            .enumerate()
+            .any(|(idx, slot)| idx != mover_idx && slot.as_ref().is_some_and(|s| s.peer_cursors))
+    }
+
+    fn any_peer_cursor_reader(&self) -> bool {
+        self.slots.iter().flatten().any(|slot| slot.peer_cursors)
+    }
+
+    pub(super) fn publish_peer_cursor(&mut self, idx: usize, x: i32, y: i32) {
+        let Some(slot) = &self.slots[idx] else {
+            return;
+        };
+        let color = slot.color;
+        let prev = self.peer_cursors_local.entries[idx];
+        if prev.visible && prev.color == color && prev.x == x && prev.y == y {
+            return;
+        }
+        self.peer_cursor_seq += 1;
+        self.peer_cursors_local.entries[idx] = crate::shared::PeerCursorEntry {
+            seq: self.peer_cursor_seq,
+            color,
+            x,
+            y,
+            visible: true,
+        };
+        if self.has_peer_cursor_observer(idx) {
+            self.room.peer_cursors.send_replace(self.peer_cursors_local);
+        }
+    }
+
+    pub(super) fn hide_peer_cursor(&mut self, idx: usize) {
+        if !self.peer_cursors_local.entries[idx].visible {
+            return;
+        }
+        self.peer_cursor_seq += 1;
+        self.peer_cursors_local.entries[idx].seq = self.peer_cursor_seq;
+        self.peer_cursors_local.entries[idx].visible = false;
+        if self.any_peer_cursor_reader() {
+            self.room.peer_cursors.send_replace(self.peer_cursors_local);
+        }
+    }
+
+    pub(super) fn hide_all_peer_cursors(&mut self) {
+        let mut changed = false;
+        for entry in &mut self.peer_cursors_local.entries {
+            if entry.visible {
+                self.peer_cursor_seq += 1;
+                entry.seq = self.peer_cursor_seq;
+                entry.visible = false;
+                changed = true;
+            }
+        }
+        if changed && self.any_peer_cursor_reader() {
+            self.room.peer_cursors.send_replace(self.peer_cursors_local);
+        }
     }
 
     fn iterate(&mut self) -> Step {
-        let shared = self.shared.clone();
         let now = self.clock.now();
-        if shared.cancel.is_cancelled() {
+        if self.room.cancel.is_cancelled() {
             return Step::Exit(WorkerExit::Cancelled);
         }
-        let policy = shared.policy.get();
+        self.sync_slots();
+        let policy = self.room.policy.get();
+        let allowed = self.room.policy.allowed();
         if policy != self.policy {
             self.policy = policy;
-            self.release_control();
+            self.release_all_control();
             // Revoking control gives the owner their display back; a grant,
             // which moves the epoch too, does not.
-            if !shared.policy.allowed() {
+            if !allowed {
                 self.restore_mode(now);
             }
         }
-        self.state.record.control_allowed = shared.policy.allowed();
-        if shared.lane.take_overflow() {
-            self.overflowed();
+        for slot in self.slots.iter_mut().flatten() {
+            slot.state.record.control_allowed = allowed;
         }
-        if shared.auth.lock().take_stale() {
-            self.backend.release();
-            self.drop_held();
+        if self.room.restore_requested.swap(false, Ordering::AcqRel) {
+            self.display_mode(None, ModeCommand::HostRestore, now);
         }
-        self.release_if_stale(now);
-        if self.hold.until.is_some_and(|until| now >= until) && !self.release_hold() {
-            return Step::Exit(WorkerExit::Cancelled);
-        }
-        if !self.drain_lane() {
-            return Step::Exit(WorkerExit::Cancelled);
+        for idx in 0..MAX_VIEWERS {
+            let Some(cancelled) = self.slots[idx]
+                .as_ref()
+                .map(|slot| slot.shared.cancel.is_cancelled())
+            else {
+                continue;
+            };
+            if cancelled {
+                if self.room.cancel.is_cancelled() {
+                    return Step::Exit(WorkerExit::Cancelled);
+                }
+                self.detach_slot(idx);
+                continue;
+            }
+            if self.slots[idx]
+                .as_ref()
+                .is_some_and(|slot| slot.shared.lane.take_overflow())
+            {
+                self.slot_overflowed(idx);
+            }
+            if self.slots[idx]
+                .as_ref()
+                .is_some_and(|slot| slot.shared.auth.lock().take_stale())
+            {
+                self.release_slot_inputs(idx);
+                self.drop_slot_held(idx);
+            }
+            self.release_slot_if_stale(idx, now);
+            if self.slots[idx]
+                .as_ref()
+                .and_then(|slot| slot.hold.until)
+                .is_some_and(|until| now >= until)
+                && !self.release_slot_hold(idx)
+            {
+                if self.room.cancel.is_cancelled() {
+                    return Step::Exit(WorkerExit::Cancelled);
+                }
+                self.detach_slot(idx);
+                continue;
+            }
+            if !self.drain_slot_lane(idx) {
+                if self.room.cancel.is_cancelled() {
+                    return Step::Exit(WorkerExit::Cancelled);
+                }
+                self.detach_slot(idx);
+            }
         }
         if self.fatal.is_none() {
-            self.renew_lease(now);
+            self.renew_leases(now);
             self.capture_step(self.clock.now());
         }
         // Only a live capture may execute input queued during its backend call.
-        if self.fatal.is_none() && !self.drain_lane() {
-            return Step::Exit(WorkerExit::Cancelled);
+        if self.fatal.is_none() {
+            if self.room.cancel.is_cancelled() {
+                return Step::Exit(WorkerExit::Cancelled);
+            }
+            self.sync_slots();
+            for idx in 0..MAX_VIEWERS {
+                if self.slots[idx].is_some() && !self.drain_slot_lane(idx) {
+                    if self.room.cancel.is_cancelled() {
+                        return Step::Exit(WorkerExit::Cancelled);
+                    }
+                    self.detach_slot(idx);
+                }
+            }
         }
         if let Some(failure) = self.fatal.take() {
             return Step::Exit(WorkerExit::capture_error(failure));
         }
         let now = self.clock.now();
         self.sample_cursor(now);
-        self.window.roll(now, &mut self.state);
+        if let Some(rolled) = self.window.roll(now) {
+            self.stats = rolled;
+            for slot in self.slots.iter_mut().flatten() {
+                slot.state.capture_fps = rolled.capture_fps;
+                slot.state.encoder_dwell = rolled.encoder_dwell;
+                slot.state.input_wait = rolled.input_wait;
+            }
+        }
         // Fine process timers while capturing serve the network tasks too;
         // a paused or unavailable session gives them back.
-        let capturing = !self.paused && self.unavailable.is_none();
+        let has_slots = self.slots.iter().any(Option::is_some);
+        let capturing = !self.paused && self.unavailable.is_none() && has_slots;
         if capturing != self.timer.is_some() {
             self.timer = capturing.then(TimerResolution::hold);
         }
-        if self.notice_until.is_some_and(|until| now >= until) {
-            self.notice_until = None;
-            self.state.notice = None;
+        for slot in self.slots.iter_mut().flatten() {
+            if slot.notice_until.is_some_and(|until| now >= until) {
+                slot.notice_until = None;
+                slot.state.notice = None;
+            }
         }
-        self.publish();
+        self.publish_all();
         Step::Wait(self.deadline(now))
     }
 
-    fn notice(&mut self, code: NoticeCode, message: String, now: Instant) {
-        self.notice_serial += 1;
-        self.state.notice = Some((code, message, self.notice_serial));
-        self.notice_until = Some(now + NOTICE_TTL);
+    pub(super) fn notice_slot(
+        &mut self,
+        idx: usize,
+        code: NoticeCode,
+        message: String,
+        now: Instant,
+    ) {
+        let Some(slot) = &mut self.slots[idx] else {
+            return;
+        };
+        slot.notice_serial += 1;
+        slot.state.notice = Some((code, message, slot.notice_serial));
+        slot.notice_until = Some(now + NOTICE_TTL);
     }
 
-    fn publish(&mut self) {
-        self.state.record.state = if self.paused {
+    pub(super) fn notice_all(&mut self, code: NoticeCode, message: String, now: Instant) {
+        for idx in 0..MAX_VIEWERS {
+            if self.slots[idx].is_some() {
+                self.notice_slot(idx, code, message.clone(), now);
+            }
+        }
+    }
+
+    pub(super) fn publish_slot(&mut self, idx: usize) {
+        let Some(slot) = &mut self.slots[idx] else {
+            return;
+        };
+        slot.state.record.state = if slot.paused {
             SessionState::Paused
         } else if self.unavailable.is_some() {
             SessionState::CaptureUnavailable
-        } else if self.streaming {
+        } else if slot.streaming {
             SessionState::Streaming
         } else {
             SessionState::Connecting
         };
-        let (reason, message) = match self.unavailable.as_ref().or(self.control_note.as_ref()) {
+        let (reason, message) = match self.unavailable.as_ref().or(slot.control_note.as_ref()) {
             Some((reason, message)) => (Some(*reason), message.as_str()),
             None => (None, ""),
         };
-        self.state.record.reason = reason;
-        if self.state.record.message != message {
-            self.state.record.message.clear();
-            self.state.record.message.push_str(message);
+        slot.state.record.reason = reason;
+        if slot.state.record.message != message {
+            slot.state.record.message.clear();
+            slot.state.record.message.push_str(message);
         }
-        self.shared.state.send_if_modified(|published| {
-            let changed = *published != self.state;
+        let next = &slot.state;
+        slot.shared.state.send_if_modified(|published| {
+            let changed = *published != *next;
             if changed {
-                published.clone_from(&self.state);
+                published.clone_from(next);
             }
             changed
         });
     }
 
+    pub(super) fn publish_all(&mut self) {
+        for idx in 0..MAX_VIEWERS {
+            if self.slots[idx].is_some() {
+                self.publish_slot(idx);
+            }
+        }
+    }
+
     /// The earliest of the next tick, cursor sample, context check, encoder
     /// poll, hold end and notice expiry; every wait also ends on a wake.
     fn deadline(&self, now: Instant) -> Instant {
-        let deadline = [self.hold.until, self.notice_until]
-            .into_iter()
-            .flatten()
-            .fold(now + CONTEXT_CHECK_INTERVAL, Instant::min);
+        let mut deadline = now + CONTEXT_CHECK_INTERVAL;
+        for slot in self.slots.iter().flatten() {
+            if let Some(until) = slot.hold.until {
+                deadline = deadline.min(until);
+            }
+            if let Some(until) = slot.notice_until {
+                deadline = deadline.min(until);
+            }
+        }
         if self.unavailable.is_some() && !self.paused {
             return deadline.min(self.context_due);
         }
-        let deadline = if self.backend.pending_video() > 0 {
-            deadline.min(self.drain_due)
-        } else {
-            deadline
-        };
-        if self.paused {
+        if self.backend.pending_video() > 0 {
+            deadline = deadline.min(self.drain_due);
+        }
+        if self.paused || !self.slots.iter().any(Option::is_some) {
             return deadline;
         }
         deadline

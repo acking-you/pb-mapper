@@ -3,7 +3,10 @@
 //! "encoder" returns one 4 KiB unit per capture, and a viewer whose renderer
 //! presents every unit at once. The first window streams video only; the
 //! second also moves the pointer every 4 ms under control, which feeds the
-//! host's input lane and its input wait window. Allocations are counted for
+//! host's input lane and its input wait window; the third adds a second
+//! controlling viewer moving its pointer in tandem, exercising zero-copy video
+//! fan-out and `peer_cursors` broadcasts (`units_per_s` stays measured per host
+//! encoded unit via the first viewer). Allocations are counted for
 //! the whole process, so the viewer's and the relay's are in every figure:
 //! compare runs of this harness with each other only. A reallocation counts
 //! as one allocation of its new size.
@@ -253,8 +256,92 @@ async fn main() {
     let end = Tally::now(&presented, &inputs);
     start.report("video+pointer", &end);
 
+    let viewer2 = Viewer::connect(
+        &client,
+        host.invitation(),
+        ConnectOptions {
+            path: PathPolicy::RelayOnly,
+            ..Default::default()
+        },
+        ViewerConfig {
+            codecs: vec![VideoCodec::H264],
+            limits: VideoLimits::for_viewer(60.0),
+            fps_override: false,
+            quality: QualityPreset::Balanced,
+            progress: None,
+        },
+    )
+    .await
+    .unwrap();
+    let presented2 = Arc::new(AtomicU64::new(0));
+    let renderer2 = render(&viewer2, presented2.clone(), stop.clone());
+    viewer2.request_control(true).unwrap();
+    let started = Instant::now();
+    while !(viewer2.status().controlling && presented2.load(Ordering::Relaxed) > 0) {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "second viewer got no picture under control"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let start = Tally::now(&presented, &inputs);
+    let mut tick = tokio::time::interval(POINTER_EVERY);
+    let mut x = 0;
+    while start.at.elapsed() < WINDOW {
+        tick.tick().await;
+        x = (x + 7) % 1920;
+        let v1 = viewer.view();
+        let _ = viewer.input(v1.generation, &[Input::Move { x, y: 360 }]);
+        let v2 = viewer2.view();
+        let _ = viewer2.input(
+            v2.generation,
+            &[Input::Move {
+                x: 1919 - x,
+                y: 720,
+            }],
+        );
+    }
+    let end = Tally::now(&presented, &inputs);
+    start.report("2viewers+pointer", &end);
+
+    // One distinct move at a time. The relay, host and observer run on the
+    // runtime workers while this benchmark thread samples the public view.
+    // Timing includes the polling interval and excludes UI vsync and display.
+    let mut latencies = Vec::with_capacity(256);
+    for x in 0..256 {
+        let generation = viewer.view().generation;
+        let start = Instant::now();
+        viewer
+            .input(generation, &[Input::Move { x, y: 123 }])
+            .unwrap();
+        loop {
+            let peer = viewer2.view();
+            if peer.peer_count == 1 && peer.peer_x[0] == x as i32 && peer.peer_y[0] == 123 {
+                latencies.push(start.elapsed().as_micros());
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(3),
+                "peer pointer timed out"
+            );
+            std::thread::sleep(Duration::from_micros(100));
+        }
+    }
+    latencies.sort_unstable();
+    println!(
+        "case=peer_cursor samples={} p50_us={} p95_us={} p99_us={}",
+        latencies.len(),
+        latencies[127],
+        latencies[243],
+        latencies[253]
+    );
+
     stop.store(true, Ordering::Release);
+    viewer2.stop().await.unwrap();
     viewer.stop().await.unwrap();
+    renderer2.join().unwrap();
     renderer.join().unwrap();
     host.stop().await.unwrap();
 }

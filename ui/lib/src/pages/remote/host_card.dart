@@ -747,6 +747,7 @@ class _SharingCard extends StatelessWidget {
         if (sharing && viewer != null)
           ViewerPanel(
             viewer: viewer,
+            viewers: v.viewers,
             controlAllowed: v.controlAllowed,
             desktop: desktop,
           ),
@@ -1201,11 +1202,13 @@ class ViewerPanel extends StatefulWidget {
   const ViewerPanel({
     super.key,
     required this.viewer,
+    this.viewers = const [],
     required this.controlAllowed,
     required this.desktop,
   });
 
   final DesktopHostViewer viewer;
+  final List<DesktopHostViewer> viewers;
   final bool controlAllowed;
   final DesktopStore desktop;
 
@@ -1294,14 +1297,33 @@ class _ViewerPanelState extends State<ViewerPanel> {
     _scheduleCheck();
     final l10n = context.l10n;
     final scheme = Theme.of(context).colorScheme;
-    final viewer = widget.viewer;
-    final duration = formatSessionDuration(
-      context,
-      DateTime.now().difference(viewer.since),
-    );
-    final meta = viewer.path == 'direct' || viewer.path == 'relay'
-        ? l10n.hostViewerMeta(pathLabel(context, viewer.path), duration)
-        : duration;
+    final viewers = widget.viewers.isNotEmpty
+        ? widget.viewers
+        : [widget.viewer];
+    final active = [
+      for (final v in viewers)
+        if (!v.paused) v,
+    ];
+    final controllingCount = [
+      for (final v in active)
+        if (v.controlling) v,
+    ].length;
+    final headline = active.isEmpty
+        ? l10n.sharingViewerPaused
+        : controllingCount > 0
+        ? l10n.hostViewersControlling(controllingCount)
+        : l10n.hostViewersWatching(active.length);
+    String viewerMeta(DesktopHostViewer v) {
+      final duration = formatSessionDuration(
+        context,
+        DateTime.now().difference(v.since),
+      );
+      return v.path == 'direct' || v.path == 'relay'
+          ? l10n.hostViewerMeta(pathLabel(context, v.path), duration)
+          : duration;
+    }
+
+    final meta = [for (final v in viewers) viewerMeta(v)].join('  ·  ');
     final small = ButtonStyle(
       minimumSize: const WidgetStatePropertyAll(Size(0, 32)),
       padding: const WidgetStatePropertyAll(
@@ -1335,11 +1357,7 @@ class _ViewerPanelState extends State<ViewerPanel> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          viewer.paused
-              ? l10n.sharingViewerPaused
-              : viewer.controlling
-              ? l10n.hostViewersControlling(1)
-              : l10n.hostViewersWatching(1),
+          headline,
           style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: 2),

@@ -133,11 +133,6 @@ const NAMED: [(Key, char); 36] = [
     (Key::Digit9, '9'),
 ];
 
-/// Whether `key` is a named letter or digit, which goes through a layout.
-pub(crate) fn named(key: Key) -> bool {
-    NAMED.iter().any(|(named, _)| *named == key)
-}
-
 /// The places that type characters: a Mac keyboard's main block, without
 /// the keypad and the function keys.
 const TYPING: RangeInclusive<u16> = 0x00..=0x32;

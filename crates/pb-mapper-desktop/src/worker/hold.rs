@@ -1,7 +1,7 @@
 //! The hold that keeps a drag start from merging into a double click.
 
 use crate::{
-    Button, Input, InputEvent,
+    Input, InputEvent,
     lane::{LANE_CAPACITY, LaneCommand},
 };
 use std::{
@@ -31,26 +31,33 @@ pub(super) struct DragHold {
     /// Held commands other than moves.
     presses: usize,
     pub(super) until: Option<Instant>,
-    /// The last injected pointer position, in input space.
-    pointer: Option<(u32, u32)>,
-    /// The last injected left press, and where the pointer was.
-    left_down: Option<(Instant, (u32, u32))>,
 }
-impl DragHold {
-    /// When a drag-start press at `now` must wait: within the double-click
-    /// time and box of the last left press.
-    pub(super) fn until(&self, guard: crate::DoubleClickGuard, now: Instant) -> Option<Instant> {
-        let (pressed, (x, y)) = self.left_down?;
-        let (px, py) = self.pointer?;
+
+/// The shared injector counts clicks from every controller on this display.
+#[derive(Clone, Copy)]
+pub(super) struct LeftPress {
+    pub at: Instant,
+    pub position: (u32, u32),
+}
+
+impl LeftPress {
+    pub(super) fn drag_deadline(
+        self,
+        pointer: (u32, u32),
+        guard: crate::DoubleClickGuard,
+        now: Instant,
+    ) -> Option<Instant> {
         let time = Duration::from_millis(guard.time_ms.into());
-        let until = (pressed + time + DRAG_GUARD_MARGIN).min(now + DRAG_GUARD_MAX);
-        (now.saturating_duration_since(pressed) < time
-            && px.abs_diff(x) <= guard.half_box.0
-            && py.abs_diff(y) <= guard.half_box.1
+        let until = self.at + (time + DRAG_GUARD_MARGIN).min(DRAG_GUARD_MAX);
+        (now.saturating_duration_since(self.at) < time
+            && pointer.0.abs_diff(self.position.0) <= guard.half_box.0
+            && pointer.1.abs_diff(self.position.1) <= guard.half_box.1
             && until > now)
             .then_some(until)
     }
+}
 
+impl DragHold {
     /// Hold `command` behind the press. False when that would hold more than
     /// a lane of commands.
     pub(super) fn push(&mut self, command: LaneCommand) -> bool {
@@ -81,22 +88,5 @@ impl DragHold {
         self.until = None;
         self.presses = 0;
         std::mem::take(&mut self.held)
-    }
-
-    pub(super) fn injected(&mut self, input: &Input, now: Instant) {
-        match *input {
-            Input::Move { x, y } => self.pointer = Some((x, y)),
-            Input::Button {
-                button: Button::Left,
-                down: true,
-                ..
-            } => self.left_down = self.pointer.map(|pointer| (now, pointer)),
-            Input::Button { .. }
-            | Input::Wheel { .. }
-            | Input::Key { .. }
-            | Input::Text { .. }
-            | Input::Lock {}
-            | Input::PhysicalKey { .. } => {}
-        }
     }
 }

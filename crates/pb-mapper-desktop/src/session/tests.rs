@@ -42,7 +42,7 @@ fn unit(generation: u64, frame_id: u64, keyframe: bool) -> HostUnit {
         pts_us: frame_id * 16_667,
         encode_us: 0,
         ready_at: Instant::now(),
-        bytes: bytes::Bytes::from(vec![frame_id as u8; 100]),
+        bytes: crate::outgoing::FrameBytes::Owned(vec![frame_id as u8; 100]),
     }
 }
 

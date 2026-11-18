@@ -6,6 +6,7 @@ use crate::{
     protocol::{
         CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE,
         CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265,
+        CAPABILITY_PEER_CURSORS,
     },
 };
 use serde::Serialize;
@@ -117,6 +118,7 @@ impl ViewerConfig {
             CAPABILITY_CURSOR_SEQUENCE.to_owned(),
             CAPABILITY_DISPLAY_MODE.to_owned(),
             CAPABILITY_CURSOR_SHAPE.to_owned(),
+            CAPABILITY_PEER_CURSORS.to_owned(),
         ];
         if self.codecs.contains(&VideoCodec::H265) {
             capabilities.push(CAPABILITY_H265.to_owned());

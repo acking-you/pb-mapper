@@ -627,22 +627,16 @@ mod tests {
         assert!(matches!(temporary.admin(), Err(Error::NotAdministrator)));
     }
 
-    /// A relay address that refuses every connection: a socket bound there
-    /// and never listening, which the caller keeps so nothing else takes it.
-    fn refusing_relay() -> (tokio::net::TcpSocket, std::net::SocketAddr) {
-        let held = tokio::net::TcpSocket::new_v4().unwrap();
-        held.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let relay = held.local_addr().unwrap();
-        (held, relay)
-    }
+    // No listener can own destination port zero. A bound, non-listening TCP
+    // socket can instead time out on macOS after the entire setup deadline.
+    const UNREACHABLE_RELAY: &str = "127.0.0.1:0";
 
     /// A connection asked to listen on port 0 says which port it got, for
     /// either transport, and listens there: the relay need not be up for it.
     #[tokio::test]
     async fn a_connection_on_port_zero_says_where_it_listens() {
-        let (_held, relay) = refusing_relay();
         let client = Client::from_credential(
-            relay.to_string(),
+            UNREACHABLE_RELAY.to_owned(),
             Credential::Admin(TEST_ADMIN_KEY_BYTES),
             false,
             None,
@@ -700,15 +694,16 @@ mod tests {
         assert_eq!(tcp.credential(), rotated);
     }
 
-    /// A stream whose relay refuses every connection until its setup
-    /// deadline fails with why, not only with the deadline: the reason a
-    /// `connect_tcp` caller gets names the refusal the operating system gave.
+    /// When every dial fails before the setup deadline, `connect_tcp`
+    /// reports the operating system error to its caller.
     #[tokio::test]
     async fn an_unreachable_relay_fails_connect_tcp_with_its_cause() {
-        let (_held, relay) = refusing_relay();
-        let refused = TcpStream::connect(relay).await.unwrap_err().to_string();
+        let dial_error = TcpStream::connect(UNREACHABLE_RELAY)
+            .await
+            .unwrap_err()
+            .to_string();
         let client = Client::from_credential(
-            relay.to_string(),
+            UNREACHABLE_RELAY.to_owned(),
             Credential::Admin(TEST_ADMIN_KEY_BYTES),
             false,
             None,
@@ -729,6 +724,6 @@ mod tests {
         let Err(Error::TunnelFailed { reason }) = ready else {
             panic!("expected a failed tunnel, got {ready:?}");
         };
-        assert!(reason.contains(&refused), "{reason}");
+        assert!(reason.contains(&dial_error), "{reason}");
     }
 }

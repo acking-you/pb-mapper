@@ -1,6 +1,5 @@
 //! The hand-off from thread C to B-send: encoded units waiting for send credit.
-//! The submit gate keeps it below two units plus the encoder's in-flight ones,
-//! so an overflow is a bug path; it never discards an IDR it was handed.
+//! A slow viewer keeps a decodable prefix and resumes at a keyframe after a gap.
 use crate::{
     VideoCodec,
     worker::{ENCODER_DEPTH, TRANSPORT_GATE},
@@ -21,6 +20,22 @@ const _: () = assert!(
 /// waits behind an IDR in flight does not count (`CreditLedger::aging_since`).
 pub(crate) const OUTGOING_MAX_AGE: Duration = Duration::from_secs(1);
 
+/// Encoded picture bytes: kept directly as `Vec<u8>` when a single viewer is
+/// active (zero promotion allocation), or refcounted across multiple viewers.
+pub(crate) enum FrameBytes {
+    Owned(Vec<u8>),
+    Shared(bytes::Bytes),
+}
+impl std::ops::Deref for FrameBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Shared(bytes) => bytes,
+        }
+    }
+}
+
 pub(crate) struct HostUnit {
     pub generation: u64,
     pub frame_id: u64,
@@ -32,17 +47,18 @@ pub(crate) struct HostUnit {
     pub pts_us: u64,
     pub encode_us: u32,
     pub ready_at: Instant,
-    pub bytes: bytes::Bytes,
+    pub bytes: FrameBytes,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Push {
-    Queued,
-    /// The queue was cleared; the pushed unit survives only if it is an IDR.
-    /// The caller requests a host resync.
-    Overflow {
-        dropped: usize,
-    },
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Push {
+    pub dropped: usize,
+    pub request_idr: bool,
+}
+
+struct Queue {
+    units: VecDeque<HostUnit>,
+    needs_keyframe: bool,
 }
 
 /// What B-send needs to admit the head without taking it.
@@ -74,14 +90,17 @@ pub(crate) struct ProducedSnapshot {
 }
 
 pub(crate) struct Outgoing {
-    q: parking_lot::Mutex<VecDeque<HostUnit>>,
+    q: parking_lot::Mutex<Queue>,
     notify: tokio::sync::Notify,
     stats: ProducedCounters,
 }
 impl Outgoing {
     pub fn new() -> Self {
         Self {
-            q: parking_lot::Mutex::new(VecDeque::with_capacity(OUTGOING_CAPACITY)),
+            q: parking_lot::Mutex::new(Queue {
+                units: VecDeque::with_capacity(OUTGOING_CAPACITY),
+                needs_keyframe: true,
+            }),
             notify: tokio::sync::Notify::new(),
             stats: ProducedCounters::default(),
         }
@@ -101,29 +120,33 @@ impl Outgoing {
                 .non_idr_bytes
                 .fetch_add(unit.bytes.len() as u64, Ordering::Relaxed);
         }
-        let result = {
-            let mut q = self.q.lock();
-            let queued: usize = q.iter().map(|unit| unit.bytes.len()).sum();
-            if q.len() >= OUTGOING_CAPACITY || queued + unit.bytes.len() > OUTGOING_BYTES {
-                let mut dropped = q.len();
-                q.clear();
-                if unit.keyframe {
-                    q.push_back(unit);
-                } else {
-                    dropped += 1;
-                }
-                Push::Overflow { dropped }
-            } else {
-                q.push_back(unit);
-                Push::Queued
-            }
-        };
+        let mut q = self.q.lock();
+        let full = q.units.len() >= OUTGOING_CAPACITY
+            || q.units.iter().map(|unit| unit.bytes.len()).sum::<usize>() + unit.bytes.len()
+                > OUTGOING_BYTES;
+        if !unit.keyframe && (full || q.needs_keyframe) {
+            q.needs_keyframe = true;
+            // Avoid forcing the shared encoder to produce large IDRs for a
+            // viewer that still has no room. Other viewers keep their cadence.
+            return Push {
+                dropped: 1,
+                request_idr: q.units.len() < TRANSPORT_GATE,
+            };
+        }
+        let mut result = Push::default();
+        if full {
+            result.dropped = q.units.len();
+            q.units.clear();
+        }
+        q.needs_keyframe = false;
+        q.units.push_back(unit);
+        drop(q);
         self.notify.notify_one();
         result
     }
 
     pub fn peek_meta(&self) -> Option<UnitMeta> {
-        self.q.lock().front().map(|unit| UnitMeta {
+        self.q.lock().units.front().map(|unit| UnitMeta {
             generation: unit.generation,
             frame_id: unit.frame_id,
             keyframe: unit.keyframe,
@@ -134,15 +157,15 @@ impl Outgoing {
 
     #[cfg(test)]
     pub fn pop(&self) -> Option<HostUnit> {
-        self.q.lock().pop_front()
+        self.q.lock().units.pop_front()
     }
 
     /// Pop the head only if it is still the unit `peek_meta` described: C may
     /// clear or retain the queue between the peek and the pop.
     pub fn pop_if(&self, frame_id: u64) -> Option<HostUnit> {
         let mut q = self.q.lock();
-        if q.front()?.frame_id == frame_id {
-            q.pop_front()
+        if q.units.front()?.frame_id == frame_id {
+            q.units.pop_front()
         } else {
             None
         }
@@ -150,22 +173,24 @@ impl Outgoing {
 
     /// Includes the head B-send is evaluating.
     pub fn len(&self) -> usize {
-        self.q.lock().len()
+        self.q.lock().units.len()
     }
 
     pub fn clear(&self) -> usize {
         let mut q = self.q.lock();
-        let dropped = q.len();
-        q.clear();
+        let dropped = q.units.len();
+        q.units.clear();
+        q.needs_keyframe = true;
         dropped
     }
 
     /// Drop units older than generation `generation` (C, on invalidate).
     pub fn retain_generation(&self, generation: u64) -> usize {
         let mut q = self.q.lock();
-        let before = q.len();
-        q.retain(|unit| unit.generation >= generation);
-        before - q.len()
+        let before = q.units.len();
+        q.units.retain(|unit| unit.generation >= generation);
+        q.needs_keyframe |= q.units.is_empty();
+        before - q.units.len()
     }
 
     /// Resolves after a push, including one that happened before this call.
@@ -201,7 +226,7 @@ mod tests {
             pts_us: frame_id,
             encode_us: 0,
             ready_at: Instant::now(),
-            bytes: bytes::Bytes::from(vec![0; len]),
+            bytes: FrameBytes::Owned(vec![0; len]),
         }
     }
 
@@ -210,37 +235,32 @@ mod tests {
         let outgoing = Outgoing::new();
         let full = OUTGOING_CAPACITY as u64;
         for frame in 1..=full {
-            assert_eq!(outgoing.push(unit(1, frame, frame == 1, 10)), Push::Queued);
+            assert_eq!(
+                outgoing.push(unit(1, frame, frame == 1, 10)),
+                Push::default()
+            );
         }
-        // A push that was not awaited yet still wakes B-send.
         outgoing.notified().await;
+        let blocked = outgoing.push(unit(1, full + 1, false, 10));
+        assert_eq!(blocked.dropped, 1);
+        assert!(!blocked.request_idr);
+        for frame in 1..=full {
+            assert_eq!(outgoing.pop().unwrap().frame_id, frame);
+        }
+        let gap = outgoing.push(unit(1, full + 2, false, 10));
+        assert!(gap.request_idr);
+        assert!(outgoing.peek_meta().is_none());
         assert_eq!(
-            outgoing.push(unit(1, full + 1, false, 10)),
-            Push::Overflow {
-                dropped: OUTGOING_CAPACITY + 1
-            }
+            outgoing.push(unit(1, full + 3, true, OUTGOING_BYTES)),
+            Push::default()
         );
-        assert_eq!(outgoing.len(), 0);
-        assert_eq!(
-            outgoing.push(unit(1, full + 2, true, OUTGOING_BYTES)),
-            Push::Queued
-        );
-        assert_eq!(
-            outgoing.push(unit(1, full + 3, true, 1)),
-            Push::Overflow { dropped: 1 }
-        );
-        let head = outgoing.peek_meta().unwrap();
-        assert!(head.keyframe && head.len == 1);
-
-        outgoing.push(unit(2, full + 4, true, 10));
+        assert_eq!(outgoing.push(unit(1, full + 4, true, 1)).dropped, 1);
+        assert!(outgoing.peek_meta().unwrap().keyframe);
+        outgoing.push(unit(2, full + 5, true, 10));
         assert_eq!(outgoing.retain_generation(2), 1);
-        assert_eq!(outgoing.pop().map(|unit| unit.frame_id), Some(full + 4));
+        assert_eq!(outgoing.pop().unwrap().frame_id, full + 5);
         assert_eq!(outgoing.clear(), 0);
         let produced = outgoing.produced();
-        assert_eq!((produced.frames, produced.keyframes), (full + 4, 4));
-        assert_eq!(
-            (produced.non_idr_frames, produced.non_idr_bytes),
-            (full, 10 * full)
-        );
+        assert_eq!((produced.frames, produced.keyframes), (full + 5, 4));
     }
 }

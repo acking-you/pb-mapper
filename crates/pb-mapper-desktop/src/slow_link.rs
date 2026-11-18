@@ -206,6 +206,7 @@ impl SyntheticEncoder {
 }
 impl Backend for SyntheticEncoder {
     fn configure_video(&mut self, limits: VideoLimits, nominal_fps: u32) -> Result<()> {
+        self.pending.clear();
         limits.validate()?;
         self.nominal_fps = nominal_fps;
         self.probe.configured.fetch_add(1, Ordering::Relaxed);

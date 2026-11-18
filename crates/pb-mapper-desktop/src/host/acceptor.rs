@@ -1,14 +1,17 @@
 //! The host's listener: each connection's handshake and session.
 
-use super::{BACKEND_ANSWER_WAIT, Live, Shared};
+use super::{BACKEND_ANSWER_WAIT, Room, Shared};
 use crate::{
     Display, QualityPreset, Result, VideoCodec, VideoLimits, VideoSize,
     launch::Launch,
-    protocol::{CAPABILITY_H265, HostMessage, RejectReason, ViewerMessage, valid_capabilities},
+    protocol::{
+        CAPABILITY_H265, CAPABILITY_PEER_CURSORS, HostMessage, PeerColor, PeerSlot, RejectReason,
+        StopReason, ViewerMessage, valid_capabilities,
+    },
     qos::scaled_size,
-    session::{self, Session},
+    session::{self, Session, stop_message},
     wire,
-    worker::{self, WorkerConfig},
+    worker::{self, RoomShared, RoomSlotConfig},
 };
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -17,7 +20,7 @@ use std::{
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore},
     task::JoinSet,
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
@@ -27,8 +30,8 @@ use tokio_util::sync::CancellationToken;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 /// A `Rejected` and the close after it.
 const REJECT_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
-/// Connections in their handshake or session at once; one holds the viewer slot.
-const MAX_CONNECTIONS: usize = 8;
+/// Connections in their handshake or session at once; up to `MAX_VIEWERS` hold viewer slots.
+const MAX_CONNECTIONS: usize = 12;
 
 /// What the viewer asked for in a valid `Authenticate`.
 struct Request {
@@ -40,8 +43,7 @@ struct Request {
     capabilities: Vec<String>,
 }
 
-/// A viewer that holds the slot and heard `Accepted`, with its thread C
-/// waiting for the session.
+/// A viewer that holds a room slot and heard `Accepted`.
 struct Admitted {
     stream: TlsStream<TcpStream>,
     permit: OwnedSemaphorePermit,
@@ -49,9 +51,10 @@ struct Admitted {
     codec: VideoCodec,
     /// The size the encoder is expected to produce.
     video: VideoSize,
-    /// What `Accepted` listed.
-    capabilities: Vec<String>,
-    prepared: worker::Prepared,
+    room: Arc<Room>,
+    slot: PeerSlot,
+    conn_id: u64,
+    session: Arc<Session>,
 }
 
 /// A session's codec: H.265 when the viewer decodes it and the backend
@@ -81,26 +84,57 @@ fn expected_video(display: Option<&Display>, limits: VideoLimits) -> VideoSize {
     VideoSize { width, height }
 }
 
+fn negotiated_capabilities(host_caps: &[String], requested: &[String]) -> Vec<String> {
+    let mut capabilities = host_caps.to_vec();
+    if requested
+        .iter()
+        .any(|capability| capability == CAPABILITY_PEER_CURSORS)
+        && !capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_PEER_CURSORS)
+    {
+        capabilities.push(CAPABILITY_PEER_CURSORS.to_owned());
+    }
+    capabilities
+}
+
+async fn send_rejected(mut stream: TlsStream<TcpStream>, rejected: RejectReason) {
+    tracing::info!(
+        target: "pb_mapper_desktop::session",
+        event = "desktop_host_rejected",
+        reason = ?rejected,
+    );
+    let _ = tokio::time::timeout(REJECT_WRITE_TIMEOUT, async {
+        let rejected = HostMessage::Rejected { reason: rejected };
+        wire::write_message(&mut stream, &rejected, None).await?;
+        stream.shutdown().await
+    })
+    .await;
+}
+
 /// Frees the viewer slot however `serve` ends, a panic or a dropped task
 /// included: the host's status forgets this session, and the display-mode
 /// retry looks, since thread C put the display back as the session ended
 /// unless it could not.
 struct SlotRelease<'a> {
     shared: &'a Shared,
-    session: Arc<Session>,
+    room: Arc<Room>,
+    slot: PeerSlot,
+    conn_id: u64,
+    armed: bool,
 }
 impl Drop for SlotRelease<'_> {
     fn drop(&mut self) {
-        let mut slot = self.shared.session.lock();
-        if slot
-            .as_ref()
-            .is_some_and(|held| Arc::ptr_eq(&held.session, &self.session))
-        {
-            slot.take();
+        if !self.armed {
+            return;
         }
-        drop(slot);
-        self.shared.restore_pending.store(true, Ordering::Release);
-        self.shared.restore.notify_one();
+        if self.room.detach(self.slot, self.conn_id) {
+            self.room.shared.cancel.cancel();
+            self.room.shared.wake.notify();
+            self.shared.clear_room(&self.room);
+            self.shared.restore_pending.store(true, Ordering::Release);
+            self.shared.restore.notify_one();
+        }
     }
 }
 
@@ -111,7 +145,8 @@ pub(super) struct Acceptor {
     pub(super) launch: Arc<dyn Launch>,
     pub(super) admission: Option<Arc<dyn crate::ControlAdmission>>,
     pub(super) shared: Arc<Shared>,
-    /// The single viewer slot.
+    pub(super) room: AsyncMutex<Option<Arc<Room>>>,
+    /// Up to `MAX_VIEWERS` concurrent viewer slots.
     pub(super) slot: Arc<Semaphore>,
     pub(super) cancel: CancellationToken,
 }
@@ -145,8 +180,10 @@ impl Acceptor {
             request,
             codec,
             video,
-            capabilities,
-            prepared,
+            room,
+            slot,
+            conn_id,
+            session,
         }) = accepted
         else {
             return;
@@ -154,6 +191,7 @@ impl Acceptor {
         tracing::info!(
             target: "pb_mapper_desktop::session",
             event = "desktop_host_accepted",
+            slot = slot.index(),
             codec = ?codec,
             max_width = request.limits.max_width,
             max_height = request.limits.max_height,
@@ -162,42 +200,38 @@ impl Acceptor {
             height = video.height,
             quality = ?request.quality,
         );
-        let session = Session::new(
-            self.shared.policy.clone(),
-            self.cancel.child_token(),
-            codec,
-            request.limits,
-            request.quality,
-            &request.capabilities,
-            &capabilities,
-        );
-        session.expect_video_size(video);
-        *self.shared.session.lock() = Some(Live {
-            session: session.clone(),
-            capabilities,
-        });
-        let slot = SlotRelease {
+        let mut release = SlotRelease {
             shared: &self.shared,
-            session: session.clone(),
+            room: room.clone(),
+            slot,
+            conn_id,
+            armed: true,
         };
-        let mut worker = prepared.start(
-            session.shared.clone(),
-            WorkerConfig {
-                codec,
-                limits: request.limits,
-                admission: self.admission.clone(),
-                cursor_shapes: session.cursor_shape,
-            },
-        );
-        session::run(
-            session.clone(),
-            stream,
-            async move { worker.exited().await },
-        )
+        let session_cancel = session.shared.cancel.clone();
+        let worker_room = room.clone();
+        session::run(session.clone(), stream, async move {
+            worker_room.wait_for_session(session_cancel).await
+        })
         .await;
+        {
+            let mut active = self.room.lock().await;
+            release.armed = false;
+            let empty = room.detach(slot, conn_id);
+            if empty || room.is_closed() {
+                if active.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &room)) {
+                    active.take();
+                }
+                self.shared.clear_room(&room);
+                if empty {
+                    room.shutdown().await;
+                    self.shared.restore_pending.store(true, Ordering::Release);
+                    self.shared.restore.notify_one();
+                }
+            }
+        }
         // The slot frees before the permit, which a panic keeps too: `permit`
         // was bound first, so it is dropped last.
-        drop(slot);
+        drop(release);
         drop(permit);
     }
 
@@ -209,10 +243,82 @@ impl Acceptor {
     /// encodes H.265, unless an H.265 encoder already failed in this process.
     async fn accept_session(&self, socket: TcpStream) -> Option<Admitted> {
         let (mut stream, permit, request) = self.handshake(socket).await?;
+        let mut active = self.room.lock().await;
+        if let Some(existing) = active.as_ref().cloned()
+            && existing.is_closed()
+        {
+            active.take();
+            self.shared.clear_room(&existing);
+            existing.shutdown().await;
+            self.shared.restore_pending.store(true, Ordering::Release);
+            self.shared.restore.notify_one();
+        }
         let offered = request
             .capabilities
             .iter()
             .any(|capability| capability == CAPABILITY_H265);
+        if let Some(room) = active.as_ref().cloned() {
+            let Some((codec, incompatible)) = room.negotiate_codec(&request.codecs, offered) else {
+                drop(active);
+                send_rejected(stream, RejectReason::Busy).await;
+                return None;
+            };
+            let Some(slot) = room.free_slot() else {
+                drop(active);
+                send_rejected(stream, RejectReason::Busy).await;
+                return None;
+            };
+            let video = expected_video(room.display.as_ref(), request.limits);
+            let capabilities =
+                negotiated_capabilities(&room.host_capabilities, &request.capabilities);
+            let accepted = HostMessage::Accepted {
+                codec,
+                limits: request.limits,
+                nominal_fps: request.limits.max_fps,
+                quality: request.quality,
+                capabilities: capabilities.clone(),
+            };
+            tokio::time::timeout(
+                HANDSHAKE_TIMEOUT,
+                wire::write_message(&mut stream, &accepted, None),
+            )
+            .await
+            .ok()?
+            .ok()?;
+            if !incompatible.is_empty() || codec != room.current_codec() {
+                let message = stop_message(StopReason::Restarting);
+                for session in incompatible {
+                    session.end(StopReason::Restarting, message);
+                }
+                room.set_codec(codec);
+            }
+            let session = Session::new_in_room(
+                slot,
+                room.shared.wake.clone(),
+                room.shared.peer_cursors.clone(),
+                self.shared.policy.clone(),
+                self.cancel.child_token(),
+                codec,
+                request.codecs.clone(),
+                request.limits,
+                request.quality,
+                &request.capabilities,
+                &capabilities,
+            );
+            session.expect_video_size(video);
+            let conn_id = room.attach(slot, session.clone(), request.limits)?;
+            return Some(Admitted {
+                stream,
+                permit,
+                request,
+                codec,
+                video,
+                room,
+                slot,
+                conn_id,
+                session,
+            });
+        }
         // Never H.265 again in this process once one of its encoders failed,
         // whatever a backend says.
         let probe = offered && !worker::h265_failed();
@@ -223,10 +329,10 @@ impl Acceptor {
             .ok()
             .and_then(|answer| answer.ok())
             .and_then(Result::ok);
-        let video = expected_video(
-            description.as_ref().map(|described| &described.display),
-            request.limits,
-        );
+        let display = description
+            .as_ref()
+            .map(|described| described.display.clone());
+        let video = expected_video(display.as_ref(), request.limits);
         let caps =
             description.map_or_else(|| self.launch.fallback_caps(), |described| described.caps);
         let h265 = match prepared.h265.as_mut() {
@@ -236,8 +342,10 @@ impl Acceptor {
             ),
             None => false,
         };
-        let codec = choose_codec(&request.codecs, probe && h265);
-        let capabilities = caps.values();
+        let can_h265 = probe && h265;
+        let codec = choose_codec(&request.codecs, can_h265);
+        let host_capabilities = caps.values();
+        let capabilities = negotiated_capabilities(&host_capabilities, &request.capabilities);
         let accepted = HostMessage::Accepted {
             codec,
             limits: request.limits,
@@ -245,17 +353,62 @@ impl Acceptor {
             quality: request.quality,
             capabilities: capabilities.clone(),
         };
-        wire::write_message(&mut stream, &accepted, None)
-            .await
-            .ok()?;
+        tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            wire::write_message(&mut stream, &accepted, None),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        let room_shared = RoomShared::new(self.shared.policy.clone(), codec);
+        let slot = PeerSlot::FIRST;
+        let session = Session::new_in_room(
+            slot,
+            room_shared.wake.clone(),
+            room_shared.peer_cursors.clone(),
+            self.shared.policy.clone(),
+            self.cancel.child_token(),
+            codec,
+            request.codecs.clone(),
+            request.limits,
+            request.quality,
+            &request.capabilities,
+            &capabilities,
+        );
+        session.expect_video_size(video);
+        room_shared.set_slot(
+            slot,
+            1,
+            RoomSlotConfig {
+                shared: session.shared.clone(),
+                color: PeerColor::default(),
+                limits: request.limits,
+                cursor_shapes: session.cursor_shape,
+                peer_cursors: session.peer_cursors,
+            },
+        );
+        let worker = prepared.start_room(room_shared.clone(), self.admission.clone());
+        let room = Room::new_with_first_slot(
+            room_shared,
+            worker,
+            host_capabilities,
+            display,
+            can_h265,
+            codec,
+            session.clone(),
+        );
+        *active = Some(room.clone());
+        *self.shared.room.lock() = Some(room.clone());
         Some(Admitted {
             stream,
             permit,
             request,
             codec,
             video,
-            capabilities,
-            prepared,
+            room,
+            slot,
+            conn_id: 1,
+            session,
         })
     }
 
@@ -307,17 +460,7 @@ impl Acceptor {
         } else {
             RejectReason::Busy
         };
-        tracing::info!(
-            target: "pb_mapper_desktop::session",
-            event = "desktop_host_rejected",
-            reason = ?rejected,
-        );
-        let _ = tokio::time::timeout(REJECT_WRITE_TIMEOUT, async {
-            let rejected = HostMessage::Rejected { reason: rejected };
-            wire::write_message(&mut stream, &rejected, None).await?;
-            stream.shutdown().await
-        })
-        .await;
+        send_rejected(stream, rejected).await;
         None
     }
 

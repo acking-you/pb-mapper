@@ -96,7 +96,8 @@ is the Remote tab. How the page and the viewer are laid out is in
    **Stop sharing** is always within reach while a viewer is connected (see
    [Who is viewing](#who-is-viewing-and-a-hidden-window)).
 
-There is one shared display and one viewer at a time. Input uses the shared
+There is one shared display, which up to four viewers may watch or control at
+once (a fifth connection is refused as busy). Input uses the shared
 display's physical coordinates, DPI, letterboxing and viewer transform,
 including negative monitor origins. A stale screen disables input while
 keeping the texture visible. The Windows GPU capture backend currently rejects
@@ -106,6 +107,8 @@ beside the video: its position always, and its shape where both ends list
 viewer in control, this computer's own pointer takes the host's shape over the
 picture, so one pointer shows; a phone paints the shape at the picture's
 scale. A host without shapes (0.11.0) shows the generic arrow, as before.
+When more than one viewer controls at once and both ends list `peer_cursors`,
+each viewer also sees the others' active pointers in distinct session colours.
 
 ### Sharing a Mac
 
@@ -1615,6 +1618,25 @@ hidden pointer may have been reported only before the move, the thread, once
 it has taken a move, reports the next sample that is not that move's echo even
 when it equals the last report, at the newer watermark: the clamp, or the
 pointer still hidden, reaches the viewer with the move behind it.
+
+**Concurrent controllers and peer pointers.** Up to four viewers (`MAX_VIEWERS`)
+share one capture and encode loop. A viewer can join with the current codec
+whenever it can decode it. The shared encoder uses the lowest frame-rate target
+among unpaused viewers, including decoder-backlog caps. Pausing or leaving
+removes that viewer's limit. Capture continues while any viewer has send capacity.
+A slow viewer can drain its queued pictures and resumes at a keyframe after a
+gap. A single viewer receives the owned frame buffer directly, and two or more
+share the same encoded bytes. Each viewer has its own input lane,
+presentation ledger, drag-start hold and held-input set: releasing or
+disconnecting one controller lifts only keys and mouse buttons no remaining
+controller still holds, and a button or wheel event re-aims the OS pointer to
+that controller's last move if another controller moved it in between. Viewers
+and hosts that list `peer_cursors` receive `PeerCursor` updates outside the
+video queue — each controller assigned a distinct colour (`0..4`) for its
+session — while OS cursor echoes from another controller's move are suppressed
+for `peer_cursors` observers so one move never draws two pointers. With a
+single controller, no `PeerCursor` message is sent and the viewer mounts no
+extra compositor layer.
 
 **The pointer's shape.** A viewer that renders shapes, and a host whose
 backend reports them, list `cursor_shape`; the host sends shapes only when

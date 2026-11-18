@@ -39,7 +39,15 @@ pub(crate) const CAPABILITY_PHYSICAL_KEYS: &str = "physical_keys";
 /// backend reports them; only when both listed it does the host write
 /// `CursorShape` and `Cursor::shape`.
 pub(crate) const CAPABILITY_CURSOR_SHAPE: &str = "cursor_shape";
+/// Both ways: this end speaks peer cursors. Only when both listed it does
+/// the host write `PeerCursor`.
+pub(crate) const CAPABILITY_PEER_CURSORS: &str = "peer_cursors";
 const MAX_CAPABILITIES: usize = 16;
+
+/// Viewers a host serves at once.
+pub(crate) const MAX_VIEWERS: usize = 4;
+/// Other viewers' pointers a viewer can see at once.
+pub(crate) const MAX_PEER_CURSORS: usize = MAX_VIEWERS - 1;
 
 /// The shape slots of a session. A `CursorShape` defines or overwrites one;
 /// the host chooses which, and a viewer keeps exactly this many, so neither
@@ -70,6 +78,62 @@ impl TryFrom<u8> for ShapeSlot {
 impl From<ShapeSlot> for u8 {
     fn from(slot: ShapeSlot) -> Self {
         slot.0
+    }
+}
+
+/// A viewer slot in a multi-viewer host room (`0..MAX_VIEWERS`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub(crate) struct PeerSlot(u8);
+impl PeerSlot {
+    pub(crate) const FIRST: Self = Self(0);
+
+    pub(crate) fn new(index: usize) -> Option<Self> {
+        u8::try_from(index)
+            .ok()
+            .filter(|index| usize::from(*index) < MAX_VIEWERS)
+            .map(Self)
+    }
+    pub(crate) fn index(self) -> usize {
+        self.0.into()
+    }
+}
+impl TryFrom<u8> for PeerSlot {
+    type Error = &'static str;
+    fn try_from(index: u8) -> Result<Self, Self::Error> {
+        Self::new(index.into()).ok_or("peer cursor slot out of bounds")
+    }
+}
+impl From<PeerSlot> for u8 {
+    fn from(slot: PeerSlot) -> Self {
+        slot.0
+    }
+}
+
+/// A peer cursor palette index (`0..MAX_VIEWERS`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub(crate) struct PeerColor(u8);
+impl PeerColor {
+    pub(crate) fn new(index: usize) -> Option<Self> {
+        u8::try_from(index)
+            .ok()
+            .filter(|index| usize::from(*index) < MAX_VIEWERS)
+            .map(Self)
+    }
+    pub(crate) fn as_u8(self) -> u8 {
+        self.0
+    }
+}
+impl TryFrom<u8> for PeerColor {
+    type Error = &'static str;
+    fn try_from(index: u8) -> Result<Self, Self::Error> {
+        Self::new(index.into()).ok_or("peer cursor color out of bounds")
+    }
+}
+impl From<PeerColor> for u8 {
+    fn from(color: PeerColor) -> Self {
+        color.0
     }
 }
 
@@ -220,6 +284,16 @@ pub(crate) enum HostMessage {
     /// record: its straight RGBA8 bitmap. Only when both ends listed
     /// `cursor_shape`, and before the first `Cursor` naming that slot.
     CursorShape(ShapeRecord),
+    /// Another controlling viewer's pointer, in the display's physical pixels.
+    /// Only when both ends listed `peer_cursors`.
+    PeerCursor {
+        generation: u64,
+        peer: PeerSlot,
+        color: PeerColor,
+        x: i32,
+        y: i32,
+        visible: bool,
+    },
     /// 1, 2, 3 …; one outstanding at a time, in stream order.
     Probe {
         nonce: u64,
@@ -627,6 +701,14 @@ mod tests {
                 width: 1,
                 height: 256,
             }),
+            HostMessage::PeerCursor {
+                generation: 4,
+                peer: PeerSlot::new(1).unwrap(),
+                color: PeerColor::new(2).unwrap(),
+                x: 120,
+                y: 340,
+                visible: true,
+            },
             HostMessage::Probe { nonce: 2 },
             HostMessage::Stats(StatsRecord {
                 capture_fps: 59.5,
@@ -725,6 +807,16 @@ mod tests {
         let mut cursor = serde_json::to_value(&host[4]).unwrap();
         cursor["shape"] = json!(CURSOR_SLOTS);
         assert!(serde_json::from_value::<HostMessage>(cursor).is_err());
+        let peer_cursor = serde_json::to_value(&host[6]).unwrap();
+        assert_eq!(peer_cursor["t"], "peer_cursor");
+        for field in ["peer", "color"] {
+            let mut broken = peer_cursor.clone();
+            broken[field] = json!(MAX_VIEWERS);
+            assert!(
+                serde_json::from_value::<HostMessage>(broken).is_err(),
+                "{field}"
+            );
+        }
 
         assert!(valid_capabilities(&[
             "lock".into(),

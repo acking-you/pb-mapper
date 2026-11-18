@@ -246,4 +246,153 @@ void main() {
     prefs.dispose();
     h.dispose();
   });
+
+  testWidgets(
+    'peer cursors paint in distinct colours on an isolated layer and tear down '
+    'to zero cost when no peer controls',
+    (tester) async {
+      tester.view
+        ..physicalSize = const Size(800, 450)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final h = await ViewerHarness.live(tester);
+      final prefs = ViewerPrefs(persist: false);
+      DesktopView viewWithPeers({
+        required int seq,
+        required List<DesktopPeerCursor> peers,
+      }) => DesktopView(
+        generation: 1,
+        presentedFrameId: 1,
+        cursorSeq: 1,
+        displayWidth: 1920,
+        displayHeight: 1080,
+        videoWidth: 1920,
+        videoHeight: 1080,
+        cursorX: 960,
+        cursorY: 540,
+        state: 2,
+        cursorVisible: true,
+        controlling: true,
+        controlAllowed: true,
+        fresh: true,
+        peerCursorSeq: seq,
+        peerCursors: peers,
+      );
+
+      h.api.viewValue = viewWithPeers(seq: 0, peers: const []);
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Builder(
+            builder: (context) => Theme(
+              data: viewerTheme(context),
+              child: ViewerStage.of(
+                h.store,
+                viewport: h.viewport,
+                input: h.input,
+                machine: h.machine,
+                touchMode: h.touchMode,
+                title: 'Office',
+                actions: ViewerActions(
+                  desktop: h.store,
+                  input: h.input,
+                  prefs: prefs,
+                  viewport: h.viewport,
+                  onDisconnect: () async {},
+                  onQuality: (_) {},
+                  onResolution: (_) {},
+                  onMaxFps: (_) {},
+                  onDisplayMode: (_) {},
+                  onTypeText: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+
+      final peerLayer = find.byType(RemotePeerCursorLayer);
+      expect(
+        find.descendant(of: peerLayer, matching: find.byType(CustomPaint)),
+        findsNothing,
+      );
+
+      // Two peer controllers appear with distinct palette indices.
+      h.api.viewValue = viewWithPeers(
+        seq: 1,
+        peers: const [
+          DesktopPeerCursor(color: 0, x: 480, y: 540),
+          DesktopPeerCursor(color: 2, x: 1440, y: 270),
+        ],
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+      await tester.pump();
+      expect(
+        peerLayer,
+        paints
+          ..path(
+            style: PaintingStyle.fill,
+            color: peerCursorColor(0),
+            includes: [
+              h.viewport.toLocal(const Offset(0.25, 0.5)) + const Offset(2, 6),
+            ],
+          )
+          ..path(style: PaintingStyle.stroke, color: const Color(0xFFFFFFFF))
+          ..path(
+            style: PaintingStyle.fill,
+            color: peerCursorColor(2),
+            includes: [
+              h.viewport.toLocal(const Offset(0.75, 0.25)) + const Offset(2, 6),
+            ],
+          )
+          ..path(style: PaintingStyle.stroke, color: const Color(0xFFFFFFFF)),
+      );
+
+      // Moving a peer cursor repaints only RemotePeerCursorLayer.
+      final outside = <String>[];
+      var inside = 0;
+      debugOnProfilePaint = (o) {
+        final element = (o.debugCreator! as DebugCreator).element;
+        var owned = element.widget is RemotePeerCursorLayer;
+        element.visitAncestorElements((e) {
+          owned |= e.widget is RemotePeerCursorLayer;
+          return !owned;
+        });
+        if (owned) {
+          inside++;
+        } else {
+          outside.add('${element.widget.runtimeType}');
+        }
+      };
+      try {
+        h.api.viewValue = viewWithPeers(
+          seq: 2,
+          peers: const [
+            DesktopPeerCursor(color: 0, x: 960, y: 540),
+            DesktopPeerCursor(color: 2, x: 1440, y: 270),
+          ],
+        );
+        await tester.pump(const Duration(milliseconds: 16));
+      } finally {
+        debugOnProfilePaint = null;
+      }
+      expect(inside, isPositive);
+      expect(outside, isEmpty);
+
+      // Peers leave: the layer tears down back to SizedBox.shrink.
+      h.api.viewValue = viewWithPeers(seq: 3, peers: const []);
+      await tester.pump(const Duration(milliseconds: 16));
+      await tester.pump();
+      expect(
+        find.descendant(of: peerLayer, matching: find.byType(CustomPaint)),
+        findsNothing,
+      );
+
+      await tester.pumpWidget(const SizedBox());
+      prefs.dispose();
+      h.dispose();
+    },
+  );
 }

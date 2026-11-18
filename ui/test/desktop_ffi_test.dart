@@ -10,14 +10,14 @@ void main() {
   // Rust writes these structs and Dart reads them. Rust and the Windows runner
   // pin the C offsets at compile time; this pins Dart's mirrors to the same
   // ones (perf 7.4, 7.5).
-  test('the view leaf and video meta mirror the 56-byte C layouts', () {
-    expect(sizeOf<PbDesktopViewV1>(), 56);
+  test('the view leaf and video meta mirror the 96/56-byte C layouts', () {
+    expect(sizeOf<PbDesktopViewV2>(), 96);
     expect(sizeOf<PbDesktopVideoMetaV1>(), 56);
 
-    final leaf = calloc<PbDesktopViewV1>();
+    final leaf = calloc<PbDesktopViewV2>();
     final meta = calloc<PbDesktopVideoMetaV1>();
     try {
-      leaf.cast<Uint8>().asTypedList(56).buffer.asByteData()
+      final bytes = leaf.cast<Uint8>().asTypedList(96).buffer.asByteData()
         ..setUint64(0, 7, Endian.host)
         ..setUint64(8, 42, Endian.host)
         ..setUint64(16, 3, Endian.host)
@@ -32,8 +32,9 @@ void main() {
         // cursor visible, controlling, fresh
         ..setUint8(53, 0x13)
         ..setUint16(54, 0xBEEF, Endian.host);
+      final solo = desktopViewFromLeaf(leaf.ref);
       expect(
-        desktopViewFromLeaf(leaf.ref),
+        solo,
         const DesktopView(
           generation: 7,
           presentedFrameId: 42,
@@ -52,6 +53,23 @@ void main() {
           fresh: true,
         ),
       );
+      expect(identical(solo.peerCursors, const <DesktopPeerCursor>[]), isTrue);
+
+      bytes
+        ..setUint64(56, 11, Endian.host)
+        ..setInt32(64, 640, Endian.host)
+        ..setInt32(68, 1280, Endian.host)
+        ..setInt32(76, 360, Endian.host)
+        ..setInt32(80, 720, Endian.host)
+        ..setUint8(88, 2)
+        ..setUint8(89, 1)
+        ..setUint8(90, 3);
+      final shared = desktopViewFromLeaf(leaf.ref);
+      expect(shared.peerCursorSeq, 11);
+      expect(shared.peerCursors, const [
+        DesktopPeerCursor(color: 1, x: 640, y: 360),
+        DesktopPeerCursor(color: 3, x: 1280, y: 720),
+      ]);
 
       meta.cast<Uint8>().asTypedList(56).buffer.asByteData()
         ..setUint64(8, 9, Endian.host)

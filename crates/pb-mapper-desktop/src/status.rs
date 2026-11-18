@@ -13,6 +13,10 @@ pub struct HostStatus {
     pub control_allowed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewer: Option<HostViewer>,
+    /// Every connected viewer, the primary (`viewer`) first. Empty while
+    /// waiting or stopped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub viewers: Vec<HostViewer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<Display>,
     pub desktop: DesktopKind,

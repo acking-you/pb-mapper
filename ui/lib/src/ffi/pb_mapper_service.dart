@@ -54,7 +54,7 @@ class PbMapperService {
   }
 
   /// Fills [scratch] from the per-frame view leaf: 1 a viewer, 0 none.
-  int desktopView(Pointer<PbDesktopViewV1> scratch) =>
+  int desktopView(Pointer<PbDesktopViewV2> scratch) =>
       _ffi.pbMapperDesktopView(_requireHandle(), scratch);
 
   /// What native video consumers compare with their own (D9).

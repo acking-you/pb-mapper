@@ -691,6 +691,22 @@ pub struct PbDesktopViewV1 {
     /// definition, a new number. 0: none, so the generic arrow.
     pub cursor_shape: u16,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PbDesktopViewV2 {
+    pub base: PbDesktopViewV1,
+    /// Advances with every peer-cursor change.
+    pub peer_cursor_seq: u64,
+    /// Physical pixels of up to 3 other controlling viewers' pointers.
+    pub peer_x: [i32; 3],
+    pub peer_y: [i32; 3],
+    /// Active entries in `peer_x`/`peer_y`/`peer_color` (`0..=3`).
+    pub peer_count: u8,
+    /// Palette index (`0..4`) for each active peer cursor.
+    pub peer_color: [u8; 3],
+    pub reserved: u32,
+}
 // The layout of perf 7.4, field by field: `From` fills it by name, so a
 // same-size reorder would otherwise compile. desktop_ffi_test.dart pins Dart's
 // mirror to the same offsets.
@@ -711,6 +727,15 @@ const _: () = {
     assert!(offset_of!(V, state) == 52);
     assert!(offset_of!(V, flags) == 53);
     assert!(offset_of!(V, cursor_shape) == 54);
+    type V2 = PbDesktopViewV2;
+    assert!(size_of::<V2>() == 96 && align_of::<V2>() == 8);
+    assert!(offset_of!(V2, base) == 0);
+    assert!(offset_of!(V2, peer_cursor_seq) == 56);
+    assert!(offset_of!(V2, peer_x) == 64);
+    assert!(offset_of!(V2, peer_y) == 76);
+    assert!(offset_of!(V2, peer_count) == 88);
+    assert!(offset_of!(V2, peer_color) == 89);
+    assert!(offset_of!(V2, reserved) == 92);
 };
 
 impl From<DesktopView> for PbDesktopViewV1 {
@@ -734,6 +759,20 @@ impl From<DesktopView> for PbDesktopViewV1 {
     }
 }
 
+impl From<DesktopView> for PbDesktopViewV2 {
+    fn from(view: DesktopView) -> Self {
+        Self {
+            base: view.into(),
+            peer_cursor_seq: view.peer_cursor_seq,
+            peer_x: view.peer_x,
+            peer_y: view.peer_y,
+            peer_count: view.peer_count,
+            peer_color: view.peer_color,
+            reserved: 0,
+        }
+    }
+}
+
 /// 1 with a viewer, 0 without one (`out` zeroed), -1 for a null pointer or a
 /// panic. A leaf: no allocation, no tokio, `parking_lot` locks only. Call it
 /// on the isolate that also destroys the handle.
@@ -745,6 +784,28 @@ pub unsafe extern "C" fn pb_mapper_desktop_view_v1(
     handle: *mut PbMapperHandle,
     out: *mut PbDesktopViewV1,
 ) -> i32 {
+    // SAFETY: the caller provides the v1 layout.
+    unsafe { read_view(handle, out) }
+}
+
+/// Read the per-frame view including peer pointers.
+///
+/// # Safety
+/// `handle` must be null or live, and `out` null or writable for a full v2 view.
+/// The caller must serialize this call with handle destruction.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pb_mapper_desktop_view_v2(
+    handle: *mut PbMapperHandle,
+    out: *mut PbDesktopViewV2,
+) -> i32 {
+    // SAFETY: the caller provides the v2 layout.
+    unsafe { read_view(handle, out) }
+}
+
+unsafe fn read_view<V: Default + From<DesktopView>>(
+    handle: *mut PbMapperHandle,
+    out: *mut V,
+) -> i32 {
     if handle.is_null() || out.is_null() {
         return -1;
     }
@@ -753,7 +814,7 @@ pub unsafe extern "C" fn pb_mapper_desktop_view_v1(
         let handle = unsafe { &*handle };
         let (code, view) = match handle.desktop.viewer() {
             Some(viewer) => (1, viewer.view().into()),
-            None => (0, PbDesktopViewV1::default()),
+            None => (0, V::default()),
         };
         // SAFETY: checked non-null; the caller provides a writable struct.
         unsafe { out.write(view) };

@@ -3,6 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Up to four devices can watch or control a shared remote desktop at once. Each controller keeps its own control grant, held keys and mouse position. Watching devices see each controller's pointer in a distinct colour when both ends support peer cursors. The shared video stream respects the lowest frame-rate target among active viewers, including limits requested by a decoder that is falling behind.
 - The macOS remote desktop host wakes when ScreenCaptureKit delivers a picture or VideoToolbox finishes encoding it. A still screen can answer a keyframe request without waiting for motion. The macOS and iOS viewers reuse the received buffer when a video sample's slices are already contiguous.
 - On macOS, the remote desktop permission card can reveal the running app in Finder. `make build-ui-macos-local` builds a separately named app with its own privacy settings for local testing.
 - On macOS, Quit from the Dock or application menu and Command-Q now end desktop sessions and quit the app. Closing the window keeps it in the menu bar.

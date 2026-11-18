@@ -254,6 +254,134 @@ class RemoteCursorLayer extends StatelessWidget {
 /// phone shows a whole desktop small, and its pointer must stay legible.
 const kMinPointerSide = 32.0;
 
+/// High-contrast fills for up to four concurrent controllers (`PeerColor`
+/// `0..4`): coral, sky, amber, emerald.
+const kPeerCursorColors = <Color>[
+  Color(0xFFFF5A5F),
+  Color(0xFF0EA5E9),
+  Color(0xFFF59E0B),
+  Color(0xFF10B981),
+];
+
+Color peerCursorColor(int index) => kPeerCursorColors[index & 3];
+
+final Path _arrowPath = Path()
+  ..moveTo(1, 1)
+  ..lineTo(1, 20)
+  ..lineTo(6, 16)
+  ..lineTo(10, 25)
+  ..lineTo(14, 23)
+  ..lineTo(10, 15)
+  ..lineTo(17, 15)
+  ..close();
+
+/// Other controlling viewers' pointers, each in its session colour, drawn in
+/// an isolated layer beneath [RemoteCursorLayer]. While empty it renders a
+/// zero-cost placeholder with no compositor layer or viewport listener.
+class RemotePeerCursorLayer extends StatefulWidget {
+  const RemotePeerCursorLayer({
+    super.key,
+    required this.viewport,
+    required this.peerCursors,
+  });
+
+  final RemoteViewport viewport;
+  final ValueListenable<List<PeerCursorPoint>> peerCursors;
+
+  @override
+  State<RemotePeerCursorLayer> createState() => _RemotePeerCursorLayerState();
+}
+
+class _RemotePeerCursorLayerState extends State<RemotePeerCursorLayer> {
+  late bool _active = widget.peerCursors.value.isNotEmpty;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.peerCursors.addListener(_onPeersChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant RemotePeerCursorLayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.peerCursors, widget.peerCursors)) {
+      oldWidget.peerCursors.removeListener(_onPeersChanged);
+      widget.peerCursors.addListener(_onPeersChanged);
+      _active = widget.peerCursors.value.isNotEmpty;
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.peerCursors.removeListener(_onPeersChanged);
+    super.dispose();
+  }
+
+  void _onPeersChanged() {
+    final active = widget.peerCursors.value.isNotEmpty;
+    if (active != _active) {
+      setState(() => _active = active);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_active) return const SizedBox.shrink();
+    return RepaintBoundary(
+      child: IgnorePointer(
+        child: ClipRect(
+          child: CustomPaint(
+            size: Size.infinite,
+            painter: RemotePeerCursorPainter(
+              viewport: widget.viewport,
+              peerCursors: widget.peerCursors,
+              repaint: Listenable.merge([widget.viewport, widget.peerCursors]),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class RemotePeerCursorPainter extends CustomPainter {
+  RemotePeerCursorPainter({
+    required this.viewport,
+    required this.peerCursors,
+    required Listenable repaint,
+  }) : super(repaint: repaint);
+
+  final RemoteViewport viewport;
+  final ValueListenable<List<PeerCursorPoint>> peerCursors;
+
+  static final _fills = <Paint>[
+    for (final color in kPeerCursorColors) Paint()..color = color,
+  ];
+  static final _edge = Paint()
+    ..color = const Color(0xFFFFFFFF)
+    ..style = PaintingStyle.stroke
+    ..strokeJoin = StrokeJoin.round
+    ..strokeWidth = 1.5;
+
+  @override
+  void paint(Canvas canvas, Size _) {
+    final peers = peerCursors.value;
+    if (peers.isEmpty) return;
+    for (final peer in peers) {
+      final at = viewport.toLocal(peer.position);
+      final path = _arrowPath.shift(at - const Offset(1, 1));
+      canvas
+        ..drawPath(path, _fills[peer.color & 3])
+        ..drawPath(path, _edge);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant RemotePeerCursorPainter oldDelegate) =>
+      !identical(oldDelegate.viewport, viewport) ||
+      !identical(oldDelegate.peerCursors, peerCursors);
+}
+
 /// Where the cursor is drawn, and as what: [shape]'s bitmap at [scale],
 /// its hotspot at [at], or with no shape the generic arrow.
 typedef RemoteCursorPaint = ({
@@ -271,16 +399,6 @@ class RemoteCursorPainter extends CustomPainter {
   final RemoteCursorPaint? Function() cursor;
 
   static const size = Size(18, 27);
-
-  static final _arrow = Path()
-    ..moveTo(1, 1)
-    ..lineTo(1, 20)
-    ..lineTo(6, 16)
-    ..lineTo(10, 25)
-    ..lineTo(14, 23)
-    ..lineTo(10, 15)
-    ..lineTo(17, 15)
-    ..close();
 
   static final _fill = Paint()..color = const Color(0xFF000000);
   static final _edge = Paint()
@@ -307,7 +425,7 @@ class RemoteCursorPainter extends CustomPainter {
       return;
     }
     // The arrow's tip is at (1, 1).
-    final path = _arrow.shift(what.at - const Offset(1, 1));
+    final path = _arrowPath.shift(what.at - const Offset(1, 1));
     canvas
       ..drawPath(path, _fill)
       ..drawPath(path, _edge);

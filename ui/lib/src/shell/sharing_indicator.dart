@@ -173,7 +173,7 @@ class _SharingIndicatorState extends State<SharingIndicator> {
     return ValueListenableBuilder(
       valueListenable: desktop.hostView,
       builder: (context, host, _) {
-        final viewer = host.viewer;
+        final viewer = host.activeViewer;
         _report(viewer != null);
         if (viewer == null) return const SizedBox.shrink();
         final label = sharingLabel(context, viewer);
@@ -401,7 +401,7 @@ class _SharingFallbackLayerState extends State<SharingFallbackLayer>
       widget.chrome.fallbackNeeded,
     ]),
     builder: (context, _) {
-      final viewer = widget.desktop.hostView.value.viewer;
+      final viewer = widget.desktop.hostView.value.activeViewer;
       if (viewer == null || !widget.chrome.fallbackNeeded.value) {
         return const SizedBox.shrink();
       }
