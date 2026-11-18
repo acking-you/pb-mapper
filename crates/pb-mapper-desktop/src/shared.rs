@@ -10,7 +10,9 @@ use crate::{
     idr::IdrPolicy,
     lane::InputLane,
     outgoing::Outgoing,
-    protocol::{DesktopKind, NoticeCode, SessionState, StateRecord},
+    protocol::{
+        DesktopKind, MAX_VIEWERS, NoticeCode, PeerColor, PeerSlot, SessionState, StateRecord,
+    },
     scheduler::Wake,
 };
 use std::{
@@ -49,6 +51,8 @@ impl Policy {
 pub(crate) struct SessionShared {
     /// Session start, for the host status's `since_ms`.
     pub epoch: Instant,
+    /// This viewer's slot in the shared room.
+    pub slot: PeerSlot,
     pub cancel: CancellationToken,
     pub policy: Arc<Policy>,
     pub auth: parking_lot::Mutex<AuthLedger>,
@@ -61,15 +65,38 @@ pub(crate) struct SessionShared {
     pub state: tokio::sync::watch::Sender<EngineState>,
     /// C to B-send: the newest pointer report.
     pub cursor: tokio::sync::watch::Sender<Option<CursorReport>>,
+    /// C to every B-send in the room: each controlling viewer's pointer.
+    pub peer_cursors: Arc<tokio::sync::watch::Sender<PeerCursorSnapshot>>,
     /// Wakes C's waiter.
     pub wake: Wake,
 }
 impl SessionShared {
+    #[cfg(test)]
     pub fn new(policy: Arc<Policy>, cancel: CancellationToken, targets: Targets) -> Self {
-        let wake = Wake::new();
+        Self::new_in_room(
+            PeerSlot::FIRST,
+            Wake::new(),
+            Arc::new(tokio::sync::watch::Sender::new(
+                PeerCursorSnapshot::default(),
+            )),
+            policy,
+            cancel,
+            targets,
+        )
+    }
+
+    pub fn new_in_room(
+        slot: PeerSlot,
+        wake: Wake,
+        peer_cursors: Arc<tokio::sync::watch::Sender<PeerCursorSnapshot>>,
+        policy: Arc<Policy>,
+        cancel: CancellationToken,
+        targets: Targets,
+    ) -> Self {
         let control_allowed = policy.allowed();
         Self {
             epoch: Instant::now(),
+            slot,
             cancel,
             policy,
             auth: parking_lot::Mutex::new(AuthLedger::new(EngineState::FIRST_GENERATION)),
@@ -79,9 +106,26 @@ impl SessionShared {
             targets,
             state: tokio::sync::watch::Sender::new(EngineState::connecting(control_allowed)),
             cursor: tokio::sync::watch::Sender::new(None),
+            peer_cursors,
             wake,
         }
     }
+}
+
+/// One controlling viewer's latest pointer in the room.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PeerCursorEntry {
+    pub seq: u64,
+    pub color: PeerColor,
+    pub x: i32,
+    pub y: i32,
+    pub visible: bool,
+}
+
+/// Every slot's pointer in the room, published lock-free from C to B-send.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PeerCursorSnapshot {
+    pub entries: [PeerCursorEntry; MAX_VIEWERS],
 }
 
 /// What the QoS controller asks of C, published after every change.

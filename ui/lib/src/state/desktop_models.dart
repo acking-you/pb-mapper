@@ -3,6 +3,7 @@
 // so a `ValueNotifier` holding it notifies only on a real change (D14).
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' show Offset;
 
 import 'package:flutter/foundation.dart';
 
@@ -717,6 +718,46 @@ class DesktopPicture {
   int get hashCode => Object.hash(textureId, aspectRatio, codec);
 }
 
+/// Another controlling viewer's pointer in host display pixels, as
+/// `PbDesktopViewV1` carries it.
+@immutable
+class DesktopPeerCursor {
+  const DesktopPeerCursor({
+    required this.color,
+    required this.x,
+    required this.y,
+  });
+
+  final int color, x, y;
+
+  @override
+  bool operator ==(Object other) =>
+      other is DesktopPeerCursor &&
+      other.color == color &&
+      other.x == x &&
+      other.y == y;
+  @override
+  int get hashCode => Object.hash(color, x, y);
+}
+
+/// Another controlling viewer's pointer normalised to `[0, 1]` on the
+/// active display.
+@immutable
+class PeerCursorPoint {
+  const PeerCursorPoint({required this.color, required this.position});
+
+  final int color;
+  final Offset position;
+
+  @override
+  bool operator ==(Object other) =>
+      other is PeerCursorPoint &&
+      other.color == color &&
+      other.position == position;
+  @override
+  int get hashCode => Object.hash(color, position);
+}
+
 /// The mirror of `PbDesktopViewV1`: read every rendered frame, never
 /// published through a notifier.
 @immutable
@@ -740,6 +781,8 @@ class DesktopView {
     this.secureDesktop = false,
     this.fresh = false,
     this.paused = false,
+    this.peerCursorSeq = 0,
+    this.peerCursors = const [],
   });
 
   /// `presented_age_ms` when nothing has been presented.
@@ -758,6 +801,8 @@ class DesktopView {
   final int state;
   final bool cursorVisible, controlling, controlAllowed, secureDesktop;
   final bool fresh, paused;
+  final int peerCursorSeq;
+  final List<DesktopPeerCursor> peerCursors;
 
   @override
   bool operator ==(Object other) =>
@@ -779,9 +824,11 @@ class DesktopView {
       other.controlAllowed == controlAllowed &&
       other.secureDesktop == secureDesktop &&
       other.fresh == fresh &&
-      other.paused == paused;
+      other.paused == paused &&
+      other.peerCursorSeq == peerCursorSeq &&
+      listEquals(other.peerCursors, peerCursors);
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
     generation,
     presentedFrameId,
     presentedAgeMs,
@@ -800,7 +847,9 @@ class DesktopView {
     secureDesktop,
     fresh,
     paused,
-  );
+    peerCursorSeq,
+    Object.hashAll(peerCursors),
+  ]);
 }
 
 /// What the host's pointer looks like: a shape the viewer's own OS has
@@ -1479,6 +1528,7 @@ class DesktopHostView {
     this.displayId,
     this.helper = DesktopHelperState.none,
     this.viewer,
+    this.viewers = const [],
     this.otherRelay,
     this.unsupportedReason,
     this.displayMode,
@@ -1526,6 +1576,19 @@ class DesktopHostView {
   final int? displayId;
   final DesktopHelperState helper;
   final DesktopHostViewer? viewer;
+  final List<DesktopHostViewer> viewers;
+
+  /// Active controller first, then active watcher, then paused.
+  DesktopHostViewer? get activeViewer {
+    if (viewers.isEmpty) return viewer;
+    for (final v in viewers) {
+      if (!v.paused && v.controlling) return v;
+    }
+    for (final v in viewers) {
+      if (!v.paused) return v;
+    }
+    return viewers.first;
+  }
 
   /// The relay this computer is shared or paused on, when the settings now
   /// name another relay or credential; null while it is where they publish.
@@ -1572,6 +1635,7 @@ class DesktopHostView {
       other.displayId == displayId &&
       other.helper == helper &&
       other.viewer == viewer &&
+      listEquals(other.viewers, viewers) &&
       other.otherRelay == otherRelay &&
       other.unsupportedReason == unsupportedReason &&
       other.displayMode == displayMode &&
@@ -1596,6 +1660,7 @@ class DesktopHostView {
     displayId,
     helper,
     viewer,
+    Object.hashAll(viewers),
     otherRelay,
     unsupportedReason,
     displayMode,

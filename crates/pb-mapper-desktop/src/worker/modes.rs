@@ -15,8 +15,16 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     /// owner's restore needs no control. A change is a new context at the
     /// next check, which follows at once: a new generation, an IDR, held
     /// input released, the encoder built at the new size.
-    pub(super) fn display_mode(&mut self, command: ModeCommand, now: Instant) {
-        let controls = self.state.record.controlling && self.allowed();
+    pub(super) fn display_mode(
+        &mut self,
+        requester: Option<usize>,
+        command: ModeCommand,
+        now: Instant,
+    ) {
+        let controls = requester
+            .and_then(|idx| self.slots[idx].as_ref())
+            .is_some_and(|slot| slot.state.record.controlling)
+            && self.allowed();
         let refused = if command != ModeCommand::HostRestore && !controls {
             Some("control of the remote computer is needed to change its resolution")
         } else if self
@@ -27,8 +35,6 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             Some("the remote resolution cannot change while the secure desktop shows")
         } else if let ModeCommand::Set(mode) = command
             && !self
-                .state
-                .record
                 .modes
                 .as_ref()
                 .is_some_and(|modes| modes.supported.contains(&mode))
@@ -40,7 +46,12 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             None
         };
         if let Some(refused) = refused {
-            return self.notice(NoticeCode::DisplayModeFailed, refused.into(), now);
+            return match requester {
+                Some(idx) => {
+                    self.notice_slot(idx, NoticeCode::DisplayModeFailed, refused.into(), now)
+                }
+                None => self.notice_all(NoticeCode::DisplayModeFailed, refused.into(), now),
+            };
         }
         let Some(context) = self.context.clone() else {
             return;
@@ -54,7 +65,12 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             Err(failure) if link_lost(&failure) => {
                 self.fatal = Some(failure);
             }
-            Err(failure) => self.notice(NoticeCode::DisplayModeFailed, failure.to_string(), now),
+            Err(failure) => match requester {
+                Some(idx) => {
+                    self.notice_slot(idx, NoticeCode::DisplayModeFailed, failure.to_string(), now)
+                }
+                None => self.notice_all(NoticeCode::DisplayModeFailed, failure.to_string(), now),
+            },
         }
     }
 
@@ -90,7 +106,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
 
     /// The display's modes as the backend reads them now.
     pub(super) fn read_modes(&mut self, context: &DesktopContext) {
-        self.state.record.modes = match self.backend.display_modes(context) {
+        let modes = match self.backend.display_modes(context) {
             Ok(modes) => modes.filter(ModeList::valid),
             Err(failure) => {
                 tracing::debug!(
@@ -101,5 +117,9 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 None
             }
         };
+        self.modes = modes.clone();
+        for slot in self.slots.iter_mut().flatten() {
+            slot.state.record.modes = modes.clone();
+        }
     }
 }

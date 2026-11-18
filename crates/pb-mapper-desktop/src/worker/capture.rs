@@ -5,10 +5,11 @@ use super::{
     capture_consent_ended, link_lost,
 };
 use crate::{
-    Backend, EncodedFrame, FailureKind, Result, VideoCodec, VideoRate, error, failure_kind,
+    Backend, EncodedFrame, FailureKind, Result, VideoCodec, VideoLimits, VideoRate, error,
+    failure_kind,
     idr::IdrReason,
-    outgoing::{HostUnit, Push},
-    protocol::{StateReason, VideoSize},
+    outgoing::{FrameBytes, HostUnit, Push},
+    protocol::{MAX_VIEWERS, StateReason, VideoSize},
 };
 use std::{
     io,
@@ -47,7 +48,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
         if self.context.is_some() || recovered {
             if changed && self.context.is_some() {
-                self.invalidate();
+                self.invalidate_all();
             }
             self.keyframe = true;
             if let Err(failure) = self
@@ -63,8 +64,11 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             // change reaches the viewer too.
             self.read_modes(&context);
         }
-        self.state.record.display = Some(context.display.clone());
-        self.state.record.desktop = context.desktop;
+        for slot in self.slots.iter_mut().flatten() {
+            slot.state.record.display = Some(context.display.clone());
+            slot.state.record.desktop = context.desktop;
+            slot.streaming = false;
+        }
         self.context = Some(context);
         self.unavailable = None;
         self.streaming = false;
@@ -100,7 +104,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             return;
         }
         self.context_due = if self.unavailable.is_none() && self.streaming {
-            self.invalidate();
+            self.invalidate_all();
             now
         } else {
             now + UNAVAILABLE_RETRY
@@ -114,9 +118,12 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         self.unavailable = Some((reason, failure.to_string()));
     }
 
-    /// Capturing, not paused, with a frame produced in this generation.
-    pub(super) fn live(&self) -> bool {
-        !self.paused && self.unavailable.is_none() && self.streaming
+    /// Capturing, not paused, with a frame produced for `idx` in this generation.
+    pub(super) fn slot_live(&self, idx: usize) -> bool {
+        self.unavailable.is_none()
+            && self.slots[idx]
+                .as_ref()
+                .is_some_and(|slot| !slot.paused && slot.streaming)
     }
 
     /// When to poll the encoder again after `at`. A push source wakes thread
@@ -128,9 +135,49 @@ impl<B: Backend, K: Clock> Engine<B, K> {
 
     /// At most one backend capture or drain call.
     pub(super) fn capture_step(&mut self, now: Instant) {
-        let shared = self.shared.clone();
-        let targets = &shared.targets;
-        if targets.paused.load(Ordering::Acquire) {
+        let mut any_unpaused = false;
+        let mut desired_limits: Option<VideoLimits> = None;
+        let mut pace_fps = 1u32;
+        let mut encoder_bps = u32::MAX;
+        for idx in 0..MAX_VIEWERS {
+            let Some(paused) = self.slots[idx]
+                .as_ref()
+                .map(|slot| slot.shared.targets.paused.load(Ordering::Acquire))
+            else {
+                continue;
+            };
+            if paused {
+                if let Some(slot) = &mut self.slots[idx] {
+                    slot.paused = true;
+                    slot.state.dropped_frames += slot.shared.outgoing.clear() as u64;
+                }
+                self.hide_peer_cursor(idx);
+            } else if let Some(slot) = &mut self.slots[idx] {
+                if slot.paused {
+                    slot.paused = false;
+                    self.keyframe = true;
+                }
+                any_unpaused = true;
+                desired_limits = Some(match desired_limits {
+                    None => slot.limits,
+                    Some(cur) => VideoLimits {
+                        max_width: cur.max_width.min(slot.limits.max_width),
+                        max_height: cur.max_height.min(slot.limits.max_height),
+                        max_fps: cur.max_fps.max(slot.limits.max_fps),
+                    },
+                });
+                pace_fps =
+                    pace_fps.max(slot.shared.targets.pace_fps.load(Ordering::Acquire).max(1));
+                encoder_bps =
+                    encoder_bps.min(slot.shared.targets.encoder_bps.load(Ordering::Acquire));
+            }
+        }
+        self.cursor_shapes = self
+            .slots
+            .iter()
+            .flatten()
+            .any(|slot| !slot.paused && slot.cursor_shapes);
+        if !any_unpaused {
             // Never send while paused, and resume with an IDR.
             self.paused = true;
             if self.backend.pending_video() > 0
@@ -141,13 +188,14 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 match result {
                     Ok(Some(frame)) => {
                         self.window.dwell(frame.format.encode_us);
-                        self.state.dropped_frames += 1;
+                        for slot in self.slots.iter_mut().flatten() {
+                            slot.state.dropped_frames += 1;
+                        }
                     }
                     Ok(None) => {}
                     Err(failure) => self.fail(failure, now),
                 }
             }
-            self.state.dropped_frames += self.shared.outgoing.clear() as u64;
             self.keyframe = true;
             return;
         }
@@ -158,24 +206,47 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if retry && now < self.context_due {
             return;
         }
+        let limits_changed = desired_limits.filter(|limits| *limits != self.limits);
+        if let Some(limits) = limits_changed {
+            self.limits = limits;
+            self.keyframe = true;
+            if self.context.is_some()
+                && !retry
+                && let Err(failure) = self
+                    .backend
+                    .configure_video(self.limits, self.limits.max_fps)
+            {
+                self.fail(failure, now);
+                return;
+            }
+        }
         if self.check_due(now) && !self.geometry(now) {
             return;
         }
         let Some(context) = &self.context else {
             return;
         };
-        let pace_fps = targets.pace_fps.load(Ordering::Acquire).max(1);
         if pace_fps != self.pace_fps {
             self.pace_fps = pace_fps;
             self.pacer.set_pace(pace_fps, now);
         }
         if retry || self.pacer.due(now) {
-            if self.shared.outgoing.len() < TRANSPORT_GATE
-                && self.backend.pending_video() < ENCODER_DEPTH
-            {
-                let keyframe = self.keyframe || self.shared.idr.lock().take_due(now);
+            let can_deliver = self
+                .slots
+                .iter()
+                .flatten()
+                .any(|slot| !slot.paused && slot.shared.outgoing.len() < TRANSPORT_GATE);
+            if can_deliver && self.backend.pending_video() < ENCODER_DEPTH {
+                let keyframe = self
+                    .slots
+                    .iter()
+                    .flatten()
+                    .filter(|slot| !slot.paused)
+                    .fold(self.keyframe, |due, slot| {
+                        due | slot.shared.idr.lock().take_due(now)
+                    });
                 let rate = VideoRate {
-                    bitrate: targets.encoder_bps.load(Ordering::Acquire),
+                    bitrate: encoder_bps,
                     pace_fps,
                 };
                 let result = self
@@ -185,7 +256,9 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                     // Handed over: an IDR still in the encoder at the next
                     // tick must not be asked for again.
                     self.keyframe = false;
-                    self.shared.idr.lock().answered(now);
+                    for slot in self.slots.iter().flatten().filter(|slot| !slot.paused) {
+                        slot.shared.idr.lock().answered(now);
+                    }
                 }
                 let done = self.clock.now();
                 self.drain_due = self.drain_after(done);
@@ -193,7 +266,9 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             } else {
                 // Transport backpressure or a full encoder, never
                 // presentation: skip the tick.
-                self.state.skipped_ticks += 1;
+                for slot in self.slots.iter_mut().flatten().filter(|slot| !slot.paused) {
+                    slot.state.skipped_ticks += 1;
+                }
             }
             self.pacer.consume(now);
         } else if self.backend.pending_video() > 0 {
@@ -227,39 +302,79 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         };
         let format = frame.format;
         self.window.dwell(format.encode_us);
-        if format.keyframe {
-            self.shared.idr.lock().answered(at);
-        }
         self.frame_id += 1;
-        self.shared.auth.lock().on_produced(self.frame_id, at);
         if !format.duplicate {
             self.window.unique += 1;
         }
-        self.state.record.video = Some(VideoSize {
+        let video = VideoSize {
             width: format.width,
             height: format.height,
-        });
-        self.state.gop = format.gop;
+        };
+        self.video = Some(video);
+        self.gop = format.gop;
         self.streaming = true;
-        // B-send writes the `State` of a generation before its first unit:
-        // publish it before the unit can be taken.
-        self.publish();
-        let pushed = self.shared.outgoing.push(HostUnit {
-            generation: self.state.record.generation,
-            frame_id: self.frame_id,
-            codec: format.codec,
-            width: format.width,
-            height: format.height,
-            keyframe: format.keyframe,
-            duplicate: format.duplicate,
-            pts_us: format.pts_us,
-            encode_us: format.encode_us,
-            ready_at: at,
-            bytes: bytes::Bytes::from(frame.bytes),
-        });
-        if let Push::Overflow { dropped } = pushed {
-            self.state.dropped_frames += dropped as u64;
-            self.shared.idr.lock().request(IdrReason::HostResync);
+        let active_count = self
+            .slots
+            .iter()
+            .flatten()
+            .filter(|slot| !slot.paused)
+            .count();
+        if active_count == 0 {
+            return;
+        }
+        enum Fanout {
+            Single(Option<Vec<u8>>),
+            Shared(bytes::Bytes),
+        }
+        let mut fanout = if active_count == 1 {
+            Fanout::Single(Some(frame.bytes))
+        } else {
+            Fanout::Shared(bytes::Bytes::from(frame.bytes))
+        };
+        for idx in 0..MAX_VIEWERS {
+            let Some(slot) = &mut self.slots[idx] else {
+                continue;
+            };
+            if slot.paused {
+                continue;
+            }
+            if format.keyframe {
+                slot.shared.idr.lock().answered(at);
+            }
+            slot.shared.auth.lock().on_produced(self.frame_id, at);
+            slot.state.record.video = Some(video);
+            slot.state.gop = format.gop;
+            slot.streaming = true;
+            // B-send writes the `State` of a generation before its first unit:
+            // publish it before the unit can be taken.
+            self.publish_slot(idx);
+            let Some(slot) = &mut self.slots[idx] else {
+                continue;
+            };
+            let unit_bytes = match &mut fanout {
+                Fanout::Single(owned) => match owned.take() {
+                    Some(vec) => FrameBytes::Owned(vec),
+                    None => continue,
+                },
+                Fanout::Shared(bytes) => FrameBytes::Shared(bytes.clone()),
+            };
+            let pushed = slot.shared.outgoing.push(HostUnit {
+                generation: slot.state.record.generation,
+                frame_id: self.frame_id,
+                codec: format.codec,
+                width: format.width,
+                height: format.height,
+                keyframe: format.keyframe,
+                duplicate: format.duplicate,
+                pts_us: format.pts_us,
+                encode_us: format.encode_us,
+                ready_at: at,
+                bytes: unit_bytes,
+            });
+            if let Push::Overflow { dropped } = pushed {
+                slot.state.dropped_frames += dropped as u64;
+                slot.shared.idr.lock().request(IdrReason::HostResync);
+            }
         }
     }
 }

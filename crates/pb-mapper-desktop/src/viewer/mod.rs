@@ -41,8 +41,9 @@ use crate::{
     error,
     modes::{DisplayModeError, Mode, ModeList, ModeTarget},
     protocol::{
-        CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE, CAPABILITY_PHYSICAL_KEYS, CURSOR_SLOTS,
-        DesktopKind, NoticeCode, Route, SessionState, ShapeSlot, StateRecord, VideoSize,
+        CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE, CAPABILITY_PEER_CURSORS,
+        CAPABILITY_PHYSICAL_KEYS, CURSOR_SLOTS, DesktopKind, MAX_PEER_CURSORS, MAX_VIEWERS,
+        NoticeCode, Route, SessionState, ShapeSlot, StateRecord, VideoSize,
     },
     security, valid_service,
 };
@@ -177,6 +178,7 @@ struct ViewerShared {
     state: Mutex<ViewerStateSlot>,
     stats: Mutex<ViewerStatsAcc>,
     cursor: Mutex<CursorSlot>,
+    peer_cursors: Mutex<PeerCursorsSlot>,
     /// Taken apart from the others, never while one is held.
     shapes: Mutex<ShapeTable>,
     outbound: Outbound,
@@ -223,6 +225,21 @@ impl CursorSlot {
                 .zip(self.moved)
                 .is_some_and(|(taken, moved)| moved.0 == generation && taken < moved.1)
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct PeerCursorEntry {
+    generation: u64,
+    color: u8,
+    x: i32,
+    y: i32,
+    visible: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct PeerCursorsSlot {
+    seq: u64,
+    peers: [PeerCursorEntry; MAX_VIEWERS],
 }
 
 /// The pointer shapes the host defined, one per slot, each with the number
@@ -391,6 +408,10 @@ impl Viewer {
             .capabilities
             .iter()
             .any(|capability| capability == CAPABILITY_CURSOR_SHAPE);
+        let peer_cursors = accepted
+            .capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_PEER_CURSORS);
         let shared = Arc::new(ViewerShared {
             state: Mutex::new(ViewerStateSlot {
                 codec: accepted.codec,
@@ -409,6 +430,7 @@ impl Viewer {
             }),
             stats: Mutex::new(ViewerStatsAcc::new(now, config.limits.max_fps)),
             cursor: Mutex::new(CursorSlot::default()),
+            peer_cursors: Mutex::new(PeerCursorsSlot::default()),
             shapes: Mutex::new(ShapeTable::default()),
             outbound: Outbound::new(),
         });
@@ -428,6 +450,7 @@ impl Viewer {
                 codec: accepted.codec,
                 limits: config.limits,
                 cursor_shapes,
+                peer_cursors,
             },
         ));
         Ok(Self {
@@ -575,6 +598,7 @@ impl Viewer {
         let now = Instant::now();
         let presented = self.sink.presented();
         let cursor = *self.shared.cursor.lock();
+        let peer_cursors = *self.shared.peer_cursors.lock();
         let state = self.shared.state.lock();
         let generation = state.generation();
         let host = state.host.as_ref();
@@ -585,6 +609,21 @@ impl Viewer {
         let cursor_visible = cursor.visible && cursor.generation == generation;
         let flag = |set: bool, bit: u8| if set { bit } else { 0 };
         let current = presented.filter(|presented| presented.generation == generation);
+        let mut peer_x = [0i32; MAX_PEER_CURSORS];
+        let mut peer_y = [0i32; MAX_PEER_CURSORS];
+        let mut peer_color = [0u8; MAX_PEER_CURSORS];
+        let mut peer_count = 0usize;
+        if !state.paused {
+            for entry in peer_cursors.peers {
+                if entry.visible && entry.generation == generation && peer_count < MAX_PEER_CURSORS
+                {
+                    peer_x[peer_count] = entry.x;
+                    peer_y[peer_count] = entry.y;
+                    peer_color[peer_count] = entry.color;
+                    peer_count += 1;
+                }
+            }
+        }
         DesktopView {
             generation,
             presented_frame_id: current.map_or(0, |presented| presented.frame_id),
@@ -612,6 +651,11 @@ impl Viewer {
                 )
                 | flag(fresh, DesktopView::FLAG_FRESH)
                 | flag(state.paused, DesktopView::FLAG_PAUSED),
+            peer_cursor_seq: peer_cursors.seq,
+            peer_x,
+            peer_y,
+            peer_count: peer_count as u8,
+            peer_color,
         }
     }
 

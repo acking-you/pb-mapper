@@ -6,10 +6,11 @@ use crate::{
     idr::IdrReason,
     outgoing::OUTGOING_MAX_AGE,
     protocol::{
-        HostMessage, NoticeCode, ShapeRecord, StateReason, StateRecord, StatsRecord, StopReason,
+        HostMessage, MAX_VIEWERS, NoticeCode, PeerSlot, ShapeRecord, StateReason, StateRecord,
+        StatsRecord, StopReason,
     },
     qos::QOS_TICK,
-    shared::{CursorReport, EngineState},
+    shared::{CursorReport, EngineState, PeerCursorSnapshot},
     wire::{self, MAX_PAYLOAD},
 };
 use pb_mapper_core::time::saturating_micros;
@@ -80,11 +81,14 @@ pub(super) struct Sender<'a, W> {
     /// differs.
     engine: EngineState,
     cursor: watch::Receiver<Option<CursorReport>>,
+    peer_cursors: watch::Receiver<PeerCursorSnapshot>,
     /// The engine state last written as `State`.
     written: Option<StateRecord>,
     notice_serial: u64,
     /// The last cursor report written, or dropped as stale.
     cursor_serial: u64,
+    peer_cursor_seq: [u64; MAX_VIEWERS],
+    peer_cursor_generation: u64,
     /// The shapes the viewer's slots hold.
     shapes: ShapeSlots,
     next_tick: Instant,
@@ -105,9 +109,12 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             state,
             engine,
             cursor: session.shared.cursor.subscribe(),
+            peer_cursors: session.shared.peer_cursors.subscribe(),
             written: None,
             notice_serial: 0,
             cursor_serial: 0,
+            peer_cursor_seq: [0; MAX_VIEWERS],
+            peer_cursor_generation: 0,
             shapes: ShapeSlots::default(),
             next_tick: now + QOS_TICK,
             next_stats: now + STATS_INTERVAL,
@@ -188,6 +195,9 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         // Paused: no cursor and no video, while probes, state and stats go on.
         if !self.session.shared.targets.paused.load(Ordering::Acquire) {
             self.cursor().await?;
+            if self.session.peer_cursors {
+                self.write_peer_cursors().await?;
+            }
             if self.video().await? {
                 wake_at = wake_at.min(Instant::now() + CREDIT_RECHECK);
             }
@@ -197,13 +207,24 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
 
     async fn wait(&mut self, wake_at: Instant) {
         let session = self.session;
+        let paused = session.shared.targets.paused.load(Ordering::Acquire);
+        let peer_enabled = session.peer_cursors && !paused && self.written.is_some();
+        let own = session.shared.slot.index();
+        let seen = self.peer_cursor_seq;
         tokio::select! {
             biased;
             () = session.shared.cancel.cancelled() => {}
             () = session.shared.outgoing.notified() => {}
             () = session.credit_changed.notified() => {}
             _ = self.state.changed() => {}
-            _ = self.cursor.changed() => {}
+            _ = self.cursor.changed(), if !paused => {}
+            _ = self.peer_cursors.wait_for(|snapshot| {
+                snapshot
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .any(|(index, entry)| index != own && entry.seq > seen[index])
+            }), if peer_enabled => {}
             () = tokio::time::sleep_until(wake_at.into()) => {}
         }
     }
@@ -324,6 +345,48 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             shape,
         };
         self.send(&message, None).await
+    }
+
+    /// Write every other controlling viewer's newest pointer immediately.
+    /// Waits for `State`, skips this viewer's own slot, and re-announces
+    /// visible peer cursors when this viewer's generation advances.
+    async fn write_peer_cursors(&mut self) -> Result<(), Abandoned> {
+        let stated = self
+            .written
+            .as_ref()
+            .map_or(0, |written| written.generation);
+        if stated == 0 {
+            return Ok(());
+        }
+        let generation_changed = stated != self.peer_cursor_generation;
+        if generation_changed {
+            self.peer_cursor_generation = stated;
+            self.peer_cursor_seq = [0; MAX_VIEWERS];
+        }
+        let snapshot = *self.peer_cursors.borrow_and_update();
+        let own = self.session.shared.slot.index();
+        for (index, entry) in snapshot.entries.into_iter().enumerate() {
+            if index == own || entry.seq <= self.peer_cursor_seq[index] {
+                continue;
+            }
+            self.peer_cursor_seq[index] = entry.seq;
+            if generation_changed && !entry.visible {
+                continue;
+            }
+            let Some(peer) = PeerSlot::new(index) else {
+                continue;
+            };
+            let message = HostMessage::PeerCursor {
+                generation: stated,
+                peer,
+                color: entry.color,
+                x: entry.x,
+                y: entry.y,
+                visible: entry.visible,
+            };
+            self.send(&message, None).await?;
+        }
+        Ok(())
     }
 
     /// Write every unit credit admits. Returns whether the head waits for

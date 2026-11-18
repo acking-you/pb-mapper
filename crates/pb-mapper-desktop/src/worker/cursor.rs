@@ -3,6 +3,7 @@
 use super::{Clock, Engine, link_lost};
 use crate::{
     Backend, CursorShape,
+    protocol::MAX_VIEWERS,
     shared::{CursorReport, CursorUpdate},
 };
 use std::time::{Duration, Instant};
@@ -37,7 +38,14 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         match shape {
             Some(Ok(Some(shape))) => {
                 let (kind, width, height) = (shape.kind(), shape.width(), shape.height());
-                if self.cursor.reshape(shape) {
+                self.cursor_shape = Some(shape.clone());
+                let mut logged = false;
+                for slot in self.slots.iter_mut().flatten() {
+                    if slot.cursor_shapes && slot.cursor.reshape(shape.clone()) {
+                        logged = true;
+                    }
+                }
+                if logged {
                     tracing::debug!(
                         target: "pb_mapper_desktop::session",
                         event = "desktop_cursor_shape",
@@ -55,15 +63,58 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             ),
             Some(Ok(None)) | None => {}
         }
-        let cursor = position.map(|position| CursorUpdate {
-            generation: self.state.record.generation,
-            x: position.x,
-            y: position.y,
-            visible: position.visible,
-            shape: self.cursor.shape_serial,
-        });
-        if let Some(report) = self.cursor.sample(cursor, self.sequence) {
-            self.shared.cursor.send_replace(Some(report));
+        let mover_moved = std::mem::replace(&mut self.mover_moved_since_sample, false);
+        let owner_slot = match (self.last_pointer_owner, position) {
+            (Some((mover, mx, my)), Some(pos)) if pos.visible => {
+                let at = (u32::try_from(pos.x).ok(), u32::try_from(pos.y).ok());
+                if at == (Some(mx), Some(my)) {
+                    Some(mover)
+                } else if mover_moved {
+                    // OS clamped the mover's injection; update both owner and peer cursor.
+                    if let (Some(cx), Some(cy)) = at {
+                        self.last_pointer_owner = Some((mover, cx, cy));
+                        if let Some(slot) = &mut self.slots[mover.index()] {
+                            slot.pointer = Some((cx, cy));
+                        }
+                    }
+                    self.publish_peer_cursor(mover.index(), pos.x, pos.y);
+                    Some(mover)
+                } else {
+                    // Physical host pointer moved independently.
+                    self.last_pointer_owner = None;
+                    None
+                }
+            }
+            _ => {
+                if !mover_moved {
+                    self.last_pointer_owner = None;
+                }
+                None
+            }
+        };
+        for idx in 0..MAX_VIEWERS {
+            let Some(slot) = &mut self.slots[idx] else {
+                continue;
+            };
+            if slot.paused {
+                continue;
+            }
+            // When another controller moved the OS cursor, viewers that render
+            // colored peer cursors keep their own cursor independent rather
+            // than stacking a duplicate OS cursor on top of the peer cursor.
+            if slot.peer_cursors && owner_slot.is_some_and(|mover| mover != slot.slot) {
+                continue;
+            }
+            let cursor = position.map(|position| CursorUpdate {
+                generation: slot.state.record.generation,
+                x: position.x,
+                y: position.y,
+                visible: position.visible,
+                shape: slot.cursor.shape_serial,
+            });
+            if let Some(report) = slot.cursor.sample(cursor, slot.sequence) {
+                slot.shared.cursor.send_replace(Some(report));
+            }
         }
     }
 }

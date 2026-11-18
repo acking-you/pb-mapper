@@ -1,12 +1,20 @@
 //! Thread C's one-second statistics window.
 
-use crate::shared::{EngineState, InputWaitStats};
+use crate::shared::InputWaitStats;
 use std::time::{Duration, Instant};
 
 /// The window of the published capture rate and input wait.
 const STATS_WINDOW: Duration = Duration::from_secs(1);
 /// Input wait samples kept per window; the maximum is exact beyond it.
 const WAIT_SAMPLES: usize = 4096;
+
+/// Rolled one-second figures shared across active slots in the room.
+#[derive(Clone, Copy, Default)]
+pub(super) struct WindowStats {
+    pub capture_fps: f32,
+    pub encoder_dwell: Option<Duration>,
+    pub input_wait: InputWaitStats,
+}
 
 /// The published one-second rates: unique captures, input wait and the
 /// encoder's dwell.
@@ -47,14 +55,14 @@ impl Window {
         }
     }
 
-    pub(super) fn roll(&mut self, now: Instant, state: &mut EngineState) {
+    pub(super) fn roll(&mut self, now: Instant) -> Option<WindowStats> {
         let elapsed = now.saturating_duration_since(self.started);
         if elapsed < STATS_WINDOW {
-            return;
+            return None;
         }
-        state.capture_fps = self.unique as f32 / elapsed.as_secs_f32();
+        let capture_fps = self.unique as f32 / elapsed.as_secs_f32();
         let middle = self.dwells.len() / 2;
-        state.encoder_dwell =
+        let encoder_dwell =
             (!self.dwells.is_empty()).then(|| *self.dwells.select_nth_unstable(middle).1);
         self.waits.sort_unstable();
         let at = |quantile: usize| {
@@ -63,7 +71,7 @@ impl Window {
                 .copied()
                 .unwrap_or(0)
         };
-        state.input_wait = InputWaitStats {
+        let input_wait = InputWaitStats {
             p50_us: at(50),
             p99_us: at(99),
             max_us: self.max_wait,
@@ -81,5 +89,10 @@ impl Window {
         waits.clear();
         *max_wait = 0;
         dwells.clear();
+        Some(WindowStats {
+            capture_fps,
+            encoder_dwell,
+            input_wait,
+        })
     }
 }

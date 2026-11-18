@@ -94,6 +94,7 @@ class DesktopHostStatus {
     this.message = '',
     this.controlAllowed = false,
     this.viewer,
+    this.viewers = const [],
     this.display,
     this.desktop = 'ordinary',
     this.capabilities = const [],
@@ -109,31 +110,44 @@ class DesktopHostStatus {
     String? invitation,
     String? server,
     bool matchesRelay = true,
-  }) => DesktopHostStatus(
-    state: status['state'] as String? ?? 'waiting',
-    reason: status['reason'] as String?,
-    message: status['message'] as String? ?? '',
-    controlAllowed: status['control_allowed'] == true,
-    viewer: status['viewer'] is Map
+  }) {
+    final primary = status['viewer'] is Map
         ? DesktopHostViewer.fromJson(
             Map<String, dynamic>.from(status['viewer'] as Map),
           )
-        : null,
-    display: status['display'] is Map
-        ? DesktopDisplay.fromJson(
-            Map<String, dynamic>.from(status['display'] as Map),
-          )
-        : null,
-    desktop: status['desktop'] as String? ?? 'ordinary',
-    capabilities: [
-      for (final c in status['capabilities'] as List? ?? const []) c as String,
-    ],
-    service: service,
-    invitation: invitation,
-    server: server,
-    displayMode: DisplayModeList.fromJson(status['display_mode']),
-    matchesRelay: matchesRelay,
-  );
+        : null;
+    final rawViewers = status['viewers'];
+    final viewers = rawViewers is List
+        ? [
+            for (final v in rawViewers)
+              if (v is Map)
+                DesktopHostViewer.fromJson(Map<String, dynamic>.from(v)),
+          ]
+        : (primary != null ? [primary] : const <DesktopHostViewer>[]);
+    return DesktopHostStatus(
+      state: status['state'] as String? ?? 'waiting',
+      reason: status['reason'] as String?,
+      message: status['message'] as String? ?? '',
+      controlAllowed: status['control_allowed'] == true,
+      viewer: primary ?? (viewers.isNotEmpty ? viewers.first : null),
+      viewers: viewers,
+      display: status['display'] is Map
+          ? DesktopDisplay.fromJson(
+              Map<String, dynamic>.from(status['display'] as Map),
+            )
+          : null,
+      desktop: status['desktop'] as String? ?? 'ordinary',
+      capabilities: [
+        for (final c in status['capabilities'] as List? ?? const [])
+          c as String,
+      ],
+      service: service,
+      invitation: invitation,
+      server: server,
+      displayMode: DisplayModeList.fromJson(status['display_mode']),
+      matchesRelay: matchesRelay,
+    );
+  }
 
   /// `waiting`, `connecting`, `streaming`, `paused`, `capture_unavailable`
   /// or `stopped`.
@@ -142,6 +156,7 @@ class DesktopHostStatus {
   final String message;
   final bool controlAllowed;
   final DesktopHostViewer? viewer;
+  final List<DesktopHostViewer> viewers;
   final DesktopDisplay? display;
   final String desktop;
   final List<String> capabilities;
@@ -161,24 +176,34 @@ class DesktopHostStatus {
   DesktopHostStatus copyWith({
     bool? controlAllowed,
     DesktopHostViewer? Function()? viewer,
+    List<DesktopHostViewer>? viewers,
     DesktopDisplay? display,
     String? service,
     String? invitation,
-  }) => DesktopHostStatus(
-    state: state,
-    reason: reason,
-    message: message,
-    controlAllowed: controlAllowed ?? this.controlAllowed,
-    viewer: viewer == null ? this.viewer : viewer(),
-    display: display ?? this.display,
-    desktop: desktop,
-    capabilities: capabilities,
-    service: service ?? this.service,
-    invitation: invitation ?? this.invitation,
-    server: server,
-    displayMode: displayMode,
-    matchesRelay: matchesRelay,
-  );
+  }) {
+    final nextViewer = viewer == null ? this.viewer : viewer();
+    final nextViewers =
+        viewers ??
+        (viewer == null
+            ? this.viewers
+            : (nextViewer == null ? const [] : [nextViewer]));
+    return DesktopHostStatus(
+      state: state,
+      reason: reason,
+      message: message,
+      controlAllowed: controlAllowed ?? this.controlAllowed,
+      viewer: nextViewer,
+      viewers: nextViewers,
+      display: display ?? this.display,
+      desktop: desktop,
+      capabilities: capabilities,
+      service: service ?? this.service,
+      invitation: invitation ?? this.invitation,
+      server: server,
+      displayMode: displayMode,
+      matchesRelay: matchesRelay,
+    );
+  }
 }
 
 /// The Windows background service's hosting, as it last reported it.
@@ -977,6 +1002,22 @@ class DesktopApi implements DesktopApiClient {
 DesktopView desktopViewFromLeaf(PbDesktopViewV1 leaf) {
   final flags = leaf.flags;
   bool flag(int bit) => flags & (1 << bit) != 0;
+  final count = leaf.peerCount.clamp(0, 3);
+  final peerCursors = switch (count) {
+    0 => const <DesktopPeerCursor>[],
+    1 => [
+      DesktopPeerCursor(color: leaf.peerColor0, x: leaf.peerX0, y: leaf.peerY0),
+    ],
+    2 => [
+      DesktopPeerCursor(color: leaf.peerColor0, x: leaf.peerX0, y: leaf.peerY0),
+      DesktopPeerCursor(color: leaf.peerColor1, x: leaf.peerX1, y: leaf.peerY1),
+    ],
+    _ => [
+      DesktopPeerCursor(color: leaf.peerColor0, x: leaf.peerX0, y: leaf.peerY0),
+      DesktopPeerCursor(color: leaf.peerColor1, x: leaf.peerX1, y: leaf.peerY1),
+      DesktopPeerCursor(color: leaf.peerColor2, x: leaf.peerX2, y: leaf.peerY2),
+    ],
+  };
   return DesktopView(
     generation: leaf.generation,
     presentedFrameId: leaf.presentedFrameId,
@@ -996,5 +1037,7 @@ DesktopView desktopViewFromLeaf(PbDesktopViewV1 leaf) {
     secureDesktop: flag(3),
     fresh: flag(4),
     paused: flag(5),
+    peerCursorSeq: leaf.peerCursorSeq,
+    peerCursors: peerCursors,
   );
 }

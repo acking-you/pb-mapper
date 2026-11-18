@@ -690,6 +690,16 @@ pub struct PbDesktopViewV1 {
     /// The pointer's shape, which the `cursor_shape` hot op resolves; a new
     /// definition, a new number. 0: none, so the generic arrow.
     pub cursor_shape: u16,
+    /// Advances with every peer-cursor change.
+    pub peer_cursor_seq: u64,
+    /// Physical pixels of up to 3 other controlling viewers' pointers.
+    pub peer_x: [i32; 3],
+    pub peer_y: [i32; 3],
+    /// Active entries in `peer_x`/`peer_y`/`peer_color` (`0..=3`).
+    pub peer_count: u8,
+    /// Palette index (`0..4`) for each active peer cursor.
+    pub peer_color: [u8; 3],
+    pub reserved: u32,
 }
 // The layout of perf 7.4, field by field: `From` fills it by name, so a
 // same-size reorder would otherwise compile. desktop_ffi_test.dart pins Dart's
@@ -697,7 +707,7 @@ pub struct PbDesktopViewV1 {
 const _: () = {
     use std::mem::offset_of;
     type V = PbDesktopViewV1;
-    assert!(size_of::<V>() == 56 && align_of::<V>() == 8);
+    assert!(size_of::<V>() == 96 && align_of::<V>() == 8);
     assert!(offset_of!(V, generation) == 0);
     assert!(offset_of!(V, presented_frame_id) == 8);
     assert!(offset_of!(V, cursor_seq) == 16);
@@ -711,6 +721,12 @@ const _: () = {
     assert!(offset_of!(V, state) == 52);
     assert!(offset_of!(V, flags) == 53);
     assert!(offset_of!(V, cursor_shape) == 54);
+    assert!(offset_of!(V, peer_cursor_seq) == 56);
+    assert!(offset_of!(V, peer_x) == 64);
+    assert!(offset_of!(V, peer_y) == 76);
+    assert!(offset_of!(V, peer_count) == 88);
+    assert!(offset_of!(V, peer_color) == 89);
+    assert!(offset_of!(V, reserved) == 92);
 };
 
 impl From<DesktopView> for PbDesktopViewV1 {
@@ -730,6 +746,12 @@ impl From<DesktopView> for PbDesktopViewV1 {
             state: view.state,
             flags: view.flags,
             cursor_shape: view.cursor_shape,
+            peer_cursor_seq: view.peer_cursor_seq,
+            peer_x: view.peer_x,
+            peer_y: view.peer_y,
+            peer_count: view.peer_count,
+            peer_color: view.peer_color,
+            reserved: 0,
         }
     }
 }

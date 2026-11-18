@@ -13,6 +13,19 @@ pub(crate) enum Pressed {
     /// A physical key, by its USB HID usage (`Input::PhysicalKey`).
     Physical(u16),
 }
+impl Pressed {
+    pub(crate) fn into_release_input(self) -> crate::Input {
+        match self {
+            Self::Button(button) => crate::Input::Button {
+                button,
+                down: false,
+                drag_start: false,
+            },
+            Self::Key(key) => crate::Input::Key { key, down: false },
+            Self::Physical(usage) => crate::Input::PhysicalKey { usage, down: false },
+        }
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct Held {
@@ -60,6 +73,24 @@ impl Held {
         self.keys.retain(|key| release(Pressed::Key(*key)).is_err());
         self.physical
             .retain(|usage| release(Pressed::Physical(*usage)).is_err());
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.buttons.is_empty() && self.keys.is_empty() && self.physical.is_empty()
+    }
+
+    pub(crate) fn contains(&self, pressed: Pressed) -> bool {
+        match pressed {
+            Pressed::Button(button) => self.buttons.contains(&button),
+            Pressed::Key(key) => self.keys.contains(&key),
+            Pressed::Physical(usage) => self.physical.contains(&usage),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.buttons.clear();
+        self.keys.clear();
+        self.physical.clear();
     }
 }
 

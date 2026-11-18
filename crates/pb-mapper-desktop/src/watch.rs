@@ -55,6 +55,7 @@ fn same_host(a: &HostStatus, b: &HostStatus) -> bool {
         message,
         control_allowed,
         viewer,
+        viewers,
         display,
         desktop,
         capabilities,
@@ -68,6 +69,11 @@ fn same_host(a: &HostStatus, b: &HostStatus) -> bool {
             (Some(a), Some(b)) => same_host_viewer(a, b),
             (a, b) => a.is_none() && b.is_none(),
         }
+        && viewers.len() == b.viewers.len()
+        && viewers
+            .iter()
+            .zip(&b.viewers)
+            .all(|(a, b)| same_host_viewer(a, b))
         && *display == b.display
         && *desktop == b.desktop
         && *capabilities == b.capabilities

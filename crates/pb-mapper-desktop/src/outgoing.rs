@@ -21,6 +21,22 @@ const _: () = assert!(
 /// waits behind an IDR in flight does not count (`CreditLedger::aging_since`).
 pub(crate) const OUTGOING_MAX_AGE: Duration = Duration::from_secs(1);
 
+/// Encoded picture bytes: kept directly as `Vec<u8>` when a single viewer is
+/// active (zero promotion allocation), or refcounted across multiple viewers.
+pub(crate) enum FrameBytes {
+    Owned(Vec<u8>),
+    Shared(bytes::Bytes),
+}
+impl std::ops::Deref for FrameBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Shared(bytes) => bytes,
+        }
+    }
+}
+
 pub(crate) struct HostUnit {
     pub generation: u64,
     pub frame_id: u64,
@@ -32,7 +48,7 @@ pub(crate) struct HostUnit {
     pub pts_us: u64,
     pub encode_us: u32,
     pub ready_at: Instant,
-    pub bytes: bytes::Bytes,
+    pub bytes: FrameBytes,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -201,7 +217,7 @@ mod tests {
             pts_us: frame_id,
             encode_us: 0,
             ready_at: Instant::now(),
-            bytes: bytes::Bytes::from(vec![0; len]),
+            bytes: FrameBytes::Owned(vec![0; len]),
         }
     }
 

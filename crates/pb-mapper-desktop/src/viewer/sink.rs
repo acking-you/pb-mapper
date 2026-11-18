@@ -182,6 +182,8 @@ struct SinkState {
     wait_key: bool,
     /// The next IDR handed out carries `discontinuity`.
     next_discontinuity: bool,
+    /// The encoded size of the last keyframe in this generation.
+    last_size: Option<(u32, u32)>,
     /// When the consumer last took an IDR.
     idr_pulled_at: Option<Instant>,
     /// When it took its first, which starts its decoder.
@@ -208,6 +210,7 @@ impl SinkState {
             generation: 0,
             wait_key: true,
             next_discontinuity: true,
+            last_size: None,
             idr_pulled_at: None,
             first_idr_pulled_at: None,
             handed: VecDeque::with_capacity(RECENT_FRAMES),
@@ -233,6 +236,7 @@ impl SinkState {
     fn restart(&mut self) -> u64 {
         self.wait_key = true;
         self.next_discontinuity = true;
+        self.last_size = None;
         self.clear()
     }
     fn enqueue(&mut self, unit: VideoUnit) {
@@ -381,7 +385,12 @@ impl VideoSink {
                 );
             }
             state.wait_key = false;
-            unit.discontinuity = std::mem::take(&mut state.next_discontinuity) || superseded > 0;
+            let resized = state
+                .last_size
+                .replace((unit.width, unit.height))
+                .is_some_and(|previous| previous != (unit.width, unit.height));
+            unit.discontinuity =
+                std::mem::take(&mut state.next_discontinuity) || superseded > 0 || resized;
             state.recovery.on_idr_received(now);
         } else if state.wait_key {
             state.discarded += 1;

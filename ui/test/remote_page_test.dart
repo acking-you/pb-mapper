@@ -805,6 +805,55 @@ void main() {
   );
 
   testWidgets(
+    'the host card counts multiple controlling viewers and disconnects them '
+    'together',
+    (tester) async {
+      final api = FakePbMapperApi();
+      final first = DesktopHostViewer(
+        controlling: true,
+        path: 'direct',
+        since: DateTime(2026, 11, 7, 9),
+      );
+      final second = DesktopHostViewer(
+        controlling: true,
+        path: 'relay',
+        since: DateTime(2026, 11, 7, 9, 5),
+      );
+      api.desktop.hostSnapshot = DesktopHostSnapshot(
+        host: DesktopHostStatus(
+          state: 'streaming',
+          controlAllowed: true,
+          service: 'desktop:here',
+          invitation: 'pbd1.here',
+          viewer: first,
+          viewers: [first, second],
+        ),
+      );
+      await pumpApp(tester, api, page: AppPage.remote);
+      expect(find.text('2 viewers are in control'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: _key('host-viewer'),
+          matching: find.textContaining('Direct'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: _key('host-viewer'),
+          matching: find.textContaining('Relay'),
+        ),
+        findsOneWidget,
+      );
+
+      await _tapIn(tester, _key('host-disconnect-viewer'));
+      await settle(tester);
+      expect(_key('host-viewer'), findsNothing);
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
     'a computer remembered while it is viewed, whose identity changes before '
     "the vault answers, takes the host's new invitation from the viewer in "
     'place of its record',

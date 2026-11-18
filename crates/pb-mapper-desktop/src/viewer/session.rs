@@ -98,6 +98,7 @@ pub(super) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
             | HostMessage::Video { .. }
             | HostMessage::Cursor { .. }
             | HostMessage::CursorShape(_)
+            | HostMessage::PeerCursor { .. }
             | HostMessage::Probe { .. }
             | HostMessage::Stats { .. }
             | HostMessage::Notice { .. }
@@ -156,6 +157,8 @@ pub(super) struct Session {
     pub(super) limits: VideoLimits,
     /// The host listed `cursor_shape`, as this viewer always does.
     pub(super) cursor_shapes: bool,
+    /// Both ends listed `peer_cursors`.
+    pub(super) peer_cursors: bool,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -186,6 +189,7 @@ pub(super) async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, s
         codec,
         limits,
         cursor_shapes,
+        peer_cursors,
     } = &session;
     let (mut read, mut write) = tokio::io::split(stream);
     let mut reader = Reader {
@@ -194,6 +198,7 @@ pub(super) async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, s
         codec: *codec,
         limits: *limits,
         cursor_shapes: *cursor_shapes,
+        peer_cursors: *peer_cursors,
         last_seq: 0,
         generation: 0,
     };
@@ -259,6 +264,9 @@ struct Reader<'a> {
     /// Both ends listed `cursor_shape`: shapes may come, and no other host
     /// may send one.
     cursor_shapes: bool,
+    /// Both ends listed `peer_cursors`: peer cursors may come, and no other
+    /// host may send one.
+    peer_cursors: bool,
     last_seq: u64,
     /// The generation of the last `State`.
     generation: u64,
@@ -432,6 +440,29 @@ impl Reader<'_> {
                 let mut cursor = self.shared.cursor.lock();
                 if cursor.slot == Some(record.id) {
                     cursor.shape = number;
+                }
+            }
+            HostMessage::PeerCursor {
+                generation,
+                peer,
+                color,
+                x,
+                y,
+                visible,
+            } => {
+                if !self.peer_cursors {
+                    return Err(Ended::protocol("a peer cursor this viewer did not ask for"));
+                }
+                if generation == self.generation {
+                    let mut peers = self.shared.peer_cursors.lock();
+                    peers.peers[peer.index()] = super::PeerCursorEntry {
+                        generation,
+                        color: color.as_u8(),
+                        x,
+                        y,
+                        visible,
+                    };
+                    peers.seq += 1;
                 }
             }
             HostMessage::Stats(host) => self.shared.stats.lock().on_host(Instant::now(), host),

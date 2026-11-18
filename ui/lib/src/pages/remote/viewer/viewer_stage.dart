@@ -44,6 +44,7 @@ class ViewerStage extends StatefulWidget {
     this.toolbarInset,
     this.touchIndicator = true,
     this.cursor,
+    this.peerCursors,
     this.localPointer = false,
   });
 
@@ -78,6 +79,7 @@ class ViewerStage extends StatefulWidget {
     toolbarInset: toolbarInset,
     touchIndicator: touchIndicator,
     cursor: desktop.cursor,
+    peerCursors: desktop.peerCursors,
     localPointer: localPointer,
   );
 
@@ -107,6 +109,9 @@ class ViewerStage extends StatefulWidget {
   /// The session's remote cursor, whose shape the host's pointer takes;
   /// without it, the generic arrow.
   final DesktopCursor? cursor;
+
+  /// Other controlling viewers' pointers on this display.
+  final ValueListenable<List<PeerCursorPoint>>? peerCursors;
 
   /// A desktop viewer: the local pointer hovers the picture, and takes the
   /// host's shape there while it controls (see [RemotePointerLook]).
@@ -174,6 +179,7 @@ class _ViewerStageState extends State<ViewerStage> {
       :actions,
       :compact,
       :touchIndicator,
+      :peerCursors,
     ) = widget;
     final pointer = _pointer;
     final scene = ValueListenableBuilder(
@@ -219,6 +225,8 @@ class _ViewerStageState extends State<ViewerStage> {
           ),
         ),
         GreyStill(session: session, viewport: viewport),
+        if (peerCursors != null)
+          RemotePeerCursorLayer(viewport: viewport, peerCursors: peerCursors),
         RemoteCursorLayer(viewport: viewport, input: input, pointer: pointer),
         if (touchIndicator) TouchIndicator(machine: machine),
         if (compact)

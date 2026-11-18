@@ -13,18 +13,20 @@ mod tests;
 
 use self::sender::Sender;
 use crate::{
-    QualityPreset, VideoCodec, VideoLimits, VideoSize,
+    HostPath, QualityPreset, VideoCodec, VideoLimits, VideoSize,
     credit::{CreditLedger, ReceiptAhead},
     idr::IdrReason,
     lane::LaneCommand,
     modes::{Mode, ModeCommand},
     protocol::{
         CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE,
-        CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, StateReason, StateRecord, StopReason,
+        CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265,
+        CAPABILITY_PEER_CURSORS, PeerSlot, Route, StateReason, StateRecord, StopReason,
         ViewerMessage,
     },
     qos::{Qos, TargetValues},
-    shared::{Policy, SessionShared, Targets},
+    scheduler::Wake,
+    shared::{PeerCursorSnapshot, Policy, SessionShared, Targets},
     wire::{self, WireError},
     worker::WorkerExit,
 };
@@ -35,7 +37,7 @@ use std::{
     future::Future,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -105,7 +107,11 @@ enum End {
 /// slot; the tasks of `run` drive it.
 pub(crate) struct Session {
     pub shared: Arc<SessionShared>,
-    codec: VideoCodec,
+    pub codec: VideoCodec,
+    /// Non-H.265 codecs this viewer offered in `Authenticate`.
+    pub offered_codecs: Vec<VideoCodec>,
+    /// Whether this viewer offered `h265`.
+    pub offered_h265: bool,
     /// The viewer reads the encoder's dwell in `Stats`.
     encoder_dwell: bool,
     /// The viewer reads a `Cursor`'s input watermark.
@@ -115,8 +121,12 @@ pub(crate) struct Session {
     display_mode: bool,
     /// Both ends listed `cursor_shape`: the viewer reads the pointer's shape.
     pub cursor_shape: bool,
+    /// Both ends listed `peer_cursors`: the viewer reads other peers' pointers.
+    pub peer_cursors: bool,
     /// When the session was accepted, for display only.
     pub started_unix_ms: u64,
+    /// 0 unknown, 1 direct, 2 relay (`ViewerMessage::Path`).
+    route: AtomicU8,
     /// Send credit and QoS, shared by B-recv and B-send only.
     credit: Mutex<CreditLedger>,
     qos: Mutex<Qos>,
@@ -129,10 +139,46 @@ pub(crate) struct Session {
 impl Session {
     /// `capabilities` are the viewer's; `offered`, what the host listed in
     /// `Accepted`.
+    #[cfg(test)]
     pub fn new(
         policy: Arc<Policy>,
         cancel: CancellationToken,
         codec: VideoCodec,
+        limits: VideoLimits,
+        quality: QualityPreset,
+        capabilities: &[String],
+        offered: &[String],
+    ) -> Arc<Self> {
+        Self::new_in_room(
+            PeerSlot::FIRST,
+            Wake::new(),
+            Arc::new(tokio::sync::watch::Sender::new(
+                PeerCursorSnapshot::default(),
+            )),
+            policy,
+            cancel,
+            codec,
+            vec![codec],
+            limits,
+            quality,
+            capabilities,
+            offered,
+        )
+    }
+
+    /// A session attached to a shared multi-viewer room.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each room and handshake parameter is distinct"
+    )]
+    pub fn new_in_room(
+        slot: PeerSlot,
+        wake: Wake,
+        peer_cursors_tx: Arc<tokio::sync::watch::Sender<PeerCursorSnapshot>>,
+        policy: Arc<Policy>,
+        cancel: CancellationToken,
+        codec: VideoCodec,
+        offered_codecs: Vec<VideoCodec>,
         limits: VideoLimits,
         quality: QualityPreset,
         capabilities: &[String],
@@ -144,17 +190,24 @@ impl Session {
         let qos = Qos::new(limits, codec, quality, listed(CAPABILITY_FPS_OVERRIDE), now);
         let targets = qos.targets(now);
         Arc::new(Self {
-            shared: Arc::new(SessionShared::new(
+            shared: Arc::new(SessionShared::new_in_room(
+                slot,
+                wake,
+                peer_cursors_tx,
                 policy,
                 cancel,
                 Targets::new(targets.pace_fps, targets.encoder_bps),
             )),
             codec,
+            offered_codecs,
+            offered_h265: listed(CAPABILITY_H265),
             encoder_dwell: listed(CAPABILITY_ENCODER_DWELL),
             cursor_sequence: listed(CAPABILITY_CURSOR_SEQUENCE),
             display_mode: both(CAPABILITY_DISPLAY_MODE),
             cursor_shape: both(CAPABILITY_CURSOR_SHAPE),
+            peer_cursors: both(CAPABILITY_PEER_CURSORS),
             started_unix_ms: pb_mapper_core::time::unix_millis(),
+            route: AtomicU8::new(0),
             credit: Mutex::new(CreditLedger::new(now)),
             qos: Mutex::new(qos),
             credit_changed: Notify::new(),
@@ -200,6 +253,15 @@ impl Session {
     /// The preset the viewer chose last.
     pub fn quality(&self) -> QualityPreset {
         self.qos.lock().preset()
+    }
+
+    /// The transport path the viewer reported, if any.
+    pub fn reported_path(&self) -> Option<HostPath> {
+        match self.route.load(Ordering::Acquire) {
+            1 => Some(HostPath::Direct),
+            2 => Some(HostPath::Relay),
+            _ => None,
+        }
     }
 
     /// The size the encoder is expected to produce, told before thread C
@@ -308,8 +370,16 @@ impl Session {
                 self.update_qos(now, |qos| qos.resume(now));
                 shared.idr.lock().force(IdrReason::Resume);
                 shared.wake.notify();
+                self.credit_changed.notify_one();
             }
-            ViewerMessage::Path { .. } => self.qos.lock().reset_baseline(),
+            ViewerMessage::Path { route } => {
+                let code = match route {
+                    Route::Direct => 1,
+                    Route::RelayTcp | Route::RelayQuic => 2,
+                };
+                self.route.store(code, Ordering::Release);
+                self.qos.lock().reset_baseline();
+            }
             ViewerMessage::Control { enabled } => {
                 if enabled && !shared.policy.allowed() {
                     self.control_denied.store(true, Ordering::Release);

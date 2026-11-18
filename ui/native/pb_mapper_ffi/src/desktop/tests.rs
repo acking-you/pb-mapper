@@ -301,7 +301,8 @@ fn the_view_names_a_shape_the_hot_op_resolves() {
     let handle = new_handle(&root);
     let handle = &handle;
     let host = handle.runtime.block_on(async {
-        let (viewer, mut host) = scripted_viewer_listing(json!(["cursor_shape"])).await;
+        let (viewer, mut host) =
+            scripted_viewer_listing(json!(["cursor_shape", "peer_cursors"])).await;
         handle
             .desktop
             .connect_viewer(|_| async { Ok((viewer, connected())) })
@@ -320,10 +321,28 @@ fn the_view_names_a_shape_the_hot_op_resolves() {
             json!({"t": "cursor", "generation": 1, "x": 4, "y": 5, "visible": true, "shape": 3}),
         )
         .await;
+        send(
+            &mut host,
+            json!({"t": "peer_cursor", "generation": 1, "peer": 1, "color": 2,
+                "x": 120, "y": 340, "visible": true}),
+        )
+        .await;
         host
     });
-    eventually(|| view(handle).1.cursor_shape != 0);
-    let shape = view(handle).1.cursor_shape;
+    eventually(|| {
+        let snapshot = view(handle).1;
+        snapshot.cursor_shape != 0 && snapshot.peer_count == 1
+    });
+    let snapshot = view(handle).1;
+    assert_eq!(
+        (
+            snapshot.peer_x[0],
+            snapshot.peer_y[0],
+            snapshot.peer_color[0]
+        ),
+        (120, 340, 2)
+    );
+    let shape = snapshot.cursor_shape;
     let resolved = hot(handle, json!({"op": "cursor_shape", "shape": shape}));
     assert_eq!(
         resolved["data"],

@@ -1,0 +1,18 @@
+# Baseline (b0e77c6)
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1156 allocs_per_unit=19.28 alloc_bytes_per_unit=40218
+case=video+pointer units_per_s=60.0 inputs_per_s=246.6 allocs_per_s=3579 allocs_per_unit=59.65 alloc_bytes_per_unit=47046
+
+# After — run 1
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1145 allocs_per_unit=19.08 alloc_bytes_per_unit=40208
+case=video+pointer units_per_s=60.0 inputs_per_s=249.8 allocs_per_s=3599 allocs_per_unit=60.00 alloc_bytes_per_unit=47121
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10143 allocs_per_unit=169.09 alloc_bytes_per_unit=100503
+
+# After — run 2
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1145 allocs_per_unit=19.10 alloc_bytes_per_unit=40242
+case=video+pointer units_per_s=60.2 inputs_per_s=249.3 allocs_per_s=3592 allocs_per_unit=59.69 alloc_bytes_per_unit=47055
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.1 allocs_per_s=10102 allocs_per_unit=168.40 alloc_bytes_per_unit=100459
+
+# After — run 3
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1146 allocs_per_unit=19.11 alloc_bytes_per_unit=40228
+case=video+pointer units_per_s=60.2 inputs_per_s=249.9 allocs_per_s=3596 allocs_per_unit=59.75 alloc_bytes_per_unit=47070
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.2 allocs_per_s=10104 allocs_per_unit=168.42 alloc_bytes_per_unit=100454

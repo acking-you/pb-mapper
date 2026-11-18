@@ -249,7 +249,7 @@ pub struct IntervalStats {
     pub gaps_250: u64,
 }
 
-/// The per-vsync view: the Rust mirror of the FFI's 56-byte
+/// The per-vsync view: the Rust mirror of the FFI's 96-byte
 /// `PbDesktopViewV1`, filled without allocating.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DesktopView {
@@ -278,6 +278,15 @@ pub struct DesktopView {
     pub state: u8,
     /// `FLAG_*` bits.
     pub flags: u8,
+    /// Advances with every peer-cursor change.
+    pub peer_cursor_seq: u64,
+    /// Physical pixels of up to 3 other controlling viewers' pointers.
+    pub peer_x: [i32; 3],
+    pub peer_y: [i32; 3],
+    /// Active entries in `peer_x`/`peer_y`/`peer_color` (`0..=3`).
+    pub peer_count: u8,
+    /// Palette index (`0..4`) for each active peer cursor.
+    pub peer_color: [u8; 3],
 }
 impl DesktopView {
     pub const STATE_NONE: u8 = 0;

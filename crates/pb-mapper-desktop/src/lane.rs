@@ -60,6 +60,7 @@ impl InputLane {
 
     /// Queue the owner's `command` and wake C, past a lane the viewer filled:
     /// it is not the viewer's input, and the owner's requests bound it.
+    #[cfg(test)]
     pub fn push_owner(&self, command: LaneCommand) {
         self.q.lock().push_back((command, Instant::now()));
         self.wake.notify();

@@ -3,8 +3,8 @@ use crate::{
     Display, Key, VideoLimits,
     protocol::{
         CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE, CAPABILITY_ENCODER_DWELL,
-        CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265, HostMessage, RejectReason, StopReason,
-        ViewerMessage,
+        CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265, CAPABILITY_PEER_CURSORS, HostMessage, PeerColor,
+        PeerSlot, RejectReason, StopReason, ViewerMessage,
     },
     wire,
 };
@@ -191,7 +191,8 @@ async fn scripted_host_session_acknowledges_first_and_authorises_input_by_presen
             CAPABILITY_ENCODER_DWELL,
             CAPABILITY_CURSOR_SEQUENCE,
             CAPABILITY_DISPLAY_MODE,
-            CAPABILITY_CURSOR_SHAPE
+            CAPABILITY_CURSOR_SHAPE,
+            CAPABILITY_PEER_CURSORS
         ]
     );
 
@@ -327,6 +328,7 @@ async fn h265_is_offered_as_a_capability_and_accepted_only_when_offered() {
             CAPABILITY_CURSOR_SEQUENCE,
             CAPABILITY_DISPLAY_MODE,
             CAPABILITY_CURSOR_SHAPE,
+            CAPABILITY_PEER_CURSORS,
             CAPABILITY_H265,
             CAPABILITY_FPS_OVERRIDE
         ]
@@ -877,6 +879,53 @@ async fn a_decoder_that_cannot_recover_ends_the_session() {
         consumer.next(Duration::ZERO, 1 << 20),
         Pull::Closed
     ));
+    drop(host);
+    viewer.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn peer_cursors_require_capability_and_track_generation_and_visibility() {
+    let msg = |generation, slot, color, x, y, visible| HostMessage::PeerCursor {
+        generation,
+        peer: PeerSlot::new(slot).unwrap(),
+        color: PeerColor::new(color).unwrap(),
+        x,
+        y,
+        visible,
+    };
+    let (unasked, mut unasked_host, _) = connect(accepted()).await;
+    let unasked = unasked.unwrap();
+    send(&mut unasked_host, state(1, false), None).await;
+    send(&mut unasked_host, msg(1, 1, 1, 120, 80, true), None).await;
+    eventually(|| unasked.status().reason == Some(ViewerReason::Protocol)).await;
+    unasked.stop().await.unwrap();
+
+    let (viewer, mut host, _) = connect(HostMessage::Accepted {
+        codec: VideoCodec::H264,
+        limits: VideoLimits::for_viewer(60.0),
+        nominal_fps: 60,
+        quality: QualityPreset::Balanced,
+        capabilities: vec![CAPABILITY_PEER_CURSORS.into()],
+    })
+    .await;
+    let viewer = viewer.unwrap();
+    send(&mut host, state(2, false), None).await;
+    eventually(|| viewer.view().generation == 2).await;
+    // Stale generation is ignored; current generation packs active peers.
+    send(&mut host, msg(1, 1, 1, 50, 60, true), None).await;
+    send(&mut host, msg(2, 1, 2, 320, 240, true), None).await;
+    eventually(|| viewer.view().peer_count == 1).await;
+    let view = viewer.view();
+    assert_eq!(view.peer_color[0], 2);
+    assert_eq!((view.peer_x[0], view.peer_y[0]), (320, 240));
+
+    viewer.pause();
+    assert_eq!(viewer.view().peer_count, 0);
+    viewer.resume();
+    assert_eq!(viewer.view().peer_count, 1);
+
+    send(&mut host, msg(2, 1, 2, 320, 240, false), None).await;
+    eventually(|| viewer.view().peer_count == 0).await;
     drop(host);
     viewer.stop().await.unwrap();
 }

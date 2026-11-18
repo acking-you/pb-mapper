@@ -27,16 +27,26 @@ struct Observation {
     releases: AtomicU32,
     /// A button is held down.
     held: AtomicBool,
+    held_buttons: Mutex<std::collections::HashSet<Button>>,
     dropped: AtomicU32,
+    log: Mutex<Vec<Input>>,
 }
 impl Observation {
     fn input(&self, input: &Input) {
-        if matches!(input, Input::Button { down: true, .. }) {
-            self.held.store(true, Ordering::Release);
+        if let Input::Button { button, down, .. } = *input {
+            let mut buttons = self.held_buttons.lock().unwrap();
+            if down {
+                buttons.insert(button);
+            } else {
+                buttons.remove(&button);
+            }
+            self.held.store(!buttons.is_empty(), Ordering::Release);
         }
+        self.log.lock().unwrap().push(input.clone());
         self.inputs.fetch_add(1, Ordering::AcqRel);
     }
     fn release(&self) {
+        self.held_buttons.lock().unwrap().clear();
         self.held.store(false, Ordering::Release);
         self.releases.fetch_add(1, Ordering::AcqRel);
     }
@@ -78,6 +88,7 @@ impl Drop for Desktop {
 struct Encoded {
     observed: Arc<Observation>,
     cursor: Arc<AtomicU32>,
+    cursor_y: AtomicU32,
     bytes: usize,
     frames: u64,
 }
@@ -119,11 +130,15 @@ impl Backend for Encoded {
     fn cursor(&mut self, _: &DesktopContext) -> Result<Option<CursorPosition>> {
         Ok(Some(CursorPosition {
             x: self.cursor.load(Ordering::Relaxed) as i32,
-            y: 0,
+            y: self.cursor_y.load(Ordering::Relaxed) as i32,
             visible: true,
         }))
     }
     fn input(&mut self, input: &Input) -> Result<()> {
+        if let Input::Move { x, y } = *input {
+            self.cursor.store(x, Ordering::Relaxed);
+            self.cursor_y.store(y, Ordering::Relaxed);
+        }
         self.observed.input(input);
         Ok(())
     }
@@ -149,6 +164,7 @@ async fn encoded_host(
             Ok(Encoded {
                 observed: observed.clone(),
                 cursor: cursor.clone(),
+                cursor_y: AtomicU32::new(0),
                 bytes,
                 frames: 0,
             })
@@ -524,6 +540,199 @@ async fn frozen_renderer_keeps_credit_and_cursor_but_never_input() {
     .await;
     drop(renderer);
     viewer.stop().await.unwrap();
+    host.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_controllers_exchange_colored_peer_cursors_and_isolate_held_inputs() {
+    let relay = Relay::start("desktop-multi-control").await;
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
+    let observed = Arc::new(Observation::default());
+    let cursor = Arc::new(AtomicU32::new(0));
+    let host = encoded_host(&client, "desktop:multi", &observed, &cursor, 2048).await;
+
+    let viewer_a = relay_viewer(&client, &host, VideoCodec::H264).await;
+    let renderer_a = Renderer::start(&viewer_a);
+    let viewer_b = relay_viewer(&client, &host, VideoCodec::H264).await;
+    let renderer_b = Renderer::start(&viewer_b);
+
+    viewer_a.request_control(true).unwrap();
+    viewer_b.request_control(true).unwrap();
+    let status_a = wait(&viewer_a, |s| s.controlling && s.fresh).await;
+    let status_b = wait(&viewer_b, |s| s.controlling && s.fresh).await;
+    until(Duration::from_secs(3), || {
+        let status = host.status();
+        status.viewers.len() == 2 && status.viewers.iter().all(|v| v.controlling)
+    })
+    .await;
+
+    // Viewer A moves + holds Left + Shift; Viewer B moves + holds Left.
+    viewer_a
+        .input(
+            status_a.generation,
+            &[
+                Input::Move { x: 120, y: 240 },
+                PRESS[0].clone(),
+                SHIFT[0].clone(),
+            ],
+        )
+        .unwrap();
+    viewer_b
+        .input(
+            status_b.generation,
+            &[Input::Move { x: 640, y: 480 }, PRESS[0].clone()],
+        )
+        .unwrap();
+
+    // Each viewer sees only the peer's cursor, with distinct palette indices.
+    until(Duration::from_secs(3), || {
+        let va = viewer_a.view();
+        let vb = viewer_b.view();
+        va.peer_count == 1
+            && vb.peer_count == 1
+            && (va.peer_x[0], va.peer_y[0]) == (640, 480)
+            && (vb.peer_x[0], vb.peer_y[0]) == (120, 240)
+    })
+    .await;
+    assert_ne!(viewer_a.view().peer_color[0], viewer_b.view().peer_color[0]);
+
+    // Viewer A clicks Right after Viewer B moved the pointer: host repositions
+    // back to Viewer A's (120, 240) immediately ahead of the click.
+    observed.log.lock().unwrap().clear();
+    viewer_a
+        .input(
+            viewer_a.status().generation,
+            &[
+                Input::Button {
+                    button: Button::Right,
+                    down: true,
+                    drag_start: false,
+                },
+                Input::Button {
+                    button: Button::Right,
+                    down: false,
+                    drag_start: false,
+                },
+            ],
+        )
+        .unwrap();
+    until(Duration::from_secs(3), || {
+        observed.log.lock().unwrap().len() >= 3
+    })
+    .await;
+    {
+        let log = observed.log.lock().unwrap();
+        assert!(matches!(log[0], Input::Move { x: 120, y: 240 }));
+        assert!(matches!(
+            log[1],
+            Input::Button {
+                button: Button::Right,
+                down: true,
+                ..
+            }
+        ));
+    }
+
+    // Disconnecting Viewer A hides its peer cursor without resetting Viewer B's
+    // generation or releasing Button::Left still held by Viewer B, while
+    // releasing Key::Shift held only by Viewer A.
+    let gen_b = viewer_b.status().generation;
+    let releases_before = observed.releases.load(Ordering::Acquire);
+    observed.log.lock().unwrap().clear();
+    drop(renderer_a);
+    viewer_a.stop().await.unwrap();
+    until(Duration::from_secs(3), || {
+        host.status().viewers.len() == 1 && viewer_b.view().peer_count == 0
+    })
+    .await;
+    assert_eq!(viewer_b.status().generation, gen_b);
+    assert!(viewer_b.status().controlling);
+    assert!(observed.held.load(Ordering::Acquire));
+    assert_eq!(observed.releases.load(Ordering::Acquire), releases_before);
+    {
+        let log = observed.log.lock().unwrap();
+        assert!(log.iter().any(|ev| matches!(
+            ev,
+            Input::Key {
+                key: Key::Shift,
+                down: false
+            }
+        )));
+        assert!(!log.iter().any(|ev| matches!(
+            ev,
+            Input::Button {
+                button: Button::Left,
+                down: false,
+                ..
+            }
+        )));
+    }
+
+    // Once Viewer B releases control, no viewer holds Button::Left so the backend releases.
+    viewer_b.request_control(false).unwrap();
+    wait(&viewer_b, |s| !s.controlling).await;
+    until(Duration::from_secs(3), || {
+        !observed.held.load(Ordering::Acquire)
+            && host.status().viewers.iter().all(|v| !v.controlling)
+    })
+    .await;
+
+    drop(renderer_b);
+    viewer_b.stop().await.unwrap();
+    host.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn room_admits_up_to_four_viewers_and_refuses_a_fifth_as_busy() {
+    let relay = Relay::start("desktop-room-cap").await;
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
+    let observed = Arc::new(Observation::default());
+    let cursor = Arc::new(AtomicU32::new(0));
+    let host = encoded_host(&client, "desktop:cap", &observed, &cursor, 1024).await;
+
+    let mut viewers = Vec::new();
+    let mut renderers = Vec::new();
+    for _ in 0..4 {
+        let v = relay_viewer(&client, &host, VideoCodec::H264).await;
+        let r = Renderer::start(&v);
+        viewers.push(v);
+        renderers.push(r);
+    }
+    for v in &viewers {
+        wait(v, |s| s.fresh).await;
+    }
+    assert_eq!(host.status().viewers.len(), 4);
+
+    let fifth = Viewer::connect(
+        &client,
+        host.invitation(),
+        ConnectOptions {
+            path: PathPolicy::RelayOnly,
+            ..Default::default()
+        },
+        config(VideoCodec::H264),
+    )
+    .await;
+    assert!(matches!(fifth, Err(ConnectError::Busy)));
+    for v in &viewers {
+        assert_eq!(v.status().state, ViewerState::Streaming);
+    }
+
+    drop(renderers.pop());
+    viewers.pop().unwrap().stop().await.unwrap();
+    until(Duration::from_secs(3), || host.status().viewers.len() == 3).await;
+
+    let replacement = relay_viewer(&client, &host, VideoCodec::H264).await;
+    let replacement_renderer = Renderer::start(&replacement);
+    wait(&replacement, |s| s.fresh).await;
+    assert_eq!(host.status().viewers.len(), 4);
+
+    drop(replacement_renderer);
+    replacement.stop().await.unwrap();
+    drop(renderers);
+    for v in viewers {
+        v.stop().await.unwrap();
+    }
     host.stop().await.unwrap();
 }
 

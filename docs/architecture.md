@@ -299,14 +299,18 @@ Nothing in the SDK crates knows it exists.
     each connection's handshake and session), `session.rs` (B-recv;
     `session/sender.rs` B-send; `session/shapes.rs` the host's table of the
     64 pointer-shape slots the viewer holds, in B-send, so a definition is
-    never lost to a newer report), `shared.rs`: The host, and one session's
-    network side, B-recv and B-send over TLS; `shared.rs` states the lock
-    discipline
-  - `worker.rs` (`worker/`: capture, the input lane and control grant, the
+    never lost to a newer report), `shared.rs`: The host, its room of up to
+    four concurrent viewers (`MAX_VIEWERS = 4`), and each session's network
+    side, B-recv and B-send over TLS; `shared.rs` states the lock discipline
+    and holds the lock-free room epoch and `PeerCursorSnapshot`
+  - `worker.rs` (`worker/`: capture, per-viewer input lanes and control grants,
+    the
     pointer reports, the drag-start hold, display modes, the one-second
     statistics window), `pacer.rs`, `scheduler.rs`, `lane.rs`: Thread C, the
-    one desktop-bound thread (capture, encode, input), its pacing, its one
-    wait, and the input lane from B-recv
+    one desktop-bound thread (one capture and encode fanned out across active
+    viewers as `FrameBytes::Owned` for one or zero-copy `FrameBytes::Shared`
+    for several, plus input), its pacing, its one wait, and the input lanes
+    from B-recv
   - `timer.rs`: Fine process timers, held while a session captures; on
     Windows `platform/windows/timer.rs` (the power-throttling opt-out and
     `timeBeginPeriod`), on macOS `platform/macos/timer.rs` (App Nap held
@@ -393,10 +397,12 @@ Nothing in the SDK crates knows it exists.
     or is offered Update); `background.rs` and `background/`, its own host
     and that host's grant at rest; `os/`, its Win32 glue by concern. The
     service side and the `pb-mapper-desktop-helper` binary need `--features
-    windows-helper`. `HELPER_PROTOCOL` (now 8) and the `.v<n>` pipe names
+    windows-helper`. `HELPER_PROTOCOL` (now 9) and the `.v<n>` pipe names
     change together; an installed helper of another protocol, or of another
     build (its executable differs from the one bundled with the app), is
-    offered Update. Protocol 8: `Request::CursorShape`, `shape_serial` on
+    offered Update. Protocol 9: `HostStatus.viewers` across the background
+    host's status pipe (`HostStatus.viewer` remains the primary entry).
+    Protocol 8: `Request::CursorShape`, `shape_serial` on
     every answer that observed the pointer once shapes were asked for, the
     shape's `ShapeHeader` with its bitmap as the byte record (one round trip
     per new shape), `Input::PhysicalKey` inside `Request::Input`, and
@@ -729,10 +735,12 @@ The design and its rules are in `docs/ui-design.md`.
       `pb_mapper_spawn_hidden_powershell_v1` is gone: the app now starts the
       installer itself, see `docs/ui-updates.md`);
     - `pb_mapper_desktop_view_v1`, the remote desktop's per-frame view leaf:
-      it fills a caller-owned 56-byte `PbDesktopViewV1` (mirrored in
+      it fills a caller-owned 96-byte `PbDesktopViewV1` (mirrored in
       `pb_mapper_ffi.dart`; `size_of` and `offset_of` asserts guard it, as
       they guard `PbDesktopVideoMetaV1` on both sides; `cursor_shape`, a
-      `u16` at offset 54, is the number of the pointer's shape) and returns
+      `u16` at offset 54, is the number of the pointer's shape, and offsets
+      56..96 carry `peer_cursor_seq` plus up to three other controlling
+      viewers' coloured pointer positions) and returns
       1, 0 without a viewer, or -1;
     - the desktop video exports and their JNI twins, below
   - `desktop.rs`: The remote desktop. `pb_mapper_desktop_call_json` takes

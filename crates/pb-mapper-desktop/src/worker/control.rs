@@ -4,8 +4,9 @@ use super::{Clock, Engine, link_lost};
 use crate::{
     Backend, Button, Input, InputEvent,
     idr::IdrReason,
+    input::held::Pressed,
     lane::LaneCommand,
-    protocol::{NoticeCode, StateReason},
+    protocol::{MAX_VIEWERS, NoticeCode, StateReason},
 };
 use std::time::{Duration, Instant};
 
@@ -13,14 +14,74 @@ use std::time::{Duration, Instant};
 const LEASE_RENEW_MIN: Duration = Duration::from_millis(250);
 
 impl<B: Backend, K: Clock> Engine<B, K> {
+    fn other_slots_hold_any(&self, idx: usize) -> bool {
+        self.slots
+            .iter()
+            .enumerate()
+            .any(|(j, slot)| j != idx && slot.as_ref().is_some_and(|s| !s.held.is_empty()))
+    }
+
+    fn other_slots_hold(&self, idx: usize, pressed: Pressed) -> bool {
+        self.slots
+            .iter()
+            .enumerate()
+            .any(|(j, slot)| j != idx && slot.as_ref().is_some_and(|s| s.held.contains(pressed)))
+    }
+
+    /// Release held OS inputs attributable exclusively to slot `idx`.
+    pub(super) fn release_slot_inputs(&mut self, idx: usize) {
+        if !self.other_slots_hold_any(idx) {
+            self.backend.release();
+            if let Some(slot) = &mut self.slots[idx] {
+                slot.held.clear();
+            }
+            return;
+        }
+        if self.context.is_none() {
+            self.backend.release();
+            if let Some(slot) = &mut self.slots[idx] {
+                slot.held.clear();
+            }
+            return;
+        }
+        let mut to_release = Vec::new();
+        if let Some(slot) = &mut self.slots[idx] {
+            slot.held.release(|pressed| {
+                to_release.push(pressed);
+                Ok(())
+            });
+        }
+        for pressed in to_release {
+            if !self.other_slots_hold(idx, pressed)
+                && let Some(context) = &self.context
+            {
+                let release_input = pressed.into_release_input();
+                let _ = self.backend.input_in_context(context, &release_input);
+            }
+        }
+    }
+
+    pub(super) fn sync_lease(&mut self) {
+        let any_controlling = self
+            .slots
+            .iter()
+            .flatten()
+            .any(|slot| slot.state.record.controlling);
+        if !any_controlling {
+            self.lease = None;
+        }
+    }
+
     /// A full lane means input is late beyond repair: end control rather than
     /// inject a burst the user no longer expects.
-    pub(super) fn congested(&mut self) {
-        self.release_control();
-        self.control_note = Some((
-            StateReason::InputCongestion,
-            "input arrived faster than the host could apply it; request control again".into(),
-        ));
+    pub(super) fn slot_congested(&mut self, idx: usize) {
+        self.release_slot_control(idx);
+        if let Some(slot) = &mut self.slots[idx] {
+            slot.control_note = Some((
+                StateReason::InputCongestion,
+                "input arrived faster than the host could apply it; request control again".into(),
+            ));
+        }
     }
 
     /// The lane overflowed: its input is late beyond repair, only counted as
@@ -30,87 +91,115 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     /// after the viewer's own release or pause it is refused, as a drain
     /// refuses it, and a grant queued in the lane is not taken, as control
     /// ends anyway. Nothing runs once cancelled.
-    pub(super) fn overflowed(&mut self) {
-        let mut drained = std::mem::take(&mut self.drained);
-        self.shared.lane.drain_into(&mut drained);
+    pub(super) fn slot_overflowed(&mut self, idx: usize) {
+        let Some(slot) = &mut self.slots[idx] else {
+            return;
+        };
+        let mut drained = std::mem::take(&mut slot.drained);
+        slot.shared.lane.drain_into(&mut drained);
         for (command, _) in drained.drain(..) {
+            let cancelled = self.room.cancel.is_cancelled()
+                || self.slots[idx]
+                    .as_ref()
+                    .is_none_or(|slot| slot.shared.cancel.is_cancelled());
             match command {
                 LaneCommand::Input(event) => {
-                    self.taken(&event);
+                    self.slot_taken(idx, &event);
                 }
-                LaneCommand::DisplayMode(command) if !self.shared.cancel.is_cancelled() => {
+                LaneCommand::DisplayMode(command) if !cancelled => {
                     let now = self.clock.now();
-                    self.display_mode(command, now);
+                    self.display_mode(Some(idx), command, now);
                 }
                 // `congested` below releases control in full.
                 LaneCommand::Control { enabled: false } | LaneCommand::EndControl => {
-                    self.state.record.controlling = false;
+                    if let Some(slot) = &mut self.slots[idx] {
+                        slot.state.record.controlling = false;
+                    }
                 }
                 LaneCommand::DisplayMode(_)
                 | LaneCommand::Control { enabled: true }
                 | LaneCommand::Release => {}
             }
         }
-        self.drained = drained;
-        self.congested();
+        if let Some(slot) = &mut self.slots[idx] {
+            slot.drained = drained;
+        }
+        self.slot_congested(idx);
     }
 
     /// Execute every queued command in order. False when cancelled: the rest
     /// of the lane is dropped, never executed.
-    pub(super) fn drain_lane(&mut self) -> bool {
-        let mut drained = std::mem::take(&mut self.drained);
-        self.shared.lane.drain_into(&mut drained);
+    pub(super) fn drain_slot_lane(&mut self, idx: usize) -> bool {
+        let Some(slot) = &mut self.slots[idx] else {
+            return true;
+        };
+        let mut drained = std::mem::take(&mut slot.drained);
+        slot.shared.lane.drain_into(&mut drained);
         let mut finished = true;
         for (command, received) in drained.drain(..) {
-            if self.shared.cancel.is_cancelled() {
+            let cancelled = self.room.cancel.is_cancelled()
+                || self.slots[idx]
+                    .as_ref()
+                    .is_none_or(|slot| slot.shared.cancel.is_cancelled());
+            if cancelled {
                 // The rest drop with the drain, never run.
                 finished = false;
                 break;
             }
             let now = self.clock.now();
             self.window.wait(now.saturating_duration_since(received));
-            self.execute(command, now);
+            self.execute_slot(idx, command, now);
         }
-        self.drained = drained;
+        if let Some(slot) = &mut self.slots[idx] {
+            slot.drained = drained;
+        }
         finished
     }
 
-    fn execute(&mut self, command: LaneCommand, now: Instant) {
+    fn execute_slot(&mut self, idx: usize, command: LaneCommand, now: Instant) {
         // A display mode command is never held behind a drag, nor ends one.
-        if self.hold.until.is_some() && !matches!(command, LaneCommand::DisplayMode(_)) {
+        let holding = self.slots[idx]
+            .as_ref()
+            .is_some_and(|slot| slot.hold.until.is_some());
+        if holding && !matches!(command, LaneCommand::DisplayMode(_)) {
             if !matches!(
                 command,
                 LaneCommand::Release
                     | LaneCommand::EndControl
                     | LaneCommand::Control { enabled: false }
             ) {
-                if !self.hold.push(command) {
-                    self.congested();
+                let pushed = self.slots[idx]
+                    .as_mut()
+                    .is_some_and(|slot| slot.hold.push(command));
+                if !pushed {
+                    self.slot_congested(idx);
                 }
                 return;
             }
             // Ending control drops the whole hold: nothing in it was injected.
-            self.drop_held();
+            self.drop_slot_held(idx);
         }
         match command {
-            LaneCommand::Control { enabled } => self.control(enabled),
-            LaneCommand::Release => self.backend.release(),
-            LaneCommand::EndControl => self.release_control(),
-            LaneCommand::Input(event) => match self.drag_guard(&event, now) {
+            LaneCommand::Control { enabled } => self.slot_control(idx, enabled),
+            LaneCommand::Release => self.release_slot_inputs(idx),
+            LaneCommand::EndControl => self.release_slot_control(idx),
+            LaneCommand::Input(event) => match self.drag_guard(idx, &event, now) {
                 Some(until) => {
-                    self.hold.until = Some(until);
-                    self.hold.push(LaneCommand::Input(event));
+                    if let Some(slot) = &mut self.slots[idx] {
+                        slot.hold.until = Some(until);
+                        slot.hold.push(LaneCommand::Input(event));
+                    }
                 }
-                None => self.input(event, now),
+                None => self.slot_input(idx, event, now),
             },
-            LaneCommand::DisplayMode(command) => self.display_mode(command, now),
+            LaneCommand::DisplayMode(command) => self.display_mode(Some(idx), command, now),
         }
     }
 
     /// When an admitted left press that starts a drag follows a click within
     /// the OS double-click time and box, it must wait until the returned time
     /// so the two never merge into a double click.
-    fn drag_guard(&mut self, event: &InputEvent, now: Instant) -> Option<Instant> {
+    fn drag_guard(&mut self, idx: usize, event: &InputEvent, now: Instant) -> Option<Instant> {
         let Input::Button {
             button: Button::Left,
             down: true,
@@ -119,9 +208,13 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         else {
             return None;
         };
-        if !self.state.record.controlling
-            || !self.allowed()
-            || !self
+        if !self.allowed() {
+            return None;
+        }
+        let guard = self.backend.double_click_guard()?;
+        let slot = self.slots[idx].as_ref()?;
+        if !slot.state.record.controlling
+            || !slot
                 .shared
                 .auth
                 .lock()
@@ -129,129 +222,237 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         {
             return None;
         }
-        let guard = self.backend.double_click_guard()?;
-        self.hold.until(guard, now)
+        slot.hold.until(guard, now)
     }
 
     /// The hold ended: each held command runs the full input path now, as if
     /// it had just left the lane. False when cancelled.
-    pub(super) fn release_hold(&mut self) -> bool {
-        let held = self.hold.release();
+    pub(super) fn release_slot_hold(&mut self, idx: usize) -> bool {
+        let Some(slot) = &mut self.slots[idx] else {
+            return true;
+        };
+        let held = slot.hold.release();
         for (index, command) in held.into_iter().enumerate() {
-            if self.shared.cancel.is_cancelled() {
+            let cancelled = self.room.cancel.is_cancelled()
+                || self.slots[idx]
+                    .as_ref()
+                    .is_none_or(|slot| slot.shared.cancel.is_cancelled());
+            if cancelled {
                 return false;
             }
             let now = self.clock.now();
             match command {
                 // The press that started the hold has waited it out.
-                LaneCommand::Input(event) if index == 0 => self.input(event, now),
-                command => self.execute(command, now),
+                LaneCommand::Input(event) if index == 0 => self.slot_input(idx, event, now),
+                command => self.execute_slot(idx, command, now),
             }
         }
         true
     }
 
     pub(super) fn allowed(&self) -> bool {
-        self.shared.policy.allowed() && self.shared.policy.get() == self.policy
+        self.room.policy.allowed() && self.room.policy.get() == self.policy
     }
 
-    fn control(&mut self, enabled: bool) {
+    fn slot_control(&mut self, idx: usize, enabled: bool) {
         let allowed = self.allowed();
+        let Some(currently_controlling) = self.slots[idx]
+            .as_ref()
+            .map(|slot| slot.state.record.controlling)
+        else {
+            return;
+        };
         // A request repeated on a delayed link must not reset the desktop
         // generation, the decoder or an active lease.
-        if enabled && allowed && self.state.record.controlling {
+        if enabled && allowed && currently_controlling {
             return;
         }
-        if !enabled && !self.state.record.controlling {
-            self.backend.release();
+        if !enabled && !currently_controlling {
+            self.release_slot_inputs(idx);
             return;
         }
-        self.release_control();
-        self.control_note = None;
+        self.release_slot_control(idx);
+        if let Some(slot) = &mut self.slots[idx] {
+            slot.control_note = None;
+        }
         if !enabled {
             return;
         }
         if !allowed {
-            self.control_note = Some((
-                StateReason::ControlDenied,
-                "control is not authorized at the host".into(),
-            ));
+            if let Some(slot) = &mut self.slots[idx] {
+                slot.control_note = Some((
+                    StateReason::ControlDenied,
+                    "control is not authorized at the host".into(),
+                ));
+            }
             return;
         }
-        if let Some(admission) = &self.admission {
+        if self.lease.is_none()
+            && let Some(admission) = &self.admission
+        {
             match admission.acquire() {
                 Ok(lease) => self.lease = Some(lease),
                 Err(failure) => {
-                    self.control_note = Some((StateReason::ControlDenied, failure.to_string()));
+                    if let Some(slot) = &mut self.slots[idx] {
+                        slot.control_note = Some((StateReason::ControlDenied, failure.to_string()));
+                    }
                     return;
                 }
             }
         }
-        self.state.record.controlling = true;
+        if let Some(slot) = &mut self.slots[idx] {
+            slot.state.record.controlling = true;
+        }
     }
 
     /// Count `event` as taken off the lane, applied or not. A cursor report
     /// carries the last sequence taken, which tells the viewer what the report
     /// already reflects. False for a sequence already taken.
-    pub(super) fn taken(&mut self, event: &InputEvent) -> bool {
-        if event.sequence <= self.sequence {
+    pub(super) fn slot_taken(&mut self, idx: usize, event: &InputEvent) -> bool {
+        let Some(slot) = &mut self.slots[idx] else {
+            return false;
+        };
+        if event.sequence <= slot.sequence {
             return false;
         }
-        self.sequence = event.sequence;
+        slot.sequence = event.sequence;
         if matches!(event.input, Input::Move { .. }) {
-            self.cursor.took_move();
+            slot.cursor.took_move();
         }
         true
     }
 
     /// Drop every held command, none of which was injected; held input
     /// counts as taken.
-    pub(super) fn drop_held(&mut self) {
-        for command in self.hold.release() {
+    pub(super) fn drop_slot_held(&mut self, idx: usize) {
+        let Some(slot) = &mut self.slots[idx] else {
+            return;
+        };
+        let released = slot.hold.release();
+        for command in released {
             if let LaneCommand::Input(event) = command {
-                self.taken(&event);
+                self.slot_taken(idx, &event);
             }
         }
     }
 
-    fn input(&mut self, event: InputEvent, now: Instant) {
-        if !self.taken(&event) {
+    fn slot_input(&mut self, idx: usize, event: InputEvent, now: Instant) {
+        if !self.slot_taken(idx, &event) {
             return;
         }
         // The injection boundary checks the desktop for every input; this
         // checks it only when a check is due.
         if (self.check_due(now) && !self.geometry(now))
             || !self.allowed()
-            || !self.state.record.controlling
+            || !self.slots[idx]
+                .as_ref()
+                .is_some_and(|slot| slot.state.record.controlling)
         {
             return;
         }
-        if !self.live()
-            || !self
-                .shared
-                .auth
-                .lock()
-                .admits(event.generation, event.frame_id, now)
-        {
+        let admitted = self.slot_live(idx)
+            && self.slots[idx].as_ref().is_some_and(|slot| {
+                slot.shared
+                    .auth
+                    .lock()
+                    .admits(event.generation, event.frame_id, now)
+            });
+        if !admitted {
             // The screen changed or the presented frame is stale: wait for a
-            // fresh frame, and hold nothing meanwhile.
-            self.backend.release();
+            // fresh frame, and hold nothing for this viewer meanwhile.
+            self.release_slot_inputs(idx);
             return;
         }
+        let shared_hold = match event.input {
+            Input::Button {
+                button,
+                down: false,
+                ..
+            } => self.other_slots_hold(idx, Pressed::Button(button)),
+            Input::Key { key, down: false } => self.other_slots_hold(idx, Pressed::Key(key)),
+            Input::PhysicalKey { usage, down: false } => {
+                self.other_slots_hold(idx, Pressed::Physical(usage))
+            }
+            _ => false,
+        };
         let Some(context) = &self.context else {
             return;
         };
+        // When another controller moved the OS cursor in the meantime, return
+        // the pointer to this viewer's last position before clicking/scrolling.
+        if matches!(event.input, Input::Button { .. } | Input::Wheel { .. })
+            && let Some((peer_slot, Some((px, py)))) =
+                self.slots[idx].as_ref().map(|s| (s.slot, s.pointer))
+            && self.last_pointer_owner != Some((peer_slot, px, py))
+        {
+            let reposition = Input::Move { x: px, y: py };
+            if self.backend.input_in_context(context, &reposition).is_ok() {
+                self.last_pointer_owner = Some((peer_slot, px, py));
+                self.mover_moved_since_sample = true;
+                if let Some(slot) = &mut self.slots[idx] {
+                    slot.cursor.injected(px, py);
+                    slot.hold.injected(&reposition, now);
+                }
+            }
+        }
         let lock = matches!(event.input, Input::Lock {});
-        match self.backend.input_in_context(context, &event.input) {
-            Ok(()) if lock => self.notice(
+        let injected = match event.input {
+            Input::Button { button, down, .. } => {
+                let backend = &mut self.backend;
+                match &mut self.slots[idx] {
+                    Some(slot) if shared_hold => slot.held.button(button, false, |_| Ok(())),
+                    Some(slot) => slot.held.button(button, down, |_| {
+                        backend.input_in_context(context, &event.input)
+                    }),
+                    None => return,
+                }
+            }
+            Input::Key { key, down } => {
+                let backend = &mut self.backend;
+                match &mut self.slots[idx] {
+                    Some(slot) if shared_hold => slot.held.key(key, false, |_| Ok(())),
+                    Some(slot) => slot.held.key(key, down, |_| {
+                        backend.input_in_context(context, &event.input)
+                    }),
+                    None => return,
+                }
+            }
+            Input::PhysicalKey { usage, down } => {
+                let backend = &mut self.backend;
+                match &mut self.slots[idx] {
+                    Some(slot) if shared_hold => slot.held.physical(usage, false, |_| Ok(())),
+                    Some(slot) => slot.held.physical(usage, down, |_| {
+                        backend.input_in_context(context, &event.input)
+                    }),
+                    None => return,
+                }
+            }
+            Input::Move { .. } | Input::Wheel { .. } | Input::Text { .. } | Input::Lock {} => {
+                self.backend.input_in_context(context, &event.input)
+            }
+        };
+        match injected {
+            Ok(()) if lock => self.notice_all(
                 NoticeCode::Locked,
                 "The remote computer is locked".into(),
                 now,
             ),
             Ok(()) => {
-                self.hold.injected(&event.input, now);
+                if let Some(slot) = &mut self.slots[idx] {
+                    slot.hold.injected(&event.input, now);
+                    if let Input::Move { x, y } = event.input {
+                        slot.pointer = Some((x, y));
+                        slot.cursor.injected(x, y);
+                        self.last_pointer_owner = Some((slot.slot, x, y));
+                        self.mover_moved_since_sample = true;
+                    }
+                }
                 if let Input::Move { x, y } = event.input {
-                    self.cursor.injected(x, y);
+                    self.publish_peer_cursor(
+                        idx,
+                        i32::try_from(x).unwrap_or(i32::MAX),
+                        i32::try_from(y).unwrap_or(i32::MAX),
+                    );
                 }
             }
             Err(failure) => {
@@ -260,50 +461,77 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                     return;
                 }
                 // A desktop change invalidates the event while control stays granted.
-                let generation = self.state.record.generation;
-                if !self.geometry(now) || self.state.record.generation != generation {
+                let Some(generation) = self.slots[idx]
+                    .as_ref()
+                    .map(|slot| slot.state.record.generation)
+                else {
+                    return;
+                };
+                if !self.geometry(now)
+                    || self.slots[idx]
+                        .as_ref()
+                        .is_none_or(|slot| slot.state.record.generation != generation)
+                {
                     return;
                 }
                 if lock {
                     // Nothing was held down, so control stays.
-                    self.notice(NoticeCode::LockFailed, failure.to_string(), now);
+                    self.notice_slot(idx, NoticeCode::LockFailed, failure.to_string(), now);
                     return;
                 }
                 // A live picture is not proof of working control. End the
                 // grant and keep the failure until the viewer asks for control
                 // again; queued presses are never replayed.
-                self.release_control();
-                self.control_note =
-                    Some((StateReason::InputFailed, format!("input_failed: {failure}")));
+                self.release_slot_control(idx);
+                if let Some(slot) = &mut self.slots[idx] {
+                    slot.control_note =
+                        Some((StateReason::InputFailed, format!("input_failed: {failure}")));
+                }
             }
         }
     }
 
     /// Release held input once when the presented frame goes stale. Nothing
     /// is admitted again until a fresh presentation, so one release suffices.
-    pub(super) fn release_if_stale(&mut self, now: Instant) {
-        if self.state.record.controlling && !self.shared.auth.lock().fresh(now) {
-            self.drop_held();
-            if !self.stale_released {
-                self.backend.release();
-                self.stale_released = true;
+    pub(super) fn release_slot_if_stale(&mut self, idx: usize, now: Instant) {
+        let Some((controlling, fresh, already_released)) = self.slots[idx].as_ref().map(|slot| {
+            (
+                slot.state.record.controlling,
+                slot.shared.auth.lock().fresh(now),
+                slot.stale_released,
+            )
+        }) else {
+            return;
+        };
+        if controlling && !fresh {
+            self.drop_slot_held(idx);
+            if !already_released {
+                self.release_slot_inputs(idx);
+                if let Some(slot) = &mut self.slots[idx] {
+                    slot.stale_released = true;
+                }
             }
-        } else {
-            self.stale_released = false;
+        } else if let Some(slot) = &mut self.slots[idx] {
+            slot.stale_released = false;
         }
     }
 
-    pub(super) fn renew_lease(&mut self, now: Instant) {
-        if !self.state.record.controlling
-            || self
-                .last_lease
-                .is_some_and(|at| now.saturating_duration_since(at) < LEASE_RENEW_MIN)
-            || !self.shared.auth.lock().take_lease_due()
-        {
-            return;
+    pub(super) fn renew_leases(&mut self, now: Instant) {
+        let mut should_present = false;
+        for slot in self.slots.iter_mut().flatten() {
+            if !slot.state.record.controlling
+                || slot
+                    .last_lease
+                    .is_some_and(|at| now.saturating_duration_since(at) < LEASE_RENEW_MIN)
+                || !slot.shared.auth.lock().take_lease_due()
+            {
+                continue;
+            }
+            slot.last_lease = Some(now);
+            should_present = true;
         }
-        self.last_lease = Some(now);
-        if let Some(context) = &self.context
+        if should_present
+            && let Some(context) = &self.context
             && let Err(failure) = self.backend.presented(context)
             && link_lost(&failure)
         {
@@ -311,22 +539,68 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
     }
 
-    pub(super) fn release_control(&mut self) {
-        self.invalidate();
-        self.state.record.controlling = false;
+    pub(super) fn release_slot_control(&mut self, idx: usize) {
+        self.invalidate_slot(idx);
+        if let Some(slot) = &mut self.slots[idx] {
+            slot.state.record.controlling = false;
+        }
+        self.sync_lease();
+    }
+
+    pub(super) fn release_all_control(&mut self) {
+        self.invalidate_all();
+        for slot in self.slots.iter_mut().flatten() {
+            slot.state.record.controlling = false;
+        }
         self.lease = None;
     }
 
-    /// A new desktop generation: nothing produced or presented before it
-    /// admits input, older units are not sent, and the next unit is an IDR.
-    pub(super) fn invalidate(&mut self) {
+    /// Invalidate one viewer's generation without disturbing other viewers.
+    pub(super) fn invalidate_slot(&mut self, idx: usize) {
+        self.release_slot_inputs(idx);
+        self.drop_slot_held(idx);
+        if let Some(slot) = &self.slots[idx]
+            && self
+                .last_pointer_owner
+                .is_some_and(|(owner, _, _)| owner == slot.slot)
+        {
+            self.last_pointer_owner = None;
+        }
+        self.hide_peer_cursor(idx);
+        let Some(slot) = &mut self.slots[idx] else {
+            return;
+        };
+        slot.pointer = None;
+        slot.cursor.invalidate();
+        slot.state.record.generation += 1;
+        let generation = slot.state.record.generation;
+        slot.shared.auth.lock().on_invalidate(generation);
+        slot.state.dropped_frames += slot.shared.outgoing.retain_generation(generation) as u64;
+        slot.shared.idr.lock().force(IdrReason::Generation);
+        self.keyframe = true;
+    }
+
+    /// Desktop-wide new generation: nothing produced or presented before it
+    /// admits input on any viewer, older units are dropped, and the next unit is an IDR.
+    pub(super) fn invalidate_all(&mut self) {
         self.backend.release();
-        self.drop_held();
-        self.cursor.invalidate();
-        self.state.record.generation += 1;
-        let generation = self.state.record.generation;
-        self.shared.auth.lock().on_invalidate(generation);
-        self.state.dropped_frames += self.shared.outgoing.retain_generation(generation) as u64;
-        self.shared.idr.lock().force(IdrReason::Generation);
+        self.last_pointer_owner = None;
+        self.mover_moved_since_sample = false;
+        self.hide_all_peer_cursors();
+        for idx in 0..MAX_VIEWERS {
+            self.drop_slot_held(idx);
+            let Some(slot) = &mut self.slots[idx] else {
+                continue;
+            };
+            slot.held.clear();
+            slot.pointer = None;
+            slot.cursor.invalidate();
+            slot.state.record.generation += 1;
+            let generation = slot.state.record.generation;
+            slot.shared.auth.lock().on_invalidate(generation);
+            slot.state.dropped_frames += slot.shared.outgoing.retain_generation(generation) as u64;
+            slot.shared.idr.lock().force(IdrReason::Generation);
+        }
+        self.keyframe = true;
     }
 }

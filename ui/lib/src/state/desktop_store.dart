@@ -278,6 +278,7 @@ class DesktopStore {
   );
   final _quality = ValueNotifier(DesktopQuality.balanced);
   final _cursor = DesktopCursor();
+  final _peerCursors = ValueNotifier<List<PeerCursorPoint>>(const []);
   final _decoders = ValueNotifier<DesktopDecoders?>(null);
 
   ValueListenable<DesktopHostView> get hostView => _hostView;
@@ -305,6 +306,10 @@ class DesktopStore {
   /// host's reports where they say something new. The view leaf reports
   /// them, read every rendered frame and every 16 ms (D11).
   DesktopCursor get cursor => _cursor;
+
+  /// Other controlling viewers' pointers on the active display (`[0, 1]`);
+  /// empty when this viewer is the sole controller or on an older host.
+  ValueListenable<List<PeerCursorPoint>> get peerCursors => _peerCursors;
 
   /// What this device decodes natively, probed once, at the first connect
   /// (I4); null until the probe answers. H.265 leaves it for the rest of the
@@ -638,6 +643,15 @@ class DesktopStore {
     final saved = trust?.saved;
     final matches = trust?.matchesRelay == true;
     final trustError = _trustError;
+    final primaryViewer = host?.viewer ?? backgroundHost?.viewer;
+    final rawViewers = host != null
+        ? host.viewers
+        : (backgroundHost?.viewers ?? const []);
+    final viewers = rawViewers.isNotEmpty
+        ? rawViewers
+        : (primaryViewer != null
+              ? [primaryViewer]
+              : const <DesktopHostViewer>[]);
     _hostView.value = DesktopHostView(
       loaded:
           capabilities != null &&
@@ -676,7 +690,8 @@ class DesktopStore {
           (configuredBackground ? background!.displayId : null) ??
           saved?.displayId,
       helper: _helperState(capabilities?.helper),
-      viewer: host?.viewer ?? backgroundHost?.viewer,
+      viewer: primaryViewer,
+      viewers: viewers,
       unsupportedReason: capabilities?.reason,
       displayMode: host?.displayMode ?? backgroundHost?.displayMode,
       backgroundService: capabilities?.backgroundService ?? true,
@@ -1181,6 +1196,7 @@ class DesktopStore {
       _hasPicture = false;
       _releaseMedia();
       _cursor._reset();
+      _resetPeerCursors();
       _h265Declined = false;
     }
     _attemptSerial = serial;
@@ -1686,7 +1702,8 @@ class DesktopStore {
     _view = view;
     // After paint a repaint asks for no frame: ask for the one that draws
     // the new cursor.
-    if ((_publishCursor() | _publishShape(view)) && inFrame) {
+    if ((_publishCursor() | _publishPeerCursors() | _publishShape(view)) &&
+        inFrame) {
       SchedulerBinding.instance.scheduleFrame();
     }
     if (view == null) return;
@@ -1742,6 +1759,60 @@ class DesktopStore {
       g,
       controlling: _session.value.controlling,
     );
+  }
+
+  int _peerCursorSeq = -1;
+  int _peerCursorGen = -1;
+  int _peerCursorW = 0;
+  int _peerCursorH = 0;
+
+  void _resetPeerCursors() {
+    _peerCursorSeq = -1;
+    _peerCursorGen = -1;
+    _peerCursorW = 0;
+    _peerCursorH = 0;
+    if (_peerCursors.value.isNotEmpty) {
+      _peerCursors.value = const [];
+    }
+  }
+
+  bool _publishPeerCursors() {
+    final view = _view, g = _geometry.value;
+    if (view == null ||
+        g == null ||
+        view.paused ||
+        view.peerCursors.isEmpty ||
+        view.generation != g.generation ||
+        g.displayWidth <= 0 ||
+        g.displayHeight <= 0) {
+      _peerCursorSeq = -1;
+      if (_peerCursors.value.isEmpty) return false;
+      _peerCursors.value = const [];
+      return true;
+    }
+    if (view.peerCursorSeq == _peerCursorSeq &&
+        g.generation == _peerCursorGen &&
+        g.displayWidth == _peerCursorW &&
+        g.displayHeight == _peerCursorH) {
+      return false;
+    }
+    _peerCursorSeq = view.peerCursorSeq;
+    _peerCursorGen = g.generation;
+    _peerCursorW = g.displayWidth;
+    _peerCursorH = g.displayHeight;
+    final next = <PeerCursorPoint>[
+      for (final peer in view.peerCursors)
+        PeerCursorPoint(
+          color: peer.color & 3,
+          position: Offset(
+            (peer.x / g.displayWidth).clamp(0.0, 1.0),
+            (peer.y / g.displayHeight).clamp(0.0, 1.0),
+          ),
+        ),
+    ];
+    if (listEquals(_peerCursors.value, next)) return false;
+    _peerCursors.value = next;
+    return true;
   }
 
   /// The shapes the view named, the latest last, at most [_shapeCache]: a
@@ -1853,6 +1924,8 @@ class DesktopStore {
     if (next == current) return;
     if (moved) _invalidateInput();
     _geometry.value = next;
+    _publishCursor();
+    _publishPeerCursors();
     _publishPicture();
   }
 
@@ -2132,6 +2205,7 @@ class DesktopStore {
     _jpegImage.value = null;
     _picture.value = null;
     _geometry.value = null;
+    _resetPeerCursors();
     _stats.value = DesktopStats.none;
     _publishSession();
     _schedulePolling();
@@ -2568,6 +2642,7 @@ class DesktopStore {
     _decoder.dispose();
     _quality.dispose();
     _cursor.dispose();
+    _peerCursors.dispose();
     _decoders.dispose();
   }
 }

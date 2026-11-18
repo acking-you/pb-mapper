@@ -203,7 +203,7 @@ typedef _PbMapperFreeStringNative = Void Function(Pointer<Utf8> s);
 typedef _PbMapperFreeStringDart = void Function(Pointer<Utf8> s);
 
 /// `PbDesktopViewV1`: what the viewer shows this frame, filled by the
-/// per-frame leaf `pb_mapper_desktop_view_v1`. 56 bytes, native layout.
+/// per-frame leaf `pb_mapper_desktop_view_v1`. 96 bytes, native layout.
 final class PbDesktopViewV1 extends Struct {
   @Uint64()
   external int generation;
@@ -252,6 +252,39 @@ final class PbDesktopViewV1 extends Struct {
   /// 0 none, which is the generic arrow.
   @Uint16()
   external int cursorShape;
+
+  /// Increments per peer-cursor change.
+  @Uint64()
+  external int peerCursorSeq;
+
+  /// Physical pixels of up to 3 other controlling viewers' pointers.
+  @Int32()
+  external int peerX0;
+  @Int32()
+  external int peerX1;
+  @Int32()
+  external int peerX2;
+  @Int32()
+  external int peerY0;
+  @Int32()
+  external int peerY1;
+  @Int32()
+  external int peerY2;
+
+  /// Active entries (`0..=3`).
+  @Uint8()
+  external int peerCount;
+
+  /// Palette index (`0..4`) for each active peer cursor.
+  @Uint8()
+  external int peerColor0;
+  @Uint8()
+  external int peerColor1;
+  @Uint8()
+  external int peerColor2;
+
+  @Uint32()
+  external int reserved;
 }
 
 /// `PbDesktopVideoMetaV1`: what `pb_mapper_desktop_video_next_v1` says about
