@@ -56,3 +56,15 @@ case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1141 allocs_per_unit=1
 case=video+pointer units_per_s=60.0 inputs_per_s=248.1 allocs_per_s=3559 allocs_per_unit=59.33 alloc_bytes_per_unit=47068
 case=2viewers+pointer units_per_s=59.4 inputs_per_s=469.8 allocs_per_s=9421 allocs_per_unit=158.66 alloc_bytes_per_unit=98772
 case=peer_cursor samples=256 p50_us=314 p95_us=664 p99_us=945
+
+# Before shared click history (8edf84e); same M3 Pro, macOS 27.0.1 and Rust 1.99.1, one run
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1141 allocs_per_unit=19.03 alloc_bytes_per_unit=40206
+case=video+pointer units_per_s=60.0 inputs_per_s=249.3 allocs_per_s=3543 allocs_per_unit=59.07 alloc_bytes_per_unit=47090
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=498.7 allocs_per_s=10089 allocs_per_unit=168.17 alloc_bytes_per_unit=100450
+case=peer_cursor samples=256 p50_us=262 p95_us=392 p99_us=420
+
+# After shared click history (c372914); same M3 Pro, macOS 27.0.1 and Rust 1.99.1, one run
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1144 allocs_per_unit=19.08 alloc_bytes_per_unit=40215
+case=video+pointer units_per_s=60.0 inputs_per_s=249.7 allocs_per_s=3564 allocs_per_unit=59.41 alloc_bytes_per_unit=47105
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10065 allocs_per_unit=167.78 alloc_bytes_per_unit=100496
+case=peer_cursor samples=256 p50_us=263 p95_us=680 p99_us=703

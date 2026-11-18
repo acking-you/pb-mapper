@@ -112,7 +112,7 @@ Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/
 
 **在应用里**：在要共享的电脑上打开**远程桌面**，Windows 选择**开启远程控制**（或**只共享普通桌面**，不安装辅助服务），Mac 在允许卡片要求的权限后选择**共享这台电脑**。私下复制 `pbd1.` 邀请，或把二维码给手机扫：持有邀请的人都能查看，操控是主机另外授予的权限。在另一台设备上选择**添加电脑**（手机上是**扫码添加**或**粘贴邀请**），再点**连接**。查看器的**显示**菜单（手机上在**更多**里）可以设置分辨率、最高帧率和编解码器，打开质量监测（速度、帧率、延迟、码率、编解码器、分辨率），在桌面端操控 Windows 或 Mac 电脑时，还能把对方的分辨率改成**适配本机**。**快捷键 → 输入法** 选择由你自己的输入法还是对方的输入法组字，指针也会显示对方的形状。
 
-**在你自己的应用里：** `pb-mapper = { version = "0.11", features = ["desktop"] }` 提供主机、交给你自己解码器的编码画面、输入、状态流（`Host::watch`、`Viewer::watch`）、让查看端保持连接的 `supervisor::Supervisor`，以及让主机的邀请在重启后依然有效的 `trust::TrustFile`。`cargo run -p pb-mapper --features desktop --example desktop_loopback` 在任意系统上于一个进程内跑起 relay、主机和查看端。API 与解码方法见 SDK 的 [Remote desktop 一节](crates/pb-mapper/README.md#remote-desktop)，辅助服务、视频管线与实测数据见 [docs/remote-desktop.md](docs/remote-desktop.md)（英文）。
+**在你自己的应用里：** `pb-mapper = { version = "0.12", features = ["desktop"] }` 提供主机、交给你自己解码器的编码画面、输入、状态流（`Host::watch`、`Viewer::watch`）、让查看端保持连接的 `supervisor::Supervisor`，以及让主机的邀请在重启后依然有效的 `trust::TrustFile`。`cargo run -p pb-mapper --features desktop --example desktop_loopback` 在任意系统上于一个进程内跑起 relay、主机和查看端。API 与解码方法见 SDK 的 [Remote desktop 一节](crates/pb-mapper/README.md#remote-desktop)，辅助服务、视频管线与实测数据见 [docs/remote-desktop.md](docs/remote-desktop.md)（英文）。
 
 暂不支持：Linux 或手机作主机、共享 Mac 的锁屏、音频、剪贴板、文件传输，以及同时多个查看端。补齐主机正是通向「每台设备」的路：每种主机只是接在现有接口后面的一个后端，[Platforms](docs/remote-desktop.md#platforms)（英文）一节就是给 Linux 和 Android 写后端的指南。辅助服务在 Windows 默认安全桌面策略下的 UAC 验收，以及锁屏时输入密码的验收，都还未完成。
 
@@ -122,7 +122,7 @@ CLI、应用和 Node 包跑的是同一个 Rust 客户端。在你自己的程�
 
 ```toml
 [dependencies]
-pb-mapper = "0.11"
+pb-mapper = "0.12"
 tokio = { version = "1", features = ["full"] }
 ```
 
