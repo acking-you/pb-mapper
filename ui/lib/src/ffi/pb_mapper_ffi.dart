@@ -352,7 +352,13 @@ class PbMapperFFI {
       .lookupFunction<
         Int32 Function(Pointer<Void>, Pointer<PbDesktopViewV2>),
         int Function(Pointer<Void>, Pointer<PbDesktopViewV2>)
-      >('pb_mapper_desktop_view_v2', isLeaf: true);
+      >(
+        // An older library fills the common prefix of our zeroed scratch buffer.
+        lib.providesSymbol('pb_mapper_desktop_view_v2')
+            ? 'pb_mapper_desktop_view_v2'
+            : 'pb_mapper_desktop_view_v1',
+        isLeaf: true,
+      );
 
   /// `> 0` the consumer id; otherwise `CLOSED` or `ALREADY_ATTACHED`.
   late final pbMapperDesktopVideoAttach = lib
