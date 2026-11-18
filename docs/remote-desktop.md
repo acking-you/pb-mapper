@@ -1192,13 +1192,15 @@ coordinates still use the physical `Display` geometry.
 macOS hosting uses
 ScreenCaptureKit, which scales the
 display to the encoder's size and delivers NV12 (BT.709) without the cursor;
-its output queue keeps only the newest complete picture, and thread C's
-capture call hands that IOSurface to a `VTCompressionSession` without a copy,
-or repeats the last one every 250 ms on a still screen. The session runs in
+its output queue keeps the newest complete picture and wakes thread C when
+one becomes available. Thread C submits that IOSurface at the negotiated
+pace without a copy. On a still screen it can reuse the last picture for a
+requested keyframe or the 250 ms liveness repeat. The session runs in
 real time with no frame reordering, an unbounded GOP (`gop` reports the
 read-back), IDRs as a per-frame `ForceKeyFrame` option and the bitrate set
-live, with low-latency rate control for H.264 on macOS 11.3 and later. H.265
-needs the hardware encoder; H.264 prefers it and takes VideoToolbox's
+live. Both codecs request low-latency rate control when available and retry
+with standard rate control if VideoToolbox rejects the configuration. H.265
+needs the hardware encoder. H.264 prefers it and takes VideoToolbox's
 software encoder where there is none, as on a virtual Mac. The output
 callback converts the length-prefixed sample to Annex B, with the parameter
 sets in front of a keyframe, queues the unit and wakes thread C, so nothing
@@ -2002,10 +2004,11 @@ host encodes.
 H.264 and H.265 through this runner; iOS has build coverage in CI. One
 decoder thread per attached source pulls
 with a 50 ms timeout and decodes synchronously in real time, so nothing is
-reordered or held back. The runner turns Annex B into 4-byte length-prefixed
-samples in one reused buffer and keeps the parameter sets of the last
-keyframe; a keyframe whose sets differ makes a new format description and
-session. Pixel buffers come from VideoToolbox's pool; a unit costs the
+reordered or held back. The runner writes 4-byte NAL lengths into the
+received buffer when its slices are contiguous with room for each length.
+Other layouts are packed in a reusable buffer. The runner keeps the parameter
+sets of the last keyframe. A keyframe whose sets differ makes a new format
+description and session. Pixel buffers come from VideoToolbox's pool; a unit costs the
 `CMBlockBuffer` and `CMSampleBuffer` VideoToolbox requires. The newest picture
 waits for the compositor, which takes it in `copyPixelBuffer`: the first time
 it takes a picture of the current revision is the presentation receipt, and

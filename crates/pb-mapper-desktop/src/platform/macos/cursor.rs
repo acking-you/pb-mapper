@@ -51,11 +51,11 @@ enum Identity {
 pub(crate) struct MacCursor {
     geometry: Shared,
     seed: Option<Seed>,
-    /// The identities whose shape was read, or failed to be.
-    reads: ShapeReads<Identity>,
+    /// The last scale and identity whose shape was read, or failed to be.
+    reads: ShapeReads<(u64, Identity)>,
     /// The standard cursors rendered at a scale, to name a shape; none
     /// rendered (AppKit had none to give) are asked for again.
-    standards: Option<(u64, Vec<(CursorKind, CursorShape)>)>,
+    standards: Option<(u64, Vec<CursorShape>)>,
 }
 
 impl MacCursor {
@@ -74,22 +74,27 @@ impl MacCursor {
 
     /// The identity whose shape to read at `now`, when the pointer may
     /// have changed since the last read, or that one failed.
-    fn due(&self, now: Instant) -> Option<Identity> {
+    fn due(&self, scale: f64, now: Instant) -> Option<(u64, Identity)> {
+        let scale = scale.to_bits();
         let identity = match self.seed {
             // SAFETY: takes nothing, reads a counter.
             Some(seed) => Identity::Seed(unsafe { seed() }),
             None => match self.reads.last() {
-                Some(Identity::Read(at)) if now.saturating_duration_since(at) < UNSEEDED => {
+                Some((previous, Identity::Read(at)))
+                    if previous == scale && now.saturating_duration_since(at) < UNSEEDED =>
+                {
                     return None;
                 }
                 _ => Identity::Read(now),
             },
         };
+        let identity = (scale, identity);
         self.reads.due(identity, now).then_some(identity)
     }
 
-    /// The kind of `shape`: the standard cursor it equals at `scale`.
-    fn kind(&mut self, shape: &CursorShape, scale: f64) -> CursorKind {
+    /// The cached standard cursor `shape` equals at `scale`, sharing its
+    /// `Arc<[u8]>` bitmap so `ShapeSlots` matches in O(1) without copying.
+    fn standard(&mut self, shape: &CursorShape, scale: f64) -> Option<CursorShape> {
         let key = scale.to_bits();
         if self
             .standards
@@ -98,22 +103,22 @@ impl MacCursor {
         {
             self.standards = Some((key, standards(scale)));
         }
-        self.standards
-            .as_ref()
-            .and_then(|(_, standards)| {
-                standards.iter().find(|(_, standard)| {
+        self.standards.as_ref().and_then(|(_, standards)| {
+            standards
+                .iter()
+                .find(|standard| {
                     standard.hotspot() == shape.hotspot()
                         && (standard.width(), standard.height()) == (shape.width(), shape.height())
                         && standard.rgba() == shape.rgba()
                 })
-            })
-            .map_or(CursorKind::Custom, |(kind, _)| *kind)
+                .cloned()
+        })
     }
 }
 
 /// The standard cursors that have a kind and that AppKit gives, rendered
 /// at `scale`.
-fn standards(scale: f64) -> Vec<(CursorKind, CursorShape)> {
+fn standards(scale: f64) -> Vec<CursorShape> {
     /// The class's cursor of that name, or `None`.
     macro_rules! standard {
         ($name:ident) => {{
@@ -137,10 +142,7 @@ fn standards(scale: f64) -> Vec<(CursorKind, CursorShape)> {
         .into_iter()
         .filter_map(|(kind, cursor)| {
             let cursor = cursor?;
-            render(&cursor, scale, kind)
-                .ok()
-                .flatten()
-                .map(|shape| (kind, shape))
+            render(&cursor, scale, kind).ok().flatten()
         })
         .collect()
 }
@@ -215,10 +217,11 @@ impl CursorSource for MacCursor {
     }
     fn shape(&mut self) -> Result<Option<CursorShape>> {
         let now = Instant::now();
-        let Some(identity) = self.due(now) else {
+        let scale = self.geometry.get().scale;
+        let Some(identity) = self.due(scale, now) else {
             return Ok(None);
         };
-        let read = self.read_shape();
+        let read = self.read_shape(scale);
         self.reads.record(identity, &read, now);
         read
     }
@@ -230,8 +233,7 @@ impl MacCursor {
         deprecated,
         reason = "currentSystemCursor is the only public way to the pointer other apps show; nil on a system without it"
     )]
-    fn read_shape(&mut self) -> Result<Option<CursorShape>> {
-        let scale = self.geometry.get().scale;
+    fn read_shape(&mut self, scale: f64) -> Result<Option<CursorShape>> {
         autoreleasepool(|_| {
             let Some(cursor) = NSCursor::currentSystemCursor() else {
                 return Ok(None);
@@ -239,18 +241,7 @@ impl MacCursor {
             let Some(shape) = render(&cursor, scale, CursorKind::Custom)? else {
                 return Ok(None);
             };
-            let kind = self.kind(&shape, scale);
-            if kind == CursorKind::Custom {
-                return Ok(Some(shape));
-            }
-            CursorShape::new(
-                kind,
-                shape.width(),
-                shape.height(),
-                shape.hotspot(),
-                shape.rgba().to_vec(),
-            )
-            .map(Some)
+            Ok(Some(self.standard(&shape, scale).unwrap_or(shape)))
         })
     }
 }
@@ -288,15 +279,18 @@ mod tests {
         let shown = cursor.shape().unwrap().expect("the system shows a pointer");
         assert!(shown.rgba().chunks(4).any(|pixel| pixel[3] == 255));
         assert!(rendered.len() >= 5, "{} rendered", rendered.len());
-        for (kind, shape) in &rendered {
+        for shape in &rendered {
             assert!(shape.width().max(shape.height()) <= CursorShape::MAX_SIDE);
             assert!(
                 shape.rgba().chunks(4).any(|pixel| pixel[3] == 255),
-                "{kind:?} has no opaque pixel"
+                "{:?} has no opaque pixel",
+                shape.kind()
             );
         }
-        let (kind, arrow) = &rendered[0];
-        assert_eq!(autoreleasepool(|_| cursor.kind(arrow, 2.0)), *kind);
+        let arrow = &rendered[0];
+        let matched = autoreleasepool(|_| cursor.standard(arrow, 2.0)).unwrap();
+        assert_eq!(matched.kind(), arrow.kind());
+        assert!(matched.shares_bitmap(&autoreleasepool(|_| cursor.standard(arrow, 2.0)).unwrap()));
         let corner = (arrow.width() - 1, arrow.height() - 1);
         let moved = CursorShape::new(
             CursorKind::Custom,
@@ -306,6 +300,18 @@ mod tests {
             arrow.rgba().to_vec(),
         )
         .unwrap();
-        assert_eq!(cursor.kind(&moved, 2.0), CursorKind::Custom);
+        assert!(cursor.standard(&moved, 2.0).is_none());
+    }
+
+    #[test]
+    fn a_scale_change_invalidates_the_cursor_read_even_without_a_seed() {
+        let geometry = Geometry::new((0.0, 0.0, 100.0, 100.0), 200, 100);
+        let mut cursor = MacCursor::new(Rc::new(Cell::new(geometry)));
+        cursor.seed = None;
+        let now = Instant::now();
+        let identity = cursor.due(2.0, now).unwrap();
+        cursor.reads.record(identity, &Ok(()), now);
+        assert!(cursor.due(2.0, now).is_none());
+        assert!(cursor.due(1.0, now).is_some());
     }
 }

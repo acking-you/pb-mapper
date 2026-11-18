@@ -30,7 +30,12 @@ use crate::{
     native::PlatformBackend,
 };
 use serde::{Deserialize, Serialize};
-use std::{future::Future, path::Path, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 /// This build's platform.
 #[cfg(windows)]
@@ -123,6 +128,10 @@ pub(crate) trait Desktop: Sized {
     /// The geometry now. A display whose handle went stale is found again
     /// by its device name before this fails.
     fn display(&mut self) -> Result<Display>;
+    /// Whether the display is still `expected`, without allocating its name.
+    fn display_matches(&mut self, expected: &Display) -> Result<bool> {
+        Ok(&self.display()? == expected)
+    }
     fn generation(&self) -> u64 {
         0
     }
@@ -154,9 +163,15 @@ pub(crate) trait VideoSource: Sized {
     ) -> Result<Self>;
     fn codec(&self) -> VideoCodec;
     fn set_rate(&mut self, rate: VideoRate) -> Result<()>;
-    /// Pull: capture and submit one picture. Push: carry `keyframe` to the
-    /// next picture; never blocks.
-    fn submit(&mut self, keyframe: bool) -> Result<()>;
+    /// Capture and submit one picture. A push source never blocks and may
+    /// report `false` when it has no picture, leaving the worker's tick armed.
+    /// If its encoder is full, it returns `true` and keeps the IDR request.
+    fn submit(&mut self, keyframe: bool) -> Result<bool>;
+    /// When to try again on a push source, if it has nothing ready now.
+    fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        let _ = keyframe_due;
+        None
+    }
     fn drain(&mut self) -> Result<Option<EncodedFrame>>;
     fn pending(&self) -> usize;
 }

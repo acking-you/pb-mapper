@@ -828,7 +828,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
         if self.fatal.is_none() {
             self.renew_leases(now);
-            self.capture_step(now);
+            self.capture_step(self.clock.now());
         }
         // Only a live capture may execute input queued during its backend call.
         if self.fatal.is_none() {
@@ -899,27 +899,27 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     }
 
     pub(super) fn publish_slot(&mut self, idx: usize) {
-        let unavailable = self.unavailable.clone();
         let Some(slot) = &mut self.slots[idx] else {
             return;
         };
         slot.state.record.state = if slot.paused {
             SessionState::Paused
-        } else if unavailable.is_some() {
+        } else if self.unavailable.is_some() {
             SessionState::CaptureUnavailable
         } else if slot.streaming {
             SessionState::Streaming
         } else {
             SessionState::Connecting
         };
-        let (reason, message) = unavailable
-            .as_ref()
-            .or(slot.control_note.as_ref())
-            .map_or((None, String::new()), |(reason, message)| {
-                (Some(*reason), message.clone())
-            });
+        let (reason, message) = match self.unavailable.as_ref().or(slot.control_note.as_ref()) {
+            Some((reason, message)) => (Some(*reason), message.as_str()),
+            None => (None, ""),
+        };
         slot.state.record.reason = reason;
-        slot.state.record.message = message;
+        if slot.state.record.message != message {
+            slot.state.record.message.clear();
+            slot.state.record.message.push_str(message);
+        }
         let next = &slot.state;
         slot.shared.state.send_if_modified(|published| {
             let changed = *published != *next;
@@ -961,7 +961,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
         deadline
             .min(self.context_due)
-            .min(self.pacer.next())
+            .min(self.capture_at())
             .min(self.cursor_due)
     }
 }

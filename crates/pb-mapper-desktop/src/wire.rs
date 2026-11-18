@@ -145,10 +145,13 @@ async fn read_record<R: AsyncRead + Unpin>(
 ) -> Result<bool, WireError> {
     tokio::time::timeout(timeout, async {
         let mut length = [0; 4];
-        if r.read(&mut length[..1]).await? == 0 {
+        let received = r.read(&mut length).await?;
+        if received == 0 {
             return Ok(false);
         }
-        r.read_exact(&mut length[1..]).await?;
+        if received < length.len() {
+            r.read_exact(&mut length[received..]).await?;
+        }
         let len = u32::from_be_bytes(length) as usize;
         if len > MAX_HEADER {
             return Err(WireError::Framing(TOO_LARGE));
@@ -189,12 +192,14 @@ async fn read_payload_within<R: AsyncRead + Unpin>(
         return Err(WireError::Framing(PAYLOAD_SIZE));
     }
     tokio::time::timeout(write_timeout(len), async {
-        let mut bytes = Vec::with_capacity(len);
-        (&mut *r).take(len as u64).read_to_end(&mut bytes).await?;
-        if bytes.len() != len {
-            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        let mut bytes = bytes::BytesMut::with_capacity(len);
+        let mut limited = (&mut *r).take(len as u64);
+        while bytes.len() < len {
+            if limited.read_buf(&mut bytes).await? == 0 {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+            }
         }
-        Ok(bytes::Bytes::from(bytes))
+        Ok(bytes.freeze())
     })
     .await
     .map_err(|_| WireError::TimedOut)?
@@ -231,6 +236,13 @@ mod tests {
 
     fn eof(failure: Option<WireError>) -> bool {
         matches!(failure, Some(WireError::Io(failure)) if failure.kind() == io::ErrorKind::UnexpectedEof)
+    }
+
+    #[tokio::test]
+    async fn payload_reads_stop_at_the_record_boundary_and_detect_truncation() {
+        let mut records = &[0, 0, 0, 1, 7, 0, 0, 0, 2, 8][..];
+        assert_eq!(&read_payload(&mut records).await.unwrap()[..], &[7]);
+        assert!(eof(read_payload(&mut records).await.err()));
     }
 
     #[tokio::test]

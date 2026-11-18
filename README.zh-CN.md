@@ -106,7 +106,7 @@ Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/
 
 | 角色 | 目前支持 |
 | --- | --- |
-| 主机 | 装有 Media Foundation 的 Windows：GPU H.265 或 H.264；普通桌面，或经可选的辅助服务连同 UAC 提示和本人的锁屏。macOS 12.3 及以上，在应用里共享：ScreenCaptureKit 采集、VideoToolbox 编码，共享需要屏幕录制权限，远程控制另需辅助功能权限。已在 M3 Pro 上验证采集和仅观看会话 |
+| 主机 | 装有 Media Foundation 的 Windows：GPU H.265 或 H.264；普通桌面，或经可选的辅助服务连同 UAC 提示和本人的锁屏。macOS 12.3 及以上，在应用里共享：ScreenCaptureKit 采集、VideoToolbox 编码，共享需要屏幕录制权限，远程控制另需辅助功能权限。[M3 Pro 上的 1080p 仅观看实测](docs/benchmarks/2026-11-17-macos-desktop/README.md#november-18-data-path-follow-up) |
 | 应用里的查看端 | 每个平台都原生解码 H.265/H.264：Windows 与 Android（在真机和 Android 虚拟机上运行过），Linux 经 GStreamer（只在 WSL2 中运行过），macOS 与 iOS 经 VideoToolbox（已在 M3 Pro 上验证硬件解码，iOS 仍待真机验证）；没有解码器时以 JPEG 显示画面，最高 8 FPS |
 | SDK 里的查看端 | 任何系统，解码器由你提供 |
 

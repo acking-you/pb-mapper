@@ -306,6 +306,38 @@ async fn main() {
     let end = Tally::now(&presented, &inputs);
     start.report("2viewers+pointer", &end);
 
+    // One distinct move at a time. The relay, host and observer run on the
+    // runtime workers while this benchmark thread samples the public view.
+    // Timing includes the polling interval and excludes UI vsync and display.
+    let mut latencies = Vec::with_capacity(256);
+    for x in 0..256 {
+        let generation = viewer.view().generation;
+        let start = Instant::now();
+        viewer
+            .input(generation, &[Input::Move { x, y: 123 }])
+            .unwrap();
+        loop {
+            let peer = viewer2.view();
+            if peer.peer_count == 1 && peer.peer_x[0] == x as i32 && peer.peer_y[0] == 123 {
+                latencies.push(start.elapsed().as_micros());
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(3),
+                "peer pointer timed out"
+            );
+            std::thread::sleep(Duration::from_micros(100));
+        }
+    }
+    latencies.sort_unstable();
+    println!(
+        "case=peer_cursor samples={} p50_us={} p95_us={} p99_us={}",
+        latencies.len(),
+        latencies[127],
+        latencies[243],
+        latencies[253]
+    );
+
     stop.store(true, Ordering::Release);
     viewer2.stop().await.unwrap();
     viewer.stop().await.unwrap();

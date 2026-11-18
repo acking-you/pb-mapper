@@ -272,7 +272,7 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
     /// on the encoder's own thread, while thread C waits, which it wakes. The
     /// millisecond is waited as thread C waits, on a timer the platform does
     /// not coalesce.
-    fn submit(&mut self, keyframe: bool) -> Result<()> {
+    fn submit(&mut self, keyframe: bool) -> Result<bool> {
         self.frames += 1;
         let display = self.probe.current();
         let frame = EncodedFrame {
@@ -289,7 +289,7 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
         let mut flight = self.flight.lock();
         if !PUSH {
             flight.push_back(Some((Instant::now(), frame)));
-            return Ok(());
+            return Ok(true);
         }
         flight.push_back(None);
         drop(flight);
@@ -308,7 +308,7 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
             }
             waker.wake();
         });
-        Ok(())
+        Ok(true)
     }
     fn drain(&mut self) -> Result<Option<EncodedFrame>> {
         let mut flight = self.flight.lock();

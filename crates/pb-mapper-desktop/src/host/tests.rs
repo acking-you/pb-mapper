@@ -177,6 +177,7 @@ async fn handshake_reports_denied_and_busy_before_close() {
             ..
         }
     ));
+    until(|| host.status().viewers.len() == 2).await;
     drop(first);
     until(|| host.status().viewers.len() == 1).await;
     // Both viewers now support H.264. Upgrading here would disconnect the

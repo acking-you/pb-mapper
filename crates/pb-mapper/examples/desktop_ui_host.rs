@@ -120,9 +120,10 @@ fn options() -> Outcome<Options> {
 async fn main() -> Outcome {
     let options = options()?;
     let units = Arc::new(access_units(&std::fs::read(&options.clip)?));
-    if units.is_empty() {
-        return Err("the clip holds no access unit delimiter".into());
-    }
+    let first_idr = units
+        .iter()
+        .position(|unit| unit.idr)
+        .ok_or("the clip needs an access unit delimiter and an IDR picture")?;
     std::fs::create_dir_all(&options.dir)?;
     let _ = std::fs::remove_file(options.dir.join("stop"));
     let relay = LocalRelay::start("pb-mapper-desktop-ui-host").await?;
@@ -134,7 +135,8 @@ async fn main() -> Outcome {
     host_options.allow_direct = !options.relay_only;
     let (width, height) = (options.width, options.height);
     let (shapes, macos) = (options.shapes, options.macos);
-    let interval = Duration::from_secs(1) / options.fps.clamp(1, 120);
+    let fps = options.fps.clamp(1, 120);
+    let interval = Duration::from_secs(1) / fps;
     let clip = units.clone();
     let pointer: Pointer = Arc::new(Mutex::new(None));
     if options.wander {
@@ -143,11 +145,15 @@ async fn main() -> Outcome {
     let shared = pointer.clone();
     let host = Host::builder(host_options)
         .backend(move || {
+            let start = Instant::now();
             Ok(Replay {
                 units: clip.clone(),
-                next: 0,
+                next: first_idr,
+                first_idr,
+                fps,
                 interval,
-                last: None,
+                start,
+                due: start,
                 width,
                 height,
                 shapes,
@@ -234,9 +240,14 @@ async fn wander(pointer: Pointer, width: u32, height: u32) {
     }
 }
 
+struct Unit {
+    bytes: Vec<u8>,
+    idr: bool,
+}
+
 /// The clip's access units, each from its delimiter (NAL type 9) to the
 /// next.
-fn access_units(stream: &[u8]) -> Vec<Vec<u8>> {
+fn access_units(stream: &[u8]) -> Vec<Unit> {
     let starts: Vec<usize> = (0..stream.len().saturating_sub(3))
         .filter(|&at| stream[at..at + 3] == [0, 0, 1] && stream[at + 3] & 0x1f == 9)
         .map(|at| {
@@ -252,7 +263,11 @@ fn access_units(stream: &[u8]) -> Vec<Vec<u8>> {
         .enumerate()
         .map(|(i, &start)| {
             let end = starts.get(i + 1).copied().unwrap_or(stream.len());
-            stream[start..end].to_vec()
+            let bytes = stream[start..end].to_vec();
+            Unit {
+                idr: is_idr(&bytes),
+                bytes,
+            }
         })
         .collect()
 }
@@ -266,10 +281,13 @@ fn is_idr(unit: &[u8]) -> bool {
 /// The replayed desktop: one unit per capture, the pointer where the
 /// viewer last moved it, its shape by band, every input printed.
 struct Replay {
-    units: Arc<Vec<Vec<u8>>>,
+    units: Arc<Vec<Unit>>,
     next: usize,
+    first_idr: usize,
+    fps: u32,
     interval: Duration,
-    last: Option<Instant>,
+    start: Instant,
+    due: Instant,
     width: u32,
     height: u32,
     shapes: bool,
@@ -309,36 +327,40 @@ impl Backend for Replay {
         expected: &DesktopContext,
         codec: VideoCodec,
         keyframe: bool,
-        _rate: VideoRate,
+        rate: VideoRate,
     ) -> Result<Option<EncodedFrame>> {
         if codec != VideoCodec::H264 {
             return Err(std::io::Error::other("this desktop replays H.264 only"));
         }
+        if keyframe {
+            self.next = self.units[self.next..]
+                .iter()
+                .position(|unit| unit.idr)
+                .map_or(self.first_idr, |offset| self.next + offset);
+        }
         let now = Instant::now();
-        if self.last.is_some_and(|last| now - last < self.interval) {
+        // The engine already enforces its requested pace. A slower clip has
+        // its own deadline grid so jitter on one tick does not postpone the next.
+        if self.fps < rate.pace_fps && now < self.due {
             return Ok(None);
         }
-        self.last = Some(now);
-        // A keyframe asked for is the next IDR of the clip.
-        let count = self.units.len();
-        if keyframe {
-            while !is_idr(&self.units[self.next % count]) {
-                self.next += 1;
-            }
-        }
-        let unit = self.units[self.next % count].clone();
-        self.next += 1;
-        let idr = is_idr(&unit);
+        self.due = if self.fps >= rate.pace_fps || now >= self.due + self.interval {
+            now + self.interval
+        } else {
+            self.due + self.interval
+        };
+        let unit = &self.units[self.next];
+        self.next = (self.next + 1) % self.units.len();
         Ok(Some(EncodedFrame {
             format: VideoFormat {
                 codec,
                 width: expected.display.width,
                 height: expected.display.height,
-                keyframe: idr,
-                pts_us: self.next as u64 * 33_333,
+                keyframe: unit.idr,
+                pts_us: (now - self.start).as_micros() as u64,
                 ..VideoFormat::default()
             },
-            bytes: unit,
+            bytes: unit.bytes.clone(),
         }))
     }
     fn cursor(&mut self, _: &DesktopContext) -> Result<Option<CursorPosition>> {

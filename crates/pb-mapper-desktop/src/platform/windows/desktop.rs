@@ -35,11 +35,11 @@ pub(crate) fn available() -> Result<()> {
     // while input belongs to Winlogon/UAC or another inaccessible desktop.
     let desk = unsafe { OpenInputDesktop(Default::default(), false, DESKTOP_READOBJECTS) }
         .map_err(|_| ordinary_desktop_unavailable())?;
-    let name = win32::desktop_name(desk);
+    let default = win32::is_default_desktop(desk);
     unsafe {
         let _ = CloseDesktop(desk);
     }
-    if !name?.eq_ignore_ascii_case("default") {
+    if !default? {
         return Err(ordinary_desktop_unavailable());
     }
     Ok(())
@@ -72,7 +72,24 @@ fn monitor_handle(id: u32) -> Result<HMONITOR> {
         .map(|m| HMONITOR(m.as_raw_hmonitor()))
         .ok_or_else(|| display_lost("selected display is no longer available"))
 }
-fn current_display(id: u32, monitor: HMONITOR) -> Result<Display> {
+struct MonitorGeometry {
+    origin: (i32, i32),
+    size: (u32, u32),
+    device: [u16; 32],
+}
+impl MonitorGeometry {
+    fn display(self, id: u32) -> Display {
+        Display {
+            id,
+            name: win32::from_wide_nul(&self.device),
+            x: self.origin.0,
+            y: self.origin.1,
+            width: self.size.0,
+            height: self.size.1,
+        }
+    }
+}
+fn monitor_geometry(monitor: HMONITOR) -> Result<MonitorGeometry> {
     let mut info = MONITORINFOEXW::default();
     info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
     unsafe { GetMonitorInfoW(monitor, (&mut info as *mut MONITORINFOEXW).cast()).ok() }
@@ -83,14 +100,14 @@ fn current_display(id: u32, monitor: HMONITOR) -> Result<Display> {
     if width == 0 || height == 0 {
         return Err(display_lost("display is unavailable"));
     }
-    Ok(Display {
-        id,
-        name: win32::from_wide_nul(&info.szDevice),
-        x: rect.left,
-        y: rect.top,
-        width,
-        height,
+    Ok(MonitorGeometry {
+        origin: (rect.left, rect.top),
+        size: (width, height),
+        device: info.szDevice,
     })
+}
+fn current_display(id: u32, monitor: HMONITOR) -> Result<Display> {
+    Ok(monitor_geometry(monitor)?.display(id))
 }
 pub(crate) fn displays() -> Result<Vec<Display>> {
     let _dpi = DpiScope::enter();
@@ -140,7 +157,10 @@ fn by_name(name: &str) -> Option<(u32, HMONITOR)> {
                 HMONITOR(m.as_raw_hmonitor()),
             )
         })
-        .find(|(id, monitor)| current_display(*id, *monitor).is_ok_and(|d| d.name == name))
+        .find(|(_, monitor)| {
+            monitor_geometry(*monitor)
+                .is_ok_and(|geometry| win32::wide_eq_str(&geometry.device, name))
+        })
 }
 
 pub(crate) struct WinDesktop {
@@ -182,6 +202,18 @@ impl WinDesktop {
             binding: Some(binding),
         })
     }
+    fn read_geometry(&mut self) -> Result<MonitorGeometry> {
+        monitor_geometry(self.monitor).or_else(|failure| {
+            // A mode change may recreate the monitor's handle; its device
+            // name stays.
+            let (id, monitor) = by_name(&self.name)
+                .filter(|(id, _)| *id != self.id)
+                .ok_or(failure)?;
+            self.id = id;
+            self.monitor = monitor;
+            monitor_geometry(monitor)
+        })
+    }
 }
 impl Desktop for WinDesktop {
     type Scope = DpiScope;
@@ -200,16 +232,14 @@ impl Desktop for WinDesktop {
         binding.enter(on_switch)
     }
     fn display(&mut self) -> Result<Display> {
-        current_display(self.id, self.monitor).or_else(|failure| {
-            // A mode change may recreate the monitor's handle; its device
-            // name stays.
-            let (id, monitor) = by_name(&self.name)
-                .filter(|(id, _)| *id != self.id)
-                .ok_or(failure)?;
-            self.id = id;
-            self.monitor = monitor;
-            current_display(id, monitor)
-        })
+        Ok(self.read_geometry()?.display(self.id))
+    }
+    fn display_matches(&mut self, expected: &Display) -> Result<bool> {
+        let geometry = self.read_geometry()?;
+        Ok(expected.id == self.id
+            && geometry.origin == (expected.x, expected.y)
+            && geometry.size == (expected.width, expected.height)
+            && win32::wide_eq_str(&geometry.device, &expected.name))
     }
     fn generation(&self) -> u64 {
         self.binding.as_ref().map_or(0, DesktopBinding::generation)
@@ -243,7 +273,7 @@ mod tests {
             binding: None,
         };
         let _dpi = DpiScope::enter();
-        assert_eq!(stale.display().unwrap(), primary);
+        assert!(stale.display_matches(&primary).unwrap());
         assert_eq!(stale.id, primary.id);
     }
 }

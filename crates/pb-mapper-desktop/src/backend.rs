@@ -10,7 +10,10 @@ use crate::{
     modes::{Mode, ModeList},
 };
 use serde::{Deserialize, Serialize};
-use std::{io, time::Duration};
+use std::{
+    io,
+    time::{Duration, Instant},
+};
 
 /// How often thread C polls an encoder that answers only when asked.
 pub const DRAIN_POLL: Duration = Duration::from_millis(2);
@@ -102,7 +105,8 @@ pub trait Backend: 'static {
         let _ = (expected, wait);
         Ok(None)
     }
-    /// Units submitted to the encoder and not yet output (the submit gate).
+    /// Units submitted to the encoder and not yet collected (the submit gate).
+    /// Include work a drain must surface, such as an asynchronous failure.
     fn pending_video(&self) -> usize {
         0
     }
@@ -110,6 +114,19 @@ pub trait Backend: 'static {
     /// are pending. `None`: a push source that wakes thread C itself.
     fn drain_poll(&self) -> Option<Duration> {
         Some(DRAIN_POLL)
+    }
+    /// Whether the last `capture_video` handed a tick to the capture source.
+    /// A push source with no picture to encode can leave the tick armed,
+    /// even when `capture_video` collected the previous tick's output.
+    fn submitted_video(&self) -> bool {
+        true
+    }
+    /// When a push source that currently has nothing to submit next needs a
+    /// tick, including for a `keyframe_due` if it has a picture to repeat.
+    /// It wakes thread C if new work arrives sooner. `None` paces normally.
+    fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        let _ = keyframe_due;
+        None
     }
     /// Report a pointer for the expected desktop, including when no video frame
     /// changed, as it stands after every input this backend applied: thread C
@@ -243,6 +260,12 @@ impl<B: Backend + ?Sized> Backend for Box<B> {
     }
     fn drain_poll(&self) -> Option<Duration> {
         (**self).drain_poll()
+    }
+    fn submitted_video(&self) -> bool {
+        (**self).submitted_video()
+    }
+    fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        (**self).capture_idle_until(keyframe_due)
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         (**self).cursor(expected)

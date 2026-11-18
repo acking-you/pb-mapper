@@ -133,6 +133,30 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         at + self.backend.drain_poll().unwrap_or(CONTEXT_CHECK_INTERVAL)
     }
 
+    /// The next tick a capture source can use. A push source stays idle
+    /// across cursor or input wakes, and wakes C itself for a fresh picture.
+    pub(super) fn capture_at(&self) -> Instant {
+        let tick = self.pacer.next();
+        let Some(until) = self.backend.capture_idle_until(None) else {
+            return tick;
+        };
+        let keyframe_due = if self.keyframe {
+            Some(tick)
+        } else {
+            self.slots
+                .iter()
+                .flatten()
+                .filter(|slot| !slot.paused)
+                .filter_map(|slot| slot.shared.idr.lock().due_at(tick))
+                .min()
+        };
+        match keyframe_due {
+            Some(due) if due < until => self.backend.capture_idle_until(Some(due)),
+            _ => Some(until),
+        }
+        .map_or(tick, |until| until.max(tick))
+    }
+
     /// At most one backend capture or drain call.
     pub(super) fn capture_step(&mut self, now: Instant) {
         let mut any_unpaused = false;
@@ -184,7 +208,12 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 && let Some(context) = &self.context
             {
                 let result = self.backend.drain_video(context, Duration::ZERO);
-                self.drain_due = self.drain_after(self.clock.now());
+                let done = self.clock.now();
+                self.drain_due = if matches!(result, Ok(Some(_))) {
+                    done
+                } else {
+                    self.drain_after(done)
+                };
                 match result {
                     Ok(Some(frame)) => {
                         self.window.dwell(frame.format.encode_us);
@@ -193,7 +222,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                         }
                     }
                     Ok(None) => {}
-                    Err(failure) => self.fail(failure, now),
+                    Err(failure) => self.fail(failure, done),
                 }
             }
             self.keyframe = true;
@@ -230,28 +259,33 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             self.pace_fps = pace_fps;
             self.pacer.set_pace(pace_fps, now);
         }
-        if retry || self.pacer.due(now) {
-            let can_deliver = self
+        let tick_due = retry || (self.pacer.due(now) && now >= self.capture_at());
+        let pending = self.backend.pending_video();
+        if tick_due
+            && pending < ENCODER_DEPTH
+            && self
                 .slots
                 .iter()
                 .flatten()
-                .any(|slot| !slot.paused && slot.shared.outgoing.len() < TRANSPORT_GATE);
-            if can_deliver && self.backend.pending_video() < ENCODER_DEPTH {
-                let keyframe = self
+                .any(|slot| !slot.paused && slot.shared.outgoing.len() < TRANSPORT_GATE)
+        {
+            let keyframe = self.keyframe
+                || self
                     .slots
                     .iter()
                     .flatten()
-                    .filter(|slot| !slot.paused)
-                    .fold(self.keyframe, |due, slot| {
-                        due | slot.shared.idr.lock().take_due(now)
-                    });
-                let rate = VideoRate {
-                    bitrate: encoder_bps,
-                    pace_fps,
-                };
-                let result = self
-                    .backend
-                    .capture_video(context, self.codec, keyframe, rate);
+                    .any(|slot| !slot.paused && slot.shared.idr.lock().take_due(now));
+            let rate = VideoRate {
+                bitrate: encoder_bps,
+                pace_fps,
+            };
+            let result = self
+                .backend
+                .capture_video(context, self.codec, keyframe, rate);
+            let done = self.clock.now();
+            // A capture with nothing to submit leaves the tick and any
+            // requested IDR armed, even if it drained an older picture.
+            if result.is_ok() && self.backend.submitted_video() {
                 if keyframe {
                     // Handed over: an IDR still in the encoder at the next
                     // tick must not be asked for again.
@@ -260,19 +294,30 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                         slot.shared.idr.lock().answered(now);
                     }
                 }
-                let done = self.clock.now();
-                self.drain_due = self.drain_after(done);
-                self.produced(result, done);
+                self.pacer.consume(now);
+            }
+            self.drain_due = if matches!(result, Ok(Some(_))) {
+                done
             } else {
-                // Transport backpressure or a full encoder, never
-                // presentation: skip the tick.
-                for slot in self.slots.iter_mut().flatten().filter(|slot| !slot.paused) {
-                    slot.state.skipped_ticks += 1;
-                }
+                self.drain_after(done)
+            };
+            self.produced(result, done);
+            return;
+        }
+        if tick_due {
+            // Transport backpressure or a full encoder, never presentation:
+            // skip the tick and still collect what a push encoder finished.
+            for slot in self.slots.iter_mut().flatten().filter(|slot| !slot.paused) {
+                slot.state.skipped_ticks += 1;
             }
             self.pacer.consume(now);
-        } else if self.backend.pending_video() > 0 {
-            let wait = HELPER_DRAIN_WAIT_MAX.min(self.pacer.next().saturating_duration_since(now));
+        }
+        if pending > 0 {
+            let wait = if tick_due {
+                Duration::ZERO
+            } else {
+                HELPER_DRAIN_WAIT_MAX.min(self.pacer.next().saturating_duration_since(now))
+            };
             let result = self.backend.drain_video(context, wait);
             let done = self.clock.now();
             let drained = matches!(result, Ok(Some(_)));

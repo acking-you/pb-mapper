@@ -105,7 +105,7 @@ impl VideoSource for Never {
     fn set_rate(&mut self, _: VideoRate) -> Result<()> {
         match *self {}
     }
-    fn submit(&mut self, _: bool) -> Result<()> {
+    fn submit(&mut self, _: bool) -> Result<bool> {
         match *self {}
     }
     fn drain(&mut self) -> Result<Option<EncodedFrame>> {
