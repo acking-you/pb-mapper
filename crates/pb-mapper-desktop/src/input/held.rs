@@ -97,6 +97,20 @@ pub(crate) struct Held {
     physical: HashSet<u16>,
 }
 impl Held {
+    /// Text commits Enter or Tab as a key tap. Repeat a key already held
+    /// by a controller without releasing its native hold.
+    pub(crate) fn tap(
+        &mut self,
+        key: Key,
+        mut inject: impl FnMut(bool) -> Result<()>,
+    ) -> Result<()> {
+        if self.keys.contains(&key) {
+            return inject(true);
+        }
+        self.key(key, true, &mut inject)?;
+        self.key(key, false, inject)
+    }
+
     /// Press or release `button` through `inject`, which gets `down`.
     pub(crate) fn button(
         &mut self,
@@ -198,6 +212,21 @@ mod tests {
         }
         keys.released(physical);
         assert!(keys.0.is_empty());
+    }
+
+    #[test]
+    fn typing_a_held_enter_preserves_its_release_obligation() {
+        let mut held = Held::default();
+        let mut posted = Vec::new();
+        let mut inject = |down| {
+            posted.push(down);
+            Ok(())
+        };
+        held.key(Key::Enter, true, &mut inject).unwrap();
+        held.tap(Key::Enter, &mut inject).unwrap();
+        assert!(held.contains(Pressed::Key(Key::Enter)));
+        held.key(Key::Enter, false, inject).unwrap();
+        assert_eq!(posted, [true, true, false]);
     }
 
     #[test]

@@ -299,10 +299,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
                 let held = &mut self.held;
                 Input::typed(text, |typed| match typed {
                     Typed::Chars(chars) => input.text(chars),
-                    Typed::Key(key) => {
-                        held.key(key, true, |down| input.key(key, down))?;
-                        held.key(key, false, |down| input.key(key, down))
-                    }
+                    Typed::Key(key) => held.tap(key, |down| input.key(key, down)),
                 })
             }
             Input::PhysicalKey { usage, down } if <P::Input as Injector>::PHYSICAL_KEYS => self

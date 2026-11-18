@@ -1,6 +1,6 @@
 //! Thread C's input lane and the control grant.
 
-use super::{Clock, Engine, link_lost};
+use super::{Clock, Engine, LeftPress, link_lost};
 use crate::{
     Backend, Button, Input, InputEvent,
     idr::IdrReason,
@@ -222,7 +222,10 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         {
             return None;
         }
-        slot.hold.until(guard, now)
+        let pointer = slot
+            .pointer
+            .or_else(|| self.last_pointer_owner.map(|(_, x, y)| (x, y)))?;
+        self.last_left_press?.drag_deadline(pointer, guard, now)
     }
 
     /// The hold ended: each held command runs the full input path now, as if
@@ -232,7 +235,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             return true;
         };
         let held = slot.hold.release();
-        for (index, command) in held.into_iter().enumerate() {
+        for command in held {
             let cancelled = self.room.cancel.is_cancelled()
                 || self.slots[idx]
                     .as_ref()
@@ -241,11 +244,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 return false;
             }
             let now = self.clock.now();
-            match command {
-                // The press that started the hold has waited it out.
-                LaneCommand::Input(event) if index == 0 => self.slot_input(idx, event, now),
-                command => self.execute_slot(idx, command, now),
-            }
+            // Another controller may have clicked while this lane waited.
+            self.execute_slot(idx, command, now);
         }
         true
     }
@@ -364,7 +364,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             return;
         }
         let lock = matches!(event.input, Input::Lock {});
-        match self.inject_slot_input(idx, &event.input, now) {
+        match self.inject_slot_input(idx, &event.input) {
             Ok(()) if lock => self.notice_all(
                 NoticeCode::Locked,
                 "The remote computer is locked".into(),
@@ -372,7 +372,19 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             ),
             Ok(()) => {
                 if let Some(slot) = &mut self.slots[idx] {
-                    slot.hold.injected(&event.input, now);
+                    if matches!(
+                        event.input,
+                        Input::Button {
+                            button: Button::Left,
+                            down: true,
+                            ..
+                        }
+                    ) {
+                        self.last_left_press = slot
+                            .pointer
+                            .or_else(|| self.last_pointer_owner.map(|(_, x, y)| (x, y)))
+                            .map(|position| LeftPress { at: now, position });
+                    }
                     if let Input::Move { x, y } = event.input {
                         slot.pointer = Some((x, y));
                         slot.cursor.injected(x, y);
@@ -424,7 +436,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
     }
 
-    fn inject_slot_input(&mut self, idx: usize, input: &Input, now: Instant) -> crate::Result<()> {
+    fn inject_slot_input(&mut self, idx: usize, input: &Input) -> crate::Result<()> {
         let shared_hold = match *input {
             Input::Button {
                 button,
@@ -451,7 +463,6 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             self.last_pointer_owner = Some((slot.slot, x, y));
             self.mover_moved_since_sample = true;
             slot.cursor.injected(x, y);
-            slot.hold.injected(&reposition, now);
         }
         let inject = |_| {
             if shared_hold {
@@ -565,6 +576,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         self.backend.release();
         self.last_pointer_owner = None;
         self.mover_moved_since_sample = false;
+        self.last_left_press = None;
         self.hide_all_peer_cursors();
         for idx in 0..MAX_VIEWERS {
             self.drop_slot_held(idx);

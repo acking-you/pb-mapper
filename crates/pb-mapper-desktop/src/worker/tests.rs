@@ -1160,15 +1160,27 @@ fn drag_start_press_waits_out_the_double_click_time() {
         time_ms: 500,
         half_box: (2, 2),
     });
+    let peer = h.join_watcher(60);
+    assert!(peer.lane.push(LaneCommand::Control { enabled: true }));
     h.send(LaneCommand::Control { enabled: true });
     h.step();
     h.present();
 
-    // A click at t0, and a drag that starts at t0 + 200 ms: the press waits
-    // until t0 + 520 ms, and the move queued after it follows it.
-    h.input(MOVE);
-    h.input(left(true, false));
-    h.input(left(false, false));
+    // A peer clicks at t0. The drag uses the same system pointer, even
+    // though its commands arrive in a different lane.
+    let (generation, frame_id) = h.presented;
+    assert!(peer.auth.lock().on_presented(generation, frame_id, h.now()));
+    for (seq, input) in [MOVE, left(true, false), left(false, false)]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(peer.lane.push(LaneCommand::Input(InputEvent {
+            generation,
+            frame_id,
+            sequence: seq as u64 + 1,
+            input,
+        })));
+    }
     h.step();
     let t0 = h.now();
     *h.now.lock() = t0 + ms(200);

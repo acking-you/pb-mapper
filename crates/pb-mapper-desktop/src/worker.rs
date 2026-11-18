@@ -19,7 +19,7 @@ mod window;
 use self::{
     capture::unavailable_reason,
     cursor::CursorEcho,
-    hold::DragHold,
+    hold::{DragHold, LeftPress},
     window::{Window, WindowStats},
 };
 use crate::{
@@ -475,6 +475,7 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     /// capture failure is `DisplayChanging` then, and no other change is
     /// taken.
     settle_until: Option<Instant>,
+    last_left_press: Option<LeftPress>,
     /// Which viewer's move last positioned the OS cursor, and where.
     last_pointer_owner: Option<(PeerSlot, u32, u32)>,
     mover_moved_since_sample: bool,
@@ -559,6 +560,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             stats: WindowStats::default(),
             settle_until: None,
             last_pointer_owner: None,
+            last_left_press: None,
             mover_moved_since_sample: false,
             peer_cursors_local: PeerCursorSnapshot::default(),
             peer_cursor_seq: 0,
