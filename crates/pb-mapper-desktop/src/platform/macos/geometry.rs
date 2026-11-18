@@ -64,6 +64,18 @@ impl Geometry {
         }
     }
 
+    /// Whether `id`, `name` and this geometry equal `expected`, without
+    /// cloning `name`.
+    pub(crate) fn matches(&self, id: u32, name: &str, expected: &Display) -> bool {
+        let (x, y, width, height) = self.pixels();
+        expected.id == id
+            && expected.x == x
+            && expected.y == y
+            && expected.width == width
+            && expected.height == height
+            && expected.name == name
+    }
+
     /// The global point at the centre of pixel `(x, y)`, absolute physical
     /// pixels as the injector gets them: this display's pixel origin plus
     /// an offset inside it.
@@ -122,6 +134,10 @@ mod tests {
             (display.x, display.y, display.width, display.height),
             (-1920, -200, 1920, 1080)
         );
+        assert!(left.matches(7, "LEFT", &display));
+        assert!(!left.matches(7, "RIGHT", &display));
+        let resized = Geometry::new((-1920.0, -200.0, 1600.0, 900.0), 1600, 1600);
+        assert!(!resized.matches(7, "LEFT", &display));
         assert_eq!(left.point((-1920, -200)), (-1919.5, -199.5));
         assert_eq!(left.pixel((-1.0, 879.0)), Some((-1, 879)));
         assert_eq!(left.pixel((0.0, 0.0)), None);

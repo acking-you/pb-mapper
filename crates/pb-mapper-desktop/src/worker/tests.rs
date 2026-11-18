@@ -86,6 +86,10 @@ struct Fake {
     shape: Arc<Mutex<Option<crate::CursorShape>>>,
     /// How often thread C asked for the shape.
     shape_reads: Arc<AtomicU32>,
+    /// A push capture source stays idle until this instant or a callback.
+    idle_until: Arc<Mutex<Option<Instant>>>,
+    repeatable: bool,
+    submitted_video: bool,
 }
 impl Fake {
     fn new(clock: Time) -> Self {
@@ -108,6 +112,9 @@ impl Fake {
             modes: Arc::default(),
             shape: Arc::default(),
             shape_reads: Arc::default(),
+            idle_until: Arc::default(),
+            repeatable: false,
+            submitted_video: true,
         }
     }
 
@@ -181,6 +188,12 @@ impl Backend for Fake {
         if self.fail_capture.load(Ordering::SeqCst) {
             return Err(error("no compatible hardware encoder"));
         }
+        self.submitted_video = self.idle_until.lock().is_none_or(|until| until <= started)
+            || (self.repeatable && keyframe);
+        if !self.submitted_video {
+            return Ok(self.finished());
+        }
+        self.repeatable = true;
         let frame = EncodedFrame {
             format: VideoFormat {
                 codec,
@@ -213,6 +226,21 @@ impl Backend for Fake {
     }
     fn pending_video(&self) -> usize {
         self.encoding.lock().len()
+    }
+    fn submitted_video(&self) -> bool {
+        self.submitted_video
+    }
+    fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        // The first call opens the push source and learns it has no picture.
+        let until = self
+            .idle_until
+            .lock()
+            .filter(|_| !self.log.lock().captures.is_empty())?;
+        Some(if self.repeatable {
+            keyframe_due.map_or(until, |due| due.min(until))
+        } else {
+            until
+        })
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         if self.fail_input.load(Ordering::SeqCst)
@@ -1169,4 +1197,58 @@ fn an_overflow_drain_refuses_a_mode_change_after_the_viewers_release() {
         assert_ne!(Some(serial), before);
         assert_eq!(h.state().record.reason, Some(StateReason::InputCongestion));
     }
+}
+
+#[test]
+fn an_idle_capture_drains_old_output_and_keeps_the_keyframe_tick_armed() {
+    let mut h = Harness::new(true, None);
+    let start = h.now();
+    *h.fake.idle_until.lock() = Some(start + Duration::from_millis(250));
+    // Model two async results ready before one worker wake. The submit finds
+    // no fresh picture but can collect the first result.
+    for _ in 0..2 {
+        h.fake.encoding.lock().push_back((
+            start,
+            start,
+            EncodedFrame {
+                format: VideoFormat::default(),
+                bytes: vec![1],
+            },
+        ));
+    }
+
+    assert_eq!(
+        h.step(),
+        start,
+        "schedule the rest of the ready output immediately"
+    );
+    h.step();
+    assert_eq!(h.sent().len(), 2);
+    h.run(Duration::from_millis(5), true);
+
+    // A callback 5 ms into the first tick submits immediately and carries the IDR.
+    *h.fake.idle_until.lock() = None;
+    h.step();
+    assert_eq!(h.captures().len(), 2);
+    assert!(h.sent()[0].keyframe);
+}
+
+#[test]
+fn idle_capture_waits_through_cursor_wakes_but_repeats_for_a_deferred_keyframe() {
+    let mut h = Harness::new(true, None);
+    let start = h.now();
+    h.step();
+    assert!(h.sent()[0].keyframe);
+    *h.fake.idle_until.lock() = Some(start + Duration::from_secs(1));
+    h.shared
+        .idr
+        .lock()
+        .request(IdrReason::Viewer(KeyframeReason::Gap));
+
+    let interval = crate::idr::HOST_IDR_MIN_INTERVAL;
+    h.run(interval - Duration::from_millis(1), true);
+    assert_eq!(h.captures().len(), 1, "cursor wakes leave the capture idle");
+    h.run(Duration::from_millis(1), false);
+    assert_eq!(h.captures()[1].0, start + interval);
+    assert!(h.sent()[0].keyframe);
 }

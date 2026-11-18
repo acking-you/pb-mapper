@@ -49,12 +49,16 @@ impl IdrPolicy {
     }
 
     /// Whether the next submit must be an IDR.
-    pub fn take_due(&mut self, now: Instant) -> bool {
-        self.forced
-            || (self.pending.is_some()
-                && self.last.is_none_or(|last| {
-                    now.saturating_duration_since(last) >= HOST_IDR_MIN_INTERVAL
-                }))
+    pub fn take_due(&self, now: Instant) -> bool {
+        self.due_at(now).is_some_and(|due| due <= now)
+    }
+
+    /// Earliest submit a pending request can use, bounded below by `tick`.
+    pub fn due_at(&self, tick: Instant) -> Option<Instant> {
+        self.pending.map(|_| match self.last {
+            Some(last) if !self.forced => tick.max(last + HOST_IDR_MIN_INTERVAL),
+            _ => tick,
+        })
     }
 
     /// An IDR was handed to the encoder, or left it: it answers every request

@@ -6,7 +6,7 @@
 //! its output and wakes thread C (`DRAIN = None`).
 
 use super::{
-    capture::Stream,
+    capture::{CaptureState, Stream},
     encoder::{self, Encoder},
     platform::ScreenAccess,
 };
@@ -63,7 +63,7 @@ impl VideoSource for MacVideo {
             limits.max_height,
         );
         let encoder = Encoder::new(codec, width, height, limits.max_fps, rate.bitrate, waker)?;
-        let stream = Stream::start(display.id, width, height, limits.max_fps)?;
+        let stream = Stream::start(display.id, width, height, limits.max_fps, waker)?;
         Ok(Self {
             stream,
             encoder,
@@ -82,41 +82,49 @@ impl VideoSource for MacVideo {
     /// Never waits: nothing captured yet, a full encoder or a still screen
     /// inside the liveness interval submit nothing; a keyframe asked for
     /// stays asked for until a submit carries it.
-    fn submit(&mut self, keyframe: bool) -> Result<()> {
+    fn submit(&mut self, keyframe: bool) -> Result<bool> {
         self.keyframe |= keyframe | self.encoder.keyframe_due();
-        self.stream.check()?;
         if self.encoder.pending() >= ENCODER_DEPTH {
-            return Ok(());
+            return Ok(true);
         }
-        let Some((picture, fresh)) = self.stream.take() else {
-            return Ok(());
-        };
         let now = Instant::now();
-        if !fresh
-            && !self.keyframe
-            && self
+        let repeat = self.keyframe
+            || self
                 .last_submit
-                .is_some_and(|at| now.saturating_duration_since(at) < LIVENESS_INTERVAL)
-        {
-            return Ok(());
-        }
+                .is_some_and(|last| now >= last + LIVENESS_INTERVAL);
+        let Some((picture, fresh)) = self.stream.take(repeat)? else {
+            if self.last_submit.is_none() && now >= self.created + FIRST_SUBMIT_WAIT {
+                return Err(BackendError::new(
+                    FailureKind::CaptureFailed,
+                    "ScreenCaptureKit delivered no picture",
+                )
+                .into());
+            }
+            return Ok(false);
+        };
         self.encoder.encode(&picture, self.keyframe, !fresh)?;
         self.keyframe = false;
         self.last_submit = Some(now);
-        Ok(())
+        Ok(true)
+    }
+    fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        match self.stream.state() {
+            CaptureState::Ready => None,
+            CaptureState::Waiting => Some(self.created + FIRST_SUBMIT_WAIT),
+            CaptureState::Repeatable if self.keyframe || self.encoder.wants_keyframe() => None,
+            CaptureState::Repeatable => self
+                .last_submit
+                .map(|at| at + LIVENESS_INTERVAL)
+                .map(|until| keyframe_due.map_or(until, |due| due.min(until))),
+        }
     }
     fn drain(&mut self) -> Result<Option<EncodedFrame>> {
         self.stream.check()?;
-        if !self.stream.delivered() && self.created.elapsed() > FIRST_SUBMIT_WAIT {
-            return Err(BackendError::new(
-                FailureKind::CaptureFailed,
-                "ScreenCaptureKit delivered no picture",
-            )
-            .into());
-        }
         self.encoder.drain()
     }
     fn pending(&self) -> usize {
-        self.encoder.pending()
+        // A stopped stream needs to be drained even while paused, when no
+        // other callback is necessarily waiting to be collected.
+        self.encoder.pending() + usize::from(self.stream.stopped())
     }
 }

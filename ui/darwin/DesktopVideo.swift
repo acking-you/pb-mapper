@@ -192,19 +192,17 @@ private final class Bitstream {
   }
 
   private var nals: [Nal] = []
-  private(set) var sample: UnsafeMutablePointer<UInt8>
-  private var capacity: Int
+  private var scratch: UnsafeMutablePointer<UInt8>?
+  private var capacity = 0
   private var setsCodec = Codec.h264
   private var sets: [Bytes?] = [nil, nil, nil]
 
   init() {
-    capacity = 1 << 20
-    sample = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
     nals.reserveCapacity(64)
   }
 
   deinit {
-    sample.deallocate()
+    scratch?.deallocate()
     for set in sets { set?.pointer.deallocate() }
   }
 
@@ -295,15 +293,31 @@ private final class Bitstream {
     return try withBt709(described)
   }
 
-  /// Writes the sample: every NAL unit but the parameter sets and access unit
-  /// delimiters, each behind its length. Its length; 0 when nothing is left.
-  func assemble(_ base: UnsafePointer<UInt8>, _ codec: Codec) -> Int {
+  /// Replace four-byte start codes in the feed buffer with AVCC lengths.
+  /// Mixed prefixes or gaps between slices need a separate packed sample.
+  /// The decoder borrows the result until its synchronous call returns.
+  func assemble(_ base: UnsafeMutablePointer<UInt8>, _ codec: Codec)
+    -> (bytes: UnsafeMutablePointer<UInt8>, length: Int)?
+  {
+    var start = 0
     var length = 0
-    for nal in nals where codec.inSample(nal.type) { length += 4 + nal.end - nal.start }
-    if length > capacity {
-      sample.deallocate()
+    var contiguous = true
+    for nal in nals where codec.inSample(nal.type) {
+      if length == 0 { start = nal.start - 4 }
+      contiguous = contiguous && start >= 0 && nal.start == start + length + 4
+      length += 4 + nal.end - nal.start
+    }
+    guard length > 0 else { return nil }
+    let sample: UnsafeMutablePointer<UInt8>
+    if contiguous {
+      sample = base + start
+    } else if let scratch = scratch, length <= capacity {
+      sample = scratch
+    } else {
+      scratch?.deallocate()
+      sample = .allocate(capacity: length)
+      scratch = sample
       capacity = length
-      sample = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
     }
     var at = 0
     for nal in nals where codec.inSample(nal.type) {
@@ -312,10 +326,12 @@ private final class Bitstream {
       sample[at + 1] = UInt8(truncatingIfNeeded: count >> 16)
       sample[at + 2] = UInt8(truncatingIfNeeded: count >> 8)
       sample[at + 3] = UInt8(truncatingIfNeeded: count)
-      (sample + at + 4).initialize(from: base + nal.start, count: count)
+      if !contiguous {
+        (sample + at + 4).initialize(from: base + nal.start, count: count)
+      }
       at += 4 + count
     }
-    return length
+    return (sample, length)
   }
 }
 
@@ -897,19 +913,18 @@ private final class Feed {
       }
       try configure(unit)
     }
-    let length = bitstream.assemble(base, codec)
-    guard length > 0, let running = decoder else {
+    guard let sample = bitstream.assemble(base, codec), let running = decoder else {
       viewer.drop()
       return
     }
     var image: CVPixelBuffer?
     do {
-      image = try running.decode(bitstream.sample, length)
+      image = try running.decode(sample.bytes, sample.length)
     } catch is DecoderLost where unit.key {
       // Lost while the app was away, and this key frame starts over: a new
       // session takes it at once.
       try configure(unit)
-      image = try decoder?.decode(bitstream.sample, length)
+      image = try decoder?.decode(sample.bytes, sample.length)
     }
     guard let picture = image else {
       viewer.drop()

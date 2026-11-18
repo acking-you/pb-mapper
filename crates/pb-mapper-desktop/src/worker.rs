@@ -400,7 +400,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
         if self.fatal.is_none() {
             self.renew_lease(now);
-            self.capture_step(now);
+            self.capture_step(self.clock.now());
         }
         // Only a live capture may execute input queued during its backend call.
         if self.fatal.is_none() && !self.drain_lane() {
@@ -442,15 +442,15 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         } else {
             SessionState::Connecting
         };
-        let (reason, message) = self
-            .unavailable
-            .as_ref()
-            .or(self.control_note.as_ref())
-            .map_or((None, String::new()), |(reason, message)| {
-                (Some(*reason), message.clone())
-            });
+        let (reason, message) = match self.unavailable.as_ref().or(self.control_note.as_ref()) {
+            Some((reason, message)) => (Some(*reason), message.as_str()),
+            None => (None, ""),
+        };
         self.state.record.reason = reason;
-        self.state.record.message = message;
+        if self.state.record.message != message {
+            self.state.record.message.clear();
+            self.state.record.message.push_str(message);
+        }
         self.shared.state.send_if_modified(|published| {
             let changed = *published != self.state;
             if changed {
@@ -480,7 +480,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
         deadline
             .min(self.context_due)
-            .min(self.pacer.next())
+            .min(self.capture_at())
             .min(self.cursor_due)
     }
 }

@@ -181,15 +181,8 @@ impl MacDesktop {
     pub(crate) fn shared(&self) -> Shared {
         self.geometry.clone()
     }
-}
 
-impl Desktop for MacDesktop {
-    type Scope = ();
-    fn scope(&self) {}
-    fn prepare(&mut self, on_switch: impl FnOnce()) -> Result<()> {
-        available().inspect_err(|_| on_switch())
-    }
-    fn display(&mut self) -> Result<Display> {
+    fn read_geometry(&mut self) -> Result<Geometry> {
         let geometry = match geometry(self.id) {
             Some(geometry) => geometry,
             None => {
@@ -203,6 +196,22 @@ impl Desktop for MacDesktop {
             }
         };
         self.geometry.set(geometry);
+        Ok(geometry)
+    }
+}
+
+impl Desktop for MacDesktop {
+    type Scope = ();
+    fn scope(&self) {}
+    fn prepare(&mut self, on_switch: impl FnOnce()) -> Result<()> {
+        available().inspect_err(|_| on_switch())
+    }
+    fn display(&mut self) -> Result<Display> {
+        let geometry = self.read_geometry()?;
         Ok(geometry.display(self.id, self.name.clone()))
+    }
+    fn display_matches(&mut self, expected: &Display) -> Result<bool> {
+        let geometry = self.read_geometry()?;
+        Ok(geometry.matches(self.id, &self.name, expected))
     }
 }

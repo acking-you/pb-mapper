@@ -334,7 +334,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     /// P-frames behind it would age out into another IDR, and that one into
     /// the next.
     async fn video(&mut self) -> Result<bool, Abandoned> {
-        let shared = self.session.shared.clone();
+        let shared = self.session.shared.as_ref();
         loop {
             let Some(head) = shared.outgoing.peek_meta() else {
                 return Ok(false);

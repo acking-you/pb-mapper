@@ -107,24 +107,21 @@ const LOW_LATENCY: &std::ffi::CStr = c"kVTVideoEncoderSpecification_EnableLowLat
 const CONSTRAINED_HIGH: &std::ffi::CStr = c"kVTProfileLevel_H264_ConstrainedHigh_AutoLevel";
 
 /// The encoder specification: H.265 on hardware only; H.264 on hardware
-/// where there is one, with low-latency rate control when asked.
+/// where there is one; both with low-latency rate control when asked.
 fn specification(codec: VideoCodec, low_latency: bool) -> CFRetained<CFDictionary> {
     // SAFETY: VideoToolbox's static keys, alive for the process.
     unsafe {
-        match codec {
-            VideoCodec::H265 => cf::dictionary(&[(
-                kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
-                cf::boolean(true),
-            )]),
+        let hardware = match codec {
+            VideoCodec::H265 => kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
             VideoCodec::H264 | VideoCodec::Jpeg => {
-                let latency = low_latency.then(|| cf::symbol(LOW_LATENCY)).flatten();
-                let mut pairs = vec![(
-                    kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
-                    cf::boolean(true),
-                )];
-                pairs.extend(latency.map(|key| (key, cf::boolean(true))));
-                cf::dictionary(&pairs)
+                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder
             }
+        };
+        match low_latency.then(|| cf::symbol(LOW_LATENCY)).flatten() {
+            Some(latency) => {
+                cf::dictionary(&[(hardware, cf::boolean(true)), (latency, cf::boolean(true))])
+            }
+            None => cf::dictionary(&[(hardware, cf::boolean(true))]),
         }
     }
 }
@@ -228,9 +225,10 @@ impl Encoder {
         bitrate: u32,
         waker: &Waker,
     ) -> Result<Self> {
-        // H.264's low-latency rate control (macOS 11.3) first; a session
-        // that refuses it, or a property under it, is made again without.
-        let low_latency = codec == VideoCodec::H264 && cf::symbol(LOW_LATENCY).is_some();
+        // Low-latency rate control (macOS 11.3) first; a session that refuses
+        // it, or a property under it, is made again without.
+        let low_latency = matches!(codec, VideoCodec::H264 | VideoCodec::H265)
+            && cf::symbol(LOW_LATENCY).is_some();
         let build =
             |low_latency| Self::build(codec, width, height, fps, bitrate, waker, low_latency);
         let built = if low_latency {
@@ -410,14 +408,20 @@ impl Encoder {
         Ok(())
     }
 
-    /// Units submitted and not yet output.
+    /// Units submitted and not yet drained, or a callback failure waiting
+    /// for `drain` to surface.
     pub(crate) fn pending(&self) -> usize {
-        self.shared.state.lock().pending.len()
+        let state = self.shared.state.lock();
+        state.pending.len() + state.ready.len() + usize::from(state.failure.is_some())
     }
 
     /// A keyframe was asked for and lost: the next submit carries one.
     pub(crate) fn keyframe_due(&self) -> bool {
         std::mem::take(&mut self.shared.state.lock().keyframe_due)
+    }
+
+    pub(crate) fn wants_keyframe(&self) -> bool {
+        self.shared.state.lock().keyframe_due
     }
 
     /// Encode `picture`; `duplicate` when it is the last one again.
@@ -520,9 +524,14 @@ fn sync(sample: &CMSampleBuffer) -> bool {
 /// and the few SEI units an encoder may add.
 const MAX_PARAMETER_SETS: usize = 8;
 
-/// A format description's parameter sets, in order, and its NAL length
-/// size. They borrow from `format`.
-fn parameter_sets(codec: VideoCodec, format: &CMFormatDescription) -> Result<(Vec<&[u8]>, usize)> {
+/// A format description's NAL length size and, when `include_sets` is
+/// set, up to `MAX_PARAMETER_SETS` parameter sets in order. They borrow
+/// from `format` without allocating.
+fn format_sets(
+    codec: VideoCodec,
+    format: &CMFormatDescription,
+    include_sets: bool,
+) -> Result<([&[u8]; MAX_PARAMETER_SETS], usize, usize)> {
     let read = |index: usize,
                 pointer: *mut *const u8,
                 size: *mut usize,
@@ -554,9 +563,13 @@ fn parameter_sets(codec: VideoCodec, format: &CMFormatDescription) -> Result<(Ve
             &mut length,
         ),
     )?;
-    let count = count.min(MAX_PARAMETER_SETS);
-    let mut sets = Vec::with_capacity(count);
-    for index in 0..count {
+    let mut sets: [&[u8]; MAX_PARAMETER_SETS] = [&[]; MAX_PARAMETER_SETS];
+    let count = if include_sets {
+        count.min(MAX_PARAMETER_SETS)
+    } else {
+        0
+    };
+    for (index, slot) in sets.iter_mut().enumerate().take(count) {
         let (mut pointer, mut size): (*const u8, usize) = (std::ptr::null(), 0);
         cf::check(
             "reading a parameter set",
@@ -573,9 +586,9 @@ fn parameter_sets(codec: VideoCodec, format: &CMFormatDescription) -> Result<(Ve
         }
         // SAFETY: VideoToolbox's pointer into the format's own storage,
         // `size` bytes, alive while `format` is.
-        sets.push(unsafe { std::slice::from_raw_parts(pointer, size) });
+        *slot = unsafe { std::slice::from_raw_parts(pointer, size) };
     }
-    Ok((sets, usize::try_from(length).unwrap_or(0)))
+    Ok((sets, count, usize::try_from(length).unwrap_or(0)))
 }
 
 /// A sample's bytes: the block buffer's own when contiguous, else copied
@@ -657,36 +670,26 @@ fn receive(
     let Some(sample) = sample.filter(|_| !flags.contains(VTEncodeInfoFlags::FrameDropped)) else {
         // Dropped: what follows still decodes; a keyframe asked for is
         // asked for again.
-        state.keyframe_due |= pending.keyframe;
-        return false;
+        return pending.keyframe && !std::mem::replace(&mut state.keyframe_due, true);
     };
     let keyframe = sync(sample);
     if late(pending.at, previous, now) {
         state.wait_independent = true;
-        state.keyframe_due = true;
-        return false;
+        return !std::mem::replace(&mut state.keyframe_due, true);
     }
     if state.wait_independent && !keyframe {
         // A picture after a discarded one may refer to it.
-        state.keyframe_due = true;
-        return false;
+        return !std::mem::replace(&mut state.keyframe_due, true);
     }
     let converted = (|| {
         // SAFETY: the sample's format, retained for the borrow below.
         let format = unsafe { sample.format_description() }
             .ok_or_else(|| error("encoded sample has no format"))?;
-        let (sets, length) = parameter_sets(shared.codec, &format)?;
+        let (sets, count, length) = format_sets(shared.codec, &format, keyframe)?;
         let mut scratch = std::mem::take(&mut state.sample);
         let mut out = Vec::new();
-        let result = bytes(sample, &mut scratch).and_then(|bytes| {
-            annex_b(
-                shared.codec,
-                bytes,
-                length,
-                if keyframe { &sets } else { &[] },
-                &mut out,
-            )
-        });
+        let result = bytes(sample, &mut scratch)
+            .and_then(|bytes| annex_b(shared.codec, bytes, length, &sets[..count], &mut out));
         state.sample = scratch;
         result.map(|()| out)
     })();

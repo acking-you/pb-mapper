@@ -139,8 +139,8 @@ impl VideoSource for video::Encoder {
     fn set_rate(&mut self, rate: VideoRate) -> Result<()> {
         video::Encoder::set_rate(self, rate)
     }
-    fn submit(&mut self, keyframe: bool) -> Result<()> {
-        video::Encoder::submit(self, keyframe).map(|_| ())
+    fn submit(&mut self, keyframe: bool) -> Result<bool> {
+        video::Encoder::submit(self, keyframe).map(|_| true)
     }
     fn drain(&mut self) -> Result<Option<EncodedFrame>> {
         video::Encoder::drain(self).map(|image| image.map(Into::into))

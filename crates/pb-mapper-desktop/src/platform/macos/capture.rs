@@ -5,7 +5,7 @@
 //! it at its own pace. A stream the system stops says why at the next take.
 
 use super::cf;
-use crate::{BackendError, FailureKind, Result};
+use crate::{BackendError, FailureKind, Result, Waker};
 use block2::RcBlock;
 use dispatch2::{DispatchQoS, DispatchQueue, DispatchRetained, GlobalQueueIdentifier};
 use objc2::{
@@ -71,14 +71,21 @@ pub(crate) struct Latest {
     pub picture: Option<Picture>,
     /// Not taken since it arrived.
     pub fresh: bool,
-    /// Pictures delivered.
-    pub delivered: u64,
     stopped: Option<BackendError>,
 }
 
-#[derive(Default)]
+pub(super) enum CaptureState {
+    /// A fresh picture or a capture failure.
+    Ready,
+    /// The last picture is available for a repeat.
+    Repeatable,
+    /// No picture has arrived.
+    Waiting,
+}
+
 pub(crate) struct Shared {
     latest: Mutex<Latest>,
+    waker: Waker,
 }
 
 /// Whether `sample` holds a new picture: its frame status is complete. An
@@ -122,10 +129,16 @@ define_class!(
             let Some(image) = (unsafe { sample.image_buffer() }) else {
                 return;
             };
-            let mut latest = self.ivars().latest.lock();
-            latest.picture = Some(Picture(image));
-            latest.fresh = true;
-            latest.delivered += 1;
+            let wake = {
+                let mut latest = self.ivars().latest.lock();
+                let wake = !latest.fresh;
+                latest.picture = Some(Picture(image));
+                latest.fresh = true;
+                wake
+            };
+            if wake {
+                self.ivars().waker.wake();
+            }
         }
     }
 
@@ -133,6 +146,7 @@ define_class!(
         #[unsafe(method(stream:didStopWithError:))]
         fn stream_did_stop(&self, _stream: &SCStream, error: &NSError) {
             self.ivars().latest.lock().stopped = Some(failure(Some(error)));
+            self.ivars().waker.wake();
         }
     }
 );
@@ -297,20 +311,25 @@ impl Stream {
     /// Display `id`'s stream at `width` x `height`, at most `fps` pictures a
     /// second, started. Thread C has no autorelease pool: this brings its
     /// own.
-    pub(crate) fn start(id: u32, width: u32, height: u32, fps: u32) -> Result<Self> {
-        objc2::rc::autoreleasepool(|_| Self::started(id, width, height, fps))
+    pub(crate) fn start(id: u32, width: u32, height: u32, fps: u32, waker: &Waker) -> Result<Self> {
+        objc2::rc::autoreleasepool(|_| Self::started(id, width, height, fps, waker))
     }
 
-    fn started(id: u32, width: u32, height: u32, fps: u32) -> Result<Self> {
+    fn started(id: u32, width: u32, height: u32, fps: u32, waker: &Waker) -> Result<Self> {
         let display = display(id)?;
         let filter = filter(&display);
         let config = configuration(width, height, true);
         // SAFETY: a fresh configuration, before the stream reads it.
         unsafe {
-            config.setMinimumFrameInterval(CMTime::new(1, fps.max(1) as i32));
+            // Give refresh timestamps a 10% margin around the requested
+            // rate. Thread C still applies the negotiated frame cap.
+            config.setMinimumFrameInterval(CMTime::new(9, (fps.clamp(1, 1_000) * 10) as i32));
             config.setQueueDepth(QUEUE_DEPTH);
         }
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            latest: Mutex::default(),
+            waker: waker.clone(),
+        });
         let output = Output::new(shared.clone());
         let delegate = ProtocolObject::<dyn SCStreamDelegate>::from_ref(&*output);
         // SAFETY: a filter, a configuration and a delegate that lives as
@@ -369,20 +388,38 @@ impl Stream {
         }
     }
 
-    /// The newest picture and whether it is new since the last take; it
-    /// stays for a repeat.
-    pub(crate) fn take(&self) -> Option<(CFRetained<CVPixelBuffer>, bool)> {
-        let mut latest = self.shared.latest.lock();
-        let fresh = std::mem::take(&mut latest.fresh);
-        latest
-            .picture
-            .as_ref()
-            .map(|picture| (picture.0.clone(), fresh))
+    pub(super) fn stopped(&self) -> bool {
+        self.shared.latest.lock().stopped.is_some()
     }
 
-    /// Whether any picture arrived.
-    pub(crate) fn delivered(&self) -> bool {
-        self.shared.latest.lock().delivered > 0
+    /// What thread C can do without waiting for the next stream callback.
+    pub(super) fn state(&self) -> CaptureState {
+        let latest = self.shared.latest.lock();
+        if latest.fresh || latest.stopped.is_some() {
+            CaptureState::Ready
+        } else if latest.picture.is_some() {
+            CaptureState::Repeatable
+        } else {
+            CaptureState::Waiting
+        }
+    }
+
+    /// Take a new or explicitly repeated picture. A stopped stream never
+    /// yields an old picture.
+    pub(crate) fn take(&self, repeat: bool) -> Result<Option<(CFRetained<CVPixelBuffer>, bool)>> {
+        let mut latest = self.shared.latest.lock();
+        if let Some(stopped) = &latest.stopped {
+            return Err(stopped.clone().into());
+        }
+        let fresh = std::mem::take(&mut latest.fresh);
+        Ok(if fresh || repeat {
+            latest
+                .picture
+                .as_ref()
+                .map(|picture| (picture.0.clone(), fresh))
+        } else {
+            None
+        })
     }
 }
 

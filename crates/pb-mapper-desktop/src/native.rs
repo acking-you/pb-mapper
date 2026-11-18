@@ -18,7 +18,10 @@ use crate::{
         VideoSource, no_modes,
     },
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 /// The encoder's limits until `configure_video`, which every session calls
 /// before it captures.
@@ -32,6 +35,7 @@ pub(crate) struct PlatformBackend<P: Platform> {
     /// Dropped before the parts: a source built on the desktop binding goes
     /// before the binding.
     video: Option<(DesktopContext, P::Video)>,
+    submitted_video: bool,
     parts: Parts<P>,
     grant: Arc<P::Grant>,
     held: Held,
@@ -65,6 +69,7 @@ impl<P: Platform> PlatformBackend<P> {
         }
         Self {
             video: None,
+            submitted_video: true,
             parts,
             grant,
             held: Held::default(),
@@ -81,6 +86,17 @@ impl<P: Platform> PlatformBackend<P> {
             release(held, input);
             *video = None;
         })
+    }
+    /// Within the desktop's scope, bind and verify `expected` without
+    /// allocating `Display::name`.
+    fn verify(&mut self, expected: &DesktopContext) -> Result<bool> {
+        self.prepare()?;
+        if self.parts.desktop.generation() != expected.generation
+            || self.parts.desktop.kind() != expected.desktop
+        {
+            return Ok(false);
+        }
+        self.parts.desktop.display_matches(&expected.display)
     }
     /// One JPEG of `display`, bound to the input desktop before and after.
     fn still(&mut self, display: &Display) -> Result<Vec<u8>> {
@@ -129,6 +145,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
     }
     fn bind(&mut self, waker: Waker) {
         self.waker = waker;
+        self.video = None;
     }
     fn configure_video(&mut self, limits: VideoLimits, _nominal_fps: u32) -> Result<()> {
         limits.validate()?;
@@ -152,6 +169,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         keyframe: bool,
         rate: VideoRate,
     ) -> Result<Option<EncodedFrame>> {
+        self.submitted_video = true;
         if codec == VideoCodec::Jpeg {
             return Ok(Some(EncodedFrame {
                 format: VideoFormat {
@@ -168,7 +186,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             }));
         }
         let _scope = self.parts.desktop.scope();
-        if &self.context()? != expected {
+        if !self.verify(expected)? {
             return Err(error("desktop changed before video capture"));
         }
         if self
@@ -193,15 +211,16 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             .ok_or_else(|| error("video encoder unavailable"))?
             .1;
         // The worker paces: drain what is finished, then submit one capture.
-        let image = video
+        let (image, submitted) = video
             .set_rate(rate)
             .and_then(|()| video.drain())
-            .and_then(|image| video.submit(keyframe).map(|()| image))
+            .and_then(|image| video.submit(keyframe).map(|submitted| (image, submitted)))
             .inspect_err(|_| self.video = None)?;
-        if &self.context()? != expected {
+        if !self.verify(expected)? {
             self.video = None;
             return Err(error("desktop changed during video capture"));
         }
+        self.submitted_video = submitted;
         Ok(image)
     }
     /// Never blocks: the wait bounds only the helper's long-poll. A drain
@@ -228,13 +247,19 @@ impl<P: Platform> Backend for PlatformBackend<P> {
     fn drain_poll(&self) -> Option<Duration> {
         <P::Video as VideoSource>::DRAIN
     }
+    fn submitted_video(&self) -> bool {
+        self.submitted_video
+    }
+    fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        self.video.as_ref()?.1.idle_until(keyframe_due)
+    }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         let _scope = self.parts.desktop.scope();
-        if &self.context()? != expected {
+        if !self.verify(expected)? {
             return Err(error("desktop changed before cursor capture"));
         }
         let read = self.parts.cursor.read()?;
-        if &self.context()? != expected || self.parts.desktop.changed() {
+        if !self.verify(expected)? || self.parts.desktop.changed() {
             return Err(error("desktop changed during cursor capture"));
         }
         Ok(read.map(|(x, y, showing)| confine(&expected.display, (x, y), showing)))
@@ -251,7 +276,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
     }
     fn input_in_context(&mut self, expected: &DesktopContext, event: &Input) -> Result<()> {
         let _scope = self.parts.desktop.scope();
-        if &self.context()? != expected || self.parts.desktop.changed() {
+        if !self.verify(expected)? || self.parts.desktop.changed() {
             self.release();
             return Err(error("desktop changed before input"));
         }
@@ -319,7 +344,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             return Err(no_modes());
         }
         let _scope = self.parts.desktop.scope();
-        if &self.context()? != expected {
+        if !self.verify(expected)? {
             return Err(error("desktop changed before a display mode change"));
         }
         if expected.desktop != DesktopKind::Ordinary {
@@ -442,6 +467,12 @@ impl Backend for NativeBackend {
     }
     fn drain_poll(&self) -> Option<Duration> {
         self.0.drain_poll()
+    }
+    fn submitted_video(&self) -> bool {
+        self.0.submitted_video()
+    }
+    fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        self.0.capture_idle_until(keyframe_due)
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         self.0.cursor(expected)

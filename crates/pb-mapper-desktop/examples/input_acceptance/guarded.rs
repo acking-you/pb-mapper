@@ -50,6 +50,12 @@ impl Backend for Guarded {
     fn drain_poll(&self) -> Option<Duration> {
         self.inner.drain_poll()
     }
+    fn submitted_video(&self) -> bool {
+        self.inner.submitted_video()
+    }
+    fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        self.inner.capture_idle_until(keyframe_due)
+    }
     fn display_modes(&mut self, expected: &DesktopContext) -> Result<Option<ModeList>> {
         self.inner.display_modes(expected)
     }

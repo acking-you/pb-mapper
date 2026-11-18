@@ -126,25 +126,47 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         at + self.backend.drain_poll().unwrap_or(CONTEXT_CHECK_INTERVAL)
     }
 
+    /// The next tick a capture source can use. A push source stays idle
+    /// across cursor or input wakes, and wakes C itself for a fresh picture.
+    pub(super) fn capture_at(&self) -> Instant {
+        let tick = self.pacer.next();
+        let Some(until) = self.backend.capture_idle_until(None) else {
+            return tick;
+        };
+        let keyframe_due = if self.keyframe {
+            Some(tick)
+        } else {
+            self.shared.idr.lock().due_at(tick)
+        };
+        match keyframe_due {
+            Some(due) if due < until => self.backend.capture_idle_until(Some(due)),
+            _ => Some(until),
+        }
+        .map_or(tick, |until| until.max(tick))
+    }
+
     /// At most one backend capture or drain call.
     pub(super) fn capture_step(&mut self, now: Instant) {
-        let shared = self.shared.clone();
-        let targets = &shared.targets;
-        if targets.paused.load(Ordering::Acquire) {
+        if self.shared.targets.paused.load(Ordering::Acquire) {
             // Never send while paused, and resume with an IDR.
             self.paused = true;
             if self.backend.pending_video() > 0
                 && let Some(context) = &self.context
             {
                 let result = self.backend.drain_video(context, Duration::ZERO);
-                self.drain_due = self.drain_after(self.clock.now());
+                let done = self.clock.now();
+                self.drain_due = if matches!(result, Ok(Some(_))) {
+                    done
+                } else {
+                    self.drain_after(done)
+                };
                 match result {
                     Ok(Some(frame)) => {
                         self.window.dwell(frame.format.encode_us);
                         self.state.dropped_frames += 1;
                     }
                     Ok(None) => {}
-                    Err(failure) => self.fail(failure, now),
+                    Err(failure) => self.fail(failure, done),
                 }
             }
             self.state.dropped_frames += self.shared.outgoing.clear() as u64;
@@ -164,40 +186,54 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         let Some(context) = &self.context else {
             return;
         };
-        let pace_fps = targets.pace_fps.load(Ordering::Acquire).max(1);
+        let pace_fps = self.shared.targets.pace_fps.load(Ordering::Acquire).max(1);
         if pace_fps != self.pace_fps {
             self.pace_fps = pace_fps;
             self.pacer.set_pace(pace_fps, now);
         }
-        if retry || self.pacer.due(now) {
-            if self.shared.outgoing.len() < TRANSPORT_GATE
-                && self.backend.pending_video() < ENCODER_DEPTH
-            {
-                let keyframe = self.keyframe || self.shared.idr.lock().take_due(now);
-                let rate = VideoRate {
-                    bitrate: targets.encoder_bps.load(Ordering::Acquire),
-                    pace_fps,
-                };
-                let result = self
-                    .backend
-                    .capture_video(context, self.codec, keyframe, rate);
+        let tick_due = retry || (self.pacer.due(now) && now >= self.capture_at());
+        let pending = self.backend.pending_video();
+        if tick_due && self.shared.outgoing.len() < TRANSPORT_GATE && pending < ENCODER_DEPTH {
+            let keyframe = self.keyframe || self.shared.idr.lock().take_due(now);
+            let rate = VideoRate {
+                bitrate: self.shared.targets.encoder_bps.load(Ordering::Acquire),
+                pace_fps,
+            };
+            let result = self
+                .backend
+                .capture_video(context, self.codec, keyframe, rate);
+            let done = self.clock.now();
+            // A capture with nothing to submit leaves the tick and any
+            // requested IDR armed, even if it drained an older picture.
+            if result.is_ok() && self.backend.submitted_video() {
                 if keyframe {
                     // Handed over: an IDR still in the encoder at the next
                     // tick must not be asked for again.
                     self.keyframe = false;
                     self.shared.idr.lock().answered(now);
                 }
-                let done = self.clock.now();
-                self.drain_due = self.drain_after(done);
-                self.produced(result, done);
-            } else {
-                // Transport backpressure or a full encoder, never
-                // presentation: skip the tick.
-                self.state.skipped_ticks += 1;
+                self.pacer.consume(now);
             }
+            self.drain_due = if matches!(result, Ok(Some(_))) {
+                done
+            } else {
+                self.drain_after(done)
+            };
+            self.produced(result, done);
+            return;
+        }
+        if tick_due {
+            // Transport backpressure or a full encoder, never presentation:
+            // skip the tick and still collect what a push encoder finished.
+            self.state.skipped_ticks += 1;
             self.pacer.consume(now);
-        } else if self.backend.pending_video() > 0 {
-            let wait = HELPER_DRAIN_WAIT_MAX.min(self.pacer.next().saturating_duration_since(now));
+        }
+        if pending > 0 {
+            let wait = if tick_due {
+                Duration::ZERO
+            } else {
+                HELPER_DRAIN_WAIT_MAX.min(self.pacer.next().saturating_duration_since(now))
+            };
             let result = self.backend.drain_video(context, wait);
             let done = self.clock.now();
             let drained = matches!(result, Ok(Some(_)));
