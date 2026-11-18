@@ -363,75 +363,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             self.release_slot_inputs(idx);
             return;
         }
-        let shared_hold = match event.input {
-            Input::Button {
-                button,
-                down: false,
-                ..
-            } => self.other_slots_hold(idx, Pressed::Button(button)),
-            Input::Key { key, down: false } => self.other_slots_hold(idx, Pressed::Key(key)),
-            Input::PhysicalKey { usage, down: false } => {
-                self.other_slots_hold(idx, Pressed::Physical(usage))
-            }
-            _ => false,
-        };
-        let Some(context) = &self.context else {
-            return;
-        };
-        // When another controller moved the OS cursor in the meantime, return
-        // the pointer to this viewer's last position before clicking/scrolling.
-        if matches!(event.input, Input::Button { .. } | Input::Wheel { .. })
-            && let Some((peer_slot, Some((px, py)))) =
-                self.slots[idx].as_ref().map(|s| (s.slot, s.pointer))
-            && self.last_pointer_owner != Some((peer_slot, px, py))
-        {
-            let reposition = Input::Move { x: px, y: py };
-            if self.backend.input_in_context(context, &reposition).is_ok() {
-                self.last_pointer_owner = Some((peer_slot, px, py));
-                self.mover_moved_since_sample = true;
-                if let Some(slot) = &mut self.slots[idx] {
-                    slot.cursor.injected(px, py);
-                    slot.hold.injected(&reposition, now);
-                }
-            }
-        }
         let lock = matches!(event.input, Input::Lock {});
-        let injected = match event.input {
-            Input::Button { button, down, .. } => {
-                let backend = &mut self.backend;
-                match &mut self.slots[idx] {
-                    Some(slot) if shared_hold => slot.held.button(button, false, |_| Ok(())),
-                    Some(slot) => slot.held.button(button, down, |_| {
-                        backend.input_in_context(context, &event.input)
-                    }),
-                    None => return,
-                }
-            }
-            Input::Key { key, down } => {
-                let backend = &mut self.backend;
-                match &mut self.slots[idx] {
-                    Some(slot) if shared_hold => slot.held.key(key, false, |_| Ok(())),
-                    Some(slot) => slot.held.key(key, down, |_| {
-                        backend.input_in_context(context, &event.input)
-                    }),
-                    None => return,
-                }
-            }
-            Input::PhysicalKey { usage, down } => {
-                let backend = &mut self.backend;
-                match &mut self.slots[idx] {
-                    Some(slot) if shared_hold => slot.held.physical(usage, false, |_| Ok(())),
-                    Some(slot) => slot.held.physical(usage, down, |_| {
-                        backend.input_in_context(context, &event.input)
-                    }),
-                    None => return,
-                }
-            }
-            Input::Move { .. } | Input::Wheel { .. } | Input::Text { .. } | Input::Lock {} => {
-                self.backend.input_in_context(context, &event.input)
-            }
-        };
-        match injected {
+        match self.inject_slot_input(idx, &event.input, now) {
             Ok(()) if lock => self.notice_all(
                 NoticeCode::Locked,
                 "The remote computer is locked".into(),
@@ -487,6 +420,52 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                     slot.control_note =
                         Some((StateReason::InputFailed, format!("input_failed: {failure}")));
                 }
+            }
+        }
+    }
+
+    fn inject_slot_input(&mut self, idx: usize, input: &Input, now: Instant) -> crate::Result<()> {
+        let shared_hold = match *input {
+            Input::Button {
+                button,
+                down: false,
+                ..
+            } => self.other_slots_hold(idx, Pressed::Button(button)),
+            Input::Key { key, down: false } => self.other_slots_hold(idx, Pressed::Key(key)),
+            Input::PhysicalKey { usage, down: false } => {
+                self.other_slots_hold(idx, Pressed::Physical(usage))
+            }
+            _ => false,
+        };
+        let (Some(context), Some(slot)) = (&self.context, &mut self.slots[idx]) else {
+            return Ok(());
+        };
+        // When another controller moved the OS cursor in the meantime, return
+        // the pointer to this viewer's last position before clicking/scrolling.
+        if matches!(input, Input::Button { .. } | Input::Wheel { .. })
+            && let Some((x, y)) = slot.pointer
+            && self.last_pointer_owner != Some((slot.slot, x, y))
+        {
+            let reposition = Input::Move { x, y };
+            self.backend.input_in_context(context, &reposition)?;
+            self.last_pointer_owner = Some((slot.slot, x, y));
+            self.mover_moved_since_sample = true;
+            slot.cursor.injected(x, y);
+            slot.hold.injected(&reposition, now);
+        }
+        let inject = |_| {
+            if shared_hold {
+                Ok(())
+            } else {
+                self.backend.input_in_context(context, input)
+            }
+        };
+        match *input {
+            Input::Button { button, down, .. } => slot.held.button(button, down, inject),
+            Input::Key { key, down } => slot.held.key(key, down, inject),
+            Input::PhysicalKey { usage, down } => slot.held.physical(usage, down, inject),
+            Input::Move { .. } | Input::Wheel { .. } | Input::Text { .. } | Input::Lock {} => {
+                self.backend.input_in_context(context, input)
             }
         }
     }

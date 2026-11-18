@@ -159,9 +159,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
 
     /// At most one backend capture or drain call.
     pub(super) fn capture_step(&mut self, now: Instant) {
-        let mut any_unpaused = false;
         let mut desired_limits: Option<VideoLimits> = None;
-        let mut pace_fps = 1u32;
+        let mut pace_fps = u32::MAX;
         let mut encoder_bps = u32::MAX;
         for idx in 0..MAX_VIEWERS {
             let Some(paused) = self.slots[idx]
@@ -181,17 +180,16 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                     slot.paused = false;
                     self.keyframe = true;
                 }
-                any_unpaused = true;
                 desired_limits = Some(match desired_limits {
                     None => slot.limits,
                     Some(cur) => VideoLimits {
                         max_width: cur.max_width.min(slot.limits.max_width),
                         max_height: cur.max_height.min(slot.limits.max_height),
-                        max_fps: cur.max_fps.max(slot.limits.max_fps),
+                        max_fps: cur.max_fps.min(slot.limits.max_fps),
                     },
                 });
                 pace_fps =
-                    pace_fps.max(slot.shared.targets.pace_fps.load(Ordering::Acquire).max(1));
+                    pace_fps.min(slot.shared.targets.pace_fps.load(Ordering::Acquire).max(1));
                 encoder_bps =
                     encoder_bps.min(slot.shared.targets.encoder_bps.load(Ordering::Acquire));
             }
@@ -201,7 +199,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             .iter()
             .flatten()
             .any(|slot| !slot.paused && slot.cursor_shapes);
-        if !any_unpaused {
+        let Some(limits) = desired_limits else {
             // Never send while paused, and resume with an IDR.
             self.paused = true;
             if self.backend.pending_video() > 0
@@ -227,7 +225,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             }
             self.keyframe = true;
             return;
-        }
+        };
         self.paused = false;
         // A retry checks the context and then captures at once, so a failure
         // that persists never shows as recovered in between.
@@ -235,8 +233,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if retry && now < self.context_due {
             return;
         }
-        let limits_changed = desired_limits.filter(|limits| *limits != self.limits);
-        if let Some(limits) = limits_changed {
+        if limits != self.limits {
             self.limits = limits;
             self.keyframe = true;
             if self.context.is_some()

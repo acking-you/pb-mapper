@@ -55,6 +55,7 @@ struct Fake {
     clock: Time,
     width: Arc<AtomicU32>,
     fail_input: Arc<AtomicBool>,
+    fail_move: Arc<AtomicBool>,
     fail_lock: Arc<AtomicBool>,
     /// Every capture fails, while the desktop stays as it was.
     fail_capture: Arc<AtomicBool>,
@@ -98,6 +99,7 @@ impl Fake {
             clock,
             width: Arc::new(AtomicU32::new(10)),
             fail_input: Arc::default(),
+            fail_move: Arc::default(),
             fail_lock: Arc::default(),
             fail_capture: Arc::default(),
             guard: Arc::default(),
@@ -245,6 +247,7 @@ impl Backend for Fake {
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         if self.fail_input.load(Ordering::SeqCst)
+            || matches!(event, Input::Move { .. }) && self.fail_move.load(Ordering::SeqCst)
             || matches!(event, Input::Lock {}) && self.fail_lock.load(Ordering::SeqCst)
         {
             return Err(error("native injection rejected"));
@@ -324,6 +327,30 @@ impl Harness {
             presented: (0, 0),
             published: Vec::new(),
         }
+    }
+    fn join_watcher(&self, max_fps: u32) -> Arc<SessionShared> {
+        let room = &self.engine.room;
+        let slot = PeerSlot::new(1).unwrap();
+        let shared = Arc::new(SessionShared::new_in_room(
+            slot,
+            room.wake.clone(),
+            room.peer_cursors.clone(),
+            room.policy.clone(),
+            room.cancel.child_token(),
+            Targets::new(max_fps, 4_000_000),
+        ));
+        room.set_slot(
+            slot,
+            2,
+            RoomSlotConfig {
+                shared: shared.clone(),
+                color: PeerColor::new(slot.index()).unwrap(),
+                limits: VideoLimits { max_fps, ..LIMITS },
+                cursor_shapes: false,
+                peer_cursors: true,
+            },
+        );
+        shared
     }
     fn now(&self) -> Instant {
         *self.now.lock()
@@ -635,6 +662,62 @@ fn fps_and_preset_changes_never_reconfigure_the_encoder() {
         h.state().record.display.map(|display| display.width),
         Some(20)
     );
+}
+
+#[test]
+fn shared_capture_obeys_the_active_watchers_decoder_cap() {
+    let mut h = Harness::new(false, None);
+    let watcher = h.join_watcher(30);
+    watcher.targets.pace_fps.store(15, Ordering::Release);
+    h.run(Duration::from_millis(200), true);
+    let captures = h.captures();
+    assert!(captures.len() >= 3);
+    assert!(captures.iter().all(|(_, _, rate)| rate.pace_fps == 15));
+    assert!(
+        spacing(&captures)
+            .iter()
+            .all(|gap| *gap >= Duration::from_millis(66))
+    );
+    assert_eq!(h.engine.limits.max_fps, 30);
+
+    watcher.targets.paused.store(true, Ordering::Release);
+    h.run(Duration::from_millis(100), true);
+    assert_eq!(h.captures().last().unwrap().2.pace_fps, 60);
+    assert_eq!(h.engine.limits, LIMITS);
+}
+
+#[test]
+fn watcher_replaces_the_host_pointer_while_a_controller_moves_it() {
+    let mut h = Harness::new(true, None);
+    let watcher = h.join_watcher(60);
+    let cursor = || watcher.cursor.borrow().as_ref().unwrap().cursor;
+    h.send(LaneCommand::Control { enabled: true });
+    h.present();
+    assert!(cursor().visible);
+
+    h.input(Input::Move { x: 6, y: 5 });
+    h.run(Duration::from_millis(20), true);
+    let peer = watcher.peer_cursors.borrow().entries[0];
+    assert!(peer.visible);
+    assert_eq!((peer.x, peer.y), (6, 5));
+    assert!(!cursor().visible);
+
+    *h.fake.pointer.lock() = (2, 1);
+    h.run(Duration::from_millis(20), true);
+    assert!(cursor().visible);
+    assert_eq!((cursor().x, cursor().y), (2, 1));
+
+    // The host moved away. If re-aiming fails, a click cannot land there.
+    h.fake.fail_move.store(true, Ordering::Release);
+    let before = h.inputs();
+    h.input(Input::Button {
+        button: crate::Button::Left,
+        down: true,
+        drag_start: false,
+    });
+    h.step();
+    assert_eq!(h.inputs(), before);
+    assert_eq!(h.state().record.reason, Some(StateReason::InputFailed));
 }
 
 #[test]
@@ -1153,24 +1236,21 @@ fn a_display_mode_change_needs_control_but_the_owners_restore_does_not() {
     h.step();
     let (code, _, serial) = h.state().notice.unwrap();
     assert_eq!(code, NoticeCode::DisplayModeFailed);
-    h.send(LaneCommand::DisplayMode(ModeCommand::HostRestore));
+    h.engine.room.request_restore();
     h.step();
     assert_eq!(h.state().notice.map(|notice| notice.2), Some(serial));
 }
 
-/// A viewer's burst that overflows the lane drops its input, not the
-/// owner's restore queued among it, nor one asked for once the lane is full.
+/// Owner restores coalesce independently of a full viewer input lane.
 #[test]
 fn an_overflowing_lane_still_runs_the_owners_restore() {
     let mut h = Harness::new(true, None);
     h.present();
-    h.send(LaneCommand::DisplayMode(ModeCommand::HostRestore));
+    h.engine.room.request_restore();
     while h.shared.lane.push(LaneCommand::Release) {}
-    h.shared
-        .lane
-        .push_owner(LaneCommand::DisplayMode(ModeCommand::HostRestore));
+    h.engine.room.request_restore();
     h.step();
-    assert_eq!(h.fake.log.lock().restores, 2);
+    assert_eq!(h.fake.log.lock().restores, 1);
     assert_eq!(h.state().record.reason, Some(StateReason::InputCongestion));
 }
 

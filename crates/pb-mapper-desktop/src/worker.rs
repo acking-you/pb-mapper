@@ -106,7 +106,7 @@ pub(crate) struct RoomShared {
     pub wake: Wake,
     pub policy: Arc<Policy>,
     pub peer_cursors: Arc<tokio::sync::watch::Sender<PeerCursorSnapshot>>,
-    pub owner: parking_lot::Mutex<VecDeque<ModeCommand>>,
+    restore_requested: AtomicBool,
     pub epoch: AtomicU64,
     pub state: parking_lot::Mutex<RoomWorkerState>,
 }
@@ -119,13 +119,18 @@ impl RoomShared {
             peer_cursors: Arc::new(tokio::sync::watch::Sender::new(
                 PeerCursorSnapshot::default(),
             )),
-            owner: parking_lot::Mutex::new(VecDeque::new()),
+            restore_requested: AtomicBool::new(false),
             epoch: AtomicU64::new(1),
             state: parking_lot::Mutex::new(RoomWorkerState {
                 codec,
                 slots: std::array::from_fn(|_| None),
             }),
         })
+    }
+
+    pub fn request_restore(&self) {
+        self.restore_requested.store(true, Ordering::Release);
+        self.wake.notify();
     }
 
     pub fn set_codec(&self, codec: VideoCodec) {
@@ -169,7 +174,7 @@ impl RoomShared {
             wake: shared.wake.clone(),
             policy: shared.policy.clone(),
             peer_cursors: shared.peer_cursors.clone(),
-            owner: parking_lot::Mutex::new(VecDeque::new()),
+            restore_requested: AtomicBool::new(false),
             epoch: AtomicU64::new(1),
             state: parking_lot::Mutex::new(RoomWorkerState {
                 codec: config.codec,
@@ -768,16 +773,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         for slot in self.slots.iter_mut().flatten() {
             slot.state.record.control_allowed = allowed;
         }
-        loop {
-            let command = self.room.owner.lock().pop_front();
-            let Some(command) = command else {
-                break;
-            };
-            if self.room.cancel.is_cancelled() {
-                return Step::Exit(WorkerExit::Cancelled);
-            }
-            let now = self.clock.now();
-            self.display_mode(None, command, now);
+        if self.room.restore_requested.swap(false, Ordering::AcqRel) {
+            self.display_mode(None, ModeCommand::HostRestore, now);
         }
         for idx in 0..MAX_VIEWERS {
             let Some(cancelled) = self.slots[idx]

@@ -12,7 +12,6 @@ use crate::{
     DesktopKind, Display, HostPath, HostState, HostStatus, HostViewer, Invitation, ModeList,
     Result, VideoCodec, VideoLimits, error,
     launch::{Launch, Recovery},
-    modes::ModeCommand,
     platform,
     protocol::{MAX_VIEWERS, PeerColor, PeerSlot, SessionState, StopReason},
     security::HostIdentity,
@@ -565,8 +564,7 @@ impl Host {
         if let Some(room) = self.shared.room.lock().clone()
             && !room.is_empty()
         {
-            room.shared.owner.lock().push_back(ModeCommand::HostRestore);
-            room.shared.wake.notify();
+            room.shared.request_restore();
             return true;
         }
         if self.launch.recovery().is_none() {

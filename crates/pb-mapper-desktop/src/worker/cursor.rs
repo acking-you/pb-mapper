@@ -99,12 +99,17 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             if slot.paused {
                 continue;
             }
-            // When another controller moved the OS cursor, viewers that render
-            // colored peer cursors keep their own cursor independent rather
-            // than stacking a duplicate OS cursor on top of the peer cursor.
-            if slot.peer_cursors && owner_slot.is_some_and(|mover| mover != slot.slot) {
-                continue;
-            }
+            let position =
+                if slot.peer_cursors && owner_slot.is_some_and(|mover| mover != slot.slot) {
+                    // Controllers keep their local pointer. A watcher replaces the
+                    // last visible OS pointer with the mover's coloured cursor.
+                    if slot.state.record.controlling {
+                        continue;
+                    }
+                    Some(crate::CursorPosition::default())
+                } else {
+                    position
+                };
             let cursor = position.map(|position| CursorUpdate {
                 generation: slot.state.record.generation,
                 x: position.x,

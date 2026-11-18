@@ -1621,7 +1621,9 @@ pointer still hidden, reaches the viewer with the move behind it.
 
 **Concurrent controllers and peer pointers.** Up to four viewers (`MAX_VIEWERS`)
 share one capture and encode loop. A viewer can join with the current codec
-whenever it can decode it. Capture continues while any viewer has send capacity.
+whenever it can decode it. The shared encoder uses the lowest frame-rate target
+among unpaused viewers, including decoder-backlog caps. Pausing or leaving
+removes that viewer's limit. Capture continues while any viewer has send capacity.
 A slow viewer can drain its queued pictures and resumes at a keyframe after a
 gap. A single viewer receives the owned frame buffer directly, and two or more
 share the same encoded bytes. Each viewer has its own input lane,
