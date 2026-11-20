@@ -55,7 +55,7 @@ impl SckStill {
         }
         let filter = self.filter(display.id)?;
         let (width, height) = scaled_size(display.width, display.height, MAX_SIZE.0, MAX_SIZE.1);
-        let config = capture::configuration(width, height, false);
+        let prepared = capture::configuration(width, height, false);
         let (sender, receiver) = mpsc::sync_channel(1);
         let handler = RcBlock::new(move |image: *mut CGImage, failure: *mut NSError| {
             let image = std::ptr::NonNull::new(image).map(|image| {
@@ -70,7 +70,7 @@ impl SckStill {
         unsafe {
             SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
                 &filter,
-                &config,
+                &prepared.config,
                 Some(&handler),
             );
         }

@@ -214,3 +214,30 @@ fn screen_capture_consent_is_classified_by_domain_and_code() {
         FailureKind::CaptureFailed
     );
 }
+
+/// Hiding the pointer must not leave a transparent hole. NV12 has no alpha,
+/// and a Windows viewer flashes while that hole moves.
+#[test]
+fn capture_without_a_pointer_stays_opaque() {
+    use objc2::ClassType;
+    use objc2_screen_capture_kit::{SCCaptureDynamicRange, SCStreamConfiguration};
+
+    if !super::capture::available() {
+        return;
+    }
+    let prepared = super::capture::configuration(64, 64, true);
+    let class = SCStreamConfiguration::class();
+    // SAFETY: the configuration is ours, and each selector is checked first.
+    unsafe {
+        assert!(!prepared.config.showsCursor());
+        if class.responds_to(objc2::sel!(shouldBeOpaque)) {
+            assert!(prepared.config.shouldBeOpaque());
+        }
+        if class.responds_to(objc2::sel!(captureDynamicRange)) {
+            assert_eq!(
+                prepared.config.captureDynamicRange(),
+                SCCaptureDynamicRange::SDR
+            );
+        }
+    }
+}
