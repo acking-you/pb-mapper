@@ -277,7 +277,7 @@ pub(crate) fn kept_key_flags(code: u16, down: bool) -> u64 {
         return 0;
     }
     match code {
-        0x7b | 0x7c | 0x7d | 0x7e => FUNCTION | NUMERIC_PAD,
+        0x7b..=0x7e => FUNCTION | NUMERIC_PAD,
         0x72 => FUNCTION | HELP,
         // Keypad Clear carries both.
         0x47 => FUNCTION | NUMERIC_PAD,
