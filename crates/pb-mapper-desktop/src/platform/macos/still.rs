@@ -55,9 +55,15 @@ impl SckStill {
         }
         let filter = self.filter(display.id)?;
         let (width, height) = scaled_size(display.width, display.height, MAX_SIZE.0, MAX_SIZE.1);
-        let config = capture::configuration(width, height, false);
+        let prepared = capture::configuration(width, height, false);
         let (sender, receiver) = mpsc::sync_channel(1);
+        // `backgroundColor` is not retained. The block keeps one retain
+        // until ScreenCaptureKit releases it, which is after the callback,
+        // including when the wait below has already timed out. The clone
+        // inside only borrows, so the block stays `Fn`.
+        let background = prepared.background();
         let handler = RcBlock::new(move |image: *mut CGImage, failure: *mut NSError| {
+            let _background = background.clone();
             let image = std::ptr::NonNull::new(image).map(|image| {
                 // SAFETY: valid during the call; retained to outlive it.
                 unsafe { CFRetained::retain(image) }
@@ -70,7 +76,7 @@ impl SckStill {
         unsafe {
             SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
                 &filter,
-                &config,
+                &prepared.config,
                 Some(&handler),
             );
         }

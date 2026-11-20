@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- Fix a Mac remote desktop flashing while the pointer moves, which a Windows viewer shows as a continuous flicker: hiding the pointer left a transparent hole, and a letterbox the same, and the NV12 picture has no alpha so those samples shimmer. The capture now fills them with opaque black, and asks the system for an opaque SDR picture where that request exists.
+- Fix typing on a Mac remote desktop opening Finder instead of inserting the character: text was posted as the A key, and a function key left latched by an arrow or function key's release turned that into Fn-A, which focuses the Dock on Finder. Typed text now carries no key and no flags, and the function key is posted only with the keys that use it, and only while they are held.
+
 ## [0.12.0] - 2026-11-18
 - Up to four devices can watch or control a shared remote desktop at once. Each controller keeps its own control grant, held keys and mouse position. Watching devices see each controller's pointer in a distinct colour when both ends support peer cursors. The shared video stream respects the lowest frame-rate target among active viewers, including limits requested by a decoder that is falling behind.
 - The macOS remote desktop host wakes when ScreenCaptureKit delivers a picture or VideoToolbox finishes encoding it. A still screen can answer a keyframe request without waiting for motion. The macOS and iOS viewers reuse the received buffer when a video sample's slices are already contiguous.
