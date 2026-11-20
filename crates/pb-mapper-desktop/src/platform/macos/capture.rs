@@ -266,10 +266,21 @@ pub(crate) fn filter(display: &SCDisplay) -> Retained<SCContentFilter> {
 }
 
 /// A stream configuration and the background colour its property does not
-/// retain. Hold this for as long as a stream or a screenshot reads `config`.
+/// retain. A stream holds the colour until the stream has stopped. A
+/// screenshot's completion handler holds another retain ([`Self::background`]):
+/// the manager keeps the configuration, but not this colour, and the wait
+/// can return before the callback.
 pub(crate) struct PreparedCapture {
     pub(crate) config: Retained<SCStreamConfiguration>,
     background: CFRetained<CGColor>,
+}
+
+impl PreparedCapture {
+    /// Another retain of the background colour. The same object
+    /// `config.backgroundColor` points at.
+    pub(crate) fn background(&self) -> CFRetained<CGColor> {
+        self.background.clone()
+    }
 }
 
 /// The configuration of a picture `width` x `height` pixels, without the
@@ -307,8 +318,9 @@ pub(crate) fn configuration(width: u32, height: u32, nv12: bool) -> PreparedCapt
         config
     };
     let background = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
-    // SAFETY: `background` is moved into the returned value, which the
-    // caller holds. The property itself does not retain it.
+    // SAFETY: `background` is moved into the returned value. The property
+    // does not retain it, so a caller that returns before the read finishes
+    // keeps another retain from `PreparedCapture::background`.
     unsafe { config.setBackgroundColor(&background) };
     PreparedCapture { config, background }
 }
