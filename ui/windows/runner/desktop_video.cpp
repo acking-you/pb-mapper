@@ -617,9 +617,18 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     ComPtr<ID3D11VideoContext> video_context;
     ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
     ComPtr<ID3D11VideoProcessor> processor;
-    // Signalled once the GPU has run every command before it: the
-    // conversion of the frame about to be published.
+    // Signalled once the GPU has run every command before it: the copy of
+    // the frame about to be published.
     ComPtr<ID3D11Query> converted;
+    // The one texture Flutter shows, shared under a handle that stays the
+    // same for this decoder's life, so Flutter imports it once. A new
+    // shared texture per frame made Flutter build an EGL surface from each,
+    // and a frame whose import failed showed nothing until the next one:
+    // the picture blinked to the viewer's background.
+    ComPtr<ID3D11Texture2D> shown;
+    // Where each frame is converted, then copied into `shown` in one short
+    // copy, so a read of `shown` meets a whole frame.
+    ComPtr<ID3D11Texture2D> scratch;
     ComPtr<IMFDXGIDeviceManager> manager;
     // What created an H.265 decoder, which must shut it down after use.
     // Declared before `transform`, so its shutdown follows the decoder's
@@ -829,35 +838,35 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       in_desc.Texture2D.ArraySlice = subresource / source_desc.MipLevels;
       ComPtr<ID3D11VideoProcessorInputView> in_view;
       Check(video->CreateVideoProcessorInputView(source.Get(), enumerator.Get(), &in_desc, &in_view), "Open decoded GPU frame");
-      D3D11_TEXTURE2D_DESC desc{};
-      desc.Width = width; desc.Height = height; desc.MipLevels = 1; desc.ArraySize = 1;
-      desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-      desc.SampleDesc.Count = 1;
-      desc.Usage = D3D11_USAGE_DEFAULT;
-      desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-      desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
-      ComPtr<ID3D11Texture2D> target;
-      Check(device->CreateTexture2D(&desc, nullptr, &target), "Allocate Flutter GPU frame");
+      if (!scratch) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width; desc.Height = height; desc.MipLevels = 1; desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        Check(device->CreateTexture2D(&desc, nullptr, &scratch), "Allocate converted frame");
+        desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+        Check(device->CreateTexture2D(&desc, nullptr, &shown), "Allocate Flutter GPU frame");
+      }
       D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC out_desc{};
       out_desc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
       ComPtr<ID3D11VideoProcessorOutputView> out_view;
-      Check(video->CreateVideoProcessorOutputView(target.Get(), enumerator.Get(), &out_desc, &out_view), "Open Flutter GPU frame");
+      Check(video->CreateVideoProcessorOutputView(scratch.Get(), enumerator.Get(), &out_desc, &out_view), "Open converted frame");
       D3D11_VIDEO_PROCESSOR_STREAM stream{};
       stream.Enable = TRUE;
       stream.pInputSurface = in_view.Get();
       Check(video_context->VideoProcessorBlt(processor.Get(), out_view.Get(), 0, 1, &stream), "Convert decoded GPU frame");
+      context->CopyResource(shown.Get(), scratch.Get());
       context->End(converted.Get());
       context->Flush();
       WaitForConversion();
-      return std::make_shared<Surface>(std::move(target), frame);
+      return std::make_shared<Surface>(shown, frame);
     }
-    // Flutter composites the frame on its own device and takes no keyed
-    // mutex, so nothing orders its read after this device's conversion. A
-    // frame it read too early was the new texture's zeros, transparent: the
-    // viewer's background showed instead of the picture, a frame or a few at
-    // a time, about once a second under a Mac host's steady frames. So a
-    // frame is published once the GPU has written it, or after
-    // kConversionWait, as before.
+    // Flutter composites `shown` on its own device and takes no keyed mutex,
+    // so nothing orders its read after this device's copy: a frame is
+    // published, and Flutter told to draw it, once the GPU has run the copy,
+    // or after kConversionWait.
     void WaitForConversion() {
       const auto deadline = Clock::now() + kConversionWait;
       for (;;) {

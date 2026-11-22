@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 - Fix typing on a Mac remote desktop, which in 0.12.1 typed nothing from any viewer: its text rode on a key code macOS drops. Text now rides on the Space key, as Chrome Remote Desktop's does, and arrives unchanged with the Mac's own input method on.
-- Fix the picture of a remote desktop on Windows blinking to the viewer's background, a frame or a few at a time, about once a second while pictures arrived: a frame was shown before the GPU had finished converting it.
+- Fix the picture of a remote desktop on Windows blinking to the viewer's background, a frame or a few at a time, about once a second while pictures arrived: each frame reached Flutter as a new shared texture, and one Flutter could not take showed nothing until the next. The viewer now keeps one shared texture for a stream and copies each finished frame into it.
 - Fix the pointer of a Mac remote desktop jumping back while it moves: the Mac reported where the pointer was before each move as someone else's move.
 
 ## [0.12.1] - 2026-11-22
