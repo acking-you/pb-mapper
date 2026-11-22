@@ -46,6 +46,9 @@ constexpr uint32_t kMaxWidth = 3840, kMaxHeight = 2160;
 constexpr int64_t kSnapshotWidth = 320;
 constexpr float kSnapshotQuality = 0.8f;
 constexpr auto kSnapshotDeadline = std::chrono::milliseconds(300);
+// The longest a converted frame waits for the GPU before it is published
+// anyway: a GPU this slow would otherwise stop the picture.
+constexpr auto kConversionWait = std::chrono::milliseconds(100);
 
 // The video C ABI of pb_mapper_ffi.dll (desktop_video.rs). The runner does
 // not link the DLL: it resolves these from the copy Dart already loaded.
@@ -614,6 +617,9 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     ComPtr<ID3D11VideoContext> video_context;
     ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
     ComPtr<ID3D11VideoProcessor> processor;
+    // Signalled once the GPU has run every command before it: the
+    // conversion of the frame about to be published.
+    ComPtr<ID3D11Query> converted;
     ComPtr<IMFDXGIDeviceManager> manager;
     // What created an H.265 decoder, which must shut it down after use.
     // Declared before `transform`, so its shutdown follows the decoder's
@@ -641,6 +647,9 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       if (SUCCEEDED(context.As(&multithread))) multithread->SetMultithreadProtected(TRUE);
       Check(device.As(&video), "Get video device");
       Check(context.As(&video_context), "Get video context");
+      D3D11_QUERY_DESC query{};
+      query.Query = D3D11_QUERY_EVENT;
+      Check(device->CreateQuery(&query, &converted), "Create GPU completion query");
       UINT token = 0;
       Check(MFCreateDXGIDeviceManager(&token, &manager), "Create decoder device manager");
       Check(manager->ResetDevice(device.Get(), token), "Assign decoder device");
@@ -837,8 +846,26 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       stream.Enable = TRUE;
       stream.pInputSurface = in_view.Get();
       Check(video_context->VideoProcessorBlt(processor.Get(), out_view.Get(), 0, 1, &stream), "Convert decoded GPU frame");
+      context->End(converted.Get());
       context->Flush();
+      WaitForConversion();
       return std::make_shared<Surface>(std::move(target), frame);
+    }
+    // Flutter composites the frame on its own device and takes no keyed
+    // mutex, so nothing orders its read after this device's conversion. A
+    // frame it read too early was the new texture's zeros, transparent: the
+    // viewer's background showed instead of the picture, a frame or a few at
+    // a time, about once a second under a Mac host's steady frames. So a
+    // frame is published once the GPU has written it, or after
+    // kConversionWait, as before.
+    void WaitForConversion() {
+      const auto deadline = Clock::now() + kConversionWait;
+      for (;;) {
+        const HRESULT hr = context->GetData(converted.Get(), nullptr, 0, 0);
+        Check(hr, "Wait for the converted frame");
+        if (hr == S_OK || Clock::now() >= deadline) return;
+        std::this_thread::yield();
+      }
     }
   };
 
