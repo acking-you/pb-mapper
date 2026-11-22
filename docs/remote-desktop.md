@@ -873,7 +873,8 @@ does not require Flutter or a POCOX runtime.
   probe never costs the display. A description that misses the 3 s uses
   what its launcher falls back to. `bind(waker)` hands a pushing source the
   session's wake, and `drain_poll()` says whether thread C polls the encoder
-  (`Some`, every 2 ms while units are pending) or waits to be woken (`None`).
+  (`Some`, every 2 ms while units are pending, and as often for a picture
+  after a capture that had none to submit) or waits to be woken (`None`).
   `capture` (a JPEG still) is optional. `cursor` reports the pointer as the
   inputs the backend applied left it, and `cursor_shape`, asked only when the
   viewer listed `cursor_shape` and the backend's `BackendCaps::cursor_shapes`
@@ -1026,7 +1027,7 @@ crates/pb-mapper-desktop/src/
 | Part | Windows | macOS |
 | --- | --- | --- |
 | `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope | `CGDirectDisplayID` from `CGGetActiveDisplayList`, named by its UUID, which finds it again; `CGDisplayBounds` × the current mode's pixels per point; a session that is not on the console, or a locked screen, is the secure desktop |
-| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`), drained every 2 ms | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
+| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`) that thread C polls: drained, and asked again for a picture it did not have, every 2 ms | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
 | `Input` | enigo; `SendInput` with `KEYEVENTF_SCANCODE` for physical keys (a HID usage to its set-1 scancode); `SetCursorPos` for absolute moves; `LockWorkStation` | `CGEvent` at the HID tap: pointer and wheel in the bound display's points, click counts for double clicks, named letters and digits at the key the Mac's layout types them with, other keys and physical keys by `kVK_*` place, modifiers as flag changes with left and right apart, text as Unicode string events of at most 20 UTF-16 units; no lock (`LOCK = false`) |
 | `Cursor` | `GetCursorInfo`; the shape once per new `HCURSOR`: its kind from the `LoadCursorW` standard handles, its bitmap from `GetIconInfo` and `GetDIBits` (colour, alpha or AND mask; monochrome AND/XOR, an inverting pixel drawn black outlined in white) | `CGEventGetLocation`, separate; the shape when the window server's cursor seed moves (a private `CGSCurrentCursorSeed`, looked up with `dlsym`; without it at most every 500 ms): `NSCursor.currentSystemCursor` drawn at the display's scale, a kind only where it equals a standard cursor pixel for pixel, else `custom` |
 | `Modes` / `Still` | `WinModes` (dynamic changes only; see [Remote resolution](#remote-resolution)) / xcap JPEG | Core Graphics modes for this app only (`kCGConfigureForAppOnly`) / `SCScreenshotManager` and ImageIO JPEG, macOS 14 and later |
@@ -1147,7 +1148,11 @@ The thread drains the input lane, makes at most one capture or drain call, and
 drains the lane again. Capture is paced on a grid at the QoS pace: a tick is
 consumed whether it fires or is skipped, the grid keeps its long-run rate (120
 FPS on a 165 Hz display is not rounded down), and after a stall two captures
-are never closer than three quarters of a period. A tick is skipped (and
+are never closer than three quarters of a period. A tick that finds no new
+picture stays armed, so the next picture is taken as it appears rather than a
+tick later: ScreenCaptureKit, which pushes, wakes the thread for it, and DXGI,
+which cannot, is asked again every 2 ms (`DRAIN_POLL`), since asking it at
+once kept the thread busy while the desktop was still. A tick is skipped (and
 counted in `skipped_ticks`) only while two units in the hand-off queue wait for
 send credit, which is transport backpressure, or while the encoder (or the
 helper) holds four, never for presentation. The two bounds are separate
@@ -1677,6 +1682,7 @@ shapes by content, never by number.
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder |
+| Armed tick | a tick with no new picture stays armed; ScreenCaptureKit wakes thread C, DXGI is asked again every 2 ms |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
 | QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; latch at 1.3 × over 2 windows at ≤ 0.75 × nominal |
 | Process timers | 1 ms, with power throttling opted out, while a session captures |

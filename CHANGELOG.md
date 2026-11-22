@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fix a Windows computer shared from the app keeping a CPU core busy while its screen did not change, since 0.12.0: a capture tick that found no new picture asked again at once, over and over, until the screen changed. It now asks every 2 ms, so a change is still captured within 2 ms. Sharing through the background service was not affected.
 - Fix typing on a Mac remote desktop, which in 0.12.1 typed nothing from any viewer: its text rode on a key code macOS drops. Text now rides on the Space key, as Chrome Remote Desktop's does, and arrives unchanged with the Mac's own input method on.
 - Fix the picture of a remote desktop on Windows blinking to the viewer's background, a frame or a few at a time, about once a second while pictures arrived: each frame reached Flutter as a new shared texture, and one Flutter could not take showed nothing until the next. The viewer now keeps one shared texture for a stream and copies each finished frame into it.
 - Fix the pointer of a Mac remote desktop jumping back while it moves: the Mac reported where the pointer was before each move as someone else's move.

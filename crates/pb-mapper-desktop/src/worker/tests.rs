@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    CursorPosition, Display, EncodedFrame, Input, InputEvent, KeyframeReason, VideoFormat,
-    VideoRate, error,
+    CursorPosition, DRAIN_POLL, Display, EncodedFrame, Input, InputEvent, KeyframeReason,
+    VideoFormat, VideoRate, error,
     idr::IdrReason,
     lane::LANE_CAPACITY,
     modes::ModeCommand,
@@ -89,6 +89,10 @@ struct Fake {
     shape_reads: Arc<AtomicU32>,
     /// A push capture source stays idle until this instant or a callback.
     idle_until: Arc<Mutex<Option<Instant>>>,
+    /// A pull source on a still desktop, as DXGI between two presents: a
+    /// capture submits nothing unless it carries a keyframe, and the source
+    /// names no time to try again.
+    still: Arc<AtomicBool>,
     repeatable: bool,
     submitted_video: bool,
 }
@@ -115,6 +119,7 @@ impl Fake {
             shape: Arc::default(),
             shape_reads: Arc::default(),
             idle_until: Arc::default(),
+            still: Arc::default(),
             repeatable: false,
             submitted_video: true,
         }
@@ -191,8 +196,9 @@ impl Backend for Fake {
         if self.fail_capture.load(Ordering::SeqCst) {
             return Err(error("no compatible hardware encoder"));
         }
-        self.submitted_video = self.idle_until.lock().is_none_or(|until| until <= started)
-            || (self.repeatable && keyframe);
+        let idle = self.idle_until.lock().is_some_and(|until| until > started)
+            || self.still.load(Ordering::SeqCst);
+        self.submitted_video = !idle || (self.repeatable && keyframe);
         if !self.submitted_video {
             return Ok(self.finished());
         }
@@ -1365,4 +1371,28 @@ fn idle_capture_waits_through_cursor_wakes_but_repeats_for_a_deferred_keyframe()
     h.run(Duration::from_millis(1), false);
     assert_eq!(h.captures()[1].0, start + interval);
     assert!(h.sent()[0].keyframe);
+}
+
+#[test]
+fn a_pull_source_with_nothing_new_is_polled_not_asked_again_at_once() {
+    let mut h = Harness::new(true, None);
+    h.step();
+    assert!(h.sent()[0].keyframe);
+    // A still desktop on a source that cannot wake thread C and names no time
+    // to try again, as DXGI: asking it again at once spun thread C.
+    h.fake.still.store(true, Ordering::SeqCst);
+    h.run(Duration::from_millis(100), true);
+    let polls = h.captures();
+    assert!(polls.len() > 30, "{} captures", polls.len());
+    let gaps = spacing(&polls[1..]);
+    assert!(gaps.iter().all(|gap| *gap == DRAIN_POLL), "{gaps:?}");
+
+    // The tick stays armed: a new picture goes out at the next poll, rather
+    // than at the next tick.
+    h.fake.still.store(false, Ordering::SeqCst);
+    let changed = h.now();
+    h.run(Duration::from_millis(5), false);
+    let (taken, ..) = h.captures()[polls.len()];
+    assert!(taken - changed <= DRAIN_POLL, "{:?}", taken - changed);
+    assert_eq!(h.sent().len(), 1);
 }

@@ -163,9 +163,12 @@ pub(crate) trait VideoSource: Sized {
     ) -> Result<Self>;
     fn codec(&self) -> VideoCodec;
     fn set_rate(&mut self, rate: VideoRate) -> Result<()>;
-    /// Capture and submit one picture. A push source never blocks and may
-    /// report `false` when it has no picture, leaving the worker's tick armed.
-    /// If its encoder is full, it returns `true` and keeps the IDR request.
+    /// Capture and submit one picture, without blocking. A source with no
+    /// picture to submit reports `false`, leaving the worker's tick armed: a
+    /// push source names when it needs the next one (`idle_until`) or wakes
+    /// the worker, and the worker asks a pull source (`DRAIN` is `Some`)
+    /// again after that interval. A push source whose encoder is full returns
+    /// `true` and keeps the IDR request.
     fn submit(&mut self, keyframe: bool) -> Result<bool>;
     /// When to try again on a push source, if it has nothing ready now.
     fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
