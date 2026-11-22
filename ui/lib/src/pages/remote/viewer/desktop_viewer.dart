@@ -85,6 +85,9 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
   late ViewerActions _actions;
   bool _fullscreen = false, _panelHeld = false;
 
+  /// The full screen last asked for, which the window may not report yet.
+  bool _fullscreenWanted = false;
+
   DesktopStore get _desktop => widget.desktop;
 
   @override
@@ -140,7 +143,7 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
   void dispose() {
     if (isFramelessDesktop) {
       windowManager.removeListener(this);
-      if (_fullscreen) unawaited(_setFullscreen(false));
+      if (_fullscreen || _fullscreenWanted) unawaited(_setFullscreen(false));
     }
     widget.prefs.removeListener(_prefsChanged);
     _desktop.session.removeListener(_keyboardSettingsChanged);
@@ -181,16 +184,23 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
     }
   }
 
+  /// The window's own flag. The app's chrome follows it too, also once
+  /// this viewer is gone (leaving full screen as it closes).
   Future<void> _syncFullscreen() async {
     try {
       final fullscreen = await windowManager.isFullScreen();
-      if (mounted) _fullscreenChanged(fullscreen);
+      if (mounted) {
+        _fullscreenChanged(fullscreen);
+      } else {
+        windowFullScreen.value = fullscreen;
+      }
     } catch (_) {
       // No window to ask (a test, or a platform that refuses).
     }
   }
 
   Future<void> _setFullscreen(bool value) async {
+    _fullscreenWanted = value;
     try {
       await windowManager.setFullScreen(value);
     } catch (_) {
@@ -212,8 +222,10 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
   void _lifecycleChanged(AppLifecycleState? state) =>
       _keyboard.active = state == null || state == AppLifecycleState.resumed;
 
-  /// Full screen, the picture takes this computer's shortcuts too.
+  /// Full screen, the picture takes this computer's shortcuts too, and the
+  /// app's chrome hides.
   void _fullscreenChanged(bool value) {
+    windowFullScreen.value = value;
     if (value != _fullscreen) setState(() => _fullscreen = value);
     _keyboard.fullscreen = value;
   }

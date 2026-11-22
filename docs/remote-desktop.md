@@ -341,8 +341,9 @@ In either mode:
   the host when capture stops (leaving full screen, a menu or dialog taking
   the keyboard, the app going inactive) and when the secure desktop takes
   the keyboard (Win+L, Ctrl+Alt+Del, a UAC prompt), whose ups no hook sees.
-  Full screen is window_manager's own flag, read back after each change:
-  on Windows it sends its enter and leave events only from and to a
+  Full screen is window_manager's own flag, read back after each change,
+  and the app's caption buttons follow the viewer's reading of it: on
+  Windows the plugin sends its enter and leave events only from and to a
   maximized window. Ctrl+Alt+Del and Win+L, which Windows handles before any
   hook, act on this computer too. A Ctrl or Shift pressed just before a key
   the hook takes reaches the viewer through Flutter's key queue, which waits

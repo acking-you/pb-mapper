@@ -380,13 +380,18 @@ class _SharingFallbackLayerState extends State<SharingFallbackLayer>
   void initState() {
     super.initState();
     if (isFramelessDesktop) windowManager.addListener(this);
+    windowFullScreen.addListener(_fullScreenChanged);
   }
 
   @override
   void dispose() {
     if (isFramelessDesktop) windowManager.removeListener(this);
+    windowFullScreen.removeListener(_fullScreenChanged);
     super.dispose();
   }
+
+  void _fullScreenChanged() =>
+      setState(() => _fullScreen = windowFullScreen.value);
 
   @override
   void onWindowEnterFullScreen() => setState(() => _fullScreen = true);

@@ -22,6 +22,7 @@ import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_menus.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_overlays.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_stage.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_title_bar.dart';
+import 'package:pb_mapper_ui/src/shell/window_chrome.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_toolbar.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
@@ -1114,9 +1115,11 @@ void main() {
 
   testWidgets(
     "on Windows, full screen is the window manager's own flag, with no event "
-    "to say so, and full screen with control takes this computer's shortcuts",
+    "to say so: the app's caption buttons hide, and full screen with control "
+    "takes this computer's shortcuts",
     (tester) async {
       _size(tester, const Size(1280, 800));
+      addTearDown(() => windowFullScreen.value = false);
       final messenger = tester.binding.defaultBinaryMessenger;
       const windowManager = MethodChannel('window_manager');
       var fullScreen = false;
@@ -1150,28 +1153,47 @@ void main() {
         await store.connect(_target);
         api.viewerStatusValue = liveStatus(controlling: true);
         await tester.pump(const Duration(milliseconds: 500));
+        // The viewer under the app's caption buttons, as the app has them.
         await tester.pumpWidget(
           _app(
-            DesktopViewer(
-              desktop: store,
-              prefs: ViewerPrefs(persist: false),
-              title: 'Office',
+            Stack(
+              children: [
+                Positioned.fill(
+                  child: DesktopViewer(
+                    desktop: store,
+                    prefs: ViewerPrefs(persist: false),
+                    title: 'Office',
+                  ),
+                ),
+                const Positioned.fill(
+                  child: WindowControls(
+                    height: kViewerTitleBarHeight,
+                    tone: CaptionTone.viewer,
+                  ),
+                ),
+              ],
             ),
           ),
         );
         await tester.pump();
+        final close = find.byKey(const Key('caption-close'));
         expect(find.byType(ViewerTitleBar), findsOneWidget);
+        expect(close, findsOneWidget);
         expect(captured, isEmpty);
 
         final toggle = find.byKey(const Key('viewer-fullscreen'));
         await tester.tap(toggle);
         await tester.pump();
+        await tester.pump();
         expect(find.byType(ViewerTitleBar), findsNothing);
+        expect(close, findsNothing);
         expect(captured, [true]);
 
         await tester.tap(toggle);
         await tester.pump();
+        await tester.pump();
         expect(find.byType(ViewerTitleBar), findsOneWidget);
+        expect(close, findsOneWidget);
         expect(captured, [true, false]);
 
         await tester.pumpWidget(const SizedBox.shrink());

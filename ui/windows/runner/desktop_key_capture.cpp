@@ -39,80 +39,107 @@ LPARAM ScanCode(const KBDLLHOOKSTRUCT& event) {
                                                             : scan);
 }
 
-// The hook's state, on the hook's thread: what it did with each key's down,
-// until that key's up. A key taken goes down and up in Dart only; a key
-// passed, down and up in the system only.
+// A key's place in the hook's table: its scan code (ScanCode), the prefix as
+// a bit of its own.
+size_t Place(LPARAM scan) {
+  const auto prefix = (scan >> 8) & 0xFF;
+  return static_cast<size_t>(scan & 0xFF) |
+         (prefix == 0xE0   ? size_t{0x100}
+          : prefix == 0xE1 ? size_t{0x200}
+                           : size_t{0});
+}
+
+// The hook's state, on the hook's thread: what it did with the key at each
+// place, from its down to its up. A key taken goes down and up in Dart only;
+// a key passed, down and up in the system only. By place, not key code: two
+// keys share a code (Enter and the keypad's, Home and the keypad's 7 with Num
+// Lock off), and Num Lock with Shift, or a layout switch, can change a key's
+// code between its down and its up.
 class Hook {
  public:
   Hook(HWND window, const std::atomic<bool>* composing)
       : window_(window), composing_(composing) {
-    // Keys already down went to the system, and so do their ups.
-    for (DWORD vk = 1; vk < kKeys; ++vk) {
-      if (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) {
-        keys_[vk].held = Held::kPassed;
-      }
-    }
+    PassHeldKeys();
   }
 
   // True: the system must not see this event.
   bool Take(WPARAM message, const KBDLLHOOKSTRUCT& event) {
     const DWORD vk = event.vkCode;
     // VK_PACKET is text a program types, not a key.
-    if (vk == 0 || vk >= kKeys || vk == VK_PACKET) return false;
+    if (vk == 0 || vk > 0xFE || vk == VK_PACKET) return false;
     const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
     if (vk == VK_LCONTROL && event.scanCode == kAltGrControl) {
       altgr_ = down;
       // With AltGr held when capture started, Left Ctrl was marked down:
       // this is its up.
-      if (!down && keys_[VK_LCONTROL].held == Held::kPassed) {
-        keys_[VK_LCONTROL].held = Held::kNone;
-      }
+      Key& left = keys_[Place(0x1D)];
+      if (!down && left.held == Held::kPassed) left = Key{};
       return false;
     }
     const LPARAM scan = ScanCode(event);
-    // The key taken at this place, whatever its key code is now: Num Lock
-    // with Shift, or a layout switch, can change it between down and up.
-    const DWORD taken = TakenAt(vk, scan);
+    Key& key = keys_[Place(scan)];
     if (!down) {
-      if (taken == 0) {
-        keys_[vk].held = Held::kNone;
-        return false;
-      }
-      keys_[taken].held = Held::kNone;
-      Post(taken, scan, 0);
+      const bool taken = key.held == Held::kTaken;
+      if (taken) Post(key, 0);
+      key = Key{};
+      return taken;
+    }
+    if (key.held == Held::kTaken) {
+      Post(key, kDown | kRepeat);
       return true;
     }
-    if (taken != 0) {
-      Post(taken, scan, kDown | kRepeat);
-      return true;
-    }
-    if (keys_[vk].held == Held::kPassed) return false;
-    if (GetForegroundWindow() != window_ || !Takes(vk)) {
-      keys_[vk].held = Held::kPassed;
-      return false;
-    }
-    keys_[vk] = Key{Held::kTaken, scan};
-    Post(vk, scan, kDown);
-    return true;
+    if (key.held == Held::kPassed) return false;
+    const bool take = GetForegroundWindow() == window_ && Takes(vk);
+    key = Key{take ? Held::kTaken : Held::kPassed, vk, scan};
+    if (take) Post(key, kDown);
+    return take;
   }
 
-  // Each key still taken goes up in Dart, as capture stops or the secure
-  // desktop takes the keyboard. The system never saw it go down, so its real
-  // up may go there.
-  void ReleaseAll() {
-    for (DWORD vk = 1; vk < kKeys; ++vk) {
-      if (keys_[vk].held == Held::kTaken) Post(vk, keys_[vk].scan, 0);
-      keys_[vk].held = Held::kNone;
+  // Capture stops: each key still taken goes up in Dart. The system never
+  // saw it go down, so its real up may go there.
+  void ReleaseTaken() {
+    for (Key& key : keys_) {
+      if (key.held != Held::kTaken) continue;
+      Post(key, 0);
+      key = Key{};
     }
+  }
+
+  // The secure desktop (Win+L, Ctrl+Alt+Del, a UAC prompt) took the keyboard
+  // or gave it back, and no key's up came here meanwhile: the keys taken go
+  // up, and what is down now is the system's.
+  void DesktopSwitched() {
+    ReleaseTaken();
+    keys_.fill(Key{});
+    altgr_ = false;
+    PassHeldKeys();
   }
 
  private:
   enum class Held : uint8_t { kNone, kPassed, kTaken };
   struct Key {
     Held held = Held::kNone;
+    DWORD vk = 0;
     LPARAM scan = 0;
   };
-  static constexpr DWORD kKeys = 256;
+
+  // Keys down now went to the system, and so do their ups. Off the active
+  // desktop none reads as down.
+  void PassHeldKeys() {
+    for (int vk = 1; vk < 0xFF; ++vk) {
+      // Windows reports the sided codes too; a hook gets only those.
+      if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU) continue;
+      if (!(GetAsyncKeyState(vk) & 0x8000)) continue;
+      const UINT scan =
+          MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC_EX);
+      if (scan == 0) continue;
+      Key& key = keys_[Place(static_cast<LPARAM>(scan))];
+      if (key.held == Held::kNone) {
+        key = Key{Held::kPassed, static_cast<DWORD>(vk),
+                  static_cast<LPARAM>(scan)};
+      }
+    }
+  }
 
   // This computer's shortcuts: see the header.
   bool Takes(DWORD vk) const {
@@ -144,25 +171,32 @@ class Hook {
     return Taken(VK_LWIN) || Taken(VK_RWIN) || Taken(VK_LMENU) ||
            Taken(VK_RMENU);
   }
-  bool Down(DWORD vk) const { return keys_[vk].held != Held::kNone; }
-  bool Taken(DWORD vk) const { return keys_[vk].held == Held::kTaken; }
 
-  // The key code a key at `scan` was taken under, `vk` first; 0 if none.
-  DWORD TakenAt(DWORD vk, LPARAM scan) const {
-    if (Taken(vk) && keys_[vk].scan == scan) return vk;
-    for (DWORD other = 1; other < kKeys; ++other) {
-      if (Taken(other) && keys_[other].scan == scan) return other;
+  // A key with code `vk` is down, passed or taken.
+  bool Down(DWORD vk) const {
+    for (const Key& key : keys_) {
+      if (key.held != Held::kNone && key.vk == vk) return true;
     }
-    return 0;
+    return false;
   }
 
-  void Post(DWORD vk, LPARAM scan, WPARAM flags) const {
-    PostMessageW(window_, kCapturedKey, static_cast<WPARAM>(vk) | flags, scan);
+  // A key with code `vk` was taken and is still down.
+  bool Taken(DWORD vk) const {
+    for (const Key& key : keys_) {
+      if (key.held == Held::kTaken && key.vk == vk) return true;
+    }
+    return false;
+  }
+
+  // Under the code and place it went down with.
+  void Post(const Key& key, WPARAM flags) const {
+    PostMessageW(window_, kCapturedKey, static_cast<WPARAM>(key.vk) | flags,
+                 key.scan);
   }
 
   HWND window_;
   const std::atomic<bool>* composing_;
-  std::array<Key, kKeys> keys_{};
+  std::array<Key, 0x300> keys_{};
   bool altgr_ = false;
 };
 
@@ -177,11 +211,10 @@ LRESULT CALLBACK KeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
   return CallNextHookEx(nullptr, code, wparam, lparam);
 }
 
-// The secure desktop (Win+L, Ctrl+Alt+Del, a UAC prompt) took the keyboard:
-// the ups of the keys held then never come here.
-void CALLBACK DesktopSwitched(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD,
+// EVENT_SYSTEM_DESKTOPSWITCH, on the hook's thread.
+void CALLBACK OnDesktopSwitch(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD,
                               DWORD) {
-  if (t_hook != nullptr) t_hook->ReleaseAll();
+  if (t_hook != nullptr) t_hook->DesktopSwitched();
 }
 
 // The hook's own thread. The system calls a low-level hook from the message
@@ -206,7 +239,7 @@ void RunHook(HWND window, const std::atomic<bool>* composing, HANDLE started,
           ? nullptr
           : SetWinEventHook(EVENT_SYSTEM_DESKTOPSWITCH,
                             EVENT_SYSTEM_DESKTOPSWITCH, nullptr,
-                            DesktopSwitched, 0, 0, WINEVENT_OUTOFCONTEXT);
+                            OnDesktopSwitch, 0, 0, WINEVENT_OUTOFCONTEXT);
   *id = handle == nullptr ? 0 : GetCurrentThreadId();
   SetEvent(started);
   if (handle == nullptr) {
@@ -218,7 +251,7 @@ void RunHook(HWND window, const std::atomic<bool>* composing, HANDLE started,
   if (desktops != nullptr) UnhookWinEvent(desktops);
   UnhookWindowsHookEx(handle);
   t_hook = nullptr;
-  hook.ReleaseAll();
+  hook.ReleaseTaken();
 }
 
 }  // namespace

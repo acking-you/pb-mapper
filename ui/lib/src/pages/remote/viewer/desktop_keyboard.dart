@@ -153,8 +153,10 @@ class SystemKeyCapture {
     );
   }
 
-  /// When the viewer closes: capture stops, and nothing more comes.
+  /// When the viewer closes: capture stops, the runner forgets any
+  /// composing, and nothing more comes.
   void dispose() {
+    composing = false;
     captured = false;
     _disposed = true;
     onKey = null;
@@ -170,20 +172,18 @@ class SystemKeyCapture {
   }
 
   /// The key event the picture would have had for a key the runner took
-  /// (`{vk, scan, down, repeat}`), named by Flutter's own Windows tables as
-  /// its embedder names the keys it gets, and as it does by Windows' own
-  /// codes where they name none (the ISO `<>` key's code, say): the runner
-  /// has kept the key from everything else.
+  /// (`{vk, scan, down, repeat}`), named as Flutter's Windows embedder names
+  /// the keys it gets: by Flutter's own tables, and where they name none
+  /// (the ISO `<>` key's code, say), from Windows' codes as the embedder
+  /// does. The runner has kept the key from everything else.
   static KeyEvent? eventOf(Object? arguments) {
     if (arguments is! Map) return null;
     final scan = arguments['scan'], vk = arguments['vk'];
     if (scan is! int || vk is! int) return null;
     final physical =
         kWindowsToPhysicalKey[scan] ??
-        PhysicalKeyboardKey(scan | LogicalKeyboardKey.windowsPlane);
-    final logical =
-        kWindowsToLogicalKey[vk] ??
-        LogicalKeyboardKey(vk | LogicalKeyboardKey.windowsPlane);
+        PhysicalKeyboardKey((scan & 0xFF) | LogicalKeyboardKey.windowsPlane);
+    final logical = kWindowsToLogicalKey[vk] ?? _unnamedLogical(vk);
     if (arguments['down'] != true) {
       return KeyUpEvent(
         physicalKey: physical,
@@ -202,6 +202,21 @@ class SystemKeyCapture {
       physicalKey: physical,
       logicalKey: logical,
       timeStamp: Duration.zero,
+    );
+  }
+
+  /// The embedder's name for a key code its table lacks: a printable
+  /// (extended) ASCII code as that character, lower case, else the code on
+  /// the Windows plane (`KeyboardKeyEmbedderHandler::GetLogicalKey`).
+  static LogicalKeyboardKey _unnamedLogical(int vk) {
+    final lower = vk >= 0x41 && vk <= 0x5A
+        ? vk + 0x20
+        : vk >= 0xC0 && vk <= 0xDE
+        ? vk + 0x20
+        : vk;
+    final printable = (vk >= 0x20 && vk <= 0x7F) || (vk >= 0x80 && vk <= 0xFF);
+    return LogicalKeyboardKey(
+      printable ? lower : lower | LogicalKeyboardKey.windowsPlane,
     );
   }
 }

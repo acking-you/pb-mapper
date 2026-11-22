@@ -892,19 +892,20 @@ void main() {
       (PhysicalKeyboardKey.keyD, LogicalKeyboardKey.keyD),
     );
     expect(event(0x2C, 0xE037)!.physicalKey, PhysicalKeyboardKey.printScreen);
-    // A code the tables do not name is named by Windows' own, as the
-    // embedder names it: the ISO <> key's place still goes by its usage.
+    // A code the tables do not name is named as the embedder names it:
+    // the ISO <> key's place still goes by its usage.
     final iso = event(0xE2, 0x56)!;
     expect(
       (iso.physicalKey, iso.logicalKey),
-      (
-        PhysicalKeyboardKey.intlBackslash,
-        const LogicalKeyboardKey(0xE2 | LogicalKeyboardKey.windowsPlane),
-      ),
+      (PhysicalKeyboardKey.intlBackslash, const LogicalKeyboardKey(0xE2)),
     );
+    final unnamed = event(0x0E, 0xE07F)!;
     expect(
-      event(0xFF, 0x7F)!.physicalKey,
-      const PhysicalKeyboardKey(0x7F | LogicalKeyboardKey.windowsPlane),
+      (unnamed.physicalKey, unnamed.logicalKey),
+      (
+        const PhysicalKeyboardKey(0x7F | LogicalKeyboardKey.windowsPlane),
+        const LogicalKeyboardKey(0x0E | LogicalKeyboardKey.windowsPlane),
+      ),
     );
     expect(SystemKeyCapture.eventOf('key'), isNull);
   });
@@ -1069,7 +1070,18 @@ void main() {
           'false',
         ]);
 
+        // Closed while composing: the runner forgets the composing.
+        calls.clear();
+        keyboard.text.updateEditingValue(
+          TextEditingValue(
+            text: '${'1' * 64}Ani',
+            selection: const TextSelection.collapsed(offset: 67),
+            composing: const TextRange(start: 65, end: 67),
+          ),
+        );
         keyboard.dispose();
+        await tester.pump();
+        expect(calls, ['setComposing true', 'setComposing false']);
         h.dispose();
       } finally {
         debugDefaultTargetPlatformOverride = null;
