@@ -89,6 +89,14 @@ class Hook {
       return true;
     }
     if (key.held == Held::kPassed) return false;
+    // A key the system already has down is the system's, whatever the table
+    // says: held when capture started or the desktop came back, at a place
+    // MapVirtualKey named otherwise. Inside a low-level hook the async state
+    // is still the one before this event.
+    if (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) {
+      key = Key{Held::kPassed, vk, scan};
+      return false;
+    }
     const bool take = GetForegroundWindow() == window_ && Takes(vk);
     key = Key{take ? Held::kTaken : Held::kPassed, vk, scan};
     if (take) Post(key, kDown);
