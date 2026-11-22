@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.12.1] - 2026-11-22
 
 - Fix a Mac remote desktop flashing on a Windows viewer while the pointer moves: the capture left what the display's picture does not cover clear, which the NV12 video cannot show. It now fills it with opaque black, and keeps the picture SDR where the system could switch an XDR display to HDR.
 - Fix typing on a Mac remote desktop opening Finder instead of inserting the character: text was posted as the A key, and Fn, left latched by the release of an arrow or function key, made that Fn-A, which moves focus to the Dock. Text is now posted on a key code no key uses, with no modifier and no Fn, and Fn and the keypad flag go only on the key-down of the keys that own them.
