@@ -131,6 +131,12 @@ were consumed by later issue #50 test distributions (version 0.10.2), and
 distribution must use at least 931. The build counter is independent of the
 public version.
 
+To build and verify the Windows installer and zip without publishing a
+release, for example to test a change to the Windows runner, run
+`release-ui.yml` with `windows_verify_only=true` against the desired branch.
+The packages are available as the `windows-packages` workflow artifact; no
+other platform builds and nothing is attached to a release.
+
 To verify the complete Android build without publishing a release, run
 `release-ui.yml` with `android_verify_only=true` against the desired branch.
 The verified packages are available as the `android-release` workflow artifact.

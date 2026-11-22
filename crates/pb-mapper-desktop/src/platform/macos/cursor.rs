@@ -16,7 +16,7 @@
 //! cursor at all: every cursor and image is read as possibly nil (objc2's
 //! accessors assert one), and then there is no shape, or it is `Custom`.
 
-use super::{cf, desktop::Shared, pixels};
+use super::{cf, desktop::Shared, pixels, pointer};
 use crate::{
     CursorKind, CursorMode, CursorShape, Result, error,
     platform::{CursorSource, ShapeReads},
@@ -50,6 +50,8 @@ enum Identity {
 
 pub(crate) struct MacCursor {
     geometry: Shared,
+    /// The injector's last move, reported until the window server shows it.
+    pointer: pointer::Shared,
     seed: Option<Seed>,
     /// The last scale and identity whose shape was read, or failed to be.
     reads: ShapeReads<(u64, Identity)>,
@@ -59,13 +61,14 @@ pub(crate) struct MacCursor {
 }
 
 impl MacCursor {
-    pub(crate) fn new(geometry: Shared) -> Self {
+    pub(crate) fn new(geometry: Shared, pointer: pointer::Shared) -> Self {
         let seed = cf::function(c"CGSCurrentCursorSeed").map(|address| {
             // SAFETY: the window server's `int CGSCurrentCursorSeed(void)`.
             unsafe { std::mem::transmute::<*mut std::ffi::c_void, Seed>(address.as_ptr()) }
         });
         Self {
             geometry,
+            pointer,
             seed,
             reads: ShapeReads::default(),
             standards: None,
@@ -206,11 +209,16 @@ fn render(cursor: &NSCursor, scale: f64, kind: CursorKind) -> Result<Option<Curs
 impl CursorSource for MacCursor {
     const MODE: CursorMode = CursorMode::Separate;
     const SHAPES: bool = true;
-    /// On another display, it is hidden from this one's viewer.
+    /// On another display, it is hidden from this one's viewer. A move the
+    /// injector posted counts once posted (`pointer.rs`).
     fn read(&mut self) -> Result<Option<(i32, i32, bool)>> {
         let here = CGEvent::new(None);
         let point = CGEvent::location(here.as_deref());
-        Ok(Some(match self.geometry.get().pixel((point.x, point.y)) {
+        let shown = self.geometry.get().pixel((point.x, point.y));
+        let mut pointer = self.pointer.get();
+        let at = pointer.settle(shown, Instant::now());
+        self.pointer.set(pointer);
+        Ok(Some(match at {
             Some((x, y)) => (x, y, true),
             None => (0, 0, false),
         }))
@@ -264,7 +272,7 @@ mod tests {
     fn standard_pointers_render_and_are_named_by_their_image() {
         NSApplication::load();
         let geometry = Geometry::new((0.0, 0.0, 100.0, 100.0), 200, 100);
-        let mut cursor = MacCursor::new(Rc::new(Cell::new(geometry)));
+        let mut cursor = MacCursor::new(Rc::new(Cell::new(geometry)), Default::default());
         let rendered = autoreleasepool(|_| standards(2.0));
         if rendered.is_empty() && CGSessionCopyCurrentDictionary().is_none() {
             assert!(cursor.shape().unwrap().is_none());
@@ -306,7 +314,7 @@ mod tests {
     #[test]
     fn a_scale_change_invalidates_the_cursor_read_even_without_a_seed() {
         let geometry = Geometry::new((0.0, 0.0, 100.0, 100.0), 200, 100);
-        let mut cursor = MacCursor::new(Rc::new(Cell::new(geometry)));
+        let mut cursor = MacCursor::new(Rc::new(Cell::new(geometry)), Default::default());
         cursor.seed = None;
         let now = Instant::now();
         let identity = cursor.due(2.0, now).unwrap();
