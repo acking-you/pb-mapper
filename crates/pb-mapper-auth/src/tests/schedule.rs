@@ -156,9 +156,40 @@ fn a_restored_key_ends_at_its_persisted_deadline() {
 
 /// How many `temporary_key_expired` events `run` logs on this thread.
 fn expiry_events(run: impl FnOnce()) -> usize {
+    use std::sync::LazyLock;
     use std::sync::atomic::AtomicUsize;
     use tracing::field::{Field, Visit};
+    use tracing::level_filters::LevelFilter;
     use tracing::span::{Attributes, Id, Record};
+
+    /// Wants nothing and is never installed; it only has to be alive.
+    /// tracing caches, per call site, whether any subscriber wants its events,
+    /// and while one dispatcher exists it asks only the subscriber of the
+    /// thread that reaches the call site first. Another test's thread has
+    /// none, so an expiry it logged first would turn this thread's away. While
+    /// this one lives, tracing asks every live subscriber instead, `Count`
+    /// among them whenever it is installed. Its level hint, off, keeps every
+    /// call site unregistered until `Count` exists, so none is registered while
+    /// this one is alone, and it is never dropped, so `Count` is never alone.
+    struct Bystander;
+    impl tracing::Subscriber for Bystander {
+        fn max_level_hint(&self) -> Option<LevelFilter> {
+            Some(LevelFilter::OFF)
+        }
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            false
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {}
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+    static BYSTANDER: LazyLock<tracing::Dispatch> =
+        LazyLock::new(|| tracing::Dispatch::new(Bystander));
 
     struct Count(Arc<AtomicUsize>);
     struct IsExpiry(bool);
@@ -188,6 +219,7 @@ fn expiry_events(run: impl FnOnce()) -> usize {
         fn exit(&self, _: &Id) {}
     }
 
+    LazyLock::force(&BYSTANDER);
     let count = Arc::new(AtomicUsize::new(0));
     tracing::subscriber::with_default(Count(count.clone()), run);
     count.load(Ordering::Relaxed)
