@@ -4,8 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- Fix a Mac remote desktop flashing while the pointer moves, which a Windows viewer shows as a continuous flicker: hiding the pointer left a transparent hole, and a letterbox the same, and the NV12 picture has no alpha so those samples shimmer. The capture now fills them with opaque black, and asks the system for an opaque SDR picture where that request exists.
-- Fix typing on a Mac remote desktop opening Finder instead of inserting the character: text was posted as the A key, and a function key left latched by an arrow or function key's release turned that into Fn-A, which focuses the Dock on Finder. Typed text now carries no key and no flags, and the function key is posted only with the keys that use it, and only while they are held.
+- Fix a Mac remote desktop flashing on a Windows viewer while the pointer moves: the capture left what the display's picture does not cover clear, which the NV12 video cannot show. It now fills it with opaque black, and keeps the picture SDR where the system could switch an XDR display to HDR.
+- Fix typing on a Mac remote desktop opening Finder instead of inserting the character: text was posted as the A key, and Fn, left latched by the release of an arrow or function key, made that Fn-A, which moves focus to the Dock. Text is now posted on a key code no key uses, with no modifier and no Fn, and Fn and the keypad flag go only on the key-down of the keys that own them.
 
 ## [0.12.0] - 2026-11-18
 - Up to four devices can watch or control a shared remote desktop at once. Each controller keeps its own control grant, held keys and mouse position. Watching devices see each controller's pointer in a distinct colour when both ends support peer cursors. The shared video stream respects the lowest frame-rate target among active viewers, including limits requested by a decoder that is falling behind.

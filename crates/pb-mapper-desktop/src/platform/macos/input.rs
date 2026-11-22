@@ -204,9 +204,10 @@ impl MacInput {
     }
 
     /// One keyboard event of each direction carrying `units`. The event is
-    /// not the A key and carries no flags: key code 0 is `kVK_ANSI_A`, and
-    /// with Fn latched (a navigation key's key-up used to leave it so) that
-    /// is Fn-A, which focuses the Dock on Finder instead of typing.
+    /// not the A key and carries no modifier and no Fn: key code 0 is
+    /// `kVK_ANSI_A`, and with Fn latched (a navigation key's key-up used to
+    /// leave it so) that is Fn-A, which focuses the Dock on Finder instead
+    /// of typing.
     fn unicode(&self, units: &[u16]) -> Result<()> {
         for down in [true, false] {
             // An unused key code can come back as no event. Make it as the
@@ -218,7 +219,9 @@ impl MacInput {
                     CGEventField::KeyboardEventKeycode,
                     i64::from(keys::UNICODE_KEY),
                 );
-                CGEvent::set_flags(Some(event), CGEventFlags(0));
+                // The flags Core Graphics gives every keyboard event stay,
+                // as on every other key posted here.
+                self.flag(event, 0, 0);
                 // SAFETY: `units` holds `units.len()` UTF-16 code units.
                 // After the key code, so that code does not replace the string.
                 unsafe {

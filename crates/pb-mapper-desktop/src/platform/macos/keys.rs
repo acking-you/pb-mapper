@@ -279,15 +279,16 @@ pub(crate) fn kept_key_flags(code: u16, down: bool) -> u64 {
     match code {
         0x7b..=0x7e => FUNCTION | NUMERIC_PAD,
         0x72 => FUNCTION | HELP,
-        // Keypad Clear carries both.
+        // Keypad Clear, a keypad key that Core Graphics gives Fn.
         0x47 => FUNCTION | NUMERIC_PAD,
         // F1–F20, forward delete, home, end, page up, page down.
         0x7a | 0x78 | 0x63 | 0x76 | 0x60 | 0x61 | 0x62 | 0x64 | 0x65 | 0x6d | 0x67 | 0x6f
         | 0x69 | 0x6b | 0x71 | 0x6a | 0x40 | 0x4f | 0x50 | 0x5a | 0x75 | 0x73 | 0x77 | 0x79
         | 0x74 => FUNCTION,
-        // The keypad. The numeric-pad bit is how apps tell it from the main block.
+        // The rest of the keypad, the JIS comma included. The numeric-pad bit
+        // is how apps tell it from the main block.
         0x41 | 0x43 | 0x45 | 0x4b | 0x4c | 0x4e | 0x51 | 0x52 | 0x53 | 0x54 | 0x55 | 0x56
-        | 0x57 | 0x58 | 0x59 | 0x5b | 0x5c | 0x5d | 0x5e | 0x5f => NUMERIC_PAD,
+        | 0x57 | 0x58 | 0x59 | 0x5b | 0x5c | 0x5f => NUMERIC_PAD,
         _ => 0,
     }
 }
@@ -476,7 +477,9 @@ mod tests {
         assert_eq!(kept_key_flags(key_code(Key::Home), true), FUNCTION);
         assert_eq!(kept_key_flags(key_code(Key::F11), false), 0);
         assert_eq!(kept_key_flags(UNICODE_KEY, true), 0);
-        assert!(key_code(Key::A) != UNICODE_KEY);
+        // No key a viewer can press posts the text key's code.
+        assert!((0..=u16::MAX).all(|usage| usage_code(usage) != Some(UNICODE_KEY)));
+        assert_ne!(key_code(Key::A), UNICODE_KEY);
     }
 
     /// Every key of the vocabulary presses its own virtual key, and the four

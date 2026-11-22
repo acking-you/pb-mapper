@@ -1,16 +1,13 @@
 //! ScreenCaptureKit: one display's stream, scaled by the system to the
-//! encoder's size, in NV12 (BT.709 video range), without the pointer. Its
-//! queue keeps only the newest complete picture, an IOSurface-backed pixel
-//! buffer the encoder reads in place; thread C takes it at its own pace. A
-//! stream the system stops says why at the next take.
+//! encoder's size, in NV12 (sRGB through the BT.709 matrix, video range),
+//! without the pointer, which the viewer draws. Its queue keeps only the
+//! newest complete picture, an IOSurface-backed pixel buffer the encoder
+//! reads in place; thread C takes it at its own pace. A stream the system
+//! stops says why at the next take.
 //!
-//! The pointer is drawn by the viewer, so the stream leaves it out. That
-//! hole, and any letterbox, is transparent, and the default background is
-//! clear. NV12 has no alpha: those samples shimmer, and a Windows viewer
-//! flashes for as long as the pointer moves. Windows capture has no such
-//! hole. The stream is forced opaque — a black background it does not
-//! retain, `shouldBeOpaque` where the OS has it, and SDR — so the picture
-//! stays still.
+//! What the display's picture does not cover takes the background colour,
+//! clear unless set, and NV12 has no alpha to show it: the background is
+//! opaque black, which the configuration does not retain.
 
 use super::cf;
 use crate::{BackendError, FailureKind, Result, Waker};
@@ -24,8 +21,7 @@ use objc2::{
 };
 use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString};
 use objc2_core_graphics::{
-    CGColor, CGMainDisplayID, kCGColorSpaceITUR_709, kCGColorSpaceSRGB,
-    kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
+    CGColor, CGMainDisplayID, kCGColorSpaceSRGB, kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
@@ -283,44 +279,40 @@ impl PreparedCapture {
     }
 }
 
-/// The configuration of a picture `width` x `height` pixels, without the
-/// pointer: NV12 (BT.709, video range) for the encoder, else BGRA in sRGB.
-/// The background is opaque black; see the module note.
+/// The configuration of a picture `width` x `height` pixels in sRGB,
+/// without the pointer, on an opaque black background: NV12 (BT.709
+/// matrix, video range) for the encoder, else BGRA, as an image takes it.
 pub(crate) fn configuration(width: u32, height: u32, nv12: bool) -> PreparedCapture {
     // SAFETY: a fresh configuration, set before any stream reads it; the
-    // colour constants live for the process. `background` outlives every
-    // read: the caller keeps this value.
+    // constants are Core Graphics', alive for the process.
     let config = unsafe {
         let config = SCStreamConfiguration::new();
         config.setWidth(width as usize);
         config.setHeight(height as usize);
         config.setShowsCursor(false);
+        // sRGB, not BT.709: every viewer converts with the BT.709 matrix and
+        // shows the result as sRGB, which is also what the Windows host
+        // encodes. Core Graphics' BT.709 space has a 2.4 gamma that would
+        // lift dark greys (sRGB 26 of 255 becomes 37).
+        config.setColorSpaceName(kCGColorSpaceSRGB);
         if nv12 {
             config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
             config.setColorMatrix(kCGDisplayStreamYCbCrMatrix_ITU_R_709_2);
-            // The encoder and the Windows viewer both tag BT.709. sRGB here
-            // made the converter disagree with that tag.
-            config.setColorSpaceName(kCGColorSpaceITUR_709);
         } else {
             config.setPixelFormat(kCVPixelFormatType_32BGRA);
-            config.setColorSpaceName(kCGColorSpaceSRGB);
         }
-        let class = SCStreamConfiguration::class();
-        // macOS 14. Absent on 12.3–13; the black background still fills the hole.
-        if class.responds_to(sel!(setShouldBeOpaque:)) {
-            config.setShouldBeOpaque(true);
-        }
-        // Default is documented as SDR. Set it where the selector exists so a
-        // newer system cannot switch an XDR display to HDR under an 8-bit stream.
-        if class.responds_to(sel!(setCaptureDynamicRange:)) {
+        // macOS 15. SDR is the default; set where the selector exists, so
+        // that a later system cannot switch an XDR display to HDR under the
+        // 8-bit stream.
+        if SCStreamConfiguration::class().responds_to(sel!(setCaptureDynamicRange:)) {
             config.setCaptureDynamicRange(SCCaptureDynamicRange::SDR);
         }
         config
     };
     let background = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
-    // SAFETY: `background` is moved into the returned value. The property
-    // does not retain it, so a caller that returns before the read finishes
-    // keeps another retain from `PreparedCapture::background`.
+    // SAFETY: the property does not retain `background`; the returned value
+    // does, and a caller that can stop waiting before the read keeps
+    // another retain from `PreparedCapture::background`.
     unsafe { config.setBackgroundColor(&background) };
     PreparedCapture { config, background }
 }
