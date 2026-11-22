@@ -144,7 +144,7 @@ impl MacInput {
         let (x, y) = self.position();
         let event = CGEvent::new_mouse_event(Some(&self.source), kind, CGPoint { x, y }, button);
         if let Some(event) = &event {
-            self.flag(event, self.modifiers.flags());
+            self.flag(event, self.modifiers.flags(), 0);
             if let Some((dx, dy)) = moved {
                 CGEvent::set_integer_value_field(Some(event), CGEventField::MouseEventDeltaX, dx);
                 CGEvent::set_integer_value_field(Some(event), CGEventField::MouseEventDeltaY, dy);
@@ -187,25 +187,43 @@ impl MacInput {
             if modifier {
                 CGEvent::set_type(Some(event), CGEventType::FlagsChanged);
             }
-            self.flag(event, flags);
+            self.flag(event, flags, keys::kept_key_flags(code, down));
         }
         self.post(event)
     }
 
-    /// Give `event` the modifier flags `held`, keeping those it carries of
-    /// its own.
-    fn flag(&self, event: &CGEvent, held: u64) {
+    /// Give `event` the modifier flags `held`. `keep` is what of Fn, the
+    /// numeric pad and Help this key's direction owns; the rest is dropped,
+    /// so a latched Fn does not ride onto the next key.
+    fn flag(&self, event: &CGEvent, held: u64, keep: u64) {
         let made = CGEvent::flags(Some(event)).0;
-        CGEvent::set_flags(Some(event), CGEventFlags(keys::with_modifiers(made, held)));
+        CGEvent::set_flags(
+            Some(event),
+            CGEventFlags(keys::with_modifiers(made, held, keep)),
+        );
     }
 
-    /// One keyboard event of each direction carrying `units`.
+    /// One keyboard event of each direction carrying `units`. The event is
+    /// not the A key and carries no modifier and no Fn: key code 0 is
+    /// `kVK_ANSI_A`, and with Fn latched (a navigation key's key-up used to
+    /// leave it so) that is Fn-A, which focuses the Dock on Finder instead
+    /// of typing.
     fn unicode(&self, units: &[u16]) -> Result<()> {
         for down in [true, false] {
+            // An unused key code can come back as no event. Make it as the
+            // A key, then replace that code.
             let event = CGEvent::new_keyboard_event(Some(&self.source), 0, down);
             if let Some(event) = &event {
-                self.flag(event, 0);
+                CGEvent::set_integer_value_field(
+                    Some(event),
+                    CGEventField::KeyboardEventKeycode,
+                    i64::from(keys::UNICODE_KEY),
+                );
+                // The flags Core Graphics gives every keyboard event stay,
+                // as on every other key posted here.
+                self.flag(event, 0, 0);
                 // SAFETY: `units` holds `units.len()` UTF-16 code units.
+                // After the key code, so that code does not replace the string.
                 unsafe {
                     CGEvent::keyboard_set_unicode_string(
                         Some(event),
@@ -303,7 +321,7 @@ impl Injector for MacInput {
             0,
         );
         if let Some(event) = &event {
-            self.flag(event, self.modifiers.flags());
+            self.flag(event, self.modifiers.flags(), 0);
         }
         self.post(event)
     }

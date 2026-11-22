@@ -214,3 +214,53 @@ fn screen_capture_consent_is_classified_by_domain_and_code() {
         FailureKind::CaptureFailed
     );
 }
+
+/// The stream leaves the pointer to the viewer and fills what the display
+/// does not cover with opaque black, as NV12 has no alpha. It stays sRGB,
+/// as every viewer shows it, and SDR where the system offers HDR.
+#[test]
+fn capture_without_a_pointer_stays_opaque() {
+    use objc2::ClassType;
+    use objc2_core_graphics::{CGColor, kCGColorSpaceSRGB};
+    use objc2_screen_capture_kit::{SCCaptureDynamicRange, SCStreamConfiguration};
+
+    if !super::capture::available() {
+        return;
+    }
+    let prepared = super::capture::configuration(64, 64, true);
+    let black = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
+    // SAFETY: the configuration is ours and holds its background for these
+    // reads; the dynamic range is read only where its selector exists.
+    unsafe {
+        assert!(!prepared.config.showsCursor());
+        let background = prepared.config.backgroundColor();
+        assert!(CGColor::equal_to_color(Some(&background), Some(&black)));
+        assert_eq!(
+            prepared.config.colorSpaceName().to_string(),
+            kCGColorSpaceSRGB.to_string()
+        );
+        if SCStreamConfiguration::class().responds_to(objc2::sel!(captureDynamicRange)) {
+            assert_eq!(
+                prepared.config.captureDynamicRange(),
+                SCCaptureDynamicRange::SDR
+            );
+        }
+    }
+}
+
+/// Each key a viewer can press keeps, on its key-down, every Fn, keypad and
+/// Help flag Core Graphics makes it with: an arrow's are what Mission
+/// Control's Control-arrow looks for.
+#[test]
+fn key_downs_keep_the_flags_core_graphics_gives_them() {
+    use super::keys::{FUNCTION, HELP, NUMERIC_PAD, kept_key_flags, usage_code};
+    use objc2_core_graphics::{CGEvent, CGEventSource, CGEventSourceStateID};
+
+    // A private state: each key's own flags, whatever this Mac holds down.
+    let source = CGEventSource::new(CGEventSourceStateID::Private).unwrap();
+    for code in (0..=u16::MAX).filter_map(usage_code) {
+        let event = CGEvent::new_keyboard_event(Some(&source), code, true).unwrap();
+        let made = CGEvent::flags(Some(&event)).0 & (FUNCTION | HELP | NUMERIC_PAD);
+        assert_eq!(made & !kept_key_flags(code, true), 0, "key {code:#x}");
+    }
+}

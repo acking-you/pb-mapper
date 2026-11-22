@@ -1,21 +1,27 @@
 //! ScreenCaptureKit: one display's stream, scaled by the system to the
-//! encoder's size, in NV12 (BT.709 video range, sRGB primaries), without the
-//! pointer. Its queue keeps only the newest complete picture, an
-//! IOSurface-backed pixel buffer the encoder reads in place; thread C takes
-//! it at its own pace. A stream the system stops says why at the next take.
+//! encoder's size, in NV12 (sRGB through the BT.709 matrix, video range),
+//! without the pointer, which the viewer draws. Its queue keeps only the
+//! newest complete picture, an IOSurface-backed pixel buffer the encoder
+//! reads in place; thread C takes it at its own pace. A stream the system
+//! stops says why at the next take.
+//!
+//! What the display's picture does not cover takes the background colour,
+//! clear unless set, and NV12 has no alpha to show it: the background is
+//! opaque black, which the configuration does not retain.
 
 use super::cf;
 use crate::{BackendError, FailureKind, Result, Waker};
 use block2::RcBlock;
 use dispatch2::{DispatchQoS, DispatchQueue, DispatchRetained, GlobalQueueIdentifier};
 use objc2::{
-    AnyThread, DefinedClass, Message, define_class, msg_send,
+    AnyThread, ClassType, DefinedClass, Message, define_class, msg_send,
     rc::Retained,
     runtime::{AnyClass, NSObject, ProtocolObject},
+    sel,
 };
 use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString};
 use objc2_core_graphics::{
-    CGMainDisplayID, kCGColorSpaceSRGB, kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
+    CGColor, CGMainDisplayID, kCGColorSpaceSRGB, kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
@@ -25,9 +31,9 @@ use objc2_foundation::{
     NSArray, NSError, NSObjectProtocol, NSOperatingSystemVersion, NSProcessInfo,
 };
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCDisplay, SCFrameStatus, SCShareableContent, SCStream, SCStreamConfiguration,
-    SCStreamDelegate, SCStreamErrorCode, SCStreamErrorDomain, SCStreamFrameInfoStatus,
-    SCStreamOutput, SCStreamOutputType, SCWindow,
+    SCCaptureDynamicRange, SCContentFilter, SCDisplay, SCFrameStatus, SCShareableContent, SCStream,
+    SCStreamConfiguration, SCStreamDelegate, SCStreamErrorCode, SCStreamErrorDomain,
+    SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 use parking_lot::Mutex;
 use std::{
@@ -255,21 +261,39 @@ pub(crate) fn filter(display: &SCDisplay) -> Retained<SCContentFilter> {
     }
 }
 
+/// A stream configuration and the background colour its property does not
+/// retain. A stream holds the colour until the stream has stopped. A
+/// screenshot's completion handler holds another retain ([`Self::background`]):
+/// the manager keeps the configuration, but not this colour, and the wait
+/// can return before the callback.
+pub(crate) struct PreparedCapture {
+    pub(crate) config: Retained<SCStreamConfiguration>,
+    background: CFRetained<CGColor>,
+}
+
+impl PreparedCapture {
+    /// Another retain of the background colour. The same object
+    /// `config.backgroundColor` points at.
+    pub(crate) fn background(&self) -> CFRetained<CGColor> {
+        self.background.clone()
+    }
+}
+
 /// The configuration of a picture `width` x `height` pixels in sRGB,
-/// without the pointer: NV12 (BT.709 video range) for the encoder, else
-/// BGRA, as an image takes it.
-pub(crate) fn configuration(
-    width: u32,
-    height: u32,
-    nv12: bool,
-) -> Retained<SCStreamConfiguration> {
+/// without the pointer, on an opaque black background: NV12 (BT.709
+/// matrix, video range) for the encoder, else BGRA, as an image takes it.
+pub(crate) fn configuration(width: u32, height: u32, nv12: bool) -> PreparedCapture {
     // SAFETY: a fresh configuration, set before any stream reads it; the
     // constants are Core Graphics', alive for the process.
-    unsafe {
+    let config = unsafe {
         let config = SCStreamConfiguration::new();
         config.setWidth(width as usize);
         config.setHeight(height as usize);
         config.setShowsCursor(false);
+        // sRGB, not BT.709: every viewer converts with the BT.709 matrix and
+        // shows the result as sRGB, which is also what the Windows host
+        // encodes. Core Graphics' BT.709 space has a 2.4 gamma that would
+        // lift dark greys (sRGB 26 of 255 becomes 37).
         config.setColorSpaceName(kCGColorSpaceSRGB);
         if nv12 {
             config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
@@ -277,8 +301,20 @@ pub(crate) fn configuration(
         } else {
             config.setPixelFormat(kCVPixelFormatType_32BGRA);
         }
+        // macOS 15. SDR is the default; set where the selector exists, so
+        // that a later system cannot switch an XDR display to HDR under the
+        // 8-bit stream.
+        if SCStreamConfiguration::class().responds_to(sel!(setCaptureDynamicRange:)) {
+            config.setCaptureDynamicRange(SCCaptureDynamicRange::SDR);
+        }
         config
-    }
+    };
+    let background = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
+    // SAFETY: the property does not retain `background`; the returned value
+    // does, and a caller that can stop waiting before the read keeps
+    // another retain from `PreparedCapture::background`.
+    unsafe { config.setBackgroundColor(&background) };
+    PreparedCapture { config, background }
 }
 
 /// One display's running stream.
@@ -294,6 +330,9 @@ struct Running {
     stream: Retained<SCStream>,
     output: Retained<Output>,
     _queue: DispatchRetained<DispatchQueue>,
+    /// `SCStreamConfiguration.backgroundColor` does not retain. Dropped only
+    /// after the stream has stopped producing frames.
+    _background: CFRetained<CGColor>,
 }
 
 /// A stream's parts, handed to ScreenCaptureKit's completion queue to be
@@ -301,10 +340,10 @@ struct Running {
 struct Released {
     _running: Running,
 }
-// SAFETY: the stream, its output and their queue are Objective-C and
-// dispatch objects, retained and released atomically from any thread; once
-// handed over, nothing but the completion handler touches them, and it only
-// drops them.
+// SAFETY: the stream, its output, their queue and the background colour are
+// Objective-C and Core Foundation objects, retained and released atomically
+// from any thread; once handed over, nothing but the completion handler
+// touches them, and it only drops them.
 unsafe impl Send for Released {}
 
 impl Stream {
@@ -318,13 +357,15 @@ impl Stream {
     fn started(id: u32, width: u32, height: u32, fps: u32, waker: &Waker) -> Result<Self> {
         let display = display(id)?;
         let filter = filter(&display);
-        let config = configuration(width, height, true);
+        let prepared = configuration(width, height, true);
         // SAFETY: a fresh configuration, before the stream reads it.
         unsafe {
             // Give refresh timestamps a 10% margin around the requested
             // rate. Thread C still applies the negotiated frame cap.
-            config.setMinimumFrameInterval(CMTime::new(9, (fps.clamp(1, 1_000) * 10) as i32));
-            config.setQueueDepth(QUEUE_DEPTH);
+            prepared
+                .config
+                .setMinimumFrameInterval(CMTime::new(9, (fps.clamp(1, 1_000) * 10) as i32));
+            prepared.config.setQueueDepth(QUEUE_DEPTH);
         }
         let shared = Arc::new(Shared {
             latest: Mutex::default(),
@@ -338,7 +379,7 @@ impl Stream {
             SCStream::initWithFilter_configuration_delegate(
                 SCStream::alloc(),
                 &filter,
-                &config,
+                &prepared.config,
                 Some(delegate),
             )
         };
@@ -372,6 +413,7 @@ impl Stream {
                 stream,
                 output,
                 _queue: queue,
+                _background: prepared.background,
             }),
             shared,
         };
