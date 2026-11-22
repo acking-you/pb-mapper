@@ -13,7 +13,7 @@ use super::{
     clicks::{Clicks, SLOP},
     desktop::Shared,
     keys::{self, Layout, Modifiers},
-    layout,
+    layout, pointer,
 };
 use crate::{
     BackendError, Button, DoubleClickGuard, FailureKind, Key, Permission, Result, error,
@@ -36,6 +36,9 @@ const DEFAULT_DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
 pub(crate) struct MacInput {
     geometry: Shared,
+    /// Each move posted, for the cursor to report until the window server
+    /// shows it.
+    pointer: pointer::Shared,
     source: CFRetained<CGEventSource>,
     /// The modifier keys held down, and Caps Lock.
     modifiers: Modifiers,
@@ -52,12 +55,13 @@ pub(crate) struct MacInput {
 }
 
 impl MacInput {
-    pub(crate) fn new(geometry: Shared) -> Result<Self> {
+    pub(crate) fn new(geometry: Shared, pointer: pointer::Shared) -> Result<Self> {
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .ok_or_else(|| error("macOS refused an input event source"))?;
         layout::request(layout::FIRST_READ);
         Ok(Self {
             geometry,
+            pointer,
             source,
             modifiers: Modifiers::default(),
             buttons: [false; 3],
@@ -266,9 +270,12 @@ impl Injector for MacInput {
     /// macOS has no public call that locks the screen.
     const LOCK: bool = false;
     const PHYSICAL_KEYS: bool = true;
+    /// The cursor reports `(x, y)` until the window server has applied the
+    /// move (`pointer.rs`).
     fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
         self.allowed()?;
-        let (x, y) = self.geometry.get().point((x, y));
+        let pixel = (x, y);
+        let (x, y) = self.geometry.get().point(pixel);
         let (from_x, from_y) = self.position();
         let moved = ((x - from_x).round() as i64, (y - from_y).round() as i64);
         self.position = Some((x, y));
@@ -280,7 +287,11 @@ impl Injector for MacInput {
                 let (_, _, dragged, button) = kinds(button);
                 (dragged, button)
             });
-        self.mouse(kind, button, Some(moved), None)
+        self.mouse(kind, button, Some(moved), None)?;
+        let mut pointer = self.pointer.get();
+        pointer.moved(pixel, Instant::now());
+        self.pointer.set(pointer);
+        Ok(())
     }
     fn button(&mut self, button: Button, down: bool) -> Result<()> {
         self.allowed()?;

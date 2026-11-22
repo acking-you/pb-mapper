@@ -12,8 +12,8 @@
 //! `Platform` and nothing here touches it. Symbols of later systems are
 //! looked up at run time ([`cf::symbol`]).
 //!
-//! The pure parts (points and pixels, key codes, click counts, mode lists)
-//! build and are tested on every platform.
+//! The pure parts (points and pixels, key codes, click counts, mode lists,
+//! the pointer a posted move leaves) build and are tested on every platform.
 
 // Pure: built and tested everywhere, used by the OS parts on macOS alone.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -26,6 +26,8 @@ pub(crate) mod keys;
 pub(crate) mod mode_list;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod pixels;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod pointer;
 
 #[cfg(target_os = "macos")]
 mod capture;
@@ -151,9 +153,10 @@ mod platform {
         fn open(_: &ScreenAccess, display: &Display) -> Result<Parts<Self>> {
             let desktop = desktop::MacDesktop::open(display)?;
             let geometry = desktop.shared();
+            let pointer = super::pointer::Shared::default();
             Ok(Parts {
-                input: input::MacInput::new(geometry.clone())?,
-                cursor: cursor::MacCursor::new(geometry),
+                input: input::MacInput::new(geometry.clone(), pointer.clone())?,
+                cursor: cursor::MacCursor::new(geometry, pointer),
                 modes: modes::MacModes,
                 still: still::SckStill::default(),
                 desktop,
