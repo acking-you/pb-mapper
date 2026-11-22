@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_keyboard.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_viewer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/minimap.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/modifier_latch.dart';
@@ -20,6 +21,7 @@ import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_viewer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_menus.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_overlays.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_stage.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_title_bar.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_toolbar.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
@@ -1107,6 +1109,79 @@ void main() {
       demand.dispose();
       store.dispose();
       await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
+    "on Windows, full screen is the window manager's own flag, with no event "
+    "to say so, and full screen with control takes this computer's shortcuts",
+    (tester) async {
+      _size(tester, const Size(1280, 800));
+      final messenger = tester.binding.defaultBinaryMessenger;
+      const windowManager = MethodChannel('window_manager');
+      var fullScreen = false;
+      // As window_manager on Windows does from a restored window: entering
+      // full screen and leaving it send no event.
+      messenger.setMockMethodCallHandler(windowManager, (call) async {
+        switch (call.method) {
+          case 'setFullScreen':
+            fullScreen = (call.arguments as Map)['isFullScreen'] as bool;
+          case 'isFullScreen':
+            return fullScreen;
+          case 'isMaximized':
+            return false;
+          case 'isFocused':
+            return true;
+        }
+        return null;
+      });
+      final captured = <Object?>[];
+      messenger.setMockMethodCallHandler(SystemKeyCapture.channel, (
+        call,
+      ) async {
+        if (call.method == 'setCaptured') captured.add(call.arguments);
+        return null;
+      });
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        final api = FakeDesktopApi();
+        final store = DesktopStore(api);
+        final demand = store.demand(DesktopDemand.viewer);
+        await store.connect(_target);
+        api.viewerStatusValue = liveStatus(controlling: true);
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pumpWidget(
+          _app(
+            DesktopViewer(
+              desktop: store,
+              prefs: ViewerPrefs(persist: false),
+              title: 'Office',
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(find.byType(ViewerTitleBar), findsOneWidget);
+        expect(captured, isEmpty);
+
+        final toggle = find.byKey(const Key('viewer-fullscreen'));
+        await tester.tap(toggle);
+        await tester.pump();
+        expect(find.byType(ViewerTitleBar), findsNothing);
+        expect(captured, [true]);
+
+        await tester.tap(toggle);
+        await tester.pump();
+        expect(find.byType(ViewerTitleBar), findsOneWidget);
+        expect(captured, [true, false]);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        demand.dispose();
+        store.dispose();
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+        messenger.setMockMethodCallHandler(windowManager, null);
+        messenger.setMockMethodCallHandler(SystemKeyCapture.channel, null);
+      }
     },
   );
 }

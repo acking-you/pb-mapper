@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <variant>
 
@@ -21,8 +22,12 @@ constexpr WPARAM kRepeat = WPARAM{1} << 17;
 constexpr DWORD kAltGrControl = 0x21D;
 
 // The scan code as Flutter's Windows tables name a key, and as its embedder
-// names the keys it gets: 0xE0 ahead of an extended one.
+// names the keys it gets: 0xE0 ahead of an extended one. It names the key's
+// place, which a key's up shares with its down.
 LPARAM ScanCode(const KBDLLHOOKSTRUCT& event) {
+  // Under Alt the keyboard reports Print Screen as SysRq (0x54), which the
+  // tables do not name.
+  if (event.vkCode == VK_SNAPSHOT) return 0xE037;
   const DWORD scan = event.scanCode & 0xFF;
   if (scan == 0) {
     return static_cast<LPARAM>(
@@ -39,7 +44,8 @@ LPARAM ScanCode(const KBDLLHOOKSTRUCT& event) {
 // passed, down and up in the system only.
 class Hook {
  public:
-  explicit Hook(HWND window) : window_(window) {
+  Hook(HWND window, const std::atomic<bool>* composing)
+      : window_(window), composing_(composing) {
     // Keys already down went to the system, and so do their ups.
     for (DWORD vk = 1; vk < kKeys; ++vk) {
       if (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) {
@@ -51,36 +57,48 @@ class Hook {
   // True: the system must not see this event.
   bool Take(WPARAM message, const KBDLLHOOKSTRUCT& event) {
     const DWORD vk = event.vkCode;
-    if (vk == 0 || vk >= kKeys) return false;
+    // VK_PACKET is text a program types, not a key.
+    if (vk == 0 || vk >= kKeys || vk == VK_PACKET) return false;
     const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
     if (vk == VK_LCONTROL && event.scanCode == kAltGrControl) {
       altgr_ = down;
+      // With AltGr held when capture started, Left Ctrl was marked down:
+      // this is its up.
+      if (!down && keys_[VK_LCONTROL].held == Held::kPassed) {
+        keys_[VK_LCONTROL].held = Held::kNone;
+      }
       return false;
     }
-    Key& key = keys_[vk];
+    const LPARAM scan = ScanCode(event);
+    // The key taken at this place, whatever its key code is now: Num Lock
+    // with Shift, or a layout switch, can change it between down and up.
+    const DWORD taken = TakenAt(vk, scan);
     if (!down) {
-      const bool taken = key.held == Held::kTaken;
-      if (taken) Post(vk, key.scan, 0);
-      key.held = Held::kNone;
-      return taken;
-    }
-    if (key.held == Held::kTaken) {
-      Post(vk, key.scan, kDown | kRepeat);
+      if (taken == 0) {
+        keys_[vk].held = Held::kNone;
+        return false;
+      }
+      keys_[taken].held = Held::kNone;
+      Post(taken, scan, 0);
       return true;
     }
-    if (key.held == Held::kPassed) return false;
+    if (taken != 0) {
+      Post(taken, scan, kDown | kRepeat);
+      return true;
+    }
+    if (keys_[vk].held == Held::kPassed) return false;
     if (GetForegroundWindow() != window_ || !Takes(vk)) {
-      key.held = Held::kPassed;
+      keys_[vk].held = Held::kPassed;
       return false;
     }
-    key.held = Held::kTaken;
-    key.scan = ScanCode(event);
-    Post(vk, key.scan, kDown);
+    keys_[vk] = Key{Held::kTaken, scan};
+    Post(vk, scan, kDown);
     return true;
   }
 
-  // Capture stopped: each key still taken goes up in Dart. The system never
-  // saw it go down, so its real up may go there.
+  // Each key still taken goes up in Dart, as capture stops or the secure
+  // desktop takes the keyboard. The system never saw it go down, so its real
+  // up may go there.
   void ReleaseAll() {
     for (DWORD vk = 1; vk < kKeys; ++vk) {
       if (keys_[vk].held == Held::kTaken) Post(vk, keys_[vk].scan, 0);
@@ -102,11 +120,13 @@ class Hook {
       case VK_LWIN:
       case VK_RWIN:
       case VK_LMENU:
-      case VK_F10:
       case VK_SNAPSHOT:
         return true;
       case VK_RMENU:
         return !altgr_;
+      case VK_F10:
+        // A Japanese input method's half-width letters while it composes.
+        return Holding() || !composing_->load(std::memory_order_relaxed);
       case VK_ESCAPE:
         return Down(VK_LCONTROL) || Down(VK_RCONTROL) || Holding();
       case VK_CAPITAL:
@@ -127,11 +147,21 @@ class Hook {
   bool Down(DWORD vk) const { return keys_[vk].held != Held::kNone; }
   bool Taken(DWORD vk) const { return keys_[vk].held == Held::kTaken; }
 
+  // The key code a key at `scan` was taken under, `vk` first; 0 if none.
+  DWORD TakenAt(DWORD vk, LPARAM scan) const {
+    if (Taken(vk) && keys_[vk].scan == scan) return vk;
+    for (DWORD other = 1; other < kKeys; ++other) {
+      if (Taken(other) && keys_[other].scan == scan) return other;
+    }
+    return 0;
+  }
+
   void Post(DWORD vk, LPARAM scan, WPARAM flags) const {
     PostMessageW(window_, kCapturedKey, static_cast<WPARAM>(vk) | flags, scan);
   }
 
   HWND window_;
+  const std::atomic<bool>* composing_;
   std::array<Key, kKeys> keys_{};
   bool altgr_ = false;
 };
@@ -147,20 +177,36 @@ LRESULT CALLBACK KeyboardHook(int code, WPARAM wparam, LPARAM lparam) {
   return CallNextHookEx(nullptr, code, wparam, lparam);
 }
 
+// The secure desktop (Win+L, Ctrl+Alt+Del, a UAC prompt) took the keyboard:
+// the ups of the keys held then never come here.
+void CALLBACK DesktopSwitched(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD,
+                              DWORD) {
+  if (t_hook != nullptr) t_hook->ReleaseAll();
+}
+
 // The hook's own thread. The system calls a low-level hook from the message
 // loop of the thread that set it, waits for it with this computer's whole
 // keyboard, and removes one that keeps it waiting: the window's thread, busy
-// with the picture and Flutter, must not be that thread. `*id` is this
-// thread's id once the hook is set, 0 if it could not be; `started` is set
-// after either, and neither is touched again.
-void RunHook(HWND window, HANDLE started, DWORD* id) {
+// with the picture and Flutter, must not be that thread, and the picture's
+// decoding must not starve this one. `*id` is this thread's id once the hook
+// is set, 0 if it could not be; `started` is set after either, and neither is
+// touched again.
+void RunHook(HWND window, const std::atomic<bool>* composing, HANDLE started,
+             DWORD* id) {
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
   MSG message;
   // The queue exists before the thread's id goes out for WM_QUIT.
   PeekMessageW(&message, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
-  Hook hook(window);
+  Hook hook(window, composing);
   t_hook = &hook;
   HHOOK handle = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHook,
                                    GetModuleHandleW(nullptr), 0);
+  HWINEVENTHOOK desktops =
+      handle == nullptr
+          ? nullptr
+          : SetWinEventHook(EVENT_SYSTEM_DESKTOPSWITCH,
+                            EVENT_SYSTEM_DESKTOPSWITCH, nullptr,
+                            DesktopSwitched, 0, 0, WINEVENT_OUTOFCONTEXT);
   *id = handle == nullptr ? 0 : GetCurrentThreadId();
   SetEvent(started);
   if (handle == nullptr) {
@@ -169,6 +215,7 @@ void RunHook(HWND window, HANDLE started, DWORD* id) {
   }
   while (GetMessageW(&message, nullptr, 0, 0) > 0) {
   }
+  if (desktops != nullptr) UnhookWinEvent(desktops);
   UnhookWindowsHookEx(handle);
   t_hook = nullptr;
   hook.ReleaseAll();
@@ -183,17 +230,20 @@ DesktopKeyCapture::DesktopKeyCapture(flutter::FlutterEngine* engine,
       engine->messenger(), "pb_mapper/key_capture",
       &flutter::StandardMethodCodec::GetInstance());
   channel_->SetMethodCallHandler([this](const auto& call, auto result) {
-    if (call.method_name() != "setCaptured") {
+    const std::string& method = call.method_name();
+    if (method != "setCaptured" && method != "setComposing") {
       result->NotImplemented();
       return;
     }
-    const auto* captured =
+    const auto* value =
         call.arguments() ? std::get_if<bool>(call.arguments()) : nullptr;
-    if (!captured) {
-      result->Error("pb_mapper_key_capture", "setCaptured takes a bool");
+    if (!value) {
+      result->Error("pb_mapper_key_capture", method + " takes a bool");
       return;
     }
-    if (!SetCaptured(*captured)) {
+    if (method == "setComposing") {
+      composing_.store(*value, std::memory_order_relaxed);
+    } else if (!SetCaptured(*value)) {
       result->Error("pb_mapper_key_capture",
                     "the keyboard hook could not be set");
       return;
@@ -218,7 +268,7 @@ bool DesktopKeyCapture::SetCaptured(bool captured) {
   HANDLE started = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   if (started == nullptr) return false;
   DWORD id = 0;
-  thread_ = std::thread(RunHook, window_, started, &id);
+  thread_ = std::thread(RunHook, window_, &composing_, started, &id);
   WaitForSingleObject(started, INFINITE);
   CloseHandle(started);
   thread_id_ = id;

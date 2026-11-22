@@ -31,6 +31,7 @@ final class DesktopKeyboard {
     text = RemoteTextInput(input: input);
     input.textInput = text;
     _capture.onKey = input.handleCapturedKey;
+    text.composing.addListener(_composingChanged);
     picture.addListener(sync);
     input.ready.addListener(sync);
   }
@@ -78,10 +79,14 @@ final class DesktopKeyboard {
     if (!_capture.captured) _input.captureStopped();
   }
 
+  void _composingChanged() =>
+      _capture.composing = text.composing.value.isNotEmpty;
+
   /// Before the input it was made for.
   void dispose() {
     _picture.removeListener(sync);
     _input.ready.removeListener(sync);
+    text.composing.removeListener(_composingChanged);
     _input.textInput = null;
     text.dispose();
     _ime.enabled = true;
@@ -93,12 +98,13 @@ final class DesktopKeyboard {
 /// This computer's own shortcuts, kept from its system while the picture
 /// fills the screen with the keyboard and control, so they act on the host
 /// alone (ui §10.5): the Windows key and Alt, each with whatever is pressed
-/// while it is held, Ctrl+Esc, F10 and Print Screen. The Windows runner's
-/// keyboard hook takes them (`pb_mapper/key_capture`) and hands each here as
-/// the picture would have had it. Every other key reaches the picture as
-/// before, so this computer's input method still composes; Ctrl+Alt+Del and
-/// Win+L, which Windows handles before any hook, act on this computer too.
-/// Off elsewhere than Windows.
+/// while it is held, Ctrl+Esc, F10 (unless this computer's input method
+/// composes) and Print Screen. The Windows runner's keyboard hook takes them
+/// (`pb_mapper/key_capture`) and hands each here as the picture would have
+/// had it. Every other key reaches the picture as before, so this computer's
+/// input method still composes; Ctrl+Alt+Del and Win+L, which Windows
+/// handles before any hook, act on this computer too. Off elsewhere than
+/// Windows.
 class SystemKeyCapture {
   SystemKeyCapture() {
     if (_supported) channel.setMethodCallHandler(_handle);
@@ -130,6 +136,23 @@ class SystemKeyCapture {
     );
   }
 
+  /// This computer's input method composes: F10, one of its own keys (a
+  /// Japanese one's half-width letters), stays with it.
+  bool get composing => _composing;
+  bool _composing = false;
+  set composing(bool value) {
+    if (value == _composing || _disposed) return;
+    _composing = value;
+    if (!_supported) return;
+    unawaited(
+      channel.invokeMethod<void>('setComposing', value).catchError((
+        Object error,
+      ) {
+        debugPrint('The input method state could not be passed on: $error');
+      }),
+    );
+  }
+
   /// When the viewer closes: capture stops, and nothing more comes.
   void dispose() {
     captured = false;
@@ -148,14 +171,19 @@ class SystemKeyCapture {
 
   /// The key event the picture would have had for a key the runner took
   /// (`{vk, scan, down, repeat}`), named by Flutter's own Windows tables as
-  /// its embedder names the keys it gets; null for a key they do not name.
+  /// its embedder names the keys it gets, and as it does by Windows' own
+  /// codes where they name none (the ISO `<>` key's code, say): the runner
+  /// has kept the key from everything else.
   static KeyEvent? eventOf(Object? arguments) {
     if (arguments is! Map) return null;
     final scan = arguments['scan'], vk = arguments['vk'];
     if (scan is! int || vk is! int) return null;
-    final physical = kWindowsToPhysicalKey[scan];
-    final logical = kWindowsToLogicalKey[vk];
-    if (physical == null || logical == null) return null;
+    final physical =
+        kWindowsToPhysicalKey[scan] ??
+        PhysicalKeyboardKey(scan | LogicalKeyboardKey.windowsPlane);
+    final logical =
+        kWindowsToLogicalKey[vk] ??
+        LogicalKeyboardKey(vk | LogicalKeyboardKey.windowsPlane);
     if (arguments['down'] != true) {
       return KeyUpEvent(
         physicalKey: physical,

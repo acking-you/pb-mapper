@@ -892,7 +892,20 @@ void main() {
       (PhysicalKeyboardKey.keyD, LogicalKeyboardKey.keyD),
     );
     expect(event(0x2C, 0xE037)!.physicalKey, PhysicalKeyboardKey.printScreen);
-    expect(event(0xFF, 0x7F), isNull);
+    // A code the tables do not name is named by Windows' own, as the
+    // embedder names it: the ISO <> key's place still goes by its usage.
+    final iso = event(0xE2, 0x56)!;
+    expect(
+      (iso.physicalKey, iso.logicalKey),
+      (
+        PhysicalKeyboardKey.intlBackslash,
+        const LogicalKeyboardKey(0xE2 | LogicalKeyboardKey.windowsPlane),
+      ),
+    );
+    expect(
+      event(0xFF, 0x7F)!.physicalKey,
+      const PhysicalKeyboardKey(0x7F | LogicalKeyboardKey.windowsPlane),
+    );
     expect(SystemKeyCapture.eventOf('key'), isNull);
   });
 
@@ -901,11 +914,11 @@ void main() {
     'go to the host alone, and what capture held goes up once it stops',
     (tester) async {
       final messenger = tester.binding.defaultBinaryMessenger;
-      final captured = <Object?>[];
+      final calls = <String>[];
       messenger.setMockMethodCallHandler(SystemKeyCapture.channel, (
         call,
       ) async {
-        captured.add(call.arguments);
+        calls.add('${call.method} ${call.arguments}');
         return null;
       });
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
@@ -921,10 +934,10 @@ void main() {
           ime: LocalInputMethod(),
         )..sync();
         await tester.pump();
-        expect(captured, isEmpty);
+        expect(calls, isEmpty);
         keyboard.fullscreen = true;
         await tester.pump();
-        expect(captured, [true]);
+        expect(calls, ['setCaptured true']);
         h.sent();
 
         // What the runner's hook hands over.
@@ -978,6 +991,19 @@ void main() {
           ['meta↑'],
         ]);
 
+        // Alt and the ISO <> key, which Flutter's tables name by place
+        // only: by place to the host.
+        await key(0xA4, 0x38);
+        await key(0xE2, 0x56);
+        await key(0xE2, 0x56, down: false);
+        await key(0xA4, 0x38, down: false);
+        expect(h.sent(), [
+          ['alt↓'],
+          ['#64↓'],
+          ['#64↑'],
+          ['alt↑'],
+        ]);
+
         // Ctrl reaches the picture as ever; the Esc taken with it goes
         // after it, whole.
         await press(tester, LogicalKeyboardKey.controlLeft);
@@ -990,12 +1016,36 @@ void main() {
           ['control↑'],
         ]);
 
+        // While this computer's input method composes, the runner leaves
+        // F10 to it.
+        keyboard.text.updateEditingValue(
+          TextEditingValue(
+            text: '${'1' * 64}Ani',
+            selection: const TextSelection.collapsed(offset: 67),
+            composing: const TextRange(start: 65, end: 67),
+          ),
+        );
+        keyboard.text.updateEditingValue(
+          TextEditingValue(
+            text: '${'1' * 64}A',
+            selection: const TextSelection.collapsed(offset: 65),
+          ),
+        );
+        await tester.pump();
+        expect(calls, [
+          'setCaptured true',
+          'setComposing true',
+          'setComposing false',
+        ]);
+        calls.clear();
+        h.sent();
+
         // Out of full screen, capture stops, and the up the runner sends
         // for a Win it still held releases it on the host.
         await key(0x5B, 0xE05B);
         keyboard.fullscreen = false;
         await tester.pump();
-        expect(captured, [true, false]);
+        expect(calls, ['setCaptured false']);
         await key(0x5B, 0xE05B, down: false);
         expect(h.sent(), [
           ['meta↓'],
@@ -1011,7 +1061,13 @@ void main() {
         keyboard.active = true;
         node.unfocus();
         await tester.pump();
-        expect(captured, [true, false, true, false, true, false]);
+        expect(calls.map((call) => call.split(' ').last), [
+          'false',
+          'true',
+          'false',
+          'true',
+          'false',
+        ]);
 
         keyboard.dispose();
         h.dispose();

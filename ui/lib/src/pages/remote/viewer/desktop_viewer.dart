@@ -196,6 +196,10 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
     } catch (_) {
       // Best effort: the window stays as it is.
     }
+    // The plugin's own flag says where the window ended up: on Windows it
+    // reports entering full screen only from a maximized window, and never
+    // leaving it back to one.
+    await _syncFullscreen();
   }
 
   @override
