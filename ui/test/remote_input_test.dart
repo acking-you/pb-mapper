@@ -807,4 +807,218 @@ void main() {
       h.dispose();
     },
   );
+
+  test('a key the full-screen capture took: a modifier goes at once, and the '
+      'input method composing never has it', () {
+    final win = _down(
+      LogicalKeyboardKey.metaLeft,
+      PhysicalKeyboardKey.metaLeft,
+    );
+    // Not captured, Win waits for what it modifies.
+    expect(
+      KeyRouting.route(win, const KeyContext(textInput: true)).defers,
+      const DesktopKey(RemoteKey.meta, true),
+    );
+    final captured = KeyRouting.route(
+      win,
+      const KeyContext(textInput: true, captured: true),
+    );
+    expect(captured.inputs, [const DesktopKey(RemoteKey.meta, true)]);
+    expect(captured.holds, const DesktopKey(RemoteKey.meta, true));
+    expect(
+      KeyRouting.route(
+        win,
+        const KeyContext(
+          mode: KeyboardMode.remote,
+          physicalKeys: true,
+          captured: true,
+        ),
+      ).inputs,
+      [const DesktopPhysicalKey(0xE3, true)],
+    );
+
+    // Ctrl+Esc while this computer's input method composes: Esc is its own
+    // key, unless the capture took it.
+    final esc = _down(LogicalKeyboardKey.escape, PhysicalKeyboardKey.escape);
+    const composing = KeyContext(
+      textInput: true,
+      composing: true,
+      heldHere: {RemoteKey.control},
+    );
+    expect(KeyRouting.route(esc, composing).handled, isFalse);
+    expect(
+      KeyRouting.route(
+        esc,
+        const KeyContext(
+          textInput: true,
+          composing: true,
+          heldHere: {RemoteKey.control},
+          captured: true,
+        ),
+      ).inputs,
+      [const DesktopKey(RemoteKey.escape, true)],
+    );
+  });
+
+  test("the runner's captured keys are named as Flutter's Windows embedder "
+      'names them', () {
+    KeyEvent? event(
+      int vk,
+      int scan, {
+      bool down = true,
+      bool repeat = false,
+    }) => SystemKeyCapture.eventOf({
+      'vk': vk,
+      'scan': scan,
+      'down': down,
+      'repeat': repeat,
+    });
+    final win = event(0x5B, 0xE05B)!;
+    expect(win, isA<KeyDownEvent>());
+    expect(
+      (win.physicalKey, win.logicalKey),
+      (PhysicalKeyboardKey.metaLeft, LogicalKeyboardKey.metaLeft),
+    );
+    final altRight = event(0xA5, 0xE038, repeat: true)!;
+    expect(altRight, isA<KeyRepeatEvent>());
+    expect(
+      (altRight.physicalKey, altRight.logicalKey),
+      (PhysicalKeyboardKey.altRight, LogicalKeyboardKey.altRight),
+    );
+    final d = event(0x44, 0x20, down: false)!;
+    expect(d, isA<KeyUpEvent>());
+    expect(
+      (d.physicalKey, d.logicalKey),
+      (PhysicalKeyboardKey.keyD, LogicalKeyboardKey.keyD),
+    );
+    expect(event(0x2C, 0xE037)!.physicalKey, PhysicalKeyboardKey.printScreen);
+    expect(event(0xFF, 0x7F), isNull);
+    expect(SystemKeyCapture.eventOf('key'), isNull);
+  });
+
+  testWidgets(
+    "full screen with the keyboard and control, this computer's shortcuts "
+    'go to the host alone, and what capture held goes up once it stops',
+    (tester) async {
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final captured = <Object?>[];
+      messenger.setMockMethodCallHandler(SystemKeyCapture.channel, (
+        call,
+      ) async {
+        captured.add(call.arguments);
+        return null;
+      });
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        final h = await ViewerHarness.live(
+          tester,
+          capabilities: const ['os_windows', 'physical_keys'],
+        );
+        final node = await picture(tester, h);
+        final keyboard = DesktopKeyboard(
+          input: h.input,
+          picture: node,
+          ime: LocalInputMethod(),
+        )..sync();
+        await tester.pump();
+        expect(captured, isEmpty);
+        keyboard.fullscreen = true;
+        await tester.pump();
+        expect(captured, [true]);
+        h.sent();
+
+        // What the runner's hook hands over.
+        Future<void> key(int vk, int scan, {bool down = true}) =>
+            messenger.handlePlatformMessage(
+              SystemKeyCapture.channel.name,
+              SystemKeyCapture.channel.codec.encodeMethodCall(
+                MethodCall('key', {
+                  'vk': vk,
+                  'scan': scan,
+                  'down': down,
+                  'repeat': false,
+                }),
+              ),
+              (_) {},
+            );
+
+        // A lone Win reaches the host: its Start menu, not this one's.
+        await key(0x5B, 0xE05B);
+        await key(0x5B, 0xE05B, down: false);
+        expect(h.sent(), [
+          ['meta↓'],
+          ['meta↑'],
+        ]);
+
+        // Alt+Tab, Tab twice: the host's switcher, held open by its Alt.
+        await key(0xA4, 0x38);
+        for (var i = 0; i < 2; i++) {
+          await key(0x09, 0x0F);
+          await key(0x09, 0x0F, down: false);
+        }
+        await key(0xA4, 0x38, down: false);
+        expect(h.sent(), [
+          ['alt↓'],
+          ['tab↓'],
+          ['tab↑'],
+          ['tab↓'],
+          ['tab↑'],
+          ['alt↑'],
+        ]);
+
+        // Win+D: the D the hook took with Win is a chord.
+        await key(0x5B, 0xE05B);
+        await key(0x44, 0x20);
+        await key(0x44, 0x20, down: false);
+        await key(0x5B, 0xE05B, down: false);
+        expect(h.sent(), [
+          ['meta↓'],
+          ['d↓'],
+          ['d↑'],
+          ['meta↑'],
+        ]);
+
+        // Ctrl reaches the picture as ever; the Esc taken with it goes
+        // after it, whole.
+        await press(tester, LogicalKeyboardKey.controlLeft);
+        await key(0x1B, 0x01);
+        await key(0x1B, 0x01, down: false);
+        await lift(tester, LogicalKeyboardKey.controlLeft);
+        expect(h.sent(), [
+          ['control↓', 'escape↓'],
+          ['escape↑'],
+          ['control↑'],
+        ]);
+
+        // Out of full screen, capture stops, and the up the runner sends
+        // for a Win it still held releases it on the host.
+        await key(0x5B, 0xE05B);
+        keyboard.fullscreen = false;
+        await tester.pump();
+        expect(captured, [true, false]);
+        await key(0x5B, 0xE05B, down: false);
+        expect(h.sent(), [
+          ['meta↓'],
+          ['meta↑'],
+        ]);
+
+        // Another window in front, or a menu with the keyboard: no capture
+        // while full screen either.
+        keyboard.fullscreen = true;
+        await tester.pump();
+        keyboard.active = false;
+        await tester.pump();
+        keyboard.active = true;
+        node.unfocus();
+        await tester.pump();
+        expect(captured, [true, false, true, false, true, false]);
+
+        keyboard.dispose();
+        h.dispose();
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+        messenger.setMockMethodCallHandler(SystemKeyCapture.channel, null);
+      }
+    },
+  );
 }

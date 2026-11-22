@@ -315,11 +315,29 @@ In either mode:
   Ctrl+C is Cmd+C on a Mac. The host's system is known from its `os_*`
   capability.
 - Shortcuts that this computer's system takes first — Alt+Tab, the Windows
-  key, Win+L, Win+Space, Ctrl+Alt+Del — never reach the app; use the
-  Shortcuts menu, whose **Switch input method** sends Win+Space to a Windows
-  host and Ctrl+Space to a Mac. Ctrl+Alt+Del is unsupported, since
+  key, Win+L, Win+Space, Ctrl+Alt+Del — never reach the app in a window; use
+  the Shortcuts menu, whose **Switch input method** sends Win+Space to a
+  Windows host and Ctrl+Space to a Mac. Ctrl+Alt+Del is unsupported, since
   `SendInput` cannot produce it. **Lock remote computer** is the host's own
   command: it needs control, and says so when locking fails.
+- In full screen on Windows, while the picture has the keyboard, this viewer
+  controls and the app is active, a low-level keyboard hook
+  (`ui/windows/runner/desktop_key_capture.cpp`, channel
+  `pb_mapper/key_capture`) takes this computer's own shortcuts before its
+  system does, as RustDesk's grab does, and sends them to the host alone: the
+  Windows key and Alt (not AltGr), each with every key pressed while it is
+  held (Alt+Tab, Alt+F4, Alt alone, Win+D, Win+Space), Esc under Ctrl
+  (Ctrl+Esc, Ctrl+Shift+Esc), F10 and Print Screen. Unlike RustDesk's, it
+  leaves every other key to the window, so this computer's input method
+  still composes in the local mode, and Caps Lock, Num Lock and Scroll Lock
+  stay this computer's. A Windows key or Alt taken this way goes at once,
+  so a lone tap opens the host's Start menu or menu bar. The hook runs on a
+  thread of its own, since Windows removes a low-level hook that keeps it
+  waiting, and takes a key only while the window is in front; a key it took
+  goes up through the viewer wherever it is released, and when capture stops
+  (leaving full screen, a menu or dialog taking the keyboard, the app going
+  inactive) every key it holds goes up on the host. Ctrl+Alt+Del and Win+L,
+  which Windows handles before any hook, act on this computer too.
 - Toward a Mac (`os_macos`) the menu offers the Mac's own chords, named as
   a Mac names them: **Switch app** ⌘Tab, **Force Quit** ⌥⌘Esc, **Spotlight**
   ⌘Space and **Switch input method** ⌃Space. It leaves out Show desktop,

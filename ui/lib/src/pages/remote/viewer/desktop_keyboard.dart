@@ -15,17 +15,22 @@ import 'viewer_overlays.dart';
 /// this computer's input method composes and its text reaches the host. In
 /// remote mode, on Windows, the window's input method is off for as long as
 /// the picture has the keyboard, so keys reach the host whole: elsewhere
-/// the picture sees keys before any input method, and keeps them.
+/// the picture sees keys before any input method, and keeps them. While the
+/// picture also fills the screen, this computer's own shortcuts go to the
+/// host alone ([SystemKeyCapture]).
 final class DesktopKeyboard {
   DesktopKeyboard({
     required RemoteInput input,
     required FocusNode picture,
     LocalInputMethod? ime,
+    SystemKeyCapture? capture,
   }) : _input = input,
        _picture = picture,
-       _ime = ime ?? LocalInputMethod() {
+       _ime = ime ?? LocalInputMethod(),
+       _capture = capture ?? SystemKeyCapture() {
     text = RemoteTextInput(input: input);
     input.textInput = text;
+    _capture.onKey = input.handleCapturedKey;
     picture.addListener(sync);
     input.ready.addListener(sync);
   }
@@ -33,9 +38,31 @@ final class DesktopKeyboard {
   final RemoteInput _input;
   final FocusNode _picture;
   final LocalInputMethod _ime;
+  final SystemKeyCapture _capture;
   late final RemoteTextInput text;
 
-  /// After a change of focus, control or [RemoteInput.keyboard].
+  /// The viewer fills the screen.
+  bool get fullscreen => _fullscreen;
+  bool _fullscreen = false;
+  set fullscreen(bool value) {
+    if (value == _fullscreen) return;
+    _fullscreen = value;
+    sync();
+  }
+
+  /// This app's window has the keyboard. Lost, it may never see the keys
+  /// the capture holds go up (this computer locks, say), so the capture
+  /// stops, and their ups go with it.
+  bool get active => _active;
+  bool _active = true;
+  set active(bool value) {
+    if (value == _active) return;
+    _active = value;
+    sync();
+  }
+
+  /// After a change of focus, control, [fullscreen], [active] or
+  /// [RemoteInput.keyboard].
   void sync() {
     final focused = _picture.hasFocus;
     final local = _input.keyboard.mode == KeyboardMode.local;
@@ -47,6 +74,8 @@ final class DesktopKeyboard {
       text.hide();
     }
     _ime.enabled = !(focused && !local);
+    _capture.captured = focused && _fullscreen && _active && _input.ready.value;
+    if (!_capture.captured) _input.captureStopped();
   }
 
   /// Before the input it was made for.
@@ -56,6 +85,96 @@ final class DesktopKeyboard {
     _input.textInput = null;
     text.dispose();
     _ime.enabled = true;
+    _capture.dispose();
+    _input.captureStopped();
+  }
+}
+
+/// This computer's own shortcuts, kept from its system while the picture
+/// fills the screen with the keyboard and control, so they act on the host
+/// alone (ui §10.5): the Windows key and Alt, each with whatever is pressed
+/// while it is held, Ctrl+Esc, F10 and Print Screen. The Windows runner's
+/// keyboard hook takes them (`pb_mapper/key_capture`) and hands each here as
+/// the picture would have had it. Every other key reaches the picture as
+/// before, so this computer's input method still composes; Ctrl+Alt+Del and
+/// Win+L, which Windows handles before any hook, act on this computer too.
+/// Off elsewhere than Windows.
+class SystemKeyCapture {
+  SystemKeyCapture() {
+    if (_supported) channel.setMethodCallHandler(_handle);
+  }
+
+  static const channel = MethodChannel('pb_mapper/key_capture');
+
+  static bool get _supported =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+
+  /// Each key taken, down, repeated and up; ups keep coming for the keys
+  /// still held once capture stops.
+  ValueChanged<KeyEvent>? onKey;
+
+  bool _captured = false;
+  bool _disposed = false;
+
+  bool get captured => _captured;
+  set captured(bool value) {
+    if (value == _captured || _disposed) return;
+    _captured = value;
+    if (!_supported) return;
+    unawaited(
+      channel.invokeMethod<void>('setCaptured', value).catchError((
+        Object error,
+      ) {
+        debugPrint("This computer's shortcuts could not be captured: $error");
+      }),
+    );
+  }
+
+  /// When the viewer closes: capture stops, and nothing more comes.
+  void dispose() {
+    captured = false;
+    _disposed = true;
+    onKey = null;
+    if (_supported) channel.setMethodCallHandler(null);
+  }
+
+  Future<void> _handle(MethodCall call) async {
+    if (call.method != 'key') {
+      throw MissingPluginException('pb_mapper/key_capture: ${call.method}');
+    }
+    final event = eventOf(call.arguments);
+    if (event != null) onKey?.call(event);
+  }
+
+  /// The key event the picture would have had for a key the runner took
+  /// (`{vk, scan, down, repeat}`), named by Flutter's own Windows tables as
+  /// its embedder names the keys it gets; null for a key they do not name.
+  static KeyEvent? eventOf(Object? arguments) {
+    if (arguments is! Map) return null;
+    final scan = arguments['scan'], vk = arguments['vk'];
+    if (scan is! int || vk is! int) return null;
+    final physical = kWindowsToPhysicalKey[scan];
+    final logical = kWindowsToLogicalKey[vk];
+    if (physical == null || logical == null) return null;
+    if (arguments['down'] != true) {
+      return KeyUpEvent(
+        physicalKey: physical,
+        logicalKey: logical,
+        timeStamp: Duration.zero,
+      );
+    }
+    if (arguments['repeat'] == true) {
+      return KeyRepeatEvent(
+        physicalKey: physical,
+        logicalKey: logical,
+        timeStamp: Duration.zero,
+      );
+    }
+    return KeyDownEvent(
+      physicalKey: physical,
+      logicalKey: logical,
+      timeStamp: Duration.zero,
+    );
   }
 }
 

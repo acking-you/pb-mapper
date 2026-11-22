@@ -9,6 +9,7 @@
 #include "win32_window.h"
 #include "desktop_video.h"
 #include "desktop_ime.h"
+#include "desktop_key_capture.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -32,6 +33,7 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
   std::unique_ptr<DesktopVideo> desktop_video_;
   std::unique_ptr<DesktopIme> desktop_ime_;
+  std::unique_ptr<DesktopKeyCapture> desktop_keys_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

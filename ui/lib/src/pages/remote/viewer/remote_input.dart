@@ -91,6 +91,10 @@ final class RemoteInput implements RemotePointerSink {
   /// wheel, in the order they went down.
   final _waiting = <PhysicalKeyboardKey, DesktopKeyInput>{};
 
+  /// Keys the full-screen capture holds down here: this computer's system,
+  /// and so [HardwareKeyboard], never saw them.
+  final _captured = <PhysicalKeyboardKey, LogicalKeyboardKey>{};
+
   /// How keys reach this computer; the viewer keeps it current.
   KeyboardSettings keyboard = const KeyboardSettings();
 
@@ -237,8 +241,9 @@ final class RemoteInput implements RemotePointerSink {
 
   // ----------------------------------------------------------------- keys
 
-  /// The keyboard as [KeyRouting.route] sees it now.
-  KeyContext get _keyContext {
+  /// The keyboard as [KeyRouting.route] sees it now, for a key [captured]
+  /// or not.
+  KeyContext _keyContext({required bool captured}) {
     final text = textInput;
     final caps = _desktop.session.value.capabilities;
     return KeyContext(
@@ -253,18 +258,38 @@ final class RemoteInput implements RemotePointerSink {
       othersDown:
           _heldButtons.isNotEmpty ||
           _heldKeys.keys.any((k) => !KeyRouting.modifierKeys.contains(k)),
+      captured: captured,
     );
   }
 
   /// Hardware keys, bound to the picture's `Focus.onKeyEvent`; the rules
   /// are [KeyRouting.route]'s.
-  KeyEventResult handleHardwareKey(FocusNode node, KeyEvent event) {
+  KeyEventResult handleHardwareKey(FocusNode node, KeyEvent event) =>
+      _handleKey(event, captured: false);
+
+  /// A key the full-screen capture took from this computer's system
+  /// (`SystemKeyCapture`): the picture's rules, for a key nothing here
+  /// sees.
+  void handleCapturedKey(KeyEvent event) {
+    if (event is KeyDownEvent) {
+      _captured[event.physicalKey] = event.logicalKey;
+    } else if (event is KeyUpEvent) {
+      _captured.remove(event.physicalKey);
+    }
+    _handleKey(event, captured: true);
+  }
+
+  /// The capture stopped, and with it every key it held: their ups follow,
+  /// and release what they hold on the host.
+  void captureStopped() => _captured.clear();
+
+  KeyEventResult _handleKey(KeyEvent event, {required bool captured}) {
     final g = _live;
     if (g == null) return KeyEventResult.ignored;
     final physical = event.physicalKey;
     final route = KeyRouting.route(
       event,
-      _keyContext,
+      _keyContext(captured: captured),
       holding: _heldKeys[physical],
       upIsSwallowed: _swallowUps.contains(physical),
     );
@@ -597,13 +622,17 @@ final class RemoteInput implements RemotePointerSink {
       if (mods.contains(m)) DesktopInput.key(m, false),
   ];
 
-  static Set<RemoteKey> _physicalModifiers() {
+  /// The modifiers down here: those this computer's system has, and those
+  /// the full-screen capture holds.
+  Set<RemoteKey> _physicalModifiers() {
     final keyboard = HardwareKeyboard.instance;
     return {
       if (keyboard.isControlPressed) RemoteKey.control,
       if (keyboard.isAltPressed) RemoteKey.alt,
       if (keyboard.isShiftPressed) RemoteKey.shift,
       if (keyboard.isMetaPressed) RemoteKey.meta,
+      for (final key in _captured.values)
+        if (KeyRouting.modifier(key) case final m?) m,
     };
   }
 
