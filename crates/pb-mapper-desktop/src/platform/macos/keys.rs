@@ -264,9 +264,13 @@ pub(crate) const NUMERIC_PAD: u64 = 0x20_0000;
 pub(crate) const HELP: u64 = 0x40_0000;
 const LATCHED: u64 = FUNCTION | NUMERIC_PAD | HELP;
 
-/// A virtual key no Mac key uses (`kVK_UpArrow` is 0x7E). Text is posted on
-/// this code: key code 0 is the A key, and with Fn latched that is Fn-A.
-pub(crate) const UNICODE_KEY: u16 = 0xFF;
+/// `kVK_Space`, the key text is posted on, as Chrome Remote Desktop posts
+/// it: an app that reads the key rather than the string sees a space. A key
+/// code no key uses (0xFF, in 0.12.1) reached no app at all, with the input
+/// method on or off, and the A key (before it) was Fn-A, the Dock, under a
+/// latched Fn. Measured on macOS 27 with WeType Pinyin selected and ABC: the
+/// Space key carries "Ab1你好" through both unchanged.
+pub(crate) const UNICODE_KEY: u16 = 0x31;
 
 /// The flags of `code` going `down` that belong to the key rather than to a
 /// modifier. A key-up keeps none, so Fn does not latch. An arrow key-down
@@ -476,10 +480,9 @@ mod tests {
         assert_eq!(kept_key_flags(key_code(Key::A), true), 0);
         assert_eq!(kept_key_flags(key_code(Key::Home), true), FUNCTION);
         assert_eq!(kept_key_flags(key_code(Key::F11), false), 0);
+        // Text goes on the Space key, which owns no Fn.
+        assert_eq!(UNICODE_KEY, key_code(Key::Space));
         assert_eq!(kept_key_flags(UNICODE_KEY, true), 0);
-        // No key a viewer can press posts the text key's code.
-        assert!((0..=u16::MAX).all(|usage| usage_code(usage) != Some(UNICODE_KEY)));
-        assert_ne!(key_code(Key::A), UNICODE_KEY);
     }
 
     /// Every key of the vocabulary presses its own virtual key, and the four
