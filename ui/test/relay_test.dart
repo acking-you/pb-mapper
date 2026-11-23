@@ -468,7 +468,9 @@ void main() {
           isolatedRelayAdminKey: '0123456789abcdefghijklmnopqrstuv',
         ),
       );
-      await _open(tester, api);
+      // With motion on, settling also waits for the running relay's dot to
+      // come to rest: it lasts as long as the relay, so it cannot breathe on.
+      await pumpApp(tester, api, page: AppPage.relay, reducedMotion: false);
       await _section(tester, 'local');
       await tester.enterText(find.byKey(const Key('local-port')), '17000');
       await tester.tap(find.byKey(const Key('local-toggle')));
