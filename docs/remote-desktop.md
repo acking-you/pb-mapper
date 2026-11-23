@@ -1057,11 +1057,12 @@ crates/pb-mapper-desktop/src/
   input/{held,cursor}.rs                         release obligation, confinement, shapes
   oop/{proto,ipc,client,server}.rs               the out-of-process backend
   platform/mod.rs  unsupported.rs  waiter.rs     traits, Current, facade
-  platform/windows/{desktop,input,cursor,still,waiter,timer,mf,dpapi,modes,win32}.rs
+  platform/windows/{desktop,input,cursor,still,waiter,timer,priority,mf,dpapi,
+    modes,win32}.rs
   platform/windows/video/                        capture, scale and encode, fused
   platform/windows/helper/                       service, install, worker, pipes
   platform/macos/{mod,cf,capture,encoder,video,desktop,geometry,input,clicks,
-    keys,pixels,cursor,modes,mode_list,still,timer,waiter,keychain}.rs
+    keys,pixels,cursor,modes,mode_list,still,timer,priority,waiter,keychain}.rs
   privileged/                                    public helper facade
 ```
 
@@ -1259,7 +1260,8 @@ polls. The late-output, stall, liveness and H.265-failure rules are the
 Windows encoder's (`codec/pipeline.rs`). No picture for 3 s is a capture
 failure. While a session captures, the process holds off App Nap and keeps
 the display awake, and thread C waits on timers the kernel does not coalesce
-([Timers on a Mac host](#timers-on-a-mac-host)).
+([Timers on a Mac host](#timers-on-a-mac-host)) and, for H.264 and H.265,
+runs at the user-interactive QoS class ([Thread priority](#thread-priority)).
 
 The GOP is infinite. Before its media types are set, the encoder tries GOP
 lengths `u32::MAX`, `0x7FFF_FFFF`, 65 535 and 3 600 and keeps the first one it
@@ -1291,6 +1293,40 @@ leaves timers coarse. Measured here, a 2 ms tokio sleep took 15.7 ms, 3.5 ms
 under the guard and 15.6 ms after it. Thread C paces on its own
 high-resolution waitable timer either way.
 
+### Thread priority
+
+While a session streams H.264 or H.265, thread C runs above the owner's
+ordinary programs: at `THREAD_PRIORITY_ABOVE_NORMAL` on Windows, and on macOS
+at the user-interactive QoS class, which its ScreenCaptureKit queue already
+has. This matters only when other programs keep every core busy, where a
+capture tick or an input wake could otherwise wait for a core. The OS encodes
+both codecs off the thread, which mostly coordinates. A JPEG session keeps
+the thread's priority, because it grabs, scales and compresses each picture
+on the thread, and that work must not preempt the owner's programs.
+
+Thread C is a blocking thread of the embedder's runtime, so a guard
+(`priority.rs`) raises it on the iteration that starts capturing and gives
+back exactly the level it found, on the same thread. That happens when the
+session pauses, when capture becomes unavailable, when the session switches
+to JPEG and when it ends, before the thread returns to the pool. A thread
+already at or above the raised level is never lowered, and a failed call
+leaves the priority as it was. The helper's capture worker raises its
+capture thread the same way while the host asks it for H.264 or H.265 video,
+and gives it back after a second without a request.
+
+Other threads stay at normal priority:
+
+- The worker's pipe exchange thread.
+- The service's pipe relay, which shares the service's one runtime thread
+  with the background host's networking. Raising it would raise all of that.
+- B-recv, B-send and QUIC in every host, for the same reason: they run on the
+  embedder's runtime with every tunnel.
+
+MMCSS is not used: it moves a thread into the real-time band, and its network
+throttling could slow the process's tunnels. On Windows the level is relative
+to the process's priority class, so a host process in Efficiency mode gains
+nothing over ordinary programs. The effect has not been measured.
+
 ### Timers on a Mac host
 
 macOS coalesces timers: the kernel may fire one late by a share of its
@@ -1316,7 +1352,9 @@ thread C waits on one, with a user event for the wake
 (`platform/macos/waiter.rs`); on the runner the session then paced at
 60 frames a second, a capture every 16.7 ms at the median. The timer guard
 (`platform/macos/timer.rs`) holds the activity, which keeps App Nap off and
-the display awake; it does not stop coalescing.
+the display awake; it does not stop coalescing. Neither does thread C's
+user-interactive class while it streams H.264 or H.265
+([Thread priority](#thread-priority)), which is there for CPU contention.
 
 tokio's timers stay coalesced. On the relay path that costs no frames:
 B-send writes video when the hand-off notifies it, and probes and receipts
@@ -1732,6 +1770,7 @@ shapes by content, never by number.
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
 | QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; latch at 1.3 × over 2 windows at ≤ 0.75 × nominal |
 | Process timers | 1 ms, with power throttling opted out, while a session captures |
+| Thread C priority | above normal on Windows, user-interactive QoS on macOS, while a session captures H.264 or H.265; the helper's capture thread too, until 1 s without a video request |
 | IDR | host minimum interval 300 ms; viewer minimum 500 ms, backoff to 4 s; 1 s hold after a discontinuity |
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued; IDR grace 500 ms; stall watchdog 700 ms |
 | fps cap | tick 250 ms; × 0.9 direct, × 0.8 relay; minimum 5; +5 after 3 s; ≥ 1 s between changes |

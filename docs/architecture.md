@@ -316,6 +316,12 @@ Nothing in the SDK crates knows it exists.
     `timeBeginPeriod`), on macOS `platform/macos/timer.rs` (App Nap held
     off; the kernel still coalesces the process's timers, which thread C's
     own waiter avoids)
+  - `priority.rs`: `ThreadPriority`, a `!Send` guard that raises the
+    calling thread and gives back exactly the level it found. Thread C, and
+    the helper's capture thread, hold it while they stream H.264 or H.265,
+    never JPEG; on Windows `platform/windows/priority.rs` (above normal), on
+    macOS `platform/macos/priority.rs` (the user-interactive QoS class),
+    nothing elsewhere
   - `credit.rs`, `qos.rs`, `idr.rs`, `outgoing.rs`: Receipt credit, delay-based
     QoS, on-demand IDRs, and the hand-off from thread C to B-send
   - `protocol.rs`, `wire.rs`, `invite.rs`, `security.rs`, `auth.rs`: Protocol v2
@@ -372,7 +378,8 @@ Nothing in the SDK crates knows it exists.
     encoder failure turns it off for the process), `input` (enigo, and
     `SendInput` scancodes for physical keys), `cursor` (the shape once per
     new `HCURSOR`: kinds from the `LoadCursorW` handles, bitmaps from
-    `GetIconInfo`/`GetDIBits`), `still`, `waiter`, `timer`, `mf`, `dpapi`
+    `GetIconInfo`/`GetDIBits`), `still`, `waiter`, `timer`, `priority`
+    (`THREAD_PRIORITY_ABOVE_NORMAL`), `mf`, `dpapi`
     (the one DPAPI call every Windows store uses), `win32` (the Win32 glue
     the host and the helper share), `modes.rs` and `helper/`
   - `platform/macos/` (macOS 12.3 or later; compiled, linked and
@@ -385,11 +392,12 @@ Nothing in the SDK crates knows it exists.
     HID usages to `kVK_*`), `cursor.rs` (position, and the shape when the
     cursor seed moves), `pixels.rs`, `modes.rs` and `mode_list.rs`
     (app-only Core Graphics modes), `still.rs` (`SCScreenshotManager`),
-    `timer.rs` (App Nap held off), `waiter.rs` (thread C's wait: a kqueue
-    timer marked `NOTE_CRITICAL`, which the kernel does not coalesce, and a
-    user event for the wake), `keychain.rs`, `cf.rs` (Core Foundation
-    glue, symbols looked up at run time). Its pure modules build and are
-    tested everywhere; `tests.rs` runs only on macOS
+    `timer.rs` (App Nap held off), `priority.rs` (the user-interactive QoS
+    class, read and set back as the kernel reports it), `waiter.rs` (thread
+    C's wait: a kqueue timer marked `NOTE_CRITICAL`, which the kernel does
+    not coalesce, and a user event for the wake), `keychain.rs`, `cf.rs`
+    (Core Foundation glue, symbols looked up at run time). Its pure modules
+    build and are tested everywhere; `tests.rs` runs only on macOS
   - `platform/windows/helper/`: The opt-in UAC/Winlogon service —
     `service.rs`; the workers it starts (`worker.rs`, `child.rs`) and a
     worker's binding to the input desktop (`binding.rs`); `pipe.rs`;
