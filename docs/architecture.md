@@ -685,10 +685,12 @@ The design and its rules are in `docs/ui-design.md`.
   fetches the pointer-shape definition each time the view's number changes
   and keeps the last 16 decoded by content, since a number names another
   definition once the viewer's counter has gone round; on a Mac it shares
-  from the app alone and re-reads the capabilities while a permission is
-  missing. It reads the host when the app's own host sends `desktopHost`,
-  and on a clock only while a viewer is connected or the Windows service
-  hosts (a 30 s backstop otherwise)
+  from the app alone and re-reads the capabilities when the app comes back
+  to the front with the page open and, while the page shows a missing
+  permission, every 10 s. It reads
+  the host when the app's own host sends `desktopHost`, and on a clock only
+  while a viewer is connected or the Windows service hosts (a 30 s backstop
+  otherwise)
 
 - **`lib/src/galaxy/`**: The galaxy view — scene model, camera, frame buffer
   over `pb_mapper_galaxy_frame_v1` with its Dart mirror, painter, details panel

@@ -123,7 +123,10 @@ runs, and resumes with the app when **Share this computer** was left on.
   right page. **Screen Recording** is needed to share at all and takes effect
   once the app is reopened; **Accessibility** is needed for control and takes
   effect at once. When Accessibility is missing, the app offers view-only
-  sharing. Returning from System Settings refreshes the host card. A start
+  sharing. Returning from System Settings refreshes the host card; while the
+  card lists a missing permission it also checks every 10 s, so a grant made
+  with the window still visible beside System Settings shows without
+  switching back. Nothing checks them on a clock otherwise. A start
   without Screen Recording fails with
   `PERMISSION_MISSING`; an input without Accessibility ends control
   (`input_failed`, naming Accessibility), because macOS would drop the events

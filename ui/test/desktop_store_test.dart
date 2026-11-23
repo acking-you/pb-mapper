@@ -414,12 +414,74 @@ void main() {
     await tester.pump();
     expect(store.hostView.value.supported, isFalse);
     api.available = withDisplay;
-    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 10));
     expect(store.hostView.value.supported, isTrue);
     expect(store.hostView.value.displays, withDisplay.displays);
+    // With a display, nothing is read again on a clock.
+    api.calls.clear();
+    await tester.pump(const Duration(seconds: 20));
+    expect(api.ops, isNot(contains('capabilities')));
     page.dispose();
     store.dispose();
   });
+
+  testWidgets(
+    "a missing permission is read again on return to the app, and on a slow "
+    "clock only while the page asks for it",
+    (tester) async {
+      const granted = DesktopHostPermissions(screenCapture: true, input: true);
+      const viewOnly = DesktopHostPermissions(
+        screenCapture: true,
+        input: false,
+      );
+      DesktopCapabilities withPermissions(DesktopHostPermissions p) =>
+          DesktopCapabilities(
+            host: true,
+            permissions: p,
+            displays: const [DesktopDisplay(1, 'Display 1', 1920, 1080)],
+          );
+      final api = FakeDesktopApi()..available = withPermissions(viewOnly);
+      final store = DesktopStore(api);
+      int count(String op) => api.ops.where((o) => o == op).length;
+      var page = store.demand(DesktopDemand.page);
+      await tester.pump();
+      expect(store.hostView.value.permissions, viewOnly);
+
+      // Missing, with the card on screen: every 10 s, not every second.
+      api.calls.clear();
+      await tester.pump(const Duration(seconds: 9));
+      expect(count('capabilities'), 0);
+      await tester.pump(const Duration(seconds: 1));
+      expect(count('capabilities'), 1);
+
+      // Granted in System Settings: coming back reads it at once.
+      api.available = withPermissions(granted);
+      _lifecycle(tester, [AppLifecycleState.inactive]);
+      _lifecycle(tester, [AppLifecycleState.resumed]);
+      await tester.pump();
+      expect(store.hostView.value.permissions, granted);
+
+      // Complete: nothing more on a clock.
+      api.calls.clear();
+      await tester.pump(const Duration(seconds: 60));
+      expect(count('capabilities'), 0);
+
+      // Missing again, but the card is not on screen: nothing either.
+      api.available = withPermissions(viewOnly);
+      _lifecycle(tester, [AppLifecycleState.inactive]);
+      _lifecycle(tester, [AppLifecycleState.resumed]);
+      await tester.pump();
+      page.dispose();
+      await tester.pump();
+      api.calls.clear();
+      await tester.pump(const Duration(seconds: 60));
+      expect(count('capabilities'), 0);
+      page = store.demand(DesktopDemand.page);
+      await tester.pump();
+      page.dispose();
+      store.dispose();
+    },
+  );
 
   testWidgets('a sharing or configured host always has its invitation', (
     tester,

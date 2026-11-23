@@ -56,10 +56,10 @@ const _hostFallback = Duration(seconds: 30);
 /// again after this, until a read is not.
 const _hostChangeBusyRetry = Duration(seconds: 1);
 
-/// The capabilities' clock while the Remote page shows a card that may ask
-/// for a permission or a display: read each tick while one is missing, and
-/// every fifth otherwise.
-const _capabilityTick = Duration(seconds: 1);
+/// The capabilities while the Remote page shows a permission still missing
+/// or no display, so a grant made beside a visible window, or a display
+/// attached, shows within this. Returning to the app reads them at once.
+const _capabilityFallback = Duration(seconds: 10);
 const _viewTick = Duration(milliseconds: 16);
 const _moveInterval = Duration(milliseconds: 4);
 const _snapshotBound = Duration(milliseconds: 300);
@@ -355,8 +355,8 @@ class DesktopStore {
   /// [DesktopDemand.page] keeps the host card current where this device can
   /// host: the host is read at once, then every second while a viewer is
   /// connected or the Windows service hosts, else every 30 s, since this
-  /// app's own host announces a viewer; the capabilities are read each
-  /// second while the card asks for a permission or a display;
+  /// app's own host announces a viewer; the capabilities are read every 10 s
+  /// while the card asks for a permission or a display;
   /// [DesktopDemand.viewer] is a viewer on screen: the session resumes while
   /// it is held and the app is visible, and pauses otherwise (D13).
   ///
@@ -467,34 +467,31 @@ class DesktopStore {
           ? null
           : Timer.periodic(hostEvery, (_) => unawaited(_readHost()));
     }
-    // What the owner may fix outside the app, while the card may ask for
-    // it: a permission (macOS) or a display, on a clock of its own.
+    // What the owner may fix outside the app, while the card asks for it: a
+    // permission (macOS) or a display. Coming back to the app reads them at
+    // once; this follows a change made beside a visible window.
     final capabilities = _capabilities;
+    final awaitsOwner =
+        capabilities != null &&
+        (capabilities.reason == 'no_display' ||
+            capabilities.permissions?.complete == false);
     final capabilityEvery =
         !_disposed &&
             !_restarting &&
             !_cannotHost &&
             _hostPageVisible &&
-            capabilities != null &&
-            (capabilities.reason == 'no_display' ||
-                capabilities.permissions != null)
-        ? _capabilityTick
+            awaitsOwner
+        ? _capabilityFallback
         : null;
     if (capabilityEvery != _capabilityEvery) {
       _capabilityEvery = capabilityEvery;
       _capabilityTimer?.cancel();
       _capabilityTimer = capabilityEvery == null
           ? null
-          : Timer.periodic(capabilityEvery, (timer) {
-              final permissions = _capabilities?.permissions;
-              // Follow a grant or a reconnected display while the card is
-              // visible. Also notice a revoked grant or a second monitor.
-              if (_capabilities?.reason == 'no_display' ||
-                  (permissions != null &&
-                      (!permissions.complete || timer.tick % 5 == 0))) {
-                unawaited(_recheckCapabilities());
-              }
-            });
+          : Timer.periodic(
+              capabilityEvery,
+              (_) => unawaited(_recheckCapabilities()),
+            );
     }
     final statusEvery = _disposed || !_sessionActive
         ? null
