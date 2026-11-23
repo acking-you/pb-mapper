@@ -133,10 +133,26 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         at + self.backend.drain_poll().unwrap_or(CONTEXT_CHECK_INTERVAL)
     }
 
+    /// When a source that had nothing to submit at `at` is asked again, if
+    /// it cannot say so itself. A push source wakes thread C for a fresh
+    /// picture or names when it needs the tick (`capture_idle_until`). A pull
+    /// source, such as DXGI, does neither: asked again at once, it spun thread
+    /// C until the desktop changed. It is polled at its drain interval
+    /// instead, its tick still armed, so a new picture goes out within that
+    /// interval of appearing.
+    fn capture_poll_after(&self, at: Instant) -> Option<Instant> {
+        if self.backend.capture_idle_until(None).is_some() {
+            return None;
+        }
+        self.backend.drain_poll().map(|poll| at + poll)
+    }
+
     /// The next tick a capture source can use. A push source stays idle
-    /// across cursor or input wakes, and wakes C itself for a fresh picture.
+    /// across cursor or input wakes, and wakes C itself for a fresh picture;
+    /// a pull source with nothing to submit waits for its next poll.
     pub(super) fn capture_at(&self) -> Instant {
         let tick = self.pacer.next();
+        let tick = self.capture_poll_due.map_or(tick, |due| due.max(tick));
         let Some(until) = self.backend.capture_idle_until(None) else {
             return tick;
         };
@@ -280,9 +296,10 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 .backend
                 .capture_video(context, self.codec, keyframe, rate);
             let done = self.clock.now();
+            let submitted = result.is_ok() && self.backend.submitted_video();
             // A capture with nothing to submit leaves the tick and any
             // requested IDR armed, even if it drained an older picture.
-            if result.is_ok() && self.backend.submitted_video() {
+            if submitted {
                 if keyframe {
                     // Handed over: an IDR still in the encoder at the next
                     // tick must not be asked for again.
@@ -293,6 +310,11 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 }
                 self.pacer.consume(now);
             }
+            self.capture_poll_due = if result.is_ok() && !submitted {
+                self.capture_poll_after(done)
+            } else {
+                None
+            };
             self.drain_due = if matches!(result, Ok(Some(_))) {
                 done
             } else {
@@ -308,6 +330,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 slot.state.skipped_ticks += 1;
             }
             self.pacer.consume(now);
+            self.capture_poll_due = None;
         }
         if pending > 0 {
             let wait = if tick_due {

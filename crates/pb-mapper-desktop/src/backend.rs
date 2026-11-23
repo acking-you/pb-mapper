@@ -111,19 +111,24 @@ pub trait Backend: 'static {
         0
     }
     /// `Some(interval)`: thread C polls `drain_video` this often while units
-    /// are pending. `None`: a push source that wakes thread C itself.
+    /// are pending, and a source that had no picture to submit as often (see
+    /// `submitted_video`). `None`: a push source that wakes thread C itself.
     fn drain_poll(&self) -> Option<Duration> {
         Some(DRAIN_POLL)
     }
     /// Whether the last `capture_video` handed a tick to the capture source.
-    /// A push source with no picture to encode can leave the tick armed,
-    /// even when `capture_video` collected the previous tick's output.
+    /// A source with no picture to encode can leave the tick armed, even when
+    /// `capture_video` collected the previous tick's output. Thread C asks a
+    /// push source again when it wakes thread C or at its
+    /// `capture_idle_until`, and a pull source, which names no time, after
+    /// `drain_poll()`: never at once, which would spin thread C.
     fn submitted_video(&self) -> bool {
         true
     }
     /// When a push source that currently has nothing to submit next needs a
     /// tick, including for a `keyframe_due` if it has a picture to repeat.
-    /// It wakes thread C if new work arrives sooner. `None` paces normally.
+    /// It wakes thread C if new work arrives sooner. `None` paces normally;
+    /// see `submitted_video` for a capture that submitted nothing.
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         let _ = keyframe_due;
         None

@@ -457,6 +457,9 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     keyframe: bool,
     pacer: Pacer,
     pace_fps: u32,
+    /// When a pull source that had nothing to submit is asked again, its tick
+    /// still armed (`capture_poll_after`).
+    capture_poll_due: Option<Instant>,
     /// The next context check, or the next retry while unavailable.
     context_due: Instant,
     cursor_due: Instant,
@@ -549,6 +552,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             keyframe: true,
             pacer: Pacer::new(pace_fps, now),
             pace_fps,
+            capture_poll_due: None,
             context_due: now,
             cursor_due: now,
             cursor_shapes: false,
