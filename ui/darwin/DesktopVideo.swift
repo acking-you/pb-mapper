@@ -463,8 +463,12 @@ private final class VideoDecoder {
     return VTIsHardwareDecodeSupported(codec.type)
   }
 
-  /// One sample's picture; nil when the decoder dropped it.
-  func decode(_ bytes: UnsafeMutablePointer<UInt8>, _ length: Int) throws -> CVPixelBuffer? {
+  /// One sample's picture, nil when the decoder dropped it, and, when
+  /// [timed], how long VTDecompressionSessionDecodeFrame took in
+  /// nanoseconds. Untimed, it reads no clock.
+  func decode(_ bytes: UnsafeMutablePointer<UInt8>, _ length: Int, timed: Bool) throws
+    -> (image: CVPixelBuffer?, ns: UInt64?)
+  {
     guard let session = session else { throw DecoderLost() }
     // The sample borrows the bitstream's buffer: decoding is synchronous,
     // so nothing reads it once this call returns.
@@ -487,14 +491,16 @@ private final class VideoDecoder {
     outputStatus = 0
     outputImage = nil
     var info = VTDecodeInfoFlags()
+    let started = timed ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0
     let status = VTDecompressionSessionDecodeFrame(
       session, sampleBuffer: ready, flags: [], frameRefcon: nil, infoFlagsOut: &info)
+    let ns = timed ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- started : nil
     let result = status != 0 ? status : outputStatus
     let image = outputImage
     outputImage = nil
     if result == invalidSessionErr || result == decoderNotAvailableNowErr { throw DecoderLost() }
     try check(result, "Decode \(codec.name)")
-    return image
+    return (image, ns)
   }
 
   func close() {
@@ -589,7 +595,16 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
   private var lastRecovery = ""
   private var decoderName = ""
   private var lowLatency = false
+  private var hardware: Bool?
+  // While a stats read asks for timings: from a picture's publication to
+  // the compositor taking it, and VTDecompressionSessionDecodeFrame's own
+  // time (key frames included).
   private var surfaceConsume: Timing?
+  private var decodeTime: Timing?
+  /// While timed: the Feed thread's CPU time at the end of the last unit it
+  /// decoded. Its thread starts at attach, so this counts from there; gone
+  /// when the timings stop or the thread does.
+  private var decoderCpuNs: UInt64?
 
   init(textures: FlutterTextureRegistry, library: VideoLibrary) {
     self.textures = textures
@@ -638,6 +653,7 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     lock.lock()
     stopping = false
     revision += 1
+    decoderCpuNs = nil
     lock.unlock()
   }
 
@@ -649,21 +665,29 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     textures?.unregisterTexture(textureId)
   }
 
-  /// [timings] starts the timing accumulator, or keeps it; false drops it.
+  /// [timings] starts the timing accumulators, or keeps them; false drops
+  /// them, and the decoder thread's CPU time with them.
   func stats(timings: Bool) -> [String: Any] {
     lock.lock()
     defer { lock.unlock() }
     if !timings {
       surfaceConsume = nil
+      decodeTime = nil
+      decoderCpuNs = nil
     } else if surfaceConsume == nil {
       surfaceConsume = Timing()
+      decodeTime = Timing()
     }
     var values: [String: Any] = [
       "submitted": submitted, "decoded": decoded, "presented": presented, "dropped": dropped,
       "configurations": configurations, "recoveries": recoveries, "lastRecovery": lastRecovery,
       "decoder": decoderName, "lowLatency": lowLatency,
     ]
-    if let timing = surfaceConsume { values["timings"] = ["surface_consume": timing.snapshot] }
+    if let hardware = hardware { values["hardware"] = hardware }
+    if let surface = surfaceConsume, let decode = decodeTime {
+      values["timings"] = ["surface_consume": surface.snapshot, "decode": decode.snapshot]
+    }
+    if let cpu = decoderCpuNs { values["decoderCpuMs"] = Double(cpu) / 1_000_000 }
     return values
   }
 
@@ -746,12 +770,25 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     lock.unlock()
   }
 
-  /// A unit goes to the decoder: the revision its picture belongs to.
-  func submit() -> UInt64 {
+  /// A unit goes to the decoder: the revision its picture belongs to, and
+  /// whether a stats read asked for timings.
+  func submit() -> (revision: UInt64, timed: Bool) {
     lock.lock()
     defer { lock.unlock() }
     submitted += 1
-    return revision
+    return (revision, decodeTime != nil)
+  }
+
+  /// A timed unit is done: its decode time, when it reached the decoder,
+  /// and the Feed thread's CPU time so far. Timings stopped meanwhile keep
+  /// neither.
+  func measured(decodeNs: UInt64?, threadCpuNs: UInt64) {
+    lock.lock()
+    if let timing = decodeTime {
+      if let ns = decodeNs { timing.add(ns) }
+      decoderCpuNs = threadCpuNs
+    }
+    lock.unlock()
   }
 
   func drop() {
@@ -765,6 +802,7 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     configurations += 1
     decoderName = decoder.name
     lowLatency = decoder.realTime
+    hardware = decoder.hardware
     lock.unlock()
   }
 
@@ -873,9 +911,17 @@ private final class Feed {
       return
     }
     awaitingKey = false
-    let revision = viewer.submit()
+    let (revision, timed) = viewer.submit()
+    var decodeNs: UInt64?
+    // While timed, once the unit is done, failed or not: what its decode
+    // took and this thread's CPU time so far.
+    defer {
+      if timed {
+        viewer.measured(decodeNs: decodeNs, threadCpuNs: clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID))
+      }
+    }
     do {
-      try decode(base, unit, revision)
+      decodeNs = try decode(base, unit, revision, timed: timed)
     } catch is DecoderLost {
       // Not a decoding failure: the system took the session back. The next
       // key frame builds a new one; ask for it, unless the source is paused,
@@ -901,8 +947,11 @@ private final class Feed {
 
   /// A decoder is configured only at a key frame: when there is none (after
   /// a failure too), when the codec or the size changed, which happen only
-  /// at a key frame, or when its parameter sets changed.
-  private func decode(_ base: UnsafeMutablePointer<UInt8>, _ unit: UnitMeta, _ revision: UInt64) throws {
+  /// at a key frame, or when its parameter sets changed. When [timed], what
+  /// the decode took, in nanoseconds.
+  private func decode(_ base: UnsafeMutablePointer<UInt8>, _ unit: UnitMeta, _ revision: UInt64, timed: Bool)
+    throws -> UInt64?
+  {
     let codec = unit.codec
     try bitstream.split(base, unit.length, codec)
     let changedSets = unit.key && bitstream.takeParameterSets(base, codec)
@@ -915,20 +964,20 @@ private final class Feed {
     }
     guard let sample = bitstream.assemble(base, codec), let running = decoder else {
       viewer.drop()
-      return
+      return nil
     }
-    var image: CVPixelBuffer?
+    var decoded: (image: CVPixelBuffer?, ns: UInt64?)
     do {
-      image = try running.decode(sample.bytes, sample.length)
+      decoded = try running.decode(sample.bytes, sample.length, timed: timed)
     } catch is DecoderLost where unit.key {
       // Lost while the app was away, and this key frame starts over: a new
       // session takes it at once.
       try configure(unit)
-      image = try decoder?.decode(sample.bytes, sample.length)
+      decoded = try decoder?.decode(sample.bytes, sample.length, timed: timed) ?? (nil, nil)
     }
-    guard let picture = image else {
+    guard let picture = decoded.image else {
       viewer.drop()
-      return
+      return decoded.ns
     }
     guard CVPixelBufferGetWidth(picture) == Int(unit.width),
       CVPixelBufferGetHeight(picture) == Int(unit.height)
@@ -937,6 +986,7 @@ private final class Feed {
     }
     viewer.publish(
       Picture(buffer: picture, generation: unit.generation, frame: unit.frame, revision: revision))
+    return decoded.ns
   }
 
   private func configure(_ unit: UnitMeta) throws {
@@ -1071,6 +1121,25 @@ private enum DecoderProbe {
     #endif
     return hz > 1 ? hz : 60
   }
+
+  #if os(macOS)
+    /// Platform thread: the fastest refresh of the display [window] is on,
+    /// where the viewer presents; the fastest display's while the window is
+    /// on none (hidden, or no window yet).
+    static func windowHz(_ window: NSWindow?) -> Double {
+      guard let screen = window?.screen else { return displayMaxHz() }
+      if #available(macOS 12.0, *) {
+        let hz = Double(screen.maximumFramesPerSecond)
+        return hz > 1 ? hz : displayMaxHz()
+      }
+      let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+      guard let display = number?.uint32Value, let mode = CGDisplayCopyDisplayMode(display) else {
+        return displayMaxHz()
+      }
+      // A built-in panel reports 0 here: it is taken as 60, as above.
+      return mode.refreshRate > 1 ? mode.refreshRate : 60
+    }
+  #endif
 }
 
 /// The `pb_mapper/desktop_video` channel: probes the decoders, and creates,
@@ -1081,6 +1150,12 @@ final class DesktopVideoPlugin: NSObject, FlutterPlugin {
   /// Resolved by the first create: Dart has loaded the library by then.
   private var library: VideoLibrary?
   private var viewers: [Int64: DesktopVideoViewer] = [:]
+  #if os(macOS)
+    /// Its `view` is the Flutter view, whose window's display each stats
+    /// read takes the refresh from: the window can move. It holds the
+    /// engine only weakly, so holding it here makes no cycle.
+    private var registrar: FlutterPluginRegistrar?
+  #endif
 
   private init(textures: FlutterTextureRegistry) {
     self.textures = textures
@@ -1095,8 +1170,22 @@ final class DesktopVideoPlugin: NSObject, FlutterPlugin {
       let messenger = registrar.messenger
       let textures = registrar.textures
     #endif
+    let plugin = DesktopVideoPlugin(textures: textures)
+    #if os(macOS)
+      plugin.registrar = registrar
+    #endif
     let channel = FlutterMethodChannel(name: channelName, binaryMessenger: messenger)
-    registrar.addMethodCallDelegate(DesktopVideoPlugin(textures: textures), channel: channel)
+    registrar.addMethodCallDelegate(plugin, channel: channel)
+  }
+
+  /// The stats' refresh: on macOS the viewer window's display's, on iOS the
+  /// device's.
+  private var refreshHz: Double {
+    #if os(macOS)
+      return DecoderProbe.windowHz(registrar?.view?.window)
+    #else
+      return DecoderProbe.displayMaxHz()
+    #endif
   }
 
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -1145,7 +1234,7 @@ final class DesktopVideoPlugin: NSObject, FlutterPlugin {
       viewer.snapshot(path: path, maxWidth: width) { result($0) }
     case "stats":
       var stats = viewer.stats(timings: args["timings"] as? Bool ?? true)
-      stats["refreshHz"] = DecoderProbe.displayMaxHz()
+      stats["refreshHz"] = refreshHz
       result(stats)
     case "dispose":
       viewers.removeValue(forKey: id)
