@@ -1,5 +1,7 @@
 //! The hand-off from thread C to B-send: encoded units waiting for send credit.
-//! A slow viewer keeps a decodable prefix and resumes at a keyframe after a gap.
+//! A slow viewer keeps a decodable prefix, and after a gap resumes at a
+//! keyframe. Any keyframe supersedes the units still waiting: none has a seq
+//! yet, and nothing after a keyframe refers to anything before it.
 use crate::{
     VideoCodec,
     worker::{ENCODER_DEPTH, TRANSPORT_GATE},
@@ -134,7 +136,13 @@ impl Outgoing {
             };
         }
         let mut result = Push::default();
-        if full {
+        // A keyframe supersedes the units still waiting, full or not, so the
+        // newer independent picture goes next. None of them has a seq yet,
+        // since B-send books one at the write, so the seq stays contiguous;
+        // and a keyframe is an H.264 IDR, an H.265 IRAP or a JPEG picture,
+        // with no frame reordered, so nothing after it refers to anything
+        // older. A full hand-off gets here only with a keyframe.
+        if unit.keyframe {
             result.dropped = q.units.len();
             q.units.clear();
         }
@@ -256,11 +264,50 @@ mod tests {
         );
         assert_eq!(outgoing.push(unit(1, full + 4, true, 1)).dropped, 1);
         assert!(outgoing.peek_meta().unwrap().keyframe);
-        outgoing.push(unit(2, full + 5, true, 10));
+        // C drops the old generation before it pushes the new one's IDR.
         assert_eq!(outgoing.retain_generation(2), 1);
+        assert_eq!(outgoing.push(unit(2, full + 5, true, 10)), Push::default());
         assert_eq!(outgoing.pop().unwrap().frame_id, full + 5);
         assert_eq!(outgoing.clear(), 0);
         let produced = outgoing.produced();
         assert_eq!((produced.frames, produced.keyframes), (full + 5, 4));
+    }
+
+    /// A keyframe pushed behind units still waiting for credit replaces them,
+    /// and they count as dropped; what follows it queues behind it as usual.
+    #[test]
+    fn a_keyframe_supersedes_what_waits_ahead_of_it() {
+        let outgoing = Outgoing::new();
+        assert_eq!(outgoing.push(unit(1, 1, true, 10)), Push::default());
+        assert_eq!(outgoing.pop().unwrap().frame_id, 1);
+        for frame in [2, 3] {
+            assert_eq!(outgoing.push(unit(1, frame, false, 10)), Push::default());
+        }
+        assert_eq!(
+            outgoing.push(unit(1, 4, true, 10)),
+            Push {
+                dropped: 2,
+                request_idr: false,
+            }
+        );
+        let head = outgoing.peek_meta().unwrap();
+        assert_eq!((head.frame_id, head.keyframe), (4, true));
+        assert_eq!(outgoing.len(), 1);
+        // Production still counts every unit encoded, superseded or not.
+        let produced = outgoing.produced();
+        assert_eq!((produced.frames, produced.keyframes), (4, 2));
+        assert_eq!(outgoing.push(unit(1, 5, false, 10)), Push::default());
+        assert_eq!(outgoing.len(), 2);
+
+        // Every JPEG picture is a keyframe: only the newest waits.
+        let jpeg = |frame_id| HostUnit {
+            codec: VideoCodec::Jpeg,
+            ..unit(1, frame_id, true, 10)
+        };
+        let outgoing = Outgoing::new();
+        assert_eq!(outgoing.push(jpeg(1)), Push::default());
+        assert_eq!(outgoing.push(jpeg(2)).dropped, 1);
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing.pop().unwrap().frame_id, 2);
     }
 }
