@@ -196,15 +196,17 @@ pub(crate) fn ensure_ready() -> Result<()> {
 pub(super) fn status_with(update_check: bool) -> Status {
     // A loaded service may outlive a damaged/unreadable installation.json.
     // Only an affirmative SCM "does not exist" permits treating it as absent.
-    let (exists, running, startup_disabled) = match os::service_state() {
-        Ok(Some((running, startup_disabled))) => (true, running, startup_disabled),
-        Ok(None) => (false, false, false),
-        Err(_) => (true, false, false),
+    // One query: the process it reports running is the one verified below.
+    let (exists, service) = match os::service_state() {
+        Ok(Some(service)) => (true, service),
+        Ok(None) => (false, os::Service::default()),
+        Err(_) => (true, os::Service::default()),
     };
+    let running = service.running;
     match configuration() {
         Ok(config) => {
             let identity = if running {
-                os::verify_running_service(&config.helper_executable)
+                os::verify_running_service(service.process, &config.helper_executable)
             } else {
                 Err(error("Windows desktop service is not running"))
             };
@@ -213,7 +215,7 @@ pub(super) fn status_with(update_check: bool) -> Status {
             Status {
                 installed: true,
                 running,
-                startup_disabled,
+                startup_disabled: service.startup_disabled,
                 owned_by_user,
                 authorized_application: owned_by_user
                     && std::env::current_exe()
@@ -238,7 +240,7 @@ pub(super) fn status_with(update_check: bool) -> Status {
         Err(e) => Status {
             installed: exists,
             running,
-            startup_disabled,
+            startup_disabled: service.startup_disabled,
             message: e.to_string(),
             ..Default::default()
         },

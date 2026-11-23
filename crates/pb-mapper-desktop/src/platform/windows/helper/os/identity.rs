@@ -267,8 +267,13 @@ pub fn verify_server(
     verify_process_image(id, expected)
 }
 
-pub fn verify_running_service(expected: &Path) -> Result<()> {
-    verify_process_image(running_service_pid()?, expected)
+/// That `process`, the service's process as the query that found it running
+/// reported it, runs `expected`.
+pub fn verify_running_service(process: u32, expected: &Path) -> Result<()> {
+    if process == 0 {
+        return Err(error("helper service is not running"));
+    }
+    verify_process_image(process, expected)
 }
 
 fn verify_process_image(id: u32, expected: &Path) -> Result<()> {
