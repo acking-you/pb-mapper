@@ -323,7 +323,8 @@ Nothing in the SDK crates knows it exists.
     macOS `platform/macos/priority.rs` (the user-interactive QoS class),
     nothing elsewhere
   - `credit.rs`, `qos.rs`, `idr.rs`, `outgoing.rs`: Receipt credit, delay-based
-    QoS, on-demand IDRs, and the hand-off from thread C to B-send
+    QoS (`qos/receipt_rate.rs`, a receipt-rate estimator that is only traced),
+    on-demand IDRs, and the hand-off from thread C to B-send
   - `protocol.rs`, `wire.rs`, `invite.rs`, `security.rs`, `auth.rs`: Protocol v2
     (ALPN `pb-mapper/desktop/2`), invitations, certificate pinning, and the
     input authorisation ledger

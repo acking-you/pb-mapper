@@ -1462,7 +1462,10 @@ window of four pictures and 2 MiB.
 
 Receipts reach only the credit ledger and the QoS controller. They never reach
 the input ledger, the backend or the control lease, and no authorisation method
-takes a sequence number.
+takes a sequence number. In the QoS controller they also feed a receipt-rate
+estimator that runs in shadow: it is traced (see
+[Diagnostics](#diagnostics)) and no frame rate, bitrate or credit decision
+reads it.
 
 ### QoS: frame rate and bits per frame
 
@@ -1839,15 +1842,35 @@ The host traces each second as `desktop_feedback_interval` on
 `pb_mapper_desktop::feedback` (debug): `action`, `fps`, `pace_fps`,
 `viewer_cap`, `paused`, `unresponsive`, `bpf`, `bitrate`, `encoder_bitrate`,
 `sent_bitrate`, `rate_model`, `rtt_ms`, `baseline_ms`, `delay_ms`, `tainted`,
-`ack_queue_ms`, `window_frames`, `window_bytes`, `window_clamped`,
+`ack_queue_ms`, `standing_ms`, `busy_bps`, `used_bps`, `would_cut`,
+`window_frames`, `window_bytes`, `window_clamped`,
 `outstanding_frames`, `outstanding_bytes`, `idr_inflight`, `skipped_ticks`,
 `encoder_dwell_ms`, `keyframes`, `gop`, `input_wait_p50_us`,
 `input_wait_p99_us` and
 `input_wait_max_us`. The presentation-credit fields `quality`, `waiting`,
-`recovering`, `desired_window_bytes` and `last_ack_*` are gone. Each written
-unit is traced as `desktop_frame` on `pb_mapper_desktop::frames` (trace level),
-and the viewer traces each accepted presentation as `desktop_frame_view` with
-the same `seq`. `deployed --feedback-log` enables both host targets.
+`recovering`, `desired_window_bytes` and `last_ack_*` are gone.
+
+`standing_ms`, `busy_bps`, `used_bps` and `would_cut` come from the
+receipt-rate estimator, which only records what a receipt-driven rate control
+would see; nothing acts on them. It keeps the receipts of H.264 and H.265
+video from the last second, at most 240, each with the delay of the newest
+unit it covered and the bytes it covered, and forgets them on a path change
+and on a resume. A frame interval is one at the current pace.
+
+| Field | Definition |
+| --- | --- |
+| `standing_ms` | The least receipt delay above the base RTT over the newest receipts: at least three, spanning at least two frame intervals and 50 ms (at most 500 ms), so a burst a few milliseconds long never makes a queue on its own |
+| `busy_bps` | The median delivery rate (of two, the lower) over the newest eight receipt pairs across which the link stayed busy, the later unit's delay above the base RTT being at least the pair's gap; none below three. Receipts less than a quarter of a frame interval apart are compression, not delivery: such a pair is no sample, and its later receipt's bytes count toward the pair before it |
+| `used_bps` | What the receipts of the last second covered, from the first of them to the last; none over less than 100 ms |
+| `would_cut` | A receipt since the last trace showed a standing queue above 40 ms once each unit's own transfer at the busy rate (at most a frame interval) is taken off, with a busy rate known, no unit in its window behind an IDR, and outside a stall: the burst of receipts less than a quarter of a frame interval apart that follows a receipt gap of at least three frame intervals |
+
+Without a receipt in the last second the first three are absent, and without a
+base RTT `standing_ms` and `busy_bps` are.
+
+Each written unit is traced as `desktop_frame` on `pb_mapper_desktop::frames`
+(trace level), and the viewer traces each accepted presentation as
+`desktop_frame_view` with the same `seq`. `deployed --feedback-log` enables
+both host targets.
 
 Each session's lifecycle is logged at info on `pb_mapper_desktop::session`:
 `desktop_host_accepted`, `desktop_host_rejected`, `desktop_host_session_ended`
