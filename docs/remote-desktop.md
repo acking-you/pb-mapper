@@ -1114,14 +1114,14 @@ on every platform.
 crates/pb-mapper-desktop/src/
   backend.rs  native.rs  launch.rs  modes.rs     the seams and the glue
   codec/{annexb,avcc,pipeline}.rs                Annex B and AVCC/HVCC, encoder rules
-  input/{held,cursor}.rs                         release obligation, confinement, shapes
+  input/{held,cursor}.rs                         release obligation, confinement, shapes, settling moves
   oop/{proto,ipc,client,server}.rs               the out-of-process backend
   platform/mod.rs  unsupported.rs  waiter.rs     traits, Current, facade
-  platform/windows/{desktop,input,cursor,still,waiter,timer,mf,dpapi,modes,win32}.rs
+  platform/windows/{desktop,input,pointer,cursor,still,waiter,timer,mf,dpapi,modes,win32}.rs
   platform/windows/video/                        capture, scale and encode, fused
   platform/windows/helper/                       service, install, worker, pipes
   platform/macos/{mod,cf,capture,encoder,video,desktop,geometry,input,clicks,
-    keys,pixels,cursor,modes,mode_list,still,timer,waiter,keychain}.rs
+    keys,pixels,pointer,cursor,modes,mode_list,still,timer,waiter,keychain}.rs
   privileged/                                    public helper facade
 ```
 
@@ -1129,10 +1129,45 @@ crates/pb-mapper-desktop/src/
 | --- | --- | --- |
 | `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope | `CGDirectDisplayID` from `CGGetActiveDisplayList`, named by its UUID, which finds it again; `CGDisplayBounds` × the current mode's pixels per point; a session that is not on the console, or a locked screen, is the secure desktop |
 | `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`) that thread C polls: drained every 2 ms while it holds units, and, after a capture with no new present, asked again every 2 ms for 250 ms after an injected input or a new picture, and once a period otherwise | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
-| `Input` | enigo; `SendInput` with `KEYEVENTF_SCANCODE` for physical keys (a HID usage to its set-1 scancode); `SetCursorPos` for absolute moves; `LockWorkStation` | `CGEvent` at the HID tap: pointer and wheel in the bound display's points, click counts for double clicks, named letters and digits at the key the Mac's layout types them with, other keys and physical keys by `kVK_*` place, modifiers as flag changes with left and right apart, text as Unicode string events of at most 20 UTF-16 units; no lock (`LOCK = false`) |
-| `Cursor` | `GetCursorInfo`; the shape once per new `HCURSOR`: its kind from the `LoadCursorW` standard handles, its bitmap from `GetIconInfo` and `GetDIBits` (colour, alpha or AND mask; monochrome AND/XOR, an inverting pixel drawn black outlined in white) | `CGEventGetLocation`, separate; the shape when the window server's cursor seed moves (a private `CGSCurrentCursorSeed`, looked up with `dlsym`; without it at most every 500 ms): `NSCursor.currentSystemCursor` drawn at the display's scale, a kind only where it equals a standard cursor pixel for pixel, else `custom` |
+| `Input` | enigo; `SendInput` with `KEYEVENTF_SCANCODE` for physical keys (a HID usage to its set-1 scancode); absolute moves as one `SendInput` event each (see [Pointer moves on Windows](#pointer-moves-on-windows)); `LockWorkStation` | `CGEvent` at the HID tap: pointer and wheel in the bound display's points, click counts for double clicks, named letters and digits at the key the Mac's layout types them with, other keys and physical keys by `kVK_*` place, modifiers as flag changes with left and right apart, text as Unicode string events of at most 20 UTF-16 units; no lock (`LOCK = false`) |
+| `Cursor` | `GetCursorInfo`, separate, the injected pixel until it shows a move; the shape once per new `HCURSOR`: its kind from the `LoadCursorW` standard handles, its bitmap from `GetIconInfo` and `GetDIBits` (colour, alpha or AND mask; monochrome AND/XOR, an inverting pixel drawn black outlined in white) | `CGEventGetLocation`, separate, the injected pixel until it shows a move; the shape when the window server's cursor seed moves (a private `CGSCurrentCursorSeed`, looked up with `dlsym`; without it at most every 500 ms): `NSCursor.currentSystemCursor` drawn at the display's scale, a kind only where it equals a standard cursor pixel for pixel, else `custom` |
 | `Modes` / `Still` | `WinModes` (dynamic changes only; see [Remote resolution](#remote-resolution)) / xcap JPEG | Core Graphics modes for this app only (`kCGConfigureForAppOnly`) / `SCScreenshotManager` and ImageIO JPEG, macOS 14 and later |
 | `Grant` | none | the Screen Recording grant; Accessibility is checked at each input |
+
+### Pointer moves on Windows
+
+A Windows host injects each move as input: one `SendInput` event with
+`MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`, and
+`MOUSEEVENTF_MOVE_NOCOALESCE` while a button it pressed is held, marked as
+its other input is. Low-level mouse hooks and raw-input readers see it, the
+idle timer counts it, and while a button is held Windows posts each move
+rather than merging them into the next `WM_MOUSEMOVE`, so a stroke drawn
+remotely keeps its points. Raw input gets it as an absolute move
+(`MOUSE_MOVE_ABSOLUTE`), not as a delta. Through 0.12.1 the host placed the
+pointer with `SetCursorPos`, which is no input at all. The pixel is scaled
+to 0–65535 over the virtual desktop that `GetSystemMetrics` reports at that
+move, in thread C's per-monitor DPI scope: the least value that falls on
+that pixel when Windows truncates the scaled coordinate, which falls there
+too when it rounds, as a unit test checks for every pixel of 1920-, 3840-
+and 7680-pixel axes. The system applies a move after `SendInput` returns, so
+the cursor reports the injected pixel until `GetCursorInfo` shows it or 250
+ms pass after the last move, as a Mac host does after `CGEventPost`; the
+controller's own move still comes back as its echo.
+
+`SendInput` takes nothing while another thread blocks input, and UIPI drops
+a host's input to a window of higher integrity (an elevated program in front
+of an app that is not elevated), which `SendInput` need not report. A move
+`SendInput` refuses is placed with `SetCursorPos`. A settle window that ends
+with the pointer where an earlier read in it found it, short of a target
+inside the cursor's clip, means the moves never took effect: the host then
+places the pointer for every move while the window then in the foreground
+stays there, and warns `desktop_moves_placed` once with its token's session,
+integrity level and UIAccess. A target outside the clip (`ClipCursor`, a
+game's window) is a clamp, which placing would not change. A program that
+puts the pointer back itself, as a game that recentres it does, can look the
+same; its window then gets placed moves, as every window did before. The
+desktop service's worker runs as SYSTEM, above every window's integrity
+level, with the same injector.
 
 ### Adding an operating system
 
@@ -1819,7 +1854,7 @@ shapes by content, never by number.
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued; IDR grace 500 ms; stall watchdog 700 ms |
 | fps cap | tick 250 ms; × 0.9 direct, × 0.8 relay; minimum 5; +5 after 3 s; ≥ 1 s between changes |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
-| Cursor | sampled every 16 ms; the controller's own move never reported; a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
+| Cursor | sampled every 16 ms; the controller's own move never reported; an injected move is the pointer until the OS shows it, at most 250 ms after the last (`SETTLE`); a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
 | Codec | `Accepted` waits at most 3 s for the backend's display and H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3 |
 
 ### Diagnostics
@@ -1896,7 +1931,10 @@ Each session's lifecycle is logged at info on `pb_mapper_desktop::session`:
 `desktop_viewer_ended` (reason, detail, seconds, keyframes,
 `keyframes_requested`, `backlog_drops`); a host also logs each H.265 probe as
 `desktop_h265_probe` (usable, ms, detail) and warns `desktop_h265_failed`
-when an H.265 encoder fails and H.265 is turned off. A Mac host logs each
+when an H.265 encoder fails and H.265 is turned off. A Windows host warns
+`desktop_moves_placed` (token: the session, integrity level and UIAccess of
+its process) when its injected moves stopped taking effect and it places the
+pointer instead ([Pointer moves on Windows](#pointer-moves-on-windows)). A Mac host logs each
 encoder it opens as `macos_encoder_opened` (codec, `low_latency`, width,
 height, fps, hardware, gop, and `data_rate_limits`: whether VideoToolbox took
 the cap of 1.5 × the mean over 1 s), after

@@ -1,4 +1,5 @@
 //! The pointer on Windows: where it is, whether it shows, and its shape.
+use super::pointer;
 use crate::{
     CursorKind, CursorMode, CursorShape, Result, error,
     platform::{CursorSource, ShapeReads},
@@ -35,8 +36,9 @@ const STANDARD: [(PCWSTR, CursorKind); 14] = [
     (IDC_UPARROW, CursorKind::UpArrow),
 ];
 
-#[derive(Default)]
 pub(crate) struct WinCursor {
+    /// The injector's last move, reported until `GetCursorInfo` shows it.
+    pointer: pointer::Shared,
     /// The cursor the last `read` saw; null when none shows.
     seen: HCURSOR,
     /// The cursors whose shape `shape` read, or failed to.
@@ -44,9 +46,20 @@ pub(crate) struct WinCursor {
     /// The system cursors' shared handles, loaded at the first shape read.
     standard: Vec<(HCURSOR, CursorKind)>,
 }
+impl WinCursor {
+    pub(crate) fn new(pointer: pointer::Shared) -> Self {
+        Self {
+            pointer,
+            seen: HCURSOR::default(),
+            reads: ShapeReads::default(),
+            standard: Vec::new(),
+        }
+    }
+}
 impl CursorSource for WinCursor {
     const MODE: CursorMode = CursorMode::Separate;
     const SHAPES: bool = true;
+    /// A move the injector made counts once made (`pointer.rs`).
     fn read(&mut self) -> Result<Option<(i32, i32, bool)>> {
         let mut cursor = CURSORINFO {
             cbSize: size_of::<CURSORINFO>() as u32,
@@ -61,7 +74,10 @@ impl CursorSource for WinCursor {
             cursor.flags.0 & CURSOR_SHOWING.0 != 0 && cursor.flags.0 & CURSOR_SUPPRESSED.0 == 0;
         self.seen = cursor.hCursor;
         let point = cursor.ptScreenPos;
-        Ok(Some((point.x, point.y, showing)))
+        let mut moves = self.pointer.get();
+        let (x, y) = moves.settle((point.x, point.y), std::time::Instant::now());
+        self.pointer.set(moves);
+        Ok(Some((x, y, showing)))
     }
     /// A new handle is read once, as `ShapeReads` says: its kind by the
     /// system cursors' handles, its bitmap through `GetIconInfo`.

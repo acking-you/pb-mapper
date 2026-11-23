@@ -1,14 +1,18 @@
 //! Injection on Windows: enigo for buttons, the wheel, keys and text,
-//! `SendInput` scancodes for physical keys, `SetCursorPos` for absolute
-//! moves and `LockWorkStation`, with the token diagnostics a rejected
-//! injection records.
+//! `SendInput` for absolute moves and physical keys' scancodes,
+//! `LockWorkStation`, with the token diagnostics a rejected injection
+//! records.
+use super::pointer;
 use crate::{
     Button, DoubleClickGuard, Key, Result, error,
     input::held::{NativeKeys, Pressed},
     platform::Injector,
 };
 use enigo::{Axis, Direction, Enigo, Keyboard, Mouse};
-use std::os::windows::io::{FromRawHandle, OwnedHandle};
+use std::{
+    os::windows::io::{FromRawHandle, OwnedHandle},
+    time::Instant,
+};
 use windows::Win32::{
     Foundation::{E_UNEXPECTED, GetLastError, HANDLE},
     Security::{
@@ -21,14 +25,16 @@ use windows::Win32::{
     },
     UI::{
         Input::KeyboardAndMouse::{
-            GetDoubleClickTime, GetKeyboardLayout, INPUT, INPUT_0, INPUT_KEYBOARD,
+            GetDoubleClickTime, GetKeyboardLayout, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
             KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
-            KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC_EX, MapVirtualKeyExW, SendInput, VIRTUAL_KEY,
-            VK_NUMLOCK, VK_PAUSE,
+            KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC_EX, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE,
+            MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+            MapVirtualKeyExW, SendInput, VIRTUAL_KEY, VK_NUMLOCK, VK_PAUSE,
         },
         WindowsAndMessaging::{
             GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SM_CXDOUBLECLK,
-            SM_CYDOUBLECLK, SetCursorPos,
+            SM_CXVIRTUALSCREEN, SM_CYDOUBLECLK, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+            SM_YVIRTUALSCREEN, SetCursorPos,
         },
     },
 };
@@ -37,29 +43,52 @@ pub(crate) struct WinInput {
     enigo: Enigo,
     keyboard: KeyboardState,
     keys: NativeKeys,
+    /// Each move made, for the cursor to report until it shows, and
+    /// whether moves place the pointer for now (`pointer.rs`).
+    pointer: pointer::Shared,
+    /// Left, right, middle: held, as this injector pressed and released
+    /// them.
+    buttons: [bool; 3],
 }
 impl WinInput {
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new(pointer: pointer::Shared) -> Result<Self> {
         Ok(Self {
             enigo: Enigo::new(&enigo::Settings::default()).map_err(error)?,
             keyboard: KeyboardState::default(),
             keys: NativeKeys::default(),
+            pointer,
+            buttons: [false; 3],
         })
     }
 }
 impl Injector for WinInput {
     const LOCK: bool = true;
     const PHYSICAL_KEYS: bool = true;
+    /// Injected through `SendInput`, which the system applies after it
+    /// returns: the cursor reports `(x, y)` until it shows it. Placed with
+    /// `SetCursorPos` where `SendInput` takes nothing, or while placing
+    /// (`pointer.rs`).
     fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
-        // Enigo 0.6 absolute movement normalizes to the primary screen.
-        // The Windows API accepts physical virtual-desktop coordinates,
-        // including a selected display left/above the primary display.
-        unsafe { SetCursorPos(x, y) }.map_err(native_input_error)
+        let mut moves = self.pointer.get();
+        let made = if !moves.placing() && self.send_move(x, y) {
+            Ok(())
+        } else {
+            // SAFETY: plain coordinates, physical pixels in thread C's
+            // per-monitor DPI scope, as `x` and `y` are.
+            unsafe { SetCursorPos(x, y) }
+        };
+        if made.is_ok() {
+            moves.moved((x, y), Instant::now());
+        }
+        self.pointer.set(moves);
+        made.map_err(native_input_error)
     }
     fn button(&mut self, button: Button, down: bool) -> Result<()> {
         self.enigo
             .button(button_code(button), direction(down))
-            .map_err(native_input_error)
+            .map_err(native_input_error)?;
+        self.buttons[button_index(button)] = down;
+        Ok(())
     }
     fn wheel(&mut self, horizontal: i32, vertical: i32) -> Result<()> {
         if horizontal != 0 {
@@ -111,15 +140,66 @@ impl Injector for WinInput {
     /// A release that fails is retried at the next release, quietly.
     fn release(&mut self, pressed: Pressed) -> Result<()> {
         match pressed {
-            Pressed::Button(button) => self
-                .enigo
-                .button(button_code(button), Direction::Release)
-                .map_err(error),
+            Pressed::Button(button) => {
+                self.enigo
+                    .button(button_code(button), Direction::Release)
+                    .map_err(error)?;
+                self.buttons[button_index(button)] = false;
+                Ok(())
+            }
             Pressed::Key(_) | Pressed::Physical(_) => self.send_key(pressed, false),
         }
     }
 }
 impl WinInput {
+    /// One absolute move to physical pixel `(x, y)` through `SendInput`,
+    /// scaled to the virtual desktop as it is now, read in thread C's
+    /// per-monitor DPI scope: four metric reads, so no display change goes
+    /// unseen. While a button is held, Windows delivers every move rather
+    /// than merging them into the next `WM_MOUSEMOVE`, so a stroke keeps its
+    /// points. `false` with no virtual desktop to scale to, or when
+    /// `SendInput` took nothing.
+    fn send_move(&self, x: i32, y: i32) -> bool {
+        // SAFETY: metric reads, with no arguments but the metric.
+        let (left, top, width, height) = unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        };
+        let (Some(dx), Some(dy)) = (
+            pointer::absolute(x, left, width),
+            pointer::absolute(y, top, height),
+        ) else {
+            return false;
+        };
+        let held = if self.buttons.contains(&true) {
+            MOUSEEVENTF_MOVE_NOCOALESCE
+        } else {
+            MOUSE_EVENT_FLAGS(0)
+        };
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx,
+                    dy,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE
+                        | MOUSEEVENTF_ABSOLUTE
+                        | MOUSEEVENTF_VIRTUALDESK
+                        | held,
+                    time: 0,
+                    dwExtraInfo: self.enigo.get_marker_value(),
+                },
+            },
+        };
+        // SAFETY: one initialised `INPUT`, its size as the call requires.
+        unsafe { SendInput(&[input], size_of::<INPUT>() as i32) == 1 }
+    }
+
     fn send_key(&mut self, source: Pressed, down: bool) -> Result<()> {
         let Some((posted, _)) = self.keys.route(source, down, || native_key(source)) else {
             return Ok(());
@@ -337,6 +417,18 @@ fn native_input_error(failure: impl std::fmt::Display) -> std::io::Error {
     // launch context so a failed worker can be diagnosed without guessing or
     // requesting broader privileges. This runs only after failed injection.
     let code = unsafe { GetLastError() }.0;
+    let detail = format!("{failure}; Win32={code}; {}", token_context());
+    #[cfg(feature = "windows-helper")]
+    super::helper::record_input_failure(&detail);
+    tracing::warn!(%detail, "native desktop input failed");
+    error(format!(
+        "Windows rejected remote input (Win32={code}); check the desktop service log"
+    ))
+}
+
+/// This process's token as UIPI judges its input: its session, integrity
+/// level and UIAccess, or why they could not be read.
+pub(super) fn token_context() -> String {
     let context = (|| -> windows::core::Result<String> {
         let mut token = HANDLE::default();
         unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }?;
@@ -381,16 +473,7 @@ fn native_input_error(failure: impl std::fmt::Display) -> std::io::Error {
             ))
         }
     })();
-    let detail = format!(
-        "{failure}; Win32={code}; {}",
-        context.unwrap_or_else(|e| format!("worker token unavailable: {e}"))
-    );
-    #[cfg(feature = "windows-helper")]
-    super::helper::record_input_failure(&detail);
-    tracing::warn!(%detail, "native desktop input failed");
-    error(format!(
-        "Windows rejected remote input (Win32={code}); check the desktop service log"
-    ))
+    context.unwrap_or_else(|e| format!("worker token unavailable: {e}"))
 }
 
 fn direction(down: bool) -> Direction {
@@ -398,6 +481,14 @@ fn direction(down: bool) -> Direction {
         Direction::Press
     } else {
         Direction::Release
+    }
+}
+
+fn button_index(button: Button) -> usize {
+    match button {
+        Button::Left => 0,
+        Button::Right => 1,
+        Button::Middle => 2,
     }
 }
 

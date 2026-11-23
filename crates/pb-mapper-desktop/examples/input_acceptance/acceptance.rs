@@ -283,8 +283,9 @@ async fn exercise(
     let applied = state.applied.load(Ordering::Acquire);
     let (x, y) = ((point.x - display.x) as u32, (point.y - display.y) as u32);
     send(viewer, state, Input::Move { x, y })?;
+    // Applied, and shown: the click's guard reads the system pointer.
     wait_for(state, "native pointer move", || {
-        state.applied.load(Ordering::Acquire) > applied
+        state.applied.load(Ordering::Acquire) > applied && state.pointer_at(point)
     })
     .await?;
     let left = |down, drag_start| Input::Button {

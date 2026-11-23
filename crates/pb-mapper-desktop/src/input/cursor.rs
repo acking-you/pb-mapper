@@ -8,8 +8,8 @@ use std::{io, sync::Arc};
 /// Well past the time an OS takes to apply a posted move, even under load;
 /// a stop short of the injected pixel is reported this late.
 #[cfg_attr(
-    not(any(target_os = "macos", test)),
-    expect(dead_code, reason = "for the Mac host, which posts moves")
+    not(any(windows, target_os = "macos", test)),
+    expect(dead_code, reason = "for the hosts that post moves")
 )]
 pub(crate) const SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -25,8 +25,8 @@ pub(crate) const SETTLE: std::time::Duration = std::time::Duration::from_millis(
 /// the last move (the system stopped it short, someone at the host moved the
 /// mouse, or the move never took effect), the injected pixel is the pointer.
 #[cfg_attr(
-    not(any(target_os = "macos", test)),
-    expect(dead_code, reason = "for the Mac host, which posts moves")
+    not(any(windows, target_os = "macos", test)),
+    expect(dead_code, reason = "for the hosts that post moves")
 )]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Pointer {
@@ -39,8 +39,8 @@ pub(crate) struct Pointer {
 
 /// What a read of the pointer reports while a move settles.
 #[cfg_attr(
-    not(any(target_os = "macos", test)),
-    expect(dead_code, reason = "for the Mac host, which posts moves")
+    not(any(windows, target_os = "macos", test)),
+    expect(dead_code, reason = "for the hosts that post moves")
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Settled {
@@ -55,8 +55,8 @@ pub(crate) struct Settled {
 }
 
 #[cfg_attr(
-    not(any(target_os = "macos", test)),
-    expect(dead_code, reason = "for the Mac host, which posts moves")
+    not(any(windows, target_os = "macos", test)),
+    expect(dead_code, reason = "for the hosts that post moves")
 )]
 impl Pointer {
     /// A move to absolute pixel `to` was posted at `now`.

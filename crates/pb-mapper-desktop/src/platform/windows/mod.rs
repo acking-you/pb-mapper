@@ -1,6 +1,7 @@
 //! The Windows host: the ordinary desktop (or, in the privileged helper's
 //! worker, the bound input desktop), the fused DXGI to D3D11 to Media
-//! Foundation encoder, enigo injection and the pointer, xcap stills; DPAPI;
+//! Foundation encoder, enigo and `SendInput` injection and the pointer,
+//! xcap stills; DPAPI;
 //! the waitable timer and fine timers; and the privileged helper.
 //! Uses published Apache-2.0 xcap and MIT enigo. No RustDesk source is copied.
 
@@ -11,6 +12,7 @@ pub(crate) mod helper;
 pub(crate) mod input;
 pub(crate) mod mf;
 pub(crate) mod modes;
+pub(crate) mod pointer;
 pub(crate) mod still;
 pub(crate) mod timer;
 pub mod video;
@@ -94,11 +96,13 @@ pub(crate) fn open_bound(
     ))
 }
 
-/// A Windows host's parts on `desktop`, which is built first.
+/// A Windows host's parts on `desktop`, which is built first; the injector
+/// and the cursor share the moves made (`pointer.rs`).
 fn parts(desktop: desktop::WinDesktop) -> Result<Parts<Windows>> {
+    let pointer = pointer::Shared::default();
     Ok(Parts {
-        input: input::WinInput::new()?,
-        cursor: cursor::WinCursor::default(),
+        input: input::WinInput::new(pointer.clone())?,
+        cursor: cursor::WinCursor::new(pointer),
         modes: modes::WinModes,
         still: still::XcapJpeg,
         desktop,

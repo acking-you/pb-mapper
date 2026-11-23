@@ -147,6 +147,13 @@ impl State {
         }
         Ok(point)
     }
+    /// Whether the system pointer shows `point`, in physical pixels: an
+    /// injected move takes effect after `SendInput` returns.
+    pub(crate) fn pointer_at(&self, point: POINT) -> bool {
+        let _dpi = DpiScope::enter();
+        let mut at = POINT::default();
+        unsafe { GetCursorPos(&mut at) }.is_ok() && at == point
+    }
     fn contains(&self, point: POINT) -> Result<()> {
         let _dpi = DpiScope::enter();
         let mut client = RECT::default();
