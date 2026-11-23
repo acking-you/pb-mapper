@@ -1952,10 +1952,12 @@ left out; while the connection is down the core rows show dashes.
   `stats` once a second and turns two reads into decoded and dropped
   pictures a second, the mean from a picture's release to the surface to
   Flutter consuming it, surface credits in use, low-latency decoding and the
-  refresh rate asked for (Android; Windows reports the counts only; macOS
-  and iOS the counts, the release-to-consume mean, VideoToolbox's real-time
-  mode as low latency and the display's maximum refresh; Linux the counts).
-  Closing the panel drops the decoder's timing accumulators.
+  refresh rate asked for (Android; Windows the counts, the release-to-consume
+  mean, the fastest display's refresh and low latency only where the
+  decoder's codec API confirms it; macOS and iOS the counts, the
+  release-to-consume mean, VideoToolbox's real-time mode as low latency and
+  the display's maximum refresh; Linux the counts). Closing the panel drops
+  the decoder's timing accumulators.
 
 Read in order, the rates place a loss: capture below pace is the host's
 source or its capture gate; pace below the ceiling is the QoS controller
@@ -1986,8 +1988,9 @@ permission. No queued clicks or keys are replayed. A remembered computer
 reconnects by its id; a pasted invitation that was not remembered stays in
 memory only.
 
-Windows decodes H.265 or H.264 with Media Foundation into D3D11 shared
-textures (or takes JPEG where Media Foundation is not installed), Android
+Windows decodes H.265 or H.264 with Media Foundation into a D3D11 texture
+it shares with Flutter ([Windows presentation](#windows-presentation)), or
+takes JPEG where Media Foundation is not installed. Android decodes
 with `MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer,
 macOS and iOS with VideoToolbox into IOSurface-backed BGRA pixel buffers
 handed to a `FlutterTexture`, and Linux with GStreamer into RGBA buffers
@@ -2100,6 +2103,53 @@ an H.265 clip by the VPS in its first unit and treats IRAP pictures (NAL types
 When a picture fails to decode as H.265, the app connects again at once on
 H.264 and does not offer H.265 again until it restarts; only a failure on
 H.264 too ends the session.
+
+### Windows presentation
+
+The decoder thread, on its own D3D11 device on Flutter's adapter, converts
+each decoded NV12 picture to BGRA with the video processor into a private
+texture, then copies it in one short copy into the one texture it shares
+with Flutter. The shared handle stays the same for the decoder's life, and
+Flutter's `ExternalTextureD3d` imports a texture again only when its handle
+changes, so it imports this one once. The converter's view of the private
+texture is made once per converter; a frame opens only its decoded picture.
+
+Flutter reads the shared texture on its own device, calls the release
+callback as soon as it has bound it, before any GPU read, and takes no keyed
+mutex, so nothing orders its read after the decoder's copy. The thread
+therefore publishes a picture, and tells Flutter to draw it, once a D3D11
+event query says the GPU has run the copy, or after `kConversionWait`
+(100 ms) so that a GPU that slow does not stop the picture. Meanwhile it
+sleeps on an auto-reset event the GPU sets after the copy
+(`IDXGIDevice2::EnqueueSetEvent`). The query stays the authority: a signal
+an earlier frame left only wakes the thread early. Should a wait run out
+although the copy had finished, or fail, every decoder polls the query
+instead for the rest of the run, yielding between polls, and the runner
+says so once in the debugger output
+(`Desktop video: the GPU completion event`). The thread runs above normal
+priority, below the keyboard hook's thread, so it gets its core back as soon
+as it is woken. A tear remains possible: the next frame's copy can overlap Flutter's
+read of the current one, as nothing orders the two devices, and that
+Flutter frame then shows parts of both.
+
+There is no native overlay to bypass Flutter's compositor. Flutter paints
+the grey still picture, the peers' and the local cursor, the touch indicator
+and every overlay above the texture (`viewer_stage.dart`), Flutter on
+Windows has no platform views to put a native swap chain beneath them, and
+a native window over the picture would hide them all.
+
+Besides the counts, the `stats` method of the `pb_mapper/desktop_video`
+channel reports, while a read asks for timings, `timings.surface_consume`
+(from a picture's release to Flutter acquiring it) and `timings.convert`
+(from opening a decoded picture for the converter to the GPU finishing the
+copy, the wait and any decode work still queued on the GPU included), each
+`{samples, mean_ms, max_ms}` since the timings began. It always reports
+`refreshHz` (the fastest display's refresh, read as `decoders` reads it),
+and while a decoder thread exists `decoderCycles` (its CPU cycles since it
+started, from `QueryThreadCycleTime`). It reports `lowLatency` only when
+the decoder's `ICodecAPI` took `CODECAPI_AVLowLatencyMode`, and otherwise
+leaves it out: the decoder's attribute store, through which the mode is
+also set, takes any value.
 
 ### Android presentation and decoder
 
