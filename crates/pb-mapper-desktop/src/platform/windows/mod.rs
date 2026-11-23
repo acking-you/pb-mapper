@@ -1,7 +1,8 @@
 //! The Windows host: the ordinary desktop (or, in the privileged helper's
 //! worker, the bound input desktop), the fused DXGI to D3D11 to Media
 //! Foundation encoder, enigo injection and the pointer, xcap stills; DPAPI;
-//! the waitable timer and fine timers; and the privileged helper.
+//! the waitable timer, fine timers and the thread priority; and the
+//! privileged helper.
 //! Uses published Apache-2.0 xcap and MIT enigo. No RustDesk source is copied.
 
 pub(crate) mod cursor;
@@ -11,6 +12,7 @@ pub(crate) mod helper;
 pub(crate) mod input;
 pub(crate) mod mf;
 pub(crate) mod modes;
+pub(crate) mod priority;
 pub(crate) mod still;
 pub(crate) mod timer;
 pub mod video;

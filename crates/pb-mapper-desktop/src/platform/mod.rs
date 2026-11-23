@@ -64,6 +64,25 @@ pub(crate) mod timers {
     pub(crate) fn release() {}
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) use macos::priority;
+/// The calling thread's priority, raised by `priority::ThreadPriority`:
+/// above normal on Windows, the user-interactive QoS class on macOS,
+/// nothing elsewhere.
+#[cfg(windows)]
+pub(crate) use windows::priority;
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(crate) mod priority {
+    /// Never made: nothing is raised here.
+    pub(crate) enum Before {}
+    pub(crate) fn raise() -> Option<Before> {
+        None
+    }
+    pub(crate) fn restore(before: Before) {
+        match before {}
+    }
+}
+
 /// An operating system that hosts: a session's parts, built on its thread C.
 pub(crate) trait Platform: Sized + 'static {
     const OS: HostOs;
