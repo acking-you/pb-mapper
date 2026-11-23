@@ -79,6 +79,11 @@ pub(crate) const TRANSPORT_GATE: usize = 2;
 /// bound that followed it would deepen its own queue.
 pub(crate) const ENCODER_DEPTH: usize = 4;
 const CONTEXT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+/// How long the desktop counts as active after an input thread C injected or
+/// a new picture it produced: until then, a pull source whose tick found
+/// nothing new is asked again at its drain interval, and after it once a
+/// period, so a still desktop costs no more capture calls than the grid.
+const HOT_WINDOW: Duration = Duration::from_millis(250);
 /// How long a lock notice stays in the published state.
 const NOTICE_TTL: Duration = Duration::from_secs(5);
 
@@ -460,6 +465,8 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     /// When a pull source that had nothing to submit is asked again, its tick
     /// still armed (`capture_poll_after`).
     capture_poll_due: Option<Instant>,
+    /// Until when the desktop counts as active (`HOT_WINDOW`).
+    hot_until: Instant,
     /// The next context check, or the next retry while unavailable.
     context_due: Instant,
     cursor_due: Instant,
@@ -553,6 +560,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             pacer: Pacer::new(pace_fps, now),
             pace_fps,
             capture_poll_due: None,
+            hot_until: now,
             context_due: now,
             cursor_due: now,
             cursor_shapes: false,

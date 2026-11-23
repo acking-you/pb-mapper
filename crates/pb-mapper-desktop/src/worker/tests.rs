@@ -93,6 +93,9 @@ struct Fake {
     /// capture submits nothing unless it carries a keyframe, and the source
     /// names no time to try again.
     still: Arc<AtomicBool>,
+    /// Each unit repeats an unchanged picture, as the Windows encoder's
+    /// liveness frame does.
+    duplicate: Arc<AtomicBool>,
     repeatable: bool,
     submitted_video: bool,
 }
@@ -120,6 +123,7 @@ impl Fake {
             shape_reads: Arc::default(),
             idle_until: Arc::default(),
             still: Arc::default(),
+            duplicate: Arc::default(),
             repeatable: false,
             submitted_video: true,
         }
@@ -209,6 +213,7 @@ impl Backend for Fake {
                 width: 16,
                 height: 10,
                 keyframe,
+                duplicate: self.duplicate.load(Ordering::SeqCst),
                 gop: u32::MAX,
                 ..VideoFormat::default()
             },
@@ -389,6 +394,20 @@ impl Harness {
             assert!(spins < 1000, "thread C spins without waiting");
             *self.now.lock() = deadline.max(now);
         }
+    }
+    /// Iterate at each deadline until thread C makes one more capture call;
+    /// when that call started.
+    fn next_capture(&mut self) -> Instant {
+        let calls = self.fake.log.lock().captures.len();
+        for _ in 0..1000 {
+            let deadline = self.step();
+            if let Some(&(started, ..)) = self.fake.log.lock().captures.get(calls) {
+                return started;
+            }
+            let now = self.now();
+            *self.now.lock() = deadline.max(now);
+        }
+        panic!("thread C made no capture call");
     }
     /// B-send writes everything queued.
     fn sent(&self) -> Vec<HostUnit> {
@@ -1373,26 +1392,118 @@ fn idle_capture_waits_through_cursor_wakes_but_repeats_for_a_deferred_keyframe()
     assert!(h.sent()[0].keyframe);
 }
 
+/// The captures that started at `at` or later.
+fn captures_since(h: &Harness, at: Instant) -> Vec<(Instant, bool, VideoRate)> {
+    h.captures()
+        .into_iter()
+        .filter(|(started, ..)| *started >= at)
+        .collect()
+}
+
 #[test]
-fn a_pull_source_with_nothing_new_is_polled_not_asked_again_at_once() {
+fn a_pull_source_with_nothing_new_is_polled_while_active_and_once_a_period_while_still() {
     let mut h = Harness::new(true, None);
+    let period = Duration::from_secs(1) / 60;
     h.step();
     assert!(h.sent()[0].keyframe);
     // A still desktop on a source that cannot wake thread C and names no time
-    // to try again, as DXGI: asking it again at once spun thread C.
+    // to try again, as DXGI. Right after a new picture the desktop is active:
+    // the armed tick is asked again every drain interval, never at once,
+    // which would spin thread C.
     h.fake.still.store(true, Ordering::SeqCst);
-    h.run(Duration::from_millis(100), true);
-    let polls = h.captures();
-    assert!(polls.len() > 30, "{} captures", polls.len());
-    let gaps = spacing(&polls[1..]);
+    h.run(HOT_WINDOW, true);
+    let active = h.captures();
+    assert!(active.len() > 100, "{} captures", active.len());
+    let gaps = spacing(&active[1..]);
     assert!(gaps.iter().all(|gap| *gap == DRAIN_POLL), "{gaps:?}");
 
-    // The tick stays armed: a new picture goes out at the next poll, rather
-    // than at the next tick.
+    // Still since: asked once a period, as often as the grid would ask.
+    h.run(Duration::from_secs(1), true);
+    let still = h.captures().split_off(active.len());
+    assert!((60..=61).contains(&still.len()), "{} captures", still.len());
+    let gaps = spacing(&still);
+    assert!(gaps.iter().all(|gap| *gap == period), "{gaps:?}");
+
+    // A repeat of the unchanged picture, as the encoder's liveness frame, is
+    // no sign of activity: after the pacer's floor, a period apart again.
+    h.fake.duplicate.store(true, Ordering::SeqCst);
     h.fake.still.store(false, Ordering::SeqCst);
-    let changed = h.now();
-    h.run(Duration::from_millis(5), false);
-    let (taken, ..) = h.captures()[polls.len()];
-    assert!(taken - changed <= DRAIN_POLL, "{:?}", taken - changed);
+    let repeated = h.next_capture();
+    h.fake.still.store(true, Ordering::SeqCst);
+    h.fake.duplicate.store(false, Ordering::SeqCst);
+    h.run(Duration::from_millis(100), true);
+    let after = captures_since(&h, repeated);
+    assert_eq!(after[1].0 - repeated, period * 3 / 4);
+    let gaps = spacing(&after[1..]);
+    assert!(gaps.iter().all(|gap| *gap == period), "{gaps:?}");
+
+    // A new picture is: every drain interval again after the floor.
+    h.fake.still.store(false, Ordering::SeqCst);
+    let changed = h.next_capture();
+    h.fake.still.store(true, Ordering::SeqCst);
+    h.run(Duration::from_millis(50), true);
+    let after = captures_since(&h, changed);
+    assert_eq!(after[1].0 - changed, period * 3 / 4);
+    let gaps = spacing(&after[1..]);
+    assert!(gaps.iter().all(|gap| *gap == DRAIN_POLL), "{gaps:?}");
+
+    // While active the tick stays armed: the next picture goes out at the
+    // next poll, rather than at the next tick.
+    let moved = h.now();
+    h.fake.still.store(false, Ordering::SeqCst);
+    let taken = h.next_capture();
+    assert!(taken - moved <= DRAIN_POLL, "{:?}", taken - moved);
     assert_eq!(h.sent().len(), 1);
+}
+
+#[test]
+fn a_new_picture_collected_by_a_capture_with_nothing_new_makes_it_active() {
+    let mut h = Harness::new(true, None);
+    let period = Duration::from_secs(1) / 60;
+    h.step();
+    h.fake.still.store(true, Ordering::SeqCst);
+    h.run(HOT_WINDOW * 2, true);
+    // A change, whose unit leaves the encoder just as the next tick comes:
+    // that tick's capture finds nothing new, but collects it.
+    *h.fake.latency.lock() = period * 3 / 4;
+    h.fake.still.store(false, Ordering::SeqCst);
+    let changed = h.next_capture();
+    h.fake.still.store(true, Ordering::SeqCst);
+    h.run(Duration::from_millis(30), true);
+    let after = captures_since(&h, changed);
+    assert_eq!(after[1].0 - changed, period * 3 / 4);
+    assert_eq!(after[2].0 - after[1].0, DRAIN_POLL);
+}
+
+#[test]
+fn an_injected_input_brings_a_still_desktops_poll_in_and_keeps_it_active() {
+    let mut h = Harness::new(true, None);
+    let period = Duration::from_secs(1) / 60;
+    h.send(LaneCommand::Control { enabled: true });
+    h.step();
+    h.present();
+    h.fake.still.store(true, Ordering::SeqCst);
+    h.run(HOT_WINDOW * 2, true);
+    let polled = h.next_capture();
+    // An input a millisecond after a still desktop's poll: the next poll
+    // comes a drain interval after the input, not a period after the last,
+    // and they go on at that interval while the input's answer may appear.
+    *h.now.lock() += Duration::from_millis(1);
+    let injected = h.now();
+    h.input(MOVE);
+    h.run(HOT_WINDOW, true);
+    assert_eq!(h.inputs(), 1);
+    let active = captures_since(&h, injected);
+    assert_eq!(active[0].0, injected + DRAIN_POLL);
+    assert!(active[0].0 < polled + period);
+    assert!(active.len() > 100, "{} captures", active.len());
+    let gaps = spacing(&active);
+    assert!(gaps.iter().all(|gap| *gap == DRAIN_POLL), "{gaps:?}");
+
+    // Nothing came of it: once a period again.
+    h.run(Duration::from_millis(200), true);
+    let still = captures_since(&h, injected + HOT_WINDOW);
+    assert!(still.len() >= 12, "{} captures", still.len());
+    let gaps = spacing(&still);
+    assert!(gaps.iter().all(|gap| *gap == period), "{gaps:?}");
 }
