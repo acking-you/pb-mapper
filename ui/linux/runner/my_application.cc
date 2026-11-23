@@ -5,6 +5,7 @@
 #include <gdk/gdkx.h>
 #endif
 
+#include "desktop_pointer.h"
 #include "desktop_video.h"
 #include "flutter/generated_plugin_registrant.h"
 
@@ -74,6 +75,7 @@ static void my_application_activate(GApplication* application) {
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
   desktop_video_register(view);
+  desktop_pointer_register(view);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
