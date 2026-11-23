@@ -771,6 +771,26 @@ Windows service, independently of Flutter or an agent harness:
   revocation, session change, renderer staleness and local stop release input;
   the service gives the worker a bounded exit interval before its job is closed.
 
+Each answer of the worker, with the unit or the shape it carries, crosses
+two pipes: the worker's private pipe to the service, and the helper pipe on
+to the app. Both carry `u32 BE length | bytes` records (`oop/ipc.rs`): a
+request or an answer as JSON of at most 8 KiB, and after each answer a byte
+record of up to 4 MiB. The worker writes an answer and its byte record in
+one vectored write, and the app each request in one. mio, from 1.2.5, makes
+such a write one overlapped `WriteFile` instead of one per length and per
+body, copying the slices into its write buffer as it copied each write
+before, so joining them copies nothing more; and it makes each pipe read as
+large as the buffer it fills, from 4 KiB up to 64 KiB, where 1.2.4 read
+4 KiB at a time. Each pipe lets 256 KiB wait in either direction
+(`helper/transfer.rs`), so a write that fits beside what already waits
+completes without waiting for its reader. The service relays
+toward the app through a 256 KiB buffer, reading on while a write is in
+flight so that the next write takes all it gathered, and toward the worker
+through 64 KiB. The records, and so the helper protocol, are unchanged.
+`examples/pipe_relay_bench.rs` times a unit through two pipes and such a
+relay, and counts the writes and reads it took; no Windows run of it is
+recorded yet.
+
 Installation is serialized, replaces configuration atomically, waits for the
 service to report Running, and attempts to restore the previous configuration
 and startup state if an update fails. A rollback failure is reported and files
@@ -1807,6 +1827,7 @@ shapes by content, never by number.
 | What | Value |
 | --- | --- |
 | Records | JSON header ≤ 8 KiB; video payload 1 B to 4 MiB |
+| Helper pipes | 256 KiB may wait each way; the service relays through 256 KiB toward the app and 64 KiB toward the worker; one write per answer with its byte record |
 | Timeouts | handshake 3 s; host read 3 s; viewer header 4 s; writes 3 s plus the message's time at 1 Mbit/s; `Stopped` best effort within 1 s; the host reads on until the viewer closes, within the same second |
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |

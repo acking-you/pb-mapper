@@ -399,7 +399,8 @@ Nothing in the SDK crates knows it exists.
     `video_toolbox_rate_model_*` measure VideoToolbox's rate model
   - `platform/windows/helper/`: The opt-in UAC/Winlogon service —
     `service.rs`; the workers it starts (`worker.rs`, `child.rs`) and a
-    worker's binding to the input desktop (`binding.rs`); `pipe.rs`;
+    worker's binding to the input desktop (`binding.rs`); `pipe.rs`, and
+    `transfer.rs` (the pipes' quotas and the service's relay buffers);
     `install.rs` and `readiness.rs` (whether the installed helper can be used
     or is offered Update); `background.rs` and `background/`, its own host
     and that host's grant at rest; `os/`, its Win32 glue by concern. The
@@ -510,7 +511,9 @@ Nothing in the SDK crates knows it exists.
     Windows capture and encode benchmark, which also counts the encoder's
     calls: allocations, time and thread cycles per unit), `host_send_bench`
     (a relay, a host with a synthetic encoder and a viewer in one process,
-    counting allocations per video unit), `deployed` (the selftest, native
+    counting allocations per video unit), `pipe_relay_bench` (the helper's
+    unit path through two named pipes and a service-style relay, on Windows:
+    time per unit, and the writes and reads each took), `deployed` (the selftest, native
     size by default), `input_acceptance/` (native input into a window of its
     own, on Windows: Unicode text, line breaks, physical keys and an input
     method's composition, and the pointer's shapes over it) and
