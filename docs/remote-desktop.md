@@ -977,15 +977,19 @@ does not require Flutter or a POCOX runtime.
   control. A lost packet holds back what follows it in that direction until
   QUIC or TCP retransmits it, but the transport keeps receiving and buffering
   those later bytes and delivers them the moment the retransmission lands. With
-  an infinite GOP and no long-term references, a frame after a lost one cannot
-  be decoded before the lost one arrives, whatever stream carries it, so
-  separate streams would deliver nothing the decoder could use sooner. Input,
+  an infinite GOP and no long-term references, a P-frame after a lost one
+  cannot be decoded before the lost one arrives, whatever stream carries it.
+  Only a keyframe or a JPEG picture, which refers to nothing before it, could
+  reach the decoder sooner on a stream of its own; that rare case does not
+  outweigh keeping probes in order with the video and the one stream the relay
+  and LAN TCP can carry. Input,
   receipts and probe echoes travel the other way and never wait behind lost
   video, and probes stay in order with the video whose queue they measure. The
   relay pairs one stream per session, and a relay TCP leg or LAN TCP carries
   only one.
 - Each direct UDP socket, the host's and the viewer's, asks the system for an
-  8 MiB receive buffer when it binds, halving on refusal down to 256 KiB and
+  8 MiB receive buffer when it binds, trying each size on a throwaway socket
+  first and keeping only one that grows the buffer, halving down to 256 KiB and
   never asking for less than it has; Linux caps it at `net.core.rmem_max`, and
   the debug trace `direct UDP receive buffer` records what each socket got.
   Send buffers, the relay's sockets and congestion control (Quinn's Cubic) are
@@ -1234,12 +1238,13 @@ unit's dwell, from submit to output (the `encode_us` it returns with the
 unit), and thread C reports the median of the last second as
 `encoder_dwell_ms`. A static screen is resubmitted about every 250 ms as a
 duplicate, which unique-frame rates exclude. The hand-off queue holds at most
-six units and 8 MiB, which both bounds together never reach. A keyframe (an
-IDR, and every JPEG picture) supersedes the units still waiting there for
-send credit, whether this viewer asked for it or another viewer in the room
-caused it: none of them has a sequence number yet, and nothing after a
-keyframe refers to anything before it, so the newer picture goes next instead
-of after them, and they count as dropped frames. When the queue's oldest unit
+six units and 8 MiB, which both bounds together never reach. An H.264 or
+H.265 keyframe supersedes the units still waiting there for send credit,
+whether this viewer asked for it or another viewer in the room caused it:
+none of them has a sequence number yet, and nothing after a keyframe refers
+to anything before it, so the newer picture goes next instead of after them,
+and they count as dropped frames. JPEG pictures queue as before, so the
+transport gate still holds a JPEG session's capture back on a slow link. When the queue's oldest unit
 has waited more than a second, the queue is dropped and replaced by an IDR.
 The wait counts from when the unit was ready or from the last IDR
 receipt, whichever is later, and time spent behind an IDR still in flight
@@ -1328,7 +1333,10 @@ has. This matters only when other programs keep every core busy, where a
 capture tick or an input wake could otherwise wait for a core. The OS encodes
 both codecs off the thread, which mostly coordinates. A JPEG session keeps
 the thread's priority, because it grabs, scales and compresses each picture
-on the thread, and that work must not preempt the owner's programs.
+on the thread, and that work must not preempt the owner's programs. So does
+any backend that does not declare `Backend::encodes_off_thread`: the Windows
+and Mac backends and the helper's client declare it, and an embedder's own
+backend that encodes in software on thread C keeps the default, `false`.
 
 Thread C is a blocking thread of the embedder's runtime, so a guard
 (`priority.rs`) raises it on the iteration that starts capturing and gives
@@ -1814,7 +1822,7 @@ shapes by content, never by number.
 | Timeouts | handshake 3 s; host read 3 s; viewer header 4 s; writes 3 s plus the message's time at 1 Mbit/s; `Stopped` best effort within 1 s; the host reads on until the viewer closes, within the same second |
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
-| Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; a keyframe supersedes what waits; capture skipped at 2 waiting for credit or 4 in the encoder |
+| Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; an H.264 or H.265 keyframe supersedes what waits; capture skipped at 2 waiting for credit or 4 in the encoder |
 | Armed tick | a tick with no new picture stays armed; ScreenCaptureKit wakes thread C; DXGI, in process or through the helper, is asked again every 2 ms for 250 ms after an injected input or a new picture (an input brings a pending poll in to 2 ms), and once a period otherwise |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
 | QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; latch at 1.3 × over 2 windows at ≤ 0.75 × nominal |
@@ -1876,7 +1884,7 @@ The host traces each second as `desktop_feedback_interval` on
 `standing_ms`, `busy_bps`, `used_bps` and `would_cut` come from the
 receipt-rate estimator, which only records what a receipt-driven rate control
 would see; nothing acts on them. It keeps the receipts of H.264 and H.265
-video from the last second, at most 240, each with the delay of the newest
+video from the second up to the newest one, at most 240, each with the delay of the newest
 unit it covered and the bytes it covered, and forgets them on a path change
 and on a resume. A frame interval is one at the current pace.
 
@@ -1884,7 +1892,7 @@ and on a resume. A frame interval is one at the current pace.
 | --- | --- |
 | `standing_ms` | The least receipt delay above the base RTT over the newest receipts: at least three, spanning at least two frame intervals and 50 ms (at most 500 ms), so a burst a few milliseconds long never makes a queue on its own |
 | `busy_bps` | The median delivery rate (of two, the lower) over the newest eight receipt pairs across which the link stayed busy, the later unit's delay above the base RTT being at least the pair's gap; none below three. Receipts less than a quarter of a frame interval apart are compression, not delivery: such a pair is no sample, and its later receipt's bytes count toward the pair before it |
-| `used_bps` | What the receipts of the last second covered, from the first of them to the last; none over less than 100 ms |
+| `used_bps` | What the receipts of the second up to the newest covered, from the first of them to the last; none over less than 100 ms. For up to a second after the last receipt the trace repeats it, so a stall shows as a `used_bps` that stops changing and then disappears, not as one that falls |
 | `would_cut` | A receipt since the last trace showed a standing queue above 40 ms once each unit's own transfer at the busy rate (at most a frame interval) is taken off, with a busy rate known, no unit in its window behind an IDR, and outside a stall: the burst of receipts less than a quarter of a frame interval apart that follows a receipt gap of at least three frame intervals |
 
 Without a receipt in the last second the first three are absent, and without a

@@ -880,9 +880,12 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if capturing != self.timer.is_some() {
             self.timer = capturing.then(TimerResolution::hold);
         }
-        // This thread runs above the owner's own work only while the OS
-        // encodes what it captures; a JPEG it compresses itself.
-        let raised = capturing && ThreadPriority::raised_for(self.codec);
+        // This thread runs above the owner's own work only while hardware or
+        // the OS encodes what it captures; a JPEG, or a backend's own
+        // software encoder, runs on this thread.
+        let raised = capturing
+            && self.backend.encodes_off_thread()
+            && ThreadPriority::raised_for(self.codec);
         if raised != self.priority.is_some() {
             self.priority = raised.then(ThreadPriority::raise);
         }

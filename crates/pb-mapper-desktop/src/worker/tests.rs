@@ -98,6 +98,8 @@ struct Fake {
     /// Each unit repeats an unchanged picture, as the Windows encoder's
     /// liveness frame does.
     duplicate: Arc<AtomicBool>,
+    /// The encoder runs on the calling thread, as a software one would.
+    software: Arc<AtomicBool>,
     repeatable: bool,
     submitted_video: bool,
 }
@@ -127,6 +129,7 @@ impl Fake {
             idle_until: Arc::default(),
             still: Arc::default(),
             duplicate: Arc::default(),
+            software: Arc::default(),
             repeatable: false,
             submitted_video: true,
         }
@@ -249,6 +252,9 @@ impl Backend for Fake {
     }
     fn submitted_video(&self) -> bool {
         self.submitted_video
+    }
+    fn encodes_off_thread(&self) -> bool {
+        !self.software.load(Ordering::SeqCst)
     }
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         // The first call opens the push source and learns it has no picture.
@@ -831,6 +837,13 @@ fn thread_c_is_raised_only_while_it_streams_h264_or_h265() {
     h.run(Duration::from_millis(250), true);
     assert!(h.engine.priority.is_none());
     assert!(h.engine.timer.is_some());
+    // A backend that encodes on this thread itself is never raised.
+    h.engine.room.set_codec(VideoCodec::H264);
+    h.run(Duration::from_millis(250), true);
+    assert!(h.engine.priority.is_some());
+    h.fake.software.store(true, Ordering::SeqCst);
+    h.run(Duration::from_millis(50), true);
+    assert!(h.engine.priority.is_none());
 }
 
 /// Thread C is a blocking thread of the embedder's runtime. Its session
@@ -1526,6 +1539,25 @@ fn a_pull_source_with_nothing_new_is_polled_while_active_and_once_a_period_while
     let taken = h.next_capture();
     assert!(taken - moved <= DRAIN_POLL, "{:?}", taken - moved);
     assert_eq!(h.sent().len(), 1);
+}
+
+#[test]
+fn a_faster_pace_brings_a_still_desktops_poll_in() {
+    let mut h = Harness::new(true, None);
+    h.shared.targets.pace_fps.store(15, Ordering::Release);
+    h.step();
+    h.fake.still.store(true, Ordering::SeqCst);
+    h.run(HOT_WINDOW * 2, true);
+    // Still at 15 fps, the next poll is a 15 fps period away. At 60 fps the
+    // armed tick is asked at once, then a 60 fps period apart.
+    let polled = h.next_capture();
+    *h.now.lock() += Duration::from_millis(1);
+    let raised = h.now();
+    h.shared.targets.pace_fps.store(60, Ordering::Release);
+    assert_eq!(h.next_capture(), raised);
+    assert!(raised - polled < Duration::from_secs(1) / 15);
+    let next = h.next_capture();
+    assert_eq!(next - raised, Duration::from_secs(1) / 60);
 }
 
 #[test]

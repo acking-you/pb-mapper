@@ -318,6 +318,11 @@ impl<T: Transport> Backend for RemoteBackend<T> {
     fn capture_idle_until(&self, _: Option<std::time::Instant>) -> Option<std::time::Instant> {
         None
     }
+    /// The worker captures and encodes in its own process; thread C waits on
+    /// the pipe.
+    fn encodes_off_thread(&self) -> bool {
+        true
+    }
     /// What the worker said it can do when it started; it probes the GPU of
     /// the display it captures, in the interactive session, which the
     /// background host in session 0 cannot, and is asked about H.265 only

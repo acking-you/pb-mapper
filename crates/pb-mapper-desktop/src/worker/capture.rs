@@ -286,8 +286,15 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             return;
         };
         if pace_fps != self.pace_fps {
+            let faster = pace_fps > self.pace_fps;
             self.pace_fps = pace_fps;
             self.pacer.set_pace(pace_fps, now);
+            if faster {
+                // A still desktop's armed tick was polled a period of the
+                // slower pace away; set_pace brought the tick forward, so
+                // ask at it and re-arm, if nothing is new, at the new period.
+                self.capture_poll_due = None;
+            }
         }
         let tick_due = retry || (self.pacer.due(now) && now >= self.capture_at());
         let pending = self.backend.pending_video();

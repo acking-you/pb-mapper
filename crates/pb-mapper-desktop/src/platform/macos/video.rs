@@ -42,6 +42,8 @@ fn rate_bounds(bitrate: u32) -> Result<()> {
 impl VideoSource for MacVideo {
     type Grant = ScreenAccess;
     const DRAIN: Option<Duration> = None;
+    /// VideoToolbox encodes on its own threads, in hardware or software.
+    const ENCODES_OFF_THREAD: bool = true;
     fn encodes(_: &Display, codec: VideoCodec) -> bool {
         encoder::encodes(codec)
     }

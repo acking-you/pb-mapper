@@ -111,6 +111,8 @@ fn parts(desktop: desktop::WinDesktop) -> Result<Parts<Windows>> {
 impl VideoSource for video::Encoder {
     type Grant = ();
     const DRAIN: Option<Duration> = Some(DRAIN_POLL);
+    /// The hardware Media Foundation encoder runs on its own threads.
+    const ENCODES_OFF_THREAD: bool = true;
     fn encodes(display: &Display, codec: VideoCodec) -> bool {
         match codec {
             VideoCodec::H265 => video::h265_available(display.id),

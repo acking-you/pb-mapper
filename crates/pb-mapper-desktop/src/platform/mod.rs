@@ -173,6 +173,9 @@ pub(crate) trait VideoSource: Sized {
     /// from: one frame's share at the nominal rate per frame, unless the
     /// platform's encoder was measured to budget per second.
     const RATE_MODEL: RateModel = RateModel::Nominal;
+    /// Its H.264 and H.265 are encoded off thread C, by hardware or an OS
+    /// encoder (see `Backend::encodes_off_thread`).
+    const ENCODES_OFF_THREAD: bool = false;
     /// Asked only for a viewer that decodes the codec; the platform caches
     /// the answer per adapter.
     fn encodes(display: &Display, codec: VideoCodec) -> bool;

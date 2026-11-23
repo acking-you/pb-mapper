@@ -1342,7 +1342,7 @@ class DesktopStats {
 
 /// The native decoder's own figures over the last second, from two reads of
 /// the `pb_mapper/desktop_video` channel's `stats`. A figure the platform
-/// does not report is null: Windows has no timings, credits or refresh.
+/// does not report is null: Windows has no credits.
 @immutable
 class DesktopDecoderStats {
   const DesktopDecoderStats({
@@ -1409,7 +1409,8 @@ class DesktopDecoderStats {
   final int? credits;
   final bool? lowLatency;
 
-  /// The display mode asked for while viewing.
+  /// The refresh rate: on Android the display mode asked for while viewing,
+  /// on macOS, iOS and Windows the fastest display's.
   final double? refreshHz;
 
   @override

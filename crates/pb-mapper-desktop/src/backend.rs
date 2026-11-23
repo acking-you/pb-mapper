@@ -137,6 +137,15 @@ pub trait Backend: 'static {
         let _ = keyframe_due;
         None
     }
+    /// Whether the H.264 and H.265 this backend streams are encoded off the
+    /// thread that calls it, by hardware or an OS encoder with its own
+    /// threads, so that thread C mostly waits on them. Only then does thread
+    /// C run above the owner's ordinary programs while it streams those
+    /// codecs. A backend that encodes in software on the calling thread keeps
+    /// the default, `false`, and so never preempts the owner's work.
+    fn encodes_off_thread(&self) -> bool {
+        false
+    }
     /// Report a pointer for the expected desktop, including when no video frame
     /// changed, as it stands after every input this backend applied: thread C
     /// takes a report at the position it last injected for the controller's
@@ -275,6 +284,9 @@ impl<B: Backend + ?Sized> Backend for Box<B> {
     }
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         (**self).capture_idle_until(keyframe_due)
+    }
+    fn encodes_off_thread(&self) -> bool {
+        (**self).encodes_off_thread()
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         (**self).cursor(expected)
