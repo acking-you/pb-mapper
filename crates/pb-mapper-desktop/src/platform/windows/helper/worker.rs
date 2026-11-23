@@ -8,11 +8,12 @@ use crate::{
         proto::{Request, Response, TIMEOUT},
         server::{ServeState, exchange, serve},
     },
+    priority::ThreadPriority,
 };
 use std::sync::mpsc;
 
 /// A host that asked for no video this long is paused or gone: the worker
-/// gives its fine timers back.
+/// gives its fine timers and its capture thread's priority back.
 const VIDEO_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
 /// How often a `restore` worker tries again, and for how long at most.
 const RESTORE_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -100,9 +101,11 @@ fn serve_bound(
         }
     };
     let mut state = ServeState::new();
-    // Fine process timers while the host asks for video; a paused
-    // host asks for none.
+    // Fine process timers while the host asks for video, and this thread
+    // raised while that video is H.264 or H.265; a paused host asks for
+    // none.
     let mut timer = None;
+    let mut priority = None;
     let mut last_video = std::time::Instant::now();
     while !stopped.is_cancelled() {
         if state.last_input.elapsed() > std::time::Duration::from_secs(2) {
@@ -110,6 +113,7 @@ fn serve_bound(
         }
         if last_video.elapsed() > VIDEO_IDLE {
             timer = None;
+            priority = None;
         }
         let (request, reply) = match incoming.recv_timeout(std::time::Duration::from_millis(15)) {
             Ok(request) => request,
@@ -119,9 +123,15 @@ fn serve_bound(
         if stopped.is_cancelled() {
             break;
         }
-        if matches!(request, Request::Video { .. }) {
+        if let Request::Video { codec, .. } = &request {
             last_video = std::time::Instant::now();
             timer.get_or_insert_with(crate::timer::TimerResolution::hold);
+            // A JPEG is compressed here, at the owner's priority.
+            if ThreadPriority::raised_for(*codec) {
+                priority.get_or_insert_with(ThreadPriority::raise);
+            } else {
+                priority = None;
+            }
         }
         let close = matches!(request, Request::Close {});
         let result = serve(&mut backend, request, &mut state);
