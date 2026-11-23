@@ -14,6 +14,7 @@ AUTH_DIR="/var/lib/pb-mapper/auth"
 ADMIN_KEY_PATH="${AUTH_DIR}/admin.key"
 LEGACY_KEY_PATH="/var/lib/pb-mapper-server/msg_header_key"
 SERVER_ENV_FILE="/etc/pb-mapper/server.env"
+SYSCTL_CONF="/etc/sysctl.d/90-pb-mapper.conf"
 
 admin_key_is_env_safe() {
   local key="$1"
@@ -130,6 +131,32 @@ elif [ -z "$INSTALLER_KEY" ] && [ ! -s "$ADMIN_KEY_PATH" ] && [ -s "$LEGACY_KEY_
     echo "Migrated the legacy machine-derived key into $ADMIN_KEY_PATH"
   fi
 fi
+
+# Linux restarts an idle TCP connection's congestion window
+# (net.ipv4.tcp_slow_start_after_idle=1), so what the relay sends after a
+# pause, such as a remote desktop's next picture, starts slowly again. Turning
+# that off is host-wide: every TCP connection on this machine keeps its window
+# while idle. Asked only on a terminal, once; PB_MAPPER_TCP_TUNING=yes or no
+# answers it ahead of time.
+TCP_TUNING="${PB_MAPPER_TCP_TUNING:-}"
+if [ -z "$TCP_TUNING" ] && [ ! -e "$SYSCTL_CONF" ] && (: </dev/tty) 2>/dev/null; then
+  printf '%s' "Keep idle TCP connections' congestion window on this host (net.ipv4.tcp_slow_start_after_idle=0 in ${SYSCTL_CONF})? [y/N] " >/dev/tty
+  read -r TCP_TUNING </dev/tty || TCP_TUNING=""
+fi
+case "$TCP_TUNING" in
+  [Yy] | [Yy][Ee][Ss])
+    mkdir -p "$(dirname "$SYSCTL_CONF")"
+    printf '%s\n' \
+      "# Written by the pb-mapper installer: keep an idle TCP connection's" \
+      "# congestion window, so relayed traffic does not slow-start after a pause." \
+      "net.ipv4.tcp_slow_start_after_idle = 0" >"$SYSCTL_CONF"
+    if sysctl -w net.ipv4.tcp_slow_start_after_idle=0 >/dev/null 2>&1; then
+      echo "Wrote ${SYSCTL_CONF} and applied it"
+    else
+      echo "Wrote ${SYSCTL_CONF}; it applies at the next boot"
+    fi
+    ;;
+esac
 
 # Stop and remove existing service if present
 if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
