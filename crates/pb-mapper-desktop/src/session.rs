@@ -21,7 +21,7 @@ use crate::{
     protocol::{
         CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE,
         CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265,
-        CAPABILITY_PEER_CURSORS, PeerSlot, Route, StateReason, StateRecord, StopReason,
+        CAPABILITY_PEER_CURSORS, PeerSlot, RateModel, Route, StateReason, StateRecord, StopReason,
         ViewerMessage,
     },
     qos::{Qos, TargetValues},
@@ -161,6 +161,7 @@ impl Session {
             vec![codec],
             limits,
             quality,
+            RateModel::Nominal,
             capabilities,
             offered,
         )
@@ -181,13 +182,21 @@ impl Session {
         offered_codecs: Vec<VideoCodec>,
         limits: VideoLimits,
         quality: QualityPreset,
+        rate_model: RateModel,
         capabilities: &[String],
         offered: &[String],
     ) -> Arc<Self> {
         let now = Instant::now();
         let listed = |wanted: &str| capabilities.iter().any(|capability| capability == wanted);
         let both = |wanted: &str| listed(wanted) && offered.iter().any(|value| value == wanted);
-        let qos = Qos::new(limits, codec, quality, listed(CAPABILITY_FPS_OVERRIDE), now);
+        let qos = Qos::new(
+            limits,
+            codec,
+            quality,
+            listed(CAPABILITY_FPS_OVERRIDE),
+            rate_model,
+            now,
+        );
         let targets = qos.targets(now);
         Arc::new(Self {
             shared: Arc::new(SessionShared::new_in_room(

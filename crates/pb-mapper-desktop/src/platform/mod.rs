@@ -23,7 +23,7 @@ pub(crate) mod windows;
 use crate::{
     Access, BackendCaps, BackendError, Button, CursorMode, CursorShape, DesktopKind, Display,
     DisplaySelection, DoubleClickGuard, EncodedFrame, FailureKind, HostOptions, HostOs, Key,
-    Permission, Result, VideoCodec, VideoLimits, VideoRate, Waker,
+    Permission, RateModel, Result, VideoCodec, VideoLimits, VideoRate, Waker,
     input::held::Pressed,
     launch::{Launch, Launcher},
     modes::{Journal, Mode, Setting},
@@ -169,6 +169,10 @@ pub(crate) trait VideoSource: Sized {
     /// `Some(poll)`: output that thread C polls for. `None`: the source
     /// pushes, and wakes thread C.
     const DRAIN: Option<Duration>;
+    /// How its encoder budgets the bitrate, which each session's QoS starts
+    /// from: one frame's share at the nominal rate per frame, unless the
+    /// platform's encoder was measured to budget per second.
+    const RATE_MODEL: RateModel = RateModel::Nominal;
     /// Asked only for a viewer that decodes the codec; the platform caches
     /// the answer per adapter.
     fn encodes(display: &Display, codec: VideoCodec) -> bool;
@@ -489,6 +493,7 @@ pub(crate) fn fallback_caps<P: Platform>() -> BackendCaps {
         os: Some(P::OS),
         cursor: <P::Cursor as CursorSource>::MODE,
         cursor_shapes: <P::Cursor as CursorSource>::SHAPES,
+        rate_model: <P::Video as VideoSource>::RATE_MODEL,
         ..BackendCaps::default()
     }
 }

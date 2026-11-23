@@ -5,7 +5,7 @@
 //! returns, so `Result` stays `io::Result`.
 
 use crate::{
-    DesktopContext, DesktopKind, Display, DoubleClickGuard, EncodedFrame, Input, Result,
+    DesktopContext, DesktopKind, Display, DoubleClickGuard, EncodedFrame, Input, RateModel, Result,
     VideoCodec, VideoFormat, VideoLimits, VideoRate, error,
     modes::{Mode, ModeList},
 };
@@ -331,6 +331,14 @@ pub struct BackendCaps {
     pub physical_keys: bool,
     /// `Backend::cursor_shape` reports the pointer's shape.
     pub cursor_shapes: bool,
+    /// How the backend's H.264 and H.265 encoder budgets its bitrate, which
+    /// each session's QoS starts from. `Nominal`, the default, spends one
+    /// frame's share of the nominal rate's budget per frame, so the host
+    /// gives it bits per frame × the nominal frame rate. `Timestamp` budgets
+    /// per second of presentation time, so the host gives it bits per frame ×
+    /// the pace. A `Nominal` session whose encoder overspends at a reduced
+    /// pace still latches to `Timestamp`; nothing latches back.
+    pub rate_model: RateModel,
 }
 impl BackendCaps {
     /// The values a host lists in `Accepted.capabilities` for these.

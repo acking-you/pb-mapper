@@ -13,7 +13,7 @@ use crate::{
     Result, VideoCodec, VideoLimits, error,
     launch::{Launch, Recovery},
     platform,
-    protocol::{MAX_VIEWERS, PeerColor, PeerSlot, SessionState, StopReason},
+    protocol::{MAX_VIEWERS, PeerColor, PeerSlot, RateModel, SessionState, StopReason},
     security::HostIdentity,
     session::{Session, stop_message},
     shared::Policy,
@@ -87,17 +87,24 @@ pub(super) struct Room {
     pub host_capabilities: Vec<String>,
     pub display: Option<Display>,
     pub h265: bool,
+    /// The backend's rate model, which every viewer's QoS starts from.
+    pub rate_model: RateModel,
     inner: Mutex<RoomInner>,
     exit_rx: tokio::sync::watch::Receiver<Option<WorkerExit>>,
     join: AsyncMutex<Option<tokio::task::JoinHandle<WorkerExit>>>,
 }
 impl Room {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each is a distinct fact of the backend or the first session"
+    )]
     pub(super) fn new_with_first_slot(
         shared: Arc<RoomShared>,
         mut worker: WorkerHandle,
         host_capabilities: Vec<String>,
         display: Option<Display>,
         h265: bool,
+        rate_model: RateModel,
         codec: VideoCodec,
         session: Arc<Session>,
     ) -> Arc<Self> {
@@ -117,6 +124,7 @@ impl Room {
             host_capabilities,
             display,
             h265,
+            rate_model,
             inner: Mutex::new(RoomInner {
                 closed: false,
                 codec,

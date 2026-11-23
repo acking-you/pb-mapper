@@ -3,6 +3,7 @@
 //! `Backend` it carries. A change to any of it bumps the helper protocol.
 use crate::{
     BackendCaps, CursorKind, CursorMode, CursorShape, DesktopContext, FailureKind, HostOs, Input,
+    RateModel,
     modes::{Mode, ModeList},
 };
 use serde::{Deserialize, Serialize};
@@ -263,6 +264,7 @@ impl From<&BackendCaps> for StartCaps {
             cursor,
             physical_keys,
             cursor_shapes,
+            rate_model: _,
         } = *caps;
         Self {
             lock,
@@ -292,6 +294,10 @@ impl From<StartCaps> for BackendCaps {
             cursor,
             physical_keys,
             cursor_shapes,
+            // Never on the pipe: the worker's Media Foundation encoder budgets
+            // per frame, and `Nominal` is the safe start anyway, as the latch
+            // corrects it and nothing corrects `Timestamp`.
+            rate_model: RateModel::Nominal,
         }
     }
 }

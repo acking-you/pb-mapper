@@ -271,12 +271,14 @@ pub(crate) struct Qos {
 impl Qos {
     /// Bits per frame start at the viewer's bounds, until `set_video_size`
     /// says what the encoder produces: the host's expectation before the first
-    /// unit, then each unit's own size.
+    /// unit, then each unit's own size. The rate model starts at the
+    /// backend's (`BackendCaps::rate_model`).
     pub fn new(
         limits: VideoLimits,
         codec: VideoCodec,
         quality: QualityPreset,
         fps_override: bool,
+        rate_model: RateModel,
         now: Instant,
     ) -> Self {
         let mut qos = Self {
@@ -296,7 +298,7 @@ impl Qos {
             last_raw: None,
             start_high: false,
             bpf: 0.0,
-            rate_model: RateModel::Nominal,
+            rate_model,
             overshoot: 0,
             window: RatioWindow::new(now, ProducedSnapshot::default()),
             sampled: false,
@@ -759,6 +761,7 @@ mod tests {
             VideoCodec::H264,
             QualityPreset::Balanced,
             false,
+            RateModel::Nominal,
             now,
         )
     }
@@ -965,6 +968,7 @@ mod tests {
             VideoCodec::Jpeg,
             QualityPreset::Smooth,
             false,
+            RateModel::Nominal,
             t0,
         );
         assert_eq!(jpeg.pace(s(2)), JPEG_MAX_FPS);
@@ -995,11 +999,25 @@ mod tests {
             max_height: 2160,
             max_fps: 120,
         };
-        let chosen = Qos::new(uhd, VideoCodec::H265, QualityPreset::Quality, true, t0);
+        let chosen = Qos::new(
+            uhd,
+            VideoCodec::H265,
+            QualityPreset::Quality,
+            true,
+            RateModel::Nominal,
+            t0,
+        );
         assert!((chosen.bpf - 200_000.0 * 4f64.powf(0.75)).abs() < 1.0);
         assert_eq!(chosen.ceiling_fps, 120);
         assert!(chosen.targets(s(2)).encoder_bps > 67_000_000);
-        let auto = Qos::new(uhd, VideoCodec::H265, QualityPreset::Quality, false, t0);
+        let auto = Qos::new(
+            uhd,
+            VideoCodec::H265,
+            QualityPreset::Quality,
+            false,
+            RateModel::Nominal,
+            t0,
+        );
         assert_eq!(auto.ceiling_fps, 30);
         assert_eq!((pixel_scale(7680, 4320), pixel_scale(640, 360)), (3.0, 0.4));
         // The same bounds on a 1080p display encode 1080p: told so before the
@@ -1010,6 +1028,7 @@ mod tests {
             VideoCodec::H264,
             QualityPreset::Balanced,
             false,
+            RateModel::Nominal,
             t0,
         );
         let (width, height) = scaled_size(1920, 1080, uhd.max_width, uhd.max_height);
@@ -1120,5 +1139,28 @@ mod tests {
             qos.tick(s(3 * n), &idle(), window(n, 180, 1.0));
         }
         assert_eq!(qos.rate_model, RateModel::Timestamp);
+
+        // A backend that budgets per second starts there: from the start its
+        // encoder gets bits per frame × the pace, and no window moves it.
+        let mut qos = Qos::new(
+            limits(60),
+            VideoCodec::H264,
+            QualityPreset::Balanced,
+            false,
+            RateModel::Timestamp,
+            t0,
+        );
+        // A short path lifts Balanced to its ceiling.
+        sample(&mut qos, s(0), 20, false);
+        for pace in [60, 30, 10] {
+            qos.set_viewer_cap(pace);
+            let targets = qos.targets(s(2));
+            assert_eq!(targets.pace_fps, pace);
+            assert_eq!(targets.encoder_bps, (bpf * f64::from(pace)) as u32);
+        }
+        for n in 1..=3 {
+            qos.tick(s(3 * n), &idle(), window(n, 90, 2.0));
+        }
+        assert_eq!(qos.view(s(10)).rate_model, RateModel::Timestamp);
     }
 }

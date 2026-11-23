@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     BackendCaps, QualityPreset, VideoCodec, VideoLimits,
     launch::Launcher,
-    protocol::{CAPABILITY_H265, HostMessage, RejectReason, ViewerMessage},
+    protocol::{CAPABILITY_H265, HostMessage, RateModel, RejectReason, ViewerMessage},
     security,
     test_util::{Pixel, until_within},
     wire,
@@ -98,6 +98,23 @@ async fn next(viewer: &mut Viewer) -> Option<HostMessage> {
                 return Some(message);
             }
             message => return Some(message),
+        }
+    }
+}
+
+/// The rate model of the next `Stats`, past a video unit's payload record.
+async fn rate_model(viewer: &mut Viewer) -> RateModel {
+    loop {
+        match wire::read_header(&mut viewer.stream, Duration::from_secs(5))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            HostMessage::Stats(stats) => return stats.rate_model,
+            HostMessage::Video { .. } => {
+                wire::read_payload(&mut viewer.stream).await.unwrap();
+            }
+            _ => {}
         }
     }
 }
@@ -373,6 +390,7 @@ async fn a_late_description_falls_back_to_the_launcher() {
     let fallback = BackendCaps {
         lock: true,
         os: Some(crate::HostOs::Windows),
+        rate_model: RateModel::Timestamp,
         ..BackendCaps::default()
     };
     let host = Host::builder(options())
@@ -381,7 +399,7 @@ async fn a_late_description_falls_back_to_the_launcher() {
         .await
         .unwrap();
     let invitation = host.invitation().clone();
-    let (_viewer, answer) = authenticate(
+    let (mut viewer, answer) = authenticate(
         &client,
         &invitation,
         invitation.token_text(),
@@ -392,6 +410,78 @@ async fn a_late_description_falls_back_to_the_launcher() {
         panic!("{answer:?}");
     };
     assert_eq!(capabilities, ["lock", "os_windows"]);
+    assert_eq!(rate_model(&mut viewer).await, RateModel::Timestamp);
+    host.stop().await.unwrap();
+}
+
+/// Every viewer's QoS starts at the rate model its backend describes, a
+/// viewer who joins the room included; a backend that names none starts
+/// at `nominal`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_viewer_starts_at_the_backends_rate_model() {
+    struct Stamped;
+    impl crate::Backend for Stamped {
+        fn display(&mut self) -> Result<crate::Display> {
+            crate::Backend::display(&mut Pixel)
+        }
+        fn capture(&mut self) -> Result<Vec<u8>> {
+            crate::Backend::capture(&mut Pixel)
+        }
+        fn input(&mut self, _: &crate::Input) -> Result<()> {
+            Err(error("read-only test backend"))
+        }
+        fn release(&mut self) {}
+        fn describe(&mut self, _: bool) -> Result<crate::Description> {
+            Ok(crate::Description {
+                display: self.display()?,
+                caps: BackendCaps {
+                    rate_model: RateModel::Timestamp,
+                    ..BackendCaps::default()
+                },
+            })
+        }
+    }
+    let relay = pb_mapper_testkit::Relay::start("desktop-rate-model").await;
+    let client = Client::from_credential(
+        relay.addr().to_string(),
+        pb_mapper_testkit::admin_credential(),
+        true,
+        None,
+    );
+    let host = Host::builder(options())
+        .backend(|| Ok(Stamped))
+        .start(&client)
+        .await
+        .unwrap();
+    let invitation = host.invitation().clone();
+    let token = invitation.token_text();
+    let (mut first, answer) =
+        authenticate(&client, &invitation, token.clone(), vec![VideoCodec::Jpeg]).await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+    assert_eq!(rate_model(&mut first).await, RateModel::Timestamp);
+    let (mut joined, answer) =
+        authenticate(&client, &invitation, token, vec![VideoCodec::Jpeg]).await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+    assert_eq!(rate_model(&mut joined).await, RateModel::Timestamp);
+    drop((first, joined));
+    host.stop().await.unwrap();
+
+    let host = Host::builder(options())
+        .backend(|| Ok(Pixel))
+        .start(&client)
+        .await
+        .unwrap();
+    let invitation = host.invitation().clone();
+    let (mut viewer, answer) = authenticate(
+        &client,
+        &invitation,
+        invitation.token_text(),
+        vec![VideoCodec::Jpeg],
+    )
+    .await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+    assert_eq!(rate_model(&mut viewer).await, RateModel::Nominal);
+    drop(viewer);
     host.stop().await.unwrap();
 }
 

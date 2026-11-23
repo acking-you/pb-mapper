@@ -302,6 +302,7 @@ impl Acceptor {
                 request.codecs.clone(),
                 request.limits,
                 request.quality,
+                room.rate_model,
                 &request.capabilities,
                 &capabilities,
             );
@@ -372,6 +373,7 @@ impl Acceptor {
             request.codecs.clone(),
             request.limits,
             request.quality,
+            caps.rate_model,
             &request.capabilities,
             &capabilities,
         );
@@ -394,6 +396,7 @@ impl Acceptor {
             host_capabilities,
             display,
             can_h265,
+            caps.rate_model,
             codec,
             session.clone(),
         );

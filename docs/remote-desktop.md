@@ -906,8 +906,11 @@ does not require Flutter or a POCOX runtime.
   first unprobed, for the display it captures (which sizes the first IDR) and
   its `BackendCaps` (lock, the OS, display modes, physical keys, pointer
   shapes), from which the session's `Accepted`
-  capabilities are built; then, only for a viewer that decodes H.265 while no
-  H.265 encoder has failed in this process, probed, for H.265 alone, so a slow
+  capabilities are built, and its encoder's `rate_model`, which the session's
+  QoS starts from (`nominal` unless the encoder budgets per second; see
+  [QoS](#qos-frame-rate-and-bits-per-frame)); then, only for a viewer that
+  decodes H.265 while no H.265 encoder has failed in this process, probed, for
+  H.265 alone, so a slow
   probe never costs the display. A description that misses the 3 s uses
   what its launcher falls back to. `bind(waker)` hands a pushing source the
   session's wake, and `drain_poll()` says whether thread C polls the encoder
@@ -1525,10 +1528,16 @@ to 0.
 The encoder bitrate depends on how the encoder budgets. A per-frame-budget MFT
 (the `nominal` rate model, the default) gets `bits per frame × nominal fps` and
 spends one frame's budget per frame, so a lower pace sheds bandwidth at once.
-An encoder that budgets per second would overspend at a reduced pace. When two
-consecutive 3 s windows at no more than 0.75 × the nominal rate produce more
-than 1.3 × the expected bits, the session latches to the `timestamp` model
-(`bits per frame × pace`) for good and traces `desktop_rate_model_latched`. The
+An encoder that budgets per second of presentation time (the `timestamp`
+model) gets `bits per frame × pace`. Each session starts at the model its
+backend declares (`BackendCaps::rate_model`, `nominal` unless set), and every
+viewer of a room starts at the same one; today every platform's encoder, and
+every session through the Windows helper, starts at `nominal`. A `nominal`
+session whose encoder budgets per second would overspend at a reduced pace.
+When two consecutive 3 s windows at no more than 0.75 × the nominal rate
+produce more than 1.3 × the expected bits, the session latches to the
+`timestamp` model for good and traces `desktop_rate_model_latched`; nothing
+latches a session back to `nominal`. The
 encoder bitrate stays between 256 kbit/s and 80 Mbit/s, which the encoder and
 the helper check too, and nothing raises it because the frame rate was cut.
 At 4K, Quality's maximum bits per frame give the encoder 68 Mbit/s at a
