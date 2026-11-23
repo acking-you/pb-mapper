@@ -30,13 +30,31 @@ class StatusDot extends StatelessWidget {
   );
 }
 
-/// A dot that breathes, for something in flight: a tunnel retrying, the
-/// relay being asked. Rests as a plain dot under reduced motion.
+/// How many times a dot for a state that lasts — a viewer of this computer, a
+/// relay running here — brightens before it rests lit. A breath that never
+/// ends asks for a frame at the display's rate for as long as it shows.
+const kSettlingBreaths = 3;
+
+/// A dot that breathes. Without [breaths] it breathes for as long as it
+/// shows, for something in flight that ends on its own: a tunnel retrying,
+/// the relay being asked. With [breaths] it marks a state that can last: it
+/// brightens that many times as it appears, the last time to stay lit,
+/// brighter than a [StatusDot], and then draws nothing more. Rests lit under
+/// reduced motion.
 class PulsingDot extends StatefulWidget {
-  const PulsingDot({super.key, required this.color, this.size = 8});
+  const PulsingDot({
+    super.key,
+    required this.color,
+    this.size = 8,
+    this.breaths,
+  }) : assert(breaths == null || breaths > 0);
 
   final Color color;
   final double size;
+
+  /// How many times it brightens when it appears, the last time to stay;
+  /// null breathes until it is gone.
+  final int? breaths;
 
   @override
   State<PulsingDot> createState() => _PulsingDotState();
@@ -44,20 +62,35 @@ class PulsingDot extends StatefulWidget {
 
 class _PulsingDotState extends State<PulsingDot>
     with SingleTickerProviderStateMixin {
+  /// Half a breath: dim to lit, or back.
+  static const _half = Duration(milliseconds: 900);
+
   late final AnimationController _c = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 900),
+    duration: _half,
   );
+  bool _begun = false;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final first = !_begun;
+    _begun = true;
     if (Motion.reduced(context)) {
       _c
         ..stop()
         ..value = 1;
-    } else if (!_c.isAnimating) {
-      _c.repeat(reverse: true);
+      return;
+    }
+    final breaths = widget.breaths;
+    if (breaths == null) {
+      if (!_c.isAnimating) _c.repeat(reverse: true);
+    } else if (first) {
+      // One run through every half breath: it ends lit, and the controller
+      // stops by itself, so no frame is asked for after it.
+      _c
+        ..duration = _half * (2 * breaths - 1)
+        ..forward(from: 0);
     }
   }
 
@@ -67,31 +100,45 @@ class _PulsingDotState extends State<PulsingDot>
     super.dispose();
   }
 
+  /// How lit the dot is, 0 to 1, at the controller's [value].
+  double _lift(double value) {
+    final breaths = widget.breaths;
+    if (breaths == null) return Curves.easeInOut.transform(value);
+    // Up on even halves and down on odd ones; the last half, up, ends at 1.
+    final at = value * (2 * breaths - 1);
+    final half = at.floor();
+    final into = at - half;
+    return Curves.easeInOut.transform(half.isEven ? into : 1 - into);
+  }
+
   @override
-  Widget build(BuildContext context) => AnimatedBuilder(
-    animation: _c,
-    builder: (context, _) {
-      final t = Curves.easeInOut.transform(_c.value);
-      return Container(
-        width: widget.size,
-        height: widget.size,
-        decoration: BoxDecoration(
-          color: Color.lerp(
-            widget.color.withValues(alpha: 0.4),
-            widget.color,
-            t,
-          ),
-          shape: BoxShape.circle,
-          boxShadow: [
-            BoxShadow(
-              color: widget.color.withValues(alpha: 0.2 + 0.5 * t),
-              blurRadius: 2 + 5 * t,
-              spreadRadius: 0.4 + t,
+  Widget build(BuildContext context) => RepaintBoundary(
+    // While it breathes, only the dot repaints, not the bar around it.
+    child: AnimatedBuilder(
+      animation: _c,
+      builder: (context, _) {
+        final t = _lift(_c.value);
+        return Container(
+          width: widget.size,
+          height: widget.size,
+          decoration: BoxDecoration(
+            color: Color.lerp(
+              widget.color.withValues(alpha: 0.4),
+              widget.color,
+              t,
             ),
-          ],
-        ),
-      );
-    },
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: widget.color.withValues(alpha: 0.2 + 0.5 * t),
+                blurRadius: 2 + 5 * t,
+                spreadRadius: 0.4 + t,
+              ),
+            ],
+          ),
+        );
+      },
+    ),
   );
 }
 
@@ -105,6 +152,7 @@ class StatusChip extends StatelessWidget {
     required this.color,
     required this.label,
     this.pulsing = false,
+    this.breaths,
     this.filled = true,
     this.shrinks = false,
     this.inkLabel = false,
@@ -113,6 +161,10 @@ class StatusChip extends StatelessWidget {
   final Color color;
   final String label;
   final bool pulsing;
+
+  /// With [pulsing], how many times the dot breathes before it rests; see
+  /// [PulsingDot.breaths].
+  final int? breaths;
   final bool filled;
   final bool inkLabel;
 
@@ -135,7 +187,9 @@ class StatusChip extends StatelessWidget {
     final row = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        pulsing ? PulsingDot(color: color) : StatusDot(color: color),
+        pulsing
+            ? PulsingDot(color: color, breaths: breaths)
+            : StatusDot(color: color),
         const SizedBox(width: 6),
         shrinks ? Flexible(child: text) : text,
       ],
