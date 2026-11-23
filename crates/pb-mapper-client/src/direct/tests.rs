@@ -1,9 +1,10 @@
 use super::{
     binding,
     conn::DirectConn,
-    consumer::{COOLDOWN_INITIAL, COOLDOWN_MAX, Consumer, Cooldown, DataPath, Prepared},
+    consumer::{Consumer, DataPath, PUNCH_BUDGET, Prepared},
     endpoint::{Arrival, InterfaceSource, Network},
     lan::{Assessment, Interface, Interfaces},
+    memory::{COOLDOWN_INITIAL, COOLDOWN_MAX, Cooldown, DirectMemory, MAX_SERVICES},
     tcp,
 };
 use crate::{
@@ -62,6 +63,43 @@ fn fallback_cooldown_doubles_to_its_cap_and_clears() {
     assert!(!cooldown.active(now));
     cooldown.back_off(now);
     assert!(!cooldown.active(now + COOLDOWN_INITIAL));
+}
+
+/// A client keeps the pauses of [`MAX_SERVICES`] services at most. Past it,
+/// those that hold nothing back go first, so a running pause outlives them;
+/// with every service paused, the pause that ends soonest goes.
+#[test]
+fn direct_memory_is_bounded_and_keeps_running_pauses_longest() {
+    let now = Instant::now();
+    let pause = |memory: &mut DirectMemory, service: &str, at: Instant| {
+        let pauses = memory.pauses(service, now, 1);
+        let mut entry = pauses.lock();
+        entry.on_network(1);
+        entry.direct.back_off(at);
+        drop(entry);
+        pauses
+    };
+
+    let mut memory = DirectMemory::default();
+    let paused = pause(&mut memory, "paused", now);
+    for service in 0..MAX_SERVICES {
+        memory.pauses(&service.to_string(), now, 1);
+        assert!(memory.len() <= MAX_SERVICES);
+    }
+    assert!(Arc::ptr_eq(&memory.pauses("paused", now, 1), &paused));
+
+    let mut memory = DirectMemory::default();
+    let soonest = pause(&mut memory, "soonest", now);
+    for service in 1..MAX_SERVICES {
+        pause(
+            &mut memory,
+            &service.to_string(),
+            now + Duration::from_secs(1),
+        );
+    }
+    memory.pauses("new", now, 1);
+    assert_eq!(memory.len(), MAX_SERVICES);
+    assert!(!Arc::ptr_eq(&memory.pauses("soonest", now, 1), &soonest));
 }
 
 /// A loopback relay that offers direct, with a share of a local TCP backend
@@ -134,6 +172,7 @@ impl Share {
                 lan_transport,
                 lan_tcp: false,
             },
+            Default::default(),
         );
         consumer
             .network
@@ -603,6 +642,129 @@ async fn relay_recovery_preserves_direct_cooldown_until_network_changes() {
         registration.stop().await.unwrap();
         drop(echo);
         drop(relay);
+    })
+    .await
+    .unwrap();
+}
+
+/// Each `connect_tcp` sets up a consumer of its own, yet a fallback in one
+/// pauses direct for the client's next to the service: that one takes the
+/// relay at once instead of spending the punch budget again, and says why.
+/// A network change clears the pause.
+#[tokio::test]
+async fn a_fallback_pauses_direct_for_the_clients_next_connect_tcp() {
+    use crate::sdk::{ConnectOptions, Connection, PathPolicy};
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let relay = TestRelay::start(
+            "connect-tcp-pause",
+            Some(DirectServerConfig {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                advertise: "127.0.0.1:0".parse().unwrap(),
+            }),
+        )
+        .await;
+        let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = backend.local_addr().unwrap();
+        let _echo = AbortOnDropHandle::new(tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = backend.accept().await.unwrap();
+                let mut byte = [0; 1];
+                stream.read_exact(&mut byte).await.unwrap();
+                stream.write_all(&byte).await.unwrap();
+            }
+        }));
+        let publisher =
+            Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
+        let registration = publisher
+            .register_with_options(
+                RegisterRequest {
+                    key: "paused".into(),
+                    local_addr: backend_addr.to_string(),
+                    transport: Transport::Tcp,
+                    codec: true,
+                    force_namespace: false,
+                },
+                RegisterOptions {
+                    allow_direct: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        registration
+            .wait_ready_timeout(Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // A client on a network of its own, which this test changes, whose
+        // direct endpoints get no QUIC packet out: no punch succeeds.
+        let mut client =
+            Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
+        Arc::get_mut(&mut client.inner).unwrap().endpoint =
+            RelayEndpoint::isolated(relay.addr.into());
+        let endpoint = client.inner.endpoint.clone();
+        client
+            .inner
+            .direct_memory
+            .lock()
+            .pauses("paused", Instant::now(), endpoint.network_generation())
+            .lock()
+            .block_quic = true;
+        // How long a `connect_tcp` takes to its first echoed byte.
+        let first_byte = async || -> (Duration, Connection) {
+            let started = Instant::now();
+            let (mut stream, connection) = client
+                .connect_tcp(
+                    "paused",
+                    ConnectOptions {
+                        path: PathPolicy::Auto,
+                        port_mapping: PortMapping::Off,
+                        lan_first: true,
+                        lan_transport: LanTransport::Quic,
+                    },
+                )
+                .await
+                .unwrap();
+            stream.write_all(b"x").await.unwrap();
+            let mut byte = [0; 1];
+            stream.read_exact(&mut byte).await.unwrap();
+            assert_eq!(&byte, b"x");
+            (started.elapsed(), connection)
+        };
+        let fallbacks = |connection: &Connection| {
+            connection
+                .diagnostics()
+                .direct
+                .map_or(0, |direct| direct.fallbacks)
+        };
+
+        let (fell_back, first) = first_byte().await;
+        assert_eq!(fallbacks(&first), 1);
+        assert!(first.metrics().direct_cooldown_ms.is_some());
+
+        let (skipped, second) = first_byte().await;
+        let metrics = second.metrics();
+        assert_eq!((fallbacks(&second), metrics.cooldown_skips), (0, 1));
+        assert!(metrics.direct_cooldown_ms.is_some());
+        assert!(
+            skipped + PUNCH_BUDGET <= fell_back,
+            "{skipped:?} after a fallback that took {fell_back:?}"
+        );
+
+        endpoint.notify_network_change();
+        let (retried, third) = first_byte().await;
+        assert_eq!((fallbacks(&third), third.metrics().cooldown_skips), (1, 0));
+        assert!(retried >= PUNCH_BUDGET, "{retried:?}");
+        eprintln!(
+            "connect_tcp to the first byte: {fell_back:?} falling back, \
+             {skipped:?} inside the pause, {retried:?} after a network change"
+        );
+
+        for connection in [first, second, third] {
+            connection.stop().await.unwrap();
+        }
+        registration.stop().await.unwrap();
     })
     .await
     .unwrap();

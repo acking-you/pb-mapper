@@ -10,12 +10,14 @@ mod lan;
 mod link;
 #[cfg(feature = "port-mapping")]
 mod mapping;
+mod memory;
 mod provider;
 mod reports;
 mod socket;
 mod tcp;
 
 pub(crate) use consumer::Consumer;
+pub(crate) use memory::{DirectMemory, SharedPauses};
 use pb_mapper_protocol::direct::{SETUP_TTL_MS, SessionGrant};
 pub(crate) use provider::{MAX_SESSIONS as MAX_PROVIDER_SESSIONS, Provider};
 
