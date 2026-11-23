@@ -2,7 +2,8 @@
 //! with a visibly changing desktop, or with `--animate`. Static repeats do not
 //! count as capture FPS. It measures capture and encode only, never network or
 //! viewer presentation, and paces its submissions as the host's capture worker
-//! does: the encoder never paces itself.
+//! does: the encoder never paces itself, and a tick that finds nothing new
+//! stays armed and is asked again.
 //!
 //! - `--pattern-only`: animate the pattern window; no encoder runs here.
 //! - `--animate`: animate the pattern window and encode it.
@@ -30,7 +31,8 @@
 //! heap allocations and bytes the encoder's own calls ask for, and the time
 //! and the cycles its thread ran in them, per access unit; and the median and
 //! mean of each of a submit that converted a capture and of a drain that
-//! returned a unit.
+//! returned a unit. Either way it prints the capture calls per second, and
+//! the polls among them: the calls that found nothing new.
 #[cfg(windows)]
 mod probe_support;
 
@@ -103,9 +105,9 @@ mod counting {
 mod bench {
     use crate::{pattern::Pattern, probe_support::option};
     use pb_mapper_desktop::{
-        Backend, Display, DisplaySelection, NativeBackend, VideoCodec, VideoLimits, VideoRate,
-        displays, native_backend,
-        windows::video::{Encoded, Encoder, Statistics, h265_available},
+        Backend, DRAIN_POLL, Display, DisplaySelection, NativeBackend, VideoCodec, VideoLimits,
+        VideoRate, displays, native_backend,
+        windows::video::{Encoded, Encoder, Statistics, Submit, h265_available},
     };
     use std::{
         fs::File,
@@ -131,6 +133,10 @@ mod bench {
     /// A step's bitrate is measured after this long, once the rate controller
     /// has settled.
     const SETTLE: Duration = Duration::from_secs(2);
+    /// Thread C's `HOT_WINDOW`: after a new picture, a tick that found
+    /// nothing new is asked again every `DRAIN_POLL` for this long, and once
+    /// a period after it.
+    const HOT_WINDOW: Duration = Duration::from_millis(250);
 
     pub fn run() -> Result {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -470,6 +476,11 @@ mod bench {
         context_us: u128,
         capture_us: u128,
         calls: u64,
+        /// Capture calls (a submit, or the backend's `capture_video`), and
+        /// those of them that found nothing new and left the tick armed: the
+        /// polls a still or slowly changing desktop costs.
+        captures: u64,
+        polls: u64,
         /// What the encoder's own calls allocated, and bytes asked for.
         encoder_allocations: (u64, u64),
         /// Every encoder call, an empty drain or a submit that took nothing
@@ -558,7 +569,10 @@ mod bench {
 
     /// Each step runs the run's seconds at its pace, as the host's capture
     /// worker paces: a submission on each tick, every ready unit drained in
-    /// between, until `--frames` units are out.
+    /// between, until `--frames` units are out. A tick whose capture found
+    /// nothing new stays armed, as thread C keeps it: it is asked again every
+    /// `DRAIN_POLL` within `HOT_WINDOW` of the last new picture, and once a
+    /// period otherwise.
     fn paced(
         rates: &Rates,
         limits: &Limits,
@@ -573,6 +587,10 @@ mod bench {
             let step_start = Instant::now();
             let period = Duration::from_secs(1) / pace;
             let mut next_tick = step_start;
+            // An armed tick's next poll, and until when polls come every
+            // `DRAIN_POLL`.
+            let mut poll_due: Option<Instant> = None;
+            let mut hot_until = step_start;
             while step_start.elapsed() < Duration::from_secs(rates.seconds)
                 && limits.frames.is_none_or(|frames| tally.written < frames)
             {
@@ -595,10 +613,7 @@ mod bench {
                     pace_fps: pace,
                 };
                 let now = Instant::now();
-                let tick = now >= next_tick;
-                if tick {
-                    next_tick = (next_tick + period).max(now + period * 3 / 4);
-                }
+                let tick = now >= poll_due.map_or(next_tick, |due| due.max(next_tick));
                 let force =
                     tick && tally.forced == 0 && start.elapsed() > Duration::from_millis(1500);
                 if force {
@@ -606,7 +621,8 @@ mod bench {
                     tally.pending_idr = Some(now);
                 }
                 let mut ready = Vec::new();
-                match coder {
+                // Whether the tick's capture spent it.
+                let spent = match coder {
                     Coder::Encoder(encoder) => {
                         encoder.set_rate(rate)?;
                         loop {
@@ -625,13 +641,16 @@ mod bench {
                         if tick {
                             let (before, at, ran) =
                                 (crate::counting::now(), Instant::now(), thread_cycles());
-                            let submitted = encoder.submit(force)?;
+                            let outcome = encoder.submit(force)?;
                             let (took, ran) = (at.elapsed(), thread_cycles() - ran);
                             tally.encoder_calls(before, took, ran);
-                            if submitted {
+                            if outcome == Submit::Submitted {
                                 tally.submit_us.push(took.as_secs_f64() * 1e6);
                                 tally.submit_kcycles.push(ran as f64 / 1e3);
                             }
+                            outcome.spends_tick()
+                        } else {
+                            false
                         }
                     }
                     Coder::Backend(backend) => {
@@ -657,10 +676,31 @@ mod bench {
                             encode_us: frame.format.encode_us,
                             gop: frame.format.gop,
                         }));
+                        tick && backend.submitted_video()
                     }
-                }
+                };
+                // As thread C: a new picture this round collected makes the
+                // desktop active before an armed tick's next poll is chosen.
                 for frame in ready {
+                    if !frame.duplicate {
+                        hot_until = Instant::now() + HOT_WINDOW;
+                    }
                     tally.record(&frame, step, step_start, sinks, limits.pause_ms)?;
+                }
+                if tick {
+                    tally.captures += 1;
+                    if spent {
+                        next_tick = (next_tick + period).max(now + period * 3 / 4);
+                        poll_due = None;
+                    } else {
+                        tally.polls += 1;
+                        let done = Instant::now();
+                        poll_due = Some(if done < hot_until {
+                            done + DRAIN_POLL
+                        } else {
+                            done + DRAIN_POLL.max(period)
+                        });
+                    }
                 }
                 let idle = if limits.backend {
                     limits.poll
@@ -668,7 +708,8 @@ mod bench {
                     Duration::from_millis(1)
                 };
                 std::thread::sleep(
-                    next_tick
+                    poll_due
+                        .map_or(next_tick, |due| due.max(next_tick))
                         .saturating_duration_since(Instant::now())
                         .min(idle),
                 );
@@ -740,6 +781,13 @@ mod bench {
                 stats.max_in_flight
             );
         }
+        println!(
+            "capture_calls={} capture_calls_per_s={:.1} polls={} polls_per_s={:.1}",
+            tally.captures,
+            tally.captures as f64 / elapsed,
+            tally.polls,
+            tally.polls as f64 / elapsed,
+        );
         if let Some(paces) = &rates.paces {
             // `Nominal` encoders budget each frame from the nominal rate, so their
             // bitrate falls with the pace; `Timestamp` encoders hold the target.
