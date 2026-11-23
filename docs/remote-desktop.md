@@ -1832,7 +1832,12 @@ Each session's lifecycle is logged at info on `pb_mapper_desktop::session`:
 `desktop_viewer_ended` (reason, detail, seconds, keyframes,
 `keyframes_requested`, `backlog_drops`); a host also logs each H.265 probe as
 `desktop_h265_probe` (usable, ms, detail) and warns `desktop_h265_failed`
-when an H.265 encoder fails and H.265 is turned off. The app also warns
+when an H.265 encoder fails and H.265 is turned off. A Mac host logs each
+encoder it opens as `macos_encoder_opened` (codec, `low_latency`, width,
+height, fps, hardware, gop, and `data_rate_limits`: whether VideoToolbox took
+the cap of 1.5 × the mean over 1 s), after
+`macos_encoder_low_latency_refused` when it retried without low-latency rate
+control. The app also warns
 `desktop_connect_failed` with the typed failure, and a native decoder's
 failure is warned as `desktop_decoder_error` on `pb_mapper_desktop::frames`
 with its text as the detail. Each line names itself in an `event` field, and
