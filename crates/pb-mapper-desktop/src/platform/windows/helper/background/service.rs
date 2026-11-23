@@ -2,6 +2,7 @@
 //! host and its pending start, and the management pipe the approved
 //! application calls.
 use super::{
+    super::configuration,
     storage::{Saved, clear_marker, client, load, mark_revoked, namespace, remove, save},
     *,
 };

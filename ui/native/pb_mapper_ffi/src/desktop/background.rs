@@ -248,11 +248,14 @@ pub(super) fn failed_background(previous: Option<&Background>, error: CtlError) 
 pub(super) async fn query_background() -> Result<Background, CtlError> {
     #[cfg(windows)]
     {
-        let helper = super::blocking(desktop::privileged::status).await?;
-        query_background_for_helper(helper, async {
-            let snapshot = desktop::privileged::background::status()
-                .await
-                .map_err(err)?;
+        use desktop::privileged::background;
+        // One check of the helper per refresh, without the update check,
+        // which only the helper card reads: the status call is made with
+        // the installation it verified rather than checking it again.
+        let (helper, ready) = super::blocking(background::readiness).await?;
+        query_background_for_helper(helper, async move {
+            let ready = ready.ok_or_else(|| err("the Windows desktop service is not ready"))?;
+            let snapshot = background::status_of(ready).await.map_err(err)?;
             Ok(snapshot.into())
         })
         .await

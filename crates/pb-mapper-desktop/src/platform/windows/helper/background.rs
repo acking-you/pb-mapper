@@ -1,6 +1,6 @@
 //! Explicitly authorized hosting owned by the installed Windows service.
 //! The UI is a management client; closing it does not own or stop this host.
-use super::{configuration, ipc, os, pipe};
+use super::{Configuration, ipc, os, pipe};
 use crate::{HostStatus, Result, error};
 use pb_mapper_client::sdk::RelayTransport;
 use serde::{Deserialize, Serialize};
@@ -120,9 +120,38 @@ struct Response {
     error: Option<String>,
 }
 
+/// The installation a readiness check read and verified when it found the
+/// helper ready: what [`status_of`] asks the service with, so that one
+/// refresh checks the installation once. One call spends it; a later call
+/// checks again.
+pub struct Ready(Configuration);
+
+/// The helper's [`Status`](super::Status), without the update check, which
+/// readiness never reads, and, when it is ready, what [`status_of`] needs:
+/// a refresh that reads both checks the installation and the service once.
+/// It blocks on the file system and the service control manager.
+pub fn readiness() -> (super::Status, Option<Ready>) {
+    let (status, config) = super::readiness::assess(false);
+    let ready = config.filter(|_| status.not_ready().is_none()).map(Ready);
+    (status, ready)
+}
+
+/// [`status`], asked with what [`readiness`] found just before. The pipe's
+/// server is still verified as the running service's protected image.
+pub async fn status_of(ready: Ready) -> Result<Snapshot> {
+    call_with(ready, Command::Status {}).await
+}
+
 async fn call(command: Command) -> Result<Snapshot> {
-    super::ensure_ready()?;
-    let config = configuration()?;
+    let (status, ready) = readiness();
+    status.ensure_ready()?;
+    let ready =
+        ready.ok_or_else(|| error("Windows desktop service installation could not be read"))?;
+    call_with(ready, command).await
+}
+
+async fn call_with(ready: Ready, command: Command) -> Result<Snapshot> {
+    let Ready(config) = ready;
     let mut pipe = pipe::connect(PIPE)?;
     os::verify_server(&pipe, &config.helper_executable, None)?;
     tokio::time::timeout(CALL_TIMEOUT, async {

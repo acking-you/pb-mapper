@@ -1,6 +1,6 @@
 //! Whether the installed helper can be used now, and whether installing
 //! from this application would update it.
-use super::{EXECUTABLE, HELPER_PROTOCOL, PIPE, configuration, os, pipe};
+use super::{Configuration, EXECUTABLE, HELPER_PROTOCOL, PIPE, configuration, os, pipe};
 use crate::{Result, error};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -194,6 +194,12 @@ pub(crate) fn ensure_ready() -> Result<()> {
 /// it: the check reads both helper executables, and hashes them after a
 /// change.
 pub(super) fn status_with(update_check: bool) -> Status {
+    assess(update_check).0
+}
+
+/// [`status_with`], and the installation it read and verified, when it could:
+/// a call to the service made right after it needs neither again.
+pub(super) fn assess(update_check: bool) -> (Status, Option<Configuration>) {
     // A loaded service may outlive a damaged/unreadable installation.json.
     // Only an affirmative SCM "does not exist" permits treating it as absent.
     // One query: the process it reports running is the one verified below.
@@ -212,7 +218,7 @@ pub(super) fn status_with(update_check: bool) -> Status {
             };
             let protocol = config.protocol();
             let owned_by_user = os::current_sid().is_ok_and(|sid| sid == config.owner_sid);
-            Status {
+            let status = Status {
                 installed: true,
                 running,
                 startup_disabled: service.startup_disabled,
@@ -221,7 +227,7 @@ pub(super) fn status_with(update_check: bool) -> Status {
                     && std::env::current_exe()
                         .is_ok_and(|path| os::same_path(&path, &config.ui_executable)),
                 identity_verified: identity.is_ok(),
-                installed_application: Some(config.ui_executable),
+                installed_application: Some(config.ui_executable.clone()),
                 protocol,
                 update_required: update_required(protocol, running, || pipe::exists(PIPE)),
                 update_available: update_check && update_available(&config.helper_executable),
@@ -235,15 +241,19 @@ pub(super) fn status_with(update_check: bool) -> Status {
                     },
                     |e| e.to_string(),
                 ),
-            }
+            };
+            (status, Some(config))
         }
-        Err(e) => Status {
-            installed: exists,
-            running,
-            startup_disabled: service.startup_disabled,
-            message: e.to_string(),
-            ..Default::default()
-        },
+        Err(e) => (
+            Status {
+                installed: exists,
+                running,
+                startup_disabled: service.startup_disabled,
+                message: e.to_string(),
+                ..Default::default()
+            },
+            None,
+        ),
     }
 }
 
