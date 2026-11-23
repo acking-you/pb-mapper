@@ -252,9 +252,6 @@ impl<P: Platform> Backend for PlatformBackend<P> {
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         self.video.as_ref()?.1.idle_until(keyframe_due)
     }
-    fn encodes_off_thread(&self) -> bool {
-        <P::Video as VideoSource>::ENCODES_OFF_THREAD
-    }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         let _scope = self.parts.desktop.scope();
         if !self.verify(expected)? {
@@ -472,9 +469,6 @@ impl Backend for NativeBackend {
     }
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         self.0.capture_idle_until(keyframe_due)
-    }
-    fn encodes_off_thread(&self) -> bool {
-        self.0.encodes_off_thread()
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         self.0.cursor(expected)

@@ -72,8 +72,6 @@ struct Fake {
     delay: Duration,
     /// Told when a capture call starts.
     started: Option<std::sync::mpsc::SyncSender<()>>,
-    /// Run on thread C as each capture call starts, before `started`.
-    probe: Option<Arc<dyn Fn() + Send + Sync>>,
     /// How long a picture stays in the encoder, at the engine's clock; zero
     /// returns it from the capture call itself.
     latency: Arc<Mutex<Duration>>,
@@ -98,8 +96,6 @@ struct Fake {
     /// Each unit repeats an unchanged picture, as the Windows encoder's
     /// liveness frame does.
     duplicate: Arc<AtomicBool>,
-    /// The encoder runs on the calling thread, as a software one would.
-    software: Arc<AtomicBool>,
     repeatable: bool,
     submitted_video: bool,
 }
@@ -119,7 +115,6 @@ impl Fake {
             hidden: Arc::default(),
             delay: Duration::ZERO,
             started: None,
-            probe: None,
             latency: Arc::default(),
             encoding: Arc::default(),
             discard: Arc::default(),
@@ -129,7 +124,6 @@ impl Fake {
             idle_until: Arc::default(),
             still: Arc::default(),
             duplicate: Arc::default(),
-            software: Arc::default(),
             repeatable: false,
             submitted_video: true,
         }
@@ -194,9 +188,6 @@ impl Backend for Fake {
         rate: VideoRate,
     ) -> Result<Option<EncodedFrame>> {
         let started = (self.clock)();
-        if let Some(probe) = &self.probe {
-            probe();
-        }
         if let Some(notify) = &self.started {
             let _ = notify.try_send(());
         }
@@ -252,9 +243,6 @@ impl Backend for Fake {
     }
     fn submitted_video(&self) -> bool {
         self.submitted_video
-    }
-    fn encodes_off_thread(&self) -> bool {
-        !self.software.load(Ordering::SeqCst)
     }
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         // The first call opens the push source and learns it has no picture.
@@ -817,79 +805,6 @@ fn a_capture_that_keeps_failing_is_retried_every_unavailable_retry() {
     h.fake.fail_capture.store(false, Ordering::SeqCst);
     h.run(Duration::from_millis(300), true);
     assert_eq!(h.state().record.state, SessionState::Streaming);
-}
-
-/// Thread C is raised while it streams a codec the OS encodes, and gives
-/// that back while paused and while it streams JPEG, which it compresses
-/// itself; it keeps its fine timers for JPEG.
-#[test]
-fn thread_c_is_raised_only_while_it_streams_h264_or_h265() {
-    let mut h = Harness::new(true, None);
-    h.run(Duration::from_millis(50), true);
-    assert!(h.engine.priority.is_some());
-    h.shared.targets.paused.store(true, Ordering::Release);
-    h.run(Duration::from_millis(50), true);
-    assert!(h.engine.priority.is_none());
-    h.shared.targets.paused.store(false, Ordering::Release);
-    h.run(Duration::from_millis(50), true);
-    assert!(h.engine.priority.is_some());
-    h.engine.room.set_codec(VideoCodec::Jpeg);
-    h.run(Duration::from_millis(250), true);
-    assert!(h.engine.priority.is_none());
-    assert!(h.engine.timer.is_some());
-    // A backend that encodes on this thread itself is never raised.
-    h.engine.room.set_codec(VideoCodec::H264);
-    h.run(Duration::from_millis(250), true);
-    assert!(h.engine.priority.is_some());
-    h.fake.software.store(true, Ordering::SeqCst);
-    h.run(Duration::from_millis(50), true);
-    assert!(h.engine.priority.is_none());
-}
-
-/// Thread C is a blocking thread of the embedder's runtime. Its session
-/// raises it, and when the session ends that same pooled thread runs the
-/// next blocking task at exactly the level it had before.
-#[cfg(any(windows, target_os = "macos"))]
-#[test]
-fn thread_c_leaves_its_pool_thread_as_it_found_it() {
-    use crate::platform::priority::testing::{LOWER, RAISED, current, set};
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .max_blocking_threads(1)
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let pooled = || (std::thread::current().id(), current());
-        // Not a new thread's level, so only an exact restore reads it again.
-        let found = tokio::task::spawn_blocking(move || {
-            assert!(set(LOWER));
-            pooled()
-        })
-        .await
-        .unwrap();
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let (started, starts) = std::sync::mpsc::sync_channel(64);
-        let mut fake = Fake::new(Arc::new(Instant::now));
-        fake.started = Some(started);
-        let probed = seen.clone();
-        fake.probe = Some(Arc::new(move || probed.lock().push(pooled())));
-        let shared = session(false);
-        let mut worker = prepare(move || Ok(fake), false).start(shared.clone(), config(None));
-        // The first capture may run before thread C's first raise; every
-        // later one runs after it.
-        for _ in 0..2 {
-            starts.recv_timeout(Duration::from_secs(5)).unwrap();
-        }
-        shared.cancel.cancel();
-        assert_eq!(worker.exited().await, WorkerExit::Cancelled);
-        let left = tokio::task::spawn_blocking(pooled).await.unwrap();
-        let seen = seen.lock();
-        assert!(seen.iter().all(|(thread, _)| *thread == found.0));
-        assert!(seen.len() >= 2);
-        assert!(seen[1..].iter().all(|(_, level)| *level == RAISED));
-        assert_eq!(left, found);
-    });
 }
 
 #[tokio::test]

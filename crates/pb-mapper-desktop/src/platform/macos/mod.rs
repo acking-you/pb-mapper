@@ -3,8 +3,7 @@
 //! shape, Core Graphics display
 //! modes changed for this app only, ScreenCaptureKit stills; Screen
 //! Recording and Accessibility (event posting) as the permissions the owner
-//! grants; App Nap held off while a session captures, thread C at the
-//! user-interactive QoS class while it streams H.264 or H.265, and its waits
+//! grants; App Nap held off while a session captures, and thread C's waits
 //! on timers the kernel does not coalesce; a Keychain key for the
 //! remembered grant.
 //!
@@ -48,8 +47,6 @@ pub(crate) mod keychain;
 mod layout;
 #[cfg(target_os = "macos")]
 mod modes;
-#[cfg(target_os = "macos")]
-pub(crate) mod priority;
 #[cfg(target_os = "macos")]
 mod still;
 #[cfg(test)]

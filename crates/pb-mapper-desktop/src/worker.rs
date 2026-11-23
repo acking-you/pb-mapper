@@ -29,7 +29,6 @@ use crate::{
     lane::LaneCommand,
     modes::ModeCommand,
     pacer::Pacer,
-    priority::ThreadPriority,
     protocol::{MAX_VIEWERS, NoticeCode, PeerColor, PeerSlot, SessionState, StateReason},
     scheduler::{Waiter, Wake},
     shared::{EngineState, PeerCursorSnapshot, Policy, SessionShared},
@@ -478,8 +477,6 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     drain_due: Instant,
     /// Held while this session captures.
     timer: Option<TimerResolution>,
-    /// Held while this session captures H.264 or H.265.
-    priority: Option<ThreadPriority>,
     /// A terminal backend error, kept typed until the session chooses its stop reason.
     fatal: Option<io::Error>,
     window: Window,
@@ -570,7 +567,6 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             cursor_shape: None,
             drain_due: now,
             timer: None,
-            priority: None,
             fatal: None,
             window: Window::new(now),
             stats: WindowStats::default(),
@@ -879,15 +875,6 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         let capturing = !self.paused && self.unavailable.is_none() && has_slots;
         if capturing != self.timer.is_some() {
             self.timer = capturing.then(TimerResolution::hold);
-        }
-        // This thread runs above the owner's own work only while hardware or
-        // the OS encodes what it captures; a JPEG, or a backend's own
-        // software encoder, runs on this thread.
-        let raised = capturing
-            && self.backend.encodes_off_thread()
-            && ThreadPriority::raised_for(self.codec);
-        if raised != self.priority.is_some() {
-            self.priority = raised.then(ThreadPriority::raise);
         }
         for slot in self.slots.iter_mut().flatten() {
             if slot.notice_until.is_some_and(|until| now >= until) {

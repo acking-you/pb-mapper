@@ -29,7 +29,6 @@ mod oop;
 mod outgoing;
 mod pacer;
 mod platform;
-mod priority;
 pub mod privileged;
 mod protocol;
 mod qos;
