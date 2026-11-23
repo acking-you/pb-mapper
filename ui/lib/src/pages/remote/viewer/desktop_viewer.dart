@@ -85,6 +85,9 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
   late ViewerActions _actions;
   bool _fullscreen = false, _panelHeld = false;
 
+  /// The full screen last asked for, which the window may not report yet.
+  bool _fullscreenWanted = false;
+
   DesktopStore get _desktop => widget.desktop;
 
   @override
@@ -113,7 +116,9 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
     _lifecycle = AppLifecycleListener(
       onInactive: _input.releaseAll,
       onHide: _input.releaseAll,
+      onStateChange: _lifecycleChanged,
     );
+    _lifecycleChanged(WidgetsBinding.instance.lifecycleState);
     if (isFramelessDesktop) {
       windowManager.addListener(this);
       unawaited(_syncFullscreen());
@@ -138,7 +143,7 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
   void dispose() {
     if (isFramelessDesktop) {
       windowManager.removeListener(this);
-      if (_fullscreen) unawaited(_setFullscreen(false));
+      if (_fullscreen || _fullscreenWanted) unawaited(_setFullscreen(false));
     }
     widget.prefs.removeListener(_prefsChanged);
     _desktop.session.removeListener(_keyboardSettingsChanged);
@@ -179,11 +184,15 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
     }
   }
 
+  /// The window's own flag. The app's chrome follows it too, also once
+  /// this viewer is gone (leaving full screen as it closes).
   Future<void> _syncFullscreen() async {
     try {
       final fullscreen = await windowManager.isFullScreen();
-      if (mounted && fullscreen != _fullscreen) {
-        setState(() => _fullscreen = fullscreen);
+      if (mounted) {
+        _fullscreenChanged(fullscreen);
+      } else {
+        windowFullScreen.value = fullscreen;
       }
     } catch (_) {
       // No window to ask (a test, or a platform that refuses).
@@ -191,18 +200,35 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
   }
 
   Future<void> _setFullscreen(bool value) async {
+    _fullscreenWanted = value;
     try {
       await windowManager.setFullScreen(value);
     } catch (_) {
       // Best effort: the window stays as it is.
     }
+    // The plugin's own flag says where the window ended up: on Windows it
+    // reports entering full screen only from a maximized window, and never
+    // leaving it back to one.
+    await _syncFullscreen();
   }
 
   @override
-  void onWindowEnterFullScreen() => setState(() => _fullscreen = true);
+  void onWindowEnterFullScreen() => _fullscreenChanged(true);
 
   @override
-  void onWindowLeaveFullScreen() => setState(() => _fullscreen = false);
+  void onWindowLeaveFullScreen() => _fullscreenChanged(false);
+
+  /// Unknown counts as active: not every embedder reports one.
+  void _lifecycleChanged(AppLifecycleState? state) =>
+      _keyboard.active = state == null || state == AppLifecycleState.resumed;
+
+  /// Full screen, the picture takes this computer's shortcuts too, and the
+  /// app's chrome hides.
+  void _fullscreenChanged(bool value) {
+    windowFullScreen.value = value;
+    if (value != _fullscreen) setState(() => _fullscreen = value);
+    _keyboard.fullscreen = value;
+  }
 
   Future<void> _disconnect() =>
       (widget.onDisconnect ?? _desktop.disconnect).call();

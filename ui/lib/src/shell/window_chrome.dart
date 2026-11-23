@@ -24,6 +24,12 @@ bool get isFramelessDesktop =>
 bool get drawsCaptionButtons =>
     isFramelessDesktop && defaultTargetPlatform != TargetPlatform.macOS;
 
+/// Whether the window fills the screen, for the chrome that hides then. Set
+/// by what changes it (the desktop viewer, from the window's own flag), since
+/// window_manager on Windows reports entering and leaving full screen only
+/// for a maximized window.
+final windowFullScreen = ValueNotifier(false);
+
 /// Room the macOS traffic lights take at the window's leading edge.
 double get trafficLightInset =>
     isFramelessDesktop && defaultTargetPlatform == TargetPlatform.macOS
@@ -138,12 +144,14 @@ class _WindowControlsState extends State<WindowControls> with WindowListener {
   void initState() {
     super.initState();
     windowManager.addListener(this);
+    windowFullScreen.addListener(_sync);
     _sync();
   }
 
   @override
   void dispose() {
     windowManager.removeListener(this);
+    windowFullScreen.removeListener(_sync);
     super.dispose();
   }
 

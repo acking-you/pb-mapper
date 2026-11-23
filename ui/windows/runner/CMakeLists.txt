@@ -10,6 +10,7 @@ add_executable(${BINARY_NAME} WIN32
   "flutter_window.cpp"
   "desktop_video.cpp"
   "desktop_ime.cpp"
+  "desktop_key_capture.cpp"
   "main.cpp"
   "utils.cpp"
   "win32_window.cpp"

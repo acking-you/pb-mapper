@@ -166,6 +166,7 @@ class KeyContext {
     this.latched = const {},
     this.heldHere = const {},
     this.othersDown = false,
+    this.captured = false,
   });
 
   final KeyboardMode mode;
@@ -201,6 +202,11 @@ class KeyContext {
   /// A button or a key other than a modifier is held on the host: a
   /// modifier pressed now goes at once.
   final bool othersDown;
+
+  /// The full-screen capture took the key from this device's system
+  /// (`SystemKeyCapture`): nothing here, its input method included, ever
+  /// sees it.
+  final bool captured;
 }
 
 /// How hardware keys reach the host (ui §10.5.1). Pure: the caller supplies
@@ -220,6 +226,11 @@ class KeyContext {
 /// and Alt go at once, since the host's input method needs their taps, and
 /// only the host's Win waits. An older host gets its vocabulary as keys and
 /// the rest as text.
+///
+/// In either mode a key the full-screen capture took ([KeyContext.captured])
+/// never reaches this device: a modifier among them goes at once, so a lone
+/// Win or Alt reaches the host too, and the input method's composing leaves
+/// them alone.
 ///
 /// Modifiers come in two namings, which never meet unconverted: this
 /// keyboard's ([KeyContext.heldHere]) and the host's ([KeyContext.latched],
@@ -428,12 +439,13 @@ abstract final class KeyRouting {
 
     // 1. A modifier waits for what it modifies, Shift, Ctrl and Alt in
     // remote mode excepted: there only the host's Win waits, whichever key
-    // here it is. Repeats add nothing. One that goes at once takes those
-    // waiting ahead of it, so a chord reaches the host whole and in order.
+    // here it is. One captured never waits: it switches nothing here.
+    // Repeats add nothing. One that goes at once takes those waiting ahead
+    // of it, so a chord reaches the host whole and in order.
     if (m != null) {
       if (up || e is KeyRepeatEvent) return KeyRoute(handled: !ime);
       final (host, key) = _hostModifier(e.physicalKey, m, c);
-      final waits = !remote || host == RemoteKey.meta;
+      final waits = !c.captured && (!remote || host == RemoteKey.meta);
       if (waits && !c.othersDown) return KeyRoute(defers: key, handled: !ime);
       return KeyRoute(inputs: [key], holds: key, flush: true, handled: !ime);
     }
@@ -471,8 +483,9 @@ abstract final class KeyRouting {
     }
 
     // 3. The input method's own keys while it composes: Enter, Backspace,
-    // the arrows and Escape act on what it composes.
-    if (ime && c.composing) return const KeyRoute.ignored();
+    // the arrows and Escape act on what it composes. It never sees a
+    // captured one.
+    if (ime && c.composing && !c.captured) return const KeyRoute.ignored();
 
     // 4. A special key: a real down and up, wrapped while latched; a
     // command key the vocabulary cannot name goes by place.
