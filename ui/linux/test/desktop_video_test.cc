@@ -2,13 +2,22 @@
 // Flutter: libpb_mapper_ffi.so's test source (feature desktop-test-source)
 // plays them into a video source, the module pulls, decodes and publishes
 // them, and a thread standing in for Flutter's raster thread acquires each
-// picture, which is its presentation receipt. It checks the decoder state
-// rules the runner shares with Windows and Android. Run by
+// picture, which is its presentation receipt, and uploads it in a GL ES
+// context with no surface (EGL), as Flutter's texture does. It checks the
+// decoder state rules the runner shares with Windows and Android, and
+// measures how many pictures a second each size decodes and presents and
+// what each thread's CPU costs per picture. Run by
 // scripts/test/linux-desktop-video.sh, which builds the library and the
 // clips.
 //
 // desktop_video_test <libpb_mapper_ffi.so> <clip folder>
+#include <dirent.h>
 #include <dlfcn.h>
+#include <epoxy/egl.h>
+#include <epoxy/gl.h>
+#include <pthread.h>
+#include <sys/resource.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -20,9 +29,11 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "desktop_video_module.h"
@@ -101,11 +112,161 @@ void Resolve(void* handle, Fn& fn, const char* name) {
   }
 }
 
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+
+// A GL ES 2 context with no surface, as Flutter's raster thread has one
+// (fl_opengl_manager.cc asks for client version 2): llvmpipe where there
+// is no GPU.
+class GlContext {
+ public:
+  GlContext() = default;
+  GlContext(const GlContext&) = delete;
+  GlContext& operator=(const GlContext&) = delete;
+  ~GlContext() {
+    if (context_ != EGL_NO_CONTEXT) eglDestroyContext(display_, context_);
+    if (display_ != EGL_NO_DISPLAY) eglTerminate(display_);
+  }
+  bool Create(std::string* why) {
+    // Mesa's surfaceless platform, which falls back to llvmpipe without a
+    // GPU; else whatever display EGL picks.
+    EGLint major = 0, minor = 0;
+    if (epoxy_has_egl_extension(EGL_NO_DISPLAY, "EGL_MESA_platform_surfaceless")) {
+      display_ = eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA, nullptr, nullptr);
+      if (display_ != EGL_NO_DISPLAY && !eglInitialize(display_, &major, &minor)) display_ = EGL_NO_DISPLAY;
+    }
+    if (display_ == EGL_NO_DISPLAY) {
+      display_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+      if (display_ != EGL_NO_DISPLAY && !eglInitialize(display_, &major, &minor)) display_ = EGL_NO_DISPLAY;
+    }
+    if (display_ == EGL_NO_DISPLAY) {
+      *why = "no EGL display initializes";
+      return false;
+    }
+    if (!eglBindAPI(EGL_OPENGL_ES_API)) {
+      *why = "no GL ES in EGL";
+      return false;
+    }
+    const EGLint config_attributes[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE};
+    EGLConfig config = nullptr;
+    EGLint configs = 0;
+    if (!eglChooseConfig(display_, config_attributes, &config, 1, &configs) || configs < 1) config = nullptr;
+    const EGLint context_attributes[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+    context_ = eglCreateContext(display_, config, EGL_NO_CONTEXT, context_attributes);
+    if (context_ == EGL_NO_CONTEXT) {
+      *why = "cannot create a GL ES 2 context";
+      return false;
+    }
+    return true;
+  }
+  // On the thread that renders, as Flutter makes its context current there.
+  bool MakeCurrent() { return eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, context_) == EGL_TRUE; }
+  void Release() { eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); }
+  EGLDisplay display() const { return display_; }
+
+ private:
+  EGLDisplay display_ = EGL_NO_DISPLAY;
+  EGLContext context_ = EGL_NO_CONTEXT;
+};
+
+// The calling thread's CPU time so far, in microseconds.
+uint64_t ThreadCpuUs() {
+  struct rusage usage {};
+  if (getrusage(RUSAGE_THREAD, &usage) != 0) return 0;
+  return static_cast<uint64_t>(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000000u +
+         static_cast<uint64_t>(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
+}
+
+// Every thread of this process: its name and CPU time so far, in
+// nanoseconds (schedstat), or from its tick counts (stat) where the kernel
+// keeps no schedstat. GStreamer's and the decoders' threads are not this
+// harness's to ask with getrusage(RUSAGE_THREAD).
+struct ThreadTime {
+  std::string name;
+  uint64_t ns = 0;
+};
+std::string ReadLine(const std::string& path) {
+  std::ifstream in(path);
+  std::string line;
+  std::getline(in, line);
+  return line;
+}
+std::map<long, ThreadTime> ReadThreads() {
+  std::map<long, ThreadTime> threads;
+  DIR* dir = opendir("/proc/self/task");
+  if (!dir) return threads;
+  const long ticks = sysconf(_SC_CLK_TCK);
+  while (const struct dirent* entry = readdir(dir)) {
+    const long tid = strtol(entry->d_name, nullptr, 10);
+    if (tid <= 0) continue;
+    const std::string task = std::string("/proc/self/task/") + entry->d_name;
+    ThreadTime time;
+    time.name = ReadLine(task + "/comm");
+    const std::string schedstat = ReadLine(task + "/schedstat");
+    if (!schedstat.empty()) {
+      time.ns = strtoull(schedstat.c_str(), nullptr, 10);
+    } else if (ticks > 0) {
+      // utime and stime are the 12th and 13th fields after the name, which
+      // is in parentheses and may hold spaces.
+      const std::string stat = ReadLine(task + "/stat");
+      const size_t close = stat.rfind(')');
+      if (close == std::string::npos) continue;
+      std::vector<std::string> fields;
+      size_t at = close + 2;
+      while (at < stat.size() && fields.size() < 13) {
+        const size_t end = stat.find(' ', at);
+        fields.push_back(stat.substr(at, end == std::string::npos ? std::string::npos : end - at));
+        if (end == std::string::npos) break;
+        at = end + 1;
+      }
+      if (fields.size() < 13) continue;
+      const uint64_t used = strtoull(fields[11].c_str(), nullptr, 10) + strtoull(fields[12].c_str(), nullptr, 10);
+      time.ns = used * 1000000000u / static_cast<uint64_t>(ticks);
+    }
+    threads[tid] = time;
+  }
+  closedir(dir);
+  return threads;
+}
+
+// What each thread name spent between two reads, per decoded picture, in
+// milliseconds, largest first; a thread that started meanwhile counts from
+// zero, one that ended is missed.
+std::string CpuPerPicture(const std::map<long, ThreadTime>& before, const std::map<long, ThreadTime>& after,
+                          uint64_t pictures) {
+  if (pictures == 0) return "no pictures";
+  std::map<std::string, uint64_t> by_name;
+  for (const auto& entry : after) {
+    const auto found = before.find(entry.first);
+    const uint64_t start = found == before.end() ? 0 : found->second.ns;
+    if (entry.second.ns > start) by_name[entry.second.name] += entry.second.ns - start;
+  }
+  std::vector<std::pair<uint64_t, std::string>> spent;
+  uint64_t total = 0;
+  for (const auto& entry : by_name) {
+    spent.emplace_back(entry.second, entry.first);
+    total += entry.second;
+  }
+  std::sort(spent.rbegin(), spent.rend());
+  char line[160];
+  snprintf(line, sizeof(line), "%.2f ms in all", total / 1e6 / static_cast<double>(pictures));
+  std::string text = line;
+  for (const auto& entry : spent) {
+    const double ms = entry.first / 1e6 / static_cast<double>(pictures);
+    if (ms < 0.01) continue;
+    snprintf(line, sizeof(line), "; %s %.2f", entry.second.c_str(), ms);
+    text += line;
+  }
+  return text;
+}
+
 // Flutter's raster thread: acquires the newest picture whenever the module
-// says there is one, and keeps it until the next.
+// says there is one, keeps it until the next, and uploads it into a GL
+// texture as FlPixelBufferTexture's populate does.
 class Raster {
  public:
-  explicit Raster(const PbVideoModule* module) : module_(module) {}
+  Raster(const PbVideoModule* module, GlContext* gl) : module_(module), gl_(gl) {}
   ~Raster() { Stop(); }
   static void Ready(void* context) {
     auto* self = static_cast<Raster*>(context);
@@ -159,6 +320,10 @@ class Raster {
     wake_.notify_one();
   }
   int pictures() const { return pictures_; }
+  // This thread's CPU time so far (getrusage), in microseconds.
+  uint64_t cpu_us() const { return cpu_us_; }
+  // Whether its GL context was current and every upload succeeded.
+  bool uploaded() const { return gl_ready_ && gl_errors_ == 0; }
   // The size of the picture shown last, and whether it has content.
   void Last(uint32_t* width, uint32_t* height, bool* content) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -169,17 +334,28 @@ class Raster {
 
  private:
   void Run() {
+    pthread_setname_np(pthread_self(), "raster");
+    gl_ready_ = gl_->MakeCurrent();
+    GLuint texture = 0;
     while (true) {
       {
         std::unique_lock<std::mutex> lock(mutex_);
         wake_.wait(lock, [this] { return (ready_ && !held_) || stopping_; });
-        if (stopping_) return;
+        if (stopping_) break;
         ready_ = false;
       }
       PbVideoPicture* picture = module_->acquire(decoder_);
       if (!picture) continue;
       uint32_t width = 0, height = 0;
       const uint8_t* rgba = module_->pixels(picture, &width, &height);
+      if (gl_ready_ && rgba) {
+        if (texture == 0) glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(width), static_cast<GLsizei>(height), 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, rgba);
+        glFlush();
+        if (glGetError() != GL_NO_ERROR) ++gl_errors_;
+      }
       // The test pattern is never one colour.
       bool content = false;
       for (size_t i = 4; rgba && !content && i < static_cast<size_t>(width) * height * 4; i += 4099 * 4) {
@@ -188,13 +364,20 @@ class Raster {
       if (shown_) module_->release(shown_);
       shown_ = picture;
       ++pictures_;
+      cpu_us_ = ThreadCpuUs();
       std::lock_guard<std::mutex> lock(mutex_);
       width_ = width;
       height_ = height;
       content_ = content;
     }
+    if (texture) glDeleteTextures(1, &texture);
+    if (gl_ready_) gl_->Release();
   }
   const PbVideoModule* module_;
+  GlContext* const gl_;
+  bool gl_ready_ = false;
+  std::atomic<int> gl_errors_{0};
+  std::atomic<uint64_t> cpu_us_{0};
   PbVideoDecoder* decoder_ = nullptr;
   std::thread thread_;
   std::mutex mutex_;
@@ -252,8 +435,13 @@ void Check(bool ok, const char* what) {
 
 PbVideoStats Stats(const PbVideoModule* module, PbVideoDecoder* decoder) {
   PbVideoStats stats{};
-  module->stats(decoder, &stats);
+  module->stats(decoder, 1, &stats);
   return stats;
+}
+
+double MeanMs(const PbVideoTiming& first, const PbVideoTiming& last) {
+  if (last.samples <= first.samples) return 0;
+  return (last.total_us - first.total_us) / 1000.0 / static_cast<double>(last.samples - first.samples);
 }
 }  // namespace
 
@@ -302,7 +490,8 @@ int main(int argc, char** argv) {
       Exists(folder + "/h264-large.h264") ? WriteClip({folder + "/h264-large.h264"}, false, folder + "/h264-large.clip") : "";
   const std::string uhd =
       Exists(folder + "/h264-2160.h264") ? WriteClip({folder + "/h264-2160.h264"}, false, folder + "/h264-2160.clip") : "";
-  if (h264.empty() || mixed.empty()) {
+  const std::string fhd = WriteClip({folder + "/h264-1080.h264"}, false, folder + "/h264-1080.clip");
+  if (h264.empty() || mixed.empty() || fhd.empty()) {
     fprintf(stderr, "no H.264 clips in %s\n", folder.c_str());
     return 2;
   }
@@ -319,7 +508,13 @@ int main(int argc, char** argv) {
   Check(probed == 0 && probe.h264.max_width > 0, "the probe finds an H.264 decoder");
   if (broken) Check(probe.h264.hardware != 0, "the registry offers a hardware H.264 decoder to break");
 
-  Raster raster(module);
+  GlContext gl;
+  std::string why;
+  const bool has_gl = gl.Create(&why);
+  Check(has_gl, has_gl ? "a GL ES context with no surface stands in for Flutter's" : why.c_str());
+  if (!has_gl) return 1;
+
+  Raster raster(module, &gl);
   PbVideoDecoder* decoder = module->create(&shims, Raster::Ready, &raster);
   Check(decoder != nullptr, "a decoder is created");
   if (!decoder) return 1;
@@ -335,6 +530,39 @@ int main(int argc, char** argv) {
     return consumer > 0;
   };
 
+  // A measurement, not a check: each size offered at 60 and at 120 fps
+  // (Flutter's Linux embedder draws at most 60), as decoded and presented
+  // pictures a second, the mean decode time and every thread's CPU per
+  // decoded picture. On llvmpipe the compositor's GL work runs on the CPU
+  // too, so its share here is no figure for a GPU.
+  auto measure = [&](const std::string& clip, const char* size, uint32_t fps) {
+    const uint64_t played = g_ffi.source(clip.c_str(), fps);
+    if (!attach(played)) {
+      printf("%s offered at %u fps: the decoder did not attach\n", size, fps);
+      g_ffi.stop(played);
+      return;
+    }
+    const int taken = raster.pictures();
+    WaitFor([&] { return raster.pictures() > taken + 10; }, milliseconds(5000));
+    const PbVideoStats first = stats();
+    const auto threads = ReadThreads();
+    const uint64_t raster_cpu = raster.cpu_us();
+    const auto started = Clock::now();
+    std::this_thread::sleep_for(milliseconds(3000));
+    const PbVideoStats last = stats();
+    const auto threads_after = ReadThreads();
+    const uint64_t raster_after = raster.cpu_us();
+    const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
+    const uint64_t decoded = last.decoded - first.decoded, presented = last.presented - first.presented;
+    printf("%s offered at %u fps: %.1f decoded/s, %.1f presented/s, %.1f dropped/s, decode %.2f ms (%s)\n", size, fps,
+           decoded / seconds, presented / seconds, (last.dropped - first.dropped) / seconds,
+           MeanMs(first.decode, last.decode), last.decoder);
+    printf("  CPU per decoded picture: %s\n", CpuPerPicture(threads, threads_after, decoded).c_str());
+    printf("  raster thread (getrusage) per presented picture: %.2f ms\n",
+           presented ? (raster_after - raster_cpu) / 1000.0 / static_cast<double>(presented) : 0.0);
+    g_ffi.stop(played);
+  };
+
   printf("H.264 1280x720 at 60 fps\n");
   uint64_t source = g_ffi.source(h264.c_str(), 60);
   Check(attach(source), "the decoder attaches to the test source");
@@ -345,6 +573,7 @@ int main(int argc, char** argv) {
     bool content = false;
     raster.Last(&width, &height, &content);
     Check(width == 1280 && height == 720 && content, "pictures are 1280x720 RGBA with content");
+    Check(raster.uploaded(), "the compositor's stand-in uploads every picture");
     std::lock_guard<std::mutex> lock(g_text_mutex);
     printf("  decoder: %s (%s)\n", g_decoder.c_str(), g_hardware ? "hardware" : "software");
     if (broken) {
@@ -464,20 +693,17 @@ int main(int argc, char** argv) {
     printf("3840x2160 H.264 with no hardware decoder that works\n");
     refused(g_ffi.source(uhd.c_str(), 60), "it fails: software H.264 stops at 1080p, reported with failed_v1");
   } else if (!uhd.empty()) {
-    // A measurement, not a check: how many 3840x2160 pictures a second the
-    // decoder and the conversion to RGBA keep up with, offered 120.
-    source = g_ffi.source(uhd.c_str(), 120);
-    attach(source);
-    WaitFor([&] { return stats().decoded > 0 && raster.pictures() > 0; }, milliseconds(5000));
-    const PbVideoStats first = stats();
-    const auto started = Clock::now();
-    std::this_thread::sleep_for(milliseconds(3000));
-    const PbVideoStats last = stats();
-    const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
-    printf("3840x2160 offered at 120 fps: %.1f decoded/s, %.1f presented/s, %.1f dropped/s (%s)\n",
-           (last.decoded - first.decoded) / seconds, (last.presented - first.presented) / seconds,
-           (last.dropped - first.dropped) / seconds, last.decoder);
-    g_ffi.stop(source);
+    // How many 3840x2160 pictures a second the decoder and the compositor's
+    // stand-in keep up with.
+    measure(uhd, "3840x2160", 60);
+    measure(uhd, "3840x2160", 120);
+  }
+
+  if (!broken) {
+    for (const uint32_t fps : {60u, 120u}) {
+      measure(h264, "1280x720", fps);
+      measure(fhd, "1920x1080", fps);
+    }
   }
 
   if (broken) {

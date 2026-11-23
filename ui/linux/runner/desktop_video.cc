@@ -215,6 +215,16 @@ bool WriteSnapshot(const uint8_t* rgba, uint32_t width, uint32_t height, uint32_
   return true;
 }
 
+// A timing as the other runners report it: count, mean and maximum.
+FlValue* TimingValue(const PbVideoTiming& timing) {
+  FlValue* value = fl_value_new_map();
+  const double mean = timing.samples == 0 ? 0.0 : timing.total_us / 1000.0 / static_cast<double>(timing.samples);
+  fl_value_set_string_take(value, "samples", fl_value_new_int(static_cast<int64_t>(timing.samples)));
+  fl_value_set_string_take(value, "mean_ms", fl_value_new_float(mean));
+  fl_value_set_string_take(value, "max_ms", fl_value_new_float(timing.max_us / 1000.0));
+  return value;
+}
+
 int64_t Number(FlValue* map, const char* key) {
   FlValue* value = fl_value_lookup_string(map, key);
   if (!value) throw std::runtime_error("Missing video field");
@@ -431,8 +441,13 @@ class DesktopVideo {
       }
       Snapshot(texture, fl_value_get_string(path), static_cast<uint32_t>(std::min<int64_t>(width, UINT32_MAX)), call);
     } else if (strcmp(method, "stats") == 0) {
+      // `timings` is optional and true when absent, as on Windows and
+      // macOS.
+      FlValue* wanted = fl_value_lookup_string(args, "timings");
+      const bool timings =
+          !wanted || fl_value_get_type(wanted) != FL_VALUE_TYPE_BOOL || fl_value_get_bool(wanted);
       PbVideoStats stats{};
-      texture->module->stats(texture->decoder, &stats);
+      texture->module->stats(texture->decoder, timings ? 1 : 0, &stats);
       g_autoptr(FlValue) result = fl_value_new_map();
       fl_value_set_string_take(result, "submitted", fl_value_new_int(static_cast<int64_t>(stats.submitted)));
       fl_value_set_string_take(result, "decoded", fl_value_new_int(static_cast<int64_t>(stats.decoded)));
@@ -442,6 +457,11 @@ class DesktopVideo {
       fl_value_set_string_take(result, "recoveries", fl_value_new_int(static_cast<int64_t>(stats.recoveries)));
       fl_value_set_string_take(result, "lastRecovery", fl_value_new_string(stats.last_recovery));
       fl_value_set_string_take(result, "decoder", fl_value_new_string(stats.decoder));
+      if (timings) {
+        FlValue* measured = fl_value_new_map();
+        fl_value_set_string_take(measured, "decode", TimingValue(stats.decode));
+        fl_value_set_string_take(result, "timings", measured);
+      }
       fl_method_call_respond_success(call, result, nullptr);
     } else if (strcmp(method, "dispose") == 0) {
       viewers_.erase(found);

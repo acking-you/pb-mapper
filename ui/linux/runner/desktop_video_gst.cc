@@ -325,6 +325,29 @@ struct Frame {
   uint64_t revision = 0;
   bool key = false;
   Codec codec = Codec::kH264;
+  // When it entered the pipeline.
+  Clock::time_point fed{};
+};
+
+// One of the stats' timings: count, total and longest, in constant space,
+// as the other runners keep theirs.
+struct Timing {
+  uint64_t samples = 0;
+  Clock::duration total{}, longest{};
+  void Add(Clock::duration elapsed) {
+    ++samples;
+    total += elapsed;
+    longest = std::max(longest, elapsed);
+  }
+  PbVideoTiming Snapshot() const {
+    using std::chrono::duration_cast;
+    using std::chrono::microseconds;
+    PbVideoTiming out{};
+    out.samples = samples;
+    out.total_us = static_cast<uint64_t>(duration_cast<microseconds>(total).count());
+    out.max_us = static_cast<uint64_t>(duration_cast<microseconds>(longest).count());
+    return out;
+  }
 };
 
 // Compressed units are pulled straight into these buffers; a buffer the
@@ -460,8 +483,11 @@ class Pipeline {
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (pending_.empty()) progress_ = Clock::now();
-      pending_.emplace(next_pts_, frame);
+      const Clock::time_point now = Clock::now();
+      if (pending_.empty()) progress_ = now;
+      Frame fed = frame;
+      fed.fed = now;
+      pending_.emplace(next_pts_, fed);
     }
     const GstFlowReturn flow = gst_app_src_push_buffer(src_, buffer);
     if (flow != GST_FLOW_OK) throw std::runtime_error(std::string("Decode video input (") + gst_flow_get_name(flow) + ")");
@@ -725,7 +751,9 @@ struct PbVideoDecoder {
     return picture;
   }
 
-  void Stats(PbVideoStats* out) {
+  // `timings` starts the decode timing, or keeps it; false drops it until
+  // the next read that asks.
+  void Stats(bool timings, PbVideoStats* out) {
     *out = PbVideoStats{};
     out->submitted = submitted_;
     out->decoded = decoded_;
@@ -736,15 +764,20 @@ struct PbVideoDecoder {
     std::lock_guard<std::mutex> lock(mutex_);
     CopyText(out->decoder, sizeof(out->decoder), decoder_name_);
     CopyText(out->last_recovery, sizeof(out->last_recovery), last_recovery_);
+    if (timings != timing_) decode_ = Timing{};
+    timing_ = timings;
+    if (timings) out->decode = decode_.Snapshot();
   }
 
   // Streaming thread: the newest picture, unless a newer revision began.
-  void Publish(PbVideoPicture* picture) {
+  // `decode` is how long its unit took from the pipeline's input.
+  void Publish(PbVideoPicture* picture, Clock::duration decode) {
     ++decoded_;
     PbVideoPicture* replaced = picture;
     bool shown = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (timing_) decode_.Add(decode);
       if (picture->revision == revision_.load()) {
         replaced = latest_;
         if (replaced && !latest_acquired_) ++dropped_;
@@ -929,6 +962,9 @@ struct PbVideoDecoder {
   uint64_t consumed_revision_ = 0;
   std::string decoder_name_;
   std::string last_recovery_;
+  // While a stats read asks for timings.
+  bool timing_ = false;
+  Timing decode_;
   // The decoder thread's own; reset by Attach while no thread runs.
   int64_t generation_ = -1, last_ = 0;
   bool awaiting_key_ = true;
@@ -1002,7 +1038,7 @@ void Pipeline::Decoded(GstSample* sample) {
   }
   std::lock_guard<std::mutex> lock(owner_mutex_);
   if (owner_) {
-    owner_->Publish(picture);
+    owner_->Publish(picture, Clock::now() - frame.fed);
   } else {
     Release(picture);
   }
@@ -1024,8 +1060,8 @@ void Detach(PbVideoDecoder* decoder) {
   if (decoder) decoder->Detach();
 }
 PbVideoPicture* Acquire(PbVideoDecoder* decoder) { return decoder ? decoder->Acquire() : nullptr; }
-void Stats(PbVideoDecoder* decoder, PbVideoStats* out) {
-  if (decoder && out) decoder->Stats(out);
+void Stats(PbVideoDecoder* decoder, uint32_t timings, PbVideoStats* out) {
+  if (decoder && out) decoder->Stats(timings != 0, out);
 }
 void Destroy(PbVideoDecoder* decoder) { delete decoder; }
 const uint8_t* Pixels(const PbVideoPicture* picture, uint32_t* width, uint32_t* height) {

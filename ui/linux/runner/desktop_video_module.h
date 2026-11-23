@@ -59,6 +59,13 @@ typedef struct PbVideoProbe {
   PbVideoCodecProbe h265;
 } PbVideoProbe;
 
+// One of the stats' timings since the read that started it.
+typedef struct PbVideoTiming {
+  uint64_t samples;
+  uint64_t total_us;
+  uint64_t max_us;
+} PbVideoTiming;
+
 // The counters the channel's `stats` reports.
 typedef struct PbVideoStats {
   uint64_t submitted;
@@ -69,6 +76,9 @@ typedef struct PbVideoStats {
   uint64_t recoveries;
   char decoder[64];
   char last_recovery[256];
+  // While timings are on: from a unit entering the pipeline until its
+  // picture is published.
+  PbVideoTiming decode;
 } PbVideoStats;
 
 // A decoded picture: tightly packed RGBA, width x 4 bytes a row. Counted;
@@ -97,7 +107,9 @@ typedef struct PbVideoModule {
   // null before the first. The first acquisition of a current picture is
   // its presentation receipt to Rust. Non-blocking.
   PbVideoPicture* (*acquire)(PbVideoDecoder* decoder);
-  void (*stats)(PbVideoDecoder* decoder, PbVideoStats* out);
+  // `timings` non-zero starts the timing accumulators, or keeps them; zero
+  // drops them until a read that asks again.
+  void (*stats)(PbVideoDecoder* decoder, uint32_t timings, PbVideoStats* out);
   // Detaches and frees the decoder; pictures still retained stay valid.
   void (*destroy)(PbVideoDecoder* decoder);
   const uint8_t* (*pixels)(const PbVideoPicture* picture, uint32_t* width,
@@ -106,7 +118,7 @@ typedef struct PbVideoModule {
   void (*release)(PbVideoPicture* picture);
 } PbVideoModule;
 
-#define PB_VIDEO_MODULE_ABI 1u
+#define PB_VIDEO_MODULE_ABI 2u
 #define PB_VIDEO_MODULE_FILE "libpb_mapper_desktop_video.so"
 #define PB_VIDEO_MODULE_SYMBOL "pb_mapper_desktop_video_module_v1"
 typedef const PbVideoModule* (*PbVideoModuleEntry)(void);

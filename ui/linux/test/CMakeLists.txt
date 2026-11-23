@@ -1,6 +1,7 @@
 # The GStreamer decoder module and a harness that drives it with recorded
-# clips, outside Flutter. scripts/test/linux-desktop-video.sh builds and runs
-# it; the app build (../CMakeLists.txt) does not include it.
+# clips, outside Flutter, in a GL ES context with no surface standing in for
+# Flutter's. scripts/test/linux-desktop-video.sh builds and runs it; the app
+# build (../CMakeLists.txt) does not include it.
 cmake_minimum_required(VERSION 3.13)
 project(desktop_video_test LANGUAGES CXX)
 
@@ -8,6 +9,8 @@ find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET
   gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0)
+# libepoxy resolves EGL and GL ES at run time, as Flutter's embedder does.
+pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
 
 set(RUNNER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../runner")
 
@@ -27,5 +30,6 @@ target_compile_options(desktop_video_test PRIVATE -Wall -Werror)
 target_include_directories(desktop_video_test PRIVATE "${RUNNER_DIR}")
 target_compile_definitions(desktop_video_test PRIVATE
   PB_VIDEO_MODULE_PATH="$<TARGET_FILE:pb_mapper_desktop_video>")
-target_link_libraries(desktop_video_test PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
+target_link_libraries(desktop_video_test PRIVATE
+  ${CMAKE_DL_LIBS} Threads::Threads PkgConfig::EPOXY)
 add_dependencies(desktop_video_test pb_mapper_desktop_video)
