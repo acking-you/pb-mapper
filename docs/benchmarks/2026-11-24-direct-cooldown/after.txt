@@ -1,0 +1,15 @@
+run 1
+connect_tcp to the first byte: 2.035781417s falling back, 8.563375ms inside the pause, 2.029297666s after a network change
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 91 filtered out; finished in 4.11s
+run 2
+connect_tcp to the first byte: 2.040982333s falling back, 11.758583ms inside the pause, 2.021740042s after a network change
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 91 filtered out; finished in 4.09s
+run 3
+connect_tcp to the first byte: 2.026714917s falling back, 8.457417ms inside the pause, 2.020305916s after a network change
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 91 filtered out; finished in 4.07s
+run 4
+connect_tcp to the first byte: 2.060400625s falling back, 24.19275ms inside the pause, 2.039868s after a network change
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 91 filtered out; finished in 4.14s
+run 5
+connect_tcp to the first byte: 2.031670458s falling back, 6.708375ms inside the pause, 2.022625666s after a network change
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 91 filtered out; finished in 4.08s

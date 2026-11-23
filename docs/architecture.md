@@ -264,11 +264,14 @@ Nothing in the SDK crates knows it exists.
     the dialing race in `dial.rs`) probe and dial each path as it answers;
     `consumer.rs` is the dialing end, up to the commit point or the relay
     fallback, over `control.rs`'s control connection, and `provider.rs` is
-    the publishing end. `identity.rs` carries the exact certificates,
-    `mapping.rs` the gateway port mapping (feature `port-mapping`),
-    `reports.rs` the coalesced observations, and `link.rs` what a committed
-    session's path is. LAN-first (on by default, `lan_first` in the options,
-    carried as the crate-private `DirectPolicy` of `direct_policy.rs`)
+    the publishing end. `memory.rs` holds the pauses after a fallback: a
+    connect tunnel's own, or the client's `DirectMemory`, which its
+    `connect_tcp` calls share per service. `identity.rs` carries the exact
+    certificates, `mapping.rs` the gateway port mapping (feature
+    `port-mapping`), `reports.rs` the coalesced observations, and `link.rs`
+    what a committed session's path is. LAN-first (on by default,
+    `lan_first` in the options, carried as the crate-private
+    `DirectPolicy` of `direct_policy.rs`)
     only orders probes and holds other paths back while a LAN is known to
     be there (`Assessment::holds`); off, the LAN is still detected and
     reported. A committed session's `DirectLink` lives in
