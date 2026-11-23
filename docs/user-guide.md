@@ -250,11 +250,48 @@ Optional flags:
 - `--direct-advertise <IP:PORT>`: the public address clients should use for it, when the UDP port is mapped differently from the TCP one (default: the address each client dialed)
 - `--ipv6`: enable IPv6 listening
 - `--keep-alive`: enable TCP keep-alive
+- `--tcp-congestion <NAME>`: on Linux, the TCP congestion control the relay sends with, such as `bbr` (default: the kernel's; see [Tuning a Linux relay](#tuning-a-linux-relay))
 - `--auth-state-dir`: authentication state directory (Linux services default `/var/lib/pb-mapper/auth`; unprivileged Linux, macOS, and Windows use a user-writable application directory)
 - `--max-temporary-keys`: fixed temporary-key slot capacity (default `65536`)
 - `--max-temporary-key-ttl`: maximum issued TTL (default `30d`)
 - `--legacy-protocol allow|deny`: initial legacy-client policy
 - `--use-machine-msg-header-key`: explicit legacy compatibility mode
+
+### Tuning a Linux relay
+
+Two kernel settings decide how quickly the relay sends after a pause and over
+a lossy path. Both change only what the relay sends, such as a remote
+desktop's picture on its way to the viewer; what the shared computer sends to
+the relay runs on that computer's own network stack. Neither applies to
+direct connections.
+
+**Slow start after idle.** Linux restarts the congestion window of a TCP
+connection that was idle (`net.ipv4.tcp_slow_start_after_idle = 1`, the
+default), so the first picture after a still screen starts slowly again. While
+it is on, the relay logs `relay_tcp_idle_restart` at startup. To turn it off:
+
+```bash
+echo 'net.ipv4.tcp_slow_start_after_idle = 0' | sudo tee /etc/sysctl.d/90-pb-mapper.conf
+sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0
+```
+
+This applies to every TCP connection on the host. The install scripts offer to
+write that file (`PB_MAPPER_TCP_TUNING=yes` or `no` answers ahead of time),
+and the Docker Compose file sets it for the container alone (Linux 4.15 or
+later).
+
+**Congestion control.** `--tcp-congestion bbr`, or
+`PB_MAPPER_TCP_CONGESTION=bbr`, has every connection the relay accepts send
+with BBR, which random loss on a long cross-border or mobile path does not
+slow as it does Linux's default, Cubic. It is off by default because BBR
+shares a congested link with Cubic flows less evenly. The kernel needs the
+`tcp_bbr` module (`sudo modprobe tcp_bbr`, and `tcp_bbr` in a file under
+`/etc/modules-load.d/` to keep it after a reboot). A relay that runs as root,
+as the install scripts' service does, may then choose it; otherwise add `bbr`
+to `net.ipv4.tcp_allowed_congestion_control`, or give the relay
+`CAP_NET_ADMIN` (`cap_add: [NET_ADMIN]` in Docker). When the kernel refuses,
+the relay logs `relay_tcp_congestion_unavailable` with the fix and keeps the
+default. On other systems the option only logs that warning.
 
 ### Administrator and temporary credentials
 
@@ -446,6 +483,7 @@ Closing the window keeps the app in the tray. Quit from the tray menu, or on mac
 - `PB_MAPPER_NEW_STREAMS_PER_SECOND`: sustained new-stream rate per namespace, default `100`
 - `PB_MAPPER_NEW_STREAMS_BURST`: new-stream burst per namespace, default `200`
 - `PB_MAPPER_KEEP_ALIVE`: enable TCP keep-alive (set to `ON`)
+- `PB_MAPPER_TCP_CONGESTION`: the relay's TCP congestion control on Linux, such as `bbr`, when `--tcp-congestion` is not given; unset keeps the kernel's default
 - `PB_MAPPER_LOG_FORMAT`: tracing output format, one of `pretty` (default), `compact`, or `json`
 - `PB_MAPPER_CONTROL_IO_TIMEOUT`: general control I/O timeout, default `30s`; recovery setup applies shorter adaptive/total deadlines (at most `5s`), and a smaller configured value still applies
 - `PB_MAPPER_STREAM_ACK_TIMEOUT`: initial/minimum stream ACK budget, default `300ms`; each control connection adapts it to latency/timeouts before trying another candidate
