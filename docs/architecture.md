@@ -693,7 +693,7 @@ The design and its rules are in `docs/ui-design.md`.
   definition once the viewer's counter has gone round; on a Mac it shares
   from the app alone and re-reads the capabilities when the app comes back
   to the front with the page open and, while the page shows a missing
-  permission, every 10 s. It reads
+  permission or no display, every 10 s. It reads
   the host when the app's own host sends `desktopHost`, and on a clock only
   while a viewer is connected or the Windows service hosts (a 30 s backstop
   otherwise)

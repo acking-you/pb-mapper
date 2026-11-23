@@ -322,7 +322,10 @@ impl Supervisor {
         attest_login: impl FnOnce() -> Result<Option<os::SessionIdentity>>,
     ) -> Result<Option<u32>> {
         let now = Instant::now();
-        let starting = self.host.is_none() && self.pending.is_none() && now >= self.retry_at;
+        // Any tick with nothing hosting or starting may start, even one whose
+        // retry is not due yet: `reconcile_session` reads the clock again,
+        // and a start must never follow a tick that trusted the login.
+        let starting = self.host.is_none() && self.pending.is_none();
         let attested = self.login.as_ref().map(|last| {
             (
                 last.identity.session,

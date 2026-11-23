@@ -15,6 +15,12 @@ use std::time::Duration;
 /// 100 ms while it runs.
 pub(crate) const RECHECK: Duration = Duration::from_secs(5);
 
+/// Half the supervisor's 1 s tick. A tick wakes a little after its
+/// scheduled instant, by a different amount each time, so a recheck due
+/// within this much is made on this tick rather than slipping to the next:
+/// the login is rechecked every fifth tick.
+const SLACK: Duration = Duration::from_millis(500);
+
 /// What a tick asks Windows about the owner's login.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Attest {
@@ -34,7 +40,7 @@ pub(crate) enum Attest {
 pub(crate) fn attest(attested: Option<(u32, Duration)>, active: u32, starting: bool) -> Attest {
     match attested {
         Some((session, since)) if !starting && session == active => {
-            if since >= RECHECK {
+            if since + SLACK >= RECHECK {
                 Attest::Recheck
             } else {
                 Attest::Trust
@@ -58,8 +64,17 @@ mod tests {
         assert_eq!(attest(None, 1, true), Attest::Full);
         assert_eq!(attest(Some((1, just)), 1, false), Attest::Trust);
         assert_eq!(
-            attest(Some((1, RECHECK - Duration::from_millis(1))), 1, false),
+            attest(
+                Some((1, RECHECK - SLACK - Duration::from_millis(1))),
+                1,
+                false
+            ),
             Attest::Trust
+        );
+        // A fifth tick that woke a little earlier than the one that checked.
+        assert_eq!(
+            attest(Some((1, RECHECK - Duration::from_millis(10))), 1, false),
+            Attest::Recheck
         );
         assert_eq!(attest(Some((1, RECHECK)), 1, false), Attest::Recheck);
         // Another session holds the console: a switch, a remote connection

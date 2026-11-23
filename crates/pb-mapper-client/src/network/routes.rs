@@ -46,6 +46,18 @@ const MESSAGE: usize = 2048;
 /// task and the reading it schedules.
 const DRAIN: usize = 64;
 
+/// The socket's receive buffer. Darwin drops what does not fit without
+/// telling the reader, and a network switch writes a message for every
+/// neighbour route it clears beside the few that tell of the change; the
+/// default buffer holds about forty.
+const BUFFER: usize = 256 * 1024;
+
+/// `<net/route.h>`'s message types. libc names them for macOS only; iOS runs
+/// the same kernel, with the same values and header.
+const RTM_NEWADDR: u8 = 0xc;
+const RTM_DELADDR: u8 = 0xd;
+const RTM_IFINFO: u8 = 0xe;
+
 /// The kernel's routing socket, read without blocking.
 pub(super) struct Routes(AsyncFd<Socket>);
 
@@ -57,6 +69,10 @@ impl Routes {
             Type::from(libc::SOCK_RAW),
             None,
         )?;
+        // Best effort: the safety reading still finds what a drop hides.
+        if let Err(error) = socket.set_recv_buffer_size(BUFFER) {
+            tracing::debug!(event = "network_route_buffer_unchanged", %error);
+        }
         Self::from_socket(socket)
     }
 
@@ -83,8 +99,8 @@ impl Routes {
                     messages.change |= buffer.get(..read).is_some_and(tells_of_change);
                 }
                 Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {}
-                // The kernel dropped messages for this socket: one of them may
-                // have told of a change.
+                // Some kernels report messages they dropped for this socket;
+                // one of them may have told of a change.
                 Ok(Err(error)) if error.raw_os_error() == Some(libc::ENOBUFS) => {
                     messages.change = true;
                 }
@@ -92,6 +108,9 @@ impl Routes {
                 Err(_would_block) => break,
             }
         }
+        // Darwin drops without a word: a wake that found the socket still
+        // full may have lost a message that told of a change.
+        messages.change |= messages.read == DRAIN;
         Ok(messages)
     }
 }
@@ -111,10 +130,7 @@ struct Messages {
 /// any more are walked by their lengths.
 fn tells_of_change(mut messages: &[u8]) -> bool {
     while let [low, high, _version, kind, ..] = *messages {
-        if matches!(
-            libc::c_int::from(kind),
-            libc::RTM_NEWADDR | libc::RTM_DELADDR | libc::RTM_IFINFO
-        ) {
+        if matches!(kind, RTM_NEWADDR | RTM_DELADDR | RTM_IFINFO) {
             return true;
         }
         let length = usize::from(u16::from_ne_bytes([low, high]));
@@ -210,7 +226,9 @@ pub(super) async fn watch(
     }
 }
 
+// The tests build the kernel's headers with libc's macOS-only names.
 #[cfg(test)]
+#[cfg(target_os = "macos")]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -232,6 +250,14 @@ mod tests {
     /// Addresses and interfaces going up or down are changes; routes, which
     /// come and go with neighbours, are not. A read is walked message by
     /// message, and a length that would loop or overrun ends the walk.
+    /// The local message types are libc's on macOS.
+    #[test]
+    fn the_message_types_match_the_kernels() {
+        assert_eq!(libc::c_int::from(RTM_NEWADDR), libc::RTM_NEWADDR);
+        assert_eq!(libc::c_int::from(RTM_DELADDR), libc::RTM_DELADDR);
+        assert_eq!(libc::c_int::from(RTM_IFINFO), libc::RTM_IFINFO);
+    }
+
     #[test]
     fn only_address_and_interface_messages_tell_of_a_change() {
         for kind in [libc::RTM_NEWADDR, libc::RTM_DELADDR, libc::RTM_IFINFO] {
@@ -355,6 +381,10 @@ mod tests {
         // The paused clock moves only once the watcher waits on its socket
         // and timer, past its first reading.
         kernel.send(&message(libc::RTM_ADD, 92)).unwrap();
+        // A timer of the test's own, so the park that delivers the message
+        // advances the paused clock only to it, never to the watcher's
+        // safety deadline.
+        tokio::time::sleep(Duration::from_millis(1)).await;
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(readings(), 1, "a route message reads nothing");
 
@@ -362,6 +392,7 @@ mod tests {
         let sent = Instant::now();
         kernel.send(&message(libc::RTM_NEWADDR, 40)).unwrap();
         kernel.send(&message(libc::RTM_IFINFO, 40)).unwrap();
+        tokio::time::sleep(Duration::from_millis(1)).await;
         hints.changed().await.unwrap();
         assert_eq!(*hints.borrow_and_update(), 1);
         assert_eq!(readings(), 2, "one reading for the run");

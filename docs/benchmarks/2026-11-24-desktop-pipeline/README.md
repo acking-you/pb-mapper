@@ -77,3 +77,23 @@ wait out a busy thread's quantum, was not measured.
 - Direct UDP receive buffers: `netstat -s -p udp` receive errors on a Windows
   viewer over LAN QUIC at Quality or 4K. On this Mac the default is already
   786,896 bytes and an 8 MiB request is granted.
+
+## Sharing with no viewer
+
+The installed 0.12.1 app on this Mac, sharing with no viewer, sampled with
+`sample` and `top`: 0.0 to 0.9% of a core with the window behind others,
+readings of 0.0, 1.7, 1.0 and 5.6% two seconds apart with the window in front
+on the Remote page, and 0.09 s of CPU over 30 s (about 0.3%). No desktop host
+code ran: capture, encoding, the timer guard and App Nap's activity start only
+with a viewer. The recurring work was the host-status poll (a new Dart
+isolate each time), the Remote page's capability checks and the network
+watcher's interface poll, which this release removes or slows:
+
+| What | Before | After | How measured |
+| --- | --- | --- | --- |
+| Network watcher, idle `pb-mapper register tcp` | 30 address readings/min, 58 idle wakeups/min, 1.04 s CPU per 10 min | 1 reading/min, 32 wakeups/min, 0.16 s CPU per 10 min | release build, 600 s, local relay, `top` |
+| Sharing dots with a viewer connected, window shown | a frame every 1/60 s for the whole session (1,200 in 20 s) | 261 frames in 20 s, none after about 5 s | widget test, simulated time, frames scheduled |
+| Host status with nobody connected | every 2 s (1 s on the Remote page), a new isolate each | on the host's change event, plus every 30 s | code; the store tests pin the cadence |
+
+The app built from this release has not been measured in the same way here:
+that needs Screen Recording granted to the locally built app.

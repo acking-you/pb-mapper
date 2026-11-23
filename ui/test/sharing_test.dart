@@ -194,11 +194,34 @@ void main() {
         {'inactive': true},
       ]);
 
-      // Closed again, it stays closed for the rest of that session.
+      // Closed again, it stays closed for the rest of that session, even as
+      // the same viewer takes control: the view changes, the viewer does not.
+      api.desktop.hostSnapshot = viewedHost(controlling: true);
       api.desktop.announceHostChange();
       await tester.pump();
       await tester.pump();
       expect(shown, hasLength(1));
+
+      // Another viewer, who arrived later, brings it back again.
+      final later = viewedHost().host!;
+      api.desktop.hostSnapshot = DesktopHostSnapshot(
+        host: DesktopHostStatus(
+          state: later.state,
+          controlAllowed: true,
+          service: later.service,
+          invitation: later.invitation,
+          viewer: DesktopHostViewer(
+            controlling: false,
+            paused: false,
+            path: 'direct',
+            since: DateTime(2026, 11, 7, 10),
+          ),
+        ),
+      );
+      api.desktop.announceHostChange();
+      await tester.pump();
+      await tester.pump();
+      expect(shown, hasLength(2));
 
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
