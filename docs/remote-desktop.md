@@ -1238,13 +1238,7 @@ unit's dwell, from submit to output (the `encode_us` it returns with the
 unit), and thread C reports the median of the last second as
 `encoder_dwell_ms`. A static screen is resubmitted about every 250 ms as a
 duplicate, which unique-frame rates exclude. The hand-off queue holds at most
-six units and 8 MiB, which both bounds together never reach. An H.264 or
-H.265 keyframe supersedes the units still waiting there for send credit,
-whether this viewer asked for it or another viewer in the room caused it:
-none of them has a sequence number yet, and nothing after a keyframe refers
-to anything before it, so the newer picture goes next instead of after them,
-and they count as dropped frames. JPEG pictures queue as before, so the
-transport gate still holds a JPEG session's capture back on a slow link. When the queue's oldest unit
+six units and 8 MiB, which both bounds together never reach. When the queue's oldest unit
 has waited more than a second, the queue is dropped and replaced by an IDR.
 The wait counts from when the unit was ready or from the last IDR
 receipt, whichever is later, and time spent behind an IDR still in flight
@@ -1822,7 +1816,7 @@ shapes by content, never by number.
 | Timeouts | handshake 3 s; host read 3 s; viewer header 4 s; writes 3 s plus the message's time at 1 Mbit/s; `Stopped` best effort within 1 s; the host reads on until the viewer closes, within the same second |
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
-| Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; an H.264 or H.265 keyframe supersedes what waits; capture skipped at 2 waiting for credit or 4 in the encoder |
+| Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder |
 | Armed tick | a tick with no new picture stays armed; ScreenCaptureKit wakes thread C; DXGI, in process or through the helper, is asked again every 2 ms for 250 ms after an injected input or a new picture (an input brings a pending poll in to 2 ms), and once a period otherwise |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
 | QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; latch at 1.3 × over 2 windows at ≤ 0.75 × nominal |

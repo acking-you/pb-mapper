@@ -1,8 +1,7 @@
 use super::*;
 use crate::{
     Display,
-    credit::FRAME_WINDOW_MIN,
-    outgoing::{HostUnit, Push},
+    outgoing::HostUnit,
     protocol::{HostMessage, NoticeCode, SessionState, VideoSize},
     shared::{CursorReport, CursorUpdate, EngineState},
 };
@@ -143,8 +142,8 @@ async fn stale_generation_units_are_dropped_before_admission() {
     assert_eq!(payload.unwrap()[..], [1; 100]);
 
     // A control grant invalidates generation 1 while two of its units
-    // wait in the hand-off: B-send drops them without a seq once it wrote
-    // generation 2's `State`, which the new generation's cursor waits for.
+    // wait in the hand-off: they are dropped without a seq. The new
+    // generation's cursor waits for its `State`.
     let report = |serial| {
         Some(CursorReport {
             serial,
@@ -175,12 +174,9 @@ async fn stale_generation_units_are_dropped_before_admission() {
     shared.outgoing.push(unit(1, 3, false));
     shared.cursor.send_replace(report(1));
     shared.state.send_replace(streaming(2));
+    shared.outgoing.push(unit(2, 4, true));
     assert_eq!(state_generation(&viewer.next().await.0), 2);
     assert!(cursor(&viewer.next().await.0));
-    // The pass that wrote these dropped both units before this task ran
-    // again, so generation 2's IDR, which would otherwise supersede them,
-    // finds the hand-off empty.
-    assert_eq!(shared.outgoing.push(unit(2, 4, true)), Push::default());
     assert_eq!(video(&viewer.next().await.0), (2, 2, 4));
 
     // The session continues, and the seq stays contiguous. Each report
@@ -214,71 +210,6 @@ async fn stale_generation_units_are_dropped_before_admission() {
     let mut rest = vec![];
     viewer.read.read_to_end(&mut rest).await.unwrap();
     assert!(rest.is_empty());
-    drop(viewer);
-    running.await.unwrap();
-}
-
-/// An IDR pushed while P-frames wait for credit supersedes them: it goes out
-/// as soon as credit admits it, at the next seq, instead of after them.
-#[tokio::test]
-async fn a_queued_idr_does_not_wait_behind_units_waiting_for_credit() {
-    let (viewer, host) = tokio::io::duplex(1 << 20);
-    let (read, write) = tokio::io::split(viewer);
-    let mut viewer = Viewer { read, write };
-    let session = Session::new(
-        Arc::new(Policy::new(true)),
-        CancellationToken::new(),
-        VideoCodec::H264,
-        VideoLimits::for_viewer(60.0),
-        QualityPreset::Balanced,
-        &[],
-        &[],
-    );
-    // A 5 fps cap keeps the window at its least, in frames.
-    session
-        .handle(ViewerMessage::FpsCap { fps: 5 }, Instant::now())
-        .unwrap();
-    let shared = session.shared.clone();
-    shared.state.send_replace(streaming(1));
-    let cancel = shared.cancel.clone();
-    let running = tokio::spawn(run(session.clone(), host, async move {
-        cancel.cancelled().await;
-        WorkerExit::Cancelled
-    }));
-    assert_eq!(state_generation(&viewer.next().await.0), 1);
-
-    // IDR 1 and the P-frames after it fill the window; two more wait for
-    // credit.
-    let window = FRAME_WINDOW_MIN as u64;
-    for frame in 1..=window + 2 {
-        assert_eq!(
-            shared.outgoing.push(unit(1, frame, frame == 1)),
-            Push::default()
-        );
-    }
-    for frame in 1..=window {
-        assert_eq!(video(&viewer.next().await.0), (frame, 1, frame));
-    }
-    assert_eq!(shared.outgoing.len(), 2);
-    let idr = window + 3;
-    assert_eq!(
-        shared.outgoing.push(unit(1, idr, true)),
-        Push {
-            dropped: 2,
-            request_idr: false,
-        }
-    );
-
-    // IDR 1 is still in flight, so the new IDR waits for its receipt, then
-    // goes next: no P-frame of the old picture chain is written before it,
-    // and the seq has no gap.
-    viewer.send(ViewerMessage::Received { seq: 1 }).await;
-    let (written, payload) = viewer.next().await;
-    assert_eq!(video(&written), (window + 1, 1, idr));
-    assert!(matches!(written, HostMessage::Video { keyframe: true, .. }));
-    assert_eq!(payload.unwrap()[..], [idr as u8; 100]);
-
-    shared.cancel.cancel();
     drop(viewer);
     running.await.unwrap();
 }
