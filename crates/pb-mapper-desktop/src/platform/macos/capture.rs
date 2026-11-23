@@ -8,6 +8,12 @@
 //! What the display's picture does not cover takes the background colour,
 //! clear unless set, and NV12 has no alpha to show it: the background is
 //! opaque black, which the configuration does not retain.
+//!
+//! Each picture keeps when it arrived, which thread C anchors its pacing
+//! on, and how long after the window server displayed it that was
+//! (`SCStreamFrameInfoDisplayTime`), which only the debug log reads. The
+//! stream counts its complete pictures, its idle samples and the pictures a
+//! newer one replaced before thread C took them.
 
 use super::cf;
 use crate::{BackendError, FailureKind, Result, Waker};
@@ -33,12 +39,13 @@ use objc2_foundation::{
 use objc2_screen_capture_kit::{
     SCCaptureDynamicRange, SCContentFilter, SCDisplay, SCFrameStatus, SCShareableContent, SCStream,
     SCStreamConfiguration, SCStreamDelegate, SCStreamErrorCode, SCStreamErrorDomain,
-    SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType, SCWindow,
+    SCStreamFrameInfoDisplayTime, SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType,
+    SCWindow,
 };
 use parking_lot::Mutex;
 use std::{
-    sync::{Arc, mpsc},
-    time::Duration,
+    sync::{Arc, OnceLock, mpsc},
+    time::{Duration, Instant},
 };
 
 /// The longest an asynchronous ScreenCaptureKit call is waited for.
@@ -77,7 +84,42 @@ pub(crate) struct Latest {
     pub picture: Option<Picture>,
     /// Not taken since it arrived.
     pub fresh: bool,
+    /// When `picture` arrived, and how long after the window server
+    /// displayed it, when its sample said.
+    arrived: Option<Instant>,
+    displayed: Option<Duration>,
+    /// Complete pictures since the last take.
+    since_take: u32,
+    counts: Counts,
     stopped: Option<BackendError>,
+}
+
+/// What the stream delivered since it started.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Counts {
+    /// Samples holding a new picture.
+    pub complete: u64,
+    /// Samples that said nothing changed.
+    pub idle: u64,
+    /// New pictures a newer one replaced before thread C took them.
+    pub replaced: u64,
+}
+
+/// A picture thread C took.
+pub(crate) struct Taken {
+    pub picture: CFRetained<CVPixelBuffer>,
+    /// For a picture not taken before, when it arrived.
+    pub fresh: Option<Arrival>,
+}
+
+/// When a new picture arrived, and what came with it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Arrival {
+    pub at: Instant,
+    /// The complete pictures since the last take: it and those it replaced.
+    pub pictures: u32,
+    /// How long after the window server displayed it it arrived.
+    pub displayed: Option<Duration>,
 }
 
 pub(super) enum CaptureState {
@@ -94,24 +136,68 @@ pub(crate) struct Shared {
     waker: Waker,
 }
 
-/// Whether `sample` holds a new picture: its frame status is complete. An
-/// idle frame (nothing changed) and the others hold none.
-fn complete(sample: &CMSampleBuffer) -> bool {
+/// The frame status of `sample` (complete: a new picture; idle: nothing
+/// changed), and the mach absolute time the window server displayed it,
+/// read from one attachments dictionary.
+fn frame_info(sample: &CMSampleBuffer) -> Option<(SCFrameStatus, Option<u64>)> {
     // SAFETY: the stream's sample, read only.
-    let Some(attachments) = (unsafe { sample.sample_attachments_array(false) }) else {
-        return false;
-    };
+    let attachments = unsafe { sample.sample_attachments_array(false) }?;
     // SAFETY: a sample's attachments are an array of dictionaries.
     let attachments = unsafe { CFRetained::cast_unchecked::<CFArray<CFDictionary>>(attachments) };
-    let Some(info) = attachments.get(0) else {
-        return false;
-    };
-    // SAFETY: a ScreenCaptureKit constant, which exists wherever its classes
+    let info = attachments.get(0)?;
+    // SAFETY: ScreenCaptureKit constants, which exist wherever its classes
     // do; an NSString is the CFString it is toll-free bridged to.
-    let key: &CFString = unsafe { &*(SCStreamFrameInfoStatus as *const _ as *const CFString) };
-    cf::value::<CFNumber>(&info, key)
-        .and_then(|status| status.as_i64())
-        .is_some_and(|status| status == SCFrameStatus::Complete.0 as i64)
+    let (status, displayed): (&CFString, &CFString) = unsafe {
+        (
+            &*(SCStreamFrameInfoStatus as *const _ as *const CFString),
+            &*(SCStreamFrameInfoDisplayTime as *const _ as *const CFString),
+        )
+    };
+    let status = cf::value::<CFNumber>(&info, status)?.as_i64()?;
+    let displayed = cf::value::<CFNumber>(&info, displayed)
+        .and_then(|time| time.as_i64())
+        .and_then(|time| u64::try_from(time).ok());
+    Some((SCFrameStatus(status as isize), displayed))
+}
+
+/// Mach absolute time's units, as `mach_timebase_info` gives them.
+#[repr(C)]
+struct Timebase {
+    numer: u32,
+    denom: u32,
+}
+// libc declares these deprecated in favour of a crate of their own.
+unsafe extern "C" {
+    fn mach_absolute_time() -> u64;
+    fn mach_timebase_info(info: *mut Timebase) -> i32;
+}
+
+/// The longest ago a display time is believed.
+const DISPLAYED_MAX_AGE: Duration = Duration::from_secs(1);
+
+/// How long ago the mach absolute time `ticks` was: a time a moment ahead
+/// (the order of the reads) is now, and one over a second old, or with no
+/// timebase, is none.
+fn mach_age(ticks: u64) -> Option<Duration> {
+    static TIMEBASE: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    let (numer, denom) = (*TIMEBASE.get_or_init(|| {
+        let mut timebase = Timebase { numer: 0, denom: 0 };
+        // SAFETY: an out parameter the call fills.
+        let status = unsafe { mach_timebase_info(&mut timebase) };
+        (status == 0 && timebase.numer != 0 && timebase.denom != 0)
+            .then_some((timebase.numer, timebase.denom))
+    }))?;
+    // SAFETY: no arguments; reads a clock.
+    let now = unsafe { mach_absolute_time() };
+    ticks_age(now.saturating_sub(ticks), numer, denom)
+}
+
+/// `ticks` of mach absolute time at `numer / denom` nanoseconds each, as a
+/// duration no longer than `DISPLAYED_MAX_AGE`.
+fn ticks_age(ticks: u64, numer: u32, denom: u32) -> Option<Duration> {
+    let nanos = u128::from(ticks) * u128::from(numer) / u128::from(denom.max(1));
+    let age = Duration::from_nanos(u64::try_from(nanos).ok()?);
+    (age <= DISPLAYED_MAX_AGE).then_some(age)
 }
 
 define_class!(
@@ -125,21 +211,39 @@ define_class!(
     unsafe impl NSObjectProtocol for Output {}
 
     unsafe impl SCStreamOutput for Output {
-        /// On the stream's queue: keep the newest complete picture.
+        /// On the stream's queue: keep the newest complete picture, when it
+        /// arrived, and count it and the idle samples.
         #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
         fn stream_did_output(&self, _stream: &SCStream, sample: &CMSampleBuffer, kind: SCStreamOutputType) {
-            if kind != SCStreamOutputType::Screen || !complete(sample) {
+            if kind != SCStreamOutputType::Screen {
+                return;
+            }
+            let Some((status, displayed)) = frame_info(sample) else {
+                return;
+            };
+            if status == SCFrameStatus::Idle {
+                self.ivars().latest.lock().counts.idle += 1;
+                return;
+            }
+            if status != SCFrameStatus::Complete {
                 return;
             }
             // SAFETY: the stream's sample, read only.
             let Some(image) = (unsafe { sample.image_buffer() }) else {
                 return;
             };
+            let arrived = Instant::now();
+            let displayed = displayed.and_then(mach_age);
             let wake = {
                 let mut latest = self.ivars().latest.lock();
                 let wake = !latest.fresh;
+                latest.counts.complete += 1;
+                latest.counts.replaced += u64::from(latest.fresh);
+                latest.since_take = latest.since_take.saturating_add(1);
                 latest.picture = Some(Picture(image));
                 latest.fresh = true;
+                latest.arrived = Some(arrived);
+                latest.displayed = displayed;
                 wake
             };
             if wake {
@@ -446,22 +550,33 @@ impl Stream {
         }
     }
 
-    /// Take a new or explicitly repeated picture. A stopped stream never
-    /// yields an old picture.
-    pub(crate) fn take(&self, repeat: bool) -> Result<Option<(CFRetained<CVPixelBuffer>, bool)>> {
+    /// Take a new or explicitly repeated picture: a new one with when it
+    /// arrived and the complete pictures since the last take. A stopped
+    /// stream never yields an old picture.
+    pub(crate) fn take(&self, repeat: bool) -> Result<Option<Taken>> {
         let mut latest = self.shared.latest.lock();
         if let Some(stopped) = &latest.stopped {
             return Err(stopped.clone().into());
         }
         let fresh = std::mem::take(&mut latest.fresh);
-        Ok(if fresh || repeat {
-            latest
-                .picture
-                .as_ref()
-                .map(|picture| (picture.0.clone(), fresh))
-        } else {
-            None
-        })
+        if !(fresh || repeat) {
+            return Ok(None);
+        }
+        let pictures = std::mem::take(&mut latest.since_take);
+        let arrival = latest.arrived.filter(|_| fresh).map(|at| Arrival {
+            at,
+            pictures,
+            displayed: latest.displayed,
+        });
+        Ok(latest.picture.as_ref().map(|picture| Taken {
+            picture: picture.0.clone(),
+            fresh: arrival,
+        }))
+    }
+
+    /// What the stream delivered since it started.
+    pub(super) fn counts(&self) -> Counts {
+        self.shared.latest.lock().counts
     }
 }
 
@@ -487,5 +602,35 @@ impl Drop for Stream {
         // SAFETY: stopping a stream is allowed at any time; the handler,
         // which only drops what it holds under a lock, outlives the call.
         unsafe { stream.stopCaptureWithCompletionHandler(Some(&stopped)) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mach ticks become nanoseconds through the timebase (Apple silicon's
+    /// 125/3), and an age over a second is none.
+    #[test]
+    fn display_times_are_aged_through_the_timebase() {
+        assert_eq!(ticks_age(24_000, 125, 3), Some(Duration::from_millis(1)));
+        assert_eq!(ticks_age(1_000, 1, 1), Some(Duration::from_micros(1)));
+        assert_eq!(ticks_age(24_000_001, 125, 3), None);
+        // The clock itself: a time 2 ms ago reads about 2 ms old, one ahead
+        // as now, one 2 s ago as none.
+        let mut timebase = Timebase { numer: 0, denom: 0 };
+        // SAFETY: an out parameter the call fills.
+        assert_eq!(unsafe { mach_timebase_info(&mut timebase) }, 0);
+        let ticks =
+            |ms: u64| ms * 1_000_000 * u64::from(timebase.denom) / u64::from(timebase.numer);
+        // SAFETY: no arguments.
+        let now = unsafe { mach_absolute_time() };
+        let ago = mach_age(now - ticks(2)).unwrap();
+        assert!(
+            ago >= Duration::from_millis(2) && ago < Duration::from_millis(50),
+            "{ago:?}"
+        );
+        assert!(mach_age(now + ticks(1)).unwrap() < Duration::from_millis(50));
+        assert_eq!(mach_age(now - ticks(2_000)), None);
     }
 }
