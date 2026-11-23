@@ -1,0 +1,33 @@
+# RUST_LOG=off host_send_bench; Apple M6, 12 cores, 24 GiB, macOS 27.0 (26A425), Rust 1.99.1, release builds
+# baseline 65ca9e7
+== before 1
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1148 allocs_per_unit=19.15 alloc_bytes_per_unit=40239
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=3548 allocs_per_unit=59.13 alloc_bytes_per_unit=47140
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10051 allocs_per_unit=167.55 alloc_bytes_per_unit=100522
+case=peer_cursor samples=256 p50_us=236 p95_us=275 p99_us=384
+== before 2
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1146 allocs_per_unit=19.10 alloc_bytes_per_unit=40232
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=3549 allocs_per_unit=59.16 alloc_bytes_per_unit=47154
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=498.7 allocs_per_s=10041 allocs_per_unit=167.39 alloc_bytes_per_unit=100470
+case=peer_cursor samples=256 p50_us=261 p95_us=414 p99_us=423
+== before 3
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1149 allocs_per_unit=19.16 alloc_bytes_per_unit=40241
+case=video+pointer units_per_s=60.0 inputs_per_s=249.5 allocs_per_s=3548 allocs_per_unit=59.16 alloc_bytes_per_unit=47135
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.5 allocs_per_s=10038 allocs_per_unit=167.34 alloc_bytes_per_unit=100557
+case=peer_cursor samples=256 p50_us=256 p95_us=393 p99_us=426
+# head 688bfa0
+== final 1
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1151 allocs_per_unit=19.19 alloc_bytes_per_unit=40242
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3547 allocs_per_unit=59.13 alloc_bytes_per_unit=47141
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10047 allocs_per_unit=167.47 alloc_bytes_per_unit=100518
+case=peer_cursor samples=256 p50_us=237 p95_us=385 p99_us=440
+== final 2
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1146 allocs_per_unit=19.12 alloc_bytes_per_unit=40233
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3549 allocs_per_unit=59.16 alloc_bytes_per_unit=47156
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=498.6 allocs_per_s=10034 allocs_per_unit=167.29 alloc_bytes_per_unit=100470
+case=peer_cursor samples=256 p50_us=259 p95_us=415 p99_us=429
+== final 3
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1145 allocs_per_unit=19.10 alloc_bytes_per_unit=40233
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3542 allocs_per_unit=59.04 alloc_bytes_per_unit=47154
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.5 allocs_per_s=10057 allocs_per_unit=167.67 alloc_bytes_per_unit=100512
+case=peer_cursor samples=256 p50_us=253 p95_us=419 p99_us=444
