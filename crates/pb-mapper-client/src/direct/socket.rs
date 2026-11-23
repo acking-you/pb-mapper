@@ -56,6 +56,17 @@ const MAX_PROBE_STATES: usize = 1024;
 const STUN_TIMEOUT: Duration = Duration::from_millis(700);
 /// How often a STUN binding checks whether a request is due again.
 const STUN_RETRANSMIT_CHECK: Duration = Duration::from_millis(25);
+/// The kernel receive buffer a socket asks for first. Quinn's pacer sends a
+/// burst back to back; what the endpoint driver has not read yet waits here,
+/// and a datagram with no room is dropped, which QUIC answers with a
+/// retransmission and a smaller congestion window.
+const RECEIVE_BUFFER: usize = 8 << 20;
+/// The smallest size the halving still asks for.
+const MIN_RECEIVE_BUFFER: usize = 256 << 10;
+const _: () = assert!(
+    MIN_RECEIVE_BUFFER <= RECEIVE_BUFFER,
+    "the halving starts at or above its floor"
+);
 
 /// Endpoint configuration for every direct endpoint. Both ends are
 /// pb-mapper, so not advertising QUIC-bit greasing (RFC 9287) keeps the fixed
@@ -288,10 +299,35 @@ fn is_quic(segment: &[u8]) -> bool {
     segment.first().is_some_and(|byte| byte & 0x40 != 0)
 }
 
+/// Raise `udp`'s kernel receive buffer, best effort, and return the size it
+/// reports afterwards. A failure leaves the socket as it was and never fails
+/// its bind; a size that cannot be read is left alone, since it could only
+/// shrink.
+fn raise_receive_buffer(udp: &std::net::UdpSocket) -> Option<usize> {
+    let socket = socket2::SockRef::from(udp);
+    let current = socket.recv_buffer_size().ok()?;
+    raise(current, |size| socket.set_recv_buffer_size(size));
+    socket.recv_buffer_size().ok()
+}
+
+/// Ask `set` for [`RECEIVE_BUFFER`], halving after each refusal down to
+/// [`MIN_RECEIVE_BUFFER`], and return the first size it accepts. Nothing at
+/// or below `current` is asked for. Apple refuses a size above
+/// `kern.ipc.maxsockbuf`; Linux accepts any, caps it at
+/// `net.core.rmem_max`, and keeps and reports double that for its own
+/// bookkeeping.
+fn raise(current: usize, mut set: impl FnMut(usize) -> io::Result<()>) -> Option<usize> {
+    std::iter::successors(Some(RECEIVE_BUFFER), |size| Some(size / 2))
+        .take_while(|&size| size > current && size >= MIN_RECEIVE_BUFFER)
+        .find(|&size| set(size).is_ok())
+}
+
 impl Socket {
     pub fn bind(addr: SocketAddr) -> io::Result<(Self, Demux)> {
         let udp = std::net::UdpSocket::bind(addr)?;
+        let receive_buffer = raise_receive_buffer(&udp);
         let local = udp.local_addr()?;
+        tracing::debug!(%local, ?receive_buffer, "direct UDP receive buffer");
         udp.set_nonblocking(true)?;
         // Share one socket and one reactor registration. Quinn owns its only
         // reader; control sends use Tokio's independent write waiters.
@@ -708,6 +744,50 @@ mod tests {
             &batch[..len],
             &[0x40, 0x40, 0x40, 0x40, 0x41, 0x41, 0x41, 0x41, 0x42, 0x42]
         );
+    }
+
+    /// What [`raise`] asks for from `current` of a system that refuses every
+    /// size above `limit`, and the size it settles on.
+    fn raised(current: usize, limit: usize) -> (Vec<usize>, Option<usize>) {
+        let mut asked = Vec::new();
+        let accepted = raise(current, |size| {
+            asked.push(size);
+            if size <= limit {
+                Ok(())
+            } else {
+                Err(io::ErrorKind::OutOfMemory.into())
+            }
+        });
+        (asked, accepted)
+    }
+
+    #[test]
+    fn the_receive_buffer_halves_on_refusal_and_never_asks_for_less() {
+        const MIB: usize = 1 << 20;
+        // Apple refuses what is above its kern.ipc.maxsockbuf.
+        assert_eq!(
+            raised(64 << 10, 2 * MIB),
+            (vec![8 * MIB, 4 * MIB, 2 * MIB], Some(2 * MIB))
+        );
+        // Refused down to the floor, the socket keeps what it has.
+        assert_eq!(
+            raised(64 << 10, 0),
+            (
+                vec![8 * MIB, 4 * MIB, 2 * MIB, MIB, 512 << 10, 256 << 10],
+                None
+            )
+        );
+        // Nothing at or below the size the socket has is asked for.
+        assert_eq!(raised(2 * MIB, 0), (vec![8 * MIB, 4 * MIB], None));
+        assert_eq!(raised(RECEIVE_BUFFER, usize::MAX), (vec![], None));
+    }
+
+    #[test]
+    fn raising_a_real_receive_buffer_never_shrinks_it() {
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let before = socket2::SockRef::from(&udp).recv_buffer_size().unwrap();
+        let after = raise_receive_buffer(&udp).unwrap();
+        assert!(after >= before, "{after} < {before}");
     }
 
     /// Older peers read probes by these offsets: the magic, the session id,

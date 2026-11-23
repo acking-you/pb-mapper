@@ -984,6 +984,12 @@ does not require Flutter or a POCOX runtime.
   video, and probes stay in order with the video whose queue they measure. The
   relay pairs one stream per session, and a relay TCP leg or LAN TCP carries
   only one.
+- Each direct UDP socket, the host's and the viewer's, asks the system for an
+  8 MiB receive buffer when it binds, halving on refusal down to 256 KiB and
+  never asking for less than it has; Linux caps it at `net.core.rmem_max`, and
+  the debug trace `direct UDP receive buffer` records what each socket got.
+  Send buffers, the relay's sockets and congestion control (Quinn's Cubic) are
+  unchanged.
 - Input binds to a desktop/display generation and to a presentation the viewer
   validated less than two seconds ago. `Viewer::input(generation, &inputs)`
   sends a batch of up to 16, stamps the presented frame and consecutive
