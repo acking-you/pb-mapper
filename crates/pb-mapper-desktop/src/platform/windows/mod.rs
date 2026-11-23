@@ -1,7 +1,8 @@
 //! The Windows host: the ordinary desktop (or, in the privileged helper's
 //! worker, the bound input desktop), the fused DXGI to D3D11 to Media
 //! Foundation encoder, enigo injection and the pointer, xcap stills; DPAPI;
-//! the waitable timer and fine timers; and the privileged helper.
+//! the waitable timer and fine timers; the display and the system kept awake
+//! while capture runs; and the privileged helper.
 //! Uses published Apache-2.0 xcap and MIT enigo. No RustDesk source is copied.
 
 pub(crate) mod cursor;
@@ -11,6 +12,7 @@ pub(crate) mod helper;
 pub(crate) mod input;
 pub(crate) mod mf;
 pub(crate) mod modes;
+pub(crate) mod power;
 pub(crate) mod still;
 pub(crate) mod timer;
 pub mod video;
@@ -124,6 +126,9 @@ impl VideoSource for video::Encoder {
         rate: VideoRate,
         _: &Waker,
     ) -> Result<Self> {
+        // Opening counts as capture: a session whose encoder fails to open
+        // on a dark display, and is retried, still wakes it.
+        power::touch();
         Self::new_with_size(
             display,
             codec,
@@ -140,8 +145,11 @@ impl VideoSource for video::Encoder {
         video::Encoder::set_rate(self, rate)
     }
     /// A full encoder spends the tick; a desktop with nothing new leaves it
-    /// armed, and thread C asks again.
+    /// armed, and thread C asks again. Every call keeps the display and the
+    /// system awake a little longer: thread C submits at least once a second
+    /// while a session streams, and never while it is paused.
     fn submit(&mut self, keyframe: bool) -> Result<bool> {
+        power::touch();
         video::Encoder::submit(self, keyframe).map(video::Submit::spends_tick)
     }
     fn drain(&mut self) -> Result<Option<EncodedFrame>> {

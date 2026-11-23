@@ -6,6 +6,10 @@
 //! one adds `platform/<os>/` and an arm of [`Current`]. "Platforms" in
 //! `docs/remote-desktop.md` is the guide.
 
+// When the Windows host keeps the display and the system awake: pure, so
+// every platform tests it.
+#[cfg(any(windows, test))]
+pub(crate) mod awake;
 // The Windows background service's checks of its owner's login: pure, so
 // every platform tests them.
 #[cfg(any(all(windows, feature = "windows-helper"), test))]
