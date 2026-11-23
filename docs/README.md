@@ -42,6 +42,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [Benchmarks](benchmarks/) | the QUIC measurements, the [refactor's performance pass](benchmarks/2026-11-11-refactor/README.md) its [build times](benchmarks/2026-11-11-refactor/compile-time.md) and the open-items passes ([credential store](benchmarks/2026-11-11-refactor/open-items-auth.md), [relay](benchmarks/2026-11-11-refactor/open-items-relay.md), [desktop](benchmarks/2026-11-11-refactor/open-items-desktop.md)), the [remote desktop's data paths before and after every platform](benchmarks/2026-11-12-remote-desktop-platforms/README.md) and the [M3 Pro hardware run](benchmarks/2026-11-17-macos-desktop/README.md) |
 | [Multi-device control benchmark](benchmarks/2026-11-18-multi-device-control/README.md) | `host_send_bench` before and after multi-viewer desktop rooms and coloured peer cursors |
 | [Desktop pipeline measurements](benchmarks/2026-11-24-desktop-pipeline/README.md) | `host_send_bench` and the slow-link suite before and after armed capture ticks and the receipt-rate estimator, and the A/B runs behind the withdrawn hand-off and thread-priority changes |
+| [Viewer pixel snap measurements](benchmarks/2026-11-24-viewer-pixel-snap/README.md) | the contrast a 1-pixel stroke keeps through the viewer's picture transform, before and after keeping a 1:1 picture on device pixels and showing a near-1 fit at exactly 1:1 |
 
 ## Security
 
