@@ -133,6 +133,15 @@ off. The optional `cycleWindow` switch hides the desktop viewer after eight
 samples and shows it again four samples later. Check `events` for pause and
 resume and `summary.resume_picture_ms` for the return of a fresh picture.
 
+Each sample's `native` holds VideoToolbox's own figures: the counts;
+`timings.decode` (`VTDecompressionSessionDecodeFrame`, keyframes included)
+and `timings.surface_consume` (a picture's publication to the compositor
+taking it), each `samples`, `mean_ms` and `max_ms` since the timings began;
+`decoderCpuMs`, the decoder thread's CPU time since it started (a reconnect
+starts a new thread); `hardware`; `lowLatency`; and `refreshHz`, the
+display the viewer window is on. Compare builds as on Windows below, with
+`decoderCpuMs` gained per second in place of `decoderCycles`.
+
 ## Windows viewer
 
 Build the FFI library and helper with `scripts/build/pb-mapper-ffi-windows.ps1`,
@@ -247,7 +256,10 @@ One JSON object:
   pictures released to the texture and not yet consumed, at most two, and
   `refreshHz`, the display mode the window asks for while video shows; on
   Windows also the timings, `refreshHz`, `decoderCycles` and `lowLatency`
-  that [Windows viewer](#windows-viewer) lists) and
+  that [Windows viewer](#windows-viewer) lists; on macOS the timings,
+  `decoderCpuMs`, `hardware`, `lowLatency` and `refreshHz` that
+  [macOS viewer](#macos-viewer) lists; on Linux `timings.surface_consume`
+  and `refreshHz`) and
   `flutter`: the frame timings Flutter reported in that second (it batches
   them about once a second), with the frames whose build or raster took
   longer than one refresh interval as `over_budget`.

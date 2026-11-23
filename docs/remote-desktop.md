@@ -1944,15 +1944,30 @@ left out; while the connection is down the core rows show dashes.
   cap, capture ticks skipped a second, the encoder's dwell, its target
   bitrate and rate model, and the adaptation.
 - **Decoder**: while the panel is open, the store reads the native decoder's
-  `stats` once a second and turns two reads into decoded and dropped
-  pictures a second, the mean from a picture's release to the surface to
-  Flutter consuming it, surface credits in use, low-latency decoding and the
-  refresh rate asked for (Android; Windows the counts, the release-to-consume
-  mean, the fastest display's refresh and low latency only where the
-  decoder's codec API confirms it; macOS and iOS the counts, the
-  release-to-consume mean, VideoToolbox's real-time mode as low latency and
-  the display's maximum refresh; Linux the counts). Closing the panel drops
-  the decoder's timing accumulators.
+  `stats` once a second and turns two reads into rates and, for each timing,
+  its mean over the pictures between the reads. A row shows only where the
+  platform reports its figure:
+  - Android: decoded and dropped pictures a second, the mean from a
+    picture's release to the surface to Flutter consuming it, surface credits
+    in use, low-latency decoding and the refresh rate asked for.
+  - Windows: the counts, the release-to-consume mean, the convert time
+    (Convert and copy: from opening a decoded picture to the GPU finishing
+    its copy), the fastest display's refresh, and low latency only where the
+    decoder's codec API confirms it. Its decoder thread's CPU comes as
+    cycles, which the panel does not show.
+  - macOS and iOS: the counts, the decode time (VideoToolbox decoding a unit,
+    keyframes included), the release-to-consume mean, the decoder thread's
+    CPU as a share of one core, VideoToolbox's real-time mode as low latency,
+    and the refresh of the display the viewer window is on (macOS) or the
+    device's (iOS).
+  - Linux: the counts, the release-to-consume mean and the fastest display's
+    refresh.
+
+  The Mac's decode time and Windows' convert time measure different spans,
+  so each has its own row. A present time (`timings.present`) gets a row
+  too, for a runner that presents pictures itself; none does in this
+  revision. Closing the panel drops the decoder's timing accumulators and
+  its CPU reading.
 
 Read in order, the rates place a loss: capture below pace is the host's
 source or its capture gate; pace below the ceiling is the QoS controller
@@ -2227,7 +2242,23 @@ it takes a picture of the current revision is the presentation receipt, and
 a picture replaced before that counts as dropped. A session the system takes
 back (`kVTInvalidSessionErr`, `kVTVideoDecoderNotAvailableNowErr`, as when
 iOS backgrounds the app) is rebuilt at the next keyframe and does not count
-as a failure. Log lines start with `PbDesktopVideo:`. The iOS app links the
+as a failure. Log lines start with `PbDesktopVideo:`.
+
+The `stats` method of the `pb_mapper/desktop_video` channel reports, besides
+the counts, `lowLatency` (VideoToolbox took real-time mode), `hardware` once
+a decoder is configured, and `refreshHz`. On macOS that is the refresh of the
+display the Flutter window is on, read at each call so that it follows the
+window to another display, or the fastest display's while the window is on
+none; on iOS it is the device's. While a read asks for timings it adds
+`timings.surface_consume` (from a picture's publication to the compositor
+taking it) and `timings.decode` (`VTDecompressionSessionDecodeFrame`,
+keyframes included), each `{samples, mean_ms, max_ms}` since the timings
+began, and `decoderCpuMs`: the decoder thread's CPU time since it started at
+attach (`CLOCK_THREAD_CPUTIME_ID`), which the thread reads itself after each
+unit it decodes, so it trails by at most that unit. Without timings the
+thread reads no clock, and stopping them drops all three.
+
+The iOS app links the
 whole FFI static library and keeps its symbols (`-force_load`,
 `-Wl,-export_dynamic` in `ui/ios/Flutter/PbMapperFfi.xcconfig`): Dart and the
 decoder find every symbol by name at run time, so before this the linker took
@@ -2258,7 +2289,15 @@ decoder with units inside and no picture for 2 s is rebuilt with a keyframe
 request, as on Android. `copy_pixels` on the raster thread takes the newest
 picture, which is the presentation receipt. Each picture is converted to RGBA
 on the CPU and uploaded by Flutter: one CPU copy per frame, and no zero-copy
-(dma-buf or EGLImage) path yet. `G_MESSAGES_DEBUG=pb-mapper-video` shows the
+(dma-buf or EGLImage) path yet. The `stats` method reports the counts and
+`refreshHz` (the fastest monitor's, read as `decoders` reads it) and, while
+a read asks for timings, `timings.surface_consume` as
+`{samples, mean_ms, max_ms}`: from the module's `frame_ready` for a newer
+picture to `copy_pixels` taking it. A raster pass already under way can take
+a picture before its `frame_ready` runs; that sample then counts from an
+earlier one, or is skipped. Without timings `frame_ready` reads no clock. A
+decode time would need the module's interface to carry it, and is not
+reported. `G_MESSAGES_DEBUG=pb-mapper-video` shows the
 module's log, `GST_DEBUG=3` GStreamer's. A viewer needs GStreamer's base and
 bad plugins and a decoder: gst-libav (or openh264 for H.264) in software,
 the VA-API driver, or NVIDIA's driver; the user guide lists the packages.
