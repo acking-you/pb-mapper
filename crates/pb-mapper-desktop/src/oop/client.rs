@@ -21,6 +21,9 @@ pub(crate) struct RemoteBackend<T: Transport> {
     cursor: Option<crate::CursorPosition>,
     /// The worker encoder's pending units, from the last response.
     pending: usize,
+    /// Whether the last capture handed the worker's source its tick, as its
+    /// answer said (`submitted_video`).
+    submitted: bool,
     /// From the `Start` response: the interactive session's values, which
     /// differ from this process's when it is the SYSTEM service in session 0.
     double_click: Option<crate::DoubleClickGuard>,
@@ -68,6 +71,7 @@ impl<T: Transport> RemoteBackend<T> {
             context: None,
             cursor: None,
             pending: 0,
+            submitted: true,
             double_click: None,
             h265: None,
             changed_mode: false,
@@ -127,6 +131,7 @@ impl<T: Transport> RemoteBackend<T> {
             error: reason,
             failure,
             video,
+            submitted,
             cursor,
             pending,
             double_click,
@@ -138,6 +143,12 @@ impl<T: Transport> RemoteBackend<T> {
             shape,
         } = response;
         self.pending = pending as usize;
+        // Only a capture's answer says whether it found nothing new; absent,
+        // as every failure and every helper before protocol 10 answers, the
+        // tick was spent.
+        if matches!(request, Request::Video { submit: true, .. }) {
+            self.submitted = submitted.unwrap_or(true);
+        }
         if let Some(reason) = reason {
             return Err(match failure {
                 Some(kind) => BackendError::new(kind, reason).into(),
@@ -299,8 +310,10 @@ impl<T: Transport> Backend for RemoteBackend<T> {
     fn pending_video(&self) -> usize {
         self.pending
     }
+    /// What the last capture's answer said: a worker whose source had no new
+    /// picture leaves the tick armed, and thread C polls it.
     fn submitted_video(&self) -> bool {
-        true
+        self.submitted
     }
     fn capture_idle_until(&self, _: Option<std::time::Instant>) -> Option<std::time::Instant> {
         None
@@ -399,6 +412,7 @@ impl<T: Transport> Drop for RemoteBackend<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::synthetic::Probe;
     use tokio::io::DuplexStream;
 
     /// A `RemoteBackend` over an in-memory pipe whose worker answers each
@@ -473,35 +487,20 @@ mod tests {
         assert_eq!(ordinary, desktop());
     }
 
-    /// Protocol 8 over a pipe to a worker serving a synthetic display: its
-    /// `Start` answer says what it can do, H.265 is asked only for a viewer
-    /// that decodes it, the pointer's shape crosses once per new shape, its
-    /// modes cross, a change and its restore apply there, and a failure
-    /// reads back as the kind the worker gave it.
-    #[test]
-    fn protocol_8_carries_caps_shapes_modes_and_failure_kinds() {
+    /// A `RemoteBackend` started over an in-memory pipe to a worker that
+    /// serves a synthetic display on `probe` through `server::serve`, as the
+    /// helper's worker does; `seen` is shown each request first.
+    fn synthetic(
+        probe: &Probe,
+        journal: std::path::PathBuf,
+        mut seen: impl FnMut(&Request) + Send + 'static,
+    ) -> (RemoteBackend<DuplexStream>, std::thread::JoinHandle<()>) {
         use crate::{
             native::PlatformBackend,
-            platform::{
-                Platform,
-                synthetic::{Probe, Synthetic},
-            },
+            platform::{Platform, synthetic::Synthetic},
         };
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        let (probe, modes) = Probe::with_modes();
-        let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop");
-        let asked_h265 = Arc::new(AtomicUsize::new(0));
-        let asked_shape = Arc::new(AtomicUsize::new(0));
         let (pipe, mut worker) = tokio::io::duplex(1 << 16);
-        let (worker_probe, worker_journal, asked, asked_for_shape) = (
-            probe.clone(),
-            journal.to_path_buf(),
-            asked_h265.clone(),
-            asked_shape.clone(),
-        );
+        let worker_probe = probe.clone();
         let helper = std::thread::spawn(move || {
             runtime().block_on(async move {
                 // The service reads the host's `Start`; the worker answers.
@@ -512,18 +511,13 @@ mod tests {
                 };
                 let parts = Synthetic::<false>::open(&worker_probe, &Probe::display()).unwrap();
                 let mut backend = PlatformBackend::from_parts(
-                    Arc::new(worker_probe),
+                    std::sync::Arc::new(worker_probe),
                     parts,
-                    crate::modes::Journal::in_dir(Some(worker_journal)),
+                    crate::modes::Journal::in_dir(Some(journal)),
                 );
                 let mut state = super::super::server::ServeState::new();
                 super::super::server::exchange(&mut worker, 1, display_device, |request| {
-                    if matches!(request, Request::H265 {}) {
-                        asked.fetch_add(1, Ordering::SeqCst);
-                    }
-                    if matches!(request, Request::CursorShape {}) {
-                        asked_for_shape.fetch_add(1, Ordering::SeqCst);
-                    }
+                    seen(&request);
                     let answer = super::super::server::serve(&mut backend, request, &mut state)
                         .unwrap_or_else(|failure| (Response::failed(&failure, 0), vec![]));
                     async move { Ok(answer) }
@@ -532,7 +526,7 @@ mod tests {
                 .unwrap();
             });
         });
-        let mut backend = RemoteBackend::start(
+        let backend = RemoteBackend::start(
             runtime(),
             pipe,
             1,
@@ -540,6 +534,33 @@ mod tests {
             BackendCaps::default(),
         )
         .unwrap();
+        (backend, helper)
+    }
+
+    /// Protocol 8 over a pipe to a worker serving a synthetic display: its
+    /// `Start` answer says what it can do, H.265 is asked only for a viewer
+    /// that decodes it, the pointer's shape crosses once per new shape, its
+    /// modes cross, a change and its restore apply there, and a failure
+    /// reads back as the kind the worker gave it.
+    #[test]
+    fn protocol_8_carries_caps_shapes_modes_and_failure_kinds() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let (probe, modes) = Probe::with_modes();
+        let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop");
+        let asked_h265 = Arc::new(AtomicUsize::new(0));
+        let asked_shape = Arc::new(AtomicUsize::new(0));
+        let (asked, asked_for_shape) = (asked_h265.clone(), asked_shape.clone());
+        let (mut backend, helper) = synthetic(&probe, journal.to_path_buf(), move |request| {
+            if matches!(request, Request::H265 {}) {
+                asked.fetch_add(1, Ordering::SeqCst);
+            }
+            if matches!(request, Request::CursorShape {}) {
+                asked_for_shape.fetch_add(1, Ordering::SeqCst);
+            }
+        });
         let described = backend.describe(false).unwrap();
         assert!(described.caps.display_modes && !described.caps.h265);
         assert_eq!(described.caps.os, Some(crate::HostOs::Linux));
@@ -587,6 +608,84 @@ mod tests {
             crate::failure_kind(&lost),
             Some(crate::FailureKind::DisplayLost)
         );
+        drop(backend);
+        helper.join().unwrap();
+    }
+
+    /// Protocol 10 over a pipe to a worker serving a synthetic display: a
+    /// capture that found nothing new says so, and leaves thread C's tick
+    /// armed, while still collecting what the encoder finished.
+    #[test]
+    fn protocol_10_says_when_a_capture_found_nothing_new() {
+        let probe = Probe::default();
+        let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop-still");
+        let (mut backend, helper) = synthetic(&probe, journal.to_path_buf(), |_| {});
+        let context = backend.context().unwrap();
+        backend
+            .configure_video(crate::VideoLimits::for_viewer(60.0), 60)
+            .unwrap();
+        let rate = crate::VideoRate {
+            bitrate: crate::qos::ENCODER_BITRATE_MIN,
+            pace_fps: 60,
+        };
+        let capture = |backend: &mut RemoteBackend<_>| {
+            let unit = backend
+                .capture_video(&context, crate::VideoCodec::H264, false, rate)
+                .unwrap();
+            (unit, backend.submitted_video())
+        };
+        let (first, submitted) = capture(&mut backend);
+        assert!(first.is_none() && submitted);
+        probe.still(true);
+        let (drained, submitted) = capture(&mut backend);
+        assert!(drained.is_some() && !submitted);
+        // A drain says nothing of a tick.
+        backend
+            .drain_video(&context, std::time::Duration::ZERO)
+            .unwrap();
+        assert!(!backend.submitted_video());
+        probe.still(false);
+        let (_, submitted) = capture(&mut backend);
+        assert!(submitted);
+        drop(backend);
+        helper.join().unwrap();
+    }
+
+    /// `submitted` crosses only when false: a capture whose answer has none,
+    /// as no worker before protocol 10 sent one, spent the tick.
+    #[test]
+    fn an_absent_submitted_means_the_tick_was_spent() {
+        assert!(
+            !serde_json::to_string(&Response::default())
+                .unwrap()
+                .contains("submitted")
+        );
+        let still = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let worker_still = still.clone();
+        let reported = desktop();
+        let (mut backend, helper) = remote(move |request| {
+            let capture = matches!(request, Request::Video { submit: true, .. });
+            let still = worker_still.load(std::sync::atomic::Ordering::SeqCst);
+            Response {
+                context: Some(reported.clone()),
+                submitted: (capture && still).then_some(false),
+                ..Response::default()
+            }
+        });
+        let rate = crate::VideoRate {
+            bitrate: 4_000_000,
+            pace_fps: 60,
+        };
+        let codec = crate::VideoCodec::H264;
+        backend
+            .capture_video(&desktop(), codec, false, rate)
+            .unwrap();
+        assert!(!backend.submitted_video());
+        still.store(false, std::sync::atomic::Ordering::SeqCst);
+        backend
+            .capture_video(&desktop(), codec, false, rate)
+            .unwrap();
+        assert!(backend.submitted_video());
         drop(backend);
         helper.join().unwrap();
     }
