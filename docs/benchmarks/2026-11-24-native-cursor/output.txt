@@ -1,0 +1,84 @@
+== run 1: stdout and stderr
+[IMPORTANT:flutter/shell/platform/embedder/embedder_surface_metal_impeller.mm(53)] Using the Impeller rendering backend (MetalSDF).
+flutter: {
+  "rebuild": {
+    "p50": 3.53,
+    "p90": 6.508,
+    "p99": 7.219,
+    "max": 7.252
+  },
+  "system": {
+    "p50": 0.208,
+    "p90": 0.32,
+    "p99": 0.399,
+    "max": 0.457
+  },
+  "bitmap_set": {
+    "p50": 0.542,
+    "p90": 0.854,
+    "p99": 1.326,
+    "max": 1.57
+  },
+  "bitmap_create": {
+    "p50": 0.667,
+    "p90": 1.366,
+    "p99": 89.203,
+    "max": 114.13
+  }
+}
+== run 2: stdout and stderr
+[IMPORTANT:flutter/shell/platform/embedder/embedder_surface_metal_impeller.mm(53)] Using the Impeller rendering backend (MetalSDF).
+flutter: {
+  "rebuild": {
+    "p50": 3.478,
+    "p90": 6.401,
+    "p99": 7.274,
+    "max": 7.324
+  },
+  "system": {
+    "p50": 0.216,
+    "p90": 0.273,
+    "p99": 0.317,
+    "max": 0.322
+  },
+  "bitmap_set": {
+    "p50": 0.545,
+    "p90": 0.735,
+    "p99": 1.037,
+    "max": 1.745
+  },
+  "bitmap_create": {
+    "p50": 0.658,
+    "p90": 0.926,
+    "p99": 3.015,
+    "max": 14.422
+  }
+}
+== run 3: stdout and stderr
+[IMPORTANT:flutter/shell/platform/embedder/embedder_surface_metal_impeller.mm(53)] Using the Impeller rendering backend (MetalSDF).
+flutter: {
+  "rebuild": {
+    "p50": 3.602,
+    "p90": 6.611,
+    "p99": 7.407,
+    "max": 7.633
+  },
+  "system": {
+    "p50": 0.083,
+    "p90": 0.101,
+    "p99": 0.114,
+    "max": 0.116
+  },
+  "bitmap_set": {
+    "p50": 0.492,
+    "p90": 0.671,
+    "p99": 0.842,
+    "max": 1.048
+  },
+  "bitmap_create": {
+    "p50": 1.169,
+    "p90": 1.542,
+    "p99": 2.177,
+    "max": 2.423
+  }
+}
