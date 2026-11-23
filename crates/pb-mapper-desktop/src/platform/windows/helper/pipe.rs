@@ -32,8 +32,8 @@ pub fn bind(name: &str, sid: Option<&str>, first: bool) -> Result<NamedPipeServe
         .first_pipe_instance(first)
         .reject_remote_clients(true)
         .max_instances(8)
-        .in_buffer_size(8192)
-        .out_buffer_size(8192);
+        .in_buffer_size(super::transfer::PIPE_QUOTA)
+        .out_buffer_size(super::transfer::PIPE_QUOTA);
     unsafe { options.create_with_security_attributes_raw(name, descriptor.attributes().cast()) }
 }
 pub fn connect(name: &str) -> Result<NamedPipeClient> {
@@ -65,4 +65,55 @@ pub fn exists(name: &str) -> bool {
 
 pub fn raw<T: std::os::windows::io::AsRawHandle>(pipe: &T) -> HANDLE {
     HANDLE(pipe.as_raw_handle())
+}
+
+#[cfg(all(test, feature = "windows-helper"))]
+mod tests {
+    use super::*;
+    use crate::oop::ipc;
+
+    /// A unit within the quota waits in the pipe, in either direction, while
+    /// nobody reads it: its write completes at once, so the writer's next
+    /// write, which starts only once the last one completed, never waits on
+    /// the reader. Every unit still arrives whole.
+    #[tokio::test]
+    async fn a_unit_waits_in_the_pipe_until_its_reader_reads() {
+        let name = format!(
+            r"\\.\pipe\pb-mapper.desktop-test.{}",
+            crate::security::secret().unwrap()
+        );
+        let owner = os::current_sid().unwrap();
+        let mut server = bind(&name, Some(owner.as_str()), true).unwrap();
+        let mut client = connect(&name).unwrap();
+        server.connect().await.unwrap();
+        let unit: Vec<u8> = (0..=255u8)
+            .cycle()
+            .take(super::super::transfer::PIPE_QUOTA as usize * 3 / 4)
+            .collect();
+        let bound = std::time::Duration::from_secs(5);
+        // The worker's direction, toward the service: the pipe's in quota.
+        tokio::time::timeout(bound, async {
+            ipc::write_bytes(&mut client, &unit, ipc::MAX_FRAME).await?;
+            ipc::write_bytes(&mut client, &unit, ipc::MAX_FRAME).await
+        })
+        .await
+        .expect("the first unit waits in the pipe")
+        .unwrap();
+        for _ in 0..2 {
+            let read = ipc::read_bytes(&mut server, ipc::MAX_FRAME).await.unwrap();
+            assert!(read == unit);
+        }
+        // The service's direction, toward the app: the out quota.
+        tokio::time::timeout(bound, async {
+            ipc::write_bytes(&mut server, &unit, ipc::MAX_FRAME).await?;
+            ipc::write_bytes(&mut server, &unit, ipc::MAX_FRAME).await
+        })
+        .await
+        .expect("the first unit waits in the pipe")
+        .unwrap();
+        for _ in 0..2 {
+            let read = ipc::read_bytes(&mut client, ipc::MAX_FRAME).await.unwrap();
+            assert!(read == unit);
+        }
+    }
 }

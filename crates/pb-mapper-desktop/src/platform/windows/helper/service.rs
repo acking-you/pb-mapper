@@ -234,7 +234,12 @@ async fn session(
         () = stop.cancelled() => {},
         () = revoked.cancelled() => {},
         () = watch => {},
-        _ = tokio::io::copy_bidirectional(&mut caller, &mut private) => {},
+        _ = tokio::io::copy_bidirectional_with_sizes(
+            &mut caller,
+            &mut private,
+            transfer::RELAY_TO_WORKER,
+            transfer::RELAY_TO_APP,
+        ) => {},
     }
     drop(private); // EOF wakes the worker and releases its held input.
     child.wait_exit(Duration::from_secs(2)).await;

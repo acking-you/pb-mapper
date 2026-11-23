@@ -22,6 +22,8 @@ mod restart;
 #[cfg(feature = "windows-helper")]
 mod service;
 #[cfg(feature = "windows-helper")]
+mod transfer;
+#[cfg(feature = "windows-helper")]
 mod worker;
 
 use crate::{
