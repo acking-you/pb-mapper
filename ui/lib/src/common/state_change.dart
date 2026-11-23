@@ -7,6 +7,10 @@ enum StateChangeKind {
   server,
   config,
 
+  /// This app's own desktop host: a viewer came or left, or what
+  /// `host_status` shows of it changed. `DesktopStore` reads it again.
+  desktopHost,
+
   /// A kind this build does not know. Newer Rust, older Dart — treated as
   /// "something changed", which is the safe reading for an invalidation hint.
   unknown;
@@ -16,6 +20,7 @@ enum StateChangeKind {
     'clients' => StateChangeKind.clients,
     'server' => StateChangeKind.server,
     'config' => StateChangeKind.config,
+    'desktopHost' => StateChangeKind.desktopHost,
     _ => StateChangeKind.unknown,
   };
 }

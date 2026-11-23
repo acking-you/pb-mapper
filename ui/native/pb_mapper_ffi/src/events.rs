@@ -31,6 +31,10 @@ pub enum ChangeKind {
     Clients,
     Server,
     Config,
+    /// This app's own desktop host: a viewer came or left, or what
+    /// `host_status` shows of it changed. The Windows service's host sends
+    /// none.
+    DesktopHost,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +96,19 @@ mod tests {
         assert!(json.contains("\"key\":\"home\""), "{json}");
         assert!(json.contains("\"origin\":\"cli\""), "{json}");
         assert!(json.contains("\"seq\":7"), "{json}");
+    }
+
+    /// The desktop host's kind, as Dart's `StateChangeKind.parse` reads it.
+    #[test]
+    fn the_desktop_host_kind_is_camel_case() {
+        let change = StateChange {
+            kind: ChangeKind::DesktopHost,
+            key: None,
+            origin: Origin::Internal,
+            seq: 1,
+        };
+        let json = serde_json::to_string(&change).unwrap();
+        assert!(json.contains("\"kind\":\"desktopHost\""), "{json}");
     }
 
     /// A whole-list change carries no key, and must not send a null one that

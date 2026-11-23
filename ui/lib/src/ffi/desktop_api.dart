@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import '../common/state_change.dart';
 import '../state/desktop_models.dart';
 import 'desktop_video.dart';
 import 'pb_mapper_ffi.dart';
@@ -544,6 +545,12 @@ abstract interface class DesktopApiClient {
   /// in System Settings); whether it is granted now.
   Future<bool> requestHostPermission(String permission);
   Future<DesktopHostSnapshot> hostStatus();
+
+  /// Fires after this app's own host changed in a way [hostStatus] shows: a
+  /// viewer arrived or left, a session's state, control or pause changed,
+  /// control was allowed or withdrawn, or hosting stopped. The Windows
+  /// service's host sends nothing. A hint, not state: read [hostStatus].
+  Stream<void> get hostChanges;
   Future<DesktopHostEnable> enableHost(
     String service,
     int displayId, {
@@ -705,6 +712,12 @@ class DesktopApi implements DesktopApiClient {
         'permission': permission,
       }))['granted'] ==
       true;
+
+  /// The `desktopHost` events of the Rust change callback.
+  @override
+  Stream<void> get hostChanges => PbMapperService.changeStream
+      .where((change) => change.kind == StateChangeKind.desktopHost)
+      .map((_) {});
 
   @override
   Future<DesktopHostSnapshot> hostStatus() async {

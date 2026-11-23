@@ -776,7 +776,9 @@ The design and its rules are in `docs/ui-design.md`.
     `display_mode` takes `{target}`; `host_restore_display_mode` is the
     host card's Restore. `desktop.rs` dispatches; `desktop/viewer.rs` holds
     `connect`, the viewer's state and the two hot exports, `desktop/host.rs`
-    this app's own host, `desktop/background.rs` the Windows service's host
+    this app's own host, whose `Host::changes` it forwards as `desktopHost`
+    change events (`events.rs`, at most one per 100 ms),
+    `desktop/background.rs` the Windows service's host
     as the app sees it, and `desktop/trust.rs` the remembered host grant
   - `desktop_video.rs`: Video goes from the viewer's `VideoSink` straight to
     its consumer. That is the native decoder: the runner's decoder thread
