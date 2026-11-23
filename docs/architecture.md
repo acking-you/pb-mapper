@@ -397,7 +397,8 @@ Nothing in the SDK crates knows it exists.
     C's wait: a kqueue timer marked `NOTE_CRITICAL`, which the kernel does
     not coalesce, and a user event for the wake), `keychain.rs`, `cf.rs`
     (Core Foundation glue, symbols looked up at run time). Its pure modules
-    build and are tested everywhere; `tests.rs` runs only on macOS
+    build and are tested everywhere; `tests.rs` runs only on macOS, and its
+    ignored `video_toolbox_rate_model_*` measure VideoToolbox's rate model
   - `platform/windows/helper/`: The opt-in UAC/Winlogon service —
     `service.rs`; the workers it starts (`worker.rs`, `child.rs`) and a
     worker's binding to the input desktop (`binding.rs`); `pipe.rs`;
@@ -438,7 +439,9 @@ Nothing in the SDK crates knows it exists.
     (`annexb.rs`), length-prefixed (AVCC/HVCC) samples to Annex B
     (`avcc.rs`, for VideoToolbox), and the encoder rules both platforms
     share (`pipeline.rs`: late output, first-submit and output waits,
-    liveness, what an H.265 failure is)
+    liveness, what an H.265 failure is); `rate_fit.rs`, test-only, fits a
+    pace sweep to a rate model for the macOS encoder's measurement and, by
+    path, `video_bench --pace`
   - `input/`: the input vocabulary a controlling viewer sends (`Input`,
     `Button`, `Key`, `InputEvent`, `DoubleClickGuard`; `Input` and `Key` are
     `#[non_exhaustive]`, and `Input::PhysicalKey` carries a USB HID usage,

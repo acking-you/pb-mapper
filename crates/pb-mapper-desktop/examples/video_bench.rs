@@ -35,6 +35,10 @@
 //! the polls among them: the calls that found nothing new.
 #[cfg(windows)]
 mod probe_support;
+// The `--pace` classifier, shared with the macOS encoder's measurement test.
+#[cfg(windows)]
+#[path = "../src/codec/rate_fit.rs"]
+mod rate_fit;
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -791,41 +795,30 @@ mod bench {
         if let Some(paces) = &rates.paces {
             // `Nominal` encoders budget each frame from the nominal rate, so their
             // bitrate falls with the pace; `Timestamp` encoders hold the target.
-            let (bitrate, fps) = (limits.bitrate, rates.fps);
             let window = (Duration::from_secs(rates.seconds) - SETTLE).as_secs_f64();
-            let ratios: Vec<(f64, f64)> = paces
+            let sweep: Vec<(u32, f64)> = paces
                 .iter()
                 .zip(&tally.measured)
-                .map(|(&pace, &bytes)| {
-                    let produced = bytes as f64 * 8.0 / window;
-                    let nominal = f64::from(bitrate) * f64::from(pace) / f64::from(fps);
-                    println!(
-                        "pace={pace} produced_mbps={:.3} nominal_expected_mbps={:.3} nominal_ratio={:.3} timestamp_ratio={:.3}",
-                        produced / 1e6,
-                        nominal / 1e6,
-                        produced / nominal,
-                        produced / f64::from(bitrate)
-                    );
-                    (produced / nominal, produced / f64::from(bitrate))
-                })
+                .map(|(&pace, &bytes)| (pace, bytes as f64 * 8.0 / window))
                 .collect();
-            let score = |pick: fn(&(f64, f64)) -> f64| {
-                ratios
-                    .iter()
-                    .map(|ratio| pick(ratio).ln().abs())
-                    .sum::<f64>()
-            };
-            let nominal = score(|ratio| ratio.0) <= score(|ratio| ratio.1);
-            let within = ratios
-                .iter()
-                .map(|ratio| if nominal { ratio.0 } else { ratio.1 })
-                .all(|ratio| (0.75..=1.25).contains(&ratio));
+            let fit = crate::rate_fit::Fit::new(limits.bitrate, rates.fps, &sweep);
+            for step in &fit.steps {
+                println!(
+                    "pace={} produced_mbps={:.3} nominal_expected_mbps={:.3} nominal_ratio={:.3} timestamp_ratio={:.3}",
+                    step.pace,
+                    step.produced_bps / 1e6,
+                    step.nominal_bps / 1e6,
+                    step.nominal,
+                    step.timestamp
+                );
+            }
             println!(
-                "rate_model={} within_25_percent={within} gop={}",
-                if nominal { "nominal" } else { "timestamp" },
+                "rate_model={} within_25_percent={} gop={}",
+                fit.model(),
+                fit.within,
                 stats.gop
             );
-            if !within {
+            if !fit.within {
                 return Err("produced bitrate is not within 25% of the rate model".into());
             }
         }

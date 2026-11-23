@@ -1604,6 +1604,20 @@ no display, so its encoder is unreachable from the capture adapter. Run
 `--codec h264` and `--codec h265`, on such a host before relying on the
 `nominal` default there; the latch handles a per-second-budget encoder.
 
+A Mac host's VideoToolbox encoder starts at `nominal` as well. The ignored
+tests `video_toolbox_rate_model_h264` and `video_toolbox_rate_model_h265`
+(`platform/macos/tests.rs`) measure it as `video_bench --pace` measures Media
+Foundation: each codec at 1080p, 1440p and 4K, with low-latency rate control
+and without, at a nominal 60 FPS and 4 Mbit/s, paced at 60, 30, 15 and 5 FPS
+on synthetic IOSurface pictures covered in fresh grain, so no Screen
+Recording grant is needed. They print, for each step, the pictures submitted
+and the units out, the encoder's dwell and the bitrate against both models;
+the fitted model (the same ±25% classifier, `codec/rate_fit.rs`); the largest
+unit after a 1 s pause; each encoder's `macos_encoder_opened` line; and a
+summary line a case. A case that fits neither model is reported, not failed.
+Run them in release mode on a quiet Mac, one at a time:
+`cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture --test-threads=1 video_toolbox_rate_model`.
+
 ### Viewer: newest decodable frame, fps cap and recovery
 
 The viewer's read task writes the receipt for each video record before it hands
@@ -2561,7 +2575,8 @@ Local build artifacts do not constitute a published release. The
 `capture_probe`, `video_bench` and `deployed` examples provide bounded development
 probes; the deployed probe revokes its dedicated temporary credential on normal
 completion and removes its controller setup file. Never publish that file.
-`video_bench --pace 60,30,15,5` classifies the encoder's rate model and, like
+`video_bench --pace 60,30,15,5` classifies the encoder's rate model (on a Mac,
+the ignored `video_toolbox_rate_model_*` tests classify VideoToolbox's) and, like
 `video_bench 60 60 --animate`, prints its GOP and keyframe count, and the
 largest keyframe and access unit. `--codec h265` encodes H.265 and first
 prints the host's probe; `--exact` encodes exactly `--max-width` ×
