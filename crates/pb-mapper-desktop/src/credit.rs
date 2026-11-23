@@ -68,6 +68,21 @@ struct Sent {
     bytes: u32,
     sent_at: Instant,
     keyframe: bool,
+    /// An IDR, or written while one was in flight: its receipt's delay
+    /// includes that IDR's transfer.
+    behind_idr: bool,
+}
+
+/// What one receipt says about the link, for the QoS controller's receipt-rate
+/// estimator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Receipt {
+    /// From writing the newest unit it covered to the receipt.
+    pub delay: Duration,
+    /// The payload bytes it newly covered.
+    pub bytes: u64,
+    /// The newest unit it covered was behind an IDR.
+    pub behind_idr: bool,
 }
 
 /// How much may be in flight before the next admission.
@@ -191,6 +206,7 @@ impl CreditLedger {
             bytes: len as u32,
             sent_at: now,
             keyframe,
+            behind_idr: keyframe || self.idr_inflight.is_some(),
         });
         self.in_flight_bytes += len;
         if keyframe && self.idr_inflight.is_none() {
@@ -200,28 +216,35 @@ impl CreditLedger {
     }
 
     /// A cumulative receipt: every unit up to `seq` was read off the network.
-    pub fn on_receipt(&mut self, seq: u64, now: Instant) -> Result<(), ReceiptAhead> {
+    /// Returns what it says about the link; nothing for a duplicate.
+    pub fn on_receipt(&mut self, seq: u64, now: Instant) -> Result<Option<Receipt>, ReceiptAhead> {
         if seq > self.last_admitted {
             return Err(ReceiptAhead);
         }
         if seq <= self.acked {
-            return Ok(());
+            return Ok(None);
         }
         let mut newest = None;
+        let mut bytes = 0;
         while let Some(sent) = self.in_flight.front()
             && sent.seq <= seq
         {
             self.in_flight_bytes -= sent.bytes as usize;
             self.delivered.push_back((now, sent.bytes));
-            newest = Some(sent.sent_at);
+            bytes += u64::from(sent.bytes);
+            newest = Some((sent.sent_at, sent.behind_idr));
             if sent.keyframe {
                 self.idr_received = Some(now);
             }
             self.in_flight.pop_front();
         }
-        if let Some(sent_at) = newest {
-            self.ack_samples
-                .push_back((now, now.saturating_duration_since(sent_at)));
+        let receipt = newest.map(|(sent_at, behind_idr)| Receipt {
+            delay: now.saturating_duration_since(sent_at),
+            bytes,
+            behind_idr,
+        });
+        if let Some(receipt) = receipt {
+            self.ack_samples.push_back((now, receipt.delay));
         }
         self.idr_inflight = self
             .in_flight
@@ -246,7 +269,7 @@ impl CreditLedger {
         {
             self.delivered.pop_front();
         }
-        Ok(())
+        Ok(receipt)
     }
 
     pub fn idr_inflight(&self) -> Option<u64> {
@@ -409,6 +432,49 @@ mod tests {
         // A JPEG session has a fixed window.
         let jpeg = CreditLedger::new(t0).window(VideoCodec::Jpeg, 8, 0, None, t0);
         assert_eq!((jpeg.frames, jpeg.bytes), (4, 2 * 1024 * KIB));
+    }
+
+    #[test]
+    fn a_receipt_reports_its_newest_unit_and_the_bytes_it_covered() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut credit = CreditLedger::new(t0);
+        credit.book(4 * KIB, false, ms(0));
+        credit.book(6 * KIB, false, ms(10));
+        // One receipt for both: the newest unit's delay, both units' bytes.
+        let receipt = credit.on_receipt(2, ms(35)).unwrap();
+        let receipt = receipt.unwrap();
+        assert_eq!(
+            receipt,
+            Receipt {
+                delay: Duration::from_millis(25),
+                bytes: 10 * KIB as u64,
+                behind_idr: false,
+            }
+        );
+        // A duplicate says nothing.
+        assert_eq!(credit.on_receipt(2, ms(40)).unwrap(), None);
+
+        // An IDR and what is written while it is in flight are behind it;
+        // what is written after its receipt is not.
+        let idr = credit.book(100 * KIB, true, ms(50));
+        let behind = credit.book(4 * KIB, false, ms(60));
+        assert!(credit.on_receipt(idr, ms(150)).unwrap().unwrap().behind_idr);
+        let clear = credit.book(4 * KIB, false, ms(160));
+        assert!(
+            credit
+                .on_receipt(behind, ms(170))
+                .unwrap()
+                .unwrap()
+                .behind_idr
+        );
+        assert!(
+            !credit
+                .on_receipt(clear, ms(180))
+                .unwrap()
+                .unwrap()
+                .behind_idr
+        );
     }
 
     #[test]

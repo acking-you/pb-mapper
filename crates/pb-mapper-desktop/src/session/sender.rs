@@ -492,7 +492,10 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     async fn stats(&mut self, now: Instant) -> Result<(), Abandoned> {
         let session = self.session;
         let engine = &self.engine;
-        let qos = session.qos.lock().view(now);
+        let (qos, receipts) = {
+            let mut qos = session.qos.lock();
+            (qos.view(now), qos.take_receipt_rate(now))
+        };
         let (credit, ack_queue, window) = {
             let mut credit = session.credit.lock();
             (
@@ -564,6 +567,10 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             delay_ms = qos.delay_ms,
             tainted = qos.tainted,
             ack_queue_ms = ms(ack_queue),
+            standing_ms = receipts.standing.map(ms),
+            busy_bps = receipts.busy_bps,
+            used_bps = receipts.used_bps,
+            would_cut = receipts.would_cut,
             window_frames = window.frames,
             window_bytes = window.bytes,
             window_clamped = window.clamped,

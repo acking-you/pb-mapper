@@ -334,11 +334,12 @@ impl Session {
         match message {
             ViewerMessage::Authenticate { .. } => return Err(Violation::AuthenticatedTwice),
             ViewerMessage::Received { seq } => {
-                self.credit
+                let receipt = self
+                    .credit
                     .lock()
                     .on_receipt(seq, now)
                     .map_err(Violation::Receipt)?;
-                self.update_qos(now, Qos::on_receipt);
+                self.update_qos(now, |qos| qos.on_receipt(receipt, now));
                 self.credit_changed.notify_one();
             }
             ViewerMessage::ProbeEcho { nonce } => {
