@@ -1,7 +1,7 @@
 //! Thread C's capture: the desktop context, the encoder and its output.
 
 use super::{
-    CONTEXT_CHECK_INTERVAL, Clock, ENCODER_DEPTH, Engine, H265_FAILED, TRANSPORT_GATE,
+    CONTEXT_CHECK_INTERVAL, Clock, ENCODER_DEPTH, Engine, H265_FAILED, HOT_WINDOW, TRANSPORT_GATE,
     capture_consent_ended, link_lost,
 };
 use crate::{
@@ -133,18 +133,35 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         at + self.backend.drain_poll().unwrap_or(CONTEXT_CHECK_INTERVAL)
     }
 
-    /// When a source that had nothing to submit at `at` is asked again, if
-    /// it cannot say so itself. A push source wakes thread C for a fresh
-    /// picture or names when it needs the tick (`capture_idle_until`). A pull
-    /// source, such as DXGI, does neither: asked again at once, it spun thread
-    /// C until the desktop changed. It is polled at its drain interval
-    /// instead, its tick still armed, so a new picture goes out within that
-    /// interval of appearing.
+    /// When a source that had nothing to submit at `at` is asked again, its
+    /// tick still armed, if it cannot say so itself. A push source wakes
+    /// thread C for a fresh picture or names when it needs the tick
+    /// (`capture_idle_until`). A pull source, such as DXGI, does neither.
+    /// While the desktop is active (`hot_until`), it is asked again at its
+    /// drain interval, so the next present goes out within that interval of
+    /// appearing; while it is still, a period later, so it costs no more
+    /// capture calls than the grid.
     fn capture_poll_after(&self, at: Instant) -> Option<Instant> {
         if self.backend.capture_idle_until(None).is_some() {
             return None;
         }
-        self.backend.drain_poll().map(|poll| at + poll)
+        let poll = self.backend.drain_poll()?;
+        Some(if at < self.hot_until {
+            at + poll
+        } else {
+            at + poll.max(self.pacer.period())
+        })
+    }
+
+    /// Thread C injected an input: the desktop is active, and the input's
+    /// answer is the likeliest next present. A pull source's armed tick is
+    /// asked again within its drain interval, sooner than a still desktop's
+    /// period.
+    pub(super) fn input_injected(&mut self, now: Instant) {
+        self.hot_until = now + HOT_WINDOW;
+        if let (Some(due), Some(poll)) = (self.capture_poll_due, self.backend.drain_poll()) {
+            self.capture_poll_due = Some(due.min(now + poll));
+        }
     }
 
     /// The next tick a capture source can use. A push source stays idle
@@ -269,8 +286,15 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             return;
         };
         if pace_fps != self.pace_fps {
+            let faster = pace_fps > self.pace_fps;
             self.pace_fps = pace_fps;
             self.pacer.set_pace(pace_fps, now);
+            if faster {
+                // A still desktop's armed tick was polled a period of the
+                // slower pace away; set_pace brought the tick forward, so
+                // ask at it and re-arm, if nothing is new, at the new period.
+                self.capture_poll_due = None;
+            }
         }
         let tick_due = retry || (self.pacer.due(now) && now >= self.capture_at());
         let pending = self.backend.pending_video();
@@ -310,17 +334,20 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 }
                 self.pacer.consume(now);
             }
-            self.capture_poll_due = if result.is_ok() && !submitted {
-                self.capture_poll_after(done)
-            } else {
-                None
-            };
+            let armed = result.is_ok() && !submitted;
             self.drain_due = if matches!(result, Ok(Some(_))) {
                 done
             } else {
                 self.drain_after(done)
             };
+            // First: a new picture this call collected makes the desktop
+            // active for the poll below.
             self.produced(result, done);
+            self.capture_poll_due = if armed {
+                self.capture_poll_after(done)
+            } else {
+                None
+            };
             return;
         }
         if tick_due {
@@ -370,6 +397,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         self.frame_id += 1;
         if !format.duplicate {
             self.window.unique += 1;
+            // A new picture: the desktop is active, and more are likely.
+            self.hot_until = at + HOT_WINDOW;
         }
         let video = VideoSize {
             width: format.width,

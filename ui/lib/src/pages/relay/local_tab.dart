@@ -158,6 +158,7 @@ class _LocalRelayTabState extends State<LocalRelayTab> {
             color: running ? successColor(scheme) : availableColor(scheme),
             label: running ? l10n.localRunning : l10n.localStopped,
             pulsing: running,
+            breaths: kSettlingBreaths,
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,

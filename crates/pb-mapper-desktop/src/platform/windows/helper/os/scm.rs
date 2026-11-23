@@ -40,7 +40,19 @@ fn query_service_status(service: &ServiceHandle) -> Result<SERVICE_STATUS_PROCES
     .map_err(error)?;
     Ok(status)
 }
-pub fn service_state() -> Result<Option<(bool, bool)>> {
+/// The installed service as one query of the service control manager saw it.
+#[derive(Clone, Copy, Default)]
+pub struct Service {
+    pub running: bool,
+    /// Stopped, with its startup Disabled.
+    pub startup_disabled: bool,
+    /// Its process while it runs, else 0.
+    pub process: u32,
+}
+
+/// The service, or None when the service control manager says it does not
+/// exist.
+pub fn service_state() -> Result<Option<Service>> {
     let service = match open_service(SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG) {
         Ok(service) => service,
         Err(e)
@@ -51,13 +63,15 @@ pub fn service_state() -> Result<Option<(bool, bool)>> {
         Err(e) => return Err(error(e)),
     };
     let disabled = service_startup_disabled(&service)?;
-    let state = query_service_status(&service)?.dwCurrentState;
+    let status = query_service_status(&service)?;
+    let running = status.dwCurrentState == SERVICE_RUNNING;
     // A disabled startup policy alone says nothing about an existing process.
     // Pending transitions and failed queries must never allow a second host.
-    Ok(Some((
-        state == SERVICE_RUNNING,
-        state == SERVICE_STOPPED && disabled,
-    )))
+    Ok(Some(Service {
+        running,
+        startup_disabled: status.dwCurrentState == SERVICE_STOPPED && disabled,
+        process: if running { status.dwProcessId } else { 0 },
+    }))
 }
 fn service_startup_disabled(service: &ServiceHandle) -> Result<bool> {
     // QueryServiceConfig has a documented 8 KiB maximum. Word storage keeps

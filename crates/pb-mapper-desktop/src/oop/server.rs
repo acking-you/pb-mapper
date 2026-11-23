@@ -196,7 +196,11 @@ pub(crate) fn serve<B: Backend>(
                 return Err(error("invalid or stale video request"));
             }
             let frame = if submit {
-                backend.capture_video(&expected, codec, keyframe, rate)?
+                let frame = backend.capture_video(&expected, codec, keyframe, rate)?;
+                // Said only when it found nothing new: the host's tick stays
+                // armed then, and it asks again.
+                response.submitted = (!backend.submitted_video()).then_some(false);
+                frame
             } else {
                 drain(
                     backend,
@@ -393,6 +397,7 @@ mod tests {
         };
         let probe = Probe::default();
         let parts = Synthetic::<false>::open(&probe, &Probe::display()).unwrap();
+        let display = probe.clone();
         let mut backend = PlatformBackend::from_parts(
             std::sync::Arc::new(probe),
             parts,
@@ -425,5 +430,12 @@ mod tests {
         let (second, bytes) = serve(video(false));
         assert_eq!(second.video.unwrap().codec, VideoCodec::H264);
         assert!(!bytes.is_empty());
+        // Both took the tick, which goes unsaid; a capture of a still display
+        // says it found nothing new.
+        assert_eq!((first.submitted, second.submitted), (None, None));
+        display.still(true);
+        let (still, _) = serve(video(false));
+        assert!(still.error.is_none());
+        assert_eq!(still.submitted, Some(false));
     }
 }

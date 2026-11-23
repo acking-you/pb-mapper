@@ -246,6 +246,24 @@ impl Encoder {
         built.map_err(|failure| codec_error(codec, failure))
     }
 
+    /// `new` with low-latency rate control on or off as asked, never
+    /// retried the other way: the measurement compares the two.
+    #[cfg(test)]
+    pub(super) fn with_low_latency(
+        codec: VideoCodec,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u32,
+        waker: &Waker,
+        low_latency: bool,
+    ) -> Result<Self> {
+        if low_latency && cf::symbol(LOW_LATENCY).is_none() {
+            return Err(error("low-latency rate control needs macOS 11.3"));
+        }
+        Self::build(codec, width, height, fps, bitrate, waker, low_latency)
+    }
+
     fn build(
         codec: VideoCodec,
         width: u32,
@@ -265,6 +283,8 @@ impl Encoder {
             gop: 0,
         });
         let session = create(codec, width, height, low_latency, Arc::as_ptr(&shared))?;
+        // Whether the session took the data-rate cap, for the log.
+        let mut capped = false;
         let configured = (|| {
             // SAFETY: VideoToolbox's and Core Video's static keys and values.
             unsafe {
@@ -308,11 +328,12 @@ impl Encoder {
                     &cf::number(i64::from(bitrate)),
                 )?;
                 // A cap the session may not take; the mean still holds.
-                let _ = set(
+                capped = set(
                     &session,
                     kVTCompressionPropertyKey_DataRateLimits,
                     &data_rate_limits(bitrate),
-                );
+                )
+                .is_ok();
                 set(
                     &session,
                     kVTCompressionPropertyKey_ColorPrimaries,
@@ -365,6 +386,7 @@ impl Encoder {
             fps,
             hardware,
             gop,
+            data_rate_limits = capped,
         );
         // SAFETY: a static key.
         let keyframe = unsafe {

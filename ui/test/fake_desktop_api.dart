@@ -205,6 +205,17 @@ class FakeDesktopApi implements DesktopApiClient {
     return hostSnapshot;
   }
 
+  final _hostChanges = StreamController<void>.broadcast(sync: true);
+
+  /// Only what a test announces with [announceHostChange]: nothing this
+  /// fake does sends one by itself.
+  @override
+  Stream<void> get hostChanges => _hostChanges.stream;
+
+  /// What Rust sends when the app's own host changed, as after a viewer
+  /// arrived: set [hostSnapshot] first.
+  void announceHostChange() => _hostChanges.add(null);
+
   @override
   Future<DesktopHostEnable> enableHost(
     String service,

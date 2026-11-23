@@ -316,13 +316,128 @@ impl Drop for Decoder {
     }
 }
 
+/// One wait for an IDR: from the request until the IDR reached the sink, and
+/// the predicted frames that reached it first.
+#[derive(Clone, Copy, Debug)]
+struct Resync {
+    waited: Duration,
+    frames_first: u32,
+    /// The viewer's limiter held the request back, to send it later.
+    held: bool,
+}
+
+/// What a case and its `Resyncing` decoder share.
+#[derive(Default)]
+struct ResyncRounds {
+    stop: AtomicBool,
+    /// When the case began a round the decoder has yet to take up.
+    begun: Mutex<Option<Instant>>,
+    done: Mutex<Vec<Resync>>,
+}
+
+/// A simulated decoder like `Decoder`, without the decode time, that waits for
+/// the next IDR in each round a case begins. One that `asks` requests it, as a
+/// decoder missing a reference does, and discards the predicted frames that
+/// arrive first; one that does not times an IDR asked for elsewhere and
+/// presents what comes before it.
+struct Resyncing {
+    rounds: Arc<ResyncRounds>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Resyncing {
+    fn start(viewer: &Viewer, asks: bool) -> Self {
+        let consumer = viewer.video_sink().attach().unwrap();
+        let rounds = Arc::new(ResyncRounds::default());
+        let shared = rounds.clone();
+        let thread = std::thread::spawn(move || {
+            // The round under way: since when, its predicted frames, and
+            // whether its request was held back.
+            let mut open: Option<(Instant, u32, bool)> = None;
+            while !shared.stop.load(Ordering::Acquire) {
+                let pulled = consumer.next(Duration::from_millis(5), wire::MAX_PAYLOAD);
+                // Taken up after the pull, so a unit received before the
+                // round began never counts toward it.
+                if open.is_none() {
+                    let begun = shared.begun.lock().unwrap().take();
+                    open = begun.map(|begun| {
+                        if asks {
+                            let asked = Instant::now();
+                            (asked, 0, !consumer.keyframe(KeyframeReason::Gap))
+                        } else {
+                            (begun, 0, false)
+                        }
+                    });
+                }
+                match pulled {
+                    Pull::Unit(unit) => {
+                        if let Some((since, frames_first, held)) = &mut open
+                            && unit.received_at >= *since
+                        {
+                            if unit.keyframe {
+                                shared.done.lock().unwrap().push(Resync {
+                                    waited: unit.received_at - *since,
+                                    frames_first: *frames_first,
+                                    held: *held,
+                                });
+                                open = None;
+                            } else {
+                                *frames_first += 1;
+                                if asks {
+                                    continue;
+                                }
+                            }
+                        }
+                        consumer.presented(unit.generation, unit.frame_id);
+                    }
+                    Pull::Closed => break,
+                    _ => {}
+                }
+            }
+        });
+        Self {
+            rounds,
+            thread: Some(thread),
+        }
+    }
+    /// `RESYNC_ROUNDS` rounds `RESYNC_SPACING` apart. Each begins just before
+    /// `begin` runs and waits up to `RESYNC_LIMIT` for its IDR; the first that
+    /// waits longer ends them. Returns the rounds answered.
+    async fn run(&self, begin: impl Fn()) -> Vec<Resync> {
+        for _ in 0..RESYNC_ROUNDS {
+            tokio::time::sleep(RESYNC_SPACING).await;
+            let answered = self.rounds.done.lock().unwrap().len();
+            *self.rounds.begun.lock().unwrap() = Some(Instant::now());
+            begin();
+            let waited = tokio::time::timeout(RESYNC_LIMIT, async {
+                while self.rounds.done.lock().unwrap().len() == answered {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await;
+            if waited.is_err() {
+                break;
+            }
+        }
+        self.rounds.done.lock().unwrap().clone()
+    }
+}
+impl Drop for Resyncing {
+    fn drop(&mut self) {
+        self.rounds.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
 /// A relay, a host of the synthetic encoder, and a viewer that reaches it
 /// through the relay, over a shaped link when there is a `shape`.
 struct Rig {
     host: Host,
     viewer: Viewer,
     probe: Arc<Probe>,
-    _clients: [Client; 2],
+    /// The host's client, on the relay itself, and the viewer's.
+    clients: [Client; 2],
     /// The shaped hop the viewer reaches the relay through, if any, held
     /// while the rig lives. The testkit does not name its type.
     _link: Option<ShapedLink>,
@@ -369,31 +484,19 @@ impl Rig {
             }
             None => (client(relay.addr()), None),
         };
-        let viewer = Viewer::connect(
-            &remote,
-            host.invitation(),
-            ConnectOptions {
-                path: PathPolicy::RelayOnly,
-                ..Default::default()
-            },
-            ViewerConfig {
-                codecs: vec![VideoCodec::H264],
-                limits: VideoLimits::for_viewer(60.0),
-                fps_override: false,
-                quality: QualityPreset::Balanced,
-                progress: None,
-            },
-        )
-        .await
-        .unwrap();
+        let viewer = connect_viewer(&remote, &host).await;
         Self {
             host,
             viewer,
             probe,
-            _clients: [local, remote],
+            clients: [local, remote],
             _link: link,
             _relay: relay,
         }
+    }
+    /// Another viewer of the host, on the relay's unshaped link.
+    async fn second_viewer(&self) -> Viewer {
+        connect_viewer(&self.clients[0], &self.host).await
     }
     fn expired(&self) -> u32 {
         self.probe.expired.load(Ordering::Relaxed)
@@ -402,6 +505,27 @@ impl Rig {
         self.viewer.stop().await.unwrap();
         self.host.stop().await.unwrap();
     }
+}
+
+/// A viewer of `host` through `client`, on the relay.
+async fn connect_viewer(client: &Client, host: &Host) -> Viewer {
+    Viewer::connect(
+        client,
+        host.invitation(),
+        ConnectOptions {
+            path: PathPolicy::RelayOnly,
+            ..Default::default()
+        },
+        ViewerConfig {
+            codecs: vec![VideoCodec::H264],
+            limits: VideoLimits::for_viewer(60.0),
+            fps_override: false,
+            quality: QualityPreset::Balanced,
+            progress: None,
+        },
+    )
+    .await
+    .unwrap()
 }
 
 fn ms(since: Instant) -> f64 {
@@ -903,6 +1027,142 @@ fn sustained_slow_tls_reader() {
             "slow_tls elapsed_s={elapsed:.3} link_kib_s={} frame_bytes={FRAME_BYTES} captured={captured} skipped_ticks={} control_ms={control_ms:.3} release_ms={release_ms:.3} revoke_ms={revoke_ms:.3} stop_ms={stop_ms:.3}",
             LINK_BYTES_PER_SECOND / 1024,
             trace.last().skipped_ticks
+        );
+    });
+}
+
+/// The link of the resync cases, and an encoder that holds each picture for
+/// 45 ms, as an asynchronous one may: P-frames wait for credit in the host's
+/// hand-off when an IDR joins it.
+const RESYNC_LINK_BYTES_PER_SECOND: u64 = 125_000;
+const RESYNC_ENCODER: Duration = Duration::from_millis(45);
+/// How long a resync case lets the controllers settle on the link first.
+const RESYNC_SETTLE: Duration = Duration::from_secs(6);
+const RESYNC_ROUNDS: usize = 8;
+/// Far longer than the viewer's least interval between two requests, so the
+/// limiter holds a round's request back only for one the viewer sent itself.
+const RESYNC_SPACING: Duration = Duration::from_secs(2);
+const RESYNC_LIMIT: Duration = Duration::from_secs(5);
+
+/// The counters a resync case reads before and after its rounds.
+struct Counters {
+    status: ViewerStatus,
+    /// The host's dropped frames and the units the viewer's sink discarded.
+    drops: (u64, u64),
+}
+impl Counters {
+    fn read(viewer: &Viewer) -> Self {
+        Self {
+            status: viewer.status(),
+            drops: viewer.drops(),
+        }
+    }
+}
+
+/// What a resync case reports: each round's wait and the P-frames that came
+/// first, and over the rounds, the viewer's keyframe requests, the host's
+/// IDRs, the frames the host dropped for this viewer and those its sink
+/// discarded.
+fn report_resyncs(case: &str, resyncs: &[Resync], before: &Counters, after: &Counters) {
+    let mut waited: Vec<u128> = resyncs
+        .iter()
+        .map(|resync| resync.waited.as_millis())
+        .collect();
+    let rounds = format!("{waited:?}");
+    waited.sort_unstable();
+    let frames_first: Vec<u32> = resyncs.iter().map(|resync| resync.frames_first).collect();
+    let held = resyncs.iter().filter(|resync| resync.held).count();
+    let delta = |value: fn(&ViewerStats) -> u64| {
+        value(&after.status.stats).saturating_sub(value(&before.status.stats))
+    };
+    println!(
+        "{case} link_mbps=1 encoder_ms={} rounds={RESYNC_ROUNDS} answered={} waited_ms={rounds} waited_ms_median={:?} waited_ms_max={:?} frames_first={frames_first:?} frames_first_total={} held={held} keyframes_requested={} host_keyframes={} host_dropped_frames={} sink_discarded={} received_fps={:.1} state={:?}",
+        RESYNC_ENCODER.as_millis(),
+        resyncs.len(),
+        waited.get(waited.len() / 2),
+        waited.last(),
+        frames_first.iter().sum::<u32>(),
+        delta(|stats| stats.keyframes_requested),
+        delta(|stats| stats.keyframes),
+        after.drops.0.saturating_sub(before.drops.0),
+        after.drops.1.saturating_sub(before.drops.1),
+        after.status.stats.received_fps,
+        after.status.state,
+    );
+}
+
+/// A 1 Mbit/s link: every 2 s the decoder asks for an IDR, as one missing a
+/// reference does, and discards the predicted frames that arrive before it.
+/// Reports how long each IDR took to arrive whole and how many P-frames came
+/// first, the requests the viewer sent (any beyond one a round are repeats),
+/// its sink's discards, and the host's dropped frames and IDRs: a before and
+/// after measurement of the host's hand-off, asserting only that the session
+/// stayed up and every request was answered.
+#[test]
+#[ignore = "explicit ~30-second requested IDR measurement on a 1 Mbit/s link"]
+fn requested_idr_on_a_slow_link() {
+    traced(|_| async move {
+        let shape = Arc::new(Shape::default());
+        shape
+            .rate
+            .store(RESYNC_LINK_BYTES_PER_SECOND, Ordering::Relaxed);
+        let rig = Rig::with_encoder("resync", Some(shape), TYPICAL, RESYNC_ENCODER).await;
+        let decoder = Resyncing::start(&rig.viewer, true);
+        tokio::time::sleep(RESYNC_SETTLE).await;
+        let before = Counters::read(&rig.viewer);
+        let resyncs = decoder.run(|| {}).await;
+        let after = Counters::read(&rig.viewer);
+        drop(decoder);
+        rig.stop().await;
+        report_resyncs("requested_idr", &resyncs, &before, &after);
+        let status = after.status;
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        assert_eq!(resyncs.len(), RESYNC_ROUNDS, "every request is answered");
+    });
+}
+
+/// The same link for one viewer of a room of two, while the other, on an
+/// unlimited link, asks for an IDR every 2 s, as a refresh does; a join or a
+/// control change brings one as well. Reports, for the viewer on the slow
+/// link, how long each IDR took to arrive whole after the other asked and the
+/// P-frames it presented first, its sink's discards, and the host's dropped
+/// frames and IDRs for it.
+#[test]
+#[ignore = "explicit ~30-second measurement of a room's IDR on a 1 Mbit/s link"]
+fn idr_another_viewer_asked_for_on_a_slow_link() {
+    traced(|_| async move {
+        let shape = Arc::new(Shape::default());
+        shape
+            .rate
+            .store(RESYNC_LINK_BYTES_PER_SECOND, Ordering::Relaxed);
+        let rig = Rig::with_encoder("resync-room", Some(shape), TYPICAL, RESYNC_ENCODER).await;
+        let decoder = Resyncing::start(&rig.viewer, false);
+        let other = rig.second_viewer().await;
+        let other_decoder = Decoder::start(&other, Duration::ZERO);
+        tokio::time::sleep(RESYNC_SETTLE).await;
+        let before = Counters::read(&rig.viewer);
+        let resyncs = decoder
+            .run(|| {
+                other.request_keyframe(KeyframeReason::User);
+            })
+            .await;
+        let after = Counters::read(&rig.viewer);
+        let other_status = other.status();
+        drop((decoder, other_decoder));
+        other.stop().await.unwrap();
+        rig.stop().await;
+        report_resyncs("room_idr", &resyncs, &before, &after);
+        println!(
+            "room_idr other_received_fps={:.1} other_state={:?}",
+            other_status.stats.received_fps, other_status.state
+        );
+        for status in [after.status, other_status] {
+            assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        }
+        assert_eq!(
+            resyncs.len(),
+            RESYNC_ROUNDS,
+            "every IDR reaches the viewer on the slow link"
         );
     });
 }

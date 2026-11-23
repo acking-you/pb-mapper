@@ -5,7 +5,7 @@
 //! returns, so `Result` stays `io::Result`.
 
 use crate::{
-    DesktopContext, DesktopKind, Display, DoubleClickGuard, EncodedFrame, Input, Result,
+    DesktopContext, DesktopKind, Display, DoubleClickGuard, EncodedFrame, Input, RateModel, Result,
     VideoCodec, VideoFormat, VideoLimits, VideoRate, error,
     modes::{Mode, ModeList},
 };
@@ -15,7 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// How often thread C polls an encoder that answers only when asked.
+/// How often thread C polls an encoder that answers only when asked, and,
+/// while the desktop is active, a pulled capture that had nothing new.
 pub const DRAIN_POLL: Duration = Duration::from_millis(2);
 
 /// A picture source and input sink for one viewer session. It is built, used
@@ -111,17 +112,20 @@ pub trait Backend: 'static {
         0
     }
     /// `Some(interval)`: thread C polls `drain_video` this often while units
-    /// are pending, and a source that had no picture to submit as often (see
-    /// `submitted_video`). `None`: a push source that wakes thread C itself.
+    /// are pending, and, while the desktop is active, a source that had no
+    /// picture to submit as often (see `submitted_video`). `None`: a push
+    /// source that wakes thread C itself.
     fn drain_poll(&self) -> Option<Duration> {
         Some(DRAIN_POLL)
     }
-    /// Whether the last `capture_video` handed a tick to the capture source.
-    /// A source with no picture to encode can leave the tick armed, even when
-    /// `capture_video` collected the previous tick's output. Thread C asks a
-    /// push source again when it wakes thread C or at its
-    /// `capture_idle_until`, and a pull source, which names no time, after
-    /// `drain_poll()`: never at once, which would spin thread C.
+    /// Whether the last `capture_video` handed a tick to the capture source,
+    /// or spent it on a full encoder. A source with no new picture to encode
+    /// can leave the tick armed, even when `capture_video` collected the
+    /// previous tick's output. Thread C asks a push source again when it
+    /// wakes thread C or at its `capture_idle_until`, and a pull source,
+    /// which names no time, after `drain_poll()` for 250 ms after an input
+    /// thread C injected or a new picture, and a period later otherwise:
+    /// never at once, which would spin thread C.
     fn submitted_video(&self) -> bool {
         true
     }
@@ -327,6 +331,14 @@ pub struct BackendCaps {
     pub physical_keys: bool,
     /// `Backend::cursor_shape` reports the pointer's shape.
     pub cursor_shapes: bool,
+    /// How the backend's H.264 and H.265 encoder budgets its bitrate, which
+    /// each session's QoS starts from. `Nominal`, the default, spends one
+    /// frame's share of the nominal rate's budget per frame, so the host
+    /// gives it bits per frame × the nominal frame rate. `Timestamp` budgets
+    /// per second of presentation time, so the host gives it bits per frame ×
+    /// the pace. A `Nominal` session whose encoder overspends at a reduced
+    /// pace still latches to `Timestamp`; nothing latches back.
+    pub rate_model: RateModel,
 }
 impl BackendCaps {
     /// The values a host lists in `Accepted.capabilities` for these.

@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     BackendCaps, QualityPreset, VideoCodec, VideoLimits,
     launch::Launcher,
-    protocol::{CAPABILITY_H265, HostMessage, RejectReason, ViewerMessage},
+    protocol::{CAPABILITY_H265, HostMessage, RateModel, RejectReason, ViewerMessage},
     security,
     test_util::{Pixel, until_within},
     wire,
@@ -98,6 +98,23 @@ async fn next(viewer: &mut Viewer) -> Option<HostMessage> {
                 return Some(message);
             }
             message => return Some(message),
+        }
+    }
+}
+
+/// The rate model of the next `Stats`, past a video unit's payload record.
+async fn rate_model(viewer: &mut Viewer) -> RateModel {
+    loop {
+        match wire::read_header(&mut viewer.stream, Duration::from_secs(5))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            HostMessage::Stats(stats) => return stats.rate_model,
+            HostMessage::Video { .. } => {
+                wire::read_payload(&mut viewer.stream).await.unwrap();
+            }
+            _ => {}
         }
     }
 }
@@ -282,6 +299,170 @@ async fn status_reports_the_viewer_and_end_session_keeps_hosting() {
     assert_eq!(host.status().state, HostState::Stopped);
 }
 
+/// The next wake of a running host's `changes`; fails when none comes.
+async fn woken(changes: &mut crate::HostChanges) {
+    let woken = tokio::time::timeout(Duration::from_secs(5), changes.changed())
+        .await
+        .expect("a change the status shows wakes its watchers");
+    assert!(woken, "the host is still running");
+}
+
+/// What an app that shows the host reads on each wake: the status, until it
+/// says `wanted`. Fails when no wake brings it.
+async fn woken_until(
+    host: &Host,
+    changes: &mut crate::HostChanges,
+    wanted: impl Fn(&HostStatus) -> bool,
+) {
+    while !wanted(&host.status()) {
+        woken(changes).await;
+    }
+}
+
+/// `Host::changes` is what lets an app stop polling an idle host: it wakes
+/// when a viewer arrives, before its backend has started, when it changes or
+/// leaves, when control is withdrawn and when hosting stops, each wake after
+/// the status shows it; and an idle host wakes nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn changes_wake_on_arrival_departure_and_stop() {
+    /// A screen that describes itself at once but holds thread C before its
+    /// first state until `open`, as a backend slow to start does.
+    struct Gated(Arc<AtomicBool>);
+    impl crate::Backend for Gated {
+        fn display(&mut self) -> Result<crate::Display> {
+            crate::Backend::display(&mut Pixel)
+        }
+        fn describe(&mut self, _: bool) -> Result<crate::Description> {
+            Ok(crate::Description {
+                display: self.display()?,
+                caps: BackendCaps::default(),
+            })
+        }
+        fn configure_video(&mut self, limits: VideoLimits, _: u32) -> Result<()> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !self.0.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            limits.validate()
+        }
+        fn capture(&mut self) -> Result<Vec<u8>> {
+            Ok(vec![1])
+        }
+        fn input(&mut self, _: &crate::Input) -> Result<()> {
+            Err(error("read-only test backend"))
+        }
+        fn release(&mut self) {}
+    }
+    let relay = pb_mapper_testkit::Relay::start("desktop-changes").await;
+    let client = Client::from_credential(
+        relay.addr().to_string(),
+        pb_mapper_testkit::admin_credential(),
+        true,
+        None,
+    );
+    let mut options = options();
+    options.allow_control = true;
+    let open = Arc::new(AtomicBool::new(false));
+    let gate = open.clone();
+    let host = Host::builder(options)
+        .backend(move || Ok(Gated(gate.clone())))
+        .start(&client)
+        .await
+        .unwrap();
+    let mut changes = host.changes();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), changes.changed())
+            .await
+            .is_err(),
+        "a host with no viewer bumps nothing"
+    );
+
+    // The owner's policy, with no viewer to show it.
+    host.set_control_allowed(false);
+    woken(&mut changes).await;
+    assert!(!host.status().control_allowed);
+    host.set_control_allowed(true);
+    woken(&mut changes).await;
+    assert!(host.status().control_allowed);
+
+    // An arrival: the wake comes after the status lists the viewer.
+    let invitation = host.invitation().clone();
+    let (mut viewer, answer) = authenticate(
+        &client,
+        &invitation,
+        invitation.token_text(),
+        vec![VideoCodec::Jpeg],
+    )
+    .await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+    woken(&mut changes).await;
+    let arrived = host.status();
+    assert!(arrived.viewer.is_some(), "woken before the viewer shows");
+    assert_eq!(arrived.state, HostState::Connecting);
+    // Its backend starts, and the session streams.
+    open.store(true, Ordering::Release);
+    woken_until(&host, &mut changes, |status| {
+        status.state == HostState::Streaming
+    })
+    .await;
+
+    // What the viewer does: another preset, which no state of thread C's
+    // carries; pausing; and taking control once back.
+    let smooth = ViewerMessage::Quality {
+        preset: QualityPreset::Smooth,
+    };
+    wire::write_message(&mut viewer.stream, &smooth, None)
+        .await
+        .unwrap();
+    woken_until(&host, &mut changes, |status| {
+        status
+            .viewer
+            .as_ref()
+            .is_some_and(|viewer| viewer.quality == QualityPreset::Smooth)
+    })
+    .await;
+    wire::write_message(&mut viewer.stream, &ViewerMessage::Pause {}, None)
+        .await
+        .unwrap();
+    woken_until(&host, &mut changes, |status| {
+        status.viewer.as_ref().is_some_and(|viewer| viewer.paused)
+    })
+    .await;
+    for message in [
+        ViewerMessage::Resume {},
+        ViewerMessage::Control { enabled: true },
+    ] {
+        wire::write_message(&mut viewer.stream, &message, None)
+            .await
+            .unwrap();
+    }
+    woken_until(&host, &mut changes, |status| {
+        status
+            .viewer
+            .as_ref()
+            .is_some_and(|viewer| !viewer.paused && viewer.controlling)
+    })
+    .await;
+
+    // A departure.
+    host.end_session();
+    woken_until(&host, &mut changes, |status| status.viewer.is_none()).await;
+    drop(viewer);
+
+    // A stop, which a watcher that saw everything before it hears, and then
+    // the end once the host is gone.
+    let mut changes = host.changes();
+    host.stop().await.unwrap();
+    woken(&mut changes).await;
+    assert_eq!(host.status().state, HostState::Stopped);
+    drop(host);
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        while changes.changed().await {}
+    })
+    .await;
+    assert!(ended.is_ok(), "a dropped host's changes end");
+}
+
 /// A screen whose backend encodes H.265 until `broken`, then fails as a
 /// GPU's H.265 encoder that stopped encoding does. It keeps the bitrate
 /// each H.265 picture was encoded at.
@@ -373,6 +554,7 @@ async fn a_late_description_falls_back_to_the_launcher() {
     let fallback = BackendCaps {
         lock: true,
         os: Some(crate::HostOs::Windows),
+        rate_model: RateModel::Timestamp,
         ..BackendCaps::default()
     };
     let host = Host::builder(options())
@@ -381,7 +563,7 @@ async fn a_late_description_falls_back_to_the_launcher() {
         .await
         .unwrap();
     let invitation = host.invitation().clone();
-    let (_viewer, answer) = authenticate(
+    let (mut viewer, answer) = authenticate(
         &client,
         &invitation,
         invitation.token_text(),
@@ -392,6 +574,78 @@ async fn a_late_description_falls_back_to_the_launcher() {
         panic!("{answer:?}");
     };
     assert_eq!(capabilities, ["lock", "os_windows"]);
+    assert_eq!(rate_model(&mut viewer).await, RateModel::Timestamp);
+    host.stop().await.unwrap();
+}
+
+/// Every viewer's QoS starts at the rate model its backend describes, a
+/// viewer who joins the room included; a backend that names none starts
+/// at `nominal`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_viewer_starts_at_the_backends_rate_model() {
+    struct Stamped;
+    impl crate::Backend for Stamped {
+        fn display(&mut self) -> Result<crate::Display> {
+            crate::Backend::display(&mut Pixel)
+        }
+        fn capture(&mut self) -> Result<Vec<u8>> {
+            crate::Backend::capture(&mut Pixel)
+        }
+        fn input(&mut self, _: &crate::Input) -> Result<()> {
+            Err(error("read-only test backend"))
+        }
+        fn release(&mut self) {}
+        fn describe(&mut self, _: bool) -> Result<crate::Description> {
+            Ok(crate::Description {
+                display: self.display()?,
+                caps: BackendCaps {
+                    rate_model: RateModel::Timestamp,
+                    ..BackendCaps::default()
+                },
+            })
+        }
+    }
+    let relay = pb_mapper_testkit::Relay::start("desktop-rate-model").await;
+    let client = Client::from_credential(
+        relay.addr().to_string(),
+        pb_mapper_testkit::admin_credential(),
+        true,
+        None,
+    );
+    let host = Host::builder(options())
+        .backend(|| Ok(Stamped))
+        .start(&client)
+        .await
+        .unwrap();
+    let invitation = host.invitation().clone();
+    let token = invitation.token_text();
+    let (mut first, answer) =
+        authenticate(&client, &invitation, token.clone(), vec![VideoCodec::Jpeg]).await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+    assert_eq!(rate_model(&mut first).await, RateModel::Timestamp);
+    let (mut joined, answer) =
+        authenticate(&client, &invitation, token, vec![VideoCodec::Jpeg]).await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+    assert_eq!(rate_model(&mut joined).await, RateModel::Timestamp);
+    drop((first, joined));
+    host.stop().await.unwrap();
+
+    let host = Host::builder(options())
+        .backend(|| Ok(Pixel))
+        .start(&client)
+        .await
+        .unwrap();
+    let invitation = host.invitation().clone();
+    let (mut viewer, answer) = authenticate(
+        &client,
+        &invitation,
+        invitation.token_text(),
+        vec![VideoCodec::Jpeg],
+    )
+    .await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+    assert_eq!(rate_model(&mut viewer).await, RateModel::Nominal);
+    drop(viewer);
     host.stop().await.unwrap();
 }
 

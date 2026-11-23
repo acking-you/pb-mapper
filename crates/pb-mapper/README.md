@@ -220,7 +220,7 @@ acceptance and the 60+ FPS end-to-end UI target are still unverified. See the
 | Choose what is shared | `HostOptions { display: DisplaySelection::{Primary, Id, Device}, access: Access::{Ordinary, Privileged}, allow_control }`, `displays()` |
 | Capture with your own code | `HostBuilder::backend(\|\| Ok(backend))` with a `Backend`, built and used on its session's thread, so it need not be `Send` |
 | Keep an invitation valid across restarts | `Host::identity()` and `HostBuilder::identity`; `trust::TrustFile` seals one with a `trust::Sealer` (`trust::CurrentUser` DPAPI on Windows, `trust::Keychain` on macOS); `restart`, `switch_display` and `rename` keep it |
-| Run a host | `status()`, `watch(every)`, `end_session()`, `set_control_allowed()`, `stop()`, `stop_with(StopReason)`, `metrics()` |
+| Run a host | `status()`, `watch(every)`, `changes()` (a wake after anything `status()` shows changed, so an idle host needs no clock), `end_session()`, `set_control_allowed()`, `stop()`, `stop_with(StopReason)`, `metrics()` |
 | View | `Viewer::connect(&client, &invitation, ConnectOptions::default(), config)`, a typed `ConnectError`; `config` from `ViewerConfig::for_decoders(decoders, resolution, refresh_hz, max_fps)`, the display's own size by default, or `ViewerConfig::new(codecs)` |
 | Take the picture | `viewer.video_sink().attach()` → `VideoConsumer`: see [Decoding](#decoding) |
 | Control | `request_control(true)`, then `input(generation, &[Input])` in the host display's pixels and a typed `InputError`; `Input::PhysicalKey { usage, down }` (a USB HID usage) only to a host whose capabilities list `physical_keys`, else `InputError::NotOffered`; `view().display_point(nx, ny)`, `Input::text_chunks(text)`, `release_input()` |

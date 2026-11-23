@@ -139,6 +139,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
                 cursor: self.parts.cursor.mode(),
                 physical_keys: <P::Input as Injector>::PHYSICAL_KEYS,
                 cursor_shapes: <P::Cursor as CursorSource>::SHAPES,
+                rate_model: <P::Video as VideoSource>::RATE_MODEL,
             },
             display,
         })

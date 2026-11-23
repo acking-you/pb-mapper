@@ -10,9 +10,16 @@
 //! delay is the median of the last three samples, a cut needs the receipts to
 //! show a standing queue too unless two probes in a row saw one, and a cut
 //! the receipts alone confirm at most halves fps.
+//!
+//! `receipt_rate` estimates the link from the receipts in shadow: it is
+//! traced and feeds no decision.
+
+mod receipt_rate;
+
+use self::receipt_rate::{ReceiptRate, ReceiptRateView};
 use crate::{
     QualityPreset, VideoCodec, VideoLimits,
-    credit::{ACK_QUEUE_LIMIT, CreditView},
+    credit::{ACK_QUEUE_LIMIT, CreditView, Receipt},
     outgoing::ProducedSnapshot,
     protocol::{Adaptation, RateModel},
     wire::IO_TIMEOUT,
@@ -267,16 +274,20 @@ pub(crate) struct Qos {
     unresponsive: bool,
     startup_until: Instant,
     adaptation: Adaptation,
+    /// Traced only: no fps, bitrate or credit decision reads it.
+    receipts: ReceiptRate,
 }
 impl Qos {
     /// Bits per frame start at the viewer's bounds, until `set_video_size`
     /// says what the encoder produces: the host's expectation before the first
-    /// unit, then each unit's own size.
+    /// unit, then each unit's own size. The rate model starts at the
+    /// backend's (`BackendCaps::rate_model`).
     pub fn new(
         limits: VideoLimits,
         codec: VideoCodec,
         quality: QualityPreset,
         fps_override: bool,
+        rate_model: RateModel,
         now: Instant,
     ) -> Self {
         let mut qos = Self {
@@ -296,7 +307,7 @@ impl Qos {
             last_raw: None,
             start_high: false,
             bpf: 0.0,
-            rate_model: RateModel::Nominal,
+            rate_model,
             overshoot: 0,
             window: RatioWindow::new(now, ProducedSnapshot::default()),
             sampled: false,
@@ -312,6 +323,7 @@ impl Qos {
             unresponsive: false,
             startup_until: now + STARTUP_HOLD,
             adaptation: Adaptation::Steady,
+            receipts: ReceiptRate::new(),
         };
         qos.apply_preset(quality);
         qos
@@ -354,21 +366,23 @@ impl Qos {
         self.unresponsive = false;
     }
 
-    /// Back through the startup cap, with a fresh delay history.
+    /// Back through the startup cap, with a fresh delay and receipt history.
     pub fn resume(&mut self, now: Instant) {
         self.paused = false;
         self.unresponsive = false;
         self.startup_until = now + STARTUP_HOLD;
         self.history.clear();
         self.last_raw = None;
+        self.receipts.clear();
     }
 
-    /// A new viewer path: the old baseline means nothing. fps and bits per
-    /// frame are kept.
+    /// A new viewer path: the old baseline and receipts mean nothing. fps and
+    /// bits per frame are kept.
     pub fn reset_baseline(&mut self) {
         self.rtt.clear();
         self.history.clear();
         self.last_raw = None;
+        self.receipts.clear();
     }
 
     /// A new encoded size: bits per frame keep their 1080p-relative level.
@@ -381,9 +395,25 @@ impl Qos {
         }
     }
 
-    /// A transport receipt arrived: the viewer is alive.
-    pub fn on_receipt(&mut self) {
+    /// A transport receipt arrived: the viewer is alive. A new one, not a
+    /// duplicate, of H.264 or H.265 video that is not paused also feeds the
+    /// receipt-rate estimator.
+    pub fn on_receipt(&mut self, receipt: Option<Receipt>, now: Instant) {
         self.unresponsive = false;
+        if let Some(receipt) = receipt
+            && self.codec != VideoCodec::Jpeg
+            && !self.paused
+        {
+            let (base, pace) = (self.base_rtt(), self.pace(now));
+            self.receipts.on_receipt(receipt, now, base, pace);
+        }
+    }
+
+    /// The receipt-rate estimator's values for the once-a-second trace; its
+    /// `would_cut` covers the receipts since the last call.
+    pub fn take_receipt_rate(&mut self, now: Instant) -> ReceiptRateView {
+        let (base, pace) = (self.base_rtt(), self.pace(now));
+        self.receipts.take_view(now, base, pace)
     }
 
     /// The nonce of the probe to write now, if one is due.
@@ -759,6 +789,7 @@ mod tests {
             VideoCodec::H264,
             QualityPreset::Balanced,
             false,
+            RateModel::Nominal,
             now,
         )
     }
@@ -905,7 +936,7 @@ mod tests {
             ProducedSnapshot::default(),
         );
         assert_eq!((qos.pace(s(12)), qos.fps), (UNRESPONSIVE_FPS, 40));
-        qos.on_receipt();
+        qos.on_receipt(None, s(12));
         assert_eq!(qos.pace(s(12)), 40);
         // A late echo of the outstanding probe recovers it too, but its stale
         // RTT is not a sample.
@@ -965,9 +996,40 @@ mod tests {
             VideoCodec::Jpeg,
             QualityPreset::Smooth,
             false,
+            RateModel::Nominal,
             t0,
         );
         assert_eq!(jpeg.pace(s(2)), JPEG_MAX_FPS);
+    }
+
+    #[test]
+    fn the_receipt_rate_estimator_decides_nothing() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut qos = balanced(t0);
+        let fps = probes(&mut qos, t0, &[(20, 0); 8]);
+        assert_eq!(fps.last(), Some(&60));
+        let before = (qos.fps, qos.bpf, qos.targets(at(2000)), qos.adaptation);
+        // 2 Mbit/s with 100 ms of queue: a cut, had receipts any say.
+        for n in 0..60 {
+            let receipt = Receipt {
+                delay: Duration::from_millis(120),
+                bytes: 4250,
+                behind_idr: false,
+            };
+            qos.on_receipt(Some(receipt), at(2000 + 17 * n));
+        }
+        let now = at(2000 + 17 * 59);
+        let receipts = qos.take_receipt_rate(now);
+        assert!(receipts.would_cut, "{receipts:?}");
+        assert_eq!(receipts.standing, Some(Duration::from_millis(100)));
+        assert_eq!(
+            (qos.fps, qos.bpf, qos.targets(at(2000)), qos.adaptation),
+            before
+        );
+        // A path change forgets the receipts.
+        qos.reset_baseline();
+        assert_eq!(qos.take_receipt_rate(now), ReceiptRateView::default());
     }
 
     #[test]
@@ -995,11 +1057,25 @@ mod tests {
             max_height: 2160,
             max_fps: 120,
         };
-        let chosen = Qos::new(uhd, VideoCodec::H265, QualityPreset::Quality, true, t0);
+        let chosen = Qos::new(
+            uhd,
+            VideoCodec::H265,
+            QualityPreset::Quality,
+            true,
+            RateModel::Nominal,
+            t0,
+        );
         assert!((chosen.bpf - 200_000.0 * 4f64.powf(0.75)).abs() < 1.0);
         assert_eq!(chosen.ceiling_fps, 120);
         assert!(chosen.targets(s(2)).encoder_bps > 67_000_000);
-        let auto = Qos::new(uhd, VideoCodec::H265, QualityPreset::Quality, false, t0);
+        let auto = Qos::new(
+            uhd,
+            VideoCodec::H265,
+            QualityPreset::Quality,
+            false,
+            RateModel::Nominal,
+            t0,
+        );
         assert_eq!(auto.ceiling_fps, 30);
         assert_eq!((pixel_scale(7680, 4320), pixel_scale(640, 360)), (3.0, 0.4));
         // The same bounds on a 1080p display encode 1080p: told so before the
@@ -1010,6 +1086,7 @@ mod tests {
             VideoCodec::H264,
             QualityPreset::Balanced,
             false,
+            RateModel::Nominal,
             t0,
         );
         let (width, height) = scaled_size(1920, 1080, uhd.max_width, uhd.max_height);
@@ -1120,5 +1197,28 @@ mod tests {
             qos.tick(s(3 * n), &idle(), window(n, 180, 1.0));
         }
         assert_eq!(qos.rate_model, RateModel::Timestamp);
+
+        // A backend that budgets per second starts there: from the start its
+        // encoder gets bits per frame × the pace, and no window moves it.
+        let mut qos = Qos::new(
+            limits(60),
+            VideoCodec::H264,
+            QualityPreset::Balanced,
+            false,
+            RateModel::Timestamp,
+            t0,
+        );
+        // A short path lifts Balanced to its ceiling.
+        sample(&mut qos, s(0), 20, false);
+        for pace in [60, 30, 10] {
+            qos.set_viewer_cap(pace);
+            let targets = qos.targets(s(2));
+            assert_eq!(targets.pace_fps, pace);
+            assert_eq!(targets.encoder_bps, (bpf * f64::from(pace)) as u32);
+        }
+        for n in 1..=3 {
+            qos.tick(s(3 * n), &idle(), window(n, 90, 2.0));
+        }
+        assert_eq!(qos.view(s(10)).rate_model, RateModel::Timestamp);
     }
 }

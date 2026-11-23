@@ -18,6 +18,12 @@ it is laid out, and how the galaxy view is drawn.
   it while it has focus; advanced switches wait behind "More options".
 - **An action reports on its own control.** Start becomes a spinner while it
   runs; the outcome arrives as one toast once the tunnel leaves its retry loop.
+- **Motion ends.** A dot may breathe while something is in flight and ends
+  on its own — a tunnel dialling the relay, the relay asked for the first
+  time, a path being set up. A state that can last — a viewer of this
+  computer, a relay running here — breathes a few times as it begins and
+  then keeps still, lit (`PulsingDot.breaths`), because an animation that
+  never ends draws the window at the display's rate for as long as it shows.
 
 ## Information architecture
 
@@ -52,7 +58,10 @@ change stream and a slow relay check. The tray reads the same store instead of
 polling the FFI on its own. The remote desktop has its own store,
 `DesktopStore` (`state/desktop_store.dart`), whose views — this computer as a
 host, the open session, its statistics — each notify only their own
-listeners, so a live picture never rebuilds a page.
+listeners, so a live picture never rebuilds a page. It reads this computer's
+host when the host's change event says a viewer came, went or changed; on a
+clock it reads it every 1-2 s only while a viewer is connected or the Windows
+service hosts, and otherwise every 30 s as a backstop.
 
 ### The Relay page
 
@@ -457,6 +466,13 @@ sharing are always within reach (`shell/sharing_indicator.dart`):
 Both actions work while another host action is still running. When the
 Windows service shares with the app closed nothing is shown: the service
 cannot draw in the user's session.
+
+The capsule and the pill lead with a dot, as does Remote desktop in the rail
+and the bottom bar (`HostSharingDot`, a plain dot while sharing with no
+viewer). While the picture flows it breathes a few times as it appears, and
+again when a paused viewer resumes, then stays lit and still for the rest of
+the session, so a watched window draws nothing of its own; a paused viewer's
+dot is plain.
 
 ## Layout
 

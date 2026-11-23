@@ -113,9 +113,9 @@ async fn send_rejected(mut stream: TlsStream<TcpStream>, rejected: RejectReason)
 }
 
 /// Frees the viewer slot however `serve` ends, a panic or a dropped task
-/// included: the host's status forgets this session, and the display-mode
-/// retry looks, since thread C put the display back as the session ended
-/// unless it could not.
+/// included: the host's status forgets this session, and says so, and the
+/// display-mode retry looks, since thread C put the display back as the
+/// session ended unless it could not.
 struct SlotRelease<'a> {
     shared: &'a Shared,
     room: Arc<Room>,
@@ -135,6 +135,7 @@ impl Drop for SlotRelease<'_> {
             self.shared.restore_pending.store(true, Ordering::Release);
             self.shared.restore.notify_one();
         }
+        self.shared.changes.bump();
     }
 }
 
@@ -222,11 +223,14 @@ impl Acceptor {
                     active.take();
                 }
                 self.shared.clear_room(&room);
-                if empty {
-                    room.shutdown().await;
-                    self.shared.restore_pending.store(true, Ordering::Release);
-                    self.shared.restore.notify_one();
-                }
+            }
+            // The status lists this viewer no longer: said before an emptied
+            // room's thread C is waited for.
+            self.shared.changes.bump();
+            if empty {
+                room.shutdown().await;
+                self.shared.restore_pending.store(true, Ordering::Release);
+                self.shared.restore.notify_one();
             }
         }
         // The slot frees before the permit, which a panic keeps too: `permit`
@@ -249,6 +253,7 @@ impl Acceptor {
         {
             active.take();
             self.shared.clear_room(&existing);
+            self.shared.changes.bump();
             existing.shutdown().await;
             self.shared.restore_pending.store(true, Ordering::Release);
             self.shared.restore.notify_one();
@@ -302,11 +307,14 @@ impl Acceptor {
                 request.codecs.clone(),
                 request.limits,
                 request.quality,
+                room.rate_model,
                 &request.capabilities,
                 &capabilities,
+                self.shared.changes.clone(),
             );
             session.expect_video_size(video);
             let conn_id = room.attach(slot, session.clone(), request.limits)?;
+            self.shared.changes.bump();
             return Some(Admitted {
                 stream,
                 permit,
@@ -372,8 +380,10 @@ impl Acceptor {
             request.codecs.clone(),
             request.limits,
             request.quality,
+            caps.rate_model,
             &request.capabilities,
             &capabilities,
+            self.shared.changes.clone(),
         );
         session.expect_video_size(video);
         room_shared.set_slot(
@@ -394,11 +404,13 @@ impl Acceptor {
             host_capabilities,
             display,
             can_h265,
+            caps.rate_model,
             codec,
             session.clone(),
         );
         *active = Some(room.clone());
         *self.shared.room.lock() = Some(room.clone());
+        self.shared.changes.bump();
         Some(Admitted {
             stream,
             permit,

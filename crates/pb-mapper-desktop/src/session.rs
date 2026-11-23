@@ -21,12 +21,13 @@ use crate::{
     protocol::{
         CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE,
         CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265,
-        CAPABILITY_PEER_CURSORS, PeerSlot, Route, StateReason, StateRecord, StopReason,
+        CAPABILITY_PEER_CURSORS, PeerSlot, RateModel, Route, StateReason, StateRecord, StopReason,
         ViewerMessage,
     },
     qos::{Qos, TargetValues},
     scheduler::Wake,
     shared::{PeerCursorSnapshot, Policy, SessionShared, Targets},
+    watch::ChangeSignal,
     wire::{self, WireError},
     worker::WorkerExit,
 };
@@ -135,6 +136,9 @@ pub(crate) struct Session {
     /// B-recv refused a control request at the edge; B-send reports it.
     control_denied: AtomicBool,
     ending: Mutex<Option<End>>,
+    /// The host's: bumped when what its status reads of this session
+    /// changed (the record, pause, quality, path).
+    changes: ChangeSignal,
 }
 impl Session {
     /// `capabilities` are the viewer's; `offered`, what the host listed in
@@ -161,8 +165,10 @@ impl Session {
             vec![codec],
             limits,
             quality,
+            RateModel::Nominal,
             capabilities,
             offered,
+            ChangeSignal::new(),
         )
     }
 
@@ -181,13 +187,22 @@ impl Session {
         offered_codecs: Vec<VideoCodec>,
         limits: VideoLimits,
         quality: QualityPreset,
+        rate_model: RateModel,
         capabilities: &[String],
         offered: &[String],
+        changes: ChangeSignal,
     ) -> Arc<Self> {
         let now = Instant::now();
         let listed = |wanted: &str| capabilities.iter().any(|capability| capability == wanted);
         let both = |wanted: &str| listed(wanted) && offered.iter().any(|value| value == wanted);
-        let qos = Qos::new(limits, codec, quality, listed(CAPABILITY_FPS_OVERRIDE), now);
+        let qos = Qos::new(
+            limits,
+            codec,
+            quality,
+            listed(CAPABILITY_FPS_OVERRIDE),
+            rate_model,
+            now,
+        );
         let targets = qos.targets(now);
         Arc::new(Self {
             shared: Arc::new(SessionShared::new_in_room(
@@ -213,6 +228,7 @@ impl Session {
             credit_changed: Notify::new(),
             control_denied: AtomicBool::new(false),
             ending: Mutex::new(None),
+            changes,
         })
     }
 
@@ -325,11 +341,12 @@ impl Session {
         match message {
             ViewerMessage::Authenticate { .. } => return Err(Violation::AuthenticatedTwice),
             ViewerMessage::Received { seq } => {
-                self.credit
+                let receipt = self
+                    .credit
                     .lock()
                     .on_receipt(seq, now)
                     .map_err(Violation::Receipt)?;
-                self.update_qos(now, Qos::on_receipt);
+                self.update_qos(now, |qos| qos.on_receipt(receipt, now));
                 self.credit_changed.notify_one();
             }
             ViewerMessage::ProbeEcho { nonce } => {
@@ -360,24 +377,38 @@ impl Session {
             }
             ViewerMessage::Quality { preset } => {
                 let produced = shared.outgoing.produced();
+                let before = self.quality();
                 self.update_qos(now, |qos| qos.set_preset(preset, now, produced));
+                if self.quality() != before {
+                    self.changes.bump();
+                }
             }
             ViewerMessage::Pause {} => {
+                let paused = self.paused();
                 self.update_qos(now, Qos::set_paused);
                 shared.lane.push(LaneCommand::EndControl);
+                if !paused {
+                    self.changes.bump();
+                }
             }
             ViewerMessage::Resume {} => {
+                let paused = self.paused();
                 self.update_qos(now, |qos| qos.resume(now));
                 shared.idr.lock().force(IdrReason::Resume);
                 shared.wake.notify();
                 self.credit_changed.notify_one();
+                if paused {
+                    self.changes.bump();
+                }
             }
             ViewerMessage::Path { route } => {
                 let code = match route {
                     Route::Direct => 1,
                     Route::RelayTcp | Route::RelayQuic => 2,
                 };
-                self.route.store(code, Ordering::Release);
+                if self.route.swap(code, Ordering::AcqRel) != code {
+                    self.changes.bump();
+                }
                 self.qos.lock().reset_baseline();
             }
             ViewerMessage::Control { enabled } => {

@@ -4,14 +4,24 @@ use super::background::{
     Background, enable_host, query_background, stop_background, with_relay_match,
 };
 use super::{blocking, credential_namespace, err, host_err, trust};
-use crate::{error::CtlError, handle::PbMapperHandle, state::process_credential};
+use crate::{
+    ctl::Origin, error::CtlError, events, handle::PbMapperHandle, state::process_credential,
+};
 use pb_mapper::{
     Client,
-    desktop::{self, Access, DisplaySelection, Host, HostOptions, StopReason},
+    desktop::{self, Access, DisplaySelection, Host, HostChanges, HostOptions, StopReason},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+/// The least time between two of the host's change events. However often
+/// it changes (a viewer pausing and resuming over and over, say), the window
+/// hears it at most this often, and of the last change at most this late.
+const CHANGE_EVENT_GAP: Duration = Duration::from_millis(100);
 
 /// What the host lifecycle lock guards: the host this app runs, and its
 /// identity beside it.
@@ -21,6 +31,34 @@ pub(super) struct HostSlot {
     /// Retained, even an ephemeral local key, while its host lives, so
     /// ownership can move to the service unchanged.
     pub(super) identity: Option<LocalIdentity>,
+}
+impl HostSlot {
+    /// `host`, started or restarted, as this app's own, which tells the
+    /// window when its status changes.
+    fn hold(&mut self, host: Host, identity: LocalIdentity) {
+        forward_changes(host.changes(), CHANGE_EVENT_GAP, || {
+            events::emit(events::ChangeKind::DesktopHost, None, Origin::Internal);
+        });
+        self.host = Some(host);
+        self.identity = Some(identity);
+    }
+}
+
+/// Calls `emit` after each change `changes` wakes for, never twice within
+/// `gap`: what changed meanwhile is one more call after it. Ends once the
+/// host and what it ran are gone; it never keeps the host alive. This is
+/// what spares the window a status poll while no viewer is connected.
+pub(super) fn forward_changes(
+    mut changes: HostChanges,
+    gap: Duration,
+    emit: impl Fn() + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while changes.changed().await {
+            emit();
+            tokio::time::sleep(gap).await;
+        }
+    })
 }
 
 /// The running local host's identity and settings: what a restart on another
@@ -457,8 +495,7 @@ pub(super) async fn start_local(handle: &PbMapperHandle, start: Start) -> Result
     .await?;
     let host = persist_or_stop(host, persisted, &local_identity.scope.directory).await?;
     let invitation = host.invitation().encode();
-    slot.host = Some(host);
-    slot.identity = Some(local_identity);
+    slot.hold(host, local_identity);
     Ok(json!({"invitation": invitation}))
 }
 
@@ -571,7 +608,6 @@ pub(super) async fn restart_host(
         .map_err(host_err)?;
     let host = persist_or_stop(host, persisted, &local.scope.directory).await?;
     let invitation = host.invitation().encode();
-    slot.host = Some(host);
-    slot.identity = Some(LocalIdentity { settings, ..local });
+    slot.hold(host, LocalIdentity { settings, ..local });
     Ok(json!({"invitation": invitation}))
 }

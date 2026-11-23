@@ -42,6 +42,11 @@ impl Pacer {
     pub fn next(&self) -> Instant {
         self.next
     }
+
+    /// The period of the current pace.
+    pub fn period(&self) -> Duration {
+        self.period
+    }
 }
 
 fn period(fps: u32) -> Duration {

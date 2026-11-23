@@ -232,13 +232,21 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     /// Take what the engine published last into `engine`, then write its
     /// `State` and its notice, each only if new.
     async fn write_engine(&mut self) -> Result<(), Abandoned> {
-        {
+        let record_changed = {
             // Compared, not `has_changed`: `wait` may already have marked a
             // new value seen through `changed`.
             let latest = self.state.borrow_and_update();
-            if *latest != self.engine {
+            let changed = *latest != self.engine;
+            // The record, unlike the figures beside it, is what the host's
+            // status reads.
+            let record_changed = changed && latest.record != self.engine.record;
+            if changed {
                 self.engine.clone_from(&latest);
             }
+            record_changed
+        };
+        if record_changed {
+            self.session.changes.bump();
         }
         self.write_state().await?;
         let notice = match &self.engine.notice {
@@ -492,7 +500,10 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     async fn stats(&mut self, now: Instant) -> Result<(), Abandoned> {
         let session = self.session;
         let engine = &self.engine;
-        let qos = session.qos.lock().view(now);
+        let (qos, receipts) = {
+            let mut qos = session.qos.lock();
+            (qos.view(now), qos.take_receipt_rate(now))
+        };
         let (credit, ack_queue, window) = {
             let mut credit = session.credit.lock();
             (
@@ -564,6 +575,10 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             delay_ms = qos.delay_ms,
             tainted = qos.tainted,
             ack_queue_ms = ms(ack_queue),
+            standing_ms = receipts.standing.map(ms),
+            busy_bps = receipts.busy_bps,
+            used_bps = receipts.used_bps,
+            would_cut = receipts.would_cut,
             window_frames = window.frames,
             window_bytes = window.bytes,
             window_clamped = window.clamped,

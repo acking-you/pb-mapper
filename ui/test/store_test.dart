@@ -284,6 +284,24 @@ void main() {
     expect(store.shares.map((t) => t.key), ['from-terminal']);
   });
 
+  test("the desktop host's event is no reason to read the lists", () async {
+    final api = FakePbMapperApi();
+    final changes = StreamController<StateChange>.broadcast();
+    await _started(api, changes);
+    // As Rust sends it: a kind this build knows, not `unknown`, which would
+    // read everything again, the relay included.
+    final change = StateChange.fromMap({
+      'kind': 'desktopHost',
+      'origin': 'internal',
+      'seq': 1,
+    });
+    expect(change.kind, StateChangeKind.desktopHost);
+    api.calls.clear();
+    changes.add(change);
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(api.calls, isEmpty);
+  });
+
   test('a burst that touches both lists reads both again', () async {
     final api = FakePbMapperApi();
     final changes = StreamController<StateChange>.broadcast();

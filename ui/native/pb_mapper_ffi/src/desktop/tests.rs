@@ -1220,3 +1220,107 @@ async fn a_panicked_blocking_task_is_internal() {
     let panicked = blocking::<()>(|| panic!("a bug")).await;
     assert_eq!(panicked.unwrap_err().code(), ErrorCode::Internal);
 }
+
+/// A still screen for a host a test runs itself.
+struct Still;
+impl desktop::Backend for Still {
+    fn display(&mut self) -> std::io::Result<desktop::Display> {
+        Ok(desktop::Display {
+            id: 1,
+            name: "still".into(),
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+        })
+    }
+    fn capture(&mut self) -> std::io::Result<Vec<u8>> {
+        Ok(vec![1; 64])
+    }
+    fn input(&mut self, _: &desktop::Input) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn release(&mut self) {}
+}
+
+type Heard = tokio::sync::mpsc::UnboundedReceiver<Instant>;
+
+/// A forwarder of `host`'s changes that notes when it sent each event.
+fn forward_heard(host: &desktop::Host, gap: Duration) -> (tokio::task::JoinHandle<()>, Heard) {
+    let (sent, heard) = tokio::sync::mpsc::unbounded_channel();
+    let forwarder = forward_changes(host.changes(), gap, move || {
+        let _ = sent.send(Instant::now());
+    });
+    (forwarder, heard)
+}
+
+/// The next change event a forwarder sent, when it sent it.
+async fn heard(events: &mut Heard) -> Instant {
+    tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("a change the window must hear")
+        .expect("the host is still forwarding")
+}
+
+/// What spares the window a status poll while nobody views this computer:
+/// the host's own changes reach it, a viewer's arrival and departure and a
+/// stop each as an event after which `host_status` shows them, a burst no
+/// more than once per gap with its last change heard, and forwarding ends
+/// with the host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hosts_changes_reach_the_window_spaced_and_end_with_it() {
+    // The relay installs the test credential process-wide.
+    let _credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+    let relay = pb_mapper_testkit::Relay::start("ffi-host-changes").await;
+    let client = pb_mapper_testkit::admin_client(relay.addr());
+    let mut options = desktop::HostOptions::new("desktop:ffi-changes");
+    options.allow_direct = false;
+    let host = desktop::Host::builder(options)
+        .backend(|| Ok(Still))
+        .start(&client)
+        .await
+        .unwrap();
+    let gap = Duration::from_millis(50);
+
+    // A viewer arrives, and leaves.
+    let (forwarder, mut events) = forward_heard(&host, gap);
+    let viewer = Viewer::connect(
+        &client,
+        host.invitation(),
+        pb_mapper::ConnectOptions {
+            path: pb_mapper::PathPolicy::RelayOnly,
+            ..Default::default()
+        },
+        ViewerConfig::new(vec![VideoCodec::Jpeg]),
+    )
+    .await
+    .unwrap();
+    heard(&mut events).await;
+    assert!(host.status().viewer.is_some(), "heard before it shows");
+    viewer.stop().await.unwrap();
+    while host.status().viewer.is_some() {
+        heard(&mut events).await;
+    }
+    forwarder.abort();
+
+    // A burst, begun once the forwarder waits out its gap: what follows is
+    // heard, though no sooner than the gap after.
+    let (forwarder, mut events) = forward_heard(&host, gap);
+    host.set_control_allowed(false);
+    let first = heard(&mut events).await;
+    for allowed in [true, false, true, false, true] {
+        host.set_control_allowed(allowed);
+    }
+    let second = heard(&mut events).await;
+    assert!(second - first >= gap, "{:?}", second - first);
+
+    // A stop, and the end of forwarding once the host is gone.
+    host.stop().await.unwrap();
+    heard(&mut events).await;
+    assert_eq!(host.status().state, desktop::HostState::Stopped);
+    drop(host);
+    tokio::time::timeout(Duration::from_secs(5), forwarder)
+        .await
+        .expect("forwarding ends with the host")
+        .unwrap();
+}

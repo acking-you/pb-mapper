@@ -123,7 +123,11 @@ runs, and resumes with the app when **Share this computer** was left on.
   right page. **Screen Recording** is needed to share at all and takes effect
   once the app is reopened; **Accessibility** is needed for control and takes
   effect at once. When Accessibility is missing, the app offers view-only
-  sharing. Returning from System Settings refreshes the host card. A start
+  sharing. Returning from System Settings refreshes the host card; while the
+  card lists a missing permission or finds no display it also checks every
+  10 s, so a grant made with the window still visible beside System Settings
+  shows without switching back. Nothing checks them on a clock otherwise. A
+  start
   without Screen Recording fails with
   `PERMISSION_MISSING`; an input without Accessibility ends control
   (`input_failed`, naming Accessibility), because macOS would drop the events
@@ -429,6 +433,14 @@ the Windows service shares with the app not running at all, nothing shows a
 viewer: the service cannot draw in the user's session. Keep the app in the
 tray to see who is connected.
 
+The app's own host tells the window when a viewer arrives or leaves, or its
+session changes, through the change event `desktopHost`; the window then
+reads the host at once. So while nobody is connected it asks nothing on a
+clock but a backstop every 30 s, hidden or not. While a viewer is connected
+it reads the host every 2 s, every second on Remote desktop, for what the
+viewer panel shows. The Windows service's host sends no such event, so while
+the service shares the window reads it on that same clock, viewer or not.
+
 ## Remote resolution
 
 The desktop viewer's Display menu holds **Remote resolution**: the remote
@@ -652,6 +664,22 @@ S3/S4 cannot serve video while suspended, and no Wake-on-LAN facility or power
 policy change is included. Real service-restart, sleep/resume and locked-session
 password entry remain acceptance requirements, not consequences of unit tests.
 
+The service looks for that login once a second, but takes the login's token
+and compares its SID only before it starts the host, and while it holds no
+attested login for the console's session: at first, when the console changes
+hands, and when a recheck fails. The console's session id, which the service
+reads without calling another process, shows a user switch, a remote
+connection or a new console session at once; while it is unchanged, one
+session query every 5 s confirms that the same login (session, logon time,
+user and domain) still holds the console. A logoff followed by a new login at
+the same session id is therefore seen within 5 s rather than 1 s. Capture
+never relies on this: it attests the owner's login in full when it starts and
+every 100 ms while it runs. The app, for its part, checks the installation
+and the helper's readiness once each time it reads the service's state, and
+asks with what that check verified; on every connection it still verifies
+that the pipe's server is the running service, as the service verifies the
+app.
+
 ### Changing the relay
 
 Changing the relay or credential in Settings does not move a host that is
@@ -785,17 +813,26 @@ refused over such a grant (`HELPER_OUTDATED`, `HELPER_FOREIGN_APP`), since
 configuring it from here would replace its view-only, relay-only or paused
 policy, and under another service name its invitation.
 
-Protocol 8 is the current one, with the pipes
-`pb-mapper.desktop-helper.v8` and `pb-mapper.desktop-background.v8`. It adds
-the pointer's shape and keys by place. The first `Request::CursorShape` turns
-the worker's shape reads on; from then on every request that observes the
-pointer (context, capture, video, shape) also reads the shape and answers
-`shape_serial`, which the worker advances only when the shape's content
-changes, and the host asks for the shape again (one more round trip per new
-shape, none per tick) only when it moved. The answer carries a `ShapeHeader`
-(kind, size, hotspot) with the bitmap as its byte record, and both ends check
-its bounds. `Request::Input` may carry `Input::PhysicalKey`, and the `Start`
-caps say whether the worker reads shapes and injects physical keys.
+Protocol 10 is the current one, with the pipes
+`pb-mapper.desktop-helper.v10` and `pb-mapper.desktop-background.v10`. It
+adds `submitted` to the answer of a `Video` request that captures: `false`
+when the worker's source had no new picture to submit, so the host's thread C
+keeps its tick armed and asks again (see
+[Host: capture and encoding](#host-capture-and-encoding)). It is sent only
+then; absent, the capture took the tick, or spent it on a full encoder.
+Protocol 9 added `HostStatus.viewers` to the background host's status, for
+concurrent sessions.
+
+Protocol 8 added the pointer's shape and keys by place. The first
+`Request::CursorShape` turns the worker's shape reads on; from then on every
+request that observes the pointer (context, capture, video, shape) also reads
+the shape and answers `shape_serial`, which the worker advances only when the
+shape's content changes, and the host asks for the shape again (one more round
+trip per new shape, none per tick) only when it moved. The answer carries a
+`ShapeHeader` (kind, size, hotspot) with the bitmap as its byte record, and
+both ends check its bounds. `Request::Input` may carry `Input::PhysicalKey`,
+and the `Start` caps say whether the worker reads shapes and injects physical
+keys.
 
 Protocol 7 added display modes ([Remote resolution](#remote-resolution)):
 `Start` and `Attach` name the display's device (`\\.\DISPLAY1`), which finds
@@ -881,7 +918,14 @@ does not require Flutter or a POCOX runtime.
   app's sharing to a ready service under the same invitation; `revoked` for
   revoked trust, whether the app or the service hosts). A stop returns once the
   viewer has read `Stopped` and closed, or after 1 s.
-  `set_control_allowed` revokes or restores control live.
+  `set_control_allowed` revokes or restores control live. `Host::changes`
+  wakes, carrying nothing, after anything `status` shows changed: a viewer
+  arrived (before its backend has started) or left, a session's state,
+  control, display, pause, quality or reported path, the control policy, or
+  a stop; a burst wakes it once. A viewer's `since_ms` moves without a wake.
+  A waiting host bumps nothing, so an embedder that shows the host needs no
+  clock while nobody is connected. `Host::watch` samples `status` on a clock
+  instead.
 - A backend is constructed, used and dropped on its dedicated capture/input
   worker. `Backend` deliberately has no `Send` requirement: COM objects and
   desktop bindings remain on their owner thread. The factory itself is
@@ -897,13 +941,19 @@ does not require Flutter or a POCOX runtime.
   first unprobed, for the display it captures (which sizes the first IDR) and
   its `BackendCaps` (lock, the OS, display modes, physical keys, pointer
   shapes), from which the session's `Accepted`
-  capabilities are built; then, only for a viewer that decodes H.265 while no
-  H.265 encoder has failed in this process, probed, for H.265 alone, so a slow
+  capabilities are built, and its encoder's `rate_model`, which the session's
+  QoS starts from (`nominal` unless the encoder budgets per second; see
+  [QoS](#qos-frame-rate-and-bits-per-frame)); then, only for a viewer that
+  decodes H.265 while no H.265 encoder has failed in this process, probed, for
+  H.265 alone, so a slow
   probe never costs the display. A description that misses the 3 s uses
   what its launcher falls back to. `bind(waker)` hands a pushing source the
   session's wake, and `drain_poll()` says whether thread C polls the encoder
-  (`Some`, every 2 ms while units are pending, and as often for a picture
-  after a capture that had none to submit) or waits to be woken (`None`).
+  (`Some`, every 2 ms while units are pending) or waits to be woken (`None`).
+  `submitted_video()` says whether the last capture took the tick, or spent
+  it on a full encoder; one that had no new picture leaves the tick armed,
+  and thread C asks a polled source again as often as it drains it while the
+  desktop is active, and a period later while it is still.
   `capture` (a JPEG still) is optional. `cursor` reports the pointer as the
   inputs the backend applied left it, and `cursor_shape`, asked only when the
   viewer listed `cursor_shape` and the backend's `BackendCaps::cursor_shapes`
@@ -957,6 +1007,28 @@ does not require Flutter or a POCOX runtime.
   input, and a failed invitation does not start a capture backend. A peer of
   another desktop protocol version fails the handshake with `VersionMismatch`
   ("update pb-mapper on both computers"), never mid-session.
+- A session is one TLS connection, an ordered byte stream each way, and it
+  carries everything: video gets no QUIC stream per frame, nor one apart from
+  control. A lost packet holds back what follows it in that direction until
+  QUIC or TCP retransmits it, but the transport keeps receiving and buffering
+  those later bytes and delivers them the moment the retransmission lands. With
+  an infinite GOP and no long-term references, a P-frame after a lost one
+  cannot be decoded before the lost one arrives, whatever stream carries it.
+  Only a keyframe or a JPEG picture, which refers to nothing before it, could
+  reach the decoder sooner on a stream of its own; that rare case does not
+  outweigh keeping probes in order with the video and the one stream the relay
+  and LAN TCP can carry. Input,
+  receipts and probe echoes travel the other way and never wait behind lost
+  video, and probes stay in order with the video whose queue they measure. The
+  relay pairs one stream per session, and a relay TCP leg or LAN TCP carries
+  only one.
+- Each direct UDP socket, the host's and the viewer's, asks the system for an
+  8 MiB receive buffer when it binds, trying each size on a throwaway socket
+  first and keeping only one that grows the buffer, halving down to 256 KiB and
+  never asking for less than it has; Linux caps it at `net.core.rmem_max`, and
+  the debug trace `direct UDP receive buffer` records what each socket got.
+  Send buffers, the relay's sockets and congestion control (Quinn's Cubic) are
+  unchanged.
 - Input binds to a desktop/display generation and to a presentation the viewer
   validated less than two seconds ago. `Viewer::input(generation, &inputs)`
   sends a batch of up to 16, stamps the presented frame and consecutive
@@ -1056,7 +1128,7 @@ crates/pb-mapper-desktop/src/
 | Part | Windows | macOS |
 | --- | --- | --- |
 | `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope | `CGDirectDisplayID` from `CGGetActiveDisplayList`, named by its UUID, which finds it again; `CGDisplayBounds` × the current mode's pixels per point; a session that is not on the console, or a locked screen, is the secure desktop |
-| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`) that thread C polls: drained, and asked again for a picture it did not have, every 2 ms | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
+| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`) that thread C polls: drained every 2 ms while it holds units, and, after a capture with no new present, asked again every 2 ms for 250 ms after an injected input or a new picture, and once a period otherwise | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
 | `Input` | enigo; `SendInput` with `KEYEVENTF_SCANCODE` for physical keys (a HID usage to its set-1 scancode); `SetCursorPos` for absolute moves; `LockWorkStation` | `CGEvent` at the HID tap: pointer and wheel in the bound display's points, click counts for double clicks, named letters and digits at the key the Mac's layout types them with, other keys and physical keys by `kVK_*` place, modifiers as flag changes with left and right apart, text as Unicode string events of at most 20 UTF-16 units; no lock (`LOCK = false`) |
 | `Cursor` | `GetCursorInfo`; the shape once per new `HCURSOR`: its kind from the `LoadCursorW` standard handles, its bitmap from `GetIconInfo` and `GetDIBits` (colour, alpha or AND mask; monochrome AND/XOR, an inverting pixel drawn black outlined in white) | `CGEventGetLocation`, separate; the shape when the window server's cursor seed moves (a private `CGSCurrentCursorSeed`, looked up with `dlsym`; without it at most every 500 ms): `NSCursor.currentSystemCursor` drawn at the display's scale, a kind only where it equals a standard cursor pixel for pixel, else `custom` |
 | `Modes` / `Still` | `WinModes` (dynamic changes only; see [Remote resolution](#remote-resolution)) / xcap JPEG | Core Graphics modes for this app only (`kCGConfigureForAppOnly`) / `SCScreenshotManager` and ImageIO JPEG, macOS 14 and later |
@@ -1179,9 +1251,14 @@ consumed whether it fires or is skipped, the grid keeps its long-run rate (120
 FPS on a 165 Hz display is not rounded down), and after a stall two captures
 are never closer than three quarters of a period. A tick that finds no new
 picture stays armed, so the next picture is taken as it appears rather than a
-tick later: ScreenCaptureKit, which pushes, wakes the thread for it, and DXGI,
-which cannot, is asked again every 2 ms (`DRAIN_POLL`), since asking it at
-once kept the thread busy while the desktop was still. A tick is skipped (and
+tick later. ScreenCaptureKit, which pushes, wakes the thread for it. DXGI
+cannot, in the app's process or behind the helper (whose answer says when a
+capture found nothing new), so it is asked again, never at once: every 2 ms
+(`DRAIN_POLL`) for 250 ms (`HOT_WINDOW`) after an input the thread injected or
+a new picture, when the next present is likely, and once a period otherwise,
+so a still desktop costs no more capture calls than the grid. An injected
+input also brings a poll due a period later in to 2 ms. A capture that finds
+the encoder without room spends its tick. A tick is skipped (and
 counted in `skipped_ticks`) only while two units in the hand-off queue wait for
 send credit, which is transport backpressure, or while the encoder (or the
 helper) holds four, never for presentation. The two bounds are separate
@@ -1195,9 +1272,9 @@ unit's dwell, from submit to output (the `encode_us` it returns with the
 unit), and thread C reports the median of the last second as
 `encoder_dwell_ms`. A static screen is resubmitted about every 250 ms as a
 duplicate, which unique-frame rates exclude. The hand-off queue holds at most
-six units and 8 MiB, which both bounds together never reach; when its oldest
-unit has waited more than a second, the queue is dropped and replaced by an
-IDR. The wait counts from when the unit was ready or from the last IDR
+six units and 8 MiB, which both bounds together never reach. When the queue's oldest unit
+has waited more than a second, the queue is dropped and replaced by an IDR.
+The wait counts from when the unit was ready or from the last IDR
 receipt, whichever is later, and time spent behind an IDR still in flight
 never counts, since that IDR is already the resync. The desktop context is
 checked at most every 100 ms and inside each capture; the injection boundary
@@ -1404,7 +1481,10 @@ window of four pictures and 2 MiB.
 
 Receipts reach only the credit ledger and the QoS controller. They never reach
 the input ledger, the backend or the control lease, and no authorisation method
-takes a sequence number.
+takes a sequence number. In the QoS controller they also feed a receipt-rate
+estimator that runs in shadow: it is traced (see
+[Diagnostics](#diagnostics)) and no frame rate, bitrate or credit decision
+reads it.
 
 ### QoS: frame rate and bits per frame
 
@@ -1470,10 +1550,16 @@ to 0.
 The encoder bitrate depends on how the encoder budgets. A per-frame-budget MFT
 (the `nominal` rate model, the default) gets `bits per frame × nominal fps` and
 spends one frame's budget per frame, so a lower pace sheds bandwidth at once.
-An encoder that budgets per second would overspend at a reduced pace. When two
-consecutive 3 s windows at no more than 0.75 × the nominal rate produce more
-than 1.3 × the expected bits, the session latches to the `timestamp` model
-(`bits per frame × pace`) for good and traces `desktop_rate_model_latched`. The
+An encoder that budgets per second of presentation time (the `timestamp`
+model) gets `bits per frame × pace`. Each session starts at the model its
+backend declares (`BackendCaps::rate_model`, `nominal` unless set), and every
+viewer of a room starts at the same one; today every platform's encoder, and
+every session through the Windows helper, starts at `nominal`. A `nominal`
+session whose encoder budgets per second would overspend at a reduced pace.
+When two consecutive 3 s windows at no more than 0.75 × the nominal rate
+produce more than 1.3 × the expected bits, the session latches to the
+`timestamp` model for good and traces `desktop_rate_model_latched`; nothing
+latches a session back to `nominal`. The
 encoder bitrate stays between 256 kbit/s and 80 Mbit/s, which the encoder and
 the helper check too, and nothing raises it because the frame rate was cut.
 At 4K, Quality's maximum bits per frame give the encoder 68 Mbit/s at a
@@ -1539,6 +1625,20 @@ no display, so its encoder is unreachable from the capture adapter. Run
 `video_bench --pace 60,30,15,5` and `video_bench 60 60 --animate`, each with
 `--codec h264` and `--codec h265`, on such a host before relying on the
 `nominal` default there; the latch handles a per-second-budget encoder.
+
+A Mac host's VideoToolbox encoder starts at `nominal` as well. The ignored
+tests `video_toolbox_rate_model_h264` and `video_toolbox_rate_model_h265`
+(`platform/macos/tests.rs`) measure it as `video_bench --pace` measures Media
+Foundation: each codec at 1080p, 1440p and 4K, with low-latency rate control
+and without, at a nominal 60 FPS and 4 Mbit/s, paced at 60, 30, 15 and 5 FPS
+on synthetic IOSurface pictures covered in fresh grain, so no Screen
+Recording grant is needed. They print, for each step, the pictures submitted
+and the units out, the encoder's dwell and the bitrate against both models;
+the fitted model (the same ±25% classifier, `codec/rate_fit.rs`); the largest
+unit after a 1 s pause; each encoder's `macos_encoder_opened` line; and a
+summary line a case. A case that fits neither model is reported, not failed.
+Run them in release mode on a quiet Mac, one at a time:
+`cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture --test-threads=1 video_toolbox_rate_model`.
 
 ### Viewer: newest decodable frame, fps cap and recovery
 
@@ -1711,7 +1811,7 @@ shapes by content, never by number.
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder |
-| Armed tick | a tick with no new picture stays armed; ScreenCaptureKit wakes thread C, DXGI is asked again every 2 ms |
+| Armed tick | a tick with no new picture stays armed; ScreenCaptureKit wakes thread C; DXGI, in process or through the helper, is asked again every 2 ms for 250 ms after an injected input or a new picture (an input brings a pending poll in to 2 ms), and once a period otherwise |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
 | QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; latch at 1.3 × over 2 windows at ≤ 0.75 × nominal |
 | Process timers | 1 ms, with power throttling opted out, while a session captures |
@@ -1760,15 +1860,35 @@ The host traces each second as `desktop_feedback_interval` on
 `pb_mapper_desktop::feedback` (debug): `action`, `fps`, `pace_fps`,
 `viewer_cap`, `paused`, `unresponsive`, `bpf`, `bitrate`, `encoder_bitrate`,
 `sent_bitrate`, `rate_model`, `rtt_ms`, `baseline_ms`, `delay_ms`, `tainted`,
-`ack_queue_ms`, `window_frames`, `window_bytes`, `window_clamped`,
+`ack_queue_ms`, `standing_ms`, `busy_bps`, `used_bps`, `would_cut`,
+`window_frames`, `window_bytes`, `window_clamped`,
 `outstanding_frames`, `outstanding_bytes`, `idr_inflight`, `skipped_ticks`,
 `encoder_dwell_ms`, `keyframes`, `gop`, `input_wait_p50_us`,
 `input_wait_p99_us` and
 `input_wait_max_us`. The presentation-credit fields `quality`, `waiting`,
-`recovering`, `desired_window_bytes` and `last_ack_*` are gone. Each written
-unit is traced as `desktop_frame` on `pb_mapper_desktop::frames` (trace level),
-and the viewer traces each accepted presentation as `desktop_frame_view` with
-the same `seq`. `deployed --feedback-log` enables both host targets.
+`recovering`, `desired_window_bytes` and `last_ack_*` are gone.
+
+`standing_ms`, `busy_bps`, `used_bps` and `would_cut` come from the
+receipt-rate estimator, which only records what a receipt-driven rate control
+would see; nothing acts on them. It keeps the receipts of H.264 and H.265
+video from the second up to the newest one, at most 240, each with the delay of the newest
+unit it covered and the bytes it covered, and forgets them on a path change
+and on a resume. A frame interval is one at the current pace.
+
+| Field | Definition |
+| --- | --- |
+| `standing_ms` | The least receipt delay above the base RTT over the newest receipts: at least three, spanning at least two frame intervals and 50 ms (at most 500 ms), so a burst a few milliseconds long never makes a queue on its own |
+| `busy_bps` | The median delivery rate (of two, the lower) over the newest eight receipt pairs across which the link stayed busy, the later unit's delay above the base RTT being at least the pair's gap; none below three. Receipts less than a quarter of a frame interval apart are compression, not delivery: such a pair is no sample, and its later receipt's bytes count toward the pair before it |
+| `used_bps` | What the receipts of the second up to the newest covered, from the first of them to the last; none over less than 100 ms. For up to a second after the last receipt the trace repeats it, so a stall shows as a `used_bps` that stops changing and then disappears, not as one that falls |
+| `would_cut` | A receipt since the last trace showed a standing queue above 40 ms once each unit's own transfer at the busy rate (at most a frame interval) is taken off, with a busy rate known, no unit in its window behind an IDR, and outside a stall: the burst of receipts less than a quarter of a frame interval apart that follows a receipt gap of at least three frame intervals |
+
+Without a receipt in the last second the first three are absent, and without a
+base RTT `standing_ms` and `busy_bps` are.
+
+Each written unit is traced as `desktop_frame` on `pb_mapper_desktop::frames`
+(trace level), and the viewer traces each accepted presentation as
+`desktop_frame_view` with the same `seq`. `deployed --feedback-log` enables
+both host targets.
 
 Each session's lifecycle is logged at info on `pb_mapper_desktop::session`:
 `desktop_host_accepted`, `desktop_host_rejected`, `desktop_host_session_ended`
@@ -1776,7 +1896,12 @@ Each session's lifecycle is logged at info on `pb_mapper_desktop::session`:
 `desktop_viewer_ended` (reason, detail, seconds, keyframes,
 `keyframes_requested`, `backlog_drops`); a host also logs each H.265 probe as
 `desktop_h265_probe` (usable, ms, detail) and warns `desktop_h265_failed`
-when an H.265 encoder fails and H.265 is turned off. The app also warns
+when an H.265 encoder fails and H.265 is turned off. A Mac host logs each
+encoder it opens as `macos_encoder_opened` (codec, `low_latency`, width,
+height, fps, hardware, gop, and `data_rate_limits`: whether VideoToolbox took
+the cap of 1.5 × the mean over 1 s), after
+`macos_encoder_low_latency_refused` when it retried without low-latency rate
+control. The app also warns
 `desktop_connect_failed` with the typed failure, and a native decoder's
 failure is warned as `desktop_decoder_error` on `pb_mapper_desktop::frames`
 with its text as the detail. Each line names itself in an `event` field, and
@@ -1822,10 +1947,12 @@ left out; while the connection is down the core rows show dashes.
   `stats` once a second and turns two reads into decoded and dropped
   pictures a second, the mean from a picture's release to the surface to
   Flutter consuming it, surface credits in use, low-latency decoding and the
-  refresh rate asked for (Android; Windows reports the counts only; macOS
-  and iOS the counts, the release-to-consume mean, VideoToolbox's real-time
-  mode as low latency and the display's maximum refresh; Linux the counts).
-  Closing the panel drops the decoder's timing accumulators.
+  refresh rate asked for (Android; Windows the counts, the release-to-consume
+  mean, the fastest display's refresh and low latency only where the
+  decoder's codec API confirms it; macOS and iOS the counts, the
+  release-to-consume mean, VideoToolbox's real-time mode as low latency and
+  the display's maximum refresh; Linux the counts). Closing the panel drops
+  the decoder's timing accumulators.
 
 Read in order, the rates place a loss: capture below pace is the host's
 source or its capture gate; pace below the ceiling is the QoS controller
@@ -1856,8 +1983,9 @@ permission. No queued clicks or keys are replayed. A remembered computer
 reconnects by its id; a pasted invitation that was not remembered stays in
 memory only.
 
-Windows decodes H.265 or H.264 with Media Foundation into D3D11 shared
-textures (or takes JPEG where Media Foundation is not installed), Android
+Windows decodes H.265 or H.264 with Media Foundation into a D3D11 texture
+it shares with Flutter ([Windows presentation](#windows-presentation)), or
+takes JPEG where Media Foundation is not installed. Android decodes
 with `MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer,
 macOS and iOS with VideoToolbox into IOSurface-backed BGRA pixel buffers
 handed to a `FlutterTexture`, and Linux with GStreamer into RGBA buffers
@@ -1970,6 +2098,53 @@ an H.265 clip by the VPS in its first unit and treats IRAP pictures (NAL types
 When a picture fails to decode as H.265, the app connects again at once on
 H.264 and does not offer H.265 again until it restarts; only a failure on
 H.264 too ends the session.
+
+### Windows presentation
+
+The decoder thread, on its own D3D11 device on Flutter's adapter, converts
+each decoded NV12 picture to BGRA with the video processor into a private
+texture, then copies it in one short copy into the one texture it shares
+with Flutter. The shared handle stays the same for the decoder's life, and
+Flutter's `ExternalTextureD3d` imports a texture again only when its handle
+changes, so it imports this one once. The converter's view of the private
+texture is made once per converter; a frame opens only its decoded picture.
+
+Flutter reads the shared texture on its own device, calls the release
+callback as soon as it has bound it, before any GPU read, and takes no keyed
+mutex, so nothing orders its read after the decoder's copy. The thread
+therefore publishes a picture, and tells Flutter to draw it, once a D3D11
+event query says the GPU has run the copy, or after `kConversionWait`
+(100 ms) so that a GPU that slow does not stop the picture. Meanwhile it
+sleeps on an auto-reset event the GPU sets after the copy
+(`IDXGIDevice2::EnqueueSetEvent`). The query stays the authority: a signal
+an earlier frame left only wakes the thread early. Should a wait run out
+although the copy had finished, or fail, every decoder polls the query
+instead for the rest of the run, yielding between polls, and the runner
+says so once in the debugger output
+(`Desktop video: the GPU completion event`). The thread runs above normal
+priority, below the keyboard hook's thread, so it gets its core back as soon
+as it is woken. A tear remains possible: the next frame's copy can overlap Flutter's
+read of the current one, as nothing orders the two devices, and that
+Flutter frame then shows parts of both.
+
+There is no native overlay to bypass Flutter's compositor. Flutter paints
+the grey still picture, the peers' and the local cursor, the touch indicator
+and every overlay above the texture (`viewer_stage.dart`), Flutter on
+Windows has no platform views to put a native swap chain beneath them, and
+a native window over the picture would hide them all.
+
+Besides the counts, the `stats` method of the `pb_mapper/desktop_video`
+channel reports, while a read asks for timings, `timings.surface_consume`
+(from a picture's release to Flutter acquiring it) and `timings.convert`
+(from opening a decoded picture for the converter to the GPU finishing the
+copy, the wait and any decode work still queued on the GPU included), each
+`{samples, mean_ms, max_ms}` since the timings began. It always reports
+`refreshHz` (the fastest display's refresh, read as `decoders` reads it),
+and while a decoder thread exists `decoderCycles` (its CPU cycles since it
+started, from `QueryThreadCycleTime`). It reports `lowLatency` only when
+the decoder's `ICodecAPI` took `CODECAPI_AVLowLatencyMode`, and otherwise
+leaves it out: the decoder's attribute store, through which the mode is
+also set, takes any value.
 
 ### Android presentation and decoder
 
@@ -2240,6 +2415,14 @@ on the build before the split capture gate, the median delay and the guard:
 | Decoder taking 67 ms a frame | Host pace held at a mean 13.4 FPS by the viewer's fps cap, while the delay controller stayed at 60 FPS and the encoder bitrate at 7.9 Mbit/s: presentation lag never reaches congestion control |
 | 256 KiB/s link, 64 KiB frames, 30 s | Streaming throughout at both ends; capture held back (575 skipped ticks) instead of queueing, the link full at 2.09 Mbit/s received; control 8 ms, release 9 ms, revoke 3.5 ms (61, 47 and 15.7 ms before the timer guard); host stop 348 ms, which includes waiting for the viewer to read `Stopped` |
 
+Two further cases time a fresh picture on a 1 Mbit/s link with the encoder
+holding each picture 45 ms: `requested_idr_on_a_slow_link`, where the
+decoder asks for an IDR every 2 s and discards what arrives before it, and
+`idr_another_viewer_asked_for_on_a_slow_link`, where a second viewer on an
+unlimited link asks instead. Each reports how long every IDR took to arrive
+and the P-frames that came first, the viewer's requests, its sink's discards
+and the host's dropped frames and IDRs. No run of them is recorded yet.
+
 `video_bench 10 60 --animate --max-width 1920 --max-height 1080` still reaches
 59.9 unique capture and encode FPS at a mean 1.9 ms encode with one unit in
 flight, and 58.2 FPS through the full backend (`--backend`). With
@@ -2491,7 +2674,8 @@ Local build artifacts do not constitute a published release. The
 `capture_probe`, `video_bench` and `deployed` examples provide bounded development
 probes; the deployed probe revokes its dedicated temporary credential on normal
 completion and removes its controller setup file. Never publish that file.
-`video_bench --pace 60,30,15,5` classifies the encoder's rate model and, like
+`video_bench --pace 60,30,15,5` classifies the encoder's rate model (on a Mac,
+the ignored `video_toolbox_rate_model_*` tests classify VideoToolbox's) and, like
 `video_bench 60 60 --animate`, prints its GOP and keyframe count, and the
 largest keyframe and access unit. `--codec h265` encodes H.265 and first
 prints the host's probe; `--exact` encodes exactly `--max-width` ×

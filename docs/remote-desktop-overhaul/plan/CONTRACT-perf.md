@@ -325,7 +325,7 @@ cursor:   C sample 16 ms -> watch -> B-send CursorGate (300 ms echo suppression)
 | `FEED_QUEUE_MAX` / feeder `next` timeout / buffer pool | 2 / 50 ms / 3 × 1 MiB, grows to 4 MiB | Kotlin |
 | snapshot | ≤ 320 px wide, JPEG q80, ≤ 300 ms, never blocks close | native |
 | `NO_VIDEO_RECONNECT` / Dart backoff / `PROTOCOL_RETRY_LIMIT` | 5 s / 1, 2, 4, 8, 15 s / 3 consecutive attempts that end in `protocol` | Dart |
-| Dart polls | `viewer_status` 500 ms with a viewer demand, 1 s otherwise with a session; host 1 s with a page demand where this device can host (after the first load, none where it cannot), 2 s while sharing; tunnels 6 s only while one is live; none otherwise | Dart |
+| Dart polls | `viewer_status` 500 ms with a viewer demand, 1 s otherwise with a session; host 1 s with a page demand where this device can host (after the first load, none where it cannot), 2 s while sharing, both only while a viewer is connected or the Windows service hosts; otherwise the app's own host sends a `desktopHost` change event and the host is read on it, with a 30 s backstop while sharing or with the page; capabilities every 10 s only while the page shows a missing permission or no display, and, on a Mac or with no display, when the app comes back to the front with the page open; tunnels 6 s only while one is live; none otherwise | Dart |
 | Dart move coalescing / cursor timer | ≤ 1 move per 4 ms / 16 ms | Dart |
 
 ---
@@ -3239,7 +3239,7 @@ its files (section 12).
 | Test (`test/desktop_store_test.dart` unless noted) | Guards |
 | --- | --- |
 | "input is sent with the geometry generation only and dropped when not live" | Rust stamps; `send` returns false on `!inputLive` or an epoch mismatch; `NOT_FRESH` is silent |
-| "polling runs only on demand" | `testWidgets` with `tester.pump(duration)` (its fake clock; no `fake_async` dependency, D21): no timers when idle; `viewerStatus` only with a session; host poll only with page demand or sharing; view polling only with viewer demand; none once a device that cannot host has loaded |
+| "polling runs only on demand" | `testWidgets` with `tester.pump(duration)` (its fake clock; no `fake_async` dependency, D21): no timers when idle; `viewerStatus` only with a session; host poll only with page demand or sharing, and with no viewer only the 30 s backstop, a viewer's arrival read on the change event; view polling only with viewer demand; none once a device that cannot host has loaded |
 | "a sharing or configured host always has its invitation" | 9.4 invariant: local sharing, background sharing, a restart with remembered trust (paused), and trust remembered under another relay (not configured, invitation null) |
 | "a second connect during an attempt connects the new target" | 9.6.2 supersede semantics: the first attempt is cancelled, the retry timer cleared, the second target connected |
 | "hidden viewer pauses once, never reconnects or requests keyframes; visible resumes" | D13, D14 |

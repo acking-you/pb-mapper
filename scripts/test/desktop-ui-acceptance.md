@@ -151,6 +151,21 @@ Launch it from its build directory. The report reaches the bootstrap directly
 over loopback. Restore the normal entry before producing any product artifact:
 `flutter build windows --release --target lib/main.dart`.
 
+Each sample's `native` holds the Windows decoder's own figures: the counts;
+`timings.surface_consume` (release to Flutter's acquisition) and
+`timings.convert` (opening the decoded picture to the GPU finishing its copy,
+the wait included), each `samples`, `mean_ms` and `max_ms` since the timings
+began; `refreshHz`; `decoderCycles`, the decoder thread's CPU cycles since it
+started (a reconnect starts a new thread); and `lowLatency` only where the decoder's codec API confirmed it. To
+compare two builds, run the same case on the same machine with each and
+compare, over the samples after the warm-up, `decoderCycles` gained per
+second, each timing's mean between two samples (the change in
+`samples * mean_ms` over the change in `samples`), `picture_latency_ms`, and
+presented against received fps. Run DebugView (or a debugger) beside the
+viewer: a decoder that stopped trusting the GPU's completion event says so
+once, in a line starting `Desktop video: the GPU completion event`, and then
+polls.
+
 ## Pointer shapes and keyboard against a safe host
 
 To check pointer shapes and the keyboard on a real screen, the host must not
@@ -230,7 +245,9 @@ One JSON object:
   totals `gaps_100`/`gaps_250`, and `decoder`), `native` (the native
   decoder's own counters, where there is one; on Android also `credits`, the
   pictures released to the texture and not yet consumed, at most two, and
-  `refreshHz`, the display mode the window asks for while video shows) and
+  `refreshHz`, the display mode the window asks for while video shows; on
+  Windows also the timings, `refreshHz`, `decoderCycles` and `lowLatency`
+  that [Windows viewer](#windows-viewer) lists) and
   `flutter`: the frame timings Flutter reported in that second (it batches
   them about once a second), with the frames whose build or raster took
   longer than one refresh interval as `over_budget`.

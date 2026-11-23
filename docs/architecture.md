@@ -248,7 +248,9 @@ Nothing in the SDK crates knows it exists.
   - `relay.rs`, `relay/quic.rs`, `endpoint.rs`: The relay carrier and its
     pooled QUIC connections; relay resolution and bounded setup admission.
     `addr.rs` resolves a tunnel endpoint to every address it names,
-    `network.rs` holds the process-wide network hints, `udp_timeout.rs`
+    `network.rs` holds the process-wide network hints (on macOS and iOS
+    `network/routes.rs` reads the kernel's routing socket to learn when
+    addresses change), `udp_timeout.rs`
     orders uni-stream's process-wide UDP session timeout before any UDP
     stream reads it, and `recovery.rs` the short, bounded setup attempts
   - `test_relay.rs`, `status_text_tests.rs`: This crate's own loopback relay
@@ -317,7 +319,8 @@ Nothing in the SDK crates knows it exists.
     off; the kernel still coalesces the process's timers, which thread C's
     own waiter avoids)
   - `credit.rs`, `qos.rs`, `idr.rs`, `outgoing.rs`: Receipt credit, delay-based
-    QoS, on-demand IDRs, and the hand-off from thread C to B-send
+    QoS (`qos/receipt_rate.rs`, a receipt-rate estimator that is only traced),
+    on-demand IDRs, and the hand-off from thread C to B-send
   - `protocol.rs`, `wire.rs`, `invite.rs`, `security.rs`, `auth.rs`: Protocol v2
     (ALPN `pb-mapper/desktop/2`), invitations, certificate pinning, and the
     input authorisation ledger
@@ -361,8 +364,11 @@ Nothing in the SDK crates knows it exists.
     `Injector` takes keys, text (never `\n`, `\r` or `\t`: the neutral
     `Input::typed` taps Enter and Tab) and, where `PHYSICAL_KEYS`, keys by
     place. `synthetic.rs` is the test platform (pulled or pushed encoder,
-    shapes, a log of what it typed). How to add Linux or Android is
-    "Platforms" in `docs/remote-desktop.md`
+    shapes, a log of what it typed). `login.rs`, pure and tested on every
+    platform, says what the Windows background service's tick asks about
+    its owner's login: the token and SID in full, a session query every
+    5 s, or nothing. How to add Linux or Android is "Platforms" in
+    `docs/remote-desktop.md`
   - `platform/windows/`: the ordinary desktop, `video/` (Desktop
     Duplication → D3D11 → Media Foundation H.265 or H.264, the fused
     `VideoSource`: the `Encoder` in `mod.rs`, the Media Foundation encoder in
@@ -389,7 +395,8 @@ Nothing in the SDK crates knows it exists.
     timer marked `NOTE_CRITICAL`, which the kernel does not coalesce, and a
     user event for the wake), `keychain.rs`, `cf.rs` (Core Foundation
     glue, symbols looked up at run time). Its pure modules build and are
-    tested everywhere; `tests.rs` runs only on macOS
+    tested everywhere; `tests.rs` runs only on macOS, and its ignored
+    `video_toolbox_rate_model_*` measure VideoToolbox's rate model
   - `platform/windows/helper/`: The opt-in UAC/Winlogon service —
     `service.rs`; the workers it starts (`worker.rs`, `child.rs`) and a
     worker's binding to the input desktop (`binding.rs`); `pipe.rs`;
@@ -397,11 +404,14 @@ Nothing in the SDK crates knows it exists.
     or is offered Update); `background.rs` and `background/`, its own host
     and that host's grant at rest; `os/`, its Win32 glue by concern. The
     service side and the `pb-mapper-desktop-helper` binary need `--features
-    windows-helper`. `HELPER_PROTOCOL` (now 9) and the `.v<n>` pipe names
+    windows-helper`. `HELPER_PROTOCOL` (now 10) and the `.v<n>` pipe names
     change together; an installed helper of another protocol, or of another
     build (its executable differs from the one bundled with the app), is
-    offered Update. Protocol 9: `HostStatus.viewers` across the background
-    host's status pipe (`HostStatus.viewer` remains the primary entry).
+    offered Update. Protocol 10: `Response.submitted`, `false` only in the
+    answer to a capture whose source had no new picture, so thread C keeps
+    its tick armed and polls; absent means the tick was spent. Protocol 9:
+    `HostStatus.viewers` across the background host's status pipe
+    (`HostStatus.viewer` remains the primary entry).
     Protocol 8: `Request::CursorShape`, `shape_serial` on
     every answer that observed the pointer once shapes were asked for, the
     shape's `ShapeHeader` with its bitmap as the byte record (one round trip
@@ -422,12 +432,15 @@ Nothing in the SDK crates knows it exists.
   - `privileged/`: the public helper facade on every target —
     `support()`, and on Windows `status`, `request_installation`,
     `background::{configure, adopt, Options::resume, …}` (the app's
-    hand-off to the service)
+    hand-off to the service) and `background::{readiness, status_of}` (a
+    status read that checks the helper once)
   - `codec/`: neutral Annex B scanning and keyframe detection
     (`annexb.rs`), length-prefixed (AVCC/HVCC) samples to Annex B
     (`avcc.rs`, for VideoToolbox), and the encoder rules both platforms
     share (`pipeline.rs`: late output, first-submit and output waits,
-    liveness, what an H.265 failure is)
+    liveness, what an H.265 failure is); `rate_fit.rs`, test-only, fits a
+    pace sweep to a rate model for the macOS encoder's measurement and, by
+    path, `video_bench --pace`
   - `input/`: the input vocabulary a controlling viewer sends (`Input`,
     `Button`, `Key`, `InputEvent`, `DoubleClickGuard`; `Input` and `Key` are
     `#[non_exhaustive]`, and `Input::PhysicalKey` carries a USB HID usage,
@@ -484,7 +497,9 @@ Nothing in the SDK crates knows it exists.
     Settings>`
   - `watch.rs`: `Host::watch`, `Viewer::watch` — status as a
     `tokio::sync::watch`, sent when it changes, per-frame fields aside,
-    ending with the host or viewer
+    ending with the host or viewer; and `Host::changes` (`HostChanges`), a
+    wake with no status that the host and its sessions bump where what the
+    status shows changes, so nothing samples an idle host
   - `mapping.rs`: `DesktopView::display_point`, `Input::text_chunks`
   - `tests.rs`, `tests/session.rs`: Tests over a real relay and TLS, the second
     end to end; `slow_link.rs`: the ignored acceptance cases; `test_util.rs`:
@@ -676,8 +691,12 @@ The design and its rules are in `docs/ui-design.md`.
   fetches the pointer-shape definition each time the view's number changes
   and keeps the last 16 decoded by content, since a number names another
   definition once the viewer's counter has gone round; on a Mac it shares
-  from the app alone and re-reads the capabilities while a permission is
-  missing
+  from the app alone and re-reads the capabilities when the app comes back
+  to the front with the page open and, while the page shows a missing
+  permission or no display, every 10 s. It reads
+  the host when the app's own host sends `desktopHost`, and on a clock only
+  while a viewer is connected or the Windows service hosts (a 30 s backstop
+  otherwise)
 
 - **`lib/src/galaxy/`**: The galaxy view — scene model, camera, frame buffer
   over `pb_mapper_galaxy_frame_v1` with its Dart mirror, painter, details panel
@@ -767,7 +786,9 @@ The design and its rules are in `docs/ui-design.md`.
     `display_mode` takes `{target}`; `host_restore_display_mode` is the
     host card's Restore. `desktop.rs` dispatches; `desktop/viewer.rs` holds
     `connect`, the viewer's state and the two hot exports, `desktop/host.rs`
-    this app's own host, `desktop/background.rs` the Windows service's host
+    this app's own host, whose `Host::changes` it forwards as `desktopHost`
+    change events (`events.rs`, at most one per 100 ms),
+    `desktop/background.rs` the Windows service's host
     as the app sees it, and `desktop/trust.rs` the remembered host grant
   - `desktop_video.rs`: Video goes from the viewer's `VideoSink` straight to
     its consumer. That is the native decoder: the runner's decoder thread

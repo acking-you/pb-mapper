@@ -139,8 +139,10 @@ impl VideoSource for video::Encoder {
     fn set_rate(&mut self, rate: VideoRate) -> Result<()> {
         video::Encoder::set_rate(self, rate)
     }
+    /// A full encoder spends the tick; a desktop with nothing new leaves it
+    /// armed, and thread C asks again.
     fn submit(&mut self, keyframe: bool) -> Result<bool> {
-        video::Encoder::submit(self, keyframe).map(|_| true)
+        video::Encoder::submit(self, keyframe).map(video::Submit::spends_tick)
     }
     fn drain(&mut self) -> Result<Option<EncodedFrame>> {
         video::Encoder::drain(self).map(|image| image.map(Into::into))

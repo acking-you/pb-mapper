@@ -6,6 +6,10 @@
 //! one adds `platform/<os>/` and an arm of [`Current`]. "Platforms" in
 //! `docs/remote-desktop.md` is the guide.
 
+// The Windows background service's checks of its owner's login: pure, so
+// every platform tests them.
+#[cfg(any(all(windows, feature = "windows-helper"), test))]
+pub(crate) mod login;
 // The OS parts build on macOS alone; its pure tables are tested on every
 // platform.
 #[cfg(any(target_os = "macos", test))]
@@ -23,7 +27,7 @@ pub(crate) mod windows;
 use crate::{
     Access, BackendCaps, BackendError, Button, CursorMode, CursorShape, DesktopKind, Display,
     DisplaySelection, DoubleClickGuard, EncodedFrame, FailureKind, HostOptions, HostOs, Key,
-    Permission, Result, VideoCodec, VideoLimits, VideoRate, Waker,
+    Permission, RateModel, Result, VideoCodec, VideoLimits, VideoRate, Waker,
     input::held::Pressed,
     launch::{Launch, Launcher},
     modes::{Journal, Mode, Setting},
@@ -150,6 +154,10 @@ pub(crate) trait VideoSource: Sized {
     /// `Some(poll)`: output that thread C polls for. `None`: the source
     /// pushes, and wakes thread C.
     const DRAIN: Option<Duration>;
+    /// How its encoder budgets the bitrate, which each session's QoS starts
+    /// from: one frame's share at the nominal rate per frame, unless the
+    /// platform's encoder was measured to budget per second.
+    const RATE_MODEL: RateModel = RateModel::Nominal;
     /// Asked only for a viewer that decodes the codec; the platform caches
     /// the answer per adapter.
     fn encodes(display: &Display, codec: VideoCodec) -> bool;
@@ -164,11 +172,13 @@ pub(crate) trait VideoSource: Sized {
     fn codec(&self) -> VideoCodec;
     fn set_rate(&mut self, rate: VideoRate) -> Result<()>;
     /// Capture and submit one picture, without blocking. A source with no
-    /// picture to submit reports `false`, leaving the worker's tick armed: a
-    /// push source names when it needs the next one (`idle_until`) or wakes
-    /// the worker, and the worker asks a pull source (`DRAIN` is `Some`)
-    /// again after that interval. A push source whose encoder is full returns
-    /// `true` and keeps the IDR request.
+    /// new picture to submit reports `false`, leaving the worker's tick
+    /// armed: a push source names when it needs the next one (`idle_until`)
+    /// or wakes the worker, and the worker asks a pull source (`DRAIN` is
+    /// `Some`) again, after that interval while the desktop is active and a
+    /// period later while it is still. A source whose encoder is full returns
+    /// `true`, which spends the tick as backpressure, and keeps the IDR
+    /// request.
     fn submit(&mut self, keyframe: bool) -> Result<bool>;
     /// When to try again on a push source, if it has nothing ready now.
     fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
@@ -468,6 +478,7 @@ pub(crate) fn fallback_caps<P: Platform>() -> BackendCaps {
         os: Some(P::OS),
         cursor: <P::Cursor as CursorSource>::MODE,
         cursor_shapes: <P::Cursor as CursorSource>::SHAPES,
+        rate_model: <P::Video as VideoSource>::RATE_MODEL,
         ..BackendCaps::default()
     }
 }

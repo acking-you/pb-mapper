@@ -7,6 +7,11 @@ use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio_util::task::AbortOnDropHandle;
 
+/// macOS and iOS: the kernel's routing socket says when to read the
+/// addresses, instead of a poll.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod routes;
+
 pub(crate) struct NetworkHints {
     changes: watch::Sender<u64>,
     task: Mutex<Option<AbortOnDropHandle<()>>>,
@@ -189,29 +194,138 @@ mod tests {
     }
 }
 
+/// How often the addresses are read where nothing says when they change:
+/// on Android, which does not let an app listen on a netlink route socket,
+/// and on macOS or iOS if the routing socket cannot be opened or read.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+const POLL: Duration = Duration::from_secs(2);
+
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 async fn watch_changes(changes: watch::Sender<u64>) -> std::io::Result<()> {
+    let mut addresses = Addresses::new(Addresses::system);
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let error = match routes::Routes::open() {
+            Ok(routes) => {
+                let Err(error) = routes::watch(&routes, &changes, &mut addresses).await;
+                error
+            }
+            Err(error) => error,
+        };
+        tracing::debug!(
+            event = "network_route_socket_unavailable",
+            %error,
+            "polling interface addresses instead"
+        );
+    }
+    poll(&changes, &mut addresses).await
+}
+
+/// Read the addresses every [`POLL`], and raise a hint when they changed.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+async fn poll(changes: &watch::Sender<u64>, addresses: &mut Addresses) -> std::io::Result<()> {
     // A single owned poller avoids an unjoinable platform callback thread.
-    let mut previous = None;
-    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    let mut interval = tokio::time::interval(POLL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
-        let mut addresses = tokio::task::spawn_blocking(|| {
-            if_addrs::get_if_addrs().map(|items| {
-                items
-                    .into_iter()
-                    .filter(|item| !item.is_loopback())
-                    .map(|item| (item.name.clone(), item.ip()))
-                    .collect::<Vec<_>>()
-            })
-        })
-        .await
-        .map_err(std::io::Error::other)??;
-        addresses.sort();
-        if previous.as_ref().is_some_and(|old| old != &addresses) {
-            changes.send_modify(|generation| *generation = generation.wrapping_add(1));
+        if addresses.read().await? {
+            raise(changes);
         }
-        previous = Some(addresses);
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn raise(changes: &watch::Sender<u64>) {
+    changes.send_modify(|generation| *generation = generation.wrapping_add(1));
+}
+
+/// Every interface address but loopback, with its interface's name, sorted.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+type Snapshot = Vec<(String, std::net::IpAddr)>;
+
+/// Where addresses are read rather than reported, what a change is: the
+/// addresses differ from the last reading's.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+struct Addresses {
+    last: Option<Snapshot>,
+    /// What reads them: [`Addresses::system`], or a test's own list.
+    source: fn() -> std::io::Result<Snapshot>,
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+impl Addresses {
+    fn new(source: fn() -> std::io::Result<Snapshot>) -> Self {
+        Self { last: None, source }
+    }
+
+    /// The system's addresses.
+    fn system() -> std::io::Result<Snapshot> {
+        let mut addresses: Snapshot = if_addrs::get_if_addrs()?
+            .into_iter()
+            .filter(|item| !item.is_loopback())
+            .map(|item| {
+                let ip = item.ip();
+                (item.name, ip)
+            })
+            .collect();
+        addresses.sort();
+        Ok(addresses)
+    }
+
+    /// Read the addresses, and say whether they changed since the last
+    /// reading. The first reading only sets what later ones compare with.
+    async fn read(&mut self) -> std::io::Result<bool> {
+        let now = tokio::task::spawn_blocking(self.source)
+            .await
+            .map_err(std::io::Error::other)??;
+        Ok(self.update(now))
+    }
+
+    fn update(&mut self, now: Snapshot) -> bool {
+        let changed = self.last.as_ref().is_some_and(|last| *last != now);
+        self.last = Some(now);
+        changed
+    }
+}
+
+#[cfg(all(test, not(any(target_os = "linux", target_os = "windows"))))]
+mod read_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn snapshot(addresses: &[(&str, u8)]) -> Snapshot {
+        addresses
+            .iter()
+            .map(|&(name, last)| {
+                (
+                    name.to_owned(),
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, last)),
+                )
+            })
+            .collect()
+    }
+
+    /// The first reading is the baseline, never a change; after it, any
+    /// address gained, lost or moved to another interface is one, and the
+    /// same addresses again are not.
+    #[test]
+    fn a_change_is_a_reading_unlike_the_last() {
+        let mut addresses = Addresses::new(Addresses::system);
+        assert!(!addresses.update(snapshot(&[("en0", 2)])));
+        assert!(!addresses.update(snapshot(&[("en0", 2)])));
+        assert!(addresses.update(snapshot(&[("en0", 2), ("en1", 3)])));
+        assert!(addresses.update(snapshot(&[("en1", 3)])));
+        assert!(addresses.update(snapshot(&[("en0", 3)])));
+        assert!(!addresses.update(snapshot(&[("en0", 3)])));
+    }
+
+    /// The system's addresses read without error, in order and without
+    /// loopback, so that two readings of an unchanged system compare equal.
+    #[test]
+    fn the_system_reading_is_sorted_and_leaves_out_loopback() {
+        let addresses = Addresses::system().unwrap();
+        assert!(addresses.is_sorted());
+        assert!(addresses.iter().all(|(_, ip)| !ip.is_loopback()));
     }
 }

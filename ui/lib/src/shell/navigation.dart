@@ -178,8 +178,9 @@ class _RailRow extends StatelessWidget {
   }
 }
 
-/// Whether this computer is shared, and watched: a dot while sharing, a
-/// breathing one while a viewer is connected and the picture flows.
+/// Whether this computer is shared, and watched: a dot while sharing, and
+/// while a viewer is connected and the picture flows a brighter one, which
+/// breathes a few times as it appears and then keeps still for the session.
 class HostSharingDot extends StatelessWidget {
   const HostSharingDot({super.key});
 
@@ -198,7 +199,7 @@ class HostSharingDot extends StatelessWidget {
               : sharingLabel(context, viewer),
           child: viewer == null || viewer.paused
               ? StatusDot(color: color, size: 7)
-              : PulsingDot(color: color, size: 7),
+              : PulsingDot(color: color, size: 7, breaths: kSettlingBreaths),
         );
       },
     );

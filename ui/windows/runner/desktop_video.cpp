@@ -1,12 +1,14 @@
 #include "desktop_video.h"
 
 #include <d3d11.h>
+#include <dxgi1_2.h>
 #include <mfapi.h>
 #include <mferror.h>
 #include <mfidl.h>
 #include <mftransform.h>
 #include <wmcodecdsp.h>
 #include <codecapi.h>
+#include <strmif.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 #include <flutter/method_channel.h>
@@ -49,6 +51,15 @@ constexpr auto kSnapshotDeadline = std::chrono::milliseconds(300);
 // The longest a converted frame waits for the GPU before it is published
 // anyway: a GPU this slow would otherwise stop the picture.
 constexpr auto kConversionWait = std::chrono::milliseconds(100);
+// Set once a GPU completion event had not come by kConversionWait though
+// its copy had finished, or a wait on one failed: the driver's events cannot
+// be trusted, and every decoder polls its query instead for the rest of the
+// run.
+std::atomic<bool> gpu_events_unreliable{false};
+void DistrustGpuEvents(const char* why) {
+  if (gpu_events_unreliable.exchange(true)) return;
+  OutputDebugStringA((std::string("Desktop video: the GPU completion event ") + why + "; polling instead\n").c_str());
+}
 
 // The video C ABI of pb_mapper_ffi.dll (desktop_video.rs). The runner does
 // not link the DLL: it resolves these from the copy Dart already loaded.
@@ -423,10 +434,31 @@ struct Frame {
   Codec codec = Codec::kH264;
 };
 
+// One of the stats' timings: count, mean and maximum, in constant space, as
+// macOS and Android keep theirs. It exists only while a stats request asks
+// for timings.
+struct Timing {
+  int64_t samples = 0;
+  Clock::duration total{}, longest{};
+  void Add(Clock::duration elapsed) {
+    ++samples;
+    total += elapsed;
+    longest = std::max(longest, elapsed);
+  }
+  Value Snapshot() const {
+    using Ms = std::chrono::duration<double, std::milli>;
+    const double mean = samples == 0 ? 0.0 : Ms(total).count() / static_cast<double>(samples);
+    return Value(Map{{Value("samples"), Value(samples)}, {Value("mean_ms"), Value(mean)},
+                     {Value("max_ms"), Value(Ms(longest).count())}});
+  }
+};
+
 struct Surface {
   ComPtr<ID3D11Texture2D> texture;
   FlutterDesktopGpuSurfaceDescriptor descriptor{};
   Frame frame;
+  // When it was released to Flutter, while surface_consume is timed.
+  Clock::time_point ready{};
   Surface(ComPtr<ID3D11Texture2D> value, const Frame& decoded) : texture(std::move(value)), frame(decoded) {
     descriptor.struct_size = sizeof(descriptor);
     ComPtr<IDXGIResource> resource;
@@ -516,16 +548,36 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     }
     request.reply->Success(Value(!busy && Capture(request)));
   }
-  Map Stats() const {
+  // Platform thread. `timings` starts the timing accumulators, or keeps
+  // them; false drops them until the next read that asks.
+  Map Stats(bool timings) {
+    // The decoder thread's CPU time, in cycles since it started.
+    ULONG64 cycles = 0;
+    const bool running = worker_.joinable() && QueryThreadCycleTime(worker_.native_handle(), &cycles);
     std::lock_guard<std::mutex> lock(mutex_);
-    return {{Value("submitted"), Value(static_cast<int64_t>(submitted_.load()))},
-            {Value("decoded"), Value(static_cast<int64_t>(decoded_.load()))},
-            {Value("presented"), Value(static_cast<int64_t>(presented_.load()))},
-            {Value("dropped"), Value(static_cast<int64_t>(dropped_.load()))},
-            {Value("configurations"), Value(static_cast<int64_t>(configurations_.load()))},
-            {Value("recoveries"), Value(static_cast<int64_t>(recoveries_.load()))},
-            {Value("lastRecovery"), Value(last_recovery_)},
-            {Value("decoder"), Value(decoder_name_)}};
+    if (!timings) {
+      surface_consume_.reset();
+      convert_.reset();
+    } else if (!surface_consume_) {
+      surface_consume_.emplace();
+      convert_.emplace();
+    }
+    Map stats{{Value("submitted"), Value(static_cast<int64_t>(submitted_.load()))},
+              {Value("decoded"), Value(static_cast<int64_t>(decoded_.load()))},
+              {Value("presented"), Value(static_cast<int64_t>(presented_.load()))},
+              {Value("dropped"), Value(static_cast<int64_t>(dropped_.load()))},
+              {Value("configurations"), Value(static_cast<int64_t>(configurations_.load()))},
+              {Value("recoveries"), Value(static_cast<int64_t>(recoveries_.load()))},
+              {Value("lastRecovery"), Value(last_recovery_)},
+              {Value("decoder"), Value(decoder_name_)}};
+    if (timings) {
+      stats[Value("timings")] = Value(Map{{Value("surface_consume"), surface_consume_->Snapshot()},
+                                         {Value("convert"), convert_->Snapshot()}});
+    }
+    // Only a decoder that took low latency through its codec API says so.
+    if (low_latency_) stats[Value("lowLatency")] = Value(true);
+    if (running) stats[Value("decoderCycles")] = Value(static_cast<int64_t>(cycles));
+    return stats;
   }
 
  private:
@@ -548,6 +600,9 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
         consumed_frame_ = surface->frame.frame;
         acknowledge = true;
         consumer = consumer_.load();
+        if (surface_consume_ && surface->ready != Clock::time_point{}) {
+          surface_consume_->Add(Clock::now() - surface->ready);
+        }
       }
     }
     // The engine opens the D3D resource asynchronously. Retain the descriptor and
@@ -620,6 +675,18 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     // Signalled once the GPU has run every command before it: the copy of
     // the frame about to be published.
     ComPtr<ID3D11Query> converted;
+    // Set by the GPU once it has run every command before EnqueueSetEvent,
+    // so the wait for `converted` sleeps on it. Auto-reset.
+    struct CompletionEvent {
+      HANDLE handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+      CompletionEvent() = default;
+      CompletionEvent(const CompletionEvent&) = delete;
+      CompletionEvent& operator=(const CompletionEvent&) = delete;
+      ~CompletionEvent() { if (handle) CloseHandle(handle); }
+    } gpu_done;
+    // DXGI 1.2's EnqueueSetEvent; null without it or without the event,
+    // and the wait then polls.
+    ComPtr<IDXGIDevice2> dxgi_device;
     // The one texture Flutter shows, shared under a handle that stays the
     // same for this decoder's life, so Flutter imports it once. A new
     // shared texture per frame made Flutter build an EGL surface from each,
@@ -629,6 +696,9 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     // Where each frame is converted, then copied into `shown` in one short
     // copy, so a read of `shown` meets a whole frame.
     ComPtr<ID3D11Texture2D> scratch;
+    // The converter's view of `scratch`, made with it and again only for a
+    // new converter.
+    ComPtr<ID3D11VideoProcessorOutputView> out_view;
     ComPtr<IMFDXGIDeviceManager> manager;
     // What created an H.265 decoder, which must shut it down after use.
     // Declared before `transform`, so its shutdown follows the decoder's
@@ -645,6 +715,8 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     UINT32 coded_width = 0, coded_height = 0;
     RECT source_rect{};
     LONGLONG next_pts = 0;
+    // The decoder's codec API took CODECAPI_AVLowLatencyMode.
+    bool low_latency = false;
     Decoder(const Frame& frame, IDXGIAdapter* adapter)
         : revision(frame.revision), width(frame.width), height(frame.height), codec(frame.codec) {
       const std::string name = CodecName(codec);
@@ -659,6 +731,8 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       D3D11_QUERY_DESC query{};
       query.Query = D3D11_QUERY_EVENT;
       Check(device->CreateQuery(&query, &converted), "Create GPU completion query");
+      // A device without DXGI 1.2 leaves it null.
+      if (gpu_done.handle) device.As(&dxgi_device);
       UINT token = 0;
       Check(MFCreateDXGIDeviceManager(&token, &manager), "Create decoder device manager");
       Check(manager->ResetDevice(device.Get(), token), "Assign decoder device");
@@ -679,6 +753,17 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       // Low latency: one picture out for each unit in, nothing held back.
       attrs->SetUINT32(MF_LOW_LATENCY, TRUE);
       attrs->SetUINT32(CODECAPI_AVLowLatencyMode, TRUE);
+      // The attribute store takes any value, whether the decoder honours it
+      // or not; only its codec API can confirm the mode, and the stats
+      // report low latency only then.
+      ComPtr<ICodecAPI> codec_api;
+      if (SUCCEEDED(transform.As(&codec_api)) && codec_api->IsSupported(&CODECAPI_AVLowLatencyMode) == S_OK) {
+        VARIANT on;
+        VariantInit(&on);
+        on.vt = VT_BOOL;
+        on.boolVal = VARIANT_TRUE;
+        low_latency = SUCCEEDED(codec_api->SetValue(&CODECAPI_AVLowLatencyMode, &on));
+      }
       if (codec == Codec::kH264) {
         attrs->SetUINT32(CODECAPI_AVDecVideoMaxCodedWidth, (width + 15) & ~15u);
         attrs->SetUINT32(CODECAPI_AVDecVideoMaxCodedHeight, (height + 15) & ~15u);
@@ -696,6 +781,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       Check(transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0), "Start video decoding");
     }
     void ConfigureConverter(UINT32 input_width, UINT32 input_height, const RECT& aperture) {
+      out_view.Reset();
       processor.Reset();
       enumerator.Reset();
       D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc{};
@@ -805,7 +891,10 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       Check(transform->ProcessInput(0, sample.Get(), 0), "Decode video input");
       pending.emplace(next_pts, frame);
     }
-    std::shared_ptr<Surface> Take() {
+    // `convert` is the time from opening the decoded picture for the GPU
+    // converter to the GPU finishing its copy into `shown`, with what the
+    // decode still had queued on the GPU.
+    std::shared_ptr<Surface> Take(Clock::duration& convert) {
       MFT_OUTPUT_DATA_BUFFER output{};
       DWORD flags = 0;
       HRESULT hr = transform->ProcessOutput(0, 1, &output, &flags);
@@ -813,7 +902,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       sample.Attach(output.pSample);
       if (output.pEvents) output.pEvents->Release();
       if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return nullptr;
-      if (hr == MF_E_TRANSFORM_STREAM_CHANGE) { SetOutput(); return Take(); }
+      if (hr == MF_E_TRANSFORM_STREAM_CHANGE) { SetOutput(); return Take(convert); }
       Check(hr, "Decode video output");
       if (!sample) throw std::runtime_error("Decoder returned an empty sample");
       LONGLONG timestamp = 0;
@@ -832,12 +921,6 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       Check(dxgi->GetSubresourceIndex(&subresource), "Get decoded plane");
       D3D11_TEXTURE2D_DESC source_desc{};
       source->GetDesc(&source_desc);
-      D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC in_desc{};
-      in_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-      in_desc.Texture2D.MipSlice = subresource % source_desc.MipLevels;
-      in_desc.Texture2D.ArraySlice = subresource / source_desc.MipLevels;
-      ComPtr<ID3D11VideoProcessorInputView> in_view;
-      Check(video->CreateVideoProcessorInputView(source.Get(), enumerator.Get(), &in_desc, &in_view), "Open decoded GPU frame");
       if (!scratch) {
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = width; desc.Height = height; desc.MipLevels = 1; desc.ArraySize = 1;
@@ -849,31 +932,68 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
         desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
         Check(device->CreateTexture2D(&desc, nullptr, &shown), "Allocate Flutter GPU frame");
       }
-      D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC out_desc{};
-      out_desc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
-      ComPtr<ID3D11VideoProcessorOutputView> out_view;
-      Check(video->CreateVideoProcessorOutputView(scratch.Get(), enumerator.Get(), &out_desc, &out_view), "Open converted frame");
+      if (!out_view) {
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC out_desc{};
+        out_desc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        Check(video->CreateVideoProcessorOutputView(scratch.Get(), enumerator.Get(), &out_desc, &out_view), "Open converted frame");
+      }
+      const auto start = Clock::now();
+      D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC in_desc{};
+      in_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+      in_desc.Texture2D.MipSlice = subresource % source_desc.MipLevels;
+      in_desc.Texture2D.ArraySlice = subresource / source_desc.MipLevels;
+      ComPtr<ID3D11VideoProcessorInputView> in_view;
+      Check(video->CreateVideoProcessorInputView(source.Get(), enumerator.Get(), &in_desc, &in_view), "Open decoded GPU frame");
       D3D11_VIDEO_PROCESSOR_STREAM stream{};
       stream.Enable = TRUE;
       stream.pInputSurface = in_view.Get();
       Check(video_context->VideoProcessorBlt(processor.Get(), out_view.Get(), 0, 1, &stream), "Convert decoded GPU frame");
       context->CopyResource(shown.Get(), scratch.Get());
       context->End(converted.Get());
-      context->Flush();
       WaitForConversion();
+      convert = Clock::now() - start;
       return std::make_shared<Surface>(shown, frame);
     }
     // Flutter composites `shown` on its own device and takes no keyed mutex,
     // so nothing orders its read after this device's copy: a frame is
     // published, and Flutter told to draw it, once the GPU has run the copy,
-    // or after kConversionWait.
+    // or after kConversionWait. The query says when. Meanwhile the thread
+    // sleeps on gpu_done, which EnqueueSetEvent (it flushes) has the GPU set
+    // after the copy; a signal an earlier frame left only wakes it early.
+    // Without the event it yields between polls, which keeps a core busy.
     void WaitForConversion() {
+      bool on_event = dxgi_device && !gpu_events_unreliable.load() &&
+                      SUCCEEDED(dxgi_device->EnqueueSetEvent(gpu_done.handle));
+      if (!on_event) context->Flush();
       const auto deadline = Clock::now() + kConversionWait;
+      bool ran_out = false;
       for (;;) {
         const HRESULT hr = context->GetData(converted.Get(), nullptr, 0, 0);
         Check(hr, "Wait for the converted frame");
-        if (hr == S_OK || Clock::now() >= deadline) return;
-        std::this_thread::yield();
+        if (hr == S_OK) {
+          // The copy finished, but its event had not come by the deadline.
+          if (ran_out) DistrustGpuEvents("came late");
+          return;
+        }
+        const auto now = Clock::now();
+        if (now >= deadline) return;
+        if (!on_event) {
+          std::this_thread::yield();
+          continue;
+        }
+        const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+        switch (WaitForSingleObject(gpu_done.handle, static_cast<DWORD>(left.count()))) {
+          case WAIT_OBJECT_0:
+            ran_out = false;
+            break;
+          case WAIT_TIMEOUT:
+            ran_out = true;
+            break;
+          default:
+            DistrustGpuEvents("cannot be waited on");
+            on_event = false;
+            break;
+        }
       }
     }
   };
@@ -919,18 +1039,22 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
         decoder.reset();
         decoder = std::make_unique<Decoder>(frame, adapter_.Get());
         ++configurations_;
+        { std::lock_guard<std::mutex> lock(mutex_); low_latency_ = decoder->low_latency; }
         video_->report(consumer, decoder_name_.c_str(), 1);
       } else if (decoder->revision != frame.revision) {
         decoder->Flush(frame.revision);
       }
       decoder->Feed(frame, data, meta.len);
       for (int i = 0; i < 16; ++i) {
-        auto surface = decoder->Take();
+        Clock::duration convert{};
+        auto surface = decoder->Take(convert);
         if (!surface) break;
         ++decoded_;
         {
           std::lock_guard<std::mutex> lock(mutex_);
+          if (convert_) convert_->Add(convert);
           if (!Current(surface->frame.revision)) continue;
+          if (surface_consume_) surface->ready = Clock::now();
           latest_ = std::move(surface);
         }
         registrar_->MarkTextureFrameAvailable(id_);
@@ -941,8 +1065,12 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     }
   }
 
-  // Decoder thread, one per attached source. `next` is the only blocking call.
+  // Decoder thread, one per attached source. `next` is the only blocking
+  // call but for the wait for the GPU, which kConversionWait bounds.
   void Run(uint64_t consumer) {
+    // It sleeps while the GPU converts each picture, so it must take a core
+    // back at once when woken; still below the key hook's HIGHEST.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     mf_ = FAILED(com) ? com
           : MediaFoundationInstalled() ? MFStartup(MF_VERSION, MFSTARTUP_LITE)
@@ -999,6 +1127,11 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
   int64_t consumed_frame_ = 0;
   uint64_t consumed_revision_ = 0;
   std::string last_recovery_;
+  // While a stats read asks for timings: from a picture's release to Flutter
+  // acquiring it, and Decoder::Take's `convert`.
+  std::optional<Timing> surface_consume_, convert_;
+  // What the last decoder built said of low latency.
+  bool low_latency_ = false;
   // Set with snapshot_ for the decoder thread, which checks it after each pull.
   std::atomic<bool> snapshot_requested_{false};
   std::mutex snapshot_mutex_;
@@ -1064,7 +1197,15 @@ struct DesktopVideo::Impl {
           viewer->Snapshot(std::move(path), static_cast<uint32_t>(std::min<int64_t>(width, UINT32_MAX)), std::move(result));
         }
         else if (call.method_name() == "dispose") { viewers.erase(found); viewer->Close(); result->Success(); }
-        else if (call.method_name() == "stats") result->Success(Value(viewer->Stats()));
+        else if (call.method_name() == "stats") {
+          // `timings` is optional and true when absent, as on macOS, which
+          // also adds the refresh here.
+          const auto timings = args->find(Value("timings"));
+          const auto* wanted = timings == args->end() ? nullptr : std::get_if<bool>(&timings->second);
+          auto stats = viewer->Stats(!wanted || *wanted);
+          stats[Value("refreshHz")] = Value(DisplayMaxHz());
+          result->Success(Value(std::move(stats)));
+        }
         else result->NotImplemented();
       } catch (const std::exception& e) { result->Error("desktop_video", e.what()); }
     });

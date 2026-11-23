@@ -527,7 +527,7 @@ listens to the narrowest source:
 | --- | --- | --- | --- |
 | Overview, Tunnels, Relay, Logs, Settings, rail foot | `AppStore` (unchanged) | anything desktop | — |
 | `HostSharingDot`, `SharingIndicator`, `SharingFallbackLayer`, tray | `desktop.hostView` | session, stats | on change |
-| `HostCard` | `desktop.hostView` | session, stats | on change (poll 1 s with the page demand, 2 s while sharing without it) |
+| `HostCard` | `desktop.hostView` | session, stats | on change (the host's `desktopHost` event; with a viewer connected or the Windows service hosting, poll 1 s with the page demand, 2 s while sharing without it; else a 30 s backstop) |
 | Computer list, featured card | `computers`, `AppStore` (relay state, `desktopServiceNames`), `desktop.session` | hostView | on change; relay ≈ 12 s |
 | Viewing row meta, toolbar chip, quality panel, gutter quality | `desktop.stats` | session | ≤ 1 Hz |
 | `RemoteViewerScreen`, `DesktopViewer.build`, `TouchViewer.build` | nothing (fullscreen flag, title) | everything | — |
@@ -586,7 +586,9 @@ corrected.
   `ValueListenableBuilder<DesktopHostView>(store.desktop.hostView)`;
   `!v.sharing` → nothing; `v.viewer == null` or `v.viewer!.paused` →
   `StatusDot(color: signalColor(scheme), size: 7)`; else
-  `PulsingDot(color: signalColor(scheme), size: 7)` (static under
+  `PulsingDot(color: signalColor(scheme), size: 7, breaths:
+  kSettlingBreaths)`: it breathes a few times when the viewer appears or
+  resumes, then rests lit (docs/ui-design.md, "Motion ends"; static under
   `Motion.reduced`, which `PulsingDot` already checks). Rail: trailing after
   the label. Bar: `Positioned(top: 3, right: 8)` over the 54×30 pill.
   Semantics value `hostSharing` / `sharingViewerPaused` /
@@ -749,7 +751,7 @@ class SharingFallbackLayer extends StatefulWidget {   // state: with WindowListe
   `setReachable` stays driven by `hostView` alone.
 - `full`: capsule height 30, radius 15, padding `fromSTEB(12, 0, 3, 0)`,
   fill `scheme.tertiaryContainer` (surface tone) / `Color(0x297DB6F2)`
-  (viewer tone); `PulsingDot(signalColor, 7)` · 8 · label 12.5/600
+  (viewer tone); `PulsingDot(signalColor, 7, breaths: kSettlingBreaths)` · 8 · label 12.5/600
   `onTertiaryContainer` (`sharingViewerPaused` while `v.viewer!.paused`,
   with a static dot instead of the pulse, because nothing is captured then;
   else `sharingBeingViewed` / `sharingBeingControlled` by
@@ -760,7 +762,7 @@ class SharingFallbackLayer extends StatefulWidget {   // state: with WindowListe
 - `icons`: the same capsule without the label; the buttons are 26×26 icon
   buttons (`AppIcons.disconnect`, `AppIcons.screenShareOff`, 16) with the
   same keys and tooltips. About 90 px.
-- `dot`: a 30×30 button (`PulsingDot` in a `tertiaryContainer` circle,
+- `dot`: a 30×30 button (`PulsingDot` with `kSettlingBreaths` in a `tertiaryContainer` circle,
   tooltip = the label) opening a `MenuAnchor` with the two actions (same
   keys on the menu items).
 - Both actions bypass `busy` (perf `stopHost`; R-UI-10 for `endViewerSession`).
@@ -791,7 +793,7 @@ class SharingFallbackLayer extends StatefulWidget {   // state: with WindowListe
   (inside the title-bar band); top-left `(12, 12)` while the window is full
   screen (the viewer's toolbar owns the top centre).
 - Style: `Glass(depth: GlassDepth.floating)` pill, 36 tall, radius 18,
-  padding `fromSTEB(14, 0, 4, 0)`: `PulsingDot` · 8 · label (hidden below
+  padding `fromSTEB(14, 0, 4, 0)`: `PulsingDot` with `kSettlingBreaths` · 8 · label (hidden below
   640 px window width) · 8 ·
   `TextButton(Key('sharing-fallback-disconnect'), hostDisconnectViewer)` ·
   `FilledButton.tonal(Key('sharing-fallback-stop'), hostStop)`. **No

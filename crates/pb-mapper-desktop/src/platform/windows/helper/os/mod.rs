@@ -28,7 +28,7 @@ pub use identity::{
 pub use identity::{current_sid, verify_running_service, verify_server};
 #[cfg(feature = "windows-helper")]
 pub use log::{open_service_log, record_service_event, record_service_failure, rotate_service_log};
-pub use scm::service_state;
+pub use scm::{Service, service_state};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use windows::Win32::Foundation::HANDLE;
 

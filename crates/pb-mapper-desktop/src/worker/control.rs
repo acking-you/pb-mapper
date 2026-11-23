@@ -364,7 +364,11 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             return;
         }
         let lock = matches!(event.input, Input::Lock {});
-        match self.inject_slot_input(idx, &event.input) {
+        let injected = self.inject_slot_input(idx, &event.input);
+        if injected.is_ok() {
+            self.input_injected(now);
+        }
+        match injected {
             Ok(()) if lock => self.notice_all(
                 NoticeCode::Locked,
                 "The remote computer is locked".into(),

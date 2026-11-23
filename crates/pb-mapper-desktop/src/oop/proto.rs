@@ -3,6 +3,7 @@
 //! `Backend` it carries. A change to any of it bumps the helper protocol.
 use crate::{
     BackendCaps, CursorKind, CursorMode, CursorShape, DesktopContext, FailureKind, HostOs, Input,
+    RateModel,
     modes::{Mode, ModeList},
 };
 use serde::{Deserialize, Serialize};
@@ -53,7 +54,8 @@ pub(crate) enum Request {
         limits: crate::VideoLimits,
         nominal_fps: u32,
     },
-    /// Drain finished output, then submit one capture when `submit` is set.
+    /// Drain finished output, then submit one capture when `submit` is set;
+    /// the answer's `submitted` says when that capture found nothing new.
     /// A drain alone may wait up to `wait_ms` (at most 4) for encoder output
     /// while units are pending. The helper never paces.
     Video {
@@ -168,6 +170,12 @@ pub(crate) struct Response {
     pub failure: Option<FailureKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<crate::VideoFormat>,
+    /// In the answer to a `Video` request that submits: `Some(false)` when
+    /// the worker's source had no new picture to submit, which leaves the
+    /// host's tick armed. Absent, it was handed the tick, or spent it on a
+    /// full encoder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<crate::CursorPosition>,
     /// Units the worker's encoder holds, for the host's submit gate.
@@ -256,6 +264,7 @@ impl From<&BackendCaps> for StartCaps {
             cursor,
             physical_keys,
             cursor_shapes,
+            rate_model: _,
         } = *caps;
         Self {
             lock,
@@ -285,6 +294,10 @@ impl From<StartCaps> for BackendCaps {
             cursor,
             physical_keys,
             cursor_shapes,
+            // Never on the pipe: the worker's Media Foundation encoder budgets
+            // per frame, and `Nominal` is the safe start anyway, as the latch
+            // corrects it and nothing corrects `Timestamp`.
+            rate_model: RateModel::Nominal,
         }
     }
 }

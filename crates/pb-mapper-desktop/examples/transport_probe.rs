@@ -7,11 +7,15 @@
 //! Optional: --mib 4 --case tls-split --nagle (host accepted socket only).
 //! --consumer-server HOST:PORT changes only the consumer's relay address, for
 //! example an existing SSH loopback forward. It never starts that forward.
-//! --auto tries direct and reports the actual selected path and fallback stage.
+//! --auto tries direct and reports the actual selected path and fallback stage,
+//! then, once the download has arrived, both ends' direct link figures: QUIC
+//! counts loss at the sender, so the download's is the publisher's. With
+//! --local the relay coordinates direct on loopback.
 mod probe_support;
 
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, PathPolicy, RegisterOptions, RegisterRequest, RelayTransport, Transport,
+    Client, ConnectOptions, LinkStats, PathPolicy, RegisterOptions, RegisterRequest,
+    RelayTransport, Transport, TunnelDiagnostics,
 };
 use probe_support::{RelayConfig, option, relay_client};
 use quinn::rustls::{self, pki_types::ServerName};
@@ -89,7 +93,13 @@ async fn main() -> Result<()> {
         return Err("--consumer-server requires HOST:PORT".into());
     }
     let local_relay = if local {
-        Some(pb_mapper_testkit::Relay::start("transport-probe").await)
+        Some(
+            pb_mapper_testkit::Relay::start_with_direct(
+                "transport-probe",
+                direct.then(pb_mapper_testkit::loopback_direct),
+            )
+            .await,
+        )
     } else {
         None
     };
@@ -288,6 +298,19 @@ async fn run_case(
             serde_json::to_string(&diagnostic.direct)?,
             serde_json::to_string(&diagnostic.events)?,
         );
+        // The publisher's link closes with its session: read both ends while
+        // the host still waits for the last acknowledgement.
+        let links = || -> Result<()> {
+            if direct {
+                println!(
+                    "case={} publisher_link={} consumer_link={}",
+                    case.name,
+                    serde_json::to_string(&link_stats(registration.diagnostics()))?,
+                    serde_json::to_string(&link_stats(connection.diagnostics()))?,
+                );
+            }
+            Ok(())
+        };
         if case.tls {
             let mut tls = connector
                 .connect(ServerName::try_from(NAME)?, socket)
@@ -297,14 +320,14 @@ async fn run_case(
                 case.name,
                 started.elapsed().as_secs_f64() * 1000.0
             );
-            consumer_session(&mut tls, case, blocks).await
+            consumer_session(&mut tls, case, blocks, links).await
         } else {
             println!(
                 "case={} setup_ms={:.2}",
                 case.name,
                 started.elapsed().as_secs_f64() * 1000.0
             );
-            consumer_session(&mut socket, case, blocks).await
+            consumer_session(&mut socket, case, blocks, links).await
         }
     }
     .await;
@@ -325,6 +348,12 @@ async fn run_case(
     result?;
     host_result??;
     Ok(())
+}
+
+/// QUIC's view of the direct session open now, read from the end whose
+/// diagnostics these are: each end counts the losses of what it sent.
+fn link_stats(diagnostics: TunnelDiagnostics) -> Option<LinkStats> {
+    diagnostics.direct?.link.map(|link| link.stats)
 }
 
 async fn write_frame<W: AsyncWrite + Unpin>(
@@ -406,10 +435,13 @@ async fn host_session<S: AsyncRead + AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Ping, upload, then download; `links` runs once the download has arrived,
+/// before the acknowledgement that lets the host end its session.
 async fn consumer_session<S: AsyncRead + AsyncWrite + Unpin>(
     io: &mut S,
     case: Case,
     blocks: usize,
+    links: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let ping = payload(64);
     let mut reply = [0; 64];
@@ -448,9 +480,11 @@ async fn consumer_session<S: AsyncRead + AsyncWrite + Unpin>(
     io.write_u8(2).await?;
     io.flush().await?;
     receive_blocks(io, blocks).await?;
+    let elapsed = start.elapsed();
+    links()?;
     io.write_u8(3).await?;
     io.flush().await?;
-    report(case, "publisher_to_consumer", blocks, start.elapsed(), 0.0);
+    report(case, "publisher_to_consumer", blocks, elapsed, 0.0);
     Ok(())
 }
 

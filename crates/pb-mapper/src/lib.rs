@@ -69,7 +69,8 @@
 //! viewing and controlling one from anywhere (`desktop::Viewer`), each by a
 //! `pbd1.` invitation. A viewer hands out encoded H.264 or H.265 access
 //! units, or JPEG pictures, for a decoder the integrator brings. Around them
-//! are status streams (`Host::watch`, `Viewer::watch`), a reconnecting
+//! are status streams (`Host::watch`, `Viewer::watch`), a host's change wake
+//! (`Host::changes`, which needs no clock while nobody views), a reconnecting
 //! `desktop::supervisor::Supervisor` with the app's policy, input helpers
 //! (`DesktopView::display_point`, `Input::text_chunks`), the host display's
 //! mode (`Viewer::set_display_mode`, put back when the viewer leaves) and a

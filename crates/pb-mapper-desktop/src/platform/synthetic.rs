@@ -56,6 +56,8 @@ struct State {
     resets: usize,
     /// The pointer's shape under a handle: 1, 2, … as the test sets them.
     shape: Option<(u64, CursorShape)>,
+    /// Nothing on the display changes (`Probe::still`).
+    still: bool,
 }
 impl Probe {
     /// The pointer takes `shape`, under a new handle, as an OS sets a cursor.
@@ -112,6 +114,11 @@ impl Probe {
     }
     pub(crate) fn lose(&self, lost: bool) {
         self.0.lock().lost = lost;
+    }
+    /// While `still`, a pulled source's submit without a keyframe finds no
+    /// new picture, as DXGI between two presents, and submits nothing.
+    pub(crate) fn still(&self, still: bool) {
+        self.0.lock().still = still;
     }
     /// The keyboard injections so far, in order.
     pub(crate) fn typed(&self) -> Vec<Typed> {
@@ -271,8 +278,13 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
     /// Pulled, a unit is ready at the next poll; pushed, a millisecond later
     /// on the encoder's own thread, while thread C waits, which it wakes. The
     /// millisecond is waited as thread C waits, on a timer the platform does
-    /// not coalesce.
+    /// not coalesce. Pulled from a still probe, it submits only a keyframe,
+    /// which repeats the last picture. A pushed source names no time to try
+    /// again, so it is never still.
     fn submit(&mut self, keyframe: bool) -> Result<bool> {
+        if !PUSH && !keyframe && self.probe.0.lock().still {
+            return Ok(false);
+        }
         self.frames += 1;
         let display = self.probe.current();
         let frame = EncodedFrame {

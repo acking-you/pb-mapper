@@ -91,6 +91,31 @@ impl From<Encoded> for crate::EncodedFrame {
     }
 }
 
+/// What one [`Encoder::submit`] did with the caller's tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Submit {
+    /// A sample went to the encoder.
+    Submitted,
+    /// No room: the encoder holds `MAX_IN_FLIGHT`, asked for no input, or
+    /// has no free sample. Backpressure, which spends the tick; a requested
+    /// keyframe stays requested.
+    Full,
+    /// Room, and nothing worth sending: no new present, no keyframe due and
+    /// a submit within `LIVENESS_INTERVAL`, or no image captured yet. The
+    /// caller's tick stays armed, and it asks again.
+    Unchanged,
+}
+impl Submit {
+    /// Whether the caller's tick is spent: by everything but `Unchanged`,
+    /// whose tick waits for the next present.
+    pub fn spends_tick(self) -> bool {
+        match self {
+            Self::Submitted | Self::Full => true,
+            Self::Unchanged => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Statistics {
     pub unique_captures: u64,
@@ -470,16 +495,16 @@ impl Encoder {
 
     /// Capture the newest desktop image and submit at most one sample; the
     /// caller paces, and this never waits. Call `drain` first, which collects
-    /// the encoder's input requests. Returns false without submitting while the
-    /// encoder has no room (`MAX_IN_FLIGHT`, no input request, no free sample),
-    /// or when nothing is worth sending: no new image, no keyframe due, and a
-    /// submit within `LIVENESS_INTERVAL`. A requested keyframe stays requested
-    /// until a sample carries it.
-    pub fn submit(&mut self, force_keyframe: bool) -> Result<bool> {
+    /// the encoder's input requests. Submits nothing while the encoder has no
+    /// room (`Full`: `MAX_IN_FLIGHT`, no input request, no free sample), or
+    /// when nothing is worth sending (`Unchanged`: no new image, no keyframe
+    /// due, and a submit within `LIVENESS_INTERVAL`; or no image yet). A
+    /// requested keyframe stays requested until a sample carries it.
+    pub fn submit(&mut self, force_keyframe: bool) -> Result<Submit> {
         self.check_thread()?;
         self.force_keyframe |= force_keyframe;
         if self.pending.len() >= MAX_IN_FLIGHT || self.codec.need_input == 0 {
-            return Ok(false);
+            return Ok(Submit::Full);
         }
         self.latest_pending |= self.acquire()?;
         // Static desktops still send a fresh, verified liveness frame. These
@@ -490,14 +515,14 @@ impl Encoder {
                 .last_submit
                 .is_some_and(|at| at.elapsed() < LIVENESS_INTERVAL)
         {
-            return Ok(false);
+            return Ok(Submit::Unchanged);
         }
         let Some(texture) = &self.latest else {
-            return Ok(false);
+            return Ok(Submit::Unchanged);
         };
         let sample = match unsafe { self.allocator.AllocateSample() } {
             Ok(sample) => sample,
-            Err(e) if e.code() == MF_E_SAMPLEALLOCATOR_EMPTY => return Ok(false),
+            Err(e) if e.code() == MF_E_SAMPLEALLOCATOR_EMPTY => return Ok(Submit::Full),
             Err(e) => return Err(error(e)),
         };
         self.converter.convert(texture, &sample)?;
@@ -535,7 +560,7 @@ impl Encoder {
         self.latest_pending = false;
         self.stats.submitted += 1;
         self.stats.max_in_flight = self.stats.max_in_flight.max(self.pending.len());
-        Ok(true)
+        Ok(Submit::Submitted)
     }
 
     /// Copy a new desktop image, if there is one, into `latest`, and release
@@ -649,5 +674,15 @@ mod tests {
         // turned off and the viewer reconnects to H.264.
         assert!(h265_failed(false, false));
         assert!(h265_failed(true, true));
+    }
+
+    #[test]
+    fn only_an_unchanged_desktop_leaves_the_tick_armed() {
+        assert!(Submit::Submitted.spends_tick());
+        // A full encoder is backpressure: thread C skips to the next tick.
+        assert!(Submit::Full.spends_tick());
+        // Nothing new: thread C asks again, so the next present goes out as
+        // it appears rather than a tick later.
+        assert!(!Submit::Unchanged.spends_tick());
     }
 }

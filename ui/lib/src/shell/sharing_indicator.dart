@@ -114,12 +114,13 @@ String sharingLabel(BuildContext context, DesktopHostViewer viewer) {
       : l10n.sharingBeingViewed;
 }
 
-/// The dot that says this computer is watched: it breathes while the
-/// picture flows, and rests while the viewer has paused it, because nothing
-/// is captured then.
+/// The dot that says this computer is watched: while the picture flows it
+/// breathes a few times as it appears and then stays lit, still, for the
+/// rest of the session; while the viewer has paused it, a plain dot, because
+/// nothing is captured then.
 Widget _viewerDot(DesktopHostViewer viewer, Color color) => viewer.paused
     ? StatusDot(color: color, size: 7)
-    : PulsingDot(color: color, size: 7);
+    : PulsingDot(color: color, size: 7, breaths: kSettlingBreaths);
 
 /// The title-bar capsule while someone views this computer (D15), with
 /// Disconnect viewer and Stop sharing. Nothing at all otherwise. Under a
