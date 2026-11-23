@@ -7,8 +7,8 @@
 
 use crate::{
     Backend, BackendCaps, BackendError, Description, DesktopContext, DesktopKind, Display,
-    DisplaySelection, DoubleClickGuard, EncodedFrame, FailureKind, Input, Result, VideoCodec,
-    VideoFormat, VideoLimits, VideoRate, Waker,
+    DisplaySelection, DoubleClickGuard, EncodedFrame, FailureKind, Input, Presented, Result,
+    VideoCodec, VideoFormat, VideoLimits, VideoRate, Waker,
     backend::capture_checked,
     error,
     input::{Typed, cursor::confine, held::Held},
@@ -36,6 +36,9 @@ pub(crate) struct PlatformBackend<P: Platform> {
     /// before the binding.
     video: Option<(DesktopContext, P::Video)>,
     submitted_video: bool,
+    /// When the picture the last capture submitted was presented, if it
+    /// was a new one its source dated.
+    submitted_picture: Option<Presented>,
     parts: Parts<P>,
     grant: Arc<P::Grant>,
     held: Held,
@@ -70,6 +73,7 @@ impl<P: Platform> PlatformBackend<P> {
         Self {
             video: None,
             submitted_video: true,
+            submitted_picture: None,
             parts,
             grant,
             held: Held::default(),
@@ -148,9 +152,23 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         self.waker = waker;
         self.video = None;
     }
+    /// New limits that the open source can serve as it is (a frame rate
+    /// change) keep it, with its pending output: thread C asks for an IDR
+    /// anyway. Anything else, the same limits again (a recovery or a codec
+    /// change) included, drops it, and the next capture builds a new one.
     fn configure_video(&mut self, limits: VideoLimits, _nominal_fps: u32) -> Result<()> {
         limits.validate()?;
-        self.video = None;
+        let retuned = limits != self.limits
+            && match &mut self.video {
+                Some((context, video)) => {
+                    let _scope = self.parts.desktop.scope();
+                    video.retune(&context.display, limits).unwrap_or(false)
+                }
+                None => false,
+            };
+        if !retuned {
+            self.video = None;
+        }
         self.limits = limits;
         Ok(())
     }
@@ -169,6 +187,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         rate: VideoRate,
     ) -> Result<Option<EncodedFrame>> {
         self.submitted_video = true;
+        self.submitted_picture = None;
         if codec == VideoCodec::Jpeg {
             return Ok(Some(EncodedFrame {
                 format: VideoFormat {
@@ -209,17 +228,26 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             .as_mut()
             .ok_or_else(|| error("video encoder unavailable"))?
             .1;
-        // The worker paces: drain what is finished, then submit one capture.
-        let (image, submitted) = video
+        // The worker paces: drain what is finished, then submit one capture,
+        // and say when the display presented it.
+        let (image, submitted, picture) = video
             .set_rate(rate)
             .and_then(|()| video.drain())
-            .and_then(|image| video.submit(keyframe).map(|submitted| (image, submitted)))
+            .and_then(|image| {
+                let submitted = video.submit(keyframe)?;
+                Ok((
+                    image,
+                    submitted,
+                    submitted.then(|| video.presented()).flatten(),
+                ))
+            })
             .inspect_err(|_| self.video = None)?;
         if !self.verify(expected)? {
             self.video = None;
             return Err(error("desktop changed during video capture"));
         }
         self.submitted_video = submitted;
+        self.submitted_picture = picture;
         Ok(image)
     }
     /// Never blocks: the wait bounds only the helper's long-poll. A drain
@@ -244,10 +272,24 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         self.video.as_ref().map_or(0, |(_, video)| video.pending())
     }
     fn drain_poll(&self) -> Option<Duration> {
-        <P::Video as VideoSource>::DRAIN
+        self.video
+            .as_ref()
+            .map_or(<P::Video as VideoSource>::DRAIN, |(_, video)| {
+                video.drain_poll()
+            })
+    }
+    fn capture_poll(&self) -> Option<Duration> {
+        self.video
+            .as_ref()
+            .map_or(<P::Video as VideoSource>::CAPTURE_POLL, |(_, video)| {
+                video.capture_poll()
+            })
     }
     fn submitted_video(&self) -> bool {
         self.submitted_video
+    }
+    fn submitted_picture(&self) -> Option<Presented> {
+        self.submitted_picture
     }
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         self.video.as_ref()?.1.idle_until(keyframe_due)
@@ -315,6 +357,12 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             Input::Lock {} => {
                 Err(BackendError::new(FailureKind::Unsupported, "lock the desktop").into())
             }
+        }
+    }
+    fn video_paused(&mut self, paused: bool) {
+        if let Some((_, video)) = &mut self.video {
+            let _scope = self.parts.desktop.scope();
+            video.paused(paused);
         }
     }
     fn presented(&mut self, _expected: &DesktopContext) -> Result<()> {
@@ -464,8 +512,14 @@ impl Backend for NativeBackend {
     fn drain_poll(&self) -> Option<Duration> {
         self.0.drain_poll()
     }
+    fn capture_poll(&self) -> Option<Duration> {
+        self.0.capture_poll()
+    }
     fn submitted_video(&self) -> bool {
         self.0.submitted_video()
+    }
+    fn submitted_picture(&self) -> Option<Presented> {
+        self.0.submitted_picture()
     }
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         self.0.capture_idle_until(keyframe_due)
@@ -481,6 +535,9 @@ impl Backend for NativeBackend {
     }
     fn input_in_context(&mut self, expected: &DesktopContext, event: &Input) -> Result<()> {
         self.0.input_in_context(expected, event)
+    }
+    fn video_paused(&mut self, paused: bool) {
+        self.0.video_paused(paused);
     }
     fn presented(&mut self, expected: &DesktopContext) -> Result<()> {
         self.0.presented(expected)

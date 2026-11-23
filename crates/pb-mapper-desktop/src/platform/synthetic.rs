@@ -2,7 +2,9 @@
 //! behind the same `PlatformBackend` every real platform uses. `PUSH = false`
 //! is a pulled encoder that thread C polls, as Windows' MFT; `PUSH = true` is
 //! a pushing one that wakes thread C when a unit is ready, as a callback
-//! encoder does.
+//! encoder does. A pushing source can also be a dated display
+//! (`Probe::date`): pictures presented at a set rate on the test's clock,
+//! each waking thread C as it lands, as ScreenCaptureKit's do.
 
 use super::{
     CursorSource, Desktop, DisplayModes, HostSupport, Injector, Parts, Platform, StillCapture,
@@ -10,8 +12,9 @@ use super::{
 };
 use crate::{
     BackendError, Button, CursorMode, CursorShape, DRAIN_POLL, Display, DisplaySelection,
-    EncodedFrame, FailureKind, HostOs, Key, Result, VideoCodec, VideoFormat, VideoLimits,
-    VideoRate, Waker,
+    EncodedFrame, FailureKind, HostOs, Key, Presented, Result, VideoCodec, VideoFormat,
+    VideoLimits, VideoRate, Waker,
+    codec::pipeline::{FIRST_SUBMIT_WAIT, LIVENESS_INTERVAL},
     input::held::Pressed,
     modes::{Mode, Setting},
 };
@@ -58,7 +61,52 @@ struct State {
     shape: Option<(u64, CursorShape)>,
     /// Nothing on the display changes (`Probe::still`).
     still: bool,
+    /// Video sources opened.
+    opened: usize,
+    /// The dated display, once `Probe::date` set one.
+    dated: Option<Dated>,
 }
+
+/// The test's clock.
+pub(crate) type TestClock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// A display presenting every `period` nanoseconds from `epoch`, on the
+/// test's clock. Each present lands when `Probe::land` reaches it, replacing
+/// the one before if no capture took that, and wakes the source's thread C.
+struct Dated {
+    epoch: Instant,
+    period: f64,
+    clock: TestClock,
+    /// The newest present landed, and whether a capture took it.
+    landed: Option<u64>,
+    fresh: bool,
+    /// Presents landed since the last capture took one.
+    since_take: u32,
+    /// Presents a newer one replaced before any capture took them.
+    replaced: u64,
+    /// Each take: the present's time, and when the capture took it.
+    takes: Vec<(Instant, Instant)>,
+    /// The open source's wake.
+    waker: Option<Waker>,
+}
+impl Dated {
+    fn at(&self, present: u64) -> Instant {
+        self.epoch + Duration::from_nanos((present as f64 * self.period).round() as u64)
+    }
+    /// The newest present at or before `now`.
+    fn newest(&self, now: Instant) -> Option<u64> {
+        let since = now.checked_duration_since(self.epoch)?;
+        let mut present = (since.as_nanos() as f64 / self.period) as u64;
+        while self.at(present + 1) <= now {
+            present += 1;
+        }
+        while present > 0 && self.at(present) > now {
+            present -= 1;
+        }
+        Some(present)
+    }
+}
+
 impl Probe {
     /// The pointer takes `shape`, under a new handle, as an OS sets a cursor.
     pub(crate) fn set_shape(&self, shape: CursorShape) {
@@ -126,6 +174,74 @@ impl Probe {
     }
     pub(crate) fn released(&self) -> Vec<Pressed> {
         self.0.lock().released.clone()
+    }
+    /// How many video sources were opened.
+    pub(crate) fn opened(&self) -> usize {
+        self.0.lock().opened
+    }
+    /// From now on a pushing source is a display presenting at `hz` from
+    /// `epoch` on `clock`, whose presents `land` delivers; set it before the
+    /// source opens.
+    pub(crate) fn date(&self, hz: f64, epoch: Instant, clock: TestClock) {
+        self.0.lock().dated = Some(Dated {
+            epoch,
+            period: 1e9 / hz,
+            clock,
+            landed: None,
+            fresh: false,
+            since_take: 0,
+            replaced: 0,
+            takes: Vec::new(),
+            waker: None,
+        });
+    }
+    /// The first present after `now`.
+    pub(crate) fn next_present(&self, now: Instant) -> Option<Instant> {
+        let state = self.0.lock();
+        let dated = state.dated.as_ref()?;
+        Some(dated.at(dated.newest(now).map_or(0, |present| present + 1)))
+    }
+    /// The presents up to `now` land: each replaces an untaken one, and a
+    /// new one wakes the source's thread C.
+    pub(crate) fn land(&self, now: Instant) {
+        let mut state = self.0.lock();
+        let Some(dated) = state.dated.as_mut() else {
+            return;
+        };
+        let Some(newest) = dated.newest(now) else {
+            return;
+        };
+        // Before the first, only the newest present counts.
+        let first = dated.landed.map_or(newest, |landed| landed + 1);
+        if newest < first {
+            return;
+        }
+        let landing = newest - first + 1;
+        dated.replaced += landing - u64::from(!dated.fresh);
+        dated.since_take = dated
+            .since_take
+            .saturating_add(u32::try_from(landing).unwrap_or(u32::MAX));
+        dated.landed = Some(newest);
+        dated.fresh = true;
+        if let Some(waker) = &dated.waker {
+            waker.wake();
+        }
+    }
+    /// Each picture a capture took: when it was presented, and taken.
+    pub(crate) fn takes(&self) -> Vec<(Instant, Instant)> {
+        self.0
+            .lock()
+            .dated
+            .as_ref()
+            .map_or_else(Vec::new, |dated| dated.takes.clone())
+    }
+    /// Presents a newer one replaced before a capture took them.
+    pub(crate) fn replaced(&self) -> u64 {
+        self.0
+            .lock()
+            .dated
+            .as_ref()
+            .map_or(0, |dated| dated.replaced)
     }
 }
 
@@ -243,9 +359,17 @@ type Flight = Arc<Mutex<VecDeque<Option<(Instant, EncodedFrame)>>>>;
 pub(crate) struct SynVideo<const PUSH: bool> {
     probe: Probe,
     codec: VideoCodec,
+    limits: VideoLimits,
     waker: Waker,
     flight: Flight,
     frames: u64,
+    /// A dated display's source: when it opened and last submitted, on the
+    /// test's clock; a keyframe asked for and not yet submitted; and the
+    /// last submit's present.
+    opened: Option<Instant>,
+    last_submit: Option<Instant>,
+    keyframe: bool,
+    presented: Option<Presented>,
 }
 impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
     type Grant = Probe;
@@ -257,17 +381,38 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
         probe: &Probe,
         _: &Display,
         codec: VideoCodec,
-        _: VideoLimits,
+        limits: VideoLimits,
         _: VideoRate,
         waker: &Waker,
     ) -> Result<Self> {
+        let mut state = probe.0.lock();
+        state.opened += 1;
+        let opened = state.dated.as_mut().filter(|_| PUSH).map(|dated| {
+            dated.waker = Some(waker.clone());
+            (dated.clock)()
+        });
+        drop(state);
         Ok(Self {
             probe: probe.clone(),
             codec,
+            limits,
             waker: waker.clone(),
             flight: Flight::default(),
             frames: 0,
+            opened,
+            last_submit: None,
+            keyframe: true,
+            presented: None,
         })
+    }
+    /// Serves new limits of the same size as it is; a size change rebuilds.
+    fn retune(&mut self, _: &Display, limits: VideoLimits) -> Result<bool> {
+        let same_size = (limits.max_width, limits.max_height)
+            == (self.limits.max_width, self.limits.max_height);
+        if same_size {
+            self.limits = limits;
+        }
+        Ok(same_size)
     }
     fn codec(&self) -> VideoCodec {
         self.codec
@@ -282,6 +427,10 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
     /// which repeats the last picture. A pushed source names no time to try
     /// again, so it is never still.
     fn submit(&mut self, keyframe: bool) -> Result<bool> {
+        self.presented = None;
+        if self.opened.is_some() {
+            return self.submit_dated(keyframe);
+        }
         if !PUSH && !keyframe && self.probe.0.lock().still {
             return Ok(false);
         }
@@ -322,6 +471,31 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
         });
         Ok(true)
     }
+    fn presented(&self) -> Option<Presented> {
+        self.presented
+    }
+    /// A dated display's source as ScreenCaptureKit's: a new picture at
+    /// once, else the last one again for a keyframe or every
+    /// `LIVENESS_INTERVAL`; it wakes thread C for a new one.
+    fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        let opened = self.opened?;
+        let fresh = self
+            .probe
+            .0
+            .lock()
+            .dated
+            .as_ref()
+            .is_some_and(|dated| dated.fresh);
+        match self.last_submit {
+            _ if fresh => None,
+            None => Some(opened + FIRST_SUBMIT_WAIT),
+            Some(_) if self.keyframe => None,
+            Some(last) => {
+                let until = last + LIVENESS_INTERVAL;
+                Some(keyframe_due.map_or(until, |due| due.min(until)))
+            }
+        }
+    }
     fn drain(&mut self) -> Result<Option<EncodedFrame>> {
         let mut flight = self.flight.lock();
         if flight.front().is_none_or(Option::is_none) {
@@ -335,6 +509,54 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
     }
     fn pending(&self) -> usize {
         self.flight.lock().len()
+    }
+}
+
+impl<const PUSH: bool> SynVideo<PUSH> {
+    /// The newest present if no capture took it, else a repeat for a
+    /// keyframe or liveness, else nothing; the unit is ready at once.
+    fn submit_dated(&mut self, keyframe: bool) -> Result<bool> {
+        self.keyframe |= keyframe;
+        let mut state = self.probe.0.lock();
+        let Some(dated) = state.dated.as_mut() else {
+            return Ok(false);
+        };
+        let now = (dated.clock)();
+        let repeat = self.keyframe
+            || self
+                .last_submit
+                .is_some_and(|last| now >= last + LIVENESS_INTERVAL);
+        match dated.landed {
+            Some(present) if dated.fresh => {
+                let at = dated.at(present);
+                self.presented = Some(Presented::new(at, dated.since_take));
+                dated.fresh = false;
+                dated.since_take = 0;
+                dated.takes.push((at, now));
+            }
+            Some(_) if repeat && self.last_submit.is_some() => {}
+            _ => return Ok(false),
+        }
+        drop(state);
+        self.frames += 1;
+        let display = self.probe.current();
+        let frame = EncodedFrame {
+            format: VideoFormat {
+                codec: self.codec,
+                width: display.width,
+                height: display.height,
+                keyframe: self.keyframe,
+                duplicate: self.presented.is_none(),
+                pts_us: self.frames * 16_667,
+                ..VideoFormat::default()
+            },
+            bytes: vec![1; 64],
+        };
+        self.flight.lock().push_back(Some((Instant::now(), frame)));
+        self.waker.wake();
+        self.keyframe = false;
+        self.last_submit = Some(now);
+        Ok(true)
     }
 }
 

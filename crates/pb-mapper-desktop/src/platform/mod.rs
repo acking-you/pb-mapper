@@ -27,7 +27,7 @@ pub(crate) mod windows;
 use crate::{
     Access, BackendCaps, BackendError, Button, CursorMode, CursorShape, DesktopKind, Display,
     DisplaySelection, DoubleClickGuard, EncodedFrame, FailureKind, HostOptions, HostOs, Key,
-    Permission, RateModel, Result, VideoCodec, VideoLimits, VideoRate, Waker,
+    Permission, Presented, RateModel, Result, VideoCodec, VideoLimits, VideoRate, Waker,
     input::held::Pressed,
     launch::{Launch, Launcher},
     modes::{Journal, Mode, Setting},
@@ -152,8 +152,14 @@ pub(crate) trait Desktop: Sized {
 pub(crate) trait VideoSource: Sized {
     type Grant;
     /// `Some(poll)`: output that thread C polls for. `None`: the source
-    /// pushes, and wakes thread C.
+    /// pushes, and wakes thread C. `PlatformBackend` reports it while no
+    /// source is open, and the open source's `drain_poll` once one is.
     const DRAIN: Option<Duration>;
+    /// `Some(poll)`: a capture with no new picture that thread C asks again
+    /// this often while the desktop is active. `None`: the source wakes
+    /// thread C for a new picture. Reported while no source is open, as
+    /// `DRAIN` is.
+    const CAPTURE_POLL: Option<Duration> = Self::DRAIN;
     /// How its encoder budgets the bitrate, which each session's QoS starts
     /// from: one frame's share at the nominal rate per frame, unless the
     /// platform's encoder was measured to budget per second.
@@ -174,12 +180,19 @@ pub(crate) trait VideoSource: Sized {
     /// Capture and submit one picture, without blocking. A source with no
     /// new picture to submit reports `false`, leaving the worker's tick
     /// armed: a push source names when it needs the next one (`idle_until`)
-    /// or wakes the worker, and the worker asks a pull source (`DRAIN` is
-    /// `Some`) again, after that interval while the desktop is active and a
-    /// period later while it is still. A source whose encoder is full returns
+    /// or wakes the worker, and the worker asks a pull source
+    /// (`capture_poll` is `Some`) again, after that interval while the
+    /// desktop is active and a period later while it is still. A source whose
+    /// encoder is full returns
     /// `true`, which spends the tick as backpressure, and keeps the IDR
     /// request.
     fn submit(&mut self, keyframe: bool) -> Result<bool>;
+    /// When the display presented the picture the last `submit` submitted,
+    /// and the presents it covers; `None` when it submitted nothing, a
+    /// repeat, or a picture it cannot date (`Backend::submitted_picture`).
+    fn presented(&self) -> Option<Presented> {
+        None
+    }
     /// When to try again on a push source, if it has nothing ready now.
     fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         let _ = keyframe_due;
@@ -187,6 +200,29 @@ pub(crate) trait VideoSource: Sized {
     }
     fn drain(&mut self) -> Result<Option<EncodedFrame>>;
     fn pending(&self) -> usize;
+    /// How often thread C polls this source's output (`DRAIN`). A method,
+    /// so that an encoder that cannot push after all can fall back to
+    /// polling.
+    fn drain_poll(&self) -> Option<Duration> {
+        Self::DRAIN
+    }
+    /// How often thread C asks this source's idle capture again
+    /// (`CAPTURE_POLL`), as `drain_poll` is a method.
+    fn capture_poll(&self) -> Option<Duration> {
+        Self::CAPTURE_POLL
+    }
+    /// Every viewer paused, or one resumed (`Backend::video_paused`). A pull
+    /// source does nothing while thread C captures nothing.
+    fn paused(&mut self, paused: bool) {
+        let _ = paused;
+    }
+    /// Serve `limits` on `display` as this source is, without a rebuild:
+    /// `Ok(true)` when it now does (only the frame rate changed, say), and
+    /// `Ok(false)` or a failure when it must be built again.
+    fn retune(&mut self, display: &Display, limits: VideoLimits) -> Result<bool> {
+        let _ = (display, limits);
+        Ok(false)
+    }
 }
 
 /// Injection primitives. The release obligation, validation and the desktop
