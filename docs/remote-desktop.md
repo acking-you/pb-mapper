@@ -972,6 +972,18 @@ does not require Flutter or a POCOX runtime.
   input, and a failed invitation does not start a capture backend. A peer of
   another desktop protocol version fails the handshake with `VersionMismatch`
   ("update pb-mapper on both computers"), never mid-session.
+- A session is one TLS connection, an ordered byte stream each way, and it
+  carries everything: video gets no QUIC stream per frame, nor one apart from
+  control. A lost packet holds back what follows it in that direction until
+  QUIC or TCP retransmits it, but the transport keeps receiving and buffering
+  those later bytes and delivers them the moment the retransmission lands. With
+  an infinite GOP and no long-term references, a frame after a lost one cannot
+  be decoded before the lost one arrives, whatever stream carries it, so
+  separate streams would deliver nothing the decoder could use sooner. Input,
+  receipts and probe echoes travel the other way and never wait behind lost
+  video, and probes stay in order with the video whose queue they measure. The
+  relay pairs one stream per session, and a relay TCP leg or LAN TCP carries
+  only one.
 - Input binds to a desktop/display generation and to a presentation the viewer
   validated less than two seconds ago. `Viewer::input(generation, &inputs)`
   sends a batch of up to 16, stamps the presented frame and consecutive
