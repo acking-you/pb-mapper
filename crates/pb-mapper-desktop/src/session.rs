@@ -27,6 +27,7 @@ use crate::{
     qos::{Qos, TargetValues},
     scheduler::Wake,
     shared::{PeerCursorSnapshot, Policy, SessionShared, Targets},
+    watch::ChangeSignal,
     wire::{self, WireError},
     worker::WorkerExit,
 };
@@ -135,6 +136,9 @@ pub(crate) struct Session {
     /// B-recv refused a control request at the edge; B-send reports it.
     control_denied: AtomicBool,
     ending: Mutex<Option<End>>,
+    /// The host's: bumped when what its status reads of this session
+    /// changed (the record, pause, quality, path).
+    changes: ChangeSignal,
 }
 impl Session {
     /// `capabilities` are the viewer's; `offered`, what the host listed in
@@ -164,6 +168,7 @@ impl Session {
             RateModel::Nominal,
             capabilities,
             offered,
+            ChangeSignal::new(),
         )
     }
 
@@ -185,6 +190,7 @@ impl Session {
         rate_model: RateModel,
         capabilities: &[String],
         offered: &[String],
+        changes: ChangeSignal,
     ) -> Arc<Self> {
         let now = Instant::now();
         let listed = |wanted: &str| capabilities.iter().any(|capability| capability == wanted);
@@ -222,6 +228,7 @@ impl Session {
             credit_changed: Notify::new(),
             control_denied: AtomicBool::new(false),
             ending: Mutex::new(None),
+            changes,
         })
     }
 
@@ -370,24 +377,38 @@ impl Session {
             }
             ViewerMessage::Quality { preset } => {
                 let produced = shared.outgoing.produced();
+                let before = self.quality();
                 self.update_qos(now, |qos| qos.set_preset(preset, now, produced));
+                if self.quality() != before {
+                    self.changes.bump();
+                }
             }
             ViewerMessage::Pause {} => {
+                let paused = self.paused();
                 self.update_qos(now, Qos::set_paused);
                 shared.lane.push(LaneCommand::EndControl);
+                if !paused {
+                    self.changes.bump();
+                }
             }
             ViewerMessage::Resume {} => {
+                let paused = self.paused();
                 self.update_qos(now, |qos| qos.resume(now));
                 shared.idr.lock().force(IdrReason::Resume);
                 shared.wake.notify();
                 self.credit_changed.notify_one();
+                if paused {
+                    self.changes.bump();
+                }
             }
             ViewerMessage::Path { route } => {
                 let code = match route {
                     Route::Direct => 1,
                     Route::RelayTcp | Route::RelayQuic => 2,
                 };
-                self.route.store(code, Ordering::Release);
+                if self.route.swap(code, Ordering::AcqRel) != code {
+                    self.changes.bump();
+                }
                 self.qos.lock().reset_baseline();
             }
             ViewerMessage::Control { enabled } => {

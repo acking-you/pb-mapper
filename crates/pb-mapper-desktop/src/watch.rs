@@ -1,8 +1,39 @@
 //! Status as a stream: `Host::watch` and `Viewer::watch` publish a status
-//! when it changes, and end with the host or the viewer.
+//! when it changes, and end with the host or the viewer; `Host::changes`
+//! only says that a host's status may have changed, with nothing sampled.
 use crate::{Host, HostStatus, HostViewer, NoticeInfo, Viewer, ViewerState, ViewerStatus};
-use std::{future::Future, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 use tokio::sync::watch;
+
+/// What wakes a host's [`HostChanges`]: the host and each of its sessions
+/// hold one and bump it where something its status shows may have changed.
+/// Bumps that no receiver has seen yet wake it once.
+#[derive(Clone)]
+pub(crate) struct ChangeSignal(Arc<watch::Sender<u64>>);
+impl ChangeSignal {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(watch::Sender::new(0)))
+    }
+    /// Never awaits or allocates, so it is safe under a lock and in `Drop`;
+    /// with no receiver it only counts.
+    pub(crate) fn bump(&self) {
+        self.0.send_modify(|count| *count = count.wrapping_add(1));
+    }
+    pub(crate) fn subscribe(&self) -> HostChanges {
+        HostChanges(self.0.subscribe())
+    }
+}
+
+/// Wakes when a host's status may have changed: see [`Host::changes`].
+pub struct HostChanges(watch::Receiver<u64>);
+impl HostChanges {
+    /// Resolves at the next change after the last one this saw, at once if
+    /// one came since; however many came, once. False once the host and
+    /// every task it ran are gone, after which nothing changes.
+    pub async fn changed(&mut self) -> bool {
+        self.0.changed().await.is_ok()
+    }
+}
 
 impl Host {
     /// This host's status now, then each time it changes, sampled every

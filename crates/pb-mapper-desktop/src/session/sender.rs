@@ -232,13 +232,21 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     /// Take what the engine published last into `engine`, then write its
     /// `State` and its notice, each only if new.
     async fn write_engine(&mut self) -> Result<(), Abandoned> {
-        {
+        let record_changed = {
             // Compared, not `has_changed`: `wait` may already have marked a
             // new value seen through `changed`.
             let latest = self.state.borrow_and_update();
-            if *latest != self.engine {
+            let changed = *latest != self.engine;
+            // The record, unlike the figures beside it, is what the host's
+            // status reads.
+            let record_changed = changed && latest.record != self.engine.record;
+            if changed {
                 self.engine.clone_from(&latest);
             }
+            record_changed
+        };
+        if record_changed {
+            self.session.changes.bump();
         }
         self.write_state().await?;
         let notice = match &self.engine.notice {

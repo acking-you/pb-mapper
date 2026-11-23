@@ -17,6 +17,7 @@ use crate::{
     security::HostIdentity,
     session::{Session, stop_message},
     shared::Policy,
+    watch::{ChangeSignal, HostChanges},
     worker::{self, RoomShared, RoomSlotConfig, WorkerExit, WorkerHandle},
 };
 use parking_lot::Mutex;
@@ -67,6 +68,9 @@ struct Shared {
     restore_pending: AtomicBool,
     /// Wakes that retry at once.
     restore: tokio::sync::Notify,
+    /// Bumped wherever `status` may now read otherwise: see
+    /// [`Host::changes`].
+    changes: ChangeSignal,
 }
 
 pub(super) struct RoomSlot {
@@ -422,6 +426,7 @@ impl Host {
             // a restart too starts here.
             restore_pending: AtomicBool::new(true),
             restore: tokio::sync::Notify::new(),
+            changes: ChangeSignal::new(),
         });
         let cancel = CancellationToken::new();
         let restore = launch
@@ -537,6 +542,19 @@ impl Host {
     pub fn status(&self) -> HostStatus {
         self.shared.status()
     }
+    /// Wakes, carrying nothing, when [`Self::status`] may read otherwise: a
+    /// viewer arrived or left; a session's state, control, display, pause,
+    /// quality or reported path changed; control was allowed or withdrawn;
+    /// or hosting stopped. Each wake comes after the change, so a status
+    /// read then shows it, and a burst wakes it once. What moves on its
+    /// own is not announced: a viewer's `since_ms`, and the path of one
+    /// that never reported its own. A waiting host bumps nothing until one
+    /// of these happens, and a bump that nothing waits for only counts. It
+    /// ends, `changed` returning false, once the host and everything it ran
+    /// are gone; it never keeps the host alive.
+    pub fn changes(&self) -> HostChanges {
+        self.shared.changes.subscribe()
+    }
     /// What reads this host's status apart from the host, without keeping
     /// it, or its registration, alive.
     pub(crate) fn status_handle(&self) -> HostStatusHandle {
@@ -590,6 +608,7 @@ impl Host {
         if let Some(room) = self.shared.room.lock().clone() {
             room.shared.wake.notify();
         }
+        self.shared.changes.bump();
     }
     /// Stop hosting; a connected viewer hears `Stopped{host_stopped}`.
     pub async fn stop(&self) -> Result<()> {
@@ -609,14 +628,14 @@ impl Host {
             let _ = task.await;
         }
         join.take();
-        self.shared
-            .registration
-            .stop()
-            .await
-            .map_err(io::Error::other)?;
-        self.shared.stopped.store(true, Ordering::Release);
-        self.last.send_replace(Some(self.shared.status()));
-        Ok(())
+        let stopped = self.shared.registration.stop().await;
+        if stopped.is_ok() {
+            self.shared.stopped.store(true, Ordering::Release);
+            self.last.send_replace(Some(self.shared.status()));
+        }
+        // Control is withdrawn even when the relay did not take the stop.
+        self.shared.changes.bump();
+        stopped.map_err(io::Error::other)
     }
 }
 impl Drop for Host {

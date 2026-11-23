@@ -491,7 +491,9 @@ Nothing in the SDK crates knows it exists.
     Settings>`
   - `watch.rs`: `Host::watch`, `Viewer::watch` — status as a
     `tokio::sync::watch`, sent when it changes, per-frame fields aside,
-    ending with the host or viewer
+    ending with the host or viewer; and `Host::changes` (`HostChanges`), a
+    wake with no status that the host and its sessions bump where what the
+    status shows changes, so nothing samples an idle host
   - `mapping.rs`: `DesktopView::display_point`, `Input::text_chunks`
   - `tests.rs`, `tests/session.rs`: Tests over a real relay and TLS, the second
     end to end; `slow_link.rs`: the ignored acceptance cases; `test_util.rs`:

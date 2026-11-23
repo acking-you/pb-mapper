@@ -890,7 +890,14 @@ does not require Flutter or a POCOX runtime.
   app's sharing to a ready service under the same invitation; `revoked` for
   revoked trust, whether the app or the service hosts). A stop returns once the
   viewer has read `Stopped` and closed, or after 1 s.
-  `set_control_allowed` revokes or restores control live.
+  `set_control_allowed` revokes or restores control live. `Host::changes`
+  wakes, carrying nothing, after anything `status` shows changed: a viewer
+  arrived (before its backend has started) or left, a session's state,
+  control, display, pause, quality or reported path, the control policy, or
+  a stop; a burst wakes it once. A viewer's `since_ms` moves without a wake.
+  A waiting host bumps nothing, so an embedder that shows the host needs no
+  clock while nobody is connected. `Host::watch` samples `status` on a clock
+  instead.
 - A backend is constructed, used and dropped on its dedicated capture/input
   worker. `Backend` deliberately has no `Send` requirement: COM objects and
   desktop bindings remain on their owner thread. The factory itself is

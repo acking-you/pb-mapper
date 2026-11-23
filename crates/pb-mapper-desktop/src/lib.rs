@@ -85,6 +85,7 @@ pub use viewer::{
     VideoSink, VideoUnit, Viewer, ViewerConfig, ViewerLink, ViewerReason, ViewerState, ViewerStats,
     ViewerStatus,
 };
+pub use watch::HostChanges;
 
 /// What only a Windows build has.
 #[cfg(windows)]
