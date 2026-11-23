@@ -23,9 +23,12 @@ pub enum ConsoleState {
     Unlocked,
 }
 
+/// The approved owner's login, attested in full, while it holds the active
+/// console: the background host keeps it, and rechecks it with
+/// [`SessionIdentity::check`] while the console's session is unchanged.
 #[cfg(feature = "windows-helper")]
-pub fn background_session(owner_sid: &str) -> Result<Option<u32>> {
-    Ok(available_owner_session(owner_sid)?.map(|identity| identity.session))
+pub fn background_session(owner_sid: &str) -> Result<Option<SessionIdentity>> {
+    available_owner_session(owner_sid)
 }
 
 #[cfg(feature = "windows-helper")]

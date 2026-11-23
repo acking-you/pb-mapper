@@ -6,7 +6,10 @@ use super::{
     storage::{Saved, clear_marker, client, load, mark_revoked, namespace, remove, save},
     *,
 };
-use crate::{Host, HostOptions, HostState, StopReason};
+use crate::{
+    Host, HostOptions, HostState, StopReason,
+    platform::login::{self, Attest},
+};
 use pb_mapper_core::timeout::RetryBackoff;
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{
@@ -46,6 +49,7 @@ pub(crate) async fn run(stop: CancellationToken) -> Result<()> {
         host: None,
         pending: None,
         session: None,
+        login: None,
         message,
         retry_at: Instant::now(),
         retry: retry(),
@@ -95,12 +99,21 @@ pub(crate) async fn run(stop: CancellationToken) -> Result<()> {
     outcome
 }
 
+/// The owner's login as the supervisor last attested it in full, and when it
+/// was attested or last rechecked.
+struct Login {
+    identity: os::SessionIdentity,
+    checked: Instant,
+}
+
 struct Supervisor {
     saved: Option<Saved>,
     enabled: bool,
     host: Option<Host>,
     pending: Option<JoinHandle<Result<Host>>>,
     session: Option<u32>,
+    /// What `owner_session` attested, while the service follows the login.
+    login: Option<Login>,
     message: String,
     retry_at: Instant,
     retry: RetryBackoff,
@@ -285,10 +298,63 @@ impl Supervisor {
     }
     async fn reconcile(&mut self, owner_sid: &str) {
         if !self.enabled || self.saved.is_none() {
+            self.login = None;
             return;
         }
-        self.reconcile_session(os::background_session(owner_sid))
-            .await;
+        let observed = self.owner_session(
+            os::active_session(),
+            // The same session, logon time, user and domain: the login
+            // whose SID was attested.
+            |identity| identity.check().is_ok(),
+            || os::background_session(owner_sid),
+        );
+        self.reconcile_session(observed).await;
+    }
+    /// The owner's console session, with `active` the console's session id
+    /// now, asking Windows only what `login::attest` says this tick needs:
+    /// while the console's session is the one attested, `recheck` every
+    /// `login::RECHECK`, a session query, instead of `attest_login`, its
+    /// token and SID, every tick.
+    fn owner_session(
+        &mut self,
+        active: u32,
+        recheck: impl FnOnce(&os::SessionIdentity) -> bool,
+        attest_login: impl FnOnce() -> Result<Option<os::SessionIdentity>>,
+    ) -> Result<Option<u32>> {
+        let now = Instant::now();
+        let starting = self.host.is_none() && self.pending.is_none() && now >= self.retry_at;
+        let attested = self.login.as_ref().map(|last| {
+            (
+                last.identity.session,
+                now.saturating_duration_since(last.checked),
+            )
+        });
+        if let Some(last) = self.login.as_mut() {
+            match login::attest(attested, active, starting) {
+                Attest::Trust => return Ok(Some(last.identity.session)),
+                Attest::Recheck => {
+                    if recheck(&last.identity) {
+                        last.checked = now;
+                        return Ok(Some(last.identity.session));
+                    }
+                }
+                Attest::Full => {}
+            }
+        }
+        match attest_login() {
+            Ok(identity) => {
+                let session = identity.as_ref().map(|identity| identity.session);
+                self.login = identity.map(|identity| Login {
+                    identity,
+                    checked: now,
+                });
+                Ok(session)
+            }
+            Err(failure) => {
+                self.login = None;
+                Err(failure)
+            }
+        }
     }
     async fn reconcile_session(&mut self, observed: Result<Option<u32>>) {
         let session = match observed {
@@ -438,6 +504,7 @@ mod tests {
             host: None,
             pending: None,
             session: None,
+            login: None,
             message: String::new(),
             retry_at: Instant::now(),
             retry: retry(),
@@ -636,6 +703,78 @@ mod tests {
         assert_ne!(supervisor.message, "waiting_for_owner_session");
         supervisor.reconcile_session(Ok(None)).await;
         assert_eq!(supervisor.message, "waiting_for_owner_session");
+    }
+
+    /// While it hosts, the supervisor asks Windows nothing about a login it
+    /// attested on the console's session, rechecks that login once
+    /// `RECHECK` has passed, and attests in full when the console changes
+    /// hands, when a recheck fails and before every start.
+    #[tokio::test(start_paused = true)]
+    async fn an_attested_login_is_trusted_between_rechecks_and_never_for_a_start() {
+        let identity = |session| os::SessionIdentity {
+            session,
+            logon_time: 100,
+            user: "owner".into(),
+            domain: "desk".into(),
+        };
+        let attested = || -> Result<Option<os::SessionIdentity>> { Ok(Some(identity(7))) };
+        let unasked = || -> Result<Option<os::SessionIdentity>> { panic!("attested in full") };
+        let unchecked = |_: &os::SessionIdentity| -> bool { panic!("rechecked") };
+        let mut supervisor = state(Saved::prepare(options(), "owner-one", None, None).unwrap());
+        // A tick that may start the host attests in full.
+        assert_eq!(
+            supervisor.owner_session(7, unchecked, attested).unwrap(),
+            Some(7)
+        );
+        // Hosting, the login stands on the same console session.
+        supervisor.pending = Some(tokio::spawn(std::future::pending::<Result<Host>>()));
+        assert_eq!(
+            supervisor.owner_session(7, unchecked, unasked).unwrap(),
+            Some(7)
+        );
+        // Once `RECHECK` has passed it is rechecked, and stands again.
+        tokio::time::advance(login::RECHECK).await;
+        assert_eq!(
+            supervisor.owner_session(7, |_| true, unasked).unwrap(),
+            Some(7)
+        );
+        assert_eq!(
+            supervisor.owner_session(7, unchecked, unasked).unwrap(),
+            Some(7)
+        );
+        // A failed recheck attests in full: the owner signed out.
+        tokio::time::advance(login::RECHECK).await;
+        assert_eq!(
+            supervisor.owner_session(7, |_| false, || Ok(None)).unwrap(),
+            None
+        );
+        assert!(supervisor.login.is_none());
+        // Another console session is attested at once, and a failure to
+        // attest forgets the login it had.
+        supervisor.owner_session(7, unchecked, attested).unwrap();
+        assert_eq!(
+            supervisor
+                .owner_session(8, unchecked, || Ok(Some(identity(8))))
+                .unwrap(),
+            Some(8)
+        );
+        assert!(
+            supervisor
+                .owner_session(9, unchecked, || Err(error("WTSQueryUserToken failed")))
+                .is_err()
+        );
+        assert!(supervisor.login.is_none());
+        // Before a start, even a login attested this instant is attested again.
+        supervisor.owner_session(7, unchecked, attested).unwrap();
+        supervisor.pending.take().unwrap().abort();
+        let mut asked = false;
+        supervisor
+            .owner_session(7, unchecked, || {
+                asked = true;
+                attested()
+            })
+            .unwrap();
+        assert!(asked);
     }
 
     #[tokio::test]

@@ -6,6 +6,10 @@
 //! one adds `platform/<os>/` and an arm of [`Current`]. "Platforms" in
 //! `docs/remote-desktop.md` is the guide.
 
+// The Windows background service's checks of its owner's login: pure, so
+// every platform tests them.
+#[cfg(any(all(windows, feature = "windows-helper"), test))]
+pub(crate) mod login;
 // The OS parts build on macOS alone; its pure tables are tested on every
 // platform.
 #[cfg(any(target_os = "macos", test))]
