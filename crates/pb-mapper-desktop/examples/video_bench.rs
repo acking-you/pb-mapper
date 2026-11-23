@@ -32,13 +32,21 @@
 //! and the cycles its thread ran in them, per access unit; and the median and
 //! mean of each of a submit that converted a capture and of a drain that
 //! returned a unit. Either way it prints the capture calls per second, and
-//! the polls among them: the calls that found nothing new.
+//! the polls among them: the calls that found nothing new; and, with thread
+//! C's own pacer anchoring each tick on the present it took, the wait from
+//! a present to the submit that took it (p50 and p95), the share of submits
+//! whose picture was dated, and the presents no submit took
+//! (`coalesced_presents`).
 #[cfg(windows)]
 mod probe_support;
 // The `--pace` classifier, shared with the macOS encoder's measurement test.
 #[cfg(windows)]
 #[path = "../src/codec/rate_fit.rs"]
 mod rate_fit;
+// Thread C's capture pacer itself.
+#[cfg(windows)]
+#[path = "../src/pacer.rs"]
+mod pacer;
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -107,7 +115,7 @@ mod counting {
 /// The benchmark: its options, the paced loop and the report.
 #[cfg(windows)]
 mod bench {
-    use crate::{pattern::Pattern, probe_support::option};
+    use crate::{pacer::Pacer, pattern::Pattern, probe_support::option};
     use pb_mapper_desktop::{
         Backend, DRAIN_POLL, Display, DisplaySelection, NativeBackend, VideoCodec, VideoLimits,
         VideoRate, displays, native_backend,
@@ -281,6 +289,14 @@ mod bench {
         let mut sorted = samples.to_vec();
         sorted.sort_by(f64::total_cmp);
         sorted.get(sorted.len() / 2).copied().unwrap_or(0.0)
+    }
+
+    /// The `percent` quantile of `samples`, 0 without any.
+    fn quantile(samples: &[f64], percent: usize) -> f64 {
+        let mut sorted = samples.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        let at = (sorted.len() * percent / 100).min(sorted.len().saturating_sub(1));
+        sorted.get(at).copied().unwrap_or(0.0)
     }
 
     fn mean(samples: &[f64]) -> f64 {
@@ -485,6 +501,12 @@ mod bench {
         /// polls a still or slowly changing desktop costs.
         captures: u64,
         polls: u64,
+        /// Submits that spent their tick, and from each dated picture's
+        /// present to the submit that took it, in milliseconds.
+        submits: u64,
+        present_waits: Vec<f64>,
+        /// The presents the backend's dated pictures covered beyond one each.
+        backend_coalesced: u64,
         /// What the encoder's own calls allocated, and bytes asked for.
         encoder_allocations: (u64, u64),
         /// Every encoder call, an empty drain or a submit that took nothing
@@ -587,10 +609,10 @@ mod bench {
         start: Instant,
     ) -> Result {
         let mut current_bitrate = limits.bitrate;
+        let mut pacer = Pacer::new(rates.fps, start);
         for (step, &pace) in steps.iter().enumerate() {
             let step_start = Instant::now();
-            let period = Duration::from_secs(1) / pace;
-            let mut next_tick = step_start;
+            pacer.set_pace(pace, step_start);
             // An armed tick's next poll, and until when polls come every
             // `DRAIN_POLL`.
             let mut poll_due: Option<Instant> = None;
@@ -617,7 +639,7 @@ mod bench {
                     pace_fps: pace,
                 };
                 let now = Instant::now();
-                let tick = now >= poll_due.map_or(next_tick, |due| due.max(next_tick));
+                let tick = pacer.due(now) && poll_due.is_none_or(|due| now >= due);
                 let force =
                     tick && tally.forced == 0 && start.elapsed() > Duration::from_millis(1500);
                 if force {
@@ -625,8 +647,9 @@ mod bench {
                     tally.pending_idr = Some(now);
                 }
                 let mut ready = Vec::new();
-                // Whether the tick's capture spent it.
-                let spent = match coder {
+                // Whether the tick's capture spent it, and when the display
+                // presented the picture it submitted.
+                let (spent, presented) = match coder {
                     Coder::Encoder(encoder) => {
                         encoder.set_rate(rate)?;
                         loop {
@@ -652,9 +675,9 @@ mod bench {
                                 tally.submit_us.push(took.as_secs_f64() * 1e6);
                                 tally.submit_kcycles.push(ran as f64 / 1e3);
                             }
-                            outcome.spends_tick()
+                            (outcome.spends_tick(), encoder.presented())
                         } else {
-                            false
+                            (false, None)
                         }
                     }
                     Coder::Backend(backend) => {
@@ -680,7 +703,13 @@ mod bench {
                             encode_us: frame.format.encode_us,
                             gop: frame.format.gop,
                         }));
-                        tick && backend.submitted_video()
+                        let spent = tick && backend.submitted_video();
+                        let presented = backend.submitted_picture().filter(|_| spent);
+                        if let Some(presented) = presented {
+                            tally.backend_coalesced +=
+                                u64::from(presented.presents.saturating_sub(1));
+                        }
+                        (spent, presented)
                     }
                 };
                 // As thread C: a new picture this round collected makes the
@@ -694,7 +723,13 @@ mod bench {
                 if tick {
                     tally.captures += 1;
                     if spent {
-                        next_tick = (next_tick + period).max(now + period * 3 / 4);
+                        tally.submits += 1;
+                        if let Some(presented) = presented {
+                            let waited = now.saturating_duration_since(presented.at);
+                            tally.present_waits.push(waited.as_secs_f64() * 1e3);
+                        }
+                        // As thread C: a dated picture anchors the next tick.
+                        pacer.consume(now, presented.map(|presented| presented.at));
                         poll_due = None;
                     } else {
                         tally.polls += 1;
@@ -702,7 +737,7 @@ mod bench {
                         poll_due = Some(if done < hot_until {
                             done + DRAIN_POLL
                         } else {
-                            done + DRAIN_POLL.max(period)
+                            done + DRAIN_POLL.max(pacer.period())
                         });
                     }
                 }
@@ -711,9 +746,10 @@ mod bench {
                 } else {
                     Duration::from_millis(1)
                 };
+                let earliest = pacer.earliest();
                 std::thread::sleep(
                     poll_due
-                        .map_or(next_tick, |due| due.max(next_tick))
+                        .map_or(earliest, |due| due.max(earliest))
                         .saturating_duration_since(Instant::now())
                         .min(idle),
                 );
@@ -791,6 +827,19 @@ mod bench {
             tally.captures as f64 / elapsed,
             tally.polls,
             tally.polls as f64 / elapsed,
+        );
+        let coalesced = if limits.backend {
+            tally.backend_coalesced
+        } else {
+            stats.coalesced_presents
+        };
+        println!(
+            "dated_submits={} of {} present_to_submit_p50_ms={:.3} present_to_submit_p95_ms={:.3} coalesced_presents={coalesced} coalesced_presents_per_s={:.2}",
+            tally.present_waits.len(),
+            tally.submits,
+            quantile(&tally.present_waits, 50),
+            quantile(&tally.present_waits, 95),
+            coalesced as f64 / elapsed,
         );
         if let Some(paces) = &rates.paces {
             // `Nominal` encoders budget each frame from the nominal rate, so their

@@ -5,6 +5,10 @@
 //! into host memory. The GPU's own Media Foundation encoder, rather than
 //! application code, implements the codec. Create, use and drop this object on
 //! the capture worker's desktop thread.
+//!
+//! A new picture is dated by when the display presented it (DXGI's
+//! `LastPresentTime`, a performance counter reading), which thread C anchors
+//! its pacing on and its sample time follows.
 
 mod codec;
 mod converter;
@@ -13,7 +17,7 @@ mod probe;
 pub use probe::h265_available;
 
 use crate::{
-    BackendError, Display, FailureKind, Result, VideoCodec,
+    BackendError, Display, FailureKind, Presented, Result, VideoCodec,
     codec::pipeline::{FIRST_SUBMIT_WAIT, LIVENESS_INTERVAL, OUTPUT_WAIT, codec_error, late},
     error,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
@@ -22,6 +26,7 @@ use codec::{Codec, EncoderSettings, attributes, media_type, sample_bytes};
 use converter::Converter;
 use std::{
     collections::VecDeque,
+    sync::OnceLock,
     thread::ThreadId,
     time::{Duration, Instant},
 };
@@ -34,6 +39,7 @@ use windows::{
         Media::MediaFoundation::*,
         System::{
             Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
+            Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
             Variant::VARIANT,
         },
     },
@@ -55,6 +61,8 @@ const _: () = assert!(
 );
 /// The largest capture, and the largest encoded size.
 const MAX_SIZE: (u32, u32) = (7680, 4320);
+/// The oldest present that still dates a picture.
+const PRESENT_MAX_AGE: Duration = Duration::from_secs(1);
 
 pub struct Encoded {
     pub codec: VideoCodec,
@@ -128,6 +136,9 @@ pub struct Statistics {
     /// The GOP size the encoder reads back: a `GOP_CANDIDATES` entry, or what
     /// it clamped them to. 0 when it reports none.
     pub gop: u32,
+    /// Presents DXGI folded into the acquires that found a new picture,
+    /// beyond one each (`AccumulatedFrames - 1`): presents no capture took.
+    pub coalesced_presents: u64,
 }
 
 struct Runtime {
@@ -181,6 +192,16 @@ pub struct Encoder {
     _manager: IMFDXGIDeviceManager,
     latest: Option<ID3D11Texture2D>,
     latest_pending: bool,
+    /// When the display presented `latest`'s picture, where DXGI says, and
+    /// the presents it covers, summed while it waits (`latest_pending`).
+    latest_at: Option<Instant>,
+    latest_presents: u32,
+    /// The last submit's new, dated picture.
+    presented: Option<Presented>,
+    /// The last sample time, in microseconds since `created`.
+    last_pts_us: Option<u64>,
+    /// The first acquire was logged.
+    first_logged: bool,
     pending: VecDeque<(u64, Instant, bool)>,
     /// When the last output was collected, discarded or not.
     last_output: Option<Instant>,
@@ -352,6 +373,11 @@ impl Encoder {
             _manager: manager,
             latest: None,
             latest_pending: false,
+            latest_at: None,
+            latest_presents: 0,
+            presented: None,
+            last_pts_us: None,
+            first_logged: false,
             pending: VecDeque::with_capacity(MAX_IN_FLIGHT),
             last_output: None,
             width,
@@ -376,6 +402,12 @@ impl Encoder {
     }
     pub fn statistics(&self) -> Statistics {
         self.stats.clone()
+    }
+    /// When the display presented the new picture the last `submit`
+    /// submitted, and the presents it covers; `None` after a submit that
+    /// sent a repeat, an undated picture or nothing.
+    pub fn presented(&self) -> Option<Presented> {
+        self.presented
     }
 
     /// Apply a QoS rate. Only the mean bitrate reaches the encoder, and only
@@ -502,6 +534,7 @@ impl Encoder {
     /// requested keyframe stays requested until a sample carries it.
     pub fn submit(&mut self, force_keyframe: bool) -> Result<Submit> {
         self.check_thread()?;
+        self.presented = None;
         self.force_keyframe |= force_keyframe;
         if self.pending.len() >= MAX_IN_FLIGHT || self.codec.need_input == 0 {
             return Ok(Submit::Full);
@@ -527,13 +560,17 @@ impl Encoder {
         };
         self.converter.convert(texture, &sample)?;
         let now = Instant::now();
-        let pts_us = now.duration_since(self.created).as_micros() as u64;
+        // A new picture's sample time is when the display presented it, so
+        // durations follow the display's cadence rather than the polls'; a
+        // repeat's is now. Strictly increasing either way.
+        let fresh = self.latest_pending;
+        let presented = self.latest_at.filter(|_| fresh);
+        let pts_us = sample_time(presented.unwrap_or(now), self.created, self.last_pts_us);
         // Variable frame rate: a sample lasts the real interval since the
         // previous one, while MF_MT_FRAME_RATE stays nominal. Pace changes
         // therefore never touch the media type or rebuild the encoder.
-        let duration = self.last_submit.map_or(self.frame_period(), |last| {
-            now.duration_since(last)
-                .clamp(self.frame_period(), Duration::from_secs(1))
+        let duration = self.last_pts_us.map_or(self.frame_period(), |last| {
+            Duration::from_micros(pts_us - last).clamp(self.frame_period(), Duration::from_secs(1))
         });
         unsafe {
             sample.SetSampleTime((pts_us * 10) as i64).map_err(error)?;
@@ -556,7 +593,13 @@ impl Encoder {
         self.codec.need_input -= 1;
         self.force_keyframe = false;
         self.last_submit = Some(now);
-        self.pending.push_back((pts_us, now, !self.latest_pending));
+        self.last_pts_us = Some(pts_us);
+        self.pending.push_back((pts_us, now, !fresh));
+        if fresh {
+            self.presented = presented.map(|at| Presented::new(at, self.latest_presents));
+            self.latest_at = None;
+            self.latest_presents = 0;
+        }
         self.latest_pending = false;
         self.stats.submitted += 1;
         self.stats.max_in_flight = self.stats.max_in_flight.max(self.pending.len());
@@ -567,7 +610,10 @@ impl Encoder {
     /// the duplication frame at once. A frame held until the next acquire (as
     /// windows-capture's `acquire_next_frame` does) keeps DXGI from
     /// accumulating the next update meanwhile, so an acquire at the next tick
-    /// races that update and misses about every other one.
+    /// races that update and misses about every other one. A new image is
+    /// dated by its present, and counts the presents DXGI accumulated in it;
+    /// the first one is copied whatever its present says, so a still
+    /// desktop shows at once, and is left undated.
     fn acquire(&mut self) -> Result<bool> {
         let duplication = self.capture.duplication();
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -577,10 +623,23 @@ impl Encoder {
             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
             Err(e) => return Err(error(e)),
         }
+        let first = self.latest.is_none();
+        if !self.first_logged {
+            // Whether a new duplication's first frame on a still desktop
+            // reports a present, which only a device shows.
+            self.first_logged = true;
+            tracing::debug!(
+                target: "pb_mapper_desktop::session",
+                event = "windows_capture_first_acquire",
+                last_present_time = info.LastPresentTime,
+                accumulated_frames = info.AccumulatedFrames,
+                resource = resource.is_some(),
+            );
+        }
         let copied = (|| {
             let present = info.LastPresentTime;
             // Zero: only the pointer moved.
-            if present == 0 || present == self.last_present {
+            if !(first && resource.is_some()) && (present == 0 || present == self.last_present) {
                 return Ok(false);
             }
             let frame: ID3D11Texture2D = resource
@@ -609,8 +668,21 @@ impl Encoder {
                 .as_ref()
                 .ok_or_else(|| error("missing capture texture"))?;
             unsafe { self.capture.device_context().CopyResource(latest, &frame) };
-            self.last_present = present;
+            if present != 0 {
+                self.last_present = present;
+            }
             self.stats.unique_captures += 1;
+            self.stats.coalesced_presents += u64::from(info.AccumulatedFrames.saturating_sub(1));
+            // A picture left waiting keeps its presents, and takes the newer
+            // one's time.
+            self.latest_at = if first {
+                None
+            } else {
+                present_instant(present)
+            };
+            self.latest_presents = self
+                .latest_presents
+                .saturating_add(info.AccumulatedFrames.max(1));
             Ok(true)
         })();
         let released = unsafe { duplication.ReleaseFrame() }.map_err(error);
@@ -620,6 +692,46 @@ impl Encoder {
     fn frame_period(&self) -> Duration {
         Duration::from_nanos(1_000_000_000 / u64::from(self.fps))
     }
+}
+
+/// A sample time in microseconds since `created` for a picture of `at`,
+/// later than the `last` one.
+fn sample_time(at: Instant, created: Instant, last: Option<u64>) -> u64 {
+    let pts_us =
+        u64::try_from(at.saturating_duration_since(created).as_micros()).unwrap_or(u64::MAX);
+    last.map_or(pts_us, |last| pts_us.max(last.saturating_add(1)))
+}
+
+/// When the display presented at performance counter reading `ticks`
+/// (`LastPresentTime`), as an `Instant`, by its age against the counter
+/// now. std's `Instant` reads the same counter on Windows, so this is exact
+/// but for the moment between the two reads.
+fn present_instant(ticks: i64) -> Option<Instant> {
+    static FREQUENCY: OnceLock<Option<i64>> = OnceLock::new();
+    let frequency = (*FREQUENCY.get_or_init(|| {
+        let mut frequency: i64 = 0;
+        // SAFETY: an out parameter the call fills.
+        unsafe { QueryPerformanceFrequency(&mut frequency) }.ok()?;
+        (frequency > 0).then_some(frequency)
+    }))?;
+    let mut now: i64 = 0;
+    // SAFETY: as above.
+    unsafe { QueryPerformanceCounter(&mut now) }.ok()?;
+    counter_instant(ticks, now, frequency, Instant::now())
+}
+
+/// The instant of counter reading `ticks`, given that the counter, at
+/// `frequency` a second, read `now` at `at`: a reading a moment ahead of
+/// `now` (the order of the reads) is `at`, and one over `PRESENT_MAX_AGE`
+/// old is none.
+fn counter_instant(ticks: i64, now: i64, frequency: i64, at: Instant) -> Option<Instant> {
+    let age = (i128::from(now) - i128::from(ticks)).max(0);
+    let nanos = age * 1_000_000_000 / i128::from(frequency.max(1));
+    let age = Duration::from_nanos(u64::try_from(nanos).ok()?);
+    if age > PRESENT_MAX_AGE {
+        return None;
+    }
+    at.checked_sub(age)
 }
 
 /// Why an encoder took no input in its first `FIRST_SUBMIT_WAIT`. It asked
@@ -674,6 +786,47 @@ mod tests {
         // turned off and the viewer reconnects to H.264.
         assert!(h265_failed(false, false));
         assert!(h265_failed(true, true));
+    }
+
+    /// A present's counter reading becomes an `Instant` by its age: now is
+    /// now, an older reading earlier, one ahead now, one over a second old
+    /// none; and the sample times built on them only rise.
+    #[test]
+    fn presents_are_dated_by_their_age_on_the_performance_counter() {
+        let mut frequency: i64 = 0;
+        // SAFETY: out parameters the calls fill.
+        unsafe { QueryPerformanceFrequency(&mut frequency) }.unwrap();
+        let mut now: i64 = 0;
+        unsafe { QueryPerformanceCounter(&mut now) }.unwrap();
+        let near = |at: Instant, target: Instant| {
+            at.max(target) - at.min(target) < Duration::from_millis(1)
+        };
+        assert!(near(present_instant(now).unwrap(), Instant::now()));
+        let earlier = present_instant(now - frequency / 10).unwrap();
+        assert!(near(earlier + Duration::from_millis(100), Instant::now()));
+        assert!(near(
+            present_instant(now + frequency).unwrap(),
+            Instant::now()
+        ));
+        assert_eq!(present_instant(now - frequency * 2), None);
+
+        let at = Instant::now();
+        assert_eq!(counter_instant(1_000, 1_000, 10_000_000, at), Some(at));
+        assert_eq!(
+            counter_instant(1_000, 11_000, 10_000_000, at),
+            Some(at - Duration::from_millis(1))
+        );
+        assert_eq!(counter_instant(2_000, 1_000, 10_000_000, at), Some(at));
+        assert_eq!(counter_instant(0, 10_000_001, 10_000_000, at), None);
+
+        let created = at - Duration::from_secs(1);
+        assert_eq!(sample_time(at, created, None), 1_000_000);
+        assert_eq!(sample_time(at, created, Some(999_000)), 1_000_000);
+        assert_eq!(sample_time(at, created, Some(1_000_000)), 1_000_001);
+        assert_eq!(
+            sample_time(created - Duration::from_secs(1), created, Some(5)),
+            6
+        );
     }
 
     #[test]
