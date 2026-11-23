@@ -2347,6 +2347,14 @@ on the build before the split capture gate, the median delay and the guard:
 | Decoder taking 67 ms a frame | Host pace held at a mean 13.4 FPS by the viewer's fps cap, while the delay controller stayed at 60 FPS and the encoder bitrate at 7.9 Mbit/s: presentation lag never reaches congestion control |
 | 256 KiB/s link, 64 KiB frames, 30 s | Streaming throughout at both ends; capture held back (575 skipped ticks) instead of queueing, the link full at 2.09 Mbit/s received; control 8 ms, release 9 ms, revoke 3.5 ms (61, 47 and 15.7 ms before the timer guard); host stop 348 ms, which includes waiting for the viewer to read `Stopped` |
 
+Two further cases time a fresh picture on a 1 Mbit/s link with the encoder
+holding each picture 45 ms: `requested_idr_on_a_slow_link`, where the
+decoder asks for an IDR every 2 s and discards what arrives before it, and
+`idr_another_viewer_asked_for_on_a_slow_link`, where a second viewer on an
+unlimited link asks instead. Each reports how long every IDR took to arrive
+and the P-frames that came first, the viewer's requests, its sink's discards
+and the host's dropped frames and IDRs. No run of them is recorded yet.
+
 `video_bench 10 60 --animate --max-width 1920 --max-height 1080` still reaches
 59.9 unique capture and encode FPS at a mean 1.9 ms encode with one unit in
 flight, and 58.2 FPS through the full backend (`--backend`). With

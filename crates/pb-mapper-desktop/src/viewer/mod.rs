@@ -485,6 +485,19 @@ impl Viewer {
         current_status(&self.shared, &self.sink)
     }
 
+    /// The host's dropped frames, from its last `Stats`, and the units this
+    /// viewer's sink discarded: `ViewerStats::dropped_frames` sums the two.
+    #[cfg(test)]
+    pub(crate) fn drops(&self) -> (u64, u64) {
+        let host = self
+            .shared
+            .stats
+            .lock()
+            .host
+            .map_or(0, |host| host.dropped_frames);
+        (host, self.sink.snapshot(Instant::now()).discarded)
+    }
+
     /// What reads this viewer's status, apart from the viewer.
     pub(crate) fn status_handle(&self) -> ViewerStatusHandle {
         ViewerStatusHandle {
