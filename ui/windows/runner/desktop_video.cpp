@@ -696,6 +696,9 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     // Where each frame is converted, then copied into `shown` in one short
     // copy, so a read of `shown` meets a whole frame.
     ComPtr<ID3D11Texture2D> scratch;
+    // The converter's view of `scratch`, made with it and again only for a
+    // new converter.
+    ComPtr<ID3D11VideoProcessorOutputView> out_view;
     ComPtr<IMFDXGIDeviceManager> manager;
     // What created an H.265 decoder, which must shut it down after use.
     // Declared before `transform`, so its shutdown follows the decoder's
@@ -778,6 +781,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       Check(transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0), "Start video decoding");
     }
     void ConfigureConverter(UINT32 input_width, UINT32 input_height, const RECT& aperture) {
+      out_view.Reset();
       processor.Reset();
       enumerator.Reset();
       D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc{};
@@ -928,6 +932,11 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
         desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
         Check(device->CreateTexture2D(&desc, nullptr, &shown), "Allocate Flutter GPU frame");
       }
+      if (!out_view) {
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC out_desc{};
+        out_desc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        Check(video->CreateVideoProcessorOutputView(scratch.Get(), enumerator.Get(), &out_desc, &out_view), "Open converted frame");
+      }
       const auto start = Clock::now();
       D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC in_desc{};
       in_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
@@ -935,10 +944,6 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       in_desc.Texture2D.ArraySlice = subresource / source_desc.MipLevels;
       ComPtr<ID3D11VideoProcessorInputView> in_view;
       Check(video->CreateVideoProcessorInputView(source.Get(), enumerator.Get(), &in_desc, &in_view), "Open decoded GPU frame");
-      D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC out_desc{};
-      out_desc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
-      ComPtr<ID3D11VideoProcessorOutputView> out_view;
-      Check(video->CreateVideoProcessorOutputView(scratch.Get(), enumerator.Get(), &out_desc, &out_view), "Open converted frame");
       D3D11_VIDEO_PROCESSOR_STREAM stream{};
       stream.Enable = TRUE;
       stream.pInputSurface = in_view.Get();
