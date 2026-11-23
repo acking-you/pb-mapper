@@ -173,10 +173,11 @@ be the viewer's own desktop: a viewer controlling the computer it runs on feeds
 back into itself. `desktop_ui_host` hosts a recorded clip instead, on a relay in
 its own process, and prints every input it applies (`host_input …`, physical
 keys as `usage=0x…`) and every pointer shape it reports (`host_shape …`). The
-shape follows five vertical bands, left to right: arrow, I-beam, resize
-(top-left to bottom-right), hand and a custom checkered disc. Make an all-IDR
-clip whose picture labels the bands, start the host, and serve its
-`controller.json` with the bootstrap:
+shape follows six vertical bands, left to right: arrow, I-beam, resize
+(top-left to bottom-right), hand, a custom checkered disc and the busy
+hourglass, which a Mac viewer, having no busy pointer of its own, shows as
+the host's bitmap. Make an all-IDR clip whose picture labels the bands, start
+the host, and serve its `controller.json` with the bootstrap:
 
 ```powershell
 ffmpeg -f lavfi -i "color=c=0x202020:s=1280x720:r=30:d=4" -c:v libx264 -profile:v baseline `
