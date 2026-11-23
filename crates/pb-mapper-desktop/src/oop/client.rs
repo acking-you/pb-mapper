@@ -429,10 +429,7 @@ mod tests {
             runtime.block_on(async move {
                 loop {
                     let request: Request = ipc::read_json(&mut worker).await.unwrap();
-                    ipc::write_json(&mut worker, &answer(&request))
-                        .await
-                        .unwrap();
-                    ipc::write_bytes(&mut worker, &[], ipc::MAX_FRAME)
+                    ipc::write_record(&mut worker, &answer(&request), &[])
                         .await
                         .unwrap();
                     if matches!(request, Request::Close {}) {
