@@ -364,8 +364,11 @@ Nothing in the SDK crates knows it exists.
     `Injector` takes keys, text (never `\n`, `\r` or `\t`: the neutral
     `Input::typed` taps Enter and Tab) and, where `PHYSICAL_KEYS`, keys by
     place. `synthetic.rs` is the test platform (pulled or pushed encoder,
-    shapes, a log of what it typed). How to add Linux or Android is
-    "Platforms" in `docs/remote-desktop.md`
+    shapes, a log of what it typed). `login.rs`, pure and tested on every
+    platform, says what the Windows background service's tick asks about
+    its owner's login: the token and SID in full, a session query every
+    5 s, or nothing. How to add Linux or Android is "Platforms" in
+    `docs/remote-desktop.md`
   - `platform/windows/`: the ordinary desktop, `video/` (Desktop
     Duplication → D3D11 → Media Foundation H.265 or H.264, the fused
     `VideoSource`: the `Encoder` in `mod.rs`, the Media Foundation encoder in
@@ -429,7 +432,8 @@ Nothing in the SDK crates knows it exists.
   - `privileged/`: the public helper facade on every target —
     `support()`, and on Windows `status`, `request_installation`,
     `background::{configure, adopt, Options::resume, …}` (the app's
-    hand-off to the service)
+    hand-off to the service) and `background::{readiness, status_of}` (a
+    status read that checks the helper once)
   - `codec/`: neutral Annex B scanning and keyframe detection
     (`annexb.rs`), length-prefixed (AVCC/HVCC) samples to Annex B
     (`avcc.rs`, for VideoToolbox), and the encoder rules both platforms

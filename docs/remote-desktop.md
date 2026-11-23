@@ -663,6 +663,22 @@ S3/S4 cannot serve video while suspended, and no Wake-on-LAN facility or power
 policy change is included. Real service-restart, sleep/resume and locked-session
 password entry remain acceptance requirements, not consequences of unit tests.
 
+The service looks for that login once a second, but takes the login's token
+and compares its SID only before it starts the host, and while it holds no
+attested login for the console's session: at first, when the console changes
+hands, and when a recheck fails. The console's session id, which the service
+reads without calling another process, shows a user switch, a remote
+connection or a new console session at once; while it is unchanged, one
+session query every 5 s confirms that the same login (session, logon time,
+user and domain) still holds the console. A logoff followed by a new login at
+the same session id is therefore seen within 5 s rather than 1 s. Capture
+never relies on this: it attests the owner's login in full when it starts and
+every 100 ms while it runs. The app, for its part, checks the installation
+and the helper's readiness once each time it reads the service's state, and
+asks with what that check verified; on every connection it still verifies
+that the pipe's server is the running service, as the service verifies the
+app.
+
 ### Changing the relay
 
 Changing the relay or credential in Settings does not move a host that is
