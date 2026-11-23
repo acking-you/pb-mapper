@@ -248,7 +248,9 @@ Nothing in the SDK crates knows it exists.
   - `relay.rs`, `relay/quic.rs`, `endpoint.rs`: The relay carrier and its
     pooled QUIC connections; relay resolution and bounded setup admission.
     `addr.rs` resolves a tunnel endpoint to every address it names,
-    `network.rs` holds the process-wide network hints, `udp_timeout.rs`
+    `network.rs` holds the process-wide network hints (on macOS and iOS
+    `network/routes.rs` reads the kernel's routing socket to learn when
+    addresses change), `udp_timeout.rs`
     orders uni-stream's process-wide UDP session timeout before any UDP
     stream reads it, and `recovery.rs` the short, bounded setup attempts
   - `test_relay.rs`, `status_text_tests.rs`: This crate's own loopback relay

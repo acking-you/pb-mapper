@@ -216,9 +216,10 @@ Each works as designed; the line says what the other choice would cost.
   hint per 250 ms, at once, and drops a second call inside that window. It
   is a synchronous call, which Node makes from its JavaScript thread outside
   any runtime, with no task to send a trailing hint from; the address
-  watcher (Linux, Windows), which also hints at the end of a burst, and the
-  two-second address poll elsewhere raise their own hints for the same
-  change.
+  watcher (Linux, Windows), which also hints at the end of a burst, the
+  routing socket (macOS, iOS), which reads the addresses once a run of
+  messages goes quiet, and the two-second address poll elsewhere raise
+  their own hints for the same change.
 - The consumer's control setup takes no `control_permit`: taking one would
   queue direct setups behind registration recovery for up to the 3 s
   negotiation budget and send more of them to the relay.

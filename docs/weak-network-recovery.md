@@ -189,8 +189,12 @@ It fails before the admission-accounting fix and passes afterward.
   Each endpoint owns at most one lookup; eight process-wide permits bound actual
   OS lookups, including ones whose caller was cancelled. A blocking OS lookup
   cannot be forcibly cancelled and keeps its permit until completion.
-- A shared watcher observes interface address changes (native notifications on
-  Linux/Windows; a single two-second poller elsewhere). Host integrations can also
+- A shared watcher observes interface address changes: native notifications on
+  Linux/Windows; on macOS/iOS the kernel's routing socket, whose address and
+  interface messages have the addresses read again once it has been quiet for
+  250 ms (at most 2 s into a run of messages), with a safety reading every 60 s;
+  on Android, or where the routing socket cannot be used, a single two-second
+  poller. Host integrations can also
   call `Client::notify_network_change()` / Node `notifyNetworkChange()`. Notifications
   are hints, never proof of connectivity, and bursts are coalesced. The initial
   address inventory does not count as a change. WSL may not expose a physical

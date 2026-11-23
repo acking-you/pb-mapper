@@ -7,6 +7,11 @@ use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio_util::task::AbortOnDropHandle;
 
+/// macOS and iOS: the kernel's routing socket says when to read the
+/// addresses, instead of a poll.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod routes;
+
 pub(crate) struct NetworkHints {
     changes: watch::Sender<u64>,
     task: Mutex<Option<AbortOnDropHandle<()>>>,
@@ -189,13 +194,30 @@ mod tests {
     }
 }
 
-/// How often the addresses are read where nothing says when they change.
+/// How often the addresses are read where nothing says when they change:
+/// on Android, which does not let an app listen on a netlink route socket,
+/// and on macOS or iOS if the routing socket cannot be opened or read.
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 const POLL: Duration = Duration::from_secs(2);
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 async fn watch_changes(changes: watch::Sender<u64>) -> std::io::Result<()> {
     let mut addresses = Addresses::new(Addresses::system);
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let error = match routes::Routes::open() {
+            Ok(routes) => {
+                let Err(error) = routes::watch(&routes, &changes, &mut addresses).await;
+                error
+            }
+            Err(error) => error,
+        };
+        tracing::debug!(
+            event = "network_route_socket_unavailable",
+            %error,
+            "polling interface addresses instead"
+        );
+    }
     poll(&changes, &mut addresses).await
 }
 
