@@ -105,8 +105,12 @@ rotated displays instead of presenting incorrect geometry. The pointer travels
 beside the video: its position always, and its shape where both ends list
 `cursor_shape` (see [Input and cursor](#input-and-cursor)). On a desktop
 viewer in control, this computer's own pointer takes the host's shape over the
-picture, so one pointer shows; a phone paints the shape at the picture's
-scale. A host without shapes (0.11.0) shows the generic arrow, as before.
+picture, so one pointer shows: a shape this computer's system has as its own
+pointer, and any other (an app's own cursor, and on a Mac the busy, help, move
+and diagonal resize pointers) as the host's bitmap made this computer's
+cursor, which moves with the mouse and changes without waiting for a Flutter
+frame. A phone paints the shape at the picture's scale. A host without shapes
+(0.11.0) shows the generic arrow, as before.
 When more than one viewer controls at once and both ends list `peer_cursors`,
 each viewer also sees the others' active pointers in distinct session colours.
 
@@ -1801,6 +1805,49 @@ changes. The number is a `u16` that goes round after 65 535 definitions; a
 new one passes over every number a slot holds and the one last asked for,
 so the number Dart shows keeps its definition, and Dart keeps decoded
 shapes by content, never by number.
+
+**The viewer's pointer.** While a desktop viewer controls, the local pointer
+over the picture is one `RemoteShapeCursor` per viewer
+(`remote_cursor_layer.dart`), so Flutter's mouse tracker keeps its session for
+as long as the pointer stays over the picture. That session shows the shape
+itself, the moment the host's shape, the picture's scale or whether the host's
+pointer is under the local one changes: no widget rebuilds, and no frame is
+waited for, where a `MouseRegion` takes a new cursor only in the post-frame
+pass of the frame that rebuilt it. A kind this computer's system has goes to
+the engine's `activateSystemCursor`. Flutter's macOS embedder knows no busy,
+progress, help, move or diagonal resize pointer and shows those as the arrow,
+so on a Mac they take the bitmap path, as do `up_arrow` and `custom`
+everywhere. The bitmap path scales the host's bitmap to the picture (one host
+pixel as 0.35 to 2 logical pixels, at most 128 logical pixels a side, times
+the device pixel ratio, area-averaged in premultiplied space) and hands it to
+the runner's `pb_mapper/desktop_pointer` channel
+(`ui/lib/src/ffi/desktop_pointer.dart`): `cursor_create {id, rgba, width,
+height, hot_x, hot_y}` in straight RGBA and physical pixels, `cursor_set
+{id}` and `cursor_delete {id}`. The viewer keeps 16 such cursors, by content
+and by scale to within 2 %, and deletes the oldest past that, all of them
+when the host's shape is forgotten (another viewer), and all when the viewer
+closes. Each runner shows the cursor on its platform thread at once:
+
+- Windows (`ui/windows/runner/desktop_pointer.cpp`): `CreateIconIndirect`
+  from a 32-bpp top-down DIB section with its alpha and a 1-bpp AND mask from
+  it, `SetCursor`, and `DestroyIcon`, kept until another cursor shows when it
+  is still the current one. The engine answers `WM_SETCURSOR` over the client
+  area without setting a cursor, so this one stays until Dart activates a
+  system cursor.
+- macOS (`ui/darwin/DesktopPointer.swift`, in the macOS runner only):
+  `NSCursor(image:hotSpot:)` from the bitmap at the window's backing scale.
+  It tells `FlutterView` through its `didUpdateMouseCursor:`, so the view's
+  `cursorUpdate:` restores this cursor rather than the last system one; an
+  engine without that method gets a local `cursorUpdate` monitor that keeps
+  it instead.
+- Linux (`ui/linux/runner/desktop_pointer.cc`): `gdk_cursor_new_from_surface`
+  from a cairo surface at the view's scale, padded to whole logical pixels,
+  set on the toplevel's `GdkWindow`, where the engine sets its own cursors.
+
+A call that fails (no runner, or one that cannot make the cursor) paints the
+shape under a hidden pointer for the rest of that viewer, as a viewer did
+before. Viewing only, with the host's pointer elsewhere, and on a phone, the
+shape is painted as before.
 
 ### Constants
 

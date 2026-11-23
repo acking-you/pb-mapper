@@ -659,10 +659,18 @@ The design and its rules are in `docs/ui-design.md`.
     `ImmAssociateContextEx` on the Flutter view's window) that turns the
     window's input method off in the remote mode.
     `remote_cursor_layer.dart` decides how the pointer looks
-    (`RemotePointerLook`: the local pointer in the host's shape, a painted
-    bitmap, or the generic arrow for an older host), `RemotePointerRegion`
-    sets the local pointer over the picture and `RemotePointer` carries the
-    choice. The gestures and key rules are in `docs/remote-desktop.md`
+    (`RemotePointerLook`: the local pointer in the host's shape, as a system
+    pointer or the host's bitmap, a painted bitmap, or the generic arrow for
+    an older host), `RemotePointerRegion` sets the local pointer over the
+    picture and `RemotePointer` carries the choice. While this viewer
+    controls, that pointer is `RemotePointer.shapeCursor`, a
+    `RemoteShapeCursor` whose session switches the shape itself, with no
+    rebuild: system kinds through the engine, bitmaps through the runners'
+    `pb_mapper/desktop_pointer` channel (`lib/src/ffi/desktop_pointer.dart`;
+    `windows/runner/desktop_pointer.cpp`, `darwin/DesktopPointer.swift` in
+    the macOS runner only, `linux/runner/desktop_pointer.cc`).
+    `tool/pointer_latency.dart` times both paths in a release build. The
+    gestures and key rules are in `docs/remote-desktop.md`
 
 - **`lib/src/shell/`**: Navigation and window chrome
   - `app_scope.dart`: `AppPage` (six places; the phone bar has five, Logs
