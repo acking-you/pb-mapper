@@ -1,9 +1,94 @@
-//! Pointer metadata, confined to the selected display, and the pointer's
-//! shape.
+//! Pointer metadata, confined to the selected display, the pointer's shape,
+//! and the pointer an injector's move leaves until the OS shows it.
 
 use crate::Display;
 use serde::{Deserialize, Serialize};
 use std::{io, sync::Arc};
+
+/// Well past the time an OS takes to apply a posted move, even under load;
+/// a stop short of the injected pixel is reported this late.
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "for the Mac host, which posts moves")
+)]
+pub(crate) const SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The last move an injector posted, until the OS shows it. Both hosts post
+/// a move the OS applies after the call returns (`CGEventPost`,
+/// `SendInput`), so the pointer read right after it can still show where it
+/// was. Thread C reports every position but the one it injected, and a
+/// viewer in control follows a report more than a pixel from its own
+/// pointer, so that stale position would drag the viewer's pointer back after
+/// each move: it would flicker between the two for as long as it moved. The
+/// `Backend::cursor` contract is the pointer as it stands after every input
+/// applied. Until a read shows the injected pixel, or `SETTLE` passes after
+/// the last move (the system stopped it short, someone at the host moved the
+/// mouse, or the move never took effect), the injected pixel is the pointer.
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "for the Mac host, which posts moves")
+)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Pointer {
+    /// Absolute pixel, and when it was posted.
+    moved: Option<((i32, i32), std::time::Instant)>,
+    /// What the first read since a move showed, while no read has shown the
+    /// injected pixel; `Some(None)`: a pointer not on the bound display.
+    first: Option<Option<(i32, i32)>>,
+}
+
+/// What a read of the pointer reports while a move settles.
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "for the Mac host, which posts moves")
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Settled {
+    /// The pointer to report: the injected pixel until a read shows it.
+    pub(crate) at: Option<(i32, i32)>,
+    /// The injected pixel, when this read ended its settle window with the
+    /// pointer short of it and where an earlier read in the window found it:
+    /// no move posted since then took effect. A pointer that moved
+    /// (someone at the host), or a window no earlier read saw (no reads
+    /// meanwhile), says nothing of the moves.
+    pub(crate) unmoved: Option<(i32, i32)>,
+}
+
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "for the Mac host, which posts moves")
+)]
+impl Pointer {
+    /// A move to absolute pixel `to` was posted at `now`.
+    pub(crate) fn moved(&mut self, to: (i32, i32), now: std::time::Instant) {
+        self.moved = Some((to, now));
+    }
+
+    /// The pointer to report at `now`, given the absolute pixel the OS shows
+    /// (`None`: not on the bound display).
+    pub(crate) fn settle(&mut self, shown: Option<(i32, i32)>, now: std::time::Instant) -> Settled {
+        let Some((to, at)) = self.moved else {
+            return Settled {
+                at: shown,
+                unmoved: None,
+            };
+        };
+        let reached = shown == Some(to);
+        if !reached && now.saturating_duration_since(at) < SETTLE {
+            self.first.get_or_insert(shown);
+            return Settled {
+                at: Some(to),
+                unmoved: None,
+            };
+        }
+        self.moved = None;
+        let first = self.first.take();
+        Settled {
+            at: shown,
+            unmoved: (!reached && first == Some(shown)).then_some(to),
+        }
+    }
+}
 
 /// Generic pointer hotspot in physical pixels relative to the selected display.
 /// This is position/visibility metadata; the image is a [`CursorShape`].
@@ -256,6 +341,95 @@ pub(crate) fn confine(display: &Display, (x, y): (i32, i32), showing: bool) -> C
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Before the OS applies a move, the read shows the old pixel, or none
+    /// when that was off the display: the injected one is reported. Once it
+    /// shows the move, reads are the OS's again, so a later move of the
+    /// host's own mouse is reported; and a move the system stopped short is
+    /// reported once `SETTLE` has passed.
+    #[test]
+    fn a_posted_move_is_the_pointer_until_the_os_shows_it() {
+        let start = Instant::now();
+        let mut pointer = Pointer::default();
+        let at = |pointer: &mut Pointer, shown, now| pointer.settle(shown, now).at;
+        assert_eq!(at(&mut pointer, Some((5, 5)), start), Some((5, 5)));
+
+        pointer.moved((100, 40), start);
+        assert_eq!(at(&mut pointer, Some((5, 5)), start), Some((100, 40)));
+        assert_eq!(at(&mut pointer, None, start), Some((100, 40)));
+        assert_eq!(at(&mut pointer, Some((100, 40)), start), Some((100, 40)));
+        assert_eq!(at(&mut pointer, Some((7, 9)), start), Some((7, 9)));
+
+        pointer.moved((200, 80), start);
+        let late = start + SETTLE;
+        assert_eq!(
+            at(
+                &mut pointer,
+                Some((199, 80)),
+                late - Duration::from_millis(1)
+            ),
+            Some((200, 80))
+        );
+        assert_eq!(at(&mut pointer, Some((199, 80)), late), Some((199, 80)));
+    }
+
+    /// A window that ends with the pointer where a read in it found it says
+    /// no move since took effect, however many were posted; one that ends
+    /// at the target, with a pointer that moved meanwhile, or at its first
+    /// read says nothing of the moves.
+    #[test]
+    fn a_window_that_ends_where_it_started_reports_its_moves_unmoved() {
+        let start = Instant::now();
+        let late = start + SETTLE;
+        let mut pointer = Pointer::default();
+        let unmoved = |pointer: &mut Pointer, shown, now| pointer.settle(shown, now).unmoved;
+
+        // Every move dropped: the pointer stays at (5, 5) throughout, and
+        // the window, kept open by each move, ends `SETTLE` after the last.
+        pointer.moved((100, 40), start);
+        assert_eq!(unmoved(&mut pointer, Some((5, 5)), start), None);
+        pointer.moved((120, 40), start + Duration::from_millis(100));
+        assert_eq!(unmoved(&mut pointer, Some((5, 5)), late), None);
+        let end = late + Duration::from_millis(100);
+        assert_eq!(
+            pointer.settle(Some((5, 5)), end),
+            Settled {
+                at: Some((5, 5)),
+                unmoved: Some((120, 40)),
+            }
+        );
+        // Taken once: the window is over.
+        assert_eq!(unmoved(&mut pointer, Some((5, 5)), end), None);
+
+        // Off the display before and after counts as the same place.
+        pointer.moved((100, 40), start);
+        assert_eq!(unmoved(&mut pointer, None, start), None);
+        assert_eq!(unmoved(&mut pointer, None, late), Some((100, 40)));
+
+        // Someone at the host moved the mouse during the window.
+        pointer.moved((100, 40), start);
+        assert_eq!(unmoved(&mut pointer, Some((5, 5)), start), None);
+        assert_eq!(unmoved(&mut pointer, Some((60, 9)), late), None);
+
+        // No read in the window before the one that ends it.
+        pointer.moved((100, 40), start);
+        assert_eq!(unmoved(&mut pointer, Some((5, 5)), late), None);
+
+        // Reached late, after reads of the old pixel.
+        pointer.moved((100, 40), start);
+        assert_eq!(unmoved(&mut pointer, Some((5, 5)), start), None);
+        assert_eq!(unmoved(&mut pointer, Some((100, 40)), late), None);
+
+        // A read that shows the move closes the window: its reads no longer
+        // count in the next one.
+        pointer.moved((100, 40), start);
+        assert_eq!(unmoved(&mut pointer, Some((5, 5)), start), None);
+        assert_eq!(unmoved(&mut pointer, Some((100, 40)), start), None);
+        pointer.moved((200, 40), start);
+        assert_eq!(unmoved(&mut pointer, Some((5, 5)), late), None);
+    }
+
     #[test]
     fn pointer_coordinates_are_physical_and_confined_to_the_selected_display() {
         let display = Display {
