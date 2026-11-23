@@ -2,6 +2,7 @@
 //! where direct coordination listens.
 
 use std::error::Error;
+use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,8 +15,9 @@ use pb_mapper_auth::{
 use pb_mapper_core::checksum::{
     MACHINE_MSG_HEADER_KEY_PATH, set_process_msg_header_key, setup_machine_msg_header_key,
 };
-use pb_mapper_core::config::keep_alive_from_env;
-use pb_mapper_server::DirectServerConfig;
+use pb_mapper_core::config::{PB_MAPPER_TCP_CONGESTION, keep_alive_from_env};
+use pb_mapper_server::{DirectServerConfig, TcpCongestion};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::{parse_duration, stop_requests};
@@ -58,6 +60,11 @@ pub(super) struct ServerArgs {
     /// Enable TCP keep-alive. PB_MAPPER_KEEP_ALIVE=ON is also supported.
     #[arg(long, default_value_t = false)]
     keep_alive: bool,
+    /// On Linux, the TCP congestion control the relay sends with, such as
+    /// `bbr`. PB_MAPPER_TCP_CONGESTION is also supported. Default: the
+    /// system's.
+    #[arg(long, value_name = "NAME")]
+    tcp_congestion: Option<TcpCongestion>,
     /// Derive MSG_HEADER_KEY from this machine and persist it for other roles.
     #[arg(long, default_value_t = false)]
     use_machine_msg_header_key: bool,
@@ -107,6 +114,7 @@ impl From<LegacyProtocolArg> for LegacyProtocolPolicy {
 enum ServerFlagError {
     MaxTemporaryKeys,
     MaxTemporaryKeyTtl,
+    TcpCongestionEnv,
 }
 
 impl std::fmt::Display for ServerFlagError {
@@ -121,6 +129,12 @@ impl std::fmt::Display for ServerFlagError {
                 "`--max-temporary-key-ttl` must be between {}s and {}d",
                 MIN_TEMP_KEY_TTL.as_secs(),
                 MAX_TEMP_KEY_TTL.as_secs() / 86_400
+            ),
+            Self::TcpCongestionEnv => write!(
+                f,
+                "`{PB_MAPPER_TCP_CONGESTION}` must name a TCP congestion control: 1 to {} ASCII \
+                 letters, digits, `_` or `-`",
+                TcpCongestion::MAX_LEN
             ),
         }
     }
@@ -153,9 +167,52 @@ fn server_auth_config(args: &ServerArgs) -> Result<AuthConfig, ServerFlagError> 
     }))
 }
 
+/// The congestion control `PB_MAPPER_TCP_CONGESTION` asks for, read only
+/// when `--tcp-congestion` is absent. Unset or blank asks for none.
+fn tcp_congestion_from_env(
+    value: Option<OsString>,
+) -> Result<Option<TcpCongestion>, ServerFlagError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .ok_or(ServerFlagError::TcpCongestionEnv)?
+        .trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    TcpCongestion::new(value)
+        .map(Some)
+        .map_err(|_| ServerFlagError::TcpCongestionEnv)
+}
+
+/// Have the relay send with `congestion`, best effort: a kernel that refuses
+/// leaves the system's default, and the log says how to allow it.
+fn use_tcp_congestion(listener: &TcpListener, congestion: &TcpCongestion) {
+    match pb_mapper_server::set_tcp_congestion(listener, congestion) {
+        Ok(()) => tracing::info!(
+            event = "relay_tcp_congestion",
+            %congestion,
+            "the relay's TCP connections send with this congestion control"
+        ),
+        Err(error) => tracing::warn!(
+            event = "relay_tcp_congestion_unavailable",
+            %congestion,
+            error = %error.io(),
+            fix = %error.fix(),
+            "the relay's TCP connections keep the system's congestion control"
+        ),
+    }
+}
+
 pub(super) async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
     let stop = stop_requests()?;
     let auth_config = server_auth_config(&args)?;
+    let tcp_congestion = match &args.tcp_congestion {
+        Some(congestion) => Some(congestion.clone()),
+        None => tcp_congestion_from_env(std::env::var_os(PB_MAPPER_TCP_CONGESTION))?,
+    };
     let admin_key_path = pb_mapper_auth::admin_key_path(&auth_config.state_dir);
     if args.init_admin_key {
         std::fs::create_dir_all(&auth_config.state_dir)?;
@@ -203,6 +260,9 @@ pub(super) async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
     };
     let auth = pb_mapper_auth::AuthRuntime::from_process(auth_config).await?;
     let listener = pb_mapper_core::listener::bind(SocketAddr::new(ip_addr, args.port))?;
+    if let Some(congestion) = &tcp_congestion {
+        use_tcp_congestion(&listener, congestion);
+    }
     let relay = pb_mapper_server::run_server_on_listener_with_options(
         listener,
         shutdown.clone(),
@@ -329,6 +389,7 @@ mod tests {
         assert_eq!(defaults.max_temporary_keys, None);
         assert_eq!(defaults.max_temporary_key_ttl, None);
         assert_eq!(defaults.legacy_protocol, None);
+        assert_eq!(defaults.tcp_congestion, None);
 
         // Each value differs from its default, so each one shows its flag
         // reached the relay's configuration.
@@ -363,6 +424,30 @@ mod tests {
         assert_eq!(
             server_auth_config(&server_args(&["--max-temporary-key-ttl", "5s"])).unwrap_err(),
             ServerFlagError::MaxTemporaryKeyTtl
+        );
+    }
+
+    #[test]
+    fn tcp_congestion_comes_from_the_flag_or_the_environment() {
+        let bbr = TcpCongestion::new("bbr").unwrap();
+        assert_eq!(
+            server_args(&["--tcp-congestion", "bbr"]).tcp_congestion,
+            Some(bbr.clone())
+        );
+        // clap refuses a name Linux would cut short or could not hold.
+        for name in ["", "bbr cubic", "abcdefghijklmnop"] {
+            assert!(
+                Cli::try_parse_from(["pb-mapper", "server", "--tcp-congestion", name]).is_err(),
+                "{name:?}"
+            );
+        }
+
+        assert_eq!(tcp_congestion_from_env(None), Ok(None));
+        assert_eq!(tcp_congestion_from_env(Some(" ".into())), Ok(None));
+        assert_eq!(tcp_congestion_from_env(Some("bbr\n".into())), Ok(Some(bbr)));
+        assert_eq!(
+            tcp_congestion_from_env(Some("bbr cubic".into())),
+            Err(ServerFlagError::TcpCongestionEnv)
         );
     }
 }

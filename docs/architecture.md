@@ -214,6 +214,10 @@ Nothing in the SDK crates knows it exists.
   - `manager.rs`: The routing manager's work queue, and the registry of
     connection IDs and the mailboxes they are reached through
   - `connection.rs`: Per-socket authentication and dispatch
+  - `tcp_tuning.rs`: How a Linux relay's TCP connections send: the congestion
+    control `--tcp-congestion` sets once on the listener, which Linux hands to
+    every connection it accepts, and the startup notice while
+    `net.ipv4.tcp_slow_start_after_idle` is on
   - `server.rs`, `client.rs`: The service-side and subscriber-side loops
   - `guard.rs`: The one deregistration every connection kind owes the routing
     manager, sent exactly once

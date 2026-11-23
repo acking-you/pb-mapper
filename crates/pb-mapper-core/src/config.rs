@@ -218,6 +218,10 @@ pub const PB_MAPPER_LOG_FORMAT: &str = "PB_MAPPER_LOG_FORMAT";
 pub const PB_MAPPER_TUNNEL_IDLE_TIMEOUT: &str = "PB_MAPPER_TUNNEL_IDLE_TIMEOUT";
 pub const PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT: &str = "PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT";
 pub const PB_MAPPER_NEW_STREAMS_PER_SECOND: &str = "PB_MAPPER_NEW_STREAMS_PER_SECOND";
+/// The TCP congestion control a Linux relay sends with, such as `bbr`: what
+/// `pb-mapper server --tcp-congestion` takes when the flag is absent. Read once,
+/// by the `server` role at startup.
+pub const PB_MAPPER_TCP_CONGESTION: &str = "PB_MAPPER_TCP_CONGESTION";
 /// What [`new_streams_per_second`] is when the variable is unset or not a
 /// positive integer.
 pub const DEFAULT_NEW_STREAMS_PER_SECOND: u32 = 100;

@@ -10,7 +10,8 @@
 //! serializes global routing maps and quotas. `task` holds the messages between
 //! them, `routing` the routing model the runtime keeps, and `service_key` the
 //! namespaced service keys both use. Service-side and client-side tunnel loops
-//! remain isolated in `server` and `client`.
+//! remain isolated in `server` and `client`, and `tcp_tuning` holds what a
+//! Linux relay may change about how its TCP connections send.
 
 mod admin;
 mod client;
@@ -28,6 +29,7 @@ mod server;
 mod service_key;
 mod status;
 mod task;
+mod tcp_tuning;
 
 use std::net::SocketAddr;
 
@@ -38,6 +40,7 @@ pub use runtime::{
     run_server_on_listener_with_options, run_server_with_auth_config, run_server_with_shutdown,
 };
 pub use task::{ConnTask, ManagerTask};
+pub use tcp_tuning::{InvalidTcpCongestion, TcpCongestion, TcpCongestionError, set_tcp_congestion};
 
 // Paths the connection handlers and the direct coordinator name items by.
 pub(crate) use error::Result;
