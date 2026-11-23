@@ -1,6 +1,7 @@
 #include "desktop_video.h"
 
 #include <d3d11.h>
+#include <dxgi1_2.h>
 #include <mfapi.h>
 #include <mferror.h>
 #include <mfidl.h>
@@ -50,6 +51,15 @@ constexpr auto kSnapshotDeadline = std::chrono::milliseconds(300);
 // The longest a converted frame waits for the GPU before it is published
 // anyway: a GPU this slow would otherwise stop the picture.
 constexpr auto kConversionWait = std::chrono::milliseconds(100);
+// Set once a GPU completion event had not come by kConversionWait though
+// its copy had finished, or a wait on one failed: the driver's events cannot
+// be trusted, and every decoder polls its query instead for the rest of the
+// run.
+std::atomic<bool> gpu_events_unreliable{false};
+void DistrustGpuEvents(const char* why) {
+  if (gpu_events_unreliable.exchange(true)) return;
+  OutputDebugStringA((std::string("Desktop video: the GPU completion event ") + why + "; polling instead\n").c_str());
+}
 
 // The video C ABI of pb_mapper_ffi.dll (desktop_video.rs). The runner does
 // not link the DLL: it resolves these from the copy Dart already loaded.
@@ -665,6 +675,18 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     // Signalled once the GPU has run every command before it: the copy of
     // the frame about to be published.
     ComPtr<ID3D11Query> converted;
+    // Set by the GPU once it has run every command before EnqueueSetEvent,
+    // so the wait for `converted` sleeps on it. Auto-reset.
+    struct CompletionEvent {
+      HANDLE handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+      CompletionEvent() = default;
+      CompletionEvent(const CompletionEvent&) = delete;
+      CompletionEvent& operator=(const CompletionEvent&) = delete;
+      ~CompletionEvent() { if (handle) CloseHandle(handle); }
+    } gpu_done;
+    // DXGI 1.2's EnqueueSetEvent; null without it or without the event,
+    // and the wait then polls.
+    ComPtr<IDXGIDevice2> dxgi_device;
     // The one texture Flutter shows, shared under a handle that stays the
     // same for this decoder's life, so Flutter imports it once. A new
     // shared texture per frame made Flutter build an EGL surface from each,
@@ -706,6 +728,8 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       D3D11_QUERY_DESC query{};
       query.Query = D3D11_QUERY_EVENT;
       Check(device->CreateQuery(&query, &converted), "Create GPU completion query");
+      // A device without DXGI 1.2 leaves it null.
+      if (gpu_done.handle) device.As(&dxgi_device);
       UINT token = 0;
       Check(MFCreateDXGIDeviceManager(&token, &manager), "Create decoder device manager");
       Check(manager->ResetDevice(device.Get(), token), "Assign decoder device");
@@ -921,7 +945,6 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       Check(video_context->VideoProcessorBlt(processor.Get(), out_view.Get(), 0, 1, &stream), "Convert decoded GPU frame");
       context->CopyResource(shown.Get(), scratch.Get());
       context->End(converted.Get());
-      context->Flush();
       WaitForConversion();
       convert = Clock::now() - start;
       return std::make_shared<Surface>(shown, frame);
@@ -929,14 +952,43 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     // Flutter composites `shown` on its own device and takes no keyed mutex,
     // so nothing orders its read after this device's copy: a frame is
     // published, and Flutter told to draw it, once the GPU has run the copy,
-    // or after kConversionWait.
+    // or after kConversionWait. The query says when. Meanwhile the thread
+    // sleeps on gpu_done, which EnqueueSetEvent (it flushes) has the GPU set
+    // after the copy; a signal an earlier frame left only wakes it early.
+    // Without the event it yields between polls, which keeps a core busy.
     void WaitForConversion() {
+      bool on_event = dxgi_device && !gpu_events_unreliable.load() &&
+                      SUCCEEDED(dxgi_device->EnqueueSetEvent(gpu_done.handle));
+      if (!on_event) context->Flush();
       const auto deadline = Clock::now() + kConversionWait;
+      bool ran_out = false;
       for (;;) {
         const HRESULT hr = context->GetData(converted.Get(), nullptr, 0, 0);
         Check(hr, "Wait for the converted frame");
-        if (hr == S_OK || Clock::now() >= deadline) return;
-        std::this_thread::yield();
+        if (hr == S_OK) {
+          // The copy finished, but its event had not come by the deadline.
+          if (ran_out) DistrustGpuEvents("came late");
+          return;
+        }
+        const auto now = Clock::now();
+        if (now >= deadline) return;
+        if (!on_event) {
+          std::this_thread::yield();
+          continue;
+        }
+        const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+        switch (WaitForSingleObject(gpu_done.handle, static_cast<DWORD>(left.count()))) {
+          case WAIT_OBJECT_0:
+            ran_out = false;
+            break;
+          case WAIT_TIMEOUT:
+            ran_out = true;
+            break;
+          default:
+            DistrustGpuEvents("cannot be waited on");
+            on_event = false;
+            break;
+        }
       }
     }
   };
@@ -1008,8 +1060,12 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     }
   }
 
-  // Decoder thread, one per attached source. `next` is the only blocking call.
+  // Decoder thread, one per attached source. `next` is the only blocking
+  // call but for the wait for the GPU, which kConversionWait bounds.
   void Run(uint64_t consumer) {
+    // It sleeps while the GPU converts each picture, so it must take a core
+    // back at once when woken; still below the key hook's HIGHEST.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     mf_ = FAILED(com) ? com
           : MediaFoundationInstalled() ? MFStartup(MF_VERSION, MFSTARTUP_LITE)
