@@ -58,7 +58,10 @@ change stream and a slow relay check. The tray reads the same store instead of
 polling the FFI on its own. The remote desktop has its own store,
 `DesktopStore` (`state/desktop_store.dart`), whose views — this computer as a
 host, the open session, its statistics — each notify only their own
-listeners, so a live picture never rebuilds a page.
+listeners, so a live picture never rebuilds a page. It reads this computer's
+host when the host's change event says a viewer came, went or changed; on a
+clock it reads it every 1-2 s only while a viewer is connected or the Windows
+service hosts, and otherwise every 30 s as a backstop.
 
 ### The Relay page
 

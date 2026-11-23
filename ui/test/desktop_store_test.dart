@@ -38,6 +38,19 @@ void _lifecycle(WidgetTester tester, List<AppLifecycleState> states) {
   }
 }
 
+/// A host status read that, while [held] is set, answers only once it
+/// completes, with what the host says then.
+class _HeldStatusApi extends FakeDesktopApi {
+  Completer<void>? held;
+
+  @override
+  Future<DesktopHostSnapshot> hostStatus() async {
+    await super.hostStatus();
+    await held?.future;
+    return hostSnapshot;
+  }
+}
+
 /// A host whose stop never returns until [wedge] completes.
 class _WedgedStopApi extends FakeDesktopApi {
   final wedge = Completer<void>();
@@ -197,38 +210,77 @@ void main() {
     await tester.pump(const Duration(seconds: 10));
     expect(api.calls, isEmpty);
 
-    // The page polls the host each second, and not after it leaves.
+    // The page reads the host once. With no viewer, only this app's own
+    // actions and its host's change events change what it says, so the
+    // page reads it again only as a 30 s backstop, and not after it leaves.
     final page = store.demand(DesktopDemand.page);
     await tester.pump();
     api.calls.clear();
-    await tester.pump(const Duration(seconds: 3));
-    expect(api.ops, ['host_status', 'host_status', 'host_status']);
+    await tester.pump(const Duration(seconds: 29));
+    expect(api.calls, isEmpty);
+    await tester.pump(const Duration(seconds: 1));
+    expect(api.ops, ['host_status']);
     _lifecycle(tester, [AppLifecycleState.inactive, AppLifecycleState.hidden]);
     api.calls.clear();
-    await tester.pump(const Duration(seconds: 8));
+    await tester.pump(const Duration(seconds: 60));
     expect(api.calls, isEmpty);
     _lifecycle(tester, [AppLifecycleState.inactive, AppLifecycleState.resumed]);
-    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 30));
     expect(count('host_status'), 1);
     page.dispose();
     await tester.pump();
     api.calls.clear();
-    await tester.pump(const Duration(seconds: 10));
+    await tester.pump(const Duration(seconds: 60));
     expect(api.calls, isEmpty);
 
-    // Sharing polls every two seconds without a page, so a viewer's
-    // arrival is seen; stopping ends it.
+    // Sharing with no viewer connected: only the backstop, without a page
+    // too, since the host announces a viewer's arrival.
     await store.enableHost(
       displayId: 1,
       allowControl: true,
       ordinaryOnly: true,
     );
     api.calls.clear();
+    await tester.pump(const Duration(seconds: 30));
+    expect(api.ops, ['host_status']);
+
+    // A viewer arrives: read at once on the event, and then every two
+    // seconds while it is connected, for what its session shows.
+    final local = api.hostSnapshot.host!;
+    DesktopHostSnapshot viewed(DesktopHostViewer? viewer) =>
+        DesktopHostSnapshot(
+          host: DesktopHostStatus(
+            state: viewer == null ? 'waiting' : 'streaming',
+            controlAllowed: local.controlAllowed,
+            viewer: viewer,
+            display: local.display,
+            service: local.service,
+            invitation: local.invitation,
+          ),
+        );
+    api.hostSnapshot = viewed(DesktopHostViewer(since: DateTime(2026, 11)));
+    api.calls.clear();
+    api.announceHostChange();
+    await tester.pump();
+    expect(api.ops, ['host_status']);
+    expect(store.hostView.value.viewer, isNotNull);
+    api.calls.clear();
     await tester.pump(const Duration(seconds: 4));
     expect(api.ops, ['host_status', 'host_status']);
+
+    // It leaves: the event, then the backstop again.
+    api.hostSnapshot = viewed(null);
+    api.announceHostChange();
+    await tester.pump();
+    expect(store.hostView.value.viewer, isNull);
+    api.calls.clear();
+    await tester.pump(const Duration(seconds: 29));
+    expect(api.calls, isEmpty);
+
+    // Stopping ends it.
     await store.stopHost();
     api.calls.clear();
-    await tester.pump(const Duration(seconds: 10));
+    await tester.pump(const Duration(seconds: 60));
     expect(api.calls, isEmpty);
 
     // A session without a viewer on screen: its status each second, and
@@ -279,6 +331,77 @@ void main() {
     phonePage.dispose();
     phone.dispose();
   });
+
+  testWidgets(
+    "the host's change event reads it at once, a burst during a read once "
+    "more after it, and a read a lifecycle call held up again until it is not",
+    (tester) async {
+      final api = _HeldStatusApi();
+      final store = DesktopStore(api);
+      await store.enableHost(
+        displayId: 1,
+        allowControl: true,
+        ordinaryOnly: true,
+      );
+      int reads() => api.ops.where((o) => o == 'host_status').length;
+      final local = api.hostSnapshot;
+      final viewed = DesktopHostSnapshot(
+        host: DesktopHostStatus(
+          state: 'streaming',
+          controlAllowed: true,
+          service: local.host!.service,
+          invitation: local.host!.invitation,
+          viewer: DesktopHostViewer(since: DateTime(2026, 11)),
+        ),
+      );
+
+      // Three events while the first read is out: one read more, not three.
+      api.calls.clear();
+      api.held = Completer<void>();
+      api.announceHostChange();
+      api.announceHostChange();
+      api.announceHostChange();
+      await tester.pump();
+      expect(reads(), 1);
+      api.hostSnapshot = viewed;
+      api.held!.complete();
+      api.held = null;
+      await tester.pump();
+      expect(reads(), 2);
+      expect(store.hostView.value.viewer, isNotNull);
+
+      // It leaves.
+      api.hostSnapshot = local;
+      api.announceHostChange();
+      await tester.pump();
+      expect(store.hostView.value.viewer, isNull);
+
+      // One arrives while a lifecycle call holds the host: read again each
+      // second until a read is not held up, then only on the viewer's clock.
+      api.hostSnapshot = const DesktopHostSnapshot(busy: true);
+      api.calls.clear();
+      api.announceHostChange();
+      await tester.pump();
+      expect(reads(), 1);
+      await tester.pump(const Duration(seconds: 1));
+      expect(reads(), 2);
+      expect(store.hostView.value.viewer, isNull);
+      api.hostSnapshot = viewed;
+      await tester.pump(const Duration(seconds: 1));
+      expect(reads(), 3);
+      expect(store.hostView.value.viewer, isNotNull);
+      api.calls.clear();
+      await tester.pump(const Duration(seconds: 2));
+      expect(reads(), 1);
+
+      store.dispose();
+      // Nothing is read for an event after that.
+      api.calls.clear();
+      api.announceHostChange();
+      await tester.pump();
+      expect(reads(), 0);
+    },
+  );
 
   testWidgets('a display attached after a headless start can be shared', (
     tester,

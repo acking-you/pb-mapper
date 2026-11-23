@@ -29,7 +29,9 @@ final changes = StreamController<StateChange>.broadcast();
 /// and their last pictures in [thumbnails], a fresh temporary directory
 /// unless a test passes its own (it must exist: a widget test's clock never
 /// finishes creating one). A null [needsSetup] leaves first-run setup for
-/// the app to decide from what [api] holds.
+/// the app to decide from what [api] holds. [desktop] runs the window's
+/// desktop life (the tray, closing to it), whose `window_manager` and
+/// `tray_manager` channels the test must answer.
 Future<void> pumpApp(
   WidgetTester tester,
   FakePbMapperApi api, {
@@ -43,6 +45,7 @@ Future<void> pumpApp(
   ViewerPrefs? viewerPrefs,
   RemoteComputerVault? vault,
   Directory? thumbnails,
+  bool desktop = false,
 }) async {
   if (thumbnails == null) {
     final temp = Directory.systemTemp.createTempSync('pbm-thumbnails-');
@@ -74,6 +77,7 @@ Future<void> pumpApp(
         viewerPrefs: viewerPrefs ?? ViewerPrefs(persist: false),
         vault: vault ?? FakeRemoteComputerVault(),
         thumbnailDir: () async => thumbnailDir,
+        desktop: desktop,
       ),
     ),
   );

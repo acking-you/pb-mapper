@@ -527,7 +527,7 @@ listens to the narrowest source:
 | --- | --- | --- | --- |
 | Overview, Tunnels, Relay, Logs, Settings, rail foot | `AppStore` (unchanged) | anything desktop | — |
 | `HostSharingDot`, `SharingIndicator`, `SharingFallbackLayer`, tray | `desktop.hostView` | session, stats | on change |
-| `HostCard` | `desktop.hostView` | session, stats | on change (poll 1 s with the page demand, 2 s while sharing without it) |
+| `HostCard` | `desktop.hostView` | session, stats | on change (the host's `desktopHost` event; with a viewer connected or the Windows service hosting, poll 1 s with the page demand, 2 s while sharing without it; else a 30 s backstop) |
 | Computer list, featured card | `computers`, `AppStore` (relay state, `desktopServiceNames`), `desktop.session` | hostView | on change; relay ≈ 12 s |
 | Viewing row meta, toolbar chip, quality panel, gutter quality | `desktop.stats` | session | ≤ 1 Hz |
 | `RemoteViewerScreen`, `DesktopViewer.build`, `TouchViewer.build` | nothing (fullscreen flag, title) | everything | — |

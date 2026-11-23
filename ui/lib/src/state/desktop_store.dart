@@ -39,8 +39,27 @@ const _protocolRetryLimit = 3;
 const _noVideoReconnectMs = 5000;
 const _statusVisible = Duration(milliseconds: 500);
 const _statusHidden = Duration(seconds: 1);
+
+/// The host read on a clock, while what it shows moves on its own (a
+/// viewer's session) or comes with no event (the Windows service's host):
+/// with the Remote page, and without it while sharing.
 const _hostWithPage = Duration(seconds: 1);
 const _hostWhileSharing = Duration(seconds: 2);
+
+/// The host read on a clock otherwise, with the page or this app's own host
+/// up: only a backstop. That host sends a change event when a viewer comes
+/// or goes, and its watch keeps the last change, so none is lost while the
+/// event path works; this bounds what a broken one would cost.
+const _hostFallback = Duration(seconds: 30);
+
+/// A change event whose read found the host held by a lifecycle call is read
+/// again after this, until a read is not.
+const _hostChangeBusyRetry = Duration(seconds: 1);
+
+/// The capabilities' clock while the Remote page shows a card that may ask
+/// for a permission or a display: read each tick while one is missing, and
+/// every fifth otherwise.
+const _capabilityTick = Duration(seconds: 1);
 const _viewTick = Duration(milliseconds: 16);
 const _moveInterval = Duration(milliseconds: 4);
 const _snapshotBound = Duration(milliseconds: 300);
@@ -255,6 +274,7 @@ class DesktopStore {
        _now = now ?? DateTime.now,
        _onRestartReady = onRestartReady {
     _geometry.addListener(_publishCursor);
+    _hostChanges = _api.hostChanges.listen((_) => _onHostChanged());
   }
 
   final DesktopApiClient _api;
@@ -332,9 +352,13 @@ class DesktopStore {
   static final _framed = <DesktopStore>{};
   static bool _frameHooked = false;
 
-  /// [DesktopDemand.page] polls the host every second where this device can
-  /// host; [DesktopDemand.viewer] is a viewer on screen: the session resumes
-  /// while it is held and the app is visible, and pauses otherwise (D13).
+  /// [DesktopDemand.page] keeps the host card current where this device can
+  /// host: the host is read at once, then every second while a viewer is
+  /// connected or the Windows service hosts, else every 30 s, since this
+  /// app's own host announces a viewer; the capabilities are read each
+  /// second while the card asks for a permission or a display;
+  /// [DesktopDemand.viewer] is a viewer on screen: the session resumes while
+  /// it is held and the app is visible, and pauses otherwise (D13).
   ///
   /// Widgets take and give back demand in `initState` and `dispose`, inside
   /// a frame, so the session's change is published after that frame.
@@ -410,36 +434,66 @@ class DesktopStore {
 
   // ---------------------------------------------------------------- timers
 
-  Timer? _hostTimer, _statusTimer, _viewTimer, _statsTimer, _decoderTimer;
-  Duration? _hostEvery, _statusEvery;
+  Timer? _hostTimer, _capabilityTimer, _statusTimer, _viewTimer;
+  Timer? _statsTimer, _decoderTimer;
+  Duration? _hostEvery, _capabilityEvery, _statusEvery;
 
   bool get _sessionActive =>
       _target != null && _end == null && !_identityChanged;
   bool get _viewPolling => _visible && _sessionActive;
 
   void _schedulePolling() {
-    final hostEvery = _disposed || _restarting || _cannotHost
+    final host = _hostView.value;
+    // A viewer's session (how long, which path, what quality) moves on its
+    // own, and the Windows service's host sends no change event: those are
+    // read on the clock. This app's own host says when a viewer comes, goes
+    // or changes, so without one only the fallback runs.
+    final clocked = host.viewer != null || host.background;
+    final hostEvery =
+        _disposed ||
+            _restarting ||
+            _cannotHost ||
+            (!_hostPageVisible && !host.sharing)
         ? null
+        : !clocked
+        ? _hostFallback
         : _hostPageVisible
         ? _hostWithPage
-        : _hostView.value.sharing
-        ? _hostWhileSharing
-        : null;
+        : _hostWhileSharing;
     if (hostEvery != _hostEvery) {
       _hostEvery = hostEvery;
       _hostTimer?.cancel();
       _hostTimer = hostEvery == null
           ? null
-          : Timer.periodic(hostEvery, (timer) {
+          : Timer.periodic(hostEvery, (_) => unawaited(_readHost()));
+    }
+    // What the owner may fix outside the app, while the card may ask for
+    // it: a permission (macOS) or a display, on a clock of its own.
+    final capabilities = _capabilities;
+    final capabilityEvery =
+        !_disposed &&
+            !_restarting &&
+            !_cannotHost &&
+            _hostPageVisible &&
+            capabilities != null &&
+            (capabilities.reason == 'no_display' ||
+                capabilities.permissions != null)
+        ? _capabilityTick
+        : null;
+    if (capabilityEvery != _capabilityEvery) {
+      _capabilityEvery = capabilityEvery;
+      _capabilityTimer?.cancel();
+      _capabilityTimer = capabilityEvery == null
+          ? null
+          : Timer.periodic(capabilityEvery, (timer) {
               final permissions = _capabilities?.permissions;
               // Follow a grant or a reconnected display while the card is
               // visible. Also notice a revoked grant or a second monitor.
-              final refresh =
-                  _hostPageVisible &&
-                  (_capabilities?.reason == 'no_display' ||
-                      (permissions != null &&
-                          (!permissions.complete || timer.tick % 5 == 0)));
-              unawaited(_readHost(refreshCapabilities: refresh));
+              if (_capabilities?.reason == 'no_display' ||
+                  (permissions != null &&
+                      (!permissions.complete || timer.tick % 5 == 0))) {
+                unawaited(_recheckCapabilities());
+              }
             });
     }
     final statusEvery = _disposed || !_sessionActive
@@ -508,6 +562,16 @@ class DesktopStore {
   DesktopCapabilities? _capabilities;
   int _capabilityReads = 0, _capabilityApplied = 0;
 
+  /// The capabilities read again, and shown when they changed.
+  Future<void> _recheckCapabilities() async {
+    try {
+      await _readCapabilities();
+    } catch (_) {
+      return; // Keep the last answer.
+    }
+    _publishHost();
+  }
+
   // A permission request can finish while an older monitor poll is in flight.
   Future<void> _readCapabilities() async {
     final read = ++_capabilityReads;
@@ -525,6 +589,13 @@ class DesktopStore {
   DesktopFailure? _trustError;
   DesktopHostSnapshot? _host;
   bool _hostStatusRead = false, _hostBusy = false;
+
+  /// The last host read applied found the host held by a lifecycle call.
+  bool _hostReadBusy = false;
+
+  StreamSubscription<void>? _hostChanges;
+  bool _hostChangeReading = false, _hostChangeAgain = false;
+  Timer? _hostChangeRetry;
   bool _enabling = false, _restarting = false, _startupRestored = false;
   DesktopFailure? _hostError;
   int _hostSerial = 0, _hostResumeAttempt = 0;
@@ -611,6 +682,7 @@ class DesktopStore {
       final snapshot = await _api.hostStatus();
       if (_disposed || read <= _hostApplied) return;
       _hostApplied = read;
+      _hostReadBusy = snapshot.busy;
       // A lifecycle call holds the host, so it is unknown, not gone: keep
       // the one this store has until a read that is not busy.
       _host = snapshot.busy
@@ -624,6 +696,37 @@ class DesktopStore {
       // A failed poll keeps the last state; actions report their own errors.
     }
     _publishHost();
+  }
+
+  /// Rust says this app's own host changed: a viewer came or went, or its
+  /// session or the host's policy changed. Read it now, so a viewer's
+  /// arrival brings the window back and shows in the tray at once. Changes
+  /// during a read are one more read after it.
+  void _onHostChanged() {
+    if (_disposed) return;
+    if (_hostChangeReading) {
+      _hostChangeAgain = true;
+      return;
+    }
+    unawaited(_readHostChange());
+  }
+
+  Future<void> _readHostChange() async {
+    _hostChangeRetry?.cancel();
+    _hostChangeRetry = null;
+    _hostChangeReading = true;
+    try {
+      do {
+        _hostChangeAgain = false;
+        await _readHost();
+      } while (_hostChangeAgain && !_disposed);
+    } finally {
+      _hostChangeReading = false;
+    }
+    // A lifecycle call held the host, so the change is still unread.
+    if (_hostReadBusy && !_disposed) {
+      _hostChangeRetry = Timer(_hostChangeBusyRetry, _onHostChanged);
+    }
   }
 
   Future<void> _readTrustAndHost(int serial) async {
@@ -2613,6 +2716,9 @@ class DesktopStore {
     _cancelRetry();
     _cancelControlCooldown();
     _hostTimer?.cancel();
+    _capabilityTimer?.cancel();
+    _hostChangeRetry?.cancel();
+    unawaited(_hostChanges?.cancel());
     _statusTimer?.cancel();
     _viewTimer?.cancel();
     _statsTimer?.cancel();

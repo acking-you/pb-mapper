@@ -429,6 +429,14 @@ the Windows service shares with the app not running at all, nothing shows a
 viewer: the service cannot draw in the user's session. Keep the app in the
 tray to see who is connected.
 
+The app's own host tells the window when a viewer arrives or leaves, or its
+session changes, through the change event `desktopHost`; the window then
+reads the host at once. So while nobody is connected it asks nothing on a
+clock but a backstop every 30 s, hidden or not. While a viewer is connected
+it reads the host every 2 s, every second on Remote desktop, for what the
+viewer panel shows. The Windows service's host sends no such event, so while
+the service shares the window reads it on that same clock, viewer or not.
+
 ## Remote resolution
 
 The desktop viewer's Display menu holds **Remote resolution**: the remote

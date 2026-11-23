@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 import 'package:pb_mapper_ui/src/pages/tunnels_page.dart';
@@ -137,6 +138,70 @@ void main() {
         greaterThan(polls),
       );
       expect(find.byType(PulsingDot), findsNWidgets(2));
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
+    'a viewer arriving while the window is hidden brings it back, without '
+    "focus, on the host's change event, once per viewer",
+    (tester) async {
+      final messenger = tester.binding.defaultBinaryMessenger;
+      const window = MethodChannel('window_manager');
+      const tray = MethodChannel('tray_manager');
+      final shown = <Object?>[];
+      messenger.setMockMethodCallHandler(window, (call) async {
+        switch (call.method) {
+          case 'isVisible' || 'isMinimized' || 'isMaximized':
+            return false;
+          case 'show':
+            shown.add(call.arguments);
+        }
+        return null;
+      });
+      messenger.setMockMethodCallHandler(tray, (_) async => true);
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(window, null);
+        messenger.setMockMethodCallHandler(tray, null);
+      });
+
+      // Shared, with nobody connected, and the window closed to the tray.
+      final api = FakePbMapperApi();
+      final local = viewedHost().host!;
+      api.desktop.hostSnapshot = DesktopHostSnapshot(
+        host: DesktopHostStatus(
+          controlAllowed: true,
+          service: local.service,
+          invitation: local.invitation,
+        ),
+      );
+      await pumpApp(tester, api, desktop: true);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      await tester.pump();
+
+      // A viewer connects. Nothing reads the host on a two-second clock any
+      // more, so until Rust says so the window stays where it is ...
+      api.desktop.hostSnapshot = viewedHost();
+      await tester.pump(const Duration(seconds: 5));
+      expect(shown, isEmpty);
+
+      // ... and the host's change event brings it back at once.
+      api.desktop.announceHostChange();
+      await tester.pump();
+      await tester.pump();
+      expect(shown, [
+        {'inactive': true},
+      ]);
+
+      // Closed again, it stays closed for the rest of that session.
+      api.desktop.announceHostChange();
+      await tester.pump();
+      await tester.pump();
+      expect(shown, hasLength(1));
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await finish(tester);
     },
   );
