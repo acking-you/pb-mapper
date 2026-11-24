@@ -362,6 +362,8 @@ void main() {
         {
           'path': 'direct',
           'rtt_ms': 37,
+          'forward_queue_ms': 3,
+          'reverse_queue_ms': 300,
           'presented_fps': 58.6,
           'received_fps': 59.4,
           'capture_fps': 60.0,
@@ -423,6 +425,9 @@ void main() {
     expect(row('path', '${l10n.qualityPathLan} · IPv4'), findsOneWidget);
     expect(row('link-rtt', '4 ms'), findsOneWidget);
     expect(row('stream-rtt', '37 ms'), findsOneWidget);
+    // An upload here queues on the way back, not toward this device.
+    expect(row('one-way-queue', '3 ms'), findsOneWidget);
+    expect(row('one-way-queue', l10n.qualityQueueBack(300)), findsOneWidget);
     expect(row('speed', '2.4 MiB/s'), findsOneWidget);
     expect(row('speed', l10n.qualitySpeedSent('18 KiB/s')), findsOneWidget);
     expect(row('codec', 'H.265'), findsOneWidget);
@@ -617,6 +622,8 @@ void main() {
     );
     expect(find.byKey(const Key('quality-link-rtt')), findsNothing);
     expect(find.byKey(const Key('quality-stream-rtt')), findsOneWidget);
+    // A host that reads no arrival times reports no one-way queue.
+    expect(find.byKey(const Key('quality-one-way-queue')), findsNothing);
   });
 
   testWidgets('the chip keeps its width as the figures change', (tester) async {

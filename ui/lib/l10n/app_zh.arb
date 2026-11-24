@@ -552,6 +552,8 @@
   "qualityStreamRtt": "画面通道往返",
   "qualityLowest": "最低 {ms} ms",
   "qualityQueued": "排队 {ms} ms",
+  "qualityQueueToward": "到本机排队",
+  "qualityQueueBack": "回程排队 {ms} ms",
   "qualityLatency": "画面延迟",
   "qualityLatencySplit": "主机 {host} · 本机 {viewer} ms",
   "qualityFps": "显示帧率",
