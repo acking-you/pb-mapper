@@ -1,7 +1,11 @@
-//! The D3D11 video processor that scales the captured BGRA desktop into the
+//! The D3D11 video processor that turns each captured BGRA desktop picture
+//! upright, scales it (or crops its odd edge) and converts it into the
 //! encoder's NV12 samples on the GPU.
 use super::SAMPLES;
-use crate::{Result, error};
+use crate::{
+    Result, error,
+    scale::{Rotation, crop_only},
+};
 use std::mem::ManuallyDrop;
 use windows::{
     Win32::{
@@ -12,52 +16,125 @@ use windows::{
     core::Interface,
 };
 
+/// The textures pictures are converted from whose views are kept: the
+/// duplication's own surfaces, of which DXGI may hand out more than one,
+/// or the one copy of them a fallback makes. The oldest view goes first.
+const INPUT_VIEWS: usize = 4;
+
+/// A sample of the pool, with the texture subresource that holds its NV12
+/// picture, found once as the sample is allocated.
+pub(super) struct Sample {
+    pub(super) sample: IMFSample,
+    pub(super) texture: ID3D11Texture2D,
+    pub(super) subresource: u32,
+}
+impl Sample {
+    pub(super) fn new(sample: IMFSample) -> Result<Self> {
+        let buffer = unsafe { sample.GetBufferByIndex(0).map_err(error)? };
+        let buffer: IMFDXGIBuffer = buffer.cast().map_err(error)?;
+        let mut raw = std::ptr::null_mut();
+        unsafe {
+            buffer
+                .GetResource(&ID3D11Texture2D::IID, &mut raw)
+                .map_err(error)?;
+        }
+        // SAFETY: `GetResource` returned a referenced texture of the IID asked.
+        let texture = unsafe { ID3D11Texture2D::from_raw(raw) };
+        let subresource = unsafe { buffer.GetSubresourceIndex().map_err(error)? };
+        Ok(Self {
+            sample,
+            texture,
+            subresource,
+        })
+    }
+}
+
 pub(super) struct Converter {
     device: ID3D11VideoDevice,
     context: ID3D11VideoContext,
     enumerator: ID3D11VideoProcessorEnumerator,
     processor: ID3D11VideoProcessor,
-    /// The view of the texture captures are copied into, which is the same
-    /// for every frame, with that texture.
-    input: Option<(ID3D11Texture2D, ID3D11VideoProcessorInputView)>,
+    /// A view of each texture pictures were converted from, with that
+    /// texture: at most `INPUT_VIEWS`. Each holds its texture, so a texture
+    /// seen again at the same address is the same one.
+    inputs: Vec<(ID3D11Texture2D, ID3D11VideoProcessorInputView)>,
     /// A view of each sample texture and subresource the pool has handed
     /// out, with that texture: at most `SAMPLES.1`.
     outputs: Vec<(ID3D11Texture2D, u32, ID3D11VideoProcessorOutputView)>,
 }
 impl Converter {
+    /// A converter of `input` pictures, as captured, into `output` ones,
+    /// upright: turned by `rotation`, which a video processor without the
+    /// rotation cap refuses; cropped where the upright input is at most one
+    /// pixel larger than `output` (`crop_only`), so that it copies 1:1 and
+    /// leaves out the right column or bottom row; scaled otherwise. The
+    /// processor favours `quality` or speed.
     pub(super) fn new(
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
-        input_width: u32,
-        input_height: u32,
-        width: u32,
-        height: u32,
+        input: (u32, u32),
+        output: (u32, u32),
+        rotation: Rotation,
         fps: u32,
+        quality: bool,
     ) -> Result<Self> {
         let device: ID3D11VideoDevice = device.cast().map_err(error)?;
         let context: ID3D11VideoContext = context.cast().map_err(error)?;
+        let rate = DXGI_RATIONAL {
+            Numerator: fps,
+            Denominator: 1,
+        };
         let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-            InputFrameRate: DXGI_RATIONAL {
-                Numerator: fps,
-                Denominator: 1,
+            InputFrameRate: rate,
+            InputWidth: input.0,
+            InputHeight: input.1,
+            OutputFrameRate: rate,
+            OutputWidth: output.0,
+            OutputHeight: output.1,
+            Usage: if quality {
+                D3D11_VIDEO_USAGE_OPTIMAL_QUALITY
+            } else {
+                D3D11_VIDEO_USAGE_OPTIMAL_SPEED
             },
-            InputWidth: input_width,
-            InputHeight: input_height,
-            OutputFrameRate: DXGI_RATIONAL {
-                Numerator: fps,
-                Denominator: 1,
-            },
-            OutputWidth: width,
-            OutputHeight: height,
-            Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
         };
         let enumerator = unsafe {
             device
                 .CreateVideoProcessorEnumerator(&desc)
                 .map_err(error)?
         };
+        let turn = processor_rotation(rotation);
+        if turn.is_some() {
+            let mut caps = D3D11_VIDEO_PROCESSOR_CAPS::default();
+            unsafe { enumerator.GetVideoProcessorCaps(&mut caps).map_err(error)? };
+            if caps.FeatureCaps & D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ROTATION.0 as u32 == 0 {
+                return Err(error(
+                    "GPU video capture does not support a rotated display on this GPU: its video processor cannot rotate",
+                ));
+            }
+        }
         let processor = unsafe { device.CreateVideoProcessor(&enumerator, 0).map_err(error)? };
+        // The source rectangle is in the captured picture, before the turn;
+        // the destination and target are the upright output.
+        let upright = rotation.upright(input);
+        let kept = if crop_only(upright, output) {
+            output
+        } else {
+            upright
+        };
+        let [left, top, right, bottom] = rotation.source_rect(input, kept);
+        let source = RECT {
+            left: left as i32,
+            top: top as i32,
+            right: right as i32,
+            bottom: bottom as i32,
+        };
+        let target = RECT {
+            left: 0,
+            top: 0,
+            right: output.0 as i32,
+            bottom: output.1 as i32,
+        };
         unsafe {
             context.VideoProcessorSetStreamFrameFormat(
                 &processor,
@@ -65,28 +142,12 @@ impl Converter {
                 D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
             );
             context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
-            context.VideoProcessorSetStreamSourceRect(
-                &processor,
-                0,
-                true,
-                Some(&RECT {
-                    left: 0,
-                    top: 0,
-                    right: input_width as i32,
-                    bottom: input_height as i32,
-                }),
-            );
-            context.VideoProcessorSetStreamDestRect(
-                &processor,
-                0,
-                true,
-                Some(&RECT {
-                    left: 0,
-                    top: 0,
-                    right: width as i32,
-                    bottom: height as i32,
-                }),
-            );
+            context.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&source));
+            context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&target));
+            context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&target));
+            if let Some(turn) = turn {
+                context.VideoProcessorSetStreamRotation(&processor, 0, true, turn);
+            }
         }
         // Full-range RGB -> studio-range BT.709 NV12; state the matching values
         // on the encoded media type so hardware decoders render consistent color.
@@ -107,23 +168,17 @@ impl Converter {
             context,
             enumerator,
             processor,
-            input: None,
+            inputs: Vec::with_capacity(INPUT_VIEWS),
             outputs: Vec::with_capacity(SAMPLES.1 as usize),
         })
     }
-    /// Scale `source` into `sample`. The views of both are created once
+    /// Convert `source` into `target`. The views of both are created once
     /// and kept: each holds its texture, so a texture seen again is the same
-    /// one.
-    pub(super) fn convert(&mut self, source: &ID3D11Texture2D, sample: &IMFSample) -> Result<()> {
-        let input = match &self.input {
-            Some((texture, view)) if texture.as_raw() == source.as_raw() => view.clone(),
-            _ => {
-                let view = self.input_view(source)?;
-                self.input = Some((source.clone(), view.clone()));
-                view
-            }
-        };
-        let output = self.output_view(sample)?;
+    /// one. A video processor that refuses `source`, a duplication's own
+    /// surface, fails here, before anything is queued.
+    pub(super) fn convert(&mut self, source: &ID3D11Texture2D, target: &Sample) -> Result<()> {
+        let input = self.input_view(source)?;
+        let output = self.output_view(target)?;
         let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
             Enable: true.into(),
             pInputSurface: ManuallyDrop::new(Some(input)),
@@ -142,7 +197,19 @@ impl Converter {
         }
         result.map_err(error)
     }
-    fn input_view(&self, source: &ID3D11Texture2D) -> Result<ID3D11VideoProcessorInputView> {
+    /// Drop the kept input views, and the textures they hold: the
+    /// duplication's surfaces, once pictures are copied out of them instead.
+    pub(super) fn forget_inputs(&mut self) {
+        self.inputs.clear();
+    }
+    fn input_view(&mut self, source: &ID3D11Texture2D) -> Result<ID3D11VideoProcessorInputView> {
+        if let Some((_, view)) = self
+            .inputs
+            .iter()
+            .find(|(kept, _)| kept.as_raw() == source.as_raw())
+        {
+            return Ok(view.clone());
+        }
         let mut input = None;
         unsafe {
             self.device
@@ -163,20 +230,21 @@ impl Converter {
                 )
                 .map_err(error)?;
         }
-        input.ok_or_else(|| error("missing BGRA processor input"))
-    }
-    /// The view of the texture subresource that holds `sample`.
-    fn output_view(&mut self, sample: &IMFSample) -> Result<ID3D11VideoProcessorOutputView> {
-        let buffer = unsafe { sample.GetBufferByIndex(0).map_err(error)? };
-        let buffer: IMFDXGIBuffer = buffer.cast().map_err(error)?;
-        let mut raw = std::ptr::null_mut();
-        unsafe {
-            buffer
-                .GetResource(&ID3D11Texture2D::IID, &mut raw)
-                .map_err(error)?;
+        let input = input.ok_or_else(|| error("missing BGRA processor input"))?;
+        if self.inputs.len() >= INPUT_VIEWS {
+            self.inputs.remove(0);
         }
-        let texture = unsafe { ID3D11Texture2D::from_raw(raw) };
-        let subresource = unsafe { buffer.GetSubresourceIndex().map_err(error)? };
+        self.inputs.push((source.clone(), input.clone()));
+        Ok(input)
+    }
+    /// The view of the texture subresource that holds `target`.
+    fn output_view(&mut self, target: &Sample) -> Result<ID3D11VideoProcessorOutputView> {
+        let Sample {
+            texture,
+            subresource,
+            sample: _,
+        } = target;
+        let subresource = *subresource;
         if let Some((_, _, view)) = self
             .outputs
             .iter()
@@ -213,7 +281,7 @@ impl Converter {
         unsafe {
             self.device
                 .CreateVideoProcessorOutputView(
-                    &texture,
+                    texture,
                     &self.enumerator,
                     &output_desc,
                     Some(&mut output),
@@ -225,7 +293,20 @@ impl Converter {
         if self.outputs.len() >= SAMPLES.1 as usize {
             self.outputs.clear();
         }
-        self.outputs.push((texture, subresource, output.clone()));
+        self.outputs
+            .push((texture.clone(), subresource, output.clone()));
         Ok(output)
+    }
+}
+
+/// The video processor's turn for `rotation`, all clockwise
+/// (`D3D11_VIDEO_PROCESSOR_ROTATION_90` turns the stream 90° clockwise);
+/// `None` for none, which sets nothing.
+pub(super) fn processor_rotation(rotation: Rotation) -> Option<D3D11_VIDEO_PROCESSOR_ROTATION> {
+    match rotation {
+        Rotation::Identity => None,
+        Rotation::Cw90 => Some(D3D11_VIDEO_PROCESSOR_ROTATION_90),
+        Rotation::Cw180 => Some(D3D11_VIDEO_PROCESSOR_ROTATION_180),
+        Rotation::Cw270 => Some(D3D11_VIDEO_PROCESSOR_ROTATION_270),
     }
 }

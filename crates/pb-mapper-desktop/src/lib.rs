@@ -32,6 +32,9 @@ mod platform;
 pub mod privileged;
 mod protocol;
 mod qos;
+// Neutral: only the Windows host's video processor uses it so far.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod scale;
 mod scheduler;
 mod security;
 mod session;
