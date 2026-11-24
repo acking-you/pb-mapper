@@ -2276,31 +2276,31 @@ left out; while the connection is down the core rows show dashes.
     decoder's codec API confirms it. Its decoder thread's CPU comes as
     cycles, which the panel does not show.
   - macOS and iOS: the counts, the decode time (VideoToolbox decoding a unit,
-    keyframes included), the decoder thread's CPU as a share of one core,
-    VideoToolbox's real-time mode as low latency, and the refresh of the
-    display the viewer window is on (macOS) or the device's (iOS). A Mac's
-    layer presenter adds the present time (from the end of a picture's
-    decode to the end of its commit to the WindowServer); its dropped
-    pictures include, while the panel is open, those committed after
-    another within one refresh of the display, which no refresh showed.
-    iOS, and a Mac built with `--dart-define=presenter=texture`, add the
-    release-to-consume mean instead.
+    keyframes included), the release-to-consume mean, the decoder thread's
+    CPU as a share of one core, VideoToolbox's real-time mode as low latency,
+    and the refresh of the display the viewer window is on (macOS) or the
+    device's (iOS). A Mac app built with the layer presenter
+    (`--dart-define=presenter=layer`) shows the present time (from the end
+    of a picture's decode to the end of its commit to the WindowServer) in
+    place of release to consume; its dropped pictures include, while the
+    panel is open, those committed beyond one for each refresh of the
+    display, which no refresh showed.
   - Linux: the counts, the release-to-consume mean and the fastest display's
     refresh.
 
   The Mac's decode time and Windows' convert time measure different spans,
   so each has its own row. A present time (`timings.present`) gets a row
   too, for a runner that presents pictures itself: the Mac's layer
-  presenter. Closing the panel drops the decoder's timing accumulators and
-  its CPU reading.
+  presenter, when built in. Closing the panel drops the decoder's timing
+  accumulators and its CPU reading.
 
 Read in order, the rates place a loss: capture below pace is the host's
 source or its capture gate; pace below the ceiling is the QoS controller
 (its startup hold included) or the viewer's cap; received below capture is
-the transport; presented below received is this device's presenter. A
-Mac's layer presenter presents every picture it decodes, so there the
-decoder's dropped figure, not the presented rate, shows the pictures the
-display had no refresh for.
+the transport; presented below received is this device's presenter. The
+Mac's layer presenter, when built in, presents every picture it decodes,
+so there the decoder's dropped figure, not the presented rate, shows the
+pictures the display had no refresh for.
 
 The chip on the toolbar, and the phone's quality button, show the speed
 received. The quality monitor, off at first and remembered per device, keeps
@@ -2333,12 +2333,11 @@ Windows decodes H.265 or H.264 with Media Foundation into a D3D11 texture
 it shares with Flutter ([Windows presentation](#windows-presentation)), or
 takes JPEG where Media Foundation is not installed. Android decodes
 with `MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer,
-iOS with VideoToolbox into IOSurface-backed BGRA pixel buffers handed to a
-`FlutterTexture`, macOS with VideoToolbox into the decoder's own 420v
-pictures, which its decoder thread commits to the viewer's own Core
-Animation layer as each is decoded, shown through a platform view (a build
-with `--dart-define=presenter=texture` keeps iOS's texture path), and Linux
-with GStreamer into the decoder's
+macOS and iOS with VideoToolbox into IOSurface-backed BGRA pixel buffers
+handed to a `FlutterTexture` (a Mac app built with
+`--dart-define=presenter=layer` instead has its decoder thread commit the
+decoder's own 420v pictures to the viewer's own Core Animation layer, shown
+through a platform view), and Linux with GStreamer into the decoder's
 own NV12 or I420 pictures, which the runner converts to RGBA on the GPU into
 an `FlTextureGL`.
 Capture, encoding, decoding and blocking FFI calls stay off the Dart UI
@@ -2354,9 +2353,10 @@ macOS from the bundled dylib opened with `RTLD_NOLOAD`, on iOS from the
 process, on Linux from the loaded `libpb_mapper_ffi.so` found with
 `dl_iterate_phdr`), never a second copy: the instance token must match
 Dart's. Each reports its presentations to `VideoConsumer::presented`
-directly, when the compositor took the picture, or, on macOS, when the
-decoder thread committed it to the WindowServer. Dart reads only status,
-geometry, statistics and the latest cursor, through the per-frame view leaf.
+directly, when the compositor took the picture, or, with the Mac's layer
+presenter, when the decoder thread committed it to the WindowServer. Dart
+reads only status, geometry, statistics and the latest cursor, through the
+per-frame view leaf.
 A device with no decoder, Windows without Media Foundation and Linux without
 GStreamer's decoders included, takes JPEG, which Dart decodes off the UI
 isolate. Video bytes never become JSON or base64.
@@ -2579,16 +2579,20 @@ as when iOS backgrounds the app) is rebuilt at the next keyframe and does not
 count as a failure. Log lines start with `PbDesktopVideo:`.
 
 How a picture reaches the screen is the viewer's presenter, which the
-channel's `create` takes as `presenter`. iOS, and a Mac app built with
-`--dart-define=presenter=texture`, take a texture: VideoToolbox decodes into
-BGRA, and the newest picture waits for the compositor, which takes it in
-`copyPixelBuffer`: the first time it takes a picture of the current revision
-is the presentation receipt, and a picture replaced before that counts as
-dropped. A Mac takes the layer presenter. VideoToolbox decodes into its own
-420v (NV12, video range), which skips its conversion pass to BGRA, and the
-decoder thread commits each picture of the current revision to the viewer's
-own Core Animation layer as soon as it is decoded, in an explicit
-transaction of its own: no hop to the main thread and no Flutter frame.
+channel's `create` takes as `presenter`. iOS and the Mac take a texture:
+VideoToolbox decodes into BGRA, and the newest picture waits for the
+compositor, which takes it in `copyPixelBuffer`: the first time it takes a
+picture of the current revision is the presentation receipt, and a picture
+replaced before that counts as dropped. A Mac app built with
+`--dart-define=presenter=layer` takes the layer presenter instead, which
+stays opt-in until a run with the display on has measured its time to the
+screen and checked it there
+([the macOS viewer procedure](../scripts/test/desktop-ui-acceptance.md#macos-viewer)).
+VideoToolbox decodes into its own 420v (NV12, video range), which skips its
+conversion pass to BGRA, and the decoder thread commits each picture of the
+current revision to the viewer's own Core Animation layer as soon as it is
+decoded, in an explicit transaction of its own: no hop to the main thread
+and no Flutter frame.
 That commit to the WindowServer is the presentation receipt, so every
 picture decoded earns one. The layer keeps the last three pictures out of
 VideoToolbox's pool, since the WindowServer may still composite the earlier
@@ -2612,21 +2616,43 @@ in the texture's place, which Flutter clips and transforms as it did the
 texture, so pinch, pan and zoom stay Flutter's, and above which Flutter
 draws the cursor and the overlays. The view's own layer hosts the
 presenter's, which moves to a new view should Flutter make one. The view
-takes no keyboard focus and handles no pointer event: clicks, scrolls and
-gestures go up the responder chain to the Flutter view, the first click into
-an inactive window included, and over the picture the view leaves the cursor
-as Flutter or the pointer plugin set it. The reconnect's grey still, which
-no Flutter filter reaches there, is the layer's own: the channel's `grey`
-shows a colour-blend layer, which takes the picture's luminance, and a black
-one at half opacity, which halves it. Rendered offscreen they come within 9
-levels of the Flutter filter's grey, whose BT.709 luma weights the blend
-mode does not use. While a source streams to the view on screen, a display
-link (macOS 14 and later) asks a display whose refresh varies, such as a
-ProMotion panel, for its fastest rate, which Flutter's own frames no longer
-ask for; while the stats ask for timings it also counts each picture
-committed after another within one refresh as dropped, as a picture no
-refresh showed (a CVDisplayLink counts before macOS 14). A display of fixed
-refresh with the timings off runs no link.
+takes no keyboard focus and handles no pointer event, so that clicks,
+scrolls and gestures, the first click into an inactive window included, go
+up the responder chain to the Flutter view. Over the picture the view, not
+the Flutter view, is the one AppKit sends a cursor update, as when a menu
+closes or the app comes back to the front, and the Flutter view restores
+its own cursor only where it is that view itself; so the view sets the
+cursor the Flutter view was told last, Flutter's or the pointer plugin's
+(read from the engine's `_lastCursor`, and left as it is should an engine
+keep none). The reconnect's grey still, which no Flutter filter reaches
+there, is the layer's own: the channel's `grey` shows a colour-blend layer,
+which takes the picture's luminance, and a black one at half opacity, which
+halves it. Rendered offscreen they come within 9 levels of the Flutter
+filter's grey, whose BT.709 luma weights the blend mode does not use. While
+a source streams to the view on screen, a display link asks, from macOS 14,
+a display whose refresh varies, such as a ProMotion panel, for its fastest
+rate, which Flutter's own frames no longer ask for; while the stats ask for
+timings it also counts as dropped the pictures committed beyond one for
+each refresh since its last callback, as pictures no refresh showed (a
+CVDisplayLink counts before macOS 14). It counts refreshes, not callbacks,
+because the NSView display link calls back on the main thread, which
+Flutter's UI thread shares: a busy one misses callbacks, not refreshes. A
+display of fixed refresh with the timings off, and one whose refresh varies
+before macOS 14 with the timings off, run no link. None of the view's
+behaviour on a lit screen has been seen yet: the picture's way up and
+colours there, the grey still as the WindowServer composites it, the cursor,
+clicks, scrolls and gestures through the responder chain, live resizing and
+a ProMotion panel are what the run with the display on checks.
+
+While the stats ask for timings, the runner marks Instruments points of
+interest (subsystem `pb-mapper.desktop-video`), each with the picture's
+generation and frame: `Decoded` as a picture leaves the decoder, `Commit`
+around the layer presenter's commit, and `Consumed` when Flutter's
+compositor takes a texture's picture. They go to the system log whether or
+not a trace records them, hence only while timed. Animation Hitches records
+them once the Points of Interest instrument is added
+(`xcrun xctrace record --template 'Animation Hitches' --instrument 'Points of Interest'`),
+which puts them in one trace with the display's frames.
 
 The `stats` method of the `pb_mapper/desktop_video` channel reports, besides
 the counts, `lowLatency` (VideoToolbox took real-time mode), `hardware` once
@@ -2847,13 +2873,15 @@ What each platform's new code has been through:
   app with the Swift decoder. The iOS app links the FFI static library and
   exports its entry points. The M3 Pro viewer decoded H.264 and H.265 in
   hardware and wrote a thumbnail on disconnect. iOS device testing is pending.
-  The Mac's layer presenter ran on an M6 against `desktop_ui_host` replays
-  at 1080p, 1440p and 4K at 60 frames a second and at 1080p and 4K at 120,
-  with the session locked and the display asleep
-  ([measurements](benchmarks/2026-11-24-mac-viewer-layer/README.md)); the
-  picture on a screen, its colours and grey still there, the pointer over
-  it, the first click into an inactive window, live resizing and a
-  ProMotion panel are outstanding.
+  The Mac's layer presenter, opt-in with `--dart-define=presenter=layer`,
+  ran on an M6 against `desktop_ui_host` replays at 1080p, 1440p and 4K at
+  60 frames a second and at 1080p and 4K at 120, with the session locked
+  and the display asleep
+  ([measurements](benchmarks/2026-11-24-mac-viewer-layer/README.md)). Its
+  time to the screen against the texture's, the picture on a screen, its
+  colours and grey still there, the pointer over it, the first click into
+  an inactive window, live resizing and a ProMotion panel are outstanding;
+  they decide whether it becomes the Mac's default.
 - **Native pointer shapes.** The desktop viewers' host bitmaps as their own
   cursors (`pb_mapper/desktop_pointer`, see
   [The viewer's pointer](#input-and-cursor)) have run only on a Mac.
@@ -3097,7 +3125,7 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Direct and forced relay | Android VM runtime baselines above and deployed TCP experiments recorded; independent cross-network UI acceptance outstanding |
 | Android viewer | Native MediaCodec/Flutter texture path exercised in an Android VM; physical phone validation outstanding |
 | iOS viewer | Native VideoToolbox path; the app, linking the FFI static library (built without netdev, so no port mapping on iOS), is built unsigned in CI with its exports checked; device validation outstanding |
-| macOS viewer | VideoToolbox hardware decoding of H.264 and H.265 on an M3 Pro; thumbnail written on disconnect; the layer presenter's commits and receipts in replays on an M6 with its display asleep; the layer on screen outstanding |
+| macOS viewer | VideoToolbox hardware decoding of H.264 and H.265 on an M3 Pro; thumbnail written on disconnect; the opt-in layer presenter's commits and receipts in replays on an M6 with its display asleep; the layer on screen outstanding |
 | Linux viewer | Native GStreamer path ran in WSL2 (WSLg) with NVDEC and gst-libav, against a host replaying recorded clips; CI builds the app and decodes clips with software decoders; VA-API, V4L2 and a real Linux desktop outstanding |
 | macOS host | Compiled, linked and unit-tested in CI on a macOS runner (the encoder, the display list, the pointer read in a window-server session, thread C's waiter, a 60 fps session paced at 60 frames a second); view-only 1080p H.265 streaming on an M3 Pro |
 | Pointer shapes | Windows host's shapes read over an owned window through a viewer, the custom one pixel for pixel; the Windows app and the Android emulator paint the host's shapes; in the Windows app, against a host replaying a clip, the real local pointer took the host's shapes in control, one pointer showing; the bitmap's growth with Android pinch zoom not seen; macOS cursor shape fidelity awaits hardware comparison |

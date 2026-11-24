@@ -50,7 +50,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [Mac viewer decoder stats](benchmarks/2026-11-24-viewer-decoder-stats/README.md) | the macOS viewer's new decode time and decoder-thread CPU, read by the acceptance tool at 1080p and 4K, against a paced VideoToolbox harness on the same clips |
 | [Native pointer shape measurements](benchmarks/2026-11-24-native-cursor/README.md) | `ui/tool/pointer_latency.dart` on the macOS runner: a pointer shape change through a rebuild and the post-frame pass, against the direct system cursor and runner bitmap calls the cursor session makes, and how long a painted pointer took to draw after a mouse move |
 | [Viewer pixel snap measurements](benchmarks/2026-11-24-viewer-pixel-snap/README.md) | the contrast a 1-pixel stroke keeps through the viewer's picture transform, before and after keeping a 1:1 picture on device pixels and showing a near-1 fit at exactly 1:1 |
-| [Mac viewer layer presenter](benchmarks/2026-11-24-mac-viewer-layer/README.md) | the macOS viewer presenting on its own Core Animation layer against Flutter's texture: decode, commit and CPU in acceptance replays at 1080p, 1440p and 4K with the display asleep, and the layer's colours, grey still and snapshot rendered offscreen |
+| [Mac viewer layer presenter](benchmarks/2026-11-24-mac-viewer-layer/README.md) | the macOS viewer's opt-in Core Animation layer presenter against Flutter's texture: decode, commit and CPU in acceptance replays at 1080p, 1440p and 4K with the display asleep, the layer's colours, grey still and snapshot rendered offscreen, and the runner's points of interest in a trace |
 
 ## Security
 

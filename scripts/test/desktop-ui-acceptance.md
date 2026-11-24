@@ -133,9 +133,9 @@ off. The optional `cycleWindow` switch hides the desktop viewer after eight
 samples and shows it again four samples later. Check `events` for pause and
 resume and `summary.resume_picture_ms` for the return of a fresh picture.
 
-The viewer presents on its own Core Animation layer; to compare with
-Flutter's texture, build the same entry a second time with
-`--dart-define=presenter=texture` and keep each bundle apart. The report's
+The viewer presents through Flutter's texture; to compare with its own
+Core Animation layer, build the same entry a second time with
+`--dart-define=presenter=layer` and keep each bundle apart. The report's
 `presenter` says which a run used. Each sample's `native` holds
 VideoToolbox's own figures: the counts; `timings.decode`
 (`VTDecompressionSessionDecodeFrame`, keyframes included) and either
@@ -152,6 +152,27 @@ gained per second in place of `decoderCycles`. Run with the display on and
 the session unlocked: with the screen locked the texture path's Flutter
 frames fell to about 5 a second after the first 30 s, while the layer kept
 committing every picture.
+
+The time from a picture's decode to the screen, which decides whether the
+layer becomes the default, needs a trace: with timings on, which the tool
+asks for, the runner marks each picture's `Decoded`, the layer's `Commit`
+and the texture's `Consumed` as points of interest, with its generation and
+frame. While a run streams, record the viewer's process with the display's
+tracks beside them, at the display's top refresh and again at 60 Hz:
+
+```bash
+xcrun xctrace record --template 'Animation Hitches' \
+  --instrument 'Points of Interest' --attach "$VIEWER_PID" \
+  --time-limit 10s --output layer-144hz.trace
+```
+
+`trace-run.sh` in
+[the layer presenter's record](../../docs/benchmarks/2026-11-24-mac-viewer-layer/README.md)
+does this around one run and exports the marks. Then compare, for each
+presenter, the time from each `Decoded` to the frame that showed it, with
+`Metal System Trace` for WindowServer's GPU time. The layer becomes the
+Mac's default only with a median lower by at least half a refresh at both
+rates, a p95 no worse, and WindowServer's GPU time no higher.
 
 ## Windows viewer
 

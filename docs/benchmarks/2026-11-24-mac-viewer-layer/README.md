@@ -10,6 +10,10 @@ at 144 Hz. Other agents were building in parallel worktrees throughout:
 the load averages read before each run were 2.6 to 12.3
 ([runs-load.txt](runs-load.txt)).
 
+The layer presenter is opt-in (`--dart-define=presenter=layer`); the app
+keeps the texture until a run with the display on has done what the last
+section lists. The scripts here pass the presenter explicitly.
+
 **The console was locked, with the display asleep, during every run**
 ([displaystate.txt](displaystate.txt): `CGDisplayIsAsleep` true, and
 loginwindow's shield over the screen). No picture reached glass, so this
@@ -148,18 +152,57 @@ view took the container, and removing the first view left it in the
 second. The view's display link did not fire in a second: the display was
 asleep.
 
+## Points of interest
+
+While the stats ask for timings, the runner marks each picture's `Decoded`
+(as it leaves the decoder), the layer's `Commit` (an interval around the
+commit) and the texture's `Consumed` (Flutter's compositor taking it) as
+points of interest, with the picture's generation and frame.
+[trace-run.sh](trace-run.sh) runs [run.sh](run.sh) and records the viewer
+for 10 s, from 12 s after it started, with Animation Hitches and the Points
+of Interest instrument added; [signposts.py](signposts.py) reads the marks
+from the export. One run per presenter at 1080p and 60 frames a second,
+built from this change after review (later edits only reworded comments),
+with the display still asleep ([output](trace-runs.txt)):
+
+- Both traces held the marks, each with its picture: 634 `Decoded` and 634
+  `Commit` intervals with the layer, 634 `Decoded` and 631 `Consumed` with
+  the texture.
+- From `Decoded` to the end of `Commit`, the layer's median was 0.24 ms
+  (p95 1.04 ms); from `Decoded` to `Consumed`, the texture's was 3.81 ms
+  (p95 6.90 ms). These end at the hand-off to the WindowServer and to
+  Flutter's compositor respectively, not on the glass, which the asleep
+  display never showed.
+
+## The cursor over the picture
+
+Over the picture the layer's view, not FlutterView, receives AppKit's
+cursor updates, and FlutterView sets its last cursor again only where it is
+the view under the pointer. The layer's view sets that cursor itself, read
+from FlutterView's `_lastCursor`, which the engine's cursor plugin and the
+pointer plugin both tell through `didUpdateMouseCursor:`.
+[cursorcheck.swift](cursorcheck.swift) ([output](cursorcheck.txt)) loaded
+Flutter 3.50.1's debug and release FlutterMacOS: FlutterView answers the
+hook, `_lastCursor` is an `NSCursor`, and reading it back after the hook
+gives the cursor the hook was told. Flutter 3.44.9's engine, which CI
+builds with, was not checked; without the ivar the view leaves the cursor
+as it is.
+
 ## Left for a run with the display on, or a device
 
-- Decode-to-glass latency for both presenters at 60 Hz and 144 Hz
-  (`xcrun xctrace record --template 'Animation Hitches'` with signposts at
-  decode end and commit), and WindowServer's GPU time for each
-  (`Metal System Trace`).
+- Decode-to-glass latency for both presenters at 60 Hz and 144 Hz: the
+  marks above against the display's frames in the same trace
+  ([trace-run.sh](trace-run.sh)), and WindowServer's GPU time for each
+  (`Metal System Trace`). The layer becomes the default only with a median
+  lower by at least half a refresh at both rates, a p95 no worse, and
+  WindowServer's GPU time no higher than the texture path's.
 - WindowServer CPU with the display lit.
 - On screen: the layer's colours against the texture's, the grey still,
-  the local pointer over the picture (hidden or the host's shape), the
-  first click into an inactive window, pinch, pan and zoom, the compact
-  frame, the overlays above the picture, the picture kept across a
-  reconnect and moving during a live resize.
+  the local pointer over the picture (hidden or the host's shape, also
+  after switching to another app and back and after closing a menu over
+  the picture), the first click into an inactive window, pinch, pan and
+  zoom, the compact frame, the overlays above the picture, the picture kept
+  across a reconnect and moving during a live resize.
 - A ProMotion MacBook: 120 Hz cadence with and without the display link's
   frame-rate request, and the dropped count it keeps.
 - CI's Flutter 3.44.9 macOS build with the platform view.

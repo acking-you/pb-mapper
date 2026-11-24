@@ -101,20 +101,21 @@ DesktopDecoders decodersFromProbe(
 /// The platform view a macOS runner shows its layer presenter in.
 const desktopVideoViewType = 'pb_mapper/desktop_video_view';
 
-/// How a macOS viewer presents: `layer`, unless the build says
-/// `--dart-define=presenter=texture`, which keeps Flutter's texture (for A/B
-/// runs, and as a way back).
+/// How a macOS viewer presents: Flutter's texture, unless the build says
+/// `--dart-define=presenter=layer`. The layer stays opt-in until a run with
+/// the display on has measured its time to the screen and checked it there
+/// (docs/benchmarks/2026-11-24-mac-viewer-layer).
 const _macPresenter = String.fromEnvironment(
   'presenter',
-  defaultValue: 'layer',
+  defaultValue: 'texture',
 );
 
-/// What `create` asks of this platform's runner: the macOS runner commits
-/// each decoded picture to its own Core Animation layer, which a platform
-/// view shows; every other runner, and macOS with the texture define, hands
-/// Flutter a texture.
+/// What `create` asks of this platform's runner: with the layer define, the
+/// macOS runner commits each decoded picture to its own Core Animation
+/// layer, which a platform view shows; otherwise, and on every other
+/// platform, the runner hands Flutter a texture.
 String get desktopVideoPresenter =>
-    Platform.isMacOS && _macPresenter != 'texture' ? 'layer' : 'texture';
+    Platform.isMacOS && _macPresenter == 'layer' ? 'layer' : 'texture';
 
 /// The channel-backed texture (`pb_mapper/desktop_video` v2). [decoderHints]
 /// false configures Android's decoder without any of its decoder hints (low
