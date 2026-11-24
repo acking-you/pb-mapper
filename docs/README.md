@@ -50,6 +50,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [Mac viewer decoder stats](benchmarks/2026-11-24-viewer-decoder-stats/README.md) | the macOS viewer's new decode time and decoder-thread CPU, read by the acceptance tool at 1080p and 4K, against a paced VideoToolbox harness on the same clips |
 | [Native pointer shape measurements](benchmarks/2026-11-24-native-cursor/README.md) | `ui/tool/pointer_latency.dart` on the macOS runner: a pointer shape change through a rebuild and the post-frame pass, against the direct system cursor and runner bitmap calls the cursor session makes, and how long a painted pointer took to draw after a mouse move |
 | [Viewer pixel snap measurements](benchmarks/2026-11-24-viewer-pixel-snap/README.md) | the contrast a 1-pixel stroke keeps through the viewer's picture transform, before and after keeping a 1:1 picture on device pixels and showing a near-1 fit at exactly 1:1 |
+| [Mac desktop check reuse](benchmarks/2026-11-24-mac-session-check/README.md) | what the session and geometry check around each Mac capture and pointer read costs thread C and WindowServer, back to back and paced at 60 FPS, before and after reusing a passing one for 16 ms |
 
 ## Security
 

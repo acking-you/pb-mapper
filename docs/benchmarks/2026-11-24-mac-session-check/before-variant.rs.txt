@@ -1,0 +1,237 @@
+
+/// What the desktop check around each capture and pointer read costs thread
+/// C and WindowServer on this Mac. `PlatformBackend::verify` makes two
+/// around each capture and two around each pointer read. Each reads the
+/// login's session (`CGSessionCopyCurrentDictionary` and two lookups) and
+/// the display's geometry (`CGDisplayBounds`, `CGDisplayCopyDisplayMode`)
+/// from WindowServer, unless one that passed within `REUSE` answers
+/// (`recent`, as capture and the pointer ask). It prints, for verifies that
+/// read each time (`recent=false`) and that may reuse (`recent=true`):
+/// - back to back, 10,000 rounds of a capture's two verifies: microseconds
+///   per verify on the wall, of this thread's CPU and of WindowServer's
+///   (`ps`, to 10 ms), and reads per verify where it counts them;
+/// - paced for 10 s as thread C paces a 60 FPS session, two verifies every
+///   1/60 s and two every 16 ms for the pointer, after an idle arm that
+///   shows WindowServer's own CPU: verifies, verifies over 10 µs and
+///   WindowServer reads a second, and milliseconds a second spent in
+///   verifies and of this thread's and WindowServer's CPU.
+///
+/// While the session check passes, the verifies are `MacDesktop`'s. While
+/// it fails (a locked screen, or a login away from the console), a failure
+/// is never reused, so the verifies are the same reads through the same
+/// `Reuse` policy with the session's answer taken as a pass, and
+/// `MacDesktop`'s own recent verifies are timed as well, each of which
+/// reads. Needs no Screen Recording: `cargo test --release -p
+/// pb-mapper-desktop --lib -- --ignored --nocapture session_check`.
+#[test]
+#[ignore = "a measurement: about 35 seconds of desktop checks, in release mode"]
+fn session_check_cost() {
+    use crate::{DisplaySelection, platform::Desktop};
+
+    let Ok(display) = desktop::resolve(&DisplaySelection::Primary) else {
+        report(format_args!("skipped: this Mac has no active display"));
+        return;
+    };
+    let mut mac = desktop::MacDesktop::open(&display).unwrap();
+    let expected = mac.display().unwrap();
+    let passing = match mac.prepare(|| {}) {
+        Ok(()) => true,
+        Err(failure) => {
+            report(format_args!("the session check fails here: {failure}"));
+            false
+        }
+    };
+    report(format_args!(
+        "display {}x{} at ({}, {}) verifies={}",
+        expected.width,
+        expected.height,
+        expected.x,
+        expected.y,
+        if passing {
+            "mac_desktop"
+        } else {
+            "reads_as_passing"
+        },
+    ));
+    let mut bench = Bench {
+        mac,
+        expected,
+        passing,
+        reads: 0,
+    };
+    for recent in [false] {
+        let label = format!("recent={recent}");
+        back_to_back(&mut bench, &label, !passing, |bench| bench.verify(recent));
+    }
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    for arm in [None, Some(false)] {
+        paced(&mut bench, &waiter, arm);
+    }
+}
+
+/// Rounds of a capture's two verifies, back to back.
+const ROUNDS: u32 = 10_000;
+/// How long each paced arm runs.
+const PACED: Duration = Duration::from_secs(10);
+/// A verify slower than this read WindowServer: on the M6 that measured it,
+/// a read took tens of microseconds, and a reused answer well under one.
+const READ: Duration = Duration::from_micros(10);
+
+/// The verifies `session_check_cost` times.
+struct Bench {
+    mac: desktop::MacDesktop,
+    expected: crate::Display,
+    /// Whether the session check passes here.
+    passing: bool,
+    /// The WindowServer reads it made through `reuse`, which it counts
+    /// while the session check fails here.
+    reads: u32,
+}
+impl Bench {
+    /// One verify: `MacDesktop`'s, or its reads through `reuse`.
+    fn verify(&mut self, recent: bool) {
+        if self.passing {
+            assert!(
+                self.mac_verify(recent),
+                "the desktop changed during the measurement"
+            );
+            return;
+        }
+        // BEFORE: no reuse; every verify reads both.
+        let _ = recent;
+        let (reads, expected) = (&mut self.reads, &self.expected);
+        *reads += 1;
+        let _ = desktop::available();
+        *reads += 1;
+        let geometry = desktop::geometry(expected.id).unwrap();
+        let fits = geometry.matches(expected.id, &expected.name, expected);
+        assert!(fits, "the display changed during the measurement");
+    }
+
+    /// `MacDesktop`'s verify, as `PlatformBackend::verify` makes it: whether
+    /// it passed.
+    fn mac_verify(&mut self, recent: bool) -> bool {
+        use crate::platform::Desktop;
+        let (mac, expected) = (&mut self.mac, &self.expected);
+        let _ = recent;
+        mac.prepare(|| {}).is_ok() && mac.display_matches(expected).unwrap()
+    }
+}
+
+/// `ROUNDS` of two of `verify`, back to back; `counts`: whether `bench`
+/// counts their reads.
+fn back_to_back(bench: &mut Bench, label: &str, counts: bool, verify: impl Fn(&mut Bench)) {
+    let (reads, window_server) = (bench.reads, window_server_cpu());
+    let (wall, cpu) = (Instant::now(), thread_cpu());
+    for _ in 0..ROUNDS {
+        verify(bench);
+        verify(bench);
+    }
+    let (wall, cpu) = (wall.elapsed(), thread_cpu() - cpu);
+    let verifies = f64::from(ROUNDS * 2);
+    report(format_args!(
+        "back_to_back {label} verifies={verifies} wall_us_per_verify={:.3} thread_cpu_us_per_verify={:.3} window_server_cpu_us_per_verify={} reads_per_verify={}",
+        wall.as_secs_f64() * 1e6 / verifies,
+        cpu.as_secs_f64() * 1e6 / verifies,
+        per(window_server, window_server_cpu(), verifies * 1e-6),
+        counted(counts.then(|| bench.reads - reads), verifies),
+    ));
+}
+
+/// One paced arm: `bench.verify(recent)` for `Some(recent)`, else nothing.
+fn paced(bench: &mut Bench, waiter: &Waiter, arm: Option<bool>) {
+    let capture = Duration::from_secs(1) / 60;
+    let pointer = Duration::from_millis(16);
+    let (reads, window_server) = (bench.reads, window_server_cpu());
+    let (start, cpu) = (Instant::now(), thread_cpu());
+    let (mut next_capture, mut next_pointer) = (start, start);
+    let (mut verifies, mut slow, mut in_verify) = (0u32, 0u32, Duration::ZERO);
+    loop {
+        let now = Instant::now();
+        if now >= start + PACED {
+            break;
+        }
+        let mut rounds = 0;
+        if now >= next_capture {
+            next_capture = (next_capture + capture).max(now);
+            rounds += 1;
+        }
+        if now >= next_pointer {
+            next_pointer = (next_pointer + pointer).max(now);
+            rounds += 1;
+        }
+        if let Some(recent) = arm {
+            for _ in 0..rounds * 2 {
+                let at = Instant::now();
+                bench.verify(recent);
+                let took = at.elapsed();
+                in_verify += took;
+                verifies += 1;
+                slow += u32::from(took > READ);
+            }
+        }
+        waiter.wait(next_capture.min(next_pointer)).unwrap();
+    }
+    let (wall, cpu) = (start.elapsed().as_secs_f64(), thread_cpu() - cpu);
+    let label = arm.map_or_else(|| "idle".to_owned(), |recent| format!("recent={recent}"));
+    report(format_args!(
+        "paced {label} seconds={wall:.2} verifies_per_s={:.1} over_10us_per_s={:.1} reads_per_s={} verify_wall_ms_per_s={:.3} thread_cpu_ms_per_s={:.3} window_server_cpu_ms_per_s={}",
+        f64::from(verifies) / wall,
+        f64::from(slow) / wall,
+        counted((!bench.passing).then(|| bench.reads - reads), wall),
+        in_verify.as_secs_f64() * 1e3 / wall,
+        cpu.as_secs_f64() * 1e3 / wall,
+        per(window_server, window_server_cpu(), wall * 1e-3),
+    ));
+}
+
+/// `reads` per `count`, where they were counted.
+fn counted(reads: Option<u32>, count: f64) -> String {
+    reads.map_or_else(
+        || "uncounted".into(),
+        |reads| format!("{:.3}", f64::from(reads) / count),
+    )
+}
+
+/// This thread's CPU time.
+fn thread_cpu() -> Duration {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a local the call fills.
+    assert_eq!(
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) },
+        0
+    );
+    Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+}
+
+/// WindowServer's CPU time, as `ps` reads it (to 10 ms), where it can.
+fn window_server_cpu() -> Option<Duration> {
+    let pid = std::process::Command::new("pgrep")
+        .args(["-x", "WindowServer"])
+        .output()
+        .ok()?;
+    let pid = String::from_utf8(pid.stdout).ok()?;
+    let time = std::process::Command::new("ps")
+        .args(["-o", "time=", "-p", pid.trim()])
+        .output()
+        .ok()?;
+    let time = String::from_utf8(time.stdout).ok()?;
+    let seconds = time.trim().split(':').try_fold(0.0, |total: f64, part| {
+        Some(total * 60.0 + part.parse::<f64>().ok()?)
+    })?;
+    Some(Duration::from_secs_f64(seconds))
+}
+
+/// `after - before`, in seconds per `count`, or `unread`.
+fn per(before: Option<Duration>, after: Option<Duration>, count: f64) -> String {
+    match (before, after) {
+        (Some(before), Some(after)) => {
+            format!("{:.3}", after.saturating_sub(before).as_secs_f64() / count)
+        }
+        _ => "unread".into(),
+    }
+}

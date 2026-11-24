@@ -3,15 +3,18 @@
 //! a mode change or a reconnection that gives it another id; and the
 //! session check: a locked screen, or a login switched away from the
 //! console, is the secure desktop, which an ordinary process cannot reach.
+//! Capture and the pointer reuse a check that passed within 16 ms
+//! ([`Reuse`]), until the session's own display mode change or restore;
+//! input never does.
 
-use super::{cf, geometry::Geometry};
+use super::{cf, geometry::Geometry, reuse::Reuse};
 use crate::{BackendError, Display, DisplaySelection, FailureKind, Result, platform::Desktop};
 use objc2_core_foundation::{CFBoolean, CFNumber, CFRetained, CFString, CFUUID};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode,
     CGGetActiveDisplayList, CGMainDisplayID, CGSessionCopyCurrentDictionary,
 };
-use std::{cell::Cell, ptr::NonNull, rc::Rc};
+use std::{cell::Cell, ptr::NonNull, rc::Rc, time::Instant};
 
 /// The bound display's geometry, as the desktop last read it: the injector
 /// and the pointer convert with it. On thread C only.
@@ -117,7 +120,7 @@ pub(crate) fn resolve(selection: &DisplaySelection) -> Result<Display> {
 
 /// Whether this process's login owns the screen, unlocked: else the secure
 /// desktop.
-fn available() -> Result<()> {
+pub(super) fn available() -> Result<()> {
     let Some(session) = CGSessionCopyCurrentDictionary() else {
         return Err(secure("this process has no window server session"));
     };
@@ -155,6 +158,31 @@ pub(crate) struct MacDesktop {
     /// Its UUID, which finds it again when its id goes stale.
     name: String,
     geometry: Shared,
+    /// The last passing session check, and the last geometry read with the
+    /// id it was read under, which capture and the pointer reuse.
+    reuse: Reuse<(CGDirectDisplayID, Geometry)>,
+    reads: Reads,
+}
+
+/// How many times a desktop read WindowServer, of the session and of the
+/// geometry: counted in tests, and nothing in other builds.
+#[derive(Default)]
+struct Reads {
+    #[cfg(test)]
+    session: Cell<u32>,
+    #[cfg(test)]
+    geometry: Cell<u32>,
+}
+
+impl Reads {
+    fn count_session(&self) {
+        #[cfg(test)]
+        self.session.set(self.session.get() + 1);
+    }
+    fn count_geometry(&self) {
+        #[cfg(test)]
+        self.geometry.set(self.geometry.get() + 1);
+    }
 }
 
 impl MacDesktop {
@@ -175,6 +203,8 @@ impl MacDesktop {
             id,
             name: uuid(id).unwrap_or_else(|| display.name.clone()),
             geometry: Rc::new(Cell::new(geometry)),
+            reuse: Reuse::default(),
+            reads: Reads::default(),
         })
     }
 
@@ -182,36 +212,98 @@ impl MacDesktop {
         self.geometry.clone()
     }
 
-    fn read_geometry(&mut self) -> Result<Geometry> {
-        let geometry = match geometry(self.id) {
-            Some(geometry) => geometry,
-            None => {
-                // A reconnection may give the display another id; its UUID
-                // stays.
-                let id = by_name(&self.name)
-                    .filter(|id| *id != self.id)
-                    .ok_or_else(|| display_lost("selected display is no longer available"))?;
-                self.id = id;
-                geometry(id).ok_or_else(|| display_lost("display is unavailable"))?
-            }
-        };
-        self.geometry.set(geometry);
-        Ok(geometry)
+    /// The WindowServer reads this desktop made so far: of the session, and
+    /// of the geometry.
+    #[cfg(test)]
+    pub(super) fn reads(&self) -> (u32, u32) {
+        (self.reads.session.get(), self.reads.geometry.get())
     }
+
+    /// The session check, reused within 16 ms of a pass when `recent`.
+    fn session(&mut self, recent: bool, on_switch: impl FnOnce()) -> Result<()> {
+        let reads = &self.reads;
+        self.reuse
+            .session(Instant::now(), recent, || {
+                reads.count_session();
+                available()
+            })
+            .inspect_err(|_| on_switch())
+    }
+
+    /// Whether the display is still `expected`; with `recent`, a geometry
+    /// read within 16 ms that matched answers.
+    fn matches(&mut self, expected: &Display, recent: bool) -> Result<bool> {
+        let Self {
+            id,
+            name,
+            geometry,
+            reuse,
+            reads,
+        } = self;
+        reuse.matches(
+            Instant::now(),
+            recent,
+            || {
+                reads.count_geometry();
+                read_geometry(id, name, geometry)
+            },
+            |(read_as, read)| read.matches(*read_as, name, expected),
+        )
+    }
+}
+
+/// The geometry of display `id` now, which `shared` then holds. A
+/// reconnection may give the display another id, which `id` takes; its
+/// UUID, `name`, stays.
+fn read_geometry(
+    id: &mut CGDirectDisplayID,
+    name: &str,
+    shared: &Shared,
+) -> Result<(CGDirectDisplayID, Geometry)> {
+    let read = match geometry(*id) {
+        Some(read) => read,
+        None => {
+            let found = by_name(name)
+                .filter(|found| *found != *id)
+                .ok_or_else(|| display_lost("selected display is no longer available"))?;
+            *id = found;
+            geometry(found).ok_or_else(|| display_lost("display is unavailable"))?
+        }
+    };
+    shared.set(read);
+    Ok((*id, read))
 }
 
 impl Desktop for MacDesktop {
     type Scope = ();
     fn scope(&self) {}
     fn prepare(&mut self, on_switch: impl FnOnce()) -> Result<()> {
-        available().inspect_err(|_| on_switch())
+        self.session(false, on_switch)
+    }
+    fn prepare_recent(&mut self, on_switch: impl FnOnce()) -> Result<()> {
+        self.session(true, on_switch)
     }
     fn display(&mut self) -> Result<Display> {
-        let geometry = self.read_geometry()?;
-        Ok(geometry.display(self.id, self.name.clone()))
+        let Self {
+            id,
+            name,
+            geometry,
+            reuse,
+            reads,
+        } = self;
+        let (id, read) = reuse.geometry(Instant::now(), || {
+            reads.count_geometry();
+            read_geometry(id, name, geometry)
+        })?;
+        Ok(read.display(id, name.clone()))
     }
     fn display_matches(&mut self, expected: &Display) -> Result<bool> {
-        let geometry = self.read_geometry()?;
-        Ok(geometry.matches(self.id, &self.name, expected))
+        self.matches(expected, false)
+    }
+    fn display_matches_recent(&mut self, expected: &Display) -> Result<bool> {
+        self.matches(expected, true)
+    }
+    fn forget_recent(&mut self) {
+        self.reuse.forget();
     }
 }

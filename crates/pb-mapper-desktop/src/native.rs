@@ -84,30 +84,44 @@ impl<P: Platform> PlatformBackend<P> {
     }
     /// Bind to the input desktop. A switch, or a desktop this process cannot
     /// reach, releases held input and drops the video source first.
-    fn prepare(&mut self) -> Result<()> {
+    /// `recent`: a check that passed a moment ago may answer
+    /// (`Desktop::prepare_recent`).
+    fn prepare(&mut self, recent: bool) -> Result<()> {
         let (held, input, video) = (&mut self.held, &mut self.parts.input, &mut self.video);
-        self.parts.desktop.prepare(|| {
+        let on_switch = || {
             release(held, input);
             *video = None;
-        })
+        };
+        if recent {
+            self.parts.desktop.prepare_recent(on_switch)
+        } else {
+            self.parts.desktop.prepare(on_switch)
+        }
     }
     /// Within the desktop's scope, bind and verify `expected` without
-    /// allocating `Display::name`.
-    fn verify(&mut self, expected: &DesktopContext) -> Result<bool> {
-        self.prepare()?;
+    /// allocating `Display::name`. `recent`, around a capture or a pointer
+    /// read: the platform may answer from a check that passed a moment ago
+    /// (macOS: within 16 ms). The injection boundary and a display mode
+    /// change pass `false`, and check the desktop now.
+    fn verify(&mut self, expected: &DesktopContext, recent: bool) -> Result<bool> {
+        self.prepare(recent)?;
         if self.parts.desktop.generation() != expected.generation
             || self.parts.desktop.kind() != expected.desktop
         {
             return Ok(false);
         }
-        self.parts.desktop.display_matches(&expected.display)
+        if recent {
+            self.parts.desktop.display_matches_recent(&expected.display)
+        } else {
+            self.parts.desktop.display_matches(&expected.display)
+        }
     }
     /// One JPEG of `display`, bound to the input desktop before and after.
     fn still(&mut self, display: &Display) -> Result<Vec<u8>> {
         let _scope = self.parts.desktop.scope();
-        self.prepare()?;
+        self.prepare(false)?;
         let jpeg = self.parts.still.jpeg(display)?;
-        self.prepare()?;
+        self.prepare(false)?;
         Ok(jpeg)
     }
 }
@@ -119,7 +133,7 @@ fn release<I: Injector>(held: &mut Held, input: &mut I) {
 impl<P: Platform> Backend for PlatformBackend<P> {
     fn display(&mut self) -> Result<Display> {
         let _scope = self.parts.desktop.scope();
-        self.prepare()?;
+        self.prepare(false)?;
         self.parts.desktop.display()
     }
     fn context(&mut self) -> Result<DesktopContext> {
@@ -205,7 +219,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             }));
         }
         let _scope = self.parts.desktop.scope();
-        if !self.verify(expected)? {
+        if !self.verify(expected, true)? {
             return Err(error("desktop changed before video capture"));
         }
         if self
@@ -243,7 +257,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
                 ))
             })
             .inspect_err(|_| self.video = None)?;
-        if !self.verify(expected)? {
+        if !self.verify(expected, true)? {
             self.video = None;
             return Err(error("desktop changed during video capture"));
         }
@@ -297,11 +311,11 @@ impl<P: Platform> Backend for PlatformBackend<P> {
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         let _scope = self.parts.desktop.scope();
-        if !self.verify(expected)? {
+        if !self.verify(expected, true)? {
             return Err(error("desktop changed before cursor capture"));
         }
         let read = self.parts.cursor.read()?;
-        if !self.verify(expected)? || self.parts.desktop.changed() {
+        if !self.verify(expected, true)? || self.parts.desktop.changed() {
             return Err(error("desktop changed during cursor capture"));
         }
         Ok(read.map(|(x, y, showing)| confine(&expected.display, (x, y), showing)))
@@ -318,7 +332,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
     }
     fn input_in_context(&mut self, expected: &DesktopContext, event: &Input) -> Result<()> {
         let _scope = self.parts.desktop.scope();
-        if !self.verify(expected)? || self.parts.desktop.changed() {
+        if !self.verify(expected, false)? || self.parts.desktop.changed() {
             self.release();
             return Err(error("desktop changed before input"));
         }
@@ -389,7 +403,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             return Err(no_modes());
         }
         let _scope = self.parts.desktop.scope();
-        if !self.verify(expected)? {
+        if !self.verify(expected, false)? {
             return Err(error("desktop changed before a display mode change"));
         }
         if expected.desktop != DesktopKind::Ordinary {
@@ -402,8 +416,13 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         // Capture loses its device across the change; the source is built
         // again at the new size.
         self.video = None;
-        self.modes
-            .set(&mut self.parts.modes, &expected.display.name, mode)
+        let set = self
+            .modes
+            .set(&mut self.parts.modes, &expected.display.name, mode);
+        // A check from before the change, made or failed, no longer answers
+        // capture and the pointer.
+        self.parts.desktop.forget_recent();
+        set
     }
     fn restore_display_mode(&mut self) -> Result<bool> {
         if !<P::Modes as DisplayModes>::SUPPORTED {
@@ -411,7 +430,10 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         }
         let _scope = self.parts.desktop.scope();
         let video = &mut self.video;
-        self.modes.restore(&mut self.parts.modes, || *video = None)
+        let restored = self.modes.restore(&mut self.parts.modes, || *video = None);
+        // As after a change: the display may be another size now.
+        self.parts.desktop.forget_recent();
+        restored
     }
 }
 impl<P: Platform> Drop for PlatformBackend<P> {
@@ -557,5 +579,74 @@ impl Backend for NativeBackend {
     }
     fn restore_display_mode(&mut self) -> Result<bool> {
         self.0.restore_display_mode()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::synthetic::{Checks, Probe, Synthetic};
+
+    /// Capture and the pointer let the platform answer from a desktop check
+    /// that passed a moment ago; the injection boundary, a display mode
+    /// change and the context check always check the desktop now, and a
+    /// mode change or restore leaves nothing to reuse.
+    #[test]
+    fn only_capture_and_the_pointer_may_reuse_a_desktop_check() {
+        let probe = Probe::default();
+        let mut backend = PlatformBackend::<Synthetic<false>>::open(
+            Arc::new(probe.clone()),
+            &Probe::display(),
+            Journal::default(),
+        )
+        .unwrap();
+        let fresh = |checks| Checks {
+            prepare: checks,
+            matches: checks,
+            ..Checks::default()
+        };
+        let recent = |checks| Checks {
+            prepare_recent: checks,
+            matches_recent: checks,
+            ..Checks::default()
+        };
+
+        let context = backend.context().unwrap();
+        let bound = Checks {
+            prepare: 1,
+            ..Checks::default()
+        };
+        assert_eq!(probe.checks(), bound);
+        let rate = VideoRate {
+            bitrate: 1_000_000,
+            pace_fps: 30,
+        };
+        backend
+            .capture_video(&context, VideoCodec::H264, true, rate)
+            .unwrap();
+        assert_eq!(probe.checks(), recent(2));
+        probe.point(-1900, 10);
+        assert!(backend.cursor(&context).unwrap().is_some());
+        assert_eq!(probe.checks(), recent(2));
+
+        backend
+            .input_in_context(&context, &Input::Move { x: 3, y: 4 })
+            .unwrap();
+        assert_eq!(probe.checks(), fresh(1));
+        // With no journal it changes nothing, after its check; a change,
+        // made or failed, and a restore leave capture and the pointer
+        // nothing to reuse.
+        let mode = Mode {
+            width: 32,
+            height: 24,
+        };
+        assert!(backend.set_display_mode(&context, mode).is_err());
+        let forgot = |checks| Checks {
+            forgets: 1,
+            ..checks
+        };
+        assert_eq!(probe.checks(), forgot(fresh(1)));
+        assert!(!backend.restore_display_mode().unwrap());
+        assert_eq!(probe.checks(), forgot(Checks::default()));
     }
 }
