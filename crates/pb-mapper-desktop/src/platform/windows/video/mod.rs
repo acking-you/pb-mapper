@@ -20,6 +20,12 @@
 //! sample is kept, so that a repeat on a still desktop (liveness, a
 //! keyframe) copies its NV12 picture instead of converting again.
 //!
+//! The duplication takes FP16 first: a Windows HDR desktop arrives as
+//! composed, and each picture is tone mapped to SDR at the display's SDR
+//! white level before the video processor converts it (`tonemap.rs`). An
+//! SDR desktop still arrives in BGRA8, and so does an HDR desktop whose
+//! level Windows does not tell.
+//!
 //! The encoder's events wake its caller too: each output, and the input
 //! request a `Submit::Waiting` waits for (`codec.rs`).
 
@@ -28,6 +34,7 @@ mod codec;
 mod converter;
 mod gpu_time;
 mod probe;
+mod tonemap;
 
 pub use crate::codec::sps::SpsReorder;
 pub use gpu_time::GpuSpan;
@@ -135,6 +142,12 @@ pub struct EncoderOptions {
     /// of that comparison), as an encoder without `IMFShutdown` has them.
     /// The capture thread wakes the caller either way.
     pub poll_events: bool,
+    /// Duplicate the desktop in BGRA8 only, as every encoder did before:
+    /// DXGI then converts a Windows HDR desktop itself, expected to leave
+    /// the display's SDR white level out, rather than this encoder tone
+    /// mapping it (`video_bench --sdr-duplication`, the baseline of that
+    /// comparison). A session never does.
+    pub sdr_duplication: bool,
 }
 
 /// What the D3D11 video processor that scales and converts each picture is
@@ -311,8 +324,18 @@ pub struct Statistics {
     pub repeats: u64,
     /// Whether new pictures are converted straight from the duplication's
     /// surface; false once its video processor refused that surface, after
-    /// which each is copied out of it first.
+    /// which each is copied out of it first, and for a desktop that arrives
+    /// in FP16 (`tone_mapped`).
     pub direct_capture: bool,
+    /// Whether the desktop arrives in FP16 (Windows HDR on), and each new
+    /// picture is tone mapped to SDR, into a texture of its own, before the
+    /// video processor converts it.
+    pub tone_mapped: bool,
+    /// The display's SDR white level, in nits, read as the encoder was
+    /// built for a desktop the duplication hands out in FP16, where
+    /// Windows tells it. Where it tells none, the duplication takes BGRA8
+    /// only, and DXGI converts that desktop itself.
+    pub sdr_white_nits: Option<f32>,
     /// Whether the video processor was asked for quality
     /// (`D3D11_VIDEO_USAGE_OPTIMAL_QUALITY`) rather than speed.
     pub vp_quality: bool,
@@ -624,8 +647,40 @@ impl Encoder {
                     "selected GPU output disappeared",
                 ))
             })?;
-        let capture = DxgiDuplicationApi::new_options(monitor, &[DxgiDuplicationFormat::Bgra8])
-            .map_err(error)?;
+        // FP16 first, which DXGI hands out only for a desktop composed in
+        // it (Windows HDR on), as it is composed; BGRA8 otherwise, as
+        // before. BGRA8 only where asked, or once the tone map failed alike
+        // in this process (`tonemap::wanted`): DXGI then converts an HDR
+        // desktop itself.
+        let mut fp16 = !options.sdr_duplication && tonemap::wanted();
+        let formats: &[DxgiDuplicationFormat] = if fp16 {
+            &[DxgiDuplicationFormat::Rgba16F, DxgiDuplicationFormat::Bgra8]
+        } else {
+            &[DxgiDuplicationFormat::Bgra8]
+        };
+        let mut capture = DxgiDuplicationApi::new_options(monitor, formats).map_err(error)?;
+        let output = unsafe { capture.output().GetDesc() }.ok();
+        // The duplication's mode is in the format it hands pictures out in:
+        // FP16 for an HDR desktop.
+        let hdr =
+            fp16 && capture.duplication_desc().ModeDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+        // The SDR white level its pictures are tone mapped at, read at each
+        // build, so that a change of the setting reaches the next encoder;
+        // an SDR desktop reads none.
+        let white = output
+            .as_ref()
+            .filter(|_| hdr)
+            .and_then(|output| tonemap::sdr_white(&output.DeviceName));
+        if hdr && white.is_none() {
+            // Windows tells no level (to a process outside the console
+            // session, say): rather than the tone map guess it, the
+            // duplication is made again in BGRA8 only, which DXGI converts
+            // as before.
+            capture = capture
+                .recreate_options(&[DxgiDuplicationFormat::Bgra8])
+                .map_err(error)?;
+            fp16 = false;
+        }
         let desc = capture.duplication_desc();
         let rotation = display_rotation(desc.Rotation)?;
         // A turned display's mode is read upright, the size of its output's
@@ -635,7 +690,8 @@ impl Encoder {
         // (`Rotation::scanned_out`), and the first frame's texture is
         // checked against the result.
         let mode = (desc.ModeDesc.Width, desc.ModeDesc.Height);
-        let desktop = unsafe { capture.output().GetDesc() }
+        let desktop = output
+            .as_ref()
             .map(|output| {
                 let rect = output.DesktopCoordinates;
                 let span = |from: i32, to: i32| u32::try_from(to.saturating_sub(from)).unwrap_or(0);
@@ -726,6 +782,9 @@ impl Encoder {
             captured = format_args!("{}x{}", input.0, input.1),
             cropped = crop_only(upright, (width, height)) && upright != (width, height),
             vp_quality = quality,
+            duplication = if fp16 { "fp16,bgra8" } else { "bgra8" },
+            hdr,
+            sdr_white_nits = ?white.map(tonemap::SdrWhite::nits),
         );
         let mut allocator = std::ptr::null_mut();
         unsafe {
@@ -751,13 +810,14 @@ impl Encoder {
         // Last, once the device's multithread protection is on: from here
         // on the capture thread queues work on its context too.
         let shared = Arc::new(Shared::new(&context)?);
-        let source = DxgiSource::new(capture, converter, input, shared.clone());
+        let source = DxgiSource::new(capture, converter, input, white, shared.clone());
         let capture = PresentWaiter::spawn("pb-mapper-dxgi-capture", source, waker.clone())?;
         let now = Instant::now();
         let stats = Statistics {
             gop: codec.gop,
             events_pushed: codec.pushes(),
             direct_capture: true,
+            sdr_white_nits: white.map(tonemap::SdrWhite::nits),
             vp_quality: quality,
             opened,
             ..Statistics::default()
@@ -802,6 +862,7 @@ impl Encoder {
     pub fn statistics(&self) -> Statistics {
         Statistics {
             direct_capture: self.shared.direct(),
+            tone_mapped: self.shared.tone_mapped(),
             first_acquire: self.shared.first_acquire(),
             acquires: self.shared.acquires(),
             ..self.stats.clone()
@@ -1262,7 +1323,7 @@ impl Encoder {
                 return Ok(Taken::Full);
             };
             let context = &self.context;
-            self.shared.work(&self.device, context, true, false, || {
+            self.shared.work(&self.device, context, true, false, |_| {
                 unsafe {
                     context.CopySubresourceRegion(
                         &sample.texture,
