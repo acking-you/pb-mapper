@@ -379,7 +379,11 @@ Nothing in the SDK crates knows it exists.
     probe in `probe.rs`; H.265 only for a viewer that lists `h265`, on a GPU
     whose hardware HEVC encoder passes a probe kept per adapter, and one
     encoder failure turns it off for the process), `input` (enigo, and
-    `SendInput` scancodes for physical keys), `cursor` (the shape once per
+    `SendInput` for absolute moves and physical keys' scancodes), `pointer`
+    (what `input` and `cursor` share of a move: the injected pixel until it
+    shows, the move's absolute coordinate, and placing the pointer while a
+    window that UIPI keeps moves from, or that was in front when `SendInput`
+    refused one, stays there), `cursor` (the shape once per
     new `HCURSOR`: kinds from the `LoadCursorW` handles, bitmaps from
     `GetIconInfo`/`GetDIBits`), `still`, `waiter`, `timer`, `power` (the
     display and system power request a watchdog thread holds while capture
@@ -394,7 +398,8 @@ Nothing in the SDK crates knows it exists.
     (displays by UUID, the lock and console check), `geometry.rs` (points
     and pixels), `input.rs` (`CGEvent`), `clicks.rs`, `keys.rs` (`Key` and
     HID usages to `kVK_*`), `cursor.rs` (position, and the shape when the
-    cursor seed moves), `pixels.rs`, `modes.rs` and `mode_list.rs`
+    cursor seed moves), `pointer.rs` (the move `input.rs` and `cursor.rs`
+    share), `pixels.rs`, `modes.rs` and `mode_list.rs`
     (app-only Core Graphics modes), `still.rs` (`SCScreenshotManager`),
     `timer.rs` (App Nap held off), `waiter.rs` (thread C's wait: a kqueue
     timer marked `NOTE_CRITICAL`, which the kernel does not coalesce, and a
@@ -453,9 +458,11 @@ Nothing in the SDK crates knows it exists.
     0x04 to 0xE7, sent only to a host that listed `physical_keys`) and the
     neutral rules every platform's injector follows: held-input release
     (`held.rs`, physical keys included), text as runs with one Enter or Tab
-    per line break or tab (`Input::typed`), and cursor confinement and the
-    pointer's shape (`cursor.rs`: `CursorShape`, `CursorKind`, the
-    scale-down to 256 a side)
+    per line break or tab (`Input::typed`), and cursor confinement, the
+    pointer's shape and the pointer a posted move leaves (`cursor.rs`:
+    `CursorShape`, `CursorKind`, the scale-down to 256 a side; `Pointer`,
+    the injected pixel until the OS shows it, which the Windows and macOS
+    hosts share)
   - `modes.rs`: display modes, platform-neutral — `Mode`, `ModeList`
     (`fit_local`: the local size if listed, else the largest inside it
     within 2 % of its shape), `ModeTarget`, `DisplayModeError`; the journal

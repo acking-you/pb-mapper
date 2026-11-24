@@ -13,7 +13,8 @@
 //! looked up at run time ([`cf::symbol`]).
 //!
 //! The pure parts (points and pixels, key codes, click counts, mode lists,
-//! the pointer a posted move leaves) build and are tested on every platform.
+//! the pointer the injector and the cursor share) build and are tested on
+//! every platform.
 
 // Pure: built and tested everywhere, used by the OS parts on macOS alone.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
