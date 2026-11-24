@@ -482,6 +482,31 @@ fn a_blocked_window_makes_a_small_queue_cut() {
     assert_eq!(cuts(true), 1);
 }
 
+/// Thread C's cap at its encoder's throughput reaches the controller at its
+/// next update, the QoS tick's included: the pace it expects, reports and
+/// sizes the credit window by takes it, while the pace thread C is asked
+/// for, and the preset's least pace below which C never caps, are published
+/// as before.
+#[test]
+fn the_encoder_cap_reaches_the_controller_at_its_next_update() {
+    let session = session_listing(&[]);
+    let now = Instant::now() + crate::qos::STARTUP_HOLD + Duration::from_millis(100);
+    session.tick(now);
+    let targets = &session.shared.targets;
+    // Balanced at 60 starts at 45, and goes no lower than 10.
+    assert_eq!(targets.pace_fps.load(Ordering::Acquire), 45);
+    assert_eq!(targets.min_fps.load(Ordering::Acquire), 10);
+    session.shared.encoder_cap.store(30, Ordering::Release);
+    assert_eq!(session.qos.lock().pace_fps(now), 45);
+    session.tick(now);
+    let view = session.qos.lock().view(now);
+    assert_eq!((view.pace_fps, view.encoder_cap), (30, Some(30)));
+    assert_eq!(targets.pace_fps.load(Ordering::Acquire), 45);
+    session.shared.encoder_cap.store(0, Ordering::Release);
+    session.tick(now);
+    assert_eq!(session.qos.lock().pace_fps(now), 45);
+}
+
 /// Only a session its transport ended leaves its rate for the next: not one
 /// still running, and not one the host ended, though its transport closes
 /// after the host's decision. The record is the session's bits per frame at

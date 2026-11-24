@@ -53,6 +53,10 @@ struct Interval {
     bitrate: u64,
     encoder_bitrate: u64,
     viewer_cap: Option<u64>,
+    /// Thread C's cap at its encoder's throughput, as the QoS last read it.
+    encoder_cap: Option<u64>,
+    /// The encoder's median dwell over the host's last second.
+    encoder_dwell_ms: Option<u64>,
     /// What the host wrote in the interval, in bit/s.
     sent_bitrate: u64,
     window_clamped: bool,
@@ -93,6 +97,8 @@ impl Interval {
             bitrate: 0,
             encoder_bitrate: 0,
             viewer_cap: None,
+            encoder_cap: None,
+            encoder_dwell_ms: None,
             sent_bitrate: 0,
             window_clamped: false,
             unresponsive: false,
@@ -158,6 +164,8 @@ impl tracing::field::Visit for Interval {
             "encoder_bitrate" => self.encoder_bitrate = value,
             "sent_bitrate" => self.sent_bitrate = value,
             "viewer_cap" => self.viewer_cap = Some(value),
+            "encoder_cap" => self.encoder_cap = Some(value),
+            "encoder_dwell_ms" => self.encoder_dwell_ms = Some(value),
             "skipped_ticks" => self.skipped_ticks = value,
             "keyframes" => self.keyframes = value,
             "bpf" => self.bpf = value,
@@ -203,6 +211,63 @@ impl tracing::field::Visit for Interval {
             _ => {}
         }
     }
+}
+
+/// A change of thread C's cap at its encoder's throughput, as the host's
+/// `desktop_encoder_cap` traced it.
+#[derive(Clone, Debug, Default)]
+struct CapChange {
+    at: Option<Instant>,
+    event: bool,
+    action: String,
+    cap: Option<u64>,
+    asked_fps: u64,
+    full_ticks: u64,
+    units: u64,
+    dwell_before_us: Option<u64>,
+    dwell_after_us: Option<u64>,
+}
+impl CapChange {
+    /// `action:cap` with the second's figures, `t_ms` after `from`.
+    fn line(&self, from: Instant) -> String {
+        let ms = |us: Option<u64>| {
+            us.map_or_else(|| "-".to_owned(), |us| format!("{:.1}", us as f64 / 1000.0))
+        };
+        format!(
+            "t_ms={} {}:{} asked={} full_ticks={} units={} dwell_before_ms={} dwell_after_ms={}",
+            self.at
+                .map_or(0, |at| at.saturating_duration_since(from).as_millis()),
+            self.action,
+            self.cap
+                .map_or_else(|| "-".to_owned(), |cap| cap.to_string()),
+            self.asked_fps,
+            self.full_ticks,
+            self.units,
+            ms(self.dwell_before_us),
+            ms(self.dwell_after_us),
+        )
+    }
+}
+impl tracing::field::Visit for CapChange {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "event" => self.event = value == "desktop_encoder_cap",
+            "action" => self.action = value.to_owned(),
+            _ => {}
+        }
+    }
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        match field.name() {
+            "cap" => self.cap = Some(value),
+            "asked_fps" => self.asked_fps = value,
+            "full_ticks" => self.full_ticks = value,
+            "units" => self.units = value,
+            "dwell_before_us" => self.dwell_before_us = Some(value),
+            "dwell_after_us" => self.dwell_after_us = Some(value),
+            _ => {}
+        }
+    }
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
 }
 
 /// One accepted presentation, as the viewer's `desktop_frame_view` traced it,
@@ -258,6 +323,8 @@ struct Trace {
     /// When the host latched the timestamp rate model.
     latched: Arc<Mutex<Option<Instant>>>,
     views: Arc<Mutex<Vec<View>>>,
+    /// Each change of the cap at the encoder's throughput.
+    caps: Arc<Mutex<Vec<CapChange>>>,
 }
 impl Trace {
     fn last(&self) -> Interval {
@@ -310,6 +377,15 @@ impl<S: tracing::Subscriber> Layer<S> for Trace {
             self.intervals.lock().unwrap().push(interval);
         } else if interval.latched {
             self.latched.lock().unwrap().get_or_insert(interval.at);
+        } else {
+            let mut change = CapChange {
+                at: Some(interval.at),
+                ..CapChange::default()
+            };
+            event.record(&mut change);
+            if change.event {
+                self.caps.lock().unwrap().push(change);
+            }
         }
     }
 }
@@ -460,24 +536,28 @@ const PER_SECOND_GAP: Duration = Duration::from_secs(1);
 /// A synthetic asynchronous H.264 encoder at 1080p, run as thread C runs the
 /// Windows MFT: each capture submits one picture, whose output is ready
 /// `latency` later and must be drained; an output left in it longer than
-/// `ENCODER_EXPIRY` is lost. No decoder reads the bytes.
+/// `ENCODER_EXPIRY` is lost. A `serial` one, as an MFT slower than the pace
+/// that still takes input, starts each picture once the one before it is
+/// out, so `latency` is its service time. No decoder reads the bytes.
 struct SyntheticEncoder {
     probe: Arc<Probe>,
     sizes: Sizes,
     latency: Duration,
+    serial: bool,
     nominal_fps: u32,
     frames: u64,
     last_capture: Option<Instant>,
-    pending: VecDeque<(Instant, EncodedFrame)>,
+    /// `(submitted, ready, unit)`.
+    pending: VecDeque<(Instant, Instant, EncodedFrame)>,
 }
 impl SyntheticEncoder {
     fn ready(&mut self) -> Option<EncodedFrame> {
-        while let Some((submitted, _)) = self.pending.front() {
-            let age = submitted.elapsed();
-            if age < self.latency {
+        while let Some((submitted, ready, _)) = self.pending.front() {
+            if Instant::now() < *ready {
                 return None;
             }
-            let (_, mut frame) = self.pending.pop_front()?;
+            let age = submitted.elapsed();
+            let (_, _, mut frame) = self.pending.pop_front()?;
             if age <= ENCODER_EXPIRY {
                 // Submit to output, as the Windows encoder reports it.
                 frame.format.encode_us = u32::try_from(age.as_micros()).unwrap_or(u32::MAX);
@@ -554,7 +634,13 @@ impl Backend for SyntheticEncoder {
             },
             bytes: vec![0x65; bytes],
         };
-        self.pending.push_back((Instant::now(), frame));
+        let submitted = Instant::now();
+        let start = match self.pending.back() {
+            Some((_, ready, _)) if self.serial => submitted.max(*ready),
+            _ => submitted,
+        };
+        self.pending
+            .push_back((submitted, start + self.latency, frame));
         Ok(ready)
     }
     fn drain_video(&mut self, _: &DesktopContext, _: Duration) -> Result<Option<EncodedFrame>> {
@@ -928,7 +1014,19 @@ impl Rig {
         fps: u32,
     ) -> Self {
         let link = shape.map(|shape| (shape.clone(), shape));
-        Self::build(name, link, sizes, latency, fps).await
+        Self::build(name, link, sizes, (latency, false), fps).await
+    }
+    /// `at_fps` with an encoder that, when `serial`, serves its pictures one
+    /// at a time, `latency` each.
+    async fn with_serial(
+        name: &str,
+        shape: Option<Arc<Shape>>,
+        latency: Duration,
+        serial: bool,
+        fps: u32,
+    ) -> Self {
+        let link = shape.map(|shape| (shape.clone(), shape));
+        Self::build(name, link, TYPICAL, (latency, serial), fps).await
     }
     /// A rig whose viewer's link is shaped `up`, toward the relay, apart from
     /// `down`, toward the viewer.
@@ -937,32 +1035,34 @@ impl Rig {
             name,
             Some((up, down)),
             sizes,
-            ENCODE_TIME,
+            (ENCODE_TIME, false),
             CEILING_FPS as u32,
         )
         .await
     }
+    /// `encoder` is the latency and whether the encoder is serial.
     async fn build(
         name: &str,
         link: Option<(Arc<Shape>, Arc<Shape>)>,
         sizes: Sizes,
-        latency: Duration,
+        encoder: (Duration, bool),
         fps: u32,
     ) -> Self {
-        Self::build_with(name, link, sizes, latency, viewer_config(fps)).await
+        Self::build_with(name, link, sizes, encoder, viewer_config(fps)).await
     }
     /// A rig on the relay's unshaped link whose viewer connects with
     /// `config`.
     async fn with_config(name: &str, config: ViewerConfig) -> Self {
-        Self::build_with(name, None, TYPICAL, ENCODE_TIME, config).await
+        Self::build_with(name, None, TYPICAL, (ENCODE_TIME, false), config).await
     }
     async fn build_with(
         name: &str,
         link: Option<(Arc<Shape>, Arc<Shape>)>,
         sizes: Sizes,
-        latency: Duration,
+        encoder: (Duration, bool),
         config: ViewerConfig,
     ) -> Self {
+        let (latency, serial) = encoder;
         let relay = Relay::start(&format!("desktop-{name}")).await;
         let client = |addr: SocketAddr| {
             Client::from_credential(addr.to_string(), admin_credential(), true, None)
@@ -979,6 +1079,7 @@ impl Rig {
                     probe: source.clone(),
                     sizes,
                     latency,
+                    serial,
                     nominal_fps: 0,
                     frames: 0,
                     last_capture: None,
@@ -1234,6 +1335,110 @@ fn encoder_latency_of_45ms_keeps_60() {
         assert_eq!(rig.expired(), 0);
         trace.assert_never_latched();
     });
+}
+
+/// A 120 fps session on a short path (the user's own rate, so every preset's
+/// ceiling) whose encoder cannot keep up with 120: first one that serves a
+/// picture each 11 ms, one at a time, while it takes up to thread C's four,
+/// as a Media Foundation encoder slower than the pace does; then one that
+/// keeps each picture 45 ms but takes many at once. Reports for each, from
+/// 8 s to 48 s (past the serial encoder's first probe, about 30 s after its
+/// cap, and the pipelined one's second cap, 30 s after the first), the
+/// encoder's dwell, the received fps, the pace and the skipped ticks a
+/// second, then every change of the host's cap at the encoder's throughput
+/// (`desktop_encoder_cap`). Once both have run, the serial encoder's units
+/// must wait no more than about two service times (25 ms, with thread C's
+/// 2 ms drain poll) at the median and in all but 5 of the 40 seconds, at
+/// 75 fps or more received; the pipelined one, whose cap the guard lifts,
+/// keeps 75 or more.
+#[test]
+#[ignore = "explicit ~100-second 120 fps slow encoder measurement"]
+fn lan_rtt_keeps_120() {
+    /// What one encoder's run left for the assertions.
+    struct Outcome {
+        serial: bool,
+        state: ViewerState,
+        message: String,
+        dwell_p50: u32,
+        dwell: Vec<u32>,
+        received: Vec<f32>,
+    }
+    let outcomes = Mutex::new(Vec::new());
+    for (case, latency, serial) in [
+        ("serial_11ms", Duration::from_millis(11), true),
+        ("pipelined_45ms", Duration::from_millis(45), false),
+    ] {
+        let outcomes = &outcomes;
+        traced(|trace| async move {
+            let shape = Arc::new(Shape::default());
+            shape.delay_ms.store(SHORT_PATH_MS, Ordering::Relaxed);
+            let name = format!("lan-120-{case}");
+            let rig = Rig::with_serial(&name, Some(shape), latency, serial, 120).await;
+            let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+            let started = Instant::now();
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            let (mut received, mut dwell, mut pace, mut skipped) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for _ in 0..40 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let stats = rig.viewer.status().stats;
+                received.push(stats.received_fps);
+                dwell.push(stats.encoder_dwell_ms.unwrap_or(0));
+                pace.push(stats.pace_fps);
+                skipped.push(stats.skipped_per_s);
+            }
+            let status = rig.viewer.status();
+            let caps = trace.caps.lock().unwrap().clone();
+            rig.stop().await;
+            let mut sorted = dwell.clone();
+            sorted.sort_unstable();
+            let dwell_p50 = sorted[sorted.len() / 2];
+            let over = dwell.iter().filter(|&&ms| ms > 25).count();
+            println!(
+                "lan_rtt_keeps_120 encoder={case} one_way_ms={SHORT_PATH_MS} seconds=8..48 received_fps_mean={:.1} encoder_dwell_ms_p50={dwell_p50} encoder_dwell_ms_mean={:.1} seconds_over_25ms={over} skipped_per_s_mean={:.1} encoder_dwell_ms={dwell:?} received_fps={received:?} pace_fps={pace:?} skipped_per_s={skipped:?} expired_encoder_outputs={} state={:?}",
+                mean(&received),
+                dwell.iter().map(|&ms| f64::from(ms)).sum::<f64>() / dwell.len() as f64,
+                mean(&skipped),
+                rig.expired(),
+                status.state
+            );
+            for change in &caps {
+                println!(
+                    "lan_rtt_keeps_120 encoder={case} desktop_encoder_cap {}",
+                    change.line(started)
+                );
+            }
+            outcomes.lock().unwrap().push(Outcome {
+                serial,
+                state: status.state,
+                message: status.message,
+                dwell_p50,
+                dwell,
+                received,
+            });
+        });
+    }
+    for outcome in outcomes.into_inner().unwrap() {
+        let Outcome {
+            serial,
+            state,
+            message,
+            dwell_p50,
+            dwell,
+            received,
+        } = outcome;
+        assert_eq!(state, ViewerState::Streaming, "{message}");
+        if serial {
+            assert!(dwell_p50 <= 25, "{dwell:?}");
+            assert!(
+                dwell.iter().filter(|&&ms| ms > 25).count() <= 5,
+                "{dwell:?}"
+            );
+            assert!(mean(&received) >= 75.0, "{received:?}");
+        } else {
+            assert!(mean(&received) >= 75.0, "{received:?}");
+        }
+    }
 }
 
 /// A fixed propagation delay is not congestion: the delay controller climbs
