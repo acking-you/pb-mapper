@@ -24,7 +24,7 @@ use crate::{
         CAPABILITY_H265, CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, PeerSlot, RateModel,
         Route, StateReason, StateRecord, StopReason, ViewerMessage,
     },
-    qos::{Qos, TargetValues},
+    qos::{ClosingRate, Qos, TargetValues},
     scheduler::Wake,
     shared::{PeerCursorSnapshot, Policy, SessionShared, Targets},
     watch::ChangeSignal,
@@ -179,13 +179,17 @@ impl Session {
             limits,
             quality,
             RateModel::Nominal,
+            None,
             capabilities,
             offered,
             ChangeSignal::new(),
         )
     }
 
-    /// A session attached to a shared multi-viewer room.
+    /// A session attached to a shared multi-viewer room. `previous` is where
+    /// the last session its transport ended left its rate, which starts this
+    /// one no higher (`Qos::new`); the host passes it only to a session that
+    /// opens a room.
     #[expect(
         clippy::too_many_arguments,
         reason = "each room and handshake parameter is distinct"
@@ -201,6 +205,7 @@ impl Session {
         limits: VideoLimits,
         quality: QualityPreset,
         rate_model: RateModel,
+        previous: Option<ClosingRate>,
         capabilities: &[String],
         offered: &[String],
         changes: ChangeSignal,
@@ -215,6 +220,7 @@ impl Session {
             quality,
             listed(CAPABILITY_FPS_OVERRIDE),
             rate_model,
+            previous,
             now,
         );
         if arrival_time {
@@ -280,6 +286,16 @@ impl Session {
                 stop_message(StopReason::HostStopped).into(),
             )),
         }
+    }
+
+    /// Where this session's rate stood at `now`, if its transport ended it:
+    /// the viewer closed it, the connection failed, or the viewer went silent
+    /// for `HOST_READ_TIMEOUT`. `None` while it runs, when the host, the
+    /// capture or a protocol error ended it, and when its QoS leaves none
+    /// (`Qos::closing_rate`).
+    pub fn closing_rate(&self, now: Instant) -> Option<ClosingRate> {
+        let closed = matches!(*self.ending.lock(), Some(End::Closed));
+        closed.then(|| self.qos.lock().closing_rate(now)).flatten()
     }
 
     /// The viewer is hidden: no capture and no control until it resumes.

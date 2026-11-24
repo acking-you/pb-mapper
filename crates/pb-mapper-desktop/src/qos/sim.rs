@@ -159,13 +159,51 @@ impl Sim {
         quality: QualityPreset,
         rate_model: RateModel,
     ) -> Self {
+        Self::build(encoder, rtt_ms, one_way, quality, rate_model, None)
+    }
+
+    /// `new`, for a session a closed Balanced session's `bpf` at 1080p, just
+    /// ended, starts from (`ClosingRate`).
+    pub fn after_closing(encoder: Encoder, rtt_ms: Us, one_way: bool, bpf: f64) -> Self {
+        let record = ClosingRate {
+            preset: QualityPreset::Balanced,
+            bpf,
+            ended: Instant::now(),
+            ended_unix_ms: pb_mapper_core::time::unix_millis(),
+        };
+        Self::build(
+            encoder,
+            rtt_ms,
+            one_way,
+            QualityPreset::Balanced,
+            RateModel::Nominal,
+            Some(record),
+        )
+    }
+
+    fn build(
+        encoder: Encoder,
+        rtt_ms: Us,
+        one_way: bool,
+        quality: QualityPreset,
+        rate_model: RateModel,
+        previous: Option<ClosingRate>,
+    ) -> Self {
         let t0 = Instant::now();
         let limits = VideoLimits {
             max_width: 1920,
             max_height: 1080,
             max_fps: 60,
         };
-        let mut qos = Qos::new(limits, VideoCodec::H264, quality, false, rate_model, t0);
+        let mut qos = Qos::new(
+            limits,
+            VideoCodec::H264,
+            quality,
+            false,
+            rate_model,
+            previous,
+            t0,
+        );
         if one_way {
             qos.use_one_way();
         }
@@ -1002,4 +1040,70 @@ fn a_light_picture_behind_a_queue_it_did_not_cause_keeps_its_pace() {
             sim.span(8, 40)
         );
     }
+}
+
+#[test]
+fn a_start_a_closed_session_lowered_climbs_back_on_a_clear_link() {
+    for (case, encoder) in [
+        ("remembered", typical()),
+        ("remembered_still", Encoder::Still),
+    ] {
+        let mut sim = Sim::after_closing(encoder, 20, true, FLOOR);
+        sim.run(20);
+        sim.dump(case);
+        let first = sim.span(0, 1)[0];
+        assert!(first.bpf < 1.5 * FLOOR, "{first:?}");
+        // Back at the preset's start within 5 s, a still picture's too, which
+        // climbs no further: from there a light picture raises as any does.
+        let back = sim.first(0, |second| second.bpf >= START - 1.0);
+        assert!(back.is_some_and(|back| back < 5), "{:?}", sim.span(0, 8));
+        if matches!(encoder, Encoder::Still) {
+            assert!(sim.seconds.iter().all(|second| second.bpf <= START + 1.0));
+        }
+        assert!(sim.seconds.iter().all(|second| second.cuts == 0));
+    }
+}
+
+#[test]
+fn a_start_a_closed_session_lowered_on_its_slow_link_climbs_until_its_first_cut() {
+    let run = |remembered: bool| {
+        let mut sim = if remembered {
+            Sim::after_closing(typical(), 40, true, FLOOR)
+        } else {
+            Sim::new(typical(), 40, true)
+        };
+        sim.change(0, Change::Rate(1_000_000));
+        sim.run(20);
+        sim.dump(if remembered {
+            "slow_remembered"
+        } else {
+            "slow_cold"
+        });
+        sim
+    };
+    let (cold, again) = (run(false), run(true));
+    // Started at the floor its last session ended at, a reconnect over the
+    // same 1 Mbit/s link queues little more than its IDR's own transfer in
+    // its first two seconds, where a cold start's IDR and startup second
+    // queued several times as long ...
+    let queued = |sim: &Sim| {
+        sim.span(0, 2)
+            .iter()
+            .map(|second| second.queue_max)
+            .max()
+            .unwrap_or_default()
+    };
+    assert!(queued(&again) < ms(100), "{:?}", again.span(0, 4));
+    assert!(queued(&cold) > ms(250), "{:?}", cold.span(0, 4));
+    // ... and its first cut ends the climb back to the preset's start: from
+    // there it runs as the cold start does, at the floor.
+    assert!(!again.qos.restoring);
+    assert!(
+        again
+            .span(4, 20)
+            .iter()
+            .all(|second| second.bpf < 1.2 * FLOOR),
+        "{:?}",
+        again.span(4, 20)
+    );
 }
