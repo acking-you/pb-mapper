@@ -1180,7 +1180,7 @@ crates/pb-mapper-desktop/src/
 | Part | Windows | macOS |
 | --- | --- | --- |
 | `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope | `CGDirectDisplayID` from `CGGetActiveDisplayList`, named by its UUID, which finds it again; `CGDisplayBounds` × the current mode's pixels per point; a session that is not on the console, or a locked screen, is the secure desktop |
-| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`) whose encoder pushes and whose capture is polled: a watcher thread waits for the MFT's events and wakes thread C for each output and for an input request it waits for (`drain_poll()` is `None`; an MFT without `IMFShutdown` is drained every 2 ms instead), and, after a capture with no new present, DXGI is asked again every 2 ms for 250 ms after an injected input or a new picture and while the encoder holds units, and once a period otherwise | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
+| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`) that pushes: a capture thread that thread C arms when its tick finds nothing new waits in `AcquireNextFrame` for the next present, converts it at once and wakes thread C (`capture_poll()` is `None`), and a watcher thread waits for the MFT's events and wakes thread C for each output and for an input request it waits for (`drain_poll()` is `None`; an MFT without `IMFShutdown` is drained every 2 ms instead) | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
 | `Input` | enigo; `SendInput` with `KEYEVENTF_SCANCODE` for physical keys (a HID usage to its set-1 scancode); absolute moves as one `SendInput` event each (see [Pointer moves on Windows](#pointer-moves-on-windows)); `LockWorkStation` | `CGEvent` at the HID tap: pointer and wheel in the bound display's points, click counts for double clicks, named letters and digits at the key the Mac's layout types them with, other keys and physical keys by `kVK_*` place, modifiers as flag changes with left and right apart, text as Unicode string events of at most 20 UTF-16 units; no lock (`LOCK = false`) |
 | `Cursor` | `GetCursorInfo`, separate, the injected pixel until it shows a move; the shape once per new `HCURSOR`: its kind from the `LoadCursorW` standard handles, its bitmap from `GetIconInfo` and `GetDIBits` (colour, alpha or AND mask; monochrome AND/XOR, an inverting pixel drawn black outlined in white) | `CGEventGetLocation`, separate, the injected pixel until it shows a move; the shape when the window server's cursor seed moves (a private `CGSCurrentCursorSeed`, looked up with `dlsym`; without it at most every 500 ms): `NSCursor.currentSystemCursor` drawn at the display's scale, a kind only where it equals a standard cursor pixel for pixel, else `custom` |
 | `Modes` / `Still` | `WinModes` (dynamic changes only; see [Remote resolution](#remote-resolution)) / xcap JPEG | Core Graphics modes for this app only (`kCGConfigureForAppOnly`) / `SCScreenshotManager` and ImageIO JPEG, macOS 14 and later |
@@ -1377,22 +1377,26 @@ picture by its present and a Mac host by its arrival from ScreenCaptureKit;
 the helper's answer carries no date yet, so a host behind the helper keeps
 the grid. A tick that finds no new picture stays armed, so the next picture
 is taken as it appears rather than a tick later. ScreenCaptureKit, which
-pushes, wakes the thread for it. DXGI cannot, in the app's process or
-behind the helper (whose answer says when a capture left the tick armed), so
-it is asked again, never at once: every 2 ms (`DRAIN_POLL`, or the
-backend's `capture_poll`) for 250 ms (`HOT_WINDOW`) after an input the
-thread injected or a new picture, when the next present is likely, and
-while the encoder still holds units, which may be what kept the tick, and
-once a period otherwise, so a still desktop costs no more capture calls
-than the grid. An injected input also brings a poll due a period later in to
-2 ms. Anchoring adds such polls on an active desktop: after a dated picture
-the next tick opens three quarters of a period later, and DXGI is asked
-every 2 ms from then until the next present lands, where a grid at the
-display's own rate mostly found a present already waiting at its tick.
-`desktop_capture_pacing`'s `empty_polls_per_s` and `video_bench`'s
-`polls_per_s` count them, together with the asks of a Windows encoder
-that had not asked for input yet (`video_bench`'s `waiting` counts those
-apart). A change of the viewers' limits that changes only
+pushes, wakes the thread for it, and so, in the app's process, does the
+Windows encoder's capture thread, which such a tick arms and which waits
+for the display's next present (see the Windows host below): thread C never
+polls DXGI there. Behind the helper, whose answer says when a capture left
+the tick armed, nothing wakes the thread, so the worker is asked again,
+never at once: every 2 ms (`DRAIN_POLL`, or the backend's `capture_poll`)
+for 250 ms (`HOT_WINDOW`) after an input the thread injected or a new
+picture, when the next present is likely, and while the encoder still holds
+units, which may be what kept the tick, and once a period otherwise, so a
+still desktop costs no more capture calls than the grid. An injected input
+also brings a poll due a period later in to 2 ms. Anchoring adds such polls
+on an active desktop: after a dated picture the next tick opens three
+quarters of a period later, and the worker is asked every 2 ms from then
+until the next present lands, where a grid at the display's own rate mostly
+found a present already waiting at its tick. `desktop_capture_pacing`'s
+`empty_polls_per_s` and `video_bench`'s `polls_per_s` count them, together
+with the asks of a Windows encoder that had not asked for input yet
+(`video_bench`'s `waiting` counts those apart); in process they count the
+captures that armed the capture thread: at most one a tick on an active
+desktop, and one after each 250 ms repeat on a still one. A change of the viewers' limits that changes only
 the frame rate keeps the capture source where it can serve the new limits as
 it is (the synthetic test platform's can; the Windows and Mac sources are
 still built again), and asks for an IDR either way. Thread C passes each
@@ -1457,27 +1461,59 @@ gets no watcher, so that at most one is left behind however often the
 encoder is built again. An encoder without `IMFShutdown`, or without a
 watcher, has its events read at each drain, every 2 ms while it holds
 units. Behind
-the helper, the worker's encoder has its watcher too, but nothing it wakes:
-thread C still polls the worker every 2 ms, and the worker reads the counts
-each millisecond of a drain's long poll. An encoder that holds nothing and
+the helper, the worker's encoder has its watcher and its capture thread
+too, but nothing they wake: thread C still polls the worker every 2 ms, the
+worker reads the counts each millisecond of a drain's long poll, and a
+capture request that finds nothing new arms the worker's capture thread,
+which converts the next present as it comes for the next request to take.
+An encoder that holds nothing and
 has asked for no input for 2 s after it last took or gave a unit is
 stalled, as one that holds a unit for 2 s is.
-Each duplication frame is released at once, so no update is missed between
-ticks. A submit takes a free NV12 sample from the encoder's pool first, and
-with none free it captures nothing (`Full`), so DXGI goes on folding the
-desktop's updates into its next frame. A new picture is then converted
-straight from the duplication's surface into that sample by the D3D11 video
-processor, which the GPU is handed (`Flush`) before the frame goes back to
-DXGI and the sample to the encoder: no full-size BGRA copy of the desktop is
-made. A video processor that refuses the duplication's surface (it fails to
-make a view of it or to convert from it) has each picture copied out of it
-first for the rest of that encoder, as every picture was before, and logs
-`desktop_capture_copied` once. The last submitted sample is kept, so a
-repeat on a still desktop (the 250 ms liveness repeat, or a keyframe) copies
-its NV12 picture into a fresh sample instead of converting again; the
-encoder never writes the samples it takes. The pool holds six: four in the
-encoder at most, the last one once it is out, and a spare that a submit
-with nothing to send keeps for the next. A new image is dated by
+DXGI pushes through a capture thread of the encoder's own
+(`capture_thread.rs`, on the neutral `codec/present_waiter.rs`). Thread C
+builds the duplication, the video processor and the encoder, then hands the
+duplication and the video processor to that thread, whose first call puts
+it on thread C's desktop (`SetThreadDesktop` with thread C's
+`GetThreadDesktop`: the helper worker's bound input desktop, Winlogon's
+included; in the app's process the one it already has), before any COM or
+D3D call. When thread C's tick finds no new picture, it hands the thread a
+free NV12 sample from the encoder's pool (with none free it takes nothing,
+`Full`) and arms it. Armed, the thread first takes a frame DXGI already
+holds, then waits in `AcquireNextFrame`, at most 16 ms at a time. A frame
+with a new present is converted at once, straight from the duplication's
+surface into that sample by the D3D11 video processor, which the GPU is
+handed (`Flush`) before the frame goes back to DXGI; the thread then
+publishes the picture, disarms itself and wakes thread C, whose tick,
+already due, submits it. A frame that only moved the pointer is released and
+waited past, and wakes nothing. Unarmed (after a submit until the next tick,
+after a repeat or backpressure, or while every viewer has paused), the
+thread waits for thread C, and DXGI folds the desktop's updates into its
+next frame, which the next arming takes at once. Each frame is released as
+soon as it is converted, so no update is missed between ticks, and no
+full-size BGRA copy of the desktop is made. Both threads hold the device's
+own lock (`ID3D11Multithread`) across a picture's work on its one immediate
+context. A video processor that refuses the duplication's surface (it fails
+to make a view of it or to convert from it) has each picture copied out of
+it first for the rest of that encoder, as every picture was before, and
+logs `desktop_capture_copied` once. The last submitted sample is kept, so a
+repeat on a still desktop (the 250 ms liveness repeat, or a keyframe)
+copies its NV12 picture into a fresh sample instead of converting again;
+the encoder never writes the samples it takes. A repeat goes only once the
+armed thread has looked and found nothing newer, which it wakes thread C to
+say when thread C waits for it, or 32 ms after its arming without that
+answer, so that a keyframe, or the first submit after a pause, takes a
+present DXGI already holds rather than repeating an older picture. A present
+the thread finds as thread C disarms it is still converted and published,
+and taken at the next tick. The pool holds six: four in the encoder at most,
+the last one once it is out, and the one the capture thread holds for its
+next picture. A failure of the capture thread (DXGI's access lost on a
+desktop switch, say) is published, wakes thread C, and fails its next
+submit, which builds the capture again. Dropping the encoder stops and
+joins the capture thread, which ends within one 16 ms wait, before the
+encoder, its samples and Media Foundation go; one that has not ended within
+100 ms is left behind and logged (`desktop_capture_thread_stuck`). Behind
+the helper, a desktop switch drops the encoder, and so joins its capture
+thread, before the worker binds the new desktop. A new image is dated by
 `LastPresentTime`, a performance counter reading turned into an `Instant`
 by its age against `QueryPerformanceCounter` (one over a second old dates
 nothing), and carries the presents DXGI folded into it
@@ -2299,7 +2335,7 @@ shape is painted as before.
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder |
-| Armed tick | a tick with no new picture, or whose Windows encoder has not asked for input, stays armed; ScreenCaptureKit wakes thread C, and so does the Windows encoder's input request in process (asked again every 2 ms meanwhile); DXGI, in process or through the helper, is asked again every 2 ms for 250 ms after an injected input or a new picture and while the encoder holds units (an input brings a pending poll in to 2 ms), and once a period otherwise |
+| Armed tick | a tick with no new picture, or whose Windows encoder has not asked for input, stays armed; ScreenCaptureKit wakes thread C, and in process so does the Windows encoder's capture thread for the next present, which it waits for at most 16 ms an `AcquireNextFrame` while armed, and the encoder's input request (asked again every 2 ms meanwhile); a repeat due waits up to 32 ms after the capture thread's arming for its answer that nothing newer waits; through the helper the worker is asked again every 2 ms for 250 ms after an injected input or a new picture and while the encoder holds units (an input brings a pending poll in to 2 ms), and once a period otherwise |
 | Capture pacing | after a dated picture, the next tick a period after its present, up to ¼ period early and, for a picture of a single present, at most 1/64 period earlier than a period after the last tick (long-run rate ≤ 64/63 × pace); a picture of several presents that waited keeps the tick a period after the last; ¾ period floor after a stall; a present over a period old counts as undated, and DXGI dates no picture presented over 1 s ago |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
 | QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; rate-model latch over the last 2 s of ticks, each at ≤ 0.75 × nominal at both ends, with ≥ 6 unique frames and non-IDR bits > max(1.3, min(0.6 × nominal / mean pace, 2)) × expected at each tick's highest per-frame budget |
@@ -2359,11 +2395,15 @@ submits: ScreenCaptureKit's `complete_per_s`, `idle_per_s` and
 `replaced_per_s` (pictures a newer one replaced before thread C took them),
 and `display_to_arrival_p50_us` and `display_to_arrival_p95_us`, from
 `SCStreamFrameInfoDisplayTime` to the picture's arrival on the stream's
-queue. A Windows encoder logs its first acquire as
+queue. A Windows encoder's capture thread logs its first acquire as
 `windows_capture_first_acquire` on `pb_mapper_desktop::session` (debug):
 `last_present_time`, `accumulated_frames` and whether a desktop image came
-with it, which it also keeps in its statistics for `video_bench`'s
-`first_acquire_*`. A session's encoder logs, as it starts, whether its
+with it, which the encoder also keeps in its statistics for `video_bench`'s
+`first_acquire_*`, with the thread's `AcquireNextFrame` calls
+(`acquires`). Dropping the encoder logs how long its capture thread took to
+join (`desktop_capture_thread_joined`, debug: `join_us`), or warns
+`desktop_capture_thread_stuck` when it did not end within 100 ms and was
+left behind. A session's encoder logs, as it starts, whether its
 events are pushed (`windows_encoder_events`, debug: `encoder`, `pushed`;
 the H.265 probe's encoder, which nothing waits on, logs nothing), and
 warns `windows_encoder_watcher_failed` when its watcher thread could not
