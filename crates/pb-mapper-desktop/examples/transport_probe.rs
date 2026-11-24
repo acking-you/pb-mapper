@@ -10,12 +10,14 @@
 //! --auto tries direct and reports the actual selected path and fallback stage,
 //! then, once the download has arrived, both ends' direct link figures: QUIC
 //! counts loss at the sender, so the download's is the publisher's. With
-//! --local the relay coordinates direct on loopback.
+//! --local the relay coordinates direct on loopback. --bbr has the
+//! publisher send its direct QUIC under BBR, as a desktop host sends its
+//! video, for a run to set beside one under Cubic on the same path.
 mod probe_support;
 
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, LinkStats, PathPolicy, RegisterOptions, RegisterRequest,
-    RelayTransport, Transport, TunnelDiagnostics,
+    Client, CongestionControl, ConnectOptions, LinkStats, PathPolicy, RegisterOptions,
+    RegisterRequest, RelayTransport, Transport, TunnelDiagnostics,
 };
 use probe_support::{RelayConfig, option, relay_client};
 use quinn::rustls::{self, pki_types::ServerName};
@@ -80,6 +82,11 @@ async fn main() -> Result<()> {
     let local = args.iter().any(|arg| arg == "--local");
     let nagle = args.iter().any(|arg| arg == "--nagle");
     let direct = args.iter().any(|arg| arg == "--auto");
+    let congestion = if args.iter().any(|arg| arg == "--bbr") {
+        CongestionControl::Bbr
+    } else {
+        CongestionControl::Cubic
+    };
     let mib: usize = option(&args, "--mib").unwrap_or("1").parse()?;
     if !(1..=64).contains(&mib) {
         return Err("--mib must be 1..64".into());
@@ -187,7 +194,14 @@ async fn main() -> Result<()> {
         {
             tokio::time::timeout(
                 Duration::from_secs(180),
-                run_case(&publisher, &consumer, case, mib, !nagle, direct),
+                run_case(
+                    &publisher,
+                    &consumer,
+                    case,
+                    mib,
+                    !nagle,
+                    direct.then_some(congestion),
+                ),
             )
             .await??;
         }
@@ -230,13 +244,15 @@ fn tls_pair() -> Result<(TlsAcceptor, TlsConnector)> {
     ))
 }
 
+/// `direct` is what the publisher's direct QUIC sends under, when direct is
+/// tried at all.
 async fn run_case(
     publisher: &Client,
     consumer: &Client,
     case: Case,
     mib: usize,
     nodelay: bool,
-    direct: bool,
+    direct: Option<CongestionControl>,
 ) -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let service = format!(
@@ -245,7 +261,7 @@ async fn run_case(
         case.name
     );
     let registration = publisher
-        .register_with_options(
+        .register_with_sender_congestion(
             RegisterRequest {
                 key: service.clone(),
                 local_addr: listener.local_addr()?.to_string(),
@@ -254,9 +270,10 @@ async fn run_case(
                 force_namespace: false,
             },
             RegisterOptions {
-                allow_direct: direct,
+                allow_direct: direct.is_some(),
                 ..Default::default()
             },
+            direct.unwrap_or_default(),
         )
         .await?;
     registration
@@ -278,7 +295,7 @@ async fn run_case(
         .connect_tcp(
             service,
             ConnectOptions {
-                path: if direct {
+                path: if direct.is_some() {
                     PathPolicy::Auto
                 } else {
                     PathPolicy::RelayOnly
@@ -301,7 +318,7 @@ async fn run_case(
         // The publisher's link closes with its session: read both ends while
         // the host still waits for the last acknowledgement.
         let links = || -> Result<()> {
-            if direct {
+            if direct.is_some() {
                 println!(
                     "case={} publisher_link={} consumer_link={}",
                     case.name,
@@ -351,9 +368,13 @@ async fn run_case(
 }
 
 /// QUIC's view of the direct session open now, read from the end whose
-/// diagnostics these are: each end counts the losses of what it sent.
-fn link_stats(diagnostics: TunnelDiagnostics) -> Option<LinkStats> {
-    diagnostics.direct?.link.map(|link| link.stats)
+/// diagnostics these are: each end counts the losses of what it sent, under
+/// the controller it names.
+fn link_stats(diagnostics: TunnelDiagnostics) -> Option<(Option<CongestionControl>, LinkStats)> {
+    diagnostics
+        .direct?
+        .link
+        .map(|link| (link.congestion, link.stats))
 }
 
 async fn write_frame<W: AsyncWrite + Unpin>(
