@@ -841,11 +841,19 @@ refused over such a grant (`HELPER_OUTDATED`, `HELPER_FOREIGN_APP`), since
 configuring it from here would replace its view-only, relay-only or paused
 policy, and under another service name its invitation.
 
-Protocol 10 is the current one, with the pipes
-`pb-mapper.desktop-helper.v10` and `pb-mapper.desktop-background.v10`. It
-adds `submitted` to the answer of a `Video` request that captures: `false`
-when the worker's source had no new picture to submit, so the host's thread C
-keeps its tick armed and asks again (see
+Protocol 11 is the current one, with the pipes
+`pb-mapper.desktop-helper.v11` and `pb-mapper.desktop-background.v11`. Its
+`Start` caps name the GPU the worker captures on, with its driver
+(`adapter`: the adapter's vendor, device, subsystem and revision ids from
+DXGI, and the user-mode driver's version), under which the host keeps the
+worker's H.265 answer for later workers (see
+[H.265 and H.264](#h265-and-h264)). The worker sends a key only with a vendor
+and a driver version, and the host refuses a `Start` answer whose key lacks
+either; a worker that cannot name its GPU leaves `adapter` out.
+
+Protocol 10 added `submitted` to the answer of a `Video` request that
+captures: `false` when the worker's source had no new picture to submit, so
+the host's thread C keeps its tick armed and asks again (see
 [Host: capture and encoding](#host-capture-and-encoding)). It is sent only
 then; absent, the capture took the tick, or spent it on a full encoder.
 Protocol 9 added `HostStatus.viewers` to the background host's status, for
@@ -1591,6 +1599,27 @@ once kept; the session's encoder then took about 200 ms to build, against
 280 ms for a cold H.264 one, so most of the probe is start-up the encoder
 would pay anyway.
 
+Each session through the helper runs in a fresh worker, which would probe
+cold every time, while the host that asks it (the app, or the background
+host in the service) outlives its workers. So the host keeps each worker's
+answer, for the rest of its process, under the GPU the worker captures on,
+as its `Start` answer names it (helper protocol 11): the vendor, device,
+subsystem and revision ids of the adapter that drives the display, and its
+user-mode driver's version, which DXGI reports for `IDXGIDevice`. Not its
+LUID, which names an adapter only until the system restarts and says
+nothing of its driver. A later worker on the same GPU and driver is not
+asked, so its viewer's `Accepted` does not wait for a probe, and the
+session's encoder is then the first H.265 encoder that worker builds. A
+driver update changes the key, and the next worker probes again. A no is
+kept as a yes is, as the backend in the app keeps its probe's. An H.265
+encoder that fails through the helper drops the answer kept for its GPU, as
+H.265 goes off for the process anyway (below). A worker that cannot name its
+GPU, or whose driver reports no version, is asked every time. The host keeps
+answers for at most 8 GPUs, dropping the oldest, and logs each answer it
+gives a session as `desktop_h265_helper` (usable; kept: whether an earlier
+worker gave it; ms). How much sooner a later session reaches `Accepted` and
+its first picture has not been measured on a Windows device yet.
+
 The H.265 encoder takes the H.264 encoder's settings: low latency, CBR, an
 infinite GOP, IDRs only on demand and the same bits per frame, which show as a
 better picture rather than a lower rate. Its output type is
@@ -2210,7 +2239,9 @@ Each session's lifecycle is logged at info on `pb_mapper_desktop::session`:
 `desktop_viewer_ended` (reason, detail, seconds, keyframes,
 `keyframes_requested`, `backlog_drops`); a host also logs each H.265 probe as
 `desktop_h265_probe` (usable, ms, detail) and warns `desktop_h265_failed`
-when an H.265 encoder fails and H.265 is turned off. A Windows host warns
+when an H.265 encoder fails and H.265 is turned off; one that shares
+through the Windows helper logs each H.265 answer it gives a session as
+`desktop_h265_helper` (usable, kept, ms). A Windows host warns
 `desktop_moves_placed` (win32: the error of a `SendInput` that refused a
 move, none when moves were dropped; token: the session, integrity level and
 UIAccess of its process) when `SendInput` refused a move or its injected

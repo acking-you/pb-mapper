@@ -423,10 +423,13 @@ Nothing in the SDK crates knows it exists.
     or is offered Update); `background.rs` and `background/`, its own host
     and that host's grant at rest; `os/`, its Win32 glue by concern. The
     service side and the `pb-mapper-desktop-helper` binary need `--features
-    windows-helper`. `HELPER_PROTOCOL` (now 10) and the `.v<n>` pipe names
+    windows-helper`. `HELPER_PROTOCOL` (now 11) and the `.v<n>` pipe names
     change together; an installed helper of another protocol, or of another
     build (its executable differs from the one bundled with the app), is
-    offered Update. Protocol 10: `Response.submitted`, `false` only in the
+    offered Update. Protocol 11: `StartCaps.adapter`, the GPU and driver the
+    worker captures on (`AdapterKey`), under which `oop/client.rs` keeps the
+    worker's H.265 answer for the host's process, so a later worker on them
+    is not asked again. Protocol 10: `Response.submitted`, `false` only in the
     answer to a capture whose source had no new picture, so thread C keeps
     its tick armed and polls; absent means the tick was spent. Protocol 9:
     `HostStatus.viewers` across the background host's status pipe
