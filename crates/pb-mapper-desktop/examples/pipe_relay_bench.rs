@@ -27,7 +27,11 @@
 //! app, and the app's reads. On a named pipe each write the worker or the
 //! relay makes is one overlapped `WriteFile`; a read takes what one completed
 //! `ReadFile` delivered, or part of it. To compare mio 1.2.4, set its entry in
-//! `Cargo.lock` back, run, and restore the file.
+//! `Cargo.lock` back, run, and restore the file. mio 1.2.5 keeps a pipe's
+//! write buffer only up to 1 MiB, where 1.2.4 kept one of any size, so the
+//! worker's write of a larger answer (the 3.7 MB unit, not the 1 MB one)
+//! allocates its buffer anew each time on 1.2.5: read that line with it in
+//! mind.
 //!
 //! Elsewhere it runs over TCP on loopback, to check the harness only: those
 //! figures say nothing of named pipes, and `--quota` does nothing there.

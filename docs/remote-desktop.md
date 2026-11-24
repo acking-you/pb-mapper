@@ -779,17 +779,21 @@ record of up to 4 MiB. The worker writes an answer and its byte record in
 one vectored write, and the app each request in one. mio, from 1.2.5, makes
 such a write one overlapped `WriteFile` instead of one per length and per
 body, copying the slices into its write buffer as it copied each write
-before, so joining them copies nothing more; and it makes each pipe read as
-large as the buffer it fills, from 4 KiB up to 64 KiB, where 1.2.4 read
-4 KiB at a time. Each pipe lets 256 KiB wait in either direction
-(`helper/transfer.rs`), so a write that fits beside what already waits
-completes without waiting for its reader. The service relays
-toward the app through a 256 KiB buffer, reading on while a write is in
-flight so that the next write takes all it gathered, and toward the worker
-through 64 KiB. The records, and so the helper protocol, are unchanged.
-`examples/pipe_relay_bench.rs` times a unit through two pipes and such a
-relay, and counts the writes and reads it took; no Windows run of it is
-recorded yet.
+before, so joining them copies nothing more. A pipe keeps that buffer for
+its next write only up to 1 MiB: a larger write, an answer whose unit is
+over about 1 MiB, allocates its buffer anew each time, where 1.2.4 kept one
+of any size. mio 1.2.5 also makes each pipe read as large as the buffer it
+fills, from 4 KiB up to 64 KiB; 1.2.4 read what a buffer it kept held,
+4 KiB at the two ends that read units. Each pipe lets 256 KiB wait in either
+direction (`helper/transfer.rs`), so a write that fits beside what already
+waits completes without waiting for its reader. The service relays toward
+the app through a 256 KiB buffer, reading on while a write is in flight so
+that the next write takes all it gathered, and toward the worker through
+64 KiB, so each of its writes stays under that 1 MiB. The records, and so
+the helper protocol, are unchanged. `examples/pipe_relay_bench.rs` times a
+unit through two pipes and such a relay, and counts the writes and reads it
+took; its 3.7 MB unit is the one whose write allocates on 1.2.5. No Windows
+run of it is recorded yet.
 
 Installation is serialized, replaces configuration atomically, waits for the
 service to report Running, and attempts to restore the previous configuration
