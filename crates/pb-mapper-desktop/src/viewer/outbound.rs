@@ -12,8 +12,9 @@
 //! 7. the latest keyframe request, fps cap, quality, path and display mode;
 //! 8. a ping after `PING_IDLE` without any other message.
 //!
-//! For a host that listed `arrival_time`, a probe echo and a receipt carry
-//! when the reader finished the header they answer, on the session's clock;
+//! For a host that listed `arrival_time`, a probe echo carries when the
+//! reader finished the probe, and a receipt when it finished its newest unit,
+//! payload included, on the session's clock;
 //! for one that listed `keyframe_seq`, a keyframe request made while
 //! predicted frames are thrown away carries the last seq the reader read.
 //! Receipts outrank keyframe requests, so by the time one is written the
@@ -116,9 +117,9 @@ impl Controls {
 
 #[derive(Default)]
 struct Slots {
-    /// The newest probe's nonce, and when its header was read.
+    /// The newest probe's nonce, and when it was read.
     probe: Option<(u64, Instant)>,
-    /// The newest seq read, and when its header was read.
+    /// The newest seq read, and when it was read whole.
     receipt: Option<(u64, Instant)>,
     /// The newest seq read, kept once its receipt is written.
     read_seq: u64,
@@ -218,12 +219,12 @@ impl Outbound {
         controls.push(barrier);
         controls.obsolete_below = self.sequence.load(Ordering::Relaxed);
     }
-    /// The probe `nonce`, whose header was read at `at`.
+    /// The probe `nonce`, read at `at`.
     pub fn probe(&self, nonce: u64, at: Instant) {
         self.update(|slots| slots.probe = Some((nonce, at)));
     }
-    /// Cumulative: every video record up to `seq` was read, `seq`'s header
-    /// at `at`.
+    /// Cumulative: every video record up to `seq` was read, `seq`'s whole
+    /// by `at`.
     pub fn receipt(&self, seq: u64, at: Instant) {
         self.update(|slots| {
             if slots.receipt.is_none_or(|(old, _)| seq > old) {

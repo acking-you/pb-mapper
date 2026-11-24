@@ -232,8 +232,8 @@ async fn stale_generation_units_are_dropped_before_admission() {
 /// A viewer that listed `keyframe_seq` asks for an IDR having read seq 2,
 /// after the session's first IDR: the predicted units C makes before the
 /// next IDR are dropped without a seq, and the IDR clears the skip. One that
-/// listed `arrival_time` reads its one-way queues in `Stats`, and its video
-/// headers come apart from their payloads. A request after a seq never sent
+/// listed `arrival_time` reads its one-way queues in `Stats`. A request after
+/// a seq never sent
 /// is a protocol error.
 #[tokio::test]
 async fn a_keyframe_request_after_a_seq_skips_predicted_units_until_the_idr() {

@@ -163,6 +163,9 @@ pub(crate) struct CreditLedger {
     /// The one-way queues of a viewer that stamps arrival times; `None` for
     /// one that does not.
     one_way: Option<OneWay>,
+    /// What the RTT floor hides of a queue on this path (`Qos::floor_gap`),
+    /// which the one-way ack queue hides too.
+    floor_gap: Duration,
     /// The newest IDR booked.
     last_keyframe: Option<u64>,
     /// While set, B-send drops predicted units: until an IDR is booked, or
@@ -185,6 +188,7 @@ impl CreditLedger {
             last_receipt: now,
             delays: Vec::new(),
             one_way: arrival_time.then(|| OneWay::new(now)),
+            floor_gap: Duration::ZERO,
             last_keyframe: None,
             skip_until: None,
         }
@@ -421,14 +425,21 @@ impl CreditLedger {
     /// `ACK_SAMPLE_WINDOW`, or over the newest three receipts when fewer came
     /// in it: a slow link receipts seldom, and its queue must not vanish
     /// between two receipts. Zero before three receipts. With arrival times,
-    /// the median queue toward the viewer, which no baseline offsets.
+    /// the median queue toward the viewer, which no baseline offsets, less
+    /// what the RTT floor hides of a round trip on this path.
     pub fn ack_queue(&mut self, base_rtt: Duration, now: Instant) -> Duration {
         let median = self.ack_median(now);
         if self.one_way.is_some() {
-            median
+            median.saturating_sub(self.floor_gap)
         } else {
             median.saturating_sub(base_rtt)
         }
+    }
+
+    /// What the RTT floor hides of a queue on this path, as the QoS
+    /// controller last found it.
+    pub fn set_floor_gap(&mut self, gap: Duration) {
+        self.floor_gap = gap;
     }
 
     /// The queues of a viewer that stamps arrival times, for the stats: the
@@ -436,7 +447,7 @@ impl CreditLedger {
     /// their way back.
     pub fn one_way_queues(&mut self, now: Instant) -> Option<(Duration, Option<Duration>)> {
         let reverse = self.one_way.as_ref()?.reverse_queue();
-        Some((self.ack_median(now), reverse))
+        Some((self.ack_median(now).saturating_sub(self.floor_gap), reverse))
     }
 
     /// A probe's queue toward the viewer: written at `sent`, read when the
@@ -715,6 +726,11 @@ mod tests {
         let (mut credit, window) = one_way_window(true, 150, 0);
         assert_eq!((window.frames, window.clamped), (8, true), "{window:?}");
         assert_eq!(credit.ack_queue(base, now), Duration::from_millis(150));
+        // On a path shorter than the RTT floor, as much of it is hidden as a
+        // round trip's.
+        credit.set_floor_gap(Duration::from_millis(8));
+        assert_eq!(credit.ack_queue(base, now), Duration::from_millis(142));
+        credit.set_floor_gap(Duration::ZERO);
         // A new path forgets the minima: the next unit is the new least.
         credit.reset_one_way();
         assert_eq!(

@@ -127,9 +127,7 @@ pub(crate) struct Session {
     /// Both ends listed `peer_cursors`: the viewer reads other peers' pointers.
     pub peer_cursors: bool,
     /// Both ends listed `arrival_time`: the viewer stamps receipts and probe
-    /// echoes, and reads the one-way queues in `Stats`; B-send writes each
-    /// video header as its own TLS record, so the stamp is the unit's first
-    /// bytes.
+    /// echoes, and reads the one-way queues in `Stats`.
     arrival_time: bool,
     /// Both ends listed `keyframe_seq`: a keyframe request may name the last
     /// seq the viewer read.
@@ -369,15 +367,16 @@ impl Session {
                 self.credit_changed.notify_one();
             }
             ViewerMessage::ProbeEcho { nonce, at_us } => {
-                let (base, sent) = {
+                let (base, sent, floor_gap) = {
                     let qos = self.qos.lock();
-                    (qos.base_rtt(), qos.probe_sent_at(nonce))
+                    (qos.base_rtt(), qos.probe_sent_at(nonce), qos.floor_gap())
                 };
                 // The probe's own queue toward the viewer, and the receipts',
                 // which a cut needs as its witness unless the probes' delay
                 // persists.
                 let (forward, ack_queue) = {
                     let mut credit = self.credit.lock();
+                    credit.set_floor_gap(floor_gap);
                     let forward = at_us
                         .filter(|_| self.arrival_time)
                         .zip(sent)

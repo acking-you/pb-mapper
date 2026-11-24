@@ -640,15 +640,20 @@ impl Qos {
         {
             self.rtt.pop_front();
         }
-        self.rtt.push_back((now, rtt));
+        // Kept unfloored, so the one-way delay can hide what the floor hides.
+        self.rtt.push_back((now, elapsed));
         self.tainted = probe.tainted;
         let Some(base) = self.base_rtt() else {
             return;
         };
-        // This probe's own sample: its queue toward the viewer, or its round
+        // This probe's own sample: its queue toward the viewer, less what the
+        // floor hides of a round trip on a path shorter than it, or its round
         // trip, whose excess over the baseline is its delay.
         let (sample, raw) = match (self.one_way, forward) {
-            (true, Some(forward)) => (forward, millis(forward)),
+            (true, Some(forward)) => {
+                let forward = forward.saturating_sub(self.floor_gap());
+                (forward, millis(forward))
+            }
             (true, None) => return,
             (false, _) => (rtt, millis(rtt.saturating_sub(base))),
         };
@@ -726,8 +731,26 @@ impl Qos {
         (self.bpf * f64::from(self.pace(now))) as u64
     }
 
+    /// The least round trip over the last `RTT_WINDOW`, never below
+    /// `DELAY_FLOOR`.
     pub fn base_rtt(&self) -> Option<Duration> {
-        self.rtt.iter().map(|(_, rtt)| *rtt).min()
+        self.rtt
+            .iter()
+            .map(|(_, rtt)| *rtt)
+            .min()
+            .map(|least| least.max(DELAY_FLOOR))
+    }
+
+    /// How much of a queue the floor hides from a round trip: a path whose
+    /// least round trip is under `DELAY_FLOOR` shows only the part of a queue
+    /// above the difference. The one-way delay hides as much, so a queue
+    /// toward the viewer cuts exactly as the round trip's did.
+    pub fn floor_gap(&self) -> Duration {
+        self.rtt
+            .iter()
+            .map(|(_, rtt)| *rtt)
+            .min()
+            .map_or(Duration::ZERO, |least| DELAY_FLOOR.saturating_sub(least))
     }
 
     pub fn preset(&self) -> QualityPreset {
@@ -1379,6 +1402,29 @@ mod tests {
         // A path change forgets the receipts.
         qos.reset_baseline();
         assert_eq!(qos.take_receipt_rate(now), ReceiptRateView::default());
+    }
+
+    /// A round trip under `DELAY_FLOOR` counts as the floor, which hides
+    /// the first part of any queue on such a path; the one-way delay hides
+    /// as much, so a queue toward the viewer moves the controller alike.
+    #[test]
+    fn a_path_under_the_floor_hides_as_much_of_a_queue_one_way() {
+        let t0 = Instant::now();
+        let mut rtt = balanced(t0);
+        let mut one_way = balanced(t0);
+        one_way.use_one_way();
+        // A 2 ms path, then 154 ms queued toward the viewer, twice.
+        probes(&mut rtt, t0, &[(2, 0), (2, 0), (156, 0), (156, 0)]);
+        one_way_probes(
+            &mut one_way,
+            t0,
+            &[(2, 0, 0), (2, 0, 0), (156, 154, 0), (156, 154, 0)],
+        );
+        assert_eq!(rtt.floor_gap(), Duration::from_millis(8));
+        assert_eq!(rtt.delay_ms(), Some(146));
+        assert_eq!(one_way.delay_ms(), rtt.delay_ms());
+        assert_eq!(one_way.fps, rtt.fps);
+        assert_eq!(rtt.base_rtt(), Some(DELAY_FLOOR));
     }
 
     /// With arrival times, a queue on the viewer's uplink alone (the round

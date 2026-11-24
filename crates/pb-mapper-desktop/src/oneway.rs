@@ -1,19 +1,20 @@
 //! One-way queues from the viewer's arrival times (`arrival_time`). The
-//! viewer stamps each receipt and probe echo with when it finished reading
-//! that unit's or that probe's header, on its own session clock; the host
-//! pairs the stamp with when it booked the unit or wrote the probe, and with
-//! when the receipt came back, on its own clock. The clocks share no epoch,
-//! so every one-way delay carries one unknown constant offset: only its rise
-//! above the least seen over `RTT_WINDOW` means anything, and that rise is a
-//! queue.
+//! viewer stamps each receipt with when it finished reading that unit, and
+//! each probe echo with when it read the probe, on its own session clock; the
+//! host pairs the stamp with when it booked the unit or wrote the probe, and
+//! with when the receipt came back, on its own clock. The clocks share no
+//! epoch, so every one-way delay carries one unknown constant offset: only
+//! its rise above the least seen over `RTT_WINDOW` means anything, and that
+//! rise is a queue.
 //!
-//! - Forward, toward the viewer: from the host's send to the viewer's read of
-//!   the header. Receipts and probes share its minimum, as they share the
-//!   offset. Neither a unit's own transfer nor anything on the way back is
-//!   in it.
-//! - Reverse, back to the host: from the viewer's read of a unit's header to
-//!   the receipt for it at the host, which includes reading the unit's
-//!   payload. Only receipts feed it; the credit window reads the newest few.
+//! - Forward, toward the viewer: from the host's send to the viewer having
+//!   read the unit, or the probe. Receipts and probes share its minimum, as
+//!   they share the offset. A unit's own transfer is in it, as it is in
+//!   every round trip the host times, so the thresholds those were tuned on
+//!   hold; nothing on the way back is.
+//! - Reverse, back to the host: from the viewer having read a unit to the
+//!   receipt for it at the host: the viewer's writer and its uplink alone.
+//!   Only receipts feed it; the credit window reads the newest few.
 //!
 //! A stamp is an observation, never authority: a sample whose stamp goes
 //! backwards for its kind, or whose delay lies more than `IO_TIMEOUT` above

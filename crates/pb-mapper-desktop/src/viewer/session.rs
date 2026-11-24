@@ -286,8 +286,8 @@ impl Reader<'_> {
                     }
                     Err(failure) => return Ended::failed(failure),
                 };
-            // The header is read: a unit's first bytes are here, or, when
-            // the reader came late to it, the previous message is done.
+            // The header is read, or, when the reader came late to it, the
+            // previous message is done: a probe's arrival time.
             let at = Instant::now();
             if let Err(ended) = self.handle(message, read, at).await {
                 return ended;
@@ -295,7 +295,8 @@ impl Reader<'_> {
         }
     }
 
-    /// `at`: when `message`'s header was read.
+    /// `at`: when `message`'s header was read. A unit's arrival time is
+    /// when its payload was, and only a probe's is `at`.
     async fn handle<R: AsyncRead + Unpin>(
         &mut self,
         message: HostMessage,
@@ -322,8 +323,11 @@ impl Reader<'_> {
                 let bytes = wire::read_payload(read).await.map_err(Ended::failed)?;
                 let now = Instant::now();
                 // Transport credit first: it covers every unit read, including
-                // the ones the sink drops.
-                self.shared.outbound.receipt(seq, at);
+                // the ones the sink drops. Its arrival time is now, the unit
+                // read whole: the way toward this viewer holds the unit's own
+                // transfer, as the host's round trips always did, and the way
+                // back holds nothing but the way back.
+                self.shared.outbound.receipt(seq, now);
                 if self.last_seq.checked_add(1) != Some(seq) {
                     return Err(Ended::protocol("video sequence gap"));
                 }

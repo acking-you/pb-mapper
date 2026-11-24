@@ -178,16 +178,17 @@ pub(crate) enum ViewerMessage {
     /// input.
     Received {
         seq: u64,
-        /// When the viewer finished reading the header of `seq`'s `Video`, in
-        /// microseconds since its session began. Only to a host that listed
-        /// `arrival_time`, and an observation, never authority.
+        /// When the viewer finished reading `seq`'s `Video`, its payload
+        /// included, in microseconds since its session began. Only to a host
+        /// that listed `arrival_time`, and an observation, never authority.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at_us: Option<u64>,
     },
     /// Echo of `HostMessage::Probe`, written by the viewer's network task.
     ProbeEcho {
         nonce: u64,
-        /// When the viewer finished reading the probe, as `Received::at_us`.
+        /// When the viewer finished reading the probe, on the clock of
+        /// `Received::at_us`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at_us: Option<u64>,
     },

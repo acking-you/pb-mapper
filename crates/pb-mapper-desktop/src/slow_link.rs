@@ -100,6 +100,29 @@ impl Interval {
             reverse_queue_ms: None,
         }
     }
+
+    /// One line of what the host traced, `t_ms` after `from`, in `phase`.
+    fn print(&self, case: &str, from: Instant, phase: &str) {
+        let millis = |value: Option<u64>| value.map_or_else(|| "-".to_owned(), |ms| ms.to_string());
+        println!(
+            "{case} t_ms={} phase={phase} pace_fps={} fps={} bpf={} encoder_bitrate={} sent_bitrate={} clamped={} adaptation={} window_frames={} window_bytes={} rtt_ms={} delay_ms={} ack_queue_ms={} forward_queue_ms={} reverse_queue_ms={}",
+            self.at.saturating_duration_since(from).as_millis(),
+            self.pace_fps,
+            self.fps,
+            self.bpf,
+            self.encoder_bitrate,
+            self.sent_bitrate,
+            self.window_clamped,
+            self.adaptation,
+            self.window_frames,
+            self.window_bytes,
+            millis(self.rtt_ms),
+            millis(self.delay_ms),
+            self.ack_queue_ms,
+            millis(self.forward_queue_ms),
+            millis(self.reverse_queue_ms),
+        );
+    }
 }
 impl tracing::field::Visit for Interval {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
@@ -1190,6 +1213,10 @@ async fn bandwidth_limit(trace: &Trace, case: &str, sizes: Sizes) -> BandwidthRu
     };
     let status = rig.viewer.status();
     rig.stop().await;
+    let phase = |at: Instant| if at < lifted { "limited" } else { "lifted" };
+    for interval in trace.between(limited, Instant::now()) {
+        interval.print(case, limited, phase(interval.at));
+    }
     let rate_model = RateModelRun::read(trace, &rig.probe, limited, Instant::now());
     let limit = trace.between(limited, lifted);
     let clamped = limit
@@ -1356,27 +1383,8 @@ async fn reverse_queue(trace: &Trace, case: &str, down_rate: u64) -> ReverseRun 
         at if at < lifted => "queued",
         _ => "lifted",
     };
-    let millis = |value: Option<u64>| value.map_or_else(|| "-".to_owned(), |ms| ms.to_string());
     for interval in trace.between(started, Instant::now()) {
-        println!(
-            "{case} t_ms={} phase={} pace_fps={} fps={} bpf={} encoder_bitrate={} sent_bitrate={} clamped={} adaptation={} window_frames={} window_bytes={} rtt_ms={} delay_ms={} ack_queue_ms={} forward_queue_ms={} reverse_queue_ms={}",
-            interval.at.saturating_duration_since(started).as_millis(),
-            phase(interval.at),
-            interval.pace_fps,
-            interval.fps,
-            interval.bpf,
-            interval.encoder_bitrate,
-            interval.sent_bitrate,
-            interval.window_clamped,
-            interval.adaptation,
-            interval.window_frames,
-            interval.window_bytes,
-            millis(interval.rtt_ms),
-            millis(interval.delay_ms),
-            interval.ack_queue_ms,
-            millis(interval.forward_queue_ms),
-            millis(interval.reverse_queue_ms),
-        );
+        interval.print(case, started, phase(interval.at));
     }
     let received: Vec<(&str, f32)> = samples
         .iter()

@@ -85,21 +85,6 @@ pub(crate) async fn write_message_with<W: AsyncWrite + Unpin, T: Serialize>(
     header: &T,
     payload: Option<&[u8]>,
 ) -> Result<(), WireError> {
-    write_message_split_with(w, records, header, payload, false).await
-}
-
-/// `write_message_with`, or with `split` and a payload, the records but the
-/// payload in one write and the payload in the next, flushed once: over TLS
-/// the header then makes up its own small record, which the reader can open
-/// as soon as it lands, rather than the first of the payload's records, up
-/// to 16 KiB later. Nothing is copied either way.
-pub(crate) async fn write_message_split_with<W: AsyncWrite + Unpin, T: Serialize>(
-    w: &mut W,
-    records: &mut Vec<u8>,
-    header: &T,
-    payload: Option<&[u8]>,
-    split: bool,
-) -> Result<(), WireError> {
     records.clear();
     records.extend_from_slice(&[0; 4]);
     serde_json::to_writer(&mut *records, header).map_err(io::Error::other)?;
@@ -116,18 +101,10 @@ pub(crate) async fn write_message_split_with<W: AsyncWrite + Unpin, T: Serialize
         records.extend_from_slice(&(payload_len as u32).to_be_bytes());
     }
     tokio::time::timeout(write_timeout(header_len + payload_len), async {
-        match payload {
-            Some(payload) if split => {
-                w.write_all(records).await?;
-                w.write_all(payload).await?;
-            }
-            _ => {
-                // A vectored TLS write cuts the records of both slices as it
-                // would cut one slice of their bytes.
-                let mut bytes = Buf::chain(records.as_slice(), payload.unwrap_or_default());
-                w.write_all_buf(&mut bytes).await?;
-            }
-        }
+        // A vectored TLS write cuts the records of both slices as it would
+        // cut one slice of their bytes.
+        let mut bytes = Buf::chain(records.as_slice(), payload.unwrap_or_default());
+        w.write_all_buf(&mut bytes).await?;
         w.flush().await
     })
     .await

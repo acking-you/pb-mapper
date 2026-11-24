@@ -31,10 +31,9 @@ const CONTROL_DENIED: &str = "Control is not allowed on this computer";
 /// A write could not finish: the transport failed, or the stop budget ran out.
 struct Abandoned;
 
-/// Write one message, its header as its own TLS record when `split`. Once
-/// the session is cancelled, the message in flight and the final `Stopped`
-/// share `STOP_WRITE_TIMEOUT`, so a local stop never waits for a slow viewer
-/// to drain video.
+/// Write one message. Once the session is cancelled, the message in flight and
+/// the final `Stopped` share `STOP_WRITE_TIMEOUT`, so a local stop never waits
+/// for a slow viewer to drain video.
 async fn write<W: AsyncWrite + Unpin>(
     writer: &mut W,
     records: &mut Vec<u8>,
@@ -42,9 +41,8 @@ async fn write<W: AsyncWrite + Unpin>(
     stop_at: &mut Option<Instant>,
     header: &HostMessage,
     payload: Option<&[u8]>,
-    split: bool,
 ) -> Result<(), Abandoned> {
-    let write = wire::write_message_split_with(writer, records, header, payload, split);
+    let write = wire::write_message_with(writer, records, header, payload);
     tokio::pin!(write);
     loop {
         if let Some(deadline) = *stop_at {
@@ -147,16 +145,6 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         header: &HostMessage,
         payload: Option<&[u8]>,
     ) -> Result<(), Abandoned> {
-        self.send_split(header, payload, false).await
-    }
-
-    /// `send`, the header as its own TLS record when `split`.
-    async fn send_split(
-        &mut self,
-        header: &HostMessage,
-        payload: Option<&[u8]>,
-        split: bool,
-    ) -> Result<(), Abandoned> {
         write(
             &mut self.writer,
             &mut self.records,
@@ -164,7 +152,6 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             &mut self.stop_at,
             header,
             payload,
-            split,
         )
         .await
     }
@@ -504,10 +491,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
                     .encode_us
                     .saturating_add(u32::try_from(waited).unwrap_or(u32::MAX)),
             };
-            // A viewer that stamps arrival times reads the header as soon as
-            // it lands, not with the payload's first record.
-            self.send_split(&video, Some(&unit.bytes), self.session.arrival_time)
-                .await?;
+            self.send(&video, Some(&unit.bytes)).await?;
             let len = unit.bytes.len() as u64;
             self.counters.frames += 1;
             self.counters.bytes += len;

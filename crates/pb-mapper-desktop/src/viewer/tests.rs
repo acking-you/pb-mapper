@@ -752,7 +752,8 @@ async fn host_stats_reach_the_viewer_status() {
 }
 
 /// To a host that listed `arrival_time` and `keyframe_seq`, a probe echo
-/// and a receipt carry when their header was read, on the session's clock,
+/// and a receipt carry when the probe, or the unit, was read, on the
+/// session's clock,
 /// and a decoder's request for an IDR, which drops predicted frames until
 /// then, the last seq read; to one that did not, neither.
 #[tokio::test]
@@ -777,10 +778,15 @@ async fn arrival_times_and_keyframe_seqs_go_to_a_host_that_listed_them() {
         let viewer = viewer.unwrap();
         send(&mut host, state(1, false), None).await;
         send(&mut host, HostMessage::Probe { nonce: 3 }, None).await;
-        send(&mut host, video(1, 1, 1, true), Some(&[1; 64])).await;
+        // The unit's header with the probe, its payload 30 ms later: the
+        // receipt's time is the unit's, read whole.
+        send(&mut host, video(1, 1, 1, true), None).await;
         let ViewerMessage::ProbeEcho { nonce: 3, at_us } = receive(&mut host).await else {
             panic!("expected the probe's echo");
         };
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        host.write_u32(64).await.unwrap();
+        host.write_all(&[1; 64]).await.unwrap();
         let ViewerMessage::Received {
             seq: 1,
             at_us: first,
@@ -790,7 +796,9 @@ async fn arrival_times_and_keyframe_seqs_go_to_a_host_that_listed_them() {
         };
         assert_eq!(at_us.is_some(), listed);
         assert_eq!(first.is_some(), listed);
-        assert!(at_us <= first, "{at_us:?} {first:?}");
+        if let Some((probe, unit)) = at_us.zip(first) {
+            assert!(unit >= probe + 30_000, "{probe} {unit}");
+        }
         // Shown: live, so a decoder's request goes at once.
         let consumer = viewer.video_sink().attach().unwrap();
         pull(&consumer).await;
