@@ -265,6 +265,20 @@ async fn scripted_host_session_acknowledges_first_and_authorises_input_by_presen
         viewer.input(1, &physical),
         Err(InputError::NotOffered)
     ));
+    // So does a scroll in 1/120 of a notch, to a host that listed
+    // `wheel_hires`, as a 0.12 host did not.
+    let scroll = [
+        shift[0].clone(),
+        Input::Scroll {
+            horizontal: 0,
+            vertical: 120,
+            continuous: false,
+        },
+    ];
+    assert!(matches!(
+        viewer.input(1, &scroll),
+        Err(InputError::NotOffered)
+    ));
     viewer.input(1, &shift).unwrap();
     let ViewerMessage::Input { event } = receive(&mut host).await else {
         panic!("expected the input");
@@ -507,6 +521,50 @@ async fn a_cursor_report_older_than_the_last_move_is_set_aside_while_controlling
     send(&mut host, cursor(50, 0), None).await;
     eventually(|| seen().1 == 50).await;
     drop(host);
+    viewer.stop().await.unwrap();
+}
+
+/// To a host that listed `wheel_hires`, a scroll goes as it was given, in
+/// 1/120 of a notch, its continuity named only when set.
+#[tokio::test]
+async fn a_host_that_lists_wheel_hires_is_sent_scrolls() {
+    let (viewer, mut host, _) = connect(HostMessage::Accepted {
+        codec: VideoCodec::H264,
+        limits: VideoLimits::for_viewer(60.0),
+        nominal_fps: 60,
+        quality: QualityPreset::Balanced,
+        capabilities: vec![crate::protocol::CAPABILITY_WHEEL_HIRES.into()],
+    })
+    .await;
+    let viewer = viewer.unwrap();
+    send(&mut host, state(1, false), None).await;
+    send(&mut host, video(1, 1, 1, true), Some(&[1; 64])).await;
+    let consumer = viewer.video_sink().attach().unwrap();
+    pull(&consumer).await;
+    assert!(consumer.presented(1, 1));
+    viewer.request_control(true).unwrap();
+    send(&mut host, state(1, true), None).await;
+    eventually(|| viewer.status().controlling).await;
+    let scroll = |vertical, continuous| Input::Scroll {
+        horizontal: 2,
+        vertical,
+        continuous,
+    };
+    viewer
+        .input(1, &[scroll(-9, true), scroll(240, false)])
+        .unwrap();
+    for (vertical, continuous) in [(-9, true), (240, false)] {
+        let ViewerMessage::Input { event } =
+            until(&mut host, |m| matches!(m, ViewerMessage::Input { .. })).await
+        else {
+            unreachable!()
+        };
+        assert!(matches!(
+            event.input,
+            Input::Scroll { horizontal: 2, vertical: v, continuous: c }
+                if v == vertical && c == continuous
+        ));
+    }
     viewer.stop().await.unwrap();
 }
 

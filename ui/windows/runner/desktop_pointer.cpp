@@ -90,10 +90,18 @@ HCURSOR MakeCursor(const std::vector<uint8_t>& rgba, int width, int height, int 
 }  // namespace
 
 DesktopPointer::DesktopPointer(flutter::FlutterEngine* engine) {
+  // As Flutter's embedder reads it when its window is made, just before:
+  // its default stands when the read fails.
+  UINT lines = 3;
+  if (::SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0)) wheel_lines_ = lines;
   channel_ = std::make_unique<flutter::MethodChannel<Value>>(
       engine->messenger(), "pb_mapper/desktop_pointer", &flutter::StandardMethodCodec::GetInstance());
   channel_->SetMethodCallHandler([this](const auto& call, auto result) {
     const std::string& method = call.method_name();
+    if (method == "wheel_lines") {
+      result->Success(Value(static_cast<int64_t>(wheel_lines_)));
+      return;
+    }
     if (method != "cursor_create" && method != "cursor_set" && method != "cursor_delete") {
       result->NotImplemented();
       return;

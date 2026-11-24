@@ -490,6 +490,8 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     last_left_press: Option<LeftPress>,
     /// Which viewer's move last positioned the OS cursor, and where.
     last_pointer_owner: Option<(PeerSlot, u32, u32)>,
+    /// Which viewer last sent a fine scroll, so another does not inherit its carry.
+    last_scroll_slot: Option<PeerSlot>,
     mover_moved_since_sample: bool,
     peer_cursors_local: PeerCursorSnapshot,
     peer_cursor_seq: u64,
@@ -575,6 +577,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             stats: WindowStats::default(),
             settle_until: None,
             last_pointer_owner: None,
+            last_scroll_slot: None,
             last_left_press: None,
             mover_moved_since_sample: false,
             peer_cursors_local: PeerCursorSnapshot::default(),

@@ -8,6 +8,16 @@ use serde::{Deserialize, Serialize};
 
 /// The most UTF-8 bytes one `Input::Text` carries.
 pub(crate) const TEXT_INPUT_MAX: usize = 1024;
+/// The most notches one `Input::Wheel` turns each way.
+pub(crate) const WHEEL_NOTCHES_MAX: u32 = 100;
+/// One notch in `Input::Scroll`'s units, as Windows' `WHEEL_DELTA`.
+pub(crate) const SCROLL_UNITS_PER_NOTCH: i32 = 120;
+/// The most `Input::Scroll` units each way: as far as the most notches.
+pub(crate) const SCROLL_UNITS_MAX: u32 = 12_000;
+const _: () = assert!(
+    SCROLL_UNITS_MAX == WHEEL_NOTCHES_MAX * SCROLL_UNITS_PER_NOTCH as u32,
+    "a scroll goes as far as a wheel at most"
+);
 
 /// The OS double-click time and half the double-click box, read in the
 /// interactive session. A press that starts a drag waits this long after a
@@ -63,6 +73,17 @@ pub enum Input {
     PhysicalKey {
         usage: u16,
         down: bool,
+    },
+    /// High-resolution scrolling, in 1/120 of a notch (120 units a notch,
+    /// as Windows' `WHEEL_DELTA`), at most 12 000 each way, positive down
+    /// and right as `Wheel`. `continuous`: a trackpad's travel or a fling,
+    /// of which a notch is 100 logical pixels; otherwise a wheel's notches
+    /// and parts of one. Only to a host that listed `wheel_hires`.
+    Scroll {
+        horizontal: i32,
+        vertical: i32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        continuous: bool,
     },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -181,7 +202,15 @@ impl Input {
             Self::Wheel {
                 horizontal,
                 vertical,
-            } => (horizontal.unsigned_abs() > 100 || vertical.unsigned_abs() > 100)
+            } => (horizontal.unsigned_abs() > WHEEL_NOTCHES_MAX
+                || vertical.unsigned_abs() > WHEEL_NOTCHES_MAX)
+                .then_some("scroll input too large"),
+            Self::Scroll {
+                horizontal,
+                vertical,
+                ..
+            } => (horizontal.unsigned_abs() > SCROLL_UNITS_MAX
+                || vertical.unsigned_abs() > SCROLL_UNITS_MAX)
                 .then_some("scroll input too large"),
             Self::PhysicalKey { usage, .. } => (!PHYSICAL_KEY_USAGES.contains(usage))
                 .then_some("physical key outside the keyboard page"),
@@ -222,9 +251,49 @@ impl Input {
     }
 }
 
+/// Whole steps out of a stream of `Input::Scroll` units, per axis, what
+/// falls short of one kept for the next: a host that injects in steps of
+/// its own (lines, points, a wheel's notches) loses nothing to rounding.
+/// Units against the direction of what is kept drop it first, so a turn
+/// never takes a step back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScrollCarry {
+    kept: [i64; 2],
+}
+impl ScrollCarry {
+    /// The whole steps `(horizontal, vertical)` units complete with what
+    /// was kept, each unit worth `worth` and a step `step` of those (1 and
+    /// [`SCROLL_UNITS_PER_NOTCH`] for notches); the rest is kept.
+    pub(crate) fn take(
+        &mut self,
+        (horizontal, vertical): (i32, i32),
+        worth: i64,
+        step: i64,
+    ) -> (i32, i32) {
+        let [kept_h, kept_v] = &mut self.kept;
+        let step = step.max(1);
+        (
+            Self::axis(kept_h, horizontal, worth, step),
+            Self::axis(kept_v, vertical, worth, step),
+        )
+    }
+
+    fn axis(kept: &mut i64, units: i32, worth: i64, step: i64) -> i32 {
+        let added = i64::from(units) * worth;
+        if added.signum() * kept.signum() < 0 {
+            *kept = 0;
+        }
+        *kept += added;
+        let whole = *kept / step;
+        *kept -= whole * step;
+        // Validated units keep a step well within an `i32`.
+        whole.clamp(i32::MIN.into(), i32::MAX.into()) as i32
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Typed;
+    use super::{ScrollCarry, Typed};
     use crate::{Button, Display, Input, Key};
 
     /// The injection boundary refuses a pointer off the display, text too
@@ -276,6 +345,79 @@ mod tests {
         let physical = |usage| Input::PhysicalKey { usage, down: true };
         assert!(valid(physical(0x04)) && valid(physical(0xE7)));
         assert!(!valid(physical(0x03)) && !valid(physical(0xE8)));
+        let scroll = |horizontal, vertical| Input::Scroll {
+            horizontal,
+            vertical,
+            continuous: true,
+        };
+        assert!(valid(scroll(-12_000, 12_000)) && valid(scroll(1, -1)));
+        assert!(!valid(scroll(12_001, 0)) && !valid(scroll(0, i32::MIN)));
+    }
+
+    /// A scroll is `{"kind":"scroll",...}`; `continuous` goes only when set,
+    /// reads back false when absent, and nothing else is taken.
+    #[test]
+    fn a_scroll_names_its_continuity_only_when_it_is_continuous() {
+        let notch = Input::Scroll {
+            horizontal: 0,
+            vertical: 120,
+            continuous: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&notch).unwrap(),
+            r#"{"kind":"scroll","horizontal":0,"vertical":120}"#
+        );
+        let travel = Input::Scroll {
+            horizontal: -3,
+            vertical: 7,
+            continuous: true,
+        };
+        let json = serde_json::to_string(&travel).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"scroll","horizontal":-3,"vertical":7,"continuous":true}"#
+        );
+        let read = |json: &str| serde_json::from_str::<Input>(json);
+        assert!(matches!(
+            read(r#"{"kind":"scroll","horizontal":0,"vertical":120}"#).unwrap(),
+            Input::Scroll {
+                horizontal: 0,
+                vertical: 120,
+                continuous: false
+            }
+        ));
+        assert!(matches!(
+            read(&json).unwrap(),
+            Input::Scroll {
+                horizontal: -3,
+                vertical: 7,
+                continuous: true
+            }
+        ));
+        assert!(read(r#"{"kind":"scroll","horizontal":0,"vertical":1,"phase":1}"#).is_err());
+        assert!(read(r#"{"kind":"scroll","vertical":1}"#).is_err());
+    }
+
+    /// Steps come whole, what falls short waits for the next units, and a
+    /// turn drops it: 1.2 units a point, 120 a notch.
+    #[test]
+    fn a_scroll_carry_keeps_parts_of_a_step_until_a_turn() {
+        let mut points = ScrollCarry::default();
+        // A 300-point swipe in events of 1, 2 and 3 units: 360 units.
+        let mut moved = (0, 0);
+        for units in [1, 2, 3].repeat(60) {
+            let (h, v) = points.take((-units, units), 5, 6);
+            moved = (moved.0 + h, moved.1 + v);
+        }
+        assert_eq!(moved, (-300, 300));
+        // A turn starts from nothing: no step back, nothing owed.
+        let mut lines = ScrollCarry::default();
+        assert_eq!(lines.take((0, 100), 1, 120), (0, 0));
+        assert_eq!(lines.take((0, -100), 1, 120), (0, 0));
+        assert_eq!(lines.take((0, -20), 1, 120), (0, -1));
+        assert_eq!(lines.take((0, 60), 1, 120), (0, 0));
+        assert_eq!(lines.take((0, 60), 1, 120), (0, 1));
+        assert_eq!(lines.take((240, 0), 1, 120), (2, 0));
     }
 
     /// A line break or tab is one key and never also a character; the `\r`

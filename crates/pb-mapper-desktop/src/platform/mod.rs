@@ -263,6 +263,10 @@ pub(crate) trait Injector: Sized {
     /// Whether [`Injector::physical_key`] presses keys: a host lists
     /// `physical_keys` only then.
     const PHYSICAL_KEYS: bool = false;
+    /// Whether [`Injector::scroll`] scrolls in 1/120 of a notch: a host
+    /// lists `wheel_hires` only then. Without it `PlatformBackend` turns an
+    /// `Input::Scroll` into whole notches of [`Injector::wheel`].
+    const HIRES_WHEEL: bool = false;
     fn can_lock(&self) -> bool {
         Self::LOCK
     }
@@ -288,6 +292,21 @@ pub(crate) trait Injector: Sized {
         let _ = (usage, down);
         Err(BackendError::new(FailureKind::Unsupported, "physical keys").into())
     }
+    /// Scroll by `(horizontal, vertical)` units of 1/120 of a notch
+    /// ([`SCROLL_UNITS_PER_NOTCH`](crate::input::SCROLL_UNITS_PER_NOTCH)),
+    /// already validated, positive down and right. `continuous` is a
+    /// trackpad's travel or a fling, which a platform may scroll smoothly;
+    /// otherwise a wheel's notches and parts of one. Called only when
+    /// [`Injector::HIRES_WHEEL`]; the default refuses.
+    fn scroll(&mut self, horizontal: i32, vertical: i32, continuous: bool) -> Result<()> {
+        let _ = (horizontal, vertical, continuous);
+        Err(BackendError::new(FailureKind::Unsupported, "high-resolution scrolling").into())
+    }
+    /// Drop what [`Injector::scroll`] kept short of a step of its own (a
+    /// line, a point): `PlatformBackend` calls it as it releases held input,
+    /// so what one controller scrolled never completes the next one's step.
+    /// The default keeps nothing.
+    fn forget_scroll(&mut self) {}
     /// Called only when `can_lock`.
     fn lock(&mut self) -> Result<()>;
     fn double_click(&mut self) -> Option<DoubleClickGuard> {
@@ -544,6 +563,7 @@ pub(crate) fn fallback_caps<P: Platform>() -> BackendCaps {
     BackendCaps {
         lock: <P::Input as Injector>::LOCK,
         physical_keys: <P::Input as Injector>::PHYSICAL_KEYS,
+        hires_wheel: <P::Input as Injector>::HIRES_WHEEL,
         os: Some(P::OS),
         cursor: <P::Cursor as CursorSource>::MODE,
         cursor_shapes: <P::Cursor as CursorSource>::SHAPES,

@@ -13,11 +13,9 @@ import '../../../state/viewer_prefs.dart';
 import '../../../theme/motion.dart';
 import '../../../theme/viewer_palette.dart';
 import 'remote_input.dart';
+import 'remote_scroll.dart';
 import 'remote_viewport.dart';
 import 'touch_gestures.dart';
-
-/// Scroll distance per wheel notch; fractions accumulate.
-const kWheelPxPerNotch = 30.0;
 
 /// How long the touch indicator takes to fade after the last finger.
 const kTouchIndicatorFade = Duration(milliseconds: 150);
@@ -26,12 +24,15 @@ const kTouchIndicatorFade = Duration(milliseconds: 150);
 ///
 /// One [Listener] takes all pointers: touch and stylus go to the
 /// [TouchGestureMachine], the sole owner of touch; a mouse and a touchpad
-/// are handled here. The picture is [child], laid out at the viewport's
-/// scene and moved by one [Transform]: zoom, pan, the soft keyboard and
-/// reconnects change the transform only, never the child's element, so a
-/// native texture is never re-created (P1-4). The surface tells the
-/// viewport where it is in the view, so a pixel-exact picture lands on
-/// whole device pixels.
+/// are handled here. A wheel's notch is one notch on the host, whatever
+/// distance this computer's embedder reports for it ([wheelPxPerNotch]); a
+/// touchpad's travel goes in 1/120 of a notch to a host that takes it, and
+/// its fling is carried on ([ScrollFling]). The picture is [child], laid
+/// out at the viewport's scene and moved by one [Transform]: zoom, pan, the
+/// soft keyboard and reconnects change the transform only, never the
+/// child's element, so a native texture is never re-created (P1-4). The
+/// surface tells the viewport where it is in the view, so a pixel-exact
+/// picture lands on whole device pixels.
 class RemoteSurface extends StatefulWidget {
   const RemoteSurface({
     super.key,
@@ -52,15 +53,30 @@ class RemoteSurface extends StatefulWidget {
   State<RemoteSurface> createState() => _RemoteSurfaceState();
 }
 
-class _RemoteSurfaceState extends State<RemoteSurface> {
+class _RemoteSurfaceState extends State<RemoteSurface>
+    with SingleTickerProviderStateMixin {
   /// Fires the machine's next deadline.
   Timer? _timer;
 
   /// The mouse buttons this surface pressed on the host, per pointer.
   final _buttons = <int, Set<RemoteButton>>{};
 
-  double _wheelX = 0, _wheelY = 0;
+  /// Scrolling not yet a whole step (a notch, or 1/120 of one toward a host
+  /// that takes that): a wheel's apart from a touchpad's travel and its
+  /// fling, so what one left never shortens the other's next step.
+  final _wheel = ScrollCarry(), _travel = ScrollCarry();
   double _panZoomScale = 1;
+
+  /// A touchpad's pan so far, whose velocity starts a fling as it ends:
+  /// from its first move that scrolls the host, unless [_panFlings] went
+  /// false, as a pinch or a pan of the picture here makes it.
+  VelocityTracker? _pan;
+  bool _panFlings = false;
+
+  /// The fling carrying a touchpad's pan on, and how far it has gone.
+  ScrollFling? _fling;
+  Offset _flung = Offset.zero;
+  late final Ticker _flingTicker;
 
   /// A read of the surface's place in the view waits for the frame's end.
   bool _originDue = false;
@@ -72,7 +88,10 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
   @override
   void initState() {
     super.initState();
+    _flingTicker = createTicker(_flingTick);
     widget.touchMode.addListener(_modeChanged);
+    widget.input.localCancels.addListener(_scrollCancelled);
+    WheelLines.load();
   }
 
   @override
@@ -82,12 +101,19 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
       oldWidget.touchMode.removeListener(_modeChanged);
       widget.touchMode.addListener(_modeChanged);
     }
+    if (oldWidget.input != widget.input) {
+      oldWidget.input.localCancels.removeListener(_scrollCancelled);
+      widget.input.localCancels.addListener(_scrollCancelled);
+      _scrollCancelled();
+    }
     if (oldWidget.machine != widget.machine) _timer?.cancel();
   }
 
   @override
   void dispose() {
     widget.touchMode.removeListener(_modeChanged);
+    widget.input.localCancels.removeListener(_scrollCancelled);
+    _flingTicker.dispose();
     _timer?.cancel();
     super.dispose();
   }
@@ -126,6 +152,7 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
 
   void _down(PointerDownEvent e) {
     _focus();
+    _stopFling();
     if (_isTouch(e)) {
       _machine.down(e.pointer, e.localPosition, _input.clock());
       _arm();
@@ -208,7 +235,16 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
   }
 
   void _signal(PointerSignalEvent e) {
+    if (e is PointerScrollInertiaCancelEvent) {
+      // Fingers back on the touchpad stop a fling, as they stop the
+      // system's.
+      _stopFling();
+      return;
+    }
     if (e is! PointerScrollEvent) return;
+    final trackpad = e.kind == ui.PointerDeviceKind.trackpad;
+    // A wheel turned stops a fling, as it stops a scroll view's.
+    if (!trackpad) _stopFling();
     final dy = e.scrollDelta.dy, dx = e.scrollDelta.dx;
     if (HardwareKeyboard.instance.isControlPressed) {
       // Zoom stays local (U20).
@@ -218,34 +254,120 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
     final n = _viewport.toNormalized(e.localPosition);
     if (n == null || !_input.ready.value) return;
     _input.hover(n);
-    _wheelBy(dx, dy);
+    _scrollBy(dx, dy, trackpad: trackpad);
   }
 
-  void _panZoomStart(PointerPanZoomStartEvent e) => _panZoomScale = 1;
+  void _panZoomStart(PointerPanZoomStartEvent e) {
+    _stopFling();
+    _panZoomScale = 1;
+    _pan = null;
+    _panFlings = true;
+  }
 
   void _panZoomUpdate(PointerPanZoomUpdateEvent e) {
     if (e.scale != 1) {
+      // A pinch flings nothing.
+      _pan = null;
+      _panFlings = false;
       _viewport.zoomAt(e.localPosition, e.scale / _panZoomScale);
       _panZoomScale = e.scale;
       return;
     }
     if (_input.ready.value) {
+      if (_panFlings) {
+        (_pan ??= ScrollFling.tracker(
+          defaultTargetPlatform,
+        )).addPosition(e.timeStamp, e.pan);
+      }
       // Natural scrolling: the content follows the fingers (U10).
-      _wheelBy(-e.panDelta.dx, -e.panDelta.dy);
+      _scrollBy(-e.panDelta.dx, -e.panDelta.dy, trackpad: true);
     } else {
+      _pan = null;
+      _panFlings = false;
       _viewport.panBy(e.panDelta);
     }
   }
 
-  /// Whole notches go to the host; fractions wait for the next event.
-  void _wheelBy(double dx, double dy) {
-    _wheelX += dx / kWheelPxPerNotch;
-    _wheelY += dy / kWheelPxPerNotch;
-    final nx = _wheelX.truncate(), ny = _wheelY.truncate();
-    if (nx == 0 && ny == 0) return;
-    _wheelX -= nx;
-    _wheelY -= ny;
-    _input.wheel(nx, ny);
+  /// Fingers that lift while the pan still moves fling it on.
+  void _panZoomEnd(PointerPanZoomEndEvent e) {
+    final pan = _pan;
+    _pan = null;
+    _panFlings = false;
+    if (pan == null || !_input.ready.value) return;
+    final fling = ScrollFling.start(
+      pan.getVelocity(),
+      platform: defaultTargetPlatform,
+      devicePixelRatio: _devicePixelRatio,
+    );
+    if (fling == null) return;
+    _stopFling();
+    _fling = fling;
+    _flung = Offset.zero;
+    _flingTicker.start();
+  }
+
+  /// Each frame of a fling scrolls the host by what it travelled since the
+  /// last, as the pan it carries on did.
+  void _flingTick(Duration elapsed) {
+    final fling = _fling;
+    if (fling == null || !_input.ready.value) {
+      _stopFling();
+      return;
+    }
+    final at = fling.offsetAt(elapsed);
+    final step = at - _flung;
+    _flung = at;
+    _scrollBy(-step.dx, -step.dy, trackpad: true);
+    if (fling.isDoneAt(elapsed)) _stopFling();
+  }
+
+  void _stopFling() {
+    _fling = null;
+    if (_flingTicker.isActive) _flingTicker.stop();
+  }
+
+  /// Focus or control lost, or a new picture generation, perhaps of a host
+  /// that scrolls in other steps: the fling and any pan under way stop, and
+  /// what fell short of a step is dropped with them.
+  void _scrollCancelled() {
+    _stopFling();
+    _pan = null;
+    _panFlings = false;
+    _wheel.clear();
+    _travel.clear();
+  }
+
+  double get _devicePixelRatio =>
+      View.maybeOf(context)?.devicePixelRatio ?? 1.0;
+
+  /// A touchpad's travel ([trackpad]) or a wheel's distance, in logical
+  /// pixels as Flutter reports them, to the host: to one that takes it, in
+  /// 1/120 of a notch, 100 px a notch of travel and a wheel's notch as
+  /// this computer's embedder reports one; to any other, in whole notches,
+  /// 30 px of travel each. What falls short of a step waits for the next
+  /// of its kind.
+  void _scrollBy(double dx, double dy, {required bool trackpad}) {
+    final notch = trackpad
+        ? null
+        : wheelPxPerNotch(
+            defaultTargetPlatform,
+            devicePixelRatio: _devicePixelRatio,
+            windowsLines: WheelLines.value,
+          );
+    final carry = trackpad ? _travel : _wheel;
+    if (_input.hiresWheel) {
+      final (h, v) = notch == null
+          ? carry.take(dx * kScrollUnitsPerPixel, dy * kScrollUnitsPerPixel)
+          : carry.take(
+              dx / notch * DesktopScroll.unitsPerNotch,
+              dy / notch * DesktopScroll.unitsPerNotch,
+            );
+      if (h != 0 || v != 0) _input.scroll(h, v, continuous: trackpad);
+    } else {
+      final per = notch ?? kTrackpadPxPerNotch;
+      final (h, v) = carry.take(dx / per, dy / per);
+      if (h != 0 || v != 0) _input.wheel(h, v);
+    }
   }
 
   // ---------------------------------------------------------------- origin
@@ -290,6 +412,7 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
         onPointerSignal: _signal,
         onPointerPanZoomStart: _panZoomStart,
         onPointerPanZoomUpdate: _panZoomUpdate,
+        onPointerPanZoomEnd: _panZoomEnd,
         child: ClipRect(
           child: ListenableBuilder(
             listenable: _viewport,
