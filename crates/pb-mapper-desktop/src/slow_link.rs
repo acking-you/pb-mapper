@@ -30,6 +30,11 @@ const ENCODER_EXPIRY: Duration = Duration::from_millis(250);
 /// A LAN or nearby direct path, one way.
 const SHORT_PATH_MS: u64 = 18;
 const FEEDBACK: &str = "pb_mapper_desktop::feedback";
+/// The highest pace the rate-model latch looks at: 0.75 × the nominal 60.
+const LATCH_PACE: u64 = (qos::LATCH_PACE_RATIO * CEILING_FPS as f64) as u64;
+/// How soon after the pace falls to `LATCH_PACE` an encoder that budgets per
+/// second must be latched to the timestamp model.
+const LATCH_WITHIN: Duration = Duration::from_millis(2500);
 
 /// One host stats interval, as `desktop_feedback_interval` traced it.
 #[derive(Clone, Copy, Debug)]
@@ -43,12 +48,16 @@ struct Interval {
     bitrate: u64,
     encoder_bitrate: u64,
     viewer_cap: Option<u64>,
+    /// What the host wrote in the interval, in bit/s.
+    sent_bitrate: u64,
     window_clamped: bool,
     unresponsive: bool,
     timestamp_model: bool,
     skipped_ticks: u64,
     /// IDRs the host produced since the session began.
     keyframes: u64,
+    /// Not an interval: the host's `desktop_rate_model_latched`.
+    latched: bool,
 }
 impl Interval {
     fn new(at: Instant) -> Self {
@@ -60,11 +69,13 @@ impl Interval {
             bitrate: 0,
             encoder_bitrate: 0,
             viewer_cap: None,
+            sent_bitrate: 0,
             window_clamped: false,
             unresponsive: false,
             timestamp_model: false,
             skipped_ticks: 0,
             keyframes: 0,
+            latched: false,
         }
     }
 }
@@ -72,6 +83,7 @@ impl tracing::field::Visit for Interval {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if field.name() == "event" {
             self.feedback = value == "desktop_feedback_interval";
+            self.latched = value == "desktop_rate_model_latched";
         }
     }
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
@@ -80,6 +92,7 @@ impl tracing::field::Visit for Interval {
             "pace_fps" => self.pace_fps = value,
             "bitrate" => self.bitrate = value,
             "encoder_bitrate" => self.encoder_bitrate = value,
+            "sent_bitrate" => self.sent_bitrate = value,
             "viewer_cap" => self.viewer_cap = Some(value),
             "skipped_ticks" => self.skipped_ticks = value,
             "keyframes" => self.keyframes = value,
@@ -102,19 +115,35 @@ impl tracing::field::Visit for Interval {
 
 /// The host's feedback trace of one case.
 #[derive(Clone, Default)]
-struct Trace(Arc<Mutex<Vec<Interval>>>);
+struct Trace {
+    intervals: Arc<Mutex<Vec<Interval>>>,
+    /// When the host latched the timestamp rate model.
+    latched: Arc<Mutex<Option<Instant>>>,
+}
 impl Trace {
     fn last(&self) -> Interval {
-        *self.0.lock().unwrap().last().unwrap()
+        *self.intervals.lock().unwrap().last().unwrap()
     }
     /// The intervals traced in `from..to`.
     fn between(&self, from: Instant, to: Instant) -> Vec<Interval> {
-        let intervals = self.0.lock().unwrap();
+        let intervals = self.intervals.lock().unwrap();
         intervals
             .iter()
             .filter(|interval| (from..to).contains(&interval.at))
             .copied()
             .collect()
+    }
+    fn latched(&self) -> Option<Instant> {
+        *self.latched.lock().unwrap()
+    }
+    /// A per-frame budget is what the session starts from: nothing in its
+    /// trace may latch the timestamp model.
+    fn assert_never_latched(&self) {
+        assert_eq!(
+            self.latched(),
+            None,
+            "a per-frame budget must never latch the timestamp model"
+        );
     }
 }
 impl<S: tracing::Subscriber> Layer<S> for Trace {
@@ -122,8 +151,87 @@ impl<S: tracing::Subscriber> Layer<S> for Trace {
         let mut interval = Interval::new(Instant::now());
         event.record(&mut interval);
         if interval.feedback {
-            self.0.lock().unwrap().push(interval);
+            self.intervals.lock().unwrap().push(interval);
+        } else if interval.latched {
+            self.latched.lock().unwrap().get_or_insert(interval.at);
         }
+    }
+}
+
+/// How a case's rate model went from the instant that lowers its pace: its
+/// first capture, or a link's limit.
+struct RateModelRun {
+    /// From that instant until the host latched the timestamp model.
+    latched_after: Option<Duration>,
+    /// From the start of the stretch at a pace of `LATCH_PACE` or below the
+    /// latch came in: the pace the encoder was asked for, each change timed at
+    /// the capture that first asked for it. A capture that waits for credit
+    /// can keep the encoder from seeing a pace at all.
+    latched_in_stretch: Option<Duration>,
+    /// The mean sent bitrate over the expected one in the trace intervals at a
+    /// pace of `LATCH_PACE` or below: from that instant until the latch, or
+    /// the end, and after the latch.
+    before: Option<f64>,
+    after: Option<f64>,
+}
+impl RateModelRun {
+    fn read(trace: &Trace, probe: &Probe, from: Instant, ended: Instant) -> Self {
+        let latched = trace.latched();
+        // Each stretch of the pace at `LATCH_PACE` or below, as `start..end`.
+        let mut low: Vec<(Instant, Instant)> = Vec::new();
+        let mut since = None;
+        for (at, pace) in probe.paces.lock().unwrap().iter() {
+            match (u64::from(*pace) <= LATCH_PACE, since) {
+                (true, None) => since = Some(*at),
+                (false, Some(start)) => {
+                    low.push((start, *at));
+                    since = None;
+                }
+                _ => {}
+            }
+        }
+        low.extend(since.map(|start| (start, ended)));
+        // The stretch the latch came in, if the encoder had been asked for
+        // such a pace by then.
+        let stretch = latched.and_then(|latched| {
+            low.iter()
+                .find(|(start, end)| (*start..=*end).contains(&latched))
+                .map(|(start, _)| *start)
+        });
+        let ratio = |intervals: Vec<Interval>| {
+            let ratios: Vec<f64> = intervals
+                .iter()
+                .filter(|interval| interval.pace_fps <= LATCH_PACE && interval.bitrate > 0)
+                .map(|interval| interval.sent_bitrate as f64 / interval.bitrate as f64)
+                .collect();
+            (!ratios.is_empty()).then(|| ratios.iter().sum::<f64>() / ratios.len() as f64)
+        };
+        // An interval's figures cover the second before it.
+        let second = session::STATS_INTERVAL;
+        let until = latched.unwrap_or(ended);
+        Self {
+            latched_after: latched.map(|latched| latched.saturating_duration_since(from)),
+            latched_in_stretch: latched
+                .zip(stretch)
+                .map(|(latched, start)| latched.saturating_duration_since(start)),
+            before: ratio(trace.between(from + second, until)),
+            after: latched.and_then(|latched| ratio(trace.between(latched + second, ended))),
+        }
+    }
+}
+impl std::fmt::Display for RateModelRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ratio =
+            |ratio: Option<f64>| ratio.map_or_else(|| "-".to_owned(), |r| format!("{r:.2}"));
+        let ms = |after: Option<Duration>| after.map(|after| after.as_millis());
+        write!(
+            f,
+            "latched_after_ms={:?} latched_in_low_stretch_ms={:?} sent_over_expected_before={} sent_over_expected_after={}",
+            ms(self.latched_after),
+            ms(self.latched_in_stretch),
+            ratio(self.before),
+            ratio(self.after)
+        )
     }
 }
 
@@ -161,6 +269,8 @@ struct Probe {
     configured: AtomicU32,
     expired: AtomicU32,
     held: AtomicBool,
+    /// Each pace the encoder was asked for, from the capture that first asked.
+    paces: Mutex<Vec<(Instant, u32)>>,
 }
 
 /// What the synthetic encoder's pictures weigh.
@@ -168,11 +278,19 @@ struct Probe {
 enum Sizes {
     /// The per-frame budget `bitrate / nominal_fps`, and an IDR `idr` times it.
     Budget { idr: usize },
+    /// A per-second budget, spent as an encoder that rates by presentation
+    /// time spends it: `bitrate` over the time since the previous capture, at
+    /// most `PER_SECOND_GAP`, so a picture after idle carries the idle's bits
+    /// too; an IDR `idr` times that.
+    PerSecond { idr: usize },
     /// Every picture, IDR or not.
     Fixed(usize),
 }
 /// A desktop's usual IDR, four times a P-frame.
 const TYPICAL: Sizes = Sizes::Budget { idr: 4 };
+/// The same desktop from an encoder that budgets per second.
+const PER_SECOND: Sizes = Sizes::PerSecond { idr: 4 };
+const PER_SECOND_GAP: Duration = Duration::from_secs(1);
 
 /// A synthetic asynchronous H.264 encoder at 1080p, run as thread C runs the
 /// Windows MFT: each capture submits one picture, whose output is ready
@@ -184,6 +302,7 @@ struct SyntheticEncoder {
     latency: Duration,
     nominal_fps: u32,
     frames: u64,
+    last_capture: Option<Instant>,
     pending: VecDeque<(Instant, EncodedFrame)>,
 }
 impl SyntheticEncoder {
@@ -207,6 +326,7 @@ impl SyntheticEncoder {
 impl Backend for SyntheticEncoder {
     fn configure_video(&mut self, limits: VideoLimits, nominal_fps: u32) -> Result<()> {
         self.pending.clear();
+        self.last_capture = None;
         limits.validate()?;
         self.nominal_fps = nominal_fps;
         self.probe.configured.fetch_add(1, Ordering::Relaxed);
@@ -233,12 +353,28 @@ impl Backend for SyntheticEncoder {
         rate: VideoRate,
     ) -> Result<Option<EncodedFrame>> {
         let ready = self.ready();
+        let now = Instant::now();
         self.frames += 1;
         self.probe.captures.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut paces = self.probe.paces.lock().unwrap();
+            if paces.last().is_none_or(|(_, pace)| *pace != rate.pace_fps) {
+                paces.push((now, rate.pace_fps));
+            }
+        }
+        let nominal_period = Duration::from_secs(1) / self.nominal_fps.max(1);
+        let gap = self
+            .last_capture
+            .replace(now)
+            .map_or(nominal_period, |last| now - last)
+            .min(PER_SECOND_GAP);
         let budget = rate.bitrate as usize / self.nominal_fps.max(1) as usize / 8;
+        let per_second = (f64::from(rate.bitrate) * gap.as_secs_f64() / 8.0) as usize;
         let bytes = match self.sizes {
             Sizes::Budget { idr } if keyframe => idr * budget,
             Sizes::Budget { .. } => budget,
+            Sizes::PerSecond { idr } if keyframe => idr * per_second,
+            Sizes::PerSecond { .. } => per_second,
             Sizes::Fixed(bytes) => bytes,
         }
         .clamp(256, wire::MAX_PAYLOAD);
@@ -471,6 +607,7 @@ impl Rig {
                     latency,
                     nominal_fps: 0,
                     frames: 0,
+                    last_capture: None,
                     pending: VecDeque::new(),
                 })
             })
@@ -580,6 +717,7 @@ fn lan_rtt_keeps_60() {
             "the pace must reach the ceiling within 8 s"
         );
         assert!(mean(&received) >= 58.0, "{received:?}");
+        trace.assert_never_latched();
     });
 }
 
@@ -641,6 +779,7 @@ fn isolated_stall_does_not_collapse_fps() {
             assert!(lowest * 2 >= before, "{lowest} is below half of {before}");
             assert!(recovered <= RECOVERY, "back at 55 only after {recovered:?}");
         }
+        trace.assert_never_latched();
     });
 }
 
@@ -671,6 +810,7 @@ fn encoder_latency_of_45ms_keeps_60() {
         assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
         assert!(mean(&received) >= 58.0, "{received:?}");
         assert_eq!(rig.expired(), 0);
+        trace.assert_never_latched();
     });
 }
 
@@ -712,63 +852,102 @@ fn fixed_wan_keeps_full_rate_at_fixed_resolution() {
         assert_eq!(sizes, [(1920, 1080)]);
         assert_eq!(configured, 1, "the encoder is never rebuilt");
         assert_eq!(rig.expired(), 0);
+        trace.assert_never_latched();
     });
+}
+
+/// What one run of the bandwidth-limit case saw.
+struct BandwidthRun {
+    status: ViewerStatus,
+    before: Interval,
+    clamped: Option<Duration>,
+    lowest_pace: u64,
+    /// The encoder bitrate in each interval of the limit.
+    encoder_trace: Vec<u64>,
+    recovered: Option<Duration>,
+    expired: u32,
+}
+
+/// A 1 Mbit/s link for 8 s after 6 s unlimited, then an unlimited one again,
+/// for an encoder of `sizes`; printed as `case`.
+async fn bandwidth_limit(trace: &Trace, case: &str, sizes: Sizes) -> BandwidthRun {
+    let shape = Arc::new(Shape::default());
+    let rig = Rig::start(case, Some(shape.clone()), sizes).await;
+    let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let before = trace.last();
+    let limited = Instant::now();
+    shape.rate.store(125_000, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    shape.rate.store(0, Ordering::Relaxed);
+    let lifted = Instant::now();
+    let recovered = loop {
+        let recovered = trace
+            .between(lifted, Instant::now())
+            .into_iter()
+            .find(|interval| interval.bitrate * 5 >= START_BPS * 4);
+        if recovered.is_some() || lifted.elapsed() > Duration::from_secs(30) {
+            break recovered.map(|interval| interval.at - lifted);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    let status = rig.viewer.status();
+    rig.stop().await;
+    let rate_model = RateModelRun::read(trace, &rig.probe, limited, Instant::now());
+    let limit = trace.between(limited, lifted);
+    let clamped = limit
+        .iter()
+        .find(|interval| interval.window_clamped)
+        .map(|interval| interval.at - limited);
+    let lowest = |value: fn(&Interval) -> u64| limit.iter().map(value).min().unwrap();
+    let lowest_pace = lowest(|interval| interval.pace_fps);
+    let lowest_bitrate = lowest(|interval| interval.bitrate);
+    let lowest_encoder = lowest(|interval| interval.encoder_bitrate);
+    let encoder_trace: Vec<u64> = limit
+        .iter()
+        .map(|interval| interval.encoder_bitrate)
+        .collect();
+    println!(
+        "{case} link_mbps=1 limit_s=8 before_pace={} before_bitrate={} before_encoder_bitrate={} clamped_after_ms={:?} lowest_pace={lowest_pace} lowest_bitrate={lowest_bitrate} lowest_encoder_bitrate={lowest_encoder} recovered_after_ms={:?} final_pace={} final_bitrate={} expired_encoder_outputs={} {rate_model} state={:?}",
+        before.pace_fps,
+        before.bitrate,
+        before.encoder_bitrate,
+        clamped.map(|after| after.as_millis()),
+        recovered.map(|after| after.as_millis()),
+        status.stats.pace_fps,
+        status.stats.bitrate,
+        rig.expired(),
+        status.state
+    );
+    BandwidthRun {
+        status,
+        before,
+        clamped,
+        lowest_pace,
+        encoder_trace,
+        recovered,
+        expired: rig.expired(),
+    }
 }
 
 /// A 1 Mbit/s link for 8 s, then an unlimited one: the delivery rate clamps
 /// the window at once, the probe lowers fps and bits per frame, and both
-/// recover once the link does. The encoder is drained throughout.
+/// recover once the link does. The encoder is drained throughout, and its
+/// per-frame budget never latches the timestamp model.
 #[test]
 #[ignore = "explicit ~45-second bandwidth limit and recovery acceptance"]
 fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
     traced(|trace| async move {
-        let shape = Arc::new(Shape::default());
-        let rig = Rig::start("bandwidth", Some(shape.clone()), TYPICAL).await;
-        let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
-        tokio::time::sleep(Duration::from_secs(6)).await;
-        let before = trace.last();
-        let limited = Instant::now();
-        shape.rate.store(125_000, Ordering::Relaxed);
-        tokio::time::sleep(Duration::from_secs(8)).await;
-        shape.rate.store(0, Ordering::Relaxed);
-        let lifted = Instant::now();
-        let recovered = loop {
-            let recovered = trace
-                .between(lifted, Instant::now())
-                .into_iter()
-                .find(|interval| interval.bitrate * 5 >= START_BPS * 4);
-            if recovered.is_some() || lifted.elapsed() > Duration::from_secs(30) {
-                break recovered.map(|interval| interval.at - lifted);
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        };
-        let status = rig.viewer.status();
-        rig.stop().await;
-        let limit = trace.between(limited, lifted);
-        let clamped = limit
-            .iter()
-            .find(|interval| interval.window_clamped)
-            .map(|interval| interval.at - limited);
-        let lowest = |value: fn(&Interval) -> u64| limit.iter().map(value).min().unwrap();
-        let lowest_pace = lowest(|interval| interval.pace_fps);
-        let lowest_bitrate = lowest(|interval| interval.bitrate);
-        let lowest_encoder = lowest(|interval| interval.encoder_bitrate);
-        let encoder_trace: Vec<u64> = limit
-            .iter()
-            .map(|interval| interval.encoder_bitrate)
-            .collect();
-        println!(
-            "bandwidth_limit link_mbps=1 limit_s=8 before_pace={} before_bitrate={} before_encoder_bitrate={} clamped_after_ms={:?} lowest_pace={lowest_pace} lowest_bitrate={lowest_bitrate} lowest_encoder_bitrate={lowest_encoder} recovered_after_ms={:?} final_pace={} final_bitrate={} expired_encoder_outputs={} state={:?}",
-            before.pace_fps,
-            before.bitrate,
-            before.encoder_bitrate,
-            clamped.map(|after| after.as_millis()),
-            recovered.map(|after| after.as_millis()),
-            status.stats.pace_fps,
-            status.stats.bitrate,
-            rig.expired(),
-            status.state
-        );
+        let run = bandwidth_limit(&trace, "bandwidth_limit", TYPICAL).await;
+        let BandwidthRun {
+            status,
+            before,
+            clamped,
+            lowest_pace,
+            encoder_trace,
+            recovered,
+            expired,
+        } = run;
         assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
         // The trace samples once a second, so this is "within 1 s" to its
         // resolution.
@@ -792,10 +971,32 @@ fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
             recovered.is_some(),
             "the bitrate must recover to 80% of the start within 30 s"
         );
+        assert_eq!(expired, 0, "a full window must never starve the encoder");
+        trace.assert_never_latched();
+    });
+}
+
+/// The same limit on an encoder that budgets per second. At the nominal model
+/// it spends the nominal bitrate at any pace, so its pictures fill the link,
+/// capture waits for credit and the delay controller takes the pace to 3 FPS
+/// or below, where no 2 s of ticks holds six frames: no latch can come until
+/// pictures flow again, by when the pace is climbing back. Reports whether
+/// and when the latch came, and asserts that the session recovers as it does
+/// on a per-frame budget.
+#[test]
+#[ignore = "explicit ~45-second per-second encoder measurement on a bandwidth limit"]
+fn per_second_encoder_on_a_bandwidth_limit() {
+    traced(|trace| async move {
+        let run = bandwidth_limit(&trace, "per_second_bandwidth_limit", PER_SECOND).await;
         assert_eq!(
-            rig.expired(),
-            0,
-            "a full window must never starve the encoder"
+            run.status.state,
+            ViewerState::Streaming,
+            "{}",
+            run.status.message
+        );
+        assert!(
+            run.recovered.is_some(),
+            "the bitrate must recover to 80% of the start within 30 s"
         );
     });
 }
@@ -852,6 +1053,7 @@ fn idr_slower_than_a_second_is_followed_not_replaced() {
             "P-frames must follow the IDR: {:.1} fps",
             status.stats.received_fps
         );
+        trace.assert_never_latched();
     });
 }
 
@@ -862,44 +1064,98 @@ fn idr_slower_than_a_second_is_followed_not_replaced() {
 #[ignore = "explicit ~20-second slow presenter acceptance"]
 fn slow_presenter_is_capped_by_fps_cap_not_host_backpressure() {
     traced(|trace| async move {
-        let rig = Rig::start("slow-presenter", None, TYPICAL).await;
-        let _decoder = Decoder::start(&rig.viewer, Duration::from_millis(67));
-        tokio::time::sleep(Duration::from_secs(20)).await;
-        let measured = Instant::now();
-        let status = rig.viewer.status();
-        rig.stop().await;
-        let steady = trace.between(measured - Duration::from_secs(10), measured);
-        let mean_pace = steady.iter().map(|interval| interval.pace_fps).sum::<u64>() as f64
-            / steady.len() as f64;
-        let last = *steady.last().unwrap();
-        println!(
-            "slow_presenter decode_ms=67 mean_pace_fps={mean_pace:.1} caps={:?} fps={} encoder_bitrate={} presented_fps={:.1} backlog_drops={} keyframes_requested={} expired_encoder_outputs={} state={:?}",
-            steady
-                .iter()
-                .map(|interval| interval.viewer_cap)
-                .collect::<Vec<_>>(),
-            last.fps,
-            last.encoder_bitrate,
-            status.stats.presented_fps,
-            status.stats.backlog_drops,
-            status.stats.keyframes_requested,
-            rig.expired(),
-            status.state
-        );
-        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
-        assert!(
-            steady.iter().all(|interval| interval.viewer_cap.is_some()),
-            "the fps cap must hold the host down"
-        );
-        assert!((10.0..=16.0).contains(&mean_pace), "{mean_pace}");
+        let run = slow_presenter(&trace, "slow_presenter", TYPICAL).await;
+        let last = *run.steady.last().unwrap();
         assert_eq!(last.fps, CEILING_FPS, "the network is not congested");
         assert!(
             last.encoder_bitrate >= START_BPS && !last.timestamp_model,
             "a slow presenter must not lower the host's bitrate: {last:?}"
         );
-        assert!(steady.iter().all(|interval| !interval.unresponsive));
-        assert_eq!(rig.expired(), 0);
+        trace.assert_never_latched();
     });
+}
+
+/// The same presenter on an encoder that budgets per second: at the nominal
+/// model it spends the nominal bitrate whatever the fps cap, so the latch must
+/// find it within `LATCH_WITHIN` of the pace falling, and from then on the
+/// host sends about what it expects.
+#[test]
+#[ignore = "explicit ~20-second per-second encoder acceptance under an fps cap"]
+fn per_second_encoder_latches_under_an_fps_cap() {
+    traced(|trace| async move {
+        let run = slow_presenter(&trace, "per_second_presenter", PER_SECOND).await;
+        let last = *run.steady.last().unwrap();
+        assert!(last.timestamp_model, "{last:?}");
+        assert!(
+            run.rate_model
+                .latched_in_stretch
+                .is_some_and(|after| after <= LATCH_WITHIN),
+            "the latch must follow the pace within {LATCH_WITHIN:?}: {}",
+            run.rate_model
+        );
+        assert!(
+            run.rate_model
+                .after
+                .is_some_and(|ratio| (0.75..=1.25).contains(&ratio)),
+            "after the latch the host sends what it expects: {}",
+            run.rate_model
+        );
+    });
+}
+
+/// What one run of the slow-presenter case saw.
+struct PresenterRun {
+    /// The last 10 s of trace intervals.
+    steady: Vec<Interval>,
+    rate_model: RateModelRun,
+}
+
+/// A decoder that takes 67 ms per frame, for 20 s, on an encoder of `sizes`;
+/// printed as `case`. Asserts what holds for any encoder: the viewer's fps cap
+/// holds the pace at what it presents, and the session stays healthy.
+async fn slow_presenter(trace: &Trace, case: &str, sizes: Sizes) -> PresenterRun {
+    let rig = Rig::start(case, None, sizes).await;
+    let _decoder = Decoder::start(&rig.viewer, Duration::from_millis(67));
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let measured = Instant::now();
+    let status = rig.viewer.status();
+    rig.stop().await;
+    // The startup cap and then the viewer's fps cap hold the pace at or
+    // below `LATCH_PACE` from the first capture on.
+    let first_capture = rig.probe.paces.lock().unwrap().first().map(|(at, _)| *at);
+    let rate_model = RateModelRun::read(
+        trace,
+        &rig.probe,
+        first_capture.unwrap_or(measured),
+        measured,
+    );
+    let steady = trace.between(measured - Duration::from_secs(10), measured);
+    let mean_pace =
+        steady.iter().map(|interval| interval.pace_fps).sum::<u64>() as f64 / steady.len() as f64;
+    let last = *steady.last().unwrap();
+    println!(
+        "{case} decode_ms=67 mean_pace_fps={mean_pace:.1} caps={:?} fps={} encoder_bitrate={} presented_fps={:.1} backlog_drops={} keyframes_requested={} expired_encoder_outputs={} {rate_model} state={:?}",
+        steady
+            .iter()
+            .map(|interval| interval.viewer_cap)
+            .collect::<Vec<_>>(),
+        last.fps,
+        last.encoder_bitrate,
+        status.stats.presented_fps,
+        status.stats.backlog_drops,
+        status.stats.keyframes_requested,
+        rig.expired(),
+        status.state
+    );
+    assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+    assert!(
+        steady.iter().all(|interval| interval.viewer_cap.is_some()),
+        "the fps cap must hold the host down"
+    );
+    assert!((10.0..=16.0).contains(&mean_pace), "{mean_pace}");
+    assert!(steady.iter().all(|interval| !interval.unresponsive));
+    assert_eq!(rig.expired(), 0);
+    PresenterRun { steady, rate_model }
 }
 
 /// Poll `condition` for up to one second.
@@ -1023,8 +1279,11 @@ fn sustained_slow_tls_reader() {
             .unwrap();
         let stop_ms = ms(stopping);
         viewer.stop().await.unwrap();
+        // Pictures of one size whatever the bitrate: no rate model fits
+        // them, so the latch is reported, not asserted.
+        let rate_model = RateModelRun::read(&trace, probe, start, Instant::now());
         println!(
-            "slow_tls elapsed_s={elapsed:.3} link_kib_s={} frame_bytes={FRAME_BYTES} captured={captured} skipped_ticks={} control_ms={control_ms:.3} release_ms={release_ms:.3} revoke_ms={revoke_ms:.3} stop_ms={stop_ms:.3}",
+            "slow_tls elapsed_s={elapsed:.3} link_kib_s={} frame_bytes={FRAME_BYTES} captured={captured} skipped_ticks={} control_ms={control_ms:.3} release_ms={release_ms:.3} revoke_ms={revoke_ms:.3} stop_ms={stop_ms:.3} {rate_model}",
             LINK_BYTES_PER_SECOND / 1024,
             trace.last().skipped_ticks
         );
@@ -1101,7 +1360,7 @@ fn report_resyncs(case: &str, resyncs: &[Resync], before: &Counters, after: &Cou
 #[test]
 #[ignore = "explicit ~30-second requested IDR measurement on a 1 Mbit/s link"]
 fn requested_idr_on_a_slow_link() {
-    traced(|_| async move {
+    traced(|trace| async move {
         let shape = Arc::new(Shape::default());
         shape
             .rate
@@ -1118,6 +1377,7 @@ fn requested_idr_on_a_slow_link() {
         let status = after.status;
         assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
         assert_eq!(resyncs.len(), RESYNC_ROUNDS, "every request is answered");
+        trace.assert_never_latched();
     });
 }
 
@@ -1130,7 +1390,7 @@ fn requested_idr_on_a_slow_link() {
 #[test]
 #[ignore = "explicit ~30-second measurement of a room's IDR on a 1 Mbit/s link"]
 fn idr_another_viewer_asked_for_on_a_slow_link() {
-    traced(|_| async move {
+    traced(|trace| async move {
         let shape = Arc::new(Shape::default());
         shape
             .rate
@@ -1164,5 +1424,6 @@ fn idr_another_viewer_asked_for_on_a_slow_link() {
             RESYNC_ROUNDS,
             "every IDR reaches the viewer on the slow link"
         );
+        trace.assert_never_latched();
     });
 }
