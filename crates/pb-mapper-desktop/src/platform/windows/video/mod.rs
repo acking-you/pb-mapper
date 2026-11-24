@@ -6,9 +6,12 @@
 //! application code, implements the codec. Create, use and drop this object on
 //! the capture worker's desktop thread.
 //!
-//! A new picture is dated by when the display presented it (DXGI's
-//! `LastPresentTime`, a performance counter reading), which thread C anchors
-//! its pacing on and its sample time follows.
+//! DXGI pushes: a capture thread of the encoder's own (`capture_thread.rs`)
+//! holds the duplication and waits for the display's next present while the
+//! caller's tick wants a picture, converts it at once, and wakes the caller,
+//! which submits it. A new picture is dated by when the display presented it
+//! (DXGI's `LastPresentTime`, a performance counter reading), which thread C
+//! anchors its pacing on and its sample time follows.
 //!
 //! The video processor converts a new picture straight from the
 //! duplication's surface into the sample it is submitted in, turned upright
@@ -17,9 +20,10 @@
 //! sample is kept, so that a repeat on a still desktop (liveness, a
 //! keyframe) copies its NV12 picture instead of converting again.
 //!
-//! Given a waker, the encoder's events wake its caller: each output, and the
-//! input request a `Submit::Waiting` waits for (`codec.rs`).
+//! The encoder's events wake its caller too: each output, and the input
+//! request a `Submit::Waiting` waits for (`codec.rs`).
 
+mod capture_thread;
 mod codec;
 mod converter;
 mod gpu_time;
@@ -34,28 +38,26 @@ use crate::{
     BackendError, DRAIN_POLL, Display, FailureKind, Presented, Result, VideoCodec, Waker,
     codec::{
         annexb::codec_name,
-        pipeline::{FIRST_SUBMIT_WAIT, LIVENESS_INTERVAL, OUTPUT_WAIT, codec_error, late},
+        pipeline::{FIRST_SUBMIT_WAIT, OUTPUT_WAIT, codec_error, late},
+        present_waiter::{Arm, Idle, PresentWaiter},
     },
     error,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
     scale::{Rotation, crop_only, downscales},
     scheduler::{Waiter, Wake},
 };
+use capture_thread::{ACQUIRE_WAIT, DxgiSource, Picture, Shared};
 use codec::{Codec, EncoderSettings, attributes, media_type, sample_bytes};
 use converter::{Converter, Sample};
-use gpu_time::GpuTimer;
 use std::{
     collections::VecDeque,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     thread::ThreadId,
     time::{Duration, Instant},
 };
 use windows::{
     Win32::{
-        Graphics::{
-            Direct3D11::*,
-            Dxgi::{Common::*, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIResource},
-        },
+        Graphics::{Direct3D11::*, Dxgi::Common::*},
         Media::MediaFoundation::*,
         System::{
             Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
@@ -77,7 +79,15 @@ const MAX_IN_FLIGHT: usize = crate::worker::ENCODER_DEPTH;
 const SAMPLES: (u32, u32) = (4, 6);
 const _: () = assert!(
     MAX_IN_FLIGHT + 2 <= SAMPLES.1 as usize,
-    "the sample pool holds every unit in flight, the last one a repeat copies once it is out, and a spare"
+    "a sample is taken only with room for one more unit in flight: those units, the last one a repeat copies once it is out, a picture held back or a repeat's copy (never both), and the capture thread's next"
+);
+/// How long after arming the capture thread (or after it began converting
+/// a present it found) a due repeat, or a picture held back, waits for its
+/// look's answer before it goes anyway.
+const LOOK: Duration = Duration::from_millis(32);
+const _: () = assert!(
+    LOOK.as_millis() >= 2 * ACQUIRE_WAIT.as_millis(),
+    "a look the thread began for an earlier arming ends first, then the new arming's"
 );
 /// The PCI vendor IDs whose video processor is asked for quality where it
 /// scales the picture down (`VpUsage::Auto`): none until a device run shows
@@ -120,6 +130,11 @@ pub struct EncoderOptions {
     pub gpu_priority: bool,
     /// What the D3D11 video processor is asked to favour.
     pub vp_usage: VpUsage,
+    /// Read the encoder's events at each drain rather than have its event
+    /// watcher wake the caller (`video_bench --poll-events`, the baseline
+    /// of that comparison), as an encoder without `IMFShutdown` has them.
+    /// The capture thread wakes the caller either way.
+    pub poll_events: bool,
 }
 
 /// What the D3D11 video processor that scales and converts each picture is
@@ -256,14 +271,18 @@ pub enum Submit {
     /// requested.
     Full,
     /// Room, but the encoder has not asked for input yet: some MFTs ask
-    /// only once they have output the unit before. Nothing was captured,
-    /// the caller's tick stays armed, and it asks again at its poll or as
-    /// the encoder's request wakes it (`Encoder::idle_until`); a requested
+    /// only once they have output the unit before. Nothing was submitted
+    /// (the capture thread converts the next present meanwhile), the
+    /// caller's tick stays armed, and it asks again at its poll or as the
+    /// encoder's request wakes it (`Encoder::idle_until`); a requested
     /// keyframe stays requested.
     Waiting,
-    /// Room, and nothing worth sending: no new present, no keyframe due and
-    /// a submit within `LIVENESS_INTERVAL`, or no image captured yet. The
-    /// caller's tick stays armed, and it asks again.
+    /// Room, and nothing worth sending yet: no new picture, and no repeat
+    /// due (a keyframe, or the liveness repeat `LIVENESS_INTERVAL` after
+    /// the last submit) or one held back until the capture thread has said
+    /// that nothing newer waits. The caller's tick stays armed: the capture
+    /// thread wakes it for the next picture or that answer, or it asks
+    /// again at `Encoder::idle_until`.
     Unchanged,
 }
 impl Submit {
@@ -303,12 +322,16 @@ pub struct Statistics {
     pub gop: u32,
     /// The presents no submitted picture showed: for each dated new picture
     /// submitted, those it covers beyond one (`Presented::presents - 1`),
-    /// which DXGI accumulated into its acquire: a picture is acquired only
-    /// with a sample to convert it into, and submitted at once. Thread C's
+    /// which DXGI accumulated into its acquire: the capture thread acquires
+    /// only while the caller's tick wants a picture. Thread C's
     /// `coalesced_per_s` counts the same.
     pub coalesced_presents: u64,
     /// This encoder's first acquire, once there was one.
     pub first_acquire: Option<FirstAcquire>,
+    /// The capture thread's `AcquireNextFrame` calls, whatever each
+    /// returned: a new picture, a frame that only moved the pointer, or
+    /// none within its wait (16 ms) while armed.
+    pub acquires: u64,
     /// Submits that found room but no input request (`Submit::Waiting`).
     pub waiting: u64,
     /// Whether the encoder's events wake the caller (its event watcher
@@ -336,7 +359,8 @@ fn pickup_bucket(wait: Duration) -> usize {
 }
 
 /// A wake for a caller that drives an [`Encoder`] itself, as `video_bench`
-/// does: built with its `waker`, the encoder's event watcher wakes `wait`.
+/// does: built with its `waker`, the encoder's capture thread and event
+/// watcher wake `wait`.
 pub struct EncoderWake {
     waker: Waker,
     waiter: Waiter,
@@ -416,32 +440,26 @@ impl Drop for Runtime {
 /// access unit is ready yet; callers must continue servicing input/stop while
 /// waiting, rather than busy-spinning.
 pub struct Encoder {
-    capture: DxgiDuplicationApi,
+    /// The capture thread, which holds the duplication and the video
+    /// processor: stopped and joined first, before the encoder, the samples
+    /// and Media Foundation go.
+    capture: PresentWaiter<DxgiSource>,
+    /// What this thread shares with the capture thread.
+    shared: Arc<Shared>,
     codec: Codec,
-    converter: Converter,
+    /// The capture device, and its immediate context, on which both threads
+    /// queue work.
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
     /// The last submitted sample, a new picture or a repeat: what a repeat
-    /// copies, and `source_nv12` reads back. One of the pool, released with
-    /// `spare` before the sample allocator.
+    /// copies, and `source_nv12` reads back. One of the pool, released
+    /// before the sample allocator.
     last: Option<Sample>,
-    /// A sample allocated for a submit that then had nothing to send, kept
-    /// for the next, so that polling a still desktop allocates none.
-    spare: Option<Sample>,
     /// `video_bench --dump-source`'s read-back of `last`.
     source: Option<Source>,
-    /// `video_bench --gpu-time`'s timestamps around each picture's work.
-    gpu_timer: Option<GpuTimer>,
     allocator: IMFVideoSampleAllocatorEx,
     _manager: IMFDXGIDeviceManager,
-    /// The captured picture's size, as scanned out before any turn, which
-    /// the duplication's mode and rotation give (`Rotation::scanned_out`):
-    /// what each frame's texture must be.
-    input: (u32, u32),
-    /// Whether new pictures are converted straight from the duplication's
-    /// surface: until the video processor refuses it, after which each is
-    /// copied out into `copied` first.
-    direct: bool,
-    copied: Option<ID3D11Texture2D>,
-    /// The last submit found no free sample, and captured nothing.
+    /// The last submit found no free sample, and took nothing.
     starved: bool,
     /// The last submit sent `last` again rather than a new picture.
     repeated: bool,
@@ -461,7 +479,6 @@ pub struct Encoder {
     /// When the last submit found no input request (`Submit::Waiting`);
     /// `None` after any other outcome.
     waiting: Option<Instant>,
-    last_present: i64,
     force_keyframe: bool,
     wait_independent_output: bool,
     stats: Statistics,
@@ -486,6 +503,20 @@ struct Fresh {
     presents: u32,
 }
 
+/// What a submit with room takes from the capture thread.
+enum Taken {
+    /// A new picture it published.
+    Picture(Picture),
+    /// The last picture again, copied into this sample.
+    Repeat(Sample),
+    /// Nothing yet: it is armed, and may hold back a picture that waited
+    /// while it looks past it.
+    Unchanged,
+    /// No free sample, for a repeat or for the capture thread's next
+    /// picture.
+    Full,
+}
+
 /// The encoded size: the capture fitted inside these bounds, keeping its aspect
 /// ratio and never upscaling (a session), or exactly this size.
 #[derive(Clone, Copy)]
@@ -499,10 +530,11 @@ impl Encoder {
     /// inside `max_width` × `max_height` without upscaling: a rotated
     /// display's picture is turned upright first, and a size one pixel over
     /// the even encoded size is cropped rather than scaled. The captured
-    /// desktop stays on the GPU; no CPU readback. Given a
-    /// `waker`, the encoder's events wake it where they can
-    /// (`Statistics::events_pushed`, `drain_poll`); without one, `drain`
-    /// polls them. A session takes the default `options`.
+    /// desktop stays on the GPU; no CPU readback. The capture thread wakes
+    /// `waker` for each new picture it converts, and the encoder's events
+    /// wake it where they can (`Statistics::events_pushed`, `drain_poll`;
+    /// not with `EncoderOptions::poll_events`). A session takes the
+    /// default `options`.
     #[expect(
         clippy::too_many_arguments,
         reason = "the public constructor video_bench and the backend call; each is a plain value"
@@ -514,7 +546,7 @@ impl Encoder {
         bitrate: u32,
         max_width: u32,
         max_height: u32,
-        waker: Option<&Waker>,
+        waker: &Waker,
         options: EncoderOptions,
     ) -> Result<Self> {
         Self::build(
@@ -542,7 +574,7 @@ impl Encoder {
         bitrate: u32,
         width: u32,
         height: u32,
-        waker: Option<&Waker>,
+        waker: &Waker,
         options: EncoderOptions,
     ) -> Result<Self> {
         Self::build(
@@ -562,7 +594,7 @@ impl Encoder {
         fps: u32,
         bitrate: u32,
         size: OutputSize,
-        waker: Option<&Waker>,
+        waker: &Waker,
         options: EncoderOptions,
     ) -> Result<Self> {
         if kind == VideoCodec::Jpeg {
@@ -620,7 +652,7 @@ impl Encoder {
             OutputSize::Fit(..) => scaled_size(upright.0, upright.1, max_width, max_height),
             OutputSize::Exact(..) => ((max_width & !1).max(2), (max_height & !1).max(2)),
         };
-        let device = capture.device();
+        let (device, context) = (capture.device().clone(), capture.device_context().clone());
         // The video processor before the encoder: a GPU that cannot turn a
         // rotated display's picture fails the capture here, as one failed
         // on any rotated display before, without opening an encoder each
@@ -640,15 +672,15 @@ impl Encoder {
             downscales(upright, (width, height)),
         );
         let converter = Converter::new(
-            device,
-            capture.device_context(),
+            &device,
+            &context,
             input,
             (width, height),
             rotation,
             fps,
             quality,
         )?;
-        let manager = device_manager(device, capture.device_context())?;
+        let manager = device_manager(&device, &context)?;
         let settings = EncoderSettings {
             kind,
             width,
@@ -658,9 +690,14 @@ impl Encoder {
             options,
         };
         // Before the encoder starts, so that its first unit has it too.
-        let gpu_priority = options.gpu_priority.then(|| GpuPriority::hold(device));
-        let codec = Codec::new(device, &manager, settings, waker)
-            .map_err(|failure| codec_error(kind, failure))?;
+        let gpu_priority = options.gpu_priority.then(|| GpuPriority::hold(&device));
+        let codec = Codec::new(
+            &device,
+            &manager,
+            settings,
+            (!options.poll_events).then_some(waker),
+        )
+        .map_err(|failure| codec_error(kind, failure))?;
         let opened = codec.opened.clone();
         tracing::info!(
             target: "pb_mapper_desktop::session",
@@ -711,6 +748,11 @@ impl Encoder {
                 )
                 .map_err(error)?;
         }
+        // Last, once the device's multithread protection is on: from here
+        // on the capture thread queues work on its context too.
+        let shared = Arc::new(Shared::new(&context)?);
+        let source = DxgiSource::new(capture, converter, input, shared.clone());
+        let capture = PresentWaiter::spawn("pb-mapper-dxgi-capture", source, waker.clone())?;
         let now = Instant::now();
         let stats = Statistics {
             gop: codec.gop,
@@ -722,17 +764,14 @@ impl Encoder {
         };
         Ok(Self {
             capture,
+            shared,
             codec,
-            converter,
+            device,
+            context,
             last: None,
-            spare: None,
             source: None,
-            gpu_timer: None,
             allocator,
             _manager: manager,
-            input,
-            direct: true,
-            copied: None,
             starved: false,
             repeated: false,
             presented: None,
@@ -746,7 +785,6 @@ impl Encoder {
             created: now,
             last_submit: None,
             waiting: None,
-            last_present: 0,
             force_keyframe: true,
             wait_independent_output: true,
             stats,
@@ -762,7 +800,12 @@ impl Encoder {
         self.codec.kind
     }
     pub fn statistics(&self) -> Statistics {
-        self.stats.clone()
+        Statistics {
+            direct_capture: self.shared.direct(),
+            first_acquire: self.shared.first_acquire(),
+            acquires: self.shared.acquires(),
+            ..self.stats.clone()
+        }
     }
     /// When the display presented the new picture the last `submit`
     /// submitted, and the presents it covers; `None` after a submit that
@@ -785,22 +828,44 @@ impl Encoder {
     pub fn drain_poll(&self) -> Option<Duration> {
         (!self.codec.pushes() || self.codec.outputs() > 0).then_some(DRAIN_POLL)
     }
-    /// While the last submit waited for the encoder to ask for input and
-    /// the request wakes the caller: when to ask again. `DRAIN_POLL` after
-    /// that submit until the encoder asks, and that submit's own time once
-    /// it has, so that a request that came before the caller chose its
-    /// next poll is answered at once all the same. `None` after any other
-    /// outcome, and while the events are polled, whose caller polls its
-    /// armed tick.
-    pub fn idle_until(&self) -> Option<Instant> {
-        let asked = self.waiting?;
-        self.codec.pushes().then(|| {
-            if self.codec.input_requested() {
-                asked
-            } else {
-                asked + DRAIN_POLL
-            }
-        })
+    /// When the caller asks again if nothing wakes it first; `None`: at
+    /// its next tick. After a submit that found no input request, `DRAIN_POLL`
+    /// after it until the encoder asks (whose request wakes the caller
+    /// where its events are pushed), and that submit's own time once it
+    /// has, so that a request that came before the caller chose its next
+    /// poll is answered at once all the same. Otherwise at the tick while a
+    /// picture waits to be taken or the capture thread is not armed, which
+    /// the tick arms; and while it is armed, as the capture thread wakes
+    /// the caller, at the latest when a repeat is due (the liveness repeat,
+    /// or `keyframe_due`), or `LOOK` after its arming while a due repeat,
+    /// or a picture held back, waits for its look's answer
+    /// (`present_waiter::Idle::until`). The caller never polls DXGI.
+    pub fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        self.idle().until(Instant::now(), keyframe_due)
+    }
+
+    /// What decides when the caller needs the encoder again.
+    fn idle(&self) -> Idle {
+        Idle {
+            waiting: self
+                .waiting
+                .map(|asked| (asked, self.codec.pushes() && self.codec.input_requested())),
+            status: self.capture.status(),
+            created: self.created,
+            last_submit: self.last_submit,
+            keyframe: self.force_keyframe,
+            look: LOOK,
+        }
+    }
+
+    /// Every viewer paused: the capture thread stops waiting for presents,
+    /// which DXGI folds together until the caller arms it again. A picture
+    /// it publishes as it stops waits for the resume, which looks past it
+    /// first, as past any picture that waited.
+    pub fn paused(&self, paused: bool) {
+        if paused {
+            self.capture.disarm();
+        }
     }
 
     /// Have `source_nv12` read back the sample each `submit` gives the
@@ -814,15 +879,13 @@ impl Encoder {
     /// queries, which `gpu_times` reads back (`video_bench --gpu-time`).
     /// A session never does.
     pub fn time_gpu(&mut self) {
-        self.gpu_timer.get_or_insert_with(GpuTimer::default);
+        self.shared.time_gpu();
     }
 
     /// Move the spans of GPU work `time_gpu` timed, once the GPU has
     /// finished them, into `out`; never waits.
     pub fn gpu_times(&mut self, out: &mut Vec<GpuSpan>) {
-        if let Some(timer) = &mut self.gpu_timer {
-            timer.collect(self.capture.device_context(), out);
-        }
+        self.shared.gpu_times(&self.context, out);
     }
 
     /// Copy each new picture out of the duplication before converting it,
@@ -830,9 +893,7 @@ impl Encoder {
     /// and as every picture was before (`video_bench --copy-capture`, the
     /// comparison's baseline). A session never does.
     pub fn copy_captures(&mut self) {
-        self.direct = false;
-        self.stats.direct_capture = false;
-        self.converter.forget_inputs();
+        self.shared.copy_captures();
     }
 
     /// Read the NV12 picture the last `submit` gave the encoder back from
@@ -869,8 +930,7 @@ impl Encoder {
             };
             let mut created = None;
             unsafe {
-                self.capture
-                    .device()
+                self.device
                     .CreateTexture2D(&staging, None, Some(&mut created))
                     .map_err(error)?;
             }
@@ -880,7 +940,7 @@ impl Encoder {
             .staging
             .as_ref()
             .ok_or_else(|| error("missing staging texture"))?;
-        let context = self.capture.device_context();
+        let context = &self.context;
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
             context.CopySubresourceRegion(staging, 0, 0, 0, 0, texture, subresource, None);
@@ -1074,78 +1134,53 @@ impl Encoder {
         self.pending.len()
     }
 
-    /// Capture the newest desktop image and submit at most one sample; the
-    /// caller paces, and this never waits. Call `drain` first, which collects
-    /// the encoder's output and, when they are polled, its input requests.
-    /// Submits nothing while the encoder has no room (`Full`: `MAX_IN_FLIGHT`,
-    /// or no free sample, before anything is captured), before it asks for
-    /// input (`Waiting`: nothing is captured), or when nothing is worth
-    /// sending (`Unchanged`: no new image, no keyframe due, and a submit
-    /// within `LIVENESS_INTERVAL`; or no image yet). A requested keyframe
-    /// stays requested until a sample carries it.
+    /// Submit at most one sample: the new picture the capture thread
+    /// published, or the last one again; the caller paces, and this never
+    /// waits. Call `drain` first, which collects the encoder's output and,
+    /// when they are polled, its input requests. Submits nothing while the
+    /// encoder has no room (`Full`: `MAX_IN_FLIGHT`, or no free sample,
+    /// before anything is taken), before it asks for input (`Waiting`), or
+    /// when nothing is worth sending yet (`Unchanged`): the capture thread
+    /// is then armed, and wakes the caller for the next picture. A picture
+    /// the capture thread published that waited (the caller skipped ticks
+    /// or paused, or a repeat went first) goes only once the thread, armed
+    /// again, found nothing newer behind it. A requested keyframe stays
+    /// requested until a sample carries it. A failure the capture thread
+    /// published (the desktop switched, say) fails this and every later
+    /// submit.
     pub fn submit(&mut self, force_keyframe: bool) -> Result<Submit> {
         self.check_thread()?;
         self.presented = None;
         self.waiting = None;
         self.repeated = false;
         self.force_keyframe |= force_keyframe;
+        self.capture.failed()?;
         if self.pending.len() >= MAX_IN_FLIGHT {
+            // A full encoder spends the tick, for a caller that does not
+            // stop at `pending_len` first as thread C does: the next present
+            // waits in DXGI for the next arming.
+            self.capture.disarm();
             return Ok(Submit::Full);
         }
         if !self.codec.wants_input() {
             self.waiting = Some(Instant::now());
             self.stats.waiting += 1;
+            // The capture thread converts the next present meanwhile, for
+            // the request to take at once.
+            self.arm(false)?;
             return Ok(Submit::Waiting);
         }
-        // The sample comes first: with none free nothing is acquired, and
-        // DXGI keeps folding the desktop's updates into its next frame.
-        let sample = match self.spare.take() {
-            Some(sample) => sample,
-            None => match unsafe { self.allocator.AllocateSample() } {
-                Ok(sample) => Sample::new(sample)?,
-                Err(e) if e.code() == MF_E_SAMPLEALLOCATOR_EMPTY => {
-                    self.starved = true;
-                    return Ok(Submit::Full);
-                }
-                Err(e) => return Err(error(e)),
-            },
+        let (sample, fresh) = match self.take()? {
+            Taken::Picture(Picture { sample, fresh }) => (sample, Some(fresh)),
+            Taken::Repeat(sample) => (sample, None),
+            Taken::Unchanged => return Ok(Submit::Unchanged),
+            Taken::Full => return Ok(Submit::Full),
         };
         self.starved = false;
-        let fresh = self.acquire(&sample)?;
-        if fresh.is_none() {
-            // Static desktops still send a fresh, verified liveness frame.
-            // These repetitions are excluded from unique_captures and
-            // benchmark FPS.
-            let due = self.force_keyframe
-                || self
-                    .last_submit
-                    .is_none_or(|at| at.elapsed() >= LIVENESS_INTERVAL);
-            let Some(last) = self.last.as_ref().filter(|_| due) else {
-                self.spare = Some(sample);
-                return Ok(Submit::Unchanged);
-            };
-            // The last picture's NV12, copied whole from its sample: the
-            // video processor does not run again, and the encoder never
-            // writes the samples it takes.
-            let timing = time_begin(&mut self.gpu_timer, &self.capture)?;
-            unsafe {
-                self.capture.device_context().CopySubresourceRegion(
-                    &sample.texture,
-                    sample.subresource,
-                    0,
-                    0,
-                    0,
-                    &last.texture,
-                    last.subresource,
-                    None,
-                );
-            }
-            time_end(&mut self.gpu_timer, &self.capture, timing, true);
-            self.repeated = true;
-        }
+        self.repeated = fresh.is_none();
         let now = Instant::now();
         // A new picture's sample time is when the display presented it, so
-        // durations follow the display's cadence rather than the polls'; a
+        // durations follow the display's cadence rather than the ticks'; a
         // repeat's is now. Strictly increasing either way.
         let presented = fresh.as_ref().and_then(|fresh| fresh.at);
         let pts_us = sample_time(presented.unwrap_or(now), self.created, self.last_pts_us);
@@ -1186,6 +1221,7 @@ impl Encoder {
         self.last_pts_us = Some(pts_us);
         self.pending.push_back((pts_us, now, fresh.is_none()));
         if let Some(fresh) = fresh {
+            self.stats.unique_captures += 1;
             self.presented = fresh.at.map(|at| Presented::new(at, fresh.presents));
             if let Some(presented) = self.presented {
                 self.stats.coalesced_presents += u64::from(presented.presents.saturating_sub(1));
@@ -1198,137 +1234,79 @@ impl Encoder {
         Ok(Submit::Submitted)
     }
 
-    /// Convert a new desktop image, if there is one, into `sample`, and
-    /// release the duplication frame at once. A frame held until the next
-    /// acquire (as windows-capture's `acquire_next_frame` does) keeps DXGI
-    /// from accumulating the next update meanwhile, so an acquire at the
-    /// next tick races that update and misses about every other one. A new
-    /// image is dated by its present, and counts the presents DXGI
-    /// accumulated in it; the first one is converted whatever its present
-    /// says, so a still desktop shows at once, and is left undated.
-    fn acquire(&mut self, sample: &Sample) -> Result<Option<Fresh>> {
-        let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
-        let mut resource = None;
-        match unsafe {
-            self.capture
-                .duplication()
-                .AcquireNextFrame(0, &mut info, &mut resource)
-        } {
-            Ok(()) => {}
-            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
-            Err(e) => return Err(error(e)),
+    /// What a submit with room sends: the picture the capture thread
+    /// published, unless it waited, as of `present_waiter::FRESH_FOR`, when
+    /// DXGI may hold a newer present behind it: that one is held back
+    /// while the thread, armed again, looks past it, and goes once the look
+    /// found nothing newer or `LOOK` passed, unless a newer picture goes in
+    /// its place. Else, when a repeat is due and the thread found nothing
+    /// newer, the last picture again, copied whole from its sample (the
+    /// video processor does not run again, and the encoder never writes
+    /// the samples it takes). Else nothing yet, with the thread armed, and
+    /// asked for its look's answer when a repeat is due or a picture is
+    /// held back.
+    fn take(&mut self) -> Result<Taken> {
+        let now = Instant::now();
+        if let Some(picture) = self.capture.next_picture(now, LOOK) {
+            return Ok(Taken::Picture(picture));
         }
-        if self.stats.first_acquire.is_none() {
-            let acquired = FirstAcquire {
-                last_present_time: info.LastPresentTime,
-                accumulated_frames: info.AccumulatedFrames,
-                resource: resource.is_some(),
+        let idle = self.idle();
+        if idle.repeat_now(now)
+            && let Some(last) = &self.last
+        {
+            // The tick is spent: a present after this waits in DXGI for
+            // the next tick, which takes the newest.
+            self.capture.disarm();
+            let Some(sample) = allocate(&self.allocator)? else {
+                self.starved = true;
+                return Ok(Taken::Full);
             };
-            self.stats.first_acquire = Some(acquired);
-            tracing::debug!(
-                target: "pb_mapper_desktop::session",
-                event = "windows_capture_first_acquire",
-                last_present_time = acquired.last_present_time,
-                accumulated_frames = acquired.accumulated_frames,
-                resource = acquired.resource,
-            );
+            let context = &self.context;
+            self.shared.work(&self.device, context, true, false, || {
+                unsafe {
+                    context.CopySubresourceRegion(
+                        &sample.texture,
+                        sample.subresource,
+                        0,
+                        0,
+                        0,
+                        &last.texture,
+                        last.subresource,
+                        None,
+                    );
+                }
+                Ok(())
+            })?;
+            return Ok(Taken::Repeat(sample));
         }
-        let converted = self.convert_frame(&info, resource, sample);
-        let released = unsafe { self.capture.duplication().ReleaseFrame() }.map_err(error);
-        converted.and_then(|converted| released.map(|()| converted))
-    }
-
-    /// Convert the frame `acquire` holds into `sample`, if it shows a new
-    /// picture, and hand the GPU that work before the frame goes back to
-    /// DXGI: straight from the duplication's surface, or, once the video
-    /// processor refused it, through a copy of it, as before.
-    fn convert_frame(
-        &mut self,
-        info: &DXGI_OUTDUPL_FRAME_INFO,
-        resource: Option<IDXGIResource>,
-        sample: &Sample,
-    ) -> Result<Option<Fresh>> {
-        let first = self.last.is_none();
-        let present = info.LastPresentTime;
-        // Zero: only the pointer moved.
-        if !(first && resource.is_some()) && (present == 0 || present == self.last_present) {
-            return Ok(None);
-        }
-        let frame: ID3D11Texture2D = resource
-            .ok_or_else(|| error("missing desktop frame"))?
-            .cast()
-            .map_err(error)?;
-        if first {
-            // The converter's source rectangle and turn take the frame at
-            // the size its display mode is scanned out at, a rotated
-            // display's included.
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            unsafe { frame.GetDesc(&mut desc) };
-            if (desc.Width, desc.Height) != self.input {
-                return Err(error(format!(
-                    "the desktop image is {}x{}, not the {}x{} its display mode and rotation give",
-                    desc.Width, desc.Height, self.input.0, self.input.1
-                )));
-            }
-        }
-        let timing = time_begin(&mut self.gpu_timer, &self.capture)?;
-        if self.direct {
-            if let Err(failure) = self.converter.convert(&frame, sample) {
-                self.direct = false;
-                self.stats.direct_capture = false;
-                self.converter.forget_inputs();
-                tracing::info!(
-                    target: "pb_mapper_desktop::session",
-                    event = "desktop_capture_copied",
-                    error = %failure,
-                );
-                self.convert_copy(&frame, sample)?;
-            }
-        } else {
-            self.convert_copy(&frame, sample)?;
-        }
-        time_end(&mut self.gpu_timer, &self.capture, timing, false);
-        unsafe { self.capture.device_context().Flush() };
-        if present != 0 {
-            self.last_present = present;
-        }
-        self.stats.unique_captures += 1;
-        Ok(Some(Fresh {
-            at: if first {
-                None
-            } else {
-                present_instant(present)
-            },
-            presents: info.AccumulatedFrames.max(1),
-        }))
-    }
-
-    /// Copy `frame` out of the duplication, then convert the copy into
-    /// `sample`: for a video processor that refuses the duplication's own
-    /// surface.
-    fn convert_copy(&mut self, frame: &ID3D11Texture2D, sample: &Sample) -> Result<()> {
-        if self.copied.is_none() {
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            unsafe { frame.GetDesc(&mut desc) };
-            desc.BindFlags = D3D11_BIND_RENDER_TARGET.0 as u32;
-            desc.MiscFlags = 0;
-            desc.CPUAccessFlags = 0;
-            desc.Usage = D3D11_USAGE_DEFAULT;
-            let mut texture = None;
-            unsafe {
+        Ok(match self.arm(idle.wants_answer(now))? {
+            Arm::Armed => Taken::Unchanged,
+            // No sample for the thread to look past a picture held back
+            // with: that one goes as it is.
+            Arm::Empty => self.capture.take_held().map_or(Taken::Full, Taken::Picture),
+            // It published as it was armed: a picture, or the failure that
+            // ended it.
+            Arm::Published => {
+                self.capture.failed()?;
                 self.capture
-                    .device()
-                    .CreateTexture2D(&desc, None, Some(&mut texture))
-                    .map_err(error)?;
+                    .next_picture(Instant::now(), LOOK)
+                    .map_or(Taken::Unchanged, Taken::Picture)
             }
-            self.copied = texture;
+        })
+    }
+
+    /// Arm the capture thread, handing it a free sample for its next
+    /// picture when it has none; with `verdict`, it wakes the caller once
+    /// its look finds nothing new.
+    fn arm(&mut self, verdict: bool) -> Result<Arm> {
+        let allocator = &self.allocator;
+        let armed = self.capture.arm(verdict, || allocate(allocator))?;
+        match armed {
+            Arm::Armed => self.starved = false,
+            Arm::Empty => self.starved = true,
+            Arm::Published => {}
         }
-        let copied = self
-            .copied
-            .as_ref()
-            .ok_or_else(|| error("missing capture texture"))?;
-        unsafe { self.capture.device_context().CopyResource(copied, frame) };
-        self.converter.convert(copied, sample)
+        Ok(armed)
     }
 
     fn frame_period(&self) -> Duration {
@@ -1336,27 +1314,13 @@ impl Encoder {
     }
 }
 
-/// Open a span of the GPU work `capture`'s device queues, where `timer`
-/// (`Encoder::time_gpu`) asks for them.
-fn time_begin(
-    timer: &mut Option<GpuTimer>,
-    capture: &DxgiDuplicationApi,
-) -> Result<Option<gpu_time::Queries>> {
-    match timer {
-        Some(timer) => timer.begin(capture.device(), capture.device_context()),
-        None => Ok(None),
-    }
-}
-
-/// Close the span `time_begin` opened, for a `repeat` or a new picture.
-fn time_end(
-    timer: &mut Option<GpuTimer>,
-    capture: &DxgiDuplicationApi,
-    timing: Option<gpu_time::Queries>,
-    repeat: bool,
-) {
-    if let (Some(timer), Some(queries)) = (timer, timing) {
-        timer.end(capture.device_context(), queries, repeat);
+/// A free sample of `allocator`'s pool; `None` while the encoder holds
+/// them all.
+fn allocate(allocator: &IMFVideoSampleAllocatorEx) -> Result<Option<Sample>> {
+    match unsafe { allocator.AllocateSample() } {
+        Ok(sample) => Sample::new(sample).map(Some),
+        Err(e) if e.code() == MF_E_SAMPLEALLOCATOR_EMPTY => Ok(None),
+        Err(e) => Err(error(e)),
     }
 }
 

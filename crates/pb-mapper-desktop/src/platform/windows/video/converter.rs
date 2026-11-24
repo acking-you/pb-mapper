@@ -1,6 +1,7 @@
 //! The D3D11 video processor that turns each captured BGRA desktop picture
 //! upright, scales it (or crops its odd edge) and converts it into the
-//! encoder's NV12 samples on the GPU.
+//! encoder's NV12 samples on the GPU. Thread C builds it; the encoder's
+//! capture thread (`capture_thread.rs`) runs it.
 use super::SAMPLES;
 use crate::{
     Result, error,
@@ -28,6 +29,14 @@ pub(super) struct Sample {
     pub(super) texture: ID3D11Texture2D,
     pub(super) subresource: u32,
 }
+// SAFETY: a sample serves one thread at a time, handed between thread C and
+// the capture thread through a mutex: thread C allocates it, the capture
+// thread converts a picture into it, and thread C submits it. Media
+// Foundation's samples are free-threaded, and both threads joined the
+// process's multithreaded apartment, where an interface pointer serves
+// every thread without marshaling. The texture is a D3D11 interface, which
+// `windows` already marks `Send`.
+unsafe impl Send for Sample {}
 impl Sample {
     pub(super) fn new(sample: IMFSample) -> Result<Self> {
         let buffer = unsafe { sample.GetBufferByIndex(0).map_err(error)? };

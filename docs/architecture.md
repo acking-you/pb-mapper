@@ -388,11 +388,14 @@ Nothing in the SDK crates knows it exists.
     "Platforms" in `docs/remote-desktop.md`
   - `platform/windows/`: the ordinary desktop, `video/` (Desktop
     Duplication → D3D11 → Media Foundation H.265 or H.264, the fused
-    `VideoSource`: the `Encoder` in `mod.rs`, the Media Foundation encoder in
-    `codec.rs`, whose watcher thread waits for the MFT's events and wakes
-    thread C, the D3D11 video processor in `converter.rs`, which turns,
-    crops or scales each picture into its NV12 sample, the per-adapter H.265
-    probe in `probe.rs`; H.265 only for a viewer that lists `h265`, on a GPU
+    `VideoSource`: the `Encoder` in `mod.rs`, its capture thread in
+    `capture_thread.rs`, which thread C arms when its tick finds nothing new
+    and which waits for DXGI's next present, converts it and wakes thread C
+    (on `codec/present_waiter.rs`, neutral and tested everywhere), the
+    Media Foundation encoder in `codec.rs`, whose watcher thread waits for
+    the MFT's events and wakes thread C, the D3D11 video processor in
+    `converter.rs`, which turns, crops or scales each picture into its NV12
+    sample, the per-adapter H.265 probe in `probe.rs`; H.265 only for a viewer that lists `h265`, on a GPU
     whose hardware HEVC encoder passes a probe kept per adapter, and one
     encoder failure turns it off for the process; H.264 in a High profile
     with CABAC, Baseline where the encoder refuses High or may reorder in
@@ -497,9 +500,11 @@ Nothing in the SDK crates knows it exists.
     share (`pipeline.rs`: late output, first-submit and output waits,
     liveness, what an H.265 failure is), when a picture the encoder dropped
     is sent again and which unit is a duplicate (`resubmit.rs`, used by the
-    macOS encoder); `rate_fit.rs`,
-    test-only, fits a pace sweep to a rate model for the macOS encoder's
-    measurement and, by path, `video_bench --pace`
+    macOS encoder); `present_waiter.rs`, the thread a push capture source's
+    pictures come from while thread C's tick wants one (the Windows host's
+    DXGI capture), with thread C's rule for when it needs that source again;
+    `rate_fit.rs`, test-only, fits a pace sweep to a rate model for the
+    macOS encoder's measurement and, by path, `video_bench --pace`
   - `input/`: the input vocabulary a controlling viewer sends (`Input`,
     `Button`, `Key`, `InputEvent`, `DoubleClickGuard`; `Input` and `Key` are
     `#[non_exhaustive]`, and `Input::PhysicalKey` carries a USB HID usage,

@@ -112,13 +112,18 @@ fn parts(desktop: desktop::WinDesktop) -> Result<Parts<Windows>> {
     })
 }
 
-/// The fused encoder, unchanged inside: each submit captures and encodes.
-/// Its encoder's events wake thread C (`drain_poll` is `None`) where it can
-/// be shut down, which is every asynchronous MFT; DXGI's capture is polled.
+/// The fused encoder: its capture thread waits for DXGI's next present while
+/// thread C's tick wants a picture, converts it and wakes thread C, which
+/// submits it; its encoder's events wake thread C too (`drain_poll` is
+/// `None`) where it can be shut down, which is every asynchronous MFT.
+/// Thread C never polls DXGI (`capture_poll` is `None`).
 impl VideoSource for video::Encoder {
     type Grant = ();
     /// Before a source opens; an open one says (`drain_poll`).
     const DRAIN: Option<Duration> = Some(DRAIN_POLL);
+    /// The capture thread wakes thread C for each new picture, and the
+    /// encoder names when it needs thread C otherwise (`idle_until`).
+    const CAPTURE_POLL: Option<Duration> = None;
     fn encodes(display: &Display, codec: VideoCodec) -> bool {
         match codec {
             VideoCodec::H265 => video::h265_available(display.id),
@@ -144,7 +149,7 @@ impl VideoSource for video::Encoder {
             rate.bitrate,
             limits.max_width,
             limits.max_height,
-            Some(waker),
+            waker,
             video::EncoderOptions::default(),
         )
     }
@@ -155,10 +160,11 @@ impl VideoSource for video::Encoder {
         video::Encoder::set_rate(self, rate)
     }
     /// A full encoder spends the tick; one that has not asked for input yet,
-    /// or a desktop with nothing new, leaves it armed, and thread C asks
-    /// again. Every call keeps the display and the system awake a little
-    /// longer: thread C submits at least once a second while a session
-    /// streams, and never while it is paused.
+    /// or a desktop with nothing new, leaves it armed, with the capture
+    /// thread armed too, which wakes thread C for the next picture. Every
+    /// call keeps the display and the system awake a little longer: thread
+    /// C submits at least once a second while a session streams, and never
+    /// while it is paused.
     fn submit(&mut self, keyframe: bool) -> Result<bool> {
         power::touch();
         video::Encoder::submit(self, keyframe).map(video::Submit::spends_tick)
@@ -167,13 +173,15 @@ impl VideoSource for video::Encoder {
     fn presented(&self) -> Option<Presented> {
         video::Encoder::presented(self)
     }
-    /// After a submit that found no input request, while the request wakes
-    /// thread C: a retry at the poll interval until it comes, and at once
-    /// once it has, even if it came before thread C chose its next poll. A
-    /// keyframe due changes nothing, since the encoder takes no picture
-    /// until it asks.
-    fn idle_until(&self, _keyframe_due: Option<Instant>) -> Option<Instant> {
-        video::Encoder::idle_until(self)
+    /// After a submit that found no input request, a retry at the poll
+    /// interval until the request comes, and at once once it has, even if
+    /// it came before thread C chose its next poll. Otherwise at the tick
+    /// while a picture waits or the capture thread is to be armed, and
+    /// while it is armed, at the capture thread's wake or the next repeat
+    /// due: liveness, `keyframe_due`, or a keyframe waiting for the
+    /// thread's answer that nothing newer came.
+    fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        video::Encoder::idle_until(self, keyframe_due)
     }
     fn drain(&mut self) -> Result<Option<EncodedFrame>> {
         video::Encoder::drain(self).map(|image| image.map(Into::into))
@@ -187,9 +195,9 @@ impl VideoSource for video::Encoder {
     fn drain_poll(&self) -> Option<Duration> {
         video::Encoder::drain_poll(self)
     }
-    /// DXGI cannot wake thread C, whatever the encoder does: an armed tick
-    /// is asked again.
-    fn capture_poll(&self) -> Option<Duration> {
-        Some(DRAIN_POLL)
+    /// Every viewer paused: the capture thread stops waiting for presents
+    /// until thread C's next tick arms it again.
+    fn paused(&mut self, paused: bool) {
+        video::Encoder::paused(self, paused);
     }
 }
