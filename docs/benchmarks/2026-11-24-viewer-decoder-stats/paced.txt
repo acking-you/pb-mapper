@@ -1,0 +1,4 @@
+clip=clip-1080p.h264 1920x1080 decodes=720 mean=3.050 median=3.217 p95=3.912 max=15.352 (ms)
+clip=clip-4k.h264 3840x2160 decodes=720 mean=5.632 median=5.662 p95=6.198 max=31.509 (ms)
+clip=clip-1080p.h264 1920x1080 decodes=720 mean=2.596 median=2.774 p95=3.616 max=15.690 (ms)
+clip=clip-4k.h264 3840x2160 decodes=720 mean=5.099 median=4.736 p95=6.582 max=31.758 (ms)

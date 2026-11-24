@@ -1342,15 +1342,21 @@ class DesktopStats {
 
 /// The native decoder's own figures over the last second, from two reads of
 /// the `pb_mapper/desktop_video` channel's `stats`. A figure the platform
-/// does not report is null: Windows has no credits.
+/// does not report is null: only Android has credits, only macOS and iOS
+/// a decode time, only Windows a convert time.
 @immutable
 class DesktopDecoderStats {
   const DesktopDecoderStats({
     this.decodedPerSecond,
     this.droppedPerSecond,
     this.surfaceConsumeMs,
+    this.decodeMs,
+    this.presentMs,
+    this.convertMs,
+    this.decoderCpuMsPerSecond,
     this.credits,
     this.lowLatency,
+    this.hardware,
     this.refreshHz,
   });
 
@@ -1388,13 +1394,18 @@ class DesktopDecoderStats {
     }
 
     final credits = current['credits'], latency = current['lowLatency'];
-    final refresh = current['refreshHz'];
+    final hardware = current['hardware'], refresh = current['refreshHz'];
     return DesktopDecoderStats(
       decodedPerSecond: rate('decoded'),
       droppedPerSecond: rate('dropped'),
       surfaceConsumeMs: meanMs('surface_consume'),
+      decodeMs: meanMs('decode'),
+      presentMs: meanMs('present'),
+      convertMs: meanMs('convert'),
+      decoderCpuMsPerSecond: rate('decoderCpuMs'),
       credits: credits is num ? credits.toInt() : null,
       lowLatency: latency is bool ? latency : null,
+      hardware: hardware is bool ? hardware : null,
       refreshHz: refresh is num ? refresh.toDouble() : null,
     );
   }
@@ -1404,13 +1415,34 @@ class DesktopDecoderStats {
   /// From a picture's release to the surface until Flutter consumed it.
   final double? surfaceConsumeMs;
 
+  /// macOS and iOS: VideoToolbox decoding one unit into a picture, key
+  /// frames included.
+  final double? decodeMs;
+
+  /// From a decoded picture to the runner's own presentation of it, where
+  /// a runner presents pictures itself rather than through a texture.
+  final double? presentMs;
+
+  /// Windows: from opening a decoded picture for the converter to the GPU
+  /// finishing its copy for Flutter. Not a decode time: the two measure
+  /// different spans, so the panel labels them apart.
+  final double? convertMs;
+
+  /// The decoder thread's CPU time, in milliseconds a second: 1000 is one
+  /// core kept busy.
+  final double? decoderCpuMsPerSecond;
+
   /// Surface credits in use: pictures released to the surface and not yet
   /// consumed.
   final int? credits;
   final bool? lowLatency;
 
+  /// Whether the decoder configured last decodes in hardware.
+  final bool? hardware;
+
   /// The refresh rate: on Android the display mode asked for while viewing,
-  /// on macOS, iOS and Windows the fastest display's.
+  /// on macOS the viewer window's display's, on iOS the device's, on Windows
+  /// and Linux the fastest display's.
   final double? refreshHz;
 
   @override
@@ -1419,16 +1451,26 @@ class DesktopDecoderStats {
       other.decodedPerSecond == decodedPerSecond &&
       other.droppedPerSecond == droppedPerSecond &&
       other.surfaceConsumeMs == surfaceConsumeMs &&
+      other.decodeMs == decodeMs &&
+      other.presentMs == presentMs &&
+      other.convertMs == convertMs &&
+      other.decoderCpuMsPerSecond == decoderCpuMsPerSecond &&
       other.credits == credits &&
       other.lowLatency == lowLatency &&
+      other.hardware == hardware &&
       other.refreshHz == refreshHz;
   @override
   int get hashCode => Object.hash(
     decodedPerSecond,
     droppedPerSecond,
     surfaceConsumeMs,
+    decodeMs,
+    presentMs,
+    convertMs,
+    decoderCpuMsPerSecond,
     credits,
     lowLatency,
+    hardware,
     refreshHz,
   );
 }

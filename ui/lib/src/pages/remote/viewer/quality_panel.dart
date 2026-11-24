@@ -324,21 +324,33 @@ class QualityPanel extends StatelessWidget {
     ];
   }
 
+  /// What each platform's decoder reports: the Mac's decode time and
+  /// Windows' convert time measure different spans, so each has its label.
   static List<_Row> _decoder(BuildContext context, DesktopDecoderStats d) {
     final l10n = context.l10n;
     final (decoded, dropped) = (d.decodedPerSecond, d.droppedPerSecond);
+    final (decode, convert) = (d.decodeMs, d.convertMs);
+    final (present, cpu) = (d.presentMs, d.decoderCpuMsPerSecond);
     final (surface, credits) = (d.surfaceConsumeMs, d.credits);
     final (lowLatency, refresh) = (d.lowLatency, d.refreshHz);
+    String ms(double value) => '${value.toStringAsFixed(1)} ms';
     return [
       if (decoded != null)
         _Row('decoded', l10n.qualityDecoded, '${decoded.round()} /s'),
       if (dropped != null)
         _Row('dropped', l10n.qualityDropped, '${dropped.round()} /s'),
-      if (surface != null)
+      if (decode != null) _Row('decode', l10n.qualityDecodeTime, ms(decode)),
+      if (convert != null)
+        _Row('convert', l10n.qualityConvertTime, ms(convert)),
+      if (present != null)
+        _Row('present', l10n.qualityPresentTime, ms(present)),
+      if (surface != null) _Row('surface', l10n.qualitySurface, ms(surface)),
+      // The thread's CPU time a second, as a share of one core.
+      if (cpu != null)
         _Row(
-          'surface',
-          l10n.qualitySurface,
-          '${surface.toStringAsFixed(1)} ms',
+          'decoder-cpu',
+          l10n.qualityDecoderCpu,
+          '${(cpu / 10).toStringAsFixed(1)} %',
         ),
       if (credits != null) _Row('credits', l10n.qualityCredits, '$credits'),
       if (lowLatency != null)
