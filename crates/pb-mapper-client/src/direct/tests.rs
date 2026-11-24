@@ -903,6 +903,100 @@ async fn a_relay_without_direct_pauses_the_clients_next_connect_tcp() {
     .unwrap();
 }
 
+/// Echo one byte over `stream`.
+async fn echoes(stream: &mut tokio::net::TcpStream) {
+    stream.write_all(b"x").await.unwrap();
+    let mut byte = [0; 1];
+    stream.read_exact(&mut byte).await.unwrap();
+    assert_eq!(&byte, b"x");
+}
+
+/// A direct-only setup commits to direct or sets up nothing: its session
+/// counts in the connection it returns, on one endpoint every setup of the
+/// dialer reuses. One that finds no path says so, pauses direct for the
+/// client's `connect_tcp` calls as a fallback would, and counts as none in
+/// them; the next waits out that pause. Direct the publisher does not offer
+/// says so, and takes no relay either.
+#[tokio::test]
+async fn a_direct_only_setup_never_takes_the_relay() {
+    use crate::sdk::DirectOnlyError;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (relay, backend, _echo) = echo_relay("direct-only", true).await;
+        let registration = publish_direct(&relay, "direct-only", backend).await;
+
+        let client = Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
+        let dialer = client.direct_dialer("direct-only", direct_first()).unwrap();
+        let (mut stream, connection) = client.connect_tcp_direct(&dialer).await.unwrap();
+        echoes(&mut stream).await;
+        assert_eq!(connection.metrics().sessions.active_direct, 1);
+        assert_eq!(direct_counts(&connection).1, 0);
+        let network = dialer.consumer.network.get().unwrap().clone();
+        let (mut again, second) = client.connect_tcp_direct(&dialer).await.unwrap();
+        echoes(&mut again).await;
+        assert!(Arc::ptr_eq(
+            &network,
+            dialer.consumer.network.get().unwrap()
+        ));
+
+        // A client whose direct endpoints get no QUIC packet out.
+        let mut blocked =
+            Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
+        Arc::get_mut(&mut blocked.inner).unwrap().endpoint =
+            RelayEndpoint::isolated(relay.addr.into());
+        let generation = blocked.inner.endpoint.network_generation();
+        blocked
+            .inner
+            .direct_memory
+            .lock()
+            .pauses("direct-only", Instant::now(), generation)
+            .lock()
+            .block_quic = true;
+        let unpunchable = blocked
+            .direct_dialer("direct-only", direct_first())
+            .unwrap();
+        let missed = blocked
+            .connect_tcp_direct(&unpunchable)
+            .await
+            .err()
+            .unwrap();
+        let DirectOnlyError::Failed {
+            reason: FallbackReason::Unreachable,
+            until: Some(until),
+        } = missed
+        else {
+            panic!("{missed:?}");
+        };
+        let missed = blocked
+            .connect_tcp_direct(&unpunchable)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(missed, DirectOnlyError::Paused { until: paused } if paused == until),
+            "{missed:?}"
+        );
+        // The client's own calls to the service go by that pause.
+        let (_, relayed) = connect_tcp_first_byte(&blocked, "direct-only").await;
+        assert_eq!(direct_counts(&relayed), (0, 0, 1));
+
+        // A publisher without direct.
+        let (other, backend, _echo) = echo_relay("direct-only-relay", false).await;
+        let relayed_only = publish_direct(&other, "relay-only", backend).await;
+        let plain = Client::from_credential(other.addr.to_string(), other.credential, false, None);
+        let dialer = plain.direct_dialer("relay-only", direct_first()).unwrap();
+        let missed = plain.connect_tcp_direct(&dialer).await.err().unwrap();
+        assert!(matches!(missed, DirectOnlyError::NotOffered), "{missed:?}");
+
+        for connection in [connection, second, relayed] {
+            connection.stop().await.unwrap();
+        }
+        relayed_only.stop().await.unwrap();
+        registration.stop().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 /// A publisher sends its direct sessions under the controller it registered
 /// with, and its link says so; the consumer's end of the same session sends
 /// under Cubic, as a publisher that asks for nothing does.

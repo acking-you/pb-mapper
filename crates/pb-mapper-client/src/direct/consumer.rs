@@ -290,17 +290,89 @@ impl Consumer {
         key: &str,
         deadline: Instant,
     ) -> io::Result<Option<Prepared>> {
-        // A recent fallback says this path will not punch: take the ordinary
-        // relay path without spending the connection's setup budget on it.
-        // The fallback may have been another connection's, so say until when.
-        let paused = self
+        match self.setup(key, deadline).await? {
+            Ok(prepared) => Ok(Some(prepared)),
+            // A recent fallback says this path will not punch: take the
+            // ordinary relay path without spending the connection's setup
+            // budget on it. The fallback may have been another connection's,
+            // so say until when.
+            Err(Missed::Paused(until)) => {
+                self.diagnostics.direct_cooldown(Some(until));
+                self.diagnostics.cooldown_skip();
+                Ok(None)
+            }
+            Err(Missed::Negotiation {
+                reason,
+                says,
+                attempt,
+            }) => {
+                tracing::info!(event = "session_path_selected", path = "relay", service = %key, reason = reason.as_str());
+                attempt.fell_back(reason);
+                self.fell_back(says);
+                Ok(None)
+            }
+            Err(Missed::Unreachable(granted)) => {
+                let Granted {
+                    control,
+                    grant,
+                    mut pending,
+                    attempt,
+                } = *granted;
+                attempt.fell_back(FallbackReason::Unreachable);
+                self.fell_back(Says::Unpunchable);
+                let relayed = self.relay(key, &control, grant, &mut pending).await?;
+                self.relay_carried();
+                Ok(Some(relayed))
+            }
+        }
+    }
+    /// A setup that never takes the relay: a direct session, or why there
+    /// is none. Its attempt is its own: no fallback is counted, nothing says
+    /// the relay was selected, and only what says the path will not punch
+    /// pauses direct, at once, for this consumer's client.
+    pub async fn prepare_direct(
+        self: &Arc<Self>,
+        key: &str,
+        deadline: Instant,
+    ) -> Result<Prepared, DirectOnly> {
+        let missed = match self.setup(key, deadline).await {
+            Ok(Ok(prepared)) => return Ok(prepared),
+            Ok(Err(missed)) => missed,
+            Err(error) => return Err(DirectOnly::Io(error)),
+        };
+        let (reason, says) = match missed {
+            Missed::Paused(until) => return Err(DirectOnly::Paused(until)),
+            Missed::Negotiation {
+                reason: FallbackReason::NotOffered,
+                ..
+            } => return Err(DirectOnly::NotOffered),
+            Missed::Negotiation { reason, says, .. } => (reason, says),
+            // Its grant is cancelled as `pending` drops.
+            Missed::Unreachable(_) => (FallbackReason::Unreachable, Says::Unpunchable),
+        };
+        tracing::info!(event = "direct_only_failed", service = %key, reason = reason.as_str());
+        if says == Says::Unpunchable {
+            self.back_off();
+        }
+        let until = self
             .cooldown()
             .until()
             .filter(|until| Instant::now() < *until);
-        if paused.is_some() {
-            self.diagnostics.direct_cooldown(paused);
-            self.diagnostics.cooldown_skip();
-            return Ok(None);
+        Err(DirectOnly::Failed { reason, until })
+    }
+    /// The setup both kinds share: everything up to a committed direct
+    /// session, or why it missed, with what the relay needs to take over.
+    async fn setup(
+        self: &Arc<Self>,
+        key: &str,
+        deadline: Instant,
+    ) -> io::Result<Result<Prepared, Missed>> {
+        if let Some(until) = self
+            .cooldown()
+            .until()
+            .filter(|until| Instant::now() < *until)
+        {
+            return Ok(Err(Missed::Paused(until)));
         }
         // Before a grant arrives no endpoint can have committed, so a failed
         // capability/control/discovery attempt can use the ordinary relay path.
@@ -330,10 +402,11 @@ impl Consumer {
         let (control, network, discovered, grant) = match negotiated {
             Ok(negotiated) => negotiated,
             Err((reason, says)) => {
-                tracing::info!(event = "session_path_selected", path = "relay", service = %key, reason = reason.as_str());
-                attempt.fell_back(reason);
-                self.fell_back(says);
-                return Ok(None);
+                return Ok(Err(Missed::Negotiation {
+                    reason,
+                    says,
+                    attempt,
+                }));
             }
         };
         let deadline = deadline.min(Instant::now() + Duration::from_millis(grant.ttl_ms));
@@ -377,12 +450,13 @@ impl Consumer {
                 tracing::debug!(reason = ?failed.as_ref().map(|r| r.as_ref().map(|_| ())), "direct attempt failed before commit");
                 lan_missed(&self.diagnostics, &lan, None);
                 self.tcp_settled(tcp_missed, None);
-                attempt.fell_back(FallbackReason::Unreachable);
-                self.fell_back(Says::Unpunchable);
                 network.punching_failed();
-                let relayed = self.relay(key, &control, grant, &mut pending).await?;
-                self.relay_carried();
-                return Ok(Some(relayed));
+                return Ok(Err(Missed::Unreachable(Box::new(Granted {
+                    control,
+                    grant,
+                    pending,
+                    attempt,
+                }))));
             }
         };
         // From this point on, timeout/cancellation/ACK loss MUST NOT select relay.
@@ -419,7 +493,7 @@ impl Consumer {
         attempt.established(setup, link.kind);
         self.clear_cooldown();
         log_path(key, &link);
-        Ok(Some(Prepared {
+        Ok(Ok(Prepared {
             path: DataPath::Direct {
                 conn,
                 framing_key,
@@ -533,6 +607,45 @@ impl Consumer {
 /// end's endpoint, what it discovered, and the grant.
 type Negotiated = (Arc<Control>, Arc<Network>, Discovered, SessionGrant);
 
+/// Why a setup did not commit to direct, before the commit point, with
+/// what the relay needs to take over.
+enum Missed {
+    /// Direct is paused until then, after a recent fallback.
+    Paused(Instant),
+    /// No grant: direct was not offered, or negotiating failed or ran past
+    /// its budget.
+    Negotiation {
+        reason: FallbackReason,
+        says: Says,
+        attempt: DirectAttemptGuard,
+    },
+    /// Granted, and no path came up in time: the relay can take the grant.
+    Unreachable(Box<Granted>),
+}
+
+/// A grant no direct path came up for, which the relay can take.
+struct Granted {
+    control: Arc<Control>,
+    grant: SessionGrant,
+    pending: PendingSession,
+    attempt: DirectAttemptGuard,
+}
+
+/// Why a setup that never takes the relay set up no direct session.
+#[derive(Debug)]
+pub(crate) enum DirectOnly {
+    /// Direct is paused until then, after a recent fallback.
+    Paused(Instant),
+    /// The relay or the publisher offers no direct.
+    NotOffered,
+    /// It missed for `reason`; direct is paused until `until`, if at all.
+    Failed {
+        reason: FallbackReason,
+        until: Option<Instant>,
+    },
+    Io(io::Error),
+}
+
 /// Dial the provider for `grant`, and claim it on the path that connected:
 /// the grant's id, then its binding to this TLS session. The provider
 /// answers once the binding checks out and the grant is confirmed.
@@ -588,10 +701,21 @@ pub(crate) struct Prepared {
 impl Prepared {
     pub async fn forward<L: NetworkStream + StreamForward>(
         self,
-        mut local: L,
+        local: L,
         credential: Credential,
     ) -> io::Result<()> {
-        let (path, meter, mut report) = self.open();
+        let diagnostics = self.owner.diagnostics.clone();
+        self.forward_on(local, credential, &diagnostics).await
+    }
+    /// [`Self::forward`], counting the session in `diagnostics`: those of
+    /// the tunnel that carries it, when its consumer outlives it.
+    pub async fn forward_on<L: NetworkStream + StreamForward>(
+        self,
+        mut local: L,
+        credential: Credential,
+        diagnostics: &Diagnostics,
+    ) -> io::Result<()> {
+        let (path, meter, mut report) = self.open(diagnostics);
         let forwarding = async {
             match path {
                 DataPath::Direct {
@@ -624,8 +748,7 @@ impl Prepared {
     }
     /// Open the session in diagnostics, on its path, and start reporting it:
     /// the path to forward on, where to count its bytes, and its reporter.
-    fn open(self) -> (DataPath, Arc<ByteMeter>, SessionReporter) {
-        let diagnostics = &self.owner.diagnostics;
+    fn open(self, diagnostics: &Diagnostics) -> (DataPath, Arc<ByteMeter>, SessionReporter) {
         let (path, link) = match &self.path {
             DataPath::Direct { conn, link, .. } => (
                 SessionPath::Direct,
