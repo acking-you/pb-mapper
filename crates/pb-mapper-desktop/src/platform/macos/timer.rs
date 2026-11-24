@@ -5,7 +5,9 @@
 //! coalescing the process's timers (measured on a CI runner: a 2 ms wait
 //! still ended 8 ms late); thread C's waits avoid that themselves
 //! (`waiter.rs`). Counted across the process's sessions; the last guard ends
-//! the activity. Idle system sleep beyond that is the owner's settings'.
+//! the activity, and gives back the declaration that lit a sleeping display
+//! (`power.rs`), which the activity does not do. Idle system sleep beyond
+//! that is the owner's settings'.
 
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::{NSActivityOptions, NSObjectProtocol, NSProcessInfo, NSString};
@@ -50,4 +52,5 @@ pub(crate) fn release() {
         // SAFETY: the token is the one `beginActivity` returned, ended once.
         unsafe { NSProcessInfo::processInfo().endActivity(&activity.0) };
     }
+    super::power::release();
 }

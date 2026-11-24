@@ -9,6 +9,7 @@ use super::{
     encoder::Encoder,
     layout,
     modes::MacModes,
+    power,
     reuse::{REUSE, Reuse},
 };
 use crate::{
@@ -190,6 +191,36 @@ fn displays_are_named_by_uuid_and_measured_in_pixels() {
         assert!(current.scale >= 1);
         modes.list(&display.name).unwrap();
     }
+}
+
+/// What a session's start waits on once it woke a display: an awake one
+/// draws, found by its UUID or, without one, by its id, and another UUID
+/// never matches it, or the wait would run out at every start. Every active
+/// display is online, and the lid reads on a Mac without one. Nothing is
+/// woken.
+#[test]
+fn a_woken_display_is_found_by_the_name_it_is_bound_by() {
+    use crate::Display;
+    use objc2_core_graphics::CGDisplayIsAsleep;
+    let online = power::online();
+    for display in desktop::displays().unwrap() {
+        assert!(online.contains(&display.id), "{display:?}");
+        if CGDisplayIsAsleep(display.id) {
+            continue;
+        }
+        assert!(power::drawing(&display), "{display:?}");
+        let unnamed = Display {
+            name: String::new(),
+            ..display.clone()
+        };
+        assert!(power::drawing(&unnamed), "{display:?}");
+        let other = Display {
+            name: "00000000-0000-0000-0000-000000000000".into(),
+            ..display
+        };
+        assert!(!power::drawing(&other), "{other:?}");
+    }
+    let _ = power::lid_closed();
 }
 
 /// Only a ScreenCaptureKit refusal or user stop ends capture consent.
