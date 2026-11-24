@@ -10,7 +10,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinSet;
 
-/// How a [`shaped_link`] shapes its traffic, in both directions alike.
+/// How a [`shaped_link`] shapes its traffic: both directions alike, or one
+/// of them under [`shaped_link_each_way`].
 #[derive(Default)]
 pub struct Shape {
     /// Every byte is held this long.
@@ -38,6 +39,16 @@ impl ShapedLink {
 /// bounds what is in flight. Bytes stay in order. A connection the relay
 /// refuses is closed, and the hop goes on accepting, as a network would.
 pub async fn shaped_link(relay: SocketAddr, shape: Arc<Shape>) -> ShapedLink {
+    shaped_link_each_way(relay, shape.clone(), shape).await
+}
+
+/// A [`shaped_link`] whose directions are shaped apart: `up` what the end
+/// that connects to the hop writes toward `relay`, `down` what comes back.
+pub async fn shaped_link_each_way(
+    relay: SocketAddr,
+    up: Arc<Shape>,
+    down: Arc<Shape>,
+) -> ShapedLink {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let mut hop = JoinSet::new();
@@ -52,8 +63,8 @@ pub async fn shaped_link(relay: SocketAddr, shape: Arc<Shape>) -> ShapedLink {
             far.set_nodelay(true).unwrap();
             let (near_read, near_write) = near.into_split();
             let (far_read, far_write) = far.into_split();
-            copies.spawn(shaped_copy(near_read, far_write, shape.clone()));
-            copies.spawn(shaped_copy(far_read, near_write, shape.clone()));
+            copies.spawn(shaped_copy(near_read, far_write, up.clone()));
+            copies.spawn(shaped_copy(far_read, near_write, down.clone()));
         }
         // A listener that fails stops accepting; what it carries goes on.
         while copies.join_next().await.is_some() {}

@@ -6,7 +6,7 @@
 //! cargo test -p pb-mapper-desktop -- --ignored --nocapture slow_link
 use crate::*;
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
-use pb_mapper_testkit::{Relay, Shape, ShapedLink, admin_credential, shaped_link};
+use pb_mapper_testkit::{Relay, Shape, ShapedLink, admin_credential, shaped_link_each_way};
 use std::{
     collections::{BTreeSet, VecDeque},
     future::Future,
@@ -60,6 +60,17 @@ struct Interval {
     keyframes: u64,
     /// Not an interval: the host's `desktop_rate_model_latched`.
     latched: bool,
+    bpf: u64,
+    window_frames: u64,
+    window_bytes: u64,
+    /// The controller's action, as `Adaptation`'s debug name.
+    adaptation: &'static str,
+    delay_ms: Option<u64>,
+    ack_queue_ms: u64,
+    rtt_ms: Option<u64>,
+    /// The receipts' one-way queues, from a viewer that stamps arrival times.
+    forward_queue_ms: Option<u64>,
+    reverse_queue_ms: Option<u64>,
 }
 impl Interval {
     fn new(at: Instant) -> Self {
@@ -78,6 +89,15 @@ impl Interval {
             skipped_ticks: 0,
             keyframes: 0,
             latched: false,
+            bpf: 0,
+            window_frames: 0,
+            window_bytes: 0,
+            adaptation: "",
+            delay_ms: None,
+            ack_queue_ms: 0,
+            rtt_ms: None,
+            forward_queue_ms: None,
+            reverse_queue_ms: None,
         }
     }
 }
@@ -98,6 +118,14 @@ impl tracing::field::Visit for Interval {
             "viewer_cap" => self.viewer_cap = Some(value),
             "skipped_ticks" => self.skipped_ticks = value,
             "keyframes" => self.keyframes = value,
+            "bpf" => self.bpf = value,
+            "window_frames" => self.window_frames = value,
+            "window_bytes" => self.window_bytes = value,
+            "delay_ms" => self.delay_ms = Some(value),
+            "ack_queue_ms" => self.ack_queue_ms = value,
+            "rtt_ms" => self.rtt_ms = Some(value),
+            "forward_queue_ms" => self.forward_queue_ms = Some(value),
+            "reverse_queue_ms" => self.reverse_queue_ms = Some(value),
             _ => {}
         }
     }
@@ -109,8 +137,24 @@ impl tracing::field::Visit for Interval {
         }
     }
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "rate_model" {
-            self.timestamp_model = format!("{value:?}") == "Timestamp";
+        match field.name() {
+            "rate_model" => self.timestamp_model = format!("{value:?}") == "Timestamp",
+            "action" => {
+                let action = format!("{value:?}");
+                self.adaptation = [
+                    "Startup",
+                    "Steady",
+                    "Raising",
+                    "LoweringFps",
+                    "LoweringBitrate",
+                    "Unresponsive",
+                    "Paused",
+                ]
+                .into_iter()
+                .find(|name| *name == action)
+                .unwrap_or("?");
+            }
+            _ => {}
         }
     }
 }
@@ -815,6 +859,28 @@ impl Rig {
         latency: Duration,
         fps: u32,
     ) -> Self {
+        let link = shape.map(|shape| (shape.clone(), shape));
+        Self::build(name, link, sizes, latency, fps).await
+    }
+    /// A rig whose viewer's link is shaped `up`, toward the relay, apart from
+    /// `down`, toward the viewer.
+    async fn each_way(name: &str, up: Arc<Shape>, down: Arc<Shape>, sizes: Sizes) -> Self {
+        Self::build(
+            name,
+            Some((up, down)),
+            sizes,
+            ENCODE_TIME,
+            CEILING_FPS as u32,
+        )
+        .await
+    }
+    async fn build(
+        name: &str,
+        link: Option<(Arc<Shape>, Arc<Shape>)>,
+        sizes: Sizes,
+        latency: Duration,
+        fps: u32,
+    ) -> Self {
         let relay = Relay::start(&format!("desktop-{name}")).await;
         let client = |addr: SocketAddr| {
             Client::from_credential(addr.to_string(), admin_credential(), true, None)
@@ -840,9 +906,9 @@ impl Rig {
             .start(&local)
             .await
             .unwrap();
-        let (remote, link) = match shape {
-            Some(shape) => {
-                let link = shaped_link(relay.addr(), shape).await;
+        let (remote, link) = match link {
+            Some((up, down)) => {
+                let link = shaped_link_each_way(relay.addr(), up, down).await;
                 (client(link.addr()), Some(link))
             }
             None => (client(relay.addr()), None),
@@ -1227,6 +1293,169 @@ fn per_second_encoder_on_a_bandwidth_limit() {
         assert!(
             run.recovered.is_some(),
             "the bitrate must recover to 80% of the start within 30 s"
+        );
+    });
+}
+
+/// The standing queue a busy uplink gives the viewer's side of the link (a
+/// cloud backup, a photo sync, a video call), on top of `SHORT_PATH_MS`.
+const REVERSE_QUEUE_MS: u64 = 300;
+/// Seconds of a clean link, of the queue, and after it is lifted.
+const REVERSE_CLEAN: u64 = 6;
+const REVERSE_HELD: u64 = 15;
+const REVERSE_LIFTED: u64 = 5;
+
+/// What one run of a reverse-queue case saw.
+struct ReverseRun {
+    status: ViewerStatus,
+    /// The host's last interval before the queue.
+    before: Interval,
+    /// The host's intervals that cover only time under the queue.
+    held: Vec<Interval>,
+    /// The viewer's received fps, sampled once a second from the second
+    /// second under the queue until it is lifted.
+    received: Vec<f32>,
+}
+
+/// A short path both ways, then for `REVERSE_HELD` s `REVERSE_QUEUE_MS` more
+/// on the viewer's uplink only, with the link toward the viewer limited to
+/// `down_rate` bytes a second unless that is 0, then both lifted. Prints, as
+/// `case`, the host's every interval and the viewer's received fps.
+async fn reverse_queue(trace: &Trace, case: &str, down_rate: u64) -> ReverseRun {
+    let (up, down) = (Arc::new(Shape::default()), Arc::new(Shape::default()));
+    for shape in [&up, &down] {
+        shape.delay_ms.store(SHORT_PATH_MS, Ordering::Relaxed);
+    }
+    let rig = Rig::each_way(case, up.clone(), down.clone(), TYPICAL).await;
+    let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+    let started = Instant::now();
+    let (mut queued, mut lifted) = (None, None);
+    let mut samples = Vec::new();
+    for second in 0..REVERSE_CLEAN + REVERSE_HELD + REVERSE_LIFTED {
+        if second == REVERSE_CLEAN {
+            up.delay_ms
+                .store(SHORT_PATH_MS + REVERSE_QUEUE_MS, Ordering::Relaxed);
+            down.rate.store(down_rate, Ordering::Relaxed);
+            queued = Some(Instant::now());
+        } else if second == REVERSE_CLEAN + REVERSE_HELD {
+            up.delay_ms.store(SHORT_PATH_MS, Ordering::Relaxed);
+            down.rate.store(0, Ordering::Relaxed);
+            lifted = Some(Instant::now());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        samples.push((Instant::now(), rig.viewer.status().stats.received_fps));
+    }
+    let status = rig.viewer.status();
+    rig.stop().await;
+    let (queued, lifted) = (queued.unwrap(), lifted.unwrap());
+    let phase = |at: Instant| match at {
+        at if at < queued => "clean",
+        at if at < lifted => "queued",
+        _ => "lifted",
+    };
+    let millis = |value: Option<u64>| value.map_or_else(|| "-".to_owned(), |ms| ms.to_string());
+    for interval in trace.between(started, Instant::now()) {
+        println!(
+            "{case} t_ms={} phase={} pace_fps={} fps={} bpf={} encoder_bitrate={} sent_bitrate={} clamped={} adaptation={} window_frames={} window_bytes={} rtt_ms={} delay_ms={} ack_queue_ms={} forward_queue_ms={} reverse_queue_ms={}",
+            interval.at.saturating_duration_since(started).as_millis(),
+            phase(interval.at),
+            interval.pace_fps,
+            interval.fps,
+            interval.bpf,
+            interval.encoder_bitrate,
+            interval.sent_bitrate,
+            interval.window_clamped,
+            interval.adaptation,
+            interval.window_frames,
+            interval.window_bytes,
+            millis(interval.rtt_ms),
+            millis(interval.delay_ms),
+            interval.ack_queue_ms,
+            millis(interval.forward_queue_ms),
+            millis(interval.reverse_queue_ms),
+        );
+    }
+    let received: Vec<(&str, f32)> = samples
+        .iter()
+        .map(|(at, fps)| (phase(*at), (fps * 10.0).round() / 10.0))
+        .collect();
+    println!(
+        "{case} up_queue_ms={REVERSE_QUEUE_MS} down_rate={down_rate} received_fps={received:?} state={:?}",
+        status.state
+    );
+    let before = trace
+        .between(started, queued)
+        .last()
+        .copied()
+        .unwrap_or_else(|| trace.last());
+    ReverseRun {
+        status,
+        before,
+        held: trace.between(
+            queued + session::STATS_INTERVAL,
+            lifted + Duration::from_millis(1),
+        ),
+        received: samples
+            .iter()
+            .filter(|(at, _)| (queued + Duration::from_secs(2)..lifted).contains(at))
+            .map(|(_, fps)| *fps)
+            .collect(),
+    }
+}
+
+/// A queue on the viewer's uplink only is no congestion of the video toward
+/// it: the pace holds at the ceiling, bits per frame hold, and the window is
+/// never clamped to the delivery rate, while the viewer keeps receiving the
+/// ceiling's frames.
+#[test]
+#[ignore = "explicit ~27-second reverse-path queue acceptance"]
+fn reverse_path_queue_is_not_congestion() {
+    traced(|trace| async move {
+        let ReverseRun {
+            status,
+            before,
+            held,
+            received,
+        } = reverse_queue(&trace, "reverse_queue", 0).await;
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        assert_eq!(before.pace_fps, CEILING_FPS, "{before:?}");
+        assert!(!held.is_empty());
+        for interval in &held {
+            assert!(interval.pace_fps >= 55, "the pace fell: {interval:?}");
+            assert!(!interval.window_clamped, "the window clamped: {interval:?}");
+            assert!(
+                interval.encoder_bitrate * 10 >= before.encoder_bitrate * 9,
+                "bits per frame fell from {}: {interval:?}",
+                before.encoder_bitrate
+            );
+        }
+        assert!(
+            received.iter().all(|fps| *fps >= 55.0),
+            "the viewer received less: {received:?}"
+        );
+        trace.assert_never_latched();
+    });
+}
+
+/// The same uplink queue while the link toward the viewer is limited to
+/// 3 Mbit/s, below what the session sends: that is congestion, and the
+/// controller still cuts.
+#[test]
+#[ignore = "explicit ~27-second reverse-path queue with a forward limit acceptance"]
+fn reverse_queue_with_forward_limit_still_cuts() {
+    traced(|trace| async move {
+        let ReverseRun {
+            status,
+            before,
+            held,
+            ..
+        } = reverse_queue(&trace, "reverse_queue_forward_limit", 375_000).await;
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        let lowest = |value: fn(&Interval) -> u64| held.iter().map(value).min().unwrap();
+        assert!(
+            lowest(|interval| interval.pace_fps) < CEILING_FPS
+                || lowest(|interval| interval.encoder_bitrate) < before.encoder_bitrate,
+            "a forward limit must cut: before {before:?}, then {held:?}"
         );
     });
 }
