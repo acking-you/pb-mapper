@@ -332,6 +332,10 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         }
         Ok(read.map(|(x, y, showing)| confine(&expected.display, (x, y), showing)))
     }
+    /// Read when asked: thread C samples on its own clock.
+    fn cursor_changed(&self) -> bool {
+        false
+    }
     /// The shape of the pointer `cursor` just read, on the desktop it
     /// checked around that read.
     fn cursor_shape(&mut self, _expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
@@ -564,6 +568,9 @@ impl Backend for NativeBackend {
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         self.0.cursor(expected)
+    }
+    fn cursor_changed(&self) -> bool {
+        self.0.cursor_changed()
     }
     fn cursor_shape(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
         self.0.cursor_shape(expected)

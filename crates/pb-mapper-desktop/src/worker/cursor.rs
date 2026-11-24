@@ -94,6 +94,9 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     /// viewer gets a position sooner than the clock only with a new shape.
     /// A reading that finds a new shape keeps the looks still owed: that
     /// shape may answer an earlier move, and the newest move's come later.
+    /// A backend told of the pointer (`Backend::cursor_changed`, the
+    /// privileged helper's) is sampled as soon as it says it changed, which
+    /// starts the clock again.
     pub(super) fn sample_cursor(&mut self, now: Instant) {
         if self.paused || self.unavailable.is_some() {
             return;
@@ -102,7 +105,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if let Some(look) = look {
             self.shape_due = look.next(now);
         }
-        if now >= self.cursor_due {
+        if now >= self.cursor_due || self.backend.cursor_changed() {
             self.read_cursor(now, false);
         } else if look.is_some() && self.cursor_shapes {
             self.read_cursor(now, true);

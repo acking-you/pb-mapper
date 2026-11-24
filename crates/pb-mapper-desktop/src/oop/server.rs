@@ -311,7 +311,8 @@ struct Pushes {
     pointer_due: Option<Instant>,
     /// The looks at the pointer's shape still owed to the last move.
     looks: [Option<Instant>; 2],
-    /// The pointer and shape number pushed last.
+    /// The pointer and shape number the host holds, as the last push or
+    /// answer that carried them left it; `None` pushes the next reading.
     pointer: Option<(Option<CursorPosition>, Option<u64>)>,
     /// The `last_input` held input was let go for, once its lease ran out.
     released: Option<Instant>,
@@ -378,6 +379,8 @@ impl Pushes {
     ) -> bool {
         let close = matches!(request, Request::Close {});
         let capture = matches!(request, Request::Video { .. });
+        let observes_cursor = request.observes_cursor();
+        let input = matches!(request, Request::Input { .. });
         let moved = matches!(
             request,
             Request::Input {
@@ -401,6 +404,16 @@ impl Pushes {
                     // As thread C looks after the move it applied: the
                     // pointer's shape over what it moved onto.
                     self.looks = [Some(now + SHAPE_LOOK), Some(now + SHAPE_LATE)];
+                }
+                // The host takes the pointer this answer carries, as it
+                // takes a push: the next reading that differs is pushed.
+                if observes_cursor {
+                    self.pointer = Some((response.cursor, response.shape_serial));
+                } else if input
+                    && response.cursor.is_some()
+                    && let Some((cursor, _)) = &mut self.pointer
+                {
+                    *cursor = response.cursor;
                 }
                 Outgoing::Reply {
                     response: Box::new(response),

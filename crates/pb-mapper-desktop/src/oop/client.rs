@@ -9,7 +9,8 @@
 //! and the pushes between answers. A pushed unit or failure waits in a
 //! queue that thread C drains without crossing the pipe, a fresh picture
 //! for an armed tick is a flag, and a pushed pointer replaces the last
-//! one; each but the pointer wakes thread C. What depends on the order of
+//! one; each wakes thread C, the pointer when it changed what thread C
+//! would read (`Backend::cursor_changed`). What depends on the order of
 //! answers and pushes (the queue, the pointer, the units the worker's
 //! encoder holds) is kept by the I/O thread as each arrives, so that an
 //! answer thread C reads late never undoes a push that came after it.
@@ -358,10 +359,14 @@ impl RemoteBackend {
         Ok(())
     }
 
-    /// Tell the worker whether thread C wants video, once per change.
+    /// Tell the worker whether thread C wants video, once per change. The
+    /// worker drops the tick its last capture armed when the stream stops,
+    /// and its capture thread stops looking, so the arming goes here too:
+    /// the first tick after a resume captures, as in process.
     fn stream(&mut self, on: bool) {
         if on != self.streaming && self.call(Request::Stream { on }).is_ok() {
             self.streaming = on;
+            self.armed = None;
         }
     }
 }
@@ -425,10 +430,17 @@ impl Backend for RemoteBackend {
     /// reported.
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         self.check_link()?;
+        let mut pushed = self.link.shared.lock();
+        pushed.cursor_changed = false;
         if self.context.as_ref() != Some(expected) {
             return Err(error("helper cursor belongs to a different desktop"));
         }
-        Ok(self.link.shared.lock().cursor)
+        Ok(pushed.cursor)
+    }
+    /// The worker pushed a pointer, or a shape's number, other than the one
+    /// thread C last read; the I/O thread woke thread C for it.
+    fn cursor_changed(&self) -> bool {
+        !self.failed && self.link.shared.lock().cursor_changed
     }
     /// The first call asks the worker to read shapes from then on; later
     /// ones cross the pipe only when the worker numbered a newer shape. The
@@ -565,7 +577,8 @@ impl Backend for RemoteBackend {
         })
     }
     /// The I/O thread wakes thread C for each unit, failure and fresh
-    /// picture the worker pushes; the worker streams from now on.
+    /// picture the worker pushes, and for a pointer that changed; the
+    /// worker streams from now on.
     fn bind(&mut self, waker: Waker) {
         self.link.shared.lock().waker = Some(waker);
         self.stream(true);
@@ -741,6 +754,9 @@ struct Pushed {
     cursor: Option<CursorPosition>,
     /// The newest shape's number the worker reported.
     shape_serial: u64,
+    /// A pushed pointer changed `cursor` or `shape_serial` since thread C
+    /// last read the pointer.
+    cursor_changed: bool,
     /// Thread C's wake, once it bound the backend.
     waker: Option<Waker>,
     /// The link ended: the pipe closed, or the worker broke the protocol.
@@ -928,9 +944,14 @@ async fn read<R: tokio::io::AsyncRead + Unpin>(
                         .is_some_and(|context| inside(&cursor, &context.display))
                 });
                 if fits {
-                    pushed.cursor = cursor;
-                    if let Some(serial) = shape_serial {
+                    let serial = shape_serial.unwrap_or(pushed.shape_serial);
+                    // Thread C samples a change at once, as it would have
+                    // read it in process.
+                    if pushed.cursor != cursor || pushed.shape_serial != serial {
+                        pushed.cursor = cursor;
                         pushed.shape_serial = serial;
+                        pushed.cursor_changed = true;
+                        pushed.wake();
                     }
                     stats.pointers += 1;
                 } else {

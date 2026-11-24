@@ -146,16 +146,17 @@ fn bound(backend: &mut RemoteBackend) -> Waiter {
     waiter
 }
 
-/// Wait on `waiter`, which the backend's pushes wake, until `done`, for at
-/// most 5 s; a check every 2 ms also sees what wakes nothing (a pushed
-/// pointer).
-fn until(waiter: &Waiter, mut done: impl FnMut() -> bool) {
-    let end = Instant::now() + Duration::from_secs(5);
+/// Wait on `waiter` until `done`, each wait ended by a wake within a
+/// second: what this waits for is a push that wakes thread C, which would
+/// otherwise see it only at its next deadline.
+fn woken(waiter: &Waiter, mut done: impl FnMut() -> bool) {
     while !done() {
-        assert!(Instant::now() < end, "never happened");
-        waiter
-            .wait(Instant::now() + Duration::from_millis(2))
-            .unwrap();
+        assert!(
+            waiter
+                .wait(Instant::now() + Duration::from_secs(1))
+                .unwrap(),
+            "no wake"
+        );
     }
 }
 
@@ -733,7 +734,7 @@ fn units_arrive_without_a_drain_request() {
         Some(unit) => unit,
         None => {
             assert_eq!(backend.pending_video(), 1, "the worker's encoder holds it");
-            until(&waiter, || !backend.link.shared.lock().queue.is_empty());
+            woken(&waiter, || !backend.link.shared.lock().queue.is_empty());
             assert_eq!(backend.pending_video(), 1, "pushed, and not taken yet");
             backend
                 .drain_video(&context, Duration::ZERO)
@@ -1063,7 +1064,7 @@ fn a_fresh_picture_is_told_for_an_armed_tick_and_dated() {
     assert!(!backend.submitted_video(), "nothing presented yet");
     assert!(backend.capture_idle_until(None).is_some());
     probe.land(Instant::now());
-    until(&waiter, || backend.capture_idle_until(None).is_none());
+    woken(&waiter, || backend.capture_idle_until(None).is_none());
     // Its unit is pushed after the answer: the capture may hand it over
     // already, or a drain once it is in.
     let mut unit = backend
@@ -1080,7 +1081,7 @@ fn a_fresh_picture_is_told_for_an_armed_tick_and_dated() {
     );
     // Spent: the next tick captures.
     assert_eq!(backend.capture_idle_until(None), None);
-    until(&waiter, || {
+    woken(&waiter, || {
         if unit.is_none() {
             unit = backend.drain_video(&context, Duration::ZERO).unwrap();
         }
@@ -1092,8 +1093,9 @@ fn a_fresh_picture_is_told_for_an_armed_tick_and_dated() {
 }
 
 /// While thread C streams, the worker pushes the pointer as it moves, with
-/// no request; binding turns the stream on, and pausing every viewer turns
-/// it off and on again, once per change.
+/// no request, and a change wakes thread C, which samples it at once;
+/// binding turns the stream on, and pausing every viewer turns it off,
+/// pushing nothing, and on again, once per change.
 #[test]
 fn pointer_pushes_arrive_while_streaming() {
     let probe = Probe::default();
@@ -1122,13 +1124,117 @@ fn pointer_pushes_arrive_while_streaming() {
     };
     assert_eq!(at(&mut backend), Some((5, 7)));
     probe.point(display.x + 9, 3);
-    until(&waiter, || at(&mut backend) == Some((9, 3)));
+    woken(&waiter, || backend.cursor_changed());
+    assert_eq!(at(&mut backend), Some((9, 3)));
+    assert!(!backend.cursor_changed(), "read");
     probe.point(display.x + 2, 2);
-    until(&waiter, || at(&mut backend) == Some((2, 2)));
+    woken(&waiter, || at(&mut backend) == Some((2, 2)));
+    backend.video_paused(true);
+    // Paused: nothing pushed, nothing woken, however far the pointer goes.
+    waiter.wait(Instant::now()).unwrap();
+    probe.point(display.x + 4, 4);
+    let paused = Instant::now() + 4 * crate::worker::CURSOR_INTERVAL;
+    assert!(!waiter.wait(paused).unwrap());
+    assert_eq!(at(&mut backend), Some((2, 2)));
+    backend.video_paused(false);
+    backend.video_paused(false);
+    woken(&waiter, || at(&mut backend) == Some((4, 4)));
+    assert_eq!(*streams.lock(), [true, false, true]);
+    drop(backend);
+    helper.join().unwrap();
+}
+
+/// The worker pushes a reading that differs from the pointer the host
+/// holds, which an answer may have set: an input's answer reports the move
+/// it applied, and a pointer the system then put back where the worker last
+/// pushed it is pushed again.
+#[test]
+fn a_pointer_back_where_it_was_pushed_is_pushed_after_an_answer() {
+    let probe = Probe::default();
+    let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop-pointer-back");
+    let (mut backend, helper) = synthetic::<false>(&probe, journal.to_path_buf(), |_| None, |_| {});
+    let display = Probe::display();
+    probe.point(display.x + 5, 7);
+    let context = backend.context().unwrap();
+    let waiter = bound(&mut backend);
+    let at = |backend: &mut RemoteBackend| {
+        backend
+            .cursor(&context)
+            .unwrap()
+            .map(|cursor| (cursor.x, cursor.y))
+    };
+    probe.point(display.x + 9, 3);
+    woken(&waiter, || at(&mut backend) == Some((9, 3)));
+    backend
+        .input_in_context(&context, &Input::Move { x: 20, y: 20 })
+        .unwrap();
+    assert_eq!(at(&mut backend), Some((20, 20)), "as the input left it");
+    // The system stops the move short, where the pointer was.
+    probe.point(display.x + 9, 3);
+    woken(&waiter, || at(&mut backend) == Some((9, 3)));
+    drop(backend);
+    helper.join().unwrap();
+}
+
+/// A resume captures at its first tick: the worker dropped the arming of
+/// the capture before the pause, a keyframe's included, and tells of none.
+#[test]
+fn a_resume_drops_the_arming_of_the_capture_before_the_pause() {
+    let (mut backend, helper) = remote(|request| Response {
+        context: Some(desktop()),
+        submitted: matches!(request, Request::Video { .. }).then_some(false),
+        ..Response::default()
+    });
+    let _waiter = bound(&mut backend);
+    backend
+        .capture_video(&desktop(), VideoCodec::H264, true, rate())
+        .unwrap();
+    let now = Instant::now();
+    assert!(
+        backend
+            .capture_idle_until(Some(now))
+            .is_some_and(|until| until > now)
+    );
     backend.video_paused(true);
     backend.video_paused(false);
-    backend.video_paused(false);
-    assert_eq!(*streams.lock(), [true, false, true]);
+    assert_eq!(backend.capture_idle_until(Some(now)), None);
+    drop(backend);
+    helper.join().unwrap();
+}
+
+/// The same limits again rebuild the worker's encoder, and what it pushed
+/// before goes with it; other limits keep it.
+#[test]
+fn the_same_limits_again_drop_what_the_worker_pushed() {
+    let (mut backend, helper) = pushing(|request| {
+        let mut script = vec![];
+        if matches!(request, Request::Presented { .. }) {
+            script.extend([unit(1, 0, 1), unit(1, 0, 2)]);
+        }
+        script.extend(reply(Response {
+            context: Some(desktop()),
+            ..Response::default()
+        }));
+        script
+    });
+    let desktop = desktop();
+    let (sixty, thirty) = (
+        crate::VideoLimits::for_viewer(60.0),
+        crate::VideoLimits::for_viewer(30.0),
+    );
+    backend.configure_video(sixty, 60).unwrap();
+    backend.presented(&desktop).unwrap();
+    assert_eq!(backend.pending_video(), 2);
+    backend.configure_video(thirty, 30).unwrap();
+    assert_eq!(backend.pending_video(), 2, "other limits keep the encoder");
+    backend.configure_video(thirty, 30).unwrap();
+    assert_eq!(backend.pending_video(), 0);
+    assert!(
+        backend
+            .drain_video(&desktop, Duration::ZERO)
+            .unwrap()
+            .is_none()
+    );
     drop(backend);
     helper.join().unwrap();
 }

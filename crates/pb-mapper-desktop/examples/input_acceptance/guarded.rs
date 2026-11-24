@@ -89,6 +89,9 @@ impl Backend for Guarded {
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<CursorPosition>> {
         self.inner.cursor(expected)
     }
+    fn cursor_changed(&self) -> bool {
+        self.inner.cursor_changed()
+    }
     fn cursor_shape(&mut self, expected: &DesktopContext) -> Result<Option<CursorShape>> {
         self.inner.cursor_shape(expected)
     }
