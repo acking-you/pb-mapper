@@ -17,7 +17,7 @@ use super::Error;
 use super::error::{AddressSnafu, Result};
 use super::handle::LiveTunnel;
 use super::types::TunnelStatus;
-use super::{LanTransport, PortMapping};
+use super::{CongestionControl, LanTransport, PortMapping};
 use crate::direct_policy::DirectPolicy;
 use crate::worker_status::StatusSink;
 
@@ -121,7 +121,8 @@ impl TunnelWorker {
     /// relay: how it maps its direct endpoint's port and whether it tries a
     /// shared local network first, both noted in its diagnostics from the
     /// start either way; and what that network carries: what a consumer asks
-    /// for, and whether a provider serves TCP.
+    /// for, and whether a provider serves TCP; and what a provider's QUIC
+    /// sends under.
     pub(super) fn direct_policy(
         &self,
         direct: bool,
@@ -129,6 +130,7 @@ impl TunnelWorker {
         lan_first: bool,
         lan_transport: LanTransport,
         lan_tcp: bool,
+        congestion: CongestionControl,
     ) -> Option<DirectPolicy> {
         let port_mapping = if direct && cfg!(feature = "port-mapping") {
             port_mapping
@@ -153,6 +155,7 @@ impl TunnelWorker {
             lan_first,
             lan_transport,
             lan_tcp,
+            congestion,
         })
     }
 

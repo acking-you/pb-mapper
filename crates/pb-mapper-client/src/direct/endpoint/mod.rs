@@ -6,6 +6,7 @@ use super::{
     socket::{self, Socket},
     tcp::{self, TlsTcp},
 };
+use crate::diagnostics::CongestionControl;
 use pb_mapper_protocol::direct::{SessionGrant, SessionId};
 use std::{
     io,
@@ -36,6 +37,15 @@ const ARRIVAL_QUEUE: usize = 64;
 /// How long a stopping endpoint keeps its drivers alive to close with its
 /// peers.
 const CLOSE_DRAIN: Duration = Duration::from_secs(3);
+
+/// What an endpoint does with QUIC: a consumer's only dials, which sends
+/// under Cubic; a provider's also accepts, and sends under its policy's
+/// controller on what it accepts.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Role {
+    Dial,
+    Serve(CongestionControl),
+}
 
 /// Where this machine's interface table comes from.
 pub(super) enum InterfaceSource {
@@ -112,14 +122,18 @@ impl Mapper {
 }
 
 impl Network {
-    /// Open the endpoint. As `port_mapping` says, ask the router to map its
-    /// IPv4 port now, after a failure to punch through, or never, reporting
-    /// into `diagnostics`.
+    /// Open the endpoint for `role`. As `port_mapping` says, ask the router
+    /// to map its IPv4 port now, after a failure to punch through, or never,
+    /// reporting into `diagnostics`.
     pub fn new(
-        server: bool,
+        role: Role,
         port_mapping: crate::sdk::PortMapping,
         diagnostics: &crate::diagnostics::Diagnostics,
     ) -> io::Result<Arc<Self>> {
+        let server = match role {
+            Role::Dial => None,
+            Role::Serve(congestion) => Some(congestion),
+        };
         let identity = Identity::new()?;
         let (tx, rx) = mpsc::channel(ARRIVAL_QUEUE);
         let mut transports = Vec::new();
@@ -136,18 +150,16 @@ impl Network {
                 }
                 Err(error) => return Err(error),
             };
-            let config = if server {
-                Some(identity.server()?)
-            } else {
-                None
-            };
+            let config = server
+                .map(|congestion| identity.server(congestion))
+                .transpose()?;
             let endpoint = quinn::Endpoint::new_with_abstract_socket(
                 socket::endpoint_config(),
                 config,
                 Box::new(quic),
                 Arc::new(quinn::TokioRuntime),
             )?;
-            if server {
+            if server.is_some() {
                 let accept = accept_quic(endpoint.clone(), tx.clone());
                 acceptors.push(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
                     accept,
@@ -362,11 +374,11 @@ mod tests {
     /// router: the endpoint opens with its mapping on standby.
     #[tokio::test]
     async fn an_endpoint_that_maps_when_needed_waits_for_a_punching_failure() {
-        let network = Network::new(false, PortMapping::Auto, &Diagnostics::default()).unwrap();
+        let network = Network::new(Role::Dial, PortMapping::Auto, &Diagnostics::default()).unwrap();
         let mapper = network.mapper.as_ref().unwrap();
         assert!(mapper.started.get().is_none());
         assert_eq!(network.mapped_addr(), None);
-        let off = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+        let off = Network::new(Role::Dial, PortMapping::Off, &Diagnostics::default()).unwrap();
         assert!(off.mapper.is_none());
         // Without a failure there is nothing to start; with one, the router is
         // asked, which this test leaves to the end-to-end NAT checks.
