@@ -43,8 +43,8 @@ resume. The viewer state stayed `Streaming` throughout, and the host listed
 one viewer.
 
 The silence a live connection is given is `SILENCE_MIN`, 1.5 s, on this
-path (four base round trips are far less); the picture follows within a few
-round trips of it.
+path (four base round trips are far less), looked at every 100 ms; the
+picture followed it by 67 to 85 ms.
 
 ## Baseline: no standby
 
@@ -97,6 +97,16 @@ never exceeded the synthetic host's frame interval here. The standby's
 traffic is its host session's stats once a second and its probes, which on
 a path under 100 ms run every 250 ms, with their echoes, and the viewer's
 pings; on a path of 100 ms or more the probes run once a second.
+
+## The whole slow-link suite
+
+At `e30344a` the whole suite, these three cases included, passed: 30 cases
+in 1235 s, every line in [slow-link-suite.txt](slow-link-suite.txt). Its
+three standby summaries match the runs above within 10 ms, with the same
+IDR counts: block to picture p50 1569 ms, block to input p50 1574 ms, one IDR in
+the outage and one at the switch; a session without a standby ending at
+p50 4001 ms; first picture to direct p50 120 ms with one IDR, a longest gap
+of 34 ms and 6798 bit/s on the relay standby.
 
 ## What a device still has to show
 

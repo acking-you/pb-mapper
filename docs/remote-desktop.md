@@ -1182,8 +1182,9 @@ the same host, on the other path, that waits to take the first one's place.
   standby with it.
 - **Viewer.** `Viewer::connect` with `PathPolicy::Auto`, to a host that gave
   a ticket, opens a standby once the session streams. Beside a session that
-  runs direct across the internet (QUIC, punched or through a port mapping;
-  never one within a LAN) it opens one on the relay. Beside a session the
+  runs direct across the internet (QUIC, punched or through a port mapping,
+  or between private addresses off the LAN, as over a VPN; never one within
+  a LAN) it opens one on the relay. Beside a session the
   relay carries after direct fell back for a while (its negotiation timed
   out or failed, or a grant found no path, or a pause left direct out), or
   after its direct connection died and a relay standby took its place, it
