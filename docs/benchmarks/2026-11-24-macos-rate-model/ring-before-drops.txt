@@ -1,0 +1,53 @@
+# 2026-11-24 13:45:09 start, load averages: 1.76 2.11 2.67
+running 1 test
+test platform::macos::vt_measure::video_toolbox_drops ... codec=H264 size=1920x1080 content=Noise pace=60 bitrate=4000020 window=steady submitted=180 dropped=168 units_per_s=4.0 mbps=4.37 largest_p_bits=2740048 idr_bits=- psnr=18.35
+codec=H264 size=1920x1080 content=Noise pace=60 bitrate=4000020 window=after_idr submitted=90 dropped=68 units_per_s=14.7 mbps=4.42 largest_p_bits=2134016 idr_bits=3567776 psnr=17.07
+codec=H264 size=1920x1080 content=Noise pace=120 bitrate=8000040 window=steady submitted=360 dropped=337 units_per_s=7.7 mbps=7.89 largest_p_bits=1302312 idr_bits=- psnr=18.30
+codec=H264 size=1920x1080 content=Noise pace=120 bitrate=8000040 window=after_idr submitted=180 dropped=134 units_per_s=30.7 mbps=7.72 largest_p_bits=2133808 idr_bits=3562592 psnr=17.02
+codec=H265 size=1920x1080 content=Noise pace=60 bitrate=4000020 window=steady submitted=180 dropped=135 units_per_s=15.0 mbps=3.67 largest_p_bits=2121392 idr_bits=- psnr=17.11
+codec=H265 size=1920x1080 content=Noise pace=60 bitrate=4000020 window=after_idr submitted=90 dropped=65 units_per_s=16.7 mbps=5.07 largest_p_bits=2113120 idr_bits=3475792 psnr=17.16
+codec=H265 size=1920x1080 content=Noise pace=120 bitrate=8000040 window=steady submitted=360 dropped=270 units_per_s=30.0 mbps=8.00 largest_p_bits=2124248 idr_bits=- psnr=17.14
+codec=H265 size=1920x1080 content=Noise pace=120 bitrate=8000040 window=after_idr submitted=180 dropped=132 units_per_s=32.0 mbps=7.32 largest_p_bits=2120832 idr_bits=3475160 psnr=17.07
+codec=H264 size=1920x1080 content=Busy pace=60 bitrate=4000020 window=steady submitted=180 dropped=0 units_per_s=60.0 mbps=3.96 largest_p_bits=322232 idr_bits=- psnr=35.14
+codec=H264 size=1920x1080 content=Busy pace=60 bitrate=4000020 window=after_idr submitted=90 dropped=22 units_per_s=45.3 mbps=4.05 largest_p_bits=324608 idr_bits=2611072 psnr=29.72
+codec=H264 size=1920x1080 content=Busy pace=120 bitrate=8000040 window=steady submitted=360 dropped=0 units_per_s=120.0 mbps=7.79 largest_p_bits=323752 idr_bits=- psnr=35.26
+codec=H264 size=1920x1080 content=Busy pace=120 bitrate=8000040 window=after_idr submitted=180 dropped=21 units_per_s=106.0 mbps=8.90 largest_p_bits=392936 idr_bits=2629488 psnr=31.94
+codec=H265 size=1920x1080 content=Busy pace=60 bitrate=4000020 window=steady submitted=180 dropped=0 units_per_s=60.0 mbps=4.03 largest_p_bits=1553544 idr_bits=- psnr=35.61
+codec=H265 size=1920x1080 content=Busy pace=60 bitrate=4000020 window=after_idr submitted=90 dropped=31 units_per_s=39.3 mbps=3.02 largest_p_bits=241312 idr_bits=2440968 psnr=30.99
+codec=H265 size=1920x1080 content=Busy pace=120 bitrate=8000040 window=steady submitted=360 dropped=0 units_per_s=120.0 mbps=8.05 largest_p_bits=1571936 idr_bits=- psnr=36.00
+codec=H265 size=1920x1080 content=Busy pace=120 bitrate=8000040 window=after_idr submitted=180 dropped=25 units_per_s=103.3 mbps=7.57 largest_p_bits=828176 idr_bits=2437856 psnr=34.32
+codec=H264 size=1920x1080 content=Text pace=60 bitrate=4000020 window=steady submitted=180 dropped=0 units_per_s=60.0 mbps=2.61 largest_p_bits=251936 idr_bits=- psnr=49.27
+codec=H264 size=1920x1080 content=Text pace=60 bitrate=4000020 window=after_idr submitted=90 dropped=19 units_per_s=47.3 mbps=4.12 largest_p_bits=524936 idr_bits=2383936 psnr=32.51
+codec=H264 size=1920x1080 content=Text pace=120 bitrate=8000040 window=steady submitted=360 dropped=0 units_per_s=120.0 mbps=5.89 largest_p_bits=251160 idr_bits=- psnr=48.48
+codec=H264 size=1920x1080 content=Text pace=120 bitrate=8000040 window=after_idr submitted=180 dropped=13 units_per_s=111.3 mbps=7.87 largest_p_bits=626072 idr_bits=2397360 psnr=35.89
+codec=H265 size=1920x1080 content=Text pace=60 bitrate=4000020 window=steady submitted=180 dropped=0 units_per_s=60.0 mbps=1.54 largest_p_bits=150240 idr_bits=- psnr=52.39
+codec=H265 size=1920x1080 content=Text pace=60 bitrate=4000020 window=after_idr submitted=90 dropped=16 units_per_s=49.3 mbps=2.78 largest_p_bits=236472 idr_bits=2230448 psnr=38.60
+codec=H265 size=1920x1080 content=Text pace=120 bitrate=8000040 window=steady submitted=359 dropped=0 units_per_s=119.7 mbps=3.07 largest_p_bits=150328 idr_bits=- psnr=52.26
+codec=H265 size=1920x1080 content=Text pace=120 bitrate=8000040 window=after_idr submitted=180 dropped=13 units_per_s=111.3 mbps=4.31 largest_p_bits=152584 idr_bits=2195536 psnr=43.52
+codec=H264 size=2560x1440 content=Noise pace=60 bitrate=6158433 window=steady submitted=161 dropped=143 units_per_s=6.0 mbps=4.11 largest_p_bits=4176408 idr_bits=- psnr=22.35
+codec=H264 size=2560x1440 content=Noise pace=60 bitrate=6158433 window=after_idr submitted=88 dropped=63 units_per_s=16.7 mbps=6.46 largest_p_bits=3031880 idr_bits=5489896 psnr=24.31
+codec=H264 size=2560x1440 content=Noise pace=120 bitrate=12316867 window=steady submitted=346 dropped=324 units_per_s=7.3 mbps=12.35 largest_p_bits=2833968 idr_bits=- psnr=18.37
+codec=H264 size=2560x1440 content=Noise pace=120 bitrate=12316867 window=after_idr submitted=178 dropped=136 units_per_s=28.0 mbps=10.86 largest_p_bits=3038904 idr_bits=5490448 psnr=23.61
+codec=H265 size=2560x1440 content=Noise pace=60 bitrate=6158433 window=steady submitted=180 dropped=158 units_per_s=7.3 mbps=4.82 largest_p_bits=3741832 idr_bits=- psnr=22.48
+codec=H265 size=2560x1440 content=Noise pace=60 bitrate=6158433 window=after_idr submitted=89 dropped=64 units_per_s=16.7 mbps=8.54 largest_p_bits=3749120 idr_bits=5429016 psnr=23.71
+codec=H265 size=2560x1440 content=Noise pace=120 bitrate=12316867 window=steady submitted=360 dropped=270 units_per_s=30.0 mbps=12.26 largest_p_bits=3747184 idr_bits=- psnr=23.76
+codec=H265 size=2560x1440 content=Noise pace=120 bitrate=12316867 window=after_idr submitted=180 dropped=132 units_per_s=32.0 mbps=13.21 largest_p_bits=3743632 idr_bits=5425560 psnr=24.08
+codec=H264 size=2560x1440 content=Busy pace=60 bitrate=6158433 window=steady submitted=180 dropped=0 units_per_s=60.0 mbps=6.07 largest_p_bits=1171304 idr_bits=- psnr=32.58
+codec=H264 size=2560x1440 content=Busy pace=60 bitrate=6158433 window=after_idr submitted=90 dropped=32 units_per_s=38.7 mbps=6.32 largest_p_bits=825016 idr_bits=4880296 psnr=26.50
+codec=H264 size=2560x1440 content=Busy pace=120 bitrate=12316867 window=steady submitted=360 dropped=0 units_per_s=120.0 mbps=12.32 largest_p_bits=1255048 idr_bits=- psnr=33.38
+codec=H264 size=2560x1440 content=Busy pace=120 bitrate=12316867 window=after_idr submitted=180 dropped=39 units_per_s=93.3 mbps=11.98 largest_p_bits=793880 idr_bits=4862200 psnr=28.30
+codec=H265 size=2560x1440 content=Busy pace=60 bitrate=6158433 window=steady submitted=180 dropped=0 units_per_s=60.0 mbps=6.41 largest_p_bits=3183704 idr_bits=- psnr=33.09
+codec=H265 size=2560x1440 content=Busy pace=60 bitrate=6158433 window=after_idr submitted=90 dropped=37 units_per_s=35.3 mbps=4.89 largest_p_bits=502672 idr_bits=4667680 psnr=27.66
+codec=H265 size=2560x1440 content=Busy pace=120 bitrate=12316867 window=steady submitted=360 dropped=0 units_per_s=120.3 mbps=11.21 largest_p_bits=3403416 idr_bits=- psnr=32.13
+codec=H265 size=2560x1440 content=Busy pace=120 bitrate=12316867 window=after_idr submitted=180 dropped=32 units_per_s=98.7 mbps=12.35 largest_p_bits=1649344 idr_bits=4593184 psnr=31.72
+codec=H264 size=2560x1440 content=Text pace=60 bitrate=6158433 window=steady submitted=180 dropped=0 units_per_s=60.0 mbps=5.91 largest_p_bits=865032 idr_bits=- psnr=40.12
+codec=H264 size=2560x1440 content=Text pace=60 bitrate=6158433 window=after_idr submitted=90 dropped=24 units_per_s=44.0 mbps=6.73 largest_p_bits=906688 idr_bits=4507944 psnr=29.11
+codec=H264 size=2560x1440 content=Text pace=120 bitrate=12316867 window=steady submitted=360 dropped=0 units_per_s=120.0 mbps=11.86 largest_p_bits=704184 idr_bits=- psnr=43.01
+codec=H264 size=2560x1440 content=Text pace=120 bitrate=12316867 window=after_idr submitted=180 dropped=22 units_per_s=104.7 mbps=12.88 largest_p_bits=711488 idr_bits=4520048 psnr=32.58
+codec=H265 size=2560x1440 content=Text pace=60 bitrate=6158433 window=steady submitted=180 dropped=0 units_per_s=60.0 mbps=3.72 largest_p_bits=333432 idr_bits=- psnr=50.82
+codec=H265 size=2560x1440 content=Text pace=60 bitrate=6158433 window=after_idr submitted=90 dropped=22 units_per_s=45.3 mbps=5.39 largest_p_bits=338032 idr_bits=4340664 psnr=33.66
+codec=H265 size=2560x1440 content=Text pace=120 bitrate=12316867 window=steady submitted=360 dropped=0 units_per_s=120.0 mbps=7.46 largest_p_bits=334872 idr_bits=- psnr=50.90
+codec=H265 size=2560x1440 content=Text pace=120 bitrate=12316867 window=after_idr submitted=180 dropped=21 units_per_s=106.0 mbps=9.37 largest_p_bits=352032 idr_bits=4360768 psnr=38.78
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 258 filtered out; finished in 180.64s
+# 2026-11-24 13:48:10 end, load averages: 4.23 2.98 2.91

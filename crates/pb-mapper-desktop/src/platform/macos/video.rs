@@ -2,7 +2,8 @@
 //! stream scaled to the encoder's size, and a VideoToolbox session that
 //! reads its pictures in place. Thread C paces: each submit encodes the
 //! newest picture, or the last one again every `LIVENESS_INTERVAL` while
-//! the screen stands still, or at once for a keyframe. A submit only hands
+//! the screen stands still, or at the next tick for a keyframe or for a
+//! last picture VideoToolbox dropped (`codec::resubmit`). A submit only hands
 //! the picture to the encoder's submit thread, which makes the VideoToolbox
 //! call; at most `VT_IN_FLIGHT` units are in flight, and a submit that finds
 //! the submit thread still busy leaves its tick armed until that thread
@@ -25,7 +26,10 @@ use super::{
 use crate::{
     BackendError, Display, EncodedFrame, FailureKind, Presented, Result, VideoCodec, VideoLimits,
     VideoRate, Waker,
-    codec::pipeline::{FIRST_SUBMIT_WAIT, LATE_OUTPUT, LIVENESS_INTERVAL},
+    codec::{
+        pipeline::{FIRST_SUBMIT_WAIT, LATE_OUTPUT, LIVENESS_INTERVAL},
+        resubmit::Unit,
+    },
     error, failure_kind,
     platform::VideoSource,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
@@ -119,6 +123,9 @@ pub(crate) struct MacVideo {
     last_submit: Option<Instant>,
     /// Asked for and not yet submitted.
     keyframe: bool,
+    /// The last picture again, as a new one: VideoToolbox dropped the
+    /// newest unit. Taken from the encoder, and not yet submitted.
+    resubmit: bool,
     /// The last submit's new picture: when it arrived, and the pictures it
     /// covers.
     presented: Option<Presented>,
@@ -264,6 +271,7 @@ impl VideoSource for MacVideo {
             created: now,
             last_submit: None,
             keyframe: true,
+            resubmit: false,
             presented: None,
             timing: Timing::new(now),
         })
@@ -278,7 +286,9 @@ impl VideoSource for MacVideo {
     }
     /// Never waits: nothing captured yet, a full encoder or a still screen
     /// inside the liveness interval submit nothing; a keyframe asked for
-    /// stays asked for until a submit carries it. Thread C skips a tick
+    /// stays asked for until a submit carries it, and so does a resubmit of
+    /// the last picture, which goes as a new picture (not a duplicate: the
+    /// viewer never had it) unless a newer one came. Thread C skips a tick
     /// while `VT_IN_FLIGHT` units are in flight (`full`), and a submit that
     /// finds them anyway spends its tick; an encoder whose submit thread is
     /// still busy leaves it armed, and that thread wakes thread C once it is
@@ -293,6 +303,7 @@ impl VideoSource for MacVideo {
             return Err(power::waking());
         }
         self.keyframe |= keyframe | self.encoder.keyframe_due();
+        self.resubmit |= self.encoder.take_resubmit();
         match self.encoder.admit(VT_IN_FLIGHT) {
             Admit::Full => return Ok(true),
             Admit::Busy => return Ok(false),
@@ -300,6 +311,7 @@ impl VideoSource for MacVideo {
         }
         let now = Instant::now();
         let repeat = self.keyframe
+            || self.resubmit
             || self
                 .last_submit
                 .is_some_and(|last| now >= last + LIVENESS_INTERVAL);
@@ -333,9 +345,10 @@ impl VideoSource for MacVideo {
         if self.last_submit.is_none() {
             trace_layout(&taken.picture);
         }
-        self.encoder
-            .encode(&taken.picture, self.keyframe, taken.fresh.is_none())?;
+        let unit = Unit::of(taken.fresh.is_some(), self.resubmit);
+        self.encoder.encode(&taken.picture, self.keyframe, unit)?;
         self.keyframe = false;
+        self.resubmit = false;
         self.last_submit = Some(now);
         if let Some(arrival) = taken.fresh {
             self.presented = Some(Presented::new(arrival.at, arrival.pictures));
@@ -368,7 +381,14 @@ impl VideoSource for MacVideo {
         match self.stream.state() {
             CaptureState::Ready => None,
             CaptureState::Waiting => Some(self.created + FIRST_SUBMIT_WAIT),
-            CaptureState::Repeatable if self.keyframe || self.encoder.wants_keyframe() => None,
+            CaptureState::Repeatable
+                if self.keyframe
+                    || self.resubmit
+                    || self.encoder.wants_keyframe()
+                    || self.encoder.wants_resubmit() =>
+            {
+                None
+            }
             CaptureState::Repeatable => self
                 .last_submit
                 .map(|at| at + LIVENESS_INTERVAL)
