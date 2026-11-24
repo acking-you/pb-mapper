@@ -1,31 +1,65 @@
-//! A receipt-based rate estimator, run in shadow: it reads every transport
-//! receipt and decides nothing. Its values are traced once a second, so real
-//! links show what a receipt-driven rate control would see before one acts on
-//! it.
+//! Receipt-driven rate control, after airhand's `flow.rs`: every transport
+//! receipt updates an estimate of the link, a receipt that shows a standing
+//! queue cuts the rate the controller hands the encoder within a round trip,
+//! and the QoS tick raises it again while the receipts show none.
 //!
-//! - The standing queue is the least receipt delay above the base RTT over
-//!   the newest receipts: at least three, spanning at least two frame
-//!   intervals and 50 ms. A burst a few milliseconds long never makes one on
-//!   its own.
+//! - A receipt's queue is its delay above the baseline, less the unit's own
+//!   transfer: at the busy rate, and at most a frame interval (a frame
+//!   interval without a busy rate, when the link carried each unit before
+//!   the next). The baseline is the probes' base RTT or, once a rebase set
+//!   one, the receipts' own when higher: the least delay, less each unit's
+//!   transfer, of the receipts the rebase found the queue standing on, which
+//!   every lower receipt lowers further. The probes' base is never touched.
+//! - The standing queue is the least queue over the newest receipts: at least
+//!   three, spanning at least two frame intervals and 50 ms. A burst a few
+//!   milliseconds long never makes one on its own. The queue before it is
+//!   the least over as many receipts before those.
 //! - The busy rate is the median delivery rate over the newest receipt pairs
-//!   across which the link stayed busy: the later unit's delay above the base
-//!   RTT is at least the pair's gap. Receipts less than a quarter of a frame
-//!   interval apart are compression, not delivery: such a pair is no sample,
-//!   and its later receipt's bytes count toward the pair before it.
+//!   across which the link stayed busy: the later unit's delay above the
+//!   baseline is at least the pair's gap. Receipts less than a quarter of a
+//!   frame interval apart are compression, not delivery: such a pair is no
+//!   sample, and its later receipt's bytes count toward the pair before it.
 //! - The used rate is what the receipts covered over their newest second.
-//! - A receipt would cut when the standing queue, less each unit's own
-//!   transfer at the busy rate (at most a frame interval), is above
-//!   `QUEUE_HIGH`, with a busy rate known and nothing in the window behind an
-//!   IDR, except during a stall: the burst of receipts that crowd in after a
-//!   receipt gap of at least three frame intervals.
+//! - A stall is a receipt gap of at least three frame intervals whose first
+//!   receipt waited through at least half of it (a still picture's idle gap
+//!   waits for nothing); the receipts that come after it compressed, or each
+//!   with less delay than the one before, are what it held, and decide
+//!   nothing. Stalls recur when three end within 2 s, or two that cover 15%
+//!   of it.
+//!
+//! The queue is congested above `QUEUE_HIGH`, or above `QUEUE_LOW` while a
+//! clamped window refused a unit, and stalls that recur are congestion too.
+//! Congested, a receipt inside a hold decides nothing; a queue that drains
+//! holds; two cuts that left it where it was rebase the baseline onto it (a
+//! longer route, not a rate the host sends), once the link delivers no more
+//! than the last cut asked for, so a backlog draining or an encoder that did
+//! not follow is never taken for a route; and otherwise the rate is cut to
+//! `min(0.85 × busy, 0.9 × used)`, or `0.85 × used` when stalls recur. After
+//! two cuts a queue that stays where they left it between `QUEUE_LOW` and
+//! `QUEUE_HIGH` rebases too: a light picture's frame interval, longer at the
+//! lower pace, hides part of a route's. Without a busy rate the probe
+//! controller remains: there is no blind cut. A cut never asks below the
+//! preset's floor, and one to within 5% of what the encoder sends, as the host
+//! measured its frames, only holds again and counts toward no rebase. Two
+//! stall cuts that left the stalls as they were excuse them until they stop.
+//!
+//! The probe controller yields its frame-rate cuts to the receipts for
+//! `OWNED_AFTER` after a cut, a rebase or a drain; an episode of holds that
+//! change nothing, as at the preset's floor, is the probes' again after that.
+//!
+//! Raises follow on the QoS tick (`raise`). A light picture, which uses less
+//! than half the expected rate, raises only the pace cap; an encoder that
+//! spends more than expected is raised, since the link carries what it
+//! sends. After an episode, a recovery climbs back toward where congestion
+//! began, once; a climb cut short climbs again only once a raise has passed
+//! 1.2 × the capacity it was cut at.
 //!
 //! With arrival times (`arrival_time`) each receipt is timed on the viewer's
-//! clock, when it read its newest unit, and its delay above the base RTT is
-//! that unit's queue toward the viewer: the way back, and whatever bunches
-//! receipts on it, are in neither. A receipt whose stamp was no sample is
-//! left out. This is what a receipt-driven rate control reads.
+//! clock, when it read its newest unit, and its delay is that unit's queue
+//! toward the viewer: the way back, and whatever bunches receipts on it, are
+//! in neither. A receipt whose stamp was no sample is left out.
 //!
-//! The history is a ring reserved once, so a receipt allocates nothing.
+//! The history is a ring reserved once: a receipt allocates nothing.
 
 use crate::{credit::Receipt, video::MAX_FPS};
 use std::{
@@ -43,10 +77,10 @@ const STANDING_RECEIPTS: usize = 3;
 /// ... spanning at least this many frame intervals ...
 const STANDING_FRAMES: u32 = 2;
 /// ... and at least this long, but never longer than `STANDING_SPAN_MAX`,
-/// which the history always covers.
+/// which the history always covers twice.
 const STANDING_SPAN_MIN: Duration = Duration::from_millis(50);
 const STANDING_SPAN_MAX: Duration = Duration::from_millis(500);
-/// A receipt this many frame intervals after the one before follows a gap.
+/// A receipt this many frame intervals after the one before follows a stall.
 const STALL_FRAMES: u32 = 3;
 /// Receipts closer than a frame interval divided by this are compressed.
 const COMPRESSED_DIVISOR: u32 = 4;
@@ -56,8 +90,68 @@ const BUSY_SAMPLES: usize = 8;
 const BUSY_SAMPLES_MIN: usize = 3;
 /// The used rate needs receipts spanning at least this.
 const USED_SPAN_MIN: Duration = Duration::from_millis(100);
-/// A standing queue above this, beyond the units' own transfer, would cut.
-const QUEUE_HIGH: Duration = Duration::from_millis(40);
+/// A standing queue above this is congestion ...
+pub(crate) const QUEUE_HIGH: Duration = Duration::from_millis(40);
+/// ... and above this while a clamped window refused a unit; below it the
+/// link is clear.
+pub(crate) const QUEUE_LOW: Duration = Duration::from_millis(10);
+/// A standing queue this much below the one before is draining ...
+const DRAIN_MARGIN: Duration = Duration::from_millis(5);
+/// ... and so is one below this share of the episode's last.
+const DRAINING: f64 = 0.8;
+/// After this many cuts, a queue within this multiple of the episode's last
+/// is not the host's: the baseline moves onto it.
+const NO_EFFECT_CUTS: u32 = 2;
+const NO_EFFECT: f64 = 1.1;
+/// A cut: this share of the busy rate, at most this share of the used rate,
+/// ...
+const CUT_OF_BUSY: f64 = 0.85;
+const CUT_OF_USED: f64 = 0.9;
+/// ... or this share of the used rate when stalls recur.
+const STALL_CUT_OF_USED: f64 = 0.85;
+/// A cut holds for a round trip and the queue, within these, ...
+const HOLD_MIN: Duration = Duration::from_millis(100);
+const HOLD_MAX: Duration = Duration::from_secs(1);
+/// ... and until the used rate is within this multiple of the cut's target,
+/// for at most `HOLD_MAX`.
+const HOLD_USED: f64 = 1.1;
+/// A rebase holds raises this long: the queue it took for the route's is
+/// read against it first.
+const RAISE_AFTER_REBASE: Duration = Duration::from_secs(1);
+/// Raises: this share of the expected rate a second, or this within
+/// `NEAR_CAPACITY` of the last busy rate cut for, plus `RAISE_ADD_BPS` a
+/// second; that capacity is forgotten above `CAPACITY_CLEAR` times it.
+const RAISE_PER_S: f64 = 0.15;
+const RAISE_NEAR_PER_S: f64 = 0.04;
+const NEAR_CAPACITY: f64 = 0.9;
+const CAPACITY_CLEAR: f64 = 1.2;
+const RAISE_ADD_BPS: f64 = 100_000.0;
+/// A raise is applied once it adds this share of the expected rate.
+const RAISE_APPLY: f64 = 0.05;
+/// The most time one tick's raise covers.
+const RAISE_DT_MAX: Duration = Duration::from_millis(500);
+/// A raise of bits per frame needs the used rate at least this share of the
+/// expected one: below, the picture is light, or the encoder lags, and only
+/// the pace cap rises. An encoder that spends more than it is asked for (a
+/// content floor) is raised: the link carries what it sends.
+const RAISE_USED_MIN: f64 = 0.5;
+/// Once an episode has ended and the queue stayed under `QUEUE_LOW` for
+/// `RECOVER_QUIET`, raises run at this share a second toward `RECOVER_SHARE`
+/// of the expected rate the episode began at, once an episode.
+const RECOVER_PER_S: f64 = 0.5;
+const RECOVER_SHARE: f64 = 0.9;
+const RECOVER_QUIET: Duration = Duration::from_millis(500);
+/// Stalls recur when `STALLS_RECURRING` end within `STALL_SPAN`, or two or
+/// more that cover `STALL_SHARE` of it.
+const STALL_SPAN: Duration = Duration::from_secs(2);
+const STALLS_RECURRING: usize = 3;
+const STALL_SHARE: f64 = 0.15;
+/// The stalls kept: enough to count `STALLS_RECURRING`.
+const STALLS_KEPT: usize = 4;
+/// The probe controller yields to the receipts for this long after a cut, a
+/// rebase or a drain: an episode whose holds change nothing for longer is
+/// the probes' again.
+pub(crate) const OWNED_AFTER: Duration = Duration::from_secs(2);
 
 const _: () = assert!(
     RING >= 2 && STANDING_RECEIPTS >= 1,
@@ -69,15 +163,47 @@ const _: () = assert!(
 );
 const _: () = assert!(
     STANDING_SPAN_MIN.as_nanos() <= STANDING_SPAN_MAX.as_nanos()
-        && STANDING_SPAN_MAX.as_nanos() < HISTORY.as_nanos(),
-    "standing_window clamps its span between them, within the history"
+        && 2 * STANDING_SPAN_MAX.as_nanos() <= HISTORY.as_nanos(),
+    "standing_window clamps its span between them, and the history holds a window before it"
 );
 const _: () = assert!(COMPRESSED_DIVISOR >= 1, "a frame interval is divided by it");
+const _: () = assert!(
+    QUEUE_LOW.as_nanos() < QUEUE_HIGH.as_nanos(),
+    "a clear link is below a congested one"
+);
+const _: () = assert!(
+    HOLD_MIN.as_nanos() <= HOLD_MAX.as_nanos(),
+    "a hold is clamped between them"
+);
+const _: () = assert!(
+    DRAINING < 1.0 && NO_EFFECT > 1.0 && NO_EFFECT_CUTS >= 1,
+    "a drain lowers the queue, and no effect leaves it about where it was"
+);
+const _: () = assert!(
+    CUT_OF_BUSY < 1.0 && CUT_OF_USED < 1.0 && STALL_CUT_OF_USED < 1.0,
+    "a cut lowers the rate below what the link carried"
+);
+const _: () = assert!(
+    RAISE_NEAR_PER_S < RAISE_PER_S && RAISE_PER_S < RECOVER_PER_S,
+    "raises slow near capacity and speed up to recover"
+);
+const _: () = assert!(
+    NEAR_CAPACITY < 1.0 && CAPACITY_CLEAR > 1.0 && RECOVER_SHARE <= 1.0,
+    "the capacity band surrounds the capacity"
+);
+const _: () = assert!(
+    RAISE_USED_MIN < 1.0,
+    "an encoder that spends what it is asked for may be raised"
+);
+const _: () = assert!(
+    STALLS_RECURRING >= 2 && STALLS_KEPT >= STALLS_RECURRING,
+    "recurring stalls are counted from the ones kept"
+);
 
-/// One receipt, as the estimator keeps it.
+/// One receipt, as the controller keeps it.
 #[derive(Clone, Copy, Debug)]
 struct Sample {
-    /// On the clock receipts are timed by: since the estimator began on the
+    /// On the clock receipts are timed by: since the controller began on the
     /// host's, or the viewer's arrival time.
     at: Duration,
     /// From the host's write to the receipt, or the queue toward the viewer.
@@ -92,62 +218,252 @@ enum Flow {
     Steady,
     /// At least `STALL_FRAMES` frame intervals after the one before.
     Gap,
-    /// Compressed after a gap, or after such a receipt: what the link held,
-    /// delivered at once.
+    /// After a gap, or after such a receipt, compressed or with less delay
+    /// than the one before: what the link held, delivered.
     Burst,
 }
 
-/// The estimator's values for the trace.
+/// What a receipt decided.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Verdict {
+    None,
+    /// The queue is draining: nothing more until the hold passes.
+    Hold,
+    /// Cut the expected rate to this many bit/s.
+    Cut(f64),
+    /// Two cuts left the queue where it was: the receipts' baseline is now
+    /// this delay, on the receipts' clock (a round trip, or a queue toward
+    /// the viewer with arrival times).
+    Rebased(Duration),
+}
+
+/// What the controller is told with each receipt and tick.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Inputs {
+    /// The probes' base RTT; with arrival times, unused.
+    pub base: Option<Duration>,
+    /// The capture pace now, for the frame interval.
+    pub pace: u32,
+    /// Bits per frame × the pace: what the viewer is expected to receive.
+    pub expected_bps: f64,
+    /// What the encoder sends at the pace, as the host measured its frames:
+    /// less than expected for a light picture, more at a content floor.
+    pub sent_bps: f64,
+    /// The least a cut can ask: the preset's floor at its least pace.
+    pub floor_bps: f64,
+    /// The last probe round trip, for the hold.
+    pub rtt: Option<Duration>,
+    /// A clamped window refused a unit since the last receipt.
+    pub blocked: bool,
+    /// The receipts' pace cap is set.
+    pub capped: bool,
+}
+
+/// A raise the QoS tick applies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Lift {
+    /// The expected rate to raise to, in bit/s.
+    pub to: f64,
+    /// A light picture: only the pace cap may rise, never bits per frame.
+    pub pace_only: bool,
+}
+
+/// The controller's values for the trace.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReceiptRateView {
     pub standing: Option<Duration>,
     pub busy_bps: Option<u64>,
     pub used_bps: Option<u64>,
-    /// A receipt since the last view would have cut.
-    pub would_cut: bool,
+    /// Cuts since the session began.
+    pub cuts: u64,
+    /// An episode is under way.
+    pub episode: bool,
+}
+
+/// The standing queue, and what the receipts it is judged on show.
+#[derive(Clone, Copy, Debug)]
+struct Measure {
+    standing: Duration,
+    /// The standing queue over the receipts before those.
+    before: Option<Duration>,
+    busy: Option<u64>,
+    /// A receipt the standing queue is judged on was behind an IDR.
+    behind_idr: bool,
+    /// The least delay of those receipts less each unit's transfer, which a
+    /// rebase takes ...
+    least: Duration,
+    /// ... and the newest receipt's, which lowers it.
+    newest: Duration,
+}
+
+/// A cut, or a drain, holding the next decision.
+#[derive(Clone, Copy, Debug)]
+struct Hold {
+    since: Instant,
+    /// The least time it holds.
+    until: Instant,
+    /// After `until`, it holds while the used rate is above `HOLD_USED` ×
+    /// this, up to `HOLD_MAX` after `since`.
+    target: Option<f64>,
+}
+
+/// From the first cut until the queue is clear again.
+#[derive(Clone, Copy, Debug)]
+struct Episode {
+    cuts: u32,
+    /// The standing queue at the last cut or drain.
+    last: Duration,
+    /// The busy rate of the last cut.
+    busy: f64,
+    /// What the last cut asked for, in bit/s.
+    target: f64,
+}
+
+/// Where a recovery stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Climb {
+    #[default]
+    Idle,
+    /// Due once the queue has been clear for `RECOVER_QUIET`.
+    Armed,
+    Climbing,
+}
+
+/// The climb back after congestion.
+#[derive(Clone, Copy, Debug, Default)]
+struct Recovery {
+    /// `RECOVER_SHARE` × the expected rate before the congestion began,
+    /// until a raise reaches it.
+    to: Option<f64>,
+    climb: Climb,
+    /// A climb was cut short below `to`: none again until a raise passes
+    /// `CAPACITY_CLEAR` × the capacity, which shows the link carries more.
+    cut_short: bool,
+}
+
+/// One stall: where it began on the receipts' clock, and how much longer
+/// than a frame interval it lasted.
+#[derive(Clone, Copy, Debug, Default)]
+struct Stall {
+    began: Duration,
+    length: Duration,
+}
+
+/// Cuts for recurring stalls, while they recur.
+#[derive(Clone, Copy, Debug, Default)]
+struct StallCuts {
+    cuts: u32,
+    /// The stalled share of `STALL_SPAN` at the last cut.
+    share: f64,
+    /// Two cuts left the stalls as they were: they are not the host's.
+    excused: bool,
+}
+
+/// What the raises have built up since they last applied one.
+#[derive(Clone, Copy, Debug, Default)]
+struct Raise {
+    since: Option<Instant>,
+    share: f64,
+    added: f64,
 }
 
 pub(crate) struct ReceiptRate {
     /// The newest receipts within `HISTORY` of the newest, oldest first.
     samples: VecDeque<Sample>,
-    /// When the last receipt came, on the samples' clock, kept when the
-    /// history is trimmed.
-    last_at: Option<Duration>,
+    /// When the last receipt came, on the samples' clock, and its delay,
+    /// kept when the history is trimmed.
+    last: Option<(Duration, Duration)>,
     /// When the newest sample came, on the host's clock.
     newest: Option<Instant>,
     flow: Flow,
-    would_cut: bool,
     /// The host's clock starts at the first receipt.
     epoch: Option<Instant>,
     /// Receipts are timed by the viewer's arrival times.
     one_way: bool,
+    /// The receipts' own baseline, on their clock, once a rebase set it: the
+    /// least delay, less the unit's transfer, of the receipts it found the
+    /// queue standing on, lowered by every receipt below it.
+    rebase: Option<Duration>,
+    /// When the last rebase came.
+    rebased_at: Option<Instant>,
+    /// The busy rate the last receipt found.
+    busy: Option<u64>,
+    /// Since when the standing queue has been under `QUEUE_LOW`.
+    quiet_since: Option<Instant>,
+    hold: Option<Hold>,
+    episode: Option<Episode>,
+    /// The busy rate of the last cut, until a raise passes it.
+    capacity: Option<f64>,
+    raise: Raise,
+    recovery: Recovery,
+    /// The newest stalls, a ring.
+    stalls: [Stall; STALLS_KEPT],
+    next_stall: usize,
+    stall_cuts: StallCuts,
+    /// Cuts since the session began.
+    cuts: u64,
+    /// The last cut, rebase or drain: what the probe controller yields to.
+    acted: Option<Instant>,
 }
 impl ReceiptRate {
     pub fn new() -> Self {
         Self {
             samples: VecDeque::with_capacity(RING),
-            last_at: None,
+            last: None,
             newest: None,
             flow: Flow::Steady,
-            would_cut: false,
             epoch: None,
             one_way: false,
+            rebase: None,
+            rebased_at: None,
+            busy: None,
+            quiet_since: None,
+            hold: None,
+            episode: None,
+            capacity: None,
+            raise: Raise::default(),
+            recovery: Recovery::default(),
+            stalls: [Stall::default(); STALLS_KEPT],
+            next_stall: 0,
+            stall_cuts: StallCuts::default(),
+            cuts: 0,
+            acted: None,
         }
     }
 
     /// From now on, time receipts by the viewer's arrival times.
     pub fn use_one_way(&mut self) {
-        self.clear();
+        self.reset();
         self.one_way = true;
     }
 
-    /// Forget the receipts: they were measured on another path, or before a
-    /// pause. A cut one of them would have made is still reported.
-    pub fn clear(&mut self) {
+    /// Start again after a pause: the receipts, the episode, the hold, the
+    /// raises, the stalls and the rebase, as the one-way minima start again
+    /// too. The capacity is kept.
+    pub fn restart(&mut self) {
         self.samples.clear();
-        self.last_at = None;
+        self.last = None;
         self.newest = None;
         self.flow = Flow::Steady;
+        self.rebase = None;
+        self.rebased_at = None;
+        self.busy = None;
+        self.quiet_since = None;
+        self.hold = None;
+        self.episode = None;
+        self.raise = Raise::default();
+        self.recovery = Recovery::default();
+        self.stalls = [Stall::default(); STALLS_KEPT];
+        self.next_stall = 0;
+        self.stall_cuts = StallCuts::default();
+        self.acted = None;
+    }
+
+    /// Forget everything the link showed, the capacity too: a new path or a
+    /// new preset. The cut count is the session's.
+    pub fn reset(&mut self) {
+        self.restart();
+        self.capacity = None;
     }
 
     /// With arrival times, delays are queues already: no base to take off.
@@ -159,35 +475,27 @@ impl ReceiptRate {
         }
     }
 
-    /// One receipt at `received`, while the host paces at `pace` fps.
-    pub fn on_receipt(
-        &mut self,
-        receipt: Receipt,
-        received: Instant,
-        base: Option<Duration>,
-        pace: u32,
-    ) {
+    /// The baseline: the probes' base, or the receipts' own when higher.
+    fn baseline(&self, base: Duration) -> Duration {
+        base.max(self.rebase.unwrap_or(Duration::ZERO))
+    }
+
+    /// One receipt at `received`.
+    pub fn on_receipt(&mut self, receipt: Receipt, received: Instant, inputs: Inputs) -> Verdict {
         let (at, delay) = match (self.one_way, receipt.arrival) {
             (true, Some(arrival)) => (arrival.at, arrival.forward_queue),
-            (true, None) => return,
+            (true, None) => return Verdict::None,
             (false, _) => (
                 received.saturating_duration_since(*self.epoch.get_or_insert(received)),
                 receipt.delay,
             ),
         };
-        let base = self.base(base);
-        let frame = frame_interval(pace);
-        if let Some(last) = self.last_at {
-            let gap = at.saturating_sub(last);
-            self.flow = if gap >= frame * STALL_FRAMES {
-                Flow::Gap
-            } else if gap < frame / COMPRESSED_DIVISOR && self.flow != Flow::Steady {
-                Flow::Burst
-            } else {
-                Flow::Steady
-            };
-        }
-        self.last_at = Some(at);
+        let frame = frame_interval(inputs.pace);
+        let base = self.base(inputs.base);
+        let above = base.map_or(Duration::ZERO, |base| {
+            delay.saturating_sub(self.baseline(base))
+        });
+        self.follow(at, delay, above, frame);
         self.newest = Some(received);
         // Popping first keeps the ring within the capacity reserved for it.
         while self.samples.len() >= RING
@@ -204,63 +512,431 @@ impl ReceiptRate {
             bytes: receipt.bytes,
             behind_idr: receipt.behind_idr,
         });
-        if self.flow != Flow::Burst
-            && let Some(base) = base
-            && self.cuts(base, frame)
+        let Some(base) = base else {
+            return Verdict::None;
+        };
+        let Some(measure) = self.measure(base, frame) else {
+            return Verdict::None;
+        };
+        // The receipts' own baseline only ever falls between rebases, and
+        // goes once it is no higher than the probes'.
+        if let Some(rebase) = self.rebase
+            && measure.newest < rebase
         {
-            self.would_cut = true;
+            self.rebase = (measure.newest > base).then_some(measure.newest);
         }
+        self.busy = measure.busy;
+        if self.flow == Flow::Burst {
+            self.quiet_since = None;
+            return Verdict::None;
+        }
+        if measure.standing < QUEUE_LOW {
+            self.quiet_since.get_or_insert(received);
+        } else {
+            self.quiet_since = None;
+        }
+        if measure.behind_idr {
+            return Verdict::None;
+        }
+        self.decide(measure, at, received, inputs)
     }
 
-    /// The values at `now`, and whether a receipt since the last call would
-    /// have cut. Without a receipt in the last second only that flag is set.
-    pub fn take_view(
-        &mut self,
-        now: Instant,
-        base: Option<Duration>,
-        pace: u32,
-    ) -> ReceiptRateView {
-        let would_cut = std::mem::take(&mut self.would_cut);
-        let fresh = !self.samples.is_empty()
-            && self
-                .newest
-                .is_some_and(|newest| now.saturating_duration_since(newest) <= HISTORY);
-        if !fresh {
-            return ReceiptRateView {
-                would_cut,
-                ..ReceiptRateView::default()
+    /// Record how the receipt at `at` arrived, and a stall it ends. `above` is
+    /// its delay above the receipts' least: a stall's first receipt waited
+    /// through it, so at least half the gap beyond a frame interval; a unit
+    /// sent after a still picture's idle gap waited for nothing.
+    fn follow(&mut self, at: Duration, delay: Duration, above: Duration, frame: Duration) {
+        if let Some((last_at, last_delay)) = self.last {
+            let gap = at.saturating_sub(last_at);
+            let held = self.flow != Flow::Steady
+                && (gap < frame / COMPRESSED_DIVISOR || delay < last_delay);
+            self.flow = if gap >= frame * STALL_FRAMES && above >= gap.saturating_sub(frame) / 2 {
+                if let Some(slot) = self.stalls.get_mut(self.next_stall) {
+                    *slot = Stall {
+                        began: last_at,
+                        length: gap.saturating_sub(frame),
+                    };
+                }
+                self.next_stall = (self.next_stall + 1) % STALLS_KEPT;
+                Flow::Gap
+            } else if held {
+                Flow::Burst
+            } else {
+                Flow::Steady
             };
         }
-        let base = self.base(base);
-        let frame = frame_interval(pace);
-        ReceiptRateView {
-            standing: base.and_then(|base| self.standing(base, frame)),
-            busy_bps: base.and_then(|base| self.busy_bps(base, frame)),
-            used_bps: self.used_bps(),
-            would_cut,
+        self.last = Some((at, delay));
+    }
+
+    /// Whether stalls recur as of `at`, and the share of `STALL_SPAN` they
+    /// covered.
+    fn stalled(&self, at: Duration) -> (bool, f64) {
+        let from = at.saturating_sub(STALL_SPAN);
+        let (count, length) = self
+            .stalls
+            .iter()
+            .filter(|stall| stall.length > Duration::ZERO && stall.began + stall.length >= from)
+            .fold((0, Duration::ZERO), |(count, length), stall| {
+                let began = stall.began.max(from);
+                (count + 1, length + (stall.began + stall.length - began))
+            });
+        let share = length.as_secs_f64() / STALL_SPAN.as_secs_f64();
+        (
+            count >= STALLS_RECURRING || (count >= 2 && share >= STALL_SHARE),
+            share,
+        )
+    }
+
+    /// The decision on a receipt the stall rule and the IDR rule let through.
+    fn decide(&mut self, measure: Measure, at: Duration, now: Instant, inputs: Inputs) -> Verdict {
+        let standing = measure.standing;
+        let (recurring, share) = self.stalled(at);
+        if !recurring {
+            self.stall_cuts = StallCuts::default();
+        }
+        let queued = standing > QUEUE_HIGH || (inputs.blocked && standing > QUEUE_LOW);
+        let stalled = recurring && !self.stall_cuts.excused;
+        // Below congestion but above a clear link, after the cuts that may
+        // rebase: a queue that stays where they left it is the route's too,
+        // as for a light picture, whose frame interval at the lower pace hides
+        // part of it.
+        let lingering = !queued
+            && standing >= QUEUE_LOW
+            && self
+                .episode
+                .is_some_and(|episode| episode.cuts >= NO_EFFECT_CUTS);
+        if !queued {
+            if standing < QUEUE_LOW && self.episode.take().is_some() {
+                self.arm_recovery();
+            }
+            if !stalled && !lingering {
+                return Verdict::None;
+            }
+        }
+        let used = self.used_bps().map(|used| used as f64);
+        if self.held(now, used) {
+            return Verdict::None;
+        }
+        if queued || lingering {
+            let draining = measure
+                .before
+                .is_some_and(|before| standing + DRAIN_MARGIN < before)
+                || self.episode.is_some_and(|episode| {
+                    standing.as_secs_f64() < DRAINING * episode.last.as_secs_f64()
+                });
+            if draining {
+                if let Some(episode) = &mut self.episode {
+                    episode.last = standing;
+                }
+                self.hold = Some(Hold {
+                    since: now,
+                    until: now + hold_time(inputs, standing),
+                    target: None,
+                });
+                // The last cut is working: the receipts keep the queue.
+                self.acted = Some(now);
+                return Verdict::Hold;
+            }
+            // The link must deliver no more than the last cut asked for: while
+            // it delivers more, the queue is the host's backlog draining, or
+            // an encoder that has not followed the cuts.
+            if self.episode.is_some_and(|episode| {
+                episode.cuts >= NO_EFFECT_CUTS
+                    && standing.as_secs_f64() <= NO_EFFECT * episode.last.as_secs_f64()
+                    && used.is_some_and(|used| used <= HOLD_USED * episode.target)
+            }) {
+                return self.rebase(measure.least, now);
+            }
+        }
+        if !queued {
+            if !stalled {
+                return Verdict::None;
+            }
+            if self.stall_cuts.cuts >= NO_EFFECT_CUTS && share <= NO_EFFECT * self.stall_cuts.share
+            {
+                self.stall_cuts.excused = true;
+                return Verdict::None;
+            }
+        }
+        let busy = measure.busy.map(|busy| busy as f64);
+        let target = match (queued, stalled, busy, used) {
+            (_, true, _, Some(used)) => {
+                let target = STALL_CUT_OF_USED * used;
+                match busy.filter(|_| queued) {
+                    Some(busy) => target.min(CUT_OF_BUSY * busy),
+                    None => target,
+                }
+            }
+            (true, _, Some(busy), used) => {
+                (CUT_OF_BUSY * busy).min(used.map_or(f64::INFINITY, |used| CUT_OF_USED * used))
+            }
+            // No busy rate: no blind cut; the probe controller remains.
+            _ => return Verdict::None,
+        };
+        // A cut never asks below the preset's floor. One to about what the
+        // encoder sends changes nothing, so it is no evidence for a rebase
+        // either: the encoder has yet to follow the last one, or the host is
+        // at its floor, where the probe controller takes the queue once the
+        // receipts stop acting (`owns`). What the encoder sends is measured,
+        // so an encoder at its content floor, which spends more than it is
+        // asked for, is cut through the pace.
+        let target = target.max(inputs.floor_bps);
+        if target >= (1.0 - RAISE_APPLY) * inputs.sent_bps {
+            self.hold = Some(Hold {
+                since: now,
+                until: now + hold_time(inputs, standing),
+                target: Some(target),
+            });
+            return Verdict::Hold;
+        }
+        if queued {
+            let episode = self.episode.get_or_insert(Episode {
+                cuts: 0,
+                last: standing,
+                busy: busy.unwrap_or(target),
+                target,
+            });
+            episode.cuts += 1;
+            episode.last = standing;
+            episode.target = target;
+            if let Some(busy) = busy {
+                episode.busy = busy;
+                self.capacity = Some(busy);
+            }
+        }
+        if stalled {
+            self.stall_cuts.cuts += 1;
+            self.stall_cuts.share = share;
+        }
+        // Congestion began at the rate the session ran at: a recovery climbs
+        // back toward it. A climb that this cut stops is cut short.
+        let recovery = &mut self.recovery;
+        recovery
+            .to
+            .get_or_insert(RECOVER_SHARE * inputs.expected_bps);
+        if recovery.climb != Climb::Idle {
+            recovery.cut_short = true;
+            recovery.climb = Climb::Idle;
+        }
+        self.raise = Raise::default();
+        self.hold = Some(Hold {
+            since: now,
+            until: now + hold_time(inputs, standing),
+            target: Some(target),
+        });
+        self.cuts += 1;
+        self.acted = Some(now);
+        Verdict::Cut(target)
+    }
+
+    /// The baseline moves onto `least`: the queue the cuts left is the route,
+    /// and the rate they took is recovered.
+    fn rebase(&mut self, least: Duration, now: Instant) -> Verdict {
+        self.rebase = Some(least);
+        self.rebased_at = Some(now);
+        self.episode = None;
+        self.hold = None;
+        self.recovery.cut_short = false;
+        self.arm_recovery();
+        self.acted = Some(now);
+        Verdict::Rebased(least)
+    }
+
+    /// An episode ended: climb back, unless the last climb was cut short.
+    fn arm_recovery(&mut self) {
+        let recovery = &mut self.recovery;
+        if recovery.to.is_some() && !recovery.cut_short {
+            recovery.climb = Climb::Armed;
         }
     }
 
-    /// Whether the newest receipts show a queue a rate cut would answer.
-    fn cuts(&self, base: Duration, frame: Duration) -> bool {
-        let Some(window) = self.standing_window(frame) else {
+    /// Whether a hold still stands at `now`; one that passed is dropped.
+    fn held(&mut self, now: Instant, used: Option<f64>) -> bool {
+        let Some(hold) = self.hold else {
             return false;
         };
-        let newest = || self.samples.iter().rev().take(window);
-        // The units' own transfer only lowers the queue, so below the
-        // threshold no busy rate is needed.
-        if newest().any(|sample| sample.behind_idr)
-            || queue(newest(), base, |_| Duration::ZERO).is_none_or(|queue| queue <= QUEUE_HIGH)
-        {
-            return false;
+        let spending = hold
+            .target
+            .zip(used)
+            .is_some_and(|(target, used)| used > HOLD_USED * target);
+        let held = now < hold.until || (spending && now < hold.since + HOLD_MAX);
+        if !held {
+            self.hold = None;
         }
-        let Some(busy) = self.busy_bps(base, frame) else {
-            return false;
+        held
+    }
+
+    /// The QoS tick: the expected rate to raise to, if a raise is due. Raises
+    /// need fresh receipts, no hold, episode or recurring stalls, a standing
+    /// queue under `QUEUE_LOW`, and a baseline that has not just risen. A
+    /// light picture, which uses less than `RAISE_USED_MIN` of the expected
+    /// rate, raises only the pace cap, while one is set: it costs little at
+    /// the full pace, and a queue it builds is cut within a round trip. One
+    /// that spends more than expected is raised as any other, and what it
+    /// sends may clear the capacity.
+    pub fn raise(&mut self, now: Instant, inputs: Inputs) -> Option<Lift> {
+        let expected = inputs.expected_bps;
+        let used = self.used_bps().map(|used| used as f64);
+        let light = used.is_some_and(|used| used < RAISE_USED_MIN * expected);
+        let clear = self.fresh(now)
+            && self
+                .base(inputs.base)
+                .and_then(|base| self.measure(base, frame_interval(inputs.pace)))
+                .is_some_and(|measure| measure.standing < QUEUE_LOW)
+            && self.episode.is_none()
+            && !self.held(now, used)
+            && self
+                .last
+                .is_none_or(|(at, _)| !self.stalled(at).0 || self.stall_cuts.excused)
+            && self
+                .rebased_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= RAISE_AFTER_REBASE)
+            && expected > 0.0
+            && used.is_some()
+            && (!light || inputs.capped);
+        if !clear {
+            self.raise = Raise::default();
+            return None;
+        }
+        let quiet = self
+            .quiet_since
+            .is_some_and(|quiet| now.saturating_duration_since(quiet) >= RECOVER_QUIET);
+        let recovery = &mut self.recovery;
+        if recovery.to.is_some_and(|to| expected >= to) {
+            *recovery = Recovery::default();
+        } else if recovery.climb == Climb::Armed && quiet {
+            recovery.climb = Climb::Climbing;
+        }
+        let climbing = recovery.to.filter(|_| recovery.climb == Climb::Climbing);
+        let per_s = if climbing.is_some() {
+            RECOVER_PER_S
+        } else if self
+            .capacity
+            .is_some_and(|capacity| expected >= NEAR_CAPACITY * capacity)
+        {
+            RAISE_NEAR_PER_S
+        } else {
+            RAISE_PER_S
         };
-        queue(newest(), base, |sample| {
-            transfer(sample.bytes, busy).min(frame)
+        let since = self.raise.since.replace(now)?;
+        let dt = now
+            .saturating_duration_since(since)
+            .min(RAISE_DT_MAX)
+            .as_secs_f64();
+        self.raise.share += per_s * dt;
+        self.raise.added += RAISE_ADD_BPS * dt;
+        if self.raise.share * expected + self.raise.added < RAISE_APPLY * expected {
+            return None;
+        }
+        let mut next = expected * (1.0 + self.raise.share) + self.raise.added;
+        self.raise.share = 0.0;
+        self.raise.added = 0.0;
+        if let Some(to) = climbing
+            && next >= to
+        {
+            next = to.max(expected);
+            self.recovery = Recovery::default();
+        }
+        // Well past the last capacity with no queue: the link carries more
+        // now, as when a limit lifts, and a climb cut short may climb again.
+        // What it carries is the used rate when that is higher, as for an
+        // encoder that spends more than it is asked for.
+        let carried = next * used.map_or(1.0, |used| (used / expected).max(1.0));
+        if self
+            .capacity
+            .is_some_and(|capacity| carried > CAPACITY_CLEAR * capacity)
+        {
+            self.capacity = None;
+            self.recovery.cut_short = false;
+            self.arm_recovery();
+        }
+        Some(Lift {
+            to: next,
+            pace_only: light,
         })
-        .is_some_and(|queue| queue > QUEUE_HIGH)
+    }
+
+    /// A receipt came within `HISTORY` of `now`.
+    fn fresh(&self, now: Instant) -> bool {
+        !self.samples.is_empty()
+            && self
+                .newest
+                .is_some_and(|newest| now.saturating_duration_since(newest) <= HISTORY)
+    }
+
+    /// Whether the probe controller yields frame rate cuts to the receipts:
+    /// for `OWNED_AFTER` after a cut, a rebase or a drain, as long as
+    /// receipts come. An episode whose holds change nothing, as at the
+    /// preset's floor, yields to the probes after that.
+    pub fn owns(&self, now: Instant) -> bool {
+        self.fresh(now)
+            && self
+                .acted
+                .is_some_and(|acted| now.saturating_duration_since(acted) <= OWNED_AFTER)
+    }
+
+    /// The rate the byte window follows while an episode lasts: the newest
+    /// busy rate, or the last cut's.
+    pub fn clamp_rate(&self, now: Instant) -> Option<u64> {
+        let episode = self.episode.filter(|_| self.fresh(now))?;
+        Some(self.busy.unwrap_or(episode.busy as u64))
+    }
+
+    /// Whether a receipt came at or after `since`.
+    pub fn sampled_since(&self, since: Instant) -> bool {
+        self.newest.is_some_and(|newest| newest >= since)
+    }
+
+    /// The values at `now` for the trace. Without a receipt in the last
+    /// second only the counts are set.
+    pub fn view(&self, now: Instant, base: Option<Duration>, pace: u32) -> ReceiptRateView {
+        let counts = ReceiptRateView {
+            cuts: self.cuts,
+            episode: self.episode.is_some(),
+            ..ReceiptRateView::default()
+        };
+        if !self.fresh(now) {
+            return counts;
+        }
+        let measure = self
+            .base(base)
+            .and_then(|base| self.measure(base, frame_interval(pace)));
+        ReceiptRateView {
+            standing: measure.map(|measure| measure.standing),
+            busy_bps: measure.and_then(|measure| measure.busy),
+            used_bps: self.used_bps(),
+            ..counts
+        }
+    }
+
+    /// The standing queue and what it is judged on; `None` while the history
+    /// is shorter than its window.
+    fn measure(&self, base: Duration, frame: Duration) -> Option<Measure> {
+        let window = self.standing_window(frame)?;
+        let baseline = self.baseline(base);
+        let busy = self.busy_bps(baseline, frame);
+        let allowance =
+            |sample: &Sample| busy.map_or(frame, |busy| transfer(sample.bytes, busy).min(frame));
+        let newest = || self.samples.iter().rev().take(window);
+        let standing = queue(newest(), baseline, allowance)?;
+        let before = (self.samples.len() >= 2 * window)
+            .then(|| {
+                queue(
+                    self.samples.iter().rev().skip(window).take(window),
+                    baseline,
+                    allowance,
+                )
+            })
+            .flatten();
+        let excess = |sample: &Sample| sample.delay.saturating_sub(allowance(sample));
+        Some(Measure {
+            standing,
+            before,
+            busy,
+            behind_idr: newest().any(|sample| sample.behind_idr),
+            least: newest().map(excess).min()?,
+            newest: self.samples.back().map(excess)?,
+        })
     }
 
     /// How many of the newest receipts a standing queue is judged on; `None`
@@ -278,16 +954,9 @@ impl ReceiptRate {
             .map(|(index, _)| index + 1)
     }
 
-    fn standing(&self, base: Duration, frame: Duration) -> Option<Duration> {
-        let window = self.standing_window(frame)?;
-        queue(self.samples.iter().rev().take(window), base, |_| {
-            Duration::ZERO
-        })
-    }
-
     /// The median rate, lower of two, over the newest samples across which
     /// the link stayed busy.
-    fn busy_bps(&self, base: Duration, frame: Duration) -> Option<u64> {
+    fn busy_bps(&self, baseline: Duration, frame: Duration) -> Option<u64> {
         let compressed = frame / COMPRESSED_DIVISOR;
         let mut rates = [0u64; BUSY_SAMPLES];
         let mut found = 0;
@@ -309,7 +978,7 @@ impl ReceiptRate {
             }
             group = None;
             let gap = end.at.saturating_sub(earlier.at);
-            if end.delay.saturating_sub(base) < gap {
+            if end.delay.saturating_sub(baseline) < gap {
                 continue;
             }
             let Some(slot) = rates.get_mut(found) else {
@@ -343,22 +1012,30 @@ impl ReceiptRate {
     }
 }
 
+/// How long a cut or a drain holds: a round trip and the queue, within
+/// `HOLD_MIN` and `HOLD_MAX`.
+fn hold_time(inputs: Inputs, standing: Duration) -> Duration {
+    let rtt = inputs.rtt.or(inputs.base).unwrap_or(HOLD_MIN);
+    (rtt + standing).clamp(HOLD_MIN, HOLD_MAX)
+}
+
 /// One frame interval at `pace` fps; a second while nothing is paced.
 fn frame_interval(pace: u32) -> Duration {
     Duration::from_secs(1) / pace.max(1)
 }
 
-/// The least delay above `base` of `samples`, each less its `allowance`.
+/// The least delay above `baseline` of `samples`, each less its
+/// `allowance`.
 fn queue<'a>(
     samples: impl Iterator<Item = &'a Sample>,
-    base: Duration,
+    baseline: Duration,
     allowance: impl Fn(&Sample) -> Duration,
 ) -> Option<Duration> {
     samples
         .map(|sample| {
             sample
                 .delay
-                .saturating_sub(base)
+                .saturating_sub(baseline)
                 .saturating_sub(allowance(sample))
         })
         .min()
@@ -388,37 +1065,77 @@ mod tests {
     /// 60 fps: a frame interval of 16.7 ms.
     const PACE: u32 = 60;
 
-    /// Receipts fed at chosen times, read back at the newest.
+    /// Receipts fed at chosen times, timed by the host, as the QoS controller
+    /// feeds them.
     struct Feed {
         t0: Instant,
         rate: ReceiptRate,
         now: Instant,
+        /// What the controller expects the viewer to receive.
+        expected: f64,
+        blocked: bool,
+        /// The receipts' pace cap is set.
+        capped: bool,
+        verdicts: Vec<Verdict>,
     }
     impl Feed {
-        fn new() -> Self {
+        fn new(expected: f64) -> Self {
             let t0 = Instant::now();
             Self {
                 t0,
                 rate: ReceiptRate::new(),
                 now: t0,
+                expected,
+                blocked: false,
+                capped: false,
+                verdicts: Vec::new(),
+            }
+        }
+
+        fn at(&self, ms: u64) -> Instant {
+            self.t0 + Duration::from_millis(ms)
+        }
+
+        /// An encoder that sends what it is asked for, above the floor.
+        fn inputs(&self) -> Inputs {
+            Inputs {
+                base: Some(BASE),
+                pace: PACE,
+                expected_bps: self.expected,
+                sent_bps: self.expected,
+                floor_bps: 0.0,
+                rtt: Some(BASE),
+                blocked: self.blocked,
+                capped: self.capped,
             }
         }
 
         /// A receipt at `at_ms` of `bytes` whose unit took `queue_ms` more
-        /// than the base RTT.
-        fn receipt(&mut self, at_ms: u64, queue_ms: u64, bytes: u64) {
-            self.receipt_with(at_ms, queue_ms, bytes, false);
+        /// than the base RTT. A cut is applied to `expected`.
+        fn receipt(&mut self, at_ms: u64, queue_ms: u64, bytes: u64) -> Verdict {
+            self.receipt_with(at_ms, queue_ms, bytes, false)
         }
 
-        fn receipt_with(&mut self, at_ms: u64, queue_ms: u64, bytes: u64, behind_idr: bool) {
-            self.now = self.t0 + Duration::from_millis(at_ms);
+        fn receipt_with(
+            &mut self,
+            at_ms: u64,
+            queue_ms: u64,
+            bytes: u64,
+            behind_idr: bool,
+        ) -> Verdict {
+            self.now = self.at(at_ms);
             let receipt = Receipt {
                 delay: BASE + Duration::from_millis(queue_ms),
                 bytes,
                 behind_idr,
                 arrival: None,
             };
-            self.rate.on_receipt(receipt, self.now, Some(BASE), PACE);
+            let verdict = self.rate.on_receipt(receipt, self.now, self.inputs());
+            if let Verdict::Cut(target) = verdict {
+                self.expected = self.expected.min(target);
+            }
+            self.verdicts.push(verdict);
+            verdict
         }
 
         /// `count` receipts every `every_ms` from `from_ms`.
@@ -428,8 +1145,33 @@ mod tests {
             }
         }
 
-        fn view(&mut self) -> ReceiptRateView {
-            self.rate.take_view(self.now, Some(BASE), PACE)
+        /// The QoS tick at `at_ms`: a raise is applied to `expected`.
+        fn tick(&mut self, at_ms: u64) -> Option<f64> {
+            let lift = self.lift(at_ms)?;
+            assert!(!lift.pace_only, "{lift:?}");
+            Some(lift.to)
+        }
+
+        /// The QoS tick at `at_ms`, whatever it raises.
+        fn lift(&mut self, at_ms: u64) -> Option<Lift> {
+            self.now = self.at(at_ms);
+            let lift = self.rate.raise(self.now, self.inputs())?;
+            self.expected = lift.to;
+            Some(lift)
+        }
+
+        fn cuts(&self) -> Vec<f64> {
+            self.verdicts
+                .iter()
+                .filter_map(|verdict| match verdict {
+                    Verdict::Cut(target) => Some(*target),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn view(&self) -> ReceiptRateView {
+            self.rate.view(self.now, Some(BASE), PACE)
         }
     }
 
@@ -438,60 +1180,82 @@ mod tests {
     }
 
     #[test]
-    fn a_standing_queue_would_cut_and_its_rate_is_the_links() {
+    fn a_standing_queue_cuts_to_85_percent_of_the_busy_rate_within_a_round_trip() {
         // A 2 Mbit/s link with 100 ms of queue: a 4250-byte unit every 17 ms.
-        let mut feed = Feed::new();
-        feed.steady(0, 80, 17, 100, 4250);
+        let mut feed = Feed::new(4_000_000.0);
+        feed.steady(0, 5, 17, 100, 4250);
+        // The fourth receipt shows three busy pairs: 85% of 2 Mbit/s.
+        assert_eq!(feed.cuts(), [1_700_000.0]);
+        assert!(
+            matches!(feed.verdicts[3], Verdict::Cut(_)),
+            "{:?}",
+            feed.verdicts
+        );
         let view = feed.view();
-        assert_eq!(view.standing, Some(ms(100)));
         assert_eq!(view.busy_bps, Some(2_000_000));
-        assert_eq!(view.used_bps, Some(2_000_000));
-        assert!(view.would_cut);
-        // The flag covers the receipts since the last view.
-        assert!(!feed.view().would_cut);
+        // Its own transfer, a frame interval at most, is no queue.
+        assert!(
+            view.standing
+                .is_some_and(|standing| standing > ms(80) && standing < ms(85)),
+            "{view:?}"
+        );
+        assert_eq!((view.cuts, view.episode), (1, true));
+        // The byte window follows the busy rate, and the probes yield.
+        assert_eq!(feed.rate.clamp_rate(feed.now), Some(2_000_000));
+        assert!(feed.rate.owns(feed.now));
 
-        // A unit behind an IDR in the window decides nothing; once the window
-        // has passed it, the queue cuts again.
-        feed.receipt_with(80 * 17, 100, 4250, true);
-        assert!(!feed.view().would_cut);
-        feed.steady(81 * 17, 2, 17, 100, 4250);
-        assert!(!feed.view().would_cut);
-        feed.steady(83 * 17, 2, 17, 100, 4250);
-        assert!(feed.view().would_cut);
+        // Units behind an IDR in the window decide nothing.
+        let mut feed = Feed::new(4_000_000.0);
+        for n in 0..20 {
+            feed.receipt_with(17 * n, 100, 4250, true);
+        }
+        assert!(feed.cuts().is_empty());
 
         // 50 ms of queue is above 40, but not once each unit's own transfer
         // (17 ms at this rate, at most a frame interval) is taken off.
-        let mut feed = Feed::new();
+        let mut feed = Feed::new(4_000_000.0);
         feed.steady(0, 80, 17, 50, 4250);
-        let view = feed.view();
-        assert_eq!(view.standing, Some(ms(50)));
-        assert!(!view.would_cut);
+        assert!(feed.cuts().is_empty());
+        // ... unless a clamped window refused a unit meanwhile: above 10 ms,
+        // that is congestion too.
+        feed.blocked = true;
+        feed.receipt(80 * 17, 50, 4250);
+        assert_eq!(feed.cuts(), [1_700_000.0]);
+        // A queue under 10 ms is none, blocked or not.
+        let mut feed = Feed::new(4_000_000.0);
+        feed.blocked = true;
+        feed.steady(0, 80, 17, 20, 4250);
+        assert!(feed.cuts().is_empty());
     }
 
     #[test]
     fn an_idle_link_has_no_busy_rate_and_never_cuts() {
         // A fast link carrying 4 KiB at 60 fps: each unit crosses in 2 ms, so
         // no pair shows the link busy between two receipts.
-        let mut feed = Feed::new();
+        let mut feed = Feed::new(2_000_000.0);
         feed.steady(0, 60, 17, 2, 4096);
         // One receipt a Wi-Fi hold kept 300 ms is no standing queue.
         feed.receipt(60 * 17, 300, 4096);
         feed.steady(61 * 17, 10, 17, 2, 4096);
         let view = feed.view();
-        assert_eq!(view.standing, Some(ms(2)));
-        assert_eq!(view.busy_bps, None);
+        assert_eq!((view.standing, view.busy_bps), (Some(Duration::ZERO), None));
         assert!(
             view.used_bps
                 .is_some_and(|used| (1_900_000..2_000_000).contains(&used))
         );
-        assert!(!view.would_cut);
+        assert!(
+            feed.verdicts
+                .iter()
+                .all(|verdict| *verdict == Verdict::None)
+        );
 
-        // A second without receipts leaves nothing to report ...
+        // A second without receipts leaves only the counts ...
         let later = feed.now + HISTORY + ms(1);
         assert_eq!(
-            feed.rate.take_view(later, Some(BASE), PACE),
+            feed.rate.view(later, Some(BASE), PACE),
             ReceiptRateView::default()
         );
+        assert!(!feed.rate.owns(later));
         // ... and without a base RTT there is no queue to judge.
         let mut blind = ReceiptRate::new();
         let t0 = Instant::now();
@@ -502,74 +1266,297 @@ mod tests {
                 behind_idr: false,
                 arrival: None,
             };
-            blind.on_receipt(receipt, t0 + ms(n * 17), None, PACE);
+            let inputs = Inputs {
+                base: None,
+                ..feed.inputs()
+            };
+            let verdict = blind.on_receipt(receipt, t0 + ms(n * 17), inputs);
+            assert_eq!(verdict, Verdict::None);
         }
-        let view = blind.take_view(t0 + ms(29 * 17), None, PACE);
-        assert_eq!(
-            (view.standing, view.busy_bps, view.would_cut),
-            (None, None, false)
-        );
+        let view = blind.view(t0 + ms(29 * 17), None, PACE);
+        assert_eq!((view.standing, view.busy_bps), (None, None));
         assert!(view.used_bps.is_some());
     }
 
     #[test]
     fn a_stall_burst_never_cuts() {
         // A 2 Mbit/s link near capacity: 4250 bytes every 17 ms, 20 ms each.
-        let mut feed = Feed::new();
+        let mut feed = Feed::new(2_000_000.0);
         feed.steady(0, 60, 17, 20, 4250);
-        assert_eq!(
-            feed.view(),
-            ReceiptRateView {
-                standing: Some(ms(20)),
-                busy_bps: Some(2_000_000),
-                used_bps: Some(2_000_000),
-                would_cut: false,
-            }
-        );
+        assert_eq!(feed.view().busy_bps, Some(2_000_000));
         // The link holds everything for 600 ms, then delivers the 36 units
         // sent meanwhile 3 ms apart: their delay falls 14 ms a receipt, and
         // past 50 ms into the burst its own receipts alone stand above 100 ms.
         let held = 59 * 17 + 600;
-        let mut late_in_burst = None;
         for n in 0..36 {
             feed.receipt(held + 3 * n, 600 - 14 * n, 4250);
-            let view = feed.view();
-            assert!(!view.would_cut, "burst receipt {n}: {view:?}");
-            if n == 30 {
-                late_in_burst = Some(view);
-            }
         }
-        // The burst alone would have cut: only the stall rule held it.
-        let late = late_in_burst.unwrap();
-        assert!(
-            late.standing.is_some_and(|standing| standing > ms(100)),
-            "{late:?}"
-        );
-        assert!(late.busy_bps.is_some(), "{late:?}");
         // The link carries on as before.
         let after = held + 3 * 35;
         for n in 1..=30 {
             feed.receipt(after + 17 * n, 20, 4250);
-            assert!(!feed.view().would_cut, "receipt {n} after the burst");
         }
+        assert!(feed.cuts().is_empty(), "{:?}", feed.verdicts);
+        // A backlog the link drains at its own pace, each receipt with less
+        // delay than the one before, is the stall's too.
+        let mut feed = Feed::new(2_000_000.0);
+        feed.steady(0, 60, 17, 2, 4096);
+        let held = 59 * 17 + 600;
+        for n in 0..40 {
+            feed.receipt(held + 8 * n, 600 - 15 * n, 4096);
+        }
+        feed.steady(held + 8 * 40, 30, 17, 2, 4096);
+        assert!(feed.cuts().is_empty(), "{:?}", feed.verdicts);
+        assert_eq!(feed.view().cuts, 0);
+    }
+
+    #[test]
+    fn stalls_that_recur_cut_twice_then_are_excused_and_idle_gaps_never_count() {
+        // 300 ms stalls every second on a fast link: each burst is excused,
+        // but stalls that recur are congestion.
+        let mut feed = Feed::new(4_000_000.0);
+        feed.steady(0, 60, 17, 2, 8333);
+        let mut at = 60 * 17;
+        for _ in 0..8 {
+            // The units sent during the stall arrive at once after it; each
+            // is as large as the rate the host asks for.
+            let bytes = (feed.expected / 60.0 / 8.0) as u64;
+            at += 300;
+            for n in 0..18 {
+                feed.receipt(at + n, 300 - 16 * n, bytes);
+            }
+            at += 18;
+            for _ in 0..40 {
+                at += 17;
+                feed.receipt(at, 2, bytes);
+            }
+        }
+        let cuts = feed.cuts();
+        assert_eq!(cuts.len(), 2, "{:?}", feed.verdicts);
+        // Each to 85% of what the receipts delivered, at most.
+        assert!(cuts[0] <= 0.85 * 4_000_000.0 + 1.0, "{cuts:?}");
+        assert!(feed.rate.stall_cuts.excused);
+
+        // A still picture's idle gaps carry no delay: no stall at all.
+        let mut feed = Feed::new(4_000_000.0);
+        let mut at = 0;
+        for _ in 0..20 {
+            feed.steady(at, 5, 17, 2, 8333);
+            at += 5 * 17 + 500;
+        }
+        assert!(feed.cuts().is_empty());
+        assert!(
+            feed.rate
+                .stalls
+                .iter()
+                .all(|stall| stall.length == Duration::ZERO)
+        );
     }
 
     #[test]
     fn compressed_receipts_are_no_rate_sample() {
         // A 2 Mbit/s link whose receipts the return path bunches in threes:
         // 3750 bytes each, 1 ms apart, a group every 45 ms, 80 ms of queue.
-        let mut feed = Feed::new();
+        let mut feed = Feed::new(4_000_000.0);
         for group in 0..30 {
             for n in 0..3 {
                 feed.receipt(group * 45 + n, 80, 3750);
             }
         }
-        let view = feed.view();
         // Each pair 1 ms apart would claim 30 Mbit/s; each group is three
         // units delivered over the 45 ms since the one before.
-        assert_eq!(view.busy_bps, Some(2_000_000));
+        assert_eq!(feed.view().busy_bps, Some(2_000_000));
         // Bunching on a steady link is no stall: the queue still cuts.
-        assert_eq!(view.standing, Some(ms(80)));
-        assert!(view.would_cut);
+        assert_eq!(feed.cuts().first(), Some(&1_700_000.0));
+    }
+
+    #[test]
+    fn a_cut_holds_then_a_draining_queue_holds_and_no_cut_repeats_the_last() {
+        // 2 Mbit/s with 100 ms of queue, until the cut.
+        let mut feed = Feed::new(4_000_000.0);
+        feed.steady(0, 5, 17, 100, 4250);
+        assert_eq!(feed.cuts(), [1_700_000.0]);
+        // The link still delivers at 2 Mbit/s with the same queue: the cut
+        // holds for up to a second while what it delivers is above 1.1 × the
+        // target ...
+        feed.steady(85, 55, 17, 100, 4250);
+        assert_eq!(feed.cuts().len(), 1, "{:?}", feed.verdicts);
+        // ... and after it, a cut to the rate already asked for only holds
+        // again: it is no evidence that the host's rate is not the cause.
+        feed.steady(85 + 55 * 17, 10, 17, 100, 4250);
+        assert_eq!(feed.cuts().len(), 1, "{:?}", feed.verdicts);
+        assert!(feed.verdicts.contains(&Verdict::Hold));
+        // A queue that drains holds, whatever the busy rate.
+        let mut feed = Feed::new(8_000_000.0);
+        feed.steady(0, 10, 17, 200, 4250);
+        let cuts = feed.cuts().len();
+        let from = 10 * 17 + 1100;
+        for n in 0..12 {
+            feed.receipt(from + 17 * n, 190 - 12 * n, 4250);
+        }
+        assert_eq!(feed.cuts().len(), cuts, "{:?}", feed.verdicts);
+        assert!(feed.verdicts.contains(&Verdict::Hold));
+    }
+
+    #[test]
+    fn two_cuts_that_leave_the_queue_rebase_onto_it() {
+        // A longer route: every unit 120 ms later than the base, on a link
+        // that is not otherwise full. The busy rate is what the host sends,
+        // so each cut takes 15%, and the queue stays.
+        let mut feed = Feed::new(4_000_000.0);
+        feed.steady(0, 60, 17, 2, 8333);
+        let mut at = 60 * 17;
+        let mut rebased = None;
+        for _ in 0..240 {
+            at += 17;
+            let bytes = (feed.expected / 60.0 / 8.0) as u64;
+            if let Verdict::Rebased(level) = feed.receipt(at, 122, bytes) {
+                rebased = Some(level);
+            }
+        }
+        assert_eq!(feed.cuts().len(), 2, "{:?}", feed.verdicts);
+        // The new baseline is the queue's least, less the units' transfer.
+        let level = rebased.unwrap();
+        assert!(
+            level > BASE + ms(100) && level < BASE + ms(122),
+            "{level:?}"
+        );
+        // The longer route then cuts nothing more.
+        assert_eq!(feed.view().cuts, 2);
+        assert!(
+            feed.view()
+                .standing
+                .is_some_and(|standing| standing < QUEUE_LOW)
+        );
+        // A receipt below it lowers it: the route got shorter again.
+        feed.receipt(at + 17, 2, 8333);
+        assert_eq!(feed.rate.rebase, None);
+    }
+
+    #[test]
+    fn raises_follow_use_in_5_percent_steps_slower_near_capacity() {
+        // A clear 4 Mbit/s session: used is what is expected.
+        let mut feed = Feed::new(4_000_000.0);
+        feed.steady(0, 60, 17, 2, 8333);
+        // The first tick only starts the raise; then 15% a second plus
+        // 100 kbit/s a second, applied once it adds 5%.
+        assert_eq!(feed.tick(1000), None);
+        assert_eq!(feed.tick(1250), None);
+        let next = feed.tick(1500).unwrap();
+        assert!(
+            (next - (4_000_000.0 * 1.075 + 50_000.0)).abs() < 1.0,
+            "{next}"
+        );
+        // A still picture uses less than half of what is expected: no raise
+        // of bits per frame ...
+        let mut feed = Feed::new(4_000_000.0);
+        feed.steady(0, 60, 17, 2, 2000);
+        assert!((0..8).all(|n| feed.tick(1000 + 250 * n).is_none()));
+        // ... but a pace cap rises, which costs a light picture little.
+        feed.capped = true;
+        feed.steady(2000, 60, 17, 2, 2000);
+        let lifts: Vec<Lift> = (0..4).filter_map(|n| feed.lift(3000 + 250 * n)).collect();
+        assert!(
+            !lifts.is_empty() && lifts.iter().all(|lift| lift.pace_only),
+            "{lifts:?}"
+        );
+        // An encoder at its content floor spends four times what it is asked
+        // for: the link carries it, so it is raised.
+        let mut feed = Feed::new(1_000_000.0);
+        feed.steady(0, 60, 17, 2, 8333);
+        assert_eq!(feed.tick(1000), None);
+        assert!(feed.tick(1250).is_some_and(|next| next > 1_000_000.0));
+        // Near the capacity of the last cut, 4% a second, so the 5% takes a
+        // second where it took half of one.
+        let mut feed = Feed::new(4_000_000.0);
+        feed.rate.capacity = Some(4_200_000.0);
+        feed.steady(0, 60, 17, 2, 8333);
+        let raises: Vec<(u64, f64)> = (0..5)
+            .filter_map(|n| feed.tick(1000 + 250 * n).map(|next| (n, next)))
+            .collect();
+        assert_eq!(raises, [(4, 4_000_000.0 * 1.04 + 100_000.0)]);
+        // No raise inside an episode or a hold.
+        let mut feed = Feed::new(4_000_000.0);
+        feed.steady(0, 5, 17, 100, 4250);
+        assert!((0..4).all(|n| feed.tick(100 + 250 * n).is_none()));
+    }
+
+    #[test]
+    fn a_recovery_climbs_at_half_a_second_toward_where_congestion_began() {
+        // 4 Mbit/s, then a 2 Mbit/s queue: a cut to 1.7 Mbit/s.
+        let mut feed = Feed::new(4_000_000.0);
+        feed.steady(0, 5, 17, 100, 4250);
+        assert_eq!(feed.cuts(), [1_700_000.0]);
+        // The queue clears and the link carries 1.7 Mbit/s with nothing
+        // queued: the episode ends, and after 500 ms of a clear queue raises
+        // climb at 50% a second toward 90% of the 4 Mbit/s it began at.
+        let bytes = (1_700_000.0_f64 / 60.0 / 8.0) as u64;
+        feed.steady(1200, 120, 17, 2, bytes);
+        assert!(!feed.view().episode);
+        let start = feed.expected;
+        let mut at = 1200 + 17 * 120;
+        let mut raises = Vec::new();
+        for _ in 0..8 {
+            let bytes = (feed.expected / 60.0 / 8.0) as u64;
+            feed.steady(at, 15, 17, 2, bytes);
+            at += 250;
+            raises.extend(feed.tick(at));
+        }
+        assert!(feed.expected > 2.0 * start, "{raises:?}");
+        assert!(feed.expected <= 3_600_000.0 + 1.0, "{raises:?}");
+    }
+
+    #[test]
+    fn the_receipts_own_the_queue_for_two_seconds_after_a_cut() {
+        let mut feed = Feed::new(4_000_000.0);
+        feed.steady(0, 5, 17, 100, 4250);
+        let cut = feed.now;
+        // The queue clears: the episode ends, but the cut is recent.
+        feed.steady(1200, 30, 17, 2, 4250);
+        assert!(!feed.view().episode);
+        assert!(feed.rate.owns(feed.now));
+        assert_eq!(feed.rate.clamp_rate(feed.now), None);
+        feed.steady(1200 + 30 * 17, 70, 17, 2, 4250);
+        assert!(feed.now > cut + OWNED_AFTER);
+        assert!(!feed.rate.owns(feed.now));
+    }
+
+    #[test]
+    fn an_episode_of_holds_yields_to_the_probes_two_seconds_after_the_cut() {
+        // 2 Mbit/s with 100 ms of queue: a cut, then the link delivers as
+        // before, so every decision after the hold asks for the rate already
+        // asked for and only holds.
+        let mut feed = Feed::new(4_000_000.0);
+        feed.steady(0, 5, 17, 100, 4250);
+        assert_eq!(feed.cuts().len(), 1);
+        let cut = feed.now;
+        feed.steady(85, 180, 17, 100, 4250);
+        assert_eq!(feed.cuts().len(), 1, "{:?}", feed.verdicts);
+        assert!(feed.verdicts.contains(&Verdict::Hold));
+        // The episode lasts, and its clamp, but the probe controller has the
+        // frame rate back once nothing acted for two seconds.
+        assert!(feed.view().episode);
+        assert!(feed.now > cut + OWNED_AFTER);
+        assert!(!feed.rate.owns(feed.now));
+        assert_eq!(feed.rate.clamp_rate(feed.now), Some(2_000_000));
+    }
+
+    #[test]
+    fn no_rebase_while_the_link_delivers_more_than_the_cuts_asked() {
+        // A longer route, 122 ms, but an encoder that keeps sending 4 Mbit/s
+        // whatever it is asked: the link delivers more than the cut asked
+        // for, so the queue is the host's, and nothing rebases.
+        let mut feed = Feed::new(4_000_000.0);
+        feed.steady(0, 60, 17, 2, 8333);
+        feed.steady(60 * 17, 240, 17, 122, 8333);
+        assert!(!feed.cuts().is_empty());
+        assert!(
+            feed.verdicts
+                .iter()
+                .all(|verdict| !matches!(verdict, Verdict::Rebased(_))),
+            "{:?}",
+            feed.verdicts
+        );
+        assert_eq!(feed.rate.rebase, None);
     }
 }

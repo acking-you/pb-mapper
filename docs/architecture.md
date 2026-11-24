@@ -328,8 +328,9 @@ Nothing in the SDK crates knows it exists.
     kernel still coalesces the process's timers, which thread C's own
     waiter avoids)
   - `credit.rs`, `qos.rs`, `idr.rs`, `outgoing.rs`: Receipt credit, delay-based
-    QoS (`qos/receipt_rate.rs`, a receipt-rate estimator that is only traced),
-    on-demand IDRs, and the hand-off from thread C to B-send
+    QoS (`qos/receipt_rate.rs`, the receipt-driven rate control that cuts bits
+    per frame within a round trip; `qos/sim.rs`, a test-only closed loop of
+    it), on-demand IDRs, and the hand-off from thread C to B-send
   - `scale.rs`: How a captured picture becomes the encoded one, pure and
     tested on every platform: the quarter turn that stands a rotated
     display's picture upright, the size a turned display is captured at

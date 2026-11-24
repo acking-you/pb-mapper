@@ -1354,10 +1354,12 @@ where that fits. Seven rules carry it:
    twice as fast as the pace is taken at the pace. An undated picture, a
    repeat or a skip keeps an even grid. After a stall two captures are never
    closer than three quarters of a period.
-3. **QoS changes frame rate and bitrate only, from probe delay.** A probe once a
-   second, four a second on a short path, is answered by the viewer's network
-   task. Resolution never adapts: it changes only with a new session, a display
-   switch or an explicit choice.
+3. **QoS changes frame rate and bitrate only, from receipts and probe delay.**
+   Transport receipts cut bits per frame within a round trip and lower the
+   frame rate only below the preset's cut floor; a probe once a second, four a
+   second on a short path, answered by the viewer's network task, remains for
+   severe or unexplained delay. Resolution never adapts: it changes only with
+   a new session, a display switch or an explicit choice.
 4. **Infinite GOP.** IDRs are sent only on demand and are rate-limited on both
    sides. Requests are deferred and coalesced, never dropped.
 5. **The viewer owns presentation lag.** Its sink keeps only the newest
@@ -2295,19 +2297,20 @@ image blames the capture, which is retried. The failure is logged as `desktop_h2
 The host admits a unit against a window computed before each admission:
 
 ```text
-t      = base RTT (100 ms until the first probe) + 100 ms
+t      = base RTT (100 ms until the first probe) + rebase + 100 ms
 frames = clamp(ceil(pace × t), 3, 64)
 bytes  = clamp(2 × expected bitrate × t / 8, 64 KiB, 4 MiB)
 ```
 
 The base RTT is the minimum of recent probes, never a smoothed RTT, so queueing
-never enlarges the window. At 60 FPS, a 20 ms base RTT and 4 Mbit/s that is 8
-frames and 120 KB. A unit is admitted when nothing is in flight (whatever its
-size, so a session always progresses), when it fits both bounds, or when it is
-an IDR and no other IDR is in flight: one IDR may go over the byte window and
-one frame past the frame window, and never waits for the whole flight to
-drain. Its sequence number is booked before the write, so a receipt ahead of
-the last booked sequence is a protocol error.
+never enlarges the window. The rebase is zero until the QoS controller moves
+its baseline onto a longer route (see below). At 60 FPS, a 20 ms base RTT and
+4 Mbit/s that is 8 frames and 120 KB. A unit is admitted when nothing is in
+flight (whatever its size, so a session always progresses), when it fits both
+bounds, or when it is an IDR and no other IDR is in flight: one IDR may go over
+the byte window and one frame past the frame window, and never waits for the
+whole flight to drain. Its sequence number is booked before the write, so a
+receipt ahead of the last booked sequence is a protocol error.
 
 When receipts show a standing queue, the byte window follows the delivery rate.
 The ack queue is the median receipt delay above the base RTT over the last
@@ -2315,10 +2318,17 @@ The ack queue is the median receipt delay above the base RTT over the last
 link receipts seldom, and its queue must not vanish between two receipts. It is
 zero before three receipts. Above 100 ms, once receipts have been measured for
 500 ms, `bytes` becomes 1.25 × the delivery rate of the last 500 ms × `t`, at
-least 32 KiB and at most the normal window. An application-limited flow has no
-queue and is never clamped. The clamp bounds the queue between probes; frame
-rate and bitrate decisions stay with the probe. JPEG sessions use a fixed
-window of four pictures and 2 MiB.
+least 32 KiB and at most the normal window. While a receipt episode lasts (see
+[QoS](#qos-frame-rate-and-bits-per-frame)) `bytes` follows the busy rate the
+controller cut for instead, the same way and at once, without waiting for an
+ack queue. An application-limited flow has no queue and is never clamped. A
+unit the clamped window refuses, with no IDR in flight, marks the session
+blocked until the next receipt, which the receipts' controller reads as
+congestion from 10 ms of standing queue. After a rebase of the QoS controller's
+baseline (a route that became longer), `t` grows by the rebase and the ack
+queue counts only what lies above it; of two updates of the rebase that race
+between B-send and B-recv, the ledger keeps the newer. JPEG sessions use a
+fixed window of four pictures and 2 MiB.
 
 A viewer and a host that both list `arrival_time` time the receipts one way.
 The viewer stamps each receipt with when its reader finished reading the
@@ -2360,12 +2370,127 @@ frame and byte maximums, the IDR's headroom and JPEG's window stay as above.
 
 Receipts reach only the credit ledger and the QoS controller. They never reach
 the input ledger, the backend or the control lease, and no authorisation method
-takes a sequence number. In the QoS controller they also feed a receipt-rate
-estimator that runs in shadow: it is traced (see
-[Diagnostics](#diagnostics)) and no frame rate, bitrate or credit decision
-reads it.
+takes a sequence number. In the QoS controller they drive the rate (see
+[QoS](#qos-frame-rate-and-bits-per-frame)).
 
 ### QoS: frame rate and bits per frame
+
+Transport receipts drive the rate, after airhand's per-frame acks: a standing
+queue cuts bits per frame within a round trip and keeps the frame rate, which
+falls only once bits per frame reach the preset's cut floor, and then only to
+what the link delivers at that floor. The probe controller below remains for
+severe or unexplained delay. This reverses decision D5 of the overhaul plan
+(the probe adjusts fps and bitrate) and CONTRACT-perf R13 (receipts only clamp
+the byte window), at the owner's direction to give every platform the best
+performance airhand's design inspires; the deviation is recorded in
+[DECISIONS.md](remote-desktop-overhaul/plan/DECISIONS.md).
+
+Each receipt of H.264 or H.265 video that is not paused updates three figures
+over the newest second of receipts. The standing queue is the least delay
+above the baseline over the newest receipts (at least three, spanning two
+frame intervals and 50 ms, at most 500 ms), each less its unit's own transfer
+at the busy rate and at most a frame interval; while no busy rate is known, a
+frame interval. The busy rate is the median delivery rate over the newest
+eight receipt pairs across which the link stayed busy (the later unit's delay
+above the baseline at least the pair's gap); pairs less than a quarter of a
+frame interval apart are compression and count toward the pair before. The
+used rate is what the receipts covered over the second. The baseline is the
+probes' base RTT, or a rebased one (below); with arrival times each receipt
+is timed by the viewer's stamp and its delay is its unit's queue toward the
+viewer, so nothing on the way back counts.
+
+The queue is congested above 40 ms, or above 10 ms while the session is
+blocked (see [Send credit](#send-credit)). Congested, a receipt:
+
+- inside a hold decides nothing;
+- with the queue draining (5 ms below the one before it, or below 0.8 × the
+  episode's last) holds for a round trip and the queue;
+- after two cuts that left the queue within 1.1 × the last rebases, once the
+  link delivers no more than 1.1 × what the last cut asked for: the queue is
+  a longer route, not a rate the host sends. While the link delivers more,
+  the queue is the host's backlog draining, or an encoder that did not follow
+  the cuts;
+- without a busy rate decides nothing: there is no blind cut, and the probe
+  controller remains;
+- otherwise cuts the expected rate to `min(0.85 × busy, 0.9 × used)`, never
+  below the preset's floor at its minimum pace. A cut to within 5% of what
+  the encoder sends, as the host measured its frames (below), only holds
+  again, and counts toward no rebase: the encoder has yet to follow the last
+  one, or the host is at its floor.
+
+After two cuts, a queue between 10 and 40 ms that stays where they left them
+(within 1.1 × the last, and not draining) rebases as well, on the same
+condition: a light picture's frame interval, longer at the lower pace, hides
+part of a route's queue below 40 ms.
+
+A cut holds the next decision for a round trip and the queue, between 100 ms
+and 1 s, and while the used rate stays above 1.1 × the cut's target, up to
+1 s, so an encoder whose output trails its bitrate is not cut again before it
+follows. Receipts behind an IDR in flight decide nothing. A stall (a receipt
+gap of at least three frame intervals whose first receipt waited through half
+of it; a still picture's idle gap carries no delay) never cuts: the receipts
+after it, compressed or each with less delay than the one before, are what it
+held. Stalls that recur, three ending within 2 s or two that cover 15% of it,
+are congestion and cut to 0.85 × the used rate; after two such cuts that left
+them as they were they are excused until they stop.
+
+A cut lands in bits per frame, down to the preset's cut floor, at the pace
+before the startup cap. Below the cut floor the pace is capped at what the
+cut carries at what a frame then costs, down to the preset's minimum; below
+that, bits per frame fall again, to the preset's floor. For Balanced and
+Smooth the cut floor is the floor; Quality keeps half its start (100 000 bits
+a frame at 1080p) before its pace falls, for sharpness. The pace cap, like
+the startup cap, clamps only the output.
+
+A frame costs its budget unless the host measured otherwise. Every QoS tick
+records the non-IDR frames and bits the encoder produced; over the newest two
+ticks, each with at least two such frames and none encoded at a higher budget
+than now with frames above it (the frames from before a cut), the bits per
+frame are what the encoder spends. A light picture, which spends less than
+its budget, costs what it spends, so a cut of 15% takes 15% of its pace
+rather than most of it. An encoder that spends more than 1.25 × its budget in
+both ticks, without its excess falling to 0.8 × the tick before's as a VBV
+following a cut does, is at its content floor: a lower budget sheds nothing,
+so its frames cost what they spend, and the receipts are told it sends that
+much. Such a cost at most halves the pace a cut. An encoder that budgets per
+second also makes larger frames once the window holds captures back: under
+the timestamp model it outspends only if its bits per second also exceed
+1.25 × its bitrate, and under the nominal model a lower pace sheds none of
+its bits until the rate-model latch finds it, below.
+
+The QoS tick raises the rate while the receipts are fresh and show no hold,
+episode, recurring stalls or queue of 10 ms, and no rebase came in the last
+second: 15% a second, or 4% while the rate is within 0.9 × the busy rate of the
+last cut, plus 100 kbit/s a second, applied once it adds 5%. That capacity is
+forgotten once a raise passes 1.2 × it, or, for an encoder that spends more
+than expected, the rate the link carries does. A light picture, which uses less
+than half the expected rate, raises only the pace cap, while one is set: it
+costs little at the full pace, and a queue it builds is cut within a round
+trip. An encoder that spends more than it is asked for is raised as any other:
+the link carries what it sends. A raise lifts the pace cap first, so the frame
+rate comes back before sharpness (for Quality, bits per frame below its cut
+floor come back first), then bits per frame, up to the preset's maximum. An
+episode lasts from a cut until the queue is under 10 ms. Once it has ended and
+the queue has stayed under 10 ms for 500 ms, raises climb at 50% a second
+toward 0.9 × the expected rate congestion began at. A climb that a cut stops
+short of that falls back to 15% and 4% a second until a raise passes 1.2 × the
+capacity, which shows the link carries more, as when a limit lifts; then it
+climbs again.
+
+For 2 s after a cut, a rebase or a drain, while receipts come, the probe
+controller yields its frame rate cuts to the receipts: a delay from 150 to 600
+ms holds its fps. From 600 ms, and whenever the receipts do not own the queue,
+its steps below apply as before. An episode whose holds change nothing, as at
+the preset's floor, hands the frame rate back to the probes 2 s after the
+receipts last acted. A rebase raises the probes' baseline by as much as the
+receipts' own (their least delay, less each unit's transfer, which every lower
+receipt lowers further), at most 150 ms, until their 60 s base reaches it or a
+probe shows the longer route gone, and the credit window follows it; a path
+change, a resume and a preset change end it. Both controllers so read one
+baseline, and a queue can creep up behind rebases by at most 150 ms and the
+probes' steps. While receipts come, they own bits per frame: the 3 s window
+below steps them only in a window without one (a still picture, a pause, a JPEG
+session).
 
 The host writes a probe in stream order between video messages, so it measures
 downstream queueing; one is outstanding at a time. It writes one a second, and
@@ -2405,11 +2530,12 @@ probes' median: either this probe and the one before both saw 150 ms or more,
 and then RustDesk's step applies in full, so a sustained queue reaches the
 floor at its second sample; or the receipts witness a standing queue (the ack
 queue below is 100 ms or more), and then a cut at most halves the frame rate.
-Without either it holds. Balanced starts at its ceiling instead of its start
-value when the first probe after the preset is applied returns within 50 ms;
-the startup cap still holds the pace for its second. The controller works in
-bits per frame, so a frame-rate cut sheds bandwidth at once. Every 3 s it
-scales bits per frame by
+Without either it holds. Balanced H.264 and H.265 start at the ceiling
+instead of the start value at the first untainted probe after the preset is
+applied, whatever its round trip: the receipts cut within a round trip if the
+path cannot carry it. The startup cap still holds the pace for its second. The
+controller works in bits per frame, so a frame-rate cut sheds bandwidth at
+once. Every 3 s in which no receipt came it scales bits per frame by
 the window's worst delay: ×1.15, ×1.10 or ×1.05 below 50, 100 or 150 ms when
 the picture changed (at least six unique frames), and ×0.95, ×0.90, ×0.85 or
 ×0.80 below 200, 300 or 500 ms or above. An increase adds at most 150 kbit/s.
@@ -2453,7 +2579,9 @@ backend declares (`BackendCaps::rate_model`, `nominal` unless set), and every
 viewer of a room starts at the same one; today every platform's encoder, and
 every session through the Windows helper, starts at `nominal`. A `nominal`
 session whose encoder budgets per second would overspend at a reduced pace,
-by about the nominal rate over the pace. At every 250 ms QoS tick the host
+by about the nominal rate over the pace: a receipt cut of bits per frame lowers
+its bitrate, but the receipts' pace cap below the cut floor sheds nothing on
+it until the latch. At every 250 ms QoS tick the host
 adds up what the encoder produced since the last one: frames, unique frames,
 non-IDR bits, and the bits expected for those non-IDR frames at the highest
 per-frame budget the encoder was given during the tick. That budget is the
@@ -2977,7 +3105,7 @@ shape is painted as before.
 | Helper pipes | 256 KiB may wait each way; the service relays through 256 KiB toward the app and 64 KiB toward the worker; one write per answer with its byte record |
 | Timeouts | handshake 3 s; host read 3 s; viewer header 4 s; writes 3 s plus the message's time at 1 Mbit/s; `Stopped` best effort within 1 s; the host reads on until the viewer closes, within the same second |
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
-| Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
+| Credit window | `t` = base RTT (100 ms until measured) + a rebase + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms, or at once to the busy rate while a receipt episode lasts |
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder (2 in flight in a Mac host's VideoToolbox) |
 | Mac encoder | low latency with QP up to 51; a dropped newest picture sent again at the next tick, at most twice a picture; dropped pictures traced at most once a second |
 | Mac capture interval | (n − 0.5) / refresh: n the pace's multiple where the refresh is one within 1%, else 1 below eight times the pace and floor(refresh / pace / 4) above, at most the most refreshes that fit in 0.9 / `max_fps`, at least 1; 0.9 / `max_fps` with no refresh; a slower pace after 1 s, a faster one, a new refresh (read each second), frame-rate limit or pause at once; the longest allowed while every viewer is paused; one change in flight, a refused one failing the stream |
@@ -2985,7 +3113,8 @@ shape is painted as before.
 | Still refinement (Windows, encoders a device run listed: none yet) | from 200 ms after the last new picture or keyframe, once a fresh unit since the picture last finished refining filled ¾ of a frame's budget, a repeat a period of the pace apart, the tick and the capture thread left armed; ends after 3 outputs at two in a row under 512 B or two that did not lower the QP, at a QP of 18 or less, or at 15 repeats of the picture (from a new picture's unit that filled its budget, keyframes of it included) or 1 s; none at a pace of 4 or less, nor after a liveness repeat until a fresh unit fills its budget again; then liveness every 250 ms |
 | Capture pacing | after a dated picture, the next tick a period after its present, up to ¼ period early and, for a picture of a single present, at most 1/64 period earlier than a period after the last tick (long-run rate ≤ 64/63 × pace); a picture of several presents that waited keeps the tick a period after the last; ¾ period floor after a stall; a present over a period old counts as undated, and DXGI dates no picture presented over 1 s ago |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
-| QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; rate-model latch over the last 2 s of ticks, each at ≤ 0.75 × nominal at both ends, with ≥ 6 unique frames and non-IDR bits > max(1.3, min(0.6 × nominal / mean pace, 2)) × expected at each tick's highest per-frame budget |
+| QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves, and below 600 ms none while the receipts own the queue (2 s after a cut, rebase or drain); Balanced H.264 and H.265 start at the ceiling at the first probe; tick 250 ms; bits-per-frame window 3 s, stepping only without receipts; rate-model latch over the last 2 s of ticks, each at ≤ 0.75 × nominal at both ends, with ≥ 6 unique frames and non-IDR bits > max(1.3, min(0.6 × nominal / mean pace, 2)) × expected at each tick's highest per-frame budget |
+| Receipt rate control | standing queue over ≥ 3 receipts spanning ≥ 2 frames and 50 ms (≤ 500 ms), less each unit's transfer (≤ a frame); busy rate the median of ≤ 8 busy pairs (≥ 3); congested above 40 ms, or 10 ms when blocked; cut to min(0.85 × busy, 0.9 × used), or 0.85 × used for stalls that recur (3 in 2 s, or 2 covering 15%); hold max(RTT + queue, 100 ms) and while used > 1.1 × target, ≤ 1 s; drain at 5 ms or 0.8 ×; rebase after 2 cuts within 1.1 × (above 40 ms, or from 10 ms after them) while used ≤ 1.1 × the last cut's target, at most 150 ms for the probes; cut floor Quality 100 000 bits a frame, others the floor; a frame's cost the encoder's measured bits per non-IDR frame over 2 ticks of ≥ 2 frames when less than its budget, or above 1.25 × it in both and not falling to 0.8 × its excess (under the timestamp model also above 1.25 × its bitrate's bits), such a cost at most halving the pace a cut; raise 15%/s, 4%/s within 0.9 × capacity, + 100 kbit/s/s, in 5% steps, with used ≥ 0.5 × expected (below, the pace cap alone), capacity cleared at 1.2 ×; recovery 50%/s toward 0.9 × the pre-congestion rate after 500 ms under 10 ms |
 | Process timers | 1 ms, with power throttling opted out, while a session captures |
 | IDR | host minimum interval 300 ms; viewer minimum 500 ms, backoff to 4 s; 1 s hold after a discontinuity |
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued, drained until the IDR or a head under 125 ms; IDR grace 500 ms; stall watchdog 700 ms |
@@ -3104,35 +3233,38 @@ The host traces each second as `desktop_feedback_interval` on
 `viewer_cap`, `paused`, `unresponsive`, `bpf`, `bitrate`, `encoder_bitrate`,
 `sent_bitrate`, `rate_model`, `rtt_ms`, `baseline_ms`, `delay_ms`, `tainted`,
 `ack_queue_ms`, `forward_queue_ms` and `reverse_queue_ms` (with arrival
-times), `standing_ms`, `busy_bps`, `used_bps`, `would_cut`,
-`window_frames`, `window_bytes`, `window_clamped`,
+times), `rate_fps`, `rebase_ms`, `standing_ms`, `busy_bps`, `used_bps`,
+`cuts`, `episode`, `window_frames`, `window_bytes`, `window_clamped`,
 `outstanding_frames`, `outstanding_bytes`, `idr_inflight`, `skipped_ticks`,
 `encoder_dwell_ms`, `keyframes`, `gop`, `input_wait_p50_us`,
 `input_wait_p99_us` and
 `input_wait_max_us`. The presentation-credit fields `quality`, `waiting`,
-`recovering`, `desired_window_bytes` and `last_ack_*` are gone.
+`recovering`, `desired_window_bytes` and `last_ack_*` are gone, and so is the
+shadow estimator's `would_cut`, now that its cuts are made (`cuts`).
 
-`standing_ms`, `busy_bps`, `used_bps` and `would_cut` come from the
-receipt-rate estimator, which only records what a receipt-driven rate control
-would see; nothing acts on them. It keeps the receipts of H.264 and H.265
-video from the second up to the newest one, at most 240, each with the delay of the newest
-unit it covered and the bytes it covered, and forgets them on a path change
-and on a resume. A frame interval is one at the current pace. With arrival
-times it times each receipt by the viewer's stamp instead of its arrival at
-the host, and a receipt's delay above the base RTT is its forward queue, so
-neither the way back nor what bunches receipts on it is in any figure below;
-a receipt whose stamp was no sample is left out. A receipt-driven rate
-control reads these values rather than timing anything of its own.
+`rate_fps`, `rebase_ms`, `standing_ms`, `busy_bps`, `used_bps`, `cuts` and
+`episode` come from the receipt-driven rate control (see
+[QoS](#qos-frame-rate-and-bits-per-frame)). It keeps the receipts of H.264 and
+H.265 video from the second up to the newest one, at most 240, each with the
+delay of the newest unit it covered and the bytes it covered, and forgets them
+on a path change, a preset change and a resume. A frame interval is one at the
+current pace. With arrival times it times each receipt by the viewer's stamp
+instead of its arrival at the host, and a receipt's delay is its forward
+queue, so neither the way back nor what bunches receipts on it is in any
+figure below; a receipt whose stamp was no sample is left out.
 
 | Field | Definition |
 | --- | --- |
-| `standing_ms` | The least receipt delay above the base RTT over the newest receipts: at least three, spanning at least two frame intervals and 50 ms (at most 500 ms), so a burst a few milliseconds long never makes a queue on its own |
-| `busy_bps` | The median delivery rate (of two, the lower) over the newest eight receipt pairs across which the link stayed busy, the later unit's delay above the base RTT being at least the pair's gap; none below three. Receipts less than a quarter of a frame interval apart are compression, not delivery: such a pair is no sample, and its later receipt's bytes count toward the pair before it |
+| `rate_fps` | The pace cap a receipt cut set below the preset's cut floor, from the delivery rate at that floor; absent without one |
+| `rebase_ms` | What a rebase added to the probes' baseline, at most 150 ms; absent without one |
+| `standing_ms` | The least receipt delay above the baseline over the newest receipts, each less its unit's own transfer at the busy rate (at most a frame interval; a frame interval without a busy rate): at least three, spanning at least two frame intervals and 50 ms (at most 500 ms), so a burst a few milliseconds long never makes a queue on its own |
+| `busy_bps` | The median delivery rate (of two, the lower) over the newest eight receipt pairs across which the link stayed busy, the later unit's delay above the baseline being at least the pair's gap; none below three. Receipts less than a quarter of a frame interval apart are compression, not delivery: such a pair is no sample, and its later receipt's bytes count toward the pair before it |
 | `used_bps` | What the receipts of the second up to the newest covered, from the first of them to the last; none over less than 100 ms. For up to a second after the last receipt the trace repeats it, so a stall shows as a `used_bps` that stops changing and then disappears, not as one that falls |
-| `would_cut` | A receipt since the last trace showed a standing queue above 40 ms once each unit's own transfer at the busy rate (at most a frame interval) is taken off, with a busy rate known, no unit in its window behind an IDR, and outside a stall: the burst of receipts less than a quarter of a frame interval apart that follows a receipt gap of at least three frame intervals |
+| `cuts` | The receipt cuts since the session began |
+| `episode` | A receipt episode is under way: from a cut until the standing queue is under 10 ms |
 
-Without a receipt in the last second the first three are absent, and without a
-base RTT `standing_ms` and `busy_bps` are.
+Without a receipt in the last second `standing_ms`, `busy_bps` and `used_bps`
+are absent, and without a base RTT the first two are.
 
 Each written unit is traced as `desktop_frame` on `pb_mapper_desktop::frames`
 (trace level), and the viewer traces each accepted presentation as
@@ -3858,13 +3990,29 @@ expected one before and after the latch.
 `per_second_encoder_latches_under_an_fps_cap` asserts the latch within 2.5 s
 of that stretch's start and the expected bitrate after it.
 `per_second_encoder_on_a_bandwidth_limit` asserts only that the session
-recovers: there the per-second pictures fill the 1 Mbit/s link, capture waits
-for credit and the pace falls below 3 FPS, so no 2 s of ticks holds six
-frames until pictures flow again after the limit, and by then the pace is
-climbing back. Every case on a per-frame budget asserts that nothing latched.
+recovers: there the per-second pictures fill the 1 Mbit/s link, since a pace
+cap sheds nothing at the nominal model and only a cut of bits per frame
+does. Every case on a per-frame budget asserts that nothing latched.
 The
 [rate-model latch measurements](benchmarks/2026-11-24-rate-model-latch/README.md)
 record them before and after the per-tick latch.
+
+The table above predates receipt-driven rate control, which changes several
+of its rows: on the 1 Mbit/s limit the pace now stays at 43 FPS or more with
+bits per frame at Balanced's floor, the expected bitrate is back at 3.2 Mbit/s
+4 or 5 s after the lift, and the 350 ms round trip reaches the ceiling 0.8 s
+after connecting. Four cases measure it: `moderate_limit_keeps_60` (3 Mbit/s for
+10 s, asserting a pace of 55 or more from 1 s in and 55 received FPS over the
+last 5 s), `sudden_drop` (5 Mbit/s once bits per frame reach their maximum,
+asserting a peak ack queue of 300 ms and 100 ms from 2 s in),
+`added_route_delay` (60 ms more each way, asserting at most two receipt cuts,
+a rebase after any, and the encoder bitrate back within 15 s) and
+`recurring_stalls_cut` (300 ms stalls every second, asserting that the encoder
+bitrate falls);
+`isolated_stall_does_not_collapse_fps` asserts no receipt cut and no fall of
+the encoder bitrate.
+[Receipt-driven rate control measurements](benchmarks/2026-11-24-receipt-rate-control/README.md)
+has five runs of the suite before and after.
 Six cases cover the viewer's fps cap and its backlog, all on simulated
 decoders: `slow_decoder_speeds_up` (67 ms a frame for 20 s, then 5 ms),
 `pipelined_slow_consumer` (four units held inside, as the Linux runner holds
