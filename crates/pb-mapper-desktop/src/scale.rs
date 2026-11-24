@@ -27,6 +27,43 @@ impl Rotation {
         }
     }
 
+    /// The size a display's pictures are captured at, as scanned out, from
+    /// the size its display `mode` is given at and its upright `desktop`'s.
+    /// A quarter-turned display's mode may be given either way round: it is
+    /// taken as scanned out only where that reading alone matches the
+    /// desktop, and as upright otherwise, as Windows' Desktop Duplication is
+    /// read elsewhere (WebRTC's capturer requires the mode to equal the
+    /// output's desktop rectangle, and its pictures to be that size turned
+    /// back). A desktop that matches neither reading, or none read, leaves
+    /// the mode upright.
+    pub(crate) fn scanned_out(self, mode: (u32, u32), desktop: (u32, u32)) -> (u32, u32) {
+        // A quarter turn's swap is its own inverse: the upright size of an
+        // upright mode is the size it is scanned out at.
+        let turned = self.upright(mode);
+        if mode != desktop && turned == desktop {
+            mode
+        } else {
+            turned
+        }
+    }
+
+    /// Where captured pixel `(x, y)` of a `size` picture lands upright: the
+    /// turn itself, written out apart from `source_rect`, which the tests
+    /// check against it, and the Windows video processor too.
+    #[cfg(test)]
+    pub(crate) fn upright_point(
+        self,
+        (x, y): (u32, u32),
+        (width, height): (u32, u32),
+    ) -> (u32, u32) {
+        match self {
+            Self::Identity => (x, y),
+            Self::Cw90 => (height - 1 - y, x),
+            Self::Cw180 => (width - 1 - x, height - 1 - y),
+            Self::Cw270 => (y, width - 1 - x),
+        }
+    }
+
     /// The region of a captured `input` picture that becomes the top-left
     /// `kept` (width, height) of the upright picture, as `[left, top, right,
     /// bottom]` in the captured picture: what is left out is the upright
@@ -77,14 +114,36 @@ mod tests {
         Rotation::Cw270,
     ];
 
-    /// Where captured pixel `(x, y)` of a `size` picture lands upright: the
-    /// turn itself, written out apart from `source_rect`.
-    fn turn(rotation: Rotation, (x, y): (u32, u32), (width, height): (u32, u32)) -> (u32, u32) {
-        match rotation {
-            Rotation::Identity => (x, y),
-            Rotation::Cw90 => (height - 1 - y, x),
-            Rotation::Cw180 => (width - 1 - x, height - 1 - y),
-            Rotation::Cw270 => (y, width - 1 - x),
+    /// A quarter-turned display's pictures are captured as scanned out,
+    /// its mode's size swapped: the mode is read upright, unless only the
+    /// other reading matches the desktop. Half a turn and none keep the
+    /// mode's size whatever the desktop says.
+    #[test]
+    fn a_turned_display_is_captured_at_its_mode_turned_back() {
+        let portrait = (1080, 1920);
+        let landscape = (1920, 1080);
+        for rotation in [Rotation::Cw90, Rotation::Cw270] {
+            // The mode upright, the desktop's own size, as WebRTC reads it.
+            assert_eq!(rotation.scanned_out(portrait, portrait), landscape);
+            // The mode as scanned out, which only the desktop tells apart.
+            assert_eq!(rotation.scanned_out(landscape, portrait), landscape);
+            // No desktop to tell by: the mode is taken upright.
+            assert_eq!(rotation.scanned_out(portrait, (0, 0)), landscape);
+            assert_eq!(rotation.scanned_out(portrait, (2160, 3840)), landscape);
+            // A square mode reads the same either way.
+            assert_eq!(
+                rotation.scanned_out((1200, 1200), (1200, 1200)),
+                (1200, 1200)
+            );
+            assert_eq!(
+                rotation.upright(rotation.scanned_out(portrait, portrait)),
+                portrait
+            );
+        }
+        for rotation in [Rotation::Identity, Rotation::Cw180] {
+            assert_eq!(rotation.scanned_out(landscape, landscape), landscape);
+            assert_eq!(rotation.scanned_out(landscape, portrait), landscape);
+            assert_eq!(rotation.scanned_out(landscape, (0, 0)), landscape);
         }
     }
 
@@ -132,7 +191,7 @@ mod tests {
                     assert!(top <= bottom && bottom <= input.1, "{rotation:?} {input:?}");
                     for y in 0..input.1 {
                         for x in 0..input.0 {
-                            let (ux, uy) = turn(rotation, (x, y), input);
+                            let (ux, uy) = rotation.upright_point((x, y), input);
                             assert!(ux < upright_width && uy < upright_height);
                             let inside = (left..right).contains(&x) && (top..bottom).contains(&y);
                             let kept_pixel = ux < kept.0 && uy < kept.1;

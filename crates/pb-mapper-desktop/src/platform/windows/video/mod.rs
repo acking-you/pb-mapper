@@ -432,8 +432,9 @@ pub struct Encoder {
     gpu_timer: Option<GpuTimer>,
     allocator: IMFVideoSampleAllocatorEx,
     _manager: IMFDXGIDeviceManager,
-    /// The captured picture's size, as the duplication's mode gives it,
-    /// before any turn: what each frame's texture must be.
+    /// The captured picture's size, as scanned out before any turn, which
+    /// the duplication's mode and rotation give (`Rotation::scanned_out`):
+    /// what each frame's texture must be.
     input: (u32, u32),
     /// Whether new pictures are converted straight from the duplication's
     /// surface: until the video processor refuses it, after which each is
@@ -594,10 +595,23 @@ impl Encoder {
         let capture = DxgiDuplicationApi::new_options(monitor, &[DxgiDuplicationFormat::Bgra8])
             .map_err(error)?;
         let desc = capture.duplication_desc();
-        // The mode is the picture as scanned out, before the turn that
-        // stands it upright; the first frame's texture is checked against it.
         let rotation = display_rotation(desc.Rotation)?;
-        let input = (desc.ModeDesc.Width, desc.ModeDesc.Height);
+        // A turned display's mode is read upright, the size of its output's
+        // desktop rectangle, and its pictures as scanned out, that size
+        // turned back, as WebRTC's Desktop Duplication capturer requires;
+        // the rectangle also tells a mode given the other way round
+        // (`Rotation::scanned_out`), and the first frame's texture is
+        // checked against the result.
+        let mode = (desc.ModeDesc.Width, desc.ModeDesc.Height);
+        let desktop = unsafe { capture.output().GetDesc() }
+            .map(|output| {
+                let rect = output.DesktopCoordinates;
+                let span = |from: i32, to: i32| u32::try_from(to.saturating_sub(from)).unwrap_or(0);
+                (span(rect.left, rect.right), span(rect.top, rect.bottom))
+            })
+            // None read: the mode is taken upright.
+            .unwrap_or_default();
+        let input = rotation.scanned_out(mode, desktop);
         if input.0 < 2 || input.1 < 2 || input.0 > MAX_SIZE.0 || input.1 > MAX_SIZE.1 {
             return Err(error("unsupported GPU capture dimensions"));
         }
@@ -607,6 +621,33 @@ impl Encoder {
             OutputSize::Exact(..) => ((max_width & !1).max(2), (max_height & !1).max(2)),
         };
         let device = capture.device();
+        // The video processor before the encoder: a GPU that cannot turn a
+        // rotated display's picture fails the capture here, as one failed
+        // on any rotated display before, without opening an encoder each
+        // time it is retried. Its vendor is the adapter's, which the
+        // encoder reads again for `EncoderOpened::vendor`.
+        let vendor = unsafe {
+            capture
+                .dxgi_device()
+                .GetAdapter()
+                .and_then(|adapter| adapter.GetDesc())
+                .map_err(error)?
+                .VendorId
+        };
+        let quality = vp_quality(
+            options.vp_usage,
+            vendor,
+            downscales(upright, (width, height)),
+        );
+        let converter = Converter::new(
+            device,
+            capture.device_context(),
+            input,
+            (width, height),
+            rotation,
+            fps,
+            quality,
+        )?;
         let manager = device_manager(device, capture.device_context())?;
         let settings = EncoderSettings {
             kind,
@@ -621,11 +662,6 @@ impl Encoder {
         let codec = Codec::new(device, &manager, settings, waker)
             .map_err(|failure| codec_error(kind, failure))?;
         let opened = codec.opened.clone();
-        let quality = vp_quality(
-            options.vp_usage,
-            opened.vendor,
-            downscales(upright, (width, height)),
-        );
         tracing::info!(
             target: "pb_mapper_desktop::session",
             event = "desktop_video_encoder_opened",
@@ -649,18 +685,11 @@ impl Encoder {
             sps = %Hex(&opened.sps),
             gpu_priority = options.gpu_priority,
             rotation = degrees(rotation),
+            mode = format_args!("{}x{}", mode.0, mode.1),
+            captured = format_args!("{}x{}", input.0, input.1),
             cropped = crop_only(upright, (width, height)) && upright != (width, height),
             vp_quality = quality,
         );
-        let converter = Converter::new(
-            device,
-            capture.device_context(),
-            input,
-            (width, height),
-            rotation,
-            fps,
-            quality,
-        )?;
         let mut allocator = std::ptr::null_mut();
         unsafe {
             MFCreateVideoSampleAllocatorEx(&IMFVideoSampleAllocatorEx::IID, &mut allocator)
@@ -1230,13 +1259,14 @@ impl Encoder {
             .cast()
             .map_err(error)?;
         if first {
-            // The converter's source rectangle and turn take the frame for
-            // the display mode as scanned out, a rotated display's included.
+            // The converter's source rectangle and turn take the frame at
+            // the size its display mode is scanned out at, a rotated
+            // display's included.
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             unsafe { frame.GetDesc(&mut desc) };
             if (desc.Width, desc.Height) != self.input {
                 return Err(error(format!(
-                    "the desktop image is {}x{}, not its display mode's {}x{}",
+                    "the desktop image is {}x{}, not the {}x{} its display mode and rotation give",
                     desc.Width, desc.Height, self.input.0, self.input.1
                 )));
             }
@@ -1525,9 +1555,14 @@ mod tests {
             Some(Some(D3D11_VIDEO_PROCESSOR_ROTATION_270))
         );
         assert_eq!(turn(DXGI_MODE_ROTATION(5)), None);
-        // A portrait display scanned out landscape is encoded portrait.
-        let rotation = display_rotation(DXGI_MODE_ROTATION_ROTATE90).unwrap();
-        assert_eq!(rotation.upright((1920, 1080)), (1080, 1920));
+        // A portrait display, whose mode is given upright as its desktop
+        // is, is captured landscape, as scanned out, and encoded portrait.
+        for rotation in [DXGI_MODE_ROTATION_ROTATE90, DXGI_MODE_ROTATION_ROTATE270] {
+            let rotation = display_rotation(rotation).unwrap();
+            let captured = rotation.scanned_out((1080, 1920), (1080, 1920));
+            assert_eq!(captured, (1920, 1080));
+            assert_eq!(rotation.upright(captured), (1080, 1920));
+        }
     }
 
     /// A session asks for speed until a vendor earns quality by a device
