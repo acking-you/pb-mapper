@@ -74,8 +74,8 @@ pub enum Input {
         usage: u16,
         down: bool,
     },
-    /// High-resolution scrolling, in 1/120 of a notch
-    /// ([`SCROLL_UNITS_PER_NOTCH`]), at most 12 000 each way, positive down
+    /// High-resolution scrolling, in 1/120 of a notch (120 units a notch,
+    /// as Windows' `WHEEL_DELTA`), at most 12 000 each way, positive down
     /// and right as `Wheel`. `continuous`: a trackpad's travel or a fling,
     /// of which a notch is 100 logical pixels; otherwise a wheel's notches
     /// and parts of one. Only to a host that listed `wheel_hires`.
