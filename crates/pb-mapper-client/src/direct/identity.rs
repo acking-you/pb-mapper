@@ -1,5 +1,6 @@
 //! Exact certificates arrive over the existing authenticated control channel.
 //! WebPKI still checks validity/EKU and TLS still proves private-key possession.
+use crate::diagnostics::CongestionControl;
 use quinn::rustls::{
     self, DigitallySignedStruct, DistinguishedName, SignatureScheme,
     client::danger::HandshakeSignatureValid,
@@ -92,19 +93,22 @@ impl Identity {
         tls.enable_early_data = false;
         Ok(tls)
     }
-    pub fn server(&self) -> io::Result<quinn::ServerConfig> {
+    /// The config of the connections this end accepts, sending on them
+    /// under `congestion`.
+    pub fn server(&self, congestion: CongestionControl) -> io::Result<quinn::ServerConfig> {
         let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(self.tls_server(QUIC_ALPN)?)
             .map_err(io::Error::other)?;
         let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-        config.transport_config(Arc::new(transport()?));
+        config.transport_config(Arc::new(transport(congestion)?));
         Ok(config)
     }
+    /// The config of a connection this end dials, which sends under Cubic.
     pub fn client(&self, peer: &[u8]) -> io::Result<quinn::ClientConfig> {
         let mut config = quinn::ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(self.tls_client(peer, QUIC_ALPN)?)
                 .map_err(io::Error::other)?,
         ));
-        config.transport_config(Arc::new(transport()?));
+        config.transport_config(Arc::new(transport(CongestionControl::Cubic)?));
         Ok(config)
     }
     /// The server's config over TCP. Neither tickets nor a session cache:
@@ -130,7 +134,12 @@ impl Identity {
 /// the peer sends.
 const STREAM_WINDOW: u32 = 8 << 20;
 
-fn transport() -> io::Result<quinn::TransportConfig> {
+/// Every direct QUIC connection's transport, sending under `congestion`.
+/// Cubic is quinn's default and leaves the config as it always was. BBR's
+/// window follows the delivery rate it measured and not random loss; it
+/// keeps quinn's initial window for it (200 packets), and pacing stays
+/// quinn's, from the window and the smoothed round trip.
+pub(crate) fn transport(congestion: CongestionControl) -> io::Result<quinn::TransportConfig> {
     let mut config = quinn::TransportConfig::default();
     config
         .max_concurrent_bidi_streams(1u32.into())
@@ -140,6 +149,12 @@ fn transport() -> io::Result<quinn::TransportConfig> {
     config.keep_alive_interval(Some(KEEP_ALIVE));
     config.max_idle_timeout(Some(QUIC_IDLE.try_into().map_err(io::Error::other)?));
     config.datagram_receive_buffer_size(None);
+    match congestion {
+        CongestionControl::Cubic => {}
+        CongestionControl::Bbr => {
+            config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+        }
+    }
     Ok(config)
 }
 #[derive(Default)]

@@ -1,7 +1,7 @@
 //! How a tunnel's direct setups go, as its options say: decided by the SDK and
 //! carried through the tunnel workers to the direct core.
 
-use crate::sdk::{LanTransport, PortMapping};
+use crate::sdk::{CongestionControl, LanTransport, PortMapping};
 
 /// How a tunnel's direct setups go. A worker given none keeps to the relay.
 /// It exists without `p2p` as well, since the workers that carry it do,
@@ -21,4 +21,7 @@ pub(crate) struct DirectPolicy {
     pub lan_transport: LanTransport,
     /// Whether a provider serves TCP on a shared LAN to a consumer that asks.
     pub lan_tcp: bool,
+    /// What a provider's QUIC sends under. A consumer always sends under
+    /// Cubic, and a TCP session under the operating system's controller.
+    pub congestion: CongestionControl,
 }

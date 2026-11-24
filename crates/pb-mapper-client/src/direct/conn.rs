@@ -4,7 +4,7 @@ use super::{
     binding,
     tcp::{self, TlsTcp},
 };
-use crate::diagnostics::LinkProbe;
+use crate::diagnostics::{CongestionControl, LinkProbe};
 use pb_mapper_protocol::{
     direct::{DirectTransport, SessionGrant},
     forward::{ByteMeter, StreamForward},
@@ -62,6 +62,14 @@ impl DirectConn {
         match self {
             Self::Quic { connection, .. } => connection.0.local_ip(),
             Self::Tcp { stream, .. } => tcp::addresses(stream).1,
+        }
+    }
+    /// The controller this end sends under: QUIC's, as the connection holds
+    /// it; none of pb-mapper's over TCP.
+    pub(super) fn congestion(&self) -> Option<CongestionControl> {
+        match self {
+            Self::Quic { connection, .. } => Some(CongestionControl::of_quic(&connection.0)),
+            Self::Tcp { .. } => None,
         }
     }
     pub(super) fn probe(&self) -> LinkProbe {

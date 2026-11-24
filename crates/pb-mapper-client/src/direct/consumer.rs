@@ -4,7 +4,7 @@
 use super::{
     conn::{DirectConn, forward_direct},
     control::Control,
-    endpoint::{Dialed, Discovered, Network},
+    endpoint::{Dialed, Discovered, Network, Role},
     grant_fits,
     lan::Assessment,
     link::{counts, direct_link, lan_missed, log_path, stun_timings, summary},
@@ -447,7 +447,8 @@ impl Consumer {
         let network = self
             .network
             .get_or_try_init(|| async {
-                let network = Network::new(false, self.policy.port_mapping, &self.diagnostics)?;
+                let network =
+                    Network::new(Role::Dial, self.policy.port_mapping, &self.diagnostics)?;
                 #[cfg(test)]
                 if self.pauses.lock().block_quic {
                     network.block_quic();

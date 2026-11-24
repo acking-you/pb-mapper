@@ -42,8 +42,8 @@ pub(crate) use link::LinkProbe;
 #[cfg(feature = "p2p")]
 use link::LiveLink;
 pub use link::{
-    AddressFamily, CandidateCounts, DirectLink, InterfaceTier, LanEvidence, LinkKind, LinkStats,
-    LinkVia, SetupTimings, StunOutcome,
+    AddressFamily, CandidateCounts, CongestionControl, DirectLink, InterfaceTier, LanEvidence,
+    LinkKind, LinkStats, LinkVia, SetupTimings, StunOutcome,
 };
 use metrics::Bucket;
 pub(crate) use metrics::sample_period;

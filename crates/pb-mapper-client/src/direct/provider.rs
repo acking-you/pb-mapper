@@ -1,6 +1,6 @@
 use super::{
     conn::{DirectConn, QuicGuard, forward_direct},
-    endpoint::{Arrival, Discovered, Network},
+    endpoint::{Arrival, Discovered, Network, Role},
     grant_fits,
     lan::Assessment,
     link::{counts, direct_link, first_answers, lan_missed, log_path, stun_timings, summary},
@@ -290,7 +290,7 @@ impl Actor {
         if self.sessions.contains_key(&grant.id) {
             return;
         }
-        let (port_mapping, diagnostics) = (self.ctx.policy.port_mapping, &self.ctx.diagnostics);
+        let (policy, diagnostics) = (self.ctx.policy, &self.ctx.diagnostics);
         let admitted = admit_offer(
             &grant,
             &self.key,
@@ -298,7 +298,13 @@ impl Actor {
             self.sessions.len(),
             &mut self.network,
             &reply,
-            || Network::new(true, port_mapping, diagnostics),
+            || {
+                Network::new(
+                    Role::Serve(policy.congestion),
+                    policy.port_mapping,
+                    diagnostics,
+                )
+            },
         );
         let Some(network) = admitted else { return };
         let (tx, events) = mpsc::channel(SESSION_EVENTS);
@@ -864,13 +870,13 @@ mod tests {
     #[tokio::test]
     async fn committed_direct_cannot_acknowledge_relay_or_dial_backend_twice() {
         let provider = Network::new(
-            true,
+            Role::Serve(crate::sdk::CongestionControl::Cubic),
             crate::sdk::PortMapping::Off,
             &crate::diagnostics::Diagnostics::default(),
         )
         .unwrap();
         let consumer = Network::new(
-            false,
+            Role::Dial,
             crate::sdk::PortMapping::Off,
             &crate::diagnostics::Diagnostics::default(),
         )
@@ -909,6 +915,7 @@ mod tests {
                 lan_first: true,
                 lan_transport: crate::sdk::LanTransport::Quic,
                 lan_tcp: true,
+                congestion: crate::sdk::CongestionControl::Cubic,
             },
             is_datagram: false,
         };

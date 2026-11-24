@@ -21,7 +21,13 @@ pb-mapper-core.workspace = true
 pb-mapper-protocol.workspace = true
 pb-mapper-server.workspace = true
 
+# Both ends of a QUIC connection across the lossy hop, with a self-signed
+# certificate.
+quinn.workspace = true
 rand.workspace = true
+rcgen.workspace = true
+# The lossy hop's sockets ask for larger buffers.
+socket2.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true

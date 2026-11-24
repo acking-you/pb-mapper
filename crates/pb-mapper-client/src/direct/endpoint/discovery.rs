@@ -170,7 +170,7 @@ impl Network {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{diagnostics::Diagnostics, sdk::PortMapping};
+    use crate::{diagnostics::Diagnostics, direct::endpoint::Role, sdk::PortMapping};
     use stun_proto::types::{
         attribute::XorMappedAddress,
         message::{Message, MessageWrite, MessageWriteExt, MessageWriteVec},
@@ -197,7 +197,7 @@ mod tests {
     async fn discovery_invalidation_survives_in_flight_stun_and_coalesces_refresh() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let mut network =
-                Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+                Network::new(Role::Dial, PortMapping::Off, &Diagnostics::default()).unwrap();
             Arc::get_mut(&mut network).unwrap().network = crate::network::NetworkHints::isolated();
             let stun = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let server = stun.local_addr().unwrap();

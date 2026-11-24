@@ -2,7 +2,7 @@ use super::{
     binding,
     conn::DirectConn,
     consumer::{Consumer, DataPath, PUNCH_BUDGET, Prepared},
-    endpoint::{Arrival, InterfaceSource, Network},
+    endpoint::{Arrival, InterfaceSource, Network, Role},
     lan::{Assessment, Interface, Interfaces},
     memory::{
         COOLDOWN_INITIAL, COOLDOWN_MAX, Cooldown, DirectMemory, MAX_SERVICES, PauseScope,
@@ -12,8 +12,8 @@ use super::{
 };
 use crate::{
     diagnostics::{
-        ByteCount, Diagnostics, FallbackReason, InterfaceTier, LanEvidence, LanTcpMiss, LinkKind,
-        StunOutcome, TunnelEventKind,
+        ByteCount, CongestionControl, Diagnostics, FallbackReason, InterfaceTier, LanEvidence,
+        LanTcpMiss, LinkKind, StunOutcome, TunnelEventKind,
     },
     endpoint::RelayEndpoint,
     relay::RelayTransport,
@@ -177,6 +177,7 @@ impl Share {
                 lan_first: true,
                 lan_transport,
                 lan_tcp: false,
+                congestion: CongestionControl::Cubic,
             },
             PauseScope::Own,
         );
@@ -231,7 +232,7 @@ impl Share {
 /// is the host's to say: under WSL's mirrored networking 127.0.0.1 takes a
 /// detour through the Windows host and ::1 wins.
 fn lan_network() -> Arc<Network> {
-    let mut network = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+    let mut network = Network::new(Role::Dial, PortMapping::Off, &Diagnostics::default()).unwrap();
     Arc::get_mut(&mut network).unwrap().interfaces =
         InterfaceSource::Fixed(Interfaces::new(vec![Interface::new(
             "lan0",
@@ -674,6 +675,7 @@ async fn a_client_pause_waits_for_the_relay_to_carry_the_fallback() {
             lan_first: true,
             lan_transport: LanTransport::Quic,
             lan_tcp: false,
+            congestion: CongestionControl::Cubic,
         },
         PauseScope::Client(pauses.clone()),
     );
@@ -901,10 +903,105 @@ async fn a_relay_without_direct_pauses_the_clients_next_connect_tcp() {
     .unwrap();
 }
 
+/// A publisher sends its direct sessions under the controller it registered
+/// with, and its link says so; the consumer's end of the same session sends
+/// under Cubic, as a publisher that asks for nothing does.
+#[tokio::test]
+async fn a_publisher_sends_its_direct_sessions_under_its_controller() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let relay = TestRelay::start(
+            "sender-congestion",
+            Some(DirectServerConfig {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                advertise: "127.0.0.1:0".parse().unwrap(),
+            }),
+        )
+        .await;
+        // An echo of one byte that keeps each connection open, so the
+        // session and its link stay up while they are read.
+        let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = backend.local_addr().unwrap();
+        let _echo = AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (mut stream, _) = backend.accept().await.unwrap();
+                let mut byte = [0; 1];
+                stream.read_exact(&mut byte).await.unwrap();
+                stream.write_all(&byte).await.unwrap();
+                held.push(stream);
+            }
+        }));
+        let link = |diagnostics: crate::sdk::TunnelDiagnostics| {
+            diagnostics
+                .direct
+                .and_then(|direct| direct.link)
+                .map(|link| (link.transport, link.congestion))
+        };
+        for (key, registered) in [
+            ("sender-bbr", Some(CongestionControl::Bbr)),
+            ("sender-default", None),
+        ] {
+            let publisher =
+                Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
+            let request = RegisterRequest {
+                key: key.into(),
+                local_addr: backend_addr.to_string(),
+                transport: Transport::Tcp,
+                codec: true,
+                force_namespace: false,
+            };
+            let options = RegisterOptions {
+                allow_direct: true,
+                ..Default::default()
+            };
+            let registration = match registered {
+                Some(congestion) => {
+                    publisher
+                        .register_with_sender_congestion(request, options, congestion)
+                        .await
+                }
+                None => publisher.register_with_options(request, options).await,
+            }
+            .unwrap();
+            registration
+                .wait_ready_timeout(Duration::from_secs(5))
+                .await
+                .unwrap();
+            let consumer =
+                Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
+            let (mut stream, connection) = consumer.connect_tcp(key, direct_first()).await.unwrap();
+            stream.write_all(b"x").await.unwrap();
+            let mut byte = [0; 1];
+            stream.read_exact(&mut byte).await.unwrap();
+            let sends = registered.unwrap_or(CongestionControl::Cubic);
+            assert_eq!(
+                link(registration.diagnostics()),
+                Some((DirectTransport::Quic, Some(sends))),
+                "{key}: the publisher's end"
+            );
+            assert_eq!(
+                link(connection.diagnostics()),
+                Some((DirectTransport::Quic, Some(CongestionControl::Cubic))),
+                "{key}: the consumer's end"
+            );
+            drop(stream);
+            connection.stop().await.unwrap();
+            registration.stop().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn peer_certificate_and_session_binding_are_both_required() {
-    let provider = Network::new(true, PortMapping::Off, &Diagnostics::default()).unwrap();
-    let consumer = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+    let provider = Network::new(
+        Role::Serve(CongestionControl::Cubic),
+        PortMapping::Off,
+        &Diagnostics::default(),
+    )
+    .unwrap();
+    let consumer = Network::new(Role::Dial, PortMapping::Off, &Diagnostics::default()).unwrap();
     // Use one discovered loopback path for the TLS boundary test. With multiple
     // candidates, the client's winning connection and the first server accept
     // can be different TLS sessions, which correctly have different bindings.
@@ -954,7 +1051,7 @@ async fn peer_certificate_and_session_binding_are_both_required() {
     let mut wrong = grant.clone();
     wrong.service = "another-service".into();
     assert!(binding::verify_binding(&incoming, &wrong, &tag).is_err());
-    let stranger = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+    let stranger = Network::new(Role::Dial, PortMapping::Off, &Diagnostics::default()).unwrap();
     stranger
         .authorize(&grant, false, Instant::now() + Duration::from_secs(3))
         .unwrap();
@@ -984,7 +1081,12 @@ async fn peer_certificate_and_session_binding_are_both_required() {
         }
     };
     only_granted().await;
-    let other_provider = Network::new(true, PortMapping::Off, &Diagnostics::default()).unwrap();
+    let other_provider = Network::new(
+        Role::Serve(CongestionControl::Cubic),
+        PortMapping::Off,
+        &Diagnostics::default(),
+    )
+    .unwrap();
     wrong.provider.certificate = other_provider.identity.certificate.clone();
     assert!(
         consumer
