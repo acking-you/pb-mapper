@@ -272,7 +272,10 @@ Nothing in the SDK crates knows it exists.
     connect tunnel's own, or the client's `DirectMemory`, which its
     `connect_tcp` calls share per service and which only an unpunchable
     path the relay carried pauses (`PauseScope`). `identity.rs` carries
-    the exact certificates, `mapping.rs` the gateway port mapping (feature
+    the exact certificates and the QUIC transport, which sends under Cubic
+    except on a publishing end that asked for another `CongestionControl`
+    (the hidden `Client::register_with_sender_congestion`, carried in
+    `DirectPolicy`), `mapping.rs` the gateway port mapping (feature
     `port-mapping`), `reports.rs` the coalesced observations, and `link.rs`
     what a committed session's path is. LAN-first (on by default,
     `lan_first` in the options, carried as the crate-private
@@ -590,7 +593,10 @@ Nothing in the SDK crates knows it exists.
     Windows capture and encode benchmark, which also counts the encoder's
     calls: allocations, time and thread cycles per unit), `host_send_bench`
     (a relay, a host with a synthetic encoder and a viewer in one process,
-    counting allocations per video unit), `pipe_relay_bench` (the helper's
+    counting allocations per video unit), `direct_cc_bench` (Cubic against
+    BBR for synthetic video under the host's credit window, over two quinn
+    endpoints with the direct transport and a testkit `lossy_udp` hop),
+    `pipe_relay_bench` (the helper's
     unit path through two named pipes and a service-style relay, on Windows:
     time per unit, and the writes and reads each took), `deployed` (the selftest, native
     size by default), `input_acceptance/` (native input into a window of its
@@ -638,6 +644,9 @@ Nothing in the SDK crates knows it exists.
   - `shaped.rs`: `Shape` / `shaped_link` — a TCP hop with delay and rate
     adjustable while connections run, owned by the `ShapedLink` it returns,
     shared by the remote desktop's tests
+  - `lossy.rs`: `LossyShape` / `lossy_udp` — a UDP hop that loses
+    datagrams from a fixed seed, delays them in one ordered queue each way
+    and polices them to a rate, for QUIC over a lossy long path
   - `poll.rs`: The one readiness loop every probe polls with
   - Tests log as the binary does: the crate includes the CLI's
     `src/bin/pb-mapper/logging.rs` by path. `TEST_ADMIN_KEY` is
@@ -1251,7 +1260,8 @@ docker-compose -f docker/docker-compose.yml up
   on `pb-mapper-testkit`
 - **Remote desktop (Rust)**: `cargo test -p pb-mapper-desktop -- --ignored
   --nocapture slow_link` runs the ignored acceptance cases: a synthetic encoder
-  over a real relay and TLS on a shaped link. CI does not run them. The host's
+  over a real relay and TLS on a shaped link, and over one direct-style QUIC
+  connection through a lossy hop. CI does not run them. The host's
   capture, encoder and helper compile only on Windows, where CI's
   `rust-windows-desktop` job lints and tests them; the macOS host only on
   macOS, where `rust-macos-desktop` lints and tests it and checks that

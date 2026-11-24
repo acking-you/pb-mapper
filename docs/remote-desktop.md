@@ -1101,8 +1101,24 @@ does not require Flutter or a POCOX runtime.
   first and keeping only one that grows the buffer, halving down to 256 KiB and
   never asking for less than it has; Linux caps it at `net.core.rmem_max`, and
   the debug trace `direct UDP receive buffer` records what each socket got.
-  Send buffers, the relay's sockets and congestion control (Quinn's Cubic) are
-  unchanged.
+  Send buffers and the relay's sockets are unchanged.
+- Congestion control is the sender's own and never crosses the wire. The
+  host's end of a direct QUIC session sends its video under
+  `VIDEO_CONGESTION` in `host.rs`, which it passes to the hidden
+  `Client::register_with_sender_congestion`; the viewer's end, relayed
+  sessions and LAN TCP keep their own controllers. It is Quinn's Cubic.
+  BBR was measured against it on loopback
+  ([host direct congestion control](benchmarks/2026-11-24-host-direct-bbr/README.md)):
+  on paths with 0.1–1% random loss and 60 or 120 ms round trips the receipts
+  held its rate at 4.8 to 8.2 Mbit/s against Cubic's 0.7 to 4.8, whose cut
+  on every loss capped them, and in all but one run it shortened the wait
+  for a requested keyframe; but behind a 5 Mbit/s
+  policer it lost more packets and kept a requested keyframe waiting longer
+  (a median 157.8 ms against 111.5), even with the receipts setting the
+  rate: its window grew to megabytes, so Quinn's pacing, which follows the
+  window, no longer spaced a burst. Each end's `DirectLink::congestion`, and
+  the `congestion` field of `session_path_selected` (`os` over TCP), say
+  which controller it sends under.
 - Input binds to a desktop/display generation and to a presentation the viewer
   validated less than two seconds ago. `Viewer::input(generation, &inputs)`
   sends a batch of up to 16, stamps the presented frame and consecutive
@@ -3506,7 +3522,8 @@ write it, users may read it): `pb_mapper_desktop::session`,
 `pb_mapper_desktop::feedback` and `pb_mapper_client::direct` at info, which
 are the session lifecycle above, `desktop_rate_model_latched`,
 `desktop_start_rate_remembered`, and `session_path_selected` with the path,
-the service and the peer address. No other target is written; none of these
+the service, the peer address and the congestion controller the host's end
+sends under (`congestion`). No other target is written; none of these
 logs an invitation, a key or a credential. The once-a-second
 `desktop_feedback_interval` is debug and is not written; the viewer's
 statistics carry those numbers. At 1 MiB the file becomes
