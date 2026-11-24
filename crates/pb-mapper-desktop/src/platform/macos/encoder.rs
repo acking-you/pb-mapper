@@ -825,8 +825,8 @@ fn serve(owned: SendSession, shared: &Shared) {
     // A picture never taken goes with the session.
     state.job = None;
     drop(state);
-    // SAFETY: invalidated once, after the last call; `shared` and the
-    // session stay alive until this thread returns.
+    // SAFETY: after the last call, and once outside a test's `tear_down`;
+    // `shared` and the session stay alive until this thread returns.
     unsafe { session.invalidate() };
     let mut state = shared.state.lock();
     state.exited = true;
