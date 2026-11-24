@@ -491,14 +491,17 @@ mod tests {
         let typed = rig.fresh(ms(240));
         assert_eq!(rig.due(rig.at(ms(250))), None);
         assert_eq!(rig.next(), rig.at(ms(440)));
-        // The interrupted burst's outputs, and the new picture's, come out
-        // after it: older than any new burst, they say nothing, though they
-        // would have ended it.
+        // A slow encoder holds them all until the next burst's first
+        // repeat went: the interrupted burst's outputs, older than it, say
+        // nothing of it, though at a QP of 10 they would have ended it.
+        let third = rig.refine(rig.at(ms(440)));
         rig.repeats.output(first, true, false, 10, Some(10));
         rig.repeats.output(second, true, false, 10, Some(10));
         rig.repeats.output(typed, false, false, 300, None);
-        assert_eq!(rig.next(), rig.at(ms(440)));
-        let left = usize::from(REFINE_MAX) - 2;
+        rig.repeats.output(third, true, false, BUDGET, None);
+        let period = Duration::from_secs(1) / PACE;
+        assert_eq!(rig.next(), rig.at(ms(440)) + period);
+        let left = usize::from(REFINE_MAX) - 3;
         assert_eq!(rig.burst(&[BUDGET], &[None]), left);
 
         // A keyframe ends the burst, and its IDR, filling its budget, gives
