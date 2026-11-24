@@ -169,9 +169,11 @@ uint32_t Largest(const GValue* value) {
   return UINT32_MAX;
 }
 
-// "vah264dec (VA-API H.264 Decoder) on renderD128": the element, its long
-// name and the GPU it decodes on (pb_video::Describe), without the long name
-// when that is longer than the 63 bytes report_v1 takes.
+// "nvh264dec (NVDEC H.264 Decoder) on renderD129, another GPU": the element,
+// its long name and the GPU it decodes on (pb_video::Describe), without the
+// long name when the whole is longer than the 63 bytes report_v1 takes, as
+// a va decoder's long name, which names its driver's device, can make it
+// ("vah264dec on renderD128").
 std::string DecoderName(const std::string& element, const std::string& longname, const std::string& gpu) {
   const std::string name = longname.empty() ? element + gpu : element + " (" + longname + ")" + gpu;
   if (name.size() <= 63) return name;
@@ -186,6 +188,10 @@ pb_video::Topology ReadTopology(const std::string& device) {
   topology.gpus = pb_video::ReadGpus();
   topology.presenting = device.empty() ? "" : pb_video::RenderNode(device);
   topology.va_all_drivers = g_getenv("GST_VA_ALL_DRIVERS") != nullptr;
+  guint major = 0, minor = 0, micro = 0, nano = 0;
+  gst_version(&major, &minor, &micro, &nano);
+  topology.gst_major = major;
+  topology.gst_minor = minor;
   return topology;
 }
 
@@ -273,10 +279,14 @@ std::vector<Candidate> Candidates(Codec codec, bool dmabuf, const pb_video::Topo
   const std::vector<size_t> order = pb_video::Order(decoders, all, topology, &where);
   std::vector<Candidate> ordered;
   ordered.reserve(found.size());
+  // G_MESSAGES_DEBUG=pb-mapper-video: the order, each with where it decodes.
+  std::string listed;
   for (const size_t i : order) {
     found[i].name = DecoderName(found[i].factory, longnames[i], pb_video::Describe(where[i]));
+    listed += (listed.empty() ? "" : " | ") + found[i].factory + pb_video::Describe(where[i]);
     ordered.push_back(std::move(found[i]));
   }
+  g_debug("%s decoders in order: %s", CodecName(codec), listed.empty() ? "none" : listed.c_str());
   return ordered;
 }
 
@@ -339,9 +349,14 @@ int32_t Probe(const char* device, PbVideoProbe* out, char* error, size_t error_l
   }
   const pb_video::Topology topology = ReadTopology(device ? device : "");
   // G_MESSAGES_DEBUG=pb-mapper-video: which GPU presents, and so which
-  // decoders go first.
-  g_debug("Presenting GPU: %s (render node %s); %zu render node(s)", device && *device ? device : "unknown",
-          topology.presenting.empty() ? "unknown" : topology.presenting.c_str(), topology.gpus.size());
+  // decoders go first, among which render nodes.
+  g_debug("Presenting GPU: %s (render node %s); GStreamer %u.%u", device && *device ? device : "unknown",
+          topology.presenting.empty() ? "unknown" : topology.presenting.c_str(), topology.gst_major,
+          topology.gst_minor);
+  for (const pb_video::Gpu& gpu : topology.gpus) {
+    g_debug("Render node %s: driver %s%s", gpu.node.c_str(), gpu.driver.empty() ? "unknown" : gpu.driver.c_str(),
+            gpu.openable ? "" : ", which this process cannot open");
+  }
   ProbeCodec(Codec::kH264, topology, &out->h264);
   ProbeCodec(Codec::kH265, topology, &out->h265);
   return 0;

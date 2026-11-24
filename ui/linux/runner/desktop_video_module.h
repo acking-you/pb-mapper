@@ -50,8 +50,8 @@ typedef struct PbVideoExports {
 
 // What a codec decodes here: the largest picture a session should ask for
 // (0 x 0: none), whether its decoder runs on hardware, and its element with
-// the GPU it decodes on where that is known ("vah264dec (VA-API H.264
-// Decoder) on renderD128"), as the session reports it.
+// the GPU it decodes on where that is known ("vah264dec on renderD128"), as
+// the session reports it.
 typedef struct PbVideoCodecProbe {
   uint32_t max_width;
   uint32_t max_height;

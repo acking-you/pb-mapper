@@ -70,19 +70,33 @@ bool ParseVa(const std::string& factory, std::string* node, std::string* codec) 
   return !codec->empty();
 }
 
-// Whether the va plugin opens `gpu` as a VA display: this process may open
-// its node, and GStreamer takes its driver, Intel's or Mesa's; NVIDIA's
-// only under GST_VA_ALL_DRIVERS.
+// Whether the va plugin may open `gpu` as a VA display: this process may
+// open its node, and GStreamer takes its driver. From 1.24 that is Intel's
+// or Mesa's, NVIDIA's only under GST_VA_ALL_DRIVERS; before, any driver.
 bool VaOpens(const Gpu& gpu, const Topology& topology) {
-  return gpu.openable && (topology.va_all_drivers || gpu.driver != kNvidiaDriver);
+  const bool filters = topology.gst_major == 1 && topology.gst_minor >= 24 && !topology.va_all_drivers;
+  return gpu.openable && (!filters || gpu.driver != kNvidiaDriver);
 }
 
-// The va plugin goes through the render nodes it opens by name, and names a
-// codec's factory "va<codec>dec" on the first of them (GStreamer 1.22 on;
-// 1.20: the first that decodes the codec) and "va<node><codec>dec" on every
-// later one. So the default factory's GPU is one the va plugin opens, with
-// no factory of its own for the codec, sorted before every named one. When
-// more than one GPU fits, which one is unknown (whether a VA driver is
+// Whether the va plugin's default factory for a codec is on a GPU that sorts
+// before every GPU with a factory named after it. The plugin names a
+// codec's factory "va<codec>dec" on one GPU and "va<node><codec>dec" on
+// every other, and which one has the default name changed:
+// - 1.20 goes through the GPUs it opens in order of their device files and
+//   gives it to the first that decodes the codec;
+// - 1.22 gives it to the first GPU it opened in udev's order, which follows
+//   the PCI devices, not the device files;
+// - 1.24 on gives it to the first it opens in order of their device files.
+// So 1.22, and a version not known here, say no more than that it is on a
+// GPU with no factory of its own.
+bool VaDefaultSortsFirst(const Topology& topology) {
+  return topology.gst_major == 1 && (topology.gst_minor == 20 || topology.gst_minor >= 24);
+}
+
+// A named va factory is on the render node its name carries. The default
+// one is on a GPU the va plugin may open, with no factory of its own for
+// the codec and, where VaDefaultSortsFirst, sorted before every named one.
+// When more than one GPU fits, which one is unknown (whether a VA driver is
 // installed is not in sysfs), though it is still another GPU's when the
 // presenting one does not fit.
 Where LocateVa(const Decoder& decoder, const std::vector<Decoder>& all, const Topology& topology,
@@ -104,10 +118,11 @@ Where LocateVa(const Decoder& decoder, const std::vector<Decoder>& all, const To
     }
   }
   std::sort(named.begin(), named.end());
+  const bool sorts_first = VaDefaultSortsFirst(topology);
   std::vector<const Gpu*> possible;
   for (const Gpu& gpu : topology.gpus) {
     if (!VaOpens(gpu, topology) || std::find(named.begin(), named.end(), gpu.node) != named.end()) continue;
-    if (!named.empty() && gpu.node >= named.front()) continue;
+    if (sorts_first && !named.empty() && gpu.node >= named.front()) continue;
     possible.push_back(&gpu);
   }
   if (possible.size() == 1) where.node = possible.front()->node;

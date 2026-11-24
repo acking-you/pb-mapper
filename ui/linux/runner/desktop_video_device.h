@@ -25,7 +25,7 @@ struct Gpu {
   bool openable = false;
 };
 
-// Every render node, sorted by name as GStreamer's va plugin sorts them.
+// Every render node, sorted by name, as their device files sort.
 // `sysfs` and `dev` are where /sys and /dev are mounted (a test's own trees).
 std::vector<Gpu> ReadGpus(const std::string& sysfs = "/sys", const std::string& dev = "/dev");
 
@@ -59,9 +59,13 @@ struct Where {
 struct Topology {
   std::vector<Gpu> gpus;
   std::string presenting;
-  // GST_VA_ALL_DRIVERS: the va plugin opens every VA driver, NVIDIA's
-  // included, instead of Intel's and Mesa's only.
+  // GST_VA_ALL_DRIVERS: from GStreamer 1.24 the va plugin opens every VA
+  // driver, NVIDIA's included, instead of Intel's and Mesa's only.
   bool va_all_drivers = false;
+  // The GStreamer that registered the decoders (gst_version), whose va
+  // plugin names and opens GPUs by its own version's rules; 0.0 when
+  // unknown, which takes only what every version's rules allow.
+  unsigned gst_major = 0, gst_minor = 0;
 };
 
 // Where `decoder` decodes. `all` is every decoder factory the registry has

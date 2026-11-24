@@ -65,10 +65,13 @@ std::string Ordered(const std::vector<Decoder>& decoders, const Topology& topolo
   return text;
 }
 
-Topology Machine(std::vector<Gpu> gpus, const char* presenting) {
+// GStreamer 1.`minor`; 0 for a version not known.
+Topology Machine(std::vector<Gpu> gpus, const char* presenting, unsigned minor = 24) {
   Topology topology;
   topology.gpus = std::move(gpus);
   topology.presenting = presenting;
+  topology.gst_major = minor ? 1 : 0;
+  topology.gst_minor = minor;
   return topology;
 }
 
@@ -118,14 +121,21 @@ void Orders() {
         "rendered on the NVIDIA GPU (PRIME offload), NVDEC goes first");
 
   printf("Ubuntu 22.04's GStreamer 1.20: VA through gstreamer-vaapi, whose GPU is the display server's\n");
+  // The va plugin's decoders have no rank before 1.24, so are no candidates.
   const std::vector<Decoder> jammy = {Hardware("nvh264dec", "nvcodec", kPrimary),
                                       Hardware("vaapih264dec", "vaapi", kPrimary),
                                       Software("avdec_h264", "libav", kPrimary)};
-  Check(Ordered(jammy, Machine(laptop, "renderD128")) ==
+  Check(Ordered(jammy, Machine(laptop, "renderD128", 20)) ==
             "vaapih264dec | nvh264dec on renderD129, another GPU | avdec_h264",
         "a decoder whose GPU is unknown goes before one known to be on another GPU");
+  // Listed first at the same rank, gstreamer-vaapi would win on registry
+  // order alone.
+  const std::vector<Decoder> jammy_vaapi_first = {jammy[1], jammy[0], jammy[2]};
+  Check(Ordered(jammy_vaapi_first, Machine(laptop, "renderD129", 20)) ==
+            "nvh264dec on renderD129 | vaapih264dec | avdec_h264",
+        "rendered on the only NVIDIA GPU, NVDEC is on it and goes before a decoder whose GPU is unknown");
   printf("an NVIDIA driver with no DRM device (nvidia-drm not loaded)\n");
-  Check(Ordered(jammy, Machine({MakeGpu("renderD128", "i915")}, "renderD128")) ==
+  Check(Ordered(jammy, Machine({MakeGpu("renderD128", "i915")}, "renderD128", 20)) ==
             "vaapih264dec | nvh264dec on another GPU | avdec_h264",
         "NVDEC is still another GPU's when an Intel GPU presents");
 
@@ -157,11 +167,37 @@ void Orders() {
         "an ambiguous default factory is unknown, not another GPU's");
   Check(Ordered(h265, Machine(three, "renderD130")) == "nvh265dec on renderD130 | vah265dec on another GPU",
         "it is another GPU's when the presenting one is NVIDIA's, which the va plugin does not open");
+  // Placement whatever the rank, which is none before 1.24.
+  Check(Ordered(h265, Machine(three, "renderD130", 22)) == "nvh265dec on renderD130 | vah265dec",
+        "before 1.24 the va plugin opens NVIDIA's VA driver too, so the default factory could be there");
   std::vector<Gpu> closed = three;
   closed[0].openable = false;
   Check(Ordered(h265, Machine(closed, "renderD129")) ==
             "vah265dec on renderD129 | nvh265dec on renderD130, another GPU",
         "a render node this process cannot open is not the va plugin's");
+
+  printf("three VA GPUs: which one has the default factory depends on GStreamer's version\n");
+  // renderD128 may have no VA driver; the va plugin numbers the GPUs it
+  // opens.
+  const std::vector<Decoder> va3 = {Hardware("vah264dec", "va", kPrimary + 1),
+                                    Hardware("varenderD129h264dec", "va", kPrimary)};
+  const std::vector<Gpu> three_va = {MakeGpu("renderD128", "i915"), MakeGpu("renderD129", "amdgpu"),
+                                     MakeGpu("renderD130", "amdgpu")};
+  Check(Ordered(va3, Machine(three_va, "renderD128")) ==
+            "vah264dec on renderD128 | varenderD129h264dec on renderD129, another GPU",
+        "1.24 numbers them by device file: the default factory sorts before every named one");
+  Check(Ordered(va3, Machine(three_va, "renderD128", 20)) ==
+            "vah264dec on renderD128 | varenderD129h264dec on renderD129, another GPU",
+        "1.20 gives it to the first by device file that decodes the codec: the same");
+  Check(Ordered(va3, Machine(three_va, "renderD128", 22)) ==
+            "vah264dec | varenderD129h264dec on renderD129, another GPU",
+        "1.22 numbers them in udev's order, so it could be renderD130's too");
+  Check(Ordered(va3, Machine(three_va, "renderD128", 0)) ==
+            "vah264dec | varenderD129h264dec on renderD129, another GPU",
+        "so could a version not known here");
+  Check(Ordered(va3, Machine(three_va, "renderD130")) ==
+            "vah264dec on renderD128, another GPU | varenderD129h264dec on renderD129, another GPU",
+        "from 1.24, presented on renderD130, both are another GPU's");
 
   printf("NVIDIA's VA driver under GST_VA_ALL_DRIVERS\n");
   const std::vector<Decoder> all_drivers = {Hardware("vah264dec", "va", kPrimary + 1),
