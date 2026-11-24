@@ -195,7 +195,8 @@ fn displays_are_named_by_uuid_and_measured_in_pixels() {
 
 /// What a session's start waits on once it woke a display: an awake one
 /// draws, found by its UUID or, without one, by its id, and another UUID
-/// never matches it, or the wait would run out at every start. Every active
+/// never matches it, or the wait would run out at every start; nor is it
+/// taken for one that sleeps, which capture would fail. Every active
 /// display is online, and the lid reads on a Mac without one. Nothing is
 /// woken.
 #[test]
@@ -209,6 +210,7 @@ fn a_woken_display_is_found_by_the_name_it_is_bound_by() {
             continue;
         }
         assert!(power::drawing(&display), "{display:?}");
+        assert!(!power::sleeping(display.id), "{display:?}");
         let unnamed = Display {
             name: String::new(),
             ..display.clone()

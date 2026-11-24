@@ -9,11 +9,14 @@
 //!
 //! Where a display is woken: when a session's parts open, waiting a moment
 //! for the shared display to draw; when its capture opens, a recovery's
-//! included; at the first capture after a resume; and when an open capture
-//! delivered no picture or ScreenCaptureKit did not list the display. The
-//! power manager's assertion id is kept and passed back with each
-//! declaration, as its header asks, and released with the session's
-//! activity once the display had the time to light.
+//! included; at the first capture after a resume; when an open capture
+//! delivered no picture or ScreenCaptureKit did not list the display;
+//! before each still; and when it turned off under a running stream. One
+//! that turned off under a running capture, its stream or its stills, is
+//! lit once it has been found dark for `wake::SETTLE`. The power manager's
+//! assertion id is kept and passed back with each declaration, as its
+//! header asks, and released with the session's activity once the display
+//! had the time to light.
 
 use super::{
     desktop,
@@ -98,19 +101,18 @@ pub(crate) fn waking() -> std::io::Error {
     .into()
 }
 
-/// Light whichever of `ids` sleeps and can be lit (not the built-in panel
-/// behind a closed lid): declare the local user active, unless that was
-/// done within `WAKE_EVERY`, as one declaration lights every display.
-/// Whether one of them sleeps and is being lit.
+/// Whether display `id` sleeps and can be lit: not the built-in panel
+/// behind a closed lid. One Core Graphics read while it is awake.
+pub(crate) fn sleeping(id: CGDirectDisplayID) -> bool {
+    wakeable(CGDisplayIsAsleep(id), || CGDisplayIsBuiltin(id), lid_closed)
+}
+
+/// Light whichever of `ids` sleeps and can be lit ([`light`]). Whether one
+/// of them sleeps and is being lit.
 pub(crate) fn wake(ids: impl IntoIterator<Item = CGDirectDisplayID>) -> bool {
-    let mut lid = None;
-    let asleep = ids.into_iter().any(|id| {
-        wakeable(CGDisplayIsAsleep(id), CGDisplayIsBuiltin(id), || {
-            *lid.get_or_insert_with(lid_closed)
-        })
-    });
+    let asleep = ids.into_iter().any(sleeping);
     if asleep {
-        declare(Instant::now());
+        light();
     }
     asleep
 }
@@ -124,8 +126,12 @@ pub(crate) fn wake_for_session(display: &Display) {
         return;
     }
     let until = Instant::now() + WAKE_WAIT;
-    while !drawing(display) && Instant::now() < until {
-        std::thread::sleep(WAKE_POLL);
+    while !drawing(display) {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        std::thread::sleep(WAKE_POLL.min(left));
     }
 }
 
@@ -144,9 +150,11 @@ pub(crate) fn release() {
     let _ = unsafe { IOPMAssertionRelease(id) };
 }
 
-fn declare(now: Instant) {
+/// Declare the local user active, which lights every display, unless that
+/// was done within `WAKE_EVERY`.
+pub(crate) fn light() {
     let mut woken = WOKEN.lock();
-    if !woken.limiter.admit(now) {
+    if !woken.limiter.admit(Instant::now()) {
         return;
     }
     let name = CFString::from_static_str("pb-mapper: a remote desktop viewer is watching");

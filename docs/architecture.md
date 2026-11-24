@@ -412,7 +412,8 @@ Nothing in the SDK crates knows it exists.
     (app-only Core Graphics modes), `still.rs` (`SCScreenshotManager`),
     `timer.rs` (App Nap held off), `power.rs` (a sleeping display lit by a
     declaration of local user activity, not the built-in panel behind a
-    closed lid) and `wake.rs` (its pure rules: at most once every 2 s),
+    closed lid) and `wake.rs` (its pure rules: at most once every 2 s, and
+    a display that turns off under capture only after 1 s),
     `waiter.rs` (thread C's wait: a kqueue
     timer marked `NOTE_CRITICAL`, which the kernel does not coalesce, and a
     user event for the wake), `keychain.rs`, `cf.rs` (Core Foundation

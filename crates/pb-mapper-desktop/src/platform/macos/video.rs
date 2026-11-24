@@ -8,12 +8,15 @@
 //! A display that sleeps gives the stream nothing: an open, the first
 //! submit after a resume and a stream with no picture light it
 //! (`power.rs`) and fail, and thread C's retry opens a stream once it draws.
+//! A stream whose display turned off under it repeats its last picture
+//! until the display has been dark for `wake::SETTLE`, then does the same.
 
 use super::{
     capture::{CaptureState, Counts, Stream},
     encoder::{self, Encoder},
     platform::ScreenAccess,
     power,
+    wake::{SETTLE, SleepWatch},
 };
 use crate::{
     BackendError, Display, EncodedFrame, FailureKind, Presented, Result, VideoCodec, VideoLimits,
@@ -35,6 +38,10 @@ pub(crate) struct MacVideo {
     /// Resumed since the last submit, which then checks that the display
     /// did not fall asleep during the pause.
     resumed: bool,
+    /// What the stream found of the display's sleep, and when it last
+    /// found anything: a new picture, or a look.
+    watch: SleepWatch,
+    looked: Instant,
     created: Instant,
     last_submit: Option<Instant>,
     /// Asked for and not yet submitted.
@@ -44,6 +51,15 @@ pub(crate) struct MacVideo {
     presented: Option<Presented>,
     timing: Timing,
 }
+
+/// How often a stream with no new picture looks whether its display fell
+/// asleep, at a repeat of its last picture, which a still screen submits
+/// every `LIVENESS_INTERVAL`.
+const ASLEEP_LOOK: Duration = Duration::from_millis(500);
+const _: () = assert!(
+    ASLEEP_LOOK.as_millis() + LIVENESS_INTERVAL.as_millis() < SETTLE.as_millis(),
+    "a display that turns off under a still screen is found awake within SETTLE before"
+);
 
 /// Where `macos_capture_timing` goes: with thread C's pacing.
 const TIMING_TARGET: &str = "pb_mapper_desktop::feedback";
@@ -170,6 +186,8 @@ impl VideoSource for MacVideo {
             encoder,
             display: display.id,
             resumed: false,
+            watch: SleepWatch::default(),
+            looked: now,
             created: now,
             last_submit: None,
             keyframe: true,
@@ -187,7 +205,8 @@ impl VideoSource for MacVideo {
     /// Never waits: nothing captured yet, a full encoder or a still screen
     /// inside the liveness interval submit nothing; a keyframe asked for
     /// stays asked for until a submit carries it. A display that slept
-    /// through a pause, or that never gave a picture because it sleeps, is
+    /// through a pause, that never gave a picture because it sleeps, or
+    /// that turned off under the stream and stayed dark for `SETTLE`, is
     /// lit, and the submit fails so that thread C opens a new stream once
     /// it draws.
     fn submit(&mut self, keyframe: bool) -> Result<bool> {
@@ -218,6 +237,20 @@ impl VideoSource for MacVideo {
             }
             return Ok(false);
         };
+        if taken.fresh.is_some() {
+            self.watch.awake(now);
+            self.looked = now;
+        } else if now >= self.looked + ASLEEP_LOOK {
+            // A display put to sleep sends the stream nothing more, and its
+            // last picture would repeat for good.
+            self.looked = now;
+            if !power::sleeping(self.display) {
+                self.watch.awake(now);
+            } else if self.watch.asleep(now) {
+                power::light();
+                return Err(power::waking());
+            }
+        }
         self.encoder
             .encode(&taken.picture, self.keyframe, taken.fresh.is_none())?;
         self.keyframe = false;
