@@ -401,6 +401,7 @@ impl Host {
         let listener = pb_mapper_core::listener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
         let listening = listener.local_addr()?;
         // The video goes out on direct QUIC under VIDEO_CONGESTION.
+        let congestion = options.sender_congestion();
         let registration = client
             .register_with_sender_congestion(
                 RegisterRequest {
@@ -416,7 +417,7 @@ impl Host {
                     lan_tcp: options.lan_tcp,
                     ..Default::default()
                 },
-                VIDEO_CONGESTION,
+                congestion,
             )
             .await
             .map_err(io::Error::other)?;

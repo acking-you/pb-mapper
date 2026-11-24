@@ -1010,9 +1010,11 @@ async fn remembered_invitation_survives_restart_but_not_revocation() {
     replacement.stop().await.unwrap();
 }
 
-/// A viewer that reaches the host directly gets its video under the host's
-/// `VIDEO_CONGESTION`, which the host's end of the session names; the
-/// viewer's end sends under Cubic.
+/// A viewer that reaches the host directly gets its video under the
+/// controller the host registered with, which the host's end of the session
+/// names; the viewer's end sends under Cubic. This host asks for BBR, which
+/// no end has by default, so the test fails if the host stops registering
+/// with its own; outside tests that is `VIDEO_CONGESTION`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn direct_video_goes_out_under_the_hosts_controller() {
     let relay = pb_mapper_testkit::Relay::start_with_direct(
@@ -1028,6 +1030,7 @@ async fn direct_video_goes_out_under_the_hosts_controller() {
     );
     let mut options = HostOptions::new("desktop:direct-congestion");
     options.allow_direct = true;
+    options.sender_congestion = Some(CongestionControl::Bbr);
     let host = Host::builder(options)
         .backend(|| Ok(Pixel))
         .start(&client)
@@ -1062,7 +1065,7 @@ async fn direct_video_goes_out_under_the_hosts_controller() {
     let quic = pb_mapper_client::sdk::DirectTransport::Quic;
     assert_eq!(
         link(host.shared.registration.diagnostics()),
-        Some((quic, Some(VIDEO_CONGESTION)))
+        Some((quic, Some(CongestionControl::Bbr)))
     );
     assert_eq!(
         link(connection.diagnostics()),
