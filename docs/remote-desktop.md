@@ -2271,8 +2271,9 @@ it shares with Flutter ([Windows presentation](#windows-presentation)), or
 takes JPEG where Media Foundation is not installed. Android decodes
 with `MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer,
 macOS and iOS with VideoToolbox into IOSurface-backed BGRA pixel buffers
-handed to a `FlutterTexture`, and Linux with GStreamer into RGBA buffers
-handed to an `FlPixelBufferTexture`.
+handed to a `FlutterTexture`, and Linux with GStreamer into the decoder's
+own NV12 or I420 pictures, which the runner converts to RGBA on the GPU into
+an `FlTextureGL`.
 Capture, encoding, decoding and blocking FFI calls stay off the Dart UI
 isolate, and pinch and pan keep the same texture and decoder. On Android a
 decoder reset is acknowledged by the codec worker, keeps the Surface, and cannot
@@ -2541,15 +2542,16 @@ port (`PortMapping::Auto` never asks, `Always` is refused), as an SDK built
 without `port-mapping` does.
 
 **Linux** (`ui/linux/runner/desktop_video.cc` for the channel and the
-texture; the GStreamer module `libpb_mapper_desktop_video.so`, built from
-`desktop_video_gst.cc` when the GStreamer development files are present and
-loaded with `dlopen` at the first probe or session, so the app starts without
-it). Each source's decoder thread pulls straight into pooled `GstBuffer`s
-(one copy of the compressed data) and feeds `appsrc → h264parse/h265parse →
-decoder → videoconvert → appsink` (RGBA), pulling the next unit only while
-fewer than four are inside the pipeline, so a longer backlog stays in Rust's
-sink, which drains it while an IDR is on its way; the units inside show in the
-turnaround the fps cap watches. Decoders are chosen from the registry, hardware first
+texture, `desktop_video_gl.cc` for the GPU conversion; the GStreamer module
+`libpb_mapper_desktop_video.so`, built from `desktop_video_gst.cc` when the
+GStreamer development files are present and loaded with `dlopen` at the
+first probe or session, so the app starts without it; module and runner
+share the C interface `desktop_video_module.h`, whose ABI number, 2, rejects
+a stale module). Each source's decoder thread pulls straight into pooled
+`GstBuffer`s (one copy of the compressed data) and feeds `appsrc →
+h264parse/h265parse → decoder → appsink`, pulling the next unit only while
+fewer than four are inside the pipeline, so a backlog stays in Rust's sink,
+which drops to an IDR. Decoders are chosen from the registry, hardware first
 (VA-API, NVDEC, V4L2) and then by rank; one that fails to start is skipped,
 and one that fails or stalls before its first picture is left out for the
 rest of the run (and from later probes), so the next keyframe falls back to
@@ -2557,19 +2559,70 @@ the next decoder the probe's rule allows. When none is left, every keyframe
 is a decoder failure: the session ends as `decoder_failed`, and an H.265
 one connects again on H.264. A
 decoder with units inside and no picture for 2 s is rebuilt with a keyframe
-request, as on Android. `copy_pixels` on the raster thread takes the newest
-picture, which is the presentation receipt. Each picture is converted to RGBA
-on the CPU and uploaded by Flutter: one CPU copy per frame, and no zero-copy
-(dma-buf or EGLImage) path yet. The `stats` method reports the counts and
-`refreshHz` (the fastest monitor's, read as `decoders` reads it) and, while
-a read asks for timings, `timings.surface_consume` as
-`{samples, mean_ms, max_ms}`: from the module's `frame_ready` for a newer
-picture to `copy_pixels` taking it. A raster pass already under way can take
-a picture before its `frame_ready` runs; that sample then counts from an
-earlier one, or is skipped. Without timings `frame_ready` reads no clock. A
-decode time would need the module's interface to carry it, and is not
-reported. `G_MESSAGES_DEBUG=pb-mapper-video` shows the
-module's log, `GST_DEBUG=3` GStreamer's. A viewer needs GStreamer's base and
+request, as on Android. The appsink takes the decoder's own picture: NV12
+or I420 in system memory, which a software decoder and NVDEC give, or, with
+GStreamer 1.24 or later (whose DMA_DRM caps say a dma-buf's format and DRM
+modifier), NV12 in dma-bufs of the layouts Flutter's EGL display imports
+plane by plane as R8 and GR88 textures, as GStreamer's VA-API decoders
+give them. The runner reads those layouts from the display Flutter renders to
+(`eglGetPlatformDisplayEXT` on GDK's display) before each decoder starts;
+`PB_MAPPER_VIDEO_DMABUF=0` keeps every picture in system memory. A decoder
+whose pad templates offer neither gets `videoconvert` to NV12. The
+allocation query answers that GstVideoMeta is understood, so a decoder hands
+over padded rows or a 1088-row surface as it keeps them instead of copying,
+and that three pictures stay out of its pool: the newest, the one on screen
+and one the GPU may still read. The texture is an `FlTextureGL`: its
+`populate`, on Flutter's raster thread with Flutter's GL ES context current,
+takes the newest picture and draws it once into an RGBA8 `GL_TEXTURE_2D`
+through a framebuffer. Only then does it present the picture, which is the
+presentation receipt: a picture it cannot convert earns none, and reaches
+Rust as a decoder error at most once a second, so a GL context that can show
+nothing ends the session as `decoder_failed` rather than leave a still
+picture while the host takes input. A system-memory picture's planes are
+uploaded with `glTexSubImage2D` (R8 and RG8, or LUMINANCE and
+LUMINANCE_ALPHA on GL ES 2 without `GL_EXT_texture_rg`): 1.5 bytes a pixel
+instead of the 4 an RGBA upload takes. The picture on screen stays out of the
+decoder's pool until the next one is converted, so that a snapshot can
+convert it; it is one of the three the allocation answer counts. A dma-buf
+picture's planes are imported once per pooled buffer as EGLImages and
+sampled where the decoder wrote them; an EGL fence after the draw returns
+the buffer to the decoder once the GPU has read it, at most two being held.
+An imported plane keeps its buffer alive, so the imports go when the picture
+size or layout changes or the pictures come in system memory, and any not
+sampled for 120 conversions goes too, 64 at most being kept. The shader
+takes the matrix and range from the caps (Kr and Kb, limited or full; a
+stream that names none is BT.709 limited) and samples chroma nearest, as
+GStreamer's converter does without chroma resampling. It saves and restores
+every GL binding and switch it touches, as Flutter's own compositor does.
+Before the first picture the texture is one black pixel; a picture that
+cannot be converted leaves the last one on screen. A dma-buf that cannot be
+imported (no `GL_OES_EGL_image`, or a layout the driver refuses) makes the
+module rebuild the pipeline in system memory at the next keyframe, which it
+asks for; that refusal is no decoder error. When the texture is disposed,
+its GL objects (the RGBA texture, the planes, the imports) are deleted at
+once in a context of their own that shares Flutter's, made current with no
+surface on a thread of its own, since the GTK thread that finalizes the
+texture may have GDK's context current; where EGL cannot make one, the next
+conversion in Flutter's context deletes them. `snapshot` scales and converts
+a system-memory picture with GStreamer's converter; a dma-buf picture, which
+only the GPU reads, is read back at 320 pixels wide for it, at most once a
+second, and once more a second after the last read when a picture shown
+since is not in it, which a timer brings `populate` back for. A snapshot
+whose still is older than the picture on screen asks for it again and waits
+up to 100 ms for Flutter's next frame, keeping the older still if the
+texture is no longer drawn. `stats` adds, while a
+read asks for timings, `timings.decode` (from a unit entering the pipeline
+to its picture reaching the appsink), `timings.convert` (the conversion
+on the raster thread) and `timings.surface_consume` (from the module's
+`frame_ready` for a newer picture to `populate` taking it; a raster pass
+already under way can take a picture before its `frame_ready` runs, and that
+sample then counts from an earlier one, or is skipped), each
+`{samples, mean_ms, max_ms}`, and always `refreshHz` (the fastest monitor's,
+read as `decoders` reads it), `dmabuf` (pictures arrive as dma-bufs) and
+`videoconvert` (the pipeline converts). Without timings `frame_ready` reads
+no clock. `G_MESSAGES_DEBUG=pb-mapper-video` shows the module's log,
+including the caps each decoder gives, so whether dma-bufs were negotiated;
+`GST_DEBUG=3` shows GStreamer's. A viewer needs GStreamer's base and
 bad plugins and a decoder: gst-libav (or openh264 for H.264) in software,
 the VA-API driver, or NVIDIA's driver; the user guide lists the packages.
 The release bundles no GStreamer library: `scripts/build/check-linux-bundle.sh`
@@ -2657,7 +2710,10 @@ What each platform's new code has been through:
   real app ran against a host replaying recorded clips. The figures and
   their limits are in
   [the 2026-11-12 record](benchmarks/2026-11-12-remote-desktop-platforms/README.md#the-viewers).
-  VA-API, V4L2 and a real Linux desktop have not run.
+  VA-API, V4L2 and a real Linux desktop have not run. That run predates
+  the GPU conversion, which is built and whose clip harness runs only in
+  CI, on llvmpipe; its dma-buf path (GStreamer 1.24 with a VA-API decoder)
+  has not run.
 - **macOS host.** Compiled, linked, linted and unit-tested on a macOS
   runner in CI. The unit tests cover the VideoToolbox encoder, the display
   list, the system pointer read off the main thread in a window-server
@@ -2993,11 +3049,32 @@ Build macOS with `make build-ui-macos-release` and iOS with
 `make build-pb-mapper-ffi-ios`, then Xcode (`ui/ios/Runner.xcworkspace`);
 CI's `macos-app` and `ios-app` jobs build both, the iOS one unsigned. For Linux,
 `make build-ui-linux-release` builds the GStreamer module when `pkg-config`
-finds `gstreamer-1.0`, `gstreamer-app-1.0` and `gstreamer-video-1.0`
-(Debian and Ubuntu: `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev`),
-and leaves it out otherwise, so that build views over JPEG.
-`scripts/test/linux-desktop-video.sh [--software]` decodes recorded clips
-through the module outside Flutter (it needs GStreamer and ffmpeg).
+finds `gstreamer-1.0`, `gstreamer-app-1.0`, `gstreamer-video-1.0` and
+`gstreamer-allocators-1.0` (Debian and Ubuntu: `libgstreamer1.0-dev
+libgstreamer-plugins-base1.0-dev`), and leaves it out otherwise, so that
+build views over JPEG; the runner links libepoxy, which `libgtk-3-dev`
+brings. `scripts/test/linux-desktop-video.sh [--software]` decodes recorded
+clips through the module outside Flutter and converts every picture with
+the runner's GL code in a GL ES context with no surface (it needs GStreamer,
+ffmpeg and EGL with GL ES; Mesa's llvmpipe does without a GPU). It checks
+that the texture is an RGBA8 `GL_TEXTURE_2D` of the picture's size, that it
+matches GStreamer's converter on the same picture at 40 dB PSNR or more,
+that both snapshots have content, that a software decoder's I420 needs no
+`videoconvert`, and that the conversion and its still leave every GL
+binding and switch as they were set before. It does the same with GL ES 2's
+paths (LUMINANCE planes and padded rows, which Mesa, answering ES 2 with
+ES 3.2, never takes by itself), forced on a converter of their own, which
+must then delete its GL objects from a thread with no context. It checks
+that a picture acquired and not shown earns no receipt and reaches Rust as
+a decoder error at most once a second, and that a second decoder kept in
+system memory, playing the same clip, converts the same frames to the same
+picture at 40 dB or more: on a hardware run whose pictures are dma-bufs,
+that is what checks their import. Then it prints, for the 720p and 1080p
+clips (and 4K where a decoder takes it) offered at 60 and 120 fps, decoded
+and presented pictures a second, the mean decode time and every thread's
+CPU per decoded picture.
+On llvmpipe the GL work runs on the CPU too, so CI's figures are no
+measure of a GPU.
 
 For Android, rebuild the FFI for the intended ABI before Flutter: ARM64 for a
 matching phone, or x86_64 for the development VM. For example,

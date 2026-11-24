@@ -5,7 +5,9 @@
 // (desktop_video_gst.cc), which this runner loads with dlopen at the first
 // probe: without it, or without GStreamer, `decoders` answers none and
 // every session is JPEG, which Dart decodes. The app never needs GStreamer
-// to start.
+// to start. Each texture is an FlTextureGL whose populate, on Flutter's
+// raster thread, converts the decoder's picture to RGBA on the GPU
+// (desktop_video_gl.cc).
 #define G_LOG_DOMAIN "pb-mapper-video"
 
 #include "desktop_video.h"
@@ -24,9 +26,19 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "desktop_video_gl.h"
 #include "desktop_video_module.h"
+
+// Last: Xlib's macros (None, Status) would reach everything after.
+#ifdef GDK_WINDOWING_WAYLAND
+#include <gdk/gdkwayland.h>
+#endif
+#ifdef GDK_WINDOWING_X11
+#include <gdk/gdkx.h>
+#endif
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -41,8 +53,14 @@ constexpr size_t kMaxTextures = 2;
 // holding a reference; a populate already running when the texture is
 // unregistered still reads it. The last reference goes this much later.
 constexpr guint kTextureReleaseMs = 1000;
-// Shown until the first picture: a texture always hands Flutter pixels.
-const uint8_t kBlack[4] = {0, 0, 0, 255};
+// How often a dma-buf picture, which only the GPU reads, is read back for
+// the snapshot; the last one before the picture stops changing is read
+// back this long after the one before it.
+constexpr auto kStillInterval = std::chrono::seconds(1);
+// How long a snapshot waits for the raster thread to read back the dma-buf
+// picture on screen when its still is older: well inside the snapshot's
+// deadline, which the JPEG still has to meet.
+constexpr gint64 kStillWaitUs = 100 * G_TIME_SPAN_MILLISECOND;
 
 // The video C ABI of libpb_mapper_ffi.so. The runner does not link it: it
 // resolves the exports from the copy Dart already loaded, which stays
@@ -119,9 +137,34 @@ const PbVideoModule* LoadModule() {
 // Flutter's software renderer draws no external texture.
 bool SoftwareRenderer() { return g_strcmp0(g_getenv("FLUTTER_LINUX_RENDERER"), "software") == 0; }
 
-// The steady clock in nanoseconds, never 0 in practice: 0 means "none".
-int64_t NowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+// What Flutter's EGL display samples in place, read on the GTK thread
+// before a decoder starts. Flutter renders through EGL on the display GDK
+// opened (fl_opengl_manager.cc), whose handle this asks for again; it is
+// initialized already, initializing it again changes nothing, and nothing
+// here terminates it. PB_MAPPER_VIDEO_DMABUF=0 keeps every picture in
+// system memory.
+PbVideoPresenter ReadPresenter() {
+  PbVideoPresenter presenter{};
+  if (g_strcmp0(g_getenv("PB_MAPPER_VIDEO_DMABUF"), "0") == 0) return presenter;
+  EGLDisplay display = EGL_NO_DISPLAY;
+  GdkDisplay* gdk = gdk_display_get_default();
+  if (gdk && epoxy_has_egl_extension(EGL_NO_DISPLAY, "EGL_EXT_platform_base")) {
+#ifdef GDK_WINDOWING_WAYLAND
+    if (GDK_IS_WAYLAND_DISPLAY(gdk)) {
+      display = eglGetPlatformDisplayEXT(EGL_PLATFORM_WAYLAND_EXT, gdk_wayland_display_get_wl_display(gdk), nullptr);
+    }
+#endif
+#ifdef GDK_WINDOWING_X11
+    if (GDK_IS_X11_DISPLAY(gdk)) {
+      display = eglGetPlatformDisplayEXT(EGL_PLATFORM_X11_EXT, gdk_x11_display_get_xdisplay(gdk), nullptr);
+    }
+#endif
+  }
+  if (display != EGL_NO_DISPLAY && eglInitialize(display, nullptr, nullptr)) {
+    pb_video::ReadPresenter(display, &presenter);
+  }
+  g_debug("The presenter samples dma-bufs: %s, %u layouts", presenter.dmabuf ? "yes" : "no", presenter.modifier_count);
+  return presenter;
 }
 
 // The fastest refresh among the monitors as they are set now: the viewer
@@ -220,6 +263,36 @@ bool WriteSnapshot(const uint8_t* rgba, uint32_t width, uint32_t height, uint32_
   return true;
 }
 
+// One of the stats' timings: count, total and longest, in constant space.
+struct Timing {
+  uint64_t samples = 0;
+  Clock::duration total{}, longest{};
+  void Add(Clock::duration elapsed) {
+    ++samples;
+    total += elapsed;
+    longest = std::max(longest, elapsed);
+  }
+  PbVideoTiming Snapshot() const {
+    using std::chrono::duration_cast;
+    using std::chrono::microseconds;
+    PbVideoTiming out{};
+    out.samples = samples;
+    out.total_us = static_cast<uint64_t>(duration_cast<microseconds>(total).count());
+    out.max_us = static_cast<uint64_t>(duration_cast<microseconds>(longest).count());
+    return out;
+  }
+};
+
+// A timing as the other runners report it: count, mean and maximum.
+FlValue* TimingValue(const PbVideoTiming& timing) {
+  FlValue* value = fl_value_new_map();
+  const double mean = timing.samples == 0 ? 0.0 : timing.total_us / 1000.0 / static_cast<double>(timing.samples);
+  fl_value_set_string_take(value, "samples", fl_value_new_int(static_cast<int64_t>(timing.samples)));
+  fl_value_set_string_take(value, "mean_ms", fl_value_new_float(mean));
+  fl_value_set_string_take(value, "max_ms", fl_value_new_float(timing.max_us / 1000.0));
+  return value;
+}
+
 int64_t Number(FlValue* map, const char* key) {
   FlValue* value = fl_value_lookup_string(map, key);
   if (!value) throw std::runtime_error("Missing video field");
@@ -228,84 +301,207 @@ int64_t Number(FlValue* map, const char* key) {
 }
 }  // namespace
 
-// One texture and its decoder. Flutter's raster thread calls copy_pixels,
-// whose acquisition of a new picture is its presentation receipt.
-G_DECLARE_FINAL_TYPE(PbVideoTexture, pb_video_texture, PB, VIDEO_TEXTURE, FlPixelBufferTexture)
+namespace {
+// What a texture keeps besides its GObject fields.
+struct TextureState {
+  // Flutter's raster thread only.
+  std::unique_ptr<pb_video::VideoGl> gl;
+  Clock::time_point read_back{};
+  bool failure_logged = false;
+  // Guarded by the texture's mutex. The picture shown last, which only the
+  // raster thread replaces, and whether it is a dma-buf.
+  PbVideoPicture* shown = nullptr;
+  bool shown_dmabuf = false;
+  // While it is a dma-buf: the RGBA still a snapshot writes, read back at
+  // most once a second. `still_stale`: a picture shown since is not in it,
+  // and a timer (`still_timer` while one is set) brings the raster thread
+  // back to read it a second after the last read. `still_wanted`: a
+  // snapshot waits for it now. `still_reads` counts the raster thread's
+  // reads and attempts, which `still_read` signals.
+  std::vector<uint8_t> still;
+  uint32_t still_width = 0, still_height = 0;
+  bool still_stale = false, still_timer = false, still_wanted = false;
+  uint64_t still_reads = 0;
+  // While a stats read asks for timings: each conversion's time on the
+  // raster thread, and surface_consume, from frame_ready saying a newer
+  // picture can be acquired (`ready`, while `waiting`) to populate taking
+  // it.
+  bool timing = false;
+  Timing convert;
+  Timing consume;
+  Clock::time_point ready{};
+  bool waiting = false;
+};
+}  // namespace
+
+// One texture and its decoder. Flutter's raster thread calls populate,
+// which converts each new picture and sends the presentation receipt of
+// those it shows.
+G_DECLARE_FINAL_TYPE(PbVideoTexture, pb_video_texture, PB, VIDEO_TEXTURE, FlTextureGL)
 
 struct _PbVideoTexture {
-  FlPixelBufferTexture parent_instance;
+  FlTextureGL parent_instance;
   const PbVideoModule* module;
   PbVideoDecoder* decoder;
   FlTextureRegistrar* registrar;
   // Whether a snapshot is being written: one at a time.
   gint snapshotting;
   GMutex mutex;
-  // Guarded by mutex: the picture handed to Flutter last, which is the one
-  // on screen. Only the raster thread replaces it.
-  PbVideoPicture* shown;
-  // Whether a stats read asked for timings: written under mutex, read
-  // without it by frame_ready, which reads no clock while it is off.
+  GCond still_read;
+  TextureState* state;
+  // Whether a stats read asked for timings, as state->timing: written under
+  // mutex, read without it by frame_ready.
   gint timed;
-  // Guarded by mutex, and zero unless timed: when frame_ready last said a
-  // newer picture can be acquired (0 once a newer picture was taken), and
-  // surface_consume, from then to copy_pixels taking it.
-  int64_t ready_ns;
-  int64_t consume_samples;
-  int64_t consume_total_ns;
-  int64_t consume_max_ns;
 };
 
-G_DEFINE_TYPE(PbVideoTexture, pb_video_texture, fl_pixel_buffer_texture_get_type())
+G_DEFINE_TYPE(PbVideoTexture, pb_video_texture, fl_texture_gl_get_type())
 
-static gboolean pb_video_texture_copy_pixels(FlPixelBufferTexture* texture, const uint8_t** buffer, uint32_t* width,
-                                             uint32_t* height, GError** error) {
-  PbVideoTexture* self = PB_VIDEO_TEXTURE(texture);
-  PbVideoPicture* next = self->module->acquire(self->decoder);
-  PbVideoPicture* previous = nullptr;
+// The GTK thread, a second after the last still: Flutter calls populate
+// again, which reads the dma-buf picture on screen back, if the texture is
+// still drawn.
+static gboolean pb_video_texture_still_due(gpointer data) {
+  PbVideoTexture* self = PB_VIDEO_TEXTURE(data);
   g_mutex_lock(&self->mutex);
+  self->state->still_timer = false;
+  const bool stale = self->state->still_stale;
+  g_mutex_unlock(&self->mutex);
+  if (stale) fl_texture_registrar_mark_texture_frame_available(self->registrar, FL_TEXTURE(self));
+  return G_SOURCE_REMOVE;
+}
+
+// Flutter's raster thread, its GL context current: converts the newest
+// picture, if there is a new one, and hands Flutter the RGBA texture. Only
+// a converted picture earns its receipt; one that cannot be converted
+// leaves the last one on screen and is reported, unless it is a dma-buf
+// this context refused, after which the decoder sends system memory.
+static gboolean pb_video_texture_populate(FlTextureGL* texture, uint32_t* target, uint32_t* name, uint32_t* width,
+                                          uint32_t* height, GError** error) {
+  PbVideoTexture* self = PB_VIDEO_TEXTURE(texture);
+  TextureState* state = self->state;
+  if (!state->gl) state->gl.reset(new pb_video::VideoGl(self->module));
+  PbVideoPicture* next = self->module->acquire(self->decoder);
+  const bool timed = g_atomic_int_get(&self->timed) != 0;
+  const Clock::time_point taken = timed ? Clock::now() : Clock::time_point{};
+  g_mutex_lock(&self->mutex);
+  const bool same = next && next == state->shown;
+  bool dmabuf = state->shown_dmabuf, stale = state->still_stale;
+  const bool wanted = state->still_wanted;
+  g_mutex_unlock(&self->mutex);
+  if (same) {
+    self->module->release(next);
+    next = nullptr;
+  }
+  bool converted = false;
+  Clock::duration spent{};
   if (next) {
-    previous = self->shown;
-    self->shown = next;
-    // A picture other than the one shown, which stays retained until here,
-    // is a newer one: while timed, its wait since frame_ready.
-    if (next != previous && self->ready_ns != 0) {
-      const int64_t waited = std::max<int64_t>(0, NowNs() - self->ready_ns);
-      self->ready_ns = 0;
-      ++self->consume_samples;
-      self->consume_total_ns += waited;
-      self->consume_max_ns = std::max(self->consume_max_ns, waited);
+    const auto started = Clock::now();
+    std::string failure;
+    converted = state->gl->Convert(next, &failure);
+    spent = Clock::now() - started;
+    if (state->gl->TakeDmabufRefusal()) self->module->refuse_dmabuf(self->decoder);
+    if (converted) {
+      // Flutter draws it in this frame.
+      self->module->present(self->decoder, next);
+      dmabuf = state->gl->last_dmabuf();
+      stale = dmabuf;
+    } else if (!state->gl->last_refused()) {
+      self->module->present_failed(self->decoder, failure.c_str());
+      if (!state->failure_logged) {
+        state->failure_logged = true;
+        g_warning("Native desktop video: %s", failure.c_str());
+      }
     }
   }
-  PbVideoPicture* picture = self->shown;
-  g_mutex_unlock(&self->mutex);
-  // Flutter uploaded the previous picture when it last called.
-  if (previous) self->module->release(previous);
-  if (!picture) {
-    *buffer = kBlack;
-    *width = 1;
-    *height = 1;
-    return TRUE;
+  // A dma-buf picture on screen that the still does not hold yet is read
+  // back once a second has passed since the last read, or at once for a
+  // waiting snapshot; else a timer brings this back then.
+  if (!dmabuf) stale = false;
+  const Clock::time_point now = Clock::now();
+  const bool attempt = stale && (wanted || now - state->read_back >= kStillInterval);
+  std::vector<uint8_t> still;
+  uint32_t still_width = 0, still_height = 0;
+  bool read = false;
+  if (attempt) {
+    state->read_back = now;
+    read = state->gl->ReadBack(static_cast<uint32_t>(kSnapshotWidth), &still, &still_width, &still_height);
+    // A still that cannot be read is not tried again for this picture.
+    stale = false;
   }
-  *buffer = self->module->pixels(picture, width, height);
+  PbVideoPicture* previous = next;
+  bool arm = false;
+  g_mutex_lock(&self->mutex);
+  if (converted) {
+    previous = state->shown;
+    state->shown = next;
+    state->shown_dmabuf = dmabuf;
+    if (state->timing) state->convert.Add(spent);
+    // A newer picture shown: while timed, its wait since frame_ready. A
+    // raster pass already under way can take a picture before its
+    // frame_ready runs; that sample then counts from an earlier one, or is
+    // skipped.
+    if (timed && state->timing && state->waiting) {
+      state->consume.Add(std::max(Clock::duration::zero(), taken - state->ready));
+      state->waiting = false;
+    }
+  }
+  if (read) {
+    state->still.swap(still);
+    state->still_width = still_width;
+    state->still_height = still_height;
+  }
+  if (attempt || wanted) {
+    ++state->still_reads;
+    state->still_wanted = false;
+    g_cond_broadcast(&self->still_read);
+  }
+  state->still_stale = stale;
+  if (stale && !state->still_timer) state->still_timer = arm = true;
+  g_mutex_unlock(&self->mutex);
+  // The picture replaced, or the one that could not be shown: its planes
+  // were uploaded, or the converter holds the dma-buf until the GPU has
+  // read it.
+  if (previous) self->module->release(previous);
+  if (arm) {
+    const auto due = std::chrono::duration_cast<std::chrono::milliseconds>(kStillInterval - (now - state->read_back));
+    g_timeout_add_full(G_PRIORITY_DEFAULT, static_cast<guint>(std::max<int64_t>(due.count(), 0) + 1),
+                       pb_video_texture_still_due, g_object_ref(self), g_object_unref);
+  }
+  std::string failure;
+  if (!state->gl->Texture(name, width, height, &failure)) {
+    g_set_error_literal(error, g_quark_from_static_string("pb-mapper-video"), 0, failure.c_str());
+    return FALSE;
+  }
+  *target = GL_TEXTURE_2D;
   return TRUE;
 }
 
-// The last reference: the decoder thread stopped when the texture closed.
+// The last reference: the decoder thread stopped when the texture closed,
+// and no populate, snapshot or still timer runs any more. The converter
+// deletes its GL objects in Flutter's share group.
 static void pb_video_texture_finalize(GObject* object) {
   PbVideoTexture* self = PB_VIDEO_TEXTURE(object);
   if (self->decoder) self->module->destroy(self->decoder);
-  if (self->shown) self->module->release(self->shown);
+  if (self->state) {
+    self->state->gl.reset();
+    if (self->state->shown) self->module->release(self->state->shown);
+    delete self->state;
+  }
   g_clear_object(&self->registrar);
+  g_cond_clear(&self->still_read);
   g_mutex_clear(&self->mutex);
   G_OBJECT_CLASS(pb_video_texture_parent_class)->finalize(object);
 }
 
 static void pb_video_texture_class_init(PbVideoTextureClass* klass) {
-  FL_PIXEL_BUFFER_TEXTURE_CLASS(klass)->copy_pixels = pb_video_texture_copy_pixels;
+  FL_TEXTURE_GL_CLASS(klass)->populate = pb_video_texture_populate;
   G_OBJECT_CLASS(klass)->finalize = pb_video_texture_finalize;
 }
 
-static void pb_video_texture_init(PbVideoTexture* self) { g_mutex_init(&self->mutex); }
+static void pb_video_texture_init(PbVideoTexture* self) {
+  g_mutex_init(&self->mutex);
+  g_cond_init(&self->still_read);
+  self->state = new TextureState();
+}
 
 // A GStreamer thread: a newer picture can be acquired. The module calls this
 // just after publishing it, so its time is taken first; a raster pass
@@ -314,46 +510,23 @@ static void pb_video_texture_init(PbVideoTexture* self) { g_mutex_init(&self->mu
 static void pb_video_texture_frame_ready(void* context) {
   PbVideoTexture* self = static_cast<PbVideoTexture*>(context);
   if (g_atomic_int_get(&self->timed)) {
-    const int64_t now = NowNs();
+    const Clock::time_point now = Clock::now();
     g_mutex_lock(&self->mutex);
-    if (g_atomic_int_get(&self->timed)) self->ready_ns = now;
+    if (self->state->timing) {
+      self->state->ready = now;
+      self->state->waiting = true;
+    }
     g_mutex_unlock(&self->mutex);
   }
   fl_texture_registrar_mark_texture_frame_available(self->registrar, FL_TEXTURE(self));
 }
 
-// GTK thread, for `stats`: `timings` starts surface_consume, or keeps it,
-// and returns it as {samples, mean_ms, max_ms} since it began; false drops
-// it and returns null.
-static FlValue* pb_video_texture_timings(PbVideoTexture* self, bool timings) {
-  g_mutex_lock(&self->mutex);
-  if (!timings || !g_atomic_int_get(&self->timed)) {
-    self->ready_ns = 0;
-    self->consume_samples = 0;
-    self->consume_total_ns = 0;
-    self->consume_max_ns = 0;
-  }
-  g_atomic_int_set(&self->timed, timings ? 1 : 0);
-  const int64_t samples = self->consume_samples, total = self->consume_total_ns, longest = self->consume_max_ns;
-  g_mutex_unlock(&self->mutex);
-  if (!timings) return nullptr;
-  FlValue* timing = fl_value_new_map();
-  fl_value_set_string_take(timing, "samples", fl_value_new_int(samples));
-  fl_value_set_string_take(
-      timing, "mean_ms",
-      fl_value_new_float(samples == 0 ? 0.0 : static_cast<double>(total) / static_cast<double>(samples) / 1e6));
-  fl_value_set_string_take(timing, "max_ms", fl_value_new_float(static_cast<double>(longest) / 1e6));
-  FlValue* all = fl_value_new_map();
-  fl_value_set_string_take(all, "surface_consume", timing);
-  return all;
-}
-
 static PbVideoTexture* pb_video_texture_new(const PbVideoModule* module, const PbVideoExports* exports,
-                                            FlTextureRegistrar* registrar) {
+                                            const PbVideoPresenter& presenter, FlTextureRegistrar* registrar) {
   PbVideoTexture* self = PB_VIDEO_TEXTURE(g_object_new(pb_video_texture_get_type(), nullptr));
   self->module = module;
   self->registrar = FL_TEXTURE_REGISTRAR(g_object_ref(registrar));
-  self->decoder = module->create(exports, pb_video_texture_frame_ready, self);
+  self->decoder = module->create(exports, &presenter, pb_video_texture_frame_ready, self);
   if (!self->decoder) {
     g_object_unref(self);
     return nullptr;
@@ -362,24 +535,59 @@ static PbVideoTexture* pb_video_texture_new(const PbVideoModule* module, const P
 }
 
 namespace {
+// A snapshot of the picture on screen: in system memory the module scales
+// and converts it; a dma-buf one is its still, read back again first when
+// it is older (`refresh`, from `reads`).
 struct SnapshotJob {
   PbVideoTexture* texture;
-  PbVideoPicture* picture;
+  bool refresh;
+  uint64_t reads;
   std::string path;
   uint32_t max_width;
   Clock::time_point deadline;
   ~SnapshotJob() {
-    texture->module->release(picture);
     g_atomic_int_set(&texture->snapshotting, 0);
     g_object_unref(texture);
   }
 };
 
 void SnapshotThread(GTask* task, gpointer, gpointer data, GCancellable*) {
-  const auto* job = static_cast<const SnapshotJob*>(data);
+  auto* job = static_cast<SnapshotJob*>(data);
+  PbVideoTexture* texture = job->texture;
+  const PbVideoModule* module = texture->module;
+  PbVideoPicture* picture = nullptr;
+  std::vector<uint8_t> rgba;
   uint32_t width = 0, height = 0;
-  const uint8_t* rgba = job->texture->module->pixels(job->picture, &width, &height);
-  g_task_return_boolean(task, WriteSnapshot(rgba, width, height, job->max_width, job->path, job->deadline));
+  g_mutex_lock(&texture->mutex);
+  TextureState* state = texture->state;
+  if (job->refresh) {
+    // Flutter's next frame, if the texture is still drawn: the old still
+    // otherwise.
+    const gint64 until = g_get_monotonic_time() + kStillWaitUs;
+    while (state->still_wanted && state->still_reads == job->reads) {
+      if (!g_cond_wait_until(&texture->still_read, &texture->mutex, until)) break;
+    }
+    state->still_wanted = false;
+  }
+  if (state->shown && !state->shown_dmabuf) {
+    picture = module->retain(state->shown);
+  } else if (state->shown) {
+    rgba = state->still;
+    width = state->still_width;
+    height = state->still_height;
+  }
+  g_mutex_unlock(&texture->mutex);
+  if (picture) {
+    int32_t made = module->snapshot(picture, job->max_width, nullptr, 0, &width, &height);
+    if (made == -2) {
+      rgba.resize(static_cast<size_t>(width) * height * 4);
+      made = module->snapshot(picture, job->max_width, rgba.data(), rgba.size(), &width, &height);
+    }
+    if (made != 0) rgba.clear();
+    module->release(picture);
+  }
+  g_task_return_boolean(task, !rgba.empty() &&
+                                  WriteSnapshot(rgba.data(), width, height, job->max_width, job->path, job->deadline));
 }
 
 void SnapshotDone(GObject*, GAsyncResult* result, gpointer data) {
@@ -458,9 +666,9 @@ class DesktopVideo {
     if (strcmp(method, "create") == 0) {
       CheckInstance(static_cast<uint64_t>(Number(args, "instance")));
       if (viewers_.size() >= kMaxTextures) throw std::runtime_error("Desktop texture limit reached");
-      const PbVideoModule* module = LoadModule();
+      const PbVideoModule* module = SoftwareRenderer() ? nullptr : LoadModule();
       if (!module) throw std::runtime_error("Native video decoding is unavailable");
-      PbVideoTexture* texture = pb_video_texture_new(module, &library_->exports, textures_);
+      PbVideoTexture* texture = pb_video_texture_new(module, &library_->exports, ReadPresenter(), textures_);
       if (!texture) throw std::runtime_error("Cannot create a video decoder");
       if (!fl_texture_registrar_register_texture(textures_, FL_TEXTURE(texture))) {
         g_object_unref(texture);
@@ -490,11 +698,28 @@ class DesktopVideo {
       }
       Snapshot(texture, fl_value_get_string(path), static_cast<uint32_t>(std::min<int64_t>(width, UINT32_MAX)), call);
     } else if (strcmp(method, "stats") == 0) {
-      // `timings` is optional and true when absent, as on Windows and macOS.
+      // `timings` is optional and true when absent, as on Windows and
+      // macOS.
       FlValue* wanted = fl_value_lookup_string(args, "timings");
-      const bool timings = !wanted || fl_value_get_type(wanted) != FL_VALUE_TYPE_BOOL || fl_value_get_bool(wanted);
+      const bool timings =
+          !wanted || fl_value_get_type(wanted) != FL_VALUE_TYPE_BOOL || fl_value_get_bool(wanted);
       PbVideoStats stats{};
-      texture->module->stats(texture->decoder, &stats);
+      texture->module->stats(texture->decoder, timings ? 1 : 0, &stats);
+      PbVideoTiming convert{}, consume{};
+      g_mutex_lock(&texture->mutex);
+      TextureState* state = texture->state;
+      if (timings != state->timing) {
+        state->convert = Timing{};
+        state->consume = Timing{};
+        state->waiting = false;
+      }
+      state->timing = timings;
+      g_atomic_int_set(&texture->timed, timings ? 1 : 0);
+      if (timings) {
+        convert = state->convert.Snapshot();
+        consume = state->consume.Snapshot();
+      }
+      g_mutex_unlock(&texture->mutex);
       g_autoptr(FlValue) result = fl_value_new_map();
       fl_value_set_string_take(result, "submitted", fl_value_new_int(static_cast<int64_t>(stats.submitted)));
       fl_value_set_string_take(result, "decoded", fl_value_new_int(static_cast<int64_t>(stats.decoded)));
@@ -504,8 +729,17 @@ class DesktopVideo {
       fl_value_set_string_take(result, "recoveries", fl_value_new_int(static_cast<int64_t>(stats.recoveries)));
       fl_value_set_string_take(result, "lastRecovery", fl_value_new_string(stats.last_recovery));
       fl_value_set_string_take(result, "decoder", fl_value_new_string(stats.decoder));
-      if (FlValue* timed = pb_video_texture_timings(texture, timings)) {
-        fl_value_set_string_take(result, "timings", timed);
+      // Whether pictures come as dma-bufs, and whether videoconvert makes
+      // them NV12.
+      fl_value_set_string_take(result, "dmabuf", fl_value_new_bool((stats.flags & PB_VIDEO_STATS_DMABUF) != 0));
+      fl_value_set_string_take(result, "videoconvert",
+                               fl_value_new_bool((stats.flags & PB_VIDEO_STATS_CONVERTS) != 0));
+      if (timings) {
+        FlValue* measured = fl_value_new_map();
+        fl_value_set_string_take(measured, "decode", TimingValue(stats.decode));
+        fl_value_set_string_take(measured, "convert", TimingValue(convert));
+        fl_value_set_string_take(measured, "surface_consume", TimingValue(consume));
+        fl_value_set_string_take(result, "timings", measured);
       }
       fl_value_set_string_take(result, "refreshHz", fl_value_new_float(DisplayMaxHz()));
       fl_method_call_respond_success(call, result, nullptr);
@@ -541,22 +775,34 @@ class DesktopVideo {
     if (native != dart) throw std::runtime_error("native video library loaded twice");
   }
 
-  // The picture Flutter took last, written by a worker thread; the reply
-  // comes back on this one.
+  // The picture shown last, written by a worker thread; the reply comes
+  // back on this one. A dma-buf picture's still older than the picture is
+  // read back first, at the raster thread's next populate.
   void Snapshot(PbVideoTexture* texture, const char* path, uint32_t max_width, FlMethodCall* call) {
-    PbVideoPicture* picture = nullptr;
+    bool shown = false, refresh = false;
+    uint64_t reads = 0;
     if (g_atomic_int_compare_and_exchange(&texture->snapshotting, 0, 1)) {
       g_mutex_lock(&texture->mutex);
-      picture = texture->shown ? texture->module->retain(texture->shown) : nullptr;
+      TextureState* state = texture->state;
+      shown = state->shown != nullptr;
+      if (shown && state->shown_dmabuf && state->still_stale) {
+        state->still_wanted = refresh = true;
+        reads = state->still_reads;
+      }
       g_mutex_unlock(&texture->mutex);
-      if (!picture) g_atomic_int_set(&texture->snapshotting, 0);
+      if (!shown) g_atomic_int_set(&texture->snapshotting, 0);
     }
-    if (!picture) {
+    if (!shown) {
       g_autoptr(FlValue) result = fl_value_new_bool(FALSE);
       fl_method_call_respond_success(call, result, nullptr);
       return;
     }
-    auto* job = new SnapshotJob{PB_VIDEO_TEXTURE(g_object_ref(texture)), picture, path, max_width,
+    if (refresh) fl_texture_registrar_mark_texture_frame_available(textures_, FL_TEXTURE(texture));
+    auto* job = new SnapshotJob{PB_VIDEO_TEXTURE(g_object_ref(texture)),
+                                refresh,
+                                reads,
+                                path,
+                                max_width,
                                 Clock::now() + kSnapshotDeadline};
     GTask* task = g_task_new(nullptr, nullptr, SnapshotDone, g_object_ref(call));
     g_task_set_task_data(task, job, [](gpointer data) { delete static_cast<SnapshotJob*>(data); });

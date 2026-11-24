@@ -4,19 +4,23 @@
 //
 // One decoder thread per attached source pulls access units straight from
 // Rust into pooled GStreamer buffers and feeds an explicit pipeline,
-//   appsrc -> h264parse | h265parse -> decoder -> videoconvert -> appsink,
-// whose streaming thread decodes, converts to RGBA and publishes the newest
-// picture. The compositor's raster thread acquires it (FlPixelBufferTexture
-// copies it into its texture: the one CPU copy of this path) and that
-// acquisition is the presentation receipt. The decoder state rules are the
-// Windows runner's (ui/windows/runner/desktop_video.cpp) and the Android
-// feeder's (VideoFeeder.kt): a generation change or a discontinuity starts a
+//   appsrc -> h264parse | h265parse -> decoder -> appsink,
+// whose streaming thread publishes the newest picture as the decoder made
+// it: NV12 or I420 in system memory, or NV12 in dma-bufs where the
+// presenter samples them and GStreamer (1.24 on) says their layout. A
+// decoder that gives neither gets videoconvert to NV12. The compositor's
+// raster thread acquires the picture and converts it to RGBA on the GPU
+// (desktop_video_gl.cc); only a picture it shows earns the presentation
+// receipt. The decoder state rules are the Windows runner's
+// (ui/windows/runner/desktop_video.cpp) and the Android feeder's
+// (VideoFeeder.kt): a generation change or a discontinuity starts a
 // revision that waits for a keyframe, a codec or size change rebuilds the
 // pipeline at a keyframe, and pictures of an older revision earn no receipt.
 #define G_LOG_DOMAIN "pb-mapper-video"
 
 #include "desktop_video_module.h"
 
+#include <gst/allocators/allocators.h>
 #include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
@@ -26,8 +30,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -82,10 +88,16 @@ constexpr uint32_t kSoftwareWidth = 1920, kSoftwareHeight = 1080;
 constexpr size_t kMaxInFlight = 4;
 // A pipeline holding units this long without a picture is rebuilt.
 constexpr auto kStall = std::chrono::seconds(2);
+// The compositor's failures to show a picture reach Rust at most this
+// often: five within 30 s end the session.
+constexpr auto kPresentFailureInterval = std::chrono::seconds(1);
 // Unique, increasing timestamps that identify each unit's picture; the
 // network's are never replayed.
 constexpr GstClockTime kFrameDuration = GST_SECOND / 60;
+// videoconvert's threads, for a decoder that gives no NV12 or I420.
 constexpr uint32_t kMaxConvertThreads = 4;
+constexpr char kDmabufFeature[] = "memory:DMABuf";
+constexpr uint64_t kModifierLinear = 0;
 
 enum class Codec { kH264, kH265 };
 const char* CodecName(Codec codec) { return codec == Codec::kH265 ? "H.265" : "H.264"; }
@@ -119,6 +131,18 @@ bool InitGStreamer(std::string* error) {
   });
   if (!g_ready && error) *error = g_init_error;
   return g_ready;
+}
+
+// DMA_DRM caps, which give a dma-buf's format and DRM modifier, are
+// GStreamer 1.24's. Before them a decoder's dma-buf says nothing of its
+// tiling, so none is asked for.
+bool NegotiatesDmabuf() {
+  static const bool negotiates = [] {
+    guint major = 0, minor = 0, micro = 0, nano = 0;
+    gst_version(&major, &minor, &micro, &nano);
+    return major > 1 || (major == 1 && minor >= 24);
+  }();
+  return negotiates;
 }
 
 bool HasElement(const char* name) {
@@ -163,7 +187,9 @@ struct Candidate {
   uint32_t max_width = UINT32_MAX, max_height = UINT32_MAX;
 };
 
-bool OffersSystemMemory(GstElementFactory* factory) {
+// Whether the decoder gives pictures in system memory, or in dma-bufs when
+// `dmabuf` (the presenter samples them).
+bool OffersMemory(GstElementFactory* factory, bool dmabuf) {
   for (const GList* item = gst_element_factory_get_static_pad_templates(factory); item; item = item->next) {
     auto* templ = static_cast<GstStaticPadTemplate*>(item->data);
     if (templ->direction != GST_PAD_SRC) continue;
@@ -172,7 +198,8 @@ bool OffersSystemMemory(GstElementFactory* factory) {
     for (guint i = 0; !found && i < gst_caps_get_size(caps); ++i) {
       GstCapsFeatures* features = gst_caps_get_features(caps, i);
       found = !features || gst_caps_features_is_any(features) ||
-              gst_caps_features_contains(features, GST_CAPS_FEATURE_MEMORY_SYSTEM_MEMORY);
+              gst_caps_features_contains(features, GST_CAPS_FEATURE_MEMORY_SYSTEM_MEMORY) ||
+              (dmabuf && gst_caps_features_contains(features, kDmabufFeature));
     }
     gst_caps_unref(caps);
     if (found) return true;
@@ -181,10 +208,10 @@ bool OffersSystemMemory(GstElementFactory* factory) {
 }
 
 // Every decoder the registry has for `codec` that this pipeline can use:
-// it takes the codec, gives pictures in system memory (videoconvert reads
-// nothing else) and has a rank (GST_PLUGIN_FEATURE_RANK=name:NONE takes one
+// it takes the codec, gives pictures in system memory or, when `dmabuf`,
+// in dma-bufs, and has a rank (GST_PLUGIN_FEATURE_RANK=name:NONE takes one
 // out). Hardware first, then by rank, as GStreamer would pick them.
-std::vector<Candidate> Candidates(Codec codec) {
+std::vector<Candidate> Candidates(Codec codec, bool dmabuf) {
   std::vector<Candidate> found;
   GList* factories = gst_element_factory_list_get_elements(
       GST_ELEMENT_FACTORY_TYPE_DECODER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO, GST_RANK_MARGINAL);
@@ -207,7 +234,7 @@ std::vector<Candidate> Candidates(Codec codec) {
       }
       gst_caps_unref(caps);
     }
-    if (!takes || !OffersSystemMemory(factory)) continue;
+    if (!takes || !OffersMemory(factory, dmabuf)) continue;
     const char* klass = gst_element_factory_get_metadata(factory, GST_ELEMENT_METADATA_KLASS);
     candidate.factory = GST_OBJECT_NAME(factory);
     candidate.name = DecoderName(factory);
@@ -254,7 +281,7 @@ bool Allows(const Candidate& candidate, Codec codec, uint32_t width, uint32_t he
 // and is allowed a viewer bound, with the largest bound it is allowed.
 void ProbeCodec(Codec codec, PbVideoCodecProbe* out) {
   if (!HasElement(Parser(codec))) return;
-  for (const Candidate& candidate : Candidates(codec)) {
+  for (const Candidate& candidate : Candidates(codec, NegotiatesDmabuf())) {
     if (Failed(candidate.factory)) continue;
     for (const auto& bounds : kBounds) {
       if (!Allows(candidate, codec, bounds[0], bounds[1])) continue;
@@ -310,6 +337,149 @@ GstPadProbeReturn DefaultColorimetry(GstPad*, GstPadProbeInfo* info, gpointer) {
   return GST_PAD_PROBE_OK;
 }
 
+// The decoders lay pictures out as they keep them (padded rows, a 1088-row
+// surface) and say so with GstVideoMeta, which appsink alone does not ask
+// for: without it a decoder copies each picture into a plain layout, and a
+// dma-buf picture is refused. Pictures are the decoder's own buffers, and
+// the decoder is told how many stay out of its pool: the newest, the one
+// on screen and one the GPU may still be reading.
+GstPadProbeReturn AnswerAllocation(GstPad*, GstPadProbeInfo* info, gpointer) {
+  constexpr guint kHeldPictures = 3;
+  GstQuery* query = GST_PAD_PROBE_INFO_QUERY(info);
+  if (GST_QUERY_TYPE(query) != GST_QUERY_ALLOCATION) return GST_PAD_PROBE_OK;
+  if (!gst_query_find_allocation_meta(query, GST_VIDEO_META_API_TYPE, nullptr)) {
+    gst_query_add_allocation_meta(query, GST_VIDEO_META_API_TYPE, nullptr);
+  }
+  if (gst_query_get_n_allocation_pools(query) == 0) {
+    GstCaps* caps = nullptr;
+    gboolean need_pool = FALSE;
+    gst_query_parse_allocation(query, &caps, &need_pool);
+    GstVideoInfo picture;
+    gst_video_info_init(&picture);
+    // A dma-buf's size is its decoder's to know.
+    const guint size = caps && gst_video_info_from_caps(&picture, caps) ? static_cast<guint>(picture.size) : 0;
+    gst_query_add_allocation_pool(query, nullptr, size, kHeldPictures, 0);
+  }
+  return GST_PAD_PROBE_OK;
+}
+
+// What the presenter takes as it is: NV12 dma-bufs of the layouts it
+// imports (`modifiers`, none when it imports none), then NV12 or I420 in
+// system memory. Each layout is written as GStreamer writes it, so the
+// strings match: the fourcc alone when linear.
+GstCaps* Wanted(const std::vector<uint64_t>& modifiers) {
+  GstCaps* caps = gst_caps_new_empty();
+  if (!modifiers.empty()) {
+    std::string text = "video/x-raw(memory:DMABuf),format=(string)DMA_DRM,drm-format=(string){";
+    for (size_t i = 0; i < modifiers.size(); ++i) {
+      char format[40];
+      if (modifiers[i] == kModifierLinear) {
+        snprintf(format, sizeof(format), "\"NV12\"");
+      } else {
+        snprintf(format, sizeof(format), "\"NV12:0x%016" PRIx64 "\"", modifiers[i]);
+      }
+      text += i == 0 ? "" : ",";
+      text += format;
+    }
+    text += "}";
+    if (GstCaps* dmabuf = gst_caps_from_string(text.c_str())) gst_caps_append(caps, dmabuf);
+  }
+  if (GstCaps* system = gst_caps_from_string("video/x-raw,format=(string){NV12,I420}")) gst_caps_append(caps, system);
+  return caps;
+}
+
+// Whether `decoder` can give what `wanted` takes, with nothing in between.
+bool Gives(GstElement* decoder, const GstCaps* wanted) {
+  GstElementFactory* factory = gst_element_get_factory(decoder);
+  if (!factory) return false;
+  for (const GList* item = gst_element_factory_get_static_pad_templates(factory); item; item = item->next) {
+    auto* templ = static_cast<GstStaticPadTemplate*>(item->data);
+    if (templ->direction != GST_PAD_SRC) continue;
+    GstCaps* caps = gst_static_pad_template_get_caps(templ);
+    const bool gives = gst_caps_can_intersect(caps, wanted);
+    gst_caps_unref(caps);
+    if (gives) return true;
+  }
+  return false;
+}
+
+// What a caps change says of the pictures that follow.
+struct Layout {
+  bool dmabuf = false;
+  // System memory's: what maps the pictures.
+  GstVideoInfo info{};
+  uint32_t width = 0, height = 0, format = 0;
+  uint64_t modifier = kModifierLinear;
+  // A stream that names no matrix is BT.709 limited (DefaultColorimetry).
+  float kr = 0.2126f, kb = 0.0722f;
+  bool full_range = false;
+};
+
+void ReadColour(const GstVideoColorimetry& colorimetry, Layout* layout) {
+  gdouble kr = 0, kb = 0;
+  if (gst_video_color_matrix_get_Kr_Kb(colorimetry.matrix, &kr, &kb)) {
+    layout->kr = static_cast<float>(kr);
+    layout->kb = static_cast<float>(kb);
+  }
+  layout->full_range = colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255;
+}
+
+// GStreamer 1.24's drm-format for NV12: "NV12" when linear, or
+// "NV12:0x<modifier>".
+bool ReadDrmFormat(const char* text, uint64_t* modifier) {
+  if (!text || strncmp(text, "NV12", 4) != 0) return false;
+  if (text[4] == '\0') {
+    *modifier = kModifierLinear;
+    return true;
+  }
+  if (text[4] != ':' || text[5] != '0' || (text[6] != 'x' && text[6] != 'X')) return false;
+  char* end = nullptr;
+  const guint64 value = g_ascii_strtoull(text + 7, &end, 16);
+  if (!end || end == text + 7 || *end != '\0') return false;
+  *modifier = value;
+  return true;
+}
+
+bool ReadLayout(GstCaps* caps, Layout* out) {
+  *out = Layout{};
+  if (gst_caps_get_size(caps) == 0) return false;
+  GstCapsFeatures* features = gst_caps_get_features(caps, 0);
+  const GstStructure* structure = gst_caps_get_structure(caps, 0);
+  if (features && gst_caps_features_contains(features, kDmabufFeature)) {
+    // Read by hand: the GStreamer this was built against may predate
+    // DMA_DRM.
+    gint width = 0, height = 0;
+    if (g_strcmp0(gst_structure_get_string(structure, "format"), "DMA_DRM") != 0 ||
+        !gst_structure_get_int(structure, "width", &width) || !gst_structure_get_int(structure, "height", &height) ||
+        width <= 0 || height <= 0 || !ReadDrmFormat(gst_structure_get_string(structure, "drm-format"), &out->modifier)) {
+      return false;
+    }
+    GstVideoColorimetry colorimetry{};
+    const char* named = gst_structure_get_string(structure, "colorimetry");
+    if (named && gst_video_colorimetry_from_string(&colorimetry, named)) ReadColour(colorimetry, out);
+    out->dmabuf = true;
+    out->width = static_cast<uint32_t>(width);
+    out->height = static_cast<uint32_t>(height);
+    out->format = PB_VIDEO_FORMAT_NV12;
+    return true;
+  }
+  if (!gst_video_info_from_caps(&out->info, caps)) return false;
+  switch (GST_VIDEO_INFO_FORMAT(&out->info)) {
+    case GST_VIDEO_FORMAT_NV12:
+      out->format = PB_VIDEO_FORMAT_NV12;
+      break;
+    case GST_VIDEO_FORMAT_I420:
+      out->format = PB_VIDEO_FORMAT_I420;
+      break;
+    default:
+      return false;
+  }
+  out->width = static_cast<uint32_t>(GST_VIDEO_INFO_WIDTH(&out->info));
+  out->height = static_cast<uint32_t>(GST_VIDEO_INFO_HEIGHT(&out->info));
+  ReadColour(out->info.colorimetry, out);
+  return true;
+}
+
 // Pipelines stopping on threads of their own (Pipeline::Retire).
 std::mutex g_retire_mutex;
 std::condition_variable g_retired;
@@ -325,6 +495,29 @@ struct Frame {
   uint64_t revision = 0;
   bool key = false;
   Codec codec = Codec::kH264;
+  // When it entered the pipeline.
+  Clock::time_point fed{};
+};
+
+// One of the stats' timings: count, total and longest, in constant space,
+// as the other runners keep theirs.
+struct Timing {
+  uint64_t samples = 0;
+  Clock::duration total{}, longest{};
+  void Add(Clock::duration elapsed) {
+    ++samples;
+    total += elapsed;
+    longest = std::max(longest, elapsed);
+  }
+  PbVideoTiming Snapshot() const {
+    using std::chrono::duration_cast;
+    using std::chrono::microseconds;
+    PbVideoTiming out{};
+    out.samples = samples;
+    out.total_us = static_cast<uint64_t>(duration_cast<microseconds>(total).count());
+    out.max_us = static_cast<uint64_t>(duration_cast<microseconds>(longest).count());
+    return out;
+  }
 };
 
 // Compressed units are pulled straight into these buffers; a buffer the
@@ -369,20 +562,21 @@ class InputPool {
 
 }  // namespace
 
-// A decoded picture. The video frame stays mapped, and its buffer out of
-// videoconvert's pool, until the last reference goes.
+// A decoded picture: the decoder's own buffer, out of its pool until the
+// last reference goes. In system memory it stays mapped meanwhile; a
+// dma-buf one is never mapped.
 struct PbVideoPicture {
   std::atomic<int> refs{1};
   GstVideoFrame frame{};
   bool mapped = false;
-  // Only for a decoder whose rows are padded: Flutter reads packed rows.
-  std::vector<uint8_t> packed;
-  const uint8_t* data = nullptr;
-  uint32_t width = 0, height = 0;
+  // A dma-buf picture's.
+  GstBuffer* buffer = nullptr;
+  PbVideoPlanes planes{};
   int64_t generation = 0, frame_id = 0;
   uint64_t revision = 0;
   ~PbVideoPicture() {
     if (mapped) gst_video_frame_unmap(&frame);
+    if (buffer) gst_buffer_unref(buffer);
   }
 };
 
@@ -405,14 +599,17 @@ class Pipeline {
   // The first allowed candidate that starts, or throws: the caller reports
   // the failure, and repeated failures end the session as decoder_failed,
   // after which Dart connects again without H.265.
-  static std::unique_ptr<Pipeline> Start(const Frame& frame, PbVideoDecoder* owner) {
+  // `modifiers`: the dma-buf layouts the presenter samples, none for
+  // system memory only.
+  static std::unique_ptr<Pipeline> Start(const Frame& frame, PbVideoDecoder* owner,
+                                         const std::vector<uint64_t>& modifiers) {
     std::string last;
     bool any = false;
     if (!HasElement(Parser(frame.codec))) throw std::runtime_error(std::string("GStreamer has no ") + Parser(frame.codec));
-    for (Candidate& candidate : Candidates(frame.codec)) {
+    for (Candidate& candidate : Candidates(frame.codec, !modifiers.empty())) {
       if (Failed(candidate.factory) || !Allows(candidate, frame.codec, frame.width, frame.height)) continue;
       any = true;
-      std::unique_ptr<Pipeline> pipeline(new Pipeline(frame, std::move(candidate), owner));
+      std::unique_ptr<Pipeline> pipeline(new Pipeline(frame, std::move(candidate), owner, modifiers));
       if (pipeline->Build(&last)) return pipeline;
       MarkFailed(pipeline->decoder().factory);
     }
@@ -435,6 +632,10 @@ class Pipeline {
 
   const Candidate& decoder() const { return decoder_; }
   Codec codec() const { return codec_; }
+  // Whether videoconvert turns the decoder's pictures into NV12.
+  bool converts() const { return converts_; }
+  // Whether it asked for dma-bufs.
+  bool dmabuf() const { return dmabuf_; }
   uint32_t width() const { return width_; }
   uint32_t height() const { return height_; }
 
@@ -460,8 +661,11 @@ class Pipeline {
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (pending_.empty()) progress_ = Clock::now();
-      pending_.emplace(next_pts_, frame);
+      const Clock::time_point now = Clock::now();
+      if (pending_.empty()) progress_ = now;
+      Frame fed = frame;
+      fed.fed = now;
+      pending_.emplace(next_pts_, fed);
     }
     const GstFlowReturn flow = gst_app_src_push_buffer(src_, buffer);
     if (flow != GST_FLOW_OK) throw std::runtime_error(std::string("Decode video input (") + gst_flow_get_name(flow) + ")");
@@ -539,24 +743,36 @@ class Pipeline {
   }
 
  private:
-  Pipeline(const Frame& frame, Candidate decoder, PbVideoDecoder* owner)
-      : decoder_(std::move(decoder)), codec_(frame.codec), width_(frame.width), height_(frame.height), owner_(owner) {}
+  Pipeline(const Frame& frame, Candidate decoder, PbVideoDecoder* owner, const std::vector<uint64_t>& modifiers)
+      : decoder_(std::move(decoder)),
+        codec_(frame.codec),
+        width_(frame.width),
+        height_(frame.height),
+        modifiers_(modifiers),
+        owner_(owner) {}
 
   bool Build(std::string* why) {
     pipeline_ = gst_pipeline_new("pb-desktop-video");
     GstElement* src = gst_element_factory_make("appsrc", nullptr);
     GstElement* parse = gst_element_factory_make(Parser(codec_), nullptr);
     GstElement* decode = gst_element_factory_make(decoder_.factory.c_str(), nullptr);
-    GstElement* convert = gst_element_factory_make("videoconvert", nullptr);
     GstElement* sink = gst_element_factory_make("appsink", nullptr);
-    if (!pipeline_ || !src || !parse || !decode || !convert || !sink) {
+    GstCaps* wanted = Wanted(modifiers_);
+    // A decoder that cannot give what the presenter takes gets
+    // videoconvert to NV12, in system memory.
+    converts_ = decode && !Gives(decode, wanted);
+    GstElement* convert = converts_ ? gst_element_factory_make("videoconvert", nullptr) : nullptr;
+    if (!pipeline_ || !src || !parse || !decode || !sink || (converts_ && !convert)) {
       for (GstElement* element : {src, parse, decode, convert, sink}) {
         if (element) gst_object_unref(gst_object_ref_sink(element));
       }
+      gst_caps_unref(wanted);
       *why = "cannot create " + decoder_.factory;
       return false;
     }
-    gst_bin_add_many(GST_BIN(pipeline_), src, parse, decode, convert, sink, nullptr);
+    dmabuf_ = !converts_ && !modifiers_.empty();
+    gst_bin_add_many(GST_BIN(pipeline_), src, parse, decode, sink, nullptr);
+    if (convert) gst_bin_add(GST_BIN(pipeline_), convert);
     src_ = GST_APP_SRC(src);
 
     GstCaps* input = gst_caps_new_simple(MediaType(codec_), "stream-format", G_TYPE_STRING, "byte-stream",
@@ -572,19 +788,27 @@ class Pipeline {
     SetIfPresent(decode, "thread-type", "slice");
     SetIfPresent(decode, "max-display-delay", "0");
     SetIfPresent(decode, "low-latency", "true");
-    SetIfPresent(convert, "n-threads", std::to_string(std::min(kMaxConvertThreads, g_get_num_processors())).c_str());
-    GstCaps* output = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "RGBA", nullptr);
+    if (convert) {
+      SetIfPresent(convert, "n-threads", std::to_string(std::min(kMaxConvertThreads, g_get_num_processors())).c_str());
+    }
+    GstCaps* output = converts_ ? gst_caps_from_string("video/x-raw,format=(string)NV12") : gst_caps_ref(wanted);
+    gst_caps_unref(wanted);
     g_object_set(sink, "caps", output, "sync", FALSE, "max-buffers", 1u, "drop", FALSE, "enable-last-sample", FALSE,
                  "qos", FALSE, "emit-signals", FALSE, nullptr);
-    gst_caps_unref(output);
+    if (output) gst_caps_unref(output);
     GstAppSinkCallbacks callbacks{};
     callbacks.new_sample = &Pipeline::OnSample;
     gst_app_sink_set_callbacks(GST_APP_SINK(sink), &callbacks, this, nullptr);
 
-    if (!gst_element_link_many(src, parse, decode, convert, sink, nullptr)) {
+    const bool linked = convert ? gst_element_link_many(src, parse, decode, convert, sink, nullptr)
+                                : gst_element_link_many(src, parse, decode, sink, nullptr);
+    if (!linked) {
       *why = "cannot link " + decoder_.factory;
       return false;
     }
+    GstPad* sunk = gst_element_get_static_pad(sink, "sink");
+    gst_pad_add_probe(sunk, GST_PAD_PROBE_TYPE_QUERY_DOWNSTREAM, AnswerAllocation, nullptr, nullptr);
+    gst_object_unref(sunk);
     GstPad* parsed = gst_element_get_static_pad(parse, "src");
     gst_pad_add_probe(parsed, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM, DefaultColorimetry, nullptr, nullptr);
     gst_object_unref(parsed);
@@ -595,7 +819,8 @@ class Pipeline {
       *why = decoder_.factory + ": " + TakeError();
       return false;
     }
-    g_debug("Decoding %s %ux%u with %s", CodecName(codec_), width_, height_, decoder_.name.c_str());
+    g_debug("Decoding %s %ux%u with %s%s", CodecName(codec_), width_, height_, decoder_.name.c_str(),
+            converts_ ? " and videoconvert" : "");
     return true;
   }
 
@@ -610,6 +835,9 @@ class Pipeline {
 
   // Streaming thread.
   void Decoded(GstSample* sample);
+  // Streaming thread: the picture's planes, or why there are none.
+  std::string MapSystem(GstBuffer* buffer, PbVideoPicture* picture);
+  std::string WrapDmabuf(GstBuffer* buffer, PbVideoPicture* picture);
   void Error(const std::string& text) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -621,6 +849,8 @@ class Pipeline {
   const Candidate decoder_;
   const Codec codec_;
   const uint32_t width_, height_;
+  const std::vector<uint64_t> modifiers_;
+  bool converts_ = false, dmabuf_ = false;
   // Who takes the pictures; null once retired.
   std::mutex owner_mutex_;
   PbVideoDecoder* owner_;
@@ -639,15 +869,16 @@ class Pipeline {
   bool decoded_any_ = false;
   // Streaming thread only: the caps of the last picture and their layout.
   GstCaps* caps_ = nullptr;
-  GstVideoInfo info_{};
+  Layout layout_;
 };
 }  // namespace
 
 // One texture's decoder. While a source is attached, its thread pulls the
 // access units straight from Rust; nothing of the video crosses Dart.
 struct PbVideoDecoder {
-  PbVideoDecoder(const PbVideoExports& api, void (*frame_ready)(void*), void* context)
-      : api_(api), frame_ready_(frame_ready), context_(context) {}
+  PbVideoDecoder(const PbVideoExports& api, const PbVideoPresenter& presenter, void (*frame_ready)(void*),
+                 void* context)
+      : api_(api), presenter_(presenter), frame_ready_(frame_ready), context_(context) {}
   PbVideoDecoder(const PbVideoDecoder&) = delete;
   PbVideoDecoder& operator=(const PbVideoDecoder&) = delete;
   ~PbVideoDecoder() {
@@ -694,38 +925,60 @@ struct PbVideoDecoder {
   }
 
   // Raster thread. A picture of an older revision stays on screen until a
-  // newer one replaces it, but only a current one earns a receipt.
+  // newer one replaces it, but only a current one earns a receipt
+  // (Present).
   PbVideoPicture* Acquire() {
-    PbVideoPicture* picture = nullptr;
-    bool acknowledge = false;
-    // Read with the revision, under the lock that Detach starts a new one
-    // under: a picture is only ever receipted to the source it came from.
-    uint64_t consumer = 0;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!latest_) return nullptr;
-      picture = Retain(latest_);
-      latest_acquired_ = true;
-      if (picture->revision == revision_.load() &&
-          (consumed_revision_ != picture->revision || consumed_frame_ != picture->frame_id)) {
-        consumed_revision_ = picture->revision;
-        consumed_frame_ = picture->frame_id;
-        acknowledge = true;
-        consumer = consumer_.load();
-      }
-    }
-    if (acknowledge) {
-      ++presented_;
-      // Taken by the compositor: the receipt Rust validates and forwards
-      // for input authorisation. Non-blocking.
-      if (consumer) {
-        api_.presented(consumer, static_cast<uint64_t>(picture->generation), static_cast<uint64_t>(picture->frame_id));
-      }
-    }
-    return picture;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!latest_) return nullptr;
+    latest_acquired_ = true;
+    return Retain(latest_);
   }
 
-  void Stats(PbVideoStats* out) {
+  // Raster thread, once `picture` is converted and on screen: the receipt
+  // Rust validates and forwards for input authorisation, never for a
+  // picture the compositor could not show. Non-blocking.
+  bool Present(const PbVideoPicture* picture) {
+    uint64_t consumer = 0;
+    {
+      // Read with the revision, under the lock that Detach starts a new
+      // one under: a picture is only ever receipted to the source it came
+      // from, and once.
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (picture->revision != revision_.load() ||
+          (consumed_revision_ == picture->revision && consumed_frame_ == picture->frame_id)) {
+        return false;
+      }
+      consumed_revision_ = picture->revision;
+      consumed_frame_ = picture->frame_id;
+      consumer = consumer_.load();
+    }
+    ++presented_;
+    if (!consumer) return false;
+    api_.presented(consumer, static_cast<uint64_t>(picture->generation), static_cast<uint64_t>(picture->frame_id));
+    return true;
+  }
+
+  // Raster thread: a picture could not be shown. Rust counts it as a
+  // decoder error, at most once a second, so a compositor that can show
+  // nothing ends the session as decoder_failed instead of leaving the
+  // viewer on a still picture. A paused source asks for nothing.
+  void PresentFailed(const char* reason) {
+    const uint64_t consumer = consumer_.load();
+    if (!consumer || paused_) return;
+    const Clock::time_point now = Clock::now();
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (present_failed_ && now - present_failed_at_ < kPresentFailureInterval) return;
+      present_failed_ = true;
+      present_failed_at_ = now;
+    }
+    const std::string text = std::string("Cannot show a decoded picture: ") + (reason && *reason ? reason : "unknown");
+    api_.failed(consumer, text.c_str());
+  }
+
+  // `timings` starts the decode timing, or keeps it; false drops it until
+  // the next read that asks.
+  void Stats(bool timings, PbVideoStats* out) {
     *out = PbVideoStats{};
     out->submitted = submitted_;
     out->decoded = decoded_;
@@ -736,15 +989,24 @@ struct PbVideoDecoder {
     std::lock_guard<std::mutex> lock(mutex_);
     CopyText(out->decoder, sizeof(out->decoder), decoder_name_);
     CopyText(out->last_recovery, sizeof(out->last_recovery), last_recovery_);
+    out->flags = (converts_ ? PB_VIDEO_STATS_CONVERTS : 0) | (dmabuf_ ? PB_VIDEO_STATS_DMABUF : 0);
+    out->format = format_;
+    if (timings != timing_) decode_ = Timing{};
+    timing_ = timings;
+    if (timings) out->decode = decode_.Snapshot();
   }
 
   // Streaming thread: the newest picture, unless a newer revision began.
-  void Publish(PbVideoPicture* picture) {
+  // `decode` is how long its unit took from the pipeline's input.
+  void Publish(PbVideoPicture* picture, Clock::duration decode) {
     ++decoded_;
     PbVideoPicture* replaced = picture;
     bool shown = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (timing_) decode_.Add(decode);
+      format_ = picture->planes.format;
+      dmabuf_ = picture->planes.dmabuf != 0;
       if (picture->revision == revision_.load()) {
         replaced = latest_;
         if (replaced && !latest_acquired_) ++dropped_;
@@ -759,7 +1021,22 @@ struct PbVideoDecoder {
     if (shown) frame_ready_(context_);
   }
 
+  // Any thread: the presenter cannot sample this decoder's dma-bufs.
+  void RefuseDmabuf() {
+    if (!dmabuf_refused_.exchange(true)) g_message("The presenter cannot sample dma-bufs: decoding to system memory");
+  }
+
  private:
+  // The dma-buf layouts the next pipeline may ask for: the presenter's,
+  // while it samples them and GStreamer says their layout.
+  std::vector<uint64_t> Modifiers() const {
+    std::vector<uint64_t> modifiers;
+    if (!presenter_.dmabuf || dmabuf_refused_ || !NegotiatesDmabuf()) return modifiers;
+    const uint32_t count = std::min<uint32_t>(presenter_.modifier_count, PB_VIDEO_MAX_MODIFIERS);
+    modifiers.assign(presenter_.modifiers, presenter_.modifiers + count);
+    return modifiers;
+  }
+
   // Decoder thread. The next keyframe builds a pipeline in a new revision.
   void Recover(const std::string& reason) {
     ++revision_;
@@ -828,11 +1105,12 @@ struct PbVideoDecoder {
           throw std::runtime_error("Video size outside the session limits");
         }
         pipeline.reset();
-        pipeline = Pipeline::Start(frame, this);
+        pipeline = Pipeline::Start(frame, this, Modifiers());
         ++configurations_;
         {
           std::lock_guard<std::mutex> lock(mutex_);
           decoder_name_ = pipeline->decoder().name;
+          converts_ = pipeline->converts();
         }
         api_.report(consumer, pipeline->decoder().name.c_str(), pipeline->decoder().hardware ? 1 : 0);
       }
@@ -869,6 +1147,13 @@ struct PbVideoDecoder {
     PbDesktopVideoMetaV1 meta{};
     resumed_at_ = Clock::now();
     while (!stopping_) {
+      if (pipeline && pipeline->dmabuf() && dmabuf_refused_) {
+        // Its pictures cannot be shown: the next keyframe builds a
+        // pipeline in system memory.
+        pipeline.reset();
+        awaiting_key_ = true;
+        api_.keyframe(consumer, kReasonGap);
+      }
       if (pipeline && !pipeline->WaitForRoom(kPullTimeoutMs)) {
         Service(consumer, pipeline);
         continue;
@@ -915,6 +1200,8 @@ struct PbVideoDecoder {
   }
 
   const PbVideoExports api_;
+  const PbVideoPresenter presenter_;
+  std::atomic<bool> dmabuf_refused_{false};
   void (*const frame_ready_)(void*);
   void* const context_;
   std::atomic<uint64_t> consumer_{0};
@@ -929,6 +1216,15 @@ struct PbVideoDecoder {
   uint64_t consumed_revision_ = 0;
   std::string decoder_name_;
   std::string last_recovery_;
+  // What the current pipeline does, and the last picture's format.
+  bool converts_ = false, dmabuf_ = false;
+  uint32_t format_ = 0;
+  // When the compositor's last failure went to Rust.
+  bool present_failed_ = false;
+  Clock::time_point present_failed_at_{};
+  // While a stats read asks for timings.
+  bool timing_ = false;
+  Timing decode_;
   // The decoder thread's own; reset by Attach while no thread runs.
   int64_t generation_ = -1, last_ = 0;
   bool awaiting_key_ = true;
@@ -960,9 +1256,11 @@ void Pipeline::Decoded(GstSample* sample) {
   room_.notify_all();
   if (!known) return Error("Unknown decoded picture");
   if (caps != caps_) {
-    if (!gst_video_info_from_caps(&info_, caps)) return Error("Unreadable decoded format");
+    if (!ReadLayout(caps, &layout_)) return Error("Unreadable decoded format");
     gst_caps_replace(&caps_, caps);
-    // What the decoder gives, colorimetry included, once per format.
+    // What the decoder gives, its memory and colorimetry included, once
+    // per format: G_MESSAGES_DEBUG=pb-mapper-video shows whether dma-bufs
+    // were negotiated.
     if (GstCaps* decoded = gst_pad_get_current_caps(decoded_)) {
       gchar* text = gst_caps_to_string(decoded);
       g_debug("%s gives %s", decoder_.factory.c_str(), text);
@@ -972,49 +1270,93 @@ void Pipeline::Decoded(GstSample* sample) {
   }
   // The visible picture must be the authorized frame, never a padded or
   // cropped one.
-  if (static_cast<uint32_t>(GST_VIDEO_INFO_WIDTH(&info_)) != frame.width ||
-      static_cast<uint32_t>(GST_VIDEO_INFO_HEIGHT(&info_)) != frame.height ||
-      GST_VIDEO_INFO_FORMAT(&info_) != GST_VIDEO_FORMAT_RGBA) {
+  if (layout_.width != frame.width || layout_.height != frame.height) {
     return Error("Decoded picture does not match the authorized frame");
   }
   auto* picture = new PbVideoPicture();
-  picture->width = frame.width;
-  picture->height = frame.height;
   picture->generation = frame.generation;
   picture->frame_id = frame.frame;
   picture->revision = frame.revision;
-  if (!gst_video_frame_map(&picture->frame, &info_, buffer, GST_MAP_READ)) {
+  PbVideoPlanes& planes = picture->planes;
+  planes.width = frame.width;
+  planes.height = frame.height;
+  planes.format = layout_.format;
+  planes.kr = layout_.kr;
+  planes.kb = layout_.kb;
+  planes.full_range = layout_.full_range ? 1 : 0;
+  planes.dmabuf = layout_.dmabuf ? 1 : 0;
+  planes.modifier = layout_.modifier;
+  for (PbVideoPlane& plane : planes.planes) plane.fd = -1;
+  const std::string failure = layout_.dmabuf ? WrapDmabuf(buffer, picture) : MapSystem(buffer, picture);
+  if (!failure.empty()) {
     Release(picture);
-    return Error("Cannot read a decoded picture");
-  }
-  picture->mapped = true;
-  const auto* pixels = static_cast<const uint8_t*>(GST_VIDEO_FRAME_PLANE_DATA(&picture->frame, 0));
-  const size_t stride = static_cast<size_t>(GST_VIDEO_FRAME_PLANE_STRIDE(&picture->frame, 0));
-  const size_t row = static_cast<size_t>(frame.width) * 4;
-  if (stride == row) {
-    picture->data = pixels;
-  } else {
-    picture->packed.resize(row * frame.height);
-    for (uint32_t y = 0; y < frame.height; ++y) memcpy(&picture->packed[y * row], pixels + y * stride, row);
-    gst_video_frame_unmap(&picture->frame);
-    picture->mapped = false;
-    picture->data = picture->packed.data();
+    return Error(failure);
   }
   std::lock_guard<std::mutex> lock(owner_mutex_);
   if (owner_) {
-    owner_->Publish(picture);
+    owner_->Publish(picture, Clock::now() - frame.fed);
   } else {
     Release(picture);
   }
 }
 
-PbVideoDecoder* Create(const PbVideoExports* exports, void (*frame_ready)(void*), void* context) {
+// Mapped for the picture's life, through the decoder's GstVideoMeta when it
+// gave one: each plane from its first visible row.
+std::string Pipeline::MapSystem(GstBuffer* buffer, PbVideoPicture* picture) {
+  if (!gst_video_frame_map(&picture->frame, &layout_.info, buffer, GST_MAP_READ)) return "Cannot read a decoded picture";
+  picture->mapped = true;
+  PbVideoPlanes& planes = picture->planes;
+  planes.plane_count = planes.format == PB_VIDEO_FORMAT_NV12 ? 2 : 3;
+  if (GST_VIDEO_FRAME_N_PLANES(&picture->frame) != planes.plane_count) return "Unexpected decoded planes";
+  for (uint32_t p = 0; p < planes.plane_count; ++p) {
+    const gint stride = GST_VIDEO_FRAME_PLANE_STRIDE(&picture->frame, p);
+    if (stride <= 0) return "Unexpected decoded plane stride";
+    PbVideoPlane& plane = planes.planes[p];
+    plane.data = static_cast<const uint8_t*>(GST_VIDEO_FRAME_PLANE_DATA(&picture->frame, p));
+    plane.stride = static_cast<uint32_t>(stride);
+    plane.width = p == 0 ? planes.width : (planes.width + 1) / 2;
+    plane.height = p == 0 ? planes.height : (planes.height + 1) / 2;
+  }
+  return "";
+}
+
+// Never mapped: each plane's descriptor and offset, from the GstVideoMeta a
+// DMA_DRM picture always has (1088-row surfaces included).
+std::string Pipeline::WrapDmabuf(GstBuffer* buffer, PbVideoPicture* picture) {
+  const GstVideoMeta* meta = gst_buffer_get_video_meta(buffer);
+  if (!meta || meta->n_planes != 2) return "A dma-buf picture without its NV12 layout";
+  PbVideoPlanes& planes = picture->planes;
+  planes.plane_count = 2;
+  for (uint32_t p = 0; p < 2; ++p) {
+    guint index = 0, length = 0;
+    gsize skip = 0;
+    if (!gst_buffer_find_memory(buffer, meta->offset[p], 1, &index, &length, &skip)) return "A dma-buf plane is missing";
+    GstMemory* memory = gst_buffer_peek_memory(buffer, index);
+    if (!memory || !gst_is_dmabuf_memory(memory)) return "A dma-buf picture in other memory";
+    const gint fd = gst_dmabuf_memory_get_fd(memory);
+    const gsize offset = memory->offset + skip;
+    if (fd < 0 || meta->stride[p] <= 0 || offset > UINT32_MAX) return "An unreadable dma-buf plane";
+    PbVideoPlane& plane = planes.planes[p];
+    plane.fd = fd;
+    plane.offset = static_cast<uint32_t>(offset);
+    plane.stride = static_cast<uint32_t>(meta->stride[p]);
+    plane.width = p == 0 ? planes.width : (planes.width + 1) / 2;
+    plane.height = p == 0 ? planes.height : (planes.height + 1) / 2;
+  }
+  picture->buffer = gst_buffer_ref(buffer);
+  return "";
+}
+
+PbVideoDecoder* Create(const PbVideoExports* exports, const PbVideoPresenter* presenter, void (*frame_ready)(void*),
+                       void* context) {
   if (!exports || !frame_ready || !exports->attach || !exports->next || !exports->presented || !exports->keyframe ||
       !exports->failed || !exports->report || !exports->detach) {
     return nullptr;
   }
+  // No presenter: system memory only.
+  const PbVideoPresenter none{};
   try {
-    return new PbVideoDecoder(*exports, frame_ready, context);
+    return new PbVideoDecoder(*exports, presenter ? *presenter : none, frame_ready, context);
   } catch (const std::exception&) {
     return nullptr;
   }
@@ -1024,22 +1366,71 @@ void Detach(PbVideoDecoder* decoder) {
   if (decoder) decoder->Detach();
 }
 PbVideoPicture* Acquire(PbVideoDecoder* decoder) { return decoder ? decoder->Acquire() : nullptr; }
-void Stats(PbVideoDecoder* decoder, PbVideoStats* out) {
-  if (decoder && out) decoder->Stats(out);
+int32_t Present(PbVideoDecoder* decoder, const PbVideoPicture* picture) {
+  return decoder && picture && decoder->Present(picture) ? 1 : 0;
+}
+void PresentFailed(PbVideoDecoder* decoder, const char* reason) {
+  if (decoder) decoder->PresentFailed(reason);
+}
+void Stats(PbVideoDecoder* decoder, uint32_t timings, PbVideoStats* out) {
+  if (decoder && out) decoder->Stats(timings != 0, out);
 }
 void Destroy(PbVideoDecoder* decoder) { delete decoder; }
-const uint8_t* Pixels(const PbVideoPicture* picture, uint32_t* width, uint32_t* height) {
-  if (!picture) return nullptr;
-  if (width) *width = picture->width;
-  if (height) *height = picture->height;
-  return picture->data;
+int32_t Describe(const PbVideoPicture* picture, PbVideoPlanes* out) {
+  if (!picture || !out) return -1;
+  *out = picture->planes;
+  return 0;
+}
+// GStreamer's own converter, as videoconvert converts: no dithering and no
+// chroma resampling (each chroma sample covers its two by two pixels), as
+// the GPU conversion samples it, scaled in the same pass.
+int32_t Snapshot(const PbVideoPicture* picture, uint32_t max_width, uint8_t* rgba, size_t capacity, uint32_t* width,
+                 uint32_t* height) {
+  if (!picture || !picture->mapped || max_width == 0 || !width || !height) return -1;
+  const uint32_t source_width = picture->planes.width, source_height = picture->planes.height;
+  if (source_width == 0 || source_height == 0) return -1;
+  const uint32_t scaled_width = std::min(max_width, source_width);
+  const uint32_t scaled_height = std::max<uint32_t>(
+      1, static_cast<uint32_t>((static_cast<uint64_t>(source_height) * scaled_width + source_width / 2) / source_width));
+  *width = scaled_width;
+  *height = scaled_height;
+  const size_t size = static_cast<size_t>(scaled_width) * scaled_height * 4;
+  if (!rgba || capacity < size) return -2;
+  GstVideoInfo out;
+  gst_video_info_init(&out);
+  if (!gst_video_info_set_format(&out, GST_VIDEO_FORMAT_RGBA, scaled_width, scaled_height) ||
+      out.stride[0] != static_cast<gint>(scaled_width * 4)) {
+    return -1;
+  }
+  GstBuffer* wrapped =
+      gst_buffer_new_wrapped_full(static_cast<GstMemoryFlags>(0), rgba, size, 0, size, nullptr, nullptr);
+  GstVideoFrame frame{};
+  if (!wrapped || !gst_video_frame_map(&frame, &out, wrapped, GST_MAP_WRITE)) {
+    if (wrapped) gst_buffer_unref(wrapped);
+    return -1;
+  }
+  GstStructure* config = gst_structure_new(
+      "pb-snapshot", GST_VIDEO_CONVERTER_OPT_DITHER_METHOD, GST_TYPE_VIDEO_DITHER_METHOD, GST_VIDEO_DITHER_NONE,
+      GST_VIDEO_CONVERTER_OPT_CHROMA_MODE, GST_TYPE_VIDEO_CHROMA_MODE, GST_VIDEO_CHROMA_MODE_NONE, nullptr);
+  GstVideoConverter* converter = gst_video_converter_new(&picture->frame.info, &out, config);
+  if (converter) {
+    gst_video_converter_frame(converter, &picture->frame, &frame);
+    gst_video_converter_free(converter);
+  }
+  gst_video_frame_unmap(&frame);
+  gst_buffer_unref(wrapped);
+  return converter ? 0 : -1;
+}
+void RefuseDmabuf(PbVideoDecoder* decoder) {
+  if (decoder) decoder->RefuseDmabuf();
 }
 PbVideoPicture* RetainPicture(PbVideoPicture* picture) { return Retain(picture); }
 void ReleasePicture(PbVideoPicture* picture) { Release(picture); }
 }  // namespace
 
 extern "C" __attribute__((visibility("default"))) const PbVideoModule* pb_mapper_desktop_video_module_v1(void) {
-  static const PbVideoModule module = {PB_VIDEO_MODULE_ABI, Probe, Create, Attach, Detach, Acquire,
-                                       Stats, Destroy, Pixels, RetainPicture, ReleasePicture};
+  static const PbVideoModule module = {PB_VIDEO_MODULE_ABI, Probe,    Create,       Attach,        Detach,
+                                       Acquire,             Present,  PresentFailed, Stats,         Destroy,
+                                       Describe,            Snapshot, RefuseDmabuf,  RetainPicture, ReleasePicture};
   return &module;
 }
