@@ -281,17 +281,31 @@ and the Docker Compose file sets it for the container alone (Linux 4.15 or
 later).
 
 **Congestion control.** `--tcp-congestion bbr`, or
-`PB_MAPPER_TCP_CONGESTION=bbr`, has every connection the relay accepts send
-with BBR, which random loss on a long cross-border or mobile path does not
-slow as it does Linux's default, Cubic. It is off by default because BBR
-shares a congested link with Cubic flows less evenly. The kernel needs the
-`tcp_bbr` module (`sudo modprobe tcp_bbr`, and `tcp_bbr` in a file under
-`/etc/modules-load.d/` to keep it after a reboot). A relay that runs as root,
-as the install scripts' service does, may then choose it; otherwise add `bbr`
-to `net.ipv4.tcp_allowed_congestion_control`, or give the relay
+`PB_MAPPER_TCP_CONGESTION=bbr`, has every TCP connection the relay accepts
+send with BBR, which random loss on a long cross-border or mobile path does
+not slow as it does Linux's default, Cubic. It is off by default because BBR
+shares a congested link with Cubic flows less evenly.
+
+A relay that runs as root, as the install scripts' service and
+`services/pb-mapper-server.service` do, may choose any algorithm its kernel
+ships, and the kernel loads the module itself. Those services read
+`/etc/pb-mapper/server.env`:
+
+```bash
+sudo mkdir -p /etc/pb-mapper
+echo 'PB_MAPPER_TCP_CONGESTION=bbr' | sudo tee -a /etc/pb-mapper/server.env
+sudo systemctl restart pb-mapper-server
+```
+
+Any other relay needs the `tcp_bbr` module loaded (`sudo modprobe tcp_bbr`,
+and `tcp_bbr` in a file under `/etc/modules-load.d/` to keep it after a
+reboot), and either `bbr` in `net.ipv4.tcp_allowed_congestion_control` or
 `CAP_NET_ADMIN` (`cap_add: [NET_ADMIN]` in Docker). When the kernel refuses,
-the relay logs `relay_tcp_congestion_unavailable` with the fix and keeps the
-default. On other systems the option only logs that warning.
+the relay logs `relay_tcp_congestion_unavailable` as an error, with the fix,
+and keeps the default; with `RUST_LOG=info` it logs `relay_tcp_congestion`
+once the choice took effect. A `PB_MAPPER_TCP_CONGESTION` that is not an
+algorithm's name is logged as `relay_tcp_congestion_invalid` and ignored. On
+other systems the option only logs that it cannot apply.
 
 ### Administrator and temporary credentials
 

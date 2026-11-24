@@ -114,7 +114,6 @@ impl From<LegacyProtocolArg> for LegacyProtocolPolicy {
 enum ServerFlagError {
     MaxTemporaryKeys,
     MaxTemporaryKeyTtl,
-    TcpCongestionEnv,
 }
 
 impl std::fmt::Display for ServerFlagError {
@@ -129,12 +128,6 @@ impl std::fmt::Display for ServerFlagError {
                 "`--max-temporary-key-ttl` must be between {}s and {}d",
                 MIN_TEMP_KEY_TTL.as_secs(),
                 MAX_TEMP_KEY_TTL.as_secs() / 86_400
-            ),
-            Self::TcpCongestionEnv => write!(
-                f,
-                "`{PB_MAPPER_TCP_CONGESTION}` must name a TCP congestion control: 1 to {} ASCII \
-                 letters, digits, `_` or `-`",
-                TcpCongestion::MAX_LEN
             ),
         }
     }
@@ -169,26 +162,38 @@ fn server_auth_config(args: &ServerArgs) -> Result<AuthConfig, ServerFlagError> 
 
 /// The congestion control `PB_MAPPER_TCP_CONGESTION` asks for, read only
 /// when `--tcp-congestion` is absent. Unset or blank asks for none.
-fn tcp_congestion_from_env(
-    value: Option<OsString>,
-) -> Result<Option<TcpCongestion>, ServerFlagError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let value = value
-        .to_str()
-        .ok_or(ServerFlagError::TcpCongestionEnv)?
-        .trim();
-    if value.is_empty() {
-        return Ok(None);
+///
+/// Like the relay's other environment settings, a value it cannot use is
+/// logged and left out, so a typo in this optional setting starts the relay
+/// with the system's congestion control instead of stopping it (and a
+/// supervisor that restarts it). The flag stays strict.
+fn tcp_congestion_from_env(value: Option<OsString>) -> Option<TcpCongestion> {
+    let value = value?;
+    // A value that is not UTF-8 keeps U+FFFD here, which no name allows.
+    let value = value.to_string_lossy();
+    let name = value.trim();
+    if name.is_empty() {
+        return None;
     }
-    TcpCongestion::new(value)
-        .map(Some)
-        .map_err(|_| ServerFlagError::TcpCongestionEnv)
+    match TcpCongestion::new(name) {
+        Ok(congestion) => Some(congestion),
+        Err(error) => {
+            tracing::error!(
+                event = "relay_tcp_congestion_invalid",
+                variable = PB_MAPPER_TCP_CONGESTION,
+                %error,
+                "the relay's TCP connections keep the system's congestion control"
+            );
+            None
+        }
+    }
 }
 
 /// Have the relay send with `congestion`, best effort: a kernel that refuses
 /// leaves the system's default, and the log says how to allow it.
+///
+/// The refusal is an error, not a warning: the operator asked for this
+/// algorithm, and the Docker examples log at `error` only.
 fn use_tcp_congestion(listener: &TcpListener, congestion: &TcpCongestion) {
     match pb_mapper_server::set_tcp_congestion(listener, congestion) {
         Ok(()) => tracing::info!(
@@ -196,7 +201,7 @@ fn use_tcp_congestion(listener: &TcpListener, congestion: &TcpCongestion) {
             %congestion,
             "the relay's TCP connections send with this congestion control"
         ),
-        Err(error) => tracing::warn!(
+        Err(error) => tracing::error!(
             event = "relay_tcp_congestion_unavailable",
             %congestion,
             error = %error.io(),
@@ -209,10 +214,10 @@ fn use_tcp_congestion(listener: &TcpListener, congestion: &TcpCongestion) {
 pub(super) async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
     let stop = stop_requests()?;
     let auth_config = server_auth_config(&args)?;
-    let tcp_congestion = match &args.tcp_congestion {
-        Some(congestion) => Some(congestion.clone()),
-        None => tcp_congestion_from_env(std::env::var_os(PB_MAPPER_TCP_CONGESTION))?,
-    };
+    let tcp_congestion = args
+        .tcp_congestion
+        .clone()
+        .or_else(|| tcp_congestion_from_env(std::env::var_os(PB_MAPPER_TCP_CONGESTION)));
     let admin_key_path = pb_mapper_auth::admin_key_path(&auth_config.state_dir);
     if args.init_admin_key {
         std::fs::create_dir_all(&auth_config.state_dir)?;
@@ -442,12 +447,11 @@ mod tests {
             );
         }
 
-        assert_eq!(tcp_congestion_from_env(None), Ok(None));
-        assert_eq!(tcp_congestion_from_env(Some(" ".into())), Ok(None));
-        assert_eq!(tcp_congestion_from_env(Some("bbr\n".into())), Ok(Some(bbr)));
-        assert_eq!(
-            tcp_congestion_from_env(Some("bbr cubic".into())),
-            Err(ServerFlagError::TcpCongestionEnv)
-        );
+        assert_eq!(tcp_congestion_from_env(None), None);
+        assert_eq!(tcp_congestion_from_env(Some(" ".into())), None);
+        assert_eq!(tcp_congestion_from_env(Some("bbr\n".into())), Some(bbr));
+        // A value the relay cannot use is logged and dropped, so the relay
+        // still starts, with the system's congestion control.
+        assert_eq!(tcp_congestion_from_env(Some("bbr cubic".into())), None);
     }
 }

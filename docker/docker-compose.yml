@@ -14,6 +14,7 @@ services:
       # path does not slow as it does Linux's default, Cubic. The host needs
       # the tcp_bbr module (`modprobe tcp_bbr`) and either bbr in its
       # net.ipv4.tcp_allowed_congestion_control or `cap_add: [NET_ADMIN]` here.
+      # A refusal is logged as an error, relay_tcp_congestion_unavailable.
       # PB_MAPPER_TCP_CONGESTION: bbr
     volumes:
       - pb-mapper-auth:/var/lib/pb-mapper/auth
@@ -28,7 +29,9 @@ services:
       # start slowly again. It applies to this container's network namespace
       # only, which needs Linux 4.15 or later (remove it on an older kernel,
       # where the container would not start) and cannot be set with
-      # network_mode: host.
+      # network_mode: host. Where a user-space proxy carries the port
+      # (docker-proxy for IPv6 without ip6tables, rootless Docker or Podman),
+      # the viewer's connection ends on the host: set it on the host instead.
       net.ipv4.tcp_slow_start_after_idle: 0
     restart: unless-stopped
 

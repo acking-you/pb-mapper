@@ -184,7 +184,17 @@ sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0
 
 这会作用于本机的所有 TCP 连接。安装脚本会询问是否写入这个文件（`PB_MAPPER_TCP_TUNING=yes` 或 `no` 可预先作答），Docker Compose 文件则只对容器本身设置它（需要 Linux 4.15 或更高版本）。
 
-**拥塞控制。** `--tcp-congestion bbr` 或 `PB_MAPPER_TCP_CONGESTION=bbr` 让 relay 接受的每条连接都用 BBR 发送：跨境或移动网络这类长链路上的随机丢包不会像拖慢 Linux 默认的 Cubic 那样拖慢它。它默认关闭，因为在拥塞链路上 BBR 与 Cubic 流分享带宽不够均衡。内核需要 `tcp_bbr` 模块（`sudo modprobe tcp_bbr`，并在 `/etc/modules-load.d/` 下的文件里写上 `tcp_bbr`，重启后仍会加载）。以 root 运行的 relay（安装脚本装的服务即是）这样就能选用它；否则请把 `bbr` 加进 `net.ipv4.tcp_allowed_congestion_control`，或给 relay `CAP_NET_ADMIN`（Docker 中为 `cap_add: [NET_ADMIN]`）。内核拒绝时，relay 会记录 `relay_tcp_congestion_unavailable` 及修复方法，并沿用默认算法。在其他系统上，这个选项只会记录这条警告。
+**拥塞控制。** `--tcp-congestion bbr` 或 `PB_MAPPER_TCP_CONGESTION=bbr` 让 relay 接受的每条 TCP 连接都用 BBR 发送：跨境或移动网络这类长链路上的随机丢包不会像拖慢 Linux 默认的 Cubic 那样拖慢它。它默认关闭，因为在拥塞链路上 BBR 与 Cubic 流分享带宽不够均衡。
+
+以 root 运行的 relay（安装脚本装的服务和 `services/pb-mapper-server.service` 即是）可以选用内核自带的任何算法，内核会自行加载对应模块。这些服务会读取 `/etc/pb-mapper/server.env`：
+
+```bash
+sudo mkdir -p /etc/pb-mapper
+echo 'PB_MAPPER_TCP_CONGESTION=bbr' | sudo tee -a /etc/pb-mapper/server.env
+sudo systemctl restart pb-mapper-server
+```
+
+其他 relay 需要先加载 `tcp_bbr` 模块（`sudo modprobe tcp_bbr`，并在 `/etc/modules-load.d/` 下的文件里写上 `tcp_bbr`，重启后仍会加载），并且要么把 `bbr` 加进 `net.ipv4.tcp_allowed_congestion_control`，要么给 relay `CAP_NET_ADMIN`（Docker 中为 `cap_add: [NET_ADMIN]`）。内核拒绝时，relay 会以 error 级别记录 `relay_tcp_congestion_unavailable` 及修复方法，并沿用默认算法；`RUST_LOG=info` 时，设置生效后还会记录 `relay_tcp_congestion`。`PB_MAPPER_TCP_CONGESTION` 不是合法的算法名时，relay 记录 `relay_tcp_congestion_invalid` 并忽略它。在其他系统上，这个选项只会记录它无法生效。
 
 ### 管理员密钥与临时凭据
 

@@ -88,18 +88,30 @@ the relay runs on that computer's own network stack.
   starts slowly again. The examples above turn this off with `--sysctl` and
   `sysctls`. It applies to the container's own network namespace only, needs
   Linux 4.15 or later (on an older kernel the container does not start: remove
-  the setting there) and cannot be set with `--network host`. The relay logs
-  `relay_tcp_idle_restart` at `info` while it is on.
-- `PB_MAPPER_TCP_CONGESTION=bbr`: every connection the relay accepts sends with
-  BBR, which random loss on a long cross-border or mobile path does not slow
-  as it does Linux's default, Cubic. It is off by default because BBR shares a
-  congested link with Cubic flows less evenly. The Docker host needs the
-  `tcp_bbr` module (`sudo modprobe tcp_bbr`, and `tcp_bbr` in a file under
+  the setting there) and cannot be set with `--network host`. While it is on,
+  the relay logs `relay_tcp_idle_restart` at `info`, which the examples'
+  `RUST_LOG=error` hides.
+- `PB_MAPPER_TCP_CONGESTION=bbr`: every TCP connection the relay accepts sends
+  with BBR, which random loss on a long cross-border or mobile path does not
+  slow as it does Linux's default, Cubic. It is off by default because BBR
+  shares a congested link with Cubic flows less evenly. The Docker host needs
+  the `tcp_bbr` module (`sudo modprobe tcp_bbr`, and `tcp_bbr` in a file under
   `/etc/modules-load.d/` to keep it after a reboot), and either `bbr` in the
   host's `net.ipv4.tcp_allowed_congestion_control` or the container started
   with `--cap-add NET_ADMIN` (`cap_add: [NET_ADMIN]` in Compose). When the
-  kernel refuses, the relay logs `relay_tcp_congestion_unavailable` with the
-  fix and keeps the default.
+  kernel refuses, the relay logs `relay_tcp_congestion_unavailable` as an
+  error, with the fix, and keeps the default; with `RUST_LOG=info` it logs
+  `relay_tcp_congestion` once BBR took effect. On the host,
+  `sudo nsenter -t "$(docker inspect -f '{{.State.Pid}}' pb-mapper)" -n ss -ti`
+  shows the algorithm of each of the relay's connections.
+
+Both settings reach only the connections the relay itself accepts. Where a
+user-space proxy carries the published port, the viewer's connection ends at
+that proxy on the host instead, and the host's own settings apply to it: that
+is `docker-proxy` when publishing on IPv6 without `ip6tables`, and the port
+driver of rootless Docker or Podman. There, set
+`net.ipv4.tcp_slow_start_after_idle` (and, for BBR,
+`net.ipv4.tcp_congestion_control`) on the host.
 
 ## Tags
 
