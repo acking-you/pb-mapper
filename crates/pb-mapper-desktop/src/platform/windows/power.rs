@@ -4,17 +4,19 @@
 //! and a laptop that sleeps ends the session. A viewer's pointer moves do not
 //! count as input either (`SetCursorPos`).
 //!
-//! Capture calls [`touch`], one atomic store, in the app's process and in
-//! the background helper's worker alike, which runs in the owner's console
-//! session. A watchdog thread, started by the first touch and parked while
-//! nothing captures, holds one power request (display and system required)
-//! from the first capture after an idle spell until `awake::LINGER` after
-//! the last, and turns a dark display on when it takes it, so a session that
-//! starts or resumes on one gets its first picture without anyone at the
-//! host. A lid close, the power button or a sleep the owner chooses still
-//! win: Windows ends every request then. Process exit closes the request.
+//! Every capture call and pointer read calls [`touch`], one atomic store, in
+//! the app's process and in the background helper's worker alike, which runs
+//! in the owner's console session. A watchdog thread, started by the first
+//! touch and parked while nothing captures, holds one power request (display
+//! and system required) from the first capture after an idle spell until
+//! `awake::LINGER` after the last, and turns a dark display on when it takes
+//! it, so a session that starts or resumes on one gets its first picture
+//! without anyone at the host. A lid close, the power button or a sleep the
+//! owner chooses still win: Windows ends every request then. Process exit
+//! closes the request. When to take it and give it back is
+//! `awake::Watchdog`'s decision; this module only carries it out.
 
-use crate::platform::awake::{Action, Keeper, Touches};
+use crate::platform::awake::{Power, Touches, Wait, Watchdog};
 use std::{
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     sync::OnceLock,
@@ -75,56 +77,56 @@ fn wake() {
     }
 }
 
-/// The watchdog: holds the request while capture runs, and parks without a
-/// timeout while it does not.
+/// The watchdog's thread: looks, then sleeps or parks as the look says, for
+/// the life of the process.
 fn watch() {
-    let mut keeper = Keeper::default();
-    let mut request: Option<Request> = None;
+    let mut watchdog = Watchdog::new(&TOUCHES);
+    let mut power = Awake::default();
     loop {
-        let now = Instant::now();
-        match keeper.step(now, TOUCHES.last()) {
-            Action::Acquire { until } => {
-                request = Request::create()
-                    .inspect_err(|failure| {
-                        tracing::warn!(
-                            target: "pb_mapper_desktop::session",
-                            event = "desktop_keep_awake_failed",
-                            detail = %failure,
-                        );
-                    })
-                    .ok();
-                // Without ES_CONTINUOUS: once, as if someone at the host
-                // touched it, which turns a dark display on.
-                unsafe { SetThreadExecutionState(ES_DISPLAY_REQUIRED) };
-                tracing::debug!(
-                    target: "pb_mapper_desktop::session",
-                    event = "desktop_keep_awake",
-                    held = request.is_some(),
-                );
-                std::thread::sleep(until.saturating_duration_since(now));
+        match watchdog.look(Instant::now(), &mut power) {
+            Wait::Until(until) => {
+                std::thread::sleep(until.saturating_duration_since(Instant::now()));
             }
-            Action::Hold { until } => std::thread::sleep(until.saturating_duration_since(now)),
-            Action::Release => {
-                drop(request.take());
-                tracing::debug!(
-                    target: "pb_mapper_desktop::session",
-                    event = "desktop_keep_awake",
-                    held = false,
-                );
-                park();
-            }
-            Action::Park => park(),
+            Wait::Touch => std::thread::park(),
         }
     }
 }
 
-/// Parks until the next touch, unless one came in since the watchdog last
-/// looked. A spurious return only makes it look again.
-fn park() {
-    if !TOUCHES.park(Instant::now()) {
-        std::thread::park();
+/// The power request while the watchdog holds it; `None` if Windows would
+/// not create it.
+#[derive(Default)]
+struct Awake(Option<Request>);
+
+impl Power for Awake {
+    fn acquire(&mut self) {
+        self.0 = Request::create()
+            .inspect_err(|failure| {
+                tracing::warn!(
+                    target: "pb_mapper_desktop::session",
+                    event = "desktop_keep_awake_failed",
+                    detail = %failure,
+                );
+            })
+            .ok();
+        // SAFETY: takes flags only. Without ES_CONTINUOUS it resets the idle
+        // timers once, as if someone at the host touched it, which turns a
+        // dark display on.
+        unsafe { SetThreadExecutionState(ES_DISPLAY_REQUIRED) };
+        tracing::debug!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_keep_awake",
+            held = self.0.is_some(),
+        );
     }
-    TOUCHES.run();
+
+    fn release(&mut self) {
+        drop(self.0.take());
+        tracing::debug!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_keep_awake",
+            held = false,
+        );
+    }
 }
 
 /// `powercfg /requests` shows it beside the process.

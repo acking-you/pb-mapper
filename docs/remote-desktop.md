@@ -1356,20 +1356,23 @@ awake (`platform/windows/power.rs`). A dark display gives Desktop Duplication
 no new pictures, so a viewer that only watches would freeze at the owner's
 display-off timeout; a laptop that sleeps ends the session; and a viewer's
 pointer moves (`SetCursorPos`) are not input, so they reset neither idle
-timer. Each capture call (the encoder's open and submit, or a JPEG still)
-records its time with one atomic store, in the app's process and in the
-helper's capture worker, which runs in the owner's console session. A watchdog
-thread, started by the first capture and parked with no timeout while nothing
-captures, takes one power request with `PowerRequestDisplayRequired` and
-`PowerRequestSystemRequired` at the first capture after an idle spell. It
-turns a dark display on once at the same time, with
-`SetThreadExecutionState(ES_DISPLAY_REQUIRED)` and no `ES_CONTINUOUS`, so that
-a session that starts or resumes on one gets its first picture without anyone
-at the host. It clears the request 2 s after the last capture
-(`awake::LINGER`): a pause, a disconnect or a lost helper. Thread C asks for a
-capture at least once a second while a session streams; only a network or
-encoder stall longer than 2 s lets the request lapse, and the next capture
-takes it again. `powercfg /requests` lists the request under DISPLAY and
+timer. Each capture call (the encoder's open and submit, or a JPEG still) and
+each read of the pointer records its time with one atomic store, in the app's
+process and in the helper's capture worker, which runs in the owner's console
+session. A watchdog thread, started by the first capture and parked with no
+timeout while nothing captures, takes one power request with
+`PowerRequestDisplayRequired` and `PowerRequestSystemRequired` at the first
+capture after an idle spell. It turns a dark display on once at the same time,
+with `SetThreadExecutionState(ES_DISPLAY_REQUIRED)` and no `ES_CONTINUOUS`, so
+that a session that starts or resumes on one gets its first picture without
+anyone at the host. It clears the request 2 s after the last capture
+(`awake::LINGER`): a pause, a disconnect or a lost helper. While a session runs
+unpaused, thread C asks for a capture at least once a second, and reads the
+pointer every 16 ms (through the helper, the worker reads it at each desktop
+check and video request) even while the network or the encoder holds capture
+back, so a stall does not let the request lapse. When to take and clear it is
+`awake::Watchdog`, which the unit tests drive through whole sessions with an
+injected clock. `powercfg /requests` lists the request under DISPLAY and
 SYSTEM while it is held. A sleep the owner chooses, the power button or a lid
 set to sleep still end it. The helper protocol is unchanged: its worker runs
 the same capture.
@@ -2587,7 +2590,7 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Elevated windows / secure-desktop UAC | Helper implemented; default-policy administrator and standard-user prompt acceptance outstanding |
 | Remembered app-owned host policy | Current-user DPAPI; requires signed-in user and running app |
 | Windows service-owned background host | Final build 922 passed upgrade restart, live direct/relay delivery with its UI exited, and persistent Stop/Enable with the same invitation; OS boot, standalone SCM restart and sleep/resume acceptance pending |
-| Windows display and system kept awake while capturing | The keeper's timing is unit-tested on every platform and its power request is created in the Windows CI job; a viewer past the display-off timeout, `powercfg /requests` during capture and a pause, and waking a dark display, in the app and through the service, outstanding on a device |
+| Windows display and system kept awake while capturing | The keeper's timing and the watchdog's loop are unit-tested on every platform and its power request is created in the Windows CI job; a viewer past the display-off timeout, `powercfg /requests` during capture, a network stall and a pause, and waking a dark display, in the app and through the service, outstanding on a device |
 | Same owner's locked login / password entry | Session identity and desktop transition handling implemented; actual password-entry acceptance pending |
 | Pre-login boot, SAS, control across user switching | Unsupported; service waits for its approved owner's login |
 | Rotated GPU capture, Linux hosts, macOS before 12.3, Windows hosts without Media Foundation | Unsupported |
