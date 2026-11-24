@@ -137,15 +137,12 @@ const PbVideoModule* LoadModule() {
 // Flutter's software renderer draws no external texture.
 bool SoftwareRenderer() { return g_strcmp0(g_getenv("FLUTTER_LINUX_RENDERER"), "software") == 0; }
 
-// What Flutter's EGL display samples in place, read on the GTK thread
-// before a decoder starts. Flutter renders through EGL on the display GDK
-// opened (fl_opengl_manager.cc), whose handle this asks for again; it is
+// Flutter's EGL display, initialized, or EGL_NO_DISPLAY. GTK thread only.
+// Flutter renders through EGL on the display GDK opened
+// (fl_opengl_manager.cc), whose handle this asks for again; it is
 // initialized already, initializing it again changes nothing, and nothing
-// here terminates it. PB_MAPPER_VIDEO_DMABUF=0 keeps every picture in
-// system memory.
-PbVideoPresenter ReadPresenter() {
-  PbVideoPresenter presenter{};
-  if (g_strcmp0(g_getenv("PB_MAPPER_VIDEO_DMABUF"), "0") == 0) return presenter;
+// here terminates it.
+EGLDisplay FlutterDisplay() {
   EGLDisplay display = EGL_NO_DISPLAY;
   GdkDisplay* gdk = gdk_display_get_default();
   if (gdk && epoxy_has_egl_extension(EGL_NO_DISPLAY, "EGL_EXT_platform_base")) {
@@ -160,11 +157,30 @@ PbVideoPresenter ReadPresenter() {
     }
 #endif
   }
-  if (display != EGL_NO_DISPLAY && eglInitialize(display, nullptr, nullptr)) {
-    pb_video::ReadPresenter(display, &presenter);
-  }
+  return display != EGL_NO_DISPLAY && eglInitialize(display, nullptr, nullptr) ? display : EGL_NO_DISPLAY;
+}
+
+// What Flutter's EGL display samples in place, read on the GTK thread
+// before a decoder starts. PB_MAPPER_VIDEO_DMABUF=0 keeps every picture in
+// system memory.
+PbVideoPresenter ReadPresenter() {
+  PbVideoPresenter presenter{};
+  if (g_strcmp0(g_getenv("PB_MAPPER_VIDEO_DMABUF"), "0") == 0) return presenter;
+  const EGLDisplay display = FlutterDisplay();
+  if (display != EGL_NO_DISPLAY) pb_video::ReadPresenter(display, &presenter);
   g_debug("The presenter samples dma-bufs: %s, %u layouts", presenter.dmabuf ? "yes" : "no", presenter.modifier_count);
   return presenter;
+}
+
+// The DRM device file of the GPU Flutter renders on, read on the GTK thread
+// before the probe and before each decoder starts: the module tries the
+// decoders on that GPU first. Empty when EGL does not say, and under the
+// software renderer, which decodes nothing natively.
+std::string PresentingDevice() {
+  if (SoftwareRenderer()) return "";
+  const std::string device = pb_video::PresentingDevice(FlutterDisplay());
+  g_debug("Flutter renders on %s", device.empty() ? "a GPU EGL does not name" : device.c_str());
+  return device;
 }
 
 // The fastest refresh among the monitors as they are set now: the viewer
@@ -196,13 +212,14 @@ std::string Describe(const char* codec, const PbVideoCodecProbe& probe) {
 // The `decoders` reply: which codecs this computer decodes natively, each up
 // to the largest bound it takes, or null, and the fastest display refresh.
 // It reads the GStreamer registry and creates no decoder: a bad driver can
-// hang there. Off the GTK thread.
-FlValue* ProbeDecoders(double display_max_hz) {
+// hang there. Off the GTK thread. `device`: the presenting GPU's
+// (PresentingDevice).
+FlValue* ProbeDecoders(double display_max_hz, const std::string& device) {
   PbVideoProbe probe{};
   const PbVideoModule* module = SoftwareRenderer() ? nullptr : LoadModule();
   if (module) {
     char error[256] = "";
-    if (module->probe(&probe, error, sizeof(error)) != 0) {
+    if (module->probe(device.c_str(), &probe, error, sizeof(error)) != 0) {
       probe = PbVideoProbe{};
       g_message("Native desktop video is unavailable: %s", error);
     } else {
@@ -522,11 +539,12 @@ static void pb_video_texture_frame_ready(void* context) {
 }
 
 static PbVideoTexture* pb_video_texture_new(const PbVideoModule* module, const PbVideoExports* exports,
-                                            const PbVideoPresenter& presenter, FlTextureRegistrar* registrar) {
+                                            const PbVideoPresenter& presenter, const std::string& device,
+                                            FlTextureRegistrar* registrar) {
   PbVideoTexture* self = PB_VIDEO_TEXTURE(g_object_new(pb_video_texture_get_type(), nullptr));
   self->module = module;
   self->registrar = FL_TEXTURE_REGISTRAR(g_object_ref(registrar));
-  self->decoder = module->create(exports, &presenter, pb_video_texture_frame_ready, self);
+  self->decoder = module->create(exports, &presenter, device.c_str(), pb_video_texture_frame_ready, self);
   if (!self->decoder) {
     g_object_unref(self);
     return nullptr;
@@ -606,11 +624,13 @@ struct ProbeState {
 struct ProbeJob {
   std::shared_ptr<ProbeState> state;
   double display_max_hz;
+  std::string device;
 };
 
 void ProbeThread(GTask* task, gpointer, gpointer data, GCancellable*) {
   const auto* job = static_cast<const ProbeJob*>(data);
-  g_task_return_pointer(task, ProbeDecoders(job->display_max_hz), reinterpret_cast<GDestroyNotify>(fl_value_unref));
+  g_task_return_pointer(task, ProbeDecoders(job->display_max_hz, job->device),
+                        reinterpret_cast<GDestroyNotify>(fl_value_unref));
 }
 
 void ProbeDone(GObject*, GAsyncResult* result, gpointer) {
@@ -668,7 +688,8 @@ class DesktopVideo {
       if (viewers_.size() >= kMaxTextures) throw std::runtime_error("Desktop texture limit reached");
       const PbVideoModule* module = SoftwareRenderer() ? nullptr : LoadModule();
       if (!module) throw std::runtime_error("Native video decoding is unavailable");
-      PbVideoTexture* texture = pb_video_texture_new(module, &library_->exports, ReadPresenter(), textures_);
+      PbVideoTexture* texture =
+          pb_video_texture_new(module, &library_->exports, ReadPresenter(), PresentingDevice(), textures_);
       if (!texture) throw std::runtime_error("Cannot create a video decoder");
       if (!fl_texture_registrar_register_texture(textures_, FL_TEXTURE(texture))) {
         g_object_unref(texture);
@@ -759,7 +780,7 @@ class DesktopVideo {
     if (probe_->probing) return;
     probe_->probing = true;
     GTask* task = g_task_new(nullptr, nullptr, ProbeDone, nullptr);
-    g_task_set_task_data(task, new ProbeJob{probe_, DisplayMaxHz()},
+    g_task_set_task_data(task, new ProbeJob{probe_, DisplayMaxHz(), PresentingDevice()},
                          [](gpointer job) { delete static_cast<ProbeJob*>(job); });
     g_task_run_in_thread(task, ProbeThread);
     g_object_unref(task);
