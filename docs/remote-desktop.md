@@ -1506,8 +1506,10 @@ The bound is fixed rather than derived from the measured dwell, because a
 queueing encoder's dwell grows with its depth. A Mac host holds VideoToolbox
 to two units in flight (`VT_IN_FLIGHT`), finished units not counted, and
 thread C skips a tick that finds two as one that finds four: where
-it encodes asynchronously (a size that is not a multiple of 16, such as a
-MacBook's built-in display at its default resolution) and the pace outruns
+it encodes asynchronously (pictures whose buffers do not cover a multiple of
+16, as a MacBook's built-in display at its default resolution may give,
+which a Mac host now codes padded to one unless padding is off: see below)
+and the pace outruns
 it, the extra two only queued. On an M6 at a pace of 120, in a test loop
 that paces as thread C does, a 3024x1964 session's units took 18 ms (H.264)
 and 17 ms (H.265) from submit to output at the median with two in flight,
@@ -1898,7 +1900,40 @@ off): the encoder's size, rounded down to even pixels, may miss the
 display's shape by up to two pixels, which a picture keeping its shape left
 as a dark row or column along an edge while viewers map the pointer across
 the whole frame. Before macOS 14 the picture keeps its shape on the black
-background. Stills share the configuration. Thread C submits the newest
+background. Stills share the configuration. A size that is not a multiple
+of 16 both ways, as a 14-inch MacBook Pro's 3024x1964 and a 13-inch
+MacBook Air's 2940x1912 at Native, 1920x1080, or a display fitted to a
+viewer's limits (3024x1964 fitted to 1440p is 2216x1440), is coded in a
+frame padded to the next multiple of 16 (`platform/macos/frame.rs`:
+3024x1968, 2944x1920, 1920x1088, 2224x1440). The stream is that size,
+ScreenCaptureKit draws the display into its top left at the content's
+size in pixels (`destinationRect`, filled as above), the rest takes the
+black background, and the session codes the padded frame. VideoToolbox
+encodes a picture inside its call where the picture's buffer covers a
+multiple of 16 both ways, by its own size or with the pixels it says it
+extends by, and any other in the background: on an M6 its call took 4.7
+to 13.1 ms at the median for the first, by size, and 21 to 38 µs for the
+second. A padded frame's pictures always cover one. Each keyframe's SPS
+crops the padding away ([H.265 and H.264](#h265-and-h264)) and the units
+say the content's size, so a viewer shows the content alone and maps its
+pointer across it, as before. On an M6, in a loop paced as thread C paces
+with two units in flight, a padded frame's units took 1.1 to 2.4 ms less
+from submit to output at 60 FPS than the content coded at its own size,
+at the same frame rate (the median of five rounds; at 3024x1964, 10.71
+against 12.88 ms with H.264 and 10.38 against 12.64 ms with H.265); at a
+pace of 120, 0.95 to 1.35 ms less at 1920x1080 and 2216x1440, and 5.7 to
+9.4 ms less at 2940x1912 and above, which the encoder does not keep up
+with, at from 2.8 fewer to 0.4 more units a second
+([measurements](benchmarks/2026-11-24-mac-vt-padded-capture/README.md)).
+Pictures of the content's own size whose buffers said they extend to the
+padded size took as long, at as many units a second: where
+ScreenCaptureKit's own pictures of a size already extend so
+(`macos_capture_layout`, below), VideoToolbox already encoded them inside
+its call, and padding gains nothing there. A host pads nothing where
+ScreenCaptureKit cannot place its picture, nor for the rest of its process
+once a session's SPS would not crop. What ScreenCaptureKit's own pictures
+of these sizes are, and that it draws a padded frame as asked, is still to
+be seen on a device. Thread C submits the newest
 picture's IOSurface at the
 negotiated pace without a copy. On a still screen it can reuse the last
 picture for a requested keyframe or the 250 ms liveness repeat; it runs no
@@ -1910,8 +1945,9 @@ default QoS class as thread C is, which makes every call on
 the VideoToolbox session, the encode with its `ForceKeyFrame` option and the
 bitrate with its cap, one at a time and with no lock held across a call,
 and thread C passes it a picture or a bitrate through a one-slot mailbox. A
-session whose size is a multiple of 16 (1440p, 4K) encodes inside
-`VTCompressionSessionEncodeFrame` and calls back before it returns, so before
+picture whose buffer covers a multiple of 16 both ways (1440p, 4K, a
+padded frame) is encoded inside `VTCompressionSessionEncodeFrame`, which
+calls back before it returns, so before
 the submit thread the call held thread C for the whole encode: on an M6, at
 the median, 5.0–5.2 ms at 1920x1200, 7.2–7.5 ms at 2560x1440 and
 14.3–15.0 ms at 3840x2160, against 3–5 µs to hand the picture over now. A
@@ -2322,6 +2358,43 @@ compare each rewrite with one built by an independent reader and writer;
 and, on a Mac, have Core Media build a format description from each, at the
 original's dimensions (`platform/macos/tests.rs`)
 ([record](benchmarks/2026-11-24-windows-encoder-settings/README.md)).
+
+A Mac host that codes a padded frame (see the Mac host in
+[Host: capture and encoding](#host-capture-and-encoding)) sends each
+keyframe's SPS cropped to the content: H.264's `frame_cropping` and H.265's
+`conformance_window`, widened on the right and at the bottom by the
+padding, in chroma samples (two pixels each, in the 4:2:0 frames every
+host codes), as an encoder's own SPS crops a 1080p picture's last eight
+rows (`codec::sps::crop_sets`). Nothing else changes: H.264's SPS is read
+and written whole, as for the reorder rewrite, and H.265's is read through
+its profile, tier and level (each sub-layer's that is present), its chroma
+format and its picture size to the window, and the rest, VUI and
+extensions included, is copied as the bits it was; the VPS and PPS go as
+VideoToolbox wrote them. The units still say the content's size, so
+nothing else reaches the wire. The SPS is cropped once for each format
+VideoToolbox writes, which it kept for a whole session in a test here,
+and the cropped sets go in front of each keyframe, as before; no other
+unit carries them, and nothing more runs per unit. The cropped sets are,
+byte for byte, those VideoToolbox writes for a session at the content's
+own size, whose SPS crops the same rows and columns: at the bottom for
+1920x1080, at the right for 2216x1440 and at both for 2940x1912, so a Mac
+host already sent right-edge crops at widths that are not a multiple of
+16, and no viewer gets a header it did not get before. An SPS that would not
+show the content exactly (not 4:2:0 frames, one that shows less than the
+content, an odd number of rows or columns to crop) fails that capture as a
+capture failure, not as the codec's, so H.265 stays on, and turns padding
+off for the rest of the process (`macos_encoder_crop_failed`): thread C's
+retry codes the content's own size, as before. The tests crop parameter
+sets VideoToolbox wrote here at 1920x1088, 3024x1968 and 3344x2160 (H.264
+with low-latency rate control and without, H.265 with it), check every
+other field and set unchanged, and have Core Media read each crop at the
+content's size; a padded session's keyframe carries the parameter sets a
+session at the content's size writes, at those three sizes in each
+configuration (where the session does not say it encodes in software, as
+a virtual machine's may); a padded 2940x1912 frame, grey with a white
+last row and column, that a padded session encoded decodes through
+VideoToolbox at 2940x1912 with that row and column at its edges, in H.264
+and H.265 ([record](benchmarks/2026-11-24-mac-vt-padded-capture/README.md)).
 
 Every access unit is Annex B. An H.265 unit is a keyframe when it holds an
 IRAP picture, NAL types 16 to 21 (`(b0 >> 1) & 0x3f`; NVIDIA's IDRs are
@@ -3411,7 +3484,9 @@ skipped for two units in flight, which `skipped_ticks` counts too),
 `armed_refusals` (submits that found the thread
 busy and left their tick armed) and `peak_in_flight`. A Mac host logs each
 stream it opens as `macos_capture_opened` on `pb_mapper_desktop::session`
-(info): its `width` and `height`, the display's `refresh_hz` (the mode's
+(info): its `width` and `height`, the frame it codes them in
+(`coded_width` and `coded_height`, larger where it pads the size to a
+multiple of 16), the display's `refresh_hz` (the mode's
 `mode_hz`, else the display link's `link_period_us`), the `pace_fps` and
 `max_fps` it opened at, and the interval it started at: `n` refreshes
 (none with no refresh), `interval_us`, `paced` (whether `n` is the pace's
@@ -3432,8 +3507,13 @@ says it extends by on each side (`extended_left`, `extended_right`,
 `extended_top`, `extended_bottom`), each plane's rows and bytes per row
 (`luma_rows`, `luma_bytes_per_row`, `chroma_rows`,
 `chroma_bytes_per_row`) and its IOSurface's size (`surface_bytes`), which
-say whether ScreenCaptureKit pads its pictures to a multiple of 16, as
-VideoToolbox would then read them. A Windows encoder's capture thread logs its first acquire as
+say whether ScreenCaptureKit's pictures extend to a multiple of 16, as
+VideoToolbox then reads them, encoding them inside its call; a padded
+frame's picture has its coded size. The ignored `sck_padded_capture` test
+(`platform/macos/tests.rs`) reads the same of the main display's pictures
+at 3024x1964, 2940x1912 and 1920x1080, unpadded and padded, checks that
+a padded picture's padding is black, and times VideoToolbox's encode call
+on each. A Windows encoder's capture thread logs its first acquire as
 `windows_capture_first_acquire` on `pb_mapper_desktop::session` (debug):
 `last_present_time`, `accumulated_frames` and whether a desktop image came
 with it, which the encoder also keeps in its statistics for `video_bench`'s
@@ -3539,7 +3619,8 @@ moves stopped taking effect, and it places the pointer instead while that
 window stays in front
 ([Pointer moves on Windows](#pointer-moves-on-windows)). A Mac host logs each
 encoder it opens as `macos_encoder_opened` (codec, `low_latency`, width,
-height, fps, hardware, gop, `data_rate_limits`: whether VideoToolbox took
+height, `coded_width`, `coded_height`, fps, hardware, gop,
+`data_rate_limits`: whether VideoToolbox took
 the cap of 1.5 × the mean over 1 s, and `max_qp`: whether a low-latency
 session took the QP bound of 51), after
 `macos_encoder_low_latency_refused` when it retried without low-latency rate
@@ -3551,7 +3632,10 @@ rate it had. It traces the pictures VideoToolbox dropped as
 `seconds`, and the encoder's `total`, at most once a second and only when
 there were any. It warns `macos_encoder_left_running` (`waited_ms`) when an
 encoder's submit thread was still inside a VideoToolbox call 250 ms after
-the encoder was dropped, and was left to finish on its own. The app also warns
+the encoder was dropped, and was left to finish on its own, and
+`macos_encoder_crop_failed` (codec, width, height, `coded_width`,
+`coded_height`) when a padded session's SPS would not crop to its content,
+after which the host pads no more. The app also warns
 `desktop_connect_failed` with the typed failure, and a native decoder's
 failure is warned as `desktop_decoder_error` on `pb_mapper_desktop::frames`
 with its text as the detail. Each line names itself in an `event` field, and

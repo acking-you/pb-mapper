@@ -10,7 +10,9 @@
 //! may miss the display's shape. Before, it keeps its shape, and what it
 //! does not cover takes the background colour, clear unless set, which
 //! NV12 has no alpha to show: the background is opaque black, which the
-//! configuration does not retain.
+//! configuration does not retain. A padded frame (`frame.rs`) has the
+//! display drawn into its top left, the content's size in pixels
+//! (`destinationRect`), and the rest takes the background.
 //!
 //! The stream starts at a minimum interval between pictures from the
 //! display's refresh and the session's pace (`cadence.rs`), and changes it
@@ -25,7 +27,7 @@
 //! stream counts its complete pictures, its idle samples and the pictures a
 //! newer one replaced before thread C took them.
 
-use super::{cadence::Updates, cf};
+use super::{cadence::Updates, cf, frame::Frame};
 use crate::{BackendError, FailureKind, Result, Waker};
 use block2::RcBlock;
 use dispatch2::{DispatchQoS, DispatchQueue, DispatchRetained, GlobalQueueIdentifier};
@@ -35,7 +37,9 @@ use objc2::{
     runtime::{AnyClass, NSObject, ProtocolObject},
     sel,
 };
-use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString};
+use objc2_core_foundation::{
+    CFArray, CFDictionary, CFNumber, CFRetained, CFString, CGPoint, CGRect, CGSize,
+};
 use objc2_core_graphics::{
     CGColor, CGDisplayCopyDisplayMode, CGDisplayMode, CGMainDisplayID, kCGColorSpaceSRGB,
     kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
@@ -83,6 +87,13 @@ pub(crate) fn available() -> bool {
         NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(version)
             && AnyClass::get(c"SCStream").is_some()
     })
+}
+
+/// Whether a stream can draw the display into part of its frame
+/// (`destinationRect`, of macOS 12.3, as ScreenCaptureKit is), which a
+/// padded frame needs.
+pub(crate) fn places() -> bool {
+    SCStreamConfiguration::class().responds_to(sel!(setDestinationRect:))
 }
 
 /// A picture the stream delivered.
@@ -503,27 +514,32 @@ impl PreparedCapture {
     }
 }
 
-/// The configuration of a picture `width` x `height` pixels in sRGB,
-/// without the pointer, that the display fills (macOS 14), else on an
-/// opaque black background: NV12 (BT.709 matrix, video range) for the
-/// encoder, else BGRA, as an image takes it.
-pub(crate) fn configuration(width: u32, height: u32, nv12: bool) -> PreparedCapture {
-    with_background(width, height, nv12, CGColor::new_srgb(0.0, 0.0, 0.0, 1.0))
+/// The configuration of a picture of `frame`'s coded size in sRGB, without
+/// the pointer, whose content the display fills (macOS 14), else on an
+/// opaque black background, which also fills the rest: NV12 (BT.709 matrix,
+/// video range) for the encoder, else BGRA, as an image takes it.
+pub(crate) fn configuration(frame: Frame, nv12: bool) -> PreparedCapture {
+    with_background(frame, nv12, CGColor::new_srgb(0.0, 0.0, 0.0, 1.0))
 }
 
 /// `configuration` on `background`, a stream's own when it is updated.
-fn with_background(
-    width: u32,
-    height: u32,
-    nv12: bool,
-    background: CFRetained<CGColor>,
-) -> PreparedCapture {
+fn with_background(frame: Frame, nv12: bool, background: CFRetained<CGColor>) -> PreparedCapture {
+    let Frame { coded, content } = frame;
     // SAFETY: a fresh configuration, set before any stream reads it; the
     // constants are Core Graphics', alive for the process.
     let config = unsafe {
         let config = SCStreamConfiguration::new();
-        config.setWidth(width as usize);
-        config.setHeight(height as usize);
+        config.setWidth(coded.0 as usize);
+        config.setHeight(coded.1 as usize);
+        // A padded frame only, and only where it can (`places`): the
+        // content in the top left, in the frame's pixels. Unset, the
+        // display fills the frame.
+        if frame.cropped() {
+            config.setDestinationRect(CGRect::new(
+                CGPoint::new(0.0, 0.0),
+                CGSize::new(f64::from(content.0), f64::from(content.1)),
+            ));
+        }
         config.setShowsCursor(false);
         // sRGB, not BT.709: every viewer converts with the BT.709 matrix and
         // shows the result as sRGB, which is also what the Windows host
@@ -545,7 +561,8 @@ fn with_background(
         // macOS 14. The encoder's size, rounded down to even pixels, may
         // miss the display's shape by a pixel or two: kept, the picture
         // would leave a row or column of background along an edge, while
-        // viewers map the pointer across the whole frame.
+        // viewers map the pointer across the whole frame. In a padded
+        // frame, the picture fills its content.
         if SCStreamConfiguration::class().responds_to(sel!(setPreservesAspectRatio:)) {
             config.setPreservesAspectRatio(false);
         }
@@ -580,15 +597,14 @@ pub(crate) struct Startup {
 }
 
 /// What a stream's interval changes and their completion handlers share:
-/// the stream with its output, the size and background colour each new
+/// the stream with its output, the frame and background colour each new
 /// configuration repeats, and the changes in flight.
 struct Retune {
     /// Released before `output`, the stream's delegate, so that no
     /// reference to the stream held here outlives it.
     stream: Retained<SCStream>,
     output: Retained<Output>,
-    width: u32,
-    height: u32,
+    frame: Frame,
     /// The stream's own background colour, which every configuration it is
     /// given points at; `Running` keeps it until the stream has stopped.
     background: CFRetained<CGColor>,
@@ -622,7 +638,7 @@ impl Retune {
     /// asked for meanwhile, if any; a refused change fails the stream.
     fn issue(self: Arc<Self>, interval: Duration) {
         objc2::rc::autoreleasepool(|_| {
-            let prepared = with_background(self.width, self.height, true, self.background.clone());
+            let prepared = with_background(self.frame, true, self.background.clone());
             // SAFETY: a fresh configuration, before the stream reads it.
             unsafe {
                 prepared
@@ -713,17 +729,11 @@ struct Released {
 unsafe impl Send for Released {}
 
 impl Stream {
-    /// Display `id`'s stream at `width` x `height`, at least `interval`
-    /// between pictures (`cadence.rs`), started. Thread C has no autorelease
-    /// pool: this brings its own.
-    pub(crate) fn start(
-        id: u32,
-        width: u32,
-        height: u32,
-        interval: Duration,
-        waker: &Waker,
-    ) -> Result<Self> {
-        objc2::rc::autoreleasepool(|_| Self::started(id, width, height, interval, false, waker))
+    /// Display `id`'s stream filling `frame`, at least `interval` between
+    /// pictures (`cadence.rs`), started. Thread C has no autorelease pool:
+    /// this brings its own.
+    pub(crate) fn start(id: u32, frame: Frame, interval: Duration, waker: &Waker) -> Result<Self> {
+        objc2::rc::autoreleasepool(|_| Self::started(id, frame, interval, false, waker))
     }
 
     /// `start`, with the pointer drawn into the pictures, which a
@@ -731,18 +741,16 @@ impl Stream {
     #[cfg(test)]
     pub(super) fn start_with_pointer(
         id: u32,
-        width: u32,
-        height: u32,
+        frame: Frame,
         interval: Duration,
         waker: &Waker,
     ) -> Result<Self> {
-        objc2::rc::autoreleasepool(|_| Self::started(id, width, height, interval, true, waker))
+        objc2::rc::autoreleasepool(|_| Self::started(id, frame, interval, true, waker))
     }
 
     fn started(
         id: u32,
-        width: u32,
-        height: u32,
+        frame: Frame,
         interval: Duration,
         pointer: bool,
         waker: &Waker,
@@ -751,7 +759,7 @@ impl Stream {
         let display = display(id)?;
         let lookup = began.elapsed();
         let filter = filter(&display);
-        let prepared = configuration(width, height, true);
+        let prepared = configuration(frame, true);
         // SAFETY: a fresh configuration, before the stream reads it.
         unsafe {
             prepared
@@ -805,8 +813,7 @@ impl Stream {
         let retune = Arc::new(Retune {
             stream: stream.clone(),
             output: output.clone(),
-            width,
-            height,
+            frame,
             background: prepared.background(),
             updates: Mutex::default(),
         });

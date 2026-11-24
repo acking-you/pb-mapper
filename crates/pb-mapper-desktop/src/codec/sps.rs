@@ -1,4 +1,5 @@
-//! H.264 sequence parameter sets, read through the VUI and written back.
+//! H.264 sequence parameter sets, read through the VUI and written back,
+//! and H.265's, read as far as their conformance window.
 //!
 //! Without a `bitstream_restriction` in the SPS's VUI, a stream may reorder
 //! pictures as far as its level's decoded picture buffer allows, and a
@@ -15,7 +16,18 @@
 //! matrices and the VUI's fields before the restriction are copied as the
 //! bits they were. An SPS the parser does not take whole, or whose rewrite
 //! does not read back as written, is sent as the encoder wrote it.
+//!
+//! An SPS also says which part of its coded picture a decoder shows: H.264's
+//! `frame_cropping`, H.265's `conformance_window`. [`crop_sets`] has a
+//! keyframe's SPS show only the top left of a picture coded larger, which a
+//! Mac host codes padded to a multiple of 16 (`platform/macos/frame.rs`),
+//! every other bit as the encoder wrote it: once per set of parameter sets
+//! the encoder writes, never per picture. H.265's is read through the
+//! profile, tier and level, its sub-layers', the chroma format and the
+//! picture size to the window, and the rest is copied as the bits it was,
+//! VUI and extensions included.
 
+use crate::VideoCodec;
 use std::fmt;
 
 /// The profiles whose SPS carries the chroma format, bit depths and scaling
@@ -23,6 +35,15 @@ use std::fmt;
 const HIGH_PROFILES: [u8; 13] = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135];
 /// H.264's SPS NAL unit type.
 const SPS_NAL: u8 = 7;
+/// H.265's SPS NAL unit type, in the six bits of its two-byte header's first
+/// byte below the forbidden bit.
+const HEVC_SPS_NAL: u8 = 33;
+/// H.265's `sps_max_sub_layers_minus1` at most (H.265 7.4.3.2.1).
+const HEVC_MAX_SUB_LAYERS_MINUS1: u32 = 6;
+/// What a 4:2:0 picture's cropping counts in: a chroma sample, two luma
+/// samples across and two down, for H.264's frames (`CropUnitX` and
+/// `CropUnitY`) and H.265's conformance window (`SubWidthC`, `SubHeightC`).
+const CHROMA_420_UNIT: u32 = 2;
 /// The VUI fields before `bitstream_restriction_flag` of a VUI that sets
 /// none of them: eight flags, all 0 (H.264 E.1.1).
 const EMPTY_VUI_FIELDS: usize = 8;
@@ -80,6 +101,107 @@ pub(crate) fn restrict_reorder(nal: &[u8]) -> (SpsReorder, Option<Vec<u8>>) {
     (SpsReorder::Rewritten { stated }, Some(rewritten))
 }
 
+/// `sets`, a keyframe's parameter sets of `codec` in decoding order, each
+/// SPS among them showing only the top-left `size` of its coded picture
+/// ([`crop_to`]) and every other set as it is. `None` where there is no SPS
+/// or one does not crop: the parameter sets would not say what the viewer
+/// is to see.
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "the Mac host's padded frame alone crops")
+)]
+pub(crate) fn crop_sets(
+    codec: VideoCodec,
+    sets: &[&[u8]],
+    size: (u32, u32),
+) -> Option<Vec<Vec<u8>>> {
+    let mut cropped = Vec::with_capacity(sets.len());
+    let mut sps = false;
+    for set in sets {
+        if is_sps(codec, set) {
+            cropped.push(crop_to(codec, set, size)?);
+            sps = true;
+        } else {
+            cropped.push(set.to_vec());
+        }
+    }
+    sps.then_some(cropped)
+}
+
+/// Whether `nal`, a NAL unit of `codec` with its header, is an SPS.
+fn is_sps(codec: VideoCodec, nal: &[u8]) -> bool {
+    let Some(&header) = nal.first() else {
+        return false;
+    };
+    match codec {
+        VideoCodec::H264 => header & 0x1f == SPS_NAL,
+        VideoCodec::H265 => (header >> 1) & 0x3f == HEVC_SPS_NAL,
+        VideoCodec::Jpeg => false,
+    }
+}
+
+/// `nal`, an SPS of `codec` with its NAL header, saying that a decoder
+/// shows `size` of its picture: the top left of what it codes, cropped
+/// further from the right and the bottom, every other bit as the encoder
+/// wrote it. `None` for an SPS this does not read as far as its cropping,
+/// one whose picture is not 4:2:0 frames, one that would show less than
+/// `size` or an odd number of rows or columns more, and where the rewrite
+/// does not read back as written, at `size`.
+fn crop_to(codec: VideoCodec, nal: &[u8], size: (u32, u32)) -> Option<Vec<u8>> {
+    if size.0 == 0 || size.1 == 0 {
+        return None;
+    }
+    match codec {
+        VideoCodec::H264 => {
+            let (&header, _) = nal.split_first()?;
+            let cropped = Sps::parse(nal)?.cropped_to(size)?;
+            let rewritten = cropped.to_nal(header);
+            let read = Sps::parse(&rewritten)?;
+            (read == cropped && read.shown() == Some(size)).then_some(rewritten)
+        }
+        VideoCodec::H265 => {
+            let (&header, _) = nal.split_first_chunk::<2>()?;
+            let cropped = HevcSps::parse(nal)?.cropped_to(size)?;
+            let rewritten = cropped.to_nal(header);
+            let read = HevcSps::parse(&rewritten)?;
+            (read == cropped && read.shown() == Some(size)).then_some(rewritten)
+        }
+        VideoCodec::Jpeg => None,
+    }
+}
+
+/// `crop` (left, right, top and bottom, in chroma samples of a 4:2:0
+/// picture), with which a decoder shows `shown`, widened on the right and
+/// at the bottom so that it shows `size`: `None` where `size` is larger, or
+/// an odd number of columns or rows smaller. Cropping nothing is no
+/// cropping.
+fn crop_further(
+    crop: Option<[u32; 4]>,
+    shown: (u32, u32),
+    (width, height): (u32, u32),
+) -> Option<Option<[u32; 4]>> {
+    let units = |shown: u32, wanted: u32| {
+        let extra = shown.checked_sub(wanted)?;
+        extra
+            .is_multiple_of(CHROMA_420_UNIT)
+            .then_some(extra / CHROMA_420_UNIT)
+    };
+    let [left, right, top, bottom] = crop.unwrap_or_default();
+    let crop = [
+        left,
+        right.checked_add(units(shown.0, width)?)?,
+        top,
+        bottom.checked_add(units(shown.1, height)?)?,
+    ];
+    Some((crop != [0; 4]).then_some(crop))
+}
+
+/// `coded` luma samples less `before` and `after` chroma samples of a 4:2:0
+/// picture.
+fn shown_side(coded: u32, before: u32, after: u32) -> Option<u32> {
+    coded.checked_sub(before.checked_add(after)?.checked_mul(CHROMA_420_UNIT)?)
+}
+
 /// Bits copied as they were written: a stretch of an RBSP.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Bits {
@@ -134,6 +256,15 @@ impl<'a> Reader<'a> {
     }
     fn byte(&mut self) -> Option<u8> {
         u8::try_from(self.bits(8)?).ok()
+    }
+    /// Read past `n` bits.
+    fn skip(&mut self, n: usize) -> Option<()> {
+        let at = self.at.checked_add(n)?;
+        if at > self.data.len().checked_mul(8)? {
+            return None;
+        }
+        self.at = at;
+        Some(())
     }
     /// An unsigned Exp-Golomb code: `ue(v)`, up to `u32::MAX - 1`.
     fn ue(&mut self) -> Option<u32> {
@@ -559,6 +690,212 @@ impl Sps {
         restriction.max_dec_frame_buffering = buffering;
         sps
     }
+
+    /// The size a decoder shows of a 4:2:0 picture of frames: its
+    /// macroblocks less its cropping. `None` for any other picture, whose
+    /// cropping counts in other units.
+    fn shown(&self) -> Option<(u32, u32)> {
+        // Without the chroma format, a profile's is 4:2:0.
+        let four_two_zero = self
+            .chroma
+            .as_ref()
+            .is_none_or(|chroma| chroma.format_idc == 1);
+        if !four_two_zero || self.fields.is_some() {
+            return None;
+        }
+        let in_mbs = |minus1: u32| minus1.checked_add(1)?.checked_mul(16);
+        let [left, right, top, bottom] = self.crop.unwrap_or_default();
+        Some((
+            shown_side(in_mbs(self.width_in_mbs_minus1)?, left, right)?,
+            shown_side(in_mbs(self.height_in_map_units_minus1)?, top, bottom)?,
+        ))
+    }
+
+    /// This SPS showing `size` of its picture, cropped further from the
+    /// right and the bottom; nothing else changes.
+    fn cropped_to(&self, size: (u32, u32)) -> Option<Self> {
+        let crop = crop_further(self.crop, self.shown()?, size)?;
+        Some(Self {
+            crop,
+            ..self.clone()
+        })
+    }
+}
+
+/// `general_profile_space` through `general_level_idc` (H.265 7.3.3): the
+/// space, tier and profile, 32 compatibility flags, four source flags, 43
+/// constraint bits and one more, and the level.
+const GENERAL_PROFILE_TIER_LEVEL_BITS: usize = 2 + 1 + 5 + 32 + 4 + 43 + 1 + 8;
+/// A sub-layer's profile when present: as the general one, without a level.
+const SUB_LAYER_PROFILE_BITS: usize = 2 + 1 + 5 + 32 + 4 + 43 + 1;
+/// A sub-layer's level when present.
+const SUB_LAYER_LEVEL_BITS: usize = 8;
+/// The sub-layers `profile_tier_level` keeps two reserved bits for in all.
+const SUB_LAYER_PLACES: usize = 8;
+
+/// An H.265 SPS (`seq_parameter_set_rbsp`, H.265 7.3.2.2.1), read as far as
+/// its conformance window: the bits before it as they were written, with
+/// the chroma format and picture size read from them, the window, and the
+/// bits after it up to its `rbsp_trailing_bits` as they were written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HevcSps {
+    /// From `sps_video_parameter_set_id` through
+    /// `pic_height_in_luma_samples`.
+    head: Bits,
+    /// Read from `head`, which writes it.
+    chroma_format_idc: u32,
+    /// `pic_width_in_luma_samples` and `pic_height_in_luma_samples`, read
+    /// from `head`, which writes them.
+    coded: (u32, u32),
+    /// `conf_win_left_offset`, right, top and bottom, in chroma samples.
+    window: Option<[u32; 4]>,
+    /// From `bit_depth_luma_minus8` to the stop bit: the VUI and extensions
+    /// among it.
+    tail: Bits,
+}
+
+impl HevcSps {
+    /// Parse an SPS NAL unit, its two header bytes included. A zero byte
+    /// after its trailing bits, which a byte stream may put before the next
+    /// start code, is not part of it.
+    fn parse(nal: &[u8]) -> Option<Self> {
+        let (&[first, _], payload) = nal.split_first_chunk::<2>()?;
+        if first & 0x80 != 0 || (first >> 1) & 0x3f != HEVC_SPS_NAL {
+            return None;
+        }
+        let end = payload.iter().rposition(|&byte| byte != 0)? + 1;
+        let rbsp = unescape(payload.get(..end)?);
+        let mut bits = Reader::new(&rbsp);
+        // sps_video_parameter_set_id.
+        bits.bits(4)?;
+        let sub_layers_minus1 = bits.bits(3)?;
+        if sub_layers_minus1 > HEVC_MAX_SUB_LAYERS_MINUS1 {
+            return None;
+        }
+        // sps_temporal_id_nesting_flag.
+        bits.bit()?;
+        skip_profile_tier_level(&mut bits, sub_layers_minus1)?;
+        // sps_seq_parameter_set_id.
+        if bits.ue()? > 15 {
+            return None;
+        }
+        let chroma_format_idc = bits.ue()?;
+        if chroma_format_idc > 3 {
+            return None;
+        }
+        if chroma_format_idc == 3 {
+            // separate_colour_plane_flag.
+            bits.bit()?;
+        }
+        let coded = (bits.ue()?, bits.ue()?);
+        if coded.0 == 0 || coded.1 == 0 {
+            return None;
+        }
+        let head = bits.since(0);
+        let window = if bits.bit()? {
+            Some([bits.ue()?, bits.ue()?, bits.ue()?, bits.ue()?])
+        } else {
+            None
+        };
+        // The stop bit is the RBSP's last 1, after everything read.
+        let last = rbsp.iter().rposition(|&byte| byte != 0)?;
+        let stop = last * 8 + 7 - rbsp.get(last)?.trailing_zeros() as usize;
+        if stop < bits.at {
+            return None;
+        }
+        let tail = Reader {
+            data: &rbsp,
+            at: stop,
+        }
+        .since(bits.at);
+        Some(Self {
+            head,
+            chroma_format_idc,
+            coded,
+            window,
+            tail,
+        })
+    }
+
+    /// The RBSP of this SPS.
+    fn write(&self) -> Vec<u8> {
+        let Self {
+            head,
+            chroma_format_idc: _,
+            coded: _,
+            window,
+            tail,
+        } = self;
+        let mut out = Writer::default();
+        out.copy(head);
+        out.bit(window.is_some());
+        for offset in window.iter().flatten() {
+            out.ue(*offset);
+        }
+        out.copy(tail);
+        out.finish()
+    }
+
+    /// This SPS as a NAL unit with `header` in front, emulation prevention
+    /// included.
+    fn to_nal(&self, header: [u8; 2]) -> Vec<u8> {
+        let payload = escape(&self.write());
+        let mut nal = Vec::with_capacity(payload.len() + header.len());
+        nal.extend_from_slice(&header);
+        nal.extend_from_slice(&payload);
+        nal
+    }
+
+    /// The size a decoder shows of a 4:2:0 picture: its luma samples less
+    /// its conformance window. `None` for any other chroma format, whose
+    /// window counts in other units.
+    fn shown(&self) -> Option<(u32, u32)> {
+        if self.chroma_format_idc != 1 {
+            return None;
+        }
+        let [left, right, top, bottom] = self.window.unwrap_or_default();
+        Some((
+            shown_side(self.coded.0, left, right)?,
+            shown_side(self.coded.1, top, bottom)?,
+        ))
+    }
+
+    /// This SPS showing `size` of its picture, its window widened on the
+    /// right and at the bottom; nothing else changes.
+    fn cropped_to(&self, size: (u32, u32)) -> Option<Self> {
+        let window = crop_further(self.window, self.shown()?, size)?;
+        Some(Self {
+            window,
+            ..self.clone()
+        })
+    }
+}
+
+/// Read past `profile_tier_level(1, sps_max_sub_layers_minus1)` (H.265
+/// 7.3.3): the general profile, tier and level, which flags say each
+/// sub-layer's profile and level are present, the reserved bits after
+/// them, and those present.
+fn skip_profile_tier_level(bits: &mut Reader<'_>, sub_layers_minus1: u32) -> Option<()> {
+    bits.skip(GENERAL_PROFILE_TIER_LEVEL_BITS)?;
+    let layers = usize::try_from(sub_layers_minus1).ok()?;
+    let mut present = [(false, false); HEVC_MAX_SUB_LAYERS_MINUS1 as usize];
+    let present = present.get_mut(..layers)?;
+    for layer in present.iter_mut() {
+        *layer = (bits.bit()?, bits.bit()?);
+    }
+    if layers > 0 {
+        // reserved_zero_2bits.
+        bits.skip(2 * (SUB_LAYER_PLACES - layers))?;
+    }
+    for &(profile, level) in present.iter() {
+        if profile {
+            bits.skip(SUB_LAYER_PROFILE_BITS)?;
+        }
+        if level {
+            bits.skip(SUB_LAYER_LEVEL_BITS)?;
+        }
+    }
+    Some(())
 }
 
 impl Chroma {
@@ -1076,5 +1413,339 @@ pub(crate) mod tests {
             restrict_reorder(&sps),
             "a padded SPS is rewritten as the bare one"
         );
+    }
+
+    /// Parameter sets VideoToolbox wrote in front of a keyframe at a size a
+    /// Mac host pads its content to, and that content.
+    pub(crate) struct Padded {
+        pub(crate) name: &'static str,
+        pub(crate) codec: VideoCodec,
+        /// In decoding order: H.265's VPS, SPS and PPS.
+        pub(crate) sets: &'static [&'static str],
+        pub(crate) coded: (u32, u32),
+        pub(crate) content: (u32, u32),
+    }
+
+    /// What `video_toolbox_parameter_sets` (`platform/macos/tests.rs`)
+    /// printed on the M6 Mac of
+    /// docs/benchmarks/2026-11-24-mac-vt-padded-capture: H.264 with
+    /// low-latency rate control (Constrained High, which this macOS writes
+    /// with `constraint_set4` and `constraint_set5`), H.264 without it
+    /// (High), and H.265 with it (Main), each coding a picture padded from
+    /// 1920x1080, 3024x1964 and 3340x2160.
+    pub(crate) const PADDED: [Padded; 9] = [
+        Padded {
+            name: "constrained high 1920x1088, low latency",
+            codec: VideoCodec::H264,
+            sets: &["27640c2aac1314501e0089a6a0202020f0804258", "28ee3cb0"],
+            coded: (1920, 1088),
+            content: (1920, 1080),
+        },
+        Padded {
+            name: "constrained high 3024x1968, low latency",
+            codec: VideoCodec::H264,
+            sets: &["27640c34ac13142002f40f7a6a0202020f08042220", "28ee3cb0"],
+            coded: (3024, 1968),
+            content: (3024, 1964),
+        },
+        Padded {
+            name: "constrained high 3344x2160, low latency",
+            codec: VideoCodec::H264,
+            sets: &["27640c34ac1314700d1010fa6a0202020f08042780", "28ee3cb0"],
+            coded: (3344, 2160),
+            content: (3340, 2160),
+        },
+        Padded {
+            name: "high 1920x1088",
+            codec: VideoCodec::H264,
+            sets: &["2764002aac56807802269a80808081", "28ee3cb0"],
+            coded: (1920, 1088),
+            content: (1920, 1080),
+        },
+        Padded {
+            name: "high 3024x1968",
+            codec: VideoCodec::H264,
+            sets: &["27640034ac56802f40f7a6a020202040", "28ee3cb0"],
+            coded: (3024, 1968),
+            content: (3024, 1964),
+        },
+        Padded {
+            name: "high 3344x2160",
+            codec: VideoCodec::H264,
+            sets: &["27640034ac5680344043e9a808080810", "28ee3cb0"],
+            coded: (3344, 2160),
+            content: (3340, 2160),
+        },
+        Padded {
+            name: "main 1920x1088, low latency",
+            codec: VideoCodec::H265,
+            sets: &[
+                "40010c03ffff016000000300b0000003000003007b00001b0240",
+                "420103016000000300b0000003000003007b0000a003c0801105881b9245232e7e13d0bea1bd529a80808081fc201040",
+                "4401c0764c16c9",
+            ],
+            coded: (1920, 1088),
+            content: (1920, 1080),
+        },
+        Padded {
+            name: "main 3024x1968, low latency",
+            codec: VideoCodec::H265,
+            sets: &[
+                "40010c03ffff016000000300b00000030000030099000008c090",
+                "420103016000000300b000000300000300990000a0017a2007b1620239245210b9f84f42fa86f543faa823d5529a80808081fc201040",
+                "4401c0764c16c9",
+            ],
+            coded: (3024, 1968),
+            content: (3024, 1964),
+        },
+        Padded {
+            name: "main 3344x2160, low latency",
+            codec: VideoCodec::H265,
+            sets: &[
+                "40010c03ffff016000000300b0000003000003009900001b0240",
+                "420103016000000300b000000300000300990000a001a220021c5881b9245232e7e13d0bea1bd529a80808081fc20104",
+                "4401c0764c16c9",
+            ],
+            coded: (3344, 2160),
+            content: (3340, 2160),
+        },
+    ];
+
+    /// A padded sample's sets, as bytes.
+    pub(crate) fn padded_sets(sample: &Padded) -> Vec<Vec<u8>> {
+        sample.sets.iter().map(|set| hex(set)).collect()
+    }
+
+    /// The size an SPS of `codec` shows.
+    fn shown(codec: VideoCodec, nal: &[u8]) -> Option<(u32, u32)> {
+        match codec {
+            VideoCodec::H264 => Sps::parse(nal)?.shown(),
+            VideoCodec::H265 => HevcSps::parse(nal)?.shown(),
+            VideoCodec::Jpeg => None,
+        }
+    }
+
+    /// Every H.265 sample's SPS, and its crop, reads as far as its window
+    /// and writes back byte for byte: the bits before and after it are
+    /// where the encoder wrote them.
+    #[test]
+    fn every_hevc_sps_writes_back_byte_identically() {
+        for sample in PADDED
+            .iter()
+            .filter(|sample| sample.codec == VideoCodec::H265)
+        {
+            let sps = hex(sample.sets[1]);
+            let cropped = crop_to(VideoCodec::H265, &sps, sample.content).unwrap();
+            for nal in [sps, cropped] {
+                let read = HevcSps::parse(&nal).unwrap_or_else(|| panic!("{}", sample.name));
+                assert_eq!(read.to_nal([nal[0], nal[1]]), nal, "{}", sample.name);
+                assert_eq!(read.chroma_format_idc, 1);
+            }
+        }
+    }
+
+    /// Each sample's SPS shows the size VideoToolbox coded and, cropped,
+    /// the content alone, cropped from the right and the bottom in chroma
+    /// samples; every other field, and every other set, is as the encoder
+    /// wrote it. Cropping again to the content changes nothing, and
+    /// cropping to the coded size gives the encoder's own SPS back.
+    #[test]
+    fn every_padded_sample_crops_to_its_content() {
+        for sample in &PADDED {
+            let codec = sample.codec;
+            let sets = padded_sets(sample);
+            let borrowed: Vec<&[u8]> = sets.iter().map(Vec::as_slice).collect();
+            let cropped = crop_sets(codec, &borrowed, sample.content)
+                .unwrap_or_else(|| panic!("{}", sample.name));
+            assert_eq!(cropped.len(), sets.len());
+            let at = usize::from(codec == VideoCodec::H265);
+            for (index, (before, after)) in sets.iter().zip(&cropped).enumerate() {
+                if index != at {
+                    assert_eq!(before, after, "{}", sample.name);
+                }
+            }
+            let (before, after) = (&sets[at], &cropped[at]);
+            assert_eq!(shown(codec, before), Some(sample.coded), "{}", sample.name);
+            assert_eq!(shown(codec, after), Some(sample.content), "{}", sample.name);
+            let extra = (
+                (sample.coded.0 - sample.content.0) / 2,
+                (sample.coded.1 - sample.content.1) / 2,
+            );
+            match codec {
+                VideoCodec::H264 => {
+                    let read = Sps::parse(before).unwrap();
+                    let cropped = Sps::parse(after).unwrap();
+                    assert_eq!(read.crop, None, "{}", sample.name);
+                    assert_eq!(
+                        cropped.crop,
+                        Some([0, extra.0, 0, extra.1]),
+                        "{}",
+                        sample.name
+                    );
+                    assert_eq!(
+                        Sps {
+                            crop: None,
+                            ..cropped
+                        },
+                        read,
+                        "{}",
+                        sample.name
+                    );
+                }
+                VideoCodec::H265 | VideoCodec::Jpeg => {
+                    let read = HevcSps::parse(before).unwrap();
+                    let cropped = HevcSps::parse(after).unwrap();
+                    let [left, right, top, bottom] = read.window.unwrap_or_default();
+                    assert_eq!(
+                        cropped.window,
+                        Some([left, right + extra.0, top, bottom + extra.1]),
+                        "{}",
+                        sample.name
+                    );
+                    assert_eq!(
+                        HevcSps {
+                            window: read.window,
+                            ..cropped
+                        },
+                        read,
+                        "{}",
+                        sample.name
+                    );
+                }
+            }
+            assert_eq!(crop_to(codec, after, sample.content).as_ref(), Some(after));
+            assert_eq!(crop_to(codec, before, sample.coded).as_ref(), Some(before));
+        }
+    }
+
+    /// An H.265 SPS of `sub_layers` (whether each one's profile and level
+    /// are present), `chroma` (`chroma_format_idc`), `coded` luma samples
+    /// and `window`, a few of the usual fields after the window: built bit
+    /// by bit, every bit of the profiles and levels a 1, so that a length
+    /// misread lands on another size.
+    fn hevc_sps(
+        sub_layers: &[(bool, bool)],
+        chroma: u32,
+        coded: (u32, u32),
+        window: Option<[u32; 4]>,
+    ) -> Vec<u8> {
+        let mut out = Writer::default();
+        // sps_video_parameter_set_id, sps_max_sub_layers_minus1 and
+        // sps_temporal_id_nesting_flag.
+        out.bits(4, 0);
+        out.bits(3, sub_layers.len() as u32);
+        out.bit(true);
+        let ones = |out: &mut Writer, n: usize| (0..n).for_each(|_| out.bit(true));
+        ones(&mut out, GENERAL_PROFILE_TIER_LEVEL_BITS);
+        for &(profile, level) in sub_layers {
+            out.bit(profile);
+            out.bit(level);
+        }
+        if !sub_layers.is_empty() {
+            out.bits(2 * (SUB_LAYER_PLACES - sub_layers.len()) as u32, 0);
+        }
+        for &(profile, level) in sub_layers {
+            if profile {
+                ones(&mut out, SUB_LAYER_PROFILE_BITS);
+            }
+            if level {
+                ones(&mut out, SUB_LAYER_LEVEL_BITS);
+            }
+        }
+        out.ue(0);
+        out.ue(chroma);
+        if chroma == 3 {
+            out.bit(false);
+        }
+        out.ue(coded.0);
+        out.ue(coded.1);
+        out.bit(window.is_some());
+        for offset in window.iter().flatten() {
+            out.ue(*offset);
+        }
+        // 8-bit depths, a 16-bit picture order count, one sub-layer's
+        // ordering, then flags.
+        for value in [0, 0, 12, 1, 4, 0] {
+            out.ue(value);
+        }
+        for flag in [true, false, true, true, false] {
+            out.bit(flag);
+        }
+        [&[0x42, 0x01][..], &escape(&out.finish())].concat()
+    }
+
+    /// The profile, tier and level of every sub-layer present is read past,
+    /// whichever are present: the picture size and window are found where
+    /// they are, and the window is widened to crop to the content asked
+    /// for.
+    #[test]
+    fn an_hevc_sps_with_sub_layers_is_read_to_its_window() {
+        for sub_layers in [
+            &[][..],
+            &[(true, true), (false, true)],
+            &[(false, false); 6],
+            &[
+                (true, false),
+                (true, true),
+                (false, true),
+                (true, true),
+                (false, false),
+                (true, true),
+            ],
+        ] {
+            let sps = hevc_sps(sub_layers, 1, (1928, 1088), Some([0, 4, 0, 4]));
+            let read = HevcSps::parse(&sps).unwrap_or_else(|| panic!("{sub_layers:?}"));
+            assert_eq!(
+                (read.coded, read.window),
+                ((1928, 1088), Some([0, 4, 0, 4]))
+            );
+            assert_eq!(read.shown(), Some((1920, 1080)));
+            let cropped = crop_to(VideoCodec::H265, &sps, (1910, 1076)).unwrap();
+            let after = HevcSps::parse(&cropped).unwrap();
+            assert_eq!(after.window, Some([0, 9, 0, 6]), "{sub_layers:?}");
+            assert_eq!((after.head, after.tail), (read.head, read.tail));
+        }
+        // No window becomes one; a window of nothing is none.
+        let sps = hevc_sps(&[], 1, (1920, 1088), None);
+        let cropped = crop_to(VideoCodec::H265, &sps, (1920, 1080)).unwrap();
+        assert_eq!(HevcSps::parse(&cropped).unwrap().window, Some([0, 0, 0, 4]));
+        assert_eq!(crop_to(VideoCodec::H265, &sps, (1920, 1088)), Some(sps));
+        // Seven sub-layers is more than H.265 has.
+        let seven = hevc_sps(&[(false, false); 7], 1, (64, 64), None);
+        assert!(HevcSps::parse(&seven).is_none());
+    }
+
+    /// What would not show the content exactly is refused, and the caller
+    /// sends nothing cropped: a larger size, an odd number of rows or
+    /// columns to crop, an empty size, a picture other than 4:2:0 frames
+    /// (H.264's 4:4:4 and field samples, an H.265 4:4:4 one), an SPS cut
+    /// short or of the other codec, sets without an SPS, and JPEG.
+    #[test]
+    fn what_would_not_crop_exactly_is_refused() {
+        let h264 = hex(PADDED[0].sets[0]);
+        let h265 = hex(PADDED[6].sets[1]);
+        for (codec, sps) in [(VideoCodec::H264, &h264), (VideoCodec::H265, &h265)] {
+            assert!(crop_to(codec, sps, (1920, 1080)).is_some());
+            assert!(crop_to(codec, sps, (1922, 1080)).is_none());
+            assert!(crop_to(codec, sps, (1920, 1090)).is_none());
+            assert!(crop_to(codec, sps, (1919, 1080)).is_none());
+            assert!(crop_to(codec, sps, (1920, 1081)).is_none());
+            assert!(crop_to(codec, sps, (0, 1080)).is_none());
+            // Cut before the window. H.265's bits after it are copied, not
+            // read, so a cut there goes out cut, as the encoder wrote it.
+            assert!(crop_to(codec, &sps[..16], (1920, 1080)).is_none());
+            assert!(crop_to(VideoCodec::Jpeg, sps, (1920, 1080)).is_none());
+        }
+        assert!(crop_to(VideoCodec::H264, &h264[..h264.len() - 3], (1920, 1080)).is_none());
+        assert!(crop_to(VideoCodec::H264, &hex(BUILT[2].sps), (8, 8)).is_none());
+        assert!(crop_to(VideoCodec::H264, &hex(BUILT[1].sps), (8, 8)).is_none());
+        let four_four_four = hevc_sps(&[], 3, (1920, 1088), None);
+        assert!(HevcSps::parse(&four_four_four).is_some());
+        assert!(crop_to(VideoCodec::H265, &four_four_four, (1920, 1080)).is_none());
+        assert!(crop_to(VideoCodec::H265, &h264, (1920, 1080)).is_none());
+        assert!(crop_to(VideoCodec::H264, &h265, (1920, 1080)).is_none());
+        let vps_pps = [hex(PADDED[6].sets[0]), hex(PADDED[6].sets[2])];
+        let vps_pps: Vec<&[u8]> = vps_pps.iter().map(Vec::as_slice).collect();
+        assert!(crop_sets(VideoCodec::H265, &vps_pps, (1920, 1080)).is_none());
     }
 }

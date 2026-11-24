@@ -12,6 +12,7 @@
 
 use super::{
     encoder::{Admit, Encoder, Options},
+    frame::Frame,
     tests::{quantile, report, surface},
     video::VT_IN_FLIGHT,
 };
@@ -305,8 +306,7 @@ impl Rig {
         let waiter = Waiter::new(&wake).unwrap();
         match Encoder::tuned(
             codec,
-            width,
-            height,
+            Frame::exact(width, height),
             fps,
             bitrate,
             &Waker(wake.clone()),

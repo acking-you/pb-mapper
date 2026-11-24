@@ -1,9 +1,15 @@
 //! Capture and encode fused, as thread C sees them: a ScreenCaptureKit
 //! stream scaled to the encoder's size, and a VideoToolbox session that
-//! reads its pictures in place. Thread C paces: each submit encodes the
-//! newest picture, or the last one again every `LIVENESS_INTERVAL` while
-//! the screen stands still, or at the next tick for a keyframe or for a
-//! last picture VideoToolbox dropped (`codec::resubmit`). A submit only hands
+//! reads its pictures in place. A size that is not a multiple of 16 is
+//! captured into the top left of a frame padded to one (`frame.rs`), whose
+//! pictures cover a multiple of 16 both ways, which VideoToolbox encodes
+//! inside its call, and whose SPS crops the padding away; once a session's
+//! SPS would not crop, the process captures and encodes the size itself
+//! (`encoder::pads`).
+//! Thread C paces: each submit encodes the newest picture, or the last one
+//! again every `LIVENESS_INTERVAL` while the screen stands still, or at the
+//! next tick for a keyframe or for a last picture VideoToolbox dropped
+//! (`codec::resubmit`). A submit only hands
 //! the picture to the encoder's submit thread, which makes the VideoToolbox
 //! call; at most `VT_IN_FLIGHT` units are in flight, and a submit that finds
 //! the submit thread still busy leaves its tick armed until that thread
@@ -26,8 +32,9 @@
 
 use super::{
     cadence::{self, Follow},
-    capture::{CaptureState, Counts, Refresh, Stream},
+    capture::{self, CaptureState, Counts, Refresh, Stream},
     encoder::{self, Admit, Encoder},
+    frame::Frame,
     platform::ScreenAccess,
     power,
     wake::{SETTLE, SleepWatch},
@@ -55,9 +62,10 @@ use std::{
 
 /// Units VideoToolbox may hold at once, the mailbox's among them; thread C
 /// skips a tick that finds this many (`full`). Where a session encodes
-/// asynchronously (a size that is not a multiple of 16, such as a MacBook's
-/// built-in display at its default resolution) and the pace outruns it,
-/// each unit admitted waits behind the others: on an M6 at a pace of 120,
+/// asynchronously (pictures whose buffers do not cover a multiple of 16, as
+/// a MacBook's built-in display at its default resolution may give where
+/// padding is off) and the pace outruns it, each unit admitted waits behind
+/// the others: on an M6 at a pace of 120,
 /// a 3024x1964 session's units took 41 ms (H.264) and 39 ms (H.265) from
 /// submit to output, at a median, with four in flight, and 18 and 17 ms
 /// with two, at the same frame rate (`video_toolbox_in_flight`). Where it
@@ -121,8 +129,9 @@ pub(crate) struct MacVideo {
     encoder: Encoder,
     /// The captured display's id.
     display: u32,
-    /// The encoder's and the stream's size.
-    size: (u32, u32),
+    /// What the stream fills and the encoder codes, and the part of it the
+    /// viewers see.
+    frame: Frame,
     /// The display's refresh, and when it was last read.
     refresh: Refresh,
     refresh_read: Instant,
@@ -249,10 +258,11 @@ impl VideoSource for MacVideo {
         encoder::encodes(codec)
     }
     /// The display fitted inside the viewer's limits, its aspect kept,
-    /// never upscaled; the encoder first, whose failure is the codec's. The
-    /// stream starts at the current pace's interval on the display's
-    /// refresh. A sleeping display is lit instead, and the open fails until
-    /// it draws.
+    /// never upscaled, in the top left of a frame padded to a multiple of 16
+    /// while padding is on and the stream can place its picture; the
+    /// encoder first, whose failure is the codec's. The stream starts at
+    /// the current pace's interval on the display's refresh. A sleeping
+    /// display is lit instead, and the open fails until it draws.
     fn open(
         _: &ScreenAccess,
         display: &Display,
@@ -277,9 +287,14 @@ impl VideoSource for MacVideo {
         let (mode_hz, link_period) = (refresh.mode_hz(), refresh.link_period());
         let refresh_hz = cadence::refresh_hz(mode_hz, link_period);
         let follow = Follow::new(refresh_hz, rate.pace_fps, limits.max_fps);
-        let encoder = Encoder::new(codec, width, height, limits.max_fps, rate.bitrate, waker)?;
-        let stream = Stream::start(display.id, width, height, follow.applied(), waker).map_err(
-            |failure| {
+        let frame = if encoder::pads() && capture::places() {
+            Frame::padded(width, height)
+        } else {
+            Frame::exact(width, height)
+        };
+        let encoder = Encoder::new(codec, frame, limits.max_fps, rate.bitrate, waker)?;
+        let stream =
+            Stream::start(display.id, frame, follow.applied(), waker).map_err(|failure| {
                 // ScreenCaptureKit may not list a display that fell asleep.
                 if failure_kind(&failure) == Some(FailureKind::DisplayLost)
                     && power::wake([display.id])
@@ -288,8 +303,7 @@ impl VideoSource for MacVideo {
                 } else {
                     failure
                 }
-            },
-        )?;
+            })?;
         let opened = follow.wanted();
         let pace_fps = rate.pace_fps.min(limits.max_fps).max(1);
         tracing::info!(
@@ -297,6 +311,8 @@ impl VideoSource for MacVideo {
             event = "macos_capture_opened",
             width,
             height,
+            coded_width = frame.coded.0,
+            coded_height = frame.coded.1,
             refresh_hz,
             mode_hz,
             link_period_us = link_period.map(|period| period.as_micros() as u64),
@@ -317,7 +333,7 @@ impl VideoSource for MacVideo {
             stream,
             encoder,
             display: display.id,
-            size: (width, height),
+            frame,
             refresh,
             refresh_read: now,
             follow,
@@ -491,7 +507,7 @@ impl VideoSource for MacVideo {
             limits.max_width,
             limits.max_height,
         );
-        if size != self.size || self.stream.stopped() {
+        if size != self.frame.content || self.stream.stopped() {
             return Ok(false);
         }
         self.encoder.set_expected_fps(limits.max_fps);
