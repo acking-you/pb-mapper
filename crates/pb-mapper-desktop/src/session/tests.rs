@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    Display,
+    Display, KeyframeReason,
     outgoing::HostUnit,
     protocol::{HostMessage, NoticeCode, SessionState, VideoSize},
     shared::{CursorReport, CursorUpdate, EngineState},
@@ -181,7 +181,12 @@ async fn stale_generation_units_are_dropped_before_admission() {
 
     // The session continues, and the seq stays contiguous. Each report
     // goes out once, even at a position written before.
-    viewer.send(ViewerMessage::Received { seq: 2 }).await;
+    viewer
+        .send(ViewerMessage::Received {
+            seq: 2,
+            at_us: None,
+        })
+        .await;
     shared.cursor.send_replace(report(2));
     shared.outgoing.push(unit(2, 5, false));
     assert!(cursor(&viewer.next().await.0));
@@ -190,12 +195,22 @@ async fn stale_generation_units_are_dropped_before_admission() {
         unreachable!()
     };
     assert_eq!((stats.dropped_frames, stats.frames), (2, 3));
-    // A viewer that did not list `encoder_dwell` would reject the field.
+    // A viewer that did not list `encoder_dwell` would reject the field, and
+    // one that did not list `arrival_time` the one-way queues.
     assert_eq!(stats.encoder_dwell_ms, None);
+    assert_eq!(
+        (stats.forward_queue_ms, stats.reverse_queue_ms),
+        (None, None)
+    );
 
     // A receipt for video never sent is a protocol error, and the viewer
     // hears so before the close.
-    viewer.send(ViewerMessage::Received { seq: 9 }).await;
+    viewer
+        .send(ViewerMessage::Received {
+            seq: 9,
+            at_us: None,
+        })
+        .await;
     let (stopped, _) = viewer.next().await;
     assert!(
         matches!(
@@ -210,6 +225,96 @@ async fn stale_generation_units_are_dropped_before_admission() {
     let mut rest = vec![];
     viewer.read.read_to_end(&mut rest).await.unwrap();
     assert!(rest.is_empty());
+    drop(viewer);
+    running.await.unwrap();
+}
+
+/// A viewer that listed `keyframe_seq` asks for an IDR having read seq 2,
+/// after the session's first IDR: the predicted units C makes before the
+/// next IDR are dropped without a seq, and the IDR clears the skip. One that
+/// listed `arrival_time` reads its one-way queues in `Stats`, and its video
+/// headers come apart from their payloads. A request after a seq never sent
+/// is a protocol error.
+#[tokio::test]
+async fn a_keyframe_request_after_a_seq_skips_predicted_units_until_the_idr() {
+    let (viewer, host) = tokio::io::duplex(1 << 20);
+    let (read, write) = tokio::io::split(viewer);
+    let mut viewer = Viewer { read, write };
+    let listed = [
+        CAPABILITY_ARRIVAL_TIME.to_owned(),
+        CAPABILITY_KEYFRAME_SEQ.to_owned(),
+    ];
+    let session = Session::new(
+        Arc::new(Policy::new(true)),
+        CancellationToken::new(),
+        VideoCodec::H264,
+        VideoLimits::for_viewer(60.0),
+        QualityPreset::Balanced,
+        &listed,
+        &listed,
+    );
+    let shared = session.shared.clone();
+    shared.state.send_replace(streaming(1));
+    let cancel = shared.cancel.clone();
+    let running = tokio::spawn(run(session.clone(), host, async move {
+        cancel.cancelled().await;
+        WorkerExit::Cancelled
+    }));
+
+    assert_eq!(state_generation(&viewer.next().await.0), 1);
+    shared.outgoing.push(unit(1, 1, true));
+    shared.outgoing.push(unit(1, 2, false));
+    let (first, payload) = viewer.next().await;
+    assert_eq!(video(&first), (1, 1, 1));
+    assert_eq!(payload.unwrap()[..], [1; 100]);
+    assert_eq!(video(&viewer.next().await.0), (2, 1, 2));
+    for seq in 1..=2 {
+        viewer
+            .send(ViewerMessage::Received {
+                seq,
+                at_us: Some(10_000 * seq),
+            })
+            .await;
+    }
+    viewer
+        .send(ViewerMessage::Keyframe {
+            reason: KeyframeReason::Gap,
+            after_seq: Some(2),
+        })
+        .await;
+    crate::test_util::until_within(Duration::from_secs(5), || {
+        shared.idr.lock().take_due(Instant::now())
+    })
+    .await;
+    shared.outgoing.push(unit(1, 3, false));
+    shared.outgoing.push(unit(1, 4, false));
+    shared.outgoing.push(unit(1, 5, true));
+    shared.outgoing.push(unit(1, 6, false));
+    assert_eq!(video(&viewer.next().await.0), (3, 1, 5));
+    assert_eq!(video(&viewer.next().await.0), (4, 1, 6));
+    let HostMessage::Stats(stats) = viewer.stats().await else {
+        unreachable!()
+    };
+    assert_eq!((stats.dropped_frames, stats.frames), (2, 4));
+    assert_eq!(stats.forward_queue_ms, Some(0));
+
+    viewer
+        .send(ViewerMessage::Keyframe {
+            reason: KeyframeReason::Gap,
+            after_seq: Some(5),
+        })
+        .await;
+    let (stopped, _) = viewer.next().await;
+    assert!(
+        matches!(
+            stopped,
+            HostMessage::Stopped {
+                reason: StopReason::ProtocolError,
+                ..
+            }
+        ),
+        "{stopped:?}"
+    );
     drop(viewer);
     running.await.unwrap();
 }

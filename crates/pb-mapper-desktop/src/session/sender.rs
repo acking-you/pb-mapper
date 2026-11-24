@@ -31,9 +31,10 @@ const CONTROL_DENIED: &str = "Control is not allowed on this computer";
 /// A write could not finish: the transport failed, or the stop budget ran out.
 struct Abandoned;
 
-/// Write one message. Once the session is cancelled, the message in flight and
-/// the final `Stopped` share `STOP_WRITE_TIMEOUT`, so a local stop never waits
-/// for a slow viewer to drain video.
+/// Write one message, its header as its own TLS record when `split`. Once
+/// the session is cancelled, the message in flight and the final `Stopped`
+/// share `STOP_WRITE_TIMEOUT`, so a local stop never waits for a slow viewer
+/// to drain video.
 async fn write<W: AsyncWrite + Unpin>(
     writer: &mut W,
     records: &mut Vec<u8>,
@@ -41,8 +42,9 @@ async fn write<W: AsyncWrite + Unpin>(
     stop_at: &mut Option<Instant>,
     header: &HostMessage,
     payload: Option<&[u8]>,
+    split: bool,
 ) -> Result<(), Abandoned> {
-    let write = wire::write_message_with(writer, records, header, payload);
+    let write = wire::write_message_split_with(writer, records, header, payload, split);
     tokio::pin!(write);
     loop {
         if let Some(deadline) = *stop_at {
@@ -145,6 +147,16 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         header: &HostMessage,
         payload: Option<&[u8]>,
     ) -> Result<(), Abandoned> {
+        self.send_split(header, payload, false).await
+    }
+
+    /// `send`, the header as its own TLS record when `split`.
+    async fn send_split(
+        &mut self,
+        header: &HostMessage,
+        payload: Option<&[u8]>,
+        split: bool,
+    ) -> Result<(), Abandoned> {
         write(
             &mut self.writer,
             &mut self.records,
@@ -152,6 +164,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             &mut self.stop_at,
             header,
             payload,
+            split,
         )
         .await
     }
@@ -399,7 +412,9 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
 
     /// Write every unit credit admits. Returns whether the head waits for
     /// credit. Units of a generation older than the last `State` are dropped
-    /// without a seq, so the seq stays contiguous. A head that ages past
+    /// without a seq, so the seq stays contiguous, and so are predicted units
+    /// while the viewer waits for an IDR it asked for and drops what comes
+    /// before it (`CreditLedger::skip_to_keyframe`). A head that ages past
     /// `OUTGOING_MAX_AGE` is replaced by an IDR, but never while one is in
     /// flight: on a link where an IDR takes longer than that to cross, the
     /// P-frames behind it would age out into another IDR, and that one into
@@ -429,7 +444,19 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
                 }
                 continue;
             }
-            let aging = self.session.credit.lock().aging_since(head.ready_at);
+            let (aging, skip) = {
+                let mut credit = self.session.credit.lock();
+                (
+                    credit.aging_since(head.ready_at),
+                    !head.keyframe && credit.skipping(now),
+                )
+            };
+            if skip {
+                if shared.outgoing.pop_if(head.frame_id).is_some() {
+                    self.counters.dropped += 1;
+                }
+                continue;
+            }
             if aging.is_some_and(|since| now.saturating_duration_since(since) > OUTGOING_MAX_AGE) {
                 self.counters.dropped += shared.outgoing.clear() as u64;
                 shared.idr.lock().request(IdrReason::HostResync);
@@ -477,7 +504,10 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
                     .encode_us
                     .saturating_add(u32::try_from(waited).unwrap_or(u32::MAX)),
             };
-            self.send(&video, Some(&unit.bytes)).await?;
+            // A viewer that stamps arrival times reads the header as soon as
+            // it lands, not with the payload's first record.
+            self.send_split(&video, Some(&unit.bytes), self.session.arrival_time)
+                .await?;
             let len = unit.bytes.len() as u64;
             self.counters.frames += 1;
             self.counters.bytes += len;
@@ -504,12 +534,13 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             let mut qos = session.qos.lock();
             (qos.view(now), qos.take_receipt_rate(now))
         };
-        let (credit, ack_queue, window) = {
+        let (credit, ack_queue, one_way, window) = {
             let mut credit = session.credit.lock();
             (
                 credit.view(),
                 qos.base_rtt
                     .map_or(Duration::ZERO, |base| credit.ack_queue(base, now)),
+                credit.one_way_queues(now),
                 credit.window(
                     session.codec,
                     qos.pace_fps,
@@ -519,6 +550,8 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
                 ),
             )
         };
+        let (forward_queue, reverse_queue) = one_way.unzip();
+        let reverse_queue = reverse_queue.flatten();
         let produced = session.shared.outgoing.produced();
         let interval = now
             .saturating_duration_since(self.stats_since)
@@ -543,6 +576,10 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             base_rtt_ms: qos.base_rtt.map(ms),
             queue_delay_ms: qos.delay_ms,
             ack_queue_ms: ms(ack_queue),
+            // A ledger keeps one-way queues only for a viewer that listed
+            // `arrival_time`.
+            forward_queue_ms: forward_queue.map(ms),
+            reverse_queue_ms: reverse_queue.map(ms),
             encoder_dwell_ms: engine
                 .encoder_dwell
                 .filter(|_| session.encoder_dwell)
@@ -575,6 +612,8 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             delay_ms = qos.delay_ms,
             tainted = qos.tainted,
             ack_queue_ms = ms(ack_queue),
+            forward_queue_ms = forward_queue.map(ms),
+            reverse_queue_ms = reverse_queue.map(ms),
             standing_ms = receipts.standing.map(ms),
             busy_bps = receipts.busy_bps,
             used_bps = receipts.used_bps,

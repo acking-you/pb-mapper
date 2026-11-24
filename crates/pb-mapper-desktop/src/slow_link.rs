@@ -1312,8 +1312,11 @@ struct ReverseRun {
     before: Interval,
     /// The host's intervals that cover only time under the queue.
     held: Vec<Interval>,
-    /// The viewer's received fps, sampled once a second from the second
-    /// second under the queue until it is lifted.
+    /// The viewer's received fps, sampled once a second under the queue
+    /// until it is lifted, from the first sample that cannot cover its first
+    /// second: the viewer rolls the figure up once a second on a clock of its
+    /// own, so a sample 2 s in may still be that second's, the round trip in
+    /// which no receipt comes back and the window has yet to learn why.
     received: Vec<f32>,
 }
 
@@ -1397,7 +1400,7 @@ async fn reverse_queue(trace: &Trace, case: &str, down_rate: u64) -> ReverseRun 
         ),
         received: samples
             .iter()
-            .filter(|(at, _)| (queued + Duration::from_secs(2)..lifted).contains(at))
+            .filter(|(at, _)| (queued + Duration::from_secs(3)..lifted).contains(at))
             .map(|(_, fps)| *fps)
             .collect(),
     }

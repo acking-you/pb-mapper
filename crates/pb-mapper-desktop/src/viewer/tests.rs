@@ -2,9 +2,10 @@ use super::{session::VIEWER_TICK, *};
 use crate::{
     Display, Key, VideoLimits,
     protocol::{
-        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE, CAPABILITY_ENCODER_DWELL,
-        CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265, CAPABILITY_PEER_CURSORS, HostMessage, PeerColor,
-        PeerSlot, RejectReason, StopReason, ViewerMessage,
+        CAPABILITY_ARRIVAL_TIME, CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE,
+        CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265,
+        CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, HostMessage, PeerColor, PeerSlot,
+        RejectReason, StopReason, ViewerMessage,
     },
     wire,
 };
@@ -192,19 +193,28 @@ async fn scripted_host_session_acknowledges_first_and_authorises_input_by_presen
             CAPABILITY_CURSOR_SEQUENCE,
             CAPABILITY_DISPLAY_MODE,
             CAPABILITY_CURSOR_SHAPE,
-            CAPABILITY_PEER_CURSORS
+            CAPABILITY_PEER_CURSORS,
+            CAPABILITY_ARRIVAL_TIME,
+            CAPABILITY_KEYFRAME_SEQ
         ]
     );
 
-    // Receipts and probe echoes need no consumer at all.
+    // Receipts and probe echoes need no consumer at all. A host that did not
+    // list `arrival_time` gets no arrival time, which it would reject.
     send(&mut host, state(1, false), None).await;
     send(&mut host, HostMessage::Probe { nonce: 7 }, None).await;
     send(&mut host, video(1, 1, 1, true), Some(&[1; 64])).await;
     let (mut echoed, mut received) = (false, false);
     while !(echoed && received) {
         match receive(&mut host).await {
-            ViewerMessage::ProbeEcho { nonce: 7 } => echoed = true,
-            ViewerMessage::Received { seq: 1 } => received = true,
+            ViewerMessage::ProbeEcho {
+                nonce: 7,
+                at_us: None,
+            } => echoed = true,
+            ViewerMessage::Received {
+                seq: 1,
+                at_us: None,
+            } => received = true,
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -268,7 +278,7 @@ async fn scripted_host_session_acknowledges_first_and_authorises_input_by_presen
     send(&mut host, state(2, false), None).await;
     send(&mut host, video(2, 1, 2, false), Some(&[2; 64])).await;
     until(&mut host, |m| {
-        matches!(m, ViewerMessage::Received { seq: 2 })
+        matches!(m, ViewerMessage::Received { seq: 2, .. })
     })
     .await;
     assert!(matches!(
@@ -329,6 +339,8 @@ async fn h265_is_offered_as_a_capability_and_accepted_only_when_offered() {
             CAPABILITY_DISPLAY_MODE,
             CAPABILITY_CURSOR_SHAPE,
             CAPABILITY_PEER_CURSORS,
+            CAPABILITY_ARRIVAL_TIME,
+            CAPABILITY_KEYFRAME_SEQ,
             CAPABILITY_H265,
             CAPABILITY_FPS_OVERRIDE
         ]
@@ -650,7 +662,7 @@ async fn time_without_video_counts_only_while_streaming() {
     send(&mut host, state(1, false), None).await;
     send(&mut host, video(1, 1, 1, true), Some(&[1; 64])).await;
     until(&mut host, |m| {
-        matches!(m, ViewerMessage::Received { seq: 1 })
+        matches!(m, ViewerMessage::Received { seq: 1, .. })
     })
     .await;
     let age_within = |due: Instant| {
@@ -703,6 +715,8 @@ async fn host_stats_reach_the_viewer_status() {
             base_rtt_ms: Some(38),
             queue_delay_ms: Some(2),
             ack_queue_ms: 12,
+            forward_queue_ms: Some(4),
+            reverse_queue_ms: Some(300),
             encoder_dwell_ms: Some(3),
             dropped_frames: 0,
             skipped_ticks,
@@ -729,10 +743,77 @@ async fn host_stats_reach_the_viewer_status() {
     assert_eq!(json["sent_bitrate"], 3_900_000);
     assert_eq!(json["encoder_dwell_ms"], 3);
     assert_eq!(json["ack_queue_ms"], 12);
+    assert_eq!(json["forward_queue_ms"], 4);
+    assert_eq!(json["reverse_queue_ms"], 300);
     viewer.set_quality(QualityPreset::Smooth);
     assert_eq!(viewer.status().stats.preset, QualityPreset::Smooth);
     drop(host);
     viewer.stop().await.unwrap();
+}
+
+/// To a host that listed `arrival_time` and `keyframe_seq`, a probe echo
+/// and a receipt carry when their header was read, on the session's clock,
+/// and a decoder's request for an IDR, which drops predicted frames until
+/// then, the last seq read; to one that did not, neither.
+#[tokio::test]
+async fn arrival_times_and_keyframe_seqs_go_to_a_host_that_listed_them() {
+    let accepted_listing = |capabilities: &[&str]| HostMessage::Accepted {
+        codec: VideoCodec::H264,
+        limits: VideoLimits::for_viewer(60.0),
+        nominal_fps: 60,
+        quality: QualityPreset::Balanced,
+        capabilities: capabilities
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+    };
+    for listed in [true, false] {
+        let answer = if listed {
+            accepted_listing(&[CAPABILITY_ARRIVAL_TIME, CAPABILITY_KEYFRAME_SEQ])
+        } else {
+            accepted()
+        };
+        let (viewer, mut host, _) = connect(answer).await;
+        let viewer = viewer.unwrap();
+        send(&mut host, state(1, false), None).await;
+        send(&mut host, HostMessage::Probe { nonce: 3 }, None).await;
+        send(&mut host, video(1, 1, 1, true), Some(&[1; 64])).await;
+        let ViewerMessage::ProbeEcho { nonce: 3, at_us } = receive(&mut host).await else {
+            panic!("expected the probe's echo");
+        };
+        let ViewerMessage::Received {
+            seq: 1,
+            at_us: first,
+        } = receive(&mut host).await
+        else {
+            panic!("expected the receipt");
+        };
+        assert_eq!(at_us.is_some(), listed);
+        assert_eq!(first.is_some(), listed);
+        assert!(at_us <= first, "{at_us:?} {first:?}");
+        // Shown: live, so a decoder's request goes at once.
+        let consumer = viewer.video_sink().attach().unwrap();
+        pull(&consumer).await;
+        assert!(consumer.presented(1, 1));
+        send(&mut host, video(2, 1, 2, false), Some(&[2; 64])).await;
+        let ViewerMessage::Received { seq: 2, at_us } =
+            until(&mut host, |m| matches!(m, ViewerMessage::Received { .. })).await
+        else {
+            panic!("expected the receipt");
+        };
+        assert!(at_us >= first, "{at_us:?} {first:?}");
+        assert!(consumer.keyframe(KeyframeReason::Gap));
+        let ViewerMessage::Keyframe {
+            reason: KeyframeReason::Gap,
+            after_seq,
+        } = until(&mut host, |m| matches!(m, ViewerMessage::Keyframe { .. })).await
+        else {
+            panic!("expected the request");
+        };
+        assert_eq!(after_seq, listed.then_some(2));
+        drop(host);
+        viewer.stop().await.unwrap();
+    }
 }
 
 /// An IDR slower to cross than the hold after a new generation: its
@@ -749,7 +830,7 @@ async fn an_idr_slower_than_the_hold_is_not_asked_for_again() {
     host.write_u32(64).await.unwrap();
     host.write_all(&[1; 64]).await.unwrap();
     until(&mut host, |m| {
-        matches!(m, ViewerMessage::Received { seq: 1 })
+        matches!(m, ViewerMessage::Received { seq: 1, .. })
     })
     .await;
     assert_eq!(viewer.status().stats.keyframes_requested, 0);

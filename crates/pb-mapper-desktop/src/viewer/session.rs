@@ -286,16 +286,21 @@ impl Reader<'_> {
                     }
                     Err(failure) => return Ended::failed(failure),
                 };
-            if let Err(ended) = self.handle(message, read).await {
+            // The header is read: a unit's first bytes are here, or, when
+            // the reader came late to it, the previous message is done.
+            let at = Instant::now();
+            if let Err(ended) = self.handle(message, read, at).await {
                 return ended;
             }
         }
     }
 
+    /// `at`: when `message`'s header was read.
     async fn handle<R: AsyncRead + Unpin>(
         &mut self,
         message: HostMessage,
         read: &mut R,
+        at: Instant,
     ) -> std::result::Result<(), Ended> {
         match message {
             HostMessage::Video {
@@ -318,7 +323,7 @@ impl Reader<'_> {
                 let now = Instant::now();
                 // Transport credit first: it covers every unit read, including
                 // the ones the sink drops.
-                self.shared.outbound.receipt(seq);
+                self.shared.outbound.receipt(seq, at);
                 if self.last_seq.checked_add(1) != Some(seq) {
                     return Err(Ended::protocol("video sequence gap"));
                 }
@@ -360,7 +365,7 @@ impl Reader<'_> {
                     received_at: now,
                 });
             }
-            HostMessage::Probe { nonce } => self.shared.outbound.probe(nonce),
+            HostMessage::Probe { nonce } => self.shared.outbound.probe(nonce, at),
             HostMessage::State(host) => {
                 if host.display.as_ref().is_some_and(|display| {
                     !(1..=MAX_SIDE).contains(&display.width)
