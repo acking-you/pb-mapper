@@ -1,0 +1,83 @@
+# 2026-11-24 13:42:06 start, load averages: 2.99 2.72 3.00
+running 1 test
+test platform::macos::vt_measure::video_toolbox_resubmit ... codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=1 delay_ms=27.4 dropped_total=54
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=2 delay_ms=none dropped_total=65
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=3 delay_ms=none dropped_total=76
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=4 delay_ms=none dropped_total=87
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=5 delay_ms=none dropped_total=99
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=6 delay_ms=507.4 dropped_total=111
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=7 delay_ms=none dropped_total=123
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=8 delay_ms=none dropped_total=136
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=9 delay_ms=6.2 dropped_total=145
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=10 delay_ms=507.5 dropped_total=160
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=11 delay_ms=257.3 dropped_total=174
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=12 delay_ms=6.5 dropped_total=188
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 summary trials=12 at_least_250ms=9 within_2_ticks=3 max_ms=600.0
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=1 delay_ms=11.2 dropped_total=51
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=2 delay_ms=6.3 dropped_total=56
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=3 delay_ms=257.5 dropped_total=59
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=4 delay_ms=6.8 dropped_total=62
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=5 delay_ms=6.1 dropped_total=65
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=6 delay_ms=6.4 dropped_total=68
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=7 delay_ms=6.2 dropped_total=76
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=8 delay_ms=6.1 dropped_total=80
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=9 delay_ms=6.2 dropped_total=82
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=10 delay_ms=6.1 dropped_total=85
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=11 delay_ms=6.3 dropped_total=88
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=12 delay_ms=6.2 dropped_total=93
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 summary trials=12 at_least_250ms=1 within_2_ticks=11 max_ms=257.5
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=1 delay_ms=6.4 dropped_total=19
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=2 delay_ms=6.2 dropped_total=20
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=3 delay_ms=6.1 dropped_total=21
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=4 delay_ms=6.0 dropped_total=21
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=5 delay_ms=6.2 dropped_total=21
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=6 delay_ms=6.0 dropped_total=22
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=7 delay_ms=6.6 dropped_total=23
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=8 delay_ms=5.8 dropped_total=23
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=9 delay_ms=6.0 dropped_total=23
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=10 delay_ms=5.8 dropped_total=24
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=11 delay_ms=6.2 dropped_total=25
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=12 delay_ms=6.2 dropped_total=25
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 summary trials=12 at_least_250ms=0 within_2_ticks=12 max_ms=6.6
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=1 delay_ms=8.0 dropped_total=54
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=2 delay_ms=none dropped_total=65
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=3 delay_ms=none dropped_total=76
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=4 delay_ms=none dropped_total=87
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=5 delay_ms=none dropped_total=99
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=6 delay_ms=507.6 dropped_total=111
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=7 delay_ms=none dropped_total=123
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=8 delay_ms=256.0 dropped_total=132
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=9 delay_ms=none dropped_total=146
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=10 delay_ms=257.3 dropped_total=156
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=11 delay_ms=257.2 dropped_total=170
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=12 delay_ms=6.6 dropped_total=184
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 summary trials=12 at_least_250ms=10 within_2_ticks=2 max_ms=600.0
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=1 delay_ms=7.3 dropped_total=51
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=2 delay_ms=6.4 dropped_total=56
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=3 delay_ms=257.6 dropped_total=59
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=4 delay_ms=6.3 dropped_total=62
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=5 delay_ms=6.4 dropped_total=65
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=6 delay_ms=6.4 dropped_total=68
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=7 delay_ms=6.9 dropped_total=76
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=8 delay_ms=5.9 dropped_total=80
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=9 delay_ms=6.1 dropped_total=82
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=10 delay_ms=5.9 dropped_total=85
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=11 delay_ms=5.9 dropped_total=88
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=12 delay_ms=6.0 dropped_total=90
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 summary trials=12 at_least_250ms=1 within_2_ticks=11 max_ms=257.6
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=1 delay_ms=6.4 dropped_total=17
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=2 delay_ms=6.3 dropped_total=18
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=3 delay_ms=5.9 dropped_total=19
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=4 delay_ms=6.1 dropped_total=19
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=5 delay_ms=6.4 dropped_total=19
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=6 delay_ms=6.0 dropped_total=20
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=7 delay_ms=6.1 dropped_total=21
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=8 delay_ms=5.8 dropped_total=21
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=9 delay_ms=6.1 dropped_total=21
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=10 delay_ms=5.9 dropped_total=22
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=11 delay_ms=6.5 dropped_total=23
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=12 delay_ms=6.1 dropped_total=23
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 summary trials=12 at_least_250ms=0 within_2_ticks=12 max_ms=6.5
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 258 filtered out; finished in 182.57s
+# 2026-11-24 13:45:09 end, load averages: 1.76 2.11 2.67

@@ -404,7 +404,9 @@ Nothing in the SDK crates knows it exists.
     (`Macos`, its `support()` and the Screen Recording and Accessibility
     permissions), `capture.rs` (ScreenCaptureKit) and `encoder.rs`
     (`VTCompressionSession`, every call on its own submit thread, which
-    thread C hands pictures and bitrates through a one-slot mailbox) fused
+    thread C hands pictures and bitrates through a one-slot mailbox;
+    low-latency rate control with QP up to 51, and its dropped pictures
+    counted) fused
     in `video.rs`, which pushes and holds VideoToolbox to two units in
     flight; `desktop.rs`
     (displays by UUID, the lock and console check), `geometry.rs` (points
@@ -424,7 +426,9 @@ Nothing in the SDK crates knows it exists.
     tested everywhere; `tests.rs` runs only on macOS, and its ignored
     `video_toolbox_rate_model_*` measure VideoToolbox's rate model, and
     `video_toolbox_submit_blocking` and `video_toolbox_in_flight` what a
-    submit costs thread C and what VideoToolbox's queue costs a unit
+    submit costs thread C and what VideoToolbox's queue costs a unit;
+    `vt_measure.rs`, test-only too, holds the ignored measurements of its
+    rate control (drops, resubmits, 120 FPS, a bitrate cut)
   - `platform/windows/helper/`: The opt-in UAC/Winlogon service —
     `service.rs`; the workers it starts (`worker.rs`, `child.rs`) and a
     worker's binding to the input desktop (`binding.rs`); `pipe.rs`, and
@@ -467,9 +471,10 @@ Nothing in the SDK crates knows it exists.
     (`annexb.rs`), length-prefixed (AVCC/HVCC) samples to Annex B
     (`avcc.rs`, for VideoToolbox), and the encoder rules both platforms
     share (`pipeline.rs`: late output, first-submit and output waits,
-    liveness, what an H.265 failure is); `rate_fit.rs`, test-only, fits a
-    pace sweep to a rate model for the macOS encoder's measurement and, by
-    path, `video_bench --pace`
+    liveness, what an H.265 failure is), when a picture the encoder dropped
+    is sent again (`resubmit.rs`, used by the macOS encoder); `rate_fit.rs`,
+    test-only, fits a pace sweep to a rate model for the macOS encoder's
+    measurement and, by path, `video_bench --pace`
   - `input/`: the input vocabulary a controlling viewer sends (`Input`,
     `Button`, `Key`, `InputEvent`, `DoubleClickGuard`; `Input` and `Key` are
     `#[non_exhaustive]`, and `Input::PhysicalKey` carries a USB HID usage,
