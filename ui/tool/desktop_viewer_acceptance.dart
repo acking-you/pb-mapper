@@ -17,8 +17,10 @@
 // whether H.265 is offered where this device decodes it), resolution (720p |
 // 1080p | 1440p | native), maxFps (0 for Auto, else 30 | 60 | 90 | 120), case
 // (a label for the run), host (the host's GPU and refresh rate, which a
-// viewer cannot see) and appDir (where the native library keeps this run's
-// configuration; the app support directory's desktop-acceptance by default).
+// viewer cannot see), appDir (where the native library keeps this run's
+// configuration; the app support directory's desktop-acceptance by default)
+// and pointerMode (auto | desktop | game: what the mouse does over a host
+// that lists relative_pointer).
 // The report names the decoders the probe found.
 // controller.json may override seconds and relay_only. `deployed` always
 // writes the host's lan_first into it, so the A/B run with LAN-first off
@@ -136,9 +138,17 @@ Future<void> main() async {
     if (update['success'] != true) {
       throw StateError('Acceptance configuration failed');
     }
-    // The Display menu shows the codec this run offers.
+    // The Display menu shows the codec this run offers, and the Shortcuts
+    // menu the pointer mode.
     final prefs = ViewerPrefs(persist: false);
     await prefs.setCodec(codec);
+    await prefs.setPointerMode(
+      PointerMode.values.asNameMap()[const String.fromEnvironment(
+            'pointerMode',
+            defaultValue: 'auto',
+          )] ??
+          PointerMode.auto,
+    );
     runApp(
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,

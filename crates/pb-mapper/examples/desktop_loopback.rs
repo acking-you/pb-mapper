@@ -8,7 +8,8 @@
 //! The host's `Backend` is the example's own (`desktop_support`): it makes
 //! small fake H.264 units and records the input it receives, so nothing
 //! touches this computer's screen, keyboard, mouse or display modes. The
-//! viewer takes a picture, takes control, moves, clicks and types, changes
+//! viewer takes a picture, takes control, moves, clicks, moves the pointer by
+//! counts as a held mouse does (`relative_pointer`) and types, changes
 //! the preset, pauses and resumes, fits the host's display to its own size
 //! and sees the host put it back when it disconnects, then prints what it
 //! saw. It exits 0 when every step did what it should.
@@ -94,12 +95,16 @@ async fn main() -> Outcome {
         drag_start: false,
     });
     send(&viewer, |_| Some(click.to_vec())).await?;
+    // The host lists `relative_pointer`: the pointer moves by counts, as a
+    // mouse held over the picture moves it for a game.
+    let by = Input::MoveBy { dx: 12, dy: -7 };
+    send(&viewer, |_| Some(vec![by.clone()])).await?;
     let text = "Hello from the loopback desktop. ".repeat(40);
     let chunks: Vec<Input> = Input::text_chunks(&text).collect();
     for chunk in &chunks {
         send(&viewer, |_| Some(vec![chunk.clone()])).await?;
     }
-    let sent = 1 + click.len() + chunks.len();
+    let sent = 1 + click.len() + 1 + chunks.len();
     let started = Instant::now();
     let inputs = loop {
         let inputs = panel.inputs();
@@ -121,15 +126,28 @@ async fn main() -> Outcome {
             _ => None,
         })
         .collect();
-    if (x, y) != (display.width / 4, display.height * 3 / 4) || typed != text {
+    let moved_by = inputs
+        .iter()
+        .find_map(|input| match input {
+            Input::MoveBy { dx, dy } => Some((*dx, *dy)),
+            _ => None,
+        })
+        .ok_or("the host applied no relative move")?;
+    if (x, y) != (display.width / 4, display.height * 3 / 4)
+        || moved_by != (12, -7)
+        || typed != text
+    {
         return Err(format!(
-            "the host applied a move to {x},{y} and {} typed bytes",
+            "the host applied a move to {x},{y}, one by {moved_by:?} and {} typed bytes",
             typed.len()
         )
         .into());
     }
     println!(
-        "the host applied a move to {x},{y}, a click and {} bytes of text in {} chunks",
+        "the host applied a move to {x},{y}, a click, a move by {},{} and {} bytes of text \
+         in {} chunks",
+        moved_by.0,
+        moved_by.1,
         typed.len(),
         chunks.len()
     );

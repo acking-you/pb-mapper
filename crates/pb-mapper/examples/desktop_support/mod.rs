@@ -168,6 +168,8 @@ impl Backend for Synthetic {
         let mut caps = BackendCaps::default();
         caps.h265 = self.h265;
         caps.display_modes = true;
+        // It records a relative move as any other input.
+        caps.relative_pointer = true;
         Ok(Description {
             display: self.display()?,
             caps,
