@@ -6,7 +6,7 @@
 
 use super::{
     desktop,
-    encoder::{Admit, Encoder},
+    encoder::{Admit, Encoder, Options},
     layout,
     modes::MacModes,
     power,
@@ -654,7 +654,7 @@ const SIZES: [(u32, u32); 3] = [(1920, 1080), (2560, 1440), (3840, 2160)];
 const RING: usize = 3;
 
 /// A line past the harness's capture, so that the run's log has it.
-fn report(line: std::fmt::Arguments<'_>) {
+pub(super) fn report(line: std::fmt::Arguments<'_>) {
     let _ = writeln!(std::io::stderr(), "{line}");
 }
 
@@ -721,6 +721,7 @@ fn rate_model_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: boo
         ring: [(); RING].map(|()| surface(width, height)),
         frame: 0,
         skipped: 0,
+        force: false,
     };
     let mut sweep = Vec::new();
     for pace in PACES {
@@ -790,6 +791,215 @@ fn rate_model_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: boo
     Some(fit)
 }
 
+/// `video_toolbox_rate_model_h264` with the bitrate following the pace, as
+/// a session's QoS sets it under each rate model: each codec at 1080p, 1440p
+/// and 4K, with low-latency rate control and without, at a nominal 60 FPS,
+/// with Balanced's starting bits per frame scaled by the size to the power
+/// 0.75. After a step at 60, each model runs its sweep at 30, 15, 10 and
+/// 5 FPS: `nominal` keeps the bitrate at bits per frame × 60, `timestamp`
+/// sets bits per frame × the pace live. Each step prints what it produced a
+/// second against bits per frame × the pace (the spend QoS intends), counting
+/// the pictures VideoToolbox dropped, and per picture and per unit out;
+/// after the steps at 10 and 5 an IDR is forced, and its size and PSNR are
+/// printed. A summary line a case says whether the timestamp model's error
+/// was the smaller at every pace and within 25% at each. Run it as
+/// `video_toolbox_rate_model_h264` is.
+#[test]
+#[ignore = "a measurement: about 5.5 minutes of H.264 encoding, in release mode"]
+fn video_toolbox_rate_model_follow_h264() {
+    follow_sweeps(VideoCodec::H264);
+}
+
+/// `video_toolbox_rate_model_follow_h264` for H.265, on the hardware
+/// encoder.
+#[test]
+#[ignore = "a measurement: about 5.5 minutes of H.265 encoding, in release mode"]
+fn video_toolbox_rate_model_follow_h265() {
+    follow_sweeps(VideoCodec::H265);
+}
+
+/// The paces each model sweeps after the step at the nominal rate.
+const FOLLOW_PACES: [u32; 4] = [30, 15, 10, 5];
+/// Balanced's starting bits per frame at 1080p.
+const FOLLOW_BPF: f64 = 66_667.0;
+
+/// One step of a follow-pace sweep.
+struct Followed {
+    pace: u32,
+    submitted: u64,
+    units: usize,
+    dropped: u64,
+    /// Bits a second against bits per frame × the pace.
+    error: f64,
+    per_picture: f64,
+    per_unit: f64,
+}
+
+fn follow_sweeps(codec: VideoCodec) {
+    if !super::encoder::encodes(codec) {
+        report(format_args!(
+            "skipped: this Mac does not encode {codec:?} on hardware"
+        ));
+        return;
+    }
+    let mut summaries = Vec::new();
+    for (width, height) in SIZES {
+        for low_latency in [true, false] {
+            if let Some(summary) = follow_sweep(codec, width, height, low_latency) {
+                summaries.push(summary);
+            }
+        }
+    }
+    for summary in summaries {
+        report(format_args!("{summary}"));
+    }
+}
+
+/// One encoder's follow-pace sweep under both models, and its summary line.
+fn follow_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: bool) -> Option<String> {
+    let scale = (f64::from(width) * f64::from(height) / (1920.0 * 1080.0))
+        .powf(0.75)
+        .clamp(0.4, 3.0);
+    let bpf = FOLLOW_BPF * scale;
+    let label = format!("codec={codec:?} size={width}x{height} low_latency={low_latency}");
+    report(format_args!(
+        "follow {label} nominal_fps={NOMINAL_FPS} bits_per_frame={bpf:.0}"
+    ));
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    let options = Options {
+        low_latency,
+        capped: true,
+        quality: true,
+    };
+    let at_nominal = (bpf * f64::from(NOMINAL_FPS)) as u32;
+    let encoder = match Encoder::tuned(
+        codec,
+        width,
+        height,
+        NOMINAL_FPS,
+        at_nominal,
+        &Waker(wake.clone()),
+        options,
+    ) {
+        Ok(encoder) => encoder,
+        Err(failure) => {
+            report(format_args!("follow {label} refused: {failure}"));
+            return None;
+        }
+    };
+    let (w, h) = (width as usize, height as usize);
+    let mut pacer = Pacer {
+        encoder,
+        waiter,
+        ring: [(); RING].map(|()| surface(w, h)),
+        frame: 0,
+        skipped: 0,
+        force: false,
+    };
+    let step = |pacer: &mut Pacer, pace: u32| {
+        let start = Instant::now();
+        pacer.run(Some(pace), start + SETTLE, |_| {});
+        let (submitted, dropped) = (pacer.frame, pacer.encoder.probe(|probe| probe.dropped));
+        let (mut bits, mut units) = (0u64, 0usize);
+        pacer.run(Some(pace), start + STEP, |unit| {
+            bits += unit.bytes.len() as u64 * 8;
+            units += 1;
+        });
+        let submitted = pacer.frame - submitted;
+        let produced = bits as f64 / (STEP - SETTLE).as_secs_f64();
+        Followed {
+            pace,
+            submitted,
+            units,
+            dropped: pacer.encoder.probe(|probe| probe.dropped) - dropped,
+            error: produced / (bpf * f64::from(pace)),
+            per_picture: bits as f64 / submitted.max(1) as f64 / bpf,
+            per_unit: bits as f64 / units.max(1) as f64 / bpf,
+        }
+    };
+    let print = |model: &str, step: &Followed| {
+        report(format_args!(
+            "follow {label} model={model} pace={} submitted={} units={} dropped={} produced_over_target={:.2} bits_per_picture_over_bpf={:.2} bits_per_unit_over_bpf={:.2}",
+            step.pace,
+            step.submitted,
+            step.units,
+            step.dropped,
+            step.error,
+            step.per_picture,
+            step.per_unit,
+        ));
+    };
+    let first = step(&mut pacer, NOMINAL_FPS);
+    print("both", &first);
+    let mut errors = Vec::new();
+    for model in ["nominal", "timestamp"] {
+        pacer.encoder.set_bitrate(at_nominal);
+        pacer.run(Some(NOMINAL_FPS), Instant::now() + SETTLE, |_| {});
+        let mut steps = Vec::new();
+        for pace in FOLLOW_PACES {
+            if model == "timestamp" {
+                pacer.encoder.set_bitrate((bpf * f64::from(pace)) as u32);
+            }
+            let followed = step(&mut pacer, pace);
+            print(model, &followed);
+            if matches!(pace, 10 | 5) {
+                forced_idr(
+                    &mut pacer,
+                    pace,
+                    bpf,
+                    &format!("follow {label} model={model}"),
+                );
+            }
+            steps.push(followed);
+        }
+        errors.push(steps);
+    }
+    let (nominal, timestamp) = (&errors[0], &errors[1]);
+    let smaller = nominal
+        .iter()
+        .zip(timestamp)
+        .all(|(nominal, timestamp)| timestamp.error.ln().abs() < nominal.error.ln().abs());
+    let within: Vec<String> = timestamp
+        .iter()
+        .map(|step| format!("{}:{}", step.pace, (0.75..=1.25).contains(&step.error)))
+        .collect();
+    Some(format!(
+        "follow_summary {label} timestamp_error_smaller_everywhere={smaller} timestamp_within_25_percent=[{}]",
+        within.join(" ")
+    ))
+}
+
+/// Force an IDR at `pace` and print its size against the bits per frame,
+/// and its PSNR.
+fn forced_idr(pacer: &mut Pacer, pace: u32, bpf: f64, label: &str) {
+    pacer.encoder.probe(|probe| probe.quality.clear());
+    pacer.force = true;
+    let mut idr = None;
+    let until = Instant::now() + Duration::from_secs(1) / pace * 3;
+    pacer.run(Some(pace), until, |unit| {
+        if unit.format.keyframe && idr.is_none() {
+            idr = Some((unit.format.pts_us, unit.bytes.len() as u64 * 8));
+        }
+    });
+    let Some((pts, bits)) = idr else {
+        report(format_args!("{label} pace={pace} forced_idr=none"));
+        return;
+    };
+    let error = pacer.encoder.probe(|probe| {
+        probe
+            .quality
+            .iter()
+            .find(|(at, _)| *at == pts)
+            .map(|(_, error)| *error)
+    });
+    report(format_args!(
+        "{label} pace={pace} forced_idr_bits={bits} idr_over_bpf={:.1} idr_psnr={:.2}",
+        bits as f64 / bpf,
+        error.map_or(f64::NAN, |error| 10.0 * (255.0 * 255.0 / error).log10()),
+    ));
+}
+
 /// Thread C's pacing of one encoder over a ring of pictures, as
 /// `video_bench` paces Media Foundation, behind a Mac host's gate: a tick
 /// that finds `VT_IN_FLIGHT` units in flight skipped, as thread C skips it
@@ -802,6 +1012,8 @@ struct Pacer {
     frame: u64,
     /// Ticks spent on units in flight, which submitted nothing.
     skipped: u64,
+    /// The next picture is an IDR.
+    force: bool,
 }
 const _: () = assert!(
     VT_IN_FLIGHT < RING,
@@ -841,7 +1053,9 @@ impl Pacer {
                     Admit::Free => {
                         let picture = &self.ring[self.frame as usize % RING];
                         paint(picture, self.frame);
-                        let keyframe = self.frame == 0 || self.encoder.keyframe_due();
+                        let keyframe = self.frame == 0
+                            || std::mem::take(&mut self.force)
+                            || self.encoder.keyframe_due();
                         self.encoder.encode(picture, keyframe, false).unwrap();
                         self.frame += 1;
                         next_tick = (next_tick + period).max(now + period * 3 / 4);
@@ -860,7 +1074,7 @@ impl Pacer {
 
 /// An IOSurface-backed NV12 picture, which the encoder reads in place as it
 /// reads ScreenCaptureKit's.
-fn surface(width: usize, height: usize) -> CFRetained<CVPixelBuffer> {
+pub(super) fn surface(width: usize, height: usize) -> CFRetained<CVPixelBuffer> {
     let none = super::cf::dictionary(&[]);
     // SAFETY: a static key.
     let attributes =
@@ -1060,7 +1274,7 @@ fn micros(duration: Duration) -> u32 {
 }
 
 /// The `share` quantile of `samples`, sorted in place.
-fn quantile(samples: &mut [u32], share: f64) -> u32 {
+pub(super) fn quantile(samples: &mut [u32], share: f64) -> u32 {
     samples.sort_unstable();
     let index = ((samples.len() as f64 * share) as usize).min(samples.len().saturating_sub(1));
     samples.get(index).copied().unwrap_or(0)

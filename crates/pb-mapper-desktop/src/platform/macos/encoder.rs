@@ -111,6 +111,23 @@ struct State {
     /// The submit thread stays in its call (`park`).
     #[cfg(test)]
     parked: bool,
+    /// What a measurement reads back.
+    #[cfg(test)]
+    probe: Probe,
+}
+
+/// What a measurement reads back from an encoder: what VideoToolbox
+/// dropped, each kept unit's luma error, and how long each encode call took.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct Probe {
+    /// Outputs VideoToolbox flagged `FrameDropped`.
+    pub dropped: u64,
+    /// Each kept unit's presentation time and luma mean squared error, where
+    /// the session was built to measure it.
+    pub quality: VecDeque<(u64, f64)>,
+    /// Each encode call's duration on the submit thread, in microseconds.
+    pub calls: Vec<u32>,
 }
 impl State {
     /// Units handed over and not yet out: in VideoToolbox, or in the
@@ -172,6 +189,34 @@ struct Shared {
     codec: VideoCodec,
     size: (u32, u32),
     gop: u32,
+    /// DataRateLimits caps the mean bitrate.
+    capped: bool,
+    /// VideoToolbox measures each unit's luma error.
+    #[cfg(test)]
+    quality: bool,
+}
+
+/// What a session is built with, and in a test the measurement's knobs.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Options {
+    /// Low-latency rate control.
+    pub low_latency: bool,
+    /// DataRateLimits caps the mean: always, but in a measurement that
+    /// leaves it off.
+    pub capped: bool,
+    /// VideoToolbox measures each unit's luma error (`Probe::quality`).
+    #[cfg(test)]
+    pub quality: bool,
+}
+impl Options {
+    fn new(low_latency: bool) -> Self {
+        Self {
+            low_latency,
+            capped: true,
+            #[cfg(test)]
+            quality: false,
+        }
+    }
 }
 
 /// What the submit thread owns: the session and the keyframe option.
@@ -349,8 +394,17 @@ impl Encoder {
         // it, or a property under it, is made again without.
         let low_latency = matches!(codec, VideoCodec::H264 | VideoCodec::H265)
             && cf::symbol(LOW_LATENCY).is_some();
-        let build =
-            |low_latency| Self::build(codec, width, height, fps, bitrate, waker, low_latency);
+        let build = |low_latency| {
+            Self::build(
+                codec,
+                width,
+                height,
+                fps,
+                bitrate,
+                waker,
+                Options::new(low_latency),
+            )
+        };
         let built = if low_latency {
             build(true).or_else(|failure| {
                 tracing::info!(
@@ -378,10 +432,32 @@ impl Encoder {
         waker: &Waker,
         low_latency: bool,
     ) -> Result<Self> {
-        if low_latency && cf::symbol(LOW_LATENCY).is_none() {
+        Self::tuned(
+            codec,
+            width,
+            height,
+            fps,
+            bitrate,
+            waker,
+            Options::new(low_latency),
+        )
+    }
+
+    /// `with_low_latency` with a measurement's knobs.
+    #[cfg(test)]
+    pub(super) fn tuned(
+        codec: VideoCodec,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u32,
+        waker: &Waker,
+        options: Options,
+    ) -> Result<Self> {
+        if options.low_latency && cf::symbol(LOW_LATENCY).is_none() {
             return Err(error("low-latency rate control needs macOS 11.3"));
         }
-        Self::build(codec, width, height, fps, bitrate, waker, low_latency)
+        Self::build(codec, width, height, fps, bitrate, waker, options)
     }
 
     fn build(
@@ -391,8 +467,9 @@ impl Encoder {
         fps: u32,
         bitrate: u32,
         waker: &Waker,
-        low_latency: bool,
+        options: Options,
     ) -> Result<Self> {
+        let low_latency = options.low_latency;
         // The GOP the session reads back is known once it exists; the
         // callback reads `shared`, which therefore exists first.
         let mut shared = Arc::new(Shared {
@@ -402,6 +479,9 @@ impl Encoder {
             codec,
             size: (width, height),
             gop: 0,
+            capped: options.capped,
+            #[cfg(test)]
+            quality: options.quality,
         });
         let session = create(codec, width, height, low_latency, Arc::as_ptr(&shared))?;
         // Whether the session took the data-rate cap, for the log.
@@ -449,12 +529,19 @@ impl Encoder {
                     &cf::number(i64::from(bitrate)),
                 )?;
                 // A cap the session may not take; the mean still holds.
-                capped = set(
-                    &session,
-                    kVTCompressionPropertyKey_DataRateLimits,
-                    &data_rate_limits(bitrate),
-                )
-                .is_ok();
+                capped = options.capped
+                    && set(
+                        &session,
+                        kVTCompressionPropertyKey_DataRateLimits,
+                        &data_rate_limits(bitrate),
+                    )
+                    .is_ok();
+                #[cfg(test)]
+                if options.quality {
+                    let key = cf::symbol(c"kVTCompressionPropertyKey_CalculateMeanSquaredError")
+                        .ok_or_else(|| error("no luma error on this macOS"))?;
+                    set(&session, key, cf::boolean(true))?;
+                }
                 set(
                     &session,
                     kVTCompressionPropertyKey_ColorPrimaries,
@@ -728,6 +815,18 @@ impl Encoder {
         })
         .and_then(|bitrate| bitrate.as_i64())
     }
+
+    /// What a measurement reads back, taken through `read`.
+    #[cfg(test)]
+    pub(super) fn probe<T>(&self, read: impl FnOnce(&mut Probe) -> T) -> T {
+        read(&mut self.shared.state.lock().probe)
+    }
+
+    /// The presentation time of the last picture handed over.
+    #[cfg(test)]
+    pub(super) fn last_pts(&self) -> u64 {
+        self.pts_us
+    }
 }
 
 impl Drop for Encoder {
@@ -813,7 +912,8 @@ fn serve(owned: SendSession, shared: &Shared) {
             // Off the main thread, with no pool of its own: VideoToolbox may
             // autorelease.
             objc2::rc::autoreleasepool(|_| {
-                let refused = rate.and_then(|bitrate| apply(&session, bitrate).err());
+                let refused =
+                    rate.and_then(|bitrate| apply(&session, bitrate, shared.capped).err());
                 let encoded = job.filter(|_| refused.is_none()).map(|job| {
                     let started = Instant::now();
                     let status = encode_job(&session, &keyframe, &job);
@@ -839,6 +939,11 @@ fn serve(owned: SendSession, shared: &Shared) {
             }
             (None, Some((_, took))) => {
                 load.call(took);
+                #[cfg(test)]
+                state
+                    .probe
+                    .calls
+                    .push(u32::try_from(took.as_micros()).unwrap_or(u32::MAX));
                 None
             }
             (None, None) => None,
@@ -872,9 +977,9 @@ fn serve(owned: SendSession, shared: &Shared) {
     shared.signal.notify_all();
 }
 
-/// Set the mean bitrate and its cap, on the submit thread. A session that
-/// refuses the cap still holds the mean.
-fn apply(session: &VTCompressionSession, bitrate: u32) -> Result<()> {
+/// Set the mean bitrate and, when `capped`, its cap, on the submit thread. A
+/// session that refuses the cap still holds the mean.
+fn apply(session: &VTCompressionSession, bitrate: u32, capped: bool) -> Result<()> {
     // SAFETY: static keys.
     unsafe {
         set(
@@ -882,11 +987,13 @@ fn apply(session: &VTCompressionSession, bitrate: u32) -> Result<()> {
             kVTCompressionPropertyKey_AverageBitRate,
             &cf::number(i64::from(bitrate)),
         )?;
-        let _ = set(
-            session,
-            kVTCompressionPropertyKey_DataRateLimits,
-            &data_rate_limits(bitrate),
-        );
+        if capped {
+            let _ = set(
+                session,
+                kVTCompressionPropertyKey_DataRateLimits,
+                &data_rate_limits(bitrate),
+            );
+        }
     }
     Ok(())
 }
@@ -994,6 +1101,21 @@ fn sync(sample: &CMSampleBuffer) -> bool {
     // SAFETY: a static key.
     let key = unsafe { kCMSampleAttachmentKey_NotSync };
     !cf::value::<objc2_core_foundation::CFBoolean>(&first, key).is_some_and(|not| not.as_bool())
+}
+
+/// A unit's luma mean squared error, where its session measures it.
+#[cfg(test)]
+fn luma_error(sample: &CMSampleBuffer) -> Option<f64> {
+    let metrics = cf::symbol(c"kVTSampleAttachmentKey_QualityMetrics")?;
+    let luma = cf::symbol(c"kVTSampleAttachmentQualityMetricsKey_LumaMeanSquaredError")?;
+    // SAFETY: the encoder's sample, read only.
+    let attachments = unsafe { sample.sample_attachments_array(false) }?;
+    // SAFETY: a sample's attachments are an array of dictionaries.
+    let attachments = unsafe { CFRetained::cast_unchecked::<CFArray<CFDictionary>>(attachments) };
+    let first = attachments.get(0)?;
+    cf::value::<CFDictionary>(&first, metrics)
+        .and_then(|metrics| cf::value::<CFNumber>(&metrics, luma))
+        .and_then(|error| error.as_f64())
 }
 
 /// The most parameter sets read from a format: H.265's VPS, SPS and PPS,
@@ -1146,6 +1268,10 @@ fn receive(
     let Some(sample) = sample.filter(|_| !flags.contains(VTEncodeInfoFlags::FrameDropped)) else {
         // Dropped: what follows still decodes; a keyframe asked for is
         // asked for again.
+        #[cfg(test)]
+        {
+            state.probe.dropped += 1;
+        }
         return pending.keyframe && !std::mem::replace(&mut state.keyframe_due, true);
     };
     let keyframe = sync(sample);
@@ -1172,6 +1298,12 @@ fn receive(
     match converted {
         Ok(bytes) => {
             state.wait_independent = false;
+            #[cfg(test)]
+            if shared.quality
+                && let Some(error) = luma_error(sample)
+            {
+                state.probe.quality.push_back((pending.pts_us, error));
+            }
             let encode_us = now.saturating_duration_since(pending.at).as_micros();
             state.ready.push_back(EncodedFrame {
                 format: VideoFormat {
