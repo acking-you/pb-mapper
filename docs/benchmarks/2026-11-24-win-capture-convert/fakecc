@@ -1,0 +1,17 @@
+#!/bin/sh
+# A stand-in C compiler for a type-check of the Windows target: it writes
+# an empty object wherever one is asked for, and preprocesses to nothing.
+# Nothing is linked in a type-check, so no object is ever read.
+out=""
+prev=""
+for arg in "$@"; do
+  case "$arg" in
+    -E) exit 0 ;;
+    -Fo*) out="${arg#-Fo}" ;;
+    /Fo*) out="${arg#/Fo}" ;;
+  esac
+  if [ "$prev" = "-o" ]; then out="$arg"; fi
+  prev="$arg"
+done
+if [ -n "$out" ]; then : > "$out"; fi
+exit 0

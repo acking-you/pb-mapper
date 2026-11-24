@@ -60,6 +60,22 @@
 //!   may still be in the encoder when the run ends. The reference for
 //!   ffmpeg's PSNR and SSIM. Reading a picture back waits for the GPU, so
 //!   time the encoder in a run without it. Not with `--backend`.
+//! - `--gpu-time`: time the GPU work each submitted picture queues with
+//!   D3D11 timestamp queries (a new picture's conversion, with its copy out
+//!   of the duplication where there is one; a repeat's copy of the last
+//!   sample), read back once the GPU has them, and print a `gpu_time` line.
+//!   A video processor on another engine of the GPU may not lie wholly
+//!   inside the span; GPUView or PIX tells. Not with `--backend`.
+//! - `--copy-capture`: copy each new picture out of the duplication before
+//!   converting it, as a video processor that refuses the duplication's
+//!   surface has it and as every picture was before direct conversion: the
+//!   baseline arm of that comparison, in the same build (a repeat still
+//!   copies the last sample). Not with `--backend`.
+//! - `--vp-usage quality|speed`: ask the D3D11 video processor that scales
+//!   and converts each picture for quality or for speed at every size,
+//!   instead of a session's choice (speed, until a vendor earns quality
+//!   where the picture is scaled down). Compare the two on `--text` at a
+//!   downscaled size, with `--dump-source`.
 //!
 //! The encoder's read-back of its settings is printed as an
 //! `encoder_opened` line (`desktop_video_encoder_opened`'s fields, and the
@@ -85,7 +101,12 @@
 //! heap allocations and bytes the encoder's own calls ask for, and the time
 //! and the cycles its thread ran in them, per access unit; and the median and
 //! mean of each of a submit that converted a capture and of a drain that
-//! returned a unit; and an `encoder_events` line: whether its events were
+//! returned a unit; a `capture` line: whether new pictures were converted
+//! straight from the duplication's surface (`direct`) or copied out of it
+//! first (`copied`, where the video processor refused it), whether the
+//! video processor was asked for quality, and the submits that repeated the
+//! last picture by copying its sample, with their median and mean time; and
+//! an `encoder_events` line: whether its events were
 //! pushed or polled, the submits that found no input request (`waiting`, as
 //! `Submit::Waiting`) and, pushed, how long each output waited from its
 //! announcement to the start of the drain that collected it
@@ -190,8 +211,8 @@ mod bench {
         Backend, DRAIN_POLL, Display, DisplaySelection, NativeBackend, VideoCodec, VideoLimits,
         VideoRate, displays, native_backend,
         windows::video::{
-            Encoded, Encoder, EncoderOptions, EncoderWake, H264Profile, PICKUP_BOUNDS_US,
-            Statistics, Submit, h265_available,
+            Encoded, Encoder, EncoderOptions, EncoderWake, GpuSpan, H264Profile, PICKUP_BOUNDS_US,
+            Statistics, Submit, VpUsage, h265_available,
         },
     };
     use std::{
@@ -203,7 +224,7 @@ mod bench {
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
     /// The options that take a value, which is then no positional argument.
-    const VALUED: [&str; 14] = [
+    const VALUED: [&str; 15] = [
         "--max-width",
         "--max-height",
         "--bitrate",
@@ -218,6 +239,7 @@ mod bench {
         "--qvs",
         "--scenario",
         "--dump-source",
+        "--vp-usage",
     ];
     /// A step's bitrate is measured after this long, once the rate controller
     /// has settled.
@@ -318,10 +340,16 @@ mod bench {
             )?)
         };
         let build_ms = building.elapsed().as_secs_f64() * 1000.0;
-        if let Some(encoder) = &mut encoder
-            && sinks.source.is_some()
-        {
-            encoder.keep_source();
+        if let Some(encoder) = &mut encoder {
+            if sinks.source.is_some() {
+                encoder.keep_source();
+            }
+            if limits.gpu_time {
+                encoder.time_gpu();
+            }
+            if limits.copy_capture {
+                encoder.copy_captures();
+            }
         }
         let mut coder = match encoder {
             Some(encoder) => Coder::Encoder(encoder),
@@ -340,7 +368,7 @@ mod bench {
             }
         };
         println!(
-            "encoder={} codec={codec:?} build_ms={build_ms:.1} display={}x{} nominal_fps={fps} max_size={max_width}x{max_height}{} target_bitrate={bitrate} h264_profile={:?} qvs={} scenario={} gpu_priority={}",
+            "encoder={} codec={codec:?} build_ms={build_ms:.1} display={}x{} nominal_fps={fps} max_size={max_width}x{max_height}{} target_bitrate={bitrate} h264_profile={:?} qvs={} scenario={} gpu_priority={} vp_usage={:?}",
             coder.name(),
             display.width,
             display.height,
@@ -353,6 +381,7 @@ mod bench {
                 "none"
             },
             options.gpu_priority,
+            options.vp_usage,
         );
 
         let steps = rates.steps();
@@ -546,8 +575,13 @@ mod bench {
         poll: Duration,
         pause_ms: u64,
         exact: bool,
+        /// Time each picture's GPU work with timestamp queries.
+        gpu_time: bool,
+        /// Copy each new picture out of the duplication before converting
+        /// it, as before direct conversion.
+        copy_capture: bool,
         /// The encoder's profile, quality against speed, scenario and GPU
-        /// priority.
+        /// priority, and the video processor's usage.
         options: EncoderOptions,
     }
     impl Limits {
@@ -601,6 +635,12 @@ mod bench {
             if exact && backend {
                 return Err("--exact drives the encoder; a backend never upscales".into());
             }
+            let (gpu_time, copy_capture) = (flag(args, "--gpu-time"), flag(args, "--copy-capture"));
+            if backend && (gpu_time || copy_capture) {
+                return Err(
+                    "--gpu-time and --copy-capture drive the encoder; not with --backend".into(),
+                );
+            }
             let options = EncoderOptions {
                 h264_profile: match option(args, "--h264-profile").unwrap_or("high") {
                     "high" => H264Profile::High,
@@ -621,6 +661,17 @@ mod bench {
                     }
                 },
                 gpu_priority: flag(args, "--gpu-priority"),
+                vp_usage: match option(args, "--vp-usage") {
+                    None => VpUsage::Auto,
+                    Some("quality") => VpUsage::Quality,
+                    Some("speed") => VpUsage::Speed,
+                    Some(other) => {
+                        return Err(format!(
+                            "unknown video processor usage {other}: quality or speed"
+                        )
+                        .into());
+                    }
+                },
             };
             if options.quality_vs_speed > 100 {
                 return Err("--qvs must be 0..100".into());
@@ -628,10 +679,11 @@ mod bench {
             let changes_encoder = option(args, "--h264-profile").is_some()
                 || option(args, "--qvs").is_some()
                 || options.display_remoting
-                || options.gpu_priority;
+                || options.gpu_priority
+                || options.vp_usage != VpUsage::Auto;
             if backend && changes_encoder {
                 return Err(
-                    "--h264-profile, --qvs, --scenario and --gpu-priority build the encoder; a backend takes a session's settings"
+                    "--h264-profile, --qvs, --scenario, --gpu-priority and --vp-usage build the encoder; a backend takes a session's settings"
                         .into(),
                 );
             }
@@ -655,6 +707,8 @@ mod bench {
                 poll,
                 pause_ms,
                 exact,
+                gpu_time,
+                copy_capture,
                 options,
             };
             Ok((
@@ -774,11 +828,15 @@ mod bench {
         encoder_us: f64,
         encoder_kcycles: f64,
         /// Each submit that converted a capture, and each drain that returned
-        /// a unit: microseconds, and thousands of cycles this thread ran.
+        /// a unit: microseconds, and thousands of cycles this thread ran;
+        /// and each submit that repeated the last picture, in microseconds.
         submit_us: Vec<f64>,
+        repeat_us: Vec<f64>,
         drain_us: Vec<f64>,
         submit_kcycles: Vec<f64>,
         drain_kcycles: Vec<f64>,
+        /// `--gpu-time`'s spans, as the GPU finished them.
+        gpu: Vec<GpuSpan>,
         /// `--dump-source`'s NV12 pictures written, and the buffer each is
         /// read back into.
         sources: u64,
@@ -963,8 +1021,12 @@ mod bench {
                             let (took, ran) = (at.elapsed(), thread_cycles() - ran);
                             tally.encoder_calls(before, took, ran);
                             if outcome == Submit::Submitted {
-                                tally.submit_us.push(took.as_secs_f64() * 1e6);
-                                tally.submit_kcycles.push(ran as f64 / 1e3);
+                                if encoder.repeated() {
+                                    tally.repeat_us.push(took.as_secs_f64() * 1e6);
+                                } else {
+                                    tally.submit_us.push(took.as_secs_f64() * 1e6);
+                                    tally.submit_kcycles.push(ran as f64 / 1e3);
+                                }
                                 tally
                                     .in_encoder
                                     .push_back(encoder.presented().map(|presented| presented.at));
@@ -977,6 +1039,8 @@ mod bench {
                                     tally.sources += 1;
                                 }
                             }
+                            // Untimed: what the GPU has finished so far.
+                            encoder.gpu_times(&mut tally.gpu);
                             (outcome.spends_tick(), encoder.presented())
                         } else {
                             (false, None)
@@ -1111,6 +1175,39 @@ mod bench {
                 median(&tally.drain_kcycles),
                 mean(&tally.drain_kcycles),
             );
+            println!(
+                "capture={} vp_quality={} repeats={} repeat_p50_us={:.1} repeat_mean_us={:.1}",
+                if stats.direct_capture {
+                    "direct"
+                } else {
+                    "copied"
+                },
+                stats.vp_quality,
+                stats.repeats,
+                median(&tally.repeat_us),
+                mean(&tally.repeat_us),
+            );
+            if limits.gpu_time {
+                let spans = |repeat: bool| -> Vec<f64> {
+                    tally
+                        .gpu
+                        .iter()
+                        .filter(|span| span.repeat == repeat)
+                        .map(|span| span.micros)
+                        .collect()
+                };
+                let (converted, repeated) = (spans(false), spans(true));
+                println!(
+                    "gpu_time convert_spans={} convert_p50_us={:.1} convert_p95_us={:.1} convert_mean_us={:.1} repeat_spans={} repeat_p50_us={:.1} repeat_mean_us={:.1}",
+                    converted.len(),
+                    quantile(&converted, 50),
+                    quantile(&converted, 95),
+                    mean(&converted),
+                    repeated.len(),
+                    quantile(&repeated, 50),
+                    mean(&repeated),
+                );
+            }
             println!(
                 "encoder_events={} waiting={} waiting_per_s={:.1} have_output_to_collect_us={} have_output_to_collect_p50_us={}",
                 if stats.events_pushed {
