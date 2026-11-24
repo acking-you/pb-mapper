@@ -313,8 +313,8 @@ impl Acceptor {
                 room.set_codec(codec);
             }
             // A closed session's rate starts only a session that opens a
-            // room: one that joins shares the encoder, which runs at the
-            // least of its viewers' rates, with viewers it would pull down.
+            // room: one that joins shares an encoder that runs at the least
+            // of its viewers' rates, and would pull down those watching.
             let session = Session::new_in_room(
                 slot,
                 room.shared.wake.clone(),
