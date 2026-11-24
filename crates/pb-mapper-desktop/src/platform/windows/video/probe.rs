@@ -36,6 +36,30 @@ fn display_adapter(id: u32) -> Result<IDXGIAdapter1> {
     Err(error("selected display is no longer available"))
 }
 
+/// The GPU that drives `display`, with its driver, as the helper's worker
+/// names it to the host, which keeps the worker's H.265 answer under it:
+/// the adapter's vendor, device, subsystem and revision, and the version of
+/// its user-mode driver. `None` when no adapter drives the display, or DXGI
+/// reports no driver version for it, so that the host asks again.
+#[cfg(feature = "windows-helper")]
+pub(crate) fn adapter_key(display: &crate::Display) -> Option<crate::oop::proto::AdapterKey> {
+    use windows::{Win32::Graphics::Dxgi::IDXGIDevice, core::Interface};
+    let adapter = display_adapter(display.id).ok()?;
+    let desc = unsafe { adapter.GetDesc1() }.ok()?;
+    // Asked of `IDXGIDevice`, as DXGI documents: the version of the
+    // Direct3D 9 user-mode driver, which every component of a WDDM 2.3 or
+    // later driver package shares. An adapter without one, such as a
+    // driver that answers `DXGI_ERROR_UNSUPPORTED`, has no key.
+    let driver = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }.ok()?;
+    crate::oop::proto::AdapterKey::new(
+        desc.VendorId,
+        desc.DeviceId,
+        desc.SubSysId,
+        desc.Revision,
+        u64::try_from(driver).ok()?,
+    )
+}
+
 /// Whether the GPU that drives display `id` has a hardware H.265 encoder this
 /// pipeline can use: an MFT for that adapter that activates, takes the Main
 /// 4:2:0 output and NV12 input types at 1920x1080@60 with B-frames off, and

@@ -127,8 +127,10 @@ fn connect_backend(
 /// whether the worker reads shapes and injects physical keys. 9: `HostStatus`
 /// carries `viewers` for concurrent sessions. 10: the answer to a capture
 /// says `submitted: false` when the worker's source had no new picture, so
-/// the host keeps its tick armed and polls.
-pub const HELPER_PROTOCOL: u32 = 10;
+/// the host keeps its tick armed and polls. 11: the `Start` caps name the
+/// GPU and driver the worker captures on (`adapter`), under which the host
+/// keeps the worker's H.265 answer for later workers.
+pub const HELPER_PROTOCOL: u32 = 11;
 
 /// What a worker exits with when a display mode it changed is still
 /// journalled: the service then starts a `restore` worker.
@@ -136,7 +138,7 @@ pub const HELPER_PROTOCOL: u32 = 10;
 pub(crate) const RESTORE_PENDING: u32 = 3;
 
 const SERVICE: &str = "PbMapperDesktop";
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v10";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v11";
 const _: () = assert!(
     names_protocol(PIPE, HELPER_PROTOCOL),
     "the helper pipe's name ends in .v and HELPER_PROTOCOL"

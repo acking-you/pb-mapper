@@ -14,6 +14,8 @@ mod codec;
 mod converter;
 mod probe;
 
+#[cfg(feature = "windows-helper")]
+pub(crate) use probe::adapter_key;
 pub use probe::h265_available;
 
 use crate::{

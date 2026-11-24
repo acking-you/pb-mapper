@@ -5,9 +5,9 @@
 //! boundary.
 use super::{
     ipc,
-    proto::{DRAIN_WAIT_MAX_MS, Request, Response, ShapeHeader, TIMEOUT},
+    proto::{AdapterKey, DRAIN_WAIT_MAX_MS, Request, Response, ShapeHeader, StartCaps, TIMEOUT},
 };
-use crate::{Backend, CursorShape, DesktopContext, Result, error, failure_kind};
+use crate::{Backend, CursorShape, DesktopContext, Display, Result, error, failure_kind};
 
 /// What the worker keeps across requests.
 pub(crate) struct ServeState {
@@ -22,15 +22,22 @@ pub(crate) struct ServeState {
     /// The newest shape read, and how many different ones were.
     shape: Option<CursorShape>,
     shape_serial: u64,
+    /// The GPU, with its driver, that drives a display, which the platform
+    /// names: asked once, for the `Start` answer.
+    adapter: fn(&Display) -> Option<AdapterKey>,
 }
 impl ServeState {
-    pub(crate) fn new() -> Self {
+    /// `adapter` names the GPU that drives a display; a platform that cannot
+    /// name one answers `None`, and the host then asks this worker, and every
+    /// later one, about H.265 again.
+    pub(crate) fn new(adapter: fn(&Display) -> Option<AdapterKey>) -> Self {
         Self {
             sequence: 0,
             last_input: std::time::Instant::now(),
             shapes: false,
             shape: None,
             shape_serial: 0,
+            adapter,
         }
     }
 }
@@ -132,9 +139,14 @@ pub(crate) fn serve<B: Backend>(
         Request::Start { .. } => {
             // This worker runs in the interactive session: its settings are
             // the user's, which the service in session 0 cannot read. What
-            // it can do is said at once, never H.265, which costs a probe.
+            // it can do is said at once, never H.265, which costs a probe;
+            // the GPU it captures on lets the host skip that probe when a
+            // worker on the same GPU and driver already answered it.
             response.double_click = backend.double_click_guard();
-            response.caps = Some((&backend.describe(false)?.caps).into());
+            response.caps = Some(StartCaps {
+                adapter: (state.adapter)(&context.display),
+                ..StartCaps::from(&backend.describe(false)?.caps)
+            });
             vec![]
         }
         Request::Context {} => vec![],
@@ -333,7 +345,7 @@ mod tests {
             context: expected.clone(),
             injected: 0,
         };
-        let mut state = ServeState::new();
+        let mut state = ServeState::new(|_| None);
         let mut send = |backend: &mut Bound, next| {
             let request = Request::Input {
                 expected: expected.clone(),
@@ -400,7 +412,7 @@ mod tests {
             parts,
             crate::modes::Journal::default(),
         );
-        let mut state = ServeState::new();
+        let mut state = ServeState::new(|_| None);
         let mut serve = |request| serve(&mut backend, request, &mut state).unwrap();
         let (started, _) = serve(Request::Start {
             display_id: 1,
