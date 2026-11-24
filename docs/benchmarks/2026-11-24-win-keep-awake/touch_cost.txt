@@ -1,0 +1,21 @@
+# 2026-11-23T23:27:24Z Darwin arm64 27.0 rustc 1.99.1 (58cf8f9c3 2026-10-13)
+# load: 17.05 7.24 4.11
+$ cargo test --release -p pb-mapper-desktop --lib touch_cost -- --ignored --nocapture
+awake_touch_cost round=1 clock_ns=20.48 touch_ns=31.17
+awake_touch_cost round=2 clock_ns=17.95 touch_ns=30.41
+awake_touch_cost round=3 clock_ns=15.92 touch_ns=23.15
+awake_touch_cost round=4 clock_ns=13.45 touch_ns=19.87
+awake_touch_cost round=5 clock_ns=12.77 touch_ns=19.07
+# load: 17.37 7.47 4.21
+awake_touch_cost round=1 clock_ns=12.34 touch_ns=18.98
+awake_touch_cost round=2 clock_ns=12.31 touch_ns=19.20
+awake_touch_cost round=3 clock_ns=12.61 touch_ns=18.65
+awake_touch_cost round=4 clock_ns=12.34 touch_ns=20.63
+awake_touch_cost round=5 clock_ns=12.34 touch_ns=18.81
+# load: 16.06 7.36 4.19
+awake_touch_cost round=1 clock_ns=12.33 touch_ns=19.44
+awake_touch_cost round=2 clock_ns=12.44 touch_ns=18.94
+awake_touch_cost round=3 clock_ns=12.49 touch_ns=22.47
+awake_touch_cost round=4 clock_ns=13.20 touch_ns=21.13
+awake_touch_cost round=5 clock_ns=12.96 touch_ns=19.07
+# load: 16.06 7.36 4.19

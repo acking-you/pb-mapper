@@ -367,8 +367,11 @@ Nothing in the SDK crates knows it exists.
     shapes, a log of what it typed). `login.rs`, pure and tested on every
     platform, says what the Windows background service's tick asks about
     its owner's login: the token and SID in full, a session query every
-    5 s, or nothing. How to add Linux or Android is "Platforms" in
-    `docs/remote-desktop.md`
+    5 s, or nothing. `awake.rs`, pure and tested on every platform too, is
+    when the Windows host keeps the display and the system awake, and the
+    watchdog's loop that decides it: from the first capture after an idle
+    spell until 2 s after the last. How to add Linux or Android is
+    "Platforms" in `docs/remote-desktop.md`
   - `platform/windows/`: the ordinary desktop, `video/` (Desktop
     Duplication → D3D11 → Media Foundation H.265 or H.264, the fused
     `VideoSource`: the `Encoder` in `mod.rs`, the Media Foundation encoder in
@@ -378,9 +381,11 @@ Nothing in the SDK crates knows it exists.
     encoder failure turns it off for the process), `input` (enigo, and
     `SendInput` scancodes for physical keys), `cursor` (the shape once per
     new `HCURSOR`: kinds from the `LoadCursorW` handles, bitmaps from
-    `GetIconInfo`/`GetDIBits`), `still`, `waiter`, `timer`, `mf`, `dpapi`
-    (the one DPAPI call every Windows store uses), `win32` (the Win32 glue
-    the host and the helper share), `modes.rs` and `helper/`
+    `GetIconInfo`/`GetDIBits`), `still`, `waiter`, `timer`, `power` (the
+    display and system power request a watchdog thread holds while capture
+    calls and pointer reads touch it, and the wake of a dark display), `mf`,
+    `dpapi` (the one DPAPI call every Windows store uses), `win32` (the
+    Win32 glue the host and the helper share), `modes.rs` and `helper/`
   - `platform/macos/` (macOS 12.3 or later; compiled, linked and
     unit-tested in CI, with capture and streaming verified on an M3 Pro): `mod.rs`
     (`Macos`, its `support()` and the Screen Recording and Accessibility
