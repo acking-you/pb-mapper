@@ -119,6 +119,11 @@ const PbVideoModule* LoadModule() {
 // Flutter's software renderer draws no external texture.
 bool SoftwareRenderer() { return g_strcmp0(g_getenv("FLUTTER_LINUX_RENDERER"), "software") == 0; }
 
+// The steady clock in nanoseconds, never 0 in practice: 0 means "none".
+int64_t NowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+}
+
 // The fastest refresh among the monitors as they are set now: the viewer
 // presents at its display's rate, and the window may move to the fastest.
 // GTK thread only.
@@ -238,6 +243,16 @@ struct _PbVideoTexture {
   // Guarded by mutex: the picture handed to Flutter last, which is the one
   // on screen. Only the raster thread replaces it.
   PbVideoPicture* shown;
+  // Whether a stats read asked for timings: written under mutex, read
+  // without it by frame_ready, which reads no clock while it is off.
+  gint timed;
+  // Guarded by mutex, and zero unless timed: when frame_ready last said a
+  // newer picture can be acquired (0 once a newer picture was taken), and
+  // surface_consume, from then to copy_pixels taking it.
+  int64_t ready_ns;
+  int64_t consume_samples;
+  int64_t consume_total_ns;
+  int64_t consume_max_ns;
 };
 
 G_DEFINE_TYPE(PbVideoTexture, pb_video_texture, fl_pixel_buffer_texture_get_type())
@@ -251,6 +266,15 @@ static gboolean pb_video_texture_copy_pixels(FlPixelBufferTexture* texture, cons
   if (next) {
     previous = self->shown;
     self->shown = next;
+    // A picture other than the one shown, which stays retained until here,
+    // is a newer one: while timed, its wait since frame_ready.
+    if (next != previous && self->ready_ns != 0) {
+      const int64_t waited = std::max<int64_t>(0, NowNs() - self->ready_ns);
+      self->ready_ns = 0;
+      ++self->consume_samples;
+      self->consume_total_ns += waited;
+      self->consume_max_ns = std::max(self->consume_max_ns, waited);
+    }
   }
   PbVideoPicture* picture = self->shown;
   g_mutex_unlock(&self->mutex);
@@ -283,10 +307,45 @@ static void pb_video_texture_class_init(PbVideoTextureClass* klass) {
 
 static void pb_video_texture_init(PbVideoTexture* self) { g_mutex_init(&self->mutex); }
 
-// A GStreamer thread: a newer picture can be acquired.
+// A GStreamer thread: a newer picture can be acquired. The module calls this
+// just after publishing it, so its time is taken first; a raster pass
+// already under way can still take the picture before it, and that sample
+// then runs from an earlier frame_ready, or is skipped.
 static void pb_video_texture_frame_ready(void* context) {
   PbVideoTexture* self = static_cast<PbVideoTexture*>(context);
+  if (g_atomic_int_get(&self->timed)) {
+    const int64_t now = NowNs();
+    g_mutex_lock(&self->mutex);
+    if (g_atomic_int_get(&self->timed)) self->ready_ns = now;
+    g_mutex_unlock(&self->mutex);
+  }
   fl_texture_registrar_mark_texture_frame_available(self->registrar, FL_TEXTURE(self));
+}
+
+// GTK thread, for `stats`: `timings` starts surface_consume, or keeps it,
+// and returns it as {samples, mean_ms, max_ms} since it began; false drops
+// it and returns null.
+static FlValue* pb_video_texture_timings(PbVideoTexture* self, bool timings) {
+  g_mutex_lock(&self->mutex);
+  if (!timings || !g_atomic_int_get(&self->timed)) {
+    self->ready_ns = 0;
+    self->consume_samples = 0;
+    self->consume_total_ns = 0;
+    self->consume_max_ns = 0;
+  }
+  g_atomic_int_set(&self->timed, timings ? 1 : 0);
+  const int64_t samples = self->consume_samples, total = self->consume_total_ns, longest = self->consume_max_ns;
+  g_mutex_unlock(&self->mutex);
+  if (!timings) return nullptr;
+  FlValue* timing = fl_value_new_map();
+  fl_value_set_string_take(timing, "samples", fl_value_new_int(samples));
+  fl_value_set_string_take(
+      timing, "mean_ms",
+      fl_value_new_float(samples == 0 ? 0.0 : static_cast<double>(total) / static_cast<double>(samples) / 1e6));
+  fl_value_set_string_take(timing, "max_ms", fl_value_new_float(static_cast<double>(longest) / 1e6));
+  FlValue* all = fl_value_new_map();
+  fl_value_set_string_take(all, "surface_consume", timing);
+  return all;
 }
 
 static PbVideoTexture* pb_video_texture_new(const PbVideoModule* module, const PbVideoExports* exports,
@@ -431,6 +490,9 @@ class DesktopVideo {
       }
       Snapshot(texture, fl_value_get_string(path), static_cast<uint32_t>(std::min<int64_t>(width, UINT32_MAX)), call);
     } else if (strcmp(method, "stats") == 0) {
+      // `timings` is optional and true when absent, as on Windows and macOS.
+      FlValue* wanted = fl_value_lookup_string(args, "timings");
+      const bool timings = !wanted || fl_value_get_type(wanted) != FL_VALUE_TYPE_BOOL || fl_value_get_bool(wanted);
       PbVideoStats stats{};
       texture->module->stats(texture->decoder, &stats);
       g_autoptr(FlValue) result = fl_value_new_map();
@@ -442,6 +504,10 @@ class DesktopVideo {
       fl_value_set_string_take(result, "recoveries", fl_value_new_int(static_cast<int64_t>(stats.recoveries)));
       fl_value_set_string_take(result, "lastRecovery", fl_value_new_string(stats.last_recovery));
       fl_value_set_string_take(result, "decoder", fl_value_new_string(stats.decoder));
+      if (FlValue* timed = pb_video_texture_timings(texture, timings)) {
+        fl_value_set_string_take(result, "timings", timed);
+      }
+      fl_value_set_string_take(result, "refreshHz", fl_value_new_float(DisplayMaxHz()));
       fl_method_call_respond_success(call, result, nullptr);
     } else if (strcmp(method, "dispose") == 0) {
       viewers_.erase(found);
