@@ -1,9 +1,7 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.70s
      Running unittests src/lib.rs (target/debug/deps/pb_mapper_desktop-32b14ab934f7e8c0)
-
-running 2 tests
+running 3 tests
+test scale::tests::a_turned_display_is_captured_at_its_mode_turned_back ... ok
 test scale::tests::an_odd_edge_is_cropped_and_anything_more_is_scaled ... ok
 test scale::tests::the_source_region_is_what_lands_in_the_kept_upright_corner ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.00s
-
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.00s

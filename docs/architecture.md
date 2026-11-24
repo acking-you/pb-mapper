@@ -331,8 +331,9 @@ Nothing in the SDK crates knows it exists.
     on-demand IDRs, and the hand-off from thread C to B-send
   - `scale.rs`: How a captured picture becomes the encoded one, pure and
     tested on every platform: the quarter turn that stands a rotated
-    display's picture upright, the region of the capture each turn keeps,
-    and whether the encoded size is a crop of an odd edge or a scaling
+    display's picture upright, the size a turned display is captured at
+    given its mode, the region of the capture each turn keeps, and whether
+    the encoded size is a crop of an odd edge or a scaling
   - `protocol.rs`, `wire.rs`, `invite.rs`, `security.rs`, `auth.rs`: Protocol v2
     (ALPN `pb-mapper/desktop/2`), invitations, certificate pinning, and the
     input authorisation ledger

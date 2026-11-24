@@ -1499,21 +1499,34 @@ presents.
 GPU scaling preserves aspect ratio and never upscales; input and cursor
 coordinates still use the physical `Display` geometry. A rotated display
 (`DXGI_OUTDUPL_DESC::Rotation` 90, 180 or 270; unspecified counts as none)
-is captured as scanned out, its display mode's size, and the video processor
-turns it clockwise by the same angle (`VideoProcessorSetStreamRotation`, as
-Microsoft's Desktop Duplication sample maps the rotation), so the video has
-the upright size the `Display` already describes and its input mapping is
-unchanged; a GPU whose video processor lacks the rotation cap
-(`D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ROTATION`) fails that capture as
-before, and a first frame whose texture is not the mode's size fails it with
-both sizes named. No device has shown each angle upright yet. A desktop one
+is captured as scanned out: its display mode is read upright, the size of
+its output's desktop rectangle, and its pictures as that size turned back,
+as WebRTC's Desktop Duplication capturer requires (a mode given the other
+way round is told apart by that rectangle, `scale::Rotation::scanned_out`).
+The video processor turns each picture clockwise by the same angle
+(`VideoProcessorSetStreamRotation`, as Microsoft's Desktop Duplication
+sample maps the rotation), so the video has the upright size the `Display`
+already describes and its input mapping is unchanged. The video processor
+is set up before the encoder, so a GPU whose video processor lacks the
+rotation cap (`D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ROTATION`) fails that
+capture as before, without opening an encoder each time it is retried; a
+first frame whose texture is not the size expected fails it with both sizes
+named, and `desktop_video_encoder_opened` logs the `mode` and the
+`captured` size. No device has shown each angle upright yet. A desktop one
 pixel over the even encoded size in either dimension, such as 1365×767
 under 1080p bounds, is cropped rather than scaled by a hair under 1, which
 would blur every pixel: the video processor copies it 1:1 and leaves out the
 upright picture's right column or bottom row (`scale::crop_only`). Input and
 the pointer still map the video across the whole display, so in the half of
 the picture nearest that edge a click lands one display pixel further
-towards it. The video processor is asked for
+towards it: the viewer cannot tell that crop from a scaling without a new
+field on the wire, and a host that mapped clicks back could no longer reach
+the display's last column or row. The ignored test
+`the_video_processor_turns_crops_and_scales_as_the_geometry_says` (in
+`converter.rs`; `cargo test -p pb-mapper-desktop --all-features --lib
+converter -- --ignored` on a Windows machine with a GPU) checks the turn,
+the crop and a downscale on each hardware adapter's video processor with a
+synthetic picture, without a rotated display. The video processor is asked for
 speed (`D3D11_VIDEO_USAGE_OPTIMAL_SPEED`); quality goes on, for a downscaled
 picture only, per adapter vendor where a device run shows sharper text for
 under 1 ms of processor time, and none has yet. `video_bench --vp-usage
@@ -3257,7 +3270,8 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Windows display and system kept awake while capturing | The keeper's timing and the watchdog's loop are unit-tested on every platform and its power request is created in the Windows CI job; a viewer past the display-off timeout, `powercfg /requests` during capture, a network stall and a pause, and waking a dark display, in the app and through the service, outstanding on a device |
 | Same owner's locked login / password entry | Session identity and desktop transition handling implemented; actual password-entry acceptance pending |
 | Pre-login boot, SAS, control across user switching | Unsupported; service waits for its approved owner's login |
-| Rotated GPU capture, Linux hosts, macOS before 12.3, Windows hosts without Media Foundation | Unsupported |
+| Rotated displays on a Windows host | Turned upright by the video processor where it has the rotation cap; how the mode's size is read and the region each turn keeps are unit-tested on every platform; each angle upright, clicks landing where aimed, the converter's ignored GPU test and a GPU without the cap outstanding on a device |
+| Linux hosts, macOS before 12.3, Windows hosts without Media Foundation | Unsupported |
 | Audio, clipboard, file transfer, recording, multiple viewers | Not implemented |
 
 Background operation follows each platform's own constraints. Linux needs its

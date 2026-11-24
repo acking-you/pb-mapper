@@ -1,6 +1,7 @@
 $ RUSTC_WRAPPER= CC_x86_64_pc_windows_msvc=fakecc AR_x86_64_pc_windows_msvc=fakear \
     cargo +1.100.0 clippy --target x86_64-pc-windows-msvc -p pb-mapper-desktop \
     --all-features --all-targets -- -D warnings
+   Compiling pb-mapper-desktop v0.12.1 (<worktree>/crates/pb-mapper-desktop)
 error: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
    --> crates/pb-mapper-desktop/src/platform/windows/video/codec.rs:862:19
     |
@@ -36,16 +37,18 @@ help: consider using an iterator
    |
 
 error: could not compile `pb-mapper-desktop` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
 error: could not compile `pb-mapper-desktop` (lib test) due to 2 previous errors
 exit status 101
 
 $ (the same) -- -D warnings -A deprecated -A clippy::needless_range_loop
     Checking pb-mapper-desktop v0.12.1 (<worktree>/crates/pb-mapper-desktop)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.67s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.15s
 exit status 0
 
 $ RUSTC_WRAPPER= RUSTDOCFLAGS="-D warnings" CC_x86_64_pc_windows_msvc=fakecc AR_x86_64_pc_windows_msvc=fakear \
     cargo +1.100.0 doc --target x86_64-pc-windows-msvc -p pb-mapper-desktop --no-deps
  Documenting pb-mapper-desktop v0.12.1 (<worktree>/crates/pb-mapper-desktop)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.92s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.95s
+   Generated <worktree>/target/x86_64-pc-windows-msvc/doc/pb_mapper_desktop/index.html
 exit status 0

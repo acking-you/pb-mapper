@@ -14,9 +14,17 @@ and Rust 1.99.1, is below.
 ## The geometry, tested on every platform
 
 `scale.rs` holds what the converter is set up from: `crop_only`,
-`downscales` and the quarter turn's `source_rect`.
+`downscales`, the quarter turn's `source_rect`, and `scanned_out`, the
+size a turned display's pictures are captured at given its display mode
+and its desktop rectangle.
 `cargo test -p pb-mapper-desktop --all-features --lib scale::`
-([`scale-tests.txt`](scale-tests.txt)) passes. The region test walks
+([`scale-tests.txt`](scale-tests.txt)) passes. The size test reads a
+quarter-turned display's mode upright, the desktop rectangle's size, as
+WebRTC's Desktop Duplication capturer requires, so that a 1080×1920
+portrait mode is captured at 1920×1080, and reads it as scanned out only
+where that alone matches the desktop. With `scanned_out` returning the
+mode as given, as the first version of this change read every mode, it
+fails (`left: (1080, 1920)`, `right: (1920, 1080)`). The region test walks
 every captured pixel of small odd and even pictures under each turn,
 keeping the whole upright picture or one column, row or both less, and
 checks that a pixel is inside the source rectangle exactly when the turn
@@ -28,7 +36,8 @@ test fails (`Cw90 (5, 3) keeping (2, 5): captured (0, 0) lands at (2, 0)`).
 ## Windows type-check
 
 As in the [encoder settings record](../2026-11-24-windows-encoder-settings/README.md),
-the desktop crate's library, tests and examples were linted for
+the desktop crate's library, tests (the converter's GPU test among them)
+and examples were linted for
 `x86_64-pc-windows-msvc` from this Mac with Rust 1.100.0's Windows
 standard library: `cargo +1.100.0 clippy --target x86_64-pc-windows-msvc
 -p pb-mapper-desktop --all-features --all-targets -- -D warnings`, with
@@ -48,6 +57,15 @@ Each needs a Windows device, in release mode
 (`cargo run --release -p pb-mapper-desktop --example video_bench -- ...`),
 and each result goes in a run of its own under `docs/benchmarks/`:
 
+- **The video processor's geometry**, on any Windows machine with a GPU,
+  no rotated display needed: `cargo test -p pb-mapper-desktop
+  --all-features --lib converter -- --ignored --nocapture`. On each
+  hardware adapter, at speed and at quality, it converts a synthetic
+  picture of four grey quadrants under each turn, cropped one column and
+  one row (every pixel checked, the left-out column and row a fifth grey)
+  and halved (each quadrant's middle checked); it prints a line per case
+  and the processors that lack the rotation cap. It type-checks here; it
+  has not run.
 - **Direct conversion.** At 4K captured and 1080p encoded
   (`--max-width 1920 --max-height 1080`) and at 1440p native, on a
   discrete GPU and an Intel iGPU: `30 60 --animate --gpu-time` against the
@@ -68,10 +86,15 @@ and each result goes in a run of its own under `docs/benchmarks/`:
   (`ffmpeg -f rawvideo -pix_fmt nv12 -s WxH -i src.nv12 -frames:v 1 f.png`,
   W×H from `first_access_unit`'s `size`) must be upright, matching what
   the display shows, with `desktop_video_encoder_opened`'s `rotation` the
-  angle; in the session a click on a corner and on the pattern window must
-  land where aimed. Compare `gpu_time`'s `convert_p50_us` with an
-  unrotated run. A GPU whose video processor lacks the rotation cap must
-  fail with the error that says so.
+  angle. Record that line's `mode` and `captured`: at 90° and 270° a
+  portrait display's mode is expected upright (1080x1920) and its capture
+  landscape (1920x1080); a first frame that fails with "the desktop image
+  is ..., not the ... its display mode and rotation give" says the reading
+  is wrong on that driver. In the session a click on a corner and on the
+  pattern window must land where aimed. Compare `gpu_time`'s
+  `convert_p50_us` with an unrotated run. A GPU whose video processor
+  lacks the rotation cap must fail with the error that says so, with no
+  `desktop_video_encoder_opened` before it.
 - **Odd size.** A VM or a custom resolution of 1365×767:
   `10 60 --text --dump-source src.nv12` under the default bounds, before
   this change and after (`desktop_video_encoder_opened` says `cropped`).
