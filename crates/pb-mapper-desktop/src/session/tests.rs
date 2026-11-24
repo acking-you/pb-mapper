@@ -482,6 +482,33 @@ fn a_blocked_window_makes_a_small_queue_cut() {
     assert_eq!(cuts(true), 1);
 }
 
+/// Only a session its transport ended leaves its rate for the next: not one
+/// still running, and not one the host ended, though its transport closes
+/// after the host's decision. The record is the session's bits per frame at
+/// 1080p under its preset, the preset it ended on.
+#[test]
+fn only_a_transport_end_leaves_a_closing_rate() {
+    let t0 = Instant::now();
+    let closed = session_listing(&[]);
+    assert_eq!(closed.closing_rate(t0), None);
+    closed.update_qos(t0, |qos| {
+        qos.set_preset(QualityPreset::Smooth, t0, Default::default());
+    });
+    closed.close();
+    let record = closed.closing_rate(t0).unwrap();
+    assert_eq!(
+        (record.preset, record.ended),
+        (QualityPreset::Smooth, t0),
+        "{record:?}"
+    );
+    // Smooth's start, at the viewer's 4K bounds and back.
+    assert!((record.bpf - 50_000.0).abs() < 1e-6, "{record:?}");
+    let ended = session_listing(&[]);
+    ended.end(StopReason::HostEnded, stop_message(StopReason::HostEnded));
+    ended.close();
+    assert_eq!(ended.closing_rate(t0), None);
+}
+
 /// A rebase the receipts made reaches the credit ledger through B-recv: the
 /// longer route is no ack queue, and the window's time covers it.
 #[test]
