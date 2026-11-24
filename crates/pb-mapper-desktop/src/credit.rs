@@ -175,6 +175,11 @@ pub(crate) struct CreditLedger {
     /// What the RTT floor hides of a queue on this path (`Qos::floor_gap`),
     /// which the one-way ack queue hides too.
     floor_gap: Duration,
+    /// What a receipt rebase added to the QoS controller's baseline
+    /// (`Qos::rebase_state`): a longer route, which the window's time
+    /// covers and the ack queue does not count; and its generation.
+    rebase: Duration,
+    rebase_generation: u64,
     /// The newest IDR booked.
     last_keyframe: Option<u64>,
     /// While set, B-send drops predicted units until an IDR is booked, and
@@ -198,6 +203,8 @@ impl CreditLedger {
             delays: Vec::new(),
             one_way: arrival_time.then(|| OneWay::new(now)),
             floor_gap: Duration::ZERO,
+            rebase: Duration::ZERO,
+            rebase_generation: 0,
             last_keyframe: None,
             skip_ask_at: None,
         }
@@ -207,16 +214,18 @@ impl CreditLedger {
     /// never a smoothed one, so queueing never enlarges it, plus, with arrival
     /// times, the receipts' standing queue on their way back
     /// (`OneWay::reverse_term`), during which a unit stays unreceipted but in
-    /// no queue toward the viewer. When receipts show a standing queue over a
-    /// full delivery window, the byte budget follows the measured delivery
-    /// rate instead: that bounds the queue between probes, while fps and
-    /// bitrate decisions stay on the probe.
+    /// no queue toward the viewer. While a receipt episode lasts, `clamp` is
+    /// the busy rate the QoS controller cut for, and the byte budget follows
+    /// it at once. Otherwise, when receipts show a standing queue over a full
+    /// delivery window, the byte budget follows the measured delivery rate:
+    /// that bounds the queue whoever cuts the rate.
     pub fn window(
         &mut self,
         codec: VideoCodec,
         pace_fps: u32,
         expected_bps: u64,
         base_rtt: Option<Duration>,
+        clamp: Option<u64>,
         now: Instant,
     ) -> Window {
         if codec == VideoCodec::Jpeg {
@@ -230,18 +239,21 @@ impl CreditLedger {
             .one_way
             .as_ref()
             .map_or(Duration::ZERO, OneWay::reverse_term);
-        let t = base_rtt.unwrap_or(INITIAL_RTT) + WINDOW_MARGIN + reverse;
+        let t = base_rtt.unwrap_or(INITIAL_RTT) + self.rebase + WINDOW_MARGIN + reverse;
         let frames = (f64::from(pace_fps) * t.as_secs_f64()).ceil() as usize;
         let normal = (2.0 * expected_bps as f64 * t.as_secs_f64() / 8.0) as usize;
         let normal = normal.clamp(BYTE_WINDOW_MIN, BYTE_WINDOW_MAX);
         let delivering = self
             .delivery_since
             .is_some_and(|since| now.saturating_duration_since(since) >= DELIVERY_WINDOW);
-        let (bytes, clamped) = match base_rtt {
-            Some(base) if delivering && self.ack_queue(base, now) > ACK_QUEUE_LIMIT => {
-                let rate = self.delivery_bps(now) as f64;
-                let bytes = (DELIVERY_FACTOR * rate * t.as_secs_f64() / 8.0) as usize;
-                (bytes.clamp(BYTE_WINDOW_CLAMP_MIN, normal), true)
+        let follow = |rate: u64| {
+            let bytes = (DELIVERY_FACTOR * rate as f64 * t.as_secs_f64() / 8.0) as usize;
+            (bytes.clamp(BYTE_WINDOW_CLAMP_MIN, normal), true)
+        };
+        let (bytes, clamped) = match (clamp, base_rtt) {
+            (Some(rate), Some(_)) => follow(rate),
+            (_, Some(base)) if delivering && self.ack_queue(base, now) > ACK_QUEUE_LIMIT => {
+                follow(self.delivery_bps(now))
             }
             _ => (normal, false),
         };
@@ -445,13 +457,14 @@ impl CreditLedger {
     /// in it: a slow link receipts seldom, and its queue must not vanish
     /// between two receipts. Zero before three receipts. With arrival times,
     /// the median queue toward the viewer, which no baseline offsets, less
-    /// what the RTT floor hides of a round trip on this path.
+    /// what the RTT floor hides of a round trip on this path. Either way less
+    /// what a rebase added to the baseline.
     pub fn ack_queue(&mut self, base_rtt: Duration, now: Instant) -> Duration {
         let median = self.ack_median(now);
         if self.one_way.is_some() {
-            median.saturating_sub(self.floor_gap)
+            median.saturating_sub(self.floor_gap + self.rebase)
         } else {
-            median.saturating_sub(base_rtt)
+            median.saturating_sub(base_rtt + self.rebase)
         }
     }
 
@@ -461,12 +474,25 @@ impl CreditLedger {
         self.floor_gap = gap;
     }
 
+    /// What a receipt rebase added to the QoS controller's baseline, as of
+    /// its `generation`: a write of an older generation than the ledger has,
+    /// which lost a race with a newer one, is ignored.
+    pub fn set_rebase(&mut self, generation: u64, rebase: Duration) {
+        if generation > self.rebase_generation {
+            self.rebase_generation = generation;
+            self.rebase = rebase;
+        }
+    }
+
     /// The queues of a viewer that stamps arrival times, for the stats: the
     /// ack queue toward it, and the median of the newest receipts' queues on
     /// their way back.
     pub fn one_way_queues(&mut self, now: Instant) -> Option<(Duration, Option<Duration>)> {
         let reverse = self.one_way.as_ref()?.reverse_queue();
-        Some((self.ack_median(now).saturating_sub(self.floor_gap), reverse))
+        let forward = self
+            .ack_median(now)
+            .saturating_sub(self.floor_gap + self.rebase);
+        Some((forward, reverse))
     }
 
     /// A probe's queue toward the viewer: written at `sent`, read when the
@@ -536,7 +562,7 @@ mod tests {
         let mut credit = CreditLedger::new(t0, false);
         // 60 fps at 4 Mbit/s over a 20 ms baseline: 8 frames and 120 KB.
         let base = Some(Duration::from_millis(20));
-        let window = credit.window(VideoCodec::H264, 60, 4_000_000, base, t0);
+        let window = credit.window(VideoCodec::H264, 60, 4_000_000, base, None, t0);
         assert_eq!(
             window,
             Window {
@@ -588,7 +614,7 @@ mod tests {
             credit.on_receipt(seq, ms(n * 20 + 170), None).unwrap();
         }
         let now = ms(29 * 20 + 170);
-        let slow = credit.window(VideoCodec::H264, 60, 4_000_000, base, now);
+        let slow = credit.window(VideoCodec::H264, 60, 4_000_000, base, None, now);
         assert!(slow.clamped);
         // 5 KiB every 20 ms is about 2 Mbit/s: ×1.25 over 120 ms is about 39 KB.
         assert!((36_000..=41_000).contains(&slow.bytes), "{slow:?}");
@@ -597,7 +623,14 @@ mod tests {
             seq = credit.book(5 * KIB, false, ms(n * 20));
             credit.on_receipt(seq, ms(n * 20 + 25), None).unwrap();
         }
-        let fast = credit.window(VideoCodec::H264, 60, 4_000_000, base, ms(49 * 20 + 25));
+        let fast = credit.window(
+            VideoCodec::H264,
+            60,
+            4_000_000,
+            base,
+            None,
+            ms(49 * 20 + 25),
+        );
         assert_eq!(fast, window);
         assert_eq!(seq, 50);
         // A slow link receipts seldom: between two receipts fewer than three
@@ -607,14 +640,79 @@ mod tests {
             let seq = credit.book(9 * KIB, false, ms(n * 100));
             credit.on_receipt(seq, ms(n * 100 + 400), None).unwrap();
         }
-        let between = credit.window(VideoCodec::H264, 60, 4_000_000, base, ms(9 * 100 + 460));
+        let between = credit.window(
+            VideoCodec::H264,
+            60,
+            4_000_000,
+            base,
+            None,
+            ms(9 * 100 + 460),
+        );
         assert!(between.clamped, "{between:?}");
 
         // A JPEG session has a fixed window.
-        let jpeg = CreditLedger::new(t0, false).window(VideoCodec::Jpeg, 8, 0, None, t0);
+        let jpeg = CreditLedger::new(t0, false).window(VideoCodec::Jpeg, 8, 0, None, None, t0);
         assert_eq!((jpeg.frames, jpeg.bytes), (4, 2 * 1024 * KIB));
     }
 
+    #[test]
+    fn an_episode_clamps_the_window_at_once_and_a_rebase_is_no_queue() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let base = Some(Duration::from_millis(20));
+        let mut credit = CreditLedger::new(t0, false);
+        // Before any receipt the delivery clamp has nothing to go on, but a
+        // receipt episode's busy rate clamps at once: 1.25 × 2 Mbit/s over
+        // 20 ms + 100 ms is 37 500 bytes ...
+        let open = credit.window(VideoCodec::H264, 60, 4_000_000, base, None, t0);
+        assert!(!open.clamped);
+        let clamped = credit.window(VideoCodec::H264, 60, 4_000_000, base, Some(2_000_000), t0);
+        assert_eq!((clamped.bytes, clamped.clamped), (37_500, true));
+        assert_eq!(clamped.frames, open.frames);
+        // ... never below 32 KiB, never above the normal window ...
+        let slow = credit.window(VideoCodec::H264, 60, 4_000_000, base, Some(100_000), t0);
+        assert_eq!(slow.bytes, BYTE_WINDOW_CLAMP_MIN);
+        let fast = credit.window(VideoCodec::H264, 60, 4_000_000, base, Some(1 << 30), t0);
+        assert_eq!(fast.bytes, open.bytes);
+        // ... and never for JPEG.
+        let jpeg = credit.window(VideoCodec::Jpeg, 8, 0, base, Some(100_000), t0);
+        assert!(!jpeg.clamped);
+
+        // Receipts 150 ms above a 20 ms base: a 150 ms ack queue, which
+        // clamps the window to the delivery rate ...
+        let mut seq = 0;
+        for n in 0..30 {
+            seq = credit.book(5 * KIB, false, ms(n * 20));
+            credit.on_receipt(seq, ms(n * 20 + 170), None).unwrap();
+        }
+        let now = ms(29 * 20 + 170);
+        assert_eq!(
+            credit.ack_queue(Duration::from_millis(20), now),
+            Duration::from_millis(150)
+        );
+        assert!(
+            credit
+                .window(VideoCodec::H264, 60, 4_000_000, base, None, now)
+                .clamped
+        );
+        // ... unless 120 ms of it is a longer route the QoS controller
+        // rebased onto: 30 ms of queue, and a window whose time covers the
+        // route: 60 FPS over 20 + 120 + 100 ms is 15 frames.
+        credit.set_rebase(2, Duration::from_millis(120));
+        assert_eq!(
+            credit.ack_queue(Duration::from_millis(20), now),
+            Duration::from_millis(30)
+        );
+        let rebased = credit.window(VideoCodec::H264, 60, 4_000_000, base, None, now);
+        assert_eq!((rebased.frames, rebased.clamped), (15, false));
+        // A write of an older generation, which lost a race, changes nothing.
+        credit.set_rebase(1, Duration::ZERO);
+        assert_eq!(
+            credit.ack_queue(Duration::from_millis(20), now),
+            Duration::from_millis(30)
+        );
+        assert_eq!(seq, 30);
+    }
     #[test]
     fn a_receipt_reports_its_newest_unit_and_the_bytes_it_covered() {
         let t0 = Instant::now();
@@ -709,7 +807,7 @@ mod tests {
             assert_eq!(forward, arrival_time.then(|| Duration::from_millis(toward)));
         }
         let base = Some(Duration::from_millis(20));
-        let window = credit.window(VideoCodec::H264, 60, 4_000_000, base, last);
+        let window = credit.window(VideoCodec::H264, 60, 4_000_000, base, None, last);
         (credit, window)
     }
 
