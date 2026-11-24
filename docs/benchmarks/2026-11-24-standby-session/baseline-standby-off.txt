@@ -1,0 +1,12 @@
+test slow_link::standby_baseline_reconnects ... standby_baseline run=0 ended_after_block_ms=4009 reconnect_picture_ms=23 reconnect_input_ms=52 reason=Some(Timeout)
+standby_baseline run=1 ended_after_block_ms=3994 reconnect_picture_ms=26 reconnect_input_ms=58 reason=Some(Timeout)
+standby_baseline run=2 ended_after_block_ms=3988 reconnect_picture_ms=29 reconnect_input_ms=65 reason=Some(Timeout)
+standby_baseline run=3 ended_after_block_ms=3993 reconnect_picture_ms=25 reconnect_input_ms=61 reason=Some(Timeout)
+standby_baseline run=4 ended_after_block_ms=3993 reconnect_picture_ms=26 reconnect_input_ms=54 reason=Some(Timeout)
+standby_baseline run=5 ended_after_block_ms=4009 reconnect_picture_ms=24 reconnect_input_ms=56 reason=Some(Timeout)
+standby_baseline run=6 ended_after_block_ms=4004 reconnect_picture_ms=28 reconnect_input_ms=63 reason=Some(Timeout)
+standby_baseline run=7 ended_after_block_ms=3995 reconnect_picture_ms=29 reconnect_input_ms=61 reason=Some(Timeout)
+standby_baseline run=8 ended_after_block_ms=3989 reconnect_picture_ms=27 reconnect_input_ms=59 reason=Some(Timeout)
+standby_baseline run=9 ended_after_block_ms=3995 reconnect_picture_ms=50 reconnect_input_ms=91 reason=Some(Timeout)
+standby_baseline summary runs=10 ended_after_block_ms p50=3994 p90=4009 max=4009 reconnect_picture_ms p50=26 p90=29 max=50 reconnect_input_ms p50=59 p90=65 max=91
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 415 filtered out; finished in 100.81s

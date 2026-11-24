@@ -1,0 +1,34 @@
+test slow_link::standby_baseline_reconnects ... standby_baseline run=0 ended_after_block_ms=3993 reconnect_picture_ms=28 reconnect_input_ms=63 reason=Some(Timeout)
+standby_baseline run=1 ended_after_block_ms=3988 reconnect_picture_ms=28 reconnect_input_ms=56 reason=Some(Timeout)
+standby_baseline run=2 ended_after_block_ms=4005 reconnect_picture_ms=26 reconnect_input_ms=60 reason=Some(Timeout)
+standby_baseline run=3 ended_after_block_ms=3989 reconnect_picture_ms=25 reconnect_input_ms=52 reason=Some(Timeout)
+standby_baseline run=4 ended_after_block_ms=3993 reconnect_picture_ms=25 reconnect_input_ms=54 reason=Some(Timeout)
+standby_baseline run=5 ended_after_block_ms=3994 reconnect_picture_ms=28 reconnect_input_ms=56 reason=Some(Timeout)
+standby_baseline run=6 ended_after_block_ms=3994 reconnect_picture_ms=30 reconnect_input_ms=58 reason=Some(Timeout)
+standby_baseline run=7 ended_after_block_ms=3994 reconnect_picture_ms=26 reconnect_input_ms=54 reason=Some(Timeout)
+standby_baseline run=8 ended_after_block_ms=3992 reconnect_picture_ms=27 reconnect_input_ms=54 reason=Some(Timeout)
+standby_baseline run=9 ended_after_block_ms=4008 reconnect_picture_ms=27 reconnect_input_ms=59 reason=Some(Timeout)
+standby_baseline summary runs=10 ended_after_block_ms p50=3993 p90=4005 max=4008 reconnect_picture_ms p50=27 p90=28 max=30 reconnect_input_ms p50=56 p90=60 max=63
+test slow_link::standby_takes_a_dead_paths_place ... standby run=0 picture_after_block_ms=1584 input_after_block_ms=1587 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=1 picture_after_block_ms=1567 input_after_block_ms=1569 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=2 picture_after_block_ms=1568 input_after_block_ms=1570 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=3 picture_after_block_ms=1568 input_after_block_ms=1571 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=4 picture_after_block_ms=1568 input_after_block_ms=1572 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=5 picture_after_block_ms=1585 input_after_block_ms=1589 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=6 picture_after_block_ms=1568 input_after_block_ms=1576 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=7 picture_after_block_ms=1567 input_after_block_ms=1574 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=8 picture_after_block_ms=1567 input_after_block_ms=1568 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=9 picture_after_block_ms=1582 input_after_block_ms=1586 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby summary runs=10 picture_after_block_ms p50=1568 p90=1584 max=1585 input_after_block_ms p50=1572 p90=1587 max=1589 keyframes_in_outage min=1 max=1 keyframes_at_switch min=1 max=1
+test slow_link::standby_upgrades_a_relayed_session ... standby_upgrade run=0 direct_after_first_picture_ms=121 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade run=1 direct_after_first_picture_ms=117 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6800 state=Streaming host_viewers=1
+standby_upgrade run=2 direct_after_first_picture_ms=119 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6797 state=Streaming host_viewers=1
+standby_upgrade run=3 direct_after_first_picture_ms=112 keyframes=1 longest_gap_ms=34 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade run=4 direct_after_first_picture_ms=122 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6796 state=Streaming host_viewers=1
+standby_upgrade run=5 direct_after_first_picture_ms=118 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade run=6 direct_after_first_picture_ms=118 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade run=7 direct_after_first_picture_ms=118 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade run=8 direct_after_first_picture_ms=119 keyframes=1 longest_gap_ms=34 pictures=34 relay_standby_bit_s=6796 state=Streaming host_viewers=1
+standby_upgrade run=9 direct_after_first_picture_ms=117 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade summary runs=10 direct_after_first_picture_ms p50=118 p90=121 max=122 keyframes min=1 max=1 longest_gap_ms p50=33 p90=34 max=34 relay_standby_bit_s p50=6798 p90=6798 max=6800
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 414 filtered out; finished in 249.03s

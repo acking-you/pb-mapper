@@ -104,6 +104,7 @@ async fn blocked_video_does_not_block_local_stop() {
         },
         quality: QualityPreset::Balanced,
         capabilities: vec![],
+        standby_for: None,
     };
     wire::write_message(&mut tls, &authenticate, None)
         .await

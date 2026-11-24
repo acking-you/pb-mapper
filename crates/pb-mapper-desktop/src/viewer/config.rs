@@ -6,7 +6,7 @@ use crate::{
     protocol::{
         CAPABILITY_ARRIVAL_TIME, CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE,
         CAPABILITY_DISPLAY_MODE, CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE,
-        CAPABILITY_H265, CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS,
+        CAPABILITY_H265, CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, CAPABILITY_STANDBY,
     },
 };
 use serde::Serialize;
@@ -113,7 +113,8 @@ impl ViewerConfig {
     /// What this viewer reads and asks for, as `Authenticate.capabilities`.
     /// It always keeps the pointer's shapes (`Viewer::cursor_shape`), and
     /// always stamps arrival times and names the seq a keyframe request
-    /// follows, for a host that listed those back.
+    /// follows, for a host that listed those back, and it always speaks
+    /// standbys, though it opens them only where they serve.
     pub(crate) fn capabilities(&self) -> Vec<String> {
         let mut capabilities = vec![
             CAPABILITY_ENCODER_DWELL.to_owned(),
@@ -123,6 +124,7 @@ impl ViewerConfig {
             CAPABILITY_PEER_CURSORS.to_owned(),
             CAPABILITY_ARRIVAL_TIME.to_owned(),
             CAPABILITY_KEYFRAME_SEQ.to_owned(),
+            CAPABILITY_STANDBY.to_owned(),
         ];
         if self.codecs.contains(&VideoCodec::H265) {
             capabilities.push(CAPABILITY_H265.to_owned());

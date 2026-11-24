@@ -1,13 +1,13 @@
 //! The host's listener: each connection's handshake and session.
 
-use super::{BACKEND_ANSWER_WAIT, Room, Shared};
+use super::{BACKEND_ANSWER_WAIT, Room, Shared, TicketDigest, ticket_digest};
 use crate::{
     Display, QualityPreset, Result, VideoCodec, VideoLimits, VideoSize,
     launch::Launch,
     protocol::{
         CAPABILITY_ARRIVAL_TIME, CAPABILITY_H265, CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS,
-        HostMessage, PeerColor, PeerSlot, RejectReason, StopReason, ViewerMessage,
-        valid_capabilities,
+        CAPABILITY_STANDBY, HostMessage, PeerColor, PeerSlot, RejectReason, StopReason,
+        ViewerMessage, valid_capabilities,
     },
     qos::scaled_size,
     session::{self, Session, stop_message},
@@ -42,12 +42,21 @@ struct Request {
     quality: QualityPreset,
     /// What the viewer listed; values this host does not know are ignored.
     capabilities: Vec<String>,
+    /// The ticket of the pair this connection asks to stand by for.
+    standby_for: Option<String>,
+}
+impl Request {
+    fn listed(&self, wanted: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|capability| capability == wanted)
+    }
 }
 
-/// A viewer that holds a room slot and heard `Accepted`.
+/// A viewer that holds a room slot, or stands by for one, and heard
+/// `Accepted`. The room holds its admission permit.
 struct Admitted {
     stream: TlsStream<TcpStream>,
-    permit: OwnedSemaphorePermit,
     request: Request,
     codec: VideoCodec,
     /// The size the encoder is expected to produce.
@@ -87,11 +96,25 @@ fn expected_video(display: Option<&Display>, limits: VideoLimits) -> VideoSize {
 
 /// What every host speaks, whatever its backend: each is listed back to a
 /// viewer that listed it.
-const SESSION_CAPABILITIES: [&str; 3] = [
+const SESSION_CAPABILITIES: [&str; 4] = [
     CAPABILITY_PEER_CURSORS,
     CAPABILITY_ARRIVAL_TIME,
     CAPABILITY_KEYFRAME_SEQ,
+    CAPABILITY_STANDBY,
 ];
+
+/// A new pair's ticket, as `Accepted` carries it and as the room keeps it:
+/// 32 bytes from the system's generator. `None` when it has none to give,
+/// which leaves the pair without standbys.
+fn new_ticket() -> Option<(String, TicketDigest)> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut bytes = [0; 32];
+    SystemRandom::new().fill(&mut bytes).ok()?;
+    let ticket = URL_SAFE_NO_PAD.encode(bytes);
+    let digest = ticket_digest(&ticket);
+    Some((ticket, digest))
+}
 
 /// `Accepted.capabilities`: the backend's, then each of
 /// `SESSION_CAPABILITIES` the viewer listed.
@@ -158,6 +181,8 @@ pub(super) struct Acceptor {
     pub(super) room: AsyncMutex<Option<Arc<Room>>>,
     /// Up to `MAX_VIEWERS` concurrent viewer slots.
     pub(super) slot: Arc<Semaphore>,
+    /// Up to `MAX_VIEWERS` standbys, one per slot at most.
+    pub(super) standby: Arc<Semaphore>,
     pub(super) cancel: CancellationToken,
 }
 impl Acceptor {
@@ -186,7 +211,6 @@ impl Acceptor {
         };
         let Some(Admitted {
             stream,
-            permit,
             request,
             codec,
             video,
@@ -202,6 +226,7 @@ impl Acceptor {
             target: "pb_mapper_desktop::session",
             event = "desktop_host_accepted",
             slot = slot.index(),
+            standby = request.standby_for.is_some(),
             codec = ?codec,
             max_width = request.limits.max_width,
             max_height = request.limits.max_height,
@@ -225,8 +250,11 @@ impl Acceptor {
         .await;
         // Recorded before the slot frees, so a viewer that reconnects once
         // this one is gone starts from it. A session that leaves none keeps
-        // the record as it was, with its own end.
-        if let Some(rate) = session.closing_rate(Instant::now()) {
+        // the record as it was, with its own end, and so does a standby,
+        // which never sent video.
+        if !session.standing_by()
+            && let Some(rate) = session.closing_rate(Instant::now())
+        {
             *self.shared.closing_rate.lock() = Some(rate);
         }
         {
@@ -248,10 +276,8 @@ impl Acceptor {
                 self.shared.restore.notify_one();
             }
         }
-        // The slot frees before the permit, which a panic keeps too: `permit`
-        // was bound first, so it is dropped last.
+        // The room holds the permit, which frees with the slot.
         drop(release);
-        drop(permit);
     }
 
     /// The handshake, then `Accepted` with the session's codec and
@@ -262,6 +288,16 @@ impl Acceptor {
     /// encodes H.265, unless an H.265 encoder already failed in this process.
     async fn accept_session(&self, socket: TcpStream) -> Option<Admitted> {
         let (mut stream, permit, request) = self.handshake(socket).await?;
+        if let Some(ticket) = request.standby_for.as_deref() {
+            let ticket = ticket_digest(ticket);
+            return self.accept_standby(stream, permit, request, ticket).await;
+        }
+        // A pair's ticket, for a viewer that may open standbys.
+        let (ticket, digest) = request
+            .listed(CAPABILITY_STANDBY)
+            .then(new_ticket)
+            .flatten()
+            .unzip();
         let mut active = self.room.lock().await;
         if let Some(existing) = active.as_ref().cloned()
             && existing.is_closed()
@@ -297,6 +333,7 @@ impl Acceptor {
                 nominal_fps: request.limits.max_fps,
                 quality: request.quality,
                 capabilities: capabilities.clone(),
+                ticket: ticket.clone(),
             };
             tokio::time::timeout(
                 HANDSHAKE_TIMEOUT,
@@ -332,11 +369,10 @@ impl Acceptor {
                 self.shared.changes.clone(),
             );
             session.expect_video_size(video);
-            let conn_id = room.attach(slot, session.clone(), request.limits)?;
+            let conn_id = room.attach(slot, session.clone(), request.limits, permit, digest)?;
             self.shared.changes.bump();
             return Some(Admitted {
                 stream,
-                permit,
                 request,
                 codec,
                 video,
@@ -379,6 +415,7 @@ impl Acceptor {
             nominal_fps: request.limits.max_fps,
             quality: request.quality,
             capabilities: capabilities.clone(),
+            ticket,
         };
         tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
@@ -416,6 +453,7 @@ impl Acceptor {
                 limits: request.limits,
                 cursor_shapes: session.cursor_shape,
                 peer_cursors: session.peer_cursors,
+                succeeds: None,
             },
         );
         let worker = prepared.start_room(room_shared.clone(), self.admission.clone());
@@ -427,20 +465,106 @@ impl Acceptor {
             can_h265,
             caps.rate_model,
             codec,
-            session.clone(),
+            (session.clone(), permit, digest),
         );
         *active = Some(room.clone());
         *self.shared.room.lock() = Some(room.clone());
         self.shared.changes.bump();
         Some(Admitted {
             stream,
-            permit,
             request,
             codec,
             video,
             room,
             slot,
             conn_id: 1,
+            session,
+        })
+    }
+
+    /// A standby's admission, its token checked first: then its ticket, in
+    /// constant time over the digests, against every pair's. It joins the
+    /// pair whose ticket it presented, on that pair's codec and paused:
+    /// thread C knows nothing of it, so it causes no keyframe, shows in no
+    /// status and has no pointer, until it takes the pair's place. A
+    /// ticket no pair holds is denied; a pair that has a standby is busy.
+    async fn accept_standby(
+        &self,
+        mut stream: TlsStream<TcpStream>,
+        permit: OwnedSemaphorePermit,
+        request: Request,
+        ticket: TicketDigest,
+    ) -> Option<Admitted> {
+        let room = self.room.lock().await.clone();
+        let Some((room, slot, codec)) = room.and_then(|room| {
+            let (slot, codec) = room.pair(&ticket)?;
+            Some((room, slot, codec))
+        }) else {
+            send_rejected(stream, RejectReason::Denied).await;
+            return None;
+        };
+        // The pair's codec, which its viewer offered when it opened it.
+        let offered = match codec {
+            VideoCodec::H265 => request.listed(CAPABILITY_H265),
+            codec => request.codecs.contains(&codec),
+        };
+        if !offered {
+            send_rejected(stream, RejectReason::InvalidRequest).await;
+            return None;
+        }
+        let video = expected_video(room.display.as_ref(), request.limits);
+        let capabilities = negotiated_capabilities(&room.host_capabilities, &request.capabilities);
+        let session = Session::new_in_room(
+            slot,
+            room.shared.wake.clone(),
+            room.shared.peer_cursors.clone(),
+            self.shared.policy.clone(),
+            self.cancel.child_token(),
+            codec,
+            request.codecs.clone(),
+            request.limits,
+            request.quality,
+            room.rate_model,
+            None,
+            &request.capabilities,
+            &capabilities,
+            self.shared.changes.clone(),
+        );
+        session.expect_video_size(video);
+        let conn_id =
+            match room.attach_standby(slot, &ticket, session.clone(), request.limits, permit) {
+                Ok(conn_id) => conn_id,
+                Err(rejected) => {
+                    send_rejected(stream, rejected).await;
+                    return None;
+                }
+            };
+        let accepted = HostMessage::Accepted {
+            codec,
+            limits: request.limits,
+            nominal_fps: request.limits.max_fps,
+            quality: request.quality,
+            capabilities,
+            ticket: None,
+        };
+        let written = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            wire::write_message(&mut stream, &accepted, None),
+        )
+        .await;
+        if !matches!(written, Ok(Ok(()))) {
+            session.close();
+            room.detach(slot, conn_id);
+            return None;
+        }
+        Some(Admitted {
+            stream,
+            request,
+            codec,
+            video,
+            room,
+            slot,
+            conn_id,
             session,
         })
     }
@@ -466,9 +590,16 @@ impl Acceptor {
             limits,
             quality,
             capabilities,
+            standby_for,
         })) = wire::read_header(&mut stream, remaining).await
         else {
             return None;
+        };
+        // A standby takes a standby's permit, never a viewer slot's.
+        let permits = if standby_for.is_some() {
+            &self.standby
+        } else {
+            &self.slot
         };
         let rejected = if !self.token_matches(&token) {
             RejectReason::Denied
@@ -479,7 +610,7 @@ impl Acceptor {
             || !valid_capabilities(&capabilities)
         {
             RejectReason::InvalidRequest
-        } else if let Ok(permit) = self.slot.clone().try_acquire_owned() {
+        } else if let Ok(permit) = permits.clone().try_acquire_owned() {
             return Some((
                 stream,
                 permit,
@@ -488,6 +619,7 @@ impl Acceptor {
                     limits,
                     quality,
                     capabilities,
+                    standby_for,
                 },
             ));
         } else {

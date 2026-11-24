@@ -512,6 +512,23 @@ impl VideoSink {
         state.recovery.on_host_state(available, new_generation, now);
     }
 
+    /// The session moved to a standby's connection, whose host session
+    /// starts its own generations: whatever is queued belongs to the old
+    /// one, and the next unit handed out is an IDR that carries a
+    /// discontinuity. No presentation of the old session admits input, and
+    /// recovery waits for the new session's state. Returns the fps cap in
+    /// force, which the new session must hear again.
+    pub(super) fn switch(&self) -> Option<u32> {
+        let now = Instant::now();
+        let mut state = self.state.lock();
+        state.restart();
+        state.generation = 0;
+        state.presented = None;
+        state.handed.clear();
+        state.recovery.on_host_state(false, true, now);
+        state.fps_cap.resend(now)
+    }
+
     /// The viewer is hidden: drop the queue and wait for the IDR the host
     /// sends on resume. `next` returns `Paused`, so native stall checks stop;
     /// no keyframe is asked for, and the fps cap and the watchdog hold still.

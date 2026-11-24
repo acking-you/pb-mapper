@@ -616,7 +616,7 @@ fn check_register(request: &RegisterRequest, options: &RegisterOptions) -> Resul
 
 /// Two connected loopback TCP sockets with Nagle off: the end
 /// [`Client::connect_tcp`] hands its caller, and the end its worker forwards.
-async fn loopback_pair() -> std::io::Result<(TcpStream, TcpStream)> {
+pub(super) async fn loopback_pair() -> std::io::Result<(TcpStream, TcpStream)> {
     // Retain the bound socket until our own connection has been accepted;
     // there is no reserve/drop/rebind race or reusable external listener.
     let listener = TcpListener::bind("127.0.0.1:0").await?;

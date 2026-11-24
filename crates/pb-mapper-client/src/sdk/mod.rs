@@ -6,6 +6,8 @@
 
 mod admin;
 mod client;
+#[cfg(feature = "p2p")]
+mod direct;
 mod error;
 mod handle;
 mod types;
@@ -16,6 +18,9 @@ pub use admin::{
     ServiceInfo, ServicePage,
 };
 pub use client::{Client, RelayMetricsStream};
+#[doc(hidden)]
+#[cfg(feature = "p2p")]
+pub use direct::{DirectDialer, DirectOnlyError};
 pub use error::{Error, Result};
 pub use handle::{Connection, Registration};
 pub use types::{

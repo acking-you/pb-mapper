@@ -836,3 +836,61 @@ async fn control_grant_with_queued_video_keeps_the_session() {
     viewer.stop().await.unwrap();
     host.stop().await.unwrap();
 }
+
+/// A viewer whose session runs direct, on a path that is not a LAN's
+/// (loopback here), keeps a standby on the relay: the host's tunnel counts
+/// one direct and one relayed session, its status lists one viewer, and
+/// the viewer's own tunnel is the direct one. The standby goes with the
+/// viewer's stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_direct_viewer_keeps_a_standby_on_the_relay_that_takes_no_place() {
+    let relay = Relay::start_with_direct(
+        "desktop-standby-relay",
+        Some(DirectServerConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            advertise: "127.0.0.1:0".parse().unwrap(),
+        }),
+    )
+    .await;
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
+    let observed = Arc::new(Observation::default());
+    let backend = observed.clone();
+    let mut options = HostOptions::new("desktop:standby-relay");
+    options.allow_control = true;
+    let host = Host::builder(options)
+        .backend(move || Ok(Desktop(backend.clone())))
+        .start(&client)
+        .await
+        .unwrap();
+    let viewer = Viewer::connect(
+        &client,
+        host.invitation(),
+        ConnectOptions::default(),
+        config(VideoCodec::Jpeg),
+    )
+    .await
+    .unwrap();
+    let renderer = Renderer::start(&viewer);
+    let viewed = wait(&viewer, |status| status.fresh).await;
+    assert_eq!(viewed.stats.path, "direct");
+    until(Duration::from_secs(10), || {
+        let sessions = host.metrics().sessions;
+        sessions.active_direct == 1 && sessions.active_relay == 1
+    })
+    .await;
+    assert_eq!(host.status().viewers.len(), 1);
+    let tunnel = viewer.metrics().unwrap().sessions;
+    assert_eq!((tunnel.active_direct, tunnel.active_relay), (1, 0));
+    drop(renderer);
+    viewer.stop().await.unwrap();
+    until(Duration::from_secs(10), || {
+        let sessions = host.metrics().sessions;
+        sessions.active_direct == 0 && sessions.active_relay == 0
+    })
+    .await;
+    until(Duration::from_secs(5), || {
+        host.status().state == HostState::Waiting
+    })
+    .await;
+    host.stop().await.unwrap();
+}

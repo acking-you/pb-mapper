@@ -102,6 +102,10 @@ pub(crate) struct RoomSlotConfig {
     pub limits: VideoLimits,
     pub cursor_shapes: bool,
     pub peer_cursors: bool,
+    /// The connection this one takes the slot over from: a standby its
+    /// viewer resumed, which keeps the control it had, and with it the
+    /// admission lease, once its held input is released.
+    pub succeeds: Option<u64>,
 }
 
 /// Mutable slot membership and negotiated codec published from the acceptor to thread C.
@@ -179,6 +183,7 @@ impl RoomShared {
                 limits: config.limits,
                 cursor_shapes: config.cursor_shapes,
                 peer_cursors: false,
+                succeeds: None,
             },
         ));
         Arc::new(Self {
@@ -631,6 +636,20 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 (Some(_), None) => true,
                 (None, _) => false,
             };
+            // A standby its viewer resumed keeps the control the session it
+            // replaces had, and the lease with it; its held input is
+            // released all the same, failing closed.
+            let carried = detach_current
+                && self.allowed()
+                && match (&self.slots[idx], &next) {
+                    (Some(cur), Some((_, cfg))) => {
+                        cur.state.record.controlling
+                            && cfg.succeeds == Some(cur.conn_id)
+                            && !cfg.shared.targets.paused.load(Ordering::Acquire)
+                    }
+                    _ => false,
+                };
+            let lease = if carried { self.lease.take() } else { None };
             if detach_current {
                 self.detach_slot(idx);
             }
@@ -641,6 +660,10 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             {
                 let mut state = cfg.shared.state.borrow().clone();
                 state.record.control_allowed = allowed;
+                state.record.controlling = carried;
+                if carried {
+                    self.lease = lease;
+                }
                 if let Some(context) = &self.context {
                     state.record.display = Some(context.display.clone());
                     state.record.desktop = context.desktop;
@@ -665,6 +688,10 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 cfg.shared
                     .encoder_cap
                     .store(self.throughput.cap().unwrap_or(0), Ordering::Release);
+                // A paused join, a standby that took its pair's place before
+                // its viewer resumed it, costs the room no keyframe: its
+                // resume asks for one.
+                let paused = cfg.shared.targets.paused.load(Ordering::Acquire);
                 self.slots[idx] = Some(ViewerSlot {
                     conn_id,
                     slot: cfg.shared.slot,
@@ -676,7 +703,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                     state,
                     control_note: None,
                     streaming: false,
-                    paused: false,
+                    paused,
                     sequence: 0,
                     cursor,
                     last_lease: None,
@@ -688,7 +715,14 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                     notice_serial: 0,
                     notice_until: None,
                 });
-                self.keyframe = true;
+                if !paused {
+                    self.keyframe = true;
+                }
+            } else if carried {
+                // The successor never came: the lease is kept only while
+                // another viewer controls.
+                self.lease = lease;
+                self.sync_lease();
             }
         }
         self.cursor_shapes = self

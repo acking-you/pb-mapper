@@ -256,6 +256,12 @@ impl ViewerStatsAcc {
         self.host_at = now;
     }
 
+    /// The session moved to another host session, whose figures start over.
+    pub fn on_switch(&mut self, now: Instant) {
+        self.host = None;
+        self.host_at = now;
+    }
+
     /// `host_ms + rtt / 2 + viewer_ms`, once both medians exist.
     fn picture_latency(&self, host_ms: Option<u32>, viewer_ms: Option<u32>) -> Option<u32> {
         let rtt = self.host.and_then(|host| host.rtt_ms).unwrap_or(0);
