@@ -10,6 +10,7 @@ add_executable(${BINARY_NAME}
   "main.cc"
   "my_application.cc"
   "desktop_video.cc"
+  "desktop_video_gl.cc"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
 )
 
@@ -25,15 +26,20 @@ target_link_libraries(${BINARY_NAME} PRIVATE flutter)
 target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::GTK)
 # desktop_video.cc loads the decoder module and the FFI library at run time.
 target_link_libraries(${BINARY_NAME} PRIVATE ${CMAKE_DL_LIBS})
+# desktop_video_gl.cc converts decoded pictures in Flutter's EGL and GL ES
+# context through libepoxy, which GTK and Flutter's embedder already load.
+pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
+target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::EPOXY)
 
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # The native video decoder module (desktop_video_gst.cc), built where the
 # GStreamer development files are installed. The runner loads it at run time,
 # so the app needs neither the module nor GStreamer to start; without them
-# every remote desktop session is JPEG.
+# every remote desktop session is JPEG. gstreamer-allocators gives a
+# decoder's dma-buf descriptors.
 pkg_check_modules(GSTREAMER QUIET IMPORTED_TARGET
-  gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0)
+  gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0)
 if(GSTREAMER_FOUND)
   find_package(Threads REQUIRED)
   add_library(pb_mapper_desktop_video MODULE "desktop_video_gst.cc")

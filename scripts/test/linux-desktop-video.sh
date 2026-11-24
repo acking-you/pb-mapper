@@ -2,12 +2,16 @@
 # Decodes recorded clips through the Linux viewer's GStreamer module
 # (ui/linux/runner/desktop_video_gst.cc), outside Flutter: the FFI's test
 # source plays them, the module decodes them, and a harness stands in for
-# Flutter's raster thread (ui/linux/test/desktop_video_test.cc).
+# Flutter's raster thread in a GL ES context with no surface
+# (ui/linux/test/desktop_video_test.cc). It ends with each clip size's
+# decoded and presented pictures a second and every thread's CPU per picture.
 #
 # Needs: the GStreamer development files (libgstreamer1.0-dev,
 # libgstreamer-plugins-base1.0-dev), an H.264 decoder element (gst-libav's
 # avdec_h264, or a hardware one), h264parse/h265parse (gst-plugins-bad),
-# ffmpeg with libx264 (libx265 adds the H.265 case), cmake.
+# ffmpeg with libx264 (libx265 adds the H.265 case), cmake, libepoxy-dev, and
+# EGL with GL ES (Debian and Ubuntu: libegl1 libegl-mesa0 libgles2
+# libgl1-mesa-dri, which fall back to llvmpipe without a GPU).
 #
 #   scripts/test/linux-desktop-video.sh                    hardware decoders first
 #   scripts/test/linux-desktop-video.sh --software         hardware decoders ranked out
