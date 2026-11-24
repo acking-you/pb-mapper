@@ -1,0 +1,12 @@
+{"capture-anchored-pacing": "Time host captures from when the display presented the picture",
+ "win-keep-awake": "Keep a Windows host's display and system awake while a viewer watches",
+ "helper-pipe-transfer": "Move helper pipe units in large reads and one vectored write",
+ "win-sendinput-moves": "Inject Windows pointer moves with absolute SendInput",
+ "rate-model-latch": "Latch the timestamp rate model from per-tick bits within about 2 s",
+ "viewer-fps-cap": "Remember the decoder's capacity in the viewer's fps cap and drain age backlogs",
+ "direct-cooldown": "Share the direct-fallback cooldown across a client's connections",
+ "relay-tcp-tuning": "Keep Linux relay TCP from restarting slow start after idle, with opt-in BBR",
+ "viewer-decoder-stats": "Show decoder timings and the display refresh on Mac and Linux viewers",
+ "linux-gpu-convert": "Convert Linux viewer pictures on the GPU instead of the CPU",
+ "native-cursor": "Show the host's pointer shapes as native cursors on desktop viewers",
+ "viewer-pixel-snap": "Keep a 1:1 remote picture on the device-pixel grid"}

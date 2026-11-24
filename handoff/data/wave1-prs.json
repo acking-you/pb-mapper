@@ -1,0 +1,74 @@
+[
+ {
+  "name": "capture-anchored-pacing",
+  "branch": "wave1/01-capture-anchored-pacing",
+  "url": "https://github.com/acking-you/pb-mapper/pull/63",
+  "title": "Time host captures from when the display presented the picture"
+ },
+ {
+  "name": "win-keep-awake",
+  "branch": "wave1/02-win-keep-awake",
+  "url": "https://github.com/acking-you/pb-mapper/pull/64",
+  "title": "Keep a Windows host's display and system awake while a viewer watches"
+ },
+ {
+  "name": "helper-pipe-transfer",
+  "branch": "wave1/03-helper-pipe-transfer",
+  "url": "https://github.com/acking-you/pb-mapper/pull/65",
+  "title": "Move helper pipe units in large reads and one vectored write"
+ },
+ {
+  "name": "win-sendinput-moves",
+  "branch": "wave1/04-win-sendinput-moves",
+  "url": "https://github.com/acking-you/pb-mapper/pull/66",
+  "title": "Inject Windows pointer moves with absolute SendInput"
+ },
+ {
+  "name": "rate-model-latch",
+  "branch": "wave1/05-rate-model-latch",
+  "url": "https://github.com/acking-you/pb-mapper/pull/67",
+  "title": "Latch the timestamp rate model from per-tick bits within about 2 s"
+ },
+ {
+  "name": "viewer-fps-cap",
+  "branch": "wave1/06-viewer-fps-cap",
+  "url": "https://github.com/acking-you/pb-mapper/pull/68",
+  "title": "Remember the decoder's capacity in the viewer's fps cap and drain age backlogs"
+ },
+ {
+  "name": "direct-cooldown",
+  "branch": "wave1/07-direct-cooldown",
+  "url": "https://github.com/acking-you/pb-mapper/pull/69",
+  "title": "Share the direct-fallback cooldown across a client's connections"
+ },
+ {
+  "name": "relay-tcp-tuning",
+  "branch": "wave1/08-relay-tcp-tuning",
+  "url": "https://github.com/acking-you/pb-mapper/pull/70",
+  "title": "Keep Linux relay TCP from restarting slow start after idle, with opt-in BBR"
+ },
+ {
+  "name": "viewer-decoder-stats",
+  "branch": "wave1/09-viewer-decoder-stats",
+  "url": "https://github.com/acking-you/pb-mapper/pull/71",
+  "title": "Show decoder timings and the display refresh on Mac and Linux viewers"
+ },
+ {
+  "name": "linux-gpu-convert",
+  "branch": "wave1/10-linux-gpu-convert",
+  "url": "https://github.com/acking-you/pb-mapper/pull/72",
+  "title": "Convert Linux viewer pictures on the GPU instead of the CPU"
+ },
+ {
+  "name": "native-cursor",
+  "branch": "wave1/11-native-cursor",
+  "url": "https://github.com/acking-you/pb-mapper/pull/73",
+  "title": "Show the host's pointer shapes as native cursors on desktop viewers"
+ },
+ {
+  "name": "viewer-pixel-snap",
+  "branch": "wave1/12-viewer-pixel-snap",
+  "url": "https://github.com/acking-you/pb-mapper/pull/74",
+  "title": "Keep a 1:1 remote picture on the device-pixel grid"
+ }
+]

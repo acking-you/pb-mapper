@@ -1,0 +1,65 @@
+[
+ {
+  "name": "viewer-refresh",
+  "branch": "wave3/01-viewer-refresh",
+  "base": "wave2/18-linux-presenting-gpu",
+  "url": "https://github.com/acking-you/pb-mapper/pull/94",
+  "title": "Follow the exact refresh rate of the display the viewer's window is on"
+ },
+ {
+  "name": "decoder-install-hints",
+  "branch": "wave3/02-decoder-install-hints",
+  "base": "wave3/01-viewer-refresh",
+  "url": "https://github.com/acking-you/pb-mapper/pull/95",
+  "title": "Suggest the decoder install that would give a viewer a better codec"
+ },
+ {
+  "name": "viewer-scroll",
+  "branch": "wave3/03-viewer-scroll",
+  "base": "wave3/02-decoder-install-hints",
+  "url": "https://github.com/acking-you/pb-mapper/pull/96",
+  "title": "Scroll one host notch per wheel notch, with fine and momentum scrolling"
+ },
+ {
+  "name": "mac-vt-padded-capture",
+  "branch": "wave3/04-mac-vt-padded-capture",
+  "base": "wave3/03-viewer-scroll",
+  "url": "https://github.com/acking-you/pb-mapper/pull/97",
+  "title": "Capture unaligned Mac sizes into a 16-padded surface cropped in the SPS"
+ },
+ {
+  "name": "encoder-throughput-cap",
+  "branch": "wave3/05-encoder-throughput-cap",
+  "base": "wave3/04-mac-vt-padded-capture",
+  "url": "https://github.com/acking-you/pb-mapper/pull/98",
+  "title": "Cap the pace at the encoder's throughput when units queue four deep"
+ },
+ {
+  "name": "host-direct-bbr",
+  "branch": "wave3/06-host-direct-bbr",
+  "base": "wave3/05-encoder-throughput-cap",
+  "url": "https://github.com/acking-you/pb-mapper/pull/99",
+  "title": "Measure BBR against Cubic on the host's direct QUIC, and keep Cubic"
+ },
+ {
+  "name": "linux-video-plane",
+  "branch": "wave3/07-linux-video-plane",
+  "base": "wave3/06-host-direct-bbr",
+  "url": "https://github.com/acking-you/pb-mapper/pull/100",
+  "title": "Add an opt-in GTK GL video plane to the Linux viewer"
+ },
+ {
+  "name": "mac-viewer-enhance",
+  "branch": "wave3/08-mac-viewer-enhance",
+  "base": "wave3/07-linux-video-plane",
+  "url": "https://github.com/acking-you/pb-mapper/pull/101",
+  "title": "Add optional GPU sharpening of an enlarged picture to the Mac viewer"
+ },
+ {
+  "name": "linux-plane-scaling",
+  "branch": "wave3/09-linux-plane-scaling",
+  "base": "wave3/08-mac-viewer-enhance",
+  "url": "https://github.com/acking-you/pb-mapper/pull/102",
+  "title": "Scale the Linux video plane's picture by area and sharpen it on request"
+ }
+]

@@ -1,0 +1,128 @@
+[
+ {
+  "name": "mac-session-check-cache",
+  "branch": "wave2/01-mac-session-check-cache",
+  "base": "master",
+  "url": "https://github.com/acking-you/pb-mapper/pull/75",
+  "title": "Reuse a passing Mac desktop check for 16 ms around capture and the pointer"
+ },
+ {
+  "name": "mac-wake-display",
+  "branch": "wave2/02-mac-wake-display",
+  "base": "wave2/01-mac-session-check-cache",
+  "url": "https://github.com/acking-you/pb-mapper/pull/76",
+  "title": "Wake a sleeping Mac display when a viewer's capture starts or resumes"
+ },
+ {
+  "name": "mac-vt-submit-thread",
+  "branch": "wave2/03-mac-vt-submit-thread",
+  "base": "wave2/02-mac-wake-display",
+  "url": "https://github.com/acking-you/pb-mapper/pull/77",
+  "title": "Call VideoToolbox from its own submit thread on a Mac host"
+ },
+ {
+  "name": "mac-vt-rate-control",
+  "branch": "wave2/04-mac-vt-rate-control",
+  "base": "wave2/03-mac-vt-submit-thread",
+  "url": "https://github.com/acking-you/pb-mapper/pull/78",
+  "title": "Let Mac low-latency encodes reach QP 51 and send a dropped last picture again"
+ },
+ {
+  "name": "mac-capture-cadence",
+  "branch": "wave2/05-mac-capture-cadence",
+  "base": "wave2/04-mac-vt-rate-control",
+  "url": "https://github.com/acking-you/pb-mapper/pull/79",
+  "title": "Set ScreenCaptureKit's frame interval from the display's refresh and the pace"
+ },
+ {
+  "name": "win-mf-output-events",
+  "branch": "wave2/06-win-mf-output-events",
+  "base": "wave2/05-mac-capture-cadence",
+  "url": "https://github.com/acking-you/pb-mapper/pull/80",
+  "title": "Wake thread C on a Windows encoder's events instead of polling them"
+ },
+ {
+  "name": "win-encoder-settings",
+  "branch": "wave2/07-win-encoder-settings",
+  "base": "wave2/06-win-mf-output-events",
+  "url": "https://github.com/acking-you/pb-mapper/pull/81",
+  "title": "Encode H.264 as High with CABAC on Windows hosts"
+ },
+ {
+  "name": "win-capture-convert",
+  "branch": "wave2/08-win-capture-convert",
+  "base": "wave2/07-win-encoder-settings",
+  "url": "https://github.com/acking-you/pb-mapper/pull/82",
+  "title": "Convert straight from the DXGI surface and share rotated Windows displays"
+ },
+ {
+  "name": "win-present-waiter",
+  "branch": "wave2/09-win-present-waiter",
+  "base": "wave2/08-win-capture-convert",
+  "url": "https://github.com/acking-you/pb-mapper/pull/83",
+  "title": "Wait for the next present on a Windows capture thread instead of polling DXGI"
+ },
+ {
+  "name": "win-hdr-desktop",
+  "branch": "wave2/10-win-hdr-desktop",
+  "base": "wave2/09-win-present-waiter",
+  "url": "https://github.com/acking-you/pb-mapper/pull/84",
+  "title": "Draw HDR Windows desktops at the display's SDR white"
+ },
+ {
+  "name": "win-still-refinement",
+  "branch": "wave2/11-win-still-refinement",
+  "base": "wave2/10-win-hdr-desktop",
+  "url": "https://github.com/acking-you/pb-mapper/pull/85",
+  "title": "Sharpen a still Windows picture with a short burst of repeats"
+ },
+ {
+  "name": "helper-probe-cache",
+  "branch": "wave2/12-helper-probe-cache",
+  "base": "wave2/11-win-still-refinement",
+  "url": "https://github.com/acking-you/pb-mapper/pull/86",
+  "title": "Keep the Windows helper's H.265 answer for later sessions on the same adapter"
+ },
+ {
+  "name": "viewer-feedback",
+  "branch": "wave2/13-viewer-feedback",
+  "base": "wave2/12-helper-probe-cache",
+  "url": "https://github.com/acking-you/pb-mapper/pull/87",
+  "title": "Stamp receipts with arrival times and let keyframe requests name the last unit read"
+ },
+ {
+  "name": "receipt-rate-control",
+  "branch": "wave2/14-receipt-rate-control",
+  "base": "wave2/13-viewer-feedback",
+  "url": "https://github.com/acking-you/pb-mapper/pull/88",
+  "title": "Cut bits per frame from receipts within a round trip, keeping the frame rate"
+ },
+ {
+  "name": "reconnect-start-rate",
+  "branch": "wave2/15-reconnect-start-rate",
+  "base": "wave2/14-receipt-rate-control",
+  "url": "https://github.com/acking-you/pb-mapper/pull/89",
+  "title": "Start a reconnecting viewer at the rate its last session ended at"
+ },
+ {
+  "name": "pointer-cadence",
+  "branch": "wave2/16-pointer-cadence",
+  "base": "wave2/15-reconnect-start-rate",
+  "url": "https://github.com/acking-you/pb-mapper/pull/90",
+  "title": "Report the pointer at the session's rate and stop redrawing for still hovers"
+ },
+ {
+  "name": "mac-viewer-layer",
+  "branch": "wave2/17-mac-viewer-layer",
+  "base": "wave2/16-pointer-cadence",
+  "url": "https://github.com/acking-you/pb-mapper/pull/91",
+  "title": "Add an opt-in Core Animation presenter to the Mac viewer"
+ },
+ {
+  "name": "linux-presenting-gpu",
+  "branch": "wave2/18-linux-presenting-gpu",
+  "base": "wave2/17-mac-viewer-layer",
+  "url": "https://github.com/acking-you/pb-mapper/pull/92",
+  "title": "Decode on the GPU that draws the window on Linux viewers"
+ }
+]

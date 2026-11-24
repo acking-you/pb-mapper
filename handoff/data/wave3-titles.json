@@ -1,0 +1,9 @@
+{"viewer-refresh": "Follow the exact refresh rate of the display the viewer's window is on",
+ "decoder-install-hints": "Suggest the decoder install that would give a viewer a better codec",
+ "viewer-scroll": "Scroll one host notch per wheel notch, with fine and momentum scrolling",
+ "mac-vt-padded-capture": "Capture unaligned Mac sizes into a 16-padded surface cropped in the SPS",
+ "encoder-throughput-cap": "Cap the pace at the encoder's throughput when units queue four deep",
+ "host-direct-bbr": "Measure BBR against Cubic on the host's direct QUIC, and keep Cubic",
+ "linux-video-plane": "Add an opt-in GTK GL video plane to the Linux viewer",
+ "mac-viewer-enhance": "Add optional GPU sharpening of an enlarged picture to the Mac viewer",
+ "linux-plane-scaling": "Scale the Linux video plane's picture by area and sharpen it on request"}
