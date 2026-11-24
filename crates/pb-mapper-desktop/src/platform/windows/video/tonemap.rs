@@ -5,17 +5,20 @@
 //! FP16: linear scRGB, sRGB primaries, 1.0 = 80 nits, with SDR content at
 //! the display's SDR white level (the SDR content brightness setting)
 //! rather than at 1.0. A duplication that takes only BGRA8 gets DXGI's own
-//! conversion of that desktop, which leaves the SDR white level out, so
-//! SDR content arrives brighter or darker than the display shows it. The
-//! encoder's duplication takes FP16 first, which DXGI hands out only for
-//! such a desktop (an SDR desktop still arrives in BGRA8, which nothing
-//! here touches), and each FP16 picture is drawn into a BGRA8 texture of
-//! this module's by one full-screen triangle (`tonemap.hlsl`): divided by
-//! the SDR white level thread C read as it built the encoder
+//! conversion of that desktop, which is expected to leave the SDR white
+//! level out; what it does varies by driver and has not been recorded
+//! here. The encoder's duplication takes FP16 first, which DXGI hands out
+//! only for such a desktop (an SDR desktop still arrives in BGRA8, which
+//! nothing here touches), and each FP16 picture is drawn into a BGRA8
+//! texture of this module's by one full-screen triangle (`tonemap.hlsl`):
+//! divided by the SDR white level thread C read as it built the encoder
 //! (`sdr_white`), anything brighter than SDR white brought down to it by
 //! one gain on every channel, and encoded sRGB. The video processor then
 //! converts that texture, turning and scaling it, as it converts any
-//! other.
+//! other. Only at a level Windows told: without one, thread C duplicates
+//! in BGRA8 only, as before. For FP16 that the duplication's mode did not
+//! announce, the capture thread reads the level, and without one turns
+//! FP16 duplication off for the process.
 //!
 //! The shaders are compiled from `tonemap.hlsl` with `D3DCompile` as the
 //! first FP16 picture arrives, once per process: `d3dcompiler_47.dll`,
@@ -23,16 +26,23 @@
 //! so that nothing imports it. The draw is recorded on a deferred context
 //! once per texture DXGI hands out and replayed on the immediate context
 //! with that context's state restored, since the video processor and the
-//! encoder queue their work on it too. A tone map that cannot be built
-//! turns FP16 duplication off for the process: the capture fails, and
-//! its retry duplicates in BGRA8, which DXGI converts as before.
+//! encoder queue their work on it too.
+//!
+//! A tone map that fails alike each time turns FP16 duplication off for
+//! the process (`wanted`): one whose shaders cannot be compiled at once,
+//! and one that fails to build or to convert a picture on a device still
+//! present `FAILURES_BEFORE_REFUSAL` captures in a row. The capture fails,
+//! and its retry duplicates in BGRA8, which DXGI converts as before. A
+//! failure on a device that was removed (a driver reset or update) says
+//! nothing about the tone map: the retry builds it again on a new device.
 use crate::{Result, error};
 use std::{
     ffi::c_void,
+    io,
     num::NonZeroU32,
     sync::{
         OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Instant,
 };
@@ -77,15 +87,93 @@ const DRAWS: usize = 4;
 /// How often the display paths are asked for again when a display arrived
 /// between counting them and reading them.
 const QUERY_ATTEMPTS: usize = 3;
+/// The tone-mapped captures in a row that may fail on a device still
+/// present before FP16 duplication is turned off for the process: a tone
+/// map that fails this often, with no picture converted between, fails
+/// alike each time.
+const FAILURES_BEFORE_REFUSAL: u32 = 3;
 
-/// A tone map could not be built in this process: duplications take BGRA8
-/// only from then on.
-static REFUSED: AtomicBool = AtomicBool::new(false);
+/// Whether this process's duplications take FP16.
+static FALLBACK: Fallback = Fallback::new();
 
-/// Whether a duplication may take FP16 desktops: until a tone map could
-/// not be built in this process.
+/// Whether a duplication may take FP16 desktops: until the tone map failed
+/// alike in this process.
 pub(super) fn wanted() -> bool {
-    !REFUSED.load(Ordering::Acquire)
+    FALLBACK.wanted()
+}
+
+/// Turn FP16 duplication off for the process for `failure`, which repeats
+/// each time it is tried, and log it once.
+pub(super) fn refuse(failure: &io::Error) {
+    if FALLBACK.refuse() {
+        refused(failure);
+    }
+}
+
+/// A tone-mapped capture failed on `device` with `failure`: counted where
+/// the device is still present, and turning FP16 duplication off where it
+/// was the `FAILURES_BEFORE_REFUSAL`th in a row.
+fn failed(device: &ID3D11Device, failure: &io::Error) {
+    // SAFETY: a plain query of a device the caller holds.
+    let removed = unsafe { device.GetDeviceRemovedReason() }.is_err();
+    if FALLBACK.failed(removed) {
+        refused(failure);
+    }
+}
+
+/// Log that FP16 duplication is off for the process for `failure`.
+fn refused(failure: &io::Error) {
+    tracing::warn!(
+        target: "pb_mapper_desktop::session",
+        event = "desktop_capture_hdr_failed",
+        error = %failure,
+    );
+}
+
+/// Whether duplications take FP16, which the tone map's failures can turn
+/// off.
+struct Fallback {
+    /// FP16 duplication is off for the process.
+    refused: AtomicBool,
+    /// Tone-mapped captures that failed in a row on a device still present,
+    /// with no picture converted between them.
+    failures: AtomicU32,
+}
+impl Fallback {
+    const fn new() -> Self {
+        Self {
+            refused: AtomicBool::new(false),
+            failures: AtomicU32::new(0),
+        }
+    }
+
+    fn wanted(&self) -> bool {
+        !self.refused.load(Ordering::Acquire)
+    }
+
+    /// Turn FP16 duplication off; whether this call did.
+    fn refuse(&self) -> bool {
+        !self.refused.swap(true, Ordering::AcqRel)
+    }
+
+    /// A tone-mapped capture failed on a device that was `removed`, or is
+    /// still present; whether this turned FP16 duplication off.
+    fn failed(&self, removed: bool) -> bool {
+        if removed {
+            return false;
+        }
+        let failures = self
+            .failures
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        failures >= FAILURES_BEFORE_REFUSAL && self.refuse()
+    }
+
+    /// A tone map converted its first picture: the failures before it were
+    /// not alike.
+    fn converted(&self) {
+        self.failures.store(0, Ordering::Release);
+    }
 }
 
 /// A display's SDR white level, as `DISPLAYCONFIG_SDR_WHITE_LEVEL` gives
@@ -107,13 +195,6 @@ impl SdrWhite {
     pub(super) fn gain(self) -> f32 {
         1000.0 / self.0.get() as f32
     }
-}
-
-/// The gain the tone map divides by `white`: with no level read, 1.0,
-/// which takes SDR white for scRGB's own 80 nits, as DXGI's conversion
-/// does.
-fn gain(white: Option<SdrWhite>) -> f32 {
-    white.map_or(1.0, SdrWhite::gain)
 }
 
 /// The SDR white level of the display whose GDI device name (`\\.\DISPLAY1`,
@@ -355,45 +436,38 @@ pub(super) struct ToneMap {
     /// The draw recorded for each texture pictures came from: at most
     /// `DRAWS`.
     draws: Vec<Draw>,
+    /// A picture was converted through this tone map.
+    converted: bool,
 }
 impl ToneMap {
     /// The tone map of `size` FP16 pictures on `device`, at the SDR white
     /// level `white`: compiled, and logged, as the first FP16 picture
-    /// arrives. One that cannot be built turns FP16 duplication off for
-    /// the process (`wanted`).
-    pub(super) fn build(
-        device: &ID3D11Device,
-        size: (u32, u32),
-        white: Option<SdrWhite>,
-    ) -> Result<Self> {
+    /// arrives. Shaders that cannot be compiled turn FP16 duplication off
+    /// for the process at once, and any other failure counts towards it
+    /// (`wanted`).
+    pub(super) fn build(device: &ID3D11Device, size: (u32, u32), white: SdrWhite) -> Result<Self> {
         let started = Instant::now();
-        match Self::new(device, size, gain(white)) {
-            Ok((tone_map, compiled)) => {
-                tracing::info!(
-                    target: "pb_mapper_desktop::session",
-                    event = "desktop_capture_hdr",
-                    sdr_white_nits = ?white.map(SdrWhite::nits),
-                    compiled,
-                    build_ms = started.elapsed().as_secs_f64() * 1e3,
-                );
-                Ok(tone_map)
-            }
-            Err(failure) => {
-                if !REFUSED.swap(true, Ordering::AcqRel) {
-                    tracing::warn!(
-                        target: "pb_mapper_desktop::session",
-                        event = "desktop_capture_hdr_failed",
-                        error = %failure,
-                    );
-                }
-                Err(failure)
-            }
-        }
+        // No compiler, or shaders it refuses: alike each time.
+        let (bytecode, compiled) = bytecode().inspect_err(refuse)?;
+        let tone_map = Self::new(device, bytecode, size, white.gain())
+            .inspect_err(|failure| failed(device, failure))?;
+        tracing::info!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_capture_hdr",
+            sdr_white_nits = white.nits(),
+            compiled,
+            build_ms = started.elapsed().as_secs_f64() * 1e3,
+        );
+        Ok(tone_map)
     }
 
-    /// The tone map, and whether its shaders were compiled for it.
-    fn new(device: &ID3D11Device, (width, height): (u32, u32), gain: f32) -> Result<(Self, bool)> {
-        let (bytecode, compiled) = bytecode()?;
+    /// The tone map, with the shaders' `bytecode`.
+    fn new(
+        device: &ID3D11Device,
+        bytecode: &Bytecode,
+        (width, height): (u32, u32),
+        gain: f32,
+    ) -> Result<Self> {
         let (mut deferred, mut vertex, mut pixel, mut constant) = (None, None, None, None);
         // A constant buffer is a whole number of 16 bytes.
         let constants = [gain, 0.0, 0.0, 0.0];
@@ -451,20 +525,34 @@ impl ToneMap {
                 .map_err(error)?;
         }
         let missing = |what: &str| error(format!("missing HDR tone map {what}"));
-        Ok((
-            Self {
-                deferred: deferred.ok_or_else(|| missing("deferred context"))?,
-                vertex: vertex.ok_or_else(|| missing("vertex shader"))?,
-                pixel: pixel.ok_or_else(|| missing("pixel shader"))?,
-                gain: constant.ok_or_else(|| missing("constant"))?,
-                target,
-                target_view: target_view.ok_or_else(|| missing("render target"))?,
-                size: (width, height),
-                readable: None,
-                draws: Vec::with_capacity(DRAWS),
-            },
-            compiled,
-        ))
+        Ok(Self {
+            deferred: deferred.ok_or_else(|| missing("deferred context"))?,
+            vertex: vertex.ok_or_else(|| missing("vertex shader"))?,
+            pixel: pixel.ok_or_else(|| missing("pixel shader"))?,
+            gain: constant.ok_or_else(|| missing("constant"))?,
+            target,
+            target_view: target_view.ok_or_else(|| missing("render target"))?,
+            size: (width, height),
+            readable: None,
+            draws: Vec::with_capacity(DRAWS),
+            converted: false,
+        })
+    }
+
+    /// What became of a picture's work on `device`, its draw (`draw`) and
+    /// the conversion of what it drew: a failure counts towards turning
+    /// FP16 duplication off for the process, and the first picture
+    /// converted clears that count.
+    pub(super) fn settle(&mut self, device: &ID3D11Device, done: Result<()>) -> Result<()> {
+        match &done {
+            Ok(()) if !self.converted => {
+                self.converted = true;
+                FALLBACK.converted();
+            }
+            Ok(()) => {}
+            Err(failure) => failed(device, failure),
+        }
+        done
     }
 
     /// Queue the draw of FP16 `frame` on `device`'s immediate `context`,
@@ -615,8 +703,7 @@ mod tests {
 
     /// The SDR white level reads in thousandths of 80 nits: 1000 is
     /// scRGB's 1.0, which a gain of 1 leaves; 2500 is 200 nits, which
-    /// 0.4 brings to 1.0; 0 says nothing, and nothing read takes SDR white
-    /// for 80 nits.
+    /// 0.4 brings to 1.0; 0 says nothing.
     #[test]
     fn the_sdr_white_level_is_thousandths_of_80_nits() {
         let white = |level| SdrWhite::new(level).unwrap();
@@ -624,10 +711,39 @@ mod tests {
         assert_eq!(white(1000).gain(), 1.0);
         assert_eq!(white(2500).nits(), 200.0);
         assert_eq!(white(2500).gain(), 0.4);
+        assert_eq!(white(4000).gain(), 0.25);
         assert_eq!(white(6000).nits(), 480.0);
         assert_eq!(SdrWhite::new(0), None);
-        assert_eq!(gain(None), 1.0);
-        assert_eq!(gain(Some(white(4000))), 0.25);
+    }
+
+    /// FP16 duplication goes off for the process only for a tone map that
+    /// fails alike: shaders that cannot be compiled at once, and other
+    /// failures on a device still present only so many in a row, with no
+    /// picture converted between. A removed device's failures (a driver
+    /// reset) never count.
+    #[test]
+    fn only_a_tone_map_that_fails_alike_turns_fp16_duplication_off() {
+        let fallback = Fallback::new();
+        for _ in 0..2 * FAILURES_BEFORE_REFUSAL {
+            assert!(!fallback.failed(true));
+        }
+        for _ in 1..FAILURES_BEFORE_REFUSAL {
+            assert!(!fallback.failed(false));
+        }
+        fallback.converted();
+        for _ in 1..FAILURES_BEFORE_REFUSAL {
+            assert!(!fallback.failed(false));
+        }
+        assert!(fallback.wanted());
+        assert!(fallback.failed(false));
+        assert!(!fallback.wanted());
+        // Turned off once, and logged once.
+        assert!(!fallback.failed(false));
+        assert!(!fallback.refuse());
+
+        let compiling = Fallback::new();
+        assert!(compiling.refuse());
+        assert!(!compiling.wanted());
     }
 
     /// A display path's source matches the output by its GDI device name,
@@ -717,18 +833,18 @@ mod tests {
     /// its sRGB value, black stays black, a highlight brighter than SDR
     /// white comes down to it with its hue, and a colour outside the sRGB
     /// gamut is clipped to it. From a texture the shader reads where it is
-    /// and from one it must copy first, and again from the draw recorded
-    /// for each.
+    /// and from one it must copy first, and again, from new contents of
+    /// the same texture, through the draw recorded for each.
     #[test]
     fn an_fp16_desktop_is_drawn_as_the_sdr_picture_the_display_shows() {
         let (device, context) = warp();
         let (width, height) = (3, 2);
         // 160 nits: SDR white is scRGB 2.0.
-        let white = SdrWhite::new(2000);
+        let white = SdrWhite::new(2000).unwrap();
         // scRGB pixels and the BGRA8 each must become: 0.735357 (the sRGB
         // value of linear 0.5) is 187.52; that of 0.025 is 43.83; that of
         // 0.25 is 136.96.
-        let cases: [([f32; 4], [u8; 4]); 6] = [
+        let mut cases: [([f32; 4], [u8; 4]); 6] = [
             ([2.0, 2.0, 2.0, 1.0], [255, 255, 255, 255]),
             ([1.0, 1.0, 1.0, 1.0], [188, 188, 188, 255]),
             ([0.0, 0.0, 0.0, 1.0], [0, 0, 0, 255]),
@@ -739,8 +855,17 @@ mod tests {
             ([-1.0, 0.0, 0.5, 1.0], [137, 0, 0, 255]),
             ([2.0, 0.0, 0.0, 1.0], [0, 0, 255, 255]),
         ];
-        let pixels: Vec<u16> = cases.iter().flat_map(|(rgba, _)| rgba.map(half)).collect();
-        let expected: Vec<u8> = cases.iter().flat_map(|(_, bgra)| *bgra).collect();
+        // Each round's FP16 pixels and the BGRA8 they must become: the
+        // cases, then the cases the other way round, so that a draw
+        // replayed from what was recorded must read the texture again (and
+        // copy it again where it is copied first).
+        let mut rounds = Vec::new();
+        for _ in 0..2 {
+            let pixels: Vec<u16> = cases.iter().flat_map(|(rgba, _)| rgba.map(half)).collect();
+            let expected: Vec<u8> = cases.iter().flat_map(|(_, bgra)| *bgra).collect();
+            rounds.push((pixels, expected));
+            cases.reverse();
+        }
         let mut tone_map = ToneMap::build(&device, (width, height), white).unwrap();
         let staging_desc = D3D11_TEXTURE2D_DESC {
             Width: width,
@@ -773,22 +898,27 @@ mod tests {
                 CPUAccessFlags: 0,
                 ..staging_desc
             };
-            let data = D3D11_SUBRESOURCE_DATA {
-                pSysMem: pixels.as_ptr().cast(),
-                SysMemPitch: width * 8,
-                SysMemSlicePitch: 0,
-            };
             let mut frame = None;
             unsafe {
                 device
-                    .CreateTexture2D(&desc, Some(&data), Some(&mut frame))
+                    .CreateTexture2D(&desc, None, Some(&mut frame))
                     .unwrap();
             }
             let frame = frame.unwrap();
             // Recorded, then replayed from what was recorded.
-            for round in 0..2 {
-                // Cleared first, so that a draw that wrote nothing fails.
+            for (round, (pixels, expected)) in rounds.iter().enumerate() {
+                // The round's picture, as DXGI writes the next one into a
+                // texture it handed out before; and the target cleared,
+                // so that a draw that wrote nothing fails.
                 unsafe {
+                    context.UpdateSubresource(
+                        &frame,
+                        0,
+                        None,
+                        pixels.as_ptr().cast(),
+                        width * 8,
+                        0,
+                    );
                     context.UpdateSubresource(
                         &tone_map.target,
                         0,
@@ -820,7 +950,7 @@ mod tests {
                 }
                 assert!(
                     got.iter()
-                        .zip(&expected)
+                        .zip(expected)
                         .all(|(got, want)| got.abs_diff(*want) <= 1),
                     "bind {bind:#x}, round {round}: {got:?}, not {expected:?}"
                 );

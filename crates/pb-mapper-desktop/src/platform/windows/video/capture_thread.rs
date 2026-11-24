@@ -28,7 +28,7 @@ use super::{
     converter::{Converter, Sample},
     gpu_time::{GpuSpan, GpuTimer, Split},
     present_instant,
-    tonemap::{SdrWhite, ToneMap},
+    tonemap::{self, SdrWhite, ToneMap},
 };
 use crate::{Result, codec::present_waiter::PresentSource, error};
 use parking_lot::Mutex;
@@ -231,8 +231,8 @@ pub(super) struct DxgiSource {
     /// each picture is tone mapped into an SDR texture, which is converted.
     fp16: bool,
     /// The display's SDR white level, which thread C read as it built the
-    /// duplication, and the tone map, built as the first FP16 picture
-    /// arrives.
+    /// duplication of a desktop its mode says is in FP16, and the tone
+    /// map, built at a level as the first FP16 picture arrives.
     white: Option<SdrWhite>,
     tone_map: Option<ToneMap>,
     /// The last converted picture's `LastPresentTime`.
@@ -245,7 +245,7 @@ pub(super) struct DxgiSource {
 impl DxgiSource {
     /// On thread C, which built `capture` and `converter` for `input`
     /// pictures, and read the display's SDR `white` level for a
-    /// duplication that may hand out FP16.
+    /// duplication whose mode is FP16.
     pub(super) fn new(
         capture: DxgiDuplicationApi,
         converter: Converter,
@@ -321,13 +321,24 @@ impl DxgiSource {
             }
         }
         if self.fp16 && self.tone_map.is_none() {
+            // Thread C read the level for a duplication whose mode is
+            // FP16; FP16 that the mode did not announce has it read here.
+            let white = self.white.or_else(|| {
+                // SAFETY: a plain call on the duplication's output.
+                let output = unsafe { self.capture.output().GetDesc() }.ok()?;
+                tonemap::sdr_white(&output.DeviceName)
+            });
+            let Some(white) = white else {
+                // Windows tells no level for FP16 that thread C cannot see
+                // coming: rather than the tone map guess it, the retry
+                // duplicates in BGRA8 only, which DXGI converts as before.
+                let failure = error("the desktop arrives in FP16, with no SDR white level read");
+                tonemap::refuse(&failure);
+                return Err(failure);
+            };
             // Before the device's lock: the first build of a process
             // compiles its shaders.
-            self.tone_map = Some(ToneMap::build(
-                self.capture.device(),
-                self.input,
-                self.white,
-            )?);
+            self.tone_map = Some(ToneMap::build(self.capture.device(), self.input, white)?);
         }
         let sample = take().ok_or_else(|| error("capture thread armed without a sample"))?;
         let Self {
@@ -348,9 +359,11 @@ impl DxgiSource {
             // An FP16 picture: drawn as SDR into the tone map's texture,
             // which the video processor converts as it would a copy.
             if let Some(tone_map) = tone_map {
-                let picture = tone_map.draw(device, context, &frame)?;
-                split.tone_mapped();
-                return converter.convert(picture, &sample);
+                let done = tone_map.draw(device, context, &frame).and_then(|picture| {
+                    split.tone_mapped();
+                    converter.convert(picture, &sample)
+                });
+                return tone_map.settle(device, done);
             }
             if *direct {
                 if let Err(failure) = converter.convert(&frame, &sample) {

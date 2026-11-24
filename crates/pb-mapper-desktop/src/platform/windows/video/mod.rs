@@ -23,7 +23,8 @@
 //! The duplication takes FP16 first: a Windows HDR desktop arrives as
 //! composed, and each picture is tone mapped to SDR at the display's SDR
 //! white level before the video processor converts it (`tonemap.rs`). An
-//! SDR desktop still arrives in BGRA8.
+//! SDR desktop still arrives in BGRA8, and so does an HDR desktop whose
+//! level Windows does not tell.
 //!
 //! The encoder's events wake its caller too: each output, and the input
 //! request a `Submit::Waiting` waits for (`codec.rs`).
@@ -142,10 +143,10 @@ pub struct EncoderOptions {
     /// The capture thread wakes the caller either way.
     pub poll_events: bool,
     /// Duplicate the desktop in BGRA8 only, as every encoder did before:
-    /// DXGI then converts a Windows HDR desktop itself, without the
-    /// display's SDR white level, rather than this encoder tone mapping it
-    /// (`video_bench --sdr-duplication`, the baseline of that comparison).
-    /// A session never does.
+    /// DXGI then converts a Windows HDR desktop itself, expected to leave
+    /// the display's SDR white level out, rather than this encoder tone
+    /// mapping it (`video_bench --sdr-duplication`, the baseline of that
+    /// comparison). A session never does.
     pub sdr_duplication: bool,
 }
 
@@ -331,9 +332,9 @@ pub struct Statistics {
     /// video processor converts it.
     pub tone_mapped: bool,
     /// The display's SDR white level, in nits, read as the encoder was
-    /// built: for a duplication that may hand out FP16 (any but
-    /// `EncoderOptions::sdr_duplication`'s), where Windows tells it. A
-    /// tone map without one takes SDR white for 80 nits.
+    /// built for a desktop the duplication hands out in FP16, where
+    /// Windows tells it. Where it tells none, the duplication takes BGRA8
+    /// only, and DXGI converts that desktop itself.
     pub sdr_white_nits: Option<f32>,
     /// Whether the video processor was asked for quality
     /// (`D3D11_VIDEO_USAGE_OPTIMAL_QUALITY`) rather than speed.
@@ -648,18 +649,40 @@ impl Encoder {
             })?;
         // FP16 first, which DXGI hands out only for a desktop composed in
         // it (Windows HDR on), as it is composed; BGRA8 otherwise, as
-        // before. BGRA8 only where asked, or once a tone map could not be
-        // built in this process: DXGI then converts an HDR desktop itself.
-        let fp16 = !options.sdr_duplication && tonemap::wanted();
+        // before. BGRA8 only where asked, or once the tone map failed alike
+        // in this process (`tonemap::wanted`): DXGI then converts an HDR
+        // desktop itself.
+        let mut fp16 = !options.sdr_duplication && tonemap::wanted();
         let formats: &[DxgiDuplicationFormat] = if fp16 {
             &[DxgiDuplicationFormat::Rgba16F, DxgiDuplicationFormat::Bgra8]
         } else {
             &[DxgiDuplicationFormat::Bgra8]
         };
-        let capture = DxgiDuplicationApi::new_options(monitor, formats).map_err(error)?;
+        let mut capture = DxgiDuplicationApi::new_options(monitor, formats).map_err(error)?;
+        let output = unsafe { capture.output().GetDesc() }.ok();
+        // The duplication's mode is in the format it hands pictures out in:
+        // FP16 for an HDR desktop.
+        let hdr =
+            fp16 && capture.duplication_desc().ModeDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+        // The SDR white level its pictures are tone mapped at, read at each
+        // build, so that a change of the setting reaches the next encoder;
+        // an SDR desktop reads none.
+        let white = output
+            .as_ref()
+            .filter(|_| hdr)
+            .and_then(|output| tonemap::sdr_white(&output.DeviceName));
+        if hdr && white.is_none() {
+            // Windows tells no level (to a process outside the console
+            // session, say): rather than the tone map guess it, the
+            // duplication is made again in BGRA8 only, which DXGI converts
+            // as before.
+            capture = capture
+                .recreate_options(&[DxgiDuplicationFormat::Bgra8])
+                .map_err(error)?;
+            fp16 = false;
+        }
         let desc = capture.duplication_desc();
         let rotation = display_rotation(desc.Rotation)?;
-        let hdr = desc.ModeDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
         // A turned display's mode is read upright, the size of its output's
         // desktop rectangle, and its pictures as scanned out, that size
         // turned back, as WebRTC's Desktop Duplication capturer requires;
@@ -667,7 +690,6 @@ impl Encoder {
         // (`Rotation::scanned_out`), and the first frame's texture is
         // checked against the result.
         let mode = (desc.ModeDesc.Width, desc.ModeDesc.Height);
-        let output = unsafe { capture.output().GetDesc() }.ok();
         let desktop = output
             .as_ref()
             .map(|output| {
@@ -677,15 +699,6 @@ impl Encoder {
             })
             // None read: the mode is taken upright.
             .unwrap_or_default();
-        // The SDR white level an FP16 picture is tone mapped at, read at
-        // each build, so that a change of the setting reaches the next
-        // encoder: for any duplication that may hand out FP16, as the
-        // first frame's texture, not the mode, decides how pictures are
-        // converted.
-        let white = output
-            .as_ref()
-            .filter(|_| fp16)
-            .and_then(|output| tonemap::sdr_white(&output.DeviceName));
         let input = rotation.scanned_out(mode, desktop);
         if input.0 < 2 || input.1 < 2 || input.0 > MAX_SIZE.0 || input.1 > MAX_SIZE.1 {
             return Err(error("unsupported GPU capture dimensions"));
@@ -769,6 +782,7 @@ impl Encoder {
             captured = format_args!("{}x{}", input.0, input.1),
             cropped = crop_only(upright, (width, height)) && upright != (width, height),
             vp_quality = quality,
+            duplication = if fp16 { "fp16,bgra8" } else { "bgra8" },
             hdr,
             sdr_white_nits = ?white.map(tonemap::SdrWhite::nits),
         );

@@ -55,10 +55,11 @@
 //!   SDR desktop; with `--sdr-duplication`, as before the tone map. Not
 //!   with `--backend`.
 //! - `--sdr-duplication`: duplicate the desktop in BGRA8 only, so that
-//!   DXGI converts a Windows HDR desktop itself, without the display's SDR
-//!   white level, as every capture did before the encoder tone mapped it:
-//!   the baseline arm of that comparison, in the same build. Nothing
-//!   changes on an SDR desktop. Not with `--backend`.
+//!   DXGI converts a Windows HDR desktop itself, as every capture did
+//!   before the encoder tone mapped it: the baseline arm of that
+//!   comparison, in the same build, which records what that conversion
+//!   does on the device's driver. Nothing changes on an SDR desktop. Not
+//!   with `--backend`.
 //! - `--h264-profile base|high`: the H.264 profile asked for first (High by
 //!   default, as a session: Constrained High, High, then Baseline where the
 //!   encoder refuses them).
@@ -131,8 +132,9 @@
 //! returned a unit; a `capture` line: whether new pictures were converted
 //! straight from the duplication's surface (`direct`), copied out of it
 //! first (`copied`, where the video processor refused it) or tone mapped
-//! from an HDR desktop first (`tone_mapped`, with the display's SDR white
-//! level read as the encoder was built, `sdr_white_nits`), whether the
+//! from an HDR desktop first (`tone_mapped`), the display's SDR white
+//! level read as the encoder was built for an HDR desktop
+//! (`sdr_white_nits`), whether the
 //! video processor was asked for quality, and the submits that repeated the
 //! last picture by copying its sample, with their median and mean time; and
 //! an `encoder_events` line: whether its events were
