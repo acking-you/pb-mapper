@@ -231,6 +231,10 @@ class QualityPanel extends StatelessWidget {
     final l10n = context.l10n;
     final codec = codecLabel(st.codec);
     final chroma = chromaOf(st.codec);
+    // The decoder the viewer reported, which names the GPU it runs on where
+    // the platform says (a Linux viewer's render node, a Windows viewer's
+    // adapter).
+    final decoder = st.decoder;
     final (host, viewer) = (st.hostMs, st.viewerMs);
     String fps(double value) => s.connected ? '${value.round()} fps' : '—';
     return [
@@ -251,11 +255,19 @@ class QualityPanel extends StatelessWidget {
         l10n.qualityResolution,
         st.width == 0 || st.height == 0 ? '—' : '${st.width} × ${st.height}',
       ),
-      _Row('codec', l10n.qualityCodec, switch (st.hardwareDecoder) {
-        true => l10n.qualityHardware(codec),
-        false => l10n.qualitySoftware(codec),
-        null => codec,
-      }, mono: false),
+      _Row(
+        'codec',
+        l10n.qualityCodec,
+        switch (st.hardwareDecoder) {
+          true => l10n.qualityHardware(codec),
+          false => l10n.qualitySoftware(codec),
+          null => codec,
+        },
+        detail: s.connected && decoder != null && decoder.isNotEmpty
+            ? decoder
+            : null,
+        mono: false,
+      ),
       if (chroma != null) _Row('chroma', l10n.qualityChroma, chroma),
       if (s.connected)
         _Row(
