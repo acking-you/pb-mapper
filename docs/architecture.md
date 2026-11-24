@@ -476,8 +476,19 @@ Nothing in the SDK crates knows it exists.
     windows-helper`. `HELPER_PROTOCOL` (now 12) and the `.v<n>` pipe names
     change together; an installed helper of another protocol, or of another
     build (its executable differs from the one bundled with the app), is
-    offered Update. Protocol 12: `Input::Scroll` inside `Request::Input`,
-    and `StartCaps.hires_wheel`, whether the worker injects it.
+    offered Update. Protocol 12: the worker pushes between its answers,
+    every record tagged by `kind` (`oop/proto.rs`'s `Record`: `reply`,
+    `unit` with its bytes, `failed`, `pending`, `fresh`, `pointer`); `Request::Stream`
+    turns the pushes for a streaming host on and off; `Request::Video` lost
+    `submit` and `wait_ms`, and its answer dates the picture it submitted
+    (`presented_ago_us`, `presented_count`); `Input::Scroll` inside
+    `Request::Input`, and `StartCaps.hires_wheel`, whether the worker
+    injects it. The worker's loop
+    (`oop/server.rs`'s `work`) waits on the wake its encoder and capture
+    thread share with the exchange, and the app's `RemoteBackend` keeps one
+    I/O thread that demultiplexes answers and pushes in order, so thread C
+    neither polls nor long-polls the worker; a pushed pointer that changed
+    wakes thread C, which samples it at once (`Backend::cursor_changed`).
     Protocol 11: `Request::Adapter` and `Response.adapter`,
     the GPU and driver that drive the worker's display (`AdapterKey`, named
     by the platform through `oop/server.rs`'s `NamedAdapter`), asked only
@@ -503,9 +514,11 @@ Nothing in the SDK crates knows it exists.
     `Start` and the display-mode calls are bounded by 20 s
     (`MODE_TIMEOUT`), every other call by 3 s
   - `oop/`: the out-of-process backend over any byte transport: `proto`,
-    `ipc` framing, `RemoteBackend<T>` (client) and `serve<B>` (worker),
-    tested on every target over `tokio::io::duplex`. Both ends validate
-    input; neither check may go
+    `ipc` framing, `RemoteBackend` (client, with the I/O thread that owns
+    the transport and keeps what the worker pushed) and `serve<B>`, the
+    worker's loop `work` and `exchange` (worker), tested on every target
+    over `tokio::io::duplex` against the same loop on the synthetic
+    platform. Both ends validate input; neither check may go
   - `privileged/`: the public helper facade on every target —
     `support()`, and on Windows `status`, `request_installation`,
     `background::{configure, adopt, Options::resume, …}` (the app's
@@ -609,7 +622,8 @@ Nothing in the SDK crates knows it exists.
     `lossy_quic_pair`),
     `pipe_relay_bench` (the helper's
     unit path through two named pipes and a service-style relay, on Windows:
-    time per unit, and the writes and reads each took), `deployed` (the selftest, native
+    time per unit, pushed as protocol 12 sends it or answered as protocol 11
+    did, and the writes and reads each took), `deployed` (the selftest, native
     size by default), `input_acceptance/` (native input into a window of its
     own, on Windows: Unicode text, line breaks, physical keys and an input
     method's composition, and the pointer's shapes over it) and

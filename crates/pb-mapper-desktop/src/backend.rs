@@ -101,8 +101,10 @@ pub trait Backend: 'static {
         }))
     }
     /// Retrieve already submitted asynchronous encoder output without capturing
-    /// or submitting another image. `wait` bounds a long-poll (the helper); the
-    /// ordinary backend never blocks. Synchronous backends have nothing to drain.
+    /// or submitting another image. Thread C passes a zero `wait` and expects
+    /// no backend to block: one whose output arrives on its own (a push
+    /// encoder, the privileged helper's worker) wakes thread C for it.
+    /// Synchronous backends have nothing to drain.
     fn drain_video(
         &mut self,
         expected: &DesktopContext,
@@ -180,6 +182,17 @@ pub trait Backend: 'static {
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         let _ = expected;
         Ok(None)
+    }
+    /// Whether the pointer changed since the last `cursor` call, for a
+    /// backend that is told of it rather than reading it when asked (the
+    /// privileged helper's worker pushes it), and which wakes thread C when
+    /// it is told: thread C, while it captures, then samples it at once
+    /// rather than at its next interval, so a pointer it did not move (the
+    /// host user's, one an app or the OS moved) reaches the viewers as soon
+    /// as the backend knows of it. Default: never; thread C samples on its
+    /// own clock.
+    fn cursor_changed(&self) -> bool {
+        false
     }
     /// The pointer's shape, for a backend whose caps say `cursor_shapes`.
     /// Thread C asks only in a session whose viewer reads shapes, right
@@ -334,6 +347,9 @@ impl<B: Backend + ?Sized> Backend for Box<B> {
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         (**self).cursor(expected)
+    }
+    fn cursor_changed(&self) -> bool {
+        (**self).cursor_changed()
     }
     fn cursor_shape(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
         (**self).cursor_shape(expected)

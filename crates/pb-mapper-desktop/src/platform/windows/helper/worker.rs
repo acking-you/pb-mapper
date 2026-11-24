@@ -2,18 +2,26 @@
 //! session, and the `restore` worker that puts back a display mode one left.
 use super::*;
 use crate::{
-    Backend,
+    Backend, Waker,
     modes::Journal,
     oop::{
         proto::{Request, Response, TIMEOUT},
-        server::{ServeState, exchange, serve},
+        server::{Outgoing, ServeState, exchange, work},
     },
+    scheduler::{Waiter, Wake},
 };
-use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 
-/// A host that asked for no video this long is paused or gone: the worker
-/// gives its fine timers back.
-const VIDEO_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
+/// What the capture thread may have handed the exchange that it has not
+/// written yet: the units the encoder holds, an answer, a fresh picture and
+/// a pointer, with room to spare. A full queue holds the capture thread
+/// until the pipe takes more, and a pipe that takes nothing for 3 s ends
+/// the exchange.
+const OUTGOING_DEPTH: usize = 16;
 /// How often a `restore` worker tries again, and for how long at most.
 const RESTORE_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 pub(super) const RESTORE_FOR: std::time::Duration = std::time::Duration::from_secs(600);
@@ -45,24 +53,39 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
         // Only ever the protected one of this console session: no caller
         // names where it is.
         let journal = journal(session.session)?;
-        let (requests, incoming) = mpsc::sync_channel::<Call>(4);
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let stopped = cancel.clone();
+        let (requests, incoming) = mpsc::sync_channel::<Request>(4);
+        let (out, mut outgoing) = tokio::sync::mpsc::channel(OUTGOING_DEPTH);
+        // The capture thread's one wake: a request handed to it, a picture
+        // its encoder's capture thread published, its encoder's output.
+        let wake = Wake::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        let channels = Channels {
+            incoming,
+            out,
+            wake: wake.clone(),
+            stopped: stop.clone(),
+        };
         let (device, replayed) = (display_device.clone(), journal.clone());
         let join = std::thread::spawn(move || {
-            serve_bound(display_id, device, session, replayed, incoming, stopped)
+            serve_bound(display_id, device, session, replayed, &channels)
         });
-        let exchange = exchange(&mut pipe, display_id, display_device, |request| {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let sent = requests.try_send((request, tx)).map_err(error);
-            async move {
-                sent?;
-                rx.await.map_err(error)
-            }
-        })
+        let exchange = exchange(
+            &mut pipe,
+            display_id,
+            display_device,
+            |request| {
+                requests.try_send(request).map_err(error)?;
+                wake.notify();
+                Ok(())
+            },
+            &mut outgoing,
+        )
         .await;
-        cancel.cancel();
+        stop.store(true, Ordering::Release);
+        wake.notify();
         drop(requests);
+        // A capture thread held on a full queue lets go.
+        drop(outgoing);
         let _ = join.join();
         exchange.map(|()| journal)
     })?;
@@ -74,76 +97,60 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
     Ok(())
 }
 
-/// One request to the capture thread, with where its answer goes.
-type Call = (Request, tokio::sync::oneshot::Sender<(Response, Vec<u8>)>);
+/// What the capture thread's loop talks over: the requests the exchange
+/// hands it, what it hands the exchange to write, the wake the exchange and
+/// its encoder share, and whether the exchange ended.
+struct Channels {
+    incoming: mpsc::Receiver<Request>,
+    out: tokio::sync::mpsc::Sender<Outgoing>,
+    wake: Wake,
+    stopped: Arc<AtomicBool>,
+}
 
 /// The capture thread: opens the backend bound to `session`'s input desktop
 /// on display `display_id` (or its `device`), which replays `journal`, and
-/// serves `incoming` until it closes, `stopped` is cancelled or the host
-/// asks to close.
+/// runs the worker's loop (`server::work`) until the exchange ends or the
+/// host asks to close. The loop waits on the wake that the exchange and the
+/// backend's encoder share, so a request, a published picture and a
+/// finished unit are each taken as they come, and nothing is polled.
 fn serve_bound(
     display_id: u32,
     device: Option<String>,
     session: os::SessionIdentity,
     journal: Journal,
-    incoming: mpsc::Receiver<Call>,
-    stopped: tokio_util::sync::CancellationToken,
+    channels: &Channels,
 ) {
+    let Channels {
+        incoming,
+        out,
+        wake,
+        stopped,
+    } = channels;
     // Opening replays the journal: what a killed worker left changed.
-    let mut backend = match super::super::open_bound(display_id, device, session, journal) {
-        Ok(backend) => backend,
+    let opened = super::super::open_bound(display_id, device, session, journal)
+        .and_then(|backend| Ok((backend, Waiter::new(wake)?)));
+    let (mut backend, waiter) = match opened {
+        Ok(opened) => opened,
         Err(e) => {
-            if let Ok((_, reply)) = incoming.recv_timeout(TIMEOUT) {
-                let _ = reply.send((Response::failed(&e, 0), vec![]));
+            if incoming.recv_timeout(TIMEOUT).is_ok() {
+                let _ = out.blocking_send(Outgoing::Reply {
+                    response: Box::new(Response::failed(&e, 0)),
+                    image: vec![],
+                    presented: None,
+                });
             }
             return;
         }
     };
+    // The encoder's capture thread and event watcher wake this loop.
+    backend.bind(Waker(wake.clone()));
     // For a viewer that decodes H.265, the worker names the GPU it captures
     // on, under which the host keeps this worker's H.265 answer for the next
     // worker.
     let mut state = ServeState::new(super::super::video::named_adapter);
-    // Fine process timers while the host asks for video; a paused
-    // host asks for none.
-    let mut timer = None;
-    let mut last_video = std::time::Instant::now();
-    while !stopped.is_cancelled() {
-        if state.last_input.elapsed() > std::time::Duration::from_secs(2) {
-            backend.release();
-        }
-        if last_video.elapsed() > VIDEO_IDLE {
-            timer = None;
-        }
-        let (request, reply) = match incoming.recv_timeout(std::time::Duration::from_millis(15)) {
-            Ok(request) => request,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(_) => break,
-        };
-        if stopped.is_cancelled() {
-            break;
-        }
-        if matches!(request, Request::Video { .. }) {
-            last_video = std::time::Instant::now();
-            timer.get_or_insert_with(crate::timer::TimerResolution::hold);
-        }
-        let close = matches!(request, Request::Close {});
-        let result = serve(&mut backend, request, &mut state);
-        let pending = u32::try_from(backend.pending_video()).unwrap_or(u32::MAX);
-        let response = match result {
-            Ok((mut response, image)) => {
-                response.pending = pending;
-                (response, image)
-            }
-            Err(e) => {
-                backend.release();
-                (Response::failed(&e, pending), vec![])
-            }
-        };
-        let _ = reply.send(response);
-        if close {
-            break;
-        }
-    }
+    work(&mut backend, &mut state, incoming, out, &waiter, &|| {
+        stopped.load(Ordering::Acquire)
+    });
     backend.release();
     // The backend drops here, on its desktop: it puts back what it
     // changed, or leaves it journalled.

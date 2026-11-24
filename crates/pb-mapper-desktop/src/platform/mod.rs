@@ -223,6 +223,13 @@ pub(crate) trait VideoSource: Sized {
     fn presented(&self) -> Option<Presented> {
         None
     }
+    /// When the display presented the new picture a push source has ready
+    /// for the next `submit`, and the presents it covers; `None` when it has
+    /// none, or cannot date it. Asked only by the privileged helper's worker,
+    /// which tells its host the picture's age.
+    fn published(&self) -> Option<Presented> {
+        None
+    }
     /// When to try again on a push source, if it has nothing ready now.
     fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         let _ = keyframe_due;

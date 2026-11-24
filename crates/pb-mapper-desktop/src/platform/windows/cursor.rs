@@ -61,11 +61,11 @@ impl CursorSource for WinCursor {
     const SHAPES: bool = true;
     /// Each read keeps the display and the system awake a little longer, as
     /// a capture call does: while a session runs unpaused, thread C reads the
-    /// pointer at least every 16 ms, and the helper's worker at each desktop check and
-    /// video request, even while the network or the encoder holds capture
-    /// back. Once the session pauses, nothing reads it (through the helper,
-    /// once the encoder's last output is drained). A move the injector made
-    /// counts once made (`pointer.rs`).
+    /// pointer at least every 16 ms, and so does the helper's worker while its
+    /// host streams, and at each desktop check, even while the network or the
+    /// encoder holds capture back. Once the session pauses, nothing reads it
+    /// (through the helper, once the host stops streaming). A move the
+    /// injector made counts once made (`pointer.rs`).
     fn read(&mut self) -> Result<Option<(i32, i32, bool)>> {
         super::power::touch();
         let mut cursor = CURSORINFO {

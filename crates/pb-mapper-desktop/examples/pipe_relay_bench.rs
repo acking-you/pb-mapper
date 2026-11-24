@@ -1,15 +1,23 @@
-//! The Windows helper's unit path, in one process: a worker answers each
-//! request with a JSON record and a unit, a service relays both pipes as the
-//! helper's service does, and the app times each request until it holds the
-//! unit, as `RemoteBackend::call` waits for it. Each role runs on its own
-//! thread and current-thread runtime, as each runs in its own process. It
-//! uses the helper's framing (`src/oop/ipc.rs`) and, by default, its quotas and
-//! relay buffers (`src/platform/windows/helper/transfer.rs`).
+//! The Windows helper's unit path, in one process: a worker sends each unit
+//! as a JSON record and its bytes, a service relays both pipes as the
+//! helper's service does, and the app times each unit until it holds it.
+//! Each role runs on its own thread and current-thread runtime, as each runs
+//! in its own process. It uses the helper's framing (`src/oop/ipc.rs`) and,
+//! by default, its quotas and relay buffers
+//! (`src/platform/windows/helper/transfer.rs`).
 //!
 //! ```text
 //! cargo run --release -p pb-mapper-desktop --example pipe_relay_bench -- [flags]
 //! ```
 //!
+//! - `--mode push|answer`: `push`, what ships (helper protocol 12): after
+//!   one request the worker pushes each unit unasked, the next once the app
+//!   holds the last (an in-process signal, which crosses no pipe), and the
+//!   app times each from the worker's write until it holds the whole unit,
+//!   as `desktop_helper_push`'s receipt delay does across two processes.
+//!   `answer`, as protocol 11 and before: the worker answers each request
+//!   with a unit, and the app times the request until it holds the unit, as
+//!   `RemoteBackend::call` then waited for it.
 //! - `--writes one|records|parts`: how the worker writes an answer and the
 //!   app a request. `one`, what ships: both records of an answer in one
 //!   vectored write. `records`: one vectored write per record. `parts`, as
@@ -19,10 +27,11 @@
 //! - `--relay-to-app <bytes>`, `--relay-to-worker <bytes>`: the relay's
 //!   buffers.
 //! - `--sizes 20000,170000,1000000,3700000`: the units, in bytes.
-//! - `--records <n>`: timed requests per unit size (200), after 20 untimed.
+//! - `--records <n>`: timed units per unit size (200), after 20 untimed.
 //!
-//! Each line gives the time from the request's write until the app holds the
-//! whole unit (median, p95, mean), and the calls per request that moved bytes:
+//! Each line gives the time until the app holds the whole unit (median, p95,
+//! mean), from the worker's write (`push`) or the request's (`answer`), and
+//! the calls per unit that moved bytes:
 //! the worker's writes, the relay's reads from the worker and writes to the
 //! app, and the app's reads. On a named pipe each write the worker or the
 //! relay makes is one overlapped `WriteFile`; a read takes what one completed
@@ -48,7 +57,10 @@ use std::{
     task::{Context, Poll},
     time::{Duration, Instant},
 };
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
+    sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+};
 
 #[path = "../src/oop/ipc.rs"]
 mod ipc;
@@ -62,6 +74,23 @@ fn error(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
 }
 
 const WARM_UP: usize = 20;
+
+/// What the app times.
+#[derive(Clone, Copy)]
+enum Mode {
+    /// Each unit the worker pushes, from its write.
+    Push,
+    /// Each request, until its answer's unit is in.
+    Answer,
+}
+impl Mode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Push => "push",
+            Self::Answer => "answer",
+        }
+    }
+}
 
 /// How the worker writes an answer and the app a request.
 #[derive(Clone, Copy)]
@@ -81,6 +110,7 @@ impl Writes {
 }
 
 struct Config {
+    mode: Mode,
     writes: Writes,
     quota: u32,
     relay_to_app: usize,
@@ -92,6 +122,7 @@ struct Config {
 impl Config {
     fn parse() -> std::result::Result<Self, String> {
         let mut config = Self {
+            mode: Mode::Push,
             writes: Writes::One,
             quota: transfer::PIPE_QUOTA,
             relay_to_app: transfer::RELAY_TO_APP,
@@ -108,6 +139,13 @@ impl Config {
                     .map_err(|_| format!("{flag} takes a number, not {value}"))
             };
             match flag.as_str() {
+                "--mode" => {
+                    config.mode = match value.as_str() {
+                        "push" => Mode::Push,
+                        "answer" => Mode::Answer,
+                        _ => return Err(format!("--mode is push or answer, not {value}")),
+                    }
+                }
                 "--writes" => {
                     config.writes = match value.as_str() {
                         "one" => Writes::One,
@@ -150,10 +188,13 @@ impl Config {
 struct Ask {
     sequence: u64,
     size: usize,
+    /// Push this many units, numbered from `sequence`, instead of answering.
+    push: u64,
     close: bool,
 }
 
-/// The worker's answer, about the size of a capture's.
+/// The worker's answer, or the record of a unit it pushes, about the size
+/// of a capture's.
 #[derive(Serialize, Deserialize)]
 struct Answer {
     sequence: u64,
@@ -247,7 +288,7 @@ impl Counts {
                 .map(|counter| counter.load(Ordering::Relaxed)),
         )
     }
-    /// Per request, since `start`.
+    /// Per unit, since `start`.
     fn per(self, start: Self, requests: usize) -> [f64; 4] {
         let mut per = [0.0; 4];
         for ((slot, now), start) in per.iter_mut().zip(self.0).zip(start.0) {
@@ -318,9 +359,41 @@ fn service(
     })
 }
 
-/// The worker: answers each request with a unit of the size asked, until
-/// asked to close.
-fn worker(address: transport::Address, writes: Writes, largest: usize) -> io::Result<()> {
+/// What the worker tells the app outside the pipes in `--mode push`: when
+/// it began to write each unit; and what the app tells it: that it holds
+/// the last.
+struct Pushing {
+    written: UnboundedSender<Instant>,
+    held: UnboundedReceiver<()>,
+}
+/// The app's ends of `Pushing`.
+struct Pushed {
+    written: UnboundedReceiver<Instant>,
+    held: UnboundedSender<()>,
+}
+fn pushing() -> (Pushing, Pushed) {
+    let (written, written_rx) = unbounded_channel();
+    let (held, held_rx) = unbounded_channel();
+    (
+        Pushing {
+            written,
+            held: held_rx,
+        },
+        Pushed {
+            written: written_rx,
+            held,
+        },
+    )
+}
+
+/// The worker: answers each request with a unit of the size asked, or
+/// pushes the units it asks for, until asked to close.
+fn worker(
+    address: transport::Address,
+    writes: Writes,
+    largest: usize,
+    mut signals: Pushing,
+) -> io::Result<()> {
     runtime()?.block_on(async move {
         let pipe = transport::connect(&address).await?;
         let mut pipe = Counted::new(pipe, &UNCOUNTED, &WORKER_WRITES);
@@ -337,7 +410,23 @@ fn worker(address: transport::Address, writes: Writes, largest: usize) -> io::Re
             let bytes = unit
                 .get(..ask.size)
                 .ok_or_else(|| error("a unit larger than any asked for"))?;
-            (answer.sequence, answer.size) = (ask.sequence, ask.size);
+            answer.size = ask.size;
+            for pushed in 0..ask.push {
+                if pushed > 0 {
+                    signals
+                        .held
+                        .recv()
+                        .await
+                        .ok_or_else(|| error("the app went"))?;
+                }
+                answer.sequence = ask.sequence + pushed;
+                signals.written.send(Instant::now()).map_err(error)?;
+                send(&mut pipe, writes, &answer, Some(bytes)).await?;
+            }
+            if ask.push > 0 {
+                continue;
+            }
+            answer.sequence = ask.sequence;
             send(&mut pipe, writes, &answer, Some(bytes)).await?;
             if ask.close {
                 return Ok(());
@@ -357,11 +446,54 @@ async fn exchange<P: AsyncRead + AsyncWrite + Unpin>(
     let ask = Ask {
         sequence,
         size,
+        push: 0,
         close,
     };
     send(pipe, writes, &ask, None).await?;
     let answer: Answer = ipc::read_json(pipe).await?;
     let unit = ipc::read_bytes(pipe, ipc::MAX_FRAME).await?;
+    checked(&answer, &unit, sequence, size)
+}
+
+/// Ask the worker to push `count` units of `size`, numbered from
+/// `sequence`, and take each, timing it from the worker's write until the
+/// app holds it into `times`, when given.
+async fn take_pushed<P: AsyncRead + AsyncWrite + Unpin>(
+    pipe: &mut P,
+    writes: Writes,
+    (sequence, size, count): (u64, usize, u64),
+    signals: &mut Pushed,
+    mut times: Option<&mut Vec<Duration>>,
+) -> io::Result<()> {
+    let ask = Ask {
+        sequence,
+        size,
+        push: count,
+        close: false,
+    };
+    send(pipe, writes, &ask, None).await?;
+    for pushed in 0..count {
+        if pushed > 0 {
+            signals.held.send(()).map_err(error)?;
+        }
+        let answer: Answer = ipc::read_json(pipe).await?;
+        let unit = ipc::read_bytes(pipe, ipc::MAX_FRAME).await?;
+        let held = Instant::now();
+        let written = signals
+            .written
+            .recv()
+            .await
+            .ok_or_else(|| error("the worker went"))?;
+        checked(&answer, &unit, sequence + pushed, size)?;
+        if let Some(times) = times.as_deref_mut() {
+            times.push(held.saturating_duration_since(written));
+        }
+    }
+    Ok(())
+}
+
+/// `answer` and `unit` are the ones numbered `sequence`, whole.
+fn checked(answer: &Answer, unit: &[u8], sequence: u64, size: usize) -> io::Result<()> {
     let whole = unit.len() == size
         && unit
             .last()
@@ -394,34 +526,52 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Err("the service did not start".into());
     };
     let writes = config.writes;
-    let worker = std::thread::spawn(move || worker(worker_address, writes, largest));
+    let (signals, mut pushed) = pushing();
+    let worker = std::thread::spawn(move || worker(worker_address, writes, largest, signals));
     runtime()?.block_on(async {
         let pipe = transport::connect(&app_address).await?;
         let mut pipe = Counted::new(pipe, &APP_READS, &UNCOUNTED);
         let mut sequence = 0;
+        let (warm_up, records) = (WARM_UP as u64, config.records as u64);
         for &size in &config.sizes {
-            for _ in 0..WARM_UP {
-                sequence += 1;
-                exchange(&mut pipe, writes, sequence, size, false).await?;
-            }
-            let start = Counts::now();
             let mut times = Vec::with_capacity(config.records);
-            for _ in 0..config.records {
-                sequence += 1;
-                let began = Instant::now();
-                exchange(&mut pipe, writes, sequence, size, false).await?;
-                times.push(began.elapsed());
-            }
+            let start = match config.mode {
+                Mode::Push => {
+                    let warming = (sequence + 1, size, warm_up);
+                    take_pushed(&mut pipe, writes, warming, &mut pushed, None).await?;
+                    sequence += warm_up;
+                    let start = Counts::now();
+                    let timed = (sequence + 1, size, records);
+                    take_pushed(&mut pipe, writes, timed, &mut pushed, Some(&mut times)).await?;
+                    sequence += records;
+                    start
+                }
+                Mode::Answer => {
+                    for _ in 0..WARM_UP {
+                        sequence += 1;
+                        exchange(&mut pipe, writes, sequence, size, false).await?;
+                    }
+                    let start = Counts::now();
+                    for _ in 0..config.records {
+                        sequence += 1;
+                        let began = Instant::now();
+                        exchange(&mut pipe, writes, sequence, size, false).await?;
+                        times.push(began.elapsed());
+                    }
+                    start
+                }
+            };
             let [worker_writes, relay_reads, relay_writes, app_reads] =
                 Counts::now().per(start, config.records);
             let (median, p95, mean) = median_p95_mean(&mut times);
             println!(
-                "transport={} writes={} quota={} relay_to_app={} relay_to_worker={} \
+                "transport={} mode={} writes={} quota={} relay_to_app={} relay_to_worker={} \
                  unit_bytes={size} records={} median_us={median:.1} p95_us={p95:.1} \
                  mean_us={mean:.1} mb_per_s={:.1} worker_writes={worker_writes:.2} \
                  relay_reads={relay_reads:.2} relay_writes={relay_writes:.2} \
                  app_reads={app_reads:.2}",
                 transport::KIND,
+                config.mode.name(),
                 config.writes.name(),
                 config.quota,
                 config.relay_to_app,

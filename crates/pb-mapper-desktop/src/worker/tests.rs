@@ -99,6 +99,9 @@ struct Fake {
     shape_reads: Arc<AtomicU32>,
     /// When thread C read the pointer, at its clock.
     cursor_reads: Arc<Mutex<Vec<Instant>>>,
+    /// The backend was told the pointer changed since thread C last read
+    /// it, as the privileged helper's is by its worker's push.
+    told_cursor: Arc<AtomicBool>,
     /// A push capture source stays idle until this instant or a callback.
     idle_until: Arc<Mutex<Option<Instant>>>,
     /// A pull source on a still desktop: a capture submits nothing unless
@@ -160,6 +163,7 @@ impl Fake {
             shape: Arc::default(),
             shape_reads: Arc::default(),
             cursor_reads: Arc::default(),
+            told_cursor: Arc::default(),
             idle_until: Arc::default(),
             still: Arc::default(),
             armed: Arc::default(),
@@ -213,6 +217,7 @@ impl Backend for Fake {
             return Err(error("fake desktop changed"));
         }
         self.cursor_reads.lock().push((self.clock)());
+        self.told_cursor.store(false, Ordering::SeqCst);
         if self.hidden.load(Ordering::SeqCst) {
             return Ok(Some(CursorPosition::default()));
         }
@@ -222,6 +227,9 @@ impl Backend for Fake {
             y,
             visible: true,
         }))
+    }
+    fn cursor_changed(&self) -> bool {
+        self.told_cursor.load(Ordering::SeqCst)
     }
     fn cursor_shape(&mut self, _: &DesktopContext) -> Result<Option<crate::CursorShape>> {
         self.shape_reads.fetch_add(1, Ordering::SeqCst);
@@ -1840,6 +1848,36 @@ fn the_pointer_is_sampled_at_the_pace_down_to_8_ms() {
     }
 }
 
+/// A backend told of the pointer, as the privileged helper's is by its
+/// worker's push, is sampled as soon as it says the pointer changed,
+/// between two samples of the clock, which starts again from that reading;
+/// it is not sampled again until the clock or another change says so.
+#[test]
+fn a_pointer_the_backend_is_told_of_is_sampled_at_once() {
+    let mut h = Harness::new(true, None);
+    h.run(Duration::from_millis(50), true);
+    let sampled = h.sampled();
+    let told = sampled + Duration::from_millis(5);
+    *h.now.lock() = told;
+    *h.fake.pointer.lock() = (7, 6);
+    h.fake.told_cursor.store(true, Ordering::SeqCst);
+    let deadline = h.step();
+    assert_eq!(h.cursor_reads_after(sampled), [told]);
+    let report = h.shared.cursor.borrow().as_ref().map(|report| {
+        let cursor = report.cursor;
+        (cursor.x, cursor.y)
+    });
+    assert_eq!(report, Some((7, 6)));
+    assert!(deadline <= told + CURSOR_INTERVAL);
+    h.step();
+    assert_eq!(h.cursor_reads_after(sampled), [told], "read once a change");
+    h.run(CURSOR_INTERVAL, true);
+    assert_eq!(
+        h.cursor_reads_after(sampled),
+        [told, told + CURSOR_INTERVAL]
+    );
+}
+
 #[test]
 fn native_input_failure_ends_control_and_survives_new_video() {
     let mut h = Harness::new(true, None);
@@ -2830,6 +2868,130 @@ fn a_present_a_millisecond_before_the_tick_is_captured_as_it_lands() {
     let waits = h.waits(1);
     assert!(waits.len() >= 115, "{} takes", waits.len());
     assert!(waits.iter().all(|wait| wait.is_zero()), "{waits:?}");
+}
+
+/// Thread C over the privileged helper's pipe to the worker's loop
+/// (protocol 12), on a display whose source dates its pictures, in real
+/// time: each present reaches the viewer as the worker tells thread C of
+/// it, with no drain request and no poll, and its capture is dated by the
+/// present; once the display stands still, thread C asks the worker for
+/// little more than the liveness repeats. It runs beside the rest of the
+/// suite, so it bounds counts and structure, and a scheduler's stall may
+/// only slow it down: the wakes themselves are `oop::client`'s tests'.
+#[test]
+fn thread_c_over_the_helper_takes_each_present_without_polling() {
+    use crate::oop::{client::tests::synthetic, proto::Request};
+    /// Iterate thread C at its deadlines, its wakes and, while `presenting`,
+    /// at each present, until `end` or `done`: the units B-send took, and
+    /// the presents the captures were dated by, as the helper's answers
+    /// dated them.
+    fn drive(
+        engine: &mut Engine<crate::oop::client::RemoteBackend, Monotonic>,
+        waiter: &Waiter,
+        probe: &Probe,
+        shared: &SessionShared,
+        (end, done): (Instant, &dyn Fn() -> bool),
+        presenting: bool,
+    ) -> (usize, Vec<Instant>) {
+        let (mut units, mut dated) = (0, Vec::new());
+        while Instant::now() < end && !done() {
+            if presenting {
+                probe.land(Instant::now());
+            }
+            let deadline = match engine.iterate() {
+                Step::Wait(deadline) => deadline,
+                Step::Exit(exit) => panic!("thread C exited: {exit:?}"),
+            };
+            units += std::iter::from_fn(|| shared.outgoing.pop()).count();
+            if let Some(picture) = engine.backend.submitted_picture()
+                && dated.last() != Some(&picture.at)
+            {
+                dated.push(picture.at);
+            }
+            let present = presenting
+                .then(|| probe.next_present(Instant::now()))
+                .flatten();
+            let next = present.map_or(deadline, |present| present.min(deadline));
+            waiter.wait(next.min(end)).unwrap();
+        }
+        (units, dated)
+    }
+    const TAKES: usize = 20;
+    let probe = Probe::default();
+    probe.date(60.0, Instant::now(), Arc::new(Instant::now));
+    let journal = pb_mapper_core::test_support::TempPath::new("desktop-helper-thread-c");
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let asked = captures.clone();
+    let (backend, helper) = synthetic::<true>(
+        &probe,
+        journal.to_path_buf(),
+        |_| None,
+        move |request| {
+            if matches!(request, Request::Video { .. }) {
+                asked.lock().push(Instant::now());
+            }
+        },
+    );
+    let shared = session(true);
+    let mut engine = Engine::start(&shared, backend, config(None), Monotonic).unwrap();
+    let waiter = Waiter::new(&engine.room.wake).unwrap();
+    // A third of a second of presents, however long a loaded machine takes.
+    let taken = || probe.takes().len() >= TAKES;
+    let cap = Instant::now() + Duration::from_secs(10);
+    let (presented, dated) = drive(&mut engine, &waiter, &probe, &shared, (cap, &taken), true);
+    let takes = probe.takes();
+    assert!(takes.len() >= TAKES, "{} pictures in 10 s", takes.len());
+    // Each picture dated by its present, a little after it as the answer's
+    // way through the pipe puts it, which anchors thread C's pacing there.
+    assert!(dated.len() + 1 >= takes.len(), "{} dated", dated.len());
+    let late: Vec<Duration> = dated
+        .iter()
+        .map(|at| {
+            let present = takes
+                .iter()
+                .map(|(present, _)| *present)
+                .filter(|present| present <= at)
+                .max()
+                .expect("a date at or after a present");
+            *at - present
+        })
+        .collect();
+    let close = late
+        .iter()
+        .filter(|late| **late < Duration::from_millis(50))
+        .count();
+    assert!(
+        close * 4 >= late.len() * 3,
+        "dated after the present: {late:?}"
+    );
+    let still = Instant::now();
+    let end = still + Duration::from_millis(600);
+    let (repeated, _) = drive(
+        &mut engine,
+        &waiter,
+        &probe,
+        &shared,
+        (end, &|| false),
+        false,
+    );
+    // Every picture taken reached B-send, with no drain request.
+    assert!(
+        presented + repeated >= takes.len(),
+        "{presented} + {repeated} units"
+    );
+    let asked_still = captures
+        .lock()
+        .iter()
+        .filter(|at| **at >= still + Duration::from_millis(50))
+        .count();
+    // Two captures per liveness repeat (the repeat, then the tick that
+    // finds nothing new), every 250 ms: a poll would ask hundreds of times.
+    assert!(
+        asked_still <= 12,
+        "{asked_still} captures of a still display"
+    );
+    drop(engine);
+    helper.join().unwrap();
 }
 
 /// A viewer joining, pausing or resuming that changes only the frame-rate

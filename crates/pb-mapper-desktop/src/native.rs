@@ -46,9 +46,9 @@ pub(crate) struct PlatformBackend<P: Platform> {
     /// notches left short of the next one.
     notches: ScrollCarry,
     limits: VideoLimits,
-    /// A pushing source's wake: a session's once bound, else one of its own,
-    /// so a backend no session drives (the helper's worker, a bench) is never
-    /// without one.
+    /// A pushing source's wake: a session's once bound (or the helper's
+    /// worker's, which its loop waits on), else one of its own, so a backend
+    /// nothing drives that way (a bench) is never without one.
     waker: Waker,
     /// What this backend changed of its display's mode, journalled in
     /// `journal`, which it replays first.
@@ -127,6 +127,24 @@ impl<P: Platform> PlatformBackend<P> {
         let jpeg = self.parts.still.jpeg(display)?;
         self.prepare(false)?;
         Ok(jpeg)
+    }
+    /// When the display presented the new picture the open source has ready
+    /// for the next capture (`VideoSource::published`): for the privileged
+    /// helper's worker, which dates it to its host.
+    #[cfg_attr(
+        not(any(all(windows, feature = "windows-helper"), test)),
+        expect(dead_code, reason = "only the helper's worker serves")
+    )]
+    pub(crate) fn published(&self) -> Option<Presented> {
+        self.video.as_ref()?.1.published()
+    }
+    /// Whether the video source stayed open across [`Self::configure_video`].
+    #[cfg_attr(
+        not(any(all(windows, feature = "windows-helper"), test)),
+        expect(dead_code, reason = "only the helper's worker serves")
+    )]
+    pub(crate) fn has_video(&self) -> bool {
+        self.video.is_some()
     }
 }
 fn release<I: Injector>(held: &mut Held, input: &mut I) {
@@ -270,11 +288,10 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         self.submitted_picture = picture;
         Ok(image)
     }
-    /// Never blocks: the wait bounds only the helper's long-poll. A drain
-    /// checks no desktop: it only collects output of submits `capture_video`
-    /// checked, and the next submit or the worker's context check catches a
-    /// switch (on the helper, `serve` checks before and after each video
-    /// request).
+    /// Never blocks. A drain checks no desktop: it only collects output of
+    /// submits `capture_video` checked, and the next submit or the context
+    /// check catches a switch (on the helper, the worker pushes what it
+    /// collects this way, and checks the desktop around each capture).
     fn drain_video(
         &mut self,
         expected: &DesktopContext,
@@ -327,6 +344,10 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             return Err(error("desktop changed during cursor capture"));
         }
         Ok(read.map(|(x, y, showing)| confine(&expected.display, (x, y), showing)))
+    }
+    /// Read when asked: thread C samples on its own clock.
+    fn cursor_changed(&self) -> bool {
+        false
     }
     /// The shape of the pointer `cursor` just read, on the desktop it
     /// checked around that read.
@@ -589,6 +610,9 @@ impl Backend for NativeBackend {
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
         self.0.cursor(expected)
+    }
+    fn cursor_changed(&self) -> bool {
+        self.0.cursor_changed()
     }
     fn cursor_shape(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
         self.0.cursor_shape(expected)

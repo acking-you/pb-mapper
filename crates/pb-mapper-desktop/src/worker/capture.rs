@@ -18,8 +18,6 @@ use std::{
 };
 
 const UNAVAILABLE_RETRY: Duration = Duration::from_millis(200);
-/// The longest the helper may block one drain call for encoder output.
-const HELPER_DRAIN_WAIT_MAX: Duration = Duration::from_millis(4);
 
 impl<B: Backend, K: Clock> Engine<B, K> {
     /// A context check is due: there is no context yet, capture is
@@ -137,9 +135,9 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     /// When a source that had nothing to submit at `at` is asked again, its
     /// tick still armed, if it cannot say so itself. A push source wakes
     /// thread C for a fresh picture or names when it needs the tick
-    /// (`capture_idle_until`), as ScreenCaptureKit and, in process, the
-    /// Windows encoder's DXGI capture thread do. A pull source, such as the
-    /// privileged helper's worker, whose answers wake nothing, does neither.
+    /// (`capture_idle_until`), as ScreenCaptureKit, the Windows encoder's DXGI
+    /// capture thread and the privileged helper's worker, which pushes, do.
+    /// A pull source, which wakes nothing, does neither.
     /// While the desktop is active (`hot_until`), it is asked again at its
     /// capture poll interval, so the next present goes out within that
     /// interval of appearing; while it is still, a period later, so it costs
@@ -398,23 +396,17 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             self.capture_poll_due = None;
         }
         if pending > 0 {
-            let wait = if tick_due {
-                Duration::ZERO
-            } else {
-                HELPER_DRAIN_WAIT_MAX.min(self.capture_at().saturating_duration_since(now))
-            };
-            let result = self.backend.drain_video(context, wait);
+            // Never waits: a backend that just returned a unit is asked again
+            // at once, and one that had none at its poll interval, or, when
+            // it pushes (the privileged helper's worker among them), at its
+            // wake.
+            let result = self.backend.drain_video(context, Duration::ZERO);
             let done = self.clock.now();
-            let drained = matches!(result, Ok(Some(_)));
-            // The ordinary backend returns at once: poll it again shortly. A
-            // helper that waited the whole time is polled again at once, and so
-            // is a backend that just returned a unit.
-            self.drain_due =
-                if drained || (!wait.is_zero() && done.saturating_duration_since(now) >= wait) {
-                    done
-                } else {
-                    self.drain_after(done)
-                };
+            self.drain_due = if matches!(result, Ok(Some(_))) {
+                done
+            } else {
+                self.drain_after(done)
+            };
             self.produced(result, done);
         }
     }

@@ -80,8 +80,19 @@ impl Waiter {
                 .ok_or_else(|| error("capture waiter is not initialized"))?
                 .as_raw_handle(),
         );
-        let timeout = deadline.saturating_duration_since(Instant::now());
-        if !self.signal.pending.load(Ordering::Acquire) && !timeout.is_zero() {
+        loop {
+            if self.signal.pending.swap(false, Ordering::AcqRel) {
+                // Clear the event that wake signalled, so the next wait does
+                // not end early. A newer wake stays pending in the flag.
+                unsafe {
+                    WaitForSingleObject(event, 0);
+                }
+                return Ok(true);
+            }
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            if timeout.is_zero() {
+                return Ok(false);
+            }
             let due = -(timeout.as_nanos().div_ceil(100).clamp(1, i64::MAX as u128) as i64);
             unsafe {
                 SetWaitableTimer(
@@ -103,14 +114,5 @@ impl Waiter {
                 }
             }
         }
-        let woken = self.signal.pending.swap(false, Ordering::AcqRel);
-        if woken {
-            // Clear the event that wake signalled, so the next wait does
-            // not end early. A newer wake stays pending in the flag.
-            unsafe {
-                WaitForSingleObject(event, 0);
-            }
-        }
-        Ok(woken)
     }
 }
