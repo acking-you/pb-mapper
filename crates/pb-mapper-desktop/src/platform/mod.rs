@@ -133,12 +133,27 @@ pub(crate) trait Desktop: Sized {
     /// moved, and when the ordinary desktop is not the input desktop, which
     /// fails with `SecureDesktop`.
     fn prepare(&mut self, on_switch: impl FnOnce()) -> Result<()>;
+    /// `prepare` around a capture or a pointer read, where a check that
+    /// passed a moment ago may answer instead: a platform whose check is a
+    /// costly round trip reuses a pass briefly (macOS: 16 ms), never a
+    /// failure, and `on_switch` does not run on a reuse. The injection
+    /// boundary and the context check always call `prepare`, which renews
+    /// what this reuses. By default, `prepare`.
+    fn prepare_recent(&mut self, on_switch: impl FnOnce()) -> Result<()> {
+        self.prepare(on_switch)
+    }
     /// The geometry now. A display whose handle went stale is found again
     /// by its device name before this fails.
     fn display(&mut self) -> Result<Display>;
     /// Whether the display is still `expected`, without allocating its name.
     fn display_matches(&mut self, expected: &Display) -> Result<bool> {
         Ok(&self.display()? == expected)
+    }
+    /// `display_matches` around a capture or a pointer read, where a
+    /// geometry read a moment ago that matched may answer, as
+    /// `prepare_recent`. By default, `display_matches`.
+    fn display_matches_recent(&mut self, expected: &Display) -> Result<bool> {
+        self.display_matches(expected)
     }
     fn generation(&self) -> u64 {
         0
