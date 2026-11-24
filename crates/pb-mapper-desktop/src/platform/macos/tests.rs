@@ -24,7 +24,8 @@ use crate::{
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
-    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetWidth,
+    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
+    CVPixelBufferGetWidth,
     CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
     kCVPixelBufferIOSurfacePropertiesKey, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 };
@@ -628,6 +629,258 @@ fn text_and_ramp(row: &mut [u8], y: usize, frame: u64) {
     for (x, pixel) in ramp.iter_mut().enumerate() {
         *pixel = (16 + (half + x + y) / 8 % 224) as u8;
     }
+}
+
+/// What a VideoToolbox submit costs thread C on this Mac, and what an input
+/// queued meanwhile waits. A session whose size is a multiple of 16 encodes
+/// inside `VTCompressionSessionEncodeFrame`, so the call holds its caller for
+/// the whole encode. Each case paces an encoder as thread C paces it, on
+/// `PAINTED` pictures painted before the run, so the pacing thread does
+/// nothing else: each tick taken at its start, two never closer than three
+/// quarters of a period (`Pacer`), and the submit gate `MacVideo::submit`
+/// applies (`gate`). A reader thread queues an input every millisecond and
+/// wakes the pacing thread, which takes the queued inputs before and after
+/// each submit, as thread C drains its lane. Each case prints, over
+/// `MEASURED` after `WARM`: pictures submitted and units out a second, ticks
+/// spent on a full encoder (`skipped_per_s`), the encode call on the pacing
+/// thread (p50, p99, max), how long a queued input waited for the pacing
+/// thread (p50, p99, max), and the units' dwell (p50, p95). The bitrate is
+/// Balanced's starting bits per frame at the case's pace, scaled by its size
+/// as a session's QoS scales it.
+///
+/// Minutes of one Mac's hardware: run it in release mode on a quiet
+/// machine, one test at a time:
+/// `cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture
+/// --test-threads=1 video_toolbox_submit_blocking`.
+#[test]
+#[ignore = "a measurement: about 2.5 minutes of encoding, in release mode"]
+fn video_toolbox_submit_blocking() {
+    let sizes = [
+        (1920, 1080),
+        (1920, 1200),
+        (2560, 1440),
+        (3328, 2160),
+        (3840, 2160),
+    ];
+    for (width, height) in sizes {
+        let ring = painted(width, height);
+        for codec in [VideoCodec::H264, VideoCodec::H265] {
+            for pace in [60, 120] {
+                paced_case(codec, &ring, pace, SUBMIT_DEPTH);
+            }
+        }
+    }
+}
+
+/// VideoToolbox's queue at sizes it encodes asynchronously (not multiples
+/// of 16, as a MacBook's built-in display at its default resolution gives),
+/// and one it encodes inside the call: `video_toolbox_submit_blocking`'s
+/// cases with the submit gate at four units and at two. Run it as that one
+/// is: `cargo test --release -p pb-mapper-desktop --lib -- --ignored
+/// --nocapture --test-threads=1 video_toolbox_in_flight`.
+#[test]
+#[ignore = "a measurement: about 3 minutes of encoding, in release mode"]
+fn video_toolbox_in_flight() {
+    for (width, height) in [(3024, 1964), (3340, 2160), (1920, 1080)] {
+        let ring = painted(width, height);
+        for codec in [VideoCodec::H264, VideoCodec::H265] {
+            for pace in [60, 120] {
+                for depth in [4, 2] {
+                    paced_case(codec, &ring, pace, depth);
+                }
+            }
+        }
+    }
+}
+
+/// The pictures each paced case encodes in turn.
+const PAINTED: usize = 8;
+/// How long a paced case runs before, and while, it is measured.
+const WARM: Duration = Duration::from_secs(1);
+const MEASURED: Duration = Duration::from_secs(5);
+/// How often the emulated reader queues an input.
+const INPUT_INTERVAL: Duration = Duration::from_millis(1);
+/// The submit gate `video_toolbox_submit_blocking` runs at: thread C's.
+const SUBMIT_DEPTH: usize = crate::worker::ENCODER_DEPTH;
+
+/// `PAINTED` IOSurface pictures of the pattern, painted once.
+fn painted(width: usize, height: usize) -> Vec<CFRetained<CVPixelBuffer>> {
+    (0..PAINTED)
+        .map(|frame| {
+            let picture = surface(width, height);
+            paint(&picture, frame as u64);
+            picture
+        })
+        .collect()
+}
+
+/// What a due tick does with the encoder, as `MacVideo::submit` decides.
+enum Tick {
+    /// The encoder is full: the tick is spent.
+    Spend,
+    /// A picture is handed to the encoder.
+    Take,
+}
+
+/// `MacVideo::submit`'s gate at `depth`: units in the encoder, or out and
+/// not yet drained.
+fn gate(encoder: &Encoder, depth: usize) -> Tick {
+    if encoder.pending() >= depth {
+        Tick::Spend
+    } else {
+        Tick::Take
+    }
+}
+
+/// One paced case's samples, in microseconds, and counts.
+#[derive(Default)]
+struct Paced {
+    submitted: u32,
+    units: u32,
+    skipped: u32,
+    calls: Vec<u32>,
+    waits: Vec<u32>,
+    dwell: Vec<u32>,
+}
+impl Paced {
+    /// Take the queued inputs at `now`, as thread C drains its lane.
+    fn lane(&mut self, inputs: &std::sync::mpsc::Receiver<Instant>, measuring: bool) {
+        let now = Instant::now();
+        while let Ok(queued) = inputs.try_recv() {
+            if measuring {
+                self.waits.push(micros(now.saturating_duration_since(queued)));
+            }
+        }
+    }
+}
+
+fn micros(duration: Duration) -> u32 {
+    u32::try_from(duration.as_micros()).unwrap_or(u32::MAX)
+}
+
+/// The `share` quantile of `samples`, sorted in place.
+fn quantile(samples: &mut [u32], share: f64) -> u32 {
+    samples.sort_unstable();
+    let index = ((samples.len() as f64 * share) as usize).min(samples.len().saturating_sub(1));
+    samples.get(index).copied().unwrap_or(0)
+}
+
+/// One case of `codec` at `pace` over `ring`, its gate at `depth`.
+fn paced_case(codec: VideoCodec, ring: &[CFRetained<CVPixelBuffer>], pace: u32, depth: usize) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let width = CVPixelBufferGetWidth(&ring[0]) as u32;
+    let height = CVPixelBufferGetHeight(&ring[0]) as u32;
+    let label = format!("codec={codec:?} size={width}x{height} pace={pace} depth={depth}");
+    if !super::encoder::encodes(codec) {
+        report(format_args!("{label} skipped: no hardware encoder"));
+        return;
+    }
+    let scale = (f64::from(width) * f64::from(height) / (1920.0 * 1080.0))
+        .powf(0.75)
+        .clamp(0.4, 3.0);
+    let bitrate = (66_667.0 * scale * f64::from(pace)) as u32;
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    let mut encoder = match Encoder::new(codec, width, height, pace, bitrate, &Waker(wake.clone()))
+    {
+        Ok(encoder) => encoder,
+        Err(failure) => {
+            report(format_args!("{label} refused: {failure}"));
+            return;
+        }
+    };
+    // The reader: an input every millisecond, queued, and thread C woken.
+    let (lane, inputs) = std::sync::mpsc::channel::<Instant>();
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader = std::thread::spawn({
+        let (wake, stop) = (wake.clone(), Arc::clone(&stop));
+        move || {
+            let own = Wake::new();
+            let timer = Waiter::new(&own).unwrap();
+            let mut next = Instant::now();
+            while !stop.load(Ordering::Relaxed) {
+                next += INPUT_INTERVAL;
+                while Instant::now() < next {
+                    timer.wait(next).unwrap();
+                }
+                if lane.send(Instant::now()).is_err() {
+                    return;
+                }
+                wake.notify();
+            }
+        }
+    });
+    let start = Instant::now();
+    let (from, until) = (start + WARM, start + WARM + MEASURED);
+    let mut pacer = crate::pacer::Pacer::new(pace, start);
+    let mut paced = Paced::default();
+    let (mut frame, mut keyframe) = (0, true);
+    loop {
+        let now = Instant::now();
+        let measuring = now >= from;
+        paced.lane(&inputs, measuring);
+        while let Some(unit) = encoder.drain().unwrap() {
+            if measuring {
+                paced.units += 1;
+                paced.dwell.push(unit.format.encode_us);
+            }
+        }
+        if now >= until {
+            break;
+        }
+        if pacer.due(now) {
+            keyframe |= encoder.keyframe_due();
+            match gate(&encoder, depth) {
+                Tick::Spend => {
+                    paced.skipped += u32::from(measuring);
+                    pacer.consume(now, None);
+                }
+                Tick::Take => {
+                    let called = Instant::now();
+                    encoder
+                        .encode(&ring[frame % ring.len()], keyframe, false)
+                        .unwrap();
+                    let call = called.elapsed();
+                    if measuring {
+                        paced.calls.push(micros(call));
+                        paced.submitted += 1;
+                    }
+                    (frame, keyframe) = (frame + 1, false);
+                    pacer.consume(now, None);
+                }
+            }
+            paced.lane(&inputs, measuring);
+        }
+        waiter.wait(pacer.earliest().min(until)).unwrap();
+    }
+    stop.store(true, Ordering::Relaxed);
+    reader.join().unwrap();
+    let seconds = MEASURED.as_secs_f64();
+    let Paced {
+        submitted,
+        units,
+        skipped,
+        mut calls,
+        mut waits,
+        mut dwell,
+    } = paced;
+    report(format_args!(
+        "{label} bitrate={bitrate} submitted_per_s={:.1} units_per_s={:.1} skipped_per_s={:.1} call_p50_us={} call_p99_us={} call_max_us={} input_wait_p50_us={} input_wait_p99_us={} input_wait_max_us={} dwell_p50_ms={:.2} dwell_p95_ms={:.2}",
+        f64::from(submitted) / seconds,
+        f64::from(units) / seconds,
+        f64::from(skipped) / seconds,
+        quantile(&mut calls, 0.5),
+        quantile(&mut calls, 0.99),
+        quantile(&mut calls, 1.0),
+        quantile(&mut waits, 0.5),
+        quantile(&mut waits, 0.99),
+        quantile(&mut waits, 1.0),
+        f64::from(quantile(&mut dwell, 0.5)) / 1000.0,
+        f64::from(quantile(&mut dwell, 0.95)) / 1000.0,
+    ));
 }
 
 /// `MacDesktop` reads WindowServer for every check the injection boundary,
