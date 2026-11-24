@@ -2,12 +2,13 @@
 // Flutter: libpb_mapper_ffi.so's test source (feature desktop-test-source)
 // plays them into a video source, the module pulls, decodes and publishes
 // them, and a thread standing in for Flutter's raster thread acquires each
-// picture, which is its presentation receipt, and converts it to RGBA with
-// the runner's GL code (desktop_video_gl.cc) in a GL ES context with no
-// surface (EGL). It checks the decoder state rules the runner shares with
-// Windows and Android and the conversion against GStreamer's own, and
-// measures how many pictures a second each size decodes and presents and
-// what each thread's CPU costs per picture. Run by
+// picture, converts it to RGBA with the runner's GL code
+// (desktop_video_gl.cc) in a GL ES context with no surface (EGL) and, once
+// converted, presents it, which is its receipt. It checks the decoder state
+// rules the runner shares with Windows and Android, the conversion against
+// GStreamer's own and against a decoder in system memory, the GL state the
+// conversion leaves, and measures how many pictures a second each size
+// decodes and presents and what each thread's CPU costs per picture. Run by
 // scripts/test/linux-desktop-video.sh, which builds the library and the
 // clips.
 //
@@ -67,6 +68,9 @@ bool g_hardware = false;
 // as the sink marks the first unit after a drop.
 std::atomic<bool> g_break_next_delta{false};
 std::atomic<uint64_t> g_broken_frame{0};
+// The frame the last receipt sent on this thread named: a raster thread
+// reads it right after `present`, which receipts synchronously.
+thread_local uint64_t t_receipt_frame = 0;
 
 int32_t Next(uint64_t consumer, uint32_t timeout_ms, uint8_t* dst, uint32_t capacity, PbDesktopVideoMetaV1* meta) {
   const int32_t r = g_ffi.exports.next(consumer, timeout_ms, dst, capacity, meta);
@@ -79,6 +83,7 @@ int32_t Next(uint64_t consumer, uint32_t timeout_ms, uint8_t* dst, uint32_t capa
 }
 int32_t Presented(uint64_t consumer, uint64_t generation, uint64_t frame_id) {
   ++g_receipts;
+  t_receipt_frame = frame_id;
   const int32_t r = g_ffi.exports.presented(consumer, generation, frame_id);
   if (r == 1) ++g_accepted;
   return r;
@@ -130,19 +135,26 @@ class GlContext {
   GlContext& operator=(const GlContext&) = delete;
   ~GlContext() {
     if (context_ != EGL_NO_CONTEXT) eglDestroyContext(display_, context_);
-    if (display_ != EGL_NO_DISPLAY) eglTerminate(display_);
+    if (display_ != EGL_NO_DISPLAY && owns_display_) eglTerminate(display_);
   }
-  bool Create(std::string* why) {
+  // `same_display`: another context's display, which stays initialized
+  // when this one goes.
+  bool Create(std::string* why, const GlContext* same_display = nullptr) {
     // Mesa's surfaceless platform, which falls back to llvmpipe without a
     // GPU; else whatever display EGL picks.
     EGLint major = 0, minor = 0;
-    if (epoxy_has_egl_extension(EGL_NO_DISPLAY, "EGL_MESA_platform_surfaceless")) {
-      display_ = eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA, nullptr, nullptr);
-      if (display_ != EGL_NO_DISPLAY && !eglInitialize(display_, &major, &minor)) display_ = EGL_NO_DISPLAY;
-    }
-    if (display_ == EGL_NO_DISPLAY) {
-      display_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-      if (display_ != EGL_NO_DISPLAY && !eglInitialize(display_, &major, &minor)) display_ = EGL_NO_DISPLAY;
+    if (same_display) {
+      display_ = same_display->display_;
+    } else {
+      owns_display_ = true;
+      if (epoxy_has_egl_extension(EGL_NO_DISPLAY, "EGL_MESA_platform_surfaceless")) {
+        display_ = eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA, nullptr, nullptr);
+        if (display_ != EGL_NO_DISPLAY && !eglInitialize(display_, &major, &minor)) display_ = EGL_NO_DISPLAY;
+      }
+      if (display_ == EGL_NO_DISPLAY) {
+        display_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        if (display_ != EGL_NO_DISPLAY && !eglInitialize(display_, &major, &minor)) display_ = EGL_NO_DISPLAY;
+      }
     }
     if (display_ == EGL_NO_DISPLAY) {
       *why = "no EGL display initializes";
@@ -172,6 +184,7 @@ class GlContext {
  private:
   EGLDisplay display_ = EGL_NO_DISPLAY;
   EGLContext context_ = EGL_NO_CONTEXT;
+  bool owns_display_ = false;
 };
 
 // The renderer and version behind a context (llvmpipe on CI), read before
@@ -302,6 +315,228 @@ double Psnr(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
   return 10 * std::log10(255.0 * 255.0 * static_cast<double>(samples) / squares);
 }
 
+// Whether the current context is GL ES 3 or later, whose state adds
+// samplers, vertex array objects, pixel buffers and more pixel storage.
+bool Es3Context() { return !epoxy_is_desktop_gl() && epoxy_gl_version() >= 30; }
+
+// Every binding and switch a conversion touches, named, in the order read:
+// what Flutter's renderers may have set around it. Reading it leaves it.
+using GlState = std::vector<std::pair<std::string, long long>>;
+GlState CaptureState() {
+  const bool es3 = Es3Context();
+  GlState state;
+  const auto add = [&state](const std::string& name, long long value) { state.emplace_back(name, value); };
+  const auto integer = [&add](const std::string& name, GLenum pname) {
+    GLint value = 0;
+    glGetIntegerv(pname, &value);
+    add(name, value);
+  };
+  integer("framebuffer", GL_FRAMEBUFFER_BINDING);
+  if (es3) integer("read framebuffer", GL_READ_FRAMEBUFFER_BINDING);
+  GLint viewport[4] = {0, 0, 0, 0};
+  glGetIntegerv(GL_VIEWPORT, viewport);
+  for (int i = 0; i < 4; ++i) add("viewport[" + std::to_string(i) + "]", viewport[i]);
+  integer("program", GL_CURRENT_PROGRAM);
+  GLint active = GL_TEXTURE0;
+  glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+  add("active texture", active);
+  for (int unit = 0; unit < 3; ++unit) {
+    glActiveTexture(GL_TEXTURE0 + unit);
+    integer("texture unit " + std::to_string(unit), GL_TEXTURE_BINDING_2D);
+    if (es3) integer("sampler unit " + std::to_string(unit), GL_SAMPLER_BINDING);
+  }
+  glActiveTexture(static_cast<GLenum>(active));
+  integer("array buffer", GL_ARRAY_BUFFER_BINDING);
+  GLint vertex_array = 0;
+  if (es3) {
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vertex_array);
+    add("vertex array", vertex_array);
+    glBindVertexArray(0);
+  }
+  // Attribute 0 of the default vertex array, which the conversion draws
+  // with.
+  const std::pair<const char*, GLenum> attributes[] = {
+      {"attribute 0 enabled", GL_VERTEX_ATTRIB_ARRAY_ENABLED},
+      {"attribute 0 size", GL_VERTEX_ATTRIB_ARRAY_SIZE},
+      {"attribute 0 type", GL_VERTEX_ATTRIB_ARRAY_TYPE},
+      {"attribute 0 normalized", GL_VERTEX_ATTRIB_ARRAY_NORMALIZED},
+      {"attribute 0 stride", GL_VERTEX_ATTRIB_ARRAY_STRIDE},
+      {"attribute 0 buffer", GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING}};
+  for (const auto& attribute : attributes) {
+    GLint value = 0;
+    glGetVertexAttribiv(0, attribute.second, &value);
+    add(attribute.first, value);
+  }
+  if (es3) {
+    GLint divisor = 0;
+    glGetVertexAttribiv(0, GL_VERTEX_ATTRIB_ARRAY_DIVISOR, &divisor);
+    add("attribute 0 divisor", divisor);
+  }
+  void* pointer = nullptr;
+  glGetVertexAttribPointerv(0, GL_VERTEX_ATTRIB_ARRAY_POINTER, &pointer);
+  add("attribute 0 pointer", static_cast<long long>(reinterpret_cast<intptr_t>(pointer)));
+  if (es3) glBindVertexArray(static_cast<GLuint>(vertex_array));
+  integer("unpack alignment", GL_UNPACK_ALIGNMENT);
+  integer("pack alignment", GL_PACK_ALIGNMENT);
+  if (es3) {
+    integer("unpack row length", GL_UNPACK_ROW_LENGTH);
+    integer("unpack skip rows", GL_UNPACK_SKIP_ROWS);
+    integer("unpack skip pixels", GL_UNPACK_SKIP_PIXELS);
+    integer("pack row length", GL_PACK_ROW_LENGTH);
+    integer("pack skip rows", GL_PACK_SKIP_ROWS);
+    integer("pack skip pixels", GL_PACK_SKIP_PIXELS);
+    integer("pixel unpack buffer", GL_PIXEL_UNPACK_BUFFER_BINDING);
+    integer("pixel pack buffer", GL_PIXEL_PACK_BUFFER_BINDING);
+  }
+  GLboolean mask[4] = {GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE};
+  glGetBooleanv(GL_COLOR_WRITEMASK, mask);
+  for (int i = 0; i < 4; ++i) add("colour mask[" + std::to_string(i) + "]", mask[i]);
+  const std::pair<const char*, GLenum> switches[] = {{"blend", GL_BLEND},
+                                                     {"scissor test", GL_SCISSOR_TEST},
+                                                     {"depth test", GL_DEPTH_TEST},
+                                                     {"stencil test", GL_STENCIL_TEST},
+                                                     {"cull face", GL_CULL_FACE},
+                                                     {"dither", GL_DITHER},
+                                                     {"polygon offset fill", GL_POLYGON_OFFSET_FILL},
+                                                     {"sample alpha to coverage", GL_SAMPLE_ALPHA_TO_COVERAGE},
+                                                     {"sample coverage", GL_SAMPLE_COVERAGE}};
+  for (const auto& entry : switches) add(entry.first, glIsEnabled(entry.second));
+  if (es3) add("rasterizer discard", glIsEnabled(GL_RASTERIZER_DISCARD));
+  return state;
+}
+
+// What differs between two states first, or nothing.
+std::string Changed(const GlState& before, const GlState& after) {
+  if (before.size() != after.size()) return "what can be read of it";
+  for (size_t i = 0; i < before.size(); ++i) {
+    if (before[i] != after[i]) {
+      return before[i].first + " was " + std::to_string(before[i].second) + ", is " + std::to_string(after[i].second);
+    }
+  }
+  return "";
+}
+
+// Sets every binding and switch a conversion touches to something else
+// than its default, as Skia or Impeller may leave them, and GL ES 3's too
+// for a converter on its paths (`es3`). Going, it sets the defaults back and
+// deletes what it made.
+class DirtyState {
+ public:
+  explicit DirtyState(bool es3) : es3_(es3) {
+    glGenTextures(4, textures_);
+    glGenBuffers(3, buffers_);
+    glGenFramebuffers(1, &framebuffer_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, textures_[3]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textures_[3], 0);
+    glViewport(1, 2, 3, 4);
+    program_ = Program();
+    glUseProgram(program_);
+    for (int unit = 0; unit < 3; ++unit) {
+      glActiveTexture(GL_TEXTURE0 + unit);
+      glBindTexture(GL_TEXTURE_2D, textures_[unit]);
+    }
+    // Attribute 0 from a buffer other than the one bound.
+    glBindBuffer(GL_ARRAY_BUFFER, buffers_[0]);
+    glBufferData(GL_ARRAY_BUFFER, 64, nullptr, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_TRUE, 12, reinterpret_cast<const void*>(static_cast<intptr_t>(4)));
+    glEnableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, buffers_[1]);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
+    glPixelStorei(GL_PACK_ALIGNMENT, 2);
+    glColorMask(GL_TRUE, GL_FALSE, GL_TRUE, GL_FALSE);
+    for (const GLenum cap : kSwitches) glEnable(cap);
+    glDisable(GL_DITHER);
+    glScissor(0, 0, 1, 1);
+    if (es3_) {
+      glGenSamplers(3, samplers_);
+      for (int unit = 0; unit < 3; ++unit) glBindSampler(static_cast<GLuint>(unit), samplers_[unit]);
+      glGenVertexArrays(1, &vertex_array_);
+      glBindVertexArray(vertex_array_);
+      // Buffers with no storage: a conversion that used them would fail.
+      glBindBuffer(GL_PIXEL_UNPACK_BUFFER, buffers_[2]);
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, buffers_[2]);
+      glPixelStorei(GL_UNPACK_ROW_LENGTH, 7);
+      glPixelStorei(GL_UNPACK_SKIP_ROWS, 1);
+      glPixelStorei(GL_UNPACK_SKIP_PIXELS, 1);
+      glPixelStorei(GL_PACK_ROW_LENGTH, 5);
+      glPixelStorei(GL_PACK_SKIP_ROWS, 1);
+      glPixelStorei(GL_PACK_SKIP_PIXELS, 1);
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+      glEnable(GL_RASTERIZER_DISCARD);
+    }
+    glActiveTexture(GL_TEXTURE0 + 2);
+  }
+  DirtyState(const DirtyState&) = delete;
+  DirtyState& operator=(const DirtyState&) = delete;
+  ~DirtyState() {
+    if (es3_) {
+      glDisable(GL_RASTERIZER_DISCARD);
+      for (const GLenum pname : {GL_UNPACK_ROW_LENGTH, GL_UNPACK_SKIP_ROWS, GL_UNPACK_SKIP_PIXELS, GL_PACK_ROW_LENGTH,
+                                 GL_PACK_SKIP_ROWS, GL_PACK_SKIP_PIXELS}) {
+        glPixelStorei(pname, 0);
+      }
+      glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+      glBindVertexArray(0);
+      glDeleteVertexArrays(1, &vertex_array_);
+      for (int unit = 0; unit < 3; ++unit) glBindSampler(static_cast<GLuint>(unit), 0);
+      glDeleteSamplers(3, samplers_);
+    }
+    for (const GLenum cap : kSwitches) glDisable(cap);
+    glEnable(GL_DITHER);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glDisableVertexAttribArray(0);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, nullptr);
+    for (int unit = 0; unit < 3; ++unit) {
+      glActiveTexture(GL_TEXTURE0 + unit);
+      glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glUseProgram(0);
+    glDeleteProgram(program_);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &framebuffer_);
+    glDeleteBuffers(3, buffers_);
+    glDeleteTextures(4, textures_);
+  }
+
+ private:
+  static constexpr GLenum kSwitches[] = {GL_BLEND,          GL_SCISSOR_TEST,      GL_DEPTH_TEST,
+                                         GL_STENCIL_TEST,   GL_CULL_FACE,         GL_POLYGON_OFFSET_FILL,
+                                         GL_SAMPLE_COVERAGE, GL_SAMPLE_ALPHA_TO_COVERAGE};
+  // A program of its own to be current: one that does nothing.
+  static GLuint Program() {
+    const char* sources[2] = {"attribute vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n",
+                              "precision mediump float;\nvoid main() { gl_FragColor = vec4(1.0); }\n"};
+    const GLenum types[2] = {GL_VERTEX_SHADER, GL_FRAGMENT_SHADER};
+    const GLuint program = glCreateProgram();
+    for (int i = 0; i < 2; ++i) {
+      const GLuint shader = glCreateShader(types[i]);
+      glShaderSource(shader, 1, &sources[i], nullptr);
+      glCompileShader(shader);
+      glAttachShader(program, shader);
+      glDeleteShader(shader);
+    }
+    glLinkProgram(program);
+    return program;
+  }
+
+  const bool es3_;
+  GLuint textures_[4] = {0, 0, 0, 0}, buffers_[3] = {0, 0, 0}, samplers_[3] = {0, 0, 0};
+  GLuint framebuffer_ = 0, vertex_array_ = 0, program_ = 0;
+};
+constexpr GLenum DirtyState::kSwitches[];
+
+// Which converter a verification checks: the one in use, on the context's
+// own paths, or one made for it on GL ES 2's paths.
+enum class Paths { kContext, kEs2 };
+
 // What the conversion of one picture gave, checked on the raster thread.
 struct Verification {
   bool done = false;
@@ -313,11 +548,18 @@ struct Verification {
   bool compared = false;
   double psnr = 0;
   bool snapshot_varied = false, still_varied = false;
+  // What the conversion and its still's read-back changed of the GL state
+  // set before them: nothing, when empty.
+  std::string state_changed = "not checked";
+  // GL ES 2's converter: its texture is deleted when it goes, from a
+  // thread with no context current.
+  bool freed = false;
 };
 
 // Flutter's raster thread: acquires the newest picture whenever the module
-// says there is one, keeps it until the next, and converts it into the RGBA
-// texture with the runner's GL code, as the texture's populate does.
+// says there is one, keeps it until the next, converts it into the RGBA
+// texture with the runner's GL code and presents it once converted, as the
+// texture's populate does.
 class Raster {
  public:
   Raster(const PbVideoModule* module, GlContext* gl) : module_(module), gl_(gl) {}
@@ -373,7 +615,36 @@ class Raster {
     }
     wake_.notify_one();
   }
+  // While on, every picture acquired cannot be shown, as when the GL
+  // context fails: it is reported (present_failed), never presented.
+  void Fail(bool fail) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    fail_ = fail;
+  }
+  // While on, each presented picture's still (320 wide, read back from the
+  // GPU) is kept by its frame id, up to kMaxStills; turning it on clears
+  // them.
+  void Record(bool record) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    record_ = record;
+    if (record) stills_.clear();
+  }
+  size_t stills() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return stills_.size();
+  }
+  std::map<uint64_t, std::vector<uint8_t>> TakeStills() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::map<uint64_t, std::vector<uint8_t>> taken;
+    taken.swap(stills_);
+    return taken;
+  }
   int pictures() const { return pictures_; }
+  // Pictures acquired and not shown while Fail was on.
+  int unshown() const { return unshown_; }
+  // dma-buf pictures a converter refused, after which the decoder sends
+  // system memory.
+  int refused() const { return refused_; }
   // This thread's CPU time so far (getrusage), in microseconds.
   uint64_t cpu_us() const { return cpu_us_; }
   // Whether its GL context was current and every picture converted.
@@ -382,11 +653,13 @@ class Raster {
     std::lock_guard<std::mutex> lock(mutex_);
     return failure_;
   }
-  // Checks the conversion of the next picture.
-  Verification Verify(milliseconds limit) {
+  // Checks the conversion of the next picture, with GL state of its own
+  // set around it.
+  Verification Verify(milliseconds limit, Paths paths = Paths::kContext) {
     std::unique_lock<std::mutex> lock(mutex_);
     verification_ = Verification{};
     verify_ = true;
+    paths_ = paths;
     verified_.wait_for(lock, limit, [this] { return verification_.done; });
     verify_ = false;
     return verification_;
@@ -400,6 +673,8 @@ class Raster {
   }
 
  private:
+  static constexpr size_t kMaxStills = 120;
+
   void Run() {
     pthread_setname_np(pthread_self(), "raster");
     gl_ready_ = gl_->MakeCurrent();
@@ -417,14 +692,71 @@ class Raster {
         module_->release(picture);
         continue;
       }
+      bool verify = false, fail = false, record = false;
+      Paths paths = Paths::kContext;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        verify = verify_ && !verification_.done && converter;
+        paths = paths_;
+        fail = fail_;
+        record = record_;
+      }
+      if (fail) {
+        module_->present_failed(decoder_, "a failure the clip harness makes");
+        module_->release(picture);
+        ++unshown_;
+        continue;
+      }
       PbVideoPlanes planes{};
       module_->describe(picture, &planes);
+      // A verification on GL ES 2's paths converts with a converter of its
+      // own.
+      std::unique_ptr<pb_video::VideoGl> es2;
+      if (verify && paths == Paths::kEs2) es2.reset(new pb_video::VideoGl(module_, true));
+      pb_video::VideoGl* const use = es2 ? es2.get() : converter.get();
+      std::unique_ptr<DirtyState> dirty;
+      GlState before;
+      if (verify) {
+        dirty.reset(new DirtyState(Es3Context() && paths == Paths::kContext));
+        before = CaptureState();
+      }
       std::string failure;
-      const bool converted = converter && converter->Convert(picture, &failure);
-      if (converter && converter->TakeDmabufRefusal()) module_->refuse_dmabuf(decoder_);
+      const bool converted = use && use->Convert(picture, &failure);
+      if (use && use->TakeDmabufRefusal()) module_->refuse_dmabuf(decoder_);
+      std::string state_changed;
+      if (verify) {
+        state_changed = Changed(before, CaptureState());
+        if (converted && state_changed.empty()) {
+          std::vector<uint8_t> still;
+          uint32_t still_width = 0, still_height = 0;
+          use->ReadBack(320, &still, &still_width, &still_height);
+          state_changed = Changed(before, CaptureState());
+          if (!state_changed.empty()) state_changed = "the still: " + state_changed;
+        }
+        dirty.reset();
+      }
+      // Presented once converted, which is the receipt; else reported.
+      uint64_t frame = 0;
+      const bool refused = !converted && use && use->last_refused();
+      if (converted) {
+        t_receipt_frame = 0;
+        module_->present(decoder_, picture);
+        frame = t_receipt_frame;
+      } else if (!refused) {
+        module_->present_failed(decoder_, failure.c_str());
+      }
+      if (refused) ++refused_;
       uint32_t name = 0, width = 0, height = 0;
-      if (converted && !converter->Texture(&name, &width, &height, &failure)) name = 0;
-      if (!converted || name == 0) ++convert_failures_;
+      if (converted && !use->Texture(&name, &width, &height, &failure)) name = 0;
+      if (!refused && (!converted || name == 0)) ++convert_failures_;
+      if (record && converted && frame != 0) {
+        std::vector<uint8_t> still;
+        uint32_t still_width = 0, still_height = 0;
+        if (use->ReadBack(320, &still, &still_width, &still_height)) {
+          std::lock_guard<std::mutex> lock(mutex_);
+          if (stills_.size() < kMaxStills) stills_[frame] = std::move(still);
+        }
+      }
       // The test pattern is never one colour: its luma varies, read where
       // it is in memory (a dma-buf's is checked by reading the texture).
       bool content = converted && planes.dmabuf;
@@ -432,14 +764,19 @@ class Raster {
       for (size_t row = 1; !planes.dmabuf && luma.data && luma.width && !content && row < luma.height; row += 97) {
         content = luma.data[row * luma.stride + (row * 7) % luma.width] != luma.data[0];
       }
-      bool verify = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        verify = verify_ && !verification_.done;
-        if (!converted && failure_.empty()) failure_ = failure;
+        if (!converted && !refused && failure_.empty()) failure_ = failure;
       }
       if (verify && converted) {
-        Verification checked = Inspect(converter.get(), picture, planes, name, width, height);
+        Verification checked = Inspect(use, picture, planes, name, width, height, paths == Paths::kEs2);
+        checked.state_changed = state_changed;
+        if (es2) {
+          // Gone on a thread with no context current, as the GTK thread
+          // finalizes a texture.
+          std::thread([&es2] { es2.reset(); }).join();
+          checked.freed = name != 0 && glIsTexture(name) == GL_FALSE;
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         verification_ = checked;
         verified_.notify_all();
@@ -458,9 +795,10 @@ class Raster {
   }
 
   // Reads the converted texture back and compares it with GStreamer's
-  // converter on the same picture; checks both snapshots.
+  // converter on the same picture; checks both snapshots. `es2`: the
+  // converter may keep GL ES 2's unsized RGBA.
   Verification Inspect(pb_video::VideoGl* converter, PbVideoPicture* picture, const PbVideoPlanes& planes, GLuint name,
-                     uint32_t width, uint32_t height) {
+                       uint32_t width, uint32_t height, bool es2) {
     Verification result;
     result.done = true;
     result.planes = planes;
@@ -472,8 +810,9 @@ class Raster {
       glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &levelled_width);
       glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &levelled_height);
       glBindTexture(GL_TEXTURE_2D, 0);
-      result.texture = result.texture && internal == GL_RGBA8 && levelled_width == static_cast<GLint>(width) &&
-                       levelled_height == static_cast<GLint>(height) && glGetError() == GL_NO_ERROR;
+      result.texture = result.texture && (internal == GL_RGBA8 || (es2 && internal == GL_RGBA)) &&
+                       levelled_width == static_cast<GLint>(width) && levelled_height == static_cast<GLint>(height) &&
+                       glGetError() == GL_NO_ERROR;
       result.texture_note = "internal format checked";
     } else {
       result.texture_note = "GL ES before 3.1 cannot say its internal format";
@@ -514,9 +853,10 @@ class Raster {
   const PbVideoModule* module_;
   GlContext* const gl_;
   bool gl_ready_ = false;
-  std::atomic<int> convert_failures_{0};
+  std::atomic<int> convert_failures_{0}, unshown_{0}, refused_{0};
   std::atomic<uint64_t> cpu_us_{0};
   bool verify_ = false;
+  Paths paths_ = Paths::kContext;
   Verification verification_;
   std::condition_variable verified_;
   std::string failure_;
@@ -524,12 +864,14 @@ class Raster {
   std::thread thread_;
   std::mutex mutex_;
   std::condition_variable wake_;
-  bool ready_ = false, stopping_ = false, content_ = false, held_ = false;
+  bool ready_ = false, stopping_ = false, content_ = false, held_ = false, fail_ = false, record_ = false;
   std::vector<Clock::time_point> ready_at_;
+  std::map<uint64_t, std::vector<uint8_t>> stills_;
   uint32_t width_ = 0, height_ = 0;
   std::atomic<int> pictures_{0};
   PbVideoPicture* shown_ = nullptr;
 };
+constexpr size_t Raster::kMaxStills;
 
 // An Annex B stream with access unit delimiters, as `u32 BE len | unit`.
 std::string WriteClip(const std::vector<std::string>& streams, bool hevc, const std::string& out) {
@@ -733,6 +1075,8 @@ int main(int argc, char** argv) {
   Check(stats().configurations == 1 && g_reports == 1 && g_failures == 0, "one configuration, reported, no failure");
 
   printf("the GPU conversion\n");
+  // Whether the decoder's pictures come as dma-bufs (a hardware run).
+  bool dmabuf = false;
   {
     const Verification checked = raster.Verify(milliseconds(3000));
     const PbVideoStats now = stats();
@@ -753,10 +1097,33 @@ int main(int argc, char** argv) {
       Check(checked.snapshot_varied, "the snapshot, scaled to 320 wide, has content");
     }
     Check(checked.still_varied, "the GPU's still, scaled to 320 wide, has content");
+    Check(checked.state_changed.empty(),
+          checked.state_changed.empty() ? "it leaves every GL binding and switch it touches as it found them"
+                                        : ("it changes the GL state around it: " + checked.state_changed).c_str());
     if (!g_hardware) {
       Check(planes.format == PB_VIDEO_FORMAT_I420 && !planes.dmabuf && !(now.flags & PB_VIDEO_STATS_CONVERTS),
             "the software decoder's I420 reaches the GPU with no videoconvert");
     }
+    dmabuf = planes.dmabuf != 0;
+    printf("  dma-buf pictures refused so far: %d\n", raster.refused());
+  }
+
+  // What a GL ES 2 context without GL_EXT_texture_rg or
+  // GL_EXT_unpack_subimage takes, which Mesa never gives (it answers ES 2
+  // with ES 3.2), forced on a converter of its own; then that converter
+  // goes on a thread with no context, as a texture is finalized.
+  printf("the GPU conversion on GL ES 2's paths\n");
+  {
+    const Verification checked = raster.Verify(milliseconds(3000), Paths::kEs2);
+    Check(checked.done && checked.texture, "LUMINANCE planes and padded rows give an RGBA texture of the picture's size");
+    if (!checked.planes.dmabuf) {
+      printf("  PSNR against GStreamer's converter: %.1f dB\n", checked.psnr);
+      Check(checked.compared && checked.psnr >= 40, "it matches GStreamer's converter at 40 dB or more");
+    }
+    Check(checked.state_changed.empty(),
+          checked.state_changed.empty() ? "it leaves GL ES 2's bindings and switches as it found them"
+                                        : ("it changes the GL state around it: " + checked.state_changed).c_str());
+    Check(checked.freed, "its GL objects are deleted in the share group when it goes, from a thread with no context");
   }
 
   printf("a discontinuity on a delta unit\n");
@@ -862,6 +1229,79 @@ int main(int argc, char** argv) {
     }
     Check(g_failures == 0, "no failure");
     g_ffi.stop(source);
+  }
+
+  // The runner's populate presents a picture only once it is converted: one
+  // the compositor cannot show earns no receipt, and Rust hears of it, at
+  // most once a second, as a decoder error.
+  printf("pictures the compositor cannot show\n");
+  {
+    source = g_ffi.source(h264.c_str(), 60);
+    const int shown = g_accepted;
+    Check(attach(source), "the decoder attaches to the next source");
+    Check(WaitFor([&] { return g_accepted >= shown + 10; }, milliseconds(3000)), "its pictures are presented");
+    const int reported = g_failures, unshown = raster.unshown();
+    raster.Fail(true);
+    // Once one is not shown, every receipt sent before it has been.
+    WaitFor([&] { return raster.unshown() > unshown; }, milliseconds(1000));
+    const auto started = Clock::now();
+    const int receipted = g_receipts, first = raster.unshown();
+    WaitFor([&] { return raster.unshown() >= first + 30; }, milliseconds(3000));
+    raster.Fail(false);
+    const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
+    Check(raster.unshown() >= first + 30 && g_receipts == receipted, "pictures acquired and not shown earn no receipt");
+    Check(g_failures > reported && g_failures <= reported + 2 + static_cast<int>(seconds),
+          "their failure reaches Rust as a decoder error, at most once a second");
+    const int resumed = g_accepted;
+    Check(WaitFor([&] { return g_accepted >= resumed + 10; }, milliseconds(3000)), "pictures shown again are presented");
+    g_ffi.stop(source);
+  }
+
+  // The same clip through a second decoder whose pictures stay in system
+  // memory, each raster thread keeping the GPU's still of every frame it
+  // presents: the same frames must convert alike. On a hardware run whose
+  // pictures are dma-bufs, this is what checks their import (modifier,
+  // offsets, strides); elsewhere both are in system memory.
+  printf("the same frames through a second decoder in system memory\n");
+  {
+    GlContext reference_gl;
+    std::string reference_why;
+    const bool reference_ready = reference_gl.Create(&reference_why, &gl);
+    Check(reference_ready, reference_ready ? "a second GL context stands in for a second texture's"
+                                           : reference_why.c_str());
+    Raster reference(module, &reference_gl);
+    const PbVideoPresenter system_memory{};
+    PbVideoDecoder* second =
+        reference_ready ? module->create(&shims, &system_memory, Raster::Ready, &reference) : nullptr;
+    if (second) {
+      reference.Start(second);
+      raster.Record(true);
+      reference.Record(true);
+      const uint64_t mine = g_ffi.source(h264.c_str(), 30), theirs = g_ffi.source(h264.c_str(), 30);
+      Check(attach(mine) && module->attach(second, theirs) > 0, "both decoders attach to a source of the clip");
+      WaitFor([&] { return raster.stills() >= 60 && reference.stills() >= 60; }, milliseconds(6000));
+      raster.Record(false);
+      reference.Record(false);
+      const auto converted = raster.TakeStills(), expected = reference.TakeStills();
+      size_t common = 0;
+      double worst = 99;
+      for (const auto& entry : converted) {
+        const auto found = expected.find(entry.first);
+        if (found == expected.end()) continue;
+        ++common;
+        worst = std::min(worst, Psnr(entry.second, found->second));
+      }
+      printf("  %zu frames presented by both, the lowest PSNR %.1f dB (%s against system memory)\n", common, worst,
+             dmabuf ? "dma-bufs" : "system memory");
+      Check(common >= 20 && worst >= 40, "the same frames convert to the same picture, at 40 dB or more");
+      g_ffi.stop(mine);
+      g_ffi.stop(theirs);
+      module->detach(second);
+      reference.Stop();
+      module->destroy(second);
+    } else {
+      Check(false, "a second decoder is created");
+    }
   }
 
   if (!uhd.empty() && (broken || probe.h264.max_width < 3840)) {

@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <mutex>
+#include <system_error>
+#include <thread>
 #include <utility>
 
 namespace pb_video {
@@ -30,8 +32,12 @@ constexpr uint32_t kMaxSide = 8192;
 // dma-buf pictures the GPU may still be reading: the decoder lends them
 // from its pool, so the rest go back as soon as their fence signals.
 constexpr size_t kMaxInFlight = 2;
-// dma-buf planes kept imported, two per pooled buffer.
-constexpr size_t kMaxImages = 24;
+// dma-buf planes kept imported, two per pooled buffer: at most this many,
+// and none that went unsampled for kImageIdle dma-buf conversions (two
+// seconds at 60 fps), whose buffer has left the decoder's pool or sits
+// unused in it. An imported plane keeps its buffer alive.
+constexpr size_t kMaxImages = 64;
+constexpr uint64_t kImageIdle = 120;
 constexpr EGLTimeKHR kFenceWaitNs = 1000000000ull;
 // A conversion draws to texture units 0 to 2.
 constexpr int kUnits = 3;
@@ -101,29 +107,97 @@ const char kDownscaleShader[] =
 
 const GLfloat kQuad[] = {-1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f};
 
-// GL names a converter left when it went, deleted by the next call of any
-// converter on the context's thread: a converter may go on a thread that
-// has no context.
-std::mutex g_garbage_mutex;
-std::vector<GLuint> g_textures, g_framebuffers, g_buffers, g_programs;
+// GL names to delete in a context's share group.
+struct Names {
+  std::vector<GLuint> textures, framebuffers, buffers, programs;
+  static void Add(std::vector<GLuint>* bin, GLuint name) {
+    if (name != 0) bin->push_back(name);
+  }
+  static void Move(std::vector<GLuint>* to, std::vector<GLuint>* from) {
+    to->insert(to->end(), from->begin(), from->end());
+    from->clear();
+  }
+  void Take(Names* other) {
+    Move(&textures, &other->textures);
+    Move(&framebuffers, &other->framebuffers);
+    Move(&buffers, &other->buffers);
+    Move(&programs, &other->programs);
+  }
+  bool empty() const { return textures.empty() && framebuffers.empty() && buffers.empty() && programs.empty(); }
+  // With a context of the share group current on this thread.
+  void Delete() const {
+    if (!textures.empty()) glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+    if (!framebuffers.empty()) glDeleteFramebuffers(static_cast<GLsizei>(framebuffers.size()), framebuffers.data());
+    if (!buffers.empty()) glDeleteBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
+    for (const GLuint program : programs) glDeleteProgram(program);
+  }
+};
 
-void Discard(std::vector<GLuint>* bin, GLuint name) {
-  if (name != 0) bin->push_back(name);
-}
+// GL names a converter left where EGL could not delete them at once,
+// deleted by the next call of any converter on the context's thread.
+std::mutex g_garbage_mutex;
+Names g_garbage;
 
 void Collect() {
-  std::vector<GLuint> textures, framebuffers, buffers, programs;
+  Names names;
   {
     std::lock_guard<std::mutex> lock(g_garbage_mutex);
-    textures.swap(g_textures);
-    framebuffers.swap(g_framebuffers);
-    buffers.swap(g_buffers);
-    programs.swap(g_programs);
+    if (g_garbage.empty()) return;
+    names.Take(&g_garbage);
   }
-  if (!textures.empty()) glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
-  if (!framebuffers.empty()) glDeleteFramebuffers(static_cast<GLsizei>(framebuffers.size()), framebuffers.data());
-  if (!buffers.empty()) glDeleteBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
-  for (const GLuint program : programs) glDeleteProgram(program);
+  names.Delete();
+}
+
+// Deletes `names` in a context of its own that shares `share`'s objects,
+// made current with no surface on this thread, which has none current.
+bool DeleteInOwnContext(EGLDisplay display, EGLContext share, const Names& names) {
+  EGLint api = 0, version = 0, config_id = 0;
+  if (!eglQueryContext(display, share, EGL_CONTEXT_CLIENT_TYPE, &api) ||
+      !eglQueryContext(display, share, EGL_CONTEXT_CLIENT_VERSION, &version) ||
+      !eglBindAPI(static_cast<EGLenum>(api))) {
+    return false;
+  }
+  // The share context's own configuration, or none where EGL takes none.
+  EGLConfig config = nullptr;
+  if (eglQueryContext(display, share, EGL_CONFIG_ID, &config_id) && config_id > 0) {
+    const EGLint wanted[] = {EGL_CONFIG_ID, config_id, EGL_NONE};
+    EGLint found = 0;
+    if (!eglChooseConfig(display, wanted, &config, 1, &found) || found < 1) config = nullptr;
+  }
+  if (!config && !epoxy_has_egl_extension(display, "EGL_KHR_no_config_context")) return false;
+  const EGLint attributes[] = {EGL_CONTEXT_CLIENT_VERSION, version, EGL_NONE};
+  const EGLContext context = eglCreateContext(display, config, share, attributes);
+  if (context == EGL_NO_CONTEXT) return false;
+  const bool current = eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context) == EGL_TRUE;
+  if (current) {
+    names.Delete();
+    // Done before the context goes, so that the share group sees it.
+    glFinish();
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+  }
+  eglDestroyContext(display, context);
+  return current;
+}
+
+// The same, on a thread of its own: the calling thread may have another
+// context current (GDK's, on the GTK thread that finalizes a texture),
+// which a context made current here would replace.
+bool DeleteInShareGroup(EGLDisplay display, EGLContext share, const Names& names) {
+  if (display == EGL_NO_DISPLAY || share == EGL_NO_CONTEXT ||
+      !epoxy_has_egl_extension(display, "EGL_KHR_surfaceless_context")) {
+    return false;
+  }
+  bool deleted = false;
+  try {
+    std::thread worker([&] {
+      deleted = DeleteInOwnContext(display, share, names);
+      eglReleaseThread();
+    });
+    worker.join();
+  } catch (const std::system_error&) {
+    return false;
+  }
+  return deleted;
 }
 
 // Errors another renderer left are not this conversion's.
@@ -389,34 +463,45 @@ void ReadPresenter(EGLDisplay display, PbVideoPresenter* out) {
   }
 }
 
-VideoGl::VideoGl(const PbVideoModule* module) : module_(module) {}
+VideoGl::VideoGl(const PbVideoModule* module, bool es2_paths) : module_(module), es2_paths_(es2_paths) {}
 
 VideoGl::~VideoGl() {
+  // The GPU drew the last of these at least a frame ago.
   for (const InFlight& flight : in_flight_) {
     if (flight.fence != EGL_NO_SYNC_KHR) eglDestroySyncKHR(display_, flight.fence);
     module_->release(flight.picture);
   }
-  std::lock_guard<std::mutex> lock(g_garbage_mutex);
+  // An image's texture keeps its buffer until the texture goes too.
+  Names names;
   for (const Image& image : images_) {
     eglDestroyImageKHR(display_, image.image);
-    Discard(&g_textures, image.texture);
+    Names::Add(&names.textures, image.texture);
   }
-  for (const PlaneTexture& plane : planes_) Discard(&g_textures, plane.name);
-  for (const GLuint texture : {output_, small_, black_}) Discard(&g_textures, texture);
-  for (const GLuint framebuffer : {framebuffer_, small_framebuffer_}) Discard(&g_framebuffers, framebuffer);
-  Discard(&g_buffers, quad_);
-  for (const Program& program : programs_) Discard(&g_programs, program.name);
+  for (const PlaneTexture& plane : planes_) Names::Add(&names.textures, plane.name);
+  for (const GLuint texture : {output_, small_, black_}) Names::Add(&names.textures, texture);
+  for (const GLuint framebuffer : {framebuffer_, small_framebuffer_}) Names::Add(&names.framebuffers, framebuffer);
+  Names::Add(&names.buffers, quad_);
+  for (const Program& program : programs_) Names::Add(&names.programs, program.name);
+  if (names.empty()) return;
+  if (context_ != EGL_NO_CONTEXT && eglGetCurrentContext() == context_) {
+    names.Delete();
+    return;
+  }
+  if (DeleteInShareGroup(display_, context_, names)) return;
+  std::lock_guard<std::mutex> lock(g_garbage_mutex);
+  g_garbage.Take(&names);
 }
 
 void VideoGl::ReadCaps() {
   if (caps_read_) return;
   caps_read_ = true;
-  es3_ = !epoxy_is_desktop_gl() && epoxy_gl_version() >= 30;
-  texture_rg_ = es3_ || epoxy_has_gl_extension("GL_EXT_texture_rg");
-  row_length_ = es3_ || epoxy_has_gl_extension("GL_EXT_unpack_subimage");
-  vertex_arrays_ = es3_ || epoxy_has_gl_extension("GL_OES_vertex_array_object");
+  es3_ = !es2_paths_ && !epoxy_is_desktop_gl() && epoxy_gl_version() >= 30;
+  texture_rg_ = es3_ || (!es2_paths_ && epoxy_has_gl_extension("GL_EXT_texture_rg"));
+  row_length_ = es3_ || (!es2_paths_ && epoxy_has_gl_extension("GL_EXT_unpack_subimage"));
+  vertex_arrays_ = es3_ || (!es2_paths_ && epoxy_has_gl_extension("GL_OES_vertex_array_object"));
   egl_image_ = epoxy_has_gl_extension("GL_OES_EGL_image");
   display_ = eglGetCurrentDisplay();
+  context_ = eglGetCurrentContext();
   fences_ = display_ != EGL_NO_DISPLAY && epoxy_has_egl_extension(display_, "EGL_KHR_fence_sync");
   modifiers_ =
       display_ != EGL_NO_DISPLAY && epoxy_has_egl_extension(display_, "EGL_EXT_image_dma_buf_import_modifiers");
@@ -577,7 +662,7 @@ GLuint VideoGl::ImportPlane(const PbVideoPlane& plane, uint32_t fourcc, uint64_t
     if (image.device == device && image.inode == inode && image.offset == plane.offset &&
         image.stride == plane.stride && image.width == plane.width && image.height == plane.height &&
         image.fourcc == fourcc && image.modifier == modifier) {
-      image.used = ++imports_;
+      image.used = dmabuf_conversions_;
       return image.texture;
     }
   }
@@ -628,7 +713,7 @@ GLuint VideoGl::ImportPlane(const PbVideoPlane& plane, uint32_t fourcc, uint64_t
   cached.device = device;
   cached.inode = inode;
   cached.modifier = modifier;
-  cached.used = ++imports_;
+  cached.used = dmabuf_conversions_;
   cached.offset = plane.offset;
   cached.stride = plane.stride;
   cached.width = plane.width;
@@ -638,6 +723,25 @@ GLuint VideoGl::ImportPlane(const PbVideoPlane& plane, uint32_t fourcc, uint64_t
   cached.texture = texture;
   images_.push_back(cached);
   return texture;
+}
+
+void VideoGl::DropImages() {
+  for (const Image& image : images_) {
+    glDeleteTextures(1, &image.texture);
+    eglDestroyImageKHR(display_, image.image);
+  }
+  images_.clear();
+}
+
+void VideoGl::DropIdleImages() {
+  const uint64_t now = dmabuf_conversions_;
+  const auto idle = [now](const Image& image) { return now - image.used > kImageIdle; };
+  for (const Image& image : images_) {
+    if (!idle(image)) continue;
+    glDeleteTextures(1, &image.texture);
+    eglDestroyImageKHR(display_, image.image);
+  }
+  images_.erase(std::remove_if(images_.begin(), images_.end(), idle), images_.end());
 }
 
 bool VideoGl::Import(const PbVideoPlanes& planes, GLuint names[2], std::string* error) {
@@ -708,9 +812,16 @@ void VideoGl::Reap(bool wait) {
 }
 
 bool VideoGl::Convert(PbVideoPicture* picture, std::string* error) {
+  last_refused_ = false;
   PbVideoPlanes planes{};
   if (!picture || module_->describe(picture, &planes) != 0 || !Valid(planes)) {
     *error = "Unsupported decoded picture layout";
+    return false;
+  }
+  if (planes.dmabuf && refused_) {
+    // Until the decoder's next keyframe comes in system memory.
+    last_refused_ = true;
+    *error = "This GL context does not sample the decoder's dma-buf pictures";
     return false;
   }
   ReadCaps();
@@ -724,9 +835,24 @@ bool VideoGl::Convert(PbVideoPicture* picture, std::string* error) {
   GLfloat luma_scale[2] = {1, 1}, chroma_scale[2] = {1, 1};
   Variant variant = kNv12;
   if (planes.dmabuf) {
-    if (!Import(planes, names, error)) return false;
-  } else if (!Upload(planes, names, luma_scale, chroma_scale, &variant, error)) {
-    return false;
+    // Another size or layout is another pool: the old one's buffers go.
+    if (planes.width != images_width_ || planes.height != images_height_ || planes.modifier != images_modifier_) {
+      DropImages();
+      images_width_ = planes.width;
+      images_height_ = planes.height;
+      images_modifier_ = planes.modifier;
+    }
+    ++dmabuf_conversions_;
+    const bool imported = Import(planes, names, error);
+    DropIdleImages();
+    if (!imported) {
+      last_refused_ = refused_;
+      return false;
+    }
+  } else {
+    // A pipeline in system memory holds none of the imported buffers.
+    if (!images_.empty()) DropImages();
+    if (!Upload(planes, names, luma_scale, chroma_scale, &variant, error)) return false;
   }
   const Program* program = UseProgram(variant, error);
   if (!program || !Target(planes.width, planes.height, error)) return false;

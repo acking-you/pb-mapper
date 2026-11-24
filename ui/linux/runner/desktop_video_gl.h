@@ -29,18 +29,26 @@ void ReadPresenter(EGLDisplay display, PbVideoPresenter* out);
 // thread), with that context current.
 class VideoGl {
  public:
-  explicit VideoGl(const PbVideoModule* module);
+  // `es2_paths`, for the clip harness only: GL ES 2's paths (LUMINANCE
+  // planes, padded rows, no vertex array objects) in whatever context.
+  explicit VideoGl(const PbVideoModule* module, bool es2_paths = false);
   VideoGl(const VideoGl&) = delete;
   VideoGl& operator=(const VideoGl&) = delete;
-  // Any thread, no context needed: the GL objects are deleted by the next
-  // call of any converter in the context, and pictures still on the GPU
-  // are released.
+  // Any thread, with any context or none current: pictures still on the
+  // GPU are released, and the GL objects are deleted in the context's
+  // share group, on this thread when that context is current here, else
+  // in a context of their own on a thread of their own. Where EGL cannot
+  // make one, the next call of any converter in the context deletes them.
   ~VideoGl();
 
   // Converts `picture` (the caller keeps its reference; a dma-buf picture
   // is retained until the GPU has read it) into the RGBA texture. False,
   // with `error`, when it cannot: the texture keeps the last picture.
   bool Convert(PbVideoPicture* picture, std::string* error);
+  // Whether the last Convert that failed was given a dma-buf picture this
+  // context refuses (TakeDmabufRefusal says so once): the decoder falls
+  // back to system memory, and the failure is no fault to report.
+  bool last_refused() const { return last_refused_; }
   // The texture for Flutter: GL_TEXTURE_2D, RGBA8, the last converted
   // picture's size, or one opaque black pixel before the first.
   bool Texture(uint32_t* name, uint32_t* width, uint32_t* height, std::string* error);
@@ -68,7 +76,8 @@ class VideoGl {
     GLenum format = 0;
     uint32_t width = 0, height = 0;
   };
-  // One dma-buf plane imported once and kept while its buffer is reused.
+  // One dma-buf plane imported once and kept while its buffer is reused;
+  // `used` is the dma-buf conversion that last sampled it.
   struct Image {
     uint64_t device = 0, inode = 0, modifier = 0, used = 0;
     uint32_t offset = 0, stride = 0, width = 0, height = 0, fourcc = 0;
@@ -87,6 +96,9 @@ class VideoGl {
               Variant* variant, std::string* error);
   bool Import(const PbVideoPlanes& planes, GLuint names[2], std::string* error);
   GLuint ImportPlane(const PbVideoPlane& plane, uint32_t fourcc, uint64_t modifier);
+  // Deletes the imported planes: all of them, or those idle for a while.
+  void DropImages();
+  void DropIdleImages();
   bool Target(uint32_t width, uint32_t height, std::string* error);
   void Draw();
   // Releases the dma-buf pictures the GPU has read; `wait` waits for the
@@ -94,12 +106,15 @@ class VideoGl {
   void Reap(bool wait);
 
   const PbVideoModule* const module_;
+  const bool es2_paths_;
   bool ready_ = false;
   std::string setup_error_;
   // What the context offers, read at the first call.
   bool caps_read_ = false, es3_ = false, texture_rg_ = false, row_length_ = false, vertex_arrays_ = false;
   bool egl_image_ = false, fences_ = false, modifiers_ = false;
   EGLDisplay display_ = EGL_NO_DISPLAY;
+  // The context the objects belong to (Flutter's raster context).
+  EGLContext context_ = EGL_NO_CONTEXT;
   Program programs_[kVariants];
   GLuint quad_ = 0, black_ = 0;
   PlaneTexture planes_[3];
@@ -109,9 +124,12 @@ class VideoGl {
   // ReadBack's small texture and framebuffer.
   GLuint small_ = 0, small_framebuffer_ = 0;
   uint32_t small_width_ = 0, small_height_ = 0;
-  bool converted_ = false, last_dmabuf_ = false, refused_ = false, refusal_taken_ = false;
+  bool converted_ = false, last_dmabuf_ = false, refused_ = false, refusal_taken_ = false, last_refused_ = false;
+  // The imported planes, all of one picture size and modifier.
   std::vector<Image> images_;
-  uint64_t imports_ = 0;
+  uint32_t images_width_ = 0, images_height_ = 0;
+  uint64_t images_modifier_ = 0;
+  uint64_t dmabuf_conversions_ = 0;
   std::deque<InFlight> in_flight_;
 };
 

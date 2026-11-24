@@ -165,9 +165,20 @@ typedef struct PbVideoModule {
   // prompt. The last picture stays.
   void (*detach)(PbVideoDecoder* decoder);
   // The compositor's call: the newest picture, retained for the caller, or
-  // null before the first. The first acquisition of a current picture is
-  // its presentation receipt to Rust. Non-blocking.
+  // null before the first. Taking it is no receipt: `present` is. The
+  // compositor's thread, non-blocking.
   PbVideoPicture* (*acquire)(PbVideoDecoder* decoder);
+  // The compositor shows `picture`, acquired from this decoder: called only
+  // once it is converted and on screen. The first presentation of a current
+  // picture is its receipt to Rust, which authorizes input; 1 when it sent
+  // one. The compositor's thread, non-blocking.
+  int32_t (*present)(PbVideoDecoder* decoder, const PbVideoPicture* picture);
+  // The compositor could not show a picture it acquired, for a reason other
+  // than a dma-buf it refused (`refuse_dmabuf`): at most once a second it
+  // reaches Rust as a decoder error, which asks for a keyframe and, five in
+  // 30 s with nothing presented, ends the session as decoder_failed. The
+  // compositor's thread, non-blocking.
+  void (*present_failed)(PbVideoDecoder* decoder, const char* reason_utf8);
   // `timings` non-zero starts the timing accumulators, or keeps them; zero
   // drops them until a read that asks again.
   void (*stats)(PbVideoDecoder* decoder, uint32_t timings, PbVideoStats* out);

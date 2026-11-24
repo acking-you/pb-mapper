@@ -9,11 +9,11 @@
 // it: NV12 or I420 in system memory, or NV12 in dma-bufs where the
 // presenter samples them and GStreamer (1.24 on) says their layout. A
 // decoder that gives neither gets videoconvert to NV12. The compositor's
-// raster thread acquires the picture, which is the presentation receipt,
-// and converts it to RGBA on the GPU (desktop_video_gl.cc). The decoder
-// state rules are the
-// Windows runner's (ui/windows/runner/desktop_video.cpp) and the Android
-// feeder's (VideoFeeder.kt): a generation change or a discontinuity starts a
+// raster thread acquires the picture and converts it to RGBA on the GPU
+// (desktop_video_gl.cc); only a picture it shows earns the presentation
+// receipt. The decoder state rules are the Windows runner's
+// (ui/windows/runner/desktop_video.cpp) and the Android feeder's
+// (VideoFeeder.kt): a generation change or a discontinuity starts a
 // revision that waits for a keyframe, a codec or size change rebuilds the
 // pipeline at a keyframe, and pictures of an older revision earn no receipt.
 #define G_LOG_DOMAIN "pb-mapper-video"
@@ -88,6 +88,9 @@ constexpr uint32_t kSoftwareWidth = 1920, kSoftwareHeight = 1080;
 constexpr size_t kMaxInFlight = 4;
 // A pipeline holding units this long without a picture is rebuilt.
 constexpr auto kStall = std::chrono::seconds(2);
+// The compositor's failures to show a picture reach Rust at most this
+// often: five within 30 s end the session.
+constexpr auto kPresentFailureInterval = std::chrono::seconds(1);
 // Unique, increasing timestamps that identify each unit's picture; the
 // network's are never replayed.
 constexpr GstClockTime kFrameDuration = GST_SECOND / 60;
@@ -922,35 +925,55 @@ struct PbVideoDecoder {
   }
 
   // Raster thread. A picture of an older revision stays on screen until a
-  // newer one replaces it, but only a current one earns a receipt.
+  // newer one replaces it, but only a current one earns a receipt
+  // (Present).
   PbVideoPicture* Acquire() {
-    PbVideoPicture* picture = nullptr;
-    bool acknowledge = false;
-    // Read with the revision, under the lock that Detach starts a new one
-    // under: a picture is only ever receipted to the source it came from.
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!latest_) return nullptr;
+    latest_acquired_ = true;
+    return Retain(latest_);
+  }
+
+  // Raster thread, once `picture` is converted and on screen: the receipt
+  // Rust validates and forwards for input authorisation, never for a
+  // picture the compositor could not show. Non-blocking.
+  bool Present(const PbVideoPicture* picture) {
     uint64_t consumer = 0;
     {
+      // Read with the revision, under the lock that Detach starts a new
+      // one under: a picture is only ever receipted to the source it came
+      // from, and once.
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!latest_) return nullptr;
-      picture = Retain(latest_);
-      latest_acquired_ = true;
-      if (picture->revision == revision_.load() &&
-          (consumed_revision_ != picture->revision || consumed_frame_ != picture->frame_id)) {
-        consumed_revision_ = picture->revision;
-        consumed_frame_ = picture->frame_id;
-        acknowledge = true;
-        consumer = consumer_.load();
+      if (picture->revision != revision_.load() ||
+          (consumed_revision_ == picture->revision && consumed_frame_ == picture->frame_id)) {
+        return false;
       }
+      consumed_revision_ = picture->revision;
+      consumed_frame_ = picture->frame_id;
+      consumer = consumer_.load();
     }
-    if (acknowledge) {
-      ++presented_;
-      // Taken by the compositor: the receipt Rust validates and forwards
-      // for input authorisation. Non-blocking.
-      if (consumer) {
-        api_.presented(consumer, static_cast<uint64_t>(picture->generation), static_cast<uint64_t>(picture->frame_id));
-      }
+    ++presented_;
+    if (!consumer) return false;
+    api_.presented(consumer, static_cast<uint64_t>(picture->generation), static_cast<uint64_t>(picture->frame_id));
+    return true;
+  }
+
+  // Raster thread: a picture could not be shown. Rust counts it as a
+  // decoder error, at most once a second, so a compositor that can show
+  // nothing ends the session as decoder_failed instead of leaving the
+  // viewer on a still picture. A paused source asks for nothing.
+  void PresentFailed(const char* reason) {
+    const uint64_t consumer = consumer_.load();
+    if (!consumer || paused_) return;
+    const Clock::time_point now = Clock::now();
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (present_failed_ && now - present_failed_at_ < kPresentFailureInterval) return;
+      present_failed_ = true;
+      present_failed_at_ = now;
     }
-    return picture;
+    const std::string text = std::string("Cannot show a decoded picture: ") + (reason && *reason ? reason : "unknown");
+    api_.failed(consumer, text.c_str());
   }
 
   // `timings` starts the decode timing, or keeps it; false drops it until
@@ -1196,6 +1219,9 @@ struct PbVideoDecoder {
   // What the current pipeline does, and the last picture's format.
   bool converts_ = false, dmabuf_ = false;
   uint32_t format_ = 0;
+  // When the compositor's last failure went to Rust.
+  bool present_failed_ = false;
+  Clock::time_point present_failed_at_{};
   // While a stats read asks for timings.
   bool timing_ = false;
   Timing decode_;
@@ -1340,6 +1366,12 @@ void Detach(PbVideoDecoder* decoder) {
   if (decoder) decoder->Detach();
 }
 PbVideoPicture* Acquire(PbVideoDecoder* decoder) { return decoder ? decoder->Acquire() : nullptr; }
+int32_t Present(PbVideoDecoder* decoder, const PbVideoPicture* picture) {
+  return decoder && picture && decoder->Present(picture) ? 1 : 0;
+}
+void PresentFailed(PbVideoDecoder* decoder, const char* reason) {
+  if (decoder) decoder->PresentFailed(reason);
+}
 void Stats(PbVideoDecoder* decoder, uint32_t timings, PbVideoStats* out) {
   if (decoder && out) decoder->Stats(timings != 0, out);
 }
@@ -1397,8 +1429,8 @@ void ReleasePicture(PbVideoPicture* picture) { Release(picture); }
 }  // namespace
 
 extern "C" __attribute__((visibility("default"))) const PbVideoModule* pb_mapper_desktop_video_module_v1(void) {
-  static const PbVideoModule module = {PB_VIDEO_MODULE_ABI, Probe,    Create,   Attach,       Detach,
-                                       Acquire,            Stats,    Destroy,  Describe,     Snapshot,
-                                       RefuseDmabuf,       RetainPicture, ReleasePicture};
+  static const PbVideoModule module = {PB_VIDEO_MODULE_ABI, Probe,    Create,       Attach,        Detach,
+                                       Acquire,             Present,  PresentFailed, Stats,         Destroy,
+                                       Describe,            Snapshot, RefuseDmabuf,  RetainPicture, ReleasePicture};
   return &module;
 }
