@@ -1,0 +1,20 @@
+# trace-run.sh at 1080p, 60 frames a second, one run per presenter;
+# display asleep, session locked; 1-minute load before: layer 3.13, texture 2.32
+## layer-1080p-60
+$ python3 -I signposts.py work/traces/layer-1080p-60-signposts.xml
+Commit Begin: 634
+Commit End: 634
+Decoded Event: 634
+decoded to commit end: 634 pictures, median 0.243 ms, p95 1.042 ms, max 1.278 ms
+$ python3 -I analyze.py work/runs/layer-1080p-60
+{"run": "layer-1080p-60", "presenter": "layer", "intervals": 23, "refreshHz": 144.0, "decode_ms": 0.956, "present_ms": 0.4, "surface_consume_ms": null, "decoder_cpu_ms_per_s": 27.94, "decoded_per_s": 59.863, "presented_per_s": 59.863, "dropped_per_s_total": 0.0, "received_fps": 59.777, "presented_fps": 60.0, "flutter_frames": 36, "phases": ["connecting", "idle", "live"], "viewer_cpu_pct": 5.3, "windowserver_cpu_pct": 4.6, "gpu_util_pct_median": 0.0, "usage_seconds": 19.3}
+## texture-1080p-60
+$ python3 -I signposts.py work/traces/texture-1080p-60-signposts.xml
+Consumed Event: 631
+Decoded Event: 634
+decoded to consumed: 631 pictures, median 3.807 ms, p95 6.902 ms, max 13.504 ms
+$ python3 -I analyze.py work/runs/texture-1080p-60
+{"run": "texture-1080p-60", "presenter": "texture", "intervals": 23, "refreshHz": 144.0, "decode_ms": 1.788, "present_ms": null, "surface_consume_ms": 3.945, "decoder_cpu_ms_per_s": 3.915, "decoded_per_s": 59.841, "presented_per_s": 59.85, "dropped_per_s_total": 0.13, "received_fps": 59.741, "presented_fps": 60.0, "flutter_frames": 38, "phases": ["connecting", "idle", "live", "recovering"], "viewer_cpu_pct": 6.1, "windowserver_cpu_pct": 2.0, "gpu_util_pct_median": 0.0, "usage_seconds": 19.3}
+## display state after the runs (displaystate.swift)
+display 3 asleep true active false bounds (0.0, 0.0, 2048.0, 1152.0)
+loginwindow shield on screen: true

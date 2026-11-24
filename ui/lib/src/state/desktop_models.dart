@@ -698,10 +698,16 @@ class DesktopGeometry {
 class DesktopPicture {
   const DesktopPicture({
     this.textureId,
+    this.platformViewType,
     required this.aspectRatio,
     required this.codec,
   });
   final int? textureId;
+
+  /// The platform view that shows the native picture where the runner
+  /// presents it itself (the macOS layer presenter), made with [textureId];
+  /// null where a Flutter texture shows it.
+  final String? platformViewType;
   final double aspectRatio;
 
   /// The session's codec, `h264`, `h265` or `jpeg`; through a reconnect,
@@ -712,10 +718,12 @@ class DesktopPicture {
   bool operator ==(Object other) =>
       other is DesktopPicture &&
       other.textureId == textureId &&
+      other.platformViewType == platformViewType &&
       other.aspectRatio == aspectRatio &&
       other.codec == codec;
   @override
-  int get hashCode => Object.hash(textureId, aspectRatio, codec);
+  int get hashCode =>
+      Object.hash(textureId, platformViewType, aspectRatio, codec);
 }
 
 /// Another controlling viewer's pointer in host display pixels, as
