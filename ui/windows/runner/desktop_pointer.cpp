@@ -14,6 +14,20 @@ using Map = flutter::EncodableMap;
 // No side Dart sends is longer: 128 logical pixels at the display's scale.
 constexpr int64_t kMaxSide = 1024;
 
+// The motion summed since the last post, posted to the top-level window once
+// raw input brings some: Dart gets it once a turn of the message loop.
+constexpr UINT kLockMotion = WM_APP + 0x415;
+
+// The generic desktop page's mouse (HID usage page 0x01, usage 0x02).
+RAWINPUTDEVICE RawMouse(DWORD flags, HWND target) {
+  RAWINPUTDEVICE mouse{};
+  mouse.usUsagePage = 0x01;
+  mouse.usUsage = 0x02;
+  mouse.dwFlags = flags;
+  mouse.hwndTarget = target;
+  return mouse;
+}
+
 int64_t Number(const Map& map, const char* key) {
   const auto it = map.find(Value(key));
   if (it != map.end()) {
@@ -89,7 +103,7 @@ HCURSOR MakeCursor(const std::vector<uint8_t>& rgba, int width, int height, int 
 }
 }  // namespace
 
-DesktopPointer::DesktopPointer(flutter::FlutterEngine* engine) {
+DesktopPointer::DesktopPointer(flutter::FlutterEngine* engine, HWND window) : window_(window) {
   // As Flutter's embedder reads it when its window is made, just before:
   // its default stands when the read fails.
   UINT lines = 3;
@@ -100,6 +114,19 @@ DesktopPointer::DesktopPointer(flutter::FlutterEngine* engine) {
     const std::string& method = call.method_name();
     if (method == "wheel_lines") {
       result->Success(Value(static_cast<int64_t>(wheel_lines_)));
+      return;
+    }
+    if (method == "lock") {
+      if (Lock()) {
+        result->Success();
+      } else {
+        result->Error("desktop_pointer", "Cannot read the mouse's raw input");
+      }
+      return;
+    }
+    if (method == "unlock") {
+      Unlock();
+      result->Success();
       return;
     }
     if (method != "cursor_create" && method != "cursor_set" && method != "cursor_delete") {
@@ -156,9 +183,82 @@ DesktopPointer::DesktopPointer(flutter::FlutterEngine* engine) {
 }
 
 DesktopPointer::~DesktopPointer() {
+  Unlock();
   channel_->SetMethodCallHandler(nullptr);
   for (const auto& entry : cursors_) ::DestroyIcon(entry.second);
   for (const HCURSOR cursor : retired_) ::DestroyIcon(cursor);
+}
+
+bool DesktopPointer::Lock() {
+  if (locked_) return true;
+  RAWINPUTDEVICE mouse = RawMouse(0, window_);
+  if (!::RegisterRawInputDevices(&mouse, 1, sizeof(mouse))) return false;
+  POINT at{};
+  if (::GetCursorPos(&at)) {
+    RECT here{at.x, at.y, at.x + 1, at.y + 1};
+    ::ClipCursor(&here);
+  }
+  ::ShowCursor(FALSE);
+  locked_ = true;
+  pending_x_ = 0;
+  pending_y_ = 0;
+  return true;
+}
+
+void DesktopPointer::Unlock() {
+  if (!locked_) return;
+  locked_ = false;
+  // A removal names no window.
+  RAWINPUTDEVICE mouse = RawMouse(RIDEV_REMOVE, nullptr);
+  ::RegisterRawInputDevices(&mouse, 1, sizeof(mouse));
+  ::ClipCursor(nullptr);
+  ::ShowCursor(TRUE);
+  pending_x_ = 0;
+  pending_y_ = 0;
+}
+
+bool DesktopPointer::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
+  switch (message) {
+    case WM_INPUT: {
+      if (!locked_) return false;
+      RAWINPUT raw{};
+      UINT size = sizeof(raw);
+      const UINT read = ::GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam), RID_INPUT, &raw,
+                                          &size, sizeof(RAWINPUTHEADER));
+      // A tablet's or a remote session's absolute positions are no motion.
+      if (read == static_cast<UINT>(-1) || read == 0 || raw.header.dwType != RIM_TYPEMOUSE ||
+          (raw.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) != 0) {
+        return false;
+      }
+      pending_x_ += raw.data.mouse.lLastX;
+      pending_y_ += raw.data.mouse.lLastY;
+      if (!posted_ && (pending_x_ != 0 || pending_y_ != 0)) {
+        posted_ = ::PostMessageW(window_, kLockMotion, 0, 0) != 0;
+      }
+      // The default handling frees what raw input holds.
+      return false;
+    }
+    case kLockMotion: {
+      posted_ = false;
+      if (!locked_ || (pending_x_ == 0 && pending_y_ == 0)) return true;
+      flutter::EncodableMap motion{
+          {Value("dx"), Value(pending_x_)},
+          {Value("dy"), Value(pending_y_)},
+      };
+      pending_x_ = 0;
+      pending_y_ = 0;
+      channel_->InvokeMethod("lock_motion", std::make_unique<Value>(std::move(motion)));
+      return true;
+    }
+    case WM_ACTIVATE:
+      if (LOWORD(wparam) == WA_INACTIVE && locked_) {
+        Unlock();
+        channel_->InvokeMethod("lock_lost", nullptr);
+      }
+      return false;
+    default:
+      return false;
+  }
 }
 
 void DesktopPointer::Destroy(HCURSOR cursor) {

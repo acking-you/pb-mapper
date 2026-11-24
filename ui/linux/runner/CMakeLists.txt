@@ -34,6 +34,52 @@ target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::EPOXY)
 
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
+# The pointer lock (desktop_pointer.cc): XInput2's raw motion on X11, and the
+# pointer-constraints and relative-pointer protocols on Wayland, whose client
+# code wayland-scanner generates from wayland-protocols. A build without them
+# holds no pointer on that display server; the viewer then leaves it free.
+pkg_check_modules(XINPUT QUIET IMPORTED_TARGET xi x11)
+if(XINPUT_FOUND)
+  target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::XINPUT)
+  target_compile_definitions(${BINARY_NAME} PRIVATE PB_MAPPER_LOCK_X11)
+  message(STATUS "Pointer lock on X11: XInput2")
+else()
+  message(STATUS "Pointer lock on X11: libXi development files not found")
+endif()
+pkg_check_modules(WAYLAND_CLIENT QUIET IMPORTED_TARGET wayland-client)
+pkg_check_modules(WAYLAND_PROTOCOLS QUIET wayland-protocols)
+find_program(WAYLAND_SCANNER wayland-scanner)
+if(WAYLAND_CLIENT_FOUND AND WAYLAND_PROTOCOLS_FOUND AND WAYLAND_SCANNER)
+  enable_language(C)
+  pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+  set(LOCK_PROTOCOLS_DIR "${CMAKE_CURRENT_BINARY_DIR}/protocols")
+  file(MAKE_DIRECTORY "${LOCK_PROTOCOLS_DIR}")
+  foreach(protocol relative-pointer pointer-constraints)
+    set(protocol_xml "${WAYLAND_PROTOCOLS_DIR}/unstable/${protocol}/${protocol}-unstable-v1.xml")
+    set(protocol_header "${LOCK_PROTOCOLS_DIR}/${protocol}-unstable-v1-client-protocol.h")
+    set(protocol_code "${LOCK_PROTOCOLS_DIR}/${protocol}-unstable-v1-protocol.c")
+    add_custom_command(
+      OUTPUT "${protocol_header}"
+      COMMAND "${WAYLAND_SCANNER}" client-header "${protocol_xml}" "${protocol_header}"
+      DEPENDS "${protocol_xml}"
+      VERBATIM)
+    add_custom_command(
+      OUTPUT "${protocol_code}"
+      COMMAND "${WAYLAND_SCANNER}" private-code "${protocol_xml}" "${protocol_code}"
+      DEPENDS "${protocol_xml}"
+      VERBATIM)
+    # Generated code: the warnings the runner treats as errors are not ours.
+    set_source_files_properties("${protocol_code}" PROPERTIES COMPILE_OPTIONS "-Wno-error")
+    target_sources(${BINARY_NAME} PRIVATE "${protocol_header}" "${protocol_code}")
+  endforeach()
+  target_include_directories(${BINARY_NAME} PRIVATE "${LOCK_PROTOCOLS_DIR}")
+  target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::WAYLAND_CLIENT)
+  target_compile_definitions(${BINARY_NAME} PRIVATE PB_MAPPER_LOCK_WAYLAND)
+  message(STATUS "Pointer lock on Wayland: pointer constraints and relative pointer")
+else()
+  message(STATUS "Pointer lock on Wayland: wayland-client, wayland-protocols or wayland-scanner not found")
+endif()
+
 # The native video decoder module (desktop_video_gst.cc), built where the
 # GStreamer development files are installed. The runner loads it at run time,
 # so the app needs neither the module nor GStreamer to start; without them

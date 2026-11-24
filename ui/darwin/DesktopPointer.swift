@@ -3,7 +3,8 @@
 // like the Windows runner (ui/windows/runner/desktop_pointer.cpp) and the
 // Linux one (ui/linux/runner/desktop_pointer.cc). It makes a remote
 // computer's pointer bitmap this Mac's own cursor, which then moves with the
-// hardware and changes the moment Dart sets it, with no Flutter frame.
+// hardware and changes the moment Dart sets it, with no Flutter frame; and it
+// holds this Mac's pointer over the picture for a remote game or 3D view.
 //
 // Only the macOS runner (ui/macos/Runner.xcodeproj) compiles this file; an
 // iOS viewer paints the remote pointer.
@@ -31,26 +32,46 @@
   /// point, replacing any cursor held as `id`; `cursor_set {id}` shows it, and
   /// `cursor_delete {id}` frees it. A shown cursor stays until Dart activates
   /// a system one through the engine, which tells the view in turn.
+  ///
+  /// `lock` holds the pointer where it is: the mouse no longer moves it
+  /// (`CGAssociateMouseAndMouseCursorPosition(false)`), it is hidden, and a
+  /// local monitor sums each move's and drag's deltas, in this Mac's
+  /// pixels, posting them once a turn of the main queue as `lock_motion
+  /// {dx, dy}`. `unlock` lets go; so does the app going inactive, which it
+  /// tells Dart as `lock_lost`, and the plugin going away. Each path joins
+  /// the mouse and the pointer again and shows it.
   final class DesktopPointerPlugin: NSObject, FlutterPlugin {
     private weak var registrar: FlutterPluginRegistrar?
+    private let channel: FlutterMethodChannel
     private var cursors: [Int64: NSCursor] = [:]
     /// The cursor last set, re-set by `monitor` where the view cannot keep it.
     private var shown: NSCursor?
     private var monitor: Any?
+    /// While the pointer is held: the motion monitor and the observer that
+    /// lets go as the app goes inactive.
+    private var lockMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
+    /// Motion not posted yet, in pixels, and whether a post is queued.
+    private var pendingX = 0.0
+    private var pendingY = 0.0
+    private var posting = false
 
-    private init(registrar: FlutterPluginRegistrar) {
+    private init(registrar: FlutterPluginRegistrar, channel: FlutterMethodChannel) {
       self.registrar = registrar
+      self.channel = channel
       super.init()
     }
 
     deinit {
       if let monitor = monitor { NSEvent.removeMonitor(monitor) }
+      unlock()
     }
 
     static func register(with registrar: FlutterPluginRegistrar) {
       let channel = FlutterMethodChannel(
         name: pointerChannel, binaryMessenger: registrar.messenger)
-      registrar.addMethodCallDelegate(DesktopPointerPlugin(registrar: registrar), channel: channel)
+      registrar.addMethodCallDelegate(
+        DesktopPointerPlugin(registrar: registrar, channel: channel), channel: channel)
     }
 
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -63,6 +84,18 @@
     }
 
     private func dispatch(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) throws {
+      switch call.method {
+      case "lock":
+        try lock()
+        result(nil)
+        return
+      case "unlock":
+        unlock()
+        result(nil)
+        return
+      default:
+        break
+      }
       guard ["cursor_create", "cursor_set", "cursor_delete"].contains(call.method) else {
         result(FlutterMethodNotImplemented)
         return
@@ -141,6 +174,66 @@
       picture.addRepresentation(rep)
       return NSCursor(
         image: picture, hotSpot: NSPoint(x: CGFloat(hotX) / scale, y: CGFloat(hotY) / scale))
+    }
+
+    /// Holds the pointer, or keeps holding it.
+    private func lock() throws {
+      if lockMonitor != nil { return }
+      guard CGAssociateMouseAndMouseCursorPosition(0) == .success else {
+        throw PointerError("Cannot hold the pointer")
+      }
+      NSCursor.hide()
+      pendingX = 0
+      pendingY = 0
+      lockMonitor = NSEvent.addLocalMonitorForEvents(
+        matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+      ) { [weak self] event in
+        self?.moved(event)
+        return event
+      }
+      resignObserver = NotificationCenter.default.addObserver(
+        forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
+      ) { [weak self] _ in
+        guard let self = self, self.lockMonitor != nil else { return }
+        self.unlock()
+        self.channel.invokeMethod("lock_lost", arguments: nil)
+      }
+    }
+
+    /// Lets the pointer go, if held: the mouse moves it again, and it shows.
+    private func unlock() {
+      guard let held = lockMonitor else { return }
+      NSEvent.removeMonitor(held)
+      lockMonitor = nil
+      if let observer = resignObserver {
+        NotificationCenter.default.removeObserver(observer)
+        resignObserver = nil
+      }
+      _ = CGAssociateMouseAndMouseCursorPosition(1)
+      NSCursor.unhide()
+      pendingX = 0
+      pendingY = 0
+    }
+
+    /// A move's deltas, in points, as this Mac's pixels; posted once a turn.
+    private func moved(_ event: NSEvent) {
+      let scale = Double(event.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1)
+      pendingX += Double(event.deltaX) * scale
+      pendingY += Double(event.deltaY) * scale
+      if posting { return }
+      posting = true
+      DispatchQueue.main.async { [weak self] in self?.post() }
+    }
+
+    private func post() {
+      posting = false
+      guard lockMonitor != nil else { return }
+      let dx = pendingX.rounded(.towardZero)
+      let dy = pendingY.rounded(.towardZero)
+      pendingX -= dx
+      pendingY -= dy
+      if dx == 0 && dy == 0 { return }
+      channel.invokeMethod("lock_motion", arguments: ["dx": Int(dx), "dy": Int(dy)])
     }
 
     private func number(_ args: [String: Any], _ key: String) throws -> Int64 {

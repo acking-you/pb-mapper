@@ -28,7 +28,7 @@ bool FlutterWindow::OnCreate() {
   desktop_video_ = std::make_unique<DesktopVideo>(flutter_controller_->engine(), GetHandle(),
                                                   flutter_controller_->view()->GetNativeWindow());
   desktop_ime_ = std::make_unique<DesktopIme>(flutter_controller_->engine(), flutter_controller_->view()->GetNativeWindow());
-  desktop_pointer_ = std::make_unique<DesktopPointer>(flutter_controller_->engine());
+  desktop_pointer_ = std::make_unique<DesktopPointer>(flutter_controller_->engine(), GetHandle());
   desktop_keys_ = std::make_unique<DesktopKeyCapture>(flutter_controller_->engine(), GetHandle());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
@@ -62,6 +62,7 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               LPARAM const lparam) noexcept {
   if (desktop_video_ && desktop_video_->HandleMessage(message)) return 0;
   if (desktop_keys_ && desktop_keys_->HandleMessage(message, wparam, lparam)) return 0;
+  if (desktop_pointer_ && desktop_pointer_->HandleMessage(message, wparam, lparam)) return 0;
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =
